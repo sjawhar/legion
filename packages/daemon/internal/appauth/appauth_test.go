@@ -68,8 +68,8 @@ func verifyAppJWT(t *testing.T, token string, publicKey *rsa.PublicKey, now time
 	if claims.Issuer != appID {
 		t.Fatalf("JWT issuer = %q, want %q", claims.Issuer, appID)
 	}
-	if claims.Issued != now.Unix()-60 || claims.Expires != now.Unix()+600 {
-		t.Fatalf("JWT claims = %+v, want iat %d and exp %d", claims, now.Unix()-60, now.Unix()+600)
+	if claims.Issued != now.Unix()-60 || claims.Expires != now.Unix()+540 {
+		t.Fatalf("JWT claims = %+v, want iat %d and exp %d", claims, now.Unix()-60, now.Unix()+540)
 	}
 	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
@@ -115,6 +115,29 @@ func TestGenerateJWTSignsShippedClaims(t *testing.T) {
 	}
 
 	verifyAppJWT(t, token, &key.PublicKey, now, "12345")
+}
+
+// TestGenerateJWTExpiresInsideGitHubsCapWithMargin holds exp at most nine minutes past now and iat
+// at or before now: GitHub refuses an exp more than ten minutes ahead of its clock, so a signer
+// whose clock runs ahead of GitHub's fails at exactly ten minutes.
+func TestGenerateJWTExpiresInsideGitHubsCapWithMargin(t *testing.T) {
+	_, privatePEM := testAppKey(t)
+	now := time.Date(2026, 10, 27, 15, 42, 0, 0, time.UTC)
+	token, err := GenerateJWT("12345", privatePEM, now)
+	if err != nil {
+		t.Fatalf("GenerateJWT: %v", err)
+	}
+	var claims struct {
+		Issued  int64 `json:"iat"`
+		Expires int64 `json:"exp"`
+	}
+	decodeJWTPart(t, splitJWT(t, token)[1], &claims)
+	if lead := time.Duration(claims.Expires-now.Unix()) * time.Second; lead > 9*time.Minute {
+		t.Fatalf("exp is %s past now, want at most 9m0s (GitHub refuses more than 10m ahead of its clock)", lead)
+	}
+	if claims.Issued > now.Unix() {
+		t.Fatalf("iat %d is after now %d", claims.Issued, now.Unix())
+	}
 }
 
 func TestAppRoleForEveryRole(t *testing.T) {

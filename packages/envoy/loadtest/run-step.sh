@@ -107,4 +107,4 @@ if ((rc != 0)); then
   die "step $name failed: loadgen run exited $rc (its message above says why); $out/TABLES.md holds the step's row for diagnosis; see $out/run.log"
 fi
 "$stack" loadgen tables "$out"
-printf 'run-step.sh: step %s done in %d s: %s\n' "$name" "$((SECONDS - started))" "$out" >&2
+note "step $name done in $((SECONDS - started)) s: $out"

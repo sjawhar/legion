@@ -52,6 +52,9 @@ body:
 - `withoutServerAttributes` in `markdown-engine.ts` performs the reset. With it skipped, the
   `MarkdownBody.test.tsx` case "an ask block in a body ignores server-owned attributes its text
   forges and draws an open decision" fails: `Expected: "open"`, `Received: "answered"`.
+  Since INFRA-612 the drop runs in `remarkReadOnlyDirectives`
+  (`packages/proof-editor/src/read-only-directives.ts`), after the schema accepts the block, and
+  `withoutServerAttributes` is gone.
 - The entry chunk held 0 occurrences of `dispatch-ask-block-editing` at every head of
   sjawhar/legion#2310. The literal was found in the lazy `SubscribedAgents-*.js` chunk each time.
 - The merge with INFRA-529 (sjawhar/legion#2303, merge `f6a986e8`) brought the allowed-edit

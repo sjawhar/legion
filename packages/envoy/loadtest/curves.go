@@ -832,7 +832,7 @@ func curveTableMD(md *markdown, t curveTable, steps []*curveStep) {
 		}
 		md.row(cells...)
 	}
-	commitsUnreadNote(md, unread, "its cells from the commit rows")
+	commitsUnreadNote(md, unread, "its cells from the commit rows", "show")
 	if noCgroup {
 		md.line("\n%s: the step directory holds no cgroup.json (loadgen cgroup-merge), so its cells from cgroup.json show `-`.", noCgroupMark)
 	}

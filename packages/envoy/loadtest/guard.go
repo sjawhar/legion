@@ -11,8 +11,10 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -128,9 +130,32 @@ func (f *endpointFlags) register(fs *flag.FlagSet) {
 	fs.BoolVar(&f.allowForeign, "allow-foreign", false, "allow endpoint flags that differ from stack.json (another stack, such as a cluster copy)")
 }
 
-// tokenFlags are the endpoint flags whose values are bearer tokens; meta.json records the run's
-// arguments with their values redacted (redactArgs).
-var tokenFlags = []string{"token", "listener-token"}
+// tokenFlags are the endpoint flags whose values are bearer tokens, and urlFlags those whose values
+// are URLs. meta.json records the run's flags with each token replaced by redacted and each URL
+// without its password (recordedArgs, redactURL).
+var (
+	tokenFlags = []string{"-token", "-listener-token"}
+	urlFlags   = []string{"-url", "-listener", "-nats", "-nats-mon", "-pprof", "-pg"}
+)
+
+// redactURL is raw without the password of its userinfo (the user stays) and without a password
+// query parameter (a Postgres URL can carry one), for every place that records or prints an
+// endpoint. A value that does not parse as a URL with a scheme, such as a keyword/value connection
+// string, is redacted whole, since no password in it can be found for sure.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" {
+		return redacted
+	}
+	if _, ok := u.User.Password(); ok {
+		u.User = url.User(u.User.Username())
+	}
+	if q := u.Query(); q.Has("password") {
+		q.Del("password")
+		u.RawQuery = q.Encode()
+	}
+	return u.String()
+}
 
 // foreignFlagError refuses an endpoint flag that names something other than the stack's own.
 type foreignFlagError struct {
@@ -143,7 +168,7 @@ func (e *foreignFlagError) Error() string {
 
 // missingForeignFlagError refuses a run under -allow-foreign that leaves an endpoint flag empty:
 // it would fall back to the local stack's value, so the run would write to one stack and count,
-// sample or profile another. All are every endpoint and token flag.
+// sample or profile another. All lists every endpoint and token flag.
 type missingForeignFlagError struct {
 	Flag string
 	All  []string
@@ -200,17 +225,24 @@ func resolveEndpoints(f endpointFlags, st *stackFile) (endpoints, error) {
 		{"-token", f.token, sv.DispatchToken, &e.token},
 		{"-listener-token", f.listenerToken, sv.ListenerToken, &e.listenerToken},
 	}
+	all := make([]string, len(fields))
+	for i, field := range fields {
+		all[i] = field.flag
+	}
 	for _, field := range fields {
 		switch {
 		case f.allowForeign && field.given == "":
-			all := make([]string, len(fields))
-			for i, fl := range fields {
-				all[i] = fl.flag
-			}
 			return endpoints{}, &missingForeignFlagError{Flag: field.flag, All: all}
 		case !f.allowForeign && field.given != "" && field.given != field.stack:
 			return endpoints{}, &foreignFlagError{Flag: field.flag}
 		case field.given != "":
+			// A foreign URL that does not parse would reach an error that prints it whole,
+			// password included; the refusal names the flag alone.
+			if slices.Contains(urlFlags, field.flag) {
+				if u, err := url.Parse(field.given); err != nil || u.Scheme == "" || u.Host == "" {
+					return endpoints{}, fmt.Errorf("%s is not a URL with a scheme and a host", field.flag)
+				}
+			}
 			*field.dst = field.given
 		default:
 			*field.dst = field.stack
@@ -249,7 +281,7 @@ func checkStack(ctx context.Context, e endpoints) error {
 		}
 		status, body, err := guardGet(ctx, client, e.natsMon+"/varz", "")
 		if err == nil && status != http.StatusOK {
-			err = fmt.Errorf("GET %s/varz answered %d", e.natsMon, status)
+			err = fmt.Errorf("GET %s/varz answered %d", redactURL(e.natsMon), status)
 		}
 		if err == nil {
 			err = json.Unmarshal(body, &varz)
@@ -258,7 +290,7 @@ func checkStack(ctx context.Context, e endpoints) error {
 			return fmt.Errorf("guard: nats check failed: %w", err)
 		}
 		if varz.ServerName != e.natsServerName {
-			return fmt.Errorf("guard: nats check failed: %s/varz server_name is %q, want %q", e.natsMon, varz.ServerName, e.natsServerName)
+			return fmt.Errorf("guard: nats check failed: %s/varz server_name is %q, want %q", redactURL(e.natsMon), varz.ServerName, e.natsServerName)
 		}
 	}
 	status, body, err := guardGet(ctx, client, e.dispatch+"/api/v1/projects", e.token)
@@ -266,14 +298,14 @@ func checkStack(ctx context.Context, e endpoints) error {
 		return fmt.Errorf("guard: dispatch check failed: %w", err)
 	}
 	if status != http.StatusOK {
-		return fmt.Errorf("guard: dispatch check failed: GET %s/api/v1/projects with the stack's agent token answered %d %s", e.dispatch, status, trunc(body))
+		return fmt.Errorf("guard: dispatch check failed: GET %s/api/v1/projects with the stack's agent token answered %d %s", redactURL(e.dispatch), status, trunc(body))
 	}
 	status, body, err = guardGet(ctx, client, e.listener+"/v1/sessions", e.listenerToken)
 	if err != nil {
 		return fmt.Errorf("guard: listener check failed: %w", err)
 	}
 	if status != http.StatusOK {
-		return fmt.Errorf("guard: listener check failed: GET %s/v1/sessions with the stack's listener token answered %d %s", e.listener, status, trunc(body))
+		return fmt.Errorf("guard: listener check failed: GET %s/v1/sessions with the stack's listener token answered %d %s", redactURL(e.listener), status, trunc(body))
 	}
 	other := make([]byte, 16)
 	_, _ = rand.Read(other)
@@ -282,7 +314,7 @@ func checkStack(ctx context.Context, e endpoints) error {
 		return fmt.Errorf("guard: listener check failed: %w", err)
 	}
 	if status/100 == 2 {
-		return fmt.Errorf("guard: listener check failed: %s/v1/sessions answers %d to a token that is not the stack's, so it does not hold the stack's token", e.listener, status)
+		return fmt.Errorf("guard: listener check failed: %s/v1/sessions answers %d to a token that is not the stack's, so it does not hold the stack's token", redactURL(e.listener), status)
 	}
 	return nil
 }

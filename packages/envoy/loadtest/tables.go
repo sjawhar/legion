@@ -152,14 +152,13 @@ func (s stepData) label() string {
 	return label
 }
 
-// probeLabel is the step's label in a table of a probe, marked "(<n> failed reads)" when the probe
-// had failed reads.
-func (s stepData) probeLabel(failedReads int) string { return withFailedReads(s.label(), failedReads) }
-
-// withFailedReads is label, marked "(<n> failed reads)" when n reads failed.
+// withFailedReads is label, marked "(1 failed read)" or "(<n> failed reads)" when n reads failed.
 func withFailedReads(label string, failedReads int) string {
-	if failedReads == 0 {
+	switch failedReads {
+	case 0:
 		return label
+	case 1:
+		return label + " (1 failed read)"
 	}
 	return fmt.Sprintf("%s (%d failed reads)", label, failedReads)
 }
@@ -177,12 +176,23 @@ func (s stepData) commitsLabel() string {
 	return s.label() + " " + commitsUnreadMark
 }
 
-// commitsUnreadNote defines commitsUnreadMark under a table, when a row has it: cells names the
-// table's cells that depend on the commit rows.
-func commitsUnreadNote(md *markdown, marked bool, cells string) {
+// commitCount is text, a cell of counts from the run's commit rows, or "-" when they were not read:
+// then each count is 0 because nothing was read, not a measured 0. The latencies and the CPU per
+// operation that come from the commit rows need no override: with no commit row they hold no value
+// (pair shows "-"), and run.go nulls the CPU per operation.
+func (s stepData) commitCount(text string) string {
+	if s.sum.Events.commitsUnread() {
+		return "-"
+	}
+	return text
+}
+
+// commitsUnreadNote defines commitsUnreadMark under a table, when a row has it: subject names the
+// table's cells that depend on the commit rows, and verb is "show" or "shows" to agree with it.
+func commitsUnreadNote(md *markdown, marked bool, subject, verb string) {
 	if marked {
-		md.line("\n%s: loadgen could not read the run's rows of loadtest.event_commits (summary.json `events.commits_error` says why: a database without commit-trigger.sql, or Postgres not reachable), so %s show `-`, not a measured 0, and the step failed.",
-			commitsUnreadMark, cells)
+		md.line("\n%s: loadgen could not read the run's rows of loadtest.event_commits (summary.json `events.commits_error` says why: a database without commit-trigger.sql, or Postgres not reachable), so %s %s `-`, not a measured 0, and the step failed.",
+			commitsUnreadMark, subject, verb)
 	}
 }
 
@@ -239,17 +249,9 @@ func eventsTable(md *markdown, steps []stepData) {
 		unread = unread || e.commitsUnread()
 		events := "0"
 		if c.EventsPerS > 0 {
-			committed := num(e.CommittedPerS, 2)
-			if e.commitsUnread() {
-				committed = "-"
-			}
-			events = fmt.Sprintf("%s / %s / %s", num(c.EventsPerS, 2), num(e.OfferedPerS, 2), committed)
+			events = fmt.Sprintf("%s / %s / %s", num(c.EventsPerS, 2), num(e.OfferedPerS, 2), s.commitCount(num(e.CommittedPerS, 2)))
 		}
-		fromArrival, fromCommit := pair(e.DeliveryMsFromArrival, p50, p99, 0), pair(e.DeliveryMsFromCommit, p50, p99, 0)
-		receipts := fmt.Sprintf("%s / %s", num(float64(e.IssueTopicReceipts), 0), num(float64(e.ExpectedIssueTopicReceipts), 0))
-		if e.commitsUnread() {
-			fromArrival, fromCommit, receipts = "-", "-", "-"
-		}
+		receipts := s.commitCount(fmt.Sprintf("%s / %s", num(float64(e.IssueTopicReceipts), 0), num(float64(e.ExpectedIssueTopicReceipts), 0)))
 		reqRate := "0"
 		share := "-"
 		if c.RequestsPerS > 0 {
@@ -267,7 +269,7 @@ func eventsTable(md *markdown, steps []stepData) {
 		}
 		md.row(s.commitsLabel(), start, num(float64(c.Sessions), 0), events,
 			fmt.Sprintf("%s / %s", num(float64(e.WriteErrors.Non2xx), 0), num(float64(e.WriteErrors.Transport), 0)),
-			fromArrival, fromCommit, receipts,
+			pair(e.DeliveryMsFromArrival, p50, p99, 0), pair(e.DeliveryMsFromCommit, p50, p99, 0), receipts,
 			reqRate, share, pair(q.LatencyMs, p50, p99, 0), num(float64(q.DroppedInflightCap), 0))
 	}
 	if below {
@@ -277,7 +279,7 @@ func eventsTable(md *markdown, steps []stepData) {
 		md.line("\n(<process> exited): that stack process exited during the step (summary.json `stack_exits`), so the step failed and its row, in every table here, does not measure the load.")
 	}
 	failedNote(md, slices.ContainsFunc(steps, func(s stepData) bool { return s.failed }))
-	commitsUnreadNote(md, unread, "the committed events/s, the delivery latencies from arrival and from commit, and the issue-topic receipts")
+	commitsUnreadNote(md, unread, "the committed events/s, the delivery latencies from arrival and from commit, and the issue-topic receipts", "show")
 }
 
 func kindsTable(md *markdown, steps []stepData) {
@@ -298,15 +300,12 @@ func kindsTable(md *markdown, steps []stepData) {
 				cells = append(cells, "-")
 				continue
 			}
-			committed := num(float64(ks.Committed), 0)
-			if s.sum.Events.commitsUnread() {
-				committed = "-"
-			}
+			committed := s.commitCount(num(float64(ks.Committed), 0))
 			cells = append(cells, fmt.Sprintf("%s (%s / %s)", pair(ks.WriteMs, p50, p99, 0), committed, num(float64(ks.Offered), 0)))
 		}
 		md.row(cells...)
 	}
-	commitsUnreadNote(md, unread, "the committed counts of each kind")
+	commitsUnreadNote(md, unread, "the committed counts of each kind", "show")
 }
 
 func resourcesTable(md *markdown, steps []stepData) {
@@ -354,7 +353,7 @@ func resourcesTable(md *markdown, steps []stepData) {
 				rss = num(v, 0)
 			}
 			heap, goroutines, pool = pair(r.HeapInuseMiB, p50, smax, 0), pair(r.Goroutines, p50, smax, 0), pair(r.PoolAcquireGoroutines, p50, smax, 0)
-			if r.DispatchCPUSPerOp != nil && !s.sum.Events.commitsUnread() {
+			if r.DispatchCPUSPerOp != nil {
 				perOp = num(*r.DispatchCPUSPerOp, 4)
 			}
 			if st, ok := r.PGConnsByState["active|Lock"]; ok {
@@ -388,17 +387,18 @@ func resourcesTable(md *markdown, steps []stepData) {
 		}
 		md.row(append(cells, heap, goroutines, pool, pgMax, lockWait, perOp)...)
 	}
-	failedReadsNote(md, marked, "the 5 s sampler's reads of pg_stat_activity and of Dispatch's goroutine and heap profiles",
+	failedReadsNote(md, marked, "the 5 s sampler's reads of pg_stat_activity (a failed connect included) and of Dispatch's goroutine and heap profiles",
 		"`resources.pg_read_errors` and `resources.pprof_read_errors`")
-	commitsUnreadNote(md, unread, "the Dispatch CPU-s per operation, whose operations count the committed writes,")
+	commitsUnreadNote(md, unread, "the Dispatch CPU-s per operation (its operations count the committed writes)", "shows")
 	cgroupNotes(md, withCgroup, cgFailed, cgUnmeasured)
 }
 
-// failedReadsNote defines the "(<n> failed reads)" mark under a table, when a row has it: what
-// failed, and the summary.json keys that count the failures.
+// failedReadsNote defines the failed-reads mark under a table, when a row has it: what names the
+// reads that failed, saying what a failed read covers, and keys the summary.json keys that count
+// the failures.
 func failedReadsNote(md *markdown, marked bool, what, keys string) {
 	if marked {
-		md.line("\n(<n> failed reads): %s failed n times, a failed connect included (summary.json %s); those reads enter no statistic, and a cell with no successful read shows `-`, not 0.", what, keys)
+		md.line("\n(<n> failed reads), or (1 failed read): %s failed n times (summary.json %s); those reads enter no statistic, and a cell with no successful read shows `-`, not 0.", what, keys)
 	}
 }
 
@@ -412,7 +412,7 @@ func commitOrderLockTable(md *markdown, steps []stepData) {
 		l := s.sum.CommitOrderLock
 		marked = marked || l.Errors > 0
 		if l.Samples == 0 {
-			md.emptyRow(s.probeLabel(l.Errors), len(columns))
+			md.emptyRow(withFailedReads(s.label(), l.Errors), len(columns))
 			continue
 		}
 		holds := "-"
@@ -430,9 +430,9 @@ func commitOrderLockTable(md *markdown, steps []stepData) {
 			}
 			doing = append(doing, fmt.Sprintf("%s %s%%", mdEscape(what), num(100*d.Share, 0)))
 		}
-		md.row(s.probeLabel(l.Errors), num(100*l.HeldFraction, 0)+"%", pair(l.Waiters, p50, smax, 0), holds, num(float64(l.HoldsObserved), 0), strings.Join(doing, "; "))
+		md.row(withFailedReads(s.label(), l.Errors), num(100*l.HeldFraction, 0)+"%", pair(l.Waiters, p50, smax, 0), holds, num(float64(l.HoldsObserved), 0), strings.Join(doing, "; "))
 	}
-	failedReadsNote(md, marked, "the probe's read of pg_locks", "`commit_order_lock.errors`")
+	failedReadsNote(md, marked, "the probe's connect or read of pg_locks", "`commit_order_lock.errors`")
 }
 
 func sseTable(md *markdown, steps []stepData) {
@@ -444,14 +444,10 @@ func sseTable(md *markdown, steps []stepData) {
 	for _, s := range steps {
 		sse, e := s.sum.SSE, s.sum.Events
 		unread = unread || e.commitsUnread()
-		fromSent, fromResponse := pair(e.DeliveryMsFromSent, p50, p99, 0), pair(sse.FrameMsFromWriteResponse, p50, p99, 0)
-		if e.commitsUnread() {
-			fromSent, fromResponse = "-", "-"
-		}
-		md.row(s.commitsLabel(), fromSent, pair(sse.FrameMsFromCreatedAt, p50, p99, 0),
-			fromResponse, num(float64(sse.Frames), 0), num(float64(sse.OrderViolations), 0))
+		md.row(s.commitsLabel(), pair(e.DeliveryMsFromSent, p50, p99, 0), pair(sse.FrameMsFromCreatedAt, p50, p99, 0),
+			pair(sse.FrameMsFromWriteResponse, p50, p99, 0), num(float64(sse.Frames), 0), num(float64(sse.OrderViolations), 0))
 	}
-	commitsUnreadNote(md, unread, "the NATS delivery latencies from sent and the SSE frame latencies from write response, which take only committed writes' primary events,")
+	commitsUnreadNote(md, unread, "the NATS delivery latencies from sent and the SSE frame latencies from write response (both take only committed writes' primary events)", "show")
 }
 
 func ungrantedTable(md *markdown, steps []stepData) {
@@ -465,7 +461,7 @@ func ungrantedTable(md *markdown, steps []stepData) {
 		u := s.sum.UngrantedLocks
 		marked = marked || u.Errors > 0
 		if u.Samples == 0 {
-			md.emptyRow(s.probeLabel(u.Errors), len(columns))
+			md.emptyRow(withFailedReads(s.label(), u.Errors), len(columns))
 			continue
 		}
 		var locks, pairs []string
@@ -486,9 +482,9 @@ func ungrantedTable(md *markdown, steps []stepData) {
 		if len(locks) > 0 {
 			lockText, pairText = strings.Join(locks, "; "), strings.Join(pairs, "; ")
 		}
-		md.row(s.probeLabel(u.Errors), num(100*u.ShareWithAny, 0)+"%", lockText, pairText)
+		md.row(withFailedReads(s.label(), u.Errors), num(100*u.ShareWithAny, 0)+"%", lockText, pairText)
 	}
-	failedReadsNote(md, marked, "the sampler's read of pg_locks", "`ungranted_locks.errors`")
+	failedReadsNote(md, marked, "the sampler's connect or read of pg_locks", "`ungranted_locks.errors`")
 }
 
 func xidTable(md *markdown, steps []stepData) {
@@ -504,12 +500,14 @@ func xidTable(md *markdown, steps []stepData) {
 			// The probe makes one rate from its connect and two reads: a failure of any is one
 			// failed read, which leaves no rate.
 			marked = true
-			md.emptyRow(s.probeLabel(1), 2)
+			md.emptyRow(withFailedReads(s.label(), 1), 2)
 		default:
 			md.emptyRow(s.label(), 2)
 		}
 	}
-	failedReadsNote(md, marked, "the transaction-id probe's connect or read of the next transaction id", "`resources.xid_read_error`, which holds the error")
+	if marked {
+		md.line("\n(1 failed read): the probe's connect or one of its two reads failed; summary.json `resources.xid_read_error` holds the error.")
+	}
 }
 
 func routesTable(md *markdown, steps []stepData) {

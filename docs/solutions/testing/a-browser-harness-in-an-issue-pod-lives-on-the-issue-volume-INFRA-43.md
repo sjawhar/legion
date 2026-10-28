@@ -18,6 +18,11 @@ related_issues:
 
 # A browser harness in an issue pod lives on the issue volume: Postgres with pgvector from Debian packages, and every cache moved off the container filesystem
 
+**Update (2026-10-26, INFRA-253):** Playwright no longer starts the harness: `e2e/run.ts` starts
+it on ports the OS chooses before Playwright runs and gives the server's build ten minutes, so
+the 60 s `webServer` window below no longer applies. Pre-building the binary with the cache on the
+volume still saves the wait.
+
 Extends docs/solutions/testing/an-embedded-postgres-in-a-worker-pod-the-zonky-jar-unpacked-with-python-gives-the-daemons-database-suites-a-run-LEGION-631.md.
 
 That document's zonky-jar Postgres gives the daemon's Go suites a database and says it cannot give

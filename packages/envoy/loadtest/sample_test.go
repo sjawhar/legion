@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -140,5 +144,92 @@ func TestGoroutineCountsFailsWithoutAProfile(t *testing.T) {
 		if _, _, _, err := heapStats(base); err == nil {
 			t.Errorf("heapStats(%s) read no profile and no error", base)
 		}
+	}
+}
+
+// natsSample is fakeSample at second at with the NATS /varz counts in and out, or, when ok is
+// false, with its NATS read marked as failed.
+func natsSample(at int, in, out float64, ok bool) sample {
+	s := fakeSample(at, 1, 1, 0)
+	s.NATS = map[string]float64{}
+	if !ok {
+		s.FailedReads = append(s.FailedReads, readNATS)
+		return s
+	}
+	s.NATS["in_msgs"], s.NATS["out_msgs"], s.NATS["slow_consumers"] = in, out, 2
+	return s
+}
+
+// TestSummarizeResourcesTakesNATSRatesFromTheReadsThatWorked: a failed /varz read is counted and
+// enters no rate: the NATS rates come from the first and last reads that worked, and are null when
+// fewer than two worked.
+func TestSummarizeResourcesTakesNATSRatesFromTheReadsThatWorked(t *testing.T) {
+	// The first and the last reads failed: the rates are over the reads at 5 s and 15 s.
+	some := summarizeResources([]sample{
+		natsSample(0, 0, 0, false), natsSample(5, 1000, 3000, true), natsSample(10, 1500, 4500, true),
+		natsSample(15, 2000, 6000, true), natsSample(20, 0, 0, false),
+	}, 0, 20)
+	if some.NATSInMsgsPerS == nil || some.NATSOutMsgsPerS == nil || *some.NATSInMsgsPerS != 100 || *some.NATSOutMsgsPerS != 300 {
+		t.Fatalf("NATS in %v, out %v per s; want 100 and 300, from the reads that worked", some.NATSInMsgsPerS, some.NATSOutMsgsPerS)
+	}
+	if some.NATSSlowConsumers == nil || *some.NATSSlowConsumers != 2 || some.NATSReadErrors != 2 {
+		t.Fatalf("NATS slow consumers %v, nats_read_errors %d; want 2 and 2", some.NATSSlowConsumers, some.NATSReadErrors)
+	}
+	one := summarizeResources([]sample{natsSample(0, 0, 0, false), natsSample(5, 1000, 3000, true), natsSample(10, 0, 0, false)}, 0, 10)
+	if one.NATSInMsgsPerS != nil || one.NATSOutMsgsPerS != nil || one.NATSSlowConsumers == nil || one.NATSReadErrors != 2 {
+		t.Fatalf("one read worked: NATS in %v, out %v, slow consumers %v, nats_read_errors %d; want no rate, the read's slow consumers, 2 errors",
+			one.NATSInMsgsPerS, one.NATSOutMsgsPerS, one.NATSSlowConsumers, one.NATSReadErrors)
+	}
+	none := summarizeResources([]sample{natsSample(0, 0, 0, false), natsSample(5, 0, 0, false)}, 0, 5)
+	if none.NATSInMsgsPerS != nil || none.NATSOutMsgsPerS != nil || none.NATSSlowConsumers != nil || none.NATSReadErrors != 2 {
+		t.Fatalf("no read worked: NATS in %v, out %v, slow consumers %v, nats_read_errors %d; want none and 2 errors",
+			none.NATSInMsgsPerS, none.NATSOutMsgsPerS, none.NATSSlowConsumers, none.NATSReadErrors)
+	}
+}
+
+// TestSamplerMarksNoReadThatFailedOnceTheStepEnded: a read that fails while the step runs is
+// marked in its sample and logged; one that fails once ctx has ended is neither, as poll does.
+func TestSamplerMarksNoReadThatFailedOnceTheStepEnded(t *testing.T) {
+	down := endpoints{pprof: "http://127.0.0.1:1", natsMon: "http://127.0.0.1:1", pg: unreachablePG, pids: map[string]int{}}
+	now := time.Now()
+
+	var logged bytes.Buffer
+	running := newSampler(down)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	running.loop(ctx, now, now.Add(time.Minute), log.New(&logged, "", 0))
+	ss := running.all()
+	if want := []string{readPostgres, readGoroutines, readHeap, readNATS}; len(ss) == 0 || !slices.Equal(ss[0].FailedReads, want) {
+		t.Fatalf("samples %+v: want the first to mark %v", ss, want)
+	}
+	for _, name := range []string{"sampler: postgres", "sampler: pprof", "sampler: nats"} {
+		if !strings.Contains(logged.String(), name) {
+			t.Errorf("run.log does not log the failed %s read:\n%s", name, logged.String())
+		}
+	}
+
+	logged.Reset()
+	ended := newSampler(down)
+	endedCtx, end := context.WithCancel(context.Background())
+	end()
+	ended.loop(endedCtx, now, now.Add(time.Minute), log.New(&logged, "", 0))
+	if ss := ended.all(); len(ss) != 1 || len(ss[0].FailedReads) != 0 || logged.Len() != 0 {
+		t.Fatalf("reads that failed once ctx had ended: samples %+v, log %q; want one sample with no mark and no log line", ss, logged.String())
+	}
+}
+
+// TestXIDRateReturnsAFailedRead: given a Postgres it cannot reach, the transaction-id probe
+// returns no rate and the error, which run.log holds.
+func TestXIDRateReturnsAFailedRead(t *testing.T) {
+	var logged bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	now := time.Now()
+	rate, err := xidRate(ctx, unreachablePG, now, now, log.New(&logged, "", 0))
+	if rate != nil || err == nil {
+		t.Fatalf("xidRate on an unreachable Postgres = %v, %v; want no rate and an error", rate, err)
+	}
+	if !strings.Contains(logged.String(), err.Error()) {
+		t.Fatalf("run.log does not hold the error %q:\n%s", err, logged.String())
 	}
 }

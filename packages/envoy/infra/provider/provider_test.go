@@ -168,18 +168,33 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 	require.Equal(t, "integer", dispatch.InputProperties["pprofPort"].Type)
 	require.False(t, dispatch.InputProperties["pprofPort"].Secret)
 	require.NotContains(t, dispatch.RequiredInputs, "pprofPort")
-	// The app container's size is two optional plain strings, Kubernetes quantities.
-	for _, input := range []string{"appCpu", "appMemory"} {
+	// The app pod's container sizes, envoy-dispatch's and cloud-sql-proxy's, are four optional
+	// plain strings, Kubernetes quantities.
+	for _, input := range []string{"appCpu", "appMemory", "proxyCpu", "proxyMemory"} {
 		require.Equal(t, "string", dispatch.InputProperties[input].Type, input)
 		require.False(t, dispatch.InputProperties[input].Secret, input)
 		require.NotContains(t, dispatch.RequiredInputs, input)
 	}
-	// The app pod's disruption protection is an optional plain string and an optional plain integer.
-	for input, typ := range map[string]string{"appPriorityClassName": "string", "appPdbMinAvailable": "integer"} {
+	// The pods' disruption protection, the front door's and the listener's replica counts and the
+	// database's availability are optional plain strings and integers.
+	for input, typ := range map[string]string{
+		"priorityClassName": "string", "appPdbMinAvailable": "integer",
+		"frontDoorPdbMinAvailable": "integer", "listenerPdbMinAvailable": "integer",
+		"frontDoorReplicas": "integer", "listenerReplicas": "integer",
+		"databaseAvailabilityType": "string",
+	} {
 		require.Equal(t, typ, dispatch.InputProperties[input].Type, input)
 		require.True(t, dispatch.InputProperties[input].Plain, input)
 		require.False(t, dispatch.InputProperties[input].Secret, input)
 		require.NotContains(t, dispatch.RequiredInputs, input)
+	}
+	// The Tailscale Service the front door hosts is a required Input, typically the consumer's
+	// Service's name output; the image cert-publish runs on is a required plain string.
+	for input, plain := range map[string]bool{"tailnetService": false, "frontDoorToolsImage": true} {
+		require.Equal(t, "string", dispatch.InputProperties[input].Type, input)
+		require.Equal(t, plain, dispatch.InputProperties[input].Plain, input)
+		require.False(t, dispatch.InputProperties[input].Secret, input)
+		require.Contains(t, dispatch.RequiredInputs, input)
 	}
 	require.True(t, dispatch.Properties["agentToken"].Secret)
 	for _, output := range []string{"serviceAccountIssuer", "serviceAccountSubject"} {
