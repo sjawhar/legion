@@ -91,6 +91,20 @@ function tallDocument(lead: string, target: string): string {
   return `${lead}\n\n\`\`\`mermaid\ngraph TD\n${chain.join("\n")}\n\`\`\`\n\n${filler.join("\n\n")}\n\n${target}\n`;
 }
 
+/** Serves the Mermaid worker's script to `context` as a worker that says it is ready and never
+ *  answers, so the page's time limit refuses every diagram whatever the machine's speed, and no
+ *  diagram is drawn for real (INFRA-713: a CI runner draws 800 nodes inside the limit, and 800
+ *  nodes drawn for real in a pod take over a minute and gigabytes). Returns the URLs it served,
+ *  which a row checks, so a renamed worker bundle cannot slip the real renderer back in. */
+async function stallMermaidWorker(context: BrowserContext): Promise<string[]> {
+  const served: string[] = [];
+  await context.route(/\/assets\/mermaid-render\.worker-[^/]*\.js(\?.*)?$/, (route) => {
+    served.push(route.request().url());
+    return route.fulfill({ body: "postMessage({ ready: true });", contentType: "text/javascript" });
+  });
+  return served;
+}
+
 function diagramIn(card: Locator): Locator {
   return card.getByRole("img", { exact: true, name: diagramName });
 }
@@ -500,7 +514,8 @@ test("a mermaid source the renderer refuses shows the reason and its source, and
 
 // ELK's layout time grows faster than the diagram: a flowchart of 800 nodes with 2 edges each
 // takes over a minute. Drawn on the page's own thread it held every reader of the comment there;
-// in the worker the page keeps answering and the time limit refuses it.
+// in the worker the page keeps answering and the time limit refuses it. The worker here never
+// answers, so the refusal does not depend on how fast the machine draws.
 test("a diagram too large to draw in time shows the reason, and the page keeps responding @phone", async ({
   browser,
 }, testInfo) => {
@@ -513,6 +528,7 @@ test("a diagram too large to draw in time shows the reason, and the page keeps r
 
   const alice = await asUser(browser, "alice");
   try {
+    const stalled = await stallMermaidWorker(alice);
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
     const card = await openCommentThread(page, testInfo, comment.id, "Large:");
@@ -538,6 +554,7 @@ test("a diagram too large to draw in time shows the reason, and the page keeps r
       "Unable to render Mermaid diagram: it did not finish within 5 seconds"
     );
     await expect(card.locator("pre code").filter({ hasText: "n799 --> n0" })).toBeVisible();
+    expect(stalled).toHaveLength(1);
     await expect(diagramIn(card)).toHaveCount(0);
   } finally {
     await alice.close();
@@ -797,6 +814,7 @@ test("an edited document diagram redraws once typing pauses, and its last drawin
 
 // The document twin of the comment row above: drawn on the page's thread the layout holds the
 // page for over a minute; in the worker the page keeps answering and the time limit refuses it.
+// The worker here never answers, as in the comment row.
 test("a document diagram too large to draw in time shows the reason and its source, and the page keeps responding @phone", async ({
   browser,
 }) => {
@@ -809,6 +827,7 @@ test("a document diagram too large to draw in time shows the reason and its sour
 
   const alice = await asUser(browser, "alice");
   try {
+    const stalled = await stallMermaidWorker(alice);
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/spec`);
     await expect(documentEditor(page)).toContainText("Large document:");
@@ -835,6 +854,7 @@ test("a document diagram too large to draw in time shows the reason and its sour
       documentEditor(page).locator("pre code").filter({ hasText: "n799 --> n0" })
     ).toBeVisible();
     await expect(diagramIn(documentEditor(page))).toHaveCount(0);
+    expect(stalled).toHaveLength(1);
   } finally {
     await alice.close();
   }
