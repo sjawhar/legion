@@ -418,7 +418,7 @@ type PullRequest struct {
 	Pushes []ClassifiedPush
 	// Moves are the moves the record has made, newest last and at most the last 32: each head's
 	// arrival from the head before it, and each push on the chain of pushes it found between them. A
-	// push whose own move is among them is spent (classify.keptPushes), whenever it arrives; a push
+	// push whose own move is among them is spent (classify.unspentPushes), whenever it arrives; a push
 	// for a move not made yet - one that returns the branch to a commit it held before, say - is not.
 	Moves []Move
 	// HeadCounted is the head the fix-attempt count last counted, a push onto a red verdict, kept
