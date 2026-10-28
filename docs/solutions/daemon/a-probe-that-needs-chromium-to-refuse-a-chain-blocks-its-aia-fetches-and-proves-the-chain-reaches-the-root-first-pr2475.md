@@ -20,9 +20,12 @@ module: packages/daemon/cmd/legion/tls_probe.go
   `cert_issuer_source_aia.cc:138 AiaRequest::OnFetchCompleted got error -7` (`ERR_TIMED_OUT`).
   curl, OpenSSL, Python, Go, Node and Bun fetch no AIA, so only Chromium waits.
 - Chromium has no switch that turns AIA fetching off; only the standalone `cert_verify_tool` has
-  `--no-net-fetcher`. `--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE <probed host>` gives the
-  same result for one process: each fetch fails at once with `ERR_NAME_NOT_RESOLVED` (-105). It
-  also leaves an environment proxy's host unresolvable, so behind a proxy every load fails.
+  `--no-net-fetcher`. `--host-resolver-rules=MAP * ^NOTFOUND, EXCLUDE <probed host>` gives the
+  same result for one process: each fetch fails at once with `ERR_NAME_NOT_RESOLVED` (-105).
+  `^NOTFOUND` is the token net/dns/mapped_host_resolver.h documents. `~NOTFOUND`, which Chromium's
+  SOCKS proxy page shows, is read as a replacement host name instead; it fails only because the
+  resolver rejects `~notfound` as a malformed name. The rule also leaves an environment proxy's
+  host unresolvable, so behind a proxy every load fails.
 - Without AIA, Chromium's verdict comes from the served chain and its local trust store. That is
   the verdict to prove only if the site serves every certificate up to the distrusted root's
   subject. The probe's positive control proves this on each run: curl with only the pinned root

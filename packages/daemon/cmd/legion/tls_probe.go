@@ -341,12 +341,14 @@ var workerTLSClients = []tlsClientSpec{
 // comes from the served chain and Chromium's own trust store alone. That is the verdict to prove:
 // the positive controls show that each test site serves every certificate up to its pinned root's
 // subject, and the sites' AIA URLs hold only self-signed roots, which a path can end at only as
-// anchors of the local trust store. A proxy in env is a host name or address this rule also leaves
-// unresolvable, so behind one every load fails as unavailable, never as a refusal.
+// anchors of the local trust store. `^NOTFOUND` is the rule's token for "fail with
+// ERR_NAME_NOT_RESOLVED" (net/dns/mapped_host_resolver.h). A proxy in env is a host name or address
+// this rule also leaves unresolvable, so behind one every load fails as unavailable, never as a
+// refusal.
 func chromiumTLSArgs(site tlsSite) []string {
 	// Every tlsSites URL is an absolute https URL, which url.Parse reads without error.
 	parsed, _ := url.Parse(site.url)
-	return []string{"--headless", "--no-sandbox", "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE " + parsed.Hostname(), "--dump-dom", site.url}
+	return []string{"--headless", "--no-sandbox", "--host-resolver-rules=MAP * ^NOTFOUND, EXCLUDE " + parsed.Hostname(), "--dump-dom", site.url}
 }
 
 // imageTLSClients returns the image's TLS-capable programs. The gh wrapper manages worker tokens,

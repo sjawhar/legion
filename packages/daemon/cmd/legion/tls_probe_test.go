@@ -162,7 +162,7 @@ func TestImageChromiumResolvesOnlyTheProbedSite(t *testing.T) {
 		controlTLSSite: "example.com",
 	} {
 		program, args, _ := chromium.command(site)
-		want := []string{"--headless", "--no-sandbox", "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE " + host, "--dump-dom", site.url}
+		want := []string{"--headless", "--no-sandbox", "--host-resolver-rules=MAP * ^NOTFOUND, EXCLUDE " + host, "--dump-dom", site.url}
 		if program != "chromium" || !slices.Equal(args, want) {
 			t.Errorf("chromium command for %s = %s %q, want chromium %q", site.name, program, args, want)
 		}
