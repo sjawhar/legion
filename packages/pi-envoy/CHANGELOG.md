@@ -1,8 +1,14 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
+
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by …` with the
+  options chosen and `Answer text: …`, `Closed with no answer: …`, `Closed after an answer: …` with
+  `Last answer by …`, or `Open: no answer yet.`; against a Dispatch older than this release, which
+  reports no state, `Answer state not reported by this Dispatch; open the link to read the ask.`
+  Its description says an ask hit says whether it is answered (INFRA-569).
 
 - AskGate's marker checks at the `dispatch` CLI (no matching marker, a file changed after the
   review, a file missing when the gate ran) warn by default: the write posts with its warning and
@@ -329,15 +335,6 @@
 
 ### Changed
 
-- The shipped `envoy` skill and the bundled `envoy_publish` description say when a publish errs,
-  now that the listener confirms a role or ad-hoc topic message with its recipients before it
-  answers: a role message errs when its holder did not confirm it within about 4 seconds (seen
-  after about 8, since the client tries once more), and a team or other ad-hoc topic errs naming
-  each session registered on it, the sender excepted, that did not confirm; a session named with
-  `receipt_timeout` gets the message back from its inbox through the replay once its connection
-  returns. The
-  README, `AGENTS.md` and the delivery comment say the listener's publish route waits for the
-  receipt the session sends for a forwarded frame (INFRA-547).
 - `dispatch-writing-specs` adds two rules for the text. A spec cites code by file and symbol, never
   a line number, since a line number is stale at the next edit. A sentence that cites a gate
   passing (a test, review, check or proof) also says, in that sentence, what the pass does not

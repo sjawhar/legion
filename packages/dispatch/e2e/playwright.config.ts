@@ -12,6 +12,11 @@ import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
 // open the plain-HTTP name, which only that project maps, and the origin rows' first assertion
 // fails on loopback by design.
 const plainHttpSpecs = /plain-http-(origin|proxy)\.e2e\.ts/;
+// The `iphone` project runs only tests tagged `@phone`; which tests take the tag is in
+// `packages/dispatch/AGENTS.md`, "Phone acceptance". An untagged test drops out with no failure.
+// The regex is anchored so `@phone` matches only as a whole whitespace-separated token, never
+// inside a longer one such as `@phones` or `x@phone`.
+const phoneTagged = /(^|\s)@phone(\s|$)/;
 
 // The rows of e2e/harness-listeners.ts this run targets, as the environment names them when this
 // config evaluates.
@@ -107,6 +112,7 @@ export default defineConfig({
     {
       name: "iphone",
       testIgnore: plainHttpSpecs,
+      grep: phoneTagged,
       use: { ...devices["iPhone 13"], browserName: "chromium" },
     },
     // A caret beside a collaborator's cursor behaves per engine, the issue picker's keyboard-step

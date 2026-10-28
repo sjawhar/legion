@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
@@ -65,15 +65,15 @@
   own copy of the `legion-architect` skill says a component file goes in the branch of the source
   repository that holds it, with an id no other source of the project uses, since `dist/` and
   `legion/` were regenerated (INFRA-391).
+- The `dispatch` command (`dist/dispatch.js`) prints, under each ask hit of `dispatch search`,
+  where the ask stands: `Answered by …` with the options chosen and `Answer text: …`, `Closed with
+  no answer: …`, `Closed after an answer: …` with `Last answer by …`, or `Open: no answer yet.`;
+  against a Dispatch older than this release, which reports no state, `Answer state not reported
+  by this Dispatch; open the link to read the ask.` The bundled `dispatch_search` description says
+  an ask hit says whether it is answered, since `dist/` was regenerated (INFRA-569).
 
 ### Changed
 
-- The bundled `envoy_publish` description (`dist/` rebuilt) says a role message errs when its
-  holder did not confirm it within the listener's window, and a team or other ad-hoc topic errs
-  naming each session holding its own NATS connection that registered the topic and did not
-  confirm it; a session that stopped without unregistering stays registered for up to 5 minutes
-  and is named in that time, and a named session is not a failed delivery to the others
-  (INFRA-547).
 - The linked `dispatch-writing-specs` skill tells a session to cite code in a spec by file and
   symbol, never a line number, and to say, in each sentence that cites a gate passing, what the pass
   does not show. To stay under the 2,000-word guard it cuts lines another loaded text already says:
@@ -159,12 +159,6 @@
   daemon records. The daemon now refuses a completion of a run the issue has left before it applies
   any fact and names the current run's queued task, so the worker ends the turn and calls
   `handoff_complete` again at the same commit in that task's turn, which is applied.
-- A message the listener forwards to the session's agent subject is shown with the topic it was
-  published to: the channel notification's `topic` meta is the envelope's `topic`, falling back to
-  the NATS subject only when the envelope names none, where it was always the subject. A role
-  message's forward was shown under the session's own `notifications.agent.<id>`, and so was an
-  ad-hoc topic's copy the listener now confirms with the session, which can arrive before the copy
-  on the topic itself (INFRA-547).
 - The Legion tool's `handoff_complete` waits out a daemon restart: a connection refused, reset or
   closed before a response, or a 502 or 503 from a proxy, is retried with backoff for up to 10
   minutes, each attempt with a fresh grant, until the MCP client cancels the request

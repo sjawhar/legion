@@ -110,8 +110,8 @@ the resync probe is the backstop and, on a healthy stream, never gets there firs
   invariant), `readyConfirmedAt` set again, `launchFailures` gone (reset by the confirmed ready).
 - The phase completing: the Dispatch status transition and the Envoy listener's `listener publish
   role send` line (outcome `delivered`) for the `phase-complete` payload on the architect's role
-  topic, naming the architect's session as its holder. A listener before INFRA-547 logs `listener
-  received` / `listener role forwarded` instead.
+  topic, naming the architect's session as its holder. A listener from before the publish route
+  confirmed role messages logs `listener received` / `listener role forwarded` instead.
 - **That nobody intervened:** the redacted state page does not expose `pendingAssignment` or the
   spawn ledger, so read the daemon's durable `state.json` under its `state_dir`:
   `spawnRequests` holds one entry per `spawn_worker`; exactly one for the killed role, settled

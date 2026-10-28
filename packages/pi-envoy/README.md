@@ -95,10 +95,10 @@ omp plugin install @sjawhar/pi-envoy
 ```
 
 A session that had the pre-split package installed (the one package that carried both entries
-until 7.x) uninstalls it and installs this one once; the Unreleased entry of `CHANGELOG.md` gives
-the two commands. A Legion deployment installs `@sjawhar/pi-legion` as well
-(`packages/pi-legion/README.md`); the daemon's boot gate refuses a pane that still loads the
-pre-split package beside the new ones.
+until 7.x) uninstalls it and installs this one once; the `CHANGELOG.md` entry that renames the
+package `@sjawhar/pi-envoy` gives the two commands. A Legion deployment installs
+`@sjawhar/pi-legion` as well (`packages/pi-legion/README.md`); the daemon's boot gate refuses a
+pane that still loads the pre-split package beside the new ones.
 
 The tarball is self-contained: it ships `dist/envoy.js` — bundling every dependency except the OMP
 host packages (`@legion/pi-shared`, `@legion/contracts` and `@legion/envoy-client` are inlined) —
