@@ -1103,6 +1103,21 @@ type Mention struct {
 	SessionID *string `json:"session_id"`
 }
 
+// DeliveryClaimLapse is the lease on a pending delivery attempt (a comment_deliveries or
+// message_deliveries row): a sender's claim older than this was left by a sender that never came
+// back. Two readers depend on the one window and must agree. The API's claimLapsed
+// (internal/dispatch/api) lets another sender resume or settle an attempt whose claim is older,
+// and the outbox's mentionDeliveryQuery (internal/dispatch/outbox) stops holding a mentioned
+// session's own-topic copy back for a pending mention attempt whose claim - or creation, when no
+// sender claimed it - is older, so the outbox never waits on an attempt a sender may no longer
+// finish. Both judge it in Postgres against Postgres's own timestamps, through
+// DeliveryClaimLapseInterval.
+const DeliveryClaimLapse = time.Minute
+
+// DeliveryClaimLapseInterval is DeliveryClaimLapse as a Postgres interval literal in whole
+// seconds, for SQL that compares a delivery's claimed_at or created_at against now().
+var DeliveryClaimLapseInterval = fmt.Sprintf("interval '%d seconds'", int64(DeliveryClaimLapse/time.Second))
+
 // CommentDelivery records one attempt to deliver a mention to its resolved session.
 type CommentDelivery struct {
 	CommentID  string  `json:"comment_id"`
@@ -1254,32 +1269,27 @@ type CommentEventPayload struct {
 	// ask or is a root comment.
 	ThreadRootID string `json:"thread_root_id,omitempty"`
 	// SuppressRoute and SuppressedAuthors are resolved before the comment event commits,
-	// so the outbox can deduplicate without consulting the live session registry. A mentioned
-	// session is one a mention delivers the comment to as far as its creation knows: the
-	// session the mention's lookup pinned, or the <id> of a session:<id> mention whose lookup
-	// went unanswered within its bound (that mention itself stays unpinned).
-	// SuppressRoute says the issue route's copy is skipped because a mention delivers the
-	// comment to the session it reaches: either the route names a mentioned session, because
-	// its lookup pinned it or because its own lookup went unanswered and it is session:<id>
-	// (SuppressedRoute is the route string, SuppressedRouteSessionID that session), or the
-	// route string equals a mention's target whose lookup went unanswered (SuppressedRoute
-	// alone, no session known).
+	// so the outbox can deduplicate without consulting the live session registry. They name
+	// candidates only: the sessions the comment's mentions deliver it to as far as its creation
+	// knows - the session the mention's lookup pinned, or the <id> of a session:<id> mention whose
+	// lookup went unanswered within its bound (that mention itself stays unpinned). The mention's
+	// send runs after the commit and can fail, so the outbox skips a candidate's copy only once
+	// comment_deliveries shows its mention was sent to it, holds the copy back while that send is
+	// still pending, and publishes it when the send failed or was abandoned.
+	// SuppressRoute marks the issue route's copy as left to a mention: either the route names a
+	// candidate, because its lookup pinned it or because its own lookup went unanswered and it is
+	// session:<id> (SuppressedRoute is the route string, SuppressedRouteSessionID that candidate),
+	// or the route string equals a mention's target whose lookup went unanswered (SuppressedRoute
+	// alone, no session known). The outbox applies only a suppression that names a session, so a
+	// SuppressedRoute alone leaves the route copy published.
 	// The route copy still duplicates the mention for an unanswered role:X mention whose holder
 	// the route names under another string, and for a role:X route whose own lookup went
 	// unanswered; that session then receives two copies.
-	// SuppressedAuthors names the mentioned sessions the author routes skip: on a reply, its
-	// thread's root author when mentioned; on a new comment not in an ask's thread, every
-	// mentioned session, since the outbox reads the document's authors only when it publishes.
-	// An author route still duplicates an unanswered role:X mention whose holder is the root
-	// author or a document writer.
-	// A suppression holds while the mention can still deliver. When the mention to a session
-	// fails, its attempt's settle lifts what was suppressed for that session alone - the route
-	// suppression when it names that session or the failed target, and the session in
-	// SuppressedAuthors - and reopens this event, so the outbox publishes that session the copy
-	// it skipped, to no destination the event already reached (restoreSuppressedCopy in
-	// api/comment_delivery.go). A session a suppression names hears the comment once: from the
-	// mention, or, when the mention fails, from the route or author copy published then. The
-	// two-copy cases above are unchanged.
+	// SuppressedAuthors names the candidates the author routes skip: on a reply, its thread's root
+	// author when mentioned; on a new comment not in an ask's thread, every candidate, since the
+	// outbox reads the document's authors only when it publishes. An author route still
+	// duplicates an unanswered role:X mention whose holder is the root author or a document
+	// writer.
 	SuppressRoute            bool     `json:"suppress_route"`
 	SuppressedRoute          string   `json:"suppressed_route,omitempty"`
 	SuppressedRouteSessionID *string  `json:"suppressed_route_session_id,omitempty"`

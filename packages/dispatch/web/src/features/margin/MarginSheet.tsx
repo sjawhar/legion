@@ -74,8 +74,8 @@ export interface MarginSheetModel {
     pinnedConversations: PinnedConversationCard[];
     pinnedIds: string[];
     resolvedThreads: Thread[];
-    /** Retracted asks hidden behind the same toggle as resolved threads. */
-    retractedAskCount: number;
+    /** Retracted and withdrawn asks hidden behind the same toggle as resolved threads. */
+    foldedAskCount: number;
     threads: Thread[];
     viewerLogin: string;
     visibleArtifact: Artifact | undefined;
@@ -150,7 +150,7 @@ export function MarginSheet({
       needsYou,
       onSelectCard,
       resolvedThreads,
-      retractedAskCount,
+      foldedAskCount,
       threads,
       viewerLogin,
       visibleArtifact,
@@ -373,7 +373,7 @@ export function MarginSheet({
               onToggleThread={actions.onToggleThread}
               pendingActionIds={pendingActionIds}
               resolvedThreads={resolvedThreads}
-              retractedAskCount={retractedAskCount}
+              foldedAskCount={foldedAskCount}
               selectedItemId={selection.selectedItemId}
               showResolved={selection.showResolved}
               threads={threads}
