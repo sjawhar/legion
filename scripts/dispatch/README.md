@@ -64,25 +64,25 @@ for the stage 4b proof.
 ## Comment delivery
 
 `comment-delivery/report.ts` answers which comments people wrote in Dispatch reached no agent
-session, and why (INFRA-596). The run has three steps. Every step only reads.
+session, and why (sjawhar/legion#2366). The run has three steps. Every step only reads.
 
 1. `comments.sql` reads Dispatch's database and writes `comments.csv`: every comment that a person
    wrote in the window, one row for each session or role that the comment was owed or sent to (a
    pair). `trace.sql` writes Dispatch's whole record of one comment. Both are in
    `packages/envoy/internal/dispatch/deliveryaudit/`. Its `README.md` gives their columns.
-2. `tq receipts` (INFRA-608, in theorem-labs/agent-infra `transcript-store/`) reads
+2. `tq receipts` (in theorem-labs/agent-infra `transcript-store/`) reads
    `comments.csv` and the transcript store. It writes `receipts.tsv`, one status for each pair,
    and `receipts-counts.txt`, its counts. It owns the transcript rules: which transcript row is a
    receipt of a comment, which sessions count as the pair's session, and each pair's status.
 3. `report.ts` reads the three files and writes one markdown document and one TSV file of the
    document's pairs.
 
-INFRA-608's `transcript-store/comment-delivery/run.sh` does steps 1 and 2 on a dev box, which
+theorem-labs/agent-infra's `transcript-store/comment-delivery/run.sh` does steps 1 and 2 on a dev box, which
 reaches both Dispatch's database and the transcript store.
 
 ### The run
 
-Use one window for both steps. INFRA-608's run chooses `TO`. Both times are UTC, in the form
+Use one window for both steps. That run chooses `TO`. Both times are UTC, in the form
 `2026-10-01T00:00:00Z`.
 
 ```bash
@@ -99,7 +99,7 @@ PGOPTIONS='-c default_transaction_read_only=on' psql "$DATABASE_URL" -X -v ON_ER
   -v comment=03207432-749f-4211-9607-e378dc636807 \
   -f packages/envoy/internal/dispatch/deliveryaudit/trace.sql > trace-03207432.csv
 
-# 2. The transcript store (INFRA-608): receipts.tsv on stdout, the counts on stderr.
+# 2. The transcript store (theorem-labs/agent-infra transcript-store/): receipts.tsv on stdout, the counts on stderr.
 tq receipts --comments comments.csv --from "$FROM" > receipts.tsv 2> receipts-counts.txt
 
 # 3. The document, and the TSV file of its pairs.

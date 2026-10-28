@@ -14,9 +14,9 @@ import { ReportRefusal } from "../comment-delivery/inputs.ts";
 
 const FIXTURES = join(import.meta.dir, "..", "__fixtures__", "comment-delivery");
 const SCRIPT = join(import.meta.dir, "..", "comment-delivery", "report.ts");
-const BET15 = "03207432-749f-4211-9607-e378dc636807";
+const REPLY = "03207432-749f-4211-9607-e378dc636807";
 const CONTROL = "c1283587-7929-4a34-9048-b83f82e4bfd2";
-const BET15_LEAD = "session:01a14313-f0d7-765d-91c1-f2e043218727";
+const CLAIMANT = "session:01a14313-f0d7-765d-91c1-f2e043218727";
 const SESSION_A = "01a1a001-0000-7000-8000-000000000001";
 const id = (n: number) =>
   `0a${String(n).padStart(6, "0")}-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -129,17 +129,17 @@ describe("the pairs and the comments", () => {
   const pairVerdicts = (commentId: string) =>
     judged(report, commentId).pairs.map(({ pair, verdict: its }) => [pair.target, its]);
 
-  test("the BET-15 reply owed to the claimant, not addressed and not received, is not-addressed:claimant", () => {
-    expect(verdict(BET15)).toEqual({ class: "not-delivered", cause: "not-addressed:claimant" });
-    expect(pairVerdicts(BET15)).toEqual([
-      [BET15_LEAD, { class: "not-delivered", cause: "not-addressed:claimant" }],
+  test("a person's reply in a thread they started, owed to the claimant, not addressed and not received, is not-addressed:claimant", () => {
+    expect(verdict(REPLY)).toEqual({ class: "not-delivered", cause: "not-addressed:claimant" });
+    expect(pairVerdicts(REPLY)).toEqual([
+      [CLAIMANT, { class: "not-delivered", cause: "not-addressed:claimant" }],
     ]);
   });
 
   test("the control comment, addressed and received, is delivered", () => {
     expect(verdict(CONTROL)).toEqual({ class: "delivered", cause: "" });
     expect(pairVerdicts(CONTROL)).toEqual([
-      [BET15_LEAD, { class: "delivered", cause: "", evidence: "transcript" }],
+      [CLAIMANT, { class: "delivered", cause: "", evidence: "transcript" }],
     ]);
   });
 
@@ -228,10 +228,10 @@ describe("the pairs and the comments", () => {
 
   test("a pending mention not addressed is not-addressed; a pair owed twice names both reasons", () => {
     const comments = input.comments.replace(
-      `${BET15_LEAD},claimant,false,,,,,,,`,
-      `${BET15_LEAD},claimant;mention,false,${BET15_LEAD.slice(8)},,,steer,pending,,`
+      `${CLAIMANT},claimant,false,,,,,,,`,
+      `${CLAIMANT},claimant;mention,false,${CLAIMANT.slice(8)},,,steer,pending,,`
     );
-    expect(judged(judge({ ...input, comments }), BET15).verdict.cause).toBe(
+    expect(judged(judge({ ...input, comments }), REPLY).verdict.cause).toBe(
       "not-addressed:claimant+mention"
     );
   });
@@ -308,8 +308,8 @@ describe("the document", () => {
     // A value from the input, an author's e-mail address first, is a code span, which a Markdown
     // editor does not make a link; a uuid stays bare.
     expect(first.stdout).toContain(
-      `| ${BET15} | \`BET-15\` | 2026-10-19T01:31:21.247610Z | \`sami@theorem.dev\` | reply | ` +
-        `not delivered | \`not-addressed:claimant\` | \`${BET15_LEAD}\` (claimant): ` +
+      `| ${REPLY} | \`ACME-15\` | 2026-10-19T01:31:21.247610Z | \`sami@theorem.dev\` | reply | ` +
+        `not delivered | \`not-addressed:claimant\` | \`${CLAIMANT}\` (claimant): ` +
         "not-addressed:claimant |"
     );
     expect(first.stdout).not.toMatch(/[^`]sami@theorem\.dev/);
@@ -336,8 +336,8 @@ describe("the document", () => {
 
   test("a value with a backtick or a pipe is still one code span, in its table cell", async () => {
     const comments = input.comments.replace(
-      `${id(3)},1003,INFRA-1,2026-10-20T00:00:00.000000Z,,sami@theorem.dev,`,
-      `${id(3)},1003,\`INFRA-1\`,2026-10-20T00:00:00.000000Z,,a\`b|c@theorem.dev,`
+      `${id(3)},1003,ACME-1,2026-10-20T00:00:00.000000Z,,sami@theorem.dev,`,
+      `${id(3)},1003,\`ACME-1\`,2026-10-20T00:00:00.000000Z,,a\`b|c@theorem.dev,`
     );
     expect(comments).not.toBe(input.comments);
     const run = await cli({ comments });
@@ -346,7 +346,7 @@ describe("the document", () => {
     // The fence is the shortest backtick run that is not a run of the value; a space pads a
     // value that starts or ends with a backtick; a `|` is `\|`.
     expect(run.stdout).toContain(
-      `| ${id(3)} | \`\` \`INFRA-1\` \`\` | 2026-10-20T00:00:00.000000Z | ` +
+      `| ${id(3)} | \`\` \`ACME-1\` \`\` | 2026-10-20T00:00:00.000000Z | ` +
         "``a`b\\|c@theorem.dev`` | conversation | not delivered | `never-published` | "
     );
   });
@@ -387,7 +387,7 @@ describe("the document", () => {
     );
     expect(lines).toContain(`${id(4)}\t\t\t\t\t\t\tnot delivered\tno-target`);
     expect(lines).toContain(
-      `${BET15}\t${BET15_LEAD}\tclaimant\tno\t\t01a14313-f0d7-765d-91c1-f2e043218727\t` +
+      `${REPLY}\t${CLAIMANT}\tclaimant\tno\t\t01a14313-f0d7-765d-91c1-f2e043218727\t` +
         "not_received\tnot delivered\tnot-addressed:claimant"
     );
   });
@@ -411,8 +411,8 @@ describe("the document", () => {
   });
 
   test("puts each findings file in verbatim, in the order given, after the causes table", async () => {
-    const one = "### BET-15\n\nThe reply had *no* route:\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n";
-    const two = "### INFRA-2\n\n```text\nas it is\n```";
+    const one = "### ACME-15\n\nThe reply had *no* route:\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+    const two = "### ACME-2\n\n```text\nas it is\n```";
     const paths = [join(scratch, `${written++}-one.md`), join(scratch, `${written++}-two.md`)];
     await writeFile(paths[0] ?? "", one);
     await writeFile(paths[1] ?? "", two);
@@ -439,7 +439,7 @@ describe("the document", () => {
         "thread and to the document's session authors, and a comment on an issue with no route " +
         "and no session claim goes to the session authors of the issue's primary document. A " +
         "Legion issue before admission, and an issue that nobody routes or claims and whose " +
-        "document's author has stopped (INFRA-49), still reach no session; the findings give " +
+        "document's author has stopped (the controller's report issue), still reach no session; the findings give " +
         "each comment's cause."
     );
     expect(CAUSES["not-running"]?.meaning).toBe(
@@ -471,7 +471,7 @@ describe("refusals", () => {
     expect(run.pairs).toBeUndefined();
     expect(run.left).toEqual([]);
     expect(run.stderr).toContain(
-      `receipts.tsv lines 2 and 3: comment ${BET15} and target "${BET15_LEAD}" twice`
+      `receipts.tsv lines 2 and 3: comment ${REPLY} and target "${CLAIMANT}" twice`
     );
   });
 
@@ -534,7 +534,7 @@ describe("refusals", () => {
     const order =
       "out of order: the rows are not sorted by comment_id, then listed (true first), then target";
     // By comment_id.
-    expect(swap(1, 2)).toEqual([`receipts.tsv line 3 (comment ${BET15}): ${order}`]);
+    expect(swap(1, 2)).toEqual([`receipts.tsv line 3 (comment ${REPLY}): ${order}`]);
     // By listed: the unlisted row of a comment before its listed row.
     expect(swap(5, 6)).toEqual([`receipts.tsv line 7 (comment ${id(7)}): ${order}`]);
     // By target.
@@ -561,7 +561,7 @@ describe("refusals", () => {
   test("a duplicated comments.csv pair is refused", () => {
     const comments = append(input.comments, lineOf(input.comments, 2));
     expect(refusal({ ...input, comments })).toContain(
-      `comments.csv lines 3 and 17: comment ${BET15} and target "${BET15_LEAD}" twice`
+      `comments.csv lines 3 and 17: comment ${REPLY} and target "${CLAIMANT}" twice`
     );
   });
 
@@ -571,7 +571,7 @@ describe("refusals", () => {
     expect(run.code).toBe(1);
     expect(run.stdout).toBe("");
     expect(run.stderr).toContain(
-      `comments.csv line 3: comment ${BET15} and target ${BET15_LEAD} have no listed row in receipts.tsv`
+      `comments.csv line 3: comment ${REPLY} and target ${CLAIMANT} have no listed row in receipts.tsv`
     );
   });
 
@@ -629,7 +629,7 @@ describe("refusals", () => {
     expect(refusal({ ...input, comments: input.comments.replace("owner,", "") })[0]).toStartWith(
       'comments.csv: the header is "comment_id,event_id,created_at'
     );
-    // The header before INFRA-608's contract, with target_kind and one mention attempt.
+    // The header before `tq receipts`' contract, with target_kind and one mention attempt.
     const old = input.comments.replace("target,owed_reasons", "target,target_kind,owed_reasons");
     expect(refusal({ ...input, comments: old })[0]).toStartWith(
       'comments.csv: the header is "comment_id,event_id,owner,created_at,published_at,author,' +
@@ -644,7 +644,7 @@ describe("refusals", () => {
       .replace("btw_reply:0b000011", "reply:0b000011");
     expect(refusal({ ...input, receipts })).toEqual(
       expect.arrayContaining([
-        `receipts.tsv line 2 (comment ${BET15}): status "missing"`,
+        `receipts.tsv line 2 (comment ${REPLY}): status "missing"`,
         `receipts.tsv line 5 (comment ${id(6)}): unknown_reason "pod"`,
         `receipts.tsv line 11 (comment ${id(11)}): evidence "reply:0b000011-0000-4000-8000-000000000011"`,
       ])
@@ -654,11 +654,11 @@ describe("refusals", () => {
       `receipts.tsv line 12 (comment ${id(12)}): status "unknown" with unknown_reason ""`
     );
     const listed = input.receipts.replace(
-      `${BET15}\t1002\t${BET15_LEAD}\ttrue`,
-      `${BET15}\t1002\t${BET15_LEAD}\tyes`
+      `${REPLY}\t1002\t${CLAIMANT}\ttrue`,
+      `${REPLY}\t1002\t${CLAIMANT}\tyes`
     );
     expect(refusal({ ...input, receipts: listed })).toContain(
-      `receipts.tsv line 2 (comment ${BET15}): listed "yes"`
+      `receipts.tsv line 2 (comment ${REPLY}): listed "yes"`
     );
   });
 

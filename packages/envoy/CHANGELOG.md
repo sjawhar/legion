@@ -1806,7 +1806,7 @@
 
 ### Fixed
 
-- A person's reply in a Dispatch comment thread now reaches the agents in that thread (INFRA-596).
+- A person's reply in a Dispatch comment thread now reaches the agents in that thread (#2366).
   A reply stores its thread root as `reply_to`, so the outbox sent it to the root's author and the
   direct parent's author, which were both the person when a person started the thread, and the
   agent that answered in the thread never heard the person's next reply. The outbox now sends a

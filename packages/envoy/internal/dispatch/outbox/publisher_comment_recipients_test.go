@@ -119,7 +119,7 @@ func TestAPersonsCommentReachesTheClaimantAndTheThreadsSessions(t *testing.T) {
 		arrange func(t *testing.T, database *store.Store, broker *events.Broker) []recipientCheck
 	}{
 		{
-			// BET-15: a person comments on a passage of the issue's spec, which another session
+			// The reported case: a person comments on a passage of the issue's spec, which another session
 			// wrote; the claimant replies and resolves; the person replies, which reopens the thread.
 			name: "a person's reply on a claimed unrouted issue reaches the claimant and the document's writer once each",
 			arrange: func(t *testing.T, database *store.Store, broker *events.Broker) []recipientCheck {
@@ -272,7 +272,7 @@ func seedSpec(t *testing.T, database *store.Store, issueKey string, creator mode
 	return spec
 }
 
-// TestAPersonsCommentOnAnIssueNobodyRoutesOrClaimsReachesItsSpecsSessions covers INFRA-596: a
+// TestAPersonsCommentOnAnIssueNobodyRoutesOrClaimsReachesItsSpecsSessions covers #2366: a
 // person's comment on an issue with no route and no session claim reaches the sessions the issue's
 // primary document credits, in the claimant's place. The spec of each case credits session-spec
 // (its creator) and session-editor, and also a person and a session credit with no id, which have
@@ -291,7 +291,7 @@ func TestAPersonsCommentOnAnIssueNobodyRoutesOrClaimsReachesItsSpecsSessions(t *
 		arrange func(t *testing.T, database *store.Store, broker *events.Broker, spec string) []recipientCheck
 	}{
 		{
-			// INFRA-201: the session that wrote every version of the spec held no claim.
+			// A spec written without a claim: the session that wrote every version of the spec held no claim.
 			name: "a person's conversation comment and its edit reach the spec's sessions, and a reopening does not",
 			arrange: func(t *testing.T, database *store.Store, broker *events.Broker, spec string) []recipientCheck {
 				root := seedThreadComment(t, database, "T-1", "", alice, nil)

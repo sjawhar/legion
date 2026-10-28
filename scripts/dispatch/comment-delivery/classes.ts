@@ -21,7 +21,7 @@ import {
 } from "./inputs.ts";
 import { join } from "./join.ts";
 
-// The comment delivery audit's verdicts (INFRA-596): the causes and their fixes, each pair's
+// The comment delivery audit's verdicts (#2366): the causes and their fixes, each pair's
 // verdict, each comment's class, the counts, and the checks that refuse input that does not add up.
 
 /** The problems with receipts-counts.txt: a sum that its own numbers do not make, a number that
@@ -124,8 +124,8 @@ export interface CauseEntry {
 const FAN_OUT_TEST = "packages/envoy/internal/dispatch/outbox/publisher_comment_recipients_test.go";
 const FAN_OUT_FIX = `The Dispatch outbox fan-out fix in this pull request. Its test is ${FAN_OUT_TEST}.`;
 const LAST_HOP_FIX =
-  "INFRA-594: sessions take every event addressed to them, also when it was published while " +
-  "they were down.";
+  "The last-hop fix, outside this pull request: sessions take every event addressed to them, " +
+  "also when it was published while they were down.";
 
 /** Every cause, in the order the report gives the first one that applies, and its fix. */
 export const CAUSES: Readonly<Record<string, CauseEntry>> = {
@@ -142,8 +142,8 @@ export const CAUSES: Readonly<Record<string, CauseEntry>> = {
       "thread and to the document's session authors, and a comment on an issue with no route " +
       "and no session claim goes to the session authors of the issue's primary document. A " +
       "Legion issue before admission, and an issue that nobody routes or claims and whose " +
-      "document's author has stopped (INFRA-49), still reach no session; the findings give each " +
-      "comment's cause.",
+      "document's author has stopped (the controller's report issue), still reach no session; " +
+      "the findings give each comment's cause.",
   },
   "not-addressed:claimant": {
     meaning: "Dispatch did not send the comment to the issue's claimant session.",

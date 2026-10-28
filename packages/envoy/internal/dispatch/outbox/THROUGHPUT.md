@@ -29,9 +29,9 @@ Treat the numbers as order-of-magnitude figures.
 
 The test requires 25 ev/s. The old design fails it in every case.
 
-## Comment replies to the claimant and the thread (2026-10-27, INFRA-596)
+## Comment replies to the claimant and the thread (2026-10-27, sjawhar/legion#2366)
 
-INFRA-596 sends a person's comment on an issue with no route to the session that claimed the
+This change sends a person's comment on an issue with no route to the session that claimed the
 issue. When no session claimed the issue, it sends the comment to every session that wrote the
 issue's primary document. It also sends a reply to every session in its thread and to every
 session that wrote the thread's document. The outbox reads the claimant in its scan. For the

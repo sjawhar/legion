@@ -209,7 +209,7 @@
 
 - The `dispatch_doc_read` description says a read prints every open thread anchored on the
   document in full after the markdown, an open ask's replies included, and no resolved thread or
-  closed ask (INFRA-596).
+  closed ask (#2366).
 - `ASK_QUESTION_MAX` is 2,000, from 800, and `scripts/gen-go.ts` emits it as
   `contracts.AskQuestionMax`, which the Dispatch server enforces in place of its own literal. The
   question contract `dispatch ask` and `dispatch edit-ask` print in `--help` now asks for the

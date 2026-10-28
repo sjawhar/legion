@@ -1,4 +1,4 @@
-// The comment delivery audit's three input files (INFRA-596), read and checked: comments.csv,
+// The comment delivery audit's three input files (#2366), read and checked: comments.csv,
 // receipts.tsv and receipts-counts.txt, as report.ts gives them. Every problem is pushed to the
 // caller's list; a row that cannot be read makes no model value.
 
@@ -25,7 +25,7 @@ const COMMENT_COLUMNS = [
   "claim_used",
   "route_source",
 ] as const;
-/** receipts.tsv's columns, in order: INFRA-608's output contract. */
+/** receipts.tsv's columns, in order: the output contract of `tq receipts`. */
 const RECEIPT_COLUMNS = [
   "comment_id",
   "event_id",
@@ -214,7 +214,7 @@ export function parseReceiptsTsv(text: string, problems: string[]): ReceiptRow[]
   return table(tsvRecords(text), RECEIPT_COLUMNS, "receipts.tsv", "\t", problems);
 }
 
-/** receipts-counts.txt's keys, one line each, in order: INFRA-608's output contract. */
+/** receipts-counts.txt's keys, one line each, in order: `tq receipts`' output contract. */
 export const COUNT_KEYS = [
   "from",
   "to",
@@ -507,7 +507,7 @@ export function commentsFrom(rows: readonly CommentRow[], problems: string[]): C
 }
 
 export function receiptsFrom(rows: readonly ReceiptRow[], problems: string[]): Receipt[] {
-  // INFRA-608 sorts the rows by comment_id, then listed (true first), then target.
+  // `tq receipts` sorts the rows by comment_id, then listed (true first), then target.
   const unsorted = rows.find((row, index) => {
     const before = rows[index - 1];
     if (before === undefined) return false;

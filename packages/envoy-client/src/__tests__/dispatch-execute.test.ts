@@ -5215,7 +5215,7 @@ describe("executeDispatchTool", () => {
 
   // A reply carries no anchor, so a read of the comments anchored on the document misses every
   // reply: a thread a person reopened by replying read as its root's id alone, and the reply's text
-  // never reached the agent (INFRA-596). A person's reply under an open ask is the same: the ask
+  // never reached the agent (sjawhar/legion#2366). A person's reply under an open ask is the same: the ask
   // printed its question alone.
   test("dispatch_doc_read prints each open anchored thread with its root and every reply", async () => {
     const requests: string[] = [];

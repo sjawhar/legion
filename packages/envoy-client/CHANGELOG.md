@@ -16,7 +16,7 @@
   one read of the issue's comments without the `artifact` filter (a reply carries no anchor, so
   the filter dropped every reply), or of a project document's own
   `GET /api/v1/artifacts/{id}/comments`, grouped by ask or root; `DispatchClient.getComments`
-  loses its `artifact` argument (INFRA-596).
+  loses its `artifact` argument (#2366).
 - The `dispatch` CLI reads an AskGate store with no recorded mode as warn, not block, and refuses
   a gated write without a matching marker only when a live owner's store records `block`.
 - `dispatch ask` and `dispatch edit-ask` take a question of up to 2,000 characters, from 800, and

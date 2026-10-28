@@ -1,12 +1,12 @@
 # Comment delivery audit
 
 Two read-only psql scripts that answer whether a person's Dispatch comments reached the agent
-sessions they were owed to (INFRA-596):
+sessions they were owed to (sjawhar/legion#2366):
 
 - `comments.sql` lists every comment a person (an author of kind `user`) created in a time window,
   ask-thread replies included, with each agent session or role the comment was owed or was
   addressed to: one row per (comment, target). Its output, `comments.csv`, is the input of
-  `tq receipts` (INFRA-608, theorem-labs/agent-infra `transcript-store/`).
+  `tq receipts` (theorem-labs/agent-infra `transcript-store/`).
 - `trace.sql` shows everything Dispatch recorded about one comment's delivery.
 
 Neither script writes. Run both in a read-only transaction anyway, so a mistake cannot write. The
@@ -70,7 +70,7 @@ A target's subject is the subject the outbox's `publishRoute` uses for it: `sess
 
 ## `comments.csv` columns
 
-The columns, in this order, are a contract that other scripts consume. `tq receipts` (INFRA-608)
+The columns, in this order, are a contract that other scripts consume. `tq receipts` (theorem-labs/agent-infra `transcript-store/`)
 reads `comment_id`, `event_id`, `published_at`, `target`, `mention_session_id`,
 `mention_envelope_ids`, `mention_btw_reply_id` and `mention_modes` by name. The other columns are
 for `report.ts` (`scripts/dispatch/comment-delivery/`) and for people.

@@ -72,7 +72,7 @@
   `dispatch doc-read` reads in full: an open ask with its question and every reply under it, and
   a comment thread with its root and every reply's author, time and text, in place of the one line
   of ask and comment ids that never showed a reply. The bundled `dispatch_doc_read` description
-  says so, since `dist/` was regenerated (INFRA-596).
+  says so, since `dist/` was regenerated (#2366).
 - The linked `dispatch-writing-specs` skill tells a session to cite code in a spec by file and
   symbol, never a line number, and to say, in each sentence that cites a gate passing, what the pass
   does not show. To stay under the 2,000-word guard it cuts lines another loaded text already says:

@@ -363,7 +363,7 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 	from := time.Now().Add(-time.Minute)
 	r.call(t, http.MethodPost, "/api/v1/projects", "alice", "", map[string]any{"key": "BET", "name": "Bets"}, http.StatusCreated)
 
-	// (a) BET-15's shape: a session claims an unrouted issue; a person comments on a passage of its
+	// (a) The reported case's shape: a session claims an unrouted issue; a person comments on a passage of its
 	// spec; the session replies and resolves the thread; the person replies, which reopens it.
 	threadIssue, spec := createIssue(t, r, "BET", "Spec thread", "We ship the design on Friday.\n")
 	claim(t, r, threadIssue, "s-claimant")
