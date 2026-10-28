@@ -6,8 +6,8 @@
 // keeps responding; a label holding markup draws as text, never as an element; a block in another
 // language stays code. Every drawing row checks both halves: the image with its labels, and the
 // source hidden until the disclosure opens. At the commit before the change each body shows its
-// source as code, so every drawing row and both refusal rows fail on their diagram or status
-// assertion.
+// source as code, so every drawing row and the renderer-refusal row fail on their diagram or
+// status assertion, and the time-limit row fails at its hold assertion (no worker chunk loads).
 import { expect, type Locator, type Page, type TestInfo, test } from "@playwright/test";
 import { createAsk, createComment, createIssue, createMessage, createProject } from "./api";
 import { resetDatabase } from "./seed";
@@ -19,6 +19,25 @@ const session = {
 };
 
 const diagramName = "Rendered Mermaid diagram";
+
+/** The built Mermaid render worker's chunk, as Vite emits it under `/assets`. */
+const workerChunk = /\/assets\/mermaid-render\.worker-[^/]+\.js$/;
+
+/** The same-origin path the held worker requests once it has taken a diagram's source. */
+const workerHeldPath = "/e2e/mermaid-worker-held";
+
+/** Matches a request for `workerHeldPath`. */
+const workerHeldRoute = /\/e2e\/mermaid-worker-held$/;
+
+/** Prepended to the worker chunk, so it registers before the worker's own listener: it stops that
+ *  listener, reports through `workerHeldPath` that it holds the source, and never returns. */
+const holdingListener = [
+  'self.addEventListener("message", async (event) => {',
+  "  event.stopImmediatePropagation();",
+  `  await fetch("${workerHeldPath}");`,
+  "  for (;;) {}",
+  "});",
+].join("\n");
 
 /** A body of `lead` and then one flowchart from `from` to `to`, whose source's first line is
  *  `graph TD`. */
@@ -188,9 +207,15 @@ test("a mermaid source the renderer refuses shows the reason and its source, and
   }
 });
 
-// ELK's layout time grows faster than the diagram: a flowchart of 800 nodes with 2 edges each
-// takes over a minute. Drawn on the page's own thread it held every reader of the comment there;
-// in the worker the page keeps answering and the time limit refuses it.
+// CI's GitHub-hosted runners draw this flowchart inside 5 s (Chromium in every observed run, WebKit
+// and Firefox near the limit) while a 2-CPU issue pod takes over 10 s, so the row does not trust
+// the diagram's size. It serves the real worker chunk with one listener in front of the worker's
+// own: that listener stops it, reports through a same-origin request that it holds the source, and
+// never returns, so the page's shipped 5 s limit refuses it on every runner. The row proves the
+// page hands the source to the worker chunk, the page's thread keeps answering while that worker is
+// busy (the samples run only after the hold report), and the shipped limit refuses it with the
+// reason and the source shown. A page drawing on its own thread never loads the chunk and fails at
+// the hold assertion.
 test("a diagram too large to draw in time shows the reason, and the page keeps responding @phone", async ({
   browser,
 }, testInfo) => {
@@ -209,14 +234,29 @@ test("a diagram too large to draw in time shows the reason, and the page keeps r
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    let loads = 0;
+    let holds = 0;
+    await page.route(workerChunk, async (route) => {
+      loads += 1;
+      const response = await route.fetch();
+      await route.fulfill({ response, body: `${holdingListener}\n${await response.text()}` });
+    });
+    await page.route(workerHeldRoute, async (route) => {
+      holds += 1;
+      await route.fulfill({ status: 204 });
+    });
     await page.goto(`/issues/${issue.key}/conversation`);
     const card = await openCommentThread(page, testInfo, comment.id);
     await expect(card).toContainText("Large:");
+    await expect
+      .poll(() => holds, { message: "the Mermaid worker took the diagram's source and holds it" })
+      .toBeGreaterThanOrEqual(1);
+    expect(loads).toBeGreaterThanOrEqual(1);
     const refusal = card
       .getByRole("status")
       .filter({ hasText: "Unable to render Mermaid diagram" });
-    // While it is being drawn, a 100 ms timer on the page's thread fires on time, give or take
-    // a scheduling hiccup; a layout on that thread would hold it for the whole layout.
+    // While the worker holds the source, a 100 ms timer on the page's thread fires on time, give
+    // or take a scheduling hiccup; a layout on that thread would hold it for the whole layout.
     for (let sample = 0; sample < 5; sample += 1) {
       const elapsed = await page.evaluate(
         () =>
@@ -227,7 +267,7 @@ test("a diagram too large to draw in time shows the reason, and the page keeps r
       );
       expect(elapsed).toBeLessThan(1_000);
     }
-    // The samples ran while the diagram was still being drawn.
+    // The samples ran while the worker still held the source, before the time limit refused it.
     await expect(refusal).toHaveCount(0);
     await expect(refusal).toHaveText(
       "Unable to render Mermaid diagram: it did not finish within 5 seconds"
