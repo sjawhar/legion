@@ -1,0 +1,175 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-568",
+  "completed": "2026-10-28T22:14:00Z",
+  "testedHead": "ec1525141574e7872ca0c6768f95ba95d728f9ad",
+  "codeHead": "e64224e5503c79febb49fbb03946b3bda72dce3b",
+  "round": "Round 11, full: forward merge of main bb9fe49c (e64224e5) after retro (8e58845b removed .legion/INFRA-568/; this file is new on the branch). Fingerprint 66f1787d a0b437d3… → ec152514 03557e7b… changed: migrations renumbered 0137_related_checks / 0138_issue_embedding_spec after main's 0136_dashboard_assets, route-count base 141 → 142, migration numbers in comments and docs, and one stray jj conflict-marker line in cmd/dispatch/README.md. Every row driven again with a CLI built from this head's source.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Drove every row independently at this head: fresh dispatch:local (http://127.0.0.1:62514), main bb9fe49c's server (8787), the head binary with a fake Azure embedder on a database main migrated to 0136 first (8788), the CLI built from this head's source outside the tree."
+  },
+  "failed": 1,
+  "failures": [
+    {
+      "criterion": "The forward merge of main leaves no conflict residue: a reader of packages/envoy/cmd/dispatch/README.md (the server's operator documentation, where the related-item check's migrations are described) reads prose, not a jj conflict marker",
+      "evidence": "Merge e64224e5 (`merge: resolve conflict against main@origin`) left a jj conflict-marker line in the README. `grep -n -E '^(\\+{7}|-{7}|%{7}|<{7}|>{7}) ' packages/envoy/cmd/dispatch/README.md` at head ec152514 prints `1108:+++++++ uxwtkurr 8e58845b \"retro: remove the issue's handoff directory under .legion/ before READY\"`, between main's `0136_dashboard_assets` paragraph and this branch's `0137_related_checks` paragraph; `jj diff --from main@origin --to ec152514 -- packages/envoy/cmd/dispatch/README.md` shows it as an added line. Neither parent carries it (8e58845b: 0 such lines, main bb9fe49c: 0), so the merge resolution added it. The fix is to delete that one line. No red test: a test that reads a document's text is what this repository's test rules forbid; the grep above is the check."
+    }
+  ],
+  "resolvedFailures": [
+    {
+      "round": 1,
+      "criterion": "The check says what it did (issue title); plan task 7: an existing external issue answers not_made 'Dispatch already holds this issue; nothing was created'. The output of that write must not claim it created the issue.",
+      "resolution": "Fixed in 247b43fd: the client reads Dispatch's status (201 created, 200 already held) and prints `Dispatch already holds <KEY>: … ; nothing was created` with no related-item line. The red test c1a975c1 is unchanged and passes."
+    }
+  ],
+  "collationTest": {
+    "test": "TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (packages/envoy/internal/dispatch/api/rank_test.go:306); it refuses at rank_test.go:317 when select 'a' < 'B' is false",
+    "cluster": "rebuilt this round: rootless Postgres 17.11 + pgvector 0.8.0 on 127.0.0.1:5434, initdb --locale-provider=icu --icu-locale=en-US (select 'a' < 'B' true)",
+    "command": "DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5434/dispatch_tester_go?sslmode=disable' go test ./internal/dispatch/api -run 'TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves' -count=1 -v (main: GOWORK=off from a git archive of 2df3353c)",
+    "results": {
+      "head ec152514 (code e64224e5)": "--- PASS (5.13s)",
+      "head 66f1787d (code 9b1cba4f)": "--- PASS (3.82s)",
+      "head 94194f15 (code 402c06ae)": "--- PASS (4.31s)",
+      "head 658b7d5e (code 25c14fd6)": "--- PASS (3.79s)",
+      "head 1232687c (code 6f585d36)": "--- PASS (4.95s)",
+      "head a94f6b09 (code 4b1f15ff)": "--- PASS (4.32s)",
+      "head 563b2ca7 (code 62c33b14)": "--- PASS (3.71s)",
+      "head 73cde85c (code 9d82a849)": "--- PASS (6.37s)",
+      "head d3b65b54 (code 34719431)": "--- PASS (4.00s)",
+      "head 1f0f61d4 (code a529e99b)": "--- PASS (3.80s)",
+      "main 2df3353c": "--- PASS (4.82s)",
+      "head on the pod's C-collation Postgres (5433)": "--- FAIL at rank_test.go:317, the collation refusal"
+    },
+    "verdict": "passes on this branch and on main; the implementer's 'known C-collation test' fails only on the pod's byte-order database"
+  },
+  "proof": [
+    {
+      "criterion": "Migrations renumbered to 0137/0138 after main's 0136_dashboard_assets: a database main bb9fe49c migrated (0136) upgrades to 0138 and a title-only issue embedding becomes title + spec",
+      "surface": "main bb9fe49c's server on fresh dispatch_tester_upg (8788), then the head binary on it with DISPATCH_EMBEDDER=azure at a local fake Azure endpoint",
+      "command": "main: dispatch issue --project UPG --title 'Pangolin queue stalls before upgrade' --spec …; stop; boot the head",
+      "observed": "schema_migrations 136 under main, 138 under the head; the head's coverage pass logged repaired=1 and UPG-1's embedding text became title, blank line, spec",
+      "headSha": "ec1525141574e7872ca0c6768f95ba95d728f9ad",
+      "negativeControl": "under main the row held the title alone"
+    },
+    {
+      "criterion": "Connection count after the merge: dispatchConnectionsPerPod equals what a server process opens",
+      "surface": "pool.go and infra/gcp/dispatch.go at this head and at main bb9fe49c",
+      "command": "read the pool constants and dispatchConnectionsPerPod at both commits",
+      "observed": "head: 64 + 4 + 1 + 13 + 1 + 1 + 3 = 87 = dispatchConnectionsPerPod; main: 86",
+      "headSha": "ec1525141574e7872ca0c6768f95ba95d728f9ad",
+      "negativeControl": "main's 86 plus this branch's one lease; the leased refresh ran at 22:12:04"
+    },
+    {
+      "criterion": "Ask states and acceptance 4",
+      "surface": "dispatch CLI built from this head's source with `bun scripts/build.ts --out $TMPDIR/tester568/ce-head` (Bun 1.4.4, outside the tree) against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:62514); answers by alice through POST /api/v1/asks/{id}/answer",
+      "command": "ask re-answered Drop → Honour, dispatch ask with the same words; events locked 8 s around dispatch related on an answered and a retracted ask, then the same with no lock",
+      "observed": "`A past decision may already answer this: CORE-39 …`, `Answered by alice at 2026-10-28T22:02:41.843619499Z · options chosen: Honour`, `Answer text: Changed my mind: honour the pin.`; under the lock `Answer state not reported by this Dispatch; open the link to read the ask.` and no decision",
+      "headSha": "ec1525141574e7872ca0c6768f95ba95d728f9ad",
+      "negativeControl": "without the lock the item prints `Answered by alice at … · options chosen: none` and the decision; the first answer `Drop` is absent"
+    },
+    {
+      "criterion": "Match budget",
+      "surface": "dispatch issue against dispatch:local, project BUDG with 20,000 issues (deploy 1,800, rollout 1,500, quokka 1, xanthan 2)",
+      "command": "dispatch issue --project BUDG --force --title 'Deploy rollout incident' --spec-file budget-spec.md",
+      "observed": "terms {deploy,marshal,quokka,siev,xanthan}; BUDG-3301 first; keyword_ms 81",
+      "headSha": "ec1525141574e7872ca0c6768f95ba95d728f9ad",
+      "negativeControl": "rollout (df 1,500) absent"
+    },
+    {
+      "criterion": "Cancelled versus timeout",
+      "surface": "dispatch CLI built from this head's source with `bun scripts/build.ts --out $TMPDIR/tester568/ce-head` (Bun 1.4.4, outside the tree) against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:62514); curl -m 2",
+      "command": "asks locked 10 s around curl -m 2 POST /api/v1/issues 'Hangup pangolin filing'; asks locked 9 s around dispatch issue --force 'Patient pangolin filing'",
+      "observed": "Hangup not_made cancelled 1478 ms; Patient not_made timeout 5000 ms; skipped_for_time counts the timeouts only",
+      "headSha": "ec1525141574e7872ca0c6768f95ba95d728f9ad",
+      "negativeControl": "the waiting client is timeout"
+    },
+    {
+      "criterion": "1a: search made to fail, --force with an existing title prints that key and the not-made form",
+      "surface": "dispatch CLI built from this head's source with `bun scripts/build.ts --out $TMPDIR/tester568/ce-head` (Bun 1.4.4, outside the tree) against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:62514)",
+      "command": "asks locked 9 s, dispatch issue --project CORE --title 'Armadillo cache eviction misses the porcupine index' --force",
+      "observed": "`No related-item check was made: the search behind it did not answer within 5s. … --query 'Armadillo …'` and `Title overlaps you forced past: CORE-39`",
+      "headSha": "ec1525141574e7872ca0c6768f95ba95d728f9ad",
+      "negativeControl": "without the lock: `Related items (searched by keywords only: …)` with CORE-39 first"
+    },
+    {
+      "criterion": "1b: the head client against a server that sends no check result prints the not-made form",
+      "surface": "dispatch CLI built from this head's source with `bun scripts/build.ts --out $TMPDIR/tester568/ce-head` (Bun 1.4.4, outside the tree) against main bb9fe49c's server (8787)",
+      "command": "dispatch issue --project OLDB --title 'Render queue drops tiles on cache eviction' --spec-file spec1b.md",
+      "observed": "`No related-item check was made: the server did not say whether it searched. … --query 'Render queue drops'`",
+      "headSha": "ec1525141574e7872ca0c6768f95ba95d728f9ad",
+      "negativeControl": "a filing the old OR query matched prints `Related items:` with no mode named"
+    },
+    {
+      "criterion": "2a: one common word in many items and rare words in a few: only the rare-word matches are listed",
+      "surface": "dispatch CLI built from this head's source with `bun scripts/build.ts --out $TMPDIR/tester568/ce-head` (Bun 1.4.4, outside the tree) against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:62514) after the leased refresh at 22:12:04 (CORE 112 items)",
+      "command": "dispatch related --project CORE --title 'Telemetry ocelot xanthan zebu mismatch'; dispatch issue --force with those words",
+      "observed": "lists the items holding ocelot/xanthan/zebu, none of the 30 telemetry issues; terms {zebu,ocelot,xanthan}; telemetri ndoc 62 of 112",
+      "headSha": "ec1525141574e7872ca0c6768f95ba95d728f9ad",
+      "negativeControl": "dispatch related --title 'Telemetry' → found nothing"
+    },
+    {
+      "criterion": "2b: a 10,000-word spec gives at most 25 words",
+      "surface": "dispatch CLI built from this head's source with `bun scripts/build.ts --out $TMPDIR/tester568/ce-head` (Bun 1.4.4, outside the tree) against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:62514)",
+      "command": "dispatch issue --project CORE --force --title 'Ten thousand word spec numbat' --spec-file spec10k.md",
+      "observed": "24 terms; keyword_ms 274 (before the first leased refresh)",
+      "headSha": "ec1525141574e7872ca0c6768f95ba95d728f9ad",
+      "negativeControl": "a stopword-only text answers not_made (round 1)"
+    },
+    {
+      "criterion": "2c: same meaning with no shared word is listed; a slow or failing embedder gives keywords only",
+      "surface": "dispatch CLI built from this head's source with `bun scripts/build.ts --out $TMPDIR/tester568/ce-head` (Bun 1.4.4, outside the tree) against the head binary with the fake Azure embedder (8788), project UPG",
+      "command": "dispatch related --project UPG --title 'Truck fleet roster misplaces automobiles overnight' with the fake ok, slow:4, fail; then dispatch issue with that title",
+      "observed": "ok: `(searched by meaning and keywords)` UPG-2; slow: `keywords only: meaning search did not answer within 3s` at 3160 ms; fail: `keywords only: the text could not be embedded for meaning search`; write path recorded meaning_and_keywords",
+      "headSha": "ec1525141574e7872ca0c6768f95ba95d728f9ad",
+      "negativeControl": "--keywords-only → `searched (keywords only: keywords only was asked for) and found nothing`"
+    },
+    {
+      "criterion": "2d: a search over 300 ms and under 5 s completes; no match prints found nothing",
+      "surface": "dispatch CLI built from this head's source with `bun scripts/build.ts --out $TMPDIR/tester568/ce-head` (Bun 1.4.4, outside the tree) against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:62514)",
+      "command": "search_term_stats locked 1.5 s around dispatch issue --force --title 'Kumquat compactor evicts armadillo entries'; dispatch issue --title 'Pelican umbrella xylophone'",
+      "observed": "found, keyword_ms 1116; the unmatched title prints `Related-item check searched (keywords only: meaning search is off on this server) and found nothing.`",
+      "headSha": "ec1525141574e7872ca0c6768f95ba95d728f9ad",
+      "negativeControl": "held past 5 s (1a) → not_made timeout"
+    },
+    {
+      "criterion": "3: duplicate recall",
+      "surface": "production INFRA corpus copied today with related-recall.sh (GET only, 691 issues, 9 pairs)",
+      "command": "DISPATCH_RECALL_CORPUS=$TMPDIR/tester568/recall5.jsonl go test ./internal/dispatch/api -run TestRelatedRecallOnDuplicates -v -count=1",
+      "observed": "old 40-word OR query 4 of 9, the check's keyword query 5 of 9",
+      "headSha": "ec1525141574e7872ca0c6768f95ba95d728f9ad",
+      "negativeControl": "the folded-into pair is listed by neither"
+    },
+    {
+      "criterion": "5: doc-edit adding a decision block prints its related items",
+      "surface": "dispatch CLI built from this head's source with `bun scripts/build.ts --out $TMPDIR/tester568/ce-head` (Bun 1.4.4, outside the tree) against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:62514)",
+      "command": "dispatch doc-edit --issue CORE-39 inserting one :::ask block at end",
+      "observed": "`Decision block 76dc0125-…:` then `Related items (searched by keywords only: …)`",
+      "headSha": "ec1525141574e7872ca0c6768f95ba95d728f9ad",
+      "negativeControl": "a plain paragraph edit prints no `Decision block` line"
+    },
+    {
+      "criterion": "External issue Dispatch already holds is not reported created",
+      "surface": "dispatch CLI built from this head's source with `bun scripts/build.ts --out $TMPDIR/tester568/ce-head` (Bun 1.4.4, outside the tree) against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:62514), acme/widgets mapped to CORE",
+      "command": "dispatch issue --project CORE --external acme/widgets#7 --title 'External armadillo porcupine widget' twice",
+      "observed": "first `Created CORE-47`; second `Dispatch already holds CORE-47: … ; nothing was created`",
+      "headSha": "ec1525141574e7872ca0c6768f95ba95d728f9ad",
+      "negativeControl": "the first filing (201) prints Created"
+    },
+    {
+      "criterion": "Records route, no-write route and the authorization boundary",
+      "surface": "dispatch CLI built from this head's source with `bun scripts/build.ts --out $TMPDIR/tester568/ce-head` (Bun 1.4.4, outside the tree) against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:62514)",
+      "command": "GET /api/v1/related-checks?project=CORE; row counts around six no-write calls",
+      "observed": "total 58, by_reason already_exists 1, cancelled 1, no_embedder 54, timeout 2, skipped_for_time 2; counts 20049|11|149|61|94 before and after",
+      "headSha": "ec1525141574e7872ca0c6768f95ba95d728f9ad",
+      "negativeControl": "no bearer → 401, wrong bearer → 401, cookie POST without Origin → 403, source_kind=comment → 400"
+    }
+  ],
+  "observations": [
+    "CI at code head e64224e5 when read at 22:12Z: build, changes, lint, test, typecheck and the daemon's Postgres 16 suite queued. Not waited for. mermaid.e2e.ts:194 in CI's dispatch job is main's known failure (#2311).",
+    "This head merged main bb9fe49c, before 1767c9af (#2448), so pmdoc's broken import on main is not here: go vet ./internal/dispatch/pmdoc/ is clean at this head. A later merge of main needs #2481's one-line import fix if #2481 has not merged.",
+    "Before a project's first leased refresh a 10,000-word spec's keyword stage took 274 ms (probe mode), as in earlier rounds.",
+    "Harness: $TMPDIR/tester568 (d.sh runs ce-head/dist/dispatch.js; L.sh = dispatch:local at 62514; Postgres 5433 C and 5434 en-US under pg/)."
+  ]
+}
