@@ -2,35 +2,39 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-220",
-  "completed": "2026-10-28T16:14:00Z",
-  "round": 14,
-  "testedHead": "f319ebaa648a7a737277c54b63d3e05a9d163426 (code head; 3efecd8d above it changes only .legion/). Red test 93354c7b is above it.",
+  "completed": "2026-10-28T21:02:00Z",
+  "round": 15,
+  "testedHead": "bb11c27a (code head; PR head 1d62bdd35a45dbba72c555544a27834c6962cdbd and 54779b9d above it change only .legion/)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 13's two failures are fixed at f319ebaa648a7a737277c54b63d3e05a9d163426. `cd scripts/e2e/lib && bun test model-endpoint.test.ts claude-backend-key-runner.test.ts app-logins.test.ts install-key-file-model-route.test.ts` -> 45 pass, 0 fail. `cd packages/pi-legion && bun test scripts/skill-scenarios/rig.test.ts -t install_model_route` -> 6 pass, 0 fail. No '/v1/key/info' is left in scripts/e2e except the red test's explanatory comment. From this pod with no key, the cluster gateway's /key/info answers 401 (the route exists). bash -n ok on both proofs, model-endpoint.sh and session-db.sh."
+    "how": "I drove the Bun check myself (proof 1). Red test claude-backend-bun-pin.test.ts passes. `bun test claude-backend-bun-pin.test.ts claude-backend-key-runner.test.ts model-endpoint.test.ts app-logins.test.ts` -> 38 pass, 0 fail. bash -n claude-backend-tmux.sh ok. README line 872 says the proofs need the Bun .bun-version pins first on PATH."
   },
   "failures": [
     {
-      "criterion": "The tmux proof refuses, in its prerequisites, a devbox whose Bun the run's own build cannot use",
-      "evidence": "Since main's #2423 (merged in at f319ebaa648a7a737277c54b63d3e05a9d163426), claude-backend-tmux.sh:623 runs `bun packages/claude-envoy/scripts/build.ts --out …`, and build.ts refuses any Bun but the one .bun-version pins (1.4.4: 'refusing to build under Bun 1.4.2: .bun-version pins 1.4.4'). The prerequisites never check it, so the INFRA lead's first tmux attempt at f319ebaa648a7a737277c54b63d3e05a9d163426 failed at the build line in the rig, on the devbox's default Bun 1.4.2. Red test 93354c7b: `cd scripts/e2e/lib && bun test claude-backend-bun-pin.test.ts` -> 0 pass, 1 fail. A stand-in bun reporting another version reaches 'FAIL prerequisites: lib/app-logins.ts printed no implement App login' instead of a prerequisites refusal naming 1.4.4. With a check after the tool list comparing `bun --version` to .bun-version it passes, and claude-backend-key-runner.test.ts still passes. The README needs a line that the proofs need the pinned Bun on PATH."
-    }
-  ],
-  "failed": 1,
-  "liveRuns": [
-    {
-      "run": "(a) claude-backend-tmux.sh at f319ebaa648a7a737277c54b63d3e05a9d163426",
-      "result": "PASS, 15:48:02-15:56:37Z (second attempt, with the pinned Bun 1.4.4 first on PATH), exit 0, 10/10 ok (prerequisites, rig, admission, architect-registers-the-gate, planner-handoff, claude-implementer-registers, stop-hook-reminds-the-open-phase, claude-implementer-handoff, kill-resumes-the-same-claude-session, every-launch-endpoint-checked). Binaries stamped f319ebaa648a7a737277c54b63d3e05a9d163426 modified=false. Gateway only: 'checks keys: GET /v1/models with no key answered 401' and 'the model key is legion-infra: … (GET /key/info)'. No anthropic.com. I read dispatch://INFRA-220/artifact/infra220-f319ebaa-tmux-transcript-log."
+      "criterion": "The pull request can merge",
+      "evidence": "GitHub reports #2186 CONFLICTING / DIRTY at 54779b9d (read 21:00Z). Forward-merge main."
     },
     {
-      "run": "(b) claude-backend-sandbox.sh at f319ebaa648a7a737277c54b63d3e05a9d163426",
-      "result": "Not run yet. Worker Image run 40718837841 had been queued with no runner since 15:43Z. By the architect's decision the INFRA lead runs it at f319ebaa648a7a737277c54b63d3e05a9d163426 once that image builds, and it covers the next head, since the Bun fix touches only claude-backend-tmux.sh and the README, which neither the image nor the sandbox proof runs."
-    },
-    {
-      "run": "(c) SIGINT control",
-      "result": "Stands from ec8efe54 (round 13: teardown clean, no FAIL cleanup, nothing left). The diff ec8efe54..f319ebaa in claude-backend-sandbox.sh and lib/session-db.sh changes only the pgvector image reference, the tmpfs mount path and one comment. cleanup(), remove_app_keys, bridge-tunnel.sh and namespace-rig.sh are unchanged."
+      "criterion": "The sandbox live proof runs at the final head (it needs a worker image of that head)",
+      "evidence": "No worker image can be built at 1d62bdd3. Worker Image runs 40724829764 (1d62bdd3) and 40724129217 (8c4d5638) failed at the build's TLS client probe: 'legion probe-image: worker TLS probe failed: chromium cannot verify refusal of the emSign chain: signal: killed'. Every Worker Image run on every branch since about 14:00Z fails the same way (40701963548, 40710200769, 40713328918, 40719239124, 40719914534, 40724756609). This is main's defect in packages/daemon/cmd/legion/tls_probe.go: per 01a16962, chromium hangs on an AIA issuer fetch for the external emSign site. The fix is open as sjawhar/legion#2459 'fix(worker): give the TLS probe's browser a cold-start bound', not merged at 21:00Z. Not this branch's defect. The image builds once the forward merge brings that fix in. Until then the sandbox proof cannot run."
     }
   ],
-  "mainReds": "Main's three known reds (mermaid.e2e.ts:194, recipients-claim route-close, TestDispatchConnectionsPerPodIsTheServers) are main's, by the architect's notes. None was read at this head, since its CI had not run.",
-  "ci": "At f319ebaa648a7a737277c54b63d3e05a9d163426, read 16:12Z: Worker Image 40718837841 queued (no runner). The rest of the head's runs had not completed.",
-  "nextRound": "(b)'s result at f319ebaa648a7a737277c54b63d3e05a9d163426; red test claude-backend-bun-pin.test.ts passing; bash -n; a local drive of the Bun check against a wrong Bun and the pinned one. No tmux rerun unless the fix touches more than the prerequisites."
+  "failed": 2,
+  "proof": [
+    {
+      "criterion": "The tmux proof refuses, in its prerequisites, a Bun other than the release .bun-version pins, before its first bun call",
+      "surface": "scripts/e2e/claude-backend-tmux.sh at bb11c27a, run by bash in this issue pod with stand-in tools (a stand-in bun that logs every call, and stand-ins for every other tool)",
+      "command": "env -i HOME=… PATH=<stand-ins> LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<file> LEGION_E2E_APP_KEY_RUNNER=agent-secrets bash scripts/e2e/claude-backend-tmux.sh, with the bun stand-in answering --version 1.4.2, nothing, or 1.4.4, and once with this pod's real bun 1.3.14",
+      "observed": "1.4.2: 'FAIL prerequisites: refusing to run under Bun 1.4.2: .bun-version pins 1.4.4, and the run builds claude-envoy with packages/claude-envoy/scripts/build.ts…', and no bun call besides --version. No version: the same with 'Bun <no version>'. Real bun 1.3.14: refused naming 1.3.14 and 1.4.4. Pinned 1.4.4: passes the check to the next step (lib/app-logins.ts, which the stand-in leaves empty)",
+      "headSha": "bb11c27ad6",
+      "negativeControl": "Before the fix (round 14, f319ebaa) the same wrong-Bun stand-in reached 'FAIL prerequisites: lib/app-logins.ts printed no implement App login' with no pin named (red test 93354c7b)"
+    }
+  ],
+  "standingLiveRuns": {
+    "tmux": "PASS at f319ebaa (round 14), gateway with INFRA's key, alias legion-infra. f319ebaa..1d62bdd3 changes only claude-backend-tmux.sh's prerequisites, the README, the new Bun-pin test and .legion/, so it stands.",
+    "sigint": "Stands from ec8efe54 (round 13). The teardown code is unchanged since (round 14's diff check), and this round's diff does not touch it.",
+    "sandbox": "Not run at any head after ec8efe54 (where it passed 15/15 on the gateway, before the alias fix). It needs an image of the merged head; the next round runs it."
+  },
+  "ci": "Worker Image 40724829764 at 1d62bdd35a45dbba72c555544a27834c6962cdbd: failure (main's TLS probe, failure 2). The forward merge's runs replace the rest.",
+  "nextRound": "After the forward merge (taking #2459 once merged): build the worker image at the merged head (gh workflow run worker-image.yaml --ref legion/INFRA-220 if the PR's run is cancelled), check its label, run the sandbox proof on the gateway with alias legion-infra, and check the merge with the fingerprint and bare gates."
 }
