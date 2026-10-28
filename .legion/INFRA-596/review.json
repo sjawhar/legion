@@ -2,26 +2,26 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-596",
-  "completed": "2026-10-28T09:13:48Z",
-  "round": 4,
+  "completed": "2026-10-28T13:46:30Z",
+  "round": 5,
   "decision": "changes_requested",
-  "reviewedHead": "a42286c5956b1a676e145d22e755ef6fb947b745",
-  "codeHead": "fb909998478e3df849fae149a072a4fbc6a0e0fc",
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; no branch protection. CI head fb909998 (newest pull_request run), compare to a42286c5 handoffsOnly true. pr-title success; lint, typecheck, test queued at 09:13Z. The comment-delivery test now uses node:os tmpdir() (e1b1ab46), and test passed at e1b1ab46 per the PR body; no result yet at fb909998.",
-  "thermonuclear": "Pair ran once at a42286c5 (new round: the forward merges changed the fingerprint). deep-review: APPROVE; this PR's patch to publisher.go, recipients.go, comment_create.go, model.go, dispatch-execute.ts, dispatch-http.ts and dispatch-tools.ts is identical before and after the merges, and main's changes do not touch the recipient logic. code-quality: CHANGES, PR body text only.",
-  "roundThreeFindings": "Fixed in e1b1ab46: the test's temporary directory uses tmpdir(); describeCause returns CauseEntry and an unknown part throws. The skill change and its changelog entries moved to sjawhar/legion#2417 (577d1dc1), which I approved at af281845.",
+  "reviewedHead": "922ced2e52baaee6800b26342e1611ce8d8a9c1d",
+  "codeHead": "be2fe7170b18a951d19a364502fa4018914a0905",
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; no branch protection. CI head be2fe717, compare to 922ced2e handoffsOnly true; lint, typecheck, test queued and pr-title queued at 13:46Z.",
+  "thermonuclear": "Pair ran once at 922ced2e (new round: the forward merge onto main with #2225 changed the fingerprint). deep-review: APPROVE, no Medium or High; the primary-document copy is sent exactly when main's routing shows no route and no session claimant; recipientFilter with leftToMention sends each session once and still publishes to one whose mention failed; a failed recipient query ends the attempt after the owner topic, route and claimant; outbox, deliveryaudit and api suites and both bun suites pass. code-quality: CHANGES on docs and test leftovers from the merge.",
+  "roundFourFindings": "Dispatch keys cleaned in 892c6542 (threads PRRT_kwDORFy7ds6xDUA9, xDUBF, xDUBM accepted); round-3 tmpdir thread PRRT_kwDORFy7ds6wsEgR accepted. Leftovers named this round: deliveryaudit_test.go creates the real project BET; the PR body's E2E (tester) line names BET-15.",
   "critical": 0,
-  "important": 1,
-  "minor": 0,
+  "important": 3,
+  "minor": 5,
   "keyFindings": [
-    {
-      "severity": "important",
-      "file": "about 45 added lines in 20 files outside .legion/, and the PR body",
-      "description": "The rule relayed on this issue at 2026-10-27T17:00Z (event #52, 'Stop new leaks only') says nothing new lands on sjawhar/legion naming a Dispatch key or a dispatch:// link in author-written text, file contents, PR title or body, and that this issue's PR is cleaned before it merges. The PR adds keys in four CHANGELOGs, deliveryaudit README/.go/_test.go, outbox THROUGHPUT.md and publisher_comment_recipients_test.go comments, the envoy-client test, scripts/dispatch README, the report modules' comments and CAUSES text (classes.ts, inputs.ts, render.ts, report.ts), comment-delivery.test.ts, and the fixtures (BET-15, INFRA-1..12 in comments.csv); the PR body names 13 keys and 5 dispatch:// links. Commit messages and the title name none. Retro removes .legion/ and Legion's own Dispatch: line is exempt, so a reviewed commit must clean the rest: describe by role or by PR number, and use neutral keys (ACME-n) in fixtures."
-    }
-  ],
-  "notADefect": [
-    "Until #2417 merges, skills/dispatch/SKILL.md still says a claim delivers no comments while the docs this PR changes say it does; an agent that follows the skill routes or subscribes and still gets the comments, and #2417 is approved to merge right after this PR."
+    {"severity": "important", "file": "packages/envoy/.changes/unreleased/pr2366-thread-and-spec-recipients.yaml:17-19", "description": "'A resolve or a reopen still reaches the thread root's author only' is false since #2225: publishClaimantRoute (publisher.go:997-999) sends comment.resolved and comment.reopened to the claimant, and the PR's own tests expect [claimant, rooter]. The tester found it."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/outbox/THROUGHPUT.md:60-63,78-81", "description": "The 'main' baseline is 1b8d5c13e, before #2225, but the text calls it main and says its outbox equals the merge base and that main does not reach the claimant (250 of 450). Today's main reaches the claimant in the 'comment replies' load. Label the baseline as main before #2225 in past tense and say what changed, or re-measure against current main."},
+    {"severity": "important", "file": "docs/site/src/content/docs/dispatch/envoy.md:125-126", "description": "'A comment's edit, resolution or reopening reaches every one of these sessions' now covers the thread writers, thread-document writers and spec writers this PR adds; a resolution or reopening reaches none of them (publishAuthorRoutes' resolve/reopen arm takes only the root author; takesPrimaryAuthors takes only created/edited)."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/outbox/publisher.go:658-659 and recipients.go:175", "description": "Comments say a failed recipient query ends the attempt 'once the owner topic and the route are sent'; the claimant is sent before too (publisher.go:673), as the fragment and AGENTS.md say."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/outbox/recipients.go:198", "description": "recipientFilter reads suppressed_authors while main's claimant and follower routes read mentions; since comment_create now writes suppressed_authors equal to the mentioned sessions, read payloadMentionedSessions here too, so one rule covers every route and events already queued at deploy (whose suppressed_authors is the old narrower list) are not sent twice."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/outbox/publisher_comment_recipients_test.go:209-235", "description": "Three cases test only #2225's claimant route and the follower route, which main's publisher_claimant_test.go already covers; delete them."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/deliveryaudit/deliveryaudit_test.go:364", "description": "Creates the real project 'BET' as a fixture; use ACME as the other fixtures do."},
+    {"severity": "minor", "file": "PR body, E2E (tester) line", "description": "Names 'BET-15' (the Dispatch-key rule); say 'the reported case's shape'. The 'Dispatch:' line is exempt."}
   ],
   "contractCensus": "Not required: unchanged from round 1."
 }
