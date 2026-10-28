@@ -2,41 +2,33 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-549",
-  "completed": "2026-10-28T14:24:00Z",
-  "round": 4,
-  "reviewedCodeHead": "253b920c5f57c4e78a5b768b0f627d79df9ee7ea",
+  "completed": "2026-10-28T15:01:00Z",
+  "round": 5,
+  "reviewedCodeHead": "16234e5e20b8",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
-  "minor": 2,
-  "rebaseCheck": "Last review APPROVE at cf7b85d1 (fingerprint f4aefcc8..., fork 5fbe7ca5); head 4013403b (fingerprint 2ad25775..., fork 91d30dea): changed (clusteredhub_autopilot.go, loopbackPort, changie fragments, workflow comment), so a new round with the thermonuclear pair.",
+  "important": 1,
+  "minor": 1,
+  "roundFourThreads": {
+    "PRRT_kwDORFy7ds6xKae8": "partly fixed in c85984cdfb72 (first start correct); restart retry regression stands; I unresolved the thread",
+    "PRRT_kwDORFy7ds6xKafG": "accepted: fixed in 16234e5e20b8 (250m floor for the hub's pod shape)"
+  },
   "keyFindings": [
     {
       "severity": "important",
       "file": "packages/envoy/infra/gcp/clusteredhub_live_test.go",
-      "description": "loopbackPort binds 127.0.0.1:0, closes the socket and returns the port. The nine hub-server ports are drawn one after another (:765) and fixed into each server's args, so two draws can coincide (17 of 20,000 nine-port draws in this sandbox; cmdtest.FreeTCPPort's own doc recorded CI run 40162140539 hitting it). hubServer.start retries with the same args, so all 10 startBound attempts fail on 'address already in use' and the natslive lane this PR adds to CI goes red at random. Draw the ports with every listener held until all are drawn, or draw a server's ports again on each retry, or follow internal/testnats/cluster.go's convention."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/infra/gcp/clusteredhub_autopilot.go",
-      "description": "autopilotPodSize holds the hub and tailnet pods to autopilotPodMinCPU/MinMemory (500m/512Mi), which the base now documents (dispatch.go:99-103) as the floor of a pod with pod anti-affinity or safe-to-evict; the clustered hub's pods carry neither. GKE's general-purpose floor for them is 250m/512Mi (no bursting) or 50m/52MiB (bursting). So a natsCpu of 300m or a tailnet.listener.cpu of 150m is refused with 'below which Autopilot raises it', which is false. Give the hub its own floor or state the conservative choice truthfully in the refusal and docs (clusteredhub.go:44-47, README)."
+      "description": "hubServer.start draws three new ports on any retry (:447-450), also for the restarts in phases (b) :1074, (c) :1125, (e) :1272 and (f) :1320. The exporters' scrape targets (:1090) and the urls snapshot (:851-854) keep the old ports, so a restart that has to retry makes a later assertion fail (awaitLastSeqs at :1127, connectHub(urls[:1]) at :1155). At 253b920c a restart retried on the same ports. Fix: a restart keeps its ports (draw only on the first start), and the comment at :440-444 says why."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/infra/gcp/clusteredhub_autopilot.go",
-      "description": "Fast-follow (no behaviour change): podPriorityClass repeats the base's inline rule in newDispatchDisruption (dispatch.go:749-758); Dispatch could call it with identical text."
-    },
-    {
-      "severity": "minor",
-      "file": "PR body",
-      "description": "Size and Chain lines are stale after the merges (tailnet_service.go and dispatch.go are now the base's; fork 91d30dea)."
+      "file": "packages/envoy/infra/gcp/clusteredhub_live_test.go",
+      "description": "Cleanup: loopbackPorts.mu guards a draw that only the test goroutine makes (draw calls require, so it cannot run elsewhere)."
     }
   ],
-  "outsideThisPR": "TestDispatchConnectionsPerPodIsTheServers fails at this head and at the base (dispatchConnectionsPerPod 83 in gcp/dispatch.go:97 vs store.ConnectionsPerProcess 84, store/pool.go:307; main has 83 too); this PR touches neither file. Reported to the controller. The f5894634 Legion Envoy and Contracts failure was internal/bus tests of the base, green on the base since 81cf8c12.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at 253b920c (four Minors: loopbackPort collision, Autopilot floor condition, duplicated rules, stale body). Merge resolutions sound; tailnet_service.go at base identical to the approved copy; changie fragments match .changie.yaml; natslive Chart|Cluster ok in 30.96 s.",
-    "codeQuality": "Verdict: CHANGES at 253b920c (podPriorityClass duplicate, cleanup; loopbackPort collision, correctness)."
+    "deepReview": "Verdict: CHANGES at 16234e5e (Medium: restart retry moves ports that the exporters and urls hold). Floor and ratio verified against GKE docs and the chart.",
+    "codeQuality": "Verdict: CHANGES at 16234e5e (same restart finding; loopbackPorts.mu unneeded, cleanup)."
   },
-  "ci": "legion/INFRA-546 requires no check and is not protected. At 253b920c: typecheck and pr-title success; build, changes, lint, test and Legion Envoy and Contracts, Tests, Docs queued. Compare 253b920c...4013403b handoffsOnly true, 2 files.",
-  "verifiedLocally": "At 253b920c: gofmt clean, go vet -tags pulumilive,natslive ./... ok, go test ./core/ ./provider/ ok, go test ./gcp/ ok except TestDispatchConnectionsPerPodIsTheServers (base) and the two mkfs.ext4 data-disk tests (skipped)."
+  "ci": "legion/INFRA-546 requires no check. At 16234e5e every pull_request run is queued; 253b920c's Legion Envoy and Contracts run was cancelled. Compare 16234e5e...96cddd2a handoffsOnly true, 2 files.",
+  "verifiedLocally": "At 16234e5e: gofmt clean on gcp, go vet -tags pulumilive,natslive ./gcp/ ok, go test -run TestClusteredNatsHub ./gcp/ ok, go test -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' ./gcp/ ok (36.4 s; leader kill, exactly-once 1000, reload with cid kept, (e) and (f) refusals)."
 }
