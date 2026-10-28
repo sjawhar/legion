@@ -2,27 +2,27 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-523",
-  "completed": "2026-10-28T20:23:00Z",
-  "round": 8,
-  "headSha": "a95753b12e6adcb0030477c759e70a1131a811f2",
-  "ci": "read on GitHub at 20:20Z: no workflow run exists for a95753b1 or the branch tip 131a11af; GitHub reports the pull request mergeable=false, mergeable_state=dirty against main af1ff09c (pushed 20:15Z), so it builds no merge ref and starts no pull_request workflow. At 0a38d434 Tests, Worker Image, Docs and PR Title were success and Legion Envoy and Contracts 40747034612 has stayed queued since 18:38Z. Nothing re-run.",
-  "scope": "0a38d434 -> a95753b1 is comments only (every changed line under packages/ is a // comment: ticker.go, the five RunLeased callers, suggestion_outcomes_lease_test.go and the comment above the tester's red test, whose code is untouched).",
+  "completed": "2026-10-28T20:39:00Z",
+  "round": 9,
+  "headSha": "fa7c2a72bb1d3e5a5dea6add1881e4e816adb4f6",
+  "ci": "read on GitHub at 20:38Z: at fa7c2a72 Tests 40763256358, Legion Envoy and Contracts 40763256355, Worker Image 40763256342, Docs 40763256386 and PR Title 40763256361 queued - read as running, no verdict; the handoff tip f24d2a0b has no run of its own; GitHub reports the pull request mergeable (state blocked). Nothing re-run.",
+  "scope": "a95753b1 -> fa7c2a72: the merge of main af1ff09c (assets_test.go import block resolved; deliveryaudit_test.go adapted to api.Register's lifetime parameter).",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The change is comments only, so the bare gates: go vet ./internal/dispatch/... clean and the RunLeased tests 2/2 at a95753b1 in a scratch copy; the new wording ('a ticker delivers the first tick a pass overran at once and drops only the ones after it') matches round 7's 150% overrun probe, where passes ran back to back about 753 ms apart with period steps of 500 ms and 1 s alternating. Round 7's verification at 0a38d434 stands for the code."
+    "how": "At fa7c2a72 in a scratch copy: go vet ./... in packages/envoy (and -tags multiprocess ./cmd/dispatch) and packages/daemon clean; deliveryaudit tests 2/2; duty package 2/2; TestALoneRunnerMakesAPassOnEveryTick, TestTwoSweepRunnersRunThePassOnceAndSkipOnce and the T1 pair -race 3/3; multiprocess leased loops pass ('A ran 1 skipped 0, B ran 0 skipped 1' for each); real-tmux test 3/3; outbox lane tests -race 3/3; T12 launcher test -race 3/3; claude-envoy 223 pass 0 fail under Bun 1.4.4; the Dispatch binary booted (schema 136), streamed project.created after a signed-in 201, and on SIGTERM exited in 0.12 s with backends 11 -> 0 (census entry). The merge brought four raw default-logger swaps from main that this change does not convert (failure 1)."
   },
   "failures": [
     {
-      "criterion": "The pull request's head can be merged and its required checks can run at the head that merges",
-      "evidence": "gh api repos/sjawhar/legion/pulls/2396 -> mergeable=false, mergeable_state=dirty (base c44c1469, head 131a11af); main is at af1ff09c (2026-10-28T20:15:02Z). gh api 'repos/sjawhar/legion/actions/runs?branch=legion/INFRA-523' lists no run for a95753b1 or 131a11af: GitHub runs no pull_request workflow on a conflicting head, so no required check can pass until main is merged into the branch on this real conflict (skill://legion-worker/references/conflicts-and-rewrites.md), after which the tester compares the unchanged-diff fingerprint at a95753b1 and the new head."
+      "criterion": "T21 / PR body ('test log captures now give the log package its writer back'): every test that captures the default logger restores log.Writer and log.Flags",
+      "evidence": "The merge of main af1ff09c brought four captures that call slog.SetDefault directly and restore only slog's default: internal/dispatch/dashboard/dashboard_test.go:53-54 (captureLogs), internal/dispatch/routes/assets_test.go:155-156 (TestStaticHandlerRetainedAssets) and :674-675 (TestStaticHandlerWritesNoResponseWhenTheClientCancelsWhileTheStoreReads), internal/dispatch/docs/render_reuse_test.go:1067-1068 (TestRenderReuseADocumentOutsideTheSchema). slog.SetDefault points log's output at the capturing handler and sets flags 0, and setting the previous default (a defaultHandler) back undoes neither (Go 1.27.1 log/slog/logger.go:62-75), so log.Print after those tests writes into their finished buffers: the leak internal/logtest exists to close, and which this branch's earlier merges converted for main's other new captures. Red tests committed (1b7eace4): dashboard/log_restore_test.go TestCaptureLogsGivesTheLogPackageItsOutputBack, routes/log_restore_test.go TestAssetTestsGiveTheLogPackageItsOutputBack, docs/log_restore_test.go TestRenderReuseGivesTheLogPackageItsOutputBack (each runs the capturing test or helper as a subtest and compares log.Writer and log.Flags after it). cd packages/envoy && go test -count=1 -v -run '^(TestCaptureLogsGivesTheLogPackageItsOutputBack|TestAssetTestsGiveTheLogPackageItsOutputBack|TestRenderReuseGivesTheLogPackageItsOutputBack)$' ./internal/dispatch/dashboard/ ./internal/dispatch/routes/ ./internal/dispatch/docs/ -> FAIL in all three: 'after a test that called captureLogs ended, log writes to *slog.handlerWriter with flags 0; want *os.File with flags 3', 'after TestStaticHandlerRetainedAssets ended, log writes to *slog.handlerWriter with flags 0; want *os.File with flags 3', 'after TestRenderReuseADocumentOutsideTheSchema ended, ...'. Control: the four sites written as logtest.SetDefault(t, <same handler>) pass all three."
     }
   ],
   "failed": 1,
   "observations": [
-    "The round-6 wall-clock observation is resolved: RunLeased's due times are the ticker's values, read from the wall clock at each tick (time/sleep.go:154).",
-    "The census nit and routes.BuildAppContext's late refusal of a missing Lifetime (round 5) stand as observations.",
+    "Adjacent, same defect, pre-existing at the branch point 1b859ea3 and outside the plan's Envoy-only T21: packages/daemon/internal/api/server_test.go:144-145 swaps slog's default to io.Discard and restores slog alone (the daemon module has no logtest). Raised with the architect: fix here or name it skipped.",
     "deep-links.e2e.ts keeps its read-mark pre-read (dispatch://INFRA-662), with no retry or sleep.",
     "T6: no suite test fails main's wakeLane order deterministically.",
-    "A3 (re-run minutes over [merge, merge+7d)) is measured after the merge by the implementer's production check."
-  ]
+    "A3 is measured after the merge by the implementer's production check."
+  ],
+  "rebase": "merge of main af1ff09c on a GitHub-reported conflict: fingerprint a95753b1 f43ea3af...269c -> fa7c2a72 69905da3...6f (computed by the tester; matches the implementer's comment) - changed. The PR's own diff differs only in packages/envoy/internal/dispatch/deliveryaudit/deliveryaudit_test.go (main's new test now passes t.Context() to api.Register); main itself moved 381 files, so the round re-ran each surface the merge could reach."
 }
