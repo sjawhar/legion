@@ -517,15 +517,15 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		// be waiting for the replica, and runs its persistence observer as soon as it has it.
 		var classified, changed bool
 		var own *documentUpdateClass
-		replica.observe(room, func(logged crdt.LoggedUpdate, contentChanged bool, tree *pmdoc.Node) {
+		replica.observe(room, func(logged crdt.LoggedUpdate, contentChanged bool, asks *observedAsks) {
 			if _, identityRepair := logged.Origin.(*identityClosureOrigin); identityRepair {
 				// Its own observer records its class (above). The replica takes it all the same,
 				// so the update after it is measured against the room the repair left.
 				return
 			}
 			classified = true
-			if tree != nil {
-				s.observeAskBlocksForUpdate(room, tree)
+			if asks != nil {
+				s.observeAskBlocksForUpdate(room, asks.askBlocks())
 			}
 			// The cursor is this instance's, taken here rather than looked up when the update
 			// reaches the store: a room evicted and reloaded in between is a different instance,
@@ -580,14 +580,14 @@ func soleConnectedActor(connected map[uint64]model.Actor) (sole *model.Actor, am
 	return sole, ambiguous
 }
 
-// observeAskBlocksForUpdate records the ask blocks an update left in room's document and
-// attributes each one not already recorded (observeAskBlocks), in the same critical section the
-// update observer renders tree in (renderedReplica.observe): the observer renders each update in
-// the order the replica took them, so the room's record of its ask blocks moves forward only. The
-// tree walk that lists those ask blocks runs only once the cheap markdown comparison inside
-// observe already showed a real change, so the no-op path, the common one, pays for neither.
-func (s *Service) observeAskBlocksForUpdate(room string, tree *pmdoc.Node) {
-	askBlocks := askBlockIDs(tree)
+// observeAskBlocksForUpdate records askBlocks, the ask blocks an update left in room's document,
+// and attributes each one not already recorded (observeAskBlocks), in the same critical section
+// the update observer classifies the update in (renderedReplica.observe): the observer classifies
+// each update in the order the replica took them, so the room's record of its ask blocks moves
+// forward only. The tree walk that lists those ask blocks (observedAsks.askBlocks) runs only once
+// the cheap markdown comparison inside observe already showed a real change, so the no-op path,
+// the common one, pays for neither.
+func (s *Service) observeAskBlocksForUpdate(room string, askBlocks map[string]struct{}) {
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
 	var author *model.Actor
