@@ -486,6 +486,13 @@ func TestALinkReadFromABareAddressAfterPunctuationIsWrittenBack(t *testing.T) {
 		"x &lt;!-- see x;https://a.bc/ --> y\n",
 		"x &lt;?php x;a@b.cc ?> y\n",
 		"x &lt;!-- a@b.cc --> y\n",
+		// So is one that only CommonMark and the engine close into raw HTML, not goldmark: a
+		// declaration after a lowercase letter, and a tag whose unquoted value holds a control
+		// character.
+		"Set \\<!doctype x;a@b.cc> now\n",
+		"Set \\<!x;a@b.cc> now\n",
+		"\\<!x;a@b.cc>\n",
+		"\\<a b=\x01;a@b.cc>\n",
 	}
 	docs := make([]*Node, len(markdowns))
 	rendered := make([]string, len(markdowns))

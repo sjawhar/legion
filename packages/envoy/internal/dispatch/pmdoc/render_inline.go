@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -668,17 +669,32 @@ func autolinkAt(after []byte) bool {
 // with (inlineParsers).
 var rawHTMLParser = parser.NewRawHTMLParser()
 
-// rawHTMLScan asks rawHTMLParser whether the markdown a run wrote, from its start at from to the
-// end of written, opens inline raw HTML at each text `<` (opensAt), in the order they are written.
-// It reads the run's lines as the readers do, each later line without the prefix written after
-// the line feed (as readsBackUnder takes it off), so a `>` of a quote marker closes nothing.
+// openTagPattern is an open tag as CommonMark 0.31 and the browser editor's engine (micromark's
+// html-text) read one, which is goldmark's pattern with CommonMark's unquoted attribute value: one
+// that holds no space, tab, line ending, `"`, `'`, `=`, `<`, `>` or backtick, though it may hold a
+// control character goldmark's does not. Every tag goldmark reads matches it.
+var openTagPattern = regexp.MustCompile("^<[A-Za-z][A-Za-z0-9-]*" +
+	`(?:[\r\n \t]+[a-zA-Z_:][a-zA-Z0-9:._-]*(?:[\r\n \t]*=[\r\n \t]*(?:[^"'=<>` + "`" + `\t\n\r ]+|'[^']*'|"[^"]*"))?)*` +
+	`(?:[ \t]|(?:\r\n|\n){0,1})*/?>`)
+
+// rawHTMLScan reports whether the markdown a run wrote, from its start at from to the end of
+// written, opens inline raw HTML at each text `<` (opensAt), in the order they are written, as
+// either goldmark (rawHTMLParser) or the browser editor's engine would read it: an escaped `<`
+// reads as text in both, so one that only one of them reads as raw HTML is escaped too. goldmark
+// reads less as raw HTML than CommonMark 0.31 and the engine do, so it is asked only for a closing
+// tag, a comment, a processing instruction and a CDATA section, which it reads as they do or
+// more; an open tag is matched against CommonMark's (openTagPattern), and a declaration, `<!` and
+// any ASCII letter where goldmark reads one only after an uppercase letter, ends at the first `>`
+// after it (declarationEnd). It reads the run's lines as the readers do, each later line without
+// the prefix written after the line feed (as readsBackUnder takes it off), so a `>` of a quote
+// marker closes nothing.
 //
 // An open or closing tag reads past a `<` only inside a quoted attribute value, which ends at the
 // next quote of its kind, so no more than one asked tag is read at any byte per kind of quote, and
 // one outside both. A comment, processing instruction, declaration or CDATA section ends at the
-// first of its closer (`-->`, `?>`, `>`, `]]>`) after its `<`, which the parser searches for out
-// to the run's end, so one is asked only where the last of its kind asked does not answer for it:
-// a later `<` of that kind before the end of the construct that one found ends at the same closer,
+// first of its closer (`-->`, `?>`, `>`, `]]>`) after its `<`, which is searched for out to the
+// run's end, so one is asked only where the last of its kind asked does not answer for it: a
+// later `<` of that kind before the end of the construct that one found ends at the same closer,
 // and none after one that found no closer finds one. Each byte is so read for at most one of each
 // kind, and the run's scan is linear.
 type rawHTMLScan struct {
@@ -695,8 +711,8 @@ type rawHTMLScan struct {
 	ends [4]int
 }
 
-// opensAt reports whether the markdown written from the `<` at at reads as inline raw HTML, as
-// rawHTMLParser reads it at that `<`; at is after the `<` asked about before.
+// opensAt reports whether the markdown written from the `<` at at reads as inline raw HTML to
+// goldmark or to the engine; at is after the `<` asked about before.
 func (s *rawHTMLScan) opensAt(at int) bool {
 	if at+1 >= len(s.written) || !isASCIIAlphaNumeric(s.written[at+1]) && s.written[at+1] != '/' && s.written[at+1] != '!' && s.written[at+1] != '?' {
 		return false
@@ -719,6 +735,13 @@ func (s *rawHTMLScan) opensAt(at int) bool {
 			return true
 		}
 	}
+	switch {
+	case kind == 2:
+		s.ends[kind] = s.declarationEnd(at)
+		return s.ends[kind] >= 0
+	case isASCIILetter(s.written[at+1]):
+		return s.reader.Match(openTagPattern)
+	}
 	// The raw HTML parser reads neither the parent nor the parser context.
 	html := rawHTMLParser.Parse(nil, s.reader, nil)
 	if kind >= 0 {
@@ -729,6 +752,21 @@ func (s *rawHTMLScan) opensAt(at int) bool {
 		}
 	}
 	return html != nil
+}
+
+// declarationEnd is where the declaration opened at at, on the line the scan is at, ends: after
+// the first `>` on the run's lines from there, -1 where none follows.
+func (s *rawHTMLScan) declarationEnd(at int) int {
+	for line := s.line; line < s.lines.Len(); line++ {
+		segment := s.lines.At(line)
+		if line == s.line {
+			segment = segment.WithStart(at)
+		}
+		if index := bytes.IndexByte(segment.Value(s.written), '>'); index >= 0 {
+			return segment.Start + index + 1
+		}
+	}
+	return -1
 }
 
 // readLines makes the run's lines and a reader over them.
@@ -749,16 +787,16 @@ func (s *rawHTMLScan) readLines() {
 	s.reader = text.NewBlockReader(s.written, &s.lines)
 }
 
-// rawHTMLCloser is which kind of construct ending at the first of its closer a line opens, as
-// rawHTMLParser tells them apart: 0 a comment, 1 a processing instruction, 2 a declaration, 3 a
-// CDATA section, and -1 a tag or nothing.
+// rawHTMLCloser is which kind of construct ending at the first of its closer a line opens: 0 a
+// comment, 1 a processing instruction, 2 a declaration (`<!` and an ASCII letter, as CommonMark
+// and the engine read one), 3 a CDATA section, and -1 a tag or nothing.
 func rawHTMLCloser(line []byte) int {
 	switch {
 	case bytes.HasPrefix(line, []byte("<!--")):
 		return 0
 	case bytes.HasPrefix(line, []byte("<?")):
 		return 1
-	case len(line) > 2 && line[1] == '!' && line[2] >= 'A' && line[2] <= 'Z':
+	case len(line) > 2 && line[1] == '!' && isASCIILetter(line[2]):
 		return 2
 	case bytes.HasPrefix(line, []byte("<![CDATA[")):
 		return 3

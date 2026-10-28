@@ -1986,13 +1986,17 @@ outside ASCII (`schemeColons`, `ats`, alone or with `angleURLs`). Plain text the
 written as it is and reads back as a link, as the engine reads it. A text `<` the escape rules
 leave as it is, judged within its own text (`angleConstruct`), is escaped where what the run writes
 after it, out to a `>` in a later node, closes it into an autolink (`writeInlineRun`,
-`autolinkAt`) or CommonMark inline raw HTML - an open or closing tag, a comment, a processing
-instruction, a declaration or a CDATA section, as goldmark's raw HTML parser reads one from that
-`<` (`rawHTMLScan`): `&lt;javascript:void(a@b.cc)>`, whose email the readers link, would otherwise be
+`autolinkAt`) or inline raw HTML - an open or closing tag, a comment, a processing instruction, a
+declaration or a CDATA section, as goldmark's raw HTML parser or the engine reads one from that `<`
+(`rawHTMLScan`): `&lt;javascript:void(a@b.cc)>`, whose email the readers link, would otherwise be
 written `<javascript:void([a@b.cc](mailto:a@b.cc))>` and read back as one autolink to a
 `javascript:` address, and `Set \<input value=me@x.cc> in the form.` as
-`Set <input value=[me@x.cc](mailto:me@x.cc)> in the form.`, which reads back as raw HTML. Only a
-`<` the run's first writing reads so is escaped, so a run that reads back keeps its bytes. Marks are
+`Set <input value=[me@x.cc](mailto:me@x.cc)> in the form.`, which reads back as raw HTML. Either
+grammar decides, since an escaped `<` reads as text in both: goldmark reads a declaration only after
+`<!` and an uppercase letter, and an unquoted attribute value holding no control character, where
+CommonMark 0.31 and the engine also read a lowercase one (`<!doctype x;[a@b.cc](mailto:a@b.cc)>`)
+and a U+0001 in an unquoted value as raw HTML. Only a `<` the run's first writing reads so is
+escaped, so a run that reads back keeps its bytes. Marks are
 written in one order - link, strong, emphasis - so where a text still carries a mark the text
 before it opened, and the order puts that mark after the text's other marks, the mark is closed and
 opened again; where that puts two runs of one delimiter character side by side (bold inside italic:

@@ -16,8 +16,10 @@ body: |-
     `[a](x&amp;y)` to `x&y`), and a destination holding `>`, a control character or a final
     backslash is written so it reads back. A text `<` that the markdown written after it would close
     into an autolink, such as `&lt;javascript:void(a@b.cc)>`, is written escaped, so no write turns
-    it into one link. An email address in a document stored before emails linked to their `mailto:`
-    URL keeps its old link target until the document is written again.
+    it into one link. A text `<` that the markdown written after it would close into inline HTML
+    (`Set \<input value=me@x.cc> in the form.`) is now stored with `\<`, so the write reads back and
+    no html node replaces the text. An email address in a document stored before emails linked to
+    their `mailto:` URL keeps its old link target until the document is written again.
 time: 2026-10-28T15:16:46.931510261Z
 custom:
     Issue: pr2373
