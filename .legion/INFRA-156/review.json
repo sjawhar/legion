@@ -2,30 +2,28 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-156",
-  "completed": "2026-10-28T09:44:00Z",
+  "completed": "2026-10-28T10:32:00Z",
   "decision": "changes_requested",
-  "round": 7,
-  "scope": "The architect narrowed round 7 to two items: (1) the round-6 comment and test-name fixes, (2) a typed block's id round-trips through markdown. Judged against round 7's diff: merge 1d6fd562 and commit 7c11b41c.",
-  "headReviewed": "1c1bef26c3f5fb91d67895011244dbb38cf044d7",
-  "codeHead": "7c11b41c25b7",
-  "previousReview": "5671878515 (REQUEST_CHANGES at cabe882a)",
+  "round": 8,
+  "scope": "The architect narrowed round 8 to three items (the request-approval regression, one stop-set constant, the AGENTS.md wording). Judged against round 8's diff: 48a891d4 and merge 10bc21e1.",
+  "headReviewed": "d63107e27e0739a8bd323b76b6ef7a2fc2372d81",
+  "codeHead": "10bc21e1b5c6",
+  "previousReview": "5680643410 (REQUEST_CHANGES at 2f67ed81)",
   "critical": 0,
   "important": 1,
-  "minor": 2,
-  "workspace": "The workspace was recreated from legion/INFRA-156; it matches what was pushed (my round-6 review.json at cabe882a is on the branch).",
-  "item1": "Done. All four comment fixes and the rename match the code; both thermonuclear reviewers confirmed.",
-  "item2": "Done in Go. TestATypedBlockIDReadsBackFromTheMarkdownAsTheTreeHoldsIt fails at the pre-fix code (1d6fd562 with the new test: reconciliation 'mentions \"a b\"', and the version write 'mentions c\\uFFFDd' for U+0000) and passes at the head. pmdoc and docs filtered tests pass at the head, and go vet is clean. Both reviewers ran 50+ further ids through Go and the editor engine: all read back. But the TypeScript request-approval preflight still matches the old opener.",
-  "merge": "1d6fd562 conflicted only in packages/envoy/CHANGELOG.md; the resolution keeps both entries.",
-  "editorTests": "No file under packages/proof-editor or packages/dispatch/web changed between fe1918c7 and the head. proof-editor bun test (src/tests tests) gives 149 pass, 0 fail at the head. The tester's 12-vs-13 count is its throwaway rig, rebuilt after the disk loss, not a removed test.",
-  "ci": "Required set: lint, typecheck, test, pr-title. CI head 452554cf (compare to 1c1bef26: handoffsOnly true, 2 files). pr-title success; lint, typecheck and test were queued at 09:33Z. A request for changes does not wait on CI.",
-  "threads": "13 threads, all resolved. The four round-6 threads are answered in the implementer's replies and fixed in 7c11b41c; accepted in this review's body.",
+  "minor": 1,
+  "item1": "Done. The new dispatch-execute.test.ts cases fail at 7c11b41c's dispatch-execute.ts (0 pass, 2 fail) and pass at the head (273 pass). Contracts dispatch-block-ref.test.ts passes (106); pmdoc filtered tests pass, go vet is clean. The regenerated JSON is byte-identical to the TS table. The deep review fuzzed 20,000 ids through both writers with no difference. No other code finds an opener by id.",
+  "dist": "bun run check-dist under the pinned Bun 1.4.4 at the head: 'dist/ and legion/ match a fresh build'. The rebuild touched only dist/dispatch.js, envoy-channel.js and session-hook.js (THIRD_PARTY_NOTICES and legion/ unchanged). The extra bundle changes are earlier rounds' contracts code (MAX_BLOCK_ID_BYTES, BLOCK_REFERENCE, DISPATCH_BLOCK_POINTER_VALUES, the ISSUE_KEY to ISSUE_KEY2 rename). Why the stale dist was missed: claude-envoy's check-dist failed at 8c232738 (run 40551354001) and was cancelled on every other head; it is not in main's required set.",
+  "item2": "Done. typedBlockIDShortcutExcluded is used by the reader and the writer.",
+  "item3": "Partly. 'no space, tab or line ending' is fixed, but the same sentence still says quote, <, =, > and backtick 'end' the shortcut.",
+  "ci": "Required set: lint, typecheck, test, pr-title. I now read every check-run. At CI head 10bc21e1 (compare to d63107e2: handoffsOnly true, 2 files), every check was still queued at 10:24Z, and no earlier round-8 head finished a run. A request for changes does not wait on CI.",
+  "threads": "15 threads, all resolved. The two round-7 threads (PRRT_kwDORFy7ds6xD-xr, PRRT_kwDORFy7ds6xD-xv) are fixed in 48a891d4; accepted in the review body.",
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 1c1bef26. Medium: envoy-client request-approval preflight misses id=\"…\" ask openers. Minor: \\v/\\f no longer separate after #id (now agrees with the editor). Minor: AGENTS.md:1721 says 'no whitespace' where only ASCII space, tab and line endings stop the shortcut.",
-    "codeQuality": "Verdict: CHANGES at 1c1bef26. The same preflight finding, with stale claude-envoy dist bundles. Also, the reader's and writer's stop sets are two separate expressions (directive.go:278, :391)."
+    "deepReview": "Verdict: CHANGES at d63107e2. Medium: the merge kept the PR's entries in CHANGELOG.md, against AGENTS.md:151's changelog-fragment rule from main's 184897ac. Minor: the AGENTS.md wording.",
+    "codeQuality": "Verdict: CHANGES at d63107e2. Two items that change no behaviour: the in-file Go spelling table duplicates 16 rows of the shared table; TYPED_BLOCK_ID_SHORTCUT_EXCLUDED is exported with no caller. Fast-follow."
   },
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy-client/src/dispatch-execute.ts", "description": ":2546-2551 finds an ask block's opener by `ask{#${id} ` / `ask{#${id}}`. Go now writes an id holding whitespace, a quote, #, ., }, &, etc. as `id=\"…\"`, so dispatch request-approval reports the block 'which version N does not hold yet' and refuses on every try. Before round 7 the raw `#a b` spelling matched. Port TypedBlockIDAttribute to TypeScript (in @legion/contracts, with a shared Go/TS spelling table), build the needles from it, add test cases for `a b` and `R&D`, and rebuild packages/claude-envoy/dist, whose three bundles carry the same line."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/directive.go", "description": "The reader (:278) and the writer (:391) each concatenate typedBlockIDShortcutStops+\"&\". Round-tripping depends on the two staying equal. Use one named constant for the characters a written #id cannot hold."},
-    {"severity": "minor", "file": "packages/envoy/AGENTS.md", "description": ":1721 says 'no whitespace' ends the shortcut; only space, tab and line endings do (U+00A0 stays in the # form, as the test table shows)."}
+    {"severity": "important", "file": "packages/*/CHANGELOG.md", "description": "Main's 184897ac (#2419) makes changelog entries fragment files (AGENTS.md:151): never edit a CHANGELOG.md, and an open PR moves its entries from the old section (now '## Before changelog fragments') into fragments the next time it merges main. Merge 10bc21e1 is that merge but kept six entries in packages/{contracts,envoy,envoy-client,claude-envoy}/CHANGELOG.md, and no .changes/unreleased file exists. The fold builds release blocks only from fragments (release-push.sh), so these entries never reach a release or main@<commit> heading. Reset the four CHANGELOG.md files to main's text, and write each entry as packages/<pkg>/.changes/unreleased/INFRA-156-<slug>.yaml (kind Added or Fixed, body as a |- block)."},
+    {"severity": "minor", "file": "packages/envoy/AGENTS.md", "description": ":1721-1722 still says a quote, <, =, > and backtick 'end' the shortcut. Only a space, tab, line ending, #, . and } end it; the others make the editor read the line as no directive (as directive.go:373-379 says)."}
   ]
 }
