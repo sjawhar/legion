@@ -935,8 +935,9 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	}
 
 	// Resuming from a session file found nowhere over a pane's previous incarnation starts nothing
-	// and is a refusal, never runtime.ErrSessionFileMissing: only a resume over a process another
-	// runtime recorded, under runtime.tmux.take_over, gets a fresh agent.
+	// and is a refusal, never runtime.ErrSessionFileMissing: this runtime takes no claim over,
+	// since `runtime.tmux.take_over` is unset here, and only while that key is set does a session
+	// found nowhere get a fresh agent.
 	missing := r.spec("LEGION-1", "LEGION-1", claim.RoleArchitect)
 	missing.ResumeSessionFile = filepath.Join(r.dir, "no-such-session.jsonl")
 	before = len(r.recorded())

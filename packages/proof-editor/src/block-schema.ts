@@ -4,6 +4,7 @@ import type { MarkdownNode as ParsedMarkdownNode, NodeSchema } from '@milkdown/k
 
 import { withBlockIdSpec } from './editor/schema/block-ids.js';
 import { withDomAttributes } from './editor/schema/dom-attributes.js';
+import { markdownSource } from './typed-block-drawing.js';
 
 export type BlockAttributeKind = 'string' | 'bool' | 'enum' | 'string[]' | 'actor' | 'timestamp';
 
@@ -228,12 +229,23 @@ export function blockSchemaPlugins(schema: BlockSchema, renderBlock?: HostBlockR
   return schema.types.map((type) => $nodeSchema(type.name, () => typedBlockSpec(type, renderBlock)));
 }
 
+/** Why the schema refuses the container directive `node`, as `visit` throws it, or undefined when it is accepted. */
+export function typedBlockRefusal(schema: BlockSchema, node: { name?: string; attributes?: Record<string, string> }): string | undefined {
+  const name = node.name ?? '';
+  const type = schema.types.find((candidate) => candidate.name === name);
+  if (!type) return `unknown typed block ${JSON.stringify(name)} (known types: ${knownNames(schema)})`;
+  try {
+    directiveAttrs(type, node.attributes);
+  } catch (error) {
+    return (error as Error).message;
+  }
+  return undefined;
+}
+
 function visit(node: MarkdownNode, schema: BlockSchema): void {
   if (node.type === 'containerDirective') {
-    const name = node.name ?? '';
-    const type = schema.types.find((candidate) => candidate.name === name);
-    if (!type) throw new Error(`unknown typed block ${JSON.stringify(name)} (known types: ${knownNames(schema)})`);
-    directiveAttrs(type, node.attributes);
+    const refusal = typedBlockRefusal(schema, node);
+    if (refusal !== undefined) throw new Error(refusal);
   }
   for (const child of node.children ?? []) visit(child, schema);
 }
@@ -272,7 +284,7 @@ export function rejectUnsupportedDirectiveSyntax(tree: MarkdownNode, markdown: s
 export function remarkTypedBlocks(schema: BlockSchema) {
   validateBlockSchema(schema);
   return (tree: MarkdownNode, file: { toString(): string }) => {
-    rejectUnsupportedDirectiveSyntax(tree, file.toString());
+    rejectUnsupportedDirectiveSyntax(tree, markdownSource(file));
     for (const child of tree.children ?? []) visit(child, schema);
   };
 }

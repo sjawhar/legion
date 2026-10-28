@@ -17,6 +17,15 @@ import {
   zodSchemaApi,
 } from "@legion/contracts";
 import {
+  type AskgateOwner,
+  closeStore,
+  dropAskgateRecord,
+  openStore,
+  recordedOwnerMode,
+  selfOwner,
+  writeAskgateRecord,
+} from "@legion/envoy-client/askgate-marker";
+import {
   createDeliveryDedupe,
   type DedupeIdentity,
   DedupeIdentitySchema,
@@ -29,9 +38,11 @@ import {
   renderInbound,
   senderLabel,
 } from "@legion/envoy-client/delivery";
+import { commandName } from "@legion/envoy-client/dispatch-command";
 import {
   type ActiveDispatchConfig,
   activeDispatchSettings,
+  dispatchSettings,
 } from "@legion/envoy-client/dispatch-config";
 import {
   dispatchFirstSkillFile,
@@ -44,9 +55,11 @@ import {
   sessionDirectory as dispatchSessionDirectory,
   readResultsSince,
   resultsEnd,
+  sessionStateRoot,
   writeSessionTitle,
 } from "@legion/envoy-client/dispatch-session-state";
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe";
+import { askgateSetting, readEnvoyConfig } from "@legion/envoy-client/envoy-config";
 import { MIN_PASS_DEADLINE_MS } from "@legion/envoy-client/envoy-settings";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
@@ -154,6 +167,8 @@ import { opensAsk } from "../src/opens-ask";
 import { sideTurn } from "../src/side-turn";
 import { TypedPictures } from "../src/typed-pictures";
 import { type CardDelivery, UnwrittenFrames, unwrittenCardKeys } from "../src/unwritten-frames";
+import { registerAskGate } from "./askgate/askgate";
+import { ADVISOR_GATE_ENTRY_TYPE, type GateEntry } from "./askgate/askgate-core";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
@@ -624,6 +639,42 @@ export default function envoyExtension(pi: PiApi): void {
   // interface's `claim` and `subscribe` refuse naming why (`requireInbound`).
   const inbound = envoy.enabled && !("off" in envoy.inbound);
   const startNotice = atStart.notice ?? "";
+  // AskGate (extensions/askgate/) reviews each Dispatch write before it posts, in a session that
+  // has Dispatch: its own envoy.json and the variables over it name one. A session or pod with no
+  // Dispatch has no write to review, so the gate binds nothing there and says nothing. A
+  // checkout's file is left out of that test: it can turn off the Dispatch of its own checkout,
+  // but not the gate, which a later shell command can still pass with DISPATCH_URL. The session's
+  // own envoy.json is the gate's only switch. Its one `tool_call` handler registers with this
+  // factory's own handlers (after this entry's handler, below) and waits for the Oh My Pi modules
+  // the gate loads. A switch that cannot be read, and a gate that did not load, are said at every
+  // session start; a gate that did not load refuses each write it would review.
+  const askgateNotices: string[] = [];
+  let askgateLoad: Promise<void> = Promise.resolve();
+  let askgateFile: string | null = null;
+  const configPath = CONFIG_FILE.path;
+  const ownDispatch = (file: string): boolean => {
+    const own = readEnvoyConfig(file, process.env, { cwd: process.cwd() });
+    return dispatchSettings(process.env, own.kind === "read" ? { ...own, checkout: null } : own)
+      .enabled;
+  };
+  if (configPath !== null && (atStart.dispatch.enabled || ownDispatch(configPath))) {
+    const setting = askgateSetting(configPath);
+    if (setting.error !== null) askgateNotices.push(setting.error);
+    if (setting.enabled) askgateFile = configPath;
+  }
+  // The record that makes the `dispatch` CLI require AskGate's marker for a gated write
+  // (`@legion/envoy-client/askgate-marker`): written, while the gate is bound, for each session id
+  // this top-level instance binds (`bindDispatchSession`; a subagent's instance binds none), and
+  // kept for every one of them until shutdown, since a shell or kernel started before a switch
+  // still acts as the session it started in. A gate that did not load refuses each literal call at
+  // the hook (`loadFailureGate`), so those never reach the CLI; it mints no marker and records no
+  // mode, so every gated write that does reach the CLI — one outside the literal form, and a
+  // subagent's literal one — is refused where the session chose block (`OMP_ASKGATE=block`, which
+  // `bindDispatchSession` writes beside the record), and at the warn default posts with a warning
+  // and an `unmarked` entry.
+  const askgateOwner: AskgateOwner | undefined =
+    askgateFile === null ? undefined : selfOwner(sessionStateRoot(process.env));
+  const askgateRecords = new Set<string>();
   // The listener client exists only while Envoy is on. The listener calls and the NATS connection
   // reach it through `requireEnvoy`, which refuses, saying why Envoy is off, so this session
   // reaches no listener and no NATS server its configuration does not name. Tools, `/whoami`,
@@ -926,15 +977,43 @@ export default function envoyExtension(pi: PiApi): void {
 
   // Names the top-level session in the environment every later shell command takes, and starts
   // its ledger at the end, so a resumed or switched session never reads an earlier run's calls.
-  // Oh My Pi refreshes the shell's environment after `session_start`, `session_switch` and
-  // `session_branch`; any other caller refreshes it itself.
-  const bindDispatchSession = (id: string): void => {
+  // It also names the CLI state root (`DISPATCH_STATE_DIR`, unless it is already set), so a
+  // command that changes HOME or XDG_STATE_HOME still finds the session's ledger and AskGate
+  // record. Oh My Pi refreshes the shell's environment after `session_start`, `session_switch`
+  // and `session_branch`; any other caller refreshes it itself. A caller after `session_start`
+  // passes `ui`, so a record it cannot write is a notice at once: the start notices are shown once.
+  const bindDispatchSession = (id: string, ui?: SessionContext["ui"]): void => {
+    process.env.DISPATCH_STATE_DIR ||= sessionStateRoot(process.env);
     if (id === "") {
       delete process.env.DISPATCH_SESSION_ID;
       dispatchLedger = undefined;
       return;
     }
     process.env.DISPATCH_SESSION_ID = id;
+    if (askgateOwner !== undefined) {
+      const dir = dispatchSessionDirectory(process.env, id);
+      try {
+        openStore(askgateOwner.store);
+        // The session's own check mode at the bind: block when it chose block through OMP_ASKGATE,
+        // which survives a gate that does not load, or when this process already recorded block for
+        // this session id. The gate reads an arm per call and records it in the owner file, so a
+        // rebind (a start, a switch, a branch, a host move) keeps a recorded block rather than turn
+        // it back to warn before the gate's next call; the gate's call still sets warn when the arm
+        // is off. Kept per session in its owner file, so a switch never changes another session's.
+        const recorded = recordedOwnerMode(dir, askgateOwner);
+        writeAskgateRecord(
+          dir,
+          askgateOwner,
+          process.env.OMP_ASKGATE?.trim() === "block" || recorded === "block" ? "block" : "warn"
+        );
+        askgateRecords.add(dir);
+      } catch (error) {
+        const notice = `AskGate could not write its record for session ${id} (${messageFor(error)}), so the dispatch CLI does not ask for AskGate's marker there: a Dispatch write AskGate cannot read posts unreviewed.`;
+        logger.warn(notice);
+        if (ui === undefined) askgateNotices.push(notice);
+        else ui.notify(`envoy: ${notice}`, "warning");
+      }
+    }
     dispatchLedger = {
       sessionID: id,
       offset: resultsEnd(dispatchSessionDirectory(process.env, id)),
@@ -2495,8 +2574,11 @@ export default function envoyExtension(pi: PiApi): void {
     claimedRoleSessionID = id;
     // The transcript is the one thing `omp --resume` guarantees, so it is
     // the durable record of the claim: the listener reaps a dead session's
-    // interest row (role claim included) after its ten-minute stale-interest
-    // grace window, and this process's memory dies with it.
+    // interest row 15 minutes after the row's last write and releases the
+    // role claim separately, one session TTL after heartbeats stop (a role
+    // claim is not an interest: see `ReapRoleClaims` in
+    // packages/envoy/internal/store/kv.go), and this process's memory dies
+    // with it.
     pi.appendEntry(ROLE_CLAIM_ENTRY, { role });
     if (activeSessionContext !== undefined) ensureHeartbeat(activeSessionContext);
     // The role it moved off is handed back under the id its hold was under (a fork's parent,
@@ -2675,7 +2757,7 @@ export default function envoyExtension(pi: PiApi): void {
       // A move with no session event refreshed no shell environment: name the live id, and
       // refresh the snapshot the shell takes, as the host does after a session event.
       if ((process.env.DISPATCH_SESSION_ID ?? "") !== host) {
-        bindDispatchSession(host);
+        bindDispatchSession(host, context.ui);
         procmgr.refreshShellConfigCache();
       }
       tellIdChanged(host);
@@ -3067,6 +3149,8 @@ export default function envoyExtension(pi: PiApi): void {
     restoreLocalSessionState(context);
     lastHeard = context.sessionManager.getSessionId();
     if (startNotice !== "") context.ui.notify(`envoy: ${startNotice}`, "warning");
+    await askgateLoad;
+    for (const notice of askgateNotices) context.ui.notify(`envoy: ${notice}`, "warning");
     if (!inbound) return;
     let established = false;
     const establish = async (): Promise<void> => {
@@ -3138,7 +3222,9 @@ export default function envoyExtension(pi: PiApi): void {
     reason: SessionSwitchReason | undefined,
     context: SessionContext
   ): Promise<void> => {
-    if (!(await isSubagent(context))) bindDispatchSession(context.sessionManager.getSessionId());
+    if (!(await isSubagent(context))) {
+      bindDispatchSession(context.sessionManager.getSessionId(), context.ui);
+    }
     await rebind(reason, context);
   };
   pi.on("session_switch", (event, context) => rebindDispatch(event.reason, context));
@@ -3173,6 +3259,19 @@ export default function envoyExtension(pi: PiApi): void {
       sessionFile: undefined,
       sessionID: "",
     });
+    // The process ends, and with it every record it keeps live; removing them, and its store, is
+    // tidiness (a dead process's record is inert). Only the instance that wrote records has any.
+    if (askgateOwner !== undefined && askgateRecords.size > 0) {
+      for (const dir of askgateRecords) {
+        try {
+          dropAskgateRecord(dir, askgateOwner);
+        } catch {
+          // A record left behind names a process that is gone.
+        }
+      }
+      askgateRecords.clear();
+      closeStore(askgateOwner.store);
+    }
     const deadline = Promise.withResolvers<void>();
     const timer = setTimeout(deadline.resolve, 1_000);
     try {
@@ -3530,10 +3629,59 @@ export default function envoyExtension(pi: PiApi): void {
     return undefined;
   });
 
+  // AskGate's `tool_call` handler, registered now, in the factory, so it is there for the first
+  // call; it waits for the modules the gate loads (`registerAskGate`). Only a session with
+  // Dispatch and the switch on has one (`askgateFile`, above).
+  if (askgateFile !== null) {
+    const configFile = askgateFile;
+    // What the gate logs at bind is also a notice at session start: the one it logs there says
+    // the review deadline is under 30 s, which at the host's default handler limit is every
+    // profile that sets nothing, and a review that times out lets the write post.
+    const gateLogger = {
+      warn: (message: string) => {
+        logger.warn(message);
+        askgateNotices.push(message);
+      },
+    };
+    askgateLoad = registerAskGate(pi, { configFile, logger: gateLogger }).catch(
+      (error: unknown) => {
+        const notice = `AskGate did not load, so it refuses each Dispatch write it would review: ${messageFor(error)}. To turn AskGate off for this session, set askgate.enabled to false in ${configFile}.`;
+        logger.warn(notice);
+        askgateNotices.push(notice);
+      }
+    );
+  }
+
   pi.on("tool_result", async (event, context) => {
     // Read, and the offset advanced, on every result, failed or not and armed period or not, so a
     // later result never counts the calls this one ran.
     const entries = readNewDispatchResults();
+    // A gated write the CLI found no AskGate marker for (refused in block mode, posted with a
+    // warning in warn mode) becomes an `advisor-gate` entry, so AskGate's report counts it. Only
+    // the top-level instance records it: it reads each line of the session's ledger once, the
+    // lines of a subagent's calls included.
+    if (
+      askgateOwner !== undefined &&
+      entries.some((entry) => entry.askgate !== undefined) &&
+      !(await isSubagent(context))
+    ) {
+      for (const { tool, askgate } of entries) {
+        if (askgate === undefined) continue;
+        pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, {
+          advisor: "AskGate",
+          tool,
+          path: `dispatch ${commandName(tool)}`,
+          toolCallId: event.toolCallId,
+          decision: askgate.mode === "block" ? "revise" : "allow",
+          outcome: "unmarked",
+          verdictMode: askgate.mode,
+          reason: askgate.why,
+          latencyMs: 0,
+          revisesForKey: 0,
+          argsDigest: "",
+        } satisfies GateEntry);
+      }
+    }
     if (event.isError) return;
     // The host's live id, never the module's `sessionID`, for the reason the stop guard reads
     // it: in a fresh TUI's drift window the two disagree, and the period is armed against the
