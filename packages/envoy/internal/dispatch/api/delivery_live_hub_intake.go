@@ -73,7 +73,7 @@ func (h *deliveryHub) intake(g *hubGeneration) {
 // read failed); false once g has ended.
 func (h *deliveryHub) follow(g *hubGeneration) (relaySubscription, bool) {
 	for attempt := 1; ; attempt++ {
-		feed, err := h.feed(g.readContext(), deliveryHubFeedBuffer)
+		feed, err := h.server.eventRelay.subscribe(g.readContext(), deliveryHubFeedBuffer)
 		if err == nil {
 			return feed, true
 		}
@@ -120,10 +120,8 @@ func (h *deliveryHub) reload(g *hubGeneration) bool {
 			now := h.clock.Now()
 			h.mu.Lock()
 			defer h.mu.Unlock()
-			if h.generation == g {
-				g.p0 = p0
-				h.dirtyAllLocked(g, now)
-			}
+			g.p0 = p0
+			h.dirtyAllLocked(g, now)
 			return true
 		}
 		if g.ctx.Err() == nil {
@@ -176,11 +174,9 @@ func (h *deliveryHub) catchUpChanges(g *hubGeneration) error {
 			now := h.clock.Now()
 			h.mu.Lock()
 			defer h.mu.Unlock()
-			if h.generation == g {
-				g.changeSeq, g.changeAt = latest, timeOrZero(latestAt)
-				g.epoch++
-				h.dirtyAllLocked(g, now)
-			}
+			g.changeSeq, g.changeAt = latest, timeOrZero(latestAt)
+			g.epoch++
+			h.dirtyAllLocked(g, now)
 			return nil
 		}
 		changes, err := delivery.ChangesSince(ctx, pool, seq, deliveryLivePage)
@@ -189,12 +185,8 @@ func (h *deliveryHub) catchUpChanges(g *hubGeneration) error {
 		}
 		now := h.clock.Now()
 		h.mu.Lock()
-		if h.generation != g {
-			h.mu.Unlock()
-			return nil
-		}
 		for _, change := range changes {
-			for _, view := range h.views {
+			for _, view := range g.views {
 				if change.Seq > max(view.seq, view.readingSeq) && view.touchedBy(change, now) {
 					h.markDirtyLocked(g, view, now, deliveryCauseChange)
 				}
@@ -214,9 +206,7 @@ func (h *deliveryHub) catchUpChanges(g *hubGeneration) error {
 func (h *deliveryHub) receive(g *hubGeneration, event model.Event) {
 	now := h.clock.Now()
 	h.mu.Lock()
-	if h.generation == g {
-		h.applyEventLocked(g, event, now)
-	}
+	h.applyEventLocked(g, event, now)
 	h.mu.Unlock()
 	h.note(deliveryHubNote{what: "event", eventID: event.ID})
 }
@@ -272,7 +262,7 @@ func (h *deliveryHub) applyEventLocked(g *hubGeneration, event model.Event, now 
 		if origin := event.Actor.Origin; origin != nil && origin.SessionTitle != "" {
 			title = origin.SessionTitle
 		}
-		for _, view := range h.views {
+		for _, view := range g.views {
 			if view.showsSessionRetitled(event.Actor.ID, title) {
 				h.markDirtyLocked(g, view, now, deliveryCauseChange)
 			}
@@ -287,7 +277,7 @@ func (h *deliveryHub) applyEventLocked(g *hubGeneration, event model.Event, now 
 }
 
 func (h *deliveryHub) dirtyIssueLocked(g *hubGeneration, key string, p0 bool, now time.Time) {
-	for _, view := range h.views {
+	for _, view := range g.views {
 		if view.showsIssue(key, p0) {
 			h.markDirtyLocked(g, view, now, deliveryCauseChange)
 		}
@@ -334,7 +324,7 @@ func (view *deliveryView) showsSessionRetitled(session, title string) bool {
 }
 
 func (h *deliveryHub) dirtyAllLocked(g *hubGeneration, now time.Time) {
-	for _, view := range h.views {
+	for _, view := range g.views {
 		h.markDirtyLocked(g, view, now, deliveryCauseChange)
 	}
 }

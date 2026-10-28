@@ -239,10 +239,7 @@ func (q *agentStreamQueue) push(frame agentstream.Frame) {
 	q.frames = append(q.frames, frame)
 	q.queued += len(frame)
 	q.size += len(frame)
-	select {
-	case q.wake <- struct{}{}:
-	default:
-	}
+	signal(q.wake)
 }
 
 // take hands over every queued frame in order, and their bytes. Those bytes stay counted against

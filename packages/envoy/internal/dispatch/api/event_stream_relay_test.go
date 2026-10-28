@@ -89,7 +89,7 @@ func newCountedRelay(t *testing.T, deps Deps) (*eventStreamRelay, chan int64) {
 	relay.coalesce = time.Millisecond
 	reads := make(chan int64, 1024)
 	relay.readAfter = func(ctx context.Context, after int64) ([]model.Event, error) {
-		page, err := relay.server.readEventsAfterID(ctx, after)
+		page, err := relay.server.readEventsAfterID(ctx, after, eventRelayPage)
 		reads <- after
 		return page, err
 	}

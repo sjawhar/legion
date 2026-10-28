@@ -76,10 +76,7 @@ func (s *server) listEventLog(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	events, err := s.readEventRows(r.Context(), eventSelect+`
-		where e.id > $1
-		order by e.id asc limit $2
-	`, after, limit)
+	events, err := s.readEventsAfterID(r.Context(), after, limit)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

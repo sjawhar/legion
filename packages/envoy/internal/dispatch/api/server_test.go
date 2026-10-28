@@ -2594,7 +2594,7 @@ func TestSSEDeliversACommitBetweenItsSubscriptionAndItsReplayExactlyOnce(t *test
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-		return served.readEventsAfterID(ctx, after)
+		return served.readEventsAfterID(ctx, after, eventRelayPage)
 	}
 	httpServer := httptest.NewServer(handler)
 	t.Cleanup(httpServer.Close)

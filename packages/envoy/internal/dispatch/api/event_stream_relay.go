@@ -328,7 +328,7 @@ func (r *eventStreamRelay) page(ctx context.Context, after int64) ([]model.Event
 	if r.readAfter != nil {
 		return r.readAfter(ctx, after)
 	}
-	return r.server.readEventsAfterID(ctx, after)
+	return r.server.readEventsAfterID(ctx, after, eventRelayPage)
 }
 
 // publish fans one page out to g's subscribers and moves g's cursor to its last event, under mu.
@@ -421,12 +421,13 @@ func eventCursorCheck(ctx context.Context, q queryer, cursor int64) (maxID int64
 	return maxID, maxAt, &rowAt, nil
 }
 
-// readEventsAfterID reads the next page of committed events after an id, ask fields attached.
-func (s *server) readEventsAfterID(ctx context.Context, after int64) ([]model.Event, error) {
+// readEventsAfterID reads up to limit committed events after an id, in id order, ask fields
+// attached: the relay's page and GET /api/v1/events/log.
+func (s *server) readEventsAfterID(ctx context.Context, after int64, limit int) ([]model.Event, error) {
 	return s.readEventRows(ctx, eventSelect+`
 		where e.id > $1
 		order by e.id asc limit $2
-	`, after, eventRelayPage)
+	`, after, limit)
 }
 
 // waitFor waits for d, or until ctx ends; false means ctx ended.

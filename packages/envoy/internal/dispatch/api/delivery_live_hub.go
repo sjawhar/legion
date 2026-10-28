@@ -77,19 +77,19 @@ func (h *deliveryHub) Subscribe(conn deliveryLiveConn, frame DeliveryLiveSubscri
 		}
 		g = h.startLocked()
 	}
-	subs := h.conns[conn]
+	subs := g.conns[conn]
 	if subs == nil {
 		subs = map[string]*deliverySub{}
-		h.conns[conn] = subs
+		g.conns[conn] = subs
 	}
 	if replaced := subs[frame.Sub]; replaced != nil {
 		// conn keeps a sub, so the generation runs on.
-		h.leaveLocked(replaced)
+		g.leaveLocked(replaced)
 	}
-	view := h.views[spec.key]
+	view := g.views[spec.key]
 	if view == nil {
 		view = &deliveryView{spec: spec, subs: map[*deliverySub]struct{}{}}
-		h.views[spec.key] = view
+		g.views[spec.key] = view
 	}
 	sub := &deliverySub{id: frame.Sub, conn: conn, view: view, needsSnapshot: held == nil}
 	if held != nil {
@@ -119,7 +119,10 @@ func (h *deliveryHub) Unsubscribe(conn deliveryLiveConn, sub string) {
 func (h *deliveryHub) Close(conn deliveryLiveConn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for id := range h.conns[conn] {
+	if h.generation == nil {
+		return
+	}
+	for id := range h.generation.conns[conn] {
 		h.dropLocked(conn, id)
 	}
 }
@@ -128,27 +131,31 @@ func (h *deliveryHub) Close(conn deliveryLiveConn) {
 // drop that leaves the hub no conn stops its generation: its listener closes its connection, its
 // intake cancels its relay subscription, and nothing reads either log until the next Subscribe.
 func (h *deliveryHub) dropLocked(conn deliveryLiveConn, id string) {
-	subs := h.conns[conn]
+	g := h.generation
+	if g == nil {
+		return
+	}
+	subs := g.conns[conn]
 	sub := subs[id]
 	if sub == nil {
 		return
 	}
 	delete(subs, id)
 	if len(subs) == 0 {
-		delete(h.conns, conn)
+		delete(g.conns, conn)
 	}
-	h.leaveLocked(sub)
-	if len(h.conns) == 0 && h.generation != nil {
-		h.generation.stop()
+	g.leaveLocked(sub)
+	if len(g.conns) == 0 {
+		g.stop()
 		h.generation = nil
 	}
 }
 
 // leaveLocked takes sub out of its view, and drops the view it leaves without a sub.
-func (h *deliveryHub) leaveLocked(sub *deliverySub) {
+func (g *hubGeneration) leaveLocked(sub *deliverySub) {
 	delete(sub.view.subs, sub)
-	if len(sub.view.subs) == 0 && h.views[sub.view.spec.key] == sub.view {
-		delete(h.views, sub.view.spec.key)
+	if len(sub.view.subs) == 0 && g.views[sub.view.spec.key] == sub.view {
+		delete(g.views, sub.view.spec.key)
 	}
 }
 
@@ -179,16 +186,13 @@ const deliveryHubFeedBuffer = 1024
 // with no open page holds no connection for the hub and reads neither log for it. A generation
 // runs three goroutines on a context of its own: the listener; the intake, which alone moves the
 // change log's cursor, applies the relay's events and marks views dirty; and the worker, which
-// alone recomputes, so one recompute runs at a time. Views and conns outlive no generation (the
-// last conn's drop is what stops one), so a goroutine of a stopped generation could only reach the
-// next generation's: each checks under mu that its generation is still the hub's before it reads
-// or marks a view or sends a frame, and returns once its context ends.
+// alone recomputes, so one recompute runs at a time. A generation owns its views and conns, and
+// the drop of its last conn is what stops it, so a goroutine of a stopped generation reaches only
+// its own empty maps, never the next generation's, and returns once its context ends.
 type deliveryHub struct {
 	server   *server
 	clock    hubClock
 	lifetime context.Context
-	// feed subscribes to the event stream relay (eventStreamRelay.subscribe).
-	feed func(ctx context.Context, buffer int) (relaySubscription, error)
 	// dial, listenIdle, pingTimeout and backoff are the listener's (pglisten.Listener); dial is the
 	// shared pool's Listener, and a test sets them otherwise before the first Subscribe.
 	dial                    func(ctx context.Context) (*pgx.Conn, error)
@@ -206,12 +210,11 @@ type deliveryHub struct {
 	closed bool
 	// generation is the running generation, nil while no conn holds a sub.
 	generation *hubGeneration
-	views      map[string]*deliveryView // by canonical view key
-	conns      map[deliveryLiveConn]map[string]*deliverySub
 }
 
 // hubGeneration is one run of the hub. ctx, stop and the channels are set once at its start; the
-// rest is guarded by the hub's mu.
+// rest is guarded by the hub's mu. views and conns are emptied by the drops that stop it, and no
+// sub joins it once stopped.
 type hubGeneration struct {
 	ctx  context.Context
 	stop context.CancelFunc
@@ -221,6 +224,9 @@ type hubGeneration struct {
 	// Each wake holds at most one pending signal: what it asks for covers every signal before it.
 	wakeWork, wakeChanges, connected chan struct{}
 	barrier                          chan chan struct{}
+
+	views map[string]*deliveryView // by canonical view key
+	conns map[deliveryLiveConn]map[string]*deliverySub
 
 	// changeSeq and changeAt are the last delivery change read and its at, to tell a reset log;
 	// epoch counts the resets, so a recompute that read across one stores no change position.
@@ -379,10 +385,7 @@ var deliveryReconciledSources = []string{"prs", "runs", "ci"}
 func newDeliveryHub(s *server, lifetime context.Context, clock hubClock) *deliveryHub {
 	return &deliveryHub{
 		server: s, clock: clock, lifetime: lifetime,
-		feed:  s.eventRelay.subscribe,
-		dial:  s.deps.Store.Pool.Listener,
-		views: map[string]*deliveryView{},
-		conns: map[deliveryLiveConn]map[string]*deliverySub{},
+		dial: s.deps.Store.Pool.Listener,
 	}
 }
 
@@ -394,6 +397,8 @@ func (h *deliveryHub) startLocked() *hubGeneration {
 		ready:    make(chan struct{}),
 		wakeWork: make(chan struct{}, 1), wakeChanges: make(chan struct{}, 1), connected: make(chan struct{}, 1),
 		barrier: make(chan chan struct{}),
+		views:   map[string]*deliveryView{},
+		conns:   map[deliveryLiveConn]map[string]*deliverySub{},
 		p0:      map[string]struct{}{},
 	}
 	listener := &pglisten.Listener{

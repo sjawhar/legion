@@ -24,9 +24,6 @@ func (h *deliveryHub) applyFreshness(g *hubGeneration, payload string) {
 	now := h.clock.Now()
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.generation != g {
-		return
-	}
 	g.fresh.lastEventAt, g.fresh.lastReconcileAt, g.fresh.lastError = row.LastEventAt, row.LastReconcileAt, row.LastError
 	h.judgeLocked(g, now)
 	// The threshold moved with the reconcile time: the worker re-arms its timer.
@@ -62,7 +59,7 @@ func (h *deliveryHub) judgeLocked(g *hubGeneration, now time.Time) {
 		},
 		Stale: verdict.stale,
 	}
-	for conn := range h.conns {
+	for conn := range g.conns {
 		conn.Send(frame)
 	}
 }

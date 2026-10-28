@@ -165,7 +165,7 @@ func hubOn(t *testing.T, handler http.Handler, database *store.Store, deps Deps,
 	served := directServer(deps)
 	rig.relay = newEventStreamRelay(served, lifetime)
 	rig.relay.readAfter = func(ctx context.Context, after int64) ([]model.Event, error) {
-		page, err := served.readEventsAfterID(ctx, after)
+		page, err := served.readEventsAfterID(ctx, after, eventRelayPage)
 		rig.relayReads.Add(1)
 		return page, err
 	}
@@ -1471,9 +1471,11 @@ func TestAHubClockMovedBetweenTheWorkersReadAndItsArmStillFiresItsTimer(t *testi
 	clock.onArm(func() bool {
 		rig.hub.mu.Lock()
 		g := rig.hub.generation
-		ready := g != nil && len(rig.hub.views) == 1 && len(g.wakeWork) == 0
-		for _, view := range rig.hub.views {
-			ready = ready && view.body != nil && !view.dirty && !view.computing && !view.expiry.IsZero()
+		ready := g != nil && len(g.views) == 1 && len(g.wakeWork) == 0
+		if ready {
+			for _, view := range g.views {
+				ready = ready && view.body != nil && !view.dirty && !view.computing && !view.expiry.IsZero()
+			}
 		}
 		rig.hub.mu.Unlock()
 		if ready {

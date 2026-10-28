@@ -34,10 +34,6 @@ func (h *deliveryHub) work(g *hubGeneration) {
 		}
 		now := h.clock.Now()
 		h.mu.Lock()
-		if h.generation != g {
-			h.mu.Unlock()
-			return
-		}
 		h.judgeLocked(g, now)
 		next, ok := h.nextWakeLocked(g, now)
 		h.mu.Unlock()
@@ -56,19 +52,14 @@ func (h *deliveryHub) work(g *hubGeneration) {
 	}
 }
 
-// runDue recomputes, or narrows, the view that is due earliest, and is false when none is due or
-// g is no longer the hub's generation.
+// runDue recomputes, or narrows, the view that is due earliest, and is false when none is due.
 func (h *deliveryHub) runDue(g *hubGeneration) bool {
 	now := h.clock.Now()
 	h.mu.Lock()
-	if h.generation != g {
-		h.mu.Unlock()
-		return false
-	}
 	var due *deliveryView
 	var dueAt time.Time
 	var cause string
-	for _, view := range h.views {
+	for _, view := range g.views {
 		at, why, ok := view.dueAt()
 		if ok && !at.After(now) && (due == nil || at.Before(dueAt)) {
 			due, dueAt, cause = view, at, why
@@ -121,7 +112,7 @@ func (h *deliveryHub) nextWakeLocked(g *hubGeneration, now time.Time) (time.Time
 			next = at
 		}
 	}
-	for _, view := range h.views {
+	for _, view := range g.views {
 		if at, _, ok := view.dueAt(); ok {
 			consider(at)
 		}
@@ -171,7 +162,7 @@ func (h *deliveryHub) recompute(g *hubGeneration, view *deliveryView, cause stri
 	view.computing, view.readingSeq = false, 0
 	sent := 0
 	switch {
-	case h.generation != g || h.views[spec.key] != view:
+	case g.views[spec.key] != view:
 		// Every sub left while it read, and the generation stopped if they were the last.
 	case errors.Is(err, delivery.ErrNoSettings):
 		view.body, view.expiry, view.seq = nil, time.Time{}, read.seq
@@ -333,7 +324,7 @@ func (h *deliveryHub) expire(g *hubGeneration, view *deliveryView) {
 	view.computing = false
 	sent := 0
 	switch {
-	case h.generation != g || h.views[spec.key] != view:
+	case g.views[spec.key] != view:
 	case err != nil:
 		slog.Error("dispatch: delivery live expiry could not encode its body", "view", spec.kind, "error", err)
 		view.expiry = time.Time{}
