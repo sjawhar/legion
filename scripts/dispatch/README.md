@@ -332,13 +332,22 @@ reads or writes no table. The statement mirrors the issue row's vector
 `migrations/0056_search_text.up.sql`) and search's own `websearch_to_tsquery('english', q)`. A
 throwaway PostgreSQL 18.6, the version production runs, that listens only on a unix socket in
 `$TMPDIR/pg`, from zonky's pinned Linux x86-64 binaries on Maven Central. The block is safe to run
-again, also from a second shell at the same time: it holds a lock while it works, downloads the
-server only when `$TMPDIR/pg/server` is absent, creates the cluster only when `$TMPDIR/pg/data` is
-absent, starts the cluster only when it is not running, and prints the socket path:
+again, also from a second shell at the same time: it holds a lock while it works, prints the socket
+path and starts nothing when a server answers on the socket, refuses when none answers but
+`$TMPDIR/pg/data/postmaster.pid` is left, downloads the server only when `$TMPDIR/pg/server` is
+absent, creates the cluster only when `$TMPDIR/pg/data` is absent, then starts it and prints the
+socket path:
 
 ```bash
 pg="$TMPDIR/pg" v=18.6.0 && mkdir -p "$pg" && (
   flock 9 && cd "$pg" || exit 1
+  # Ask the socket, never pg_ctl status: each role of an issue pod has its own PID namespace, so
+  # postmaster.pid names a process only in the role that started the server.
+  if pg_isready -q -h "$pg" -U postgres; then echo "$pg/.s.PGSQL.5432"; exit 0; fi
+  if [ -e data/postmaster.pid ]; then
+    echo "no server answers on $pg, but data/postmaster.pid is left: stop the server from the shell that started it, or remove $pg" >&2
+    exit 1
+  fi
   if [ ! -d server ]; then
     rm -rf server.new &&
       curl -fsSL -o pg.jar "https://repo1.maven.org/maven2/io/zonky/test/postgres/embedded-postgres-binaries-linux-amd64/$v/embedded-postgres-binaries-linux-amd64-$v.jar" &&
@@ -354,7 +363,7 @@ pg="$TMPDIR/pg" v=18.6.0 && mkdir -p "$pg" && (
       exit 1
   fi
   # 9>&-: the server must not inherit the lock, or every later run waits on it.
-  server/bin/pg_ctl -D data status >/dev/null || server/bin/pg_ctl -D data -l pg.log start 9>&- || exit 1
+  server/bin/pg_ctl -D data -l pg.log start 9>&- || exit 1
   echo "$pg/.s.PGSQL.5432"
 ) 9>"$pg/setup.lock"
 ```
@@ -362,7 +371,10 @@ pg="$TMPDIR/pg" v=18.6.0 && mkdir -p "$pg" && (
 If a run fails, run `rm -rf "$TMPDIR/pg"` and run the block again.
 
 Pass it as `--lexeme-database "$TMPDIR/pg/.s.PGSQL.5432"`; the check connects as `postgres` to the
-`postgres` database. Stop it with `server/bin/pg_ctl -D data stop` from `$TMPDIR/pg`.
+`postgres` database. Stop it with `server/bin/pg_ctl -D data stop` from `$TMPDIR/pg`, only in the
+shell that started it: `pg_ctl` signals the PID in `postmaster.pid`, which in any other role of an
+issue pod is another process or none. When no server answers and the block refuses, remove
+`$TMPDIR/pg` and run the block again.
 
 ### The pre-registered pairs
 
