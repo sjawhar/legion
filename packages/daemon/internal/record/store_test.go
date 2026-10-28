@@ -370,7 +370,8 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		Failing: []string{"unit"}, Cancelled: []string{"e2e"}, CheckedHead: "b1c2d3",
 		FixAttempts: 2, BlockedAttempts: 1,
 		CheckRuns: []AttemptRun{{Name: "unit", ID: 91}, {Name: "lint", ID: 92}}, Generation: 4,
-		Snapshot: "snapshot-4", Pushes: pushes, Moves: []Move{{Before: "9f8e7d", SHA: "a0b1c2"}, {Before: "a0b1c2", SHA: "b1c2d3"}},
+		Snapshot: "snapshot-4", Pushes: pushes, Moves: []Move{{Before: "9f8e7d", SHA: "a0b1c2"},
+			{Before: "a0b1c2", SHA: "b1c2d3", Pushed: true, Repeat: &ClassifiedPush{SHA: "b1c2d3", Before: "a0b1c2", ByReviewApp: true}}},
 		HeadCounted: "b1c2d3", PlannedRed: true, State: PullRequestMerged, MergeSHA: "d4e5f6",
 		// A run's anchor keeps a set never read apart from an empty one, and so do its steps.
 		Run: &HeadRun{
