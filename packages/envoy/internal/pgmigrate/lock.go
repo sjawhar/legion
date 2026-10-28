@@ -96,15 +96,18 @@ type LockWait struct {
 	Holders []Session
 }
 
-// Session is a database session a migration was queued behind or the census reports. Its query
-// text is never read: an operator reads it from pg_stat_activity, and what names a session here
-// goes to the service's or the deployment's logs. XactAge is how long its transaction had been
-// open when it was read, to the microsecond Postgres keeps, nil when the census cannot see it:
-// pg_stat_activity shows another role's xact_start, and its state, only to a superuser or a
-// member of pg_read_all_stats, and records neither for a session with track_activities off
-// (untrackedState). The census refuses a lock holder whose age it cannot see, so a deployment
-// that grants the census's role pg_read_all_stats lets it read the age instead. Autovacuum is an
-// autovacuum worker, which the census tells apart however much Postgres hides (lockHolders).
+// Session is a database session a migration was queued behind or the census reports. It holds no
+// query text: what names a session here goes to the service's or the deployment's logs, and the
+// one place the census prints a session's query, a refusing lock holder's diagnosis, prints it
+// redacted (holderDiagnosis). XactAge is how long its transaction had been open when it was read,
+// to the microsecond Postgres keeps, nil when it was in no transaction or the census cannot see
+// its transaction: pg_stat_activity shows another role's xact_start, and its state, only to a
+// superuser, a member of that role or a member of pg_read_all_stats, and records neither for a
+// session with track_activities off (untrackedState). The census refuses a lock holder whose age
+// it cannot see, so a deployment that grants the census's role pg_read_all_stats lets it read the
+// age of a holder of another role instead; a holder of the census's own role it always sees.
+// Autovacuum is an autovacuum worker, which the census tells apart however much Postgres hides
+// (lockHolders).
 type Session struct {
 	PID         uint32         `json:"pid"`
 	User        string         `json:"user"`
@@ -129,12 +132,15 @@ func (s Session) String() string {
 		user = "user not visible"
 	}
 	state := s.State
+	age := "transaction age not visible"
+	switch {
+	case s.XactAge != nil:
+		age = "transaction open " + s.XactAge.String()
+	case state != "" && state != untrackedState:
+		age = "in no transaction when read"
+	}
 	if state == "" {
 		state = "state not visible"
-	}
-	age := "transaction age not visible"
-	if s.XactAge != nil {
-		age = "transaction open " + s.XactAge.String()
 	}
 	return fmt.Sprintf("pid %d (%s, application %q, %s, %s)", s.PID, user, s.Application, state, age)
 }

@@ -960,10 +960,10 @@ migration that applies cleanly against an idle database can fail the new pod's b
 
 `envoy-dispatch census` is run before a new image goes out, with the service's `DATABASE_URL` and
 under the service's own database credentials, and it is a gate: a census that refuses stops the
-deploy before the service moves, and nothing accepts a refusal and rolls past it. No deployment of
-`envoy-infra:gcp:Dispatch` runs one — the component registers no census task — so an operator runs
-it by hand against the deployment's database before updating the image, with the `kubectl run`
-recipe in `packages/envoy/infra/README.md`.
+deploy before the service moves, and nothing accepts a refusal and rolls past it. The
+`envoy-infra:gcp:Dispatch` component registers no census task, so a deployment runs it itself
+against its database before it updates the image: as a Kubernetes Job from the new image, or by
+hand with the `kubectl run` recipe in `packages/envoy/infra/README.md`.
 
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch census
@@ -977,7 +977,11 @@ everything is pending). For each it prints the tables the migration locks above 
 locks on it; the transactions open longer than a minute anywhere in the database, and those whose
 age it cannot see (another role's without `pg_read_all_stats`, or any with `track_activities`
 off), which it tells from a session in no transaction by the virtual transaction id every
-transaction locks; and the count the migration's own census answers. Those tables are:
+transaction locks; and the count the migration's own census answers. Postgres reads
+`pg_stat_activity` once per transaction and serves that copy until the transaction ends, while
+`pg_locks` is read anew each time, so before each read of lock holders and of long transactions
+the census discards that copy (`pg_stat_clear_snapshot()`), and it measures a transaction's age at
+that read (`clock_timestamp()`), not at its own start. Those tables are:
 
 - the ones its statements name (`pgmigrate.TouchedTables`: the targets of `alter table`,
   `create index … on`, `drop table`, `truncate`, `create trigger … on`, `update` with or without an
@@ -1015,16 +1019,28 @@ census like every later one. It refuses:
 - a migration whose census answers non-zero, naming the migration, the count and the census file;
 - a table a migration names above 1 GiB (`pgmigrate.CensusTableLimit`, table, indexes and TOAST),
   whose rows it then does not count: a migration that locks a table that size needs another shape
-  (`CONCURRENTLY`, batches);
+  (`CONCURRENTLY`, batches). A migration whose every statement is a `create function` (or
+  procedure) in `plpgsql` or `sql`, or a `create trigger`, as Postgres's own parser reads them
+  (libpg_query, run in pure Go by `github.com/wasilibs/go-pgquery`), is exempt: each does its work
+  in the catalog and reads no row of the table, so the time it holds its lock does not grow with
+  the table. A function in another language is not exempt, since creating a C function loads its
+  library, which can run any code; and no migration is exempt while an enabled event trigger runs
+  on `create function`, `create procedure` or `create trigger`, since it runs code of its own, and
+  the size refusal then names it. The report still prints the table's size beside the limit and
+  says why the migration is exempt, and its lock holders refuse it as they refuse any other. A
+  trigger named only in a comment, a string literal or a function body exempts nothing, and one
+  statement of any other kind beside it ends the exemption;
 - a session holding a lock on a touched table whose transaction has been open at least a minute
   (`pgmigrate.CensusLongTransaction`): the migration would give up on that lock during the rollout;
 - a session holding a lock on a touched table whose transaction's age the census cannot see.
-  `pg_stat_activity` shows another role's `xact_start` and `state` only to a superuser or a member
-  of `pg_read_all_stats`, so without that grant every other role's holder (an operator's session)
-  refuses, since the census cannot tell it is young; granting the census's role
-  `pg_read_all_stats` lets it read the age, and then only a holder older than a minute refuses.
-  A session with `track_activities` off shows its state as `disabled` and no `xact_start` to every
-  role, so it refuses too, and the refusal says so;
+  `pg_stat_activity` shows another role's `xact_start` and `state` only to a superuser, a member of
+  that role or a member of `pg_read_all_stats`, so without that grant every holder of another role
+  (an operator's session, a dump) refuses, since the census cannot tell it is young, and the
+  refusal names the grant; granting the census's role `pg_read_all_stats` lets it read the age, and
+  then it judges such a holder as it judges one of its own role. A holder of the census's own role it always sees,
+  and the refusal never names the grant for one. A session with `track_activities` off shows its
+  state as `disabled` and no `xact_start` to every role, so it refuses too, and the refusal says
+  so;
 - an autovacuum worker holding a lock on a touched table, only when Postgres will not cancel it for
   the migration. Postgres cancels an autovacuum that holds a lock another session waits for once
   that session has waited `deadlock_timeout`, so an autovacuum passes at any age, with the grant or
@@ -1045,6 +1061,24 @@ census like every later one. It refuses:
 - a census that fails or answers anything but one integer in one row;
 - a database that records no version yet holds tables, on its first migration: the runner would
   apply every migration from `0001` over them.
+
+Every refusal a lock holder causes (an old transaction, one whose age the census cannot see, an
+autovacuum Postgres will not cancel, a table it could not read) carries each such holder's
+diagnosis, read when the census refused, since the holder has usually gone
+by the time anyone looks: its state, transaction start, `backend_xid`, wait event and query from
+`pg_stat_activity`, and every lock it holds or waits for from `pg_locks`. Its query is printed
+with every literal, number and comment replaced (read with `standard_conforming_strings` on), so
+the values a query carries in those do not reach the report; what Postgres hides from the census's role prints as `not visible`. A diagnosis that
+cannot be read says so with its SQLSTATE, and the refusal stands as it is. To read the same by
+hand for a session `<pid>`:
+
+```sql
+select a.state, a.xact_start, a.backend_xid::text, a.wait_event_type, a.wait_event, a.query,
+	l.locktype, l.mode, l.granted, l.relation::regclass::text
+from pg_stat_activity a left join pg_locks l on l.pid = a.pid
+where a.pid = <pid>
+order by l.granted desc, l.locktype, l.relation::regclass::text, l.mode;
+```
 
 So a migration that changes values readers already had, whose census counts the rows it rewrites,
 cannot pass the census wherever such a row exists, and a release that must repair existing rows

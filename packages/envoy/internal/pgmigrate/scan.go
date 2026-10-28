@@ -231,3 +231,45 @@ func endOfDollarQuote(text string, i int) (int, bool) {
 	}
 	return end + 1 + closing + len(delimiter), true
 }
+
+// redactedQuery is a session's query text with its literals, numbers and comments taken out, for a
+// report read more widely than the database: each string literal, dollar-quoted literal and
+// Unicode-escaped literal or identifier becomes ?, and so does each number with whatever follows
+// it unspaced (1.5e3, 0x1F), but for a parameter's number ($1); each comment becomes one space,
+// and each run of space one space. Keywords, identifiers, quoted identifiers, operators and
+// punctuation stay, so the statement's shape and the names it touches can be read. A text cut
+// short mid-literal, as pg_stat_activity cuts one at track_activity_query_size, loses the rest of
+// that literal with it, since an unterminated literal takes the rest of the text.
+func redactedQuery(text string) string {
+	var out strings.Builder
+	space := false
+	previous := sqlToken{kind: sqlSpace}
+	for i := 0; i < len(text); {
+		kind, end, _ := nextSQLToken(text, i)
+		switch kind {
+		case sqlSpace, sqlComment:
+			space = true
+		default:
+			if space && out.Len() > 0 {
+				out.WriteByte(' ')
+			}
+			space = false
+			switch {
+			case kind == sqlNumber && previous.kind == sqlOther && previous.end == i && text[i-1] == '$':
+				out.WriteString(text[i:end])
+			case kind == sqlNumber:
+				for end < len(text) && (isIdentStart(text[end]) || isDigit(text[end]) || text[end] == '.') {
+					end++
+				}
+				out.WriteByte('?')
+			case kind == sqlString || kind == sqlDollarString || kind == sqlUnicodeEscape:
+				out.WriteByte('?')
+			default:
+				out.WriteString(text[i:end])
+			}
+		}
+		previous = sqlToken{kind: kind, start: i, end: end}
+		i = end
+	}
+	return out.String()
+}
