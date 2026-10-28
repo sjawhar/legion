@@ -245,7 +245,8 @@ made and last changed, which every import keeps; `0133` and `0134` fill `written
 rows stored before the triggers. The graph nodes' facts read them.
 `envoy-dispatch rebuild-refs` reparses every document's latest version, ask, comment, and issue message,
 reconciles `refs` with the text (surviving edges keep their provenance, orphan sources are
-deleted), marks every document owed a block index, and prints counts, `blocks_owed` among them;
+deleted), marks every document owed a block index and every comment and message owed a block
+index of its own blocks, and prints counts, `blocks_owed` and `items_owed` among them;
 it reads `DATABASE_URL` and the envoy config's `dispatch.server_url`, refusing an empty URL
 because dashboard-URL mentions are recognised only against it.
 

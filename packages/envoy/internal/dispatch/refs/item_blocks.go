@@ -534,3 +534,74 @@ func storeItemState(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID string
 	}
 	return nil
 }
+
+// OwedItemBlock is one comment or message owed a block index: its state row's owed_at is set,
+// by the trigger on a write no block-aware build indexed (a build without the index wrote it,
+// during the roll or after a rollback), or by rebuild-refs.
+type OwedItemBlock struct {
+	Kind ItemKind
+	ID   string
+}
+
+// OwedItemBlocks lists at most limit comments and messages owed a block index, oldest owed_at
+// first, and locks nothing. Each table's read goes through its partial index on owed_at.
+func OwedItemBlocks(ctx context.Context, q Queryer, limit int) ([]OwedItemBlock, error) {
+	rows, err := q.Query(ctx, `
+		select kind, id from (
+			(select 'comment' as kind, comment_id::text as id, owed_at from comment_block_state
+			 where owed_at is not null order by owed_at limit $1)
+			union all
+			(select 'message', message_id::text, owed_at from message_block_state
+			 where owed_at is not null order by owed_at limit $1)
+		) owed
+		order by owed_at, kind, id limit $1
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list the items owed a block index of their blocks: %w", err)
+	}
+	owed, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (OwedItemBlock, error) {
+		var item OwedItemBlock
+		err := row.Scan(&item.Kind, &item.ID)
+		return item, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list the items owed a block index of their blocks: %w", err)
+	}
+	return owed, nil
+}
+
+// IndexOwedItemBlocks indexes one owed comment or message in a transaction of its own and reports
+// whether it indexed it. It takes the item row `for no key update`, the lock an edit of the
+// comment takes, then indexes it as a reply naming one of its blocks does (indexItemIfOwed), which
+// takes the state row after it; it never takes an owner row. A new block and a new mention take
+// the time the item's body was written: a comment's coalesce(edited_at, created_at), a message's
+// created_at. An item a write site indexed since it was listed is no longer owed and is left
+// alone; one deleted since took its state row with it (on delete cascade), so nothing is owed.
+func IndexOwedItemBlocks(ctx context.Context, pool Pool, item OwedItemBlock, serverURL string) (bool, error) {
+	var lock string
+	switch item.Kind {
+	case ItemComment:
+		lock = `select true from comments where id = $1::uuid for no key update`
+	case ItemMessage:
+		lock = `select true from messages where id = $1::uuid for no key update`
+	default:
+		return false, fmt.Errorf("index the blocks of %s %s: not an item kind", item.Kind, item.ID)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	var found bool
+	switch err := tx.QueryRow(ctx, lock, item.ID).Scan(&found); {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("lock %s %s: %w", item.Kind, item.ID, err)
+	}
+	indexed, err := indexItemIfOwed(ctx, tx, item.Kind, item.ID, serverURL)
+	if err != nil {
+		return false, err
+	}
+	return indexed, tx.Commit(ctx)
+}

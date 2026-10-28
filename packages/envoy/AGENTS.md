@@ -1595,14 +1595,20 @@ owed; 0122's trigger marks a document owed on every markdown version any build i
 block-aware writer's own index settles later in the same transaction; and 0123-0125's triggers
 put each comment, ask and issue message (one with an `issue_key`) whose text holds `#b-` into
 `block_grammar_owed`, which 0126 seeds with those already stored, since a build that predates the
-block grammar indexes such a text without it. `cmd/dispatch` runs
+block grammar indexes such a text without it; 0136-0137's triggers set `owed_at` on the
+`comment_block_state` or `message_block_state` row of every comment (on insert and on an edit of
+its body) and every message (on insert, direct messages included) any build writes, which a
+block-aware writer's own index clears in the same transaction, and seed a row for each item
+already stored. `cmd/dispatch` runs
 `docs.Service.RunBlockIndexReconciliation` under the lease `block-index`: each tick indexes up to
-20 owed documents, by a keyset cursor, and up to 200 owed items, oldest first, every 2 s while a
-batch is full and every 30 s after, and logs `dispatch: block index` with `documents=`, `items=`,
-`owed_documents=`, `owed_items=` and `live_ahead=`. It reads a document (`TextWithBlocks`) with no
-transaction held, then, under the document's owner lock, indexes it only while its latest version
-and its owed mark are the ones it listed, taking the version's time and the `source_seq` of the
-event that recorded the version (`stampVersionEvent`). A document that owes a settlement and whose
+20 owed documents, by a keyset cursor, up to 200 owed items, oldest first, and then up to 200
+comments and messages owed their own blocks, oldest `owed_at` first, every 2 s while a batch is
+full and every 30 s after, and logs `dispatch: block index` with `documents=`, `items=`,
+`item_blocks=`, `owed_documents=`, `owed_items=`, `owed_item_blocks=` and `live_ahead=`. It reads
+a document (`TextWithBlocks`) with no transaction held, then, under the document's owner lock,
+indexes it only while its latest version and its owed mark are the ones it listed, taking the
+version's time and the `source_seq` of the event that recorded the version (`stampVersionEvent`).
+A document that owes a settlement and whose
 live markdown differs from its latest version's is skipped, counted `live_ahead` and left owed; on
 a closed issue that lasts until the issue reopens. The loop remembers such a document and counts it
 again without reading it while its latest version and its pending settlement's `marked_at` (which
@@ -1610,9 +1616,15 @@ every update append moves) stay as they were and this server holds no room for i
 re-read `for no key update` and re-indexed with this build's grammar (`refs.ReindexOwedItem`), a
 new edge taking the time its text was written and no `source_seq`; its owed row is deleted only
 while it holds the `enqueued_at` the tick listed, so an edit that lands meanwhile leaves the item
-owed.
-`rebuild-refs` marks every document owed and prints `blocks_owed=`; it leaves
-`block_grammar_owed` alone, since it has just re-read every item itself.
+owed. A comment or message owed its blocks is indexed in a transaction of its own
+(`refs.IndexOwedItemBlocks`) that takes the item row `for no key update`, then its state row, and
+never an owner row: its blocks and the mentions each holds, and for a comment or an issue message
+its own refs, at the time its body was written (a comment's `coalesce(edited_at, created_at)`, a
+message's `created_at`); a direct message writes no mention. An item deleted since it was listed
+took its state row with it.
+`rebuild-refs` marks every document owed and prints `blocks_owed=`, and marks every comment and
+message owed its blocks and prints `items_owed=`; it leaves `block_grammar_owed` alone, since it
+has just re-read every item itself.
 
 Blocker-list and parent changes serialize per project through `lockProjectIssueDependencies`
 (`api/issue_parent.go`), using the two-key advisory-lock namespace `dispatch-issue-dependencies`.

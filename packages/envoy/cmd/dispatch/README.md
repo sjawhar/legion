@@ -1180,10 +1180,11 @@ DATABASE_URL=postgres://... envoy-dispatch rebuild-refs
 ```
 
 reparses every source and reconciles the index with the text (surviving edges keep their
-provenance, edges of deleted sources are removed), marks every document owed a block index, which
-the server's block-index reconciliation then indexes, and prints
-`rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N blocks_owed=N`,
-`blocks_owed` being the documents it marked. It reads
+provenance, edges of deleted sources are removed), marks every document owed a block index and
+every comment and message owed a block index of its own blocks, which the server's block-index
+reconciliation then indexes, and prints
+`rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N blocks_owed=N items_owed=N`,
+`blocks_owed` being the documents it marked and `items_owed` the comments and messages. It reads
 `dispatch.server_url` from the envoy config the same way the server does and refuses an empty
 value: dashboard-URL mentions are recognised only against it, so an empty URL would drop them all.
 

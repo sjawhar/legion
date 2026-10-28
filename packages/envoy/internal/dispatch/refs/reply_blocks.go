@@ -14,13 +14,20 @@ import (
 
 // IndexItemIfOwed indexes comment or message itemID in the caller's transaction when its blocks
 // are owed: its state row is missing (an older build wrote it before the state existed), owed
-// (owed_at set by an older build's write), or indexed from another body than the stored one. It
-// indexes as ReindexOwedItem does: the blocks and the mentions each holds, and for a comment or
-// an issue message its own refs, at the time its body was written; a direct message writes no
-// mention. A reply that names a block of the item calls it first, so the block it names is one of
-// the item's current body. The caller holds the item's owner row and the item row; IndexItem takes
-// the state row after them.
+// (owed_at set by an older build's write, or by rebuild-refs), or indexed from another body than
+// the stored one. It indexes as ReindexOwedItem does: the blocks and the mentions each holds, and
+// for a comment or an issue message its own refs, at the time its body was written; a direct
+// message writes no mention. A reply that names a block of the item calls it first, so the block
+// it names is one of the item's current body; the block-index reconciliation drains owed items
+// through it (IndexOwedItemBlocks). The caller holds the item's owner row (the reconciliation
+// holds none) and the item row; IndexItem takes the state row after them.
 func IndexItemIfOwed(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID, serverURL string) error {
+	_, err := indexItemIfOwed(ctx, tx, kind, itemID, serverURL)
+	return err
+}
+
+// indexItemIfOwed is IndexItemIfOwed, reporting whether the item was owed and so indexed.
+func indexItemIfOwed(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID, serverURL string) (bool, error) {
 	var query string
 	switch kind {
 	case ItemComment:
@@ -36,32 +43,32 @@ func IndexItemIfOwed(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID, serv
 			from messages m left join message_block_state s on s.message_id = m.id
 			where m.id = $1::uuid`
 	default:
-		return fmt.Errorf("index the blocks of %s %s: not an item kind", kind, itemID)
+		return false, fmt.Errorf("index the blocks of %s %s: not an item kind", kind, itemID)
 	}
 	var body string
 	var writtenAt time.Time
 	var mentions, stated, owed bool
 	var sum *string
 	if err := tx.QueryRow(ctx, query, itemID).Scan(&body, &writtenAt, &mentions, &stated, &owed, &sum); err != nil {
-		return fmt.Errorf("read the block state of %s %s: %w", kind, itemID, err)
+		return false, fmt.Errorf("read the block state of %s %s: %w", kind, itemID, err)
 	}
 	if stated && !owed && sum != nil && *sum == BodySHA256(body) {
-		return nil
+		return false, nil
 	}
 	var located []text.Located
 	if mentions {
 		located = text.ExtractAt(body, serverURL)
 	}
 	if _, _, err := IndexItem(ctx, tx, kind, itemID, body, writtenAt, located, nil); err != nil {
-		return fmt.Errorf("index the blocks of %s %s: %w", kind, itemID, err)
+		return false, fmt.Errorf("index the blocks of %s %s: %w", kind, itemID, err)
 	}
 	if !mentions {
-		return nil
+		return true, nil
 	}
 	if _, err := replaceRefs(ctx, tx, string(kind), itemID, locatedRefs(located), &writtenAt); err != nil {
-		return fmt.Errorf("index %s %s: %w", kind, itemID, err)
+		return false, fmt.Errorf("index %s %s: %w", kind, itemID, err)
 	}
-	return nil
+	return true, nil
 }
 
 // CurrentItemBlock is block blockID of comment or message itemID while a current revision of the

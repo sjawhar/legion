@@ -627,6 +627,9 @@ func TestRebuildRefsConvergesOnTheLiveIndex(t *testing.T) {
 		{`delete from refs where from_kind = 'comment' and to_kind = 'artifact' and to_id = $1`, []any{issue.Key + "/spec"}},
 		{`insert into refs (from_kind, from_id, to_kind, to_id, source_seq) values ('artifact', $1, 'issue', 'ZZZ-9', 1)`, []any{design.ID}},
 		{`insert into refs (from_kind, from_id, to_kind, to_id) values ('message', '00000000-0000-0000-0000-000000000000', 'issue', $1)`, []any{issue.Key}},
+		// A message whose state row is gone, as one stored before the item-block state seeded it
+		// would be: the rebuild inserts it owed.
+		{`delete from message_block_state`, nil},
 	} {
 		if _, err := database.Pool.Exec(context.Background(), statement.sql, statement.args...); err != nil {
 			t.Fatalf("doctor refs: %v", err)
@@ -641,8 +644,9 @@ func TestRebuildRefsConvergesOnTheLiveIndex(t *testing.T) {
 		t.Fatalf("rebuild refs: %v", err)
 	}
 	// Every document has a version (three, counting the two specs); the planted row from a message
-	// that does not exist is the one orphan. Each of the three is marked owed a block index.
-	if report != (refs.Rebuild{Documents: 3, Asks: 1, Comments: 1, Messages: 1, Orphans: 1, Edges: 6, BlocksOwed: 3}) {
+	// that does not exist is the one orphan. Each of the three is marked owed a block index, and
+	// the comment and the message are marked owed a block index of their own blocks.
+	if report != (refs.Rebuild{Documents: 3, Asks: 1, Comments: 1, Messages: 1, Orphans: 1, Edges: 6, BlocksOwed: 3, ItemsOwed: 2}) {
 		t.Fatalf("rebuild report = %#v", report)
 	}
 	var documents, owed int
@@ -655,6 +659,17 @@ func TestRebuildRefsConvergesOnTheLiveIndex(t *testing.T) {
 	}
 	if documents != 3 || owed != documents {
 		t.Fatalf("after rebuild-refs %d of %d documents are owed a block index, want every one", owed, documents)
+	}
+	var items, owedItems int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select (select count(*) from comments) + (select count(*) from messages),
+		       (select count(*) from comments c join comment_block_state s on s.comment_id = c.id where s.owed_at is not null) +
+		       (select count(*) from messages m join message_block_state s on s.message_id = m.id where s.owed_at is not null)
+	`).Scan(&items, &owedItems); err != nil {
+		t.Fatalf("read the block state of every comment and message: %v", err)
+	}
+	if items != 2 || owedItems != items {
+		t.Fatalf("after rebuild-refs %d of %d comments and messages are owed a block index, want every one", owedItems, items)
 	}
 	rebuilt := readRefRows(t, database)
 	if len(rebuilt) != len(live) {
