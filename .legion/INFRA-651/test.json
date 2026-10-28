@@ -2,56 +2,61 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-651",
-  "completed": "2026-10-28T16:10:18Z",
-  "headTested": "2d81cf190bbbe1a68cff98710b0f22571e7ff326",
+  "completed": "2026-10-28T16:18:55Z",
+  "headTested": "43b4de3d93f7c1c2320bf4c8df33eaf68073fb02",
+  "round": 2,
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently: own Postgres 16.2 + pgvector (fresh initdb, real migrations), NATS, envoy-dispatch built from the workspace (head) and from git archive of main eb21e78d8e6e (base) on one database, data written through the API; route matrix, trimmed-vs-cut comparison, ETag/304 matrix, base-vs-head full-answer identity incl. headers but Date, and dispatch read with main and head CLI bundles against both servers. Re-diffed the implementer's identity files: plain, adversarial and errors full answers base == head (1,000 rows each) and versions=all == none."
+    "how": "Round 2: ran the committed packages/claude-envoy/dist/dispatch.js at 43b4de3d and at 3d0225b6 as `dispatch read` against my own local Dispatch (head and main servers on one database), compared outputs and access-log bytes, and confirmed the cited red test now passes (tests/dist-fresh.test.ts 14 pass; build.ts --check matches a fresh build) on Bun 1.4.4. Round 1: drove the route, the ETags and the pi CLI independently and re-diffed the implementer's 1,000-issue identity files (plain, adversarial, errors: base == head; versions=all == none)."
   },
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "A4 (dispatch read receives the trimmed answer) on every shipped client, and CI green: packages/claude-envoy commits its bundles of the dispatch CLI (dist/dispatch.js, dist/envoy-channel.js, dist/session-hook.js), which the PR did not rebuild",
-      "evidence": "The committed bundles still build GET /api/v1/issues/{key}/references with no query: `grep -c 'versions: \"latest\"' packages/claude-envoy/dist/{dispatch,envoy-channel,session-hook}.js` = 0, 0, 0 at 2d81cf190bbb. The repository's existing red test pins it: `cd packages/claude-envoy && <bun 1.4.4> test tests/dist-fresh.test.ts` -> (fail) 'rebuilding reproduces the committed bundle byte for byte': 'dispatch.js: fresh build differs from committed dist/ ... first difference at byte 641601' inside `async getIssueReferences(issue)`; `<bun 1.4.4> scripts/build.ts --check` -> 'generated files are stale (dist/dispatch.js, dist/envoy-channel.js, dist/session-hook.js); run `bun run build` on Bun 1.4.4 and commit the result'. CI's claude-envoy job (envoy-and-contracts.yaml, triggered by packages/envoy-client/**) runs both. Effect: a Claude Code pane's `dispatch read` keeps fetching the full answer. Fix: `bun run build` in packages/claude-envoy on the pinned Bun 1.4.4 (.bun-version), commit dist/, and add a claude-envoy changelog fragment beside the envoy-client and pi-envoy ones. No new test written: tests/dist-fresh.test.ts already fails on it."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "proof": [
     {
+      "criterion": "A4 on every shipped client: the Claude Code plugin's committed dispatch CLI asks for the trimmed answer and prints the same output (round-1 failure)",
+      "surface": "packages/claude-envoy/dist/dispatch.js as committed, run as `dispatch read` (DISPATCH_HOST=claude, CLAUDE_CODE_SESSION_ID set, agent bearer) against local Dispatch: Postgres 16.2 + pgvector, real migrations, NATS; head envoy-dispatch :28777 and main eb21e78d8e6e :28778 on one database",
+      "command": "ce.sh old|new 28777|28778 (old = the bundle at 3d0225b60a08, new = at 43b4de3d93f7): dispatch read --issue TST-1..TST-4; diff -r; access-log bytes of route=/api/v1/issues/{key}/references; grep -c 'versions: \"latest\"' dist/{dispatch,envoy-channel,session-hook}.js; <bun 1.4.4> scripts/build.ts --check; <bun 1.4.4> test tests/dist-fresh.test.ts",
+      "observed": "old vs new diff -r exit 0 on both servers, and new == the pi CLI bundle's output; head-server access log TST-1 7,041 bytes (old) vs 2,312 (new), TST-2 1,181 vs 583; grep 1, 1, 1; 'dist/ and legion/ match a fresh build'; dist-fresh 14 pass 0 fail",
+      "headSha": "43b4de3d93f7c1c2320bf4c8df33eaf68073fb02",
+      "negativeControl": "the bundle at 3d0225b6 sends no versions parameter and receives the 7,041-byte full answer"
+    },
+    {
       "criterion": "A1: without the parameter (or versions=all) the answer is byte-identical (status, headers but Date, ETag, body)",
-      "surface": "local Dispatch: Postgres 16.2 + pgvector, real migrations, NATS; head envoy-dispatch :28777 and base (main eb21e78d8e6e) :28778 on one database; data written through the HTTP API (seed.sh)",
-      "command": "for k in TST-1..TST-4: curl -D - /api/v1/issues/$k/references on both ports, strip Date, append body sha256, cmp; curl ?versions=all, ?versions= and ?version=latest on head; matrix.sh",
-      "observed": "4 of 4 issues identical base vs head (status, Content-Type, ETag, Content-Length, body); versions=all, versions= and version=latest give the full answer's ETag and bytes at head",
-      "headSha": "2d81cf190bbbe1a68cff98710b0f22571e7ff326",
-      "negativeControl": "?versions=bogus: head 400 INVALID_QUERY, base 200 with the full body (sha b3a6c4f0... on both for the full answer, 5790707... for head's 400)"
+      "surface": "same local Dispatch, data written through the HTTP API (seed.sh)",
+      "command": "round 1 at 2d81cf190bbb: curl -D - on both ports for TST-1..TST-4, strip Date, body sha256, cmp; round 2: matrix.sh 28777 m-head-r2 (server code unchanged from 2d81cf19 to 43b4de3d: the diff touches only claude-envoy dist, a changelog fragment and .legion/)",
+      "observed": "4 of 4 identical base vs head; versions=all, versions= and version=latest give the full answer at head",
+      "headSha": "43b4de3d93f7c1c2320bf4c8df33eaf68073fb02",
+      "negativeControl": "?versions=bogus: head 400 INVALID_QUERY, main 200 with the full body"
     },
     {
       "criterion": "A2: versions=latest gives each member with only its latest version, own ETag, 304 works",
       "surface": "same local Dispatch, head server",
-      "command": "jq -c '.members |= map(.artifact.versions |= [.[-1]])' full.body vs jq -c . latest.body; If-None-Match matrix; new version of deep.md then both ETags; 200 parallel reads (xargs -P 16) during 15 notes.md writes",
-      "observed": "cmp exit 0 (data-csv v2, notes-md v12, single-md v1, deep-md v3 by author3); ETags differ; own ETag -> 304 empty body, the other's -> 200; after a new version both ETags change and latest shows deep-md [4]; 200/200 reads 200, final notes-md [27]",
-      "headSha": "2d81cf190bbbe1a68cff98710b0f22571e7ff326",
-      "negativeControl": "If-None-Match with the full answer's ETag on ?versions=latest -> 200 with the trimmed body, not 304"
+      "command": "matrix.sh 28777 m-head-r2; jq -c '.members |= map(.artifact.versions |= [.[-1]])' full.body vs jq -c . latest.body; round 1 also: new version then both ETags, 200 parallel reads during 15 writes",
+      "observed": "cmp exit 0; own ETag -> 304, the other's -> 200; round 1: both ETags change after a new version, 200/200 reads 200",
+      "headSha": "43b4de3d93f7c1c2320bf4c8df33eaf68073fb02",
+      "negativeControl": "If-None-Match with the full answer's ETag on ?versions=latest -> 200 with the trimmed body"
     },
     {
       "criterion": "A3: bad versions value -> 400 INVALID_QUERY; no identity -> 401",
       "surface": "same local Dispatch, head server",
-      "command": "matrix.sh 28777 m-head",
-      "observed": "bogus, LATEST, bogus&versions=latest -> 400 INVALID_QUERY 'versions must be all or latest'; latest&versions=bogus -> 200 trimmed (first value wins, as Go's Query().Get); no identity with latest or bogus -> 401 NO_IDENTITY; wrong bearer -> 401 UNAUTHORIZED; agent bearer -> 200 trimmed; TST-999 latest -> 404, bogus -> 400",
-      "headSha": "2d81cf190bbbe1a68cff98710b0f22571e7ff326",
-      "negativeControl": "same requests on the base server answer 200 to every bogus value"
+      "command": "matrix.sh 28777 m-head-r2",
+      "observed": "bogus, LATEST, bogus&versions=latest -> 400; latest&versions=bogus -> 200 (first value); no identity -> 401 NO_IDENTITY; wrong bearer -> 401; agent bearer -> 200; TST-999 latest -> 404, bogus -> 400",
+      "headSha": "43b4de3d93f7c1c2320bf4c8df33eaf68073fb02",
+      "negativeControl": "the same bogus values on the main server answer 200"
     },
     {
-      "criterion": "A4: dispatch read prints the same output and gets the trimmed answer; new CLI vs old server prints the same (pi-envoy bundle path)",
-      "surface": "the real dispatch CLI, bundled by build-dispatch-cli.sh from main eb21e78d8e6e and from the head, as an agent session (bearer token) against both servers",
-      "command": "cli.sh base|head 28777|28778: dispatch read --issue TST-1..TST-4; diff -r",
-      "observed": "head server: main CLI vs head CLI diff -r exit 0; base server: same, exit 0; head CLI on base vs main CLI on head differ only in the Link: port; access log TST-1 references 4,793 bytes (main CLI) vs 2,312 (head CLI), TST-2 1,181 vs 583",
-      "headSha": "2d81cf190bbbe1a68cff98710b0f22571e7ff326",
-      "negativeControl": "the Claude Code plugin's committed bundles (packages/claude-envoy/dist) carry no versions=latest: the failure above"
+      "criterion": "A4: dispatch read (pi CLI bundle) prints the same output and gets the trimmed answer; new CLI vs old server prints the same",
+      "surface": "the dispatch CLI bundled by build-dispatch-cli.sh from main and from the head, agent session, both servers",
+      "command": "round 1: cli.sh base|head 28777|28778, diff -r (the envoy-client source is unchanged since)",
+      "observed": "diff -r exit 0 on each server; access log TST-1 4,793 vs 2,312 bytes at round 1's data",
+      "headSha": "43b4de3d93f7c1c2320bf4c8df33eaf68073fb02",
+      "negativeControl": "the main CLI's request carries no versions parameter and gets the full answer"
     }
   ],
   "notes": [
-    "A document row with no version in an issue's closure answers 500 INTERNAL for both the full and the trimmed answer, at base and head alike (inserted by SQL; the API writes a document with its first version). Unchanged by this PR, as the plan's gap finding 9 says.",
-    "Evidence: dispatch://INFRA-651/artifact/infra651-tester-evidence-tgz (sha256 030904904a5d795ccc5a625a9c0c32533024135e558e06c95e0cd1bdae1dbcfd).",
-    "CI at 2d81cf190bbb was queued when read (lint, typecheck, test, build, changes, Daemon Go suite); not waited on."
+    "A document row with no version in an issue's closure answers 500 INTERNAL for both answers, at main and head alike (inserted by SQL; the API writes a document with its first version). Unchanged by this PR, as the plan's gap finding 9 says.",
+    "Evidence: dispatch://INFRA-651/artifact/infra651-tester-evidence-tgz version 2 (sha256 7f8a54bbd745ca82a5f93d310b4e7ab7b1a7c2426bd607befb8bac4a8096e526).",
+    "CI at 43b4de3d93f7 was pending when read (changes, lint, typecheck, test, build, Daemon Go suite, pr-title); not waited on.",
+    "A6 (refseed in the load test after sjawhar/legion#2369) and A9 (production) are outside this round: A6 lands by the architect's forward merge before READY, A9 is the production check."
   ]
 }
