@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -530,4 +532,118 @@ func TestMarkThreadReadRacingABlockAskAnswerThatRefreshesAnAnchor(t *testing.T) 
 	if got := countEvents(t, database, "comment.anchor_refreshed"); got < refreshes+raceRounds {
 		t.Fatalf("%d anchor refreshes over %d rounds, want one a round: the race never took the refresh path", got-refreshes, raceRounds)
 	}
+}
+
+// threadLoginsOf is the stored thread_logins of the newest eventType event about the record id,
+// and whether the payload carries the field at all.
+func threadLoginsOf(t *testing.T, database *store.Store, eventType, id string) ([]string, bool) {
+	t.Helper()
+	var raw []byte
+	if err := database.Pool.QueryRow(context.Background(), `
+		select payload->'thread_logins' from events where type = $1 and payload->>'id' = $2 order by id desc limit 1
+	`, eventType, id).Scan(&raw); err != nil {
+		t.Fatalf("read the %s event of %s: %v", eventType, id, err)
+	}
+	if raw == nil {
+		return nil, false
+	}
+	logins := []string{}
+	if err := json.Unmarshal(raw, &logins); err != nil {
+		t.Fatalf("decode the %s event's thread_logins %s: %v", eventType, raw, err)
+	}
+	return logins, true
+}
+
+func requireThreadLogins(t *testing.T, database *store.Store, eventType, id string, want ...string) {
+	t.Helper()
+	if want == nil {
+		want = []string{}
+	}
+	logins, carried := threadLoginsOf(t, database, eventType, id)
+	if !carried || !slices.Equal(logins, want) {
+		t.Fatalf("%s of %s thread_logins = %#v (carried %v), want %#v", eventType, id, logins, carried, want)
+	}
+}
+
+// A comment, message or ask event names the people with a Replies row in its thread once the write
+// is in - the people whose Replies count it can move - and nobody who never wrote there.
+func TestReplyEventsNameTheThreadsParticipants(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Participants", "A spec")
+	comments := "/api/v1/issues/" + issue.Key + "/comments"
+
+	// A comment thread: its root's writer, then each reply's, and a session never.
+	root := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Who reviews this?"}, "alice")
+	requireThreadLogins(t, database, "comment.created", root.ID, "alice")
+	sessionReply := sessionComment(t, handler, comments, map[string]any{"body": "I will.", "reply_to": root.ID})
+	requireThreadLogins(t, database, "comment.created", sessionReply.ID, "alice")
+	bobReply := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Me too.", "reply_to": root.ID}, "bob")
+	requireThreadLogins(t, database, "comment.created", bobReply.ID, "alice", "bob")
+	elsewhere := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Unrelated."}, "bob")
+	requireThreadLogins(t, database, "comment.created", elsewhere.ID, "bob")
+
+	// An issue message thread, found up in_reply_to from a reply two levels down.
+	message := createIssueMessage(t, handler, issue.Key, map[string]any{"body": "Status?"}, "alice")
+	requireThreadLogins(t, database, "message.created", message.ID, "alice")
+	answered := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "Green.", "in_reply_to": message.ID, "actor": sessionActor(),
+	})
+	if answered.Code != http.StatusCreated {
+		t.Fatalf("session reply: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	answer := decodeBody[model.Message](t, answered)
+	requireThreadLogins(t, database, "message.answered", answer.ID, "alice")
+	deeper := createIssueMessage(t, handler, issue.Key, map[string]any{"body": "Thanks.", "in_reply_to": answer.ID}, "bob")
+	requireThreadLogins(t, database, "message.answered", deeper.ID, "alice", "bob")
+
+	// An ask a session opened: nobody until a person replies or answers.
+	ask := createAnswerListAsk(t, handler, issue.Key, "Ship on Friday?")
+	requireThreadLogins(t, database, "ask.opened", ask.ID)
+	clarifying := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Why Friday?", "ask_id": ask.ID}, "alice")
+	requireThreadLogins(t, database, "comment.created", clarifying.ID, "alice")
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{"text": "Yes."}, "bob"); response.Code != http.StatusOK {
+		t.Fatalf("answer: status=%d body=%s", response.Code, response.Body.String())
+	}
+	requireThreadLogins(t, database, "ask.answered", ask.ID, "alice", "bob")
+
+	// An ask a person opened names its asker, and its resolution by a session names only them.
+	opened := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{"question": "Need a review?"}, "bob")
+	if opened.Code != http.StatusCreated {
+		t.Fatalf("bob's ask: status=%d body=%s", opened.Code, opened.Body.String())
+	}
+	bobsAsk := decodeBody[model.Ask](t, opened)
+	requireThreadLogins(t, database, "ask.opened", bobsAsk.ID, "bob")
+	if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+bobsAsk.ID+"/resolve", map[string]any{
+		"kind": "resolved", "reason": "Reviewed already.", "actor": sessionActor(),
+	}); response.Code != http.StatusOK {
+		t.Fatalf("resolve: status=%d body=%s", response.Code, response.Body.String())
+	}
+	requireThreadLogins(t, database, "ask.resolved", bobsAsk.ID, "bob")
+}
+
+// A direct conversation has no Replies thread, so its messages carry no thread_logins; a
+// session's reply to an issue message through the same reply route names the issue thread's
+// writers.
+func TestSessionRepliesNameThreadLoginsOnlyOnAnIssue(t *testing.T) {
+	handler, database, root, reply, _ := directConversationFrom(t, "alice")
+	if logins, carried := threadLoginsOf(t, database, "message.created", root.ID); carried {
+		t.Fatalf("a direct message's message.created carries thread_logins %#v, want none", logins)
+	}
+	direct := reply("On it.")
+	if direct.Code != http.StatusCreated {
+		t.Fatalf("direct reply: status=%d body=%s", direct.Code, direct.Body.String())
+	}
+	if logins, carried := threadLoginsOf(t, database, "message.answered", decodeBody[model.Message](t, direct).ID); carried {
+		t.Fatalf("a direct reply's message.answered carries thread_logins %#v, want none", logins)
+	}
+
+	issue := createInteractionIssue(t, handler, "TEST", "Targeted", "A spec")
+	targeted := createIssueMessage(t, handler, issue.Key, map[string]any{
+		"body": "Can you check the deploy?", "target": "session:s1", "delivery": "aside",
+	}, "alice")
+	answered := replyTo(t, handler, targeted.ID, "Checked.")
+	if answered.Code != http.StatusCreated {
+		t.Fatalf("issue reply: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	requireThreadLogins(t, database, "message.answered", decodeBody[model.Message](t, answered).ID, "alice")
 }
