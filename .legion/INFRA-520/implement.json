@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-520",
-  "completed": "2026-10-28T15:32:53Z",
+  "completed": "2026-10-28T16:11:39Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2316",
   "proof": [
+    {
+      "criterion": "Filter drift (round 9, the tester's 71dfada1): an unreduced command falls wide, so a cd into another module cannot narrow what it reads",
+      "surface": "check-ci-filters.sh and its test suite on the branch tree (main 690c0136 merged in)",
+      "command": "PATH=$TMPDIR/pyenv/bin:$PATH bash .github/scripts/check-ci-filters.test.sh; .github/scripts/check-ci-filters.sh",
+      "observed": "Tests 81 passed, 0 failed, the tester's cd case (71dfada1) unchanged and passing; check exit 0, 24 gates 0 uncovered. Any unreduced command now counts every .go file and every go.mod, go.sum, go.work and go.work.sum of the repository; envoy_go, envoy_smoke and go_notices select any Go change. actionlint 0; image-trigger, action-pins, private-names, bun-version, release-credentials checks 0; ci-ok tests 42/0. PR MERGEABLE.",
+      "headSha": "df1f30f5568fa62ff790ed8e61c068f3021edc97",
+      "negativeControl": "On the real tree, `Test the Go daemon` changed to `cd ../envoy && go test -count=1 -timeout 20m ./...` fails naming the command ('it counts as reading every Go file of the repository; filter test must select it on any Go change') with 273 files the test filter misses. Reverted."
+    },
     {
       "criterion": "Filter drift (round 8, the tester's dc1e05b6): a go line the check reduces runs in its Run's directory, and no step of its job changes the environment unseen",
       "surface": "check-ci-filters.sh on the merged tree (main 690c0136) and its test suite",
@@ -363,7 +371,8 @@
     "Round 5: continuations joined before a go line is read, and every positional argument of a claimed go command must be one of the Run's packages (fail closed), per the architect's 'fix the class'.",
     "Review round 1: docs-deploy is gated on the docs job's newest output; check-ci-filters.sh holds -tags and mode; the router guide's cache recipe matches ci.yaml; main merged with #2358 and the three check-image-trigger-paths.sh tidy-ups carried. Known, pre-existing: the image reverse check does not model a widening || term in an image-only gate's filters clause (no workflow has one).",
     "Round 7: docs-deploy replaced by the push-only docs-pages.yaml (architect comment 6c83c); the drift check made conservative (architect, at the INFRA controller's direction): simple commands reduced, everything else counts as the whole module; go_notices and envoy_smoke widened. Script runs are held exact (the script line must equal the pinned text) rather than parsed. Main's two reds from #2233 are not fixed here (architect).",
-    "Round 8: the three Postgres 16 jobs main added as non-required are in ci-ok's needs, as every router job is, so after the flip a selected one that fails fails ci-ok."
+    "Round 8: the three Postgres 16 jobs main added as non-required are in ci-ok's needs, as every router job is, so after the flip a selected one that fails fails ci-ok.",
+    "Round 9: envoy_go also selects any Go change, besides go_notices and envoy_smoke: its `go list ./... | grep -Ev ... | xargs go test` and inline `GOOS=linux GOARCH=$arch go build` lines cannot be written in the simple form without changing what they run, so envoy-go now runs on a daemon-only change too."
   ],
   "openQuestions": [],
   "productionCheck": [
