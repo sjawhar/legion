@@ -2,20 +2,20 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-588",
-  "completed": "2026-10-28T08:46:00Z",
-  "round": "ci-red pr-title at c156b68bd6f6",
+  "completed": "2026-10-28T10:10:08Z",
+  "round": "public-file key ruling (dispatch://INFRA-472)",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2411",
-  "head": "5cfd1080069831382a886cc5e72666f5a1274275",
+  "head": "b5484b414155aebeb936fd32a64db319b151ccbe",
   "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6448930344",
-  "reviewAnswered": "No review this round. The red pr-title result was run 40551347938, which read the old title at 5cfd10800698 and was carried onto the handoff-only heads. GitHub runs no pull_request event (edited included) while the head carries skip-checks: true, so neither the title edit nor a body edit at 08:41:23Z started a run. One COMMENT review (pullrequestreview-5679907413, decides nothing) started PR Title run 40658794266 (pull_request_review) at c156b68bd6f6: success. No commit was pushed to start CI.",
+  "reviewAnswered": "Architect send-back for the controller ruling of 2026-10-28 10:04Z/10:05Z: scripts/conflicts/README.md named the Dispatch key four times (lines 5-6, 147, 157). Replaced with neutral text (the records are kept on this pull request's issue in Dispatch; the example uses --issue <KEY>) in b5484b414155; PR retitled without the key. Commit subjects left as they are (a rewrite needs a force push). Code unchanged since 5cfd10800698.",
   "proof": [
     {
-      "criterion": "The pull request title passes the required pr-title check (conventional-commit subject)",
-      "surface": "the pull request's title on GitHub, read by .github/workflows/pr-title.yaml on its `edited` event",
-      "command": "gh pr edit 2411 --title ... (earlier round); then gh api repos/sjawhar/legion/pulls/2411/reviews --method POST -f event=COMMENT (review 5679907413), which started PR Title run 40658794266",
-      "observed": "PR Title run https://github.com/sjawhar/legion/actions/runs/40658794266 (event pull_request_review, head c156b68bd6f64999a735985c1017ae37e6aba597): success; Envoy checks settlement at c156b68b: pr-title passed, 0 failed. Title: feat(scripts): measure Legion pull requests' merge conflicts before and after a fix (INFRA-588)",
-      "headSha": "5cfd1080069831382a886cc5e72666f5a1274275",
-      "negativeControl": "the old title `Measure Legion pull requests' merge conflicts before and after a fix (scripts/conflicts, INFRA-588)` is refused by the same regex (exit 1), as pr-title run 40551347938 refused it"
+      "criterion": "No public file the pull request adds names the Dispatch key, and the squash subject (the PR title) does not either",
+      "surface": "the branch tree at the head that merges, and the pull request title on GitHub",
+      "command": "git grep -n INFRA-588 b5484b414155 -- . :!.legion ; gh pr view 2411 --repo sjawhar/legion --json title",
+      "observed": "git grep prints nothing (exit 1); title: feat(scripts): measure Legion pull requests' merge conflicts before and after a fix (passes the pr-title regex locally); bun test scripts/conflicts 40 pass, biome clean, check-private-names clean",
+      "headSha": "b5484b414155aebeb936fd32a64db319b151ccbe",
+      "negativeControl": "the same grep finds the key in .legion/ at b5484b414155 (implement.json, plan.json, review.json) and in scripts/conflicts/README.md (4 lines) at 5cfd10800698, so it reads the tree it is given"
     },
     {
       "criterion": "The script is committed with tests that re-run a known merge and list its conflicted files",
@@ -42,7 +42,9 @@
       "negativeControl": "records with merge cd3c748767ee's upstream parent absent, --fixed on --from-json -> exit 1 naming the merge and parent (round 2)"
     }
   ],
-  "filesChanged": [],
+  "filesChanged": [
+    "scripts/conflicts/README.md"
+  ],
   "trickyParts": [],
   "deviations": [],
   "openQuestions": [],
