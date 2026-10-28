@@ -2,11 +2,12 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-591",
-  "completed": "2026-10-28T12:52:08Z",
-  "headTested": "e6b6698ad80fae9d38d7fdc7f176b92d225fce15 (code 8e7111478fb3; e6b6698a adds only .legion/)",
+  "completed": "2026-10-28T15:52:24Z",
+  "headTested": "6adb22b48f0aa2aae2f08d77e375cc4e180a20cc (code 1adb786e0343, a forward merge of main 25ef8cd2 plus the horizon pool in store.ConnectionsPerProcess and dispatchConnectionsPerPod 86 -> 88; 6adb22b4 adds only .legion/)",
+  "rebaseCheck": "The fingerprint changed: the merge brought main 25ef8cd2 (server registry, rolling rolls) and changed pool.go, infra/gcp/dispatch.go, infra/README.md and the fragment. So this was a full round, at the merged code against main 25ef8cd2.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 5's independent drive at 64c7b235 (identical Go diff) stands. At 8e711147: a smoke of envoy-dispatch built from the head (out-of-order commit, 3 streams under 80 concurrent posts and 16 slow writes, lock check, resuming stream on a newly started process with a foreign id held), all as in round 5. The fragment renders with `go run github.com/miniscruff/changie@v1.26.0 batch 9.9.9 --dry-run` in a copy of packages/envoy's changie files. Its name pr2392-Changed-20261028-124735.yaml matches .changie.yaml's fragmentFileFormat."
+    "how": "Drove the same surface independently at 1adb786e, with main 25ef8cd2 built the same way as the negative control, on a Postgres 16.2 and a NATS of the tester's own, with a shared DISPATCH_SIGNING_KEY, which main's registry now requires of two processes. Covered: its out-of-order steps, its newly-started-process steps, its lock check and its failing-observation case. The budget change: a process under 150 concurrent clients peaked at 73 Postgres backends, one of them the horizon's, against 72 and none on main; both are under 88. Three alternating 1x load pairs: the median comment write went from 13.4 s to 0.47 s and committed from 3.98 to 3.99 events/s. One run in three tipped into a queue on each side. The pair a single run showed (after7 3.86, 86% answered 2xx, against before7 3.99) was not borne out."
   },
   "failures": [],
   "failed": 0,
@@ -14,42 +15,46 @@
     {
       "criterion": "The global serialization is gone: a write holds no lock shared with writes to other issues.",
       "surface": "Local Dispatch built from the head's code, through the REST API; INFRA-589's harness with its 1 s lock sampler",
-      "command": "adv.py lock; run-step.sh tester5-after-1x and tester5b-new-1x --events 4 --sessions 400 --requests 60",
-      "observed": "POST on a third issue: 201 in 17 ms while the old lock was held and another issue's write was open. Commit-order lock held 0% in both 1x steps.",
-      "headSha": "64c7b23504847608f13ebc9dd349aeb660b5ef6b (Go diff identical at 8e7111478fb37de55556d6a6330d667fa256307a; smoke re-run there)",
-      "negativeControl": "Main 4e55b2e0: no answer within 8 s."
+      "command": "adv.py lock; run-step.sh tester7-{after7,a2,a3}-1x --events 4 --sessions 400 --requests 60",
+      "observed": "POST on a third issue: 201 in 15 ms while the old lock was held and another issue's write was open. Commit-order lock held 0% in all three 1x after runs. The waits sampled were on an issue's own row, tuple locks on issues, and the NOTIFY commit lock (1%).",
+      "headSha": "1adb786e0343658dd682332fda284d1df51459d4",
+      "negativeControl": "Main 25ef8cd2: no answer within 8 s. Lock held 70%, 100% and 100% in its three 1x runs, with up to 55 writers waiting."
     },
     {
       "criterion": "A reader resuming from a cursor never misses an event that commits later with a lower id; a test commits two writes out of id order and a resuming reader gets both in a defined order.",
-      "surface": "GET /api/v1/events (SSE) cold and with Last-Event-ID, on one and two processes; newly started processes with the horizon held or failing; an event log reset",
-      "command": "adv.py ooo commit|rollback; adv.py concurrent; STREAM_PORT=17778 adv.py concurrent; adv.py reset; adv.py fresh resume|cold; adv.py heartbeat; adv.py shutdown <pid>; adv.py dialfail <log>; adv.py churn 15; adv.py stall; adv.py lastid",
-      "observed": "Out of order: 123 open, 124 committed. Nothing was sent, then 123 and 124 after the commit, and a resume sent the same; on rollback only 126, 38 ms after. Concurrency: 3 streams and a mid-run resume each got exactly the 92 committed ids in order, on one process and across two. Reset: the open stream was ended and a resume went on with the new log. Newly started process with a foreign id held: a resuming stream opened in 22 ms, sent 2 heartbeats in 35 s, and got the held-back event 233 ms after the commit; SIGTERM exited in 0.05 s. Horizon pool unable to dial: the stream opened, then ended at 10.2 s with the failure logged, and the process recovered once slots were free. Overlapping 2 s holders delayed frames 1.7 to 2.0 s. Bad Last-Event-ID values are refused 400. 0 SSE order violations in both 1x load steps.",
-      "headSha": "64c7b23504847608f13ebc9dd349aeb660b5ef6b (Go diff identical at 8e7111478fb37de55556d6a6330d667fa256307a; smoke re-run there)",
-      "negativeControl": "Main 4e55b2e0: 124 was sent at once and never 123, and each concurrency stream missed 10 committed ids. Round 4's head b923561b with the horizon pool unable to dial: the stream stayed open 25 s with nothing logged."
+      "surface": "GET /api/v1/events (SSE) cold and with Last-Event-ID, on one and two registered processes; newly started processes with the horizon held or failing; an event log reset",
+      "command": "adv.py ooo commit|rollback; adv.py concurrent; STREAM_PORT=17778 adv.py concurrent; adv.py reset; adv.py fresh resume|cold; adv.py shutdown <pid>; adv.py dialfail <log>; adv.py churn 12; adv.py stall; adv.py lastid",
+      "observed": "123 open and 124 committed: nothing was sent, then 123 and 124 after the commit, and a resume sent the same; on rollback only 126, 31 ms after. Concurrency: 3 streams and a mid-run resume each got exactly the 92 committed ids in order, on one process and across two. Reset: the stream was ended and a resume went on with the new log. Newly started process with a foreign id held: a resuming stream opened in 17 ms and got the held-back event 16 ms after the commit; SIGTERM exited in 0.05 s. Every slot taken: the stream ended at 10.2 s with the failure logged, and the process recovered. Overlapping 2 s holders delayed frames 1.5 to 2.2 s. 0 SSE order violations in all six 1x runs.",
+      "headSha": "1adb786e0343658dd682332fda284d1df51459d4",
+      "negativeControl": "Main 25ef8cd2: 124 was sent at once and never 123. Each concurrency stream missed 10 committed ids, and the resume missed 7."
     },
     {
       "criterion": "Every consumer of the event stream keeps the order it relies on; the plan lists each and the test covers each.",
       "surface": "SSE and relay (above), GET /api/v1/references?since=, the outbox's per-issue NATS subject",
       "command": "adv.py refs_quiet (newly started process); adv.py refs_open; adv.py nats",
-      "observed": "References: the first since read on a quiet process listed the just-committed mention in 53 ms. With a foreign id held, or a lower id open, a read answered in about 1 s without the newer mention, and listed it after the holder or the lower write ended. NATS: 30 concurrent comments on TSB-51 reached its subject in seq order, equal to the database. The delivery hub has no reachable surface on this stack, so it rests on its Go tests; envoy-go was queued at ae2991fc when read.",
-      "headSha": "64c7b23504847608f13ebc9dd349aeb660b5ef6b (Go diff identical at 8e7111478fb37de55556d6a6330d667fa256307a; smoke re-run there)",
-      "negativeControl": "Main 4e55b2e0, round 4 with the same driver: the since read listed the mention above the open lower id."
+      "observed": "References: the first since read on a quiet process listed the mention in 47 ms. With a foreign id held, or a lower id open, a read answered in about 1 s without the newer mention and listed it afterwards. NATS: 30 concurrent comments on TSB-51 reached its subject in seq order, equal to the database. The delivery hub has no reachable surface here, so it rests on CI's Go lanes.",
+      "headSha": "1adb786e0343658dd682332fda284d1df51459d4",
+      "negativeControl": "Main 4e55b2e0, rounds 4 and 5, same driver: the since read listed the mention above the open lower id."
     },
     {
-      "criterion": "Every consumer of the event stream keeps the order it relies on (smoke at the head that merges).",
-      "surface": "GET /api/v1/events on a local Dispatch built at 8e711147",
-      "command": "adv.py ooo commit; adv.py concurrent; adv.py lock; adv.py fresh resume (r6-head.log in dispatch://INFRA-591/artifact/infra591-tester-evidence-tar-gz v5)",
-      "observed": "123 open and 124 committed: nothing was sent, then 123 and 124 after the commit, and a resume sent the same. 3 streams and a mid-run resume each got exactly the 92 committed ids in order. POST on a third issue: 201 in 20 ms with the old lock held. On a newly started process with a foreign id held, a resuming stream opened in 15 ms and got the held-back event 130 ms after the commit.",
-      "headSha": "8e7111478fb37de55556d6a6330d667fa256307a",
-      "negativeControl": "Main 4e55b2e0, round 5, same driver: 124 was sent at once and never 123, each concurrency stream missed 10 committed ids, and the POST got no answer in 8 s with the old lock held."
+      "criterion": "Before and after on the committed load reproduction at tonight's step and twice it: lock hold samples, committed vs offered, write latency p50/p99, delivery latency from the write's arrival.",
+      "surface": "INFRA-589's committed harness (#2369 at bdc451d3), seeded with main 4e55b2e0, migrated forward at each step; one 2-vCPU pod",
+      "command": "LOADTEST_SRC=<before7|after7> run-step.sh tester7-{before7,after7,a2,b2,a3,b3}-1x --events 4 --sessions 400 --requests 60, alternating (TABLES-r7-*.md in dispatch://INFRA-591/artifact/infra591-tester-evidence-tar-gz v6)",
+      "observed": "Before, three runs: committed 3.99, 2.98 and 3.98 of 3.99; comment p50 0.42, 23.1 and 13.4 s; NATS delivery from arrival p50 1.6, 23.1 and 14.7 s; 2xx 100%, 76% and 100%; lock held 70%, 100% and 100%. After, three runs: committed 3.86, 3.99 and 3.99; comment p50 5.0, 0.18 and 0.47 s; NATS delivery p50 9.0, 0.86 and 1.06 s; 2xx 86%, 100% and 100%; lock held 0% each time. The SSE frame after the write's response (after, runs 2 and 3) was 0.46 and 0.57 s, against before-run-1's 14 ms, which is the accepted live-reader cost. 0 SSE order violations.",
+      "headSha": "1adb786e0343658dd682332fda284d1df51459d4",
+      "negativeControl": "Main tips into the lock queue at 1x in two of its three runs: lock held 100% with 46 to 47 writers waiting."
+    },
+    {
+      "criterion": "Connection budget (review round 3): one server process opens at most store.ConnectionsPerProcess connections, which now counts the horizon pool, and infra/gcp's dispatchConnectionsPerPod equals it.",
+      "surface": "A running envoy-dispatch process's backends in pg_stat_activity; the two constants in the tree",
+      "command": "adv.py conns 20 (150 concurrent clients, 5 streams, a foreign id held 2 s of every 3, pg_stat_activity sampled every 100 ms); read pool.go:304-314 and infra/gcp/dispatch.go:97",
+      "observed": "Head: peak 73 backends, of which up to 1 ran the horizon's observation statement. sharedPoolSize 64 + rooms 4 + health 1 + leases 12 + outbox 1 + registry 1 + horizon 2 + 3 listeners = 88 = ConnectionsPerProcess = dispatchConnectionsPerPod. infra/README.md sizes databaseTier by ConnectionsPerProcess, so it follows. TestDispatchConnectionsPerPodIsTheServers is CI's to run.",
+      "headSha": "1adb786e0343658dd682332fda284d1df51459d4",
+      "negativeControl": "Main 25ef8cd2 under the same load: peak 72 backends, none running a horizon observation. Its sum, 86, has no horizon pool in it."
     }
   ],
-  "ci": "Read at about 12:52Z, recorded here only. At e6b6698a, build, changes, lint, test and typecheck were queued. The runs at ae2991fc were cancelled by the newer push, so no CI has completed on this round's code yet. Nothing is red.",
+  "ci": "Read at about 15:52Z, recorded here only. At 1adb786e build and lint were in progress; test, typecheck, changes, a second build and the daemon Postgres 16 suite were queued; nothing had completed. Main's own reds, which the controller ruled are not this pull request's: recipients-claim.e2e.ts route-close (#2324), TestDispatchConnectionsPerPodIsTheServers on main (#2464; this branch changes both constants), mermaid.e2e.ts:194 (#2311).",
   "risks": [
-    "On a newly started process, the first stream with no Last-Event-ID gets no headers until every transaction holding an id on the Postgres instance ends. It opened 44 ms after the commit, against 15 ms on main. This is the implementer's recorded deviation."
-  ],
-  "rebaseCheck": "No rebase. 8e711147 changes only a comment in .github/workflows/envoy-and-contracts.yaml and the changelog fragment. The fingerprint of the Go diff over packages/envoy/**/*.go against fork point 4e55b2e0 is equal at 64c7b235 (round 5) and at 8e711147: c095a437.... So round 5's real-surface proof stands for the code. This round re-ran a smoke on a binary built at 8e711147 and checked the two changed files.",
-  "resolved": [
-    "Round 5's Dispatch-key item. In the branch's diff against fork point 4e55b2e0 outside .legion/, `grep -E '^\\+.*INFRA-[0-9]+'` and a check of the added file names find nothing. The fragment is pr2392-Changed-20261028-124735.yaml with Issue: pr2392, and its body names no key and no dispatch:// link. The workflow comment no longer names one. The commit subjects written after the ruling (05ac50b1, 8e42e8a8, 52791346, 64c7b235) still end in '(INFRA-591)'. The ruling forbids rewriting them, so they are left to the architect and the merge; 8e711147's own subject names no key."
+    "On a newly started process, the first stream with no Last-Event-ID gets no headers until every transaction holding an id on the Postgres instance ends. It opened 137 ms after the commit at this head. This is the implementer's recorded deviation."
   ]
 }
