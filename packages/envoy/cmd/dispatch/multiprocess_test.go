@@ -1245,7 +1245,7 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 // list calls for one result", redeliver/sweep.go). So the GitHub fake's count of those listings
 // is what one sweep window cost the installation's rate limit, whichever process paid it.
 //
-// A period is a bucket of the database's clock (duty.Exclusive, migration 0115), so both
+// A period is a bucket of the tick's due time (duty.Exclusive, migration 0115), so both
 // processes are started inside one bucket on purpose: a second process whose first tick lands
 // past a bucket boundary is entitled to sweep, and this row is about the one that lands inside
 // the bucket its peer has already served. waitOutABucketBoundary is what keeps which of the two
@@ -1291,20 +1291,16 @@ func TestALeasedLoopRunsOnceAcrossAStaggeredStart(t *testing.T) {
 }
 
 // waitOutABucketBoundary returns with enough of period's current bucket left for a row to start
-// both processes and read their first ticks inside it. A period is floor(epoch / period) on the
-// database's clock, so a row that straddles a boundary watches a second process legitimately
-// sweep rather than skip; this waits the boundary out instead, on the same clock the gate reads,
-// and waits at most the margin it needs.
-func waitOutABucketBoundary(t *testing.T, pair *dispatchPair, period time.Duration) {
+// both processes and read their first ticks inside it. A period is floor(epoch / period) of a
+// tick's due time, on the clock of the process that ticks, so a row that straddles a boundary
+// watches a second process legitimately sweep rather than skip; this waits the boundary out
+// instead, on the clock both processes share with this test (one host), and waits at most the
+// margin it needs.
+func waitOutABucketBoundary(t *testing.T, _ *dispatchPair, period time.Duration) {
 	t.Helper()
 	// What one run of the row needs inside the bucket: two process starts and their first ticks.
 	const margin = 45 * time.Second
-	var left time.Duration
-	if err := pair.database.Pool.QueryRow(context.Background(),
-		`select make_interval(secs => $1 - mod(extract(epoch from now()), $1))`, period.Seconds(),
-	).Scan(&left); err != nil {
-		t.Fatalf("read how much of the period's bucket is left: %v", err)
-	}
+	left := period - time.Duration(time.Now().UnixNano()%period.Nanoseconds())
 	if left >= margin {
 		return
 	}
