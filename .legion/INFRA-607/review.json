@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-607",
+  "completed": "2026-10-28T19:29:34Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "4f9bd6e85c54f4f94687cb90fa16a451bce8aaa0",
+  "round": 1,
+  "critical": 0,
+  "important": 2,
+  "minor": 5,
+  "thermonuclear": {
+    "deepReview": "Verdict: APPROVE at 4f9bd6e8 (four Minor findings; M1 and M2 promoted to Important by the reviewer after tracing them, see keyFindings)",
+    "codeQuality": "Verdict: CHANGES at 4f9bd6e8 (seven findings, six cleanup-only, one minor clock-convention behaviour bounded by host/database skew)"
+  },
+  "ci": "At 19:15Z the code head 4f9bd6e8 is the newest pull_request CI head; compare 4f9bd6e8...b821c23d is .legion/ only (2 files). Required lint and typecheck succeeded; test in progress, pr-title queued. At c83c0851 the non-required 'Dispatch Go suite on production's Postgres 16' job timed out in internal/dispatch/api (10 m default; main takes 480 s there, the branch's envoy-go 494 s).",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/cmd/dispatch/main.go:545-555, packages/envoy/cmd/dispatch/shutdown.go:132-134, packages/envoy/internal/dispatch/delivery/intake.go:878-918",
+      "description": "The intake stop runs in a defer after serveUntilStopped, but shutdown() closes database.Pool as soon as HTTP has drained and no pool connection is in use. A handler waiting on GitHub holds no connection, so the pool closes under it; its upsert then fails, and deliver acknowledges the message because handling is not cancelled. The message is not handed back to the next holder as the PR's stop design says; only the next reconcile (about 5.5 min) recovers it. Stop the intakes (or at least wait for their handlers) before waitUntilIdle/pool.Close, or hand back a message whose route failed after the pool closed."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/delivery/intake.go:732-775, packages/envoy/internal/bus/nats.go Release, packages/envoy/internal/bus/recovery.go:355-388",
+      "description": "intakeDelivery.sub is the handle Subscribe returned. After the bus restores the registration on a replaced connection (restoreSubscriptions installs a new active handle, subscribed unchanged), stop drains the dead original handle: Drain errors (a false ERROR line), the drain wait is skipped, and the held messages are negatively acknowledged while the restored subscription is still bound here, so NATS redelivers them to this process and giveBack Naks them again until Release unsubscribes it. Drain the registration's current handle."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/store/migrations/0137..0140 *.up.sql:1",
+      "description": "Header lines name the pre-renumbering files (0137 says 0136_reference_excerpt_backoff, which is another migration's number). Cleanup."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/delivery/intake.go:119-141, cmd/dispatch/main.go:547-553, cmd/dispatch/shutdown.go:42-49",
+      "description": "Two deadlines own one stop (intakeStopBudget 15 s in delivery, intakeStopDeadline 25 s in main), and intakeStopBudget's comment repeats cmd/dispatch's shutdown arithmetic. Cleanup; the M1 fix may settle it."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/pglisten/listener.go:43-48,92-94, hub.go:50, duty/woken.go:29-34, delivery/intake.go:652",
+      "description": "Unused surface: pglisten.Notification/Listener.OnNotification/PID (no production caller), WokenLoop.HeldRetry always equal to MinGap, intakeDelivery.stopping redundant with keyedRunner.stopped if keys.stop runs before Drain. Cleanup."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/delivery/intake.go",
+      "description": "intake.go grows from 968 to 1219 lines; the subscription/stop subsystem (subscribeDurable..negativelyAcknowledge) can live in its own file beside keyed.go. Cleanup."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/embedqueue/queue.go:215-243, refs/excerpts.go NextExcerptRetry",
+      "description": "Two clock conventions: edit notices read a database-relative wait, the embedding queue and excerpt retry read an absolute timestamptz timed on the host clock; the cost is bounded by host/database skew. Not a defect at NTP skew; align when touching."
+    }
+  ],
+  "verified": [
+    "Each new NOTIFY (0136, 0138, 0141, 0142) rides a transaction that already notifies, exceptions named in the PR body.",
+    "No woken loop runs more often per process than the timer it replaced (MinGap 5 s / 2 s / 5 s / 60 s; settings cache retries only after a failed read).",
+    "Wakes are not lost: hub signals every wake after each LISTEN; buffered wake survives a running pass; held lease retried; late-committing suggestions stay swept=false and are judged against all their events; young events stop the cursor.",
+    "Rolling deploy: replaced function bodies keep signatures; swept column added default true then default false; new tables unread by the old build; period-0 lease records nothing.",
+    "Intake subjects are sanitized (contracts.SanitizeSubjectSegment), so intakeKey's token counts hold for dotted repository names; per-key order via keyedRunner; no lock across a GitHub call."
+  ],
+  "fastFollow": "Background-loop tidy: correct the 0137-0140 migration headers, keep one intake stop deadline, drop the unused pglisten.Notification/OnNotification, WokenLoop.HeldRetry and intakeDelivery.stopping, and move the intake subscription/stop code out of intake.go."
+}
