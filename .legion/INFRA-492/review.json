@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-492",
+  "completed": "2026-10-28T15:01:54Z",
+  "decision": "approved",
+  "round": 8,
+  "headReviewed": "the handoff push above 59aa2511f82c5f15dd0d1d5b12081a1b6ab3584b (code head 4682d7bf176c89de7ff2efd25d832414e12f9bb9)",
+  "scope": "Conflict return after my approval at b61cb118: merges of main bringing #2225 (ask-card claimant and route rows) and #2233 (a close withdraws open asks, a reopen restores them), the PR's adaptation to them, and two rewritten tests. Fingerprint differs (4530cad9 -> 92ecbf5d), so a full round over that delta, with the thermonuclear pair.",
+  "critical": 0,
+  "important": 0,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/thread_logins.go",
+      "description": "The new comment (lines 16-19) says that after a close the read names only open asks an older release's close left behind; in fact a close withdraws every open ask first, so it is always []. The read matters on a reopen (restored asks, and open asks an older release's close left). Wording only; on the Fast-follow line."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/api/event-refresh.ts",
+      "description": "askThreadsIssue and askThreadsOn take the file from 957 to 1002 lines; moving the pure leaf helpers (payload readers and target builders, lines 43-157) to a sibling module would bring it under 1000. Structural, no behaviour; on the Fast-follow line as the architect ruled."
+    }
+  ],
+  "checks": [
+    "askThreadsIssue narrowed to update/close with 'route' in changed (or changed absent): verified an ask thread reads only claimant, route, route_status and route_holder from its issue; a close that releases a claim appends issue.released (issue_patch.go:471-472); a reopen cannot carry a route; withdrawal and restore arrive as ask.resolved / ask.opened, which refresh ['ask-thread', id].",
+    "askThreadsOn: same selection as main's askThreadKeysOnIssues for an idle query; a thread on its first load is judged on the landed body (narrower, correct).",
+    "Replies: withdraw/restore ask events now carry thread_logins (events.AskEventPayload); issue.closed names [] since the asks are withdrawn first; events_test.go asserts both.",
+    "Tester round 7 at 8d32024f: recipients-claim.e2e.ts 6/6, close-withdraws-asks.e2e.ts 4/4, acceptance 1-2 and freshness 15 chromium + 5 iphone; main's own route-close test fails at main too (#2233 withdraws the card), and main's in-flight claim test relied on the cancel this PR removes; the rewrites keep what each test named.",
+    "claude-envoy check-dist on the pinned Bun 1.4.4 at 59aa2511: 'dist/ and legion/ match a fresh build'.",
+    "All four review threads resolved, each with my answer."
+  ],
+  "thermonuclear": "Both at 59aa2511, scoped to the delta. Deep review: approve, two minors (the comment above; askThreadsIssue computed twice per event, pure). Code quality: the 1002-line file and the comment.",
+  "ciRead": "Required set (rulesets): lint, typecheck, test, pr-title. At 4682d7bf (newest pull_request run head; compare to 59aa2511 is .legion/ only, 2 files): all four success (one pr-title run cancelled, another success). claude-envoy queued at 15:01Z (not required; check-dist passed locally)."
+}
