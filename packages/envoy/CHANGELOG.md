@@ -34,6 +34,18 @@
   are refused and change nothing, settlement writes no version of it, and the dashboard shows "This
   document holds content this version of Dispatch cannot show yet. It reloads in a minute." with no
   upload or rebuild, and admits the document again on its own (INFRA-558).
+- A page's document socket is writable by the numbers of every live server process, not by an
+  exact match of its schema version with the answering process's. Each process records, in four
+  new `server_processes` columns (migration `0133_server_processes_schema`, constant defaults,
+  nothing rewritten), the schema version it reads and the highest `since` it creates, its
+  embedder's identity and whether it stores files in a bucket. A page presenting `schema_version`
+  V and `schema_creatable` R is writable on an open issue when R is at most every live process's
+  version and V is at least every live process's creatable version and the highest `since` the
+  document holds; a page without `schema_creatable` counts V as R, and a process before this
+  release is left out. The Hocuspocus token's answer is the decision its socket was admitted
+  with, and a token no waiting socket presented is read-only. Every 15 s each process closes with
+  `1012` each writable document socket the fleet no longer admits, and the provider reconnects
+  (INFRA-558).
 - `GET /api/v1/dashboard/builds` says which dashboard builds Dispatch serves, to any
   authenticated caller: `{serving, live}`, `serving` the entry chunk (`/assets/index-*.js`) of the
   build the answering process serves (`""` when it serves none) and `live` the distinct entry

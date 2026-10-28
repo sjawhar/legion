@@ -828,8 +828,10 @@ headless Markdown engine. The connection presents it in its query as `schema_ver
 manifest's `version`) and `schema_creatable` (R, the highest `since` among the elements the page
 may create, `compiledSchemaCreatable`, as Go's `pmdoc.SchemaCreatable()`); its Hocuspocus token
 stays V alone, because a server that predates `schema_creatable` compares the whole token with
-its own version and its answer replaces the query's. A server version mismatch admits the tab
-read-only and the surface shows `Reload to edit`. y-prosemirror deletes, from the page's copy of
+its own version and its answer replaces the query's. The server admits the tab read-only when a
+live server process cannot read what the tab creates, or the tab cannot represent what the fleet
+creates or what the document holds (`packages/envoy/cmd/dispatch/README.md`, "Two builds at
+once"), and the surface shows `Reload to edit`. y-prosemirror deletes, from the page's copy of
 the document, an element or text the editor's schema cannot build (`createNodeFromYElement`), such
 as an element a newer build wrote; `pending-sync.ts` never keeps that repair as a pending edit, so
 no later writable admission replays it. Typed blocks use `:::name{#block-id key="value"}`

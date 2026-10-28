@@ -1,14 +1,19 @@
 package docs
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"path"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +28,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/oidc"
 )
 
@@ -31,6 +37,14 @@ type connectionState struct {
 	id    uint64
 	actor model.Actor
 	added bool
+	// documentSince is D, the highest since among the elements of the document ServeHTTP read
+	// before it handed the socket to ygo (pmdoc.DocumentSince), which authorize admits by.
+	documentSince int
+	// conn is the connection ygo serves the socket on, once ygo has hijacked it.
+	conn *admittedConn
+	// admission is the socket's schema admission, which authorize records and ServeHTTP removes
+	// once the socket has ended.
+	admission *schemaAdmission
 }
 
 type connectionContextKey struct{}
@@ -294,14 +308,24 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.preloads.Store(room, preload)
 		defer s.preloads.CompareAndDelete(room, preload)
 	}
-	connection := &connectionState{}
+	// ygo serves the socket on the connection it hijacks from w; the wrapper keeps hold of it, so
+	// a re-check that finds the socket no longer admitted can close it (RunSchemaAdmission).
+	connection := &connectionState{documentSince: pmdoc.DocumentSince(tree), conn: &admittedConn{}}
 	ctx := context.WithValue(r.Context(), connectionContextKey{}, connection)
-	s.srv.ServeHTTP(w, r.WithContext(ctx))
+	s.srv.ServeHTTP(&admittedWriter{ResponseWriter: w, conn: connection.conn}, r.WithContext(ctx))
+	if connection.admission != nil {
+		s.schemaAdmissions.remove(connection.admission)
+	}
 	if connection.added {
 		s.removeConnection(connection.room, connection.id)
 	}
 }
 
+// authorize accepts a document socket, read-only unless its page may write (schemaFleet.admits).
+// ygo asks the token's answer of authorizeSchemaVersion with the room and the token alone, so the
+// decision is recorded here, under the room and the schema_version the page presented, which is
+// the token the page sends; a socket admitted otherwise than one still waiting for that answer is
+// refused, and its provider retries (schemaAdmissions.admit).
 func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) {
 	actor, err := s.requestActor(r)
 	if err != nil {
@@ -325,28 +349,350 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 	if connection == nil {
 		return websocket.ConnectionConfig{}, false
 	}
+	fleet, err := readSchemaFleet(r.Context(), s.queryFrom(r.Context()))
+	if err != nil {
+		slog.Warn("dispatch: refuse a document socket: read the live server processes", "room", room, "error", err)
+		return websocket.ConnectionConfig{}, false
+	}
+	query := r.URL.Query()
+	page := schemaPageOf(query)
+	admission := &schemaAdmission{
+		key:           schemaAdmissionKey{room: room, token: query.Get("schema_version")},
+		page:          page,
+		documentSince: connection.documentSince,
+		writable:      open && fleet.admits(page, connection.documentSince),
+		conn:          connection.conn,
+	}
+	if !s.schemaAdmissions.admit(admission) {
+		return websocket.ConnectionConfig{}, false
+	}
+	connection.admission = admission
 	connection.room = room
 	connection.id = s.nextConnection.Add(1)
 	connection.actor = actor
 	connection.added = true
 	s.addConnection(room, connection.id, actor)
-	return websocket.ConnectionConfig{
-		ReadOnly: schemaReadOnly(open, r.URL.Query().Get("schema_version")),
-	}, true
+	return websocket.ConnectionConfig{ReadOnly: !admission.writable}, true
 }
 
-func schemaReadOnly(open bool, clientSchemaVersion string) bool {
-	return !open || clientSchemaVersion != fmt.Sprintf("%d", pmdoc.SchemaVersion())
+// authorizeSchemaVersion is ygo's OnTokenAuth: the answer to the Hocuspocus token a socket's
+// provider sends once it opens, which the provider takes as the socket's scope and ygo as its
+// read-only state (sjawhar/ygo provider/websocket/peer.go, handleAuth). The page's token is its
+// schema_version alone, since a server before INFRA-558 compares the whole token with its own
+// version. So the answer is the decision authorize recorded for a socket of room that presented
+// that schema_version and is still waiting for its answer, and that socket has had it. A token
+// no waiting socket presented is read-only. It never refuses: a refusal closes the socket with
+// 4401, after which the provider never reconnects.
+func (s *Service) authorizeSchemaVersion(room, token string) (websocket.ConnectionConfig, error) {
+	writable := s.schemaAdmissions.answer(schemaAdmissionKey{room: room, token: token})
+	return websocket.ConnectionConfig{ReadOnly: !writable}, nil
 }
 
-// authorizeSchemaVersion confirms the existing HTTP-authorized connection's schema admission
-// through Hocuspocus's authenticated scope, which is the provider's client-visible signal.
-func (s *Service) authorizeSchemaVersion(room, clientSchemaVersion string) (websocket.ConnectionConfig, error) {
-	open, err := s.issueOpen(context.Background(), s.queryFrom(context.Background()), room)
+// schemaPage is the schema a page presents on its document socket: version is C, the
+// schema_version it reads, and creatable is R, the schema_creatable it may create up to. A page
+// before INFRA-558 sends no schema_creatable and creates only what its version reads, so its R is
+// its C. A page that presents no number, or a number that does not parse, is not valid, and is
+// admitted read-only.
+type schemaPage struct {
+	version, creatable int
+	valid              bool
+}
+
+func schemaPageOf(query url.Values) schemaPage {
+	version, err := strconv.Atoi(query.Get("schema_version"))
 	if err != nil {
-		return websocket.ConnectionConfig{}, err
+		return schemaPage{}
 	}
-	return websocket.ConnectionConfig{ReadOnly: schemaReadOnly(open, clientSchemaVersion)}, nil
+	creatable := version
+	if query.Has("schema_creatable") {
+		if creatable, err = strconv.Atoi(query.Get("schema_creatable")); err != nil {
+			return schemaPage{}
+		}
+	}
+	return schemaPage{version: version, creatable: creatable, valid: true}
+}
+
+// schemaFleet is what the server processes serving the database read and create: the lowest
+// schema version and the highest creatable version among this process and every live process
+// that registers them. A process of a build before INFRA-558 registers neither
+// (processes.Process.PredatesFleetColumns) and is left out, as is a build that does not register
+// at all.
+type schemaFleet struct {
+	minVersion, maxCreatable int
+}
+
+func readSchemaFleet(ctx context.Context, db processes.Querier) (schemaFleet, error) {
+	fleet := schemaFleet{minVersion: pmdoc.SchemaVersion(), maxCreatable: pmdoc.SchemaCreatable()}
+	live, err := processes.Live(ctx, db)
+	if err != nil {
+		return schemaFleet{}, err
+	}
+	for _, process := range live {
+		if process.PredatesFleetColumns() {
+			continue
+		}
+		fleet.minVersion = min(fleet.minVersion, process.SchemaVersion)
+		fleet.maxCreatable = max(fleet.maxCreatable, process.SchemaCreatable)
+	}
+	return fleet, nil
+}
+
+// admits reports whether page may write a document whose elements need schema version
+// documentSince (pmdoc.DocumentSince) while fleet serves it: every process reads what the page
+// creates (R_page <= min V), and the page represents what every process creates and what the
+// document holds (C_page >= max(max R, D)). A page that cannot represent an element drops it from
+// its copy and writes the result back, and a process that cannot read an element the page wrote
+// refuses the document.
+func (f schemaFleet) admits(page schemaPage, documentSince int) bool {
+	return page.valid && page.creatable <= f.minVersion && page.version >= max(f.maxCreatable, documentSince)
+}
+
+// schemaAdmissionKey is what ygo's OnTokenAuth knows of a socket: its room, and the token, which
+// is the schema_version its page presented.
+type schemaAdmissionKey struct {
+	room, token string
+}
+
+// schemaAdmission is one document socket's admission: what its page presented, the documentSince
+// it was admitted against, and whether it was admitted writable. answered is set once its token
+// had its answer.
+type schemaAdmission struct {
+	key           schemaAdmissionKey
+	page          schemaPage
+	documentSince int
+	writable      bool
+	answered      bool
+	conn          *admittedConn
+}
+
+// schemaAdmissions is the admission of every document socket this process serves, from authorize
+// until ServeHTTP returns. Its zero value is ready to use.
+//
+// Every waiting socket of one key - admitted, its token not yet answered - holds one decision
+// (admit), so a token's answer is that decision, whichever of them sent it.
+type schemaAdmissions struct {
+	mu      sync.Mutex
+	sockets map[schemaAdmissionKey][]*schemaAdmission
+}
+
+// admit records a, unless a socket of a's key still waiting for its token's answer was admitted
+// otherwise: then it records nothing and returns false, and the socket is refused. The two are one
+// token, and the answer must be the one each was admitted with. The provider retries the refused
+// socket, and the first socket's token is answered within its first round trip.
+func (a *schemaAdmissions) admit(admission *schemaAdmission) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, waiting := range a.sockets[admission.key] {
+		if !waiting.answered && waiting.writable != admission.writable {
+			return false
+		}
+	}
+	if a.sockets == nil {
+		a.sockets = make(map[schemaAdmissionKey][]*schemaAdmission)
+	}
+	a.sockets[admission.key] = append(a.sockets[admission.key], admission)
+	return true
+}
+
+// answer is the decision of the first socket of key still waiting for its token's answer, which
+// it marks answered, or false (read-only) when none is waiting.
+func (a *schemaAdmissions) answer(key schemaAdmissionKey) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, waiting := range a.sockets[key] {
+		if !waiting.answered {
+			waiting.answered = true
+			return waiting.writable
+		}
+	}
+	return false
+}
+
+// remove forgets admission, once its socket has ended or a re-check has closed it. Removing one
+// already forgotten does nothing.
+func (a *schemaAdmissions) remove(admission *schemaAdmission) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.removeLocked(admission)
+}
+
+func (a *schemaAdmissions) removeLocked(admission *schemaAdmission) {
+	sockets := a.sockets[admission.key]
+	for index, candidate := range sockets {
+		if candidate == admission {
+			sockets = append(sockets[:index], sockets[index+1:]...)
+			break
+		}
+	}
+	if len(sockets) == 0 {
+		delete(a.sockets, admission.key)
+	} else {
+		a.sockets[admission.key] = sockets
+	}
+}
+
+// revokeUnless closes every writable socket that fleet no longer admits, and forgets it: its read
+// loop ends, and its connection closes with schemaRevokedCloseCode (admittedConn). It returns the
+// sockets it closed.
+func (a *schemaAdmissions) revokeUnless(fleet schemaFleet) []*schemaAdmission {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var revoked []*schemaAdmission
+	for _, sockets := range a.sockets {
+		for _, admission := range sockets {
+			if admission.writable && !fleet.admits(admission.page, admission.documentSince) {
+				revoked = append(revoked, admission)
+			}
+		}
+	}
+	for _, admission := range revoked {
+		a.removeLocked(admission)
+		if admission.conn != nil {
+			admission.conn.revoke()
+		}
+	}
+	return revoked
+}
+
+// RunSchemaAdmission checks, every live window of the registry (processes.LiveWindow), each
+// writable document socket this process serves against the live fleet again, and closes each one
+// the fleet no longer admits, until ctx ends (recheckSchemaAdmissions). A roll that follows the
+// manifest's rule never changes a decision, so editors do not flip; a process that creates what an
+// open page cannot represent, or that cannot read what it creates, ends that page's edits within
+// a window.
+func (s *Service) RunSchemaAdmission(ctx context.Context) {
+	ticker := time.NewTicker(processes.LiveWindow)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.recheckSchemaAdmissions(ctx); err != nil && ctx.Err() == nil {
+				slog.Warn("dispatch: re-check the document sockets' schema admission", "error", err)
+			}
+		}
+	}
+}
+
+// recheckSchemaAdmissions is one pass of RunSchemaAdmission. A socket it closes gets
+// schemaRevokedCloseCode, on which the provider reconnects, and the reconnect's admission decides
+// again: read-only, unless a process that admits the page serves it. A pass that cannot read the
+// live processes closes nothing.
+func (s *Service) recheckSchemaAdmissions(ctx context.Context) error {
+	fleet, err := readSchemaFleet(ctx, s.store.Pool)
+	if err != nil {
+		return err
+	}
+	for _, admission := range s.schemaAdmissions.revokeUnless(fleet) {
+		slog.Info("dispatch: close a writable document socket the live server processes no longer admit; the provider reconnects",
+			"room", admission.key.room, "schema_version", admission.page.version, "schema_creatable", admission.page.creatable,
+			"fleet_min_schema_version", fleet.minVersion, "fleet_max_schema_creatable", fleet.maxCreatable)
+	}
+	return nil
+}
+
+// schemaRevokedCloseCode closes a document socket whose page the fleet no longer admits writable:
+// 1012, Service Restart. The pinned @hocuspocus/provider 2.15 stops reconnecting only on 4401,
+// 4403 and 1009 (packages/dispatch/node_modules/@hocuspocus/provider/src/HocuspocusProviderWebsocket.ts:483-535,
+// onClose), so it reconnects on this code, and the reconnect is admitted again.
+const schemaRevokedCloseCode = gws.CloseServiceRestart
+
+// schemaRevokedCloseFrame is the close frame admittedConn writes, as a server writes it: final,
+// opcode close, unmasked.
+var schemaRevokedCloseFrame = func() []byte {
+	payload := gws.FormatCloseMessage(schemaRevokedCloseCode, "the server processes changed; reconnect")
+	return append([]byte{0x88, byte(len(payload))}, payload...)
+}()
+
+// revokedDeadline is a read deadline already past: a read on the connection fails at once.
+var revokedDeadline = time.Unix(1, 0)
+
+// admittedWriter hands ygo's upgrade an admittedConn in place of the connection it hijacks.
+type admittedWriter struct {
+	http.ResponseWriter
+	conn *admittedConn
+}
+
+func (w *admittedWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	raw, buffered, err := http.NewResponseController(w.ResponseWriter).Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	w.conn.attach(raw)
+	return w.conn, buffered, nil
+}
+
+func (w *admittedWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// admittedConn is the connection ygo serves a document socket on, which a re-check can close
+// without a change to ygo (revoke). ygo writes on a socket from its writer goroutine alone, and
+// only reading ends its read loop, so revoke sets a read deadline already past, which ends that
+// loop; ygo then stops its writer and closes the connection, and that Close writes the close frame
+// first: nothing else writes by then. Until revoke, every call passes through.
+type admittedConn struct {
+	net.Conn
+	mu      sync.Mutex
+	revoked bool
+	closed  bool
+}
+
+// attach is the connection ygo's upgrade hijacked. A socket revoked before ygo hijacked it reads
+// nothing.
+func (c *admittedConn) attach(raw net.Conn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Conn = raw
+	if c.revoked {
+		_ = raw.SetReadDeadline(revokedDeadline)
+	}
+}
+
+func (c *admittedConn) revoke() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.revoked = true
+	if c.Conn != nil {
+		_ = c.Conn.SetReadDeadline(revokedDeadline)
+	}
+}
+
+// SetReadDeadline keeps a revoked connection's past deadline: ygo clears its handshake deadline
+// once the first message arrives, which would otherwise undo a revoke made before.
+func (c *admittedConn) SetReadDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.revoked {
+		t = revokedDeadline
+	}
+	return c.Conn.SetReadDeadline(t)
+}
+
+func (c *admittedConn) SetDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.revoked {
+		return c.Conn.SetDeadline(t)
+	}
+	if err := c.Conn.SetWriteDeadline(t); err != nil {
+		return err
+	}
+	return c.Conn.SetReadDeadline(revokedDeadline)
+}
+
+// Close writes, on a revoked connection, the close frame with schemaRevokedCloseCode before it
+// closes. ygo closes the connection once its writer has stopped (provider/websocket/server.go,
+// ServeHTTP's teardown after handleDisconnect), so the frame follows the last message ygo wrote.
+func (c *admittedConn) Close() error {
+	c.mu.Lock()
+	frame := c.revoked && !c.closed
+	c.closed = true
+	c.mu.Unlock()
+	if frame {
+		_ = c.Conn.SetWriteDeadline(time.Now().Add(time.Second))
+		_, _ = c.Conn.Write(schemaRevokedCloseFrame)
+	}
+	return c.Conn.Close()
 }
 
 // ActorHeader is the header a document websocket's bearer names its session in, as the JSON of a

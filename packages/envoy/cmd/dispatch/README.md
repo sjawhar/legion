@@ -597,7 +597,18 @@ each surface the two builds share, this is what build N+1 may change while build
   mentions owed. A renderer change (the markdown a tree renders as) and a reference-grammar change
   (what a body's references parse as) are reader-first too: a build whose renderer writes an
   unchanged document differently writes no new version of it, and a rewrite of a body keeps the
-  reference edges to node kinds this build does not know.
+  reference edges to node kinds this build does not know. A page's document socket is writable by
+  the whole fleet's numbers (`internal/dispatch/docs/websocket.go`, `authorize`): each process
+  registers V, the schema version it reads, and R, the highest `since` among the elements it may
+  create, in `server_processes` (migration `0133_server_processes_schema`). A page presents its own
+  V and R as `schema_version` and `schema_creatable`, and is writable on an open issue when its R
+  is at most every live process's V, and its V is at least every live process's R and the highest
+  `since` among the elements the document holds; otherwise it is read-only. A page without
+  `schema_creatable` (a page before INFRA-558) counts its V as its R, and a process before
+  INFRA-558, whose row holds no schema numbers, is left out. Every 15 seconds (the registry's live
+  window) each process checks its open document sockets again and closes with `1012` each writable
+  one the fleet no longer admits; the provider reconnects on that code, and the new socket is
+  admitted again.
 - **NATS.** The settings of the stream `ENVOY_NOTIFICATIONS` and of the delivery durables carry a
   generation in their metadata (`dispatch.stream-generation`, `dispatch.consumer-generation`). A
   change to the stream's `MaxAge`, `Duplicates` or subjects, or to a durable's config, takes a new
@@ -1105,6 +1116,15 @@ process keeps by renewing them (`duty.Hold`): each delivery intake holds one nam
 `expires_at` is always written from the database's `now()`, so a lapse is judged by one clock. It
 is a new table: nothing existing is read, locked or rewritten, the release before it neither reads
 nor writes it, and its census answers `0`.
+
+Migration `0133_server_processes_schema` adds four columns to `server_processes`: `schema_version`
+and `schema_creatable`, the document schema numbers each process reads and creates, which the
+document socket's admission reads (Two builds at once, above); `embedder_identity`, the identity
+of the process's embedder; and `file_store`, whether it stores files in a bucket. Their defaults
+are constants (`0`, `0`, `''` and null), so Postgres rewrites no row, and a row at the defaults is
+a process of the release before it, which names its columns in every statement on the table and so
+neither reads nor writes these. Nothing else is read, locked or rewritten, and its census answers
+`0`.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a

@@ -262,6 +262,23 @@ func creatable(element Element) bool {
 	return !active.uncreatable[element]
 }
 
+// DocumentSince returns D, the highest since among the declared elements doc holds: a client
+// whose schema version is D or more can represent all of doc. An element this build's manifest
+// does not declare counts for nothing, and a nil doc is 0.
+func DocumentSince(doc *Node) int {
+	if doc == nil {
+		return 0
+	}
+	highest := 0
+	eachElement([]*Node{doc}, func(element Element) bool {
+		if versions, declared := element.Versions(); declared {
+			highest = max(highest, versions.Since)
+		}
+		return true
+	})
+	return highest
+}
+
 // eachElement calls yield with each manifest element nodes hold, in document order, until yield
 // returns false: each node, mark and typed block, each attribute a typed block holds a value for,
 // and each enum attribute's value. It reports whether yield never returned false.

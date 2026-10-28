@@ -39,6 +39,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
@@ -380,9 +381,10 @@ func main() {
 	//     the settlement resumption (it arms this process's rooms, and docs/resume.go says it
 	//     runs on an interval precisely because a rolling deploy overlaps two processes), the
 	//     delivery live hub and its listener (migration 0107_events_notify.up.sql states that
-	//     purpose), the event stream relay, the document rooms' timers, and the stale-room
-	//     evictor (it closes the rooms resident in this process that the other process's writes
-	//     left behind the durable head, so it has to run wherever a room is resident).
+	//     purpose), the event stream relay, the document rooms' timers, the stale-room evictor (it
+	//     closes the rooms resident in this process that the other process's writes left behind
+	//     the durable head, so it has to run wherever a room is resident), and the document
+	//     sockets' schema re-check (it closes this process's own sockets).
 	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
 	//     retirePlainRefreshTokens, restoreDecidedWordings and SeedRepoProjects above.
 	leases, err := database.Pool.Leases()
@@ -428,6 +430,11 @@ func main() {
 	// Postgres, and the room this process holds for it closes within that round trip, so its
 	// browsers reconnect and re-sync instead of reading text the store no longer holds.
 	go documentService.RunStaleRoomEviction(ctx)
+	// INFRA-558: every live window each document socket this process serves that is writable is
+	// checked again against the live server processes' schema numbers (registered below), and one
+	// the fleet no longer admits closes with 1012, on which the provider reconnects and is admitted
+	// again (docs.Service.authorize).
+	go documentService.RunSchemaAdmission(ctx)
 	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule.
 	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval, leases)
 	// Issues whose spec's task count is not their latest version's - every row the migration that
@@ -543,10 +550,22 @@ func main() {
 		slog.Error("dispatch: probe the database", "error", err)
 		os.Exit(1)
 	}
+	// INFRA-558: the row also carries the document schema numbers this build reads and creates,
+	// which every process's document socket admission reads; the identity of its embedder, "" with
+	// none, the same string the embedding queue compares stored vectors with; and whether it
+	// stores files in a bucket.
+	embedderIdentity := ""
+	if embedder != nil {
+		embedderIdentity = embedder.Identity()
+	}
 	registration, err := processes.Register(ctx, database.Pool, processes.Instance{
-		Commit:         buildCommit,
-		DashboardBuild: dashboardBuild.Build,
-		SigningKeys:    signingKey.Fingerprints(),
+		Commit:           buildCommit,
+		DashboardBuild:   dashboardBuild.Build,
+		SigningKeys:      signingKey.Fingerprints(),
+		SchemaVersion:    pmdoc.SchemaVersion(),
+		SchemaCreatable:  pmdoc.SchemaCreatable(),
+		EmbedderIdentity: embedderIdentity,
+		FileStore:        fileStore != nil,
 	})
 	if err != nil {
 		slog.Error("dispatch: register this server process", "error", err)
