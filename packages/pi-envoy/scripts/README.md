@@ -263,7 +263,7 @@ has one session read every file of a skill and reports whether each arrived whol
 cd packages/pi-legion/scripts/skill-scenarios
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic ./rig.sh profile head <checkout>
 # or, with no gateway: LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file>
-./rig.sh batch ask-on-message 5 head base   # starts and stops the scratch Dispatch, Postgres, NATS, listener
+./rig.sh batch ask-on-message 5 head base   # starts and stops Postgres, NATS, the listener, and each run's own scratch Dispatch
 ./rig.sh batch tester-proof 5 head base
 ./rig.sh score
 ```
