@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-194",
+  "completed": "2026-10-28T08:55:30Z",
+  "headTested": "83d3003f1d16fef9e0103d02a2d0bbe5fd319d98",
+  "codeHead": "bc359229482030f13b09432a6349237fdb05adda",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's after command on production Dispatch at 2026-10-28T08:50:57Z with a throwaway Postgres of my own and an --expect-model identity rebuilt independently from agent-infra main's dispatch/Pulumi.prod.yaml (byte-equal to the implementer's, compared without printing). Same build (9b92ac14, schema 120, compare ahead of f45fd509), same A1/A2/A3 verdicts, exit 0. All five proof entries carry six non-empty fields."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Deployed build: production carries INFRA-393's merge f45fd5095930372b4150e9289aefe35484883531",
+      "surface": "production Dispatch GET /healthz (the script's build line) and the GitHub compare API",
+      "command": "bun scripts/dispatch/meaning-search-check.ts … (build line); gh api repos/sjawhar/legion/compare/f45fd5095930372b4150e9289aefe35484883531...9b92ac14351a926361c982edb7953e0325fab0de --jq '{status,ahead_by,behind_by}'",
+      "observed": "2026-10-28T08:50:57Z: 'build commit=9b92ac14351a926361c982edb7953e0325fab0de schema=120 ok=true'; compare {status: ahead, ahead_by: 46, behind_by: 0}.",
+      "headSha": "83d3003f1d16fef9e0103d02a2d0bbe5fd319d98",
+      "negativeControl": "DISPATCH_URL=http://127.0.0.1:9 → 'build unavailable: transport', 'result unavailable exit=2' (2026-10-28T08:52:19Z): an unreadable build is never a pass."
+    },
+    {
+      "criterion": "A1: on production, dispatch search --query 'meaning search' answers with no 'Searched by keyword only' line",
+      "surface": "production Dispatch: the dispatch CLI and GET /api/v1/search through the script",
+      "command": "bun scripts/dispatch/meaning-search-check.ts --a1-query 'meaning search' …; dispatch search --query 'meaning search' > $TMPDIR/infra194t/cli.out; grep -c 'Searched by keyword only' $TMPDIR/infra194t/cli.out",
+      "observed": "08:50:57Z 'A1 degraded=no results=20 pass'; 08:51:19Z the CLI exited 0, 49 lines, keyword-only line count 0. Raw GET /api/v1/search for each A2 query also answered degraded=null.",
+      "headSha": "83d3003f1d16fef9e0103d02a2d0bbe5fd319d98",
+      "negativeControl": "A wrong token (DISPATCH_TOKEN_FILE pointing at a 44-character dsp_ dummy) → 'A1 unavailable: auth', exit 2; an empty DISPATCH_TOKEN_FILE → 'unavailable: config', exit 2. The before run (implementer, 2026-10-25T16:50:19Z) gave 'A1 degraded=yes … fail'."
+    },
+    {
+      "criterion": "A2: a query that shares no word with its target issue finds that issue in the top five",
+      "surface": "production GET /api/v1/search?q=<query>&limit=5, lexemes from a throwaway Postgres 16.2 (pgserver 0.1.4, unix socket under $TMPDIR/infra194t/pg)",
+      "command": "bun scripts/dispatch/meaning-search-check.ts --pair 'INFRA-43=<query>' --pair 'INFRA-30=<query>' --pair 'INFRA-32=<query>' --lexeme-database \"$TMPDIR/infra194t/pg/.s.PGSQL.5432\" … (queries as in the PR body table); cross-checks: psql over the same socket computing the shared lexeme count in plain SQL, and curl GET /api/v1/search?limit=5 per query reduced with jq to [kind, owner.kind, owner.key]",
+      "observed": "'A2 INFRA-43 shared=0 position=1 pass', 'A2 INFRA-30 shared=0 position=none fail', 'A2 INFRA-32 shared=0 position=none fail', 'A2 pass (pairs passed 1 of 3)'. Plain SQL: shared 0 for all three, query lexemes equal to plan.md section 4's table. Raw API: INFRA-43's issue row at position 1; for INFRA-32 its own ask sits at position 4 and is correctly not counted; INFRA-194's own plan document (which quotes the queries) is at position 2 for all three.",
+      "headSha": "83d3003f1d16fef9e0103d02a2d0bbe5fd319d98",
+      "negativeControl": "The INFRA-43 query plus one word of its title → 'A2 INFRA-43 shared=1 position=1 fail', exit 1; no --lexeme-database, a missing socket path, or postgres://…@db.internal.example:5999 → 'shared=unchecked position=1 unavailable: lexeme-database', exit 2; INFRA-999999 → 'unavailable: not-found', exit 2."
+    },
+    {
+      "criterion": "A3: every item search covers has a vector from the configured model, none failed",
+      "surface": "production GET /api/v1/search/coverage (INFRA-393)",
+      "command": "bun scripts/dispatch/meaning-search-check.ts --coverage --expect-model \"$(cat $TMPDIR/infra194t/expect-model)\" --coverage-wait 600 (identity built from theorem-labs/agent-infra main dispatch/Pulumi.prod.yaml as azure:<endpoint host>/<deployment>, never printed)",
+      "observed": "'A3 identity=match place=azure items=42965 current=42965 lacking=0 oldest_lacking_s=none failed=0 reads=2 pass'; kinds issue 2599, document 6266, comment 29502, ask 1969, message 2629, each lacking=0 failed=0. The first read held a write in flight; the second passed. Two concurrent runs at 08:53:32Z each passed on reads=1 (items 42967).",
+      "headSha": "83d3003f1d16fef9e0103d02a2d0bbe5fd319d98",
+      "negativeControl": "--expect-model 'azure:wrong.example/embed-v-4-0' → 'A3 identity=mismatch place=azure … reads=1 fail', 'result fail exit=1' (08:52:09Z); a wrong token → 'A3 unavailable: auth reads=1', exit 2."
+    },
+    {
+      "criterion": "A4: tests show fallback with notice, re-embed once the service answers, another model's vector never compared and re-embedded, a 32,000-character comment embedded whole",
+      "surface": "INFRA-393's Go tests on main at merge f45fd5095930372b4150e9289aefe35484883531, against a throwaway Postgres 16.2 with pgvector, and the merge commit's CI",
+      "command": "cd packages/envoy (tree of f45fd509 extracted under $TMPDIR/infra194t/f45) && go test -list \"$R\" ./internal/dispatch/api/ ./internal/dispatch/embedqueue/ ./internal/dispatch/embed/ && DISPATCH_TEST_DATABASE_URL='postgresql://postgres:@/postgres?host=$TMPDIR/infra194t/pg' go test -count=1 -v -run \"$R\" (same packages); envoy-go job 121704383775 of run 40351447890",
+      "observed": "All nine PASS, 0 SKIP. Clause map (paths under packages/envoy/internal/dispatch): fallback says so — TestSearchAnswersKeywordOnlyWhenTheEmbedderFails api/search_meaning_test.go:246 (Degraded == SearchDegradedEmbedderUnavailable), :249 (only the keyword hit); TestSearchAndWritesRideOutAnAzureOutage :500/:503 with the real Azure client against a 500 stand-in. Embedded once the service answers — same test :518 (not embedded, not dead during the outage), :535 (current under client.Identity()), :540 (coverage current), :545 (not degraded), :548 (meaning hit); TestProcessBatchRetriesWithBackoffOnEmbedFailure embedqueue/queue_test.go:193/:196/:209. Another model never compared — TestSearchNeverRanksAVectorOfAnotherIdentity api/search_meaning_test.go:376 (closer foreign vector excluded), :382 (ranks first once relabelled); embedded again — TestCoverDropsAnotherIdentitysVectors embedqueue/coverage_test.go:421/:439, TestTheNextPassDropsAVectorTheOldConfigurationCommittedAfterThePass :732. 32,000 characters whole — TestTheLongestCommentAndMessageReachTheEmbedderWhole api/search_meaning_test.go:430/:433/:442; multi-byte 32,000 runes at the client level in TestAzureEmbedSendsAMaxInputCharsTextWhole embed/azure_test.go:329 and TestBedrockEmbedSendsAMaxInputCharsTextWhole embed/bedrock_test.go:204. envoy-go job conclusion success (https://github.com/sjawhar/legion/actions/runs/40351447890/job/121704383775).",
+      "headSha": "f45fd5095930372b4150e9289aefe35484883531",
+      "negativeControl": "With DISPATCH_TEST_DATABASE_URL unset, TestSearchAndWritesRideOutAnAzureOutage printed '--- SKIP' ('DISPATCH_TEST_DATABASE_URL must be set to run Postgres-backed Dispatch tests'), so the PASS lines above ran against Postgres."
+    },
+    {
+      "criterion": "Output hygiene: no private host, name, URL, token, title, query or identity in the script's output",
+      "surface": "the captured stdout and stderr of every production and refusal run",
+      "command": ".github/scripts/check-private-names.sh $TMPDIR/infra194t/after.out $TMPDIR/infra194t/neg-*.out (23 files), then conc1.out conc2.out",
+      "observed": "Exit 0 on all 25 script outputs, including the wrong-token run, the postgres URL naming db.internal.example with a password, and eleven usage refusals (each a fixed 'usage:' line that never repeats the argument). The PR body passed the same scan before it was posted.",
+      "headSha": "83d3003f1d16fef9e0103d02a2d0bbe5fd319d98",
+      "negativeControl": "A control file holding the production tailnet host → exit 1. The literal dispatch CLI output (deep links) also fails the scan, which is why the script never prints a result link."
+    }
+  ],
+  "ci": "Read on GitHub, not re-run: code head bc359229 lint, typecheck, test, pr-title success; head 83d3003f lint, typecheck, pr-title success and test in progress (run 40658741435) at 2026-10-28T08:54Z.",
+  "observations": [
+    "A2 passes on one pair of three, as plan.md section 4 allows; INFRA-30 and INFRA-32 rank outside the top five. INFRA-194's own plan document, which quotes the three queries, now ranks second for each by keywords, so the pre-registered queries no longer 'match nothing anywhere'; this affects only a re-run's before-state, not the pass recorded here.",
+    "The throwaway Postgres (pid 408) was stopped by its exact PID after the runs."
+  ]
+}
