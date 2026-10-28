@@ -46,25 +46,6 @@
   machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`;
   the shared hub's listener does not), where the description said such a session received nothing
   (INFRA-122).
-- `dispatch doc-read` prints each open anchored comment in full after the document, where it
-  printed only ids: after `Document token:`, `Open anchored asks: ask a, ask b` (asks only, when
-  any), then `Open anchored comments:` with, for each open comment anchored on the document, its
-  `> quote` (and `Position:` when the record has one), `comment <id> · <author> · <created_at>`
-  (with ` · edited <time>` once edited), its full body, `Suggests: <replacement>` for a
-  suggestion, and every reply in its thread oldest first as `reply <id> · <author> · <time>` with
-  its full body. A resolved comment is not printed. With `--version N` the heading is
-  `Open anchored comments (on the live document):`. The document's markdown, `--blocks` and
-  uploaded files are unchanged. An issue document's comments are read from the issue's whole
-  comment list, since a reply carries no anchor and the document filter never lists it
-  (INFRA-148).
-- **Breaking:** `sessionStateRoot(env)` and `sessionDirectory(env, sessionId)` move from
-  `@legion/envoy-client/dispatch-session-state` to the new leaf module
-  `@legion/envoy-client/dispatch-session-directory`, which also exports `writeAtomically(path,
-  text)`: an owner-only write through a temporary file and `rename` that removes its temporary
-  file when it fails. `dispatch-session-state` and `session-answers` both write through it
-  (INFRA-148).
-- **Breaking:** `DispatchClient.getComments(issue)` loses its `artifact` argument, which no
-  caller passed (INFRA-148).
 
 ### Added
 
@@ -170,45 +151,6 @@
   decide only what text the server indexes, so a document of any name is read by its own
   reference, and a block whose id is past 256 bytes, no graph node, reads as
   `No block <id> in <document>.`
-- `session-answers.ts` (`@legion/envoy-client/session-answers`), the one module pi-envoy,
-  claude-envoy and the CLI use for what people wrote to a session in the last 72 hours
-  (INFRA-148). `renderSessionAnswers(items, {now, total?, cached?})` renders the
-  per-request message: the marker line `[Dispatch: what people wrote to this session in the last
-  72 hours, newest first, word for word. Reference, not a new request.]` (a cached list adds
-  `As read at <time>; this read failed: <reason>.` on the next line, from `cached: {readAt,
-  reason}`), then each item's time,
-  person, relation, `dispatch://` reference and owner, an ask's question cut to 200 characters,
-  `Selected:` on an answer and the words in full, newest first as a strict prefix under 8,000
-  characters (at most 7,999 UTF-16 units, the whole message), an item over the cap left out whole, and the line
-  ``<N> older items left out to stay under 8,000 characters: run `dispatch answers` to read every
-  one in full.`` when any is left out; items past 72 hours at `now` are dropped at render.
-  `readSessionAnswers({session, dispatch, env, …})` reads it for one model request
-  and never throws: one read in flight per session and Dispatch URL for the whole process (a
-  `globalThis` map, `Symbol.for("legion.pi-envoy.session-answers.v2")`), an 800 ms wait, a read
-  already waited out is not waited on again, a late answer fills the cache, the cache kept in
-  memory per session and Dispatch URL and in `sessions/<id>/answers.json` under
-  `sessionDirectory(env, session)` (written atomically, with the `dispatch_url` it was read from;
-  a session id that is no plain path segment keeps it in memory only), a list read from one
-  Dispatch never carried for another, the failure line ``[Dispatch: people's answers from the last
-  72 hours could not be read (<reason>); run `dispatch answers`.]`` when no cached list renders
-  (none read, an empty list, or every item past 72 hours), and a Dispatch that answers 404 (`this
-  Dispatch build has no answers route`) not asked again for 5 minutes. With Dispatch off with an
-  error, which names no URL, only a list read from the URL the caller names as `dispatchUrl` (the
-  configured one, `sessionDispatchUrl`) stands in, and with none named the failure line does: a list
-  another Dispatch answered is never carried.
-  `sessionAnswersSettled(session)` lets a short-lived host wait for a
-  late read to write the disk cache. `DispatchClient.sessionAnswers(session, {since?, maxChars?,
-  signal?})` reads `GET /api/v1/agents/{session_id}/answers`.
-- `dispatch answers` prints every item people wrote to the session in the last 72 hours, newest
-  first, in the same item format with no cap; against a Dispatch older than the route it prints
-  `This Dispatch (<url>) has no answers route yet: its build predates INFRA-148.` and exits 1.
-- `fileValue`, `fileBearer`, `dispatchSettings` and `sessionDispatchSettings` take
-  `commands: "kept"`, which never runs a `!` token command: it takes the outcome another call
-  already kept in the process, and with none Dispatch reads as off with an error saying the
-  command has not run. Every existing caller keeps running the command as before.
-  `dispatchUrl(env, config)` and `sessionDispatchUrl(file, env, { cwd })` return the URL alone,
-  resolved as `dispatchSettings` resolves it but without reading the token, so no `!` command runs:
-  undefined when Dispatch is off before its token is read.
 - `dispatch issues --all` reads the whole filtered listing in one request. The client gains
   `listAllIssues`, which sends neither `limit` nor `offset` and takes the bare array Dispatch
   answers for that request, refusing any other shape by name: a page back from a request carrying

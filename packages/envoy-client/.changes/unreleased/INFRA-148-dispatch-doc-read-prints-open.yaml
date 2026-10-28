@@ -1,0 +1,13 @@
+kind: Changed
+body: |-
+  `dispatch doc-read` prints each open anchored comment in full after the document, where it
+  printed only ids: after `Document token:`, `Open anchored asks: ask a, ask b` (asks only, when
+  any), then `Open anchored comments:` with, for each open comment anchored on the document, its
+  `> quote` (and `Position:` when the record has one), `comment <id> · <author> · <created_at>`
+  (with ` · edited <time>` once edited), its full body, `Suggests: <replacement>` for a
+  suggestion, and every reply in its thread oldest first as `reply <id> · <author> · <time>` with
+  its full body. A resolved comment is not printed. With `--version N` the heading is
+  `Open anchored comments (on the live document):`. The document's markdown, `--blocks` and
+  uploaded files are unchanged. An issue document's comments are read from the issue's whole
+  comment list, since a reply carries no anchor and the document filter never lists it
+  (INFRA-148).

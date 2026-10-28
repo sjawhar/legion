@@ -1,0 +1,4 @@
+kind: Changed
+body: |-
+  **Breaking:** `DispatchClient.getComments(issue)` loses its `artifact` argument, which no
+  caller passed (INFRA-148).

@@ -1,0 +1,13 @@
+kind: Added
+body: |-
+  A person's reply in a comment thread on a document now also reaches every session the document
+  credits (its creator and every session a version lists), on its own
+  `notifications.agent.<session_id>` topic, after the thread's root author and the parent's
+  author, as a new comment on the document does, so the session that wrote a document lists such a
+  reply in `GET /api/v1/agents/{session_id}/answers` even when another person started the thread
+  (INFRA-148). A reply carries no anchor, so the outbox finds its document from its event (a
+  project document's) or else from its thread root's anchor or artifact. A reply in an ask's
+  thread still reaches the ask's followers alone, and a reply on an issue's conversation, which
+  names no document, no document author. A session such a reply @-mentions hears it once, from
+  the mention: outside an ask's thread a reply's `suppressed_authors` now names every session a
+  mention resolved to, as a new comment's does.

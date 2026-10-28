@@ -46,33 +46,6 @@
 - Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
   and `parent_version`, and `dispatch read` prints them on a `Node:` line; `dist/` was
   regenerated.
-- A third session hook, `dist/session-hook.js answers`, on every `SessionStart` (startup, resume,
-  clear, compact, fork) and every `SubagentStart`, puts what people wrote to the session in the
-  last 72 hours into the model's context (dispatch://INFRA-148): answers to its asks, replies to
-  its comments, comments on documents it wrote and messages to it, read from Dispatch's
-  `GET /api/v1/agents/{session_id}/answers` for the hook input's `session_id`, which at
-  `SubagentStart` is the parent's. It is the list every Oh My Pi model request carries, under
-  8,000 characters, newest first, with a line naming `dispatch answers` when older items are left
-  out. The hook prints within 800 ms of its start, or 150 ms after its code begins when Bun's
-  start-up alone took longer, so a slow start-up never costs a list Dispatch answers at once; it
-  exits 50 ms after that, always with status 0: when Dispatch has not answered it carries the last
-  list read, kept in `answers.json` in the session's Dispatch state directory, with when it was
-  read and why this read failed, or, when no list read before has an item to show, one line saying
-  the list could not be read and why. A `!` command in envoy.json runs in a process the hook starts
-  detached, one per session at a time, and waits on until that same deadline; a slower command
-  still runs to its end or its 10 s timeout in that process, which removes its output file and
-  reads the list with its token for the next hook. While it runs, only a list read from the
-  Dispatch URL envoy.json names now stands in, never one another Dispatch answered. Against a
-  Dispatch older than this release, the line says that Dispatch has no answers route.
-- `tests/answers-claude.test.ts` runs the real Claude Code, the release the new repository-root
-  `.claude-code-pin` pins (2.1.311), against a stand-in model and Dispatch, and shows the list on
-  the Messages request after startup, `--resume`, `/compact` and a subagent's start. CI's
-  claude-envoy job installs that release (`.github/actions/install-claude-code`), and the test
-  refuses to skip there.
-- The `dispatch` command (`dist/dispatch.js`) takes `dispatch answers`, which prints every item of
-  that list in full, and `dispatch doc-read` prints each open anchored comment's author, time and
-  full text, with its replies, under the passage it is anchored to, since `dist/` was rebuilt on
-  this release's `@legion/envoy-client` and `@legion/contracts`.
 - The `dispatch` command (`dist/dispatch.js`) takes `dispatch issues --all`, which reads the whole
   filtered issue listing in one request rather than a page, for a caller that must not miss or
   repeat a row while the list changes under it. `--all` with `--limit` or `--offset` is a usage
