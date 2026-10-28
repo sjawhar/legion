@@ -94,6 +94,10 @@ func answerTransition(actor model.Actor, selected []string, text *string, option
 					return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "answer requires a selected option or free-text answer")
 				}
 			}
+			// An answer that chose no option stores an empty list, never null.
+			if selected == nil {
+				selected = []string{}
+			}
 			answer := model.AskAnswer{User: actor.ID, Selected: selected, Text: text, At: time.Now().UTC()}
 			if options.WriteBlock != nil {
 				if err := options.WriteBlock(ctx, tx, ask, answer); err != nil {

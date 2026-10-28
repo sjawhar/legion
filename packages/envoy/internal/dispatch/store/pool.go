@@ -186,14 +186,27 @@ func NewPool(pool *pgxpool.Pool) *Pool {
 // median. The ceiling is picked here rather than derived from the task's CPU allotment or read
 // out of the DSN another repository's URL builder writes.
 //
-// It is 48 of one connection budget of 84 that every pool of a process shares, partitioned rather
-// than grown: requests 48, background 6 (Background), live 4 (Live), settlements 4 (Settlements),
-// rooms 4, health 1, listen 1 with the three connections it hands over, leases leasePoolSize (12)
-// and outbox 1. A write takes a connection per statement one after another, and a read pins one
+// It is 48 of one connection budget of 83 (ConnectionsPerProcess) that every pool of a process
+// shares, partitioned rather than grown: requests 48, background 6 (Background), live 4 (Live),
+// settlements 4 (Settlements), rooms 4, health 1, the three permanent listeners (the listener
+// pool's one dial is one of them redialling), leases leasePoolSize (12) and outbox 1. The total is
+// the 83 the process opened before the partition: the request pool gave up 16, which background,
+// live, settlements and the leases' two spare connections took. A write takes a connection per
+// statement one after another, and a read pins one
 // for its whole length (PinConnection), so under load the API holds every connection of this pool;
 // the background loops, the live-update readers and the settlements wait on pools of their own, so
 // neither side can starve the other, and an acquire here waits at most requestAcquireBound before
 // it is refused with ErrPoolBusy rather than queueing without end.
+//
+// The database bounds the budget from above. Dispatch's database is the gcp:Dispatch component's
+// Cloud SQL Postgres instance, whose default max_connections follows its tier's memory
+// (https://cloud.google.com/sql/docs/postgres/flags, max_connections), and every server pod opens
+// up to ConnectionsPerProcess, the budget. During a roll, every pod that holds connections (the
+// replicas, the surge pod and pods still terminating, for up to their grace period) times that
+// sum must fit in max_connections less PostgreSQL's 3 superuser-reserved slots, so raising a pool
+// or the pod count is checked against it: read SHOW max_connections on the instance before
+// raising either. A new pool, or a new permanent Listener caller, goes into
+// ConnectionsPerProcess with it.
 const sharedPoolSize = 48
 
 // roomsPoolSize bounds the connections document loads use. Loading takes no lock and always
@@ -335,6 +348,17 @@ func (p *Pool) Leases() (*pgxpool.Pool, error) {
 // is one goroutine that runs one statement at a time and closes each cursor before its next
 // statement, so one connection is every connection it can use.
 const outboxPoolSize = 1
+
+// permanentListeners is how many connections the listener pool dials and hands off for the life
+// of the process: the delivery hub, the event stream relay and the stale-room evictor (Listener).
+const permanentListeners = 3
+
+// ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres, the
+// budget of 83 sharedPoolSize describes: every pool's size, and one connection per permanent
+// listener, which the listener pool dials and hands off rather than holds (its one dial in flight
+// is a permanent listener redialling, so it is not counted twice).
+const ConnectionsPerProcess = sharedPoolSize + backgroundPoolSize + livePoolSize + settlementsPoolSize +
+	roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + permanentListeners
 
 // Outbox is the pool the events outbox claims, reads and records events through, and reads the
 // followers and authors a publish routes to. Under load the API's requests queue for the shared

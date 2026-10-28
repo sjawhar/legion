@@ -1,0 +1,9 @@
+kind: Changed
+body: |-
+  Document settlements run at most four at once, however they start, each on the settlements
+  pool, and one a timer or the last browser's leaving starts has 60 seconds; one that runs out of
+  time or finds no connection free rolls back, keeps its document owed and is resumed later
+  without counting as a failure. A settlement renders the document before it locks the
+  document's owner row, so it no longer holds that row, and every writer of the issue queued
+  behind it, across a render. A document whose ask blocks need repairs gets them in one commit and
+  its version in the next (INFRA-592).

@@ -1,0 +1,18 @@
+kind: Changed
+body: |-
+  Past what it can serve, Dispatch refuses a request at once rather than queueing it without end.
+  Every `/api/v1` route but the two event streams and the test hooks is admitted first: reads
+  (GET, HEAD) up to 28 at once and writes up to 8, of the request pool's 48 connections, the
+  delivery timeline, measures and pipeline counting two each (they now run at most two reads at
+  once, where the timeline ran up to seven). A request that finds no room waits at most 75 ms in a
+  queue as long as its class's limit, and is otherwise answered `429 OVERLOADED` with
+  `Retry-After: 1` and `Cache-Control: no-store`, after its body is drained: nothing of it ran, so
+  any method may be sent again. A read has a deadline of 20 seconds, 5 minutes for the four file
+  version downloads, and past it is `503 REQUEST_TIMEOUT`; a write has none and runs to completion
+  once admitted, and every transaction commits apart from its caller's cancellation, within 10
+  seconds. A request whose handler waited its pool's bound for a database connection is `503
+  DATABASE_BUSY`; both 503s carry `Retry-After: 1` and `Cache-Control: no-store`. A request whose
+  client went away is answered nothing and logged at DEBUG, where it was a `500` and an ERROR line,
+  and none of these answers is logged above DEBUG (`cmd/dispatch/README.md`, "Load errors"). An
+  admitted read of weight one runs on one connection for its whole length, where an issue read
+  took twelve one after another (INFRA-592).

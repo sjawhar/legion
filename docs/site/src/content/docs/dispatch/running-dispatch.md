@@ -279,10 +279,10 @@ one. Three things have to be true first, and Dispatch can check none of them for
 A second server also costs connections, and Postgres counts them per server. Each server opens up
 to 48 connections for requests, 6 for its background work, 4 for the live event stream and
 delivery updates, 4 for settling documents, 4 for loading documents, up to 12 for the periodic
-work it runs once across the servers, one for the health check, one for the events outbox, and
-one it opens its notification listeners through, and it holds three more open for as long as it
-runs: one each for the three things that wait on Postgres notifications, which are delivery, the
-live event stream, and closing a document session another server has written to. That is 84
+work it runs once across the servers, one for the health check and one for the events outbox,
+and it holds three more open for as long as it runs, each dialled through a pool of one: one each
+for the three things that wait on Postgres notifications, which are delivery, the live event
+stream, and closing a document session another server has written to. That is 83
 connections for one server at its ceiling, and twice that for two, past a default Postgres's limit
 of 100. Each connection names what it is for in `application_name` (`dispatch-requests`,
 `dispatch-background` and so on), so `pg_stat_activity` shows which uses them. Check the

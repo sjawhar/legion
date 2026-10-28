@@ -1,0 +1,9 @@
+kind: Changed
+body: |-
+  Every write to a live document waits for that document's writer gate before its transaction
+  opens, one write per document at a time, holding no database connection and giving its
+  admission back while it waits: an edit, conditional or not, an upload, a rebuild, an anchored
+  comment or ask, a reply that writes into its document, a comment edited, resolved, reopened,
+  accepted or rejected, an ask answered, resolved or edited. `429 EDIT_QUEUE_FULL`, which only a
+  conditional edit could get, now answers any such write that finds 32 already waiting for its
+  document, and carries `Retry-After: 1` (INFRA-592).
