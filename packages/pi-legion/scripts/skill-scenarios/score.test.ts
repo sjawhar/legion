@@ -2434,7 +2434,9 @@ test("checked: a spec write made from Python as a list-literal dispatch call is 
   const row = rowOf("spec-writing-head-91");
   expect(row).toContain(" writes=2 ");
   expect(row).toContain("unchecked writes: 1 of 2");
-  expect(row).toContain("dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file ops.json");
+  expect(row).toContain(
+    "dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file ops.json"
+  );
 });
 
 test("refusals: the CLI's ledger holds each refusal, the ones a call's output hides included", () => {

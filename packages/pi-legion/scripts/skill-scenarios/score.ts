@@ -1028,7 +1028,9 @@ function withPythonDispatch(code: string): string {
       const item = element.trim();
       if (item === "") continue;
       const literal = /^(["'])(.*)\1$/s.exec(item);
-      const word = literal ? (literal[2] ?? "").replace(/[\n;&|\x60)]/g, " ").replace(/'/g, "") : "__EXPR__";
+      const word = literal
+        ? (literal[2] ?? "").replace(/[\n;&|\x60)]/g, " ").replace(/'/g, "")
+        : "__EXPR__";
       words.push(/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word}'`);
     }
     const [command, ...rest] = words;
@@ -2402,11 +2404,33 @@ function unscored(
 
 /** Where a run's tools may name an absolute path without reaching outside its sandbox, besides the
  * work directory and the label's checkout. */
-const SYSTEM_DIRS = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/tmp", "/proc", "/sys", "/dev", "/var", "/opt", "/run"];
+const SYSTEM_DIRS = [
+  "/usr",
+  "/bin",
+  "/sbin",
+  "/lib",
+  "/lib64",
+  "/etc",
+  "/tmp",
+  "/proc",
+  "/sys",
+  "/dev",
+  "/var",
+  "/opt",
+  "/run",
+];
 /** An absolute path in text: a `/` that starts no URL, ref (`dispatch://…/spec`) or relative path. */
 const ABSOLUTE_PATH = /(?<![\w:/.~-])\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._@+-]+)*/g;
 /** Argument fields that carry the text a write puts in a file: a path inside that text is no access. */
-const FILE_CONTENT = new Set(["content", "input", "ops", "body", "text", "new_string", "old_string"]);
+const FILE_CONTENT = new Set([
+  "content",
+  "input",
+  "ops",
+  "body",
+  "text",
+  "new_string",
+  "old_string",
+]);
 function argumentStrings(value: unknown): string[] {
   if (typeof value === "string") return [value];
   if (Array.isArray(value)) return value.flatMap(argumentStrings);
@@ -2418,7 +2442,10 @@ function argumentStrings(value: unknown): string[] {
 /** The first absolute path a tool call of the run, its own or a subagent's (each transcript under
  * sessions/), names outside `allowed` and SYSTEM_DIRS, whose top-level directory exists on this
  * machine (so a route such as `/v1/messages` in a command is no path). */
-function outsidePath(runDir: string, allowed: string[]): { tool: string; path: string } | undefined {
+function outsidePath(
+  runDir: string,
+  allowed: string[]
+): { tool: string; path: string } | undefined {
   const inside = (target: string) =>
     [...allowed, ...SYSTEM_DIRS].some((dir) => target === dir || target.startsWith(`${dir}/`));
   const transcripts = (dir: string): string[] =>
