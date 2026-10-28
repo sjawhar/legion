@@ -93,6 +93,10 @@ type testServerOptions struct {
 	lifetime context.Context
 	// streamHeartbeat replaces the event streams' and the sockets' fifteen-second heartbeat.
 	streamHeartbeat time.Duration
+	// tracer is installed on every connection of the server's pool (storetest.Traced), so a test
+	// sees each statement the server runs; nil leaves the pool untraced. The xid window tests
+	// (xid_window_test.go) pass a storetest.XidTracer.
+	tracer pgx.QueryTracer
 }
 
 // headerIdentity is the test header identity that records each named person in the database.
@@ -157,6 +161,9 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		lifetime = t.Context()
 	}
 	database := storetest.Open(t)
+	if options.tracer != nil {
+		database = storetest.Traced(t, database, options.tracer)
+	}
 	broker := events.NewBroker()
 	var documentPersistence docs.VersionedStore
 	if options.persistence != nil {
