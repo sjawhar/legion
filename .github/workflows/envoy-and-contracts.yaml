@@ -1639,9 +1639,19 @@ jobs:
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: setup_go
         with:
           go-version-file: packages/envoy/go.mod
-          cache-dependency-path: packages/envoy/go.sum
+          cache: false
+      # Restored on every run, saved at the end of the job only on main (the pi-legion job says why).
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: go_cache
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-${{ hashFiles('packages/envoy/go.sum') }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-{1}-', runner.os, steps.setup_go.outputs.go-version) || '' }}
       - name: Build contracts for the stall suites
         run: bun run build
         working-directory: packages/contracts
@@ -1654,3 +1664,10 @@ jobs:
       - name: Stall test of claude-envoy
         run: bun test tests/envoy-channel-stall.test.ts
         working-directory: packages/claude-envoy
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.go_cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.go_cache.outputs.cache-primary-key }}
