@@ -357,6 +357,7 @@ func TestProbeImagePassesTheRemainingAttemptBudgetToItsCommand(t *testing.T) {
 	g.succeeds(okLine(3) + "\n")
 	probe := probeOptions(t)
 	probe.Budget = 300 * time.Second
+	probe.startupBudget = 0
 	probe.commandReserve = 0
 
 	if _, err := g.r.ProbeImage(g.ctx, probe); err != nil {
@@ -379,6 +380,9 @@ func TestProbeImagePassesTheRemainingAttemptBudgetToItsCommand(t *testing.T) {
 	if got, want := command[flag+1], (240 * time.Second).String(); got != want {
 		t.Fatalf("probe budget = %q, want the 300s attempt budget less the 60s reserve %q", got, want)
 	}
+	if got, want := created.Spec.ShutdownTime.Time, now.Add(probeStartupBudget+probe.Budget+apiTimeout).UTC().Truncate(time.Second); !got.Equal(want) {
+		t.Fatalf("probe shutdown time = %s, want startup budget plus command budget and API cleanup %s", got, want)
+	}
 }
 
 func TestProbeCommandBudgetKeepsTheFullReserveBelowFourMinutes(t *testing.T) {
@@ -400,6 +404,26 @@ func TestProbeImageRefusesABudgetWithoutCommandTime(t *testing.T) {
 	if got := g.creates.Load(); got != 0 {
 		t.Fatalf("created %d probe sandboxes, want a budget refusal before a pod", got)
 	}
+}
+
+func TestProbeImageRefusesAProbePodThatDoesNotStart(t *testing.T) {
+	g := newProbeRig(t, nil).waits("ErrImagePull")
+	probe := probeOptions(t)
+	probe.Budget = 100 * time.Millisecond
+	probe.startupBudget = 100 * time.Millisecond
+	probe.Retry.Attempts = 1
+
+	err := g.probe(probe)
+	wantContains(t, err, "did not start within 100ms", "phase Pending", "container probe waiting: ErrImagePull")
+}
+
+func TestProbeImageCollectsAProbeDeadlineAfterStartup(t *testing.T) {
+	g := newProbeRig(t, nil).fails("worker TLS probe failed: curl cannot verify refusal of the AAA chain: unavailable (probe deadline)")
+	probe := probeOptions(t)
+	probe.Retry.Attempts = 1
+
+	err := g.probe(probe)
+	wantContains(t, err, "curl cannot verify refusal of the AAA chain", "probe deadline")
 }
 
 // A passing probe reports what its OK line said of the image: the model-fallback mark, as the

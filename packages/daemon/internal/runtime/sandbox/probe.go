@@ -355,7 +355,7 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 		now := r.now()
 		commandProbe := p
 		commandProbe.CommandBudget = p.commandBudget()
-		return encodeProbe(r.probeManifest(name, commandProbe, now.Add(p.Budget+apiTimeout)))
+		return encodeProbe(r.probeManifest(name, commandProbe, now.Add(p.startupBudgetDuration()+p.Budget+apiTimeout)))
 	}
 	uid, outcome, created := r.createProbe(ctx, name, digest, manifest, p.Budget)
 	if !created {
