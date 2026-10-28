@@ -10,7 +10,6 @@ date: 2026-10-28
 status: active
 module: packages/envoy/loadtest
 related_issues:
-  - "INFRA-589"
   - "sjawhar/legion#2369"
 ---
 

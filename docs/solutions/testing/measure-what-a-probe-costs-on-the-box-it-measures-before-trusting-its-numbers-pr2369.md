@@ -11,7 +11,6 @@ date: 2026-10-28
 status: active
 module: packages/envoy/loadtest
 related_issues:
-  - "INFRA-589"
   - "sjawhar/legion#2369"
 ---
 
@@ -35,7 +34,7 @@ the claim is about (for example the committed rate).
 
 ## Evidence
 
-In sjawhar/legion#2369, INFRA-591's ungranted-lock sampler was ported into the load test with a
+In sjawhar/legion#2369, the commit-order lock fix's ungranted-lock sampler was ported into the load test with a
 20 ms interval. At 1x, with about 45 waiters, each read took 75-180 ms of one Postgres backend.
 1x committed 0.29-0.82 events/s with the sampler, against 1.63-1.81 events/s without it, on the
 same build and seed (2026-10-27). `a7b5f467` set the interval to one second. `44664fc1` and
