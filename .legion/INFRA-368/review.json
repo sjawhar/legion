@@ -2,27 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-368",
-  "completed": "2026-10-28T15:46:51Z",
-  "round": 2,
+  "completed": "2026-10-28T16:10:30Z",
+  "round": 3,
   "decision": "changes_requested",
-  "reviewedHead": "e9c483b31574edd96bb8e81a19a1cc1e7321eb2d",
-  "codeHead": "1a19ad77d1d8e02be3bad57c7d7750332565270c",
+  "reviewedHead": "003852cff77a42ecbe39f1115ff60ad9cfefde90",
+  "codeHead": "32c9b9ac14e5",
   "critical": 0,
-  "important": 2,
+  "important": 1,
   "minor": 0,
-  "round1Findings": "All six round-1 findings were fixed (7cfb0dc9, 635552d3) and checked at 1a19ad77. I replied on each of the five threads; the implementer had already resolved them. The document-page `?comment=` rule is now the same in Go, web and envoy-client, and a project-document comment block links to `?comment=<id>` with no fragment (census (b) names this). Only the reference read's node carries an item block's text. IndexedBlock and itemBlocksKnown are gone, and valueOffset is one line.",
+  "round2Findings": "Both round-2 findings are fixed. 32c9b9ac makes README.md:1335 and :1361 say 0136-0138 and 0137/0138, and the body's E2E (implementer) line says 0001-0138. The census now uses narrowed searches. I ran each of a1, a2, b1, b2, c, d1 and d2 again at the head with its X filter, and each gives exactly the rows listed under it. The old census's suggestion_outcomes.go row is out of scope under the narrowed search: that file reads the refs table, and this change keeps writing the item's own rows there.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/cmd/dispatch/README.md:1335",
-      "description": "The forward merge 1a19ad77 renumbered the migrations to 0136-0138 after main's 0135_server_processes. Lines 1335 ('migrations `0135`-`0137`') and 1361 ('triggers of `0136` and `0137`') still give the old numbers, so they point an operator at main's server_processes migration. Lines 1073-1102 of the same README already give 0136-0138. The body's E2E (implementer) line also still says 'migrations 0001-0137'."
-    },
-    {
-      "severity": "important",
-      "file": "PR body: ## Contract change census",
-      "description": "I ran the census's own searches again at the head. Many hits are not listed: (a) web inbox-fixture.ts, margin/ThreadList.tsx, refs/RefLink.tsx; refs/graph.go, item_blocks.go, blocks.go, rebuild.go, docs/block_index.go and the migrations that match from_kind. (b) contracts dispatch-block-ref.ts, dispatch-tools.ts, dispatch-api.ts, dispatch-text-references.ts; web send-request.ts, ConversationTab.tsx, replies/replies-fixture.ts, margin/useMarginSheet.ts, refs/ReferencedBy.tsx, refs/target-id.ts, issue/useIssueDetail.ts, api/client.ts; envoy-client transport.ts, dispatch-http.ts; the two text testdata JSON files. (c) model.go, envoy CHANGELOG.md, dispatch/AGENTS.md, margin/margin-fixture.tsx, and two docs/solutions files. (d) most of the server and web hits are listed only by package. Each hit needs its own row with a disposition. Where a search matches noise (`node.parentElement`, `/v1/messages/send`), the search can be narrowed instead."
+      "file": "packages/claude-envoy/dist/",
+      "description": "The head changes dist/dispatch.js, dist/envoy-channel.js and dist/session-hook.js (+405/-105 against the merge-base). Main's #2423 (78d5f6b6, packages/claude-envoy/AGENTS.md) says a pull request never commits dist/ or legion/: main's Rebuild Claude Envoy plugin workflow builds them after each merge, and 'A reviewer asks for any change under the two directories to be dropped.' The architect asked the reviewer to approve only a head that changes nothing under those two directories. Fix: `jj -R \"$LEGION_WORKSPACE\" restore --from main@origin packages/claude-envoy/dist packages/claude-envoy/legion`. Merge main only for a conflict or a red check that main has fixed, as the architect directed. The production plan also has to name the rebuild run after the merge and its commit, and run `bun run check-dist` there."
     }
   ],
-  "ci": "Required checks are lint, typecheck, test and pr-title. The CI head is 1a19ad77, and every required check there was queued when this review was written. The compare 1a19ad77...e9c483b3 is handoffs only (2 files). The request for changes does not wait on CI. The architect reports that three failures in main's CI come from main itself: recipients-claim e2e, TestDispatchConnectionsPerPodIsTheServers, and mermaid.e2e.ts:194.",
-  "thermonuclear": "deep-review: `Verdict: APPROVE at e9c483b3` (3 Minor: stale lines in the body, the README migration numbers, and the envoy-client commentBlocks/messageBlocks client methods that only their own test calls. The plan names those methods, so they are not a defect). code-quality: `Verdict: CHANGES at e9c483b3` (structural: commentEventPayload hydrates in place, a pin regexp in api/references.go, ItemKind.tables() returns an error no input can produce, the reply preview is copied, and the blockItem predicate is copied). I asked for none of these structural items in round 1 either, and none of them changes behaviour beyond an error message's wording for a malformed `@v0` pin. The README numbers are finding 1."
+  "ci": "The CI head is d5f7c764, the push carrying 32c9b9ac. The compare to 003852cf is handoffs only (1 file). Every check there (lint, typecheck, test, pr-title, build x2, changes, the daemon Postgres 16 suite) was queued when this review was written. Every run at 1a19ad77 was cancelled. The request for changes does not wait on CI.",
+  "thermonuclear": "deep-review: `Verdict: APPROVE at 003852cf` (1 Minor: the body's two round-2 bullets were out of date, and I have rewritten them). code-quality: `Verdict: CHANGES at 003852cf`. These are the same structural items as round 2 (ItemKind.tables() and the per-kind forks, commentEventPayload hydrating in place, the copied reply preview, the node-id slicing in ReplyQuote.tsx, the pin regexp), plus three e2e and driver files that pass 1000 lines. I do not ask for them: none changes behaviour, I asked for none in rounds 1 or 2, and the architect scoped round 3 to the two text findings."
 }
