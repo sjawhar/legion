@@ -61,8 +61,9 @@ const (
 )
 
 // What an owed attempt is, spelled once for the reads that send it and the ones that settle it.
-// Each reads the attempt row as d; $1 is DeliveryDuplicateWindow, in seconds.
-const (
+// Each reads the attempt row as d; $1 is DeliveryDuplicateWindow, in seconds. A var block, not a
+// const one, because claimLapsed is built from the claim lease's interval at init.
+var (
 	owedMessageAttempt = `d.state = 'pending' and ` + claimLapsed + `
 		and d.created_at < now() - interval '1 minute'
 		and d.created_at > now() - make_interval(secs => $1)
