@@ -96,7 +96,7 @@ func TestCoreRoleDeliveryReresolvesSupersededLapsedHolder(t *testing.T) {
 
 	forwardedSubjects := []string{}
 	config := harness.config
-	config.forwardRole = func(subject string, item contracts.Envelope, timeout time.Duration) error {
+	config.forwardRole = func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) error {
 		forwardedSubjects = append(forwardedSubjects, subject)
 		return nil
 	}

@@ -28,7 +28,9 @@ type heldPublisher struct {
 	answers []chan error
 }
 
-func (p *heldPublisher) WindowUntil(func() time.Time) bus.Sender { return p }
+func (p *heldPublisher) WindowUntil(deadline func() time.Time) bus.Sender {
+	return deadlineWindow{Sender: p, deadline: deadline}
+}
 
 func (p *heldPublisher) PublishAsync(item contracts.Envelope) <-chan error {
 	p.mu.Lock()

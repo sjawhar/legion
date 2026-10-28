@@ -39,13 +39,12 @@ func shouldNAKFanoutDelivery(sessionLive bool, err error) bool {
 
 type listenerDeliveryHandlerConfig struct {
 	client *bus.Client
-	// forwardRole delivers a role-lane envelope to the holder's agent subject and
-	// waits for its empty receipt. main.go wires client.RequestCoreTo.
-	// bus.ErrReceiptTimeout means the forward was flushed to the server and no
-	// receipt arrived inside timeout; any other error — a raw nats.ErrTimeout
-	// from the flush included — means the forward is not known to have reached
-	// the holder.
-	forwardRole       func(subject string, item contracts.Envelope, timeout time.Duration) error
+	// forwardRole delivers a role-lane envelope to the holder's agent subject under msgID, its
+	// Nats-Msg-Id when not empty, and waits for its empty receipt. main.go wires
+	// client.RequestCoreTo. bus.ErrReceiptTimeout means the forward was flushed to the server
+	// and no receipt arrived inside timeout; any other error — a raw nats.ErrTimeout from the
+	// flush included — means the forward is not known to have reached the holder.
+	forwardRole       func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) error
 	registry          *store.Registry
 	sessions          *session.SessionRegistry
 	machineID         string
@@ -486,9 +485,18 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 		return
 	}
 	cfg.attemptCache.Record(item.DedupeKey, sessionID)
+	subject := contracts.AgentSubject(sessionID)
 	forwarded := item
 	forwarded.DedupeKey = roleForwardDedupePrefix + item.DedupeKey
-	if err := cfg.forwardRole(contracts.AgentSubject(sessionID), forwarded, roleReceiptTimeout); err != nil {
+	// The forward is stored once per message and holder however often it is sent only when the
+	// envelope's own key names its event (contracts.DedupeKeyNamesTheUpstreamEvent, asked of item:
+	// the forward's prefix hides a webhook key's shape). Two distinct envelopes can share a key
+	// their sender chose, so such a forward carries no MsgId and the stream stores each.
+	var msgID string
+	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {
+		msgID = bus.ForwardMsgID(forwarded.DedupeKey, subject)
+	}
+	if err := cfg.forwardRole(subject, forwarded, msgID, roleReceiptTimeout); err != nil {
 		if errors.Is(err, bus.ErrReceiptTimeout) {
 			applyDeliveryOutcome(cfg, item, deliveryOutcome{
 				sessionID:    sessionID,

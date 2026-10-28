@@ -32,7 +32,7 @@ func TestRequestCoreToReportsNoReceiptAsErrReceiptTimeout(t *testing.T) {
 		TraceID:        "trace_no_receipt",
 	}
 	started := time.Now()
-	err = client.RequestCoreTo(contracts.AgentSubject("ses_absent"), item, 300*time.Millisecond)
+	err = client.RequestCoreTo(contracts.AgentSubject("ses_absent"), item, "", 300*time.Millisecond)
 	elapsed := time.Since(started)
 	if !errors.Is(err, bus.ErrReceiptTimeout) {
 		t.Fatalf("RequestCoreTo error = %v, want errors.Is ErrReceiptTimeout", err)
@@ -76,7 +76,7 @@ func TestRequestCoreToReturnsNilOnAnEmptyReceipt(t *testing.T) {
 		PayloadSummary: "responder acknowledges",
 		TraceID:        "trace_receipt",
 	}
-	if err := client.RequestCoreTo(subject, item, 2*time.Second); err != nil {
+	if err := client.RequestCoreTo(subject, item, "", 2*time.Second); err != nil {
 		t.Fatalf("RequestCoreTo with a live responder = %v, want nil", err)
 	}
 }
@@ -120,7 +120,7 @@ func TestRequestCoreToFlushTimeoutIsNotErrReceiptTimeout(t *testing.T) {
 		TraceID:        "trace_stalled",
 	}
 	// Control: the same subject and responder yield a receipt while the server runs.
-	if err := client.RequestCoreTo(subject, item, 2*time.Second); err != nil {
+	if err := client.RequestCoreTo(subject, item, "", 2*time.Second); err != nil {
 		t.Fatalf("RequestCoreTo against a healthy server = %v, want nil", err)
 	}
 
@@ -131,7 +131,7 @@ func TestRequestCoreToFlushTimeoutIsNotErrReceiptTimeout(t *testing.T) {
 
 	const window = 500 * time.Millisecond
 	started := time.Now()
-	err = client.RequestCoreTo(subject, item, window)
+	err = client.RequestCoreTo(subject, item, "", window)
 	elapsed := time.Since(started)
 	if err == nil {
 		t.Fatal("RequestCoreTo against a frozen server returned nil; the forward cannot have been flushed")
@@ -147,37 +147,36 @@ func TestRequestCoreToFlushTimeoutIsNotErrReceiptTimeout(t *testing.T) {
 	}
 }
 
-// The listener's role lane forwards an envelope to its holder with RequestCoreTo, under
-// contracts.RoleForwardDedupePrefix and the envelope's own dedupe key, to an agent subject the
-// stream captures. A forward of an envelope whose key names its event - Dispatch's, or a webhook's,
-// whose key the prefix hides from contracts.DedupeKeyNamesTheUpstreamEvent - is stored once
-// however often it is sent. Two distinct envelopes that share a key their caller chose are two
-// messages, and the stream stores both.
-func TestARoleForwardIsStoredOnceOnlyWhenItsEnvelopeNamesItsEvent(t *testing.T) {
+// RequestCoreTo sends the forward under the MsgId its caller passes, so a forward sent again under
+// one MsgId to an agent subject the stream captures is stored once, and one sent with none is
+// stored each time. Which forward carries a MsgId is the listener role lane's choice
+// (cmd/listener, roleTopicDelivery).
+func TestARequestCoreToUnderOneMsgIDIsStoredOnce(t *testing.T) {
 	_, url, client := requestClient(t)
-	const topic = "notifications.role.forward-dedupe"
-	chosen := func(name string) contracts.Envelope {
-		return contracts.Envelope{EventID: "evt-" + name, Source: "agent", SourceEventID: "src-" + name, Topic: topic, DedupeKey: "shared-key"}
+	item := contracts.Envelope{
+		EventID: "dispatch-7", Source: "dispatch", SourceEventID: "7",
+		Topic: "notifications.role.forward-dedupe", DedupeKey: contracts.RoleForwardDedupePrefix + "dispatch-7",
 	}
-	dispatch := contracts.Envelope{EventID: "dispatch-7", Source: "dispatch", SourceEventID: "7", Topic: topic, DedupeKey: "dispatch-7"}
-	webhook := contracts.Envelope{EventID: "evt-webhook", Source: "github", SourceEventID: "guid-1", Topic: topic, DedupeKey: "github.guid-1"}
 	for _, tc := range []struct {
 		name, holder string
-		sends        []contracts.Envelope
+		withMsgID    bool
 		want         uint64
 	}{
-		{"two envelopes under one key their caller chose", "ses_forward_chosen", []contracts.Envelope{chosen("first"), chosen("second")}, 2},
-		{"a dispatch envelope sent twice", "ses_forward_dispatch", []contracts.Envelope{dispatch, dispatch}, 1},
-		{"a webhook envelope sent twice", "ses_forward_webhook", []contracts.Envelope{webhook, webhook}, 1},
+		{"a forward sent twice under one MsgId", "ses_forward_msgid", true, 1},
+		{"a forward sent twice with none", "ses_forward_no_msgid", false, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			subject := contracts.AgentSubject(tc.holder)
 			responder(t, url, subject)
-			for index, item := range tc.sends {
-				item.DedupeKey = contracts.RoleForwardDedupePrefix + item.DedupeKey
-				item.IssuedAt = contracts.NowMillis()
-				if err := client.RequestCoreTo(subject, item, 2*time.Second); err != nil {
-					t.Fatalf("forward %d returned %v, want nil", index+1, err)
+			var msgID string
+			if tc.withMsgID {
+				msgID = bus.ForwardMsgID(item.DedupeKey, subject)
+			}
+			for attempt := 1; attempt <= 2; attempt++ {
+				forward := item
+				forward.IssuedAt = contracts.NowMillis()
+				if err := client.RequestCoreTo(subject, forward, msgID, 2*time.Second); err != nil {
+					t.Fatalf("forward %d returned %v, want nil", attempt, err)
 				}
 			}
 			// The stream takes the messages one connection sends in order, so once it has
@@ -190,7 +189,7 @@ func TestARoleForwardIsStoredOnceOnlyWhenItsEnvelopeNamesItsEvent(t *testing.T) 
 				t.Fatalf("read the stream: %v", err)
 			}
 			if got := info.State.Subjects[subject]; got != tc.want {
-				t.Fatalf("the stream holds %d copies on %s after %d forwards, want %d", got, subject, len(tc.sends), tc.want)
+				t.Fatalf("the stream holds %d copies on %s after two forwards, want %d", got, subject, tc.want)
 			}
 		})
 	}

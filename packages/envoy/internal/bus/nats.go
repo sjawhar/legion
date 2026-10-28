@@ -1128,25 +1128,21 @@ func ForwardMsgID(dedupeKey, subject string) string {
 // are captured by the notification stream, whose non-empty JetStream publish
 // acknowledgement is not a receiver receipt, and the server's no-responders
 // answer carries a Status header, so neither is one either. The forward
-// carries a Nats-Msg-Id of item's dedupe key and subject (ForwardMsgID) when
-// the envelope it forwards names its event: contracts.DedupeKeyNamesTheUpstreamEvent
-// asked of item with contracts.RoleForwardDedupePrefix taken off its dedupe
-// key, since a role forward's key carries that prefix and the original's key
-// is what names the event. A sender that forwards one such envelope again
-// until a receipt arrives then leaves the stream one copy per message and
-// recipient, however many attempts it makes. A forward of an envelope under a
-// key its caller chose carries no MsgId, since two distinct envelopes can
-// share such a key, and the stream stores each. Every attempt still reaches
-// the core subscribers on subject. A forward with the MsgId has headers, so
-// the server hands its replies to this client with a header block, empty for
-// a receipt, and the receipt is told by its header holding no field rather
-// than by its having none. The flush is bounded by the
-// same window as the receipt wait, so the call never outlives timeout by the
-// client's default 10 s flush. A forward the server denied returns at once;
-// one publishConfirmed cannot confirm for another reason still waits, since a
-// receipt proves it was delivered, and returns that reason instead of
-// ErrReceiptTimeout if none arrives.
-func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout time.Duration) error {
+// carries msgID as its Nats-Msg-Id header when msgID is not empty, and no
+// header when it is: whether a forward is one the stream may store once is
+// its caller's choice. A sender that forwards one envelope again under one
+// MsgId until a receipt arrives leaves the stream one copy per message and
+// recipient, however many attempts it makes; a forward without one is stored
+// each time it is sent. Every attempt still reaches the core subscribers on
+// subject. A forward with a MsgId has headers, so the server hands its
+// replies to this client with a header block, empty for a receipt, and the
+// receipt is told by its header holding no field rather than by its having
+// none. The flush is bounded by the same window as the receipt wait, so the
+// call never outlives timeout by the client's default 10 s flush. A forward
+// the server denied returns at once; one publishConfirmed cannot confirm for
+// another reason still waits, since a receipt proves it was delivered, and
+// returns that reason instead of ErrReceiptTimeout if none arrives.
+func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, msgID string, timeout time.Duration) error {
 	if err := checkSubject(subject); err != nil {
 		return err
 	}
@@ -1168,10 +1164,8 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout 
 	}
 	defer receipt.Unsubscribe()
 	forward := &nats.Msg{Subject: subject, Reply: inbox, Data: data}
-	original := item
-	original.DedupeKey = strings.TrimPrefix(item.DedupeKey, contracts.RoleForwardDedupePrefix)
-	if contracts.DedupeKeyNamesTheUpstreamEvent(original) {
-		forward.Header = nats.Header{nats.MsgIdHdr: []string{ForwardMsgID(item.DedupeKey, subject)}}
+	if msgID != "" {
+		forward.Header = nats.Header{nats.MsgIdHdr: []string{msgID}}
 	}
 	err = c.publishConfirmed(ctx, conn, forward, conn.PublishMsg)
 	if err != nil && !errors.Is(err, errPublishUnconfirmed) {

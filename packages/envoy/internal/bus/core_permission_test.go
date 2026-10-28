@@ -85,7 +85,7 @@ func TestPublishCoreReportsAPublishNATSDenies(t *testing.T) {
 func TestRequestCoreToReportsAForwardNATSDenies(t *testing.T) {
 	client, _ := grantedClient(t)
 	started := time.Now()
-	err := client.RequestCoreTo(deniedRole, roleEnvelope(deniedRole), 2*time.Second)
+	err := client.RequestCoreTo(deniedRole, roleEnvelope(deniedRole), "", 2*time.Second)
 	if !errors.Is(err, bus.ErrPublishDenied) || errors.Is(err, bus.ErrReceiptTimeout) {
 		t.Fatalf("denied forward returned %v, want ErrPublishDenied", err)
 	}

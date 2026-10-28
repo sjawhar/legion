@@ -1023,7 +1023,7 @@ func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
 		stallSessionReads(t, harness.sessions)
 		var forwards atomic.Int32
 		cfg := harness.config
-		cfg.forwardRole = func(string, contracts.Envelope, time.Duration) error {
+		cfg.forwardRole = func(string, contracts.Envelope, string, time.Duration) error {
 			forwards.Add(1)
 			return nil
 		}

@@ -424,7 +424,9 @@ type fenceAfterFirstSend struct {
 	passed atomic.Bool
 }
 
-func (p *fenceAfterFirstSend) WindowUntil(func() time.Time) bus.Sender { return p }
+func (p *fenceAfterFirstSend) WindowUntil(deadline func() time.Time) bus.Sender {
+	return deadlineWindow{Sender: p, deadline: deadline}
+}
 
 func (p *fenceAfterFirstSend) PublishAsync(item contracts.Envelope) <-chan error {
 	p.passed.Store(true)
@@ -487,7 +489,9 @@ type reconnectedQuietly struct {
 
 func (p *reconnectedQuietly) Connected() bool { return p.connected.Load() }
 
-func (p *reconnectedQuietly) WindowUntil(func() time.Time) bus.Sender { return p }
+func (p *reconnectedQuietly) WindowUntil(deadline func() time.Time) bus.Sender {
+	return deadlineWindow{Sender: p, deadline: deadline}
+}
 
 // A holder whose client reads connected again when natsLossGrace runs out serves on, though no
 // connection event came: it reads the client's status as the grace ends, keeps the hold and scans,

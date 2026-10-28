@@ -42,8 +42,9 @@ session (a comment's mention, sent through the Envoy listener), apply these rule
 
 **Note 2026-10-28 (#2395):** the outbox's batch model renamed what the evidence below names.
 The predicate is `destinations.leftToMention`, the mention deliveries are one `loadMentionDeliveries`
-statement per batch (`outbox/lookups.go`), and `settleEvent` gives a held-back copy the `deferred`
-outcome (`next_attempt_at = now() + mentionPendingDelay`, no attempt counted). The rule is unchanged.
+statement per batch (`outbox/lookups.go`), and `settleEvent` records an event with a held-back copy
+`blocked`, due `mentionPendingDelay` after the record at the latest (`next_attempt_at` alone, no
+attempt counted), the outcome an event held back by an earlier one gets. The rule is unchanged.
 
 ## Evidence
 

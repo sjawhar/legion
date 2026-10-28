@@ -277,7 +277,7 @@ type batchEvent struct {
 	// delivered is the set of the event's published_destinations (publishedDestinationSet).
 	// destinationsOf are every destination the event has; resolveErr is why the list is
 	// incomplete, when it is; mentionPending is a session's copy left out of the list for a
-	// mention still being sent, which defers the event (eventDestinations, settleEvent). A
+	// mention still being sent, which blocks the event (eventDestinations, settleEvent). A
 	// copy so left out is no destination of the event, so it holds none of the owner's later
 	// events back.
 	delivered      map[string]struct{}
@@ -320,8 +320,9 @@ const (
 
 // chainSend is one send of a chain: event's envelope to dest. Its answer is classified once, as it
 // settles (sendChains): state, and the two facts the batch reads back - fenced, the send refused
-// for the publisher hold's deadline (errFenced), and connection, the send failed for the
-// connection, lost to it (bus.ErrUnavailable) or not acknowledged on it (bus.ErrNotAcknowledged).
+// for the publisher hold's deadline (bus.ErrWindowDeadline), and connection, the send failed for
+// the connection, lost to it (bus.ErrUnavailable) or not acknowledged on it
+// (bus.ErrNotAcknowledged).
 type chainSend struct {
 	event              *batchEvent
 	dest               destination
@@ -423,9 +424,10 @@ func planChains(events []*batchEvent) []*chain {
 // it came back as reached, so the chains proceed side by side and each one in order. A role route
 // is forwarded to its holder with a Request (roleForward.send), or answered at once with why it
 // stays pending. A failed send holds back the rest of its chain. A send that meets a lost
-// connection or a passed deadline (bus.ErrUnavailable; errFenced, which the window's
-// bus.ErrWindowDeadline is read as) stops the batch: no further send of any chain is made. So does
-// ctx ending; the answers already in are still read, and every other send in flight is lost.
+// connection or a passed deadline (bus.ErrUnavailable; bus.ErrWindowDeadline, the window refusing
+// a send past the publisher hold's deadline) stops the batch: no further send of any chain is
+// made. So does ctx ending; the answers already in are still read, and every other send in flight
+// is lost.
 func sendChains(ctx context.Context, sender bus.Sender, chains []*chain) {
 	stopped := false
 	var inflight []*chain
@@ -450,12 +452,8 @@ func sendChains(ctx context.Context, sender bus.Sender, chains []*chain) {
 		c := inflight[index]
 		inflight = append(inflight[:index], inflight[index+1:]...)
 		send := c.sends[c.next]
-		if errors.Is(err, bus.ErrWindowDeadline) {
-			// The window refused the write for the hold's deadline, the one fencedSender checks.
-			err = fmt.Errorf("%w: %w", errFenced, err)
-		}
 		send.err = err
-		send.fenced = errors.Is(err, errFenced)
+		send.fenced = errors.Is(err, bus.ErrWindowDeadline)
 		switch {
 		case err == nil:
 			send.state = reached

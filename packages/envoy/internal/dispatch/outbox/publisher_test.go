@@ -46,6 +46,32 @@ func (publishOnly) Connected() bool { return true }
 
 func (publishOnly) ConnectionChanged() <-chan struct{} { return nil }
 
+// deadlineWindow is a test publisher's window of a deadline, as bus.Client.WindowUntil makes one:
+// a send at or past deadline answers bus.ErrWindowDeadline and is not sent. A nil
+// deadline is none.
+type deadlineWindow struct {
+	bus.Sender
+	deadline func() time.Time
+}
+
+func (w deadlineWindow) passed() bool {
+	return w.deadline != nil && !time.Now().Before(w.deadline())
+}
+
+func (w deadlineWindow) PublishAsync(item contracts.Envelope) <-chan error {
+	if w.passed() {
+		return answered(fmt.Errorf("test window: %w", bus.ErrWindowDeadline))
+	}
+	return w.Sender.PublishAsync(item)
+}
+
+func (w deadlineWindow) Request(subject string, item contracts.Envelope, opts bus.RequestOptions) <-chan error {
+	if w.passed() {
+		return answered(fmt.Errorf("test window: %w", bus.ErrWindowDeadline))
+	}
+	return w.Sender.Request(subject, item, opts)
+}
+
 // unfenced is a publisher hold whose deadline never comes, for a test that scans without one. The
 // record's back-offs need the hold's row too (recordBatch): holding gives an outbox one.
 type unfenced struct{}
@@ -54,7 +80,8 @@ func (unfenced) Deadline() time.Time { return time.Now().Add(time.Hour) }
 
 // errMentionPending is what publish returns when the event's destinations held a mentioned
 // session's copy back for a mention still being sent (destinations.leftToMention), and nothing
-// else kept the event from finishing: the batch defers such an event (settleEvent).
+// else kept the event from finishing: the batch blocks such an event for mentionPendingDelay
+// (settleEvent).
 var errMentionPending = errors.New("a mention's delivery is still undecided")
 
 // publish sends event to each of its destinations not in delivered, as a batch of that one event
@@ -158,7 +185,9 @@ func (p *recordingPublisher) Publish(item contracts.Envelope) error {
 	return nil
 }
 
-func (p *recordingPublisher) WindowUntil(func() time.Time) bus.Sender { return p }
+func (p *recordingPublisher) WindowUntil(deadline func() time.Time) bus.Sender {
+	return deadlineWindow{Sender: p, deadline: deadline}
+}
 
 // PublishAsync answers a topic the stream does not capture as a window does (bus.ErrNotCaptured),
 // so a role route the outbox published to its role topic, rather than forwarding it, fails here.
@@ -205,7 +234,9 @@ func (p *blockingFailPublisher) Publish(contracts.Envelope) error {
 	return errors.New("publisher unavailable")
 }
 
-func (p *blockingFailPublisher) WindowUntil(func() time.Time) bus.Sender { return p }
+func (p *blockingFailPublisher) WindowUntil(deadline func() time.Time) bus.Sender {
+	return deadlineWindow{Sender: p, deadline: deadline}
+}
 
 func (p *blockingFailPublisher) PublishAsync(item contracts.Envelope) <-chan error {
 	return answered(p.Publish(item))

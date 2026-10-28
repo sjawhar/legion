@@ -268,7 +268,7 @@ func TestAnUnconfirmedForwardWithAReceiptIsDelivered(t *testing.T) {
 	conn := answeringServer(t, "notifications.other", true)
 	client := &Client{Conn: conn}
 
-	if err := client.RequestCoreTo("notifications.agent.holder", contracts.Envelope{EventID: "e", Topic: "notifications.role.r"}, 2*time.Second); err != nil {
+	if err := client.RequestCoreTo("notifications.agent.holder", contracts.Envelope{EventID: "e", Topic: "notifications.role.r"}, "", 2*time.Second); err != nil {
 		t.Fatalf("an unconfirmed forward whose receipt arrived returned %v, want nil", err)
 	}
 }
@@ -279,7 +279,7 @@ func TestAnUnconfirmedForwardWithoutAReceiptIsNotAReceiptTimeout(t *testing.T) {
 	conn := answeringServer(t, "notifications.other", false)
 	client := &Client{Conn: conn}
 
-	err := client.RequestCoreTo("notifications.agent.holder", contracts.Envelope{EventID: "e", Topic: "notifications.role.r"}, 300*time.Millisecond)
+	err := client.RequestCoreTo("notifications.agent.holder", contracts.Envelope{EventID: "e", Topic: "notifications.role.r"}, "", 300*time.Millisecond)
 	if !errors.Is(err, errPublishUnconfirmed) || errors.Is(err, ErrReceiptTimeout) {
 		t.Fatalf("an unconfirmed forward with no receipt returned %v, want the unconfirmed error", err)
 	}

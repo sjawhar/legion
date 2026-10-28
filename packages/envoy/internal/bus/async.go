@@ -153,6 +153,9 @@ func outcomeOf(answer func() error, err error) <-chan error {
 
 // send writes item to the window's connection and returns what waits for the stream's answer.
 func (w *window) send(item contracts.Envelope) (func() error, error) {
+	if err := w.expired(); err != nil {
+		return nil, err
+	}
 	if err := checkSubject(item.Topic); err != nil {
 		return nil, err
 	}
@@ -192,6 +195,15 @@ func (w *window) pin(wait time.Duration) error {
 	return nil
 }
 
+// expired answers ErrWindowDeadline once the window's deadline has passed, and nil before it or
+// when the window has none.
+func (w *window) expired() error {
+	if w.deadline != nil && !time.Now().Before(w.deadline()) {
+		return fmt.Errorf("bus: %w", ErrWindowDeadline)
+	}
+	return nil
+}
+
 // pinToSend pins the window for a send (pin), within publishAcknowledgementTimeout and no later
 // than the window's deadline, and answers ErrWindowDeadline when the deadline has passed before
 // the pin, during its wait for a connection, or by its end, which is the last check before the
@@ -204,11 +216,11 @@ func (w *window) pinToSend() error {
 	if remaining <= 0 {
 		return fmt.Errorf("bus: %w", ErrWindowDeadline)
 	}
-	err := w.pin(min(publishAcknowledgementTimeout, remaining))
-	if !time.Now().Before(w.deadline()) {
-		return fmt.Errorf("bus: %w", ErrWindowDeadline)
+	pinned := w.pin(min(publishAcknowledgementTimeout, remaining))
+	if err := w.expired(); err != nil {
+		return err
 	}
-	return err
+	return pinned
 }
 
 // current reports whether the window's connection is connected and has not reconnected since the
@@ -277,6 +289,9 @@ func (w *window) Request(subject string, item contracts.Envelope, opts RequestOp
 
 // request sends item as Request describes and returns what waits for its answer.
 func (w *window) request(subject string, item contracts.Envelope, opts RequestOptions) (func() error, error) {
+	if err := w.expired(); err != nil {
+		return nil, err
+	}
 	if err := checkSubject(subject); err != nil {
 		return nil, err
 	}

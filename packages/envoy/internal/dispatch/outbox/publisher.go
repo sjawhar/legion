@@ -132,34 +132,6 @@ type fence interface {
 	Deadline() time.Time
 }
 
-// errFenced is a send refused because the publisher hold's deadline had passed: by fencedSender,
-// or by the window itself as bus.ErrWindowDeadline, which sendChains reads as errFenced.
-var errFenced = errors.New("the publisher hold's deadline has passed")
-
-// fencedSender is a batch's window that sends nothing once the publisher hold's deadline has
-// passed: every send checks it first, and one past it answers errFenced at once, so a process that
-// froze past its deadline sends nothing when it resumes. The window is the hold's too
-// (Publisher.WindowUntil), so a send that passed this check and then waited for a connection past
-// the deadline writes nothing either.
-type fencedSender struct {
-	bus.Sender
-	hold fence
-}
-
-func (s fencedSender) PublishAsync(item contracts.Envelope) <-chan error {
-	if !time.Now().Before(s.hold.Deadline()) {
-		return failedAnswer(errFenced)
-	}
-	return s.Sender.PublishAsync(item)
-}
-
-func (s fencedSender) Request(subject string, item contracts.Envelope, opts bus.RequestOptions) <-chan error {
-	if !time.Now().Before(s.hold.Deadline()) {
-		return failedAnswer(errFenced)
-	}
-	return s.Sender.Request(subject, item, opts)
-}
-
 // failedAnswer is a send's answer already decided: err.
 func failedAnswer(err error) <-chan error {
 	answer := make(chan error, 1)
@@ -194,12 +166,13 @@ func failedAnswer(err error) <-chan error {
 // the window's, or a client not connected - reports NATS lost, which gives the publisher hold up
 // (Outbox), and releases the not-acknowledged events rather than backing them off.
 //
-// The batch runs under hold, the publisher hold: every send checks its deadline first
-// (fencedSender), its window writes nothing past it (Publisher.WindowUntil), and once it has
-// passed the batch sends nothing more and is left unrecorded - the record is the last act checked
-// against the deadline - so a process that froze past its deadline neither sends nor writes when
-// it resumes. The record's back-offs, hold-backs and releases are written only while holder still
-// holds the hold on the database's clock (recordBatch).
+// The batch runs under hold, the publisher hold: its window is the hold's (Publisher.WindowUntil
+// with the hold's deadline), which checks the deadline before each send and writes nothing past
+// it, answering bus.ErrWindowDeadline, and once it has passed the batch sends nothing more and is
+// left unrecorded - the record is the last act checked against the deadline - so a process that
+// froze past its deadline neither sends nor writes when it resumes. The record's back-offs,
+// hold-backs and releases are written only while holder still holds the hold on the database's
+// clock (recordBatch).
 func scanBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID) (batchResult, error) {
 	pending, stopped, err := readBatch(ctx, deps)
 	if err != nil {
@@ -222,7 +195,7 @@ func scanBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID) (ba
 	changed := deps.Publisher.ConnectionChanged()
 	window := deps.Publisher.WindowUntil(hold.Deadline)
 	result.started = time.Now()
-	sendChains(ctx, fencedSender{Sender: window, hold: hold}, chains)
+	sendChains(ctx, window, chains)
 
 	connectionFailed := false
 	for _, event := range events {
@@ -338,18 +311,17 @@ const (
 	// backedOff: the event failed, and waits retry.Delay of its attempts before it is tried again.
 	backedOff outcomeState = "backed_off"
 	// blocked: the event reached what it could, and a destination of it waits on an earlier event
-	// of its owner that has not reached it. It falls due when the earliest of those does, with no
-	// attempt counted, and its sends then follow theirs.
+	// of its owner that has not reached it, or a session's copy of it was held back for a mention
+	// still being sent (destinations.leftToMention), or both. It falls due when the earliest of
+	// its blockers does, and mentionPendingDelay after the record at the latest when a copy waits
+	// on a mention, with no attempt counted, and its sends then follow its blockers'. Nothing
+	// failed, and an undecided send is bounded by its sender's claim, so waiting on a mention
+	// cannot run the event to its dead-letter count.
 	blocked outcomeState = "blocked"
 	// released: the event was not tried to the end, because NATS was unreachable, the
 	// connection was replaced or the process is stopping, so it is due again at once, with no
 	// attempt counted.
 	released outcomeState = "released"
-	// deferred: the event reached every destination but a session's copy held back for a mention
-	// still being sent (destinations.leftToMention), and waits mentionPendingDelay before it is
-	// tried again, with no attempt counted: nothing failed, and an undecided send is bounded by
-	// its sender's claim, so the deferral cannot run the event to its dead-letter count.
-	deferred outcomeState = "deferred"
 )
 
 // outcome is what one event of a batch came to, as recordBatch writes it.
@@ -361,10 +333,10 @@ type outcome struct {
 	// attempts and failure are the backed-off event's attempt count and why it failed.
 	attempts int
 	failure  string
-	// delay is how long after the record a backed-off or deferred event falls due, or a blocked
-	// one whose blocker was backed off by the same batch or whose mention is still being sent;
-	// until is when a blocked one whose blocker was not due falls due, on the database's clock. A
-	// blocked event falls due at the earlier of the two.
+	// delay is how long after the record a backed-off event falls due, or a blocked one whose
+	// blocker was backed off by the same batch or whose mention is still being sent; until is when
+	// a blocked one whose blocker was not due falls due, on the database's clock. A blocked event
+	// falls due at the earlier of the two.
 	delay *time.Duration
 	until *time.Time
 }
@@ -375,12 +347,12 @@ type outcome struct {
 // met the hold's deadline settles as released as well, but its batch is left unrecorded, not
 // released (scanBatch): that outcome is never written. One whose destinations could not all be
 // resolved, or a send of which NATS answered with a failure, is backed off. Otherwise one with a
-// destination held back waits on its blockers (holdBack), and on its held-back mention copy too
-// when it has one; one that held a session's copy back for a mention still being sent
-// (batchEvent.mentionPending) and has no blocker is deferred; and one with neither is published. A
-// held-back copy so defers the event only when it is the whole of why the event did not finish: a
-// denied or failed send backs the event off with its attempt counted, and a lost one releases it,
-// as they would without the mention.
+// destination held back, or a session's copy held back for a mention still being sent
+// (batchEvent.mentionPending), is blocked: on its blockers (holdBack), and for mentionPendingDelay
+// at most when its copy waits on a mention; and one with neither is published. A held-back copy so
+// blocks the event only when no send of it failed or was lost: a denied or failed send backs the
+// event off with its attempt counted, and a lost one releases it, as they would without the
+// mention.
 func settleEvent(event *batchEvent, releaseUnacknowledged bool) outcome {
 	result := outcome{id: event.event.ID}
 	if event.failure != nil {
@@ -415,16 +387,16 @@ func settleEvent(event *batchEvent, releaseUnacknowledged bool) outcome {
 		return result
 	case len(failures) > 0:
 		return backOff(result, event.pendingEvent, "dispatch outbox: publish event", errors.Join(failures...))
-	case len(blockers) > 0:
-		result = holdBack(result, blockers)
+	case len(blockers) > 0 || event.mentionPending:
+		if len(blockers) > 0 {
+			result = holdBack(result, blockers)
+		} else {
+			slog.Debug("dispatch outbox: event waits on a mention's delivery", "event_id", event.event.ID)
+			result.state = blocked
+		}
 		if event.mentionPending && result.state == blocked && (result.delay == nil || mentionPendingDelay < *result.delay) {
 			result.delay = new(mentionPendingDelay)
 		}
-		return result
-	case event.mentionPending:
-		slog.Debug("dispatch outbox: event waits on a mention's delivery", "event_id", event.event.ID)
-		result.state = deferred
-		result.delay = new(mentionPendingDelay)
 		return result
 	}
 	result.state = published
@@ -533,10 +505,10 @@ func deferPastWindow(events []*batchEvent) []outcome {
 // holds the hold is written regardless: the destinations an event reached are added to its
 // published_destinations, and an event that reached every destination is marked published, its
 // publish_error cleared. A back-off (next_attempt_at on the database's clock, the attempt count and
-// publish_error), a hold-back, a deferral (next_attempt_at alone, mentionPendingDelay out) and a
-// release are written only while the hold is holder's and has not lapsed, checked in the same
-// statement, so a process that lost the hold mid-batch schedules nothing beside the holder that
-// took it. Each row is guarded on published_at is null.
+// publish_error), a hold-back (next_attempt_at alone, the earlier of its delay out and its until)
+// and a release are written only while the hold is holder's and has not lapsed, checked in the
+// same statement, so a process that lost the hold mid-batch schedules nothing beside the holder
+// that took it. Each row is guarded on published_at is null.
 //
 // A write that fails leaves the whole batch as it was read, which is what a process that dies
 // between NATS's acknowledgements and this write leaves too: the batch is sent again by the next
@@ -608,7 +580,6 @@ func recordBatch(ctx context.Context, deps Deps, outcomes []outcome, holder uuid
 					when not h.mine then e.next_attempt_at
 					when o.state = 'backed_off' then now() + make_interval(secs => o.delay)
 					when o.state = 'blocked' then least(now() + make_interval(secs => o.delay), o.until)
-					when o.state = 'deferred' then now() + make_interval(secs => o.delay)
 					else null
 				end
 			from outcome o
@@ -694,7 +665,7 @@ func (d *destinations) addSessions(sessionIDs []string, label string) {
 // comment's mentions resolved to: it reports whether the route leaves that session's copy to the
 // mention. A mention that reached the session delivered the comment, so the copy is skipped. A
 // mention still being sent may yet, so the copy is held back and the event marked mentionPending,
-// to be decided again when it is next read (settleEvent defers it). Any other session - every
+// to be decided again when it is next read (settleEvent blocks it). Any other session - every
 // attempt failed or was abandoned, or none was recorded - is published to as if it had not been
 // mentioned. Callers ask only about a session their payload names as mentioned; a session no
 // mention delivers to is in neither set, so it is never skipped.
