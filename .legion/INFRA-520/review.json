@@ -2,33 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-520",
-  "completed": "2026-10-28T18:53:05Z",
-  "round": 3,
-  "reviewedHead": "14b780088e52fb4b6d6861a62c588c20f0c8d592 (code head 757229848e8c)",
+  "completed": "2026-10-28T20:36:30Z",
+  "round": 4,
+  "reviewedHead": "0c48de8112e0af535bdb8002ecd7fa0b275377df (code head 20e98c18ba3f)",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 3,
+  "important": 1,
   "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": ".github/scripts/ci_filter_coverage.py:486 (ENV_WRITE), job_reason",
-      "description": "job_reason reads only each step's inline run: text, so an environment write it does not show passes. Reproduced in a copy of 14b78008: install-uv/action.yml (used by the test job before 'Test the Go daemon') given `echo \"GOFLAGS=-tags=probe\" >> \"$GITHUB_ENV\"`, plus packages/daemon/internal/record/zz_probe_test.go (//go:build probe) importing packages/envoy/racehelper -> check-ci-filters.sh exit 0, 'test: 3452 files, 0 uncovered', though `go test ./...` there compiles racehelper, outside the test filter. Same gap: a repo script that writes $GITHUB_ENV, `$(printenv GITHUB_ENV)`. Fix per the architect's choice: fall to everything (widens test and daemon-go-postgres-16, whose local actions already write $GITHUB_PATH), or pin each local action a reduced job uses by exact text, or state the boundary."
-    },
-    {
-      "severity": "important",
-      "file": ".github/scripts/ci_filter_coverage.py:396-398 (script_lines)",
-      "description": "splitlines()/strip() disagree with bash. Reproduced: envoy-go natslive step run: 'go test -tags natslive ./internal/testnats/\\n\\r# || (cd ../daemon && go build ./cmd/legion)\\n' -> check exit 0 ('envoy-go: 1941 files, 0 uncovered'); bash -e runs `$'\\r#'` (not found) and then the hidden command (stub printed 'HIDDEN ran'). NBSP form passes too (deep reviewer). Fix: split only on \\n, strip only space/tab; any byte outside printable ASCII, tab and \\n makes the script not simple; test cases for \\r# and U+00A0#."
-    },
-    {
-      "severity": "important",
-      "file": ".github/scripts/ci_filter_coverage.py:450-462 (env_reason)",
-      "description": "Only GO*/CGO_*/BASH_ENV/ENV names fall; HOME, XDG_CONFIG_HOME and PATH reach GOFLAGS through Go's env file (or swap the go binary). Verified: XDG_CONFIG_HOME=<dir> go env GOFLAGS GOENV -> '-tags=natslive', '<dir>/go/env'; deep reviewer: a step env XDG_CONFIG_HOME plus a committed go/env with GOFLAGS=-overlay passes the check (exit 0). Fix: also fall on HOME, XDG_CONFIG_HOME, PATH (or any name outside a short allowlist); one test case."
+      "file": ".github/workflows/ci.yaml (conflict with main af1ff09c)",
+      "description": "GitHub reports #2316 CONFLICTING/DIRTY at 0c48de81, so no CI can run and the head cannot be approved. `git merge-tree` with main af1ff09c: modify/delete on .github/workflows/envoy-and-contracts.yaml (main's #2331 adds the envoy-session-stall job and its filter, and adds patches/** and internal/dispatch/dashboard|processes to existing filters; #2323) and a content conflict in packages/envoy/cmd/dispatch/AGENTS.md. Merge main; carry those workflow edits into ci.yaml (the new job with its filter, ci-ok needs and SELECTED_BY, its gate in ci_job_reads.py) and keep envoy-and-contracts.yaml deleted; CI green at the new head."
     }
   ],
-  "roundTwoItems": "All verified at this head: fallback counts every file under each Go module dir (tester's red case); envoy_go/envoy_smoke steps pinned as exact entries, filters narrow again, cost restated in the body; my round-2 probes now fail (cd on its own line: daemon-go-postgres-16 522 uncovered, exit 1; -race probe: test 1 uncovered, exit 1); README names docs-pages.yaml; docs-pages.yaml and docs/site/README.md state GitHub's two bounds. Merge 44544200 ports #2300's pi-legion NATS service and LEGION_TEST_NATS_URL into ci.yaml faithfully.",
-  "threads": "Round-2 threads: answered in replies on GitHub this round.",
-  "ci": "Required set: lint, typecheck, test, pr-title. CI run 40741975291 at 75722984 queued since 18:06Z (changes queued at 18:52Z); no CI run of a #2316 head has completed.",
-  "thermonuclear": "deep review CHANGES at 14b78008 (line splitting, env names; also widened the env-write finding to repo scripts and printenv). Code quality CHANGES at 14b78008 (cleanups only: split check_table, padding tuple, lazy fallback sentinel, dead &any_go_change anchor, a Run beside an exact entry on the same step accepted silently, pinned_step's unused per-run workdir); none changes behaviour.",
-  "architect": "Scope question sent (envoy 55dc311a): the three classes need a committer to hide a command or flag; recommended fixing 2 and 3 and choosing the action pin or a stated boundary for 1."
+  "roundThreeItems": "All verified at 0c48de81: check-ci-filters.test.sh 131 passed; check passes on the tree (24 gates); my probes now fail (a \\r# hidden command: falls with U+000D, envoy-go 908 uncovered; XDG_CONFIG_HOME in a step env: falls, 522 uncovered); the boundary on env writes inside local actions and scripts is stated in check-ci-filters.sh:82-88 and the guide (174-178), true to job_reason. Round-3 threads answered and accepted.",
+  "minorNotes": "Not findings under the architect's rule (deliberately hidden commands go to the boundary): read_text() normalises \\r, so split(\"\\n\") at ci_filter_coverage.py:685 changes nothing for script_run sources; exact entries also follow the ASCII rule (fails wide), undocumented; env_reason's message does not name ENV_ALLOWED's file.",
+  "ci": "Required set: lint, typecheck, test, pr-title. CI run 40752361615 at 20e98c18 never started its changes job; the head conflicts with main, so GitHub runs no checks on it.",
+  "thermonuclear": "deep review APPROVE at 0c48de81 (Minor only); code quality CHANGES at 0c48de81 (a \\r in a pinned repository script still splits Python's way: a deliberately hidden command, the architect's written boundary, not a round; env_reason message)."
 }
