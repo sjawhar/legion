@@ -4,9 +4,11 @@
 # holds no write scope and no secret, and a publish job, which holds the credentials and runs no
 # dependency code: only release-push.sh, git, gh, jq, sha256sum, npm view and npm publish and a
 # handful of pinned actions, with no cache restored and the deploy key in the env of the one or two
-# steps that push. claude-envoy-rebuild.yaml, which is no release but pushes to main with the same
-# deploy key, takes the same split: a build job that builds the plugin, and a push job. This check
-# pins that shape, so a later edit cannot undo it quietly:
+# steps that push. changelog-fold.yaml splits each fold of the changelog fragments the same way:
+# fold_build renders them with changie, fold_publish lands them with release-push.sh push-fold.
+# claude-envoy-rebuild.yaml, which is no release but pushes to main with the same deploy key, takes
+# the same split: a build job that builds the plugin, and a push job. This check pins that shape,
+# so a later edit cannot undo it quietly:
 #
 # 1. A credentialed job — one whose `permissions` grants contents, id-token, attestations or
 #    actions: write (the workflow's `permissions` when the job declares none, as GitHub gives it;
@@ -17,8 +19,9 @@
 #    `cache-mode: none`, and (d) names the deploy key only as `DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}`
 #    (the dot form) in the step-level `env:` of a step whose `run:` calls one of its workflow's push
 #    commands (PUSH_COMMANDS): `release-push.sh push-tag` or `push-main` in the three release
-#    workflows, `release-push.sh push-built` in claude-envoy-rebuild.yaml and nowhere else; the
-#    workflow's `env:` reaches every job, so the key there is never allowed.
+#    workflows, `release-push.sh push-fold` in changelog-fold.yaml, `release-push.sh push-built` in
+#    claude-envoy-rebuild.yaml and nowhere else; the workflow's `env:` reaches every job, so the
+#    key there is never allowed.
 # 2. A build job — one that runs dependency code — holds none of those four write scopes and no
 #    `secrets` reference but `secrets.GITHUB_TOKEN`, in its own text or the workflow's `env:` (so
 #    no deploy key, by dot or by index, no other secret and no `toJSON(secrets)`), declares
@@ -63,13 +66,16 @@
 # with any subcommand but those on NPM_ALLOWED (view, and publish of a `.tgz` named right after
 # it), is `docker` with one of DOCKER_DEPENDENCY (build, run, compose, exec) or a long form on
 # DOCKER_DEPENDENCY_LONG (`docker container run`, `docker image build`, `docker buildx build`, …),
-# past docker's global options (`--config /tmp/c`, `-H tcp://x`, `-D`), or is a path with a
+# past docker's global options (`--config /tmp/c`, `-H tcp://x`, `-D`), is a path with a
 # `scripts/` or `out/` component (`./scripts/x`, `../../scripts/x`, `out/x`,
-# `"$GITHUB_WORKSPACE/out/x"`), other than .github/scripts/release-push.sh itself. Command position
-# is found by one quote-aware scan of the `run:` (its `${{ … }}` expressions elided first), as bash
-# reads it: a `#` starts a comment only at word start — the start of the run, after unquoted
-# whitespace or a newline, or after an unquoted `;`, `&`, `|`, `(`, `)`, `<`, `>` or backtick, not
-# `{` (`${#x}`, `$#` and `a#b` are words) — and the comment runs to the real newline, so a
+# `"$GITHUB_WORKSPACE/out/x"`), other than .github/scripts/release-push.sh itself, or is
+# `release-push.sh fold-notes`, at any path or none (`.github/scripts/release-push.sh
+# fold-notes`), which runs changie: release-push.sh's other commands are not dependency code, and
+# fold-notes is. Command position is found by one quote-aware scan of the `run:` (its `${{ … }}`
+# expressions elided first), as bash reads it: a `#` starts a comment only at word start — the
+# start of the run, after unquoted whitespace or a newline, or after an unquoted `;`, `&`, `|`,
+# `(`, `)`, `<`, `>` or backtick, not `{` (`${#x}`, `$#` and `a#b` are words) — and the comment
+# runs to the real newline, so a
 # backslash inside it continues nothing; escaped whitespace and an escaped `#` are word characters
 # (`echo a\ #` has no comment); a backslash-newline joins lines outside single quotes, whatever the
 # number of backslashes before it (an escaped backslash is a character: `printf 'x' \\` ends its
@@ -96,13 +102,13 @@
 # variable in command position, `xargs`, `nohup`, an unlisted program, a `bun` behind `docker -Dl
 # debug run`) is accepted on that ground.
 #
-# Scope: exactly the four workflows WORKFLOWS lists, the keys of PUSH_COMMANDS: the three release
-# workflows (release.yaml, release-envoy-listener.yaml, release-envoy-infra.yaml) and
-# claude-envoy-rebuild.yaml, which is no release but pushes to main with the deploy key, so the
-# same split binds it. Rules 1-3 read every job that has `steps:`; a job that calls a reusable
-# workflow (`uses:` and no steps, release.yaml's worker_image) is out of their scope, since what it
-# runs is that workflow's own jobs. Rules 4-5 read the jobs they name. Rule 6 reads every job's
-# `if:`, steps or not.
+# Scope: exactly the five workflows WORKFLOWS lists, the keys of PUSH_COMMANDS: the three release
+# workflows (release.yaml, release-envoy-listener.yaml, release-envoy-infra.yaml),
+# changelog-fold.yaml, and claude-envoy-rebuild.yaml, which is no release but pushes to main with
+# the deploy key, so the same split binds it. Rules 1-3 read every job that has `steps:`; a job that
+# calls a reusable workflow (`uses:` and no steps, release.yaml's worker_image) is out of their
+# scope, since what it runs is that workflow's own jobs. Rules 4-5 read the jobs they name. Rule 6
+# reads every job's `if:`, steps or not.
 #
 # Run from anywhere: .github/scripts/check-release-credentials.sh
 # CI runs it in the lint job of pr-and-main.yaml, and its tests in that workflow's test job.
@@ -142,6 +148,7 @@ LineLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapp
 RELEASE = Path(".github/workflows/release.yaml")
 LISTENER = Path(".github/workflows/release-envoy-listener.yaml")
 INFRA = Path(".github/workflows/release-envoy-infra.yaml")
+FOLD = Path(".github/workflows/changelog-fold.yaml")
 REBUILD = Path(".github/workflows/claude-envoy-rebuild.yaml")
 
 # What makes a job credentialed: one of these scopes, or the deploy key's name anywhere in it, by
@@ -156,13 +163,15 @@ DEPLOY_KEY_VALUE = re.compile(r"\$\{\{\s*secrets\.DEPLOY_KEY\s*\}\}", re.IGNOREC
 RELEASE_PUSH = ".github/scripts/release-push.sh"
 TRIPWIRE = f"{RELEASE_PUSH} no-credential"
 # The release-push.sh commands a step holding the deploy key may run, by workflow: a release pushes
-# its tag and its version bump, the rebuild lands its build, and neither runs the other's push. Its
-# keys are the workflows this check reads, in this order: a workflow joins the check here.
+# its tag and its version bump, the fold lands its folded changelogs, the rebuild lands its build,
+# and none runs another's push. Its keys are the workflows this check reads, in this order: a
+# workflow joins the check here.
 RELEASE_PUSHES = ("release-push.sh push-tag", "release-push.sh push-main")
 PUSH_COMMANDS = {
     RELEASE: RELEASE_PUSHES,
     LISTENER: RELEASE_PUSHES,
     INFRA: RELEASE_PUSHES,
+    FOLD: ("release-push.sh push-fold",),
     REBUILD: ("release-push.sh push-built",),
 }
 WORKFLOWS = list(PUSH_COMMANDS)
@@ -178,10 +187,10 @@ OTHER_SECRET = re.compile(
     re.IGNORECASE,
 )
 
-# What makes a step run dependency code.
+# What makes a step run dependency code. changie is a third-party binary, the fold's renderer.
 DEPENDENCY_COMMANDS = {
     "bun", "bunx", "go", "node", "npx", "pulumi", "mise", "make",
-    "python", "python3", "pip", "uv", "cargo", "sudo",
+    "python", "python3", "pip", "uv", "cargo", "sudo", "changie",
 }
 # npm runs a package's scripts under every subcommand (install, ci, exec, run, test, …) but these
 # two: view reads the registry, and publish of a tarball (the word right after `publish` ending in
@@ -415,6 +424,8 @@ def dependency_command(words: list[str]) -> str | None:
             return f"'docker {rest[0]} {rest[1]}'"
         return None
     path = PATH_PREFIX.sub("", command)
+    if path.rsplit("/", 1)[-1] == "release-push.sh" and words[1:2] == ["fold-notes"]:
+        return f"'{command} fold-notes' (it runs changie)"
     if DEPENDENCY_PATH.search(path) and path != RELEASE_PUSH:
         return f"'{command}'"
     return None

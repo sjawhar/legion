@@ -330,6 +330,9 @@ Claude Code session loads. Claude Code's background auto-update does the same on
 file would hold every install at the tree it was first installed from until someone changed the
 string, so a test holds both files to none.
 `package.json`'s version plays no part in an update.
+claude-envoy has no release of its own, so `.github/workflows/changelog-fold.yaml` folds its
+changelog fragments (`.changes/unreleased/`) into `CHANGELOG.md` under `main@<commit>` at the
+first fold run after they merge.
 
 ## Enable the channel
 
