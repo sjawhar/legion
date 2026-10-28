@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
@@ -977,13 +977,19 @@
 - The secrets broker logs at boot how it signs in to its database, `database sign-in
   method=rds-iam` or `method=password`, before it reaches for AWS or the database, so an operator
   tells a token sign-in from a password one in the log rather than the task's environment.
+- `GET /api/v1/search` gives every `ask` hit `ask`, where the ask stands when the search ran:
+  `open`, `answered` with its latest answer (who gave it, when, the options it chose and its
+  text), or `resolved` with its resolution and, when anyone answered it, the last answer it had,
+  which for an ask that document settlement retracted while it was answered is read from its
+  `ask.answered` events, since its row keeps none. One query reads every ask hit of a page, the
+  events are read only when the page holds a resolved ask, and a page with no ask hit reads
+  nothing more. The search palette shows it under each ask hit's excerpt: a badge (`Open`,
+  `Answered`, `Closed, no answer` or `Closed after an answer`), who closed the ask and when, and
+  its latest answer, with who gave it, when, the options chosen and its text cut to three lines
+  (INFRA-569).
 
 ### Changed
 
-- A settlement of a Dispatch document that wrote nothing into the room and repaired nothing in
-  the tree it read now renders that tree once, where it rendered it twice: its version reuses the
-  first rendering, block offsets included (INFRA-647). Versions, their block index and the
-  reference excerpts are what they were.
 - Dispatch accepts an ask question of up to 2,000 UTF-16 units, from 800, on `POST .../asks` and
   `PATCH /api/v1/asks/{id}`, read from the generated `contracts.AskQuestionMax`; an approval
   request's `summary` gets what its question leaves of the same limit.
@@ -1810,10 +1816,16 @@
 
 ### Fixed
 
-- An ask block whose answer selects nothing is now written `selected="[]"` in a version that a
-  settlement made from the tree it repaired, as the room holds it, where it was `selected="null"`
-  (INFRA-647). It happened when a peer wrote the answer into the block before the settlement's own
-  repair did, and the next settlement wrote a version again that changed only that attribute.
+- An ask hit's search excerpt, in `GET /api/v1/search` and in the write-time suggestions, is cut
+  from the text its search vector indexes - the question, the options' labels and descriptions,
+  the answer's text and the options it chose - where it was cut from the question, the options'
+  raw JSON and the answer's text, so the excerpt could show JSON keys and braces (INFRA-569).
+- An ask answer that chose no option reads `"selected": []` from `GET /api/v1/asks/{id}`, the ask
+  lists and `GET /api/v1/me/answers`, and an `ask.answered` event's `answer` and `previous_answer`
+  read it from `GET /api/v1/issues/{key}/events`, `GET /api/v1/artifacts/{id}/events` and the
+  `GET /api/v1/events` stream, where each read `null`, including the rows and `ask.answered`
+  events already stored with `null`; a new answer stores `[]` (INFRA-569).
+
 - A document now strikes tilde runs as a comment does. A run of `~` pairs only with a run of its
   own length, so `Plain ~a~~ text.` and `Plain ~~a~ text.` keep their tildes where a document
   written through the API struck `a`; a run directly after an escaped tilde may open or close, so
