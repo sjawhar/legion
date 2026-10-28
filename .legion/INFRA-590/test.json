@@ -2,65 +2,36 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-590",
-  "completed": "2026-10-28T13:20:00Z",
-  "round": 3,
-  "testedHead": "f10d635e2bc925e1a76f22f4b38a959e12ca9533",
+  "completed": "2026-10-28T13:45:00Z",
+  "round": 4,
+  "testedHead": "83dd924b2e06",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I ran the implementer's commands again at f10d635e on this pod's Postgres 17. The whole multiprocess package passed (405.3 s). The outbox, duty, bus, roles and cmd/listener packages passed (listener 415.1 s). The new review-round tests passed inside those runs, among them TestShutdownWaitsForTheOutboxToReleaseThePublisherHold. I also drove the census entries on real binaries (proof below)."
+    "how": "Round 4 reviews one commit, 83dd924b, which changes only text: comments in role.go and the 0135/0136 migrations, two workflow comments, four docs files, and the changelog fragment renamed to pr2395-Changed-20261028-131137.yaml with custom Issue: pr2395. I read every changed line: no executable line changed. The round-3 real-surface run at f10d635e (multiprocess package, census probes, e2e-local, 0136 locks, rollback) therefore still covers the behaviour, and at 83dd924b I re-ran the gates the text change can reach (below)."
   },
-  "failures": [
-    {
-      "criterion": "No Dispatch key in what this PR adds to sjawhar/legion outside .legion/. Controller rulings posted on dispatch://INFRA-590: 10:04Z comment adfd3245 says a changelog fragment is named pr-<pull request number>-<slug>.yaml with no Dispatch key; 10:06Z comment 23eaa6c1 says the file name and Issue field carry the pull request number and the body no key. The INFRA-514 architect, at 12:47Z, applied the rule to the PR's added comments and prose and asked that they be named as a fail item.",
-      "evidence": "Added lines in the diff from the merge base 2d872499 to f10d635e that name a Dispatch key: the fragment file name packages/envoy/.changes/unreleased/INFRA-590-outbox-one-publisher.yaml (its body and fields carry no key; the ruling's name is pr-2395-<slug>.yaml); .github/workflows/envoy-and-contracts.yaml:223 and :273 (INFRA-590); packages/envoy/internal/dispatch/outbox/role.go:164 (dispatch://INFRA-594); packages/envoy/internal/dispatch/store/migrations/0135_duty_holds.up.sql:1 (INFRA-590) and :2 (INFRA-558); 0136_outbox_claim.up.sql:1 (INFRA-590); .dispatch/architecture/dispatch-outbox.md:63 (INFRA-594); packages/envoy/infra/README.md:580 (INFRA-590); packages/envoy/internal/dispatch/outbox/THROUGHPUT.md:18, :36-39 (INFRA-590); docs/solutions/envoy/a-fan-out-copy-defers-...-pr2225.md:43 (INFRA-590). I found these with a scan of the '+' lines of `jj diff --git` between those commits. No red test: these are text, and a test of source text is not a test."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "Census 1: Dispatch's role-routed events no longer cross notifications.role.*; the role holder still gets each one through the outbox's forward",
-      "surface": "two real envoy-dispatch binaries (multiprocess harness), with a core NATS subscriber on notifications.role.> beside the sessions",
-      "command": "throwaway probe TestProbeNoDispatchEnvelopeOnARoleTopic: 40 comments on 4 role-routed issues written through both processes",
-      "observed": "The role holder took 40 forwards, each once and in order. notifications.role.> saw 0 messages",
-      "headSha": "f10d635e2bc925e1a76f22f4b38a959e12ca9533",
-      "negativeControl": "e2e-local's own role publish through the real listener (notifications.role.e2e-reviewer, 'Role delivery.') reaches that topic, so the subscriber pattern does see role traffic when there is any"
+      "criterion": "No Dispatch key in what this PR adds outside .legion/ (controller rulings, comments adfd3245 and 23eaa6c1 on dispatch://INFRA-590; the architect's 12:47Z list)",
+      "surface": "the PR's diff from the merge base to 83dd924b, the changelog fragment as the release fold reads it",
+      "command": "jj diff --from 'heads(::83dd924b & ::main@origin)' --to 83dd924b --git, scanning '+' lines and file names outside .legion/ for INFRA-/LEGION- keys; cd packages/envoy && go run github.com/miniscruff/changie@v1.26.0 batch v99.0.0 --dry-run",
+      "observed": "No added key remains. The one hit is LEGION-101 in the core-nats-receipt note, on a line that already held it on main. changie folds the renamed fragment under Changed ('Dispatch's events outbox publishes from one process at a time…'), with no key in the folded text. The fragment matches packages/envoy/.changie.yaml's fragmentFileFormat and its required Issue field, like main's pr2233 fragments",
+      "headSha": "83dd924b2e06",
+      "negativeControl": "The same scan at f10d635e (round 3) listed 15 key lines and the INFRA-590-outbox-one-publisher.yaml file name"
     },
     {
-      "criterion": "Census 2: the listener's role forward (RequestCoreTo) stores one copy per event only for a key that names its event, and each copy of a caller-chosen key",
-      "surface": "bus.Client.RequestCoreTo, the client the listener's role lane calls, against a real JetStream server whose stream captures agent subjects, with a holder answering the receipt; plus scripts/e2e-local.sh, which runs a real listener, NATS and the TS and Go renderers",
-      "command": "throwaway probe TestProbeRequestCoreToMsgID; cd packages/envoy && bash scripts/e2e-local.sh",
-      "observed": "Two distinct agent envelopes that share the caller key publish.caller-chosen were both stored (2 messages). One dispatch envelope forwarded twice was stored once (1 message). e2e-local: both PASS lines. A held role publish reached the holder; the fake session sends no receipt, so receipt_timeout was raised as expected",
-      "headSha": "f10d635e2bc925e1a76f22f4b38a959e12ca9533",
-      "negativeControl": "e2e-local with NATS stopped: the direct send was refused with HTTP 503 in 3.5 s, and the client got EnvoyApiError 503 'the message bus did not answer'"
-    },
-    {
-      "criterion": "Census 4 and the 0136 lock claim: reads of events go on during the three index builds and wait only for the column, the drops and the commit; the previous release runs on the 0136 schema",
-      "surface": "the real migration file on Postgres 17 with 3,000,000 events rows (1.2 GB), with a second connection probing every 200 ms (lock_timeout 150 ms); main's envoy-dispatch (merge base 2d872499) against a database the head build migrated",
-      "command": "psql: begin; <0136_outbox_claim.up.sql>; pg_sleep(3); commit; with probe.sh reading and updating one event row meanwhile. Then run the head envoy-dispatch (migrates to 136; 2 comments published; SIGTERM; duty_holds empty), and then main's envoy-dispatch on the same database, posting 3 comments",
-      "observed": "Builds 543/490/468 ms. During the builds, reads ok and writes blocked. After ALTER and the two DROPs, reads blocked until COMMIT (5 samples over the 3 s sleep). Main's build booted on schema_version 136 and published all 3 comments (published_at set, next_attempt_at null)",
-      "headSha": "f10d635e2bc925e1a76f22f4b38a959e12ca9533",
-      "negativeControl": "The probe's update of the same row failed with lock_timeout for the whole migration, so the probe can detect a held lock"
-    },
-    {
-      "criterion": "Shutdown waits for the outbox, so a stopping holder records its batch and releases the hold, and the standby takes over at once",
-      "surface": "two real envoy-dispatch binaries (multiprocess harness), comments at 10/s through the standby",
-      "command": "throwaway probe TestProbeSIGTERMReleasesCleanly: SIGTERM to the holder mid-load",
-      "observed": "The holder logged 'released the publisher hold' with no release error and no 'events outbox still stopping' warning. The standby took the hold 5 ms after the SIGTERM. Every comment was delivered once and in order",
-      "headSha": "f10d635e2bc925e1a76f22f4b38a959e12ca9533",
-      "negativeControl": "My first run of this probe also wrote through the stopped process. Those writes were refused with 'connection refused', which shows the holder really was down"
-    },
-    {
-      "criterion": "One publisher; a killed, cut, silently cut or frozen publisher is replaced within 10 s; each session takes each event once and in order; a role event waits for the receipt",
-      "surface": "the repository's multiprocess harness: two real envoy-dispatch processes, one Postgres, one NATS, a per-process NATS proxy",
-      "command": "cd packages/envoy && GOWORK=off DISPATCH_TEST_DATABASE_URL=<pg> go test -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch",
-      "observed": "ok, 405.3 s. Take-over: SIGKILL 5.448 s, NATS cut 3.004 s, silent cut 7.202 s, SIGSTOP 4.184 s, and the resumed process logged the hold lost 4 ms after resume. 200 comments: watcher 200, role holder 80, author 60, each once and in order. Killed mid-batch and restarted: comment 1 at stream sequence 3, comment 2 at 4. Role event N was published 3.5 ms after its receipt",
-      "headSha": "f10d635e2bc925e1a76f22f4b38a959e12ca9533",
-      "negativeControl": "TestAFrozenPublisherSendsNothingWhenItResumes: the SIGSTOPped holder, once resumed, started no batch"
+      "criterion": "The text change leaves the behaviour as round 3 proved it: the code builds, and the embedded migrations whose comments changed still apply",
+      "surface": "packages/envoy at 83dd924b on the pod Postgres 17",
+      "command": "cd packages/envoy && GOWORK=off go build ./... && go vet ./internal/dispatch/... ./cmd/dispatch && go vet -tags multiprocess ./cmd/dispatch && DISPATCH_TEST_DATABASE_URL=<pg> go test -count=1 -run 'TestHold|TestAStandbyDoesNotTry|TestTheClaimSkips' ./internal/dispatch/duty/ ./internal/dispatch/outbox/",
+      "observed": "Build and vet clean. duty ok (7.8 s) and outbox ok (3.2 s), each on a fresh database migrated through 0135 and 0136. The round-3 proof entries at f10d635e (multiprocess 405.3 s, census 1/2/4, 0136 locks, SIGTERM release) cover the behaviour, since no executable line changed",
+      "headSha": "83dd924b2e06",
+      "negativeControl": "TestAStandbyDoesNotTryTheHoldForEveryEventTheHolderWrites still passes here; at 63e05008 it failed with 98 takes for 100 events"
     }
   ],
   "observations": [
-    "CI at f10d635e when read: build and typecheck success; changes, lint and pr-title queued; test in progress.",
-    "Commit subjects 790c651a (10:21Z) and ab5984da (10:36Z) end in '(INFRA-590)', after the 10:13Z ruling that new subjects carry no key. The same ruling says never to rewrite or force-push existing commits for this, so this is recorded only; it is not a failure.",
-    "docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md keeps LEGION-101 on a line this PR rewrote. The key was already on main, so it is not counted."
-  ]
+    "CI at 83dd924b was queued when read (build, changes, lint, test, typecheck). Every run at f10d635e that had not finished was cancelled by this push; its lint, typecheck and build had passed.",
+    "Commit subjects 790c651a and ab5984da still end in '(INFRA-590)'. The 10:13Z ruling forbids rewriting them; the new commit 83dd924b's subject carries no key."
+  ],
+  "previousRoundHead": "f10d635e2bc925e1a76f22f4b38a959e12ca9533"
 }
