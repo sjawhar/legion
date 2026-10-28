@@ -251,6 +251,18 @@ type DispatchArgs struct {
 	AzureTenantId           pulumi.StringInput `pulumi:"azureTenantId,optional"`
 	AzureClientId           pulumi.StringInput `pulumi:"azureClientId,optional"`
 	AzureFederationAudience *string            `pulumi:"azureFederationAudience,optional"`
+
+	// AgentTokenGeneration and KeepPreviousAgentToken rotate Dispatch's shared agent token, the
+	// agentToken output and DISPATCH_AGENT_TOKEN, without refusing an agent that still holds the
+	// old value. Each generation is a RandomPassword of its own: generation 0, the default, is
+	// <hostname>-agent-token, the one the component has always made, and generation N above 0 is
+	// <hostname>-agent-token-<N>. Raising the generation mints the new one; with
+	// KeepPreviousAgentToken the component keeps generation N-1 registered as it was, so its
+	// value stays the one in the stack's state, and Dispatch accepts both (DISPATCH_AGENT_TOKEN
+	// "<new> <previous>", the first the current one). Clearing it drops generation N-1, whose
+	// value Pulumi then deletes. agentToken is always generation N. Unset, both render nothing new.
+	AgentTokenGeneration   *int  `pulumi:"agentTokenGeneration,optional"`
+	KeepPreviousAgentToken *bool `pulumi:"keepPreviousAgentToken,optional"`
 }
 
 // dispatchSeededInput names the first plain string input that holds an nkey seed. No component
@@ -361,6 +373,7 @@ type dispatchSettings struct {
 	pprofPort                                   int
 	disruption                                  dispatchDisruption
 	azure                                       dispatchAzure
+	agentTokens                                 dispatchAgentTokens
 }
 
 // dispatchAzure is the Azure embedder's plain configuration, the zero value when
@@ -637,6 +650,9 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	if s.disruption, err = newDispatchDisruption(args, s.replicas, s.frontDoorReplicas, s.listenerReplicas); err != nil {
 		return dispatchSettings{}, err
 	}
+	if s.agentTokens, err = newDispatchAgentTokens(args); err != nil {
+		return dispatchSettings{}, err
+	}
 	s.existingNamespace = args.ExistingNamespace != nil && *args.ExistingNamespace
 	if args.Namespace != nil {
 		if !dnsLabel(*args.Namespace) {
@@ -759,6 +775,42 @@ func newDispatchDisruption(args *DispatchArgs, replicas, frontDoorReplicas, list
 // limit, appCPU and appMemory, and the cloud-sql-proxy sidecar's, proxyCPU and proxyMemory.
 type dispatchAppResources struct {
 	appCPU, appMemory, proxyCPU, proxyMemory string
+}
+
+// dispatchAgentTokens is the shared agent token's rotation: the current generation, and whether
+// the one before it is kept beside it. The zero value is the one token the component has always
+// made, and renders exactly what it always did.
+type dispatchAgentTokens struct {
+	generation   int
+	keepPrevious bool
+}
+
+// newDispatchAgentTokens resolves agentTokenGeneration and keepPreviousAgentToken. It refuses a
+// negative generation, and keepPreviousAgentToken at generation 0, which has no generation before
+// it to keep.
+func newDispatchAgentTokens(args *DispatchArgs) (dispatchAgentTokens, error) {
+	var tokens dispatchAgentTokens
+	if args.AgentTokenGeneration != nil {
+		tokens.generation = *args.AgentTokenGeneration
+		if tokens.generation < 0 {
+			return dispatchAgentTokens{}, fmt.Errorf("agentTokenGeneration %d must be 0 or more; leave it unset for generation 0, the token the component has always made", tokens.generation)
+		}
+	}
+	tokens.keepPrevious = args.KeepPreviousAgentToken != nil && *args.KeepPreviousAgentToken
+	if tokens.keepPrevious && tokens.generation == 0 {
+		return dispatchAgentTokens{}, errors.New("keepPreviousAgentToken needs agentTokenGeneration 1 or more: generation 0 has no previous token to keep")
+	}
+	return tokens, nil
+}
+
+// dispatchAgentTokenName is the RandomPassword holding generation's token: generation 0 keeps the
+// name the component has always given its one token, so a stack that never rotates keeps that
+// resource and its value.
+func dispatchAgentTokenName(hostname string, generation int) string {
+	if generation == 0 {
+		return hostname + "-agent-token"
+	}
+	return hostname + "-agent-token-" + strconv.Itoa(generation)
 }
 
 // newDispatchAppResources resolves appCpu and appMemory, the envoy-dispatch container's request

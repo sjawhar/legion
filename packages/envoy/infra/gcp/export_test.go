@@ -46,6 +46,9 @@ type DispatchSettings struct {
 	AppCPU             string
 	AppMemory          string
 	PprofPort          int
+	// AgentTokenGeneration and KeepPreviousAgentToken are the resolved rotation of the agent token.
+	AgentTokenGeneration   int
+	KeepPreviousAgentToken bool
 }
 
 // ResolveDispatch resolves Dispatch's plain inputs for the external refusal and default tests.
@@ -56,20 +59,22 @@ func ResolveDispatch(args *DispatchArgs) (DispatchSettings, error) {
 	}
 	strategy := dispatchStrategyFor(s.replicas)
 	settings := DispatchSettings{
-		DatabaseVersion:    s.databaseVersion,
-		DatabaseTier:       s.databaseTier,
-		DeletionProtection: s.deletionProtection,
-		Namespace:          s.namespace,
-		Replicas:           s.replicas,
-		StrategyType:       strategy.strategyType,
-		AgentSecretsURL:    s.agentSecretsURL,
-		AppClientID:        s.appClientID,
-		AppID:              s.appID,
-		AppKeySecretName:   s.appKeySecretName,
-		AppKeySecretKey:    s.appKeySecretKey,
-		AppCPU:             s.appResources.appCPU,
-		AppMemory:          s.appResources.appMemory,
-		PprofPort:          s.pprofPort,
+		DatabaseVersion:        s.databaseVersion,
+		DatabaseTier:           s.databaseTier,
+		DeletionProtection:     s.deletionProtection,
+		Namespace:              s.namespace,
+		Replicas:               s.replicas,
+		StrategyType:           strategy.strategyType,
+		AgentSecretsURL:        s.agentSecretsURL,
+		AppClientID:            s.appClientID,
+		AppID:                  s.appID,
+		AppKeySecretName:       s.appKeySecretName,
+		AppKeySecretKey:        s.appKeySecretKey,
+		AppCPU:                 s.appResources.appCPU,
+		AppMemory:              s.appResources.appMemory,
+		PprofPort:              s.pprofPort,
+		AgentTokenGeneration:   s.agentTokens.generation,
+		KeepPreviousAgentToken: s.agentTokens.keepPrevious,
 	}
 	if rolling := strategy.rollingUpdate; rolling != nil {
 		settings.RollingUpdate = &DispatchRollingUpdate{MaxUnavailable: rolling.maxUnavailable, MaxSurge: rolling.maxSurge}

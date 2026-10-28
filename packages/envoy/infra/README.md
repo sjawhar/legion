@@ -312,6 +312,24 @@ The component refuses, each by name, before it registers a resource, a `priority
 is empty, not a DNS subdomain or has the `system-` prefix, and a budget below 1 or above its
 Deployment's replica count.
 
+`agentTokenGeneration`, 0 by default, and `keepPreviousAgentToken`, `false` by default, rotate
+Dispatch's shared agent token (`DISPATCH_AGENT_TOKEN`, and the `agentToken` output) without
+refusing an agent that still holds the old one. Each generation is a `random` RandomPassword of
+its own, registered with the same arguments: generation 0 is `<hostname>-agent-token`, the one
+token the component has always made, and generation N above 0 is `<hostname>-agent-token-<N>`.
+Raising the generation mints the new token. With `keepPreviousAgentToken` the component also keeps
+generation N-1 registered as it was, so its value stays the one the stack's state already holds
+and is stored nowhere new, and the `<hostname>-dispatch` Secret's `DISPATCH_AGENT_TOKEN` is
+`<new> <previous>`, which Dispatch reads as the current token and one more it accepts. Cleared, the
+component drops generation N-1, which the update deletes, and `DISPATCH_AGENT_TOKEN` is `<new>`
+alone. `agentToken` is always generation N. Each change to the Secret's value replaces the Secret
+and rolls the app through its checksum ([The pods](#the-pods)), so each step of a rotation
+restarts the app on the new value; the front door and the listener do not roll. With neither
+input set, or both at their defaults, the component registers exactly what it did before they
+existed, so a preview shows no change. The component refuses, each by name, before it registers
+a resource, a negative `agentTokenGeneration` and `keepPreviousAgentToken` at generation 0, which
+has no previous token. [Rotating the agent token](#rotating-the-agent-token) is the procedure.
+
 Two optional groups each come as all their inputs or none. Neither takes a secret value: the
 broker relay's credential is a token the kubelet mints and the App key is read at run time, so no
 broker credential or App key ever enters the component or its Pulumi state. Both reach the app's
@@ -404,8 +422,9 @@ Autopilot's bounds for the app pod (above), a `pprofPort` outside 1-65535 or on 
 already binds (above), a `replicas`, `frontDoorReplicas` or `listenerReplicas` below 1, a
 `priorityClassName` that is empty, not a DNS subdomain or a `system-` class, an
 `appPdbMinAvailable`, `frontDoorPdbMinAvailable` or `listenerPdbMinAvailable` outside 1 to its
-Deployment's replica count, a `databaseAvailabilityType` other than `ZONAL` or `REGIONAL`, missing
-inputs, and nkey seeds in its own name and in plain inputs before it registers a resource; it
+Deployment's replica count, a `databaseAvailabilityType` other than `ZONAL` or `REGIONAL`, a
+negative `agentTokenGeneration`, `keepPreviousAgentToken` at generation 0, missing inputs, and nkey
+seeds in its own name and in plain inputs before it registers a resource; it
 refuses an `agentSecretsUrl` or an `agentSecretsAudience` whose partner input is missing, an
 `appClientId`, `appId`, `appPrivateKeySecretName` or `appPrivateKeySecretKey` set without the
 others (each missing input named), an `appId` that is not digits or is 0, an
@@ -592,7 +611,9 @@ Secret never rolls a pod. The listener's bearer, `ENVOY_API_TOKEN` in `<hostname
 both templates, since the listener serves with it and `envoy-dispatch` sends it as `ENVOY_TOKEN`:
 the two Deployments roll in the same update, and until both have, a call from the app to a
 listener pod on the other token is refused. `DISPATCH_AGENT_TOKEN` is also the `agentToken`
-output, so a consumer that hands it to its agents passes them the new value too.
+output, so a consumer that hands it to its agents passes them the new value too; rotate it with
+`agentTokenGeneration` ([Rotating the agent token](#rotating-the-agent-token)), which keeps the
+old value accepted until every consumer has moved.
 `<hostname>-tailnet-tls` carries no checksum: a renewed certificate rolls no pod.
 
 The projected tokens need no restart either: the kubelet rewrites them in place, and Dispatch
@@ -623,6 +644,33 @@ kubectl -n dispatch run census --rm -it --restart=Never --image=<envoyImage> \
   --overrides='{"spec":{"serviceAccountName":"<hostname>"}}' \
   --command -- /usr/local/bin/envoy-dispatch census
 ```
+
+### Rotating the agent token
+
+The agent token is shared: every consumer that hands `agentToken` to its agents (writing it to a
+secret store its agents read, for example) must move to a new value before Dispatch stops
+accepting the old one. Rotate it in two updates of the program that declares the component, with
+the consumers' updates between:
+
+1. Set `agentTokenGeneration` to the current generation plus one (1 on a stack that never
+   rotated, which has generation 0) and `keepPreviousAgentToken: true`. Raise it by exactly one:
+   the component keeps generation N-1, so a jump of two would keep a generation that never
+   existed and drop the one the agents hold. The preview creates one RandomPassword,
+   `<hostname>-agent-token-<N>`, deletes none, replaces the Secret `<hostname>-dispatch` and
+   updates the app Deployment; a preview that deletes a RandomPassword is not this step. Apply it:
+   the app rolls onto both tokens, and `agentToken` is the new one.
+2. Apply every consumer, so each stores the new `agentToken`, and let each relaunch its agents
+   onto it. Agents still on the old token keep working meanwhile.
+3. Once every consumer has relaunched, clear `keepPreviousAgentToken` (or set it `false`) and
+   apply again. The preview deletes `<hostname>-agent-token-<N-1>` (`<hostname>-agent-token` after
+   the first rotation), replaces the Secret and updates the app Deployment; the app rolls onto the
+   new token alone.
+
+At one app replica each roll recreates the app's one pod, a brief outage, as any change to the
+Secret is; above one it rolls with no pod down. Never lower `agentTokenGeneration`: a generation
+the stack no longer holds is minted afresh, a value no agent has. Raising it with
+`keepPreviousAgentToken` unset is a hard cut, which refuses every agent on the old token from the
+moment the app rolls.
 
 ### The front door
 

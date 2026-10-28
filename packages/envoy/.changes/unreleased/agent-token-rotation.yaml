@@ -1,0 +1,14 @@
+kind: Added
+body: |-
+  `envoy-infra:gcp:Dispatch` rotates its shared agent token without refusing an agent that still
+  holds the old one: `agentTokenGeneration` (0 by default) names the current generation, each a
+  RandomPassword of its own (`<hostname>-agent-token` for 0, the one the component always made,
+  and `<hostname>-agent-token-<N>` above it), and `keepPreviousAgentToken` keeps generation N-1
+  registered as it was, so `DISPATCH_AGENT_TOKEN` is `<new> <previous>` and Dispatch accepts both,
+  with no value stored anywhere new. `agentToken` is always the new token, so a consumer moves on
+  its first update, and each step rolls the app through the `<hostname>-dispatch` Secret's
+  checksum. The procedure: raise the generation by one with `keepPreviousAgentToken: true` and
+  apply; apply every consumer; once every consumer has relaunched, clear `keepPreviousAgentToken`
+  and apply again (`packages/envoy/infra/README.md`, "Rotating the agent token"). With neither
+  input set the component registers exactly what it did before, so a preview shows no change. A
+  negative generation, and `keepPreviousAgentToken` at generation 0, are refused by name.

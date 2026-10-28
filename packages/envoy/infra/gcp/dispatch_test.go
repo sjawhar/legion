@@ -363,6 +363,12 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 			a.Replicas = pulumi.IntRef(3)
 			a.AppPdbMinAvailable = pulumi.IntRef(4)
 		}, err: []string{"appPdbMinAvailable 4", "from 1 to replicas (3)"}},
+		{name: "a negative agent token generation", edit: func(a *gcp.DispatchArgs) { a.AgentTokenGeneration = pulumi.IntRef(-1) }, err: []string{"agentTokenGeneration -1", "0 or more", "leave it unset for generation 0"}},
+		{name: "keeping the previous agent token with no generation set", edit: func(a *gcp.DispatchArgs) { a.KeepPreviousAgentToken = pulumi.BoolRef(true) }, err: []string{"keepPreviousAgentToken needs agentTokenGeneration 1 or more", "generation 0 has no previous token"}},
+		{name: "keeping the previous agent token at generation 0", edit: func(a *gcp.DispatchArgs) {
+			a.AgentTokenGeneration = pulumi.IntRef(0)
+			a.KeepPreviousAgentToken = pulumi.BoolRef(true)
+		}, err: []string{"keepPreviousAgentToken needs agentTokenGeneration 1 or more"}},
 		{name: "a front-door budget of no pod", edit: func(a *gcp.DispatchArgs) { a.FrontDoorPdbMinAvailable = pulumi.IntRef(0) }, err: []string{"frontDoorPdbMinAvailable 0", "from 1 to frontDoorReplicas (2)", "leave it unset for no PodDisruptionBudget"}},
 		{name: "a front-door budget above the default front-door count", edit: func(a *gcp.DispatchArgs) { a.FrontDoorPdbMinAvailable = pulumi.IntRef(3) }, err: []string{"frontDoorPdbMinAvailable 3", "from 1 to frontDoorReplicas (2)"}},
 		{name: "a front-door budget above the front-door count", edit: func(a *gcp.DispatchArgs) {

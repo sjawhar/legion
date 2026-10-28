@@ -182,6 +182,61 @@ func TestConstructRefusesDispatchDisruptionInputsFromAnotherResource(t *testing.
 	}
 }
 
+// agentTokenGeneration is a plain *int and keepPreviousAgentToken a plain *bool, each refused from
+// another resource's output as replicas is: they choose which resources the component registers.
+func TestConstructRefusesDispatchAgentTokenInputsFromAnotherResource(t *testing.T) {
+	for input, value := range map[string]property.Value{
+		"agentTokenGeneration":   property.New(1.0),
+		"keepPreviousAgentToken": property.New(true),
+	} {
+		t.Run(input, func(t *testing.T) {
+			inputs := dispatchConstructInputs()
+			inputs[input] = value.WithDependencies([]resource.URN{upstream})
+			for _, key := range []string{"tailnetAuthKey", "natsUrl", "natsSeedSecret", "signInClientSecret"} {
+				inputs[key] = property.New("example").WithDependencies([]resource.URN{upstream})
+			}
+			m, _, err := constructDispatch(t, inputs, false)
+			require.ErrorContains(t, err, input)
+			require.Empty(t, m.Types())
+		})
+	}
+}
+
+// The agentToken output is always the current generation's token, whether the previous one is
+// kept or not, so a consumer that stores it moves to the new token on the first update that raises
+// the generation. Unset, it is the one token the component has always made. (The mock engine
+// computes a password's result as <name>-result; the schema marks the output secret,
+// TestSchemaServesTheDispatchComponentWithItsSecrets.)
+func TestConstructOutputsTheCurrentAgentToken(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		// generation is agentTokenGeneration, unset when 0.
+		generation float64
+		keep       bool
+		want       string
+	}{
+		{name: "unset", want: "example-dispatch-agent-token-result"},
+		{name: "generation 1 keeping generation 0", generation: 1, keep: true, want: "example-dispatch-agent-token-1-result"},
+		{name: "generation 1 alone", generation: 1, want: "example-dispatch-agent-token-1-result"},
+		{name: "generation 2 keeping generation 1", generation: 2, keep: true, want: "example-dispatch-agent-token-2-result"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			inputs := dispatchConstructBaseInputs()
+			if row.generation != 0 {
+				inputs["agentTokenGeneration"] = property.New(row.generation)
+			}
+			if row.keep {
+				inputs["keepPreviousAgentToken"] = property.New(true)
+			}
+			_, response, err := constructDispatch(t, inputs, false)
+			require.NoError(t, err)
+			token, ok := response.State.GetOk("agentToken")
+			require.True(t, ok)
+			require.Equal(t, row.want, token.AsString())
+		})
+	}
+}
+
 // tailnetAuthKey, signInClientSecret and natsSeedSecret are Inputs, which the component reads only
 // once they resolve: a value holding an nkey seed is refused then, naming the input and never the
 // value, so no child is registered with it, plainly or as a secret. Each arrives as another
@@ -392,7 +447,7 @@ func TestConstructOutputsTheServiceAccountIssuerAndSubject(t *testing.T) {
 // the component and the input, before anything registers, and never quotes a secret one
 // (provider's TestConstructRefusesAFractionInEveryIntegerInput covers every component's).
 func TestConstructRefusesAFractionalDispatchInteger(t *testing.T) {
-	for _, input := range []string{"replicas", "pprofPort", "azureEmbedTokensPerMinute"} {
+	for _, input := range []string{"replicas", "pprofPort", "azureEmbedTokensPerMinute", "agentTokenGeneration"} {
 		for _, row := range []struct {
 			value property.Value
 			want  string

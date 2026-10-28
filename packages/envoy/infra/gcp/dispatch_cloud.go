@@ -18,14 +18,17 @@ import (
 )
 
 type dispatchCloud struct {
-	cluster       *container.Cluster
-	instance      *sql.DatabaseInstance
-	password      *random.RandomPassword
-	signing       *random.RandomPassword
-	agentToken    *random.RandomPassword
-	listenerToken *random.RandomPassword
-	principal     pulumi.StringOutput
-	seedAccessor  *secretmanager.SecretIamMember
+	cluster  *container.Cluster
+	instance *sql.DatabaseInstance
+	password *random.RandomPassword
+	signing  *random.RandomPassword
+	// agentToken is the current generation's token; previousAgentToken is the one before it, set
+	// only with keepPreviousAgentToken.
+	agentToken         *random.RandomPassword
+	previousAgentToken *random.RandomPassword
+	listenerToken      *random.RandomPassword
+	principal          pulumi.StringOutput
+	seedAccessor       *secretmanager.SecretIamMember
 	// azureKeyAccessor is set only with azureEmbedKeySecret.
 	azureKeyAccessor *secretmanager.SecretIamMember
 	// issuer is the cluster's service-account token issuer.
@@ -134,9 +137,21 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 	if err != nil {
 		return nil, err
 	}
-	agentToken, err := random.NewRandomPassword(ctx, s.hostname+"-agent-token", &random.RandomPasswordArgs{Length: pulumi.Int(48), Special: pulumi.Bool(false)}, child)
+	// Every generation's token is registered with the same arguments, so the previous generation,
+	// kept, is the resource it was and keeps its value in the stack's state, and generation 0 is the
+	// one token the component made before rotation existed.
+	agentTokenOf := func(generation int) (*random.RandomPassword, error) {
+		return random.NewRandomPassword(ctx, dispatchAgentTokenName(s.hostname, generation), &random.RandomPasswordArgs{Length: pulumi.Int(48), Special: pulumi.Bool(false)}, child)
+	}
+	agentToken, err := agentTokenOf(s.agentTokens.generation)
 	if err != nil {
 		return nil, err
+	}
+	var previousAgentToken *random.RandomPassword
+	if s.agentTokens.keepPrevious {
+		if previousAgentToken, err = agentTokenOf(s.agentTokens.generation - 1); err != nil {
+			return nil, err
+		}
 	}
 	// The listener binds 0.0.0.0 in a pod of its own, where its API refuses to start without a
 	// bearer, and its credential is its own, never a key of the Secret holding the database URL
@@ -209,5 +224,15 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 		}
 		return fmt.Sprintf("https://container.googleapis.com/v1/projects/%s/locations/%s/clusters/%s", parts[0], parts[1], parts[2]), nil
 	}).(pulumi.StringOutput)
-	return &dispatchCloud{cluster: cluster, instance: instance, password: password, signing: signing, agentToken: agentToken, listenerToken: listenerToken, principal: principal, seedAccessor: seedAccessor, azureKeyAccessor: azureKeyAccessor, issuer: issuer}, nil
+	return &dispatchCloud{cluster: cluster, instance: instance, password: password, signing: signing, agentToken: agentToken, previousAgentToken: previousAgentToken, listenerToken: listenerToken, principal: principal, seedAccessor: seedAccessor, azureKeyAccessor: azureKeyAccessor, issuer: issuer}, nil
+}
+
+// acceptedAgentTokens is DISPATCH_AGENT_TOKEN: the current token alone, the very output a stack
+// that never rotates has always rendered, or, with the previous one kept, both separated by a
+// space, the current first, which Dispatch reads as the current token and one more it accepts.
+func (c *dispatchCloud) acceptedAgentTokens() pulumi.StringOutput {
+	if c.previousAgentToken == nil {
+		return c.agentToken.Result
+	}
+	return pulumi.ToSecret(pulumi.Sprintf("%s %s", c.agentToken.Result, c.previousAgentToken.Result)).(pulumi.StringOutput)
 }

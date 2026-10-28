@@ -196,6 +196,14 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 		require.False(t, dispatch.InputProperties[input].Secret, input)
 		require.Contains(t, dispatch.RequiredInputs, input)
 	}
+	// The agent token's rotation is an optional plain integer and an optional plain boolean, neither
+	// a secret: each names which generated token is current and which is kept, never a value.
+	for input, typ := range map[string]string{"agentTokenGeneration": "integer", "keepPreviousAgentToken": "boolean"} {
+		require.Equal(t, typ, dispatch.InputProperties[input].Type, input)
+		require.True(t, dispatch.InputProperties[input].Plain, input)
+		require.False(t, dispatch.InputProperties[input].Secret, input)
+		require.NotContains(t, dispatch.RequiredInputs, input)
+	}
 	require.True(t, dispatch.Properties["agentToken"].Secret)
 	for _, output := range []string{"serviceAccountIssuer", "serviceAccountSubject"} {
 		require.Equal(t, "string", dispatch.Properties[output].Type, output)
@@ -285,7 +293,8 @@ func TestConstructRefusesAFractionInEveryIntegerInput(t *testing.T) {
 		}
 	}
 	// aws:NatsService logRetentionDays; aws:WebhookListener logRetentionDays and natsReplicas;
-	// gcp:Dispatch replicas, pprofPort and azureEmbedTokensPerMinute; gcp:NatsHub diskSizeGb;
-	// host:Listener port.
-	require.GreaterOrEqual(t, covered, 8)
+	// gcp:Dispatch replicas, frontDoorReplicas, listenerReplicas, pprofPort,
+	// azureEmbedTokensPerMinute, the three budgets and agentTokenGeneration; gcp:NatsHub
+	// diskSizeGb; host:Listener port.
+	require.GreaterOrEqual(t, covered, 14)
 }
