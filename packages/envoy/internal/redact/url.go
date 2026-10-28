@@ -13,7 +13,9 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"strconv"
@@ -241,8 +243,10 @@ func printable(err error, raw string) (*url.Error, bool) {
 	return ue, !errors.As(inner, &nested) && (transport(inner) || clean(inner.Error()))
 }
 
-// transport reports whether err is a failure class names from the transport or an HTTP status
-// answer, none of whose text quotes a URL.
+// transport reports whether err is a failure class names from the transport, a peer that broke
+// the exchange (net/http's fixed ErrSchemeMismatch for an http answer to https, EOF, a reset, a
+// broken pipe: the set the client's peerAnswered reads), or an HTTP status answer, none of whose
+// text quotes a URL.
 func transport(err error) bool {
 	var op *net.OpError
 	var dns *net.DNSError
@@ -250,7 +254,9 @@ func transport(err error) bool {
 	var re *oauth2.RetrieveError
 	return errors.As(err, &op) || errors.As(err, &dns) || errors.Is(err, syscall.ECONNREFUSED) ||
 		errors.Is(err, context.DeadlineExceeded) || errors.As(err, &timeout) && timeout.Timeout() ||
-		tlsFailure(err) || errors.As(err, &re)
+		tlsFailure(err) || errors.As(err, &re) ||
+		errors.Is(err, http.ErrSchemeMismatch) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
 }
 
 // classified is an error whose text is its class alone.

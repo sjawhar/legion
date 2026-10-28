@@ -263,9 +263,9 @@ func TestAnIDThatWouldNotNameOnePathSegmentIsRefusedByName(t *testing.T) {
 	publicURL = broker.URL
 	for _, id := range []string{"req%zz", "a b", "a/b", "req%25zz"} {
 		_, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil, "status", id)
-		want := strconv.Quote(id) + " is not a request id"
-		if exit == 0 || !strings.Contains(stderr, want) || strings.Contains(stderr, "not a valid URL") || strings.Contains(stderr, "PROOF_INVALID") {
-			t.Errorf("status %q: exit %d, stderr %q; want a refusal naming %s", id, exit, stderr, want)
+		want := "agent-secrets status: " + strconv.Quote(id) + " is not a request id\n"
+		if exit == 0 || stderr != want {
+			t.Errorf("status %q: exit %d, stderr %q; want exactly %q, with no trailer since nothing was sent", id, exit, stderr, want)
 		}
 	}
 	if n := reached.Load(); n != 0 {
@@ -279,6 +279,32 @@ func TestAnIDThatWouldNotNameOnePathSegmentIsRefusedByName(t *testing.T) {
 	}
 	if n := verified.Load(); n != 2 {
 		t.Fatalf("%d proofs verified, want 2: an ordinary id must sign the path the broker rebuilds", n)
+	}
+}
+
+// TestAPeerThatBrokeTheExchangeIsNamed: with a clean AGENT_SECRETS_URL, a real http server asked
+// over https and a real server that closes the connection each read as a peer that answered and
+// broke the exchange, with net/http's own cause.
+func TestAPeerThatBrokeTheExchangeIsNamed(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	keyDir := newKeyDir(t)
+	plain := httptest.NewServer(http.NotFoundHandler())
+	defer plain.Close()
+	closing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			conn.Close()
+		}
+	}))
+	defer closing.Close()
+	for _, row := range []struct{ base, cause string }{
+		{"https://" + strings.TrimPrefix(plain.URL, "http://"), "http: server gave HTTP response to HTTPS client"},
+		{closing.URL, "EOF"},
+	} {
+		_, stderr, _ := runAgentSecrets(t, binary, row.base, keyDir, nil, "self")
+		want := "answered but the exchange failed: GET " + row.base + "/v1/enrollments/self (AGENT_SECRETS_URL names " + row.base + "): " + row.cause + "\n"
+		if !strings.HasSuffix(stderr, want) {
+			t.Errorf("AGENT_SECRETS_URL=%s: stderr %q, want it to end %q", row.base, stderr, want)
+		}
 	}
 }
 
@@ -552,6 +578,7 @@ func TestEveryUnreachableFailureIsClassified(t *testing.T) {
 		{"any other dial failure", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("socket: too many open files")}, "no connection could be made", answered},
 		{"timed out", context.DeadlineExceeded, "did not answer in time", answered},
 		{"an HTTP answer to HTTPS", tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}, answered, ""},
+		{"an HTTP answer to HTTPS, as net/http reports it", http.ErrSchemeMismatch, answered, ""},
 		{"an untrusted certificate", &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}, answered, ""},
 		{"EOF after the request", io.EOF, answered, ""},
 		{"a reset after the request", &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ECONNRESET)}, answered, ""},

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -207,13 +208,20 @@ func TestErrorPrintsOnlyTheClassForAURLItWillNotPrint(t *testing.T) {
 }
 
 // TestErrorLeavesACleanURLsErrorAsItIs: for a configured URL URL prints unchanged, a DNS, a
-// refused and a timeout error come back as they are, with their own text.
+// refused, a timeout, an http-to-https, an EOF, a reset and a broken-pipe error come back as
+// they are, with their own text.
 func TestErrorLeavesACleanURLsErrorAsItIs(t *testing.T) {
 	const raw = "http://127.0.0.1:1"
+	call := func(cause error) error { return &url.Error{Op: "Get", URL: raw + "/v1/enrollments/self", Err: cause} }
 	for _, err := range []error{
-		&url.Error{Op: "Get", URL: raw + "/v1/enrollments/self", Err: &net.DNSError{Err: "no such host", Name: "broker.invalid", IsNotFound: true}},
-		&url.Error{Op: "Get", URL: raw + "/v1/enrollments/self", Err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}},
-		&url.Error{Op: "Get", URL: raw + "/v1/enrollments/self", Err: context.DeadlineExceeded},
+		call(&net.DNSError{Err: "no such host", Name: "broker.invalid", IsNotFound: true}),
+		call(&net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}),
+		call(context.DeadlineExceeded),
+		call(http.ErrSchemeMismatch),
+		call(io.EOF),
+		call(io.ErrUnexpectedEOF),
+		call(syscall.ECONNRESET),
+		call(syscall.EPIPE),
 	} {
 		if got := Error(err, raw); got != err {
 			t.Errorf("Error(%v) = %v, want the error as it is", err, got)
@@ -221,6 +229,42 @@ func TestErrorLeavesACleanURLsErrorAsItIs(t *testing.T) {
 	}
 	if Error(nil, "http://tokuser9f3:hunter2pw@127.0.0.1:1") != nil {
 		t.Fatal("a nil error must stay nil")
+	}
+}
+
+// closingServer is a server that takes each connection and closes it without an answer.
+func closingServer(t *testing.T) string {
+	t.Helper()
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			conn.Close()
+		}
+	}))
+	t.Cleanup(s.Close)
+	return s.URL
+}
+
+// TestErrorKeepsARealPeersCause: against real servers - an http server asked over https, and
+// one that closes the connection - net/http's error for a clean URL comes back as it is, through
+// Error, and its cause through Cause.
+func TestErrorKeepsARealPeersCause(t *testing.T) {
+	plain := httptest.NewServer(http.NotFoundHandler())
+	defer plain.Close()
+	for _, row := range []struct{ base, want string }{
+		{"https://" + strings.TrimPrefix(plain.URL, "http://"), "http: server gave HTTP response to HTTPS client"},
+		{closingServer(t), "EOF"},
+	} {
+		_, err := http.Get(row.base + "/v1/enrollments/self")
+		if err == nil || !strings.HasSuffix(err.Error(), row.want) {
+			t.Fatalf("the fixture's error %v does not end with %q", err, row.want)
+		}
+		if got := Error(err, row.base); got != err {
+			t.Errorf("Error(%v) = %v, want the error as it is", err, got)
+		}
+		if got := Cause(err, row.base); got == nil || got.Error() != row.want {
+			t.Errorf("Cause(%v) = %v, want %q", err, got, row.want)
+		}
 	}
 }
 

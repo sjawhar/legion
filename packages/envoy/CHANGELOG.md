@@ -284,12 +284,17 @@
   escaped, Dispatch's two boot errors about `DISPATCH_AGENT_SECRETS_URL`, and the broker's own
   refusals of `BROKER_PUBLIC_URL` and `BROKER_MACHINE_LOGIN_URL`. With a clean base, an error
   prints as net/http wrote it only when the URL it names is that base followed by a plain `/v1/`
-  path and the error it wraps is a transport failure, an HTTP status answer, or text the
-  allow-list passes: a redirect's target (another host or path, a query, or a malformed
-  `Location` whose text quotes it) prints the class alone. `agent-secrets` refuses an id that
-  would not name one path segment as written - `"req%zz" is not a request id` - before any call,
+  path and the error it wraps is a transport failure (a dial, name resolution, refused, timeout,
+  TLS, net/http's `http: server gave HTTP response to HTTPS client`, EOF, a reset or a broken
+  pipe), an HTTP status answer, or text the allow-list passes: a redirect's target (another host
+  or path, a query, or a malformed `Location` whose text quotes it) prints the class alone.
+  `agent-secrets` refuses an id that would not name one path segment as written - `"req%zz" is
+  not a request id`, with no `asked the broker` ending since nothing was sent - before any call,
   since the proof signs the path as built and the broker checks it against the path it decoded;
-  before, such an id was blamed on the broker's address.
+  before, such an id was blamed on the broker's address. An http server answering an https
+  `AGENT_SECRETS_URL` now reads as `the broker at … answered but the exchange failed`, as the
+  troubleshooting guide says: net/http reports it as its fixed `http.ErrSchemeMismatch`, which
+  the classification did not look for.
   `agent-secrets-devrelay --broker` no longer takes `AGENT_SECRETS_URL` as its flag default,
   which its usage text printed whole; it reads the variable after parsing. `agent-secrets-helper
   install` writes its unit `0600`, not `0644`, since the unit's `Environment=` line holds the

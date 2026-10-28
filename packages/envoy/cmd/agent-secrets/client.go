@@ -152,8 +152,9 @@ func unreachable(base, method, callURL string, err error) error {
 }
 
 // peerAnswered reports whether err shows a peer took the connection and then broke the exchange:
-// a TLS record that is not TLS (an HTTP server answering an https URL), a TLS alert or certificate
-// it would not trust, or the stream ending or being reset once it existed.
+// a TLS record that is not TLS (an HTTP server answering an https URL, which net/http reports as
+// its fixed http.ErrSchemeMismatch in place of the record error), a TLS alert or certificate it
+// would not trust, or the stream ending or being reset once it existed.
 func peerAnswered(err error) bool {
 	var record tls.RecordHeaderError
 	var alert tls.AlertError
@@ -161,7 +162,7 @@ func peerAnswered(err error) bool {
 	var authority x509.UnknownAuthorityError
 	var hostname x509.HostnameError
 	var invalid x509.CertificateInvalidError
-	return errors.As(err, &record) || errors.As(err, &alert) || errors.As(err, &verify) ||
+	return errors.As(err, &record) || errors.Is(err, http.ErrSchemeMismatch) || errors.As(err, &alert) || errors.As(err, &verify) ||
 		errors.As(err, &authority) || errors.As(err, &hostname) || errors.As(err, &invalid) ||
 		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
 		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
@@ -303,13 +304,19 @@ type RequestStatus struct {
 	Decision  *requestDecision `json:"decision"`
 }
 
+// refusedBeforeCall is a refusal this client made before it sent anything, so refusalText adds
+// no "asked the broker" ending to it.
+type refusedBeforeCall struct{ text string }
+
+func (e *refusedBeforeCall) Error() string { return e.text }
+
 // pathID refuses id, naming it as kind, when it would not appear in a call's path as written: the
 // proof signs the URL this client builds, and the broker checks it against its public URL and the
 // path it decoded, so an id url.PathEscape would change (a '%', a space, a '/') could only be
 // escaped into a proof the broker refuses, or sent raw into a different path.
 func pathID(kind, id string) error {
 	if url.PathEscape(id) != id {
-		return fmt.Errorf("%q is not %s", id, kind)
+		return &refusedBeforeCall{fmt.Sprintf("%q is not %s", id, kind)}
 	}
 	return nil
 }

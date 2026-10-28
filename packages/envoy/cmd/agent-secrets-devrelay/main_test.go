@@ -202,8 +202,19 @@ func TestATokenFileItCannotUseSendsNothing(t *testing.T) {
 func TestABrokerItCannotReachNamesNoCredentialTheURLCarries(t *testing.T) {
 	token := tokenFile(t, "caller-token")
 	np := `"` + redact.NotPrinted + `": `
+	plain := httptest.NewServer(http.NotFoundHandler())
+	defer plain.Close()
+	closing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			conn.Close()
+		}
+	}))
+	defer closing.Close()
+	overHTTPS := "https://" + strings.TrimPrefix(plain.URL, "http://")
 	for _, row := range []struct{ base, want string }{
 		{"http://127.0.0.1:1", `Post "http://127.0.0.1:1/v1/credential-requests/record-1/approve": dial tcp 127.0.0.1:1: connect: connection refused`},
+		{overHTTPS, `Post "` + overHTTPS + `/v1/credential-requests/record-1/approve": http: server gave HTTP response to HTTPS client`},
+		{closing.URL, `Post "` + closing.URL + `/v1/credential-requests/record-1/approve": EOF`},
 		{"http://tokuser9f3:hunter2pw@127.0.0.1:1", np + "connection refused"},
 		{"http://127.0.0.1:1/?token=qtok77", np + "connection refused"},
 		{"http://tokuser9f3:hunter2pw%zz@127.0.0.1:1", np + "not a valid URL"},

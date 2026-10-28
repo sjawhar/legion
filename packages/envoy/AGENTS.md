@@ -2693,13 +2693,15 @@ passes through `redact.Error(err, base)` (or `redact.Cause`, the same without ne
 `*url.Error` wrapper): it is err itself only when base is clean, the URL that error names is base
 followed by nothing or a plain `/v1/` path (`redact.Call`; a redirect's target on another host or
 path, or with a query, is not), and the error it wraps is a transport failure (`net.OpError`, name
-resolution, refused, timeout, TLS), an HTTP status answer, or text the allow-list passes (a
+resolution, refused, timeout, TLS, `http.ErrSchemeMismatch`, EOF, a reset, a broken pipe: the set
+`peerAnswered` reads), an HTTP status answer, or text the allow-list passes (a
 malformed `Location`'s error quotes the target and is not). Otherwise its text is the class alone
 (`name resolution failed`, `connection refused`, `timed out`, `TLS failed`, `the broker answered
 HTTP <n>`, `not a valid URL`, `the request failed`), found with errors.Is and errors.As on err,
 and it unwraps to err so callers classify as before. `agent-secrets` refuses an id that
 `url.PathEscape` would change (`pathID`) before any call, never escaping it: the proof signs the
-URL as built and the broker rebuilds the htu from the decoded path.
+URL as built and the broker rebuilds the htu from the decoded path. That refusal is a
+`refusedBeforeCall`, which `refusalText` prints with no `asked the broker` ending.
 Extend the allow-list
 only with a check a test proves, never a parser that prints part of a value it rejects.
 `agent-secrets-helper install` writes its unit `0600`, since its `Environment=` line holds the
