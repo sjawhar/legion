@@ -365,7 +365,12 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 // (incremental); anything else is rendered whole, as it always was (whole).
 //
 // The replica starts from the state the log records as of just before the room's first transaction
-// since its load, so a room that is only read holds no replica.
+// since its load, so a room that is only read holds no replica. The load rendered that very state
+// already (onLoadDocument), and hands that rendering, with its layout, to the replica's first run
+// (loadedRendering), which takes it in place of rendering the base again (start says why it is
+// exact). The replica holds it only through a weak pointer, so it adds no resident memory: the
+// next collection takes it, and a first run that starts after that renders the base as every run
+// after a recover does.
 type renderedReplica struct {
 	mu sync.Mutex
 	// waiting counts the update observers waiting for mu (lockForUpdate).
@@ -407,15 +412,29 @@ type renderedReplica struct {
 	// paths is the service's count of the way each rendering was had (renderPathCounts), which
 	// keepReplica hands over: the replica counts the paths its update observer takes.
 	paths *renderPathCounts
+	// loaded is the load's rendering of the room (loadedRendering), held weakly, which keepReplica
+	// hands over and the replica's first run takes (start). start and recover clear it, under mu,
+	// so no run but the first ever takes it.
+	loaded weak.Pointer[loadedRendering]
+}
+
+// loadedRendering is the rendering of a room's document its load made (onLoadDocument), and the
+// pmdoc.Layout recorded with it, valid only with that markdown, for the room's replica to take as
+// its base's (renderedReplica.start). The load holds it while it hands it to keepReplica, and the
+// replica only weakly.
+type loadedRendering struct {
+	markdown string
+	layout   *pmdoc.Layout
 }
 
 // replicaEpochs is where every renderedReplica.epoch is drawn from, so no two replicas in the
 // process, and no two runs of one replica either side of a recover, ever stand at one epoch.
 var replicaEpochs atomic.Uint64
 
-// renderPathCounts counts, one counter per path, how the renderings a room's update observer and a
-// document write need were had, so a test can assert that the path it means to exercise ran rather
-// than pass by rendering the replica, and a measurement build can report how often each one fires.
+// renderPathCounts counts, one counter per path, how the renderings a room's update observer, its
+// replica's start and a document write need were had, so a test can assert that the path it means
+// to exercise ran rather than pass by rendering the replica, and a measurement build can report how
+// often each one fires.
 // The service keeps one (Service.renderPaths) and hands each replica a pointer to it (keepReplica).
 // Nothing in the service reads them.
 type renderPathCounts struct {
@@ -444,6 +463,12 @@ type renderPathCounts struct {
 	beforeFromWrite atomic.Uint64
 	// beforeRendered counts the operations that rendered their fork before applying.
 	beforeRendered atomic.Uint64
+	// catchUpFromLoad counts the replica runs that took the load's rendering of their base
+	// (loadedRendering) in place of rendering it (renderedReplica.start).
+	catchUpFromLoad atomic.Uint64
+	// catchUpRendered counts the replica runs that rendered the base they started from: a first
+	// run whose load's rendering was collected or never made, and every run after a recover.
+	catchUpRendered atomic.Uint64
 }
 
 // maxTouchedBlocks is the most top-level blocks one update may change a type in and still be
@@ -673,7 +698,33 @@ func (r *renderedReplica) standsAt(mark forkReadMark) bool {
 // measured against. It hands the new document to the replica's finder once base is applied
 // (blockChangeFinder.watch), so what it records is each later update's. A base that does not
 // apply leaves no replica (recover).
+//
+// The replica's first run takes the load's rendering (loaded) as base's rather than render base,
+// when the rendering is still there: a weak pointer that no longer answers it, or a load that made
+// none (a document outside the schema), leaves the run to render base, as every run after a
+// recover does. start clears loaded either way, base applied or not, so no later run takes it.
+// The load's rendering is base's exactly:
+//
+//   - base is the room's whole state as of just before the first transaction to run on it after
+//     its log opened: ygo encodes it under the document's lock before that transaction's fn runs,
+//     for each open log still waiting for one (sjawhar/ygo v1.51.3-sami.4, crdt/update_log.go,
+//     OpenUpdateLog and recordUpdateLogBases; crdt/doc.go, transactInternal), and only a
+//     transaction changes the state, so base is the state the log opened on;
+//   - the load renders the room's tree before it opens the log (onLoadDocument), and nothing
+//     commits on the room in between: ygo hands the room's document to no peer or caller until
+//     the load hook returns (provider/websocket/server.go, loadRoom closes the room's ready barrier
+//     after it), and the load hands the document to nothing between the render and OpenUpdateLog.
+//     So the state the load rendered is the state the log opened on, which is base;
+//   - rendering is deterministic over one state, and the load's read of the tree (pmdoc.Read)
+//     differs from the one here (pmdoc.ReadForRendering) only in copying the attribute values it
+//     reads, which the render does not write.
+//
+// A run after a recover starts from the base the log records at some later commit
+// (crdt.UpdateLog.Reset), which the load never rendered; recover clears loaded too, so even a
+// recover before the first run leaves nothing to take. The caller holds mu.
 func (r *renderedReplica) start(room string, base []byte) {
+	loaded := r.loaded.Value()
+	r.loaded = weak.Pointer[loadedRendering]{}
 	doc := newDocumentCopy()
 	if err := crdt.ApplyUpdateV1(doc, base, nil); err != nil {
 		slog.Error("dispatch: make the document's rendered copy", "room", room, "error", err)
@@ -682,6 +733,15 @@ func (r *renderedReplica) start(room string, base []byte) {
 	}
 	r.doc, r.fragment = doc, doc.GetXmlFragment(fragmentName)
 	r.finder.watch(doc, r.fragment, &r.touched)
+	if loaded != nil {
+		// Its own string, not a pointer into loaded, which would keep the load's layout alive
+		// with the replica's markdown after an update replaced the layout.
+		markdown := loaded.markdown
+		r.markdown, r.layout = &markdown, loaded.layout
+		r.paths.catchUpFromLoad.Add(1)
+		return
+	}
+	r.paths.catchUpRendered.Add(1)
 	if markdown, _, layout, err := renderDocumentForUpdate(r.fragment); err == nil {
 		r.markdown, r.layout = &markdown, layout
 	} else {
@@ -695,10 +755,13 @@ func (r *renderedReplica) start(room string, base []byte) {
 // update it could not place - the rest of this drain and what the reset handed over - is consumed
 // all the same (consumed), and classified as a content change with no ask blocks, since nothing
 // tells what it changed: crediting a connected browser with an edit that changed nothing loses
-// less than an edit credited to nobody.
+// less than an edit credited to nobody. The replica drops the load's rendering (loaded), if its
+// first run has not taken it: nothing ties the base the reset records to the state the load
+// rendered (start).
 func (r *renderedReplica) recover(room string, unplaced []crdt.LoggedUpdate, classify func(update crdt.LoggedUpdate, changed bool, asks func() map[string]struct{})) {
 	unplaced = append(unplaced, r.log.Reset()...)
 	r.doc, r.fragment, r.markdown, r.layout = nil, nil, nil, nil
+	r.loaded = weak.Pointer[loadedRendering]{}
 	r.touched.reset()
 	r.epoch.Store(replicaEpochs.Add(1))
 	for _, update := range unplaced {
@@ -721,8 +784,13 @@ func (r *renderedReplica) recover(room string, unplaced []crdt.LoggedUpdate, cla
 // evicted instance of the room reaches that instance's replica or none, never its successor's. The
 // replica takes a fresh epoch (replicaEpochs), counts its paths on the service's renderPaths, and
 // learns what each update touched through changedTypesFinder.
-func (s *Service) keepReplica(live *crdt.Doc, log *crdt.UpdateLog) *renderedReplica {
-	replica := &renderedReplica{log: log, paths: &s.renderPaths, finder: changedTypesFinder{}}
+//
+// loaded is the load's rendering of live as log opened on it, or nil when the load made none. The
+// replica holds it only weakly, for its first run to take in place of rendering its base (start):
+// once the caller drops it, nothing holds it, so it adds no resident memory and the next
+// collection takes it.
+func (s *Service) keepReplica(live *crdt.Doc, log *crdt.UpdateLog, loaded *loadedRendering) *renderedReplica {
+	replica := &renderedReplica{log: log, paths: &s.renderPaths, finder: changedTypesFinder{}, loaded: weak.Make(loaded)}
 	replica.epoch.Store(replicaEpochs.Add(1))
 	listResident(&s.replicas, live, weak.Make(replica))
 	return replica

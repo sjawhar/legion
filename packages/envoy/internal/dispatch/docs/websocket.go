@@ -438,10 +438,19 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	}
 	// The room is still loading: ygo hands its document to no peer or caller until this hook
 	// returns (sjawhar/ygo v1.51.3-sami.1, provider/websocket/server.go:1749-1837: loadRoom closes
-	// the room's ready barrier after it), so nothing writes the tree while this walks it.
+	// the room's ready barrier after it), so nothing writes the tree while this walks it. Its
+	// rendering, with the layout recorded with it, goes to the room's replica (keepReplica, below),
+	// whose first run takes it as its base's: nothing from here to OpenUpdateLog hands the document
+	// to anything, so the state rendered here is the one the log opens on
+	// (renderedReplica.start). This load holds it only until it hands it over.
+	var loaded *loadedRendering
 	tree, err := treeOf(doc)
 	if err == nil {
-		_, err = documentMarkdown(tree)
+		rendering := &loadedRendering{}
+		rendering.markdown, _, rendering.layout, err = documentRenderingWithLayout(tree)
+		if err == nil {
+			loaded = rendering
+		}
 	}
 	var askBlocks map[string]struct{}
 	switch {
@@ -492,7 +501,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	s.unlockState(room, state)
 	// The log is opened before the observer is registered and before ygo hands the room to anyone
 	// (above), so it holds every transaction the room commits from here on, in commit order.
-	replica := s.keepReplica(doc, doc.OpenUpdateLog())
+	replica := s.keepReplica(doc, doc.OpenUpdateLog(), loaded)
 	instance := s.keepInstance(room, doc)
 	hold := &instance.hold
 	doc.OnUpdate(func(update []byte, origin any) {

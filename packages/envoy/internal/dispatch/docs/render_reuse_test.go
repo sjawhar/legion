@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"runtime"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -59,6 +61,7 @@ type renderPaths struct {
 	observerReused, observerInRoom, observerRendered   uint64
 	observerIncremental, observerUntouched             uint64
 	beforeFromReplica, beforeFromWrite, beforeRendered uint64
+	catchUpFromLoad, catchUpRendered                   uint64
 }
 
 func readRenderPaths(service *Service) renderPaths {
@@ -72,6 +75,8 @@ func readRenderPaths(service *Service) renderPaths {
 		beforeFromReplica:   counts.beforeFromReplica.Load(),
 		beforeFromWrite:     counts.beforeFromWrite.Load(),
 		beforeRendered:      counts.beforeRendered.Load(),
+		catchUpFromLoad:     counts.catchUpFromLoad.Load(),
+		catchUpRendered:     counts.catchUpRendered.Load(),
 	}
 }
 
@@ -85,12 +90,24 @@ func (p renderPaths) minus(base renderPaths) renderPaths {
 		beforeFromReplica:   p.beforeFromReplica - base.beforeFromReplica,
 		beforeFromWrite:     p.beforeFromWrite - base.beforeFromWrite,
 		beforeRendered:      p.beforeRendered - base.beforeRendered,
+		catchUpFromLoad:     p.catchUpFromLoad - base.catchUpFromLoad,
+		catchUpRendered:     p.catchUpRendered - base.catchUpRendered,
 	}
 }
 
-// observed is how many logged updates the update observer classified on any of its paths.
+// observed is how many logged updates the update observer classified on any of its paths. A
+// replica's start is no such path: it classifies no update.
 func (p renderPaths) observed() int {
 	return int(p.observerReused + p.observerInRoom + p.observerRendered + p.observerIncremental + p.observerUntouched)
+}
+
+// withoutCatchUps is p without the counts of the replica's starts (catchUpFromLoad,
+// catchUpRendered): which of the two a first start counts turns on whether a collection ran
+// between the room's load and its first commit, which a test that does not control the collector
+// cannot say.
+func (p renderPaths) withoutCatchUps() renderPaths {
+	p.catchUpFromLoad, p.catchUpRendered = 0, 0
+	return p
 }
 
 // renderShadow follows every room instance the service loads for one document (watchRenders).
@@ -451,10 +468,12 @@ func (sh *renderShadow) loggedLocked() int {
 
 // expect asserts that each path ran exactly as often as want says since m, that the room
 // observers classified every update logged since m once, recovered of them by recover, which
-// takes no path, and that the replica was compared with the shadow after every other one.
+// takes no path, and that the replica was compared with the shadow after every other one. It
+// leaves out the replica's starts (withoutCatchUps), so want names none; a test that controls the
+// collector asserts them itself (since).
 func (m renderMeasure) expect(t *testing.T, want renderPaths, recovered int) {
 	t.Helper()
-	got := readRenderPaths(m.sh.service).minus(m.paths)
+	got := m.since().withoutCatchUps()
 	if got != want {
 		t.Errorf("render paths = %+v, want %+v", got, want)
 	}
@@ -467,6 +486,11 @@ func (m renderMeasure) expect(t *testing.T, want renderPaths, recovered int) {
 	if aligned != logged-recovered {
 		t.Errorf("the replica was compared with the shadow after %d of %d commits", aligned, logged-recovered)
 	}
+}
+
+// since is the service's path counts since m.
+func (m renderMeasure) since() renderPaths {
+	return readRenderPaths(m.sh.service).minus(m.paths)
 }
 
 // check compares, for the resident room, the replica's rendering, the shadow's and a render of the
@@ -1460,7 +1484,7 @@ func TestRenderReuseABrowserTypingScript(t *testing.T) {
 		observerReused:      uint64(agentWrites),
 		beforeFromReplica:   uint64(agentWrites),
 	}, recovered)
-	got := readRenderPaths(service).minus(m.paths)
+	got := m.since()
 	if limit := uint64(enters + blockEdits + agentWrites + recovered + 1); got.observerRendered > limit {
 		t.Errorf("the observer rendered the document whole %d times, more than the %d structural edits, writes and recovers allow", got.observerRendered, limit)
 	}
@@ -1476,5 +1500,130 @@ func TestRenderReuseABrowserTypingScript(t *testing.T) {
 	state.mu.Unlock()
 	if !authored || author != reuseBob {
 		t.Errorf("the room owes the browser's ask block to %#v (recorded %t), want %#v", author, authored, reuseBob)
+	}
+}
+
+// A4. A room's replica takes, as its base's, the rendering the room's load made of the state the
+// replica starts from, in place of rendering that base again, when its first run starts while the
+// rendering is still there; a collection since the load, or a recover, leaves the run to render its
+// base. Either way the replica equals the shadow's independent render after every commit. Each case
+// that needs the load's rendering alive runs with the collector off (withoutCollections), since
+// the replica holds it only weakly and a collection between the load and the first commit would
+// otherwise decide the counts.
+func TestRenderReuseACatchUpTakesTheLoadsRendering(t *testing.T) {
+	t.Run("the first commit takes the load's rendering", func(t *testing.T) {
+		withoutCollections(t)
+		service, artifactID, sh := newRenderReuseService(t)
+		m := sh.measure()
+		replica := loadRoomForCatchUp(t, service, artifactID)
+		if heldLoadRendering(replica) == nil {
+			t.Fatal("the replica holds no rendering of the load before its first commit")
+		}
+		firstCatchUpCommit(t, service, artifactID, sh, m)
+		expectCatchUps(t, m, 1, 0)
+		if heldLoadRendering(replica) != nil {
+			t.Error("the replica still holds the load's rendering after its first run")
+		}
+	})
+	t.Run("a collection before the first commit leaves it to render", func(t *testing.T) {
+		service, artifactID, sh := newRenderReuseService(t)
+		m := sh.measure()
+		replica := loadRoomForCatchUp(t, service, artifactID)
+		runtime.GC()
+		if heldLoadRendering(replica) != nil {
+			t.Fatal("the load's rendering outlived a collection, so something holds it strongly")
+		}
+		firstCatchUpCommit(t, service, artifactID, sh, m)
+		expectCatchUps(t, m, 0, 1)
+	})
+	t.Run("a run after a recover renders", func(t *testing.T) {
+		withoutCollections(t)
+		service, artifactID, sh := newRenderReuseService(t)
+		m := sh.measure()
+		replica := loadRoomForCatchUp(t, service, artifactID)
+		firstCatchUpCommit(t, service, artifactID, sh, m)
+		expectCatchUps(t, m, 1, 0)
+		m = sh.measure()
+		// As E8 does: a replica that holds no document hands the next update to recover.
+		replica.mu.Lock()
+		replica.doc = nil
+		replica.mu.Unlock()
+		editAsConnectedPeer(t, service, artifactID, 2, reuseBob, appendBlocks(t, "A paragraph the recovering replica could not place.\n"))
+		waitForLandedAppends(t, service, artifactID)
+		editAsConnectedPeer(t, service, artifactID, 3, reuseBob, replaceRun("Paragraph 1 opens", "Paragraph 1 first opens"))
+		waitForLandedAppends(t, service, artifactID)
+		sh.check(t)
+		m.expect(t, renderPaths{observerIncremental: 1}, 1)
+		expectCatchUps(t, m, 0, 1)
+	})
+	t.Run("a recover before the first run drops the load's rendering", func(t *testing.T) {
+		withoutCollections(t)
+		service, artifactID, sh := newRenderReuseService(t)
+		m := sh.measure()
+		replica := loadRoomForCatchUp(t, service, artifactID)
+		if heldLoadRendering(replica) == nil {
+			t.Fatal("the replica holds no rendering of the load before its first commit")
+		}
+		replica.mu.Lock()
+		replica.recover(artifactID, nil, nil)
+		replica.mu.Unlock()
+		if heldLoadRendering(replica) != nil {
+			t.Fatal("the recovered replica still holds the load's rendering")
+		}
+		firstCatchUpCommit(t, service, artifactID, sh, m)
+		expectCatchUps(t, m, 0, 1)
+	})
+}
+
+// withoutCollections turns the garbage collector off for the rest of t, so nothing collects the
+// load's rendering, which the replica holds only weakly, before the test's first commit.
+func withoutCollections(t *testing.T) {
+	t.Helper()
+	previous := debug.SetGCPercent(-1)
+	t.Cleanup(func() { debug.SetGCPercent(previous) })
+}
+
+// loadRoomForCatchUp loads artifactID's room, committing nothing, and answers its replica, which
+// has not started.
+func loadRoomForCatchUp(t *testing.T, service *Service, artifactID string) *renderedReplica {
+	t.Helper()
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+	replica := service.replicaOf(service.srv.GetDoc(artifactID))
+	if replica == nil {
+		t.Fatal("the loaded room has no replica")
+	}
+	replica.mu.Lock()
+	defer replica.mu.Unlock()
+	if replica.doc != nil {
+		t.Fatal("the room committed during its load, so its replica has started")
+	}
+	return replica
+}
+
+// heldLoadRendering is the load's rendering replica still holds, or nil.
+func heldLoadRendering(replica *renderedReplica) *loadedRendering {
+	replica.mu.Lock()
+	defer replica.mu.Unlock()
+	return replica.loaded.Value()
+}
+
+// firstCatchUpCommit makes the loaded room's first commit, a browser's edit of one paragraph,
+// which starts the replica and is spliced in, and checks the replica against the shadow.
+func firstCatchUpCommit(t *testing.T, service *Service, artifactID string, sh *renderShadow, m renderMeasure) {
+	t.Helper()
+	editAsConnectedPeer(t, service, artifactID, 1, reuseBob, replaceRun("Paragraph 0 opens", "Paragraph 0 first opens"))
+	waitForLandedAppends(t, service, artifactID)
+	sh.check(t)
+	m.expect(t, renderPaths{observerIncremental: 1}, 0)
+}
+
+// expectCatchUps asserts how many replica runs took the load's rendering and how many rendered
+// their base since m.
+func expectCatchUps(t *testing.T, m renderMeasure, fromLoad, rendered uint64) {
+	t.Helper()
+	if got := m.since(); got.catchUpFromLoad != fromLoad || got.catchUpRendered != rendered {
+		t.Errorf("catch-ups: %d from the load, %d rendered; want %d and %d", got.catchUpFromLoad, got.catchUpRendered, fromLoad, rendered)
 	}
 }
