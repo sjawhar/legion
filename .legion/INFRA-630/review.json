@@ -2,24 +2,15 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-630",
-  "completed": "2026-10-28T11:25:48Z",
-  "round": 6,
-  "headReviewed": "c3a63d7ed145f1edfa2acfbd7ecba40d0c21bbfe",
+  "completed": "2026-10-28T12:28:43Z",
+  "round": 7,
+  "headReviewed": "f519ad0b1a3e",
   "decision": "approved",
   "critical": 0,
   "important": 0,
-  "minor": 1,
-  "ci": "Code head c3a63d7e (only .legion/ above it, compare handoffsOnly true): required lint, typecheck, test and pr-title completed success at 11:25Z; the rebuild workflow's pull_request build job and changelog-fold's build job succeeded; the non-required envoy-and-contracts jobs were still queued.",
-  "roundFiveItems": "All done in c3a63d7e: fragment renamed pr-2423-built-plugin-rebuilt-on-main.yaml with no key in its body (changie fold-plan and fold-notes read it); the ten docs/solutions status lines name sjawhar/legion#2423, and no added line outside .legion/ carries an INFRA key; verify-build prints an ::error:: line and exits 1 on a failed git ls-files; three refusal cases for the fold's and a release's per-workflow allow-lists (269/0, and each fails when the allow-list is widened); the extract-built and verify-build caller lists cut to one place each in the named files. Thread PRRT_kwDORFy7ds6xEmiF answered and accepted; every thread on the pull request carries the reviewer's answer and is resolved.",
-  "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at c3a63d7e (Minor: caller lists still restated in README, packages/claude-envoy/AGENTS.md and release-push.sh's check-built paragraph)",
-    "codeQuality": "Verdict: APPROVE at c3a63d7e (no finding; same note on untouched restatements)"
-  },
-  "keyFindings": [
-    {
-      "severity": "minor",
-      "file": ".github/scripts/release-push.sh",
-      "description": "Fast-follow: the check-built paragraph (164-168), packages/claude-envoy/README.md:293-297, packages/claude-envoy/AGENTS.md:69 and claude-envoy-rebuild.yaml:12-15 still name the jobs that run verify-build or extract-built; they match today. Point them at the two script headers."
-    }
-  ]
+  "minor": 0,
+  "scope": "Narrow, per the INFRA-588 architect: the round-6 fast-follow only, and nothing else changed since the approved code head c3a63d7e.",
+  "ci": "CI head 6832fdfb (only .legion/ above it, compare handoffsOnly true): required lint, typecheck, test and pr-title completed success at 12:28Z.",
+  "check": "git diff c3a63d7e f519ad0b outside .legion/ touches exactly the four named places: release-push.sh's check-built paragraph, claude-envoy-rebuild.yaml's header, packages/claude-envoy/AGENTS.md's Built bundle row and README.md's verify-build bullet; every changed line in the .sh and .yaml is a comment, and each now points to verify-build.sh's header and release-push.sh's extract-built paragraph. Comment and prose only, so no thermonuclear pass.",
+  "keyFindings": []
 }
