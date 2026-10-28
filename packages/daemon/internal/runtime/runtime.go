@@ -137,6 +137,16 @@ type IssueSuspender interface {
 	SuspendIssue(ctx context.Context, issue, tree string, authorize func(context.Context) (bool, error)) error
 }
 
+// TakingOver is a runtime that takes over the claims another runtime left in the project's store
+// (the tmux runtime under `runtime.tmux.take_over`). TakesOver names the runtime whose
+// processes it takes over, RuntimeSandbox for a Kubernetes daemon's, or "" when it takes over
+// nothing. Such a runtime cannot reach what the other runtime holds: an issue close it runs
+// releases none of the other runtime's resources, which are the operator's to delete
+// (docs/deployment.md, "Moving a project onto tmux", step 1).
+type TakingOver interface {
+	TakesOver() string
+}
+
 // RegistrationDeadline is the registration deadline's base Boot×RegistrationIntervals bound plus
 // grace: the supervisor's armRegistration calls it with ProvisionBound before a claim's hello and
 // with zero after, so the one computation is the deadline's.
