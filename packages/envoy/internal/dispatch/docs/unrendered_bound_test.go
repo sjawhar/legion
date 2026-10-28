@@ -237,7 +237,7 @@ func TestAnUnmeasuredRoomWeighsAPeerUpdateOnItsOwnBytes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			room := boundRoomDocument(newDocumentCopy())
+			room := newDocumentCopy()
 			if err := crdt.ApplyUpdateV1(room, seed, nil); err != nil {
 				t.Fatal(err)
 			}
@@ -248,6 +248,8 @@ func TestAnUnmeasuredRoomWeighsAPeerUpdateOnItsOwnBytes(t *testing.T) {
 				if _, _, measured := replica.size(); measured {
 					t.Fatal("the room's load published a measurement, want none")
 				}
+			} else {
+				boundRoomDocument(room)
 			}
 			paste := peerTyping(t, room, strings.Repeat("pasted ", pmdoc.MaxDocumentBytes/7+1))
 			before := crdt.EncodeStateAsUpdateV1(room, nil)

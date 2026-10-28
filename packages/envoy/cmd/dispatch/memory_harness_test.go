@@ -462,7 +462,7 @@ func (p *memoryServer) loadOverWebsocket(t *testing.T, artifactID string) {
 
 // The tags of the document socket's frames this harness reads and writes: Hocuspocus's framing,
 // which Dispatch's rooms speak (internal/dispatch/docs/service.go:610), puts the room's name before
-// each (sjawhar/ygo v1.51.3-sami.6, provider/websocket/server.go:66-80).
+// each (sjawhar/ygo v1.51.3-sami.7, provider/websocket/server.go:66-80).
 const (
 	frameSync       = 0
 	frameSyncStatus = 8
@@ -480,9 +480,9 @@ func documentFrame(room string, tag uint64, payload []byte) []byte {
 }
 
 // dialDocument connects to the document's room as a person's browser does: signed in, read-write
-// at the server's schema version (schemaReadOnly, internal/dispatch/docs/websocket.go:330-332).
+// at the server's schema version (schemaReadOnly, internal/dispatch/docs/websocket.go:331-333).
 // The server answers the upgrade only once it has admitted the browser and loaded the document
-// (Service.ServeHTTP, websocket.go:226-295), and a burst of browsers to documents at the bound
+// (Service.ServeHTTP, websocket.go:228-296), and a burst of browsers to documents at the bound
 // queues behind one count of a stored version at a time (storedCounts.counting) and loads sharing
 // two processors, so a browser waits for that answer as long as a browser does rather than the
 // 45 seconds gorilla's default dialer gives up after.
@@ -548,7 +548,7 @@ func (p *memoryServer) openBrowser(t *testing.T, artifactID string) *browser {
 // lifts ygo's handshake deadline (server.go:2122-2145), so a socket held open without an edit is
 // not closed thirty seconds in. A socket the server closes before any of that - the room budget's
 // refusal, which completes the upgrade only to close it (refuseOverRoomBudget,
-// internal/dispatch/docs/websocket.go:197-200) - returns the *gws.CloseError it was closed with.
+// internal/dispatch/docs/websocket.go:199-202) - returns the *gws.CloseError it was closed with.
 func (p *memoryServer) tryOpenBrowser(artifactID string) (*browser, error) {
 	connection, err := p.dialDocument(artifactID)
 	if err != nil {

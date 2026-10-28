@@ -18,7 +18,7 @@ import (
 )
 
 // A room's document decodes its stored state with the pending cap lifted, and ygo sets the room's
-// cap, maxUpdateItems, once the state is in and before OnLoadDocument (sjawhar/ygo v1.51.3-sami.6,
+// cap, maxUpdateItems, once the state is in and before OnLoadDocument (sjawhar/ygo v1.51.3-sami.7,
 // provider/websocket/server.go:1702, :1766-1773), so every peer's apply after the load is held to
 // it. A room loads a stored state that parks structs and delete ranges; a browser then sends, over
 // the document socket, an update parking delete ranges up to the cap exactly, which the room

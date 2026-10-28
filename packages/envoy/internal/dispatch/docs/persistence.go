@@ -847,14 +847,14 @@ var _ persistence.VersionedPersistence = (*PgVersioned)(nil)
 // It is also the pending queue every decode of document bytes takes, whether the service builds
 // the decoder (newDocumentCopy) or ygo builds it for the service (Server.MaxPendingItems: the
 // rooms, which ygo caps once a room's stored state is in, having decoded that state with the queue
-// lifted, sjawhar/ygo v1.51.3-sami.6, provider/websocket/server.go:1702 and :1766-1773; the service
-// decoded the same state under the queue first, loadTree or validateUpdate, so a room starts
+// lifted, sjawhar/ygo v1.51.3-sami.7, provider/websocket/server.go:1702 and :1766-1773; the service
+// decoded the same state under the queue first, loadTree or LoadDoc's rescan, so a room starts
 // within it). ygo's decoder parks each item whose parent it cannot place yet, and each later item
 // of that client behind it, and refuses the update once its queue is full, 100,000 items at ygo's
 // default. An update decoded alone parks every item that leans on the document it was written
 // against, and no update carries more items than this, so no decode parks items past it. The
 // queue caps, apart, the delete ranges parked for structs the document does not hold
-// (checkParkedDeletes, crdt/update.go:544-550 and :763-786): one update can name more of them
+// (checkParkedDeletes, crdt/update.go:580-586 and :799-822): one update can name more of them
 // than this, up to this many for each of its clients, and a decode that would park more than this
 // is refused, so a history holding more parked delete ranges than this does not load. A room's
 // struct total counts each parked range splitsAStructCanCause times within this cap

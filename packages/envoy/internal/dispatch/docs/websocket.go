@@ -67,22 +67,25 @@ type servicePersistenceAdapter struct {
 // between the two reaches that instance through the record (roomLoad) rather than no instance at
 // all. The read itself takes no advisory lock - a durable writer holds that one across its whole
 // transaction, and a load that waited for it would wedge a write that forks the room it loads -
-// so the record, not the lock, is what keeps a room from being born behind the head.
+// so the record, not the lock, is what keeps a room from being born behind the head. The record
+// also takes what the state's decode scanned, the decode of a socket's admission check
+// (loadTree) or this one's own (rescan), which is the room's scan total at its load (roomScans).
 func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 	load := a.service.beginRoomLoad(room)
-	if loaded, ok := a.service.takePreload(room); ok {
-		load.readHead(loaded.Version)
-		return loaded.Update, nil
+	if preload, ok := a.service.takePreload(room); ok {
+		load.read(preload.loaded.Version, preload.scans)
+		return preload.loaded.Update, nil
 	}
 	result, err := a.store.Load(context.Background(), room)
+	var scans uint64
 	if err == nil {
-		err = validateUpdate(result.Update)
+		scans, err = rescan(result.Update)
 	}
 	if err != nil {
 		a.service.failRoom(room, err)
 		return nil, err
 	}
-	load.readHead(result.Version)
+	load.read(result.Version, scans)
 	return result.Update, nil
 }
 
@@ -143,37 +146,36 @@ func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) er
 }
 
 // validateUpdate decodes a stored history, or an update about to replace one, as the room will
-// decode it: into a document with the server's pending queue (newDocumentCopy), so a history a room
-// served is never judged one that cannot load.
+// decode it: into a document with the server's pending queue (newDocumentCopy, rescan), so a
+// history a room served is never judged one that cannot load.
 func validateUpdate(update []byte) error {
-	if len(update) == 0 {
-		return nil
-	}
-	return crdt.ApplyUpdateV1(newDocumentCopy(), update, nil)
+	_, err := rescan(update)
+	return err
 }
 
-// preloadedDocument is the durable state a document socket's admission check decoded, kept for the
-// load ygo makes of the room next (servicePersistenceAdapter.LoadDoc), so a cold connection reads
-// and decodes the history once.
+// preloadedDocument is the durable state a document socket's admission check decoded, and what
+// that decode's conflict scans passed (rescan), kept for the load ygo makes of the room next
+// (servicePersistenceAdapter.LoadDoc), so a cold connection reads and decodes the history once.
 type preloadedDocument struct {
 	loaded persistence.LoadResult
+	scans  uint64
 }
 
-// takePreload is the update a socket's admission check loaded for room, while the durable head is
+// takePreload is the state a socket's admission check loaded for room, while the durable head is
 // still the one it loaded: every write that changes a document's stored state raises its head (an
 // append, a rebuild), and compaction keeps both the head and the state. A stale or absent preload
 // is no answer, and the caller loads the room itself.
-func (s *Service) takePreload(room string) (persistence.LoadResult, bool) {
+func (s *Service) takePreload(room string) (*preloadedDocument, bool) {
 	value, ok := s.preloads.LoadAndDelete(room)
 	if !ok {
-		return persistence.LoadResult{}, false
+		return nil, false
 	}
 	preload := value.(*preloadedDocument)
 	head, err := s.persistence.Head(context.Background(), room)
 	if err != nil || head != preload.loaded.Version {
-		return persistence.LoadResult{}, false
+		return nil, false
 	}
-	return preload.loaded, true
+	return preload, true
 }
 
 // documentSchemaCloseCode closes a document websocket whose room is outside the Proof schema
@@ -267,7 +269,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// until it is replaced from markdown. The server decides it here, for every client at once, by
 	// the same stored document and rendering `/text` answers with (readDocument), so a socket is
 	// refused exactly when that read is ErrDocOutsideSchema.
-	tree, loaded, err := s.loadTree(r.Context(), room)
+	tree, preload, err := s.loadTree(r.Context(), room)
 	if err == nil && tree != nil {
 		if _, renderErr := documentMarkdown(tree); errors.Is(renderErr, ErrDocOutsideSchema) {
 			err = renderErr
@@ -281,8 +283,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	if loaded != nil {
-		preload := &preloadedDocument{loaded: *loaded}
+	if preload != nil {
 		s.preloads.Store(room, preload)
 		defer s.preloads.CompareAndDelete(room, preload)
 	}
@@ -385,7 +386,7 @@ func (s *Service) refuseIfRebuilding(room string) error {
 // allowInject decides whether ygo may apply an injection to a room. Its issue read goes
 // through the shared pool for a caller that need hold no connection of its own (the
 // settlement warm-up in settleRoom), and that is outside the pool's deadlock cycle only
-// because ygo runs OnInject before getOrCreateRoom (sjawhar/ygo v1.51.3-sami.6,
+// because ygo runs OnInject before getOrCreateRoom (sjawhar/ygo v1.51.3-sami.7,
 // provider/websocket/inject.go:321-330): an injection refused here has published no room
 // placeholder for a connection-holder to park on, so nothing holding a connection is waiting
 // on this read. A vendored reordering of those two calls puts it back in the cycle.
@@ -417,7 +418,7 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 
 func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc) error {
 	// A load never waits for its own room's recovery. That recovery's eviction waits in ygo's
-	// CloseRoom for the ready barrier this load holds (sjawhar/ygo v1.51.3-sami.6,
+	// CloseRoom for the ready barrier this load holds (sjawhar/ygo v1.51.3-sami.7,
 	// provider/websocket/inject.go:521-529) and closes the channel awaitRoomRecovery waits on
 	// only once CloseRoom has returned (failRoomLocked), so a wait here is a cycle: the load
 	// holds the eviction, and the eviction holds the load. No deadline breaks it either -
@@ -454,7 +455,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		return err
 	}
 	// The room is still loading: ygo hands its document to no peer or caller until this hook
-	// returns (sjawhar/ygo v1.51.3-sami.6, provider/websocket/server.go:1765-1860: loadRoom closes
+	// returns (sjawhar/ygo v1.51.3-sami.7, provider/websocket/server.go:1765-1860: loadRoom closes
 	// the room's ready barrier after it), so nothing writes the tree while this walks it.
 	tree, err := treeOf(doc)
 	var markdown string
@@ -513,15 +514,24 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	}
 	s.unlockState(room, state)
 	// The room takes peer updates only once this hook returns, and every one of them under the
-	// integrate-scan bound: the state the load decoded is the server's own and went in unbounded.
-	// ygo decoded it with the pending cap lifted too, and set the room's cap, maxUpdateItems,
-	// before it ran this hook (sjawhar/ygo v1.51.3-sami.6, provider/websocket/server.go:1766-1773),
-	// so this hook's applies and every peer's are capped
+	// room's scan budget, which keepReplica sets below (newRoomScans): the state the load decoded
+	// is the server's own and went in unbounded. ygo decoded it with the pending cap lifted too,
+	// and set the room's cap, maxUpdateItems, before it ran this hook (sjawhar/ygo v1.51.3-sami.7,
+	// provider/websocket/server.go:1766-1773), so this hook's applies and every peer's are capped
 	// (TestAPeerApplyIsHeldToTheRoomsPendingCapAfterTheLoad).
-	boundRoomDocument(doc)
+	//
 	// The log is opened before the observer is registered and before ygo hands the room to anyone
 	// (above), so it holds every transaction the room commits from here on, in commit order.
 	replica := s.keepReplica(doc, doc.OpenUpdateLog(), contentMarkdown)
+	// The room's scan total starts at what the decode of the state the load read scanned, the
+	// count the load's record took from a decode the load made anyway (LoadDoc): ygo's own decode
+	// of the same bytes into this document scanned the same items, and reports none. A room ygo
+	// loaded without reading the store through this service's persistence is re-scanned here.
+	loaded, recorded := s.loadedScans(room)
+	if !recorded {
+		loaded, _ = rescan(crdt.EncodeStateAsUpdateV1(doc, nil))
+	}
+	replica.scans.rescanned(loaded)
 	// The room's charge in the room budget replaces the reservations of the sockets admitted to it
 	// (reserveRoom), which counted the stored version at both copies, with the count its load just
 	// made of the room's own document, at both copies too (roomCopies). From here the content every

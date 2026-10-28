@@ -151,9 +151,14 @@ require (
 // document's own lock, so the room's update observer measures each update against the room the
 // commit before it left; a document can bound the items one remote update's integration scans
 // (SetMaxIntegrateScan, #333), refusing an update that scans past it with ErrIntegrateScanBudget
-// and leaving the document as it was, while split runs of one item merge back in one linear pass
-// rather than a pass per run; a bounded document's remote apply keeps what earlier updates parked
-// by reference rather than copying it, so an apply costs nothing in proportion to the parked queue;
+// and leaving the document as it was, or give each remote apply an allowance of its own, asked of
+// the owner with the apply's origin under the document's lock, the drain of the pending queue
+// drawing on the same allowance (SetIntegrateScanBudget), with what every transaction's scans
+// passed readable once it commits (Transaction.IntegrateScanned) and what a refused apply's passed
+// reported with its refusal (RefusedUpdateError), while split runs of one item merge back in one
+// linear pass rather than a pass per run; a bounded document's remote apply keeps what earlier
+// updates parked by reference rather than copying it, so an apply costs nothing in proportion to
+// the parked queue;
 // parked delete ranges are retried only once the structs they name can have arrived, and the
 // pending cap (WithMaxPendingItems, Doc.SetMaxPendingItems, Server.MaxPendingItems) caps them
 // apart from parked items, while the websocket server decodes a room's stored state with the cap
@@ -161,4 +166,4 @@ require (
 // update defers integrate in dependency order, each retried only once what it waits on arrives,
 // rather than all of them in a pass per link. A merged update's skip parking the items after it
 // (reearth/ygo#257) is upstream since v1.51.0.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.51.3-sami.6
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.51.3-sami.7

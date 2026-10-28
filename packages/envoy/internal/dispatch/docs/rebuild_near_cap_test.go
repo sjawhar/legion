@@ -226,7 +226,6 @@ func rebuiltRoom(t *testing.T, markdown string, retired map[crdt.ClientID]uint64
 	if err := crdt.ApplyUpdateV1(room, seed, nil); err != nil {
 		t.Fatal(err)
 	}
-	boundRoomDocument(room)
 	rendering, err := renderDocument(room)
 	if err != nil {
 		t.Fatal(err)
@@ -414,8 +413,7 @@ func tangledHistory(t *testing.T, chain, scanners int) []byte {
 // A history whose re-scan stands within one honest offline handoff of the room's scan total
 // (roomScanTotal, honestHandoffScans) is near the scan total, which leaves every larger merge
 // refused, and a rebuild takes it: the rebuilt history re-scans fewer items than one honest
-// handoff and reads the same text. It needs a count of a re-scan's items (historyScans), which
-// sjawhar/ygo v1.51.3-sami.6 does not report.
+// handoff (historyScans, a count of the re-scan's transaction) and reads the same text.
 func TestRebuildingADocumentNearTheScanTotalLeavesItWithASmallScanTotalAndReadingTheSame(t *testing.T) {
 	state := tangledHistory(t, 2_000, 250)
 	history, err := decodeHistory(state)
@@ -424,7 +422,7 @@ func TestRebuildingADocumentNearTheScanTotalLeavesItWithASmallScanTotalAndReadin
 	}
 	scans, counted := historyScans(history)
 	if !counted {
-		t.Skip("historyScans cannot count a re-scan's items at sjawhar/ygo v1.51.3-sami.6, which reports no scan count; this runs once it reads one from the re-scan's transaction")
+		t.Fatal("the tangled history's re-scan could not be counted")
 	}
 	if scans+honestHandoffScans < roomScanTotal {
 		t.Fatalf("the tangled history re-scans %d items, want it within %d of the %d scan total: tangle it further", scans, honestHandoffScans, roomScanTotal)

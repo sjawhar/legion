@@ -15,7 +15,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
-	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -524,10 +523,11 @@ func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.
 }
 
 // loadTree is the tree of the document a socket's admission check reads (heldTree, else the stored
-// document decoded), with the durable state it decoded the document from, nil when this server
-// holds the document. A durable history that does not decode is ErrDocumentUnloadable and fails
-// the room, as ygo's own load of it would.
-func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node, *persistence.LoadResult, error) {
+// document decoded), with the durable state it decoded the document from and what that decode's
+// conflict scans passed (decodeCountingScans), nil when this server holds the document. A durable
+// history that does not decode is ErrDocumentUnloadable and fails the room, as ygo's own load of
+// it would.
+func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node, *preloadedDocument, error) {
 	tree, held, err := s.heldTree(ctx, artifactID)
 	if err != nil || held {
 		return tree, nil, err
@@ -541,17 +541,18 @@ func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node,
 		return nil, nil, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
 	}
 	if len(loaded.Update) == 0 {
-		return nil, &loaded, nil
+		return nil, &preloadedDocument{loaded: loaded}, nil
 	}
 	doc := newDocumentCopy()
-	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
+	scans, err := decodeCountingScans(doc, loaded.Update)
+	if err != nil {
 		// The room carries the decode failure as its cause, which a reader that meets the
 		// failed room answers as DOC_SERVICE_UNAVAILABLE; this read met the history itself.
 		s.failRoom(artifactID, fmt.Errorf("decode live document: %w", err))
 		return nil, nil, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
 	}
 	tree, err = treeOf(doc)
-	return tree, &loaded, err
+	return tree, &preloadedDocument{loaded: loaded, scans: scans}, err
 }
 
 func renderTokenTree(tree *pmdoc.Node) (string, string, error) {

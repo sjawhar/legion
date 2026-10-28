@@ -286,7 +286,7 @@ func renderDocumentForUpdate(doc *crdt.Doc) (string, *pmdoc.Node, error) {
 // snapshotDocument copies doc's state as of one moment. Encoding it takes the document's lock, which
 // every peer update and service write holds while it applies, so the copy is never a tree half
 // way through a write - which a direct walk of a resident room's live tree can read, since the
-// walk takes no lock (sjawhar/ygo v1.51.3-sami.6, crdt/yxml.go:353-369) - and nothing writes the
+// walk takes no lock (sjawhar/ygo v1.51.3-sami.7, crdt/yxml.go:353-369) - and nothing writes the
 // copy.
 func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 	snapshot := newDocumentCopy()
@@ -297,7 +297,7 @@ func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 }
 
 // newDocumentCopy is a document to decode a document's state into: a snapshot or a write's fork of
-// a room this server holds, the document's stored history (loadTree, validateUpdate, and the
+// a room this server holds, the document's stored history (loadTree, rescan, and the
 // fold of its stored updates and its read-back, stateThrough), or one update the store appends
 // (appendUpdate, AppendUpdateTx), decoded alone. Its pending queue is maxUpdateItems, the queue
 // every decode of document bytes takes (see maxUpdateItems).
@@ -307,7 +307,7 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 
 // renderedReplica is the copy of a room's document its update observer renders and the room's
 // reads walk (readLive). ygo fires the observer after the transaction has released the document's
-// lock (sjawhar/ygo v1.51.3-sami.6, crdt/doc.go:723-728, transactInternal), and a walk of the live
+// lock (sjawhar/ygo v1.51.3-sami.7, crdt/doc.go:794-799, transactInternal), and a walk of the live
 // tree takes no lock (crdt/yxml.go:353-369), so a render or read of the live tree can walk it while
 // another transaction writes it: a torn walk reads a healthy document as one outside the schema,
 // logs a false WARN and counts the update as a content change. Only a holder of mu writes or walks
@@ -357,9 +357,11 @@ type renderedReplica struct {
 	measurer *elementMeasurer
 	charge   *roomCharge
 	// structs is the room's struct total, which the peer update hook refuses an update past the
-	// decode cap on, and each of the measurer's counts re-bases (structTotal); nil for a replica no
+	// decode cap on, and each of the measurer's counts re-bases (structTotal), and scans its scan
+	// total and the budget of each remote apply's scans (roomScans); both nil for a replica no
 	// room's load made (keepReplica), a test's.
 	structs *structTotal
+	scans   *roomScans
 	// sizeMu orders the measurer's count of a rendering against the publications that follow it
 	// (storeCounted). It is held for a few field writes alone, never across a render or a parse,
 	// so neither the update observer nor the measurer waits on the other's work.
@@ -394,7 +396,7 @@ func (r *renderedReplica) roomCharge() *roomCharge {
 
 // sizeUnmeasured is what bytes and elements hold for a room whose document renders no markdown to
 // measure: a document outside the Proof schema, which the socket path refuses to open in the first
-// place (refuseOutsideSchema, websocket.go:187) and which a live document can still fall into
+// place (refuseOutsideSchema, websocket.go:189) and which a live document can still fall into
 // between two renders. The hook admits an update on such a room; the room's next render settles it.
 const sizeUnmeasured = -1
 
@@ -644,9 +646,11 @@ func (r *renderedReplica) chargeAdded(updates []crdt.LoggedUpdate) {
 // against and the room budget charges the load by (chargeLoadedRoom), though the replica's own
 // copy waits for the room's first transaction (start). It also counts live's struct total
 // (newStructTotal), an encode of live's state and a walk of it, here beside the load's rendering,
-// which has already walked the whole document; the load is not a keystroke.
+// which has already walked the whole document; the load is not a keystroke. And it sets live's
+// scan budget (newRoomScans), so from here every remote apply on live is bounded, with nothing of
+// the room's scan total used until the load records its re-scan (roomScans.rescanned).
 func (s *Service) keepReplica(live *crdt.Doc, log *crdt.UpdateLog, markdown *string) *renderedReplica {
-	replica := &renderedReplica{log: log, markdown: markdown, measurer: &s.measurer, structs: newStructTotal(live)}
+	replica := &renderedReplica{log: log, markdown: markdown, measurer: &s.measurer, structs: newStructTotal(live), scans: newRoomScans(live)}
 	replica.publishLoadedSize(markdown)
 	listResident(&s.replicas, live, weak.Make(replica))
 	return replica

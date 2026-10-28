@@ -1370,6 +1370,20 @@
   "Reconnecting…" and skipped the refresh a reconnect owes every view. `GET /api/v1/events` now
   sends an SSE comment, `: open`, with its headers, so the stream opens at once in every browser.
 
+- The ygo pin moves from `v1.51.3-sami.6` to `v1.51.3-sami.7` (commit `bc93c5b0`), which carries
+  every member of `v1.51.3-sami.6` unchanged and a per-apply scan budget (INFRA-179). A document
+  can ask its owner, under its lock and with the apply's origin, how many items each remote
+  apply's conflict scans may pass, the drain of the pending queue drawing on the same allowance
+  (`Doc.SetIntegrateScanBudget`); a document with a budget applies every remote update whole or
+  not at all, and a drain the allowance cannot hold is taken back with the parked queue kept. What
+  a committed transaction's scans passed is read from `Transaction.IntegrateScanned`, and a failed
+  apply on such a document returns a `*crdt.RefusedUpdateError` carrying what its scans passed.
+  Dispatch replaces the room's fixed bound of 28,640 items an update with that budget: each
+  browser's update in a room scans at most the per-frame ceiling or what is left of the room's
+  scan total, whichever is less, and is refused 4413 `DOC_TOO_TANGLED` past it, or
+  `DOC_NEEDS_REBUILD` once the room's scan total is used up, when it still takes an update
+  scanning 64 items or fewer, so typing in place goes on.
+
 - The ygo pin moves from `v1.51.3-sami.5` to `v1.51.3-sami.6` (commit `32e09873`), which carries
   every member of `v1.51.3-sami.5` unchanged and three more (INFRA-179). A bounded document's
   remote apply keeps the parked structs and parked delete ranges by reference rather than copying

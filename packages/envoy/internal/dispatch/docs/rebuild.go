@@ -32,27 +32,14 @@ type RebuildReport struct {
 // splits it can cause.
 const smallestReplacementAdds = 1 + splitsAStructCanCause + splitsAStructCanCause
 
-// roomScanTotal is the most items the conflict scans of a room's history may come to, counted
-// from a re-scan of its state: at least fifteen times the 33,308 items an honest long session
-// scanned - two browsers typing 50,000 keystrokes each, 98,816 updates, at most 12 scans in one -
-// so a room reaches it only past about fifteen such sessions.
-const roomScanTotal = 506_000
-
-// honestHandoffScans is what one honest offline handoff scans: a browser that typed into a hundred
-// paragraphs while another person typed at the same places hands over an update scanning 35,800
-// items, every place's scans summed in one update (7,160 at twenty paragraphs). A history within
-// it of roomScanTotal is near the scan total, as one within smallestReplacementAdds of
-// maxUpdateItems is near the decode cap.
-const honestHandoffScans = 35_800
-
 // historyScans is how many items a re-scan of history's state scans - its encoded state applied
-// into a fresh document in one transaction - and whether that could be counted. ygo
-// v1.51.3-sami.6 reports no such count: it bounds the scans of a remote apply
-// (SetMaxIntegrateScan, sjawhar/ygo v1.51.3-sami.6, crdt/doc.go:141-167) and reports only whether
-// an apply passed the bound, so a count would take a fresh decode of the whole history for each
-// bound tried. So no history is counted, and nearACap never finds one near the scan total.
-func historyScans(_ *crdt.Doc) (uint64, bool) {
-	return 0, false
+// into a fresh document in one remote transaction (rescan), ygo's count of that transaction's
+// scans (Transaction.IntegrateScanned, sjawhar/ygo v1.51.3-sami.7, crdt/transaction.go:95-108) -
+// and whether it could be counted: a history the decode refused is not. It is the count a room's
+// load starts the room's scan total at (roomScans), from the same decode of the same state.
+func historyScans(history *crdt.Doc) (uint64, bool) {
+	scans, err := rescan(crdt.EncodeStateAsUpdateV1(history, nil))
+	return scans, err == nil
 }
 
 // nearACap reports whether doc, a document's decoded history or its live room, stands so near a

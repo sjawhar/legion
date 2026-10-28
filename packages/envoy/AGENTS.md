@@ -558,7 +558,7 @@ looked up again with `GetDoc` once that Apply returned can have been evicted in 
 
 The replica's lock is the one a room's browsers wait on. The update observer takes it for every peer
 update (`renderedReplica.observe`), and ygo broadcasts the update to the room's other browsers only
-once the observer has returned (sjawhar/ygo v1.51.3-sami.6, `provider/websocket/peer.go`), so a read
+once the observer has returned (sjawhar/ygo v1.51.3-sami.7, `provider/websocket/peer.go`), so a read
 holding the replica for its walk holds every other browser's copy of the keystroke. A read
 therefore only tries the lock, and
 reads a copy when another read holds it or an observer waits for it (`lockForUpdate`), so reads
@@ -623,8 +623,8 @@ including `stateThrough`'s fold and read-back, and the store's check of each upd
 ygo builds it for the service (`Server.MaxPendingItems`, set in `New`: the rooms). The queue caps
 parked delete ranges apart from parked structs, each at `maxUpdateItems`. ygo decodes a room's
 stored state with the queue lifted and sets it before `OnLoadDocument` runs (sjawhar/ygo
-v1.51.3-sami.6, `provider/websocket/server.go:1766-1773`); the service decoded that state under the
-queue first (`loadTree`, `validateUpdate`), so the room starts within it, and the hook's applies
+v1.51.3-sami.7, `provider/websocket/server.go:1766-1773`); the service decoded that state under the
+queue first (`loadTree`, `LoadDoc`'s `rescan`), so the room starts within it, and the hook's applies
 and every peer's are held to it (`TestAPeerApplyIsHeldToTheRoomsPendingCapAfterTheLoad`). ygo's
 check of each update the service broadcasts (`Server.BroadcastUpdate`) takes no pending queue,
 since the room has already applied the update (reearth/ygo#268, in the pinned fork). In a room,
@@ -641,7 +641,7 @@ A room whose last peer leaves, or that only the service's `Server.Apply` touches
 edit, a read outside any transaction - stays resident until it has been idle for a minute
 (`roomIdleTimeout`), when ygo's idle sweeper evicts it. ygo's default, eager eviction, evicts a room
 the moment its last peer leaves even while a `Server.Apply` is inside its callback on it
-(sjawhar/ygo v1.51.3-sami.6, `provider/websocket/peer.go` checks only the peers): the callback's
+(sjawhar/ygo v1.51.3-sami.7, `provider/websocket/peer.go` checks only the peers): the callback's
 write then lands on the evicted room and reaches the store only through its retiring persistence
 worker, while the next access has already loaded the store without it and serves, and takes, the
 next write on a document
@@ -759,7 +759,7 @@ tree, since ygo fires it after the transaction has released the document's lock 
 can be integrating meanwhile (`renderedReplica`). The replica moves only through the room's commits,
 one at a time and in commit order: ygo appends each committed transaction's update to the room's
 update log under the document's lock, before any observer of that transaction runs
-(`crdt.UpdateLog`, sjawhar/ygo v1.51.3-sami.6), and the observer that holds the replica's lock drains
+(`crdt.UpdateLog`, sjawhar/ygo v1.51.3-sami.7), and the observer that holds the replica's lock drains
 the log, applying and rendering each update in turn and comparing each rendering with the one
 before it (`updateChangesMarkdown`). So every committed update is classified, and its authors
 credited, exactly once, by whichever observer reaches the log first, against the room as the

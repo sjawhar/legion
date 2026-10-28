@@ -199,6 +199,9 @@ type roomInstance struct {
 type roomLoad struct {
 	mu   sync.Mutex
 	head int64
+	// scans is what the conflict scans of the read state's decode passed (rescan): the room's
+	// scan total at its load, which onLoadDocument hands the room's scan budget (roomScans).
+	scans uint64
 	// appended are the versions took recorded before the instance existed, folded into its cursor
 	// when it does (start). instance is that instance, which took advances directly from then on.
 	appended []int64
@@ -216,12 +219,25 @@ func (s *Service) beginRoomLoad(room string) *roomLoad {
 	return load
 }
 
-// readHead records the head the load's read of the store saw, the version the room it loads holds
-// every update through.
-func (load *roomLoad) readHead(head persistence.Version) {
+// read records the head the load's read of the store saw, the version the room it loads holds
+// every update through, and what the decode of the state it read scanned.
+func (load *roomLoad) read(head persistence.Version, scans uint64) {
 	load.mu.Lock()
 	defer load.mu.Unlock()
-	load.head = int64(head)
+	load.head, load.scans = int64(head), scans
+}
+
+// loadedScans is what the decode of the state room's load under way read scanned (roomLoad.read),
+// and whether a load of room read the store through this service's persistence at all.
+func (s *Service) loadedScans(room string) (uint64, bool) {
+	value, ok := s.roomLoads.Load(room)
+	if !ok {
+		return 0, false
+	}
+	load := value.(*roomLoad)
+	load.mu.Lock()
+	defer load.mu.Unlock()
+	return load.scans, true
 }
 
 // took records version, which this process has made durable for the room while its load runs: on
