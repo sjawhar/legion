@@ -830,6 +830,10 @@ Give `-nats-server-name` to keep the NATS check. The sampler gets no pids. `meta
 - **The database.** Local Postgres 16.2 with pgvector, from the `pgserver` wheel, with the settings
   above. Dispatch reaches it through the latency proxy at `-rtt 1ms`, which adds about 4 ms per
   round trip, not 1 ms. `LOADTEST_PG_DIRECT=1` removes the proxy.
+- **Postgres 16, not 18.** The harness runs PostgreSQL 16.2 (the `pgserver` wheel), while
+  production Dispatch runs PostgreSQL 18 since 2026-10-28 (`gcp:Dispatch`'s default database
+  version is `POSTGRES_18`). So the harness compares a fix's before and after on one version, and
+  absolute numbers on 18 come from the cluster load test.
 - **Header identity.** A person's request names the person in `X-Dispatch-User`. Each such request
   also writes a `people` row. Production uses cookie identity. Agents use the shared bearer token
   and a session actor.
