@@ -2,61 +2,27 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-520",
-  "completed": "2026-10-28T11:05:00Z",
-  "round": 5,
-  "headTested": "4072e379dc700ba469e927ae00fb6eeb5b0e19d5 (code head 6a43ed31312a)",
-  "previousFailures": "Round 4's finding is fixed. 6a43ed31 joins backslash-continued lines (go_lines) and reads every positional argument of a claimed go command with shlex, skipping flags and the values of known value flags (line_packages, ci_filter_coverage.py:345-400). Any argument that is not one of the Run's packages fails the line. The only change since round 4 is check-ci-filters.sh's comment, ci_filter_coverage.py and the router guide, so round 3's verification of ci.yaml, the workflows, ci-ok.sh, the ruleset body and main's ported edits stands.",
-  "ci": "Run 40674943570 (CI, pull_request, 6a43ed31), created 10:47:51Z, was still queued at 11:00Z (its changes job had not started). Read as queued; I did not wait for it. The reviewer reads the head's checks before approving.",
+  "completed": "2026-10-28T13:15:00Z",
+  "round": 6,
+  "headTested": "4a082051e411e0ef0d2fd86c8752b370023078a3 (code head 18c8e316903f)",
+  "previousFailures": "None open from testing. Review round 1 (review.json at 8800c317) asked for three things: the Pages deploy order, the -tags/subcommand hole in the drift check, and the router guide's restore-keys recipe.",
+  "ci": "CI run 40690301159 at 18c8e316 (created 12:44:25Z) was still queued at 13:10Z. No CI run of any #2316 head has completed. Read as queued; I did not wait for it.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "At 4072e379: `PATH=<venv with PyYAML>:$PATH bash .github/scripts/check-ci-filters.test.sh` prints 'Results: 42 passed, 0 failed', including my three red cases (5b6fb964, 0c15655f). .github/scripts/check-ci-filters.sh on the tree exits 0 with 21 gates. In earlier rounds I read every run and check run the implementer cites through the Actions API (draft 40449276647/40455068939; cancel 40449420711; the red ci-ok cases 122068041847, 122082333771 and 122062686310; drift #2400 run 40499230272; re-runs #2412 run 40534840724 and #2413 run 40534854723; cache #2407 run 40520161451). I compared the ruleset putBody with a fresh GET of rulesets/12331919, and re-ran actionlint (exit 0) and check-pr-text.sh (exit 0)."
+    "how": "At 4a082051. check-ci-filters.test.sh before my new cases: 48 passed, 0 failed. check-ci-filters.sh on the tree: exit 0, 21 gates. The reviewer's probe (packages/envoy/cmd/broker/probe_test.go with //go:build probe importing internal/routing, and ci.yaml:2246 ending `-tags multiprocess,probe`) now exits 1. It names the tags mismatch and internal/routing/match.go and match_test.go as reads the broker_multiprocess filter misses. Docs deploy order (7fa167f8): I extracted the docs job's 'Find whether a later main commit selects docs' Python from ci.yaml and ran it on the real diff 4e55b2e0..main@origin, which prints newest=false naming docs/site/src/content/docs/dispatch/envoy.md and 171 more. An empty diff (the tip is this commit) prints newest=true. A later change only to packages/envoy/infra/go.sum prints newest=true, and a later change to docs/site/README.md prints newest=false. docs-deploy runs only when newest is true, so only the newest docs build enters the pages group. That step is the docs job's second-to-last, and a later commit's docs job builds the whole site after its own push, so the older run's deploy becomes ready first. Merge with main (18c8e316, #2358 release in 3 stages): against main 8dfaf3a7, release.yaml differs only in legion_build's Go cache (restore go-daemon, never save, as before the merge). worker-image.yaml keeps #2358's attest_digest input and differs only in the removed pull_request trigger (ci.yaml calls it), the concurrency moved onto the build job, and cache-to mode=min with ignore-error=true. The checkers' tests: check-image-trigger-paths 991 passed, check-release-credentials 240 passed, check-bun-version 110 passed, ci-ok 33 passed. The checks themselves pass on the tree (5 image builds; 6 credentialed and 9 build jobs). actionlint v1.7.7 is clean on ci.yaml, worker-image.yaml, pr-title.yaml and tests-closed.yaml. On release.yaml it reports only `cache-mode`, a key main's own release.yaml carries (3 times on main@origin). A trial merge with main 7efe36bb has no conflicts, and check-ci-filters.sh there passes all 21 gates. GitHub reports #2316 MERGEABLE."
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "Filter drift: the committed check fails, naming the cause, when a ci.yaml job's go command reads a package its filter misses, however the package is added",
-      "surface": ".github/scripts/check-ci-filters.sh on the repository tree, the command ci.yaml's ci-filters job runs",
-      "command": "Five edits to ci.yaml:2246 (broker-multiprocess), each reverted after, then `PATH=<venv with PyYAML>:$PATH .github/scripts/check-ci-filters.sh`: (a) `./internal/routing/` appended; (b) `github.com/sjawhar/envoy/internal/routing` appended; (c) `./internal/routing/` on a backslash-continued next line; (d) `; go test ./internal/routing/` chained; (e) `$(go list ./internal/routing/...)` appended",
-      "observed": "Each exits 1 with '::error file=.github/workflows/ci.yaml::job broker-multiprocess step \"Two-process tests of the secrets broker\" runs `…`, whose packages are not the Run's (./cmd/broker)…'. The unmodified tree exits 0: 'every ci.yaml filter matches every file its job reads (21 gates)'",
-      "headSha": "6a43ed31312a",
-      "negativeControl": "At 84618fbf, (b) and (c) exited 0 ('broker-multiprocess: 278 files, 0 uncovered'), and at 8f85e3ef (a) exited 0 too. A respelled flag (`-count 1` for `-count=1`) also fails, naming the stale pin, so the check fails closed"
-    },
-    {
-      "criterion": "Final job semantics and re-run safety: ci-ok passes only when changes and lint succeeded, every selected job succeeded, and every other job succeeded or was skipped",
-      "surface": ".github/scripts/ci-ok.sh, run with the SELECTED_BY and PULL_REQUEST_ONLY of ci.yaml's ci-ok step",
-      "command": "NEEDS (crafted from changes' outputs and job results) DRAFT EVENT SELECTED_BY=<ci.yaml's> PULL_REQUEST_ONLY='[\"worker-image\"]' .github/scripts/ci-ok.sh, 9 cases",
-      "observed": "Pass (exit 0): nothing selected; envoy-go selected and success; merge_group with worker_image=true and worker-image skipped. Fail (exit 1, each naming the job and why): envoy-go selected but skipped (the failed-only re-run case), changes failed, pull_request with worker_image=true and worker-image skipped, lint failed, an unselected docs cancelled, a draft",
-      "headSha": "8f85e3ef6c14d0fff4e62a2da2624dd52d8803c0",
-      "negativeControl": "The selected-but-skipped case: '::error::envoy-go ended skipped, but changes selected it (needs.changes.outputs.envoy_go is true); a selected job must succeed, and a skip here is what a failed-only re-run leaves'"
-    },
-    {
-      "criterion": "2. Each job's path list names every file it reads: a change to one file selects exactly the jobs that read it",
-      "surface": "GitHub Actions, scratch pull request #2393 stacked on legion/INFRA-520 at 8adfe9ca",
-      "command": "https://github.com/sjawhar/legion/pull/2393 (one trailing newline in packages/contracts/fixtures/dispatch-targeted-delivery.json); run https://github.com/sjawhar/legion/actions/runs/40486662393, changes job 122130029092's log",
-      "observed": "'Filter envoy_go_race = true', 'Filter envoy_go = true', 'Filter typecheck = false', 'Filter go_notices = false'. Selected: contracts, envoy-client, envoy-go, envoy-go-race, envoy-smoke, pi-envoy, test, worker-image, lint. Every other job was skipped, exactly as workflow_paths.PathsFilter predicts",
-      "headSha": "8adfe9cab8bcb728080d27a2397c2f5959a87a0b",
-      "negativeControl": "Under the filter before the envoy-go-race port (6b0588e3), the same file selects everything but envoy_go_race. coverage.py with that pattern dropped prints the fixture uncovered and exits 1"
-    },
-    {
-      "criterion": "A closed pull request cancels its waiting CI run (tests-closed.yaml joins ci.yaml's group)",
-      "surface": "GitHub Actions, scratch pull request #2450 stacked on legion/INFRA-520 at 8f85e3ef",
-      "command": "gh pr create (https://github.com/sjawhar/legion/pull/2450), CI run https://github.com/sjawhar/legion/actions/runs/40671505592 queued at 10:21:44Z; gh pr close 2450 at 10:22:17Z; jobs of the run",
-      "observed": "'CI (closed pull request)' run 40671584176 was created at 10:22:19Z and ended skipped. CI run 40671505592 ended cancelled at 10:22:21Z, with every job cancelled and none on a runner",
-      "headSha": "8f85e3ef6c14d0fff4e62a2da2624dd52d8803c0",
-      "negativeControl": "#2316's own queued CI run 40668280854 (another pull request's group) stayed queued through the close"
-    },
-    {
-      "criterion": "1. A title or body edit starts no router run",
-      "surface": "GitHub Actions on sjawhar/legion#2316",
-      "command": "gh api 'repos/sjawhar/legion/actions/runs?branch=legion/INFRA-520' after the body edits at 2026-10-27 10:06Z and 10:07Z",
-      "observed": "Only PR Title runs (40485924791, 40486096969) were created. The only CI run then was 40485844632, from the push of 0ae68a17",
-      "headSha": "0ae68a179d69f8e39b2e0ea865bb1b7d6138822d",
-      "negativeControl": "Each push starts a CI run: 0ae68a17 -> 40485844632, b2c8d83c -> 40672894121, 6a43ed31 -> 40674943570"
+      "criterion": "Filter drift (spec), and the review's round-1 finding that the check must hold the tags a claimed go command compiles with: GOFLAGS carries -tags too, and the check reads it nowhere",
+      "evidence": "line_command (ci_filter_coverage.py:368-412) reads -tags only from flags after `go <subcommand>`. A `GOFLAGS=-tags=…` in front of the command (shlex gives it as a word before `go`, which is skipped) or in the step's or job's env is never read. The go command reads GOFLAGS and applies its -tags whenever the line passes none. I checked this outside the check: in a module whose cmd/app has a `//go:build probe` test importing ./other, `GOFLAGS=-tags=probe go list -deps -test ./cmd/app` lists example.com/m/other, and without it 0 lines match. Red tests, commit 0f243125 on legion/INFRA-520, in .github/scripts/check-ci-filters.test.sh: the case 'GOFLAGS set in front of a claimed go command compiles a file outside the job's filter' (`run: GOFLAGS=-tags=probe go test ./cmd/app ./lib`) and the case 'GOFLAGS in a claimed go command's step env compiles a file outside the job's filter' (step `env: GOFLAGS: -tags=probe`). Each adds mod/cmd/app/probe_test.go (//go:build probe, imports example.com/m/other) and expects exit 1 and output naming other. Command: `PATH=<python with PyYAML>:$PATH bash .github/scripts/check-ci-filters.test.sh` -> 'Results: 48 passed, 4 failed' (both fixtures exit 0 today). No ci.yaml job sets GOFLAGS today (grep finds none), so nothing is broken on the tree now; the hole is open to the next such edit, exactly as the reviewer's trailing -tags was. Fix that fails closed: treat a GOFLAGS (inline before the go command, or in the step or job env) as part of the line, reading its -tags into the line's tags; or refuse GOFLAGS on a claimed command unless its Run lists it in env."
     }
   ],
+  "failed": 1,
+  "proof": [],
   "notProven": [
-    "No CI run of a head of #2316 has completed: run 40674943570 at 6a43ed31 was still queued at 11:00Z.",
-    "The check holds only go commands on ci.yaml run: lines to their packages. A go command a script starts (script_run: scripts/e2e/*.sh, docs/site/scripts/generate.ts, packages/envoy/scripts/e2e-local.sh, …) is checked only for its pinned text, by substring. A package appended there, or a new go command in a script, is not caught. check-ci-filters.sh's header says the table's RULES and static reads are kept by hand. A script's go commands live in that same hand-kept table, so this is the same boundary."
-  ]
+    "No CI run of a #2316 head has completed. Run 40690301159 at 18c8e316 is queued.",
+    "The docs deploy order is shown on simulated inputs to the step's own code, not on two real main pushes. Only main pushes run it, after the merge. The production check should read the first two docs-selecting main runs.",
+    "A go command a script starts (script_run) is still checked only by a substring of its text. That is the hand-kept-table boundary check-ci-filters.sh documents."
+  ],
+  "cleanup": "The probe file and ci.yaml edits are removed. The local trial merge is abandoned. jj status is clean apart from the red test commit and this handoff."
 }
