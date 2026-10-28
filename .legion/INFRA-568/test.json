@@ -2,13 +2,13 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-568",
-  "completed": "2026-10-28T13:47:00Z",
-  "testedHead": "1232687ca7f378de345304a0964ccb8c140135f2",
-  "codeHead": "6f585d3609efaf732ab4f05800ec424b36672663",
-  "round": "Round 7, full: forward merge of main 5fbd8391 (6f585d36) after the reviewer's approval at 4b1f15ff. Fingerprint a94f6b09 aed6caca… → 1232687c 429ff707… changed: main's issue-ask-repair lease plus this branch's search-term-stats make leasePoolSize 12 and the maintenance loops ten (pool.go, multiprocess_test.go comments, README, .changes, dispatch-store.md). Migrations stay 0135/0136 (main at 0134).",
+  "completed": "2026-10-28T15:18:00Z",
+  "testedHead": "658b7d5e75815aaa334cd79a27cae81ade8d3f9c",
+  "codeHead": "25c14fd63081a250025ce39b21cf3a4a21a14c70",
+  "round": "Round 8, full: review round 4 fix (a7d9ad82: envoy-infra dispatchConnectionsPerPod) and two forward merges of main (5d96b2c2, then 25c14fd6 with main d47dbf05: #2390's server-processes registry lease and migration 0135). Fingerprint 1232687c 429ff707… → 658b7d5e 5d641f7c… changed: leasePoolSize 13, ConnectionsPerProcess and dispatchConnectionsPerPod 87, eleven maintenance loops, migrations 0136_related_checks / 0137_issue_embedding_spec.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove every row independently at this head: fresh dispatch:local (http://127.0.0.1:48542) where both leased loops ran at the 10-minute mark, main 5fbd8391's server (8787), the head binary with a fake Azure embedder on a database main migrated first (8788)."
+    "how": "Checked the connection arithmetic at this head and drove every row independently: fresh dispatch:local (http://127.0.0.1:20919) where all leased loops ran at the 10-minute mark, main d47dbf05's server (8787), the head binary with a fake Azure embedder on a database main migrated to 0135 first (8788)."
   },
   "failed": 0,
   "failures": [],
@@ -24,6 +24,7 @@
     "cluster": "rebuilt this round: rootless Postgres 17.11 + pgvector 0.8.0 on 127.0.0.1:5434, initdb --locale-provider=icu --icu-locale=en-US (select 'a' < 'B' true)",
     "command": "DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5434/dispatch_tester_go?sslmode=disable' go test ./internal/dispatch/api -run 'TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves' -count=1 -v (main: GOWORK=off from a git archive of 2df3353c)",
     "results": {
+      "head 658b7d5e (code 25c14fd6)": "--- PASS (3.79s)",
       "head 1232687c (code 6f585d36)": "--- PASS (4.95s)",
       "head a94f6b09 (code 4b1f15ff)": "--- PASS (4.32s)",
       "head 563b2ca7 (code 62c33b14)": "--- PASS (3.71s)",
@@ -37,91 +38,91 @@
   },
   "proof": [
     {
-      "criterion": "Lease pool 12 (this merge): the term-statistics refresh and main's issue-ask repair both take their lease beside every other leased loop",
-      "surface": "bun run dispatch:local's server log at this head, a 20,000-issue project loaded",
-      "command": "boot at 13:35:25, then the first 10-minute passes at 13:45:25",
-      "observed": "`dispatch duty: leased pass ran lease=issue-ask-repair` (13:45:25.626) and `search term statistics refreshed projects=3 failed=0 items=20115 duration=732ms` then `lease=search-term-stats` (13:45:26.431), with suggestion-outcomes, reference-excerpts, block-index and edit-notices running in the same second; the process holds 12 connections at idle",
-      "headSha": "1232687ca7f378de345304a0964ccb8c140135f2",
-      "negativeControl": "none: a starved lease would show as a missing or late `leased pass ran` line, and none was"
+      "criterion": "Review round 4 finding (a7d9ad82, then the merge of main d47dbf05 with #2390): the Dispatch app pod's connection count matches what a server process opens, and every leased loop still gets its connection",
+      "surface": "pool.go and infra/gcp/dispatch.go at this head; bun run dispatch:local's server log and pg_stat_activity",
+      "command": "read leasePoolSize, registryPoolSize and ConnectionsPerProcess against dispatchConnectionsPerPod; watch the 10-minute leased passes; 120 concurrent GET /api/v1/projects/CORE/related while search_term_stats was locked 4 s",
+      "observed": "64 + 4 + 1 + 13 (lease) + 1 + 1 (registry) + 3 = 87 = dispatchConnectionsPerPod (main: 12 leases, 86); the .changes fragment says 87; at 15:14:27-28 issue-ask-repair, suggestion-outcomes, server-processes, reference-excerpts, block-index and search-term-stats (`refreshed projects=3 failed=0 items=20117 duration=703ms`) each logged `leased pass ran`; the process held 13 connections at idle and peaked at 46 under the burst",
+      "headSha": "658b7d5e75815aaa334cd79a27cae81ade8d3f9c",
+      "negativeControl": "none needed: a missing lease connection would show as a missing `leased pass ran` line, and none was missing; pulumi preview of gcp:Dispatch is not reachable from this pod (no cloud credentials), so the constant is checked by arithmetic and by CI's envoy-infra unit test"
     },
     {
-      "criterion": "Review round 3 fixes still hold after the merge: a failed ask-state read leaves no state and no decision; ask states print as dispatch search prints them; acceptance 4",
-      "surface": "head dispatch CLI against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:48542); answers by alice through POST /api/v1/asks/{id}/answer",
-      "command": "ask re-answered Drop → Honour, dispatch ask with the same words; then events locked 8 s around dispatch related on an answered and a retracted ask, and the same with no lock",
-      "observed": "`A past decision may already answer this: CORE-39 …`, `Answered by alice at 2026-10-28T13:36:06.472985678Z · options chosen: Honour`, `Answer text: Changed my mind: honour the pin.`; under the lock the ask item prints `Answer state not reported by this Dispatch; open the link to read the ask.` and no decision",
-      "headSha": "1232687ca7f378de345304a0964ccb8c140135f2",
-      "negativeControl": "without the lock the same item prints `Answered by alice at … · options chosen: none` and the decision; the first answer `Drop` is absent"
-    },
-    {
-      "criterion": "Upgrade: a database main 5fbd8391 migrated (0134) upgrades to 0136 and a title-only issue embedding becomes title + spec",
-      "surface": "main 5fbd8391's server on fresh dispatch_tester_upg (8788), then the head binary on it with DISPATCH_EMBEDDER=azure at a local fake Azure endpoint",
+      "criterion": "Migrations renumbered to 0136/0137 after main's 0135_server_processes: a database main d47dbf05 migrated (0135) upgrades to 0137 and a title-only issue embedding becomes title + spec",
+      "surface": "main d47dbf05's server on fresh dispatch_tester_upg (8788), then the head binary on it with DISPATCH_EMBEDDER=azure at a local fake Azure endpoint",
       "command": "main: dispatch issue --project UPG --title 'Pangolin queue stalls before upgrade' --spec …; stop; boot the head",
-      "observed": "schema_migrations 134 under main, 136 under the head; UPG-1's embedding text became title, blank line, spec",
-      "headSha": "1232687ca7f378de345304a0964ccb8c140135f2",
+      "observed": "schema_migrations 135 under main, 137 under the head; UPG-1's embedding text became title, blank line, spec",
+      "headSha": "658b7d5e75815aaa334cd79a27cae81ade8d3f9c",
       "negativeControl": "under main the row held the title alone"
+    },
+    {
+      "criterion": "Ask states (review round 3 fix): a failed answers read leaves no state and no decision; otherwise acceptance 4 in search's wording",
+      "surface": "head dispatch CLI against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:20919); answers by alice through POST /api/v1/asks/{id}/answer",
+      "command": "ask re-answered Drop → Honour, dispatch ask with the same words; events locked 8 s around dispatch related on an answered and a retracted ask, then the same with no lock",
+      "observed": "`A past decision may already answer this: CORE-39 …`, `Answered by alice at 2026-10-28T15:05:04.924508353Z · options chosen: Honour`, `Answer text: Changed my mind: honour the pin.`; under the lock `Answer state not reported by this Dispatch; open the link to read the ask.` and no decision",
+      "headSha": "658b7d5e75815aaa334cd79a27cae81ade8d3f9c",
+      "negativeControl": "without the lock the item prints `Answered by alice at … · options chosen: none` and the decision; the first answer `Drop` is absent"
     },
     {
       "criterion": "Match budget",
       "surface": "dispatch issue against dispatch:local, project BUDG with 20,000 issues (deploy 1,800, rollout 1,500, quokka 1, xanthan 2)",
       "command": "dispatch issue --project BUDG --force --title 'Deploy rollout incident' --spec-file budget-spec.md",
-      "observed": "terms {deploy,marshal,quokka,siev,xanthan}; BUDG-3301 listed first; keyword_ms 89",
-      "headSha": "1232687ca7f378de345304a0964ccb8c140135f2",
+      "observed": "terms {deploy,marshal,quokka,siev,xanthan}; BUDG-3301 listed first; keyword_ms 85",
+      "headSha": "658b7d5e75815aaa334cd79a27cae81ade8d3f9c",
       "negativeControl": "rollout (df 1,500) absent"
     },
     {
       "criterion": "Cancelled versus timeout",
-      "surface": "head dispatch CLI against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:48542); curl -m 2",
+      "surface": "head dispatch CLI against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:20919); curl -m 2",
       "command": "asks locked 10 s around curl -m 2 POST /api/v1/issues 'Hangup pangolin filing'; asks locked 9 s around dispatch issue --force 'Patient pangolin filing'",
-      "observed": "Hangup not_made cancelled 1438 ms; Patient not_made timeout 5000 ms; skipped_for_time counts the timeouts only",
-      "headSha": "1232687ca7f378de345304a0964ccb8c140135f2",
+      "observed": "Hangup not_made cancelled 1463 ms; Patient not_made timeout 5000 ms; skipped_for_time counts the timeouts only",
+      "headSha": "658b7d5e75815aaa334cd79a27cae81ade8d3f9c",
       "negativeControl": "the waiting client is timeout"
     },
     {
       "criterion": "1a: search made to fail, --force with an existing title prints that key and the not-made form",
-      "surface": "head dispatch CLI against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:48542)",
+      "surface": "head dispatch CLI against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:20919)",
       "command": "asks locked 9 s, dispatch issue --project CORE --title 'Armadillo cache eviction misses the porcupine index' --force",
       "observed": "`No related-item check was made: the search behind it did not answer within 5s. … --query 'Armadillo …'` and `Title overlaps you forced past: CORE-39`",
-      "headSha": "1232687ca7f378de345304a0964ccb8c140135f2",
+      "headSha": "658b7d5e75815aaa334cd79a27cae81ade8d3f9c",
       "negativeControl": "without the lock: `Related items (searched by keywords only: …)` with CORE-39 first"
     },
     {
       "criterion": "1b: the head client against a server that sends no check result prints the not-made form",
-      "surface": "head dispatch CLI against main 5fbd8391's server (8787)",
+      "surface": "head dispatch CLI against main d47dbf05's server (8787)",
       "command": "dispatch issue --project OLDB --title 'Render queue drops tiles on cache eviction' --spec-file spec1b.md",
       "observed": "`No related-item check was made: the server did not say whether it searched. … --query 'Render queue drops'`",
-      "headSha": "1232687ca7f378de345304a0964ccb8c140135f2",
+      "headSha": "658b7d5e75815aaa334cd79a27cae81ade8d3f9c",
       "negativeControl": "a filing the old OR query matched prints `Related items:` with no mode named"
     },
     {
       "criterion": "2a: one common word in many items and rare words in a few: only the rare-word matches are listed",
-      "surface": "head dispatch CLI against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:48542) after the leased refresh at 13:45:26 (CORE 110 items)",
-      "command": "dispatch related --project CORE --title 'Telemetry ocelot xanthan zebu mismatch'; dispatch issue --force with that title",
-      "observed": "lists CORE-8 and the spec holding ocelot/xanthan/zebu, none of the 30 telemetry issues; terms {zebu,ocelot,xanthan}; telemetri ndoc 61 of 110",
-      "headSha": "1232687ca7f378de345304a0964ccb8c140135f2",
+      "surface": "head dispatch CLI against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:20919) after the leased refresh at 15:14:28 (CORE 112 items)",
+      "command": "dispatch related --project CORE --title 'Telemetry ocelot xanthan zebu mismatch'; dispatch issue --force with those words",
+      "observed": "lists the items holding ocelot/xanthan/zebu, none of the 30 telemetry issues; terms {zebu,ocelot,xanthan}; telemetri ndoc 62 of 112",
+      "headSha": "658b7d5e75815aaa334cd79a27cae81ade8d3f9c",
       "negativeControl": "dispatch related --title 'Telemetry' → found nothing"
     },
     {
       "criterion": "2b: a 10,000-word spec gives at most 25 words",
-      "surface": "head dispatch CLI against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:48542)",
+      "surface": "head dispatch CLI against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:20919)",
       "command": "dispatch issue --project CORE --force --title 'Ten thousand word spec numbat' --spec-file spec10k.md",
-      "observed": "24 terms; keyword_ms 273 (before the first leased refresh)",
-      "headSha": "1232687ca7f378de345304a0964ccb8c140135f2",
+      "observed": "24 terms; keyword_ms 227 (before the first leased refresh)",
+      "headSha": "658b7d5e75815aaa334cd79a27cae81ade8d3f9c",
       "negativeControl": "a stopword-only text answers not_made (round 1)"
     },
     {
       "criterion": "2c: same meaning with no shared word is listed; a slow or failing embedder gives keywords only",
       "surface": "head binary with the fake Azure embedder (8788), project UPG",
       "command": "dispatch related --project UPG --title 'Truck fleet roster misplaces automobiles overnight' with the fake ok, slow:4, fail; then dispatch issue with that title",
-      "observed": "ok: `(searched by meaning and keywords)` UPG-2; slow: `keywords only: meaning search did not answer within 3s` at 3187 ms; fail: `keywords only: the text could not be embedded for meaning search`; write path recorded meaning_and_keywords",
-      "headSha": "1232687ca7f378de345304a0964ccb8c140135f2",
+      "observed": "ok: `(searched by meaning and keywords)` UPG-2; slow: `keywords only: meaning search did not answer within 3s` at 3178 ms; fail: `keywords only: the text could not be embedded for meaning search`; write path recorded meaning_and_keywords",
+      "headSha": "658b7d5e75815aaa334cd79a27cae81ade8d3f9c",
       "negativeControl": "--keywords-only → `searched (keywords only: keywords only was asked for) and found nothing`"
     },
     {
       "criterion": "2d: a search over 300 ms and under 5 s completes; no match prints found nothing",
-      "surface": "head dispatch CLI against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:48542)",
+      "surface": "head dispatch CLI against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:20919)",
       "command": "search_term_stats locked 1.5 s around dispatch issue --force --title 'Kumquat compactor evicts armadillo entries'; dispatch issue --title 'Pelican umbrella xylophone'",
-      "observed": "found, keyword_ms 1040; the unmatched title prints `Related-item check searched (keywords only: meaning search is off on this server) and found nothing.`",
-      "headSha": "1232687ca7f378de345304a0964ccb8c140135f2",
+      "observed": "found, keyword_ms 1031; the unmatched title prints `Related-item check searched (keywords only: meaning search is off on this server) and found nothing.`",
+      "headSha": "658b7d5e75815aaa334cd79a27cae81ade8d3f9c",
       "negativeControl": "held past 5 s (1a) → not_made timeout"
     },
     {
@@ -129,38 +130,39 @@
       "surface": "production INFRA corpus copied today with related-recall.sh (GET only, 691 issues, 9 pairs)",
       "command": "DISPATCH_RECALL_CORPUS=$TMPDIR/tester568/recall5.jsonl go test ./internal/dispatch/api -run TestRelatedRecallOnDuplicates -v -count=1",
       "observed": "old 40-word OR query 4 of 9, the check's keyword query 5 of 9",
-      "headSha": "1232687ca7f378de345304a0964ccb8c140135f2",
+      "headSha": "658b7d5e75815aaa334cd79a27cae81ade8d3f9c",
       "negativeControl": "the folded-into pair is listed by neither"
     },
     {
       "criterion": "5: doc-edit adding a decision block prints its related items",
-      "surface": "head dispatch CLI against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:48542)",
+      "surface": "head dispatch CLI against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:20919)",
       "command": "dispatch doc-edit --issue CORE-39 inserting one :::ask block at end",
-      "observed": "`Decision block 43555701-…:` then `Related items (searched by keywords only: …)`",
-      "headSha": "1232687ca7f378de345304a0964ccb8c140135f2",
+      "observed": "`Decision block 6844f446-…:` then `Related items (searched by keywords only: …)`",
+      "headSha": "658b7d5e75815aaa334cd79a27cae81ade8d3f9c",
       "negativeControl": "a plain paragraph edit prints no `Decision block` line"
     },
     {
       "criterion": "External issue Dispatch already holds is not reported created",
-      "surface": "head dispatch CLI against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:48542), acme/widgets mapped to CORE",
+      "surface": "head dispatch CLI against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:20919), acme/widgets mapped to CORE",
       "command": "dispatch issue --project CORE --external acme/widgets#7 --title 'External armadillo porcupine widget' twice",
       "observed": "first `Created CORE-47`; second `Dispatch already holds CORE-47: … ; nothing was created`",
-      "headSha": "1232687ca7f378de345304a0964ccb8c140135f2",
+      "headSha": "658b7d5e75815aaa334cd79a27cae81ade8d3f9c",
       "negativeControl": "the first filing (201) prints Created"
     },
     {
       "criterion": "Records route, no-write route and the authorization boundary",
-      "surface": "head dispatch CLI against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:48542)",
+      "surface": "head dispatch CLI against bun run dispatch:local (database dispatch_tester, http://127.0.0.1:20919)",
       "command": "GET /api/v1/related-checks?project=CORE; row counts around six no-write calls",
-      "observed": "total 58, by_reason already_exists 1, cancelled 1, no_embedder 54, timeout 2, skipped_for_time 2; counts 20049|11|149|61|93 before and after",
-      "headSha": "1232687ca7f378de345304a0964ccb8c140135f2",
+      "observed": "total 58, by_reason already_exists 1, cancelled 1, no_embedder 54, timeout 2, skipped_for_time 2; counts 20049|11|149|61|92 before and after",
+      "headSha": "658b7d5e75815aaa334cd79a27cae81ade8d3f9c",
       "negativeControl": "no bearer → 401, wrong bearer → 401, cookie POST without Origin → 403, source_kind=comment → 400"
     }
   ],
   "observations": [
-    "CI at code head 6f585d36 when read at 13:46Z: build, changes, lint, test, typecheck queued. Not waited for.",
-    "When the ask-state read fails the item reads `Answer state not reported by this Dispatch`, the older-server wording (round 6).",
-    "Before a project's first leased refresh a 10,000-word spec's keyword stage took 273 ms (probe mode), as in rounds 4-6.",
-    "Harness: $TMPDIR/tester568 (L.sh = dispatch:local at 48542, d.sh with T_URL, p.sh, serve.sh, fake_embed.py; Postgres 5433 C and 5434 en-US under pg/)."
+    "CI at code head 25c14fd6 when read at 15:12Z: build, changes, lint, test, typecheck and the daemon's Postgres 16 suite queued. Not waited for; the envoy-infra unit test that pins dispatchConnectionsPerPod runs there.",
+    "The implementer did not run envoy-infra's DataDisk tests (they need mkfs.ext4); I did not either: CI's lane.",
+    "Before a project's first leased refresh a 10,000-word spec's keyword stage took 227 ms (probe mode), as in earlier rounds.",
+    "The Postgres clusters had stopped since round 7 (the pod restarted); restarted on their kept data directories with fresh databases.",
+    "Harness: $TMPDIR/tester568 (L.sh = dispatch:local at 20919, d.sh with T_URL, p.sh, serve.sh, fake_embed.py; Postgres 5433 C and 5434 en-US under pg/)."
   ]
 }
