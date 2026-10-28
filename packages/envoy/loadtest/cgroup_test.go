@@ -280,6 +280,223 @@ func TestCgroupMergeReadsOnlyWhatTheStepNeedsAndRefusesUnreadableInput(t *testin
 	}
 }
 
+// cgPiecewise is the dispatch role's samples every 5 s from `from` to `to`, on the 5 s grid of
+// `from`: over each 5 s the usage rises by coresAt(the interval's start) cores. skip drops samples.
+func cgPiecewise(from, to time.Time, coresAt func(time.Time) float64, skip func(time.Time) bool) []string {
+	usage := int64(5e9)
+	var out []string
+	for at := from; !at.After(to); at = at.Add(5 * time.Second) {
+		if at.After(from) {
+			usage += int64(math.Round(coresAt(at.Add(-5*time.Second)) * 5e6))
+		}
+		if skip == nil || !skip(at) {
+			out = append(out, cgLine(at, "dispatch", "dispatch-0", usage, 1000, "1600000 100000", 3<<30, 1<<30))
+		}
+	}
+	return out
+}
+
+// replayCores is 0.5 cores before the window, `in` cores in it and 1 core after it.
+func replayCores(in float64) func(time.Time) float64 {
+	return func(at time.Time) float64 {
+		switch {
+		case at.Before(cgWinStart):
+			return 0.5
+		case at.Before(cgWinEnd):
+			return in
+		}
+		return 1
+	}
+}
+
+const (
+	replayDocHead = "{\n  \"config\": {\n    \"step\": \"r16\",\n    \"source\": \"replay\"\n  },\n  \"replay\": "
+	replayDocTail = ",\n  \"sse_bytes\": 7\n}\n"
+)
+
+// cgReplayDir is a step directory whose meta.json holds the test window and end, whose
+// summary.json holds a replay block as loadgen run -allow-foreign writes it (cpu_source none, the
+// CPU fields null) with rate factor 0.5 and the reasons given, and a samples file of lines.
+func cgReplayDir(t *testing.T, lines []string, end time.Time, reasons ...string) (dir, samples string) {
+	t.Helper()
+	dir, samples = cgStepDir(t, lines)
+	meta, err := json.Marshal(metaFile{Step: "r16", WindowStart: cgWinStart, WindowEnd: cgWinEnd, End: end})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), meta, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec := replayRecord{Inputs: replayInputs{RateFactor: 0.5, ReadMix: map[string]float64{"read": 1}}, WindowS: 600, CPUSource: "none",
+		Writes: map[string]replayWriteCount{"plain": {Planned: 3, Sent: 3}}, SkippedMissingDep: map[string]int{},
+		Timeouts: 1, InflightAtEnd: 21, Saturated: len(reasons) > 0, SaturatedReasons: append([]string{}, reasons...), Roster: 762}
+	value, err := json.MarshalIndent(rec, "  ", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "summary.json"), []byte(replayDocHead+string(value)+replayDocTail), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir, samples
+}
+
+// mergeReplay runs cgroup-merge on the replay step directory and reads summary.json back: its
+// bytes and its replay block.
+func mergeReplay(t *testing.T, dir, samples string) (string, replayRecord) {
+	t.Helper()
+	if err := runCgroupMerge([]string{dir, samples}); err != nil {
+		t.Fatalf("cgroup-merge: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "summary.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sum summary
+	if err := json.Unmarshal(b, &sum); err != nil || sum.Replay == nil {
+		t.Fatalf("summary.json: %v, replay %v:\n%s", err, sum.Replay, b)
+	}
+	return string(b), *sum.Replay
+}
+
+// TestCgroupMergeFillsTheReplayBlock: Dispatch at 0.5 cores before the window, 4 in it and 1
+// after it, meta.json's end 400 s after the window: dispatch_cpu_s 2,400, cores_full_rate 2400 /
+// 600 / 0.5 = 8, idle_cores_before 0.5, idle-corrected (2400 - 0.5 × 600) / 600 / 0.5 = 7, and
+// drain_cpu_s over 300 s (the cap, not 400) = 300, from the cgroup. loadgen's timeouts and
+// inflight_at_end reasons stay, 4 cores of a 16-core limit adds no dispatch_cpu, every other byte
+// of summary.json is kept, the drain's samples change no figure of cgroup.json, and a re-run
+// writes the same file.
+func TestCgroupMergeFillsTheReplayBlock(t *testing.T) {
+	lines := cgPiecewise(cgWinStart.Add(-2*time.Minute), cgWinEnd.Add(400*time.Second), replayCores(4), nil)
+	dir, samples := cgReplayDir(t, lines, cgWinEnd.Add(400*time.Second), saturatedTimeouts, saturatedInflight)
+	text, rec := mergeReplay(t, dir, samples)
+	if rec.CPUSource != "cgroup" || !nearPtr(rec.DispatchCPUS, 2400) || !nearPtr(rec.CoresFullRate, 8) || rec.WindowS != 600 {
+		t.Fatalf("cpu_source %q, dispatch_cpu_s %v, cores_full_rate %v, window_s %v; want cgroup, 2400, 8, 600",
+			rec.CPUSource, deref(rec.DispatchCPUS), deref(rec.CoresFullRate), rec.WindowS)
+	}
+	if !nearPtr(rec.IdleCoresBefore, 0.5) || !nearPtr(rec.CoresFullRateIdleCorrected, 7) || !nearPtr(rec.DrainCPUS, 300) {
+		t.Errorf("idle_cores_before %v, cores_full_rate_idle_corrected %v, drain_cpu_s %v; want 0.5, 7, 300",
+			deref(rec.IdleCoresBefore), deref(rec.CoresFullRateIdleCorrected), deref(rec.DrainCPUS))
+	}
+	if !rec.Saturated || strings.Join(rec.SaturatedReasons, ",") != "timeouts,inflight_at_end" {
+		t.Errorf("saturated %v %v; want true with loadgen's timeouts,inflight_at_end alone", rec.Saturated, rec.SaturatedReasons)
+	}
+	if rec.Roster != 762 || rec.Writes["plain"].Sent != 3 || rec.Inputs.ReadMix["read"] != 1 {
+		t.Errorf("fields cgroup-merge does not fill changed: %+v", rec)
+	}
+	if !strings.HasPrefix(text, replayDocHead) || !strings.HasSuffix(text, replayDocTail) {
+		t.Errorf("summary.json outside the replay block changed:\n%s", text)
+	}
+	cf, err := readCgroupFile(dir)
+	if err != nil || cf == nil {
+		t.Fatalf("cgroup.json: %v", err)
+	}
+	// Samples at 12:00:00, :05, ..., 12:10:00: 121; the drain's are brackets only.
+	if d := cf.Roles["dispatch"]; !nearPtr(d.CoresMean, 4) || !nearPtr(d.CoresPeak5s, 4) || d.Samples != 121 || d.MaxGapS > 5 {
+		t.Errorf("cgroup.json dispatch: cores_mean %v, peak %v, samples %d, max gap %v; want 4, 4, 121, at most 5",
+			deref(d.CoresMean), deref(d.CoresPeak5s), d.Samples, d.MaxGapS)
+	}
+	again, _ := mergeReplay(t, dir, samples)
+	if again != text {
+		t.Errorf("a re-run changed summary.json:\n%s\nthen\n%s", text, again)
+	}
+}
+
+// TestCgroupMergeAddsDispatchCPUSaturation: 15 cores of a 16-core limit in every 5 s interval
+// (at or over 0.9 × 16 = 14.4) adds dispatch_cpu before loadgen's own reasons, once on a re-run;
+// 15 cores in 5 of the window's 120 intervals (4%, under 10%) adds none, and drops a dispatch_cpu
+// reason an earlier merge left, keeping the step's timeouts reason.
+func TestCgroupMergeAddsDispatchCPUSaturation(t *testing.T) {
+	lines := cgPiecewise(cgWinStart.Add(-2*time.Minute), cgWinEnd.Add(time.Minute), replayCores(15), nil)
+	dir, samples := cgReplayDir(t, lines, cgWinEnd.Add(time.Minute), saturatedInflight)
+	_, rec := mergeReplay(t, dir, samples)
+	if !rec.Saturated || strings.Join(rec.SaturatedReasons, ",") != "dispatch_cpu,inflight_at_end" {
+		t.Fatalf("saturated %v %v; want dispatch_cpu,inflight_at_end", rec.Saturated, rec.SaturatedReasons)
+	}
+	if _, rec = mergeReplay(t, dir, samples); strings.Join(rec.SaturatedReasons, ",") != "dispatch_cpu,inflight_at_end" {
+		t.Errorf("a re-run gave %v; want dispatch_cpu,inflight_at_end once", rec.SaturatedReasons)
+	}
+
+	burst := func(at time.Time) float64 {
+		if !at.Before(cgWinStart) && at.Before(cgWinStart.Add(25*time.Second)) {
+			return 15
+		}
+		return 2
+	}
+	lines = cgPiecewise(cgWinStart.Add(-2*time.Minute), cgWinEnd.Add(time.Minute), burst, nil)
+	dir, samples = cgReplayDir(t, lines, cgWinEnd.Add(time.Minute), saturatedCPU, saturatedTimeouts)
+	if _, rec = mergeReplay(t, dir, samples); !rec.Saturated || strings.Join(rec.SaturatedReasons, ",") != "timeouts" {
+		t.Errorf("15 cores in 4%% of the intervals: saturated %v %v; want true with timeouts alone", rec.Saturated, rec.SaturatedReasons)
+	}
+	dir, samples = cgReplayDir(t, lines, cgWinEnd.Add(time.Minute), saturatedCPU)
+	if _, rec = mergeReplay(t, dir, samples); rec.Saturated || len(rec.SaturatedReasons) != 0 {
+		t.Errorf("15 cores in 4%% of the intervals and no loadgen reason: saturated %v %v; want false with none", rec.Saturated, rec.SaturatedReasons)
+	}
+}
+
+// TestCgroupMergeLeavesTheReplaysUnmeasurableFieldsNull: a 60 s gap in the 30 s before the window
+// leaves idle_cores_before and the idle-corrected cores null; samples that end 20 s before the
+// window's end leave dispatch_cpu_s, cores_full_rate and drain_cpu_s null; a meta.json without an
+// end leaves drain_cpu_s null; no Dispatch samples at all leave cpu_source none. Each null is
+// written as null, never as 0.
+func TestCgroupMergeLeavesTheReplaysUnmeasurableFieldsNull(t *testing.T) {
+	gap := func(at time.Time) bool { return at.After(cgWinStart.Add(-61*time.Second)) && at.Before(cgWinStart) }
+	lines := cgPiecewise(cgWinStart.Add(-2*time.Minute), cgWinEnd.Add(time.Minute), replayCores(4), gap)
+	dir, samples := cgReplayDir(t, lines, cgWinEnd.Add(time.Minute))
+	text, rec := mergeReplay(t, dir, samples)
+	if rec.IdleCoresBefore != nil || rec.CoresFullRateIdleCorrected != nil || !strings.Contains(text, `"idle_cores_before": null`) {
+		t.Errorf("a gap before the window: idle_cores_before %v, corrected %v; want both null", deref(rec.IdleCoresBefore), deref(rec.CoresFullRateIdleCorrected))
+	}
+	if rec.CPUSource != "cgroup" || !nearPtr(rec.DispatchCPUS, 2400) || !nearPtr(rec.DrainCPUS, 60) {
+		t.Errorf("a gap before the window: cpu_source %q, dispatch_cpu_s %v, drain_cpu_s %v; want cgroup, 2400, 60", rec.CPUSource, deref(rec.DispatchCPUS), deref(rec.DrainCPUS))
+	}
+
+	lines = cgPiecewise(cgWinStart.Add(-2*time.Minute), cgWinEnd.Add(-20*time.Second), replayCores(4), nil)
+	dir, samples = cgReplayDir(t, lines, cgWinEnd.Add(time.Minute))
+	text, rec = mergeReplay(t, dir, samples)
+	if rec.DispatchCPUS != nil || rec.CoresFullRate != nil || rec.DrainCPUS != nil || !nearPtr(rec.IdleCoresBefore, 0.5) {
+		t.Errorf("samples that end before the window's end: dispatch_cpu_s %v, cores_full_rate %v, drain_cpu_s %v, idle %v; want null, null, null, 0.5",
+			deref(rec.DispatchCPUS), deref(rec.CoresFullRate), deref(rec.DrainCPUS), deref(rec.IdleCoresBefore))
+	}
+	for _, field := range []string{"dispatch_cpu_s", "cores_full_rate", "drain_cpu_s"} {
+		if !strings.Contains(text, `"`+field+`": null`) {
+			t.Errorf("summary.json does not write %s as null:\n%s", field, text)
+		}
+	}
+
+	lines = cgPiecewise(cgWinStart.Add(-2*time.Minute), cgWinEnd.Add(time.Minute), replayCores(4), nil)
+	dir, samples = cgReplayDir(t, lines, time.Time{})
+	if _, rec = mergeReplay(t, dir, samples); rec.DrainCPUS != nil || !nearPtr(rec.DispatchCPUS, 2400) {
+		t.Errorf("meta.json without an end: drain_cpu_s %v, dispatch_cpu_s %v; want null and 2400", deref(rec.DrainCPUS), deref(rec.DispatchCPUS))
+	}
+
+	dir, samples = cgReplayDir(t, defaultSeries("postgres", 1).lines(nil, nil), cgWinEnd.Add(time.Minute), saturatedTimeouts)
+	if _, rec = mergeReplay(t, dir, samples); rec.CPUSource != "none" || rec.DispatchCPUS != nil || strings.Join(rec.SaturatedReasons, ",") != "timeouts" {
+		t.Errorf("no Dispatch samples: cpu_source %q, dispatch_cpu_s %v, reasons %v; want none, null, timeouts", rec.CPUSource, deref(rec.DispatchCPUS), rec.SaturatedReasons)
+	}
+}
+
+// TestCgroupMergeLeavesProcReplaysAndOtherStepsAlone: a replay block with cpu_source proc (the
+// local stack's /proc reads) and a summary.json without a replay block keep their bytes.
+func TestCgroupMergeLeavesProcReplaysAndOtherStepsAlone(t *testing.T) {
+	lines := cgPiecewise(cgWinStart.Add(-2*time.Minute), cgWinEnd.Add(time.Minute), replayCores(4), nil)
+	for name, doc := range map[string]string{
+		"proc":      replayDocHead + `{"inputs": {"rate_factor": 1}, "cpu_source": "proc", "dispatch_cpu_s": 12, "saturated": false, "saturated_reasons": []}` + replayDocTail,
+		"no replay": `{"config": {"step": "1x"}, "sse_bytes": 3}` + "\n",
+	} {
+		dir, samples := cgReplayDir(t, lines, cgWinEnd.Add(time.Minute))
+		path := filepath.Join(dir, "summary.json")
+		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := runCgroupMerge([]string{dir, samples}); err != nil {
+			t.Fatalf("%s: cgroup-merge: %v", name, err)
+		}
+		if b, _ := os.ReadFile(path); string(b) != doc {
+			t.Errorf("%s: summary.json changed:\n%s", name, b)
+		}
+	}
+}
+
 // deref is *p, or NaN for nil, for test messages.
 func deref(p *float64) float64 {
 	if p == nil {

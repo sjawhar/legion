@@ -18,7 +18,8 @@
 #   cluster.sh step --namespace NS NAME FACTOR [--duration 10m] [--reads-only]
 #       Reset, then one loadgen run at FACTOR × (4 events/s, 60 requests/s) with the
 #       series-sessions count (--reads-only: 0 events), then the crash check, cgroup-merge, tables.
-#       FACTOR may be fractional (8.5).
+#       FACTOR may be fractional (8.5). Postgres's write-out counters (pg_stat_bgwriter, and
+#       pg_stat_checkpointer from Postgres 17) go into pg-stats-before.json and pg-stats-after.json.
 #   cluster.sh series --namespace NS [--duration 10m]   1x 2x 3x 5x 7x 10x, then 10x-reads, then
 #       the refinement: loadgen curves over the series writes refine.txt (one factor per knee whose
 #       bracket it can narrow, at most two per knee); each factor F runs as step <F>x for
@@ -27,9 +28,28 @@
 #   cluster.sh db-size --namespace NS CPU MEMORY        Postgres resized to the Cloud SQL tier of
 #                                                       CPU and MEMORY (Gi), on the same PVC.
 #   cluster.sh redeploy --namespace NS --dispatch-commit SHA   Dispatch's image only, then a reset.
+#   cluster.sh replay-prepare --namespace NS [--manifest FILE] [--from-dir DIR]
+#       INFRA-639's LINUX replay inputs (default manifest ../replay-2026-10-26.json) into the
+#       template database dispatch_replay. Refuses, before it touches the copy, a manifest whose
+#       seed is null (INFRA-639's seed is not uploaded yet) or whose seed check failed (check.passed
+#       not true, version_size_mismatches or anchors_outside_logged_block not 0). Then downloads
+#       (or copies from --from-dir) and verifies the parts with stack.sh replay-get's code
+#       (common.sh replay_get_bundle, replay_fetch_parts) under <run>/replay/; streams the dump into
+#       the Postgres pod and restores it (pg_restore --no-owner --no-privileges) into a fresh
+#       database dispatch; starts the listener, then Dispatch, which migrates it; waits for /healthz
+#       (its schema_version), the block-index backfill and the quiet check (Dispatch below 0.05
+#       cores over 30 s in the sampler's cgroup reads); stops both, runs vacuum analyze and
+#       loadgen replay-checksum, and renames the database to dispatch_replay. Writes
+#       <run>/replay-prepared.json. A template of the same seed dump is reused.
+#   cluster.sh replay --namespace NS NAME [--from 0] [--to 39m]
+#       The reset from dispatch_replay (refused without it), the bundle into the runner, then
+#       loadgen run -allow-foreign -source replay at rate 1 over the sub-window, then the step's
+#       after-work and loadgen codepaths beside the outage (11.1-13.8 cores, 13.8 GiB, the
+#       residual from replay-residual.md).
 #   cluster.sh collect --namespace NS [--upload-issue KEY]
 #       Every step in the order the steps ran (meta.json start): the cross-step TABLES.md,
-#       loadgen curves into <run>/curves, loadgen codepaths in each step directory; then each
+#       loadgen curves into <run>/curves over every step but the phase replay's, loadgen codepaths
+#       in each step directory (a replay step's beside the outage, as replay runs it); then each
 #       phase's step directories, and the results (curves/, TABLES.md, each step's CODEPATHS.md and
 #       codepaths.json), as zstd tar parts under 24 MiB in <run>/upload/; with --upload-issue, each
 #       part goes to that Dispatch issue. A loadgen failure is reported, the rest still runs, and
@@ -38,17 +58,21 @@
 #   cluster.sh down --namespace NS [--run ID] deletes everything labelled with the run id and the
 #       lock, and waits until nothing of the run is left. A lock of another run is deleted only
 #       when --run names that run.
-#   cluster.sh all --namespace NS <up's flags> --profile quick|full [--upload-issue KEY] [--keep]
-#       up, seed, the series, the refinement (full only), soak, db-size 4 15Gi, step 1x-db4,
-#       collect, down; any exit runs down unless --keep. quick: 2 min steps and a 5 min hour;
-#       full: 10 and 60 min.
+#   cluster.sh all --namespace NS <up's flags> --profile quick|full [--manifest FILE]
+#                  [--upload-issue KEY] [--keep]
+#       up, seed, the series, the refinement (full only), soak, replay-prepare, replay r16,
+#       db-size 4 15Gi, step 1x-db4, replay r4, collect, down; any exit runs down unless --keep.
+#       quick: 2 min steps, a 5 min hour, replays over 0-5m; full: 10 and 60 min, replays over
+#       0-39m. A manifest whose seed is null or fails its check skips the replay phases, one
+#       line each.
 #
 # Every subcommand needs --namespace (no default; a Legion pod's own namespace is builds), and
 # every kubectl call names it. Subcommands after up find the run from the lock's `run` and its
 # directory ${LOADTEST_CLUSTER_ROOT:-$TMPDIR/dispatch-loadtest-cluster}/<run id>/ (state.json, mode
 # 600, holds the digests and the run's random credentials; cgroup.jsonl; steps/; logs/); --run ID
-# names the run instead. Needs kubectl, jq, curl, gh, go, setsid, timeout, uv (collect) and
-# dispatch (collect --upload-issue).
+# names the run instead. Needs kubectl, jq, curl, gh, go, setsid, timeout, tar, sha256sum, uv
+# (collect), dispatch (collect --upload-issue), and DISPATCH_URL and DISPATCH_TOKEN_FILE
+# (replay-prepare's downloads, without --from-dir).
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -74,6 +98,14 @@ RUNNER_IMAGE=mirror.gcr.io/library/debian:bookworm-slim
 MANIFEST_TYPES='application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json'
 # The copy containers the sampler reads and the crash check compares, by role (cgroup.go).
 SAMPLE_ROLES=(dispatch pprof postgres nats-0 nats-1 nats-2 listener runner)
+# The LINUX replay (plan D8): INFRA-639's manifest, the template database replay-prepare makes,
+# where the dump goes in the Postgres pod (on its claim), and the outage's Dispatch figures that
+# loadgen codepaths sets a replay beside (production profile §5: 11.1-13.8 cores, 13.8 GiB).
+REPLAY_MANIFEST=$here/../replay-2026-10-26.json
+REPLAY_TEMPLATE=dispatch_replay
+REPLAY_POD_DUMP=/var/lib/postgresql/copy/replay-seed.dump
+OUTAGE_CORES=11.1,13.8
+OUTAGE_MEMORY_GIB=13.8
 # What down deletes and then lists: the kinds of `kubectl get all` that the load-test Role may
 # read (it may not list replicationcontrollers, daemonsets, horizontalpodautoscalers or
 # cronjobs, so `get all` itself is refused), and the claims, ConfigMaps and Secrets.
@@ -114,6 +146,7 @@ valid() {
     tier) re='^db-custom-[1-9][0-9]*-[1-9][0-9]*$' ;;
     pg_setting) re='^[1-9][0-9]*(kB|MB|GB)?$' ;;
     duration) re='^[1-9][0-9]*(s|m|h)$' ;;
+    offset) re='^(0|[1-9][0-9]*(s|m|h))$' ;;
     step) re='^[A-Za-z0-9._-]{1,63}$' ;;
     factor) re='^[0-9]+(\.[0-9]+)?$' ;;
     issue) re='^[A-Z][A-Z0-9]*-[0-9]+$' ;;
@@ -124,10 +157,11 @@ valid() {
   [[ $2 =~ $re ]]
 }
 
-# duration_seconds D: a Go duration of one unit (90s, 10m, 1h) in seconds.
+# duration_seconds D: a Go duration of one unit (90s, 10m, 1h), or 0, in seconds.
 duration_seconds() {
   local n=${1%?}
   case $1 in
+    0) echo 0 ;;
     *s) echo "$n" ;;
     *m) echo $((n * 60)) ;;
     *h) echo $((n * 3600)) ;;
@@ -650,6 +684,28 @@ psql_at() {
 
 db_exists() { [ "$(psql_at postgres "select count(*) from pg_database where datname = '$1'")" = 1 ]; }
 
+# pg_has_table DB TABLE: DB holds public.TABLE.
+pg_has_table() { [ "$(psql_at "$1" "select to_regclass('public.$2') is not null")" = t ]; }
+
+# pg_stats FILE: Postgres's write-out counters as one JSON object (the time read, pg_stat_bgwriter,
+# and pg_stat_checkpointer where it exists: Postgres 17 and later), so a disk-bound step shows. A
+# failed read is said and leaves no file; the step goes on.
+pg_stats() {
+  local file=$1 has sql
+  if ! has=$(psql_at postgres "select to_regclass('pg_catalog.pg_stat_checkpointer') is not null"); then
+    note "reading Postgres's write-out counters failed; no ${file##*/}"
+    return 0
+  fi
+  sql="select json_build_object('at', now(), 'bgwriter', (select row_to_json(b) from pg_stat_bgwriter b)"
+  [ "$has" != t ] || sql+=", 'checkpointer', (select row_to_json(c) from pg_stat_checkpointer c)"
+  if psql_at postgres "$sql)" >"$file.tmp" && jq -e .bgwriter "$file.tmp" >/dev/null 2>&1; then
+    mv -- "$file.tmp" "$file"
+  else
+    rm -f -- "$file.tmp"
+    note "reading Postgres's write-out counters failed; no ${file##*/}"
+  fi
+}
+
 # nats_box ARGS: the nats CLI in the run's nats-box pod.
 nats_box() {
   local pod
@@ -659,10 +715,10 @@ nats_box() {
   kube exec "$pod" -c nats-box -- nats --server "nats://nats.$NS.svc:4222" "$@"
 }
 
-# scale_to DEPLOYMENT N: scale it; with 0, wait until none of its pods is left, else until its
-# rollout is done.
+# scale_to DEPLOYMENT N [SECONDS]: scale it; with 0, wait until none of its pods is left, else
+# until its rollout is done (at most SECONDS, default 900).
 scale_to() {
-  local d=$1 n=$2 deadline pods
+  local d=$1 n=$2 seconds=${3:-900} deadline pods
   kube scale deployment "$d" --replicas "$n" >/dev/null || die "kubectl could not scale deployment $d to $n"
   if ((n == 0)); then
     deadline=$((EPOCHSECONDS + 180))
@@ -673,20 +729,24 @@ scale_to() {
       sleep 2
     done
   else
-    kube_for 960 rollout status "deployment/$d" --timeout=900s >/dev/null ||
-      die "deployment $d was not ready within 15 min (kubectl -n $NS describe deployment $d says why)"
+    kube_for $((seconds + 60)) rollout status "deployment/$d" --timeout="${seconds}s" >/dev/null ||
+      die "deployment $d was not ready within $seconds s (kubectl -n $NS describe deployment $d says why)"
   fi
 }
 
+# wait_dispatch_healthy [SECONDS]: until Dispatch's /healthz reports ok and nats (at most SECONDS,
+# default 180); its answer goes into HEALTHZ.
 wait_dispatch_healthy() {
-  local pod body="" deadline=$((EPOCHSECONDS + 180))
+  local seconds=${1:-180} pod body=""
+  local deadline=$((EPOCHSECONDS + seconds))
   while :; do
     pod=$(find_pod dispatch || true)
     if [ -n "$pod" ] && body=$(kube exec "$pod" -c envoy-dispatch -- curl -fsS --max-time 5 http://127.0.0.1:8766/healthz 2>/dev/null) &&
       jq -e '.ok and .nats' <<<"$body" >/dev/null 2>&1; then
+      HEALTHZ=$body
       return 0
     fi
-    ((EPOCHSECONDS < deadline)) || die "Dispatch's /healthz did not report ok and nats within 180 s (last answer: ${body:-none}); kubectl -n $NS logs deployment/dispatch -c envoy-dispatch says why"
+    ((EPOCHSECONDS < deadline)) || die "Dispatch's /healthz did not report ok and nats within $seconds s (last answer: ${body:-none}); kubectl -n $NS logs deployment/dispatch -c envoy-dispatch says why"
     sleep 3
   done
 }
@@ -737,22 +797,32 @@ start_copy() {
 
 elapsed_since() { awk -v a="$1" -v b="$EPOCHREALTIME" 'BEGIN { printf "%.1f", b - a }'; }
 
-# reset_copy RECORD: the reset before every step (plan D5), its times and replicas into RECORD.
+# reset_copy RECORD [TEMPLATE]: the reset before every step (plan D5) from TEMPLATE (default
+# dispatch_seed), its times and replicas into RECORD. From the replay's template, the new
+# database's loadgen replay-checksum is read before Dispatch starts, into RECORD's checksum.
 reset_copy() {
-  local record=$1 started t0 kv
+  local record=$1 template=${2:-dispatch_seed} started t0 kv checksum=null
   started=$(utc_now) t0=$EPOCHREALTIME
-  db_exists dispatch_seed || die "the copy's Postgres has no template database dispatch_seed; cluster.sh seed first"
+  if ! db_exists "$template"; then
+    [ "$template" = "$REPLAY_TEMPLATE" ] && die "the copy's Postgres has no template database $template; cluster.sh replay-prepare first"
+    die "the copy's Postgres has no template database $template; cluster.sh seed first"
+  fi
   scale_to dispatch 0
   scale_to listener 0
   psql_at postgres 'drop database if exists dispatch with (force)' >/dev/null || die "drop database dispatch failed"
-  psql_at postgres 'create database dispatch template dispatch_seed' >/dev/null || die "create database dispatch from dispatch_seed failed"
+  psql_at postgres "create database dispatch template $template" >/dev/null || die "create database dispatch from $template failed"
+  if [ "$template" = "$REPLAY_TEMPLATE" ]; then
+    checksum=$(replay_checksum dispatch) || die "loadgen replay-checksum of database dispatch failed"
+  fi
   nats_purge
   start_copy
   kv=$(kv_replicas)
   jq -n --arg started "$started" --arg ended "$(utc_now)" --argjson seconds "$(elapsed_since "$t0")" --argjson kv "$kv" \
-    '{started: $started, ended: $ended, seconds: $seconds, template: "dispatch_seed",
-      stream: {name: "ENVOY_NOTIFICATIONS", num_replicas: 3}, kv_buckets: $kv}' >"$record"
-  note "reset done in $(jq -r .seconds "$record") s: database dispatch from dispatch_seed, NATS purged, listener and Dispatch ready, ENVOY_NOTIFICATIONS on 3 replicas"
+    --arg template "$template" --argjson checksum "$checksum" \
+    '{started: $started, ended: $ended, seconds: $seconds, template: $template,
+      stream: {name: "ENVOY_NOTIFICATIONS", num_replicas: 3}, kv_buckets: $kv}
+      + (if $checksum == null then {} else {checksum: $checksum} end)' >"$record"
+  note "reset done in $(jq -r .seconds "$record") s: database dispatch from $template, NATS purged, listener and Dispatch ready, ENVOY_NOTIFICATIONS on 3 replicas"
 }
 
 # ---- the runner -----------------------------------------------------------------------------------
@@ -923,15 +993,28 @@ run_step() {
   kube exec runner -c runner -- mkdir -p /work/meta /work/steps || die "mkdir in the runner failed"
   runner_put "$dir/copy-meta.json" "/work/meta/$name.json"
 
-  local started rc
-  started=$(utc_now)
   endpoints
-  runner_start "step-$name" /work/loadgen run -allow-foreign -name "$name" -out "/work/steps/$name" \
+  run_in_runner "$name" "$dir" "step-$name" $((30 + $(duration_seconds "$duration") + 20 + 900)) \
+    /work/loadgen run -allow-foreign -name "$name" -out "/work/steps/$name" \
     -seed /work/seed.json -copy-meta "/work/meta/$name.json" -build-commit "$(state .dispatch_commit)" \
     -events "$events" -sessions "$sessions" -requests "$requests" -duration "$duration" \
     -warmup 30s -grace 20s -rng-seed 1 "${ENDPOINTS[@]}"
-  rc=$(LOG_TO=$dir runner_wait "step-$name" $((30 + $(duration_seconds "$duration") + 20 + 900)))
-  [ ! -f "$dir/step-$name.log" ] || mv -- "$dir/step-$name.log" "$dir/loadgen.out"
+  note "step $name done: $dir"
+}
+
+# run_in_runner NAME DIR JOB SECONDS CMD...: a step's loadgen run CMD as the runner job JOB (at
+# most SECONDS), with Postgres's write-out counters before and after it (pg-stats-before.json,
+# pg-stats-after.json), then the after-work of every step: /work/steps/NAME copied back into DIR,
+# the crash check, the container logs, a non-zero exit recorded, cgroup-merge and tables.
+run_in_runner() {
+  local name=$1 dir=$2 job=$3 seconds=$4 started rc
+  shift 4
+  pg_stats "$dir/pg-stats-before.json"
+  started=$(utc_now)
+  runner_start "$job" "$@"
+  rc=$(LOG_TO=$dir runner_wait "$job" "$seconds")
+  pg_stats "$dir/pg-stats-after.json"
+  [ ! -f "$dir/$job.log" ] || mv -- "$dir/$job.log" "$dir/loadgen.out"
   kube exec runner -c runner -- tar -C "/work/steps/$name" -cf - . | tar -C "$dir" -xf - ||
     note "step $name: copying /work/steps/$name back from the runner failed"
 
@@ -941,7 +1024,6 @@ run_step() {
   [ "$rc" = 0 ] || record_failure "$dir" loadgen_exit "" "loadgen run ended with exit status $rc (see run.log and loadgen.out)"
   loadgen_local cgroup-merge "$dir" "$RUN_DIR/cgroup.jsonl" || note "step $name: loadgen cgroup-merge failed"
   loadgen_local tables "$dir" || note "step $name: loadgen tables failed"
-  note "step $name done: $dir"
 }
 
 # isolated CMD...: CMD in a subshell with errexit in force, its exit status in ISOLATED_RC. A
@@ -1051,19 +1133,269 @@ resize_postgres() {
   note "Postgres at $(state .postgres.tier): cpu.max $got; SHOW ALL in $RUN_DIR/postgres-settings.txt"
 }
 
-# ---- hooks for the phases other tasks add -----------------------------------------------------------
+# ---- the replay (plan D8) ---------------------------------------------------------------------------
 
-loadgen_has_replay() { loadgen_local run -h 2>&1 | grep -q -- '-source'; }
+# replay_manifest_valid MANIFEST: refuse a file that is not a schema 1 replay manifest.
+replay_manifest_valid() {
+  [ -f "$1" ] || die "no replay manifest at $1"
+  [ "$(jq -r .schema "$1" 2>/dev/null)" = 1 ] || die "$1 is not a schema 1 replay manifest"
+}
 
-# HOOK (replay, plan D8): replay-prepare (INFRA-639's seed restored into dispatch_replay), replay
-# r16 before db-size and replay r4 after it, each `loadgen run -source replay`. They come from
-# another branch; the calls belong here.
-phase_replay() {
-  if loadgen_has_replay; then
-    note "skipped phase $1: loadgen run has -source, but this cluster.sh does not call the replay yet (hook phase_replay)"
-  else
-    note "skipped phase $1: loadgen run has no -source replay yet"
+# replay_seed_refusal MANIFEST: why the manifest's seed may not be prepared, nothing when it may:
+# no seed (INFRA-639's seed is not uploaded yet), or a seed check that failed. INFRA-514's architect
+# requires check.passed true, version_size_mismatches 0 (each synthetic version's byte delta is the
+# real version's size change) and anchors_outside_logged_block 0 (each anchor sits in its logged
+# block, or the bundle counts it under the stated rule for a block that no longer exists).
+replay_seed_refusal() {
+  if [ "$(jq '.seed == null' "$1")" = true ]; then
+    printf "the manifest %s names no seed (seed is null): INFRA-639's seed is not uploaded yet\n" "${1##*/}"
+    return 0
   fi
+  jq -r '.seed.check as $c | if ($c | type) != "object" then "the manifest'"'"'s seed has no check"
+    else [(if $c.passed != true then "check.passed is \($c.passed)" else empty end),
+      (if $c.version_size_mismatches != 0 then "version_size_mismatches is \($c.version_size_mismatches)" else empty end),
+      (if $c.anchors_outside_logged_block != 0 then "anchors_outside_logged_block is \($c.anchors_outside_logged_block)" else empty end)]
+      | if length == 0 then empty else "the seed check failed: \(join(", "))" end end' "$1"
+}
+
+# replay_checksum DB: loadgen replay-checksum of the copy's database DB (its line of JSON), from
+# the runner, which needs its loadgen (put_loadgen).
+replay_checksum() {
+  local out
+  endpoints
+  out=$(kube_for 1800 exec runner -c runner -- /work/loadgen replay-checksum -allow-foreign "${ENDPOINTS[@]}" -db "$1") || return 1
+  jq -ce . <<<"$out"
+}
+
+# The jq program over cgroup.jsonl lines: Dispatch's cores over the newest span of at least 30 s
+# between two good reads of pod $pod taken at or after $since (epoch seconds), with no restart
+# (usage going down) in it; nothing while there is no such span.
+# shellcheck disable=SC2016 # jq's variables
+QUIET_JQ='def secs: (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) + ((capture("\\.(?<f>[0-9]+)Z$").f // "0") | "0." + . | tonumber);
+  [inputs | fromjson? | select(.role == "dispatch" and .pod == $pod and .error == "" and .usage_usec != null)
+    | {t: (.at | secs), u: .usage_usec} | select(.t >= $since)] | sort_by(.t)
+  | (last // empty) as $l | (map(select(.t <= $l.t - 30)) | last // empty) as $f
+  | map(select(.t >= $f.t)) as $s
+  | if any(range(1; $s | length); $s[.].u < $s[. - 1].u) then empty else ($l.u - $f.u) / 1e6 / ($l.t - $f.t) end'
+
+# wait_dispatch_quiet: until the sampler's reads of Dispatch's container (cgroup.jsonl) give below
+# 0.05 cores over 30 s, at most 900 s; the seconds it took go into QUIET_SECONDS.
+wait_dispatch_quiet() {
+  local since=$EPOCHSECONDS pod cores=""
+  local deadline=$((since + 900)) logged=$since
+  pod=$(find_pod dispatch) || die "kubectl could not list the Dispatch pod"
+  [ -n "$pod" ] || die "no running Dispatch pod for the quiet check"
+  note "waiting for Dispatch ($pod) to idle below 0.05 cores over 30 s in the sampler's cgroup reads"
+  while :; do
+    cores=$(tail -n 2000 -- "$RUN_DIR/cgroup.jsonl" 2>/dev/null | jq -nRr --arg pod "$pod" --argjson since "$since" "$QUIET_JQ") || cores=""
+    if [ -n "$cores" ] && awk -v c="$cores" 'BEGIN { exit !(c < 0.05) }'; then break; fi
+    ((EPOCHSECONDS < deadline)) || die "Dispatch did not idle below 0.05 cores over 30 s within 900 s (last: ${cores:-no 30 s span of good reads})"
+    if ((EPOCHSECONDS - logged >= 30)); then
+      note "Dispatch: ${cores:-no 30 s span of good reads yet} cores over the last 30 s; waiting"
+      logged=$EPOCHSECONDS
+    fi
+    sleep 5
+  done
+  QUIET_SECONDS=$((EPOCHSECONDS - since))
+  note "Dispatch is quiet: $cores cores over 30 s, after $QUIET_SECONDS s"
+}
+
+# wait_block_index DB: until the block-index backfill tables that DB has are empty
+# (document_block_versions with a null version, block_grammar_owed), at most 3600 s.
+wait_block_index() {
+  local db=$1 parts=() sql pending started=$EPOCHSECONDS logged=$EPOCHSECONDS
+  if pg_has_table "$db" document_block_versions; then parts+=("(select count(*) from document_block_versions where version is null)"); fi
+  if pg_has_table "$db" block_grammar_owed; then parts+=("(select count(*) from block_grammar_owed)"); fi
+  if ((${#parts[@]} == 0)); then
+    note "database $db has no block-index backfill tables"
+    return 0
+  fi
+  sql="select $(
+    IFS=+
+    printf '%s' "${parts[*]}"
+  )"
+  note "waiting for Dispatch's block-index backfill in $db (at most 3600 s)"
+  while :; do
+    pending=$(psql_at "$db" "$sql") || die "counting the block-index entries owed in $db failed"
+    [ "$pending" != 0 ] || break
+    ((EPOCHSECONDS - started < 3600)) || die "Dispatch still owes $pending block-index entries after 3600 s"
+    if ((EPOCHSECONDS - logged >= 30)); then
+      note "block-index backfill: $pending entries owed after $((EPOCHSECONDS - started)) s"
+      logged=$EPOCHSECONDS
+    fi
+    sleep 2
+  done
+  note "block-index backfill done after $((EPOCHSECONDS - started)) s"
+}
+
+# replay_prepare_run MANIFEST FROM_DIR: replay-prepare (see the header).
+replay_prepare_run() {
+  local manifest=$1 from_dir=$2 rdir=$RUN_DIR/replay rec=$RUN_DIR/replay-prepared.json why
+  replay_manifest_valid "$manifest"
+  why=$(replay_seed_refusal "$manifest")
+  [ -z "$why" ] || die "replay-prepare: $why; refusing before it touches the copy"
+  local dump_sha t0 total0=$EPOCHREALTIME
+  dump_sha=$(jq -er .seed.dump_sha256 "$manifest")
+  if [ -f "$rec" ] && [ "$(jq -r .seed_dump_sha256 "$rec")" = "$dump_sha" ] && db_exists "$REPLAY_TEMPLATE"; then
+    note "replay-prepare: the template $REPLAY_TEMPLATE of seed dump $dump_sha exists ($rec); reused"
+    return 0
+  fi
+  ensure_daemons
+
+  # INFRA-639's parts, downloaded and verified on the worker as stack.sh replay-get does.
+  local s_inputs s_stream s_restore s_migrate s_backfill s_vacuum s_checksum bundle_meta_sha seed_parts
+  t0=$EPOCHREALTIME
+  replay_get_bundle "$manifest" "$rdir" "$from_dir" loadgen_local
+  bundle_meta_sha=$(jq -r '.bundle_meta_sha256 // ""' <<<"$REPLAY_BUNDLE_VERIFIED")
+  replay_fetch_parts "$manifest" seed "$rdir/parts" "$from_dir"
+  seed_parts=("${REPLAY_PARTS[@]}")
+  s_inputs=$(elapsed_since "$t0")
+
+  # The dump, restored into a fresh database dispatch.
+  rm -f -- "$rec"
+  scale_to dispatch 0
+  scale_to listener 0
+  psql_at postgres "drop database if exists $REPLAY_TEMPLATE with (force)" >/dev/null || die "drop database $REPLAY_TEMPLATE failed"
+  psql_at postgres 'drop database if exists dispatch with (force)' >/dev/null || die "drop database dispatch failed"
+  psql_at postgres 'create database dispatch' >/dev/null || die "create database dispatch failed"
+  t0=$EPOCHREALTIME
+  note "streaming the seed dump (sha256 $dump_sha) into postgres-0:$REPLAY_POD_DUMP"
+  # shellcheck disable=SC2016 # expanded by the pod's sh
+  cat -- "${seed_parts[@]}" | kube_for 3600 exec -i postgres-0 -c postgres -- sh -c 'cat >"$1"' sh "$REPLAY_POD_DUMP" ||
+    die "streaming the seed dump into the Postgres pod failed"
+  local got
+  got=$(kube_for 900 exec postgres-0 -c postgres -- sha256sum "$REPLAY_POD_DUMP" | cut -d' ' -f1)
+  [ "$got" = "$dump_sha" ] || die "the dump in the Postgres pod has sha256 '$got', not the manifest's $dump_sha"
+  s_stream=$(elapsed_since "$t0")
+  t0=$EPOCHREALTIME
+  local log=$RUN_DIR/logs/replay-restore.log
+  note "pg_restore --no-owner --no-privileges -j 8 of the seed dump into database dispatch; log $log"
+  if ! kube_for 7200 exec postgres-0 -c postgres -- pg_restore --no-owner --no-privileges -j 8 -U dispatch -d dispatch "$REPLAY_POD_DUMP" >"$log" 2>&1; then
+    kube exec postgres-0 -c postgres -- rm -f "$REPLAY_POD_DUMP" >/dev/null 2>&1 || true
+    tail -n 20 -- "$log" >&2 || true
+    die "pg_restore of the replay seed failed; see $log"
+  fi
+  kube exec postgres-0 -c postgres -- rm -f "$REPLAY_POD_DUMP" || note "removing $REPLAY_POD_DUMP from the Postgres pod failed"
+  local before want_before
+  before=$(psql_at dispatch 'select max(version) from schema_migrations') || die "reading the restored seed's migration failed"
+  want_before=$(jq -r .seed.migration "$manifest")
+  [ "$before" = "$want_before" ] || die "the restored seed is at migration $before, the manifest says $want_before"
+  s_restore=$(elapsed_since "$t0")
+
+  # The listener first (it creates ENVOY_NOTIFICATIONS on three replicas), then Dispatch at the
+  # run's commit, which migrates the seed forward before it serves /healthz.
+  t0=$EPOCHREALTIME
+  nats_purge
+  scale_to listener 1
+  note "starting Dispatch at $(state .dispatch_commit) on the seed (migration $before); it migrates it forward"
+  scale_to dispatch 1 1800
+  wait_dispatch_healthy 1800
+  check_stream_replicas
+  local schema
+  schema=$(jq -r '.schema_version // empty' <<<"$HEALTHZ")
+  [[ $schema =~ ^[0-9]+$ ]] || die "Dispatch's /healthz reports no schema_version: $HEALTHZ"
+  s_migrate=$(elapsed_since "$t0")
+  t0=$EPOCHREALTIME
+  wait_block_index dispatch
+  s_backfill=$(elapsed_since "$t0")
+  wait_dispatch_quiet
+  scale_to dispatch 0
+  scale_to listener 0
+
+  t0=$EPOCHREALTIME
+  psql_at dispatch 'vacuum analyze' >/dev/null || die "vacuum analyze of database dispatch failed"
+  s_vacuum=$(elapsed_since "$t0")
+  local after checksum
+  after=$(psql_at dispatch 'select max(version) from schema_migrations') || die "reading the migrated seed's migration failed"
+  t0=$EPOCHREALTIME
+  put_loadgen
+  checksum=$(replay_checksum dispatch) || die "loadgen replay-checksum of the restored template failed"
+  s_checksum=$(elapsed_since "$t0")
+  psql_at postgres "alter database dispatch rename to $REPLAY_TEMPLATE" >/dev/null || die "renaming dispatch to $REPLAY_TEMPLATE failed"
+  jq -n --arg template "$REPLAY_TEMPLATE" --arg manifest "${manifest##*/}" --arg dump "$dump_sha" \
+    --arg tar "$(jq -r .bundle.tar_zst_sha256 "$manifest")" --arg meta "$bundle_meta_sha" \
+    --arg commit "$(state .dispatch_commit)" --arg image "$(state .images.dispatch)" \
+    --argjson before "$before" --argjson after "$after" --argjson schema "$schema" --argjson checksum "$checksum" \
+    --arg pg "$(psql_at postgres 'select version()')" --arg at "$(utc_now)" \
+    --argjson inputs "$s_inputs" --argjson stream "$s_stream" --argjson restore "$s_restore" \
+    --argjson migrate "$s_migrate" --argjson backfill "$s_backfill" --argjson quiet "$QUIET_SECONDS" \
+    --argjson vacuum "$s_vacuum" --argjson csum "$s_checksum" --argjson total "$(elapsed_since "$total0")" \
+    '{template: $template, manifest: $manifest, seed_dump_sha256: $dump, bundle_tar_zst_sha256: $tar,
+      bundle_meta_sha256: $meta, dispatch_commit: $commit, dispatch_image: $image,
+      migration_before: $before, migration_after: $after, schema_version: $schema, checksum: $checksum,
+      postgres_version: $pg, prepared_at: $at,
+      seconds: {inputs: $inputs, stream: $stream, restore: $restore, migrate: $migrate, backfill: $backfill,
+        quiet: $quiet, vacuum: $vacuum, checksum: $csum, total: $total}}' >"$rec"
+  note "replay-prepare done: template $REPLAY_TEMPLATE; $(jq -c '{migration_before, migration_after, schema_version, checksum, seconds}' "$rec")"
+}
+
+# replay_codepaths DIR OFFSET: loadgen codepaths of the replay step DIR beside the outage: its
+# heap profiles, the outage's cores and memory, the residual notes and the window's offset from
+# 22:55.
+replay_codepaths() {
+  loadgen_local codepaths -step "$1" -out "$1" -heap-start "$1/heap-start.pprof" -heap-end "$1/heap-end.pprof" \
+    -outage-cores "$OUTAGE_CORES" -outage-memory "$OUTAGE_MEMORY_GIB" -residual-notes "$here/replay-residual.md" -window-offset "$2"
+}
+
+# run_replay NAME FROM TO PHASE: one replay step (see the header), into steps/NAME.
+run_replay() {
+  local name=$1 from=$2 to=$3 phase=$4 window
+  valid step "$name" || die "step name '$name' may hold only letters, digits, '.', '_' and '-'"
+  valid offset "$from" || die "--from '$from' is not 0 or a whole number of s, m or h"
+  valid duration "$to" || die "--to '$to' is not a whole number of s, m or h"
+  window=$(($(duration_seconds "$to") - $(duration_seconds "$from")))
+  ((window > 0)) || die "--to $to is not after --from $from"
+  local dir=$RUN_DIR/steps/$name rec=$RUN_DIR/replay-prepared.json
+  [ ! -e "$dir" ] || die "$dir exists: name another step, or remove it"
+  { [ -f "$rec" ] && [ -f "$RUN_DIR/replay/bundle/bundle.meta.json" ]; } || die "no prepared replay ($rec and the bundle): cluster.sh replay-prepare first"
+  ensure_daemons
+  mkdir -p -- "$dir" "$RUN_DIR/phases"
+  printf '%s\n' "$name" >>"$RUN_DIR/phases/$phase"
+  note "replay $name: LINUX's write log from $from to $to after 22:55 at rate 1, on Postgres $(state .postgres.tier)"
+
+  put_loadgen
+  reset_copy "$dir/reset.json" "$REPLAY_TEMPLATE"
+  container_snapshot "$dir/containers-before.tsv"
+  write_copy_meta "$dir/copy-meta.json" "$dir"
+  cp -- "$rec" "$dir/replay-prepared.json"
+  # What loadgen run reads under $LOADTEST_ROOT for the replay's inputs: the reset
+  # (seed_dump_sha256) and the build (dispatch_commit).
+  jq -n --slurpfile p "$rec" --slurpfile r "$dir/reset.json" \
+    '{template: $r[0].template, seed_dump_sha256: $p[0].seed_dump_sha256, checksum: $r[0].checksum,
+      migration: $p[0].migration_after, prepared: $p[0], reset_at: $r[0].ended}' >"$dir/last-reset.json"
+  jq -n --slurpfile p "$rec" '{dispatch_commit: $p[0].dispatch_commit, dispatch_image: $p[0].dispatch_image,
+    newest_migration: $p[0].schema_version}' >"$dir/envoy-dispatch.json"
+  # shellcheck disable=SC2016 # nothing to expand
+  kube exec runner -c runner -- sh -c 'rm -rf /work/bundle /work/root && mkdir -p /work/meta /work/steps /work/root/replay /work/root/bin' ||
+    die "preparing the runner's directories failed"
+  tar -C "$RUN_DIR/replay" -cf - bundle | kube_for 900 exec -i runner -c runner -- tar -C /work -xf - ||
+    die "copying the bundle into the runner failed"
+  kube exec runner -c runner -- /work/loadgen replay-verify-bundle -dir /work/bundle >/dev/null ||
+    die "the bundle copied into the runner does not verify"
+  runner_put "$dir/last-reset.json" /work/root/replay/last-reset.json
+  runner_put "$dir/envoy-dispatch.json" /work/root/bin/envoy-dispatch.json
+  runner_put "$dir/copy-meta.json" "/work/meta/$name.json"
+  # Dispatch's GOMAXPROCS is its container's CPU limit, rounded up (Go's default in a cgroup).
+  local dpod cmax gomaxprocs
+  dpod=$(find_pod dispatch) || die "kubectl could not list the Dispatch pod"
+  cmax=$(kube exec "$dpod" -c envoy-dispatch -- cat /sys/fs/cgroup/cpu.max) || die "reading Dispatch's cpu.max failed"
+  [[ $cmax =~ ^([0-9]+)\ ([0-9]+)$ ]] || die "Dispatch's cpu.max reads '$cmax': no CPU limit, so its GOMAXPROCS is not known"
+  gomaxprocs=$(((BASH_REMATCH[1] + BASH_REMATCH[2] - 1) / BASH_REMATCH[2]))
+
+  endpoints
+  run_in_runner "$name" "$dir" "replay-$name" $((30 + window + 300 + 900)) \
+    env LOADTEST_ROOT=/work/root "LOADTEST_GOMAXPROCS=$gomaxprocs" \
+    /work/loadgen run -allow-foreign -source replay -name "$name" -out "/work/steps/$name" \
+    -events 0 -requests 0 -replay-inputs /work/bundle -replay-rate 1 -replay-from "$from" -replay-to "$to" \
+    -rng-seed 1 -warmup 30s -copy-meta "/work/meta/$name.json" -build-commit "$(state .dispatch_commit)" "${ENDPOINTS[@]}"
+  replay_codepaths "$dir" "$from" || note "replay $name: loadgen codepaths failed"
+  note "replay $name done: $dir"
+}
+
+# run_replay_logged ARGS: run_replay in a subshell, so that a replay that dies leaves the run going.
+run_replay_logged() {
+  isolated run_replay "$@"
+  ((ISOLATED_RC == 0)) || note "replay $1 did not complete (exit $ISOLATED_RC); the run goes on"
 }
 
 # ---- collect --------------------------------------------------------------------------------------
@@ -1077,18 +1409,21 @@ zstd_compress() {
 
 # pack_tar NAME ISSUE STAMP DIR PATH...: the PATHs under DIR as one zstd tar, split into parts
 # under 24 MiB (upload/cluster-load-test-<date>-raw-<NAME>.tar.zst.partNN); with ISSUE, each part
-# goes to that Dispatch issue. A tar packed and uploaded since the file STAMP last changed is left
-# alone; with no STAMP, it is packed and uploaded again.
+# goes to that Dispatch issue. upload/NAME.packed keeps a copy of the file STAMP (the phase's list
+# of steps) as it was at the last pack, so a tar packed and uploaded from the same list is left
+# alone, and a list that gained a step, however soon after the last pack, packs again. The copy is
+# compared, not the two files' times, since two steps of a phase can end within one tick of the
+# file system's clock. With no STAMP, the tar is packed and uploaded again.
 pack_tar() {
   local name=$1 issue=$2 stamp=$3 dir=$4 up=$RUN_DIR/upload base part
   shift 4
   mkdir -p -- "$up"
   base=$up/cluster-load-test-$(state '.created[0:10]')-raw-$name.tar.zst.part
-  if [ -z "$stamp" ] || [ ! -f "$up/$name.packed" ] || [ "$stamp" -nt "$up/$name.packed" ]; then
-    rm -f -- "$base"[0-9][0-9] "$up/$name.uploaded"
+  if [ -z "$stamp" ] || ! cmp -s -- "$stamp" "$up/$name.packed"; then
+    rm -f -- "$base"[0-9][0-9] "$up/$name.uploaded" "$up/$name.packed"
     tar -C "$dir" -cf - "$@" | zstd_compress | split -b 24000000 -d -a 2 - "$base" ||
       die "packing phase $name failed"
-    : >"$up/$name.packed"
+    if [ -n "$stamp" ]; then cp -- "$stamp" "$up/$name.packed"; else : >"$up/$name.packed"; fi
     note "phase $name packed: $(printf '%s ' "$base"[0-9][0-9])"
   fi
   if [ -n "$issue" ] && [ ! -f "$up/$name.uploaded" ]; then
@@ -1128,15 +1463,18 @@ pack_results() {
 }
 
 # collect_run [ISSUE]: the cross-step outputs, with every step in the order the steps ran:
-# TABLES.md over the steps that wrote summary.json, loadgen curves over every step directory into
-# <run>/curves, and loadgen codepaths in each step directory that holds summary.json (a step that
-# wrote none has no profile); then each phase's tar and the results tar. A loadgen failure is
-# reported, the rest still runs, and collect_run returns 1.
+# TABLES.md over the steps that wrote summary.json, loadgen curves over every step directory but
+# the phase replay's into <run>/curves, and loadgen codepaths in each step directory that holds
+# summary.json (a step that wrote none has no profile; a replay step's as replay_codepaths runs
+# it); then each phase's tar and the results tar. A loadgen failure is reported, the rest still
+# runs, and collect_run returns 1.
 collect_run() {
-  local issue=${1:-} ran=() names=() d p rc=0
+  local issue=${1:-} ran=() names=() curve_dirs=() replays=" " d p rc=0
+  [ ! -f "$RUN_DIR/phases/replay" ] || replays+="$(tr '\n' ' ' <"$RUN_DIR/phases/replay")"
   steps_in_run_order
   for d in "${DIRS[@]}"; do
     if [ -f "$d/summary.json" ]; then ran+=("$d") names+=("${d##*/}"); fi
+    if [[ $replays != *" ${d##*/} "* ]]; then curve_dirs+=("$d"); fi
   done
   if ((${#ran[@]})); then
     if loadgen_local tables -tops=false -out "$RUN_DIR/TABLES.md" "${ran[@]}"; then
@@ -1148,18 +1486,22 @@ collect_run() {
   else
     note "no step directory holds summary.json; no TABLES.md"
   fi
-  if ((${#DIRS[@]})); then
-    if loadgen_local curves -out "$RUN_DIR/curves" "${DIRS[@]}"; then
-      note "wrote $RUN_DIR/curves over ${#DIRS[@]} step directories"
+  if ((${#curve_dirs[@]})); then
+    if loadgen_local curves -out "$RUN_DIR/curves" "${curve_dirs[@]}"; then
+      note "wrote $RUN_DIR/curves over ${#curve_dirs[@]} step directories"
     else
       note "loadgen curves over the step directories failed"
       rc=1
     fi
   else
-    note "no step directory; no curves"
+    note "no step directory outside the replay; no curves"
   fi
   for d in "${ran[@]}"; do
-    loadgen_local codepaths -step "$d" -out "$d" || {
+    if [[ $replays == *" ${d##*/} "* ]]; then
+      replay_codepaths "$d" "$(jq -r '.replay.inputs.from_s // 0' "$d/summary.json")s"
+    else
+      loadgen_local codepaths -step "$d" -out "$d"
+    fi || {
       note "step ${d##*/}: loadgen codepaths failed"
       rc=1
     }
@@ -1218,7 +1560,7 @@ up_run() {
   local sc=${OPT[storage-class]:-} commit=${OPT[dispatch-commit]:-} major=${OPT[pg-major]:-}
   PRODUCTION_REPO=${OPT[production-repo]:-}
   local tool
-  for tool in kubectl jq curl gh go setsid timeout sha256sum awk; do
+  for tool in kubectl jq curl gh go setsid timeout sha256sum awk tar; do
     command -v "$tool" >/dev/null || die "up needs $tool on PATH"
   done
   [ -n "$sc" ] || die "up: --storage-class is required (for GKE: premium-rwo)"
@@ -1428,6 +1770,25 @@ cmd_collect() {
   collect_run "$issue"
 }
 
+cmd_replay_prepare() {
+  parse "namespace run manifest from-dir" "" "$@"
+  positional 0 "no positional arguments"
+  local manifest=${OPT[manifest]:-$REPLAY_MANIFEST} from_dir=${OPT[from-dir]:-} why
+  replay_manifest_valid "$manifest"
+  why=$(replay_seed_refusal "$manifest")
+  [ -z "$why" ] || die "replay-prepare: $why; refusing before it touches the copy"
+  [ -z "$from_dir" ] || [ -d "$from_dir" ] || die "replay-prepare: --from-dir $from_dir is not a directory"
+  use_run
+  replay_prepare_run "$manifest" "$from_dir"
+}
+
+cmd_replay() {
+  parse "namespace run from to" "" "$@"
+  positional 1 "NAME"
+  use_run
+  run_replay "${POS[0]}" "${OPT[from]:-0}" "${OPT[to]:-39m}" replay
+}
+
 cmd_status() {
   parse "namespace run" "" "$@"
   positional 0 "no positional arguments"
@@ -1480,15 +1841,16 @@ cmd_down() {
 }
 
 cmd_all() {
-  parse "namespace storage-class dispatch-commit pg-major production-repo listener-image profile upload-issue" "keep" "$@"
+  parse "namespace storage-class dispatch-commit pg-major production-repo listener-image profile manifest upload-issue" "keep" "$@"
   positional 0 "no positional arguments"
-  local step_d hour_d refine collect_rc issue=${OPT[upload-issue]:-}
+  local step_d hour_d replay_to refine collect_rc issue=${OPT[upload-issue]:-} manifest=${OPT[manifest]:-$REPLAY_MANIFEST} why
   case ${OPT[profile]:-} in
-    quick) step_d=2m hour_d=5m refine=false ;;
-    full) step_d=10m hour_d=60m refine=true ;;
+    quick) step_d=2m hour_d=5m replay_to=5m refine=false ;;
+    full) step_d=10m hour_d=60m replay_to=39m refine=true ;;
     *) die "all: --profile quick or --profile full is required" ;;
   esac
   [ -z "$issue" ] || valid issue "$issue" || die "--upload-issue '$issue' is not an issue key"
+  replay_manifest_valid "$manifest"
   ALL_KEEP=${OPT[keep]:-}
   RUN_TAKEN=""
   trap all_exit EXIT
@@ -1505,8 +1867,23 @@ cmd_all() {
   fi
   run_step_logged 10x-hour 10 "$hour_d" false soak
   pack_phase soak "$issue"
-  phase_replay replay-prepare
-  phase_replay "replay r16"
+  # The replay on the 16 vCPU database, then on the 4 vCPU one after its 1x step (plan D8).
+  local replay_ready=false
+  why=$(replay_seed_refusal "$manifest")
+  if [ -n "$why" ]; then
+    note "skipped phase replay-prepare: $why"
+    note "skipped phase replay r16: replay-prepare was skipped, so there is no template $REPLAY_TEMPLATE"
+  else
+    isolated replay_prepare_run "$manifest" ""
+    if ((ISOLATED_RC == 0)); then
+      replay_ready=true
+      run_replay_logged r16 0 "$replay_to" replay
+      pack_phase replay "$issue"
+    else
+      why="replay-prepare did not complete (exit $ISOLATED_RC)"
+      note "skipped phase replay r16: $why"
+    fi
+  fi
   isolated resize_postgres 4 15
   if ((ISOLATED_RC == 0)); then
     run_step_logged 1x-db4 1 "$step_d" false db4
@@ -1514,7 +1891,12 @@ cmd_all() {
     note "db-size 4 15Gi failed (exit $ISOLATED_RC); step 1x-db4 is skipped"
   fi
   pack_phase db4 "$issue"
-  phase_replay "replay r4"
+  if [ "$replay_ready" = true ]; then
+    run_replay_logged r4 0 "$replay_to" replay
+    pack_phase replay "$issue"
+  else
+    note "skipped phase replay r4: ${why:-replay-prepare was skipped}"
+  fi
   isolated collect_run "$issue"
   collect_rc=$ISOLATED_RC
   if [ -z "$ALL_KEEP" ]; then
@@ -1549,6 +1931,8 @@ main() {
     soak) cmd_soak "$@" ;;
     db-size) cmd_db_size "$@" ;;
     redeploy) cmd_redeploy "$@" ;;
+    replay-prepare) cmd_replay_prepare "$@" ;;
+    replay) cmd_replay "$@" ;;
     collect) cmd_collect "$@" ;;
     status) cmd_status "$@" ;;
     down) cmd_down "$@" ;;

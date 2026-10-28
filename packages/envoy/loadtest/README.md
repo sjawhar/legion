@@ -60,13 +60,14 @@ same step before and after its change, and compares the two rows.
 | `stack.sh` | The local stack: `setup`, `start`, `seed`, `reset` (and `reset --replay`), `stop`, `status`, `build-info`, `loadgen`, `replay-seed-patch-check`, `replay-seed`, which seeds the LINUX replay, runs `replay-check-seed` and dumps the database only when it passed, and the replay's `replay-manifest`, `replay-get` and `replay-prepare` |
 | `run-step.sh` | The one command for a named step |
 | `run-series.sh` | The series of six steps, 0.25x to 10x |
-| `common.sh` | What the three scripts share, sourced by each: the `LOADTEST_ROOT` and `LOADTEST_SRC` paths, the run lock (One run at a time, below), and the setup, start, seed and migration check before a step |
+| `common.sh` | What the three scripts share, sourced by each: the `LOADTEST_ROOT` and `LOADTEST_SRC` paths, the run lock (One run at a time, below), and the setup, start, seed and migration check before a step. Also the replay's download and verify of INFRA-639's parts, which `stack.sh replay-get` and `cluster/cluster.sh replay-prepare` both call |
 | `*_test.go` | Unit tests. They need no Postgres and no NATS: `cd packages/envoy && go test ./loadtest/` |
 | `run-step.test.sh` | The test of the run lock. It fakes `go` and `uv` and needs no stack: `cd packages/envoy && bash loadtest/run-step.test.sh` |
 | `common.test.sh` | The test of `lock_root`: a series step keeps the lock after its parent dies, a refusal names the live holder, a token without the holder's descriptor is refused, a lock held by a process that this PID namespace cannot see is refused as held (never as free), a caller takes the lock once its holder has ended, two callers waiting at once never name each other as the holder, and a record of another PID namespace whose pid runs here is refused without naming that pid. It needs no stack: `cd packages/envoy && bash loadtest/common.test.sh` |
 | `cluster/cluster.sh` | The load test on a full-size copy in a Kubernetes namespace (Running on a cluster copy, below) |
 | `cluster/manifests/` | The copy's templates: `postgres.yaml`, `dispatch.yaml`, `listener.yaml`, `runner.yaml`, `secrets.yaml.tmpl`, and `nats.yaml`, the committed render of chart `nats/nats` 2.15.1 |
 | `cluster/render-nats.sh`, `cluster/nats-values.yaml` | The render of `manifests/nats.yaml` from the chart and its values, with every image pinned by digest |
+| `cluster/replay-residual.md` | What the replay on the copy does not reproduce: `loadgen codepaths -residual-notes` lists it under each replay's residual |
 | `cluster/cluster.test.sh` | The test of `cluster.sh`. It fakes `kubectl`, `gh`, `curl`, `go`, `uv` and `dispatch` and needs no cluster: `cd packages/envoy && bash loadtest/cluster/cluster.test.sh` |
 
 ## Requirements
@@ -692,7 +693,7 @@ gives the bytes allocated in the window. `summary.json` `replay`:
 | --- | --- |
 | `inputs` | `rate_factor`, `reads_per_write`, `read_mix`, `upload_share`, `rng_seed`, `from_s`, `to_s`, `bundle_sha256` (of `bundle.meta.json`), `seed_dump_sha256` (from `$LOADTEST_ROOT/replay/last-reset.json`, else `""`), `gomaxprocs` (Dispatch's, from its environment, else `LOADTEST_GOMAXPROCS` or nproc), `dispatch_commit` (from `$LOADTEST_ROOT/bin/envoy-dispatch.json`) |
 | `window_s` | Between the two `/proc` reads. |
-| `cpu_source` | `proc`, or `none` with no Dispatch pid (`-allow-foreign`); the CPU fields are null then. |
+| `cpu_source` | `proc`, or `none` with no Dispatch pid (`-allow-foreign`); the CPU fields are null then. On a cluster copy, `loadgen cgroup-merge` fills them from the cgroup and sets `cgroup` (Running on a cluster copy, The replay on the copy). |
 | `dispatch_cpu_s` | Dispatch's CPU-seconds over the window. |
 | `cores_full_rate` | `dispatch_cpu_s / window_s / rate_factor`. |
 | `idle_cores_before` | Dispatch's cores over the 30 s before the window (the warm-up: the roster's heartbeats and the SSE streams, no replay request). |
@@ -1131,8 +1132,9 @@ Compare the right rows:
 ([INFRA-598](dispatch://INFRA-598)). It runs from a Legion worker pod. The copy is Postgres at the
 Cloud SQL tier's size, Dispatch at the size of production's pod, the Envoy listener, a three-pod
 NATS JetStream hub, and a runner pod in which `loadgen` runs. Every pod of the copy carries the
-label `dispatch-loadtest/run=<run id>`. The copy holds only the harness's synthetic seed. It takes
-no production credential: every token and password is random and made for the run.
+label `dispatch-loadtest/run=<run id>`. The copy holds the harness's synthetic seed and, for the
+replay, INFRA-639's seed of LINUX (The replay on the copy, below). It takes no production
+credential: every token and password is random and made for the run.
 
 ### Prerequisites
 
@@ -1148,7 +1150,7 @@ no production credential: every token and password is random and made for the ru
   | `deployments.apps`, `statefulsets.apps` | `create`, `get`, `list`, `watch`, `patch`, `delete` | Dispatch, the listener and nats-box; Postgres and NATS. `kubectl rollout status` watches them. |
   | `deployments.apps/scale` | `patch` | `kubectl scale` in each reset |
   | `pods` | `create`, `get`, `list`, `watch`, `delete` | The runner pod; `kubectl wait`; the pod lookups of the sampler and the crash check |
-  | `pods/exec` | `create` | `psql` in Postgres, the `nats` CLI in nats-box, Dispatch's `/healthz`, the sampler's cgroup reads, `kubectl cp` into the runner, and `loadgen` in the runner |
+  | `pods/exec` | `create` | `psql` and `pg_restore` in Postgres (and the replay's dump streamed into it), the `nats` CLI in nats-box, Dispatch's `/healthz` and `cpu.max`, the sampler's cgroup reads, `kubectl cp` and the replay's bundle into the runner, and `loadgen` in the runner |
   | `pods/log` | `get` | Each step's container logs |
   | `persistentvolumeclaims`, `jobs.batch` | `get`, `list`, `delete` | `down` |
   | `replicasets.apps` | `get`, `list` | `down`'s listing of what is left |
@@ -1168,9 +1170,14 @@ no production credential: every token and password is random and made for the ru
   4-vCPU tier (`db-size 4 15Gi`) Postgres requests 12 CPUs and 45Gi less. No Service is a
   LoadBalancer or a NodePort, and no pod has a priority class.
 - **The tools on the worker's `PATH`:** `kubectl`, `jq`, `curl`, `gh`, `go`, `setsid`, `timeout`,
-  `uv` (collect's zstd compression) and `dispatch` (only for `--upload-issue`). `gh` must read the
-  deployment repository that `--production-repo` names: `up` reads its main's
-  `dispatch/main.go` (`databaseVersion`) and `dispatch/Pulumi.prod.yaml` (`<project>:listenerImage`).
+  `tar`, `sha256sum`, `uv` (collect's zstd compression) and `dispatch` (only for
+  `--upload-issue`). `gh` must read the deployment repository that `--production-repo` names: `up`
+  reads its main's `dispatch/main.go` (`databaseVersion`) and `dispatch/Pulumi.prod.yaml`
+  (`<project>:listenerImage`).
+- **For the replay:** `DISPATCH_URL` and `DISPATCH_TOKEN_FILE` (a token that may read
+  INFRA-639's artifacts), from which `replay-prepare` downloads INFRA-639's parts, as
+  `stack.sh replay-get` does. The copy's pods never reach production: the worker downloads, and
+  pushes into the copy.
 - **An image of the commit** (An image for a commit, below).
 
 ### The one command
@@ -1182,9 +1189,12 @@ packages/envoy/loadtest/cluster/cluster.sh all --namespace loadtest --storage-cl
 
 `<owner/repo>` is the deployment repository. `all` runs `up`, `seed`, the series (1x, 2x, 3x, 5x,
 7x, 10x, then the control `10x-reads`), the refinement (profile `full` only), the hour
-`10x-hour`, `db-size 4 15Gi`, the step `1x-db4`, `collect` and `down`. It packs each phase when the
-phase ends. The replay phases print one line each that says they are skipped. Any exit runs `down`,
-unless `--keep`. A full run takes hours: start it with `setsid`, with its output in a file.
+`10x-hour`, `replay-prepare` and the replay `r16`, `db-size 4 15Gi`, the step `1x-db4`, the replay
+`r4`, `collect` and `down`. It packs each phase when the phase ends (the phase `replay` after each
+replay). A manifest whose seed is null, or whose seed check failed, skips the replay phases:
+`all` prints one line for each (`skipped phase replay-prepare: …`, `… replay r16: …`, `… replay
+r4: …`) and goes on. A replay-prepare that fails skips both replays the same way. Any exit runs
+`down`, unless `--keep`. A full run takes hours: start it with `setsid`, with its output in a file.
 
 | Flag | What it sets |
 | --- | --- |
@@ -1195,6 +1205,7 @@ unless `--keep`. A full run takes hours: start it with `setsid`, with its output
 | `--production-repo` | The deployment repository, `owner/repo`. Required. |
 | `--listener-image` | The listener's image. Default: production's `listenerImage` from the deployment repository. |
 | `--profile` | `quick` or `full` (Profiles, below). Required. |
+| `--manifest` | The replay's manifest. Default: the committed `replay-2026-10-26.json`. |
 | `--upload-issue` | A Dispatch issue key. Each phase's tar parts go to that issue with `dispatch artifact`. |
 | `--keep` | No `down` at the end or on a failure. The run stays up for debugging. |
 
@@ -1207,15 +1218,17 @@ key, or from `--run <id>`.
 | --- | --- |
 | `up <up's flags>` | Refuses, before it creates anything, a commit with no image, a `--pg-major` other than production's, and an image tag that does not resolve to a digest. Refuses with exit status 2 while the lock exists. Then takes the lock, installs the copy, starts the heartbeat and the sampler, and prints each container's requests and limits. |
 | `seed` | `loadgen seed` from the runner through Dispatch's Service, then `loadgen seed-finish`. Then it stops Dispatch and the listener and renames the database to the template `dispatch_seed`. |
-| `step NAME FACTOR [--duration 10m] [--reads-only]` | The reset, then one `loadgen run` at FACTOR × (4 events/s, 60 requests/s) with the `series-sessions` count, then the crash check, `cgroup-merge` and `tables`. FACTOR can be fractional (`8.5`). `--reads-only` sends 0 events. |
+| `step NAME FACTOR [--duration 10m] [--reads-only]` | The reset, then one `loadgen run` at FACTOR × (4 events/s, 60 requests/s) with the `series-sessions` count, then the crash check, `cgroup-merge` and `tables`. FACTOR can be fractional (`8.5`). `--reads-only` sends 0 events. Postgres's write-out counters go into `pg-stats-before.json` and `pg-stats-after.json`. |
 | `series [--duration 10m]` | 1x, 2x, 3x, 5x, 7x, 10x and `10x-reads`, then the refinement (below). |
 | `soak [--duration 60m]` | The step `10x-hour`. |
 | `db-size CPU MEMORY` | Postgres at the Cloud SQL tier of CPU and MEMORY (for example `4 15Gi`), restarted on the same claim. Postgres's `cpu.max` must then read the new limit. |
 | `redeploy --dispatch-commit SHA` | Dispatch on the image of another commit, then a reset. A before-and-after pair runs on one copy. |
-| `collect [--upload-issue KEY]` | The cross-step outputs, with every step in the order the steps ran (`meta.json` `start`): `TABLES.md`, `loadgen curves` into `curves/`, and `loadgen codepaths` in each step directory that holds `summary.json`. Then it packs each phase and the phase `results`. A failed `loadgen` command is reported, the rest still runs, and `collect` exits with status 1. |
+| `replay-prepare [--manifest FILE] [--from-dir DIR]` | The replay's template `dispatch_replay` (The replay on the copy, below). It refuses, before it touches the copy, a manifest whose seed is null or whose seed check failed. |
+| `replay NAME [--from 0] [--to 39m]` | One replay step from `dispatch_replay` (refused without it) over the sub-window FROM to TO after 22:55, then the step's after-work and `loadgen codepaths` beside the outage. |
+| `collect [--upload-issue KEY]` | The cross-step outputs, with every step in the order the steps ran (`meta.json` `start`): `TABLES.md`, `loadgen curves` into `curves/` over every step but the phase `replay`'s, and `loadgen codepaths` in each step directory that holds `summary.json` (a replay step's with the flags `replay` gives it). Then it packs each phase and the phase `results`. A failed `loadgen` command is reported, the rest still runs, and `collect` exits with status 1. |
 | `status` | The lock, the run, its heartbeat and sampler, and its pods. |
 | `down [--run ID]` | Stops the heartbeat and the sampler, deletes everything labelled with the run id (the claims, the Secrets and the lock too), waits until nothing of the run is left, and prints that listing. It removes the lock of another run only when `--run` names that run. |
-| `all <up's flags> --profile quick\|full [--upload-issue KEY] [--keep]` | The one command (above). |
+| `all <up's flags> --profile quick\|full [--manifest FILE] [--upload-issue KEY] [--keep]` | The one command (above). |
 
 **The refinement** (profile `full`, and `series`): `loadgen curves` over the steps of the series
 and of the refinement writes `refine.txt`. Each line is one factor at which a refinement step
@@ -1223,12 +1236,73 @@ narrows a knee's bracket. `cluster.sh` runs each factor F as the step `<F>x` (fo
 for the grid's duration, then runs `curves` again. It stops when `refine.txt` is empty. `curves`
 gives at most two refinement steps per knee.
 
+### The replay on the copy
+
+The replay (The replay, above) runs on INFRA-639's pieces: the manifest `replay-2026-10-26.json`,
+its bundle and seed dump parts on dispatch://INFRA-639, and `loadgen run -source replay`.
+
+**`replay-prepare`** (once per run) refuses, before it touches the copy, a manifest whose `seed`
+is null (it says that INFRA-639's seed is not uploaded yet) and a seed whose check failed:
+`check.passed` not true, or `version_size_mismatches` or `anchors_outside_logged_block` not 0
+(INFRA-514's architect requires both counts to be 0). Then, on the worker, it gets the parts under
+`<run>/replay/` with `stack.sh replay-get`'s own code (common.sh `replay_get_bundle` and
+`replay_fetch_parts`): each part's sha256 against the manifest, downloaded from `DISPATCH_URL` or
+copied from `--from-dir`; the joined bundle parts against `tar_zst_sha256`, unpacked and checked by
+`loadgen replay-verify-bundle`; the joined seed parts against `dump_sha256`. In the copy: Dispatch
+and the listener to 0; a fresh database `dispatch`; the dump streamed into the Postgres pod (on
+its claim, its sha256 checked there) and `pg_restore --no-owner --no-privileges -j 8` into it,
+which must give the manifest's migration; NATS purged, the listener, then Dispatch at
+`--dispatch-commit`, which migrates the seed forward (`/healthz` within 1,800 s, its
+`schema_version` kept); the block-index backfill tables, those that exist, empty
+(`document_block_versions` with a null version, `block_grammar_owed`; at most 3,600 s); the quiet
+check from the sampler's reads of Dispatch's container (below 0.05 cores over 30 s, at most
+900 s); Dispatch and the listener to 0; `vacuum analyze`; `loadgen replay-checksum` from the
+runner; the rename to the template `dispatch_replay`. A template of the same seed dump is reused.
+
+**`replay NAME`** resets as each step does, but from `dispatch_replay`, and reads
+`loadgen replay-checksum` of the new database before Dispatch starts (`reset.json` `checksum`).
+It copies the bundle into the runner (`/work/bundle`, checked again there), and writes the two
+files `loadgen run` reads for the replay's inputs under the runner's `LOADTEST_ROOT=/work/root`:
+`replay/last-reset.json` (`seed_dump_sha256`, so `inputs.seed_dump_sha256` is the dump's) and
+`bin/envoy-dispatch.json` (`dispatch_commit`, so `inputs.dispatch_commit` is the commit's). It
+sets `LOADTEST_GOMAXPROCS` to Dispatch's container CPU limit, rounded up, so
+`inputs.gomaxprocs` is Dispatch's. Then, detached in the runner:
+
+```bash
+loadgen run -allow-foreign -source replay -events 0 -requests 0 -replay-inputs /work/bundle \
+  -replay-rate 1 -replay-from <from> -replay-to <to> -rng-seed 1 -warmup 30s \
+  -copy-meta ... <every endpoint flag>
+```
+
+The reads, their mix, the upload share and the roster are INFRA-639's defaults. After it: the
+step's after-work (the copy back, the crash check, `cgroup-merge`, `tables`), then
+`loadgen codepaths -heap-start heap-start.pprof -heap-end heap-end.pprof -outage-cores 11.1,13.8
+-outage-memory 13.8 -residual-notes cluster/replay-residual.md -window-offset <from>`.
+
+**`cgroup-merge` fills the replay block** of `summary.json`, whose CPU fields a foreign run leaves
+null (`cpu_source` `none`), from the `dispatch` role's samples: `cpu_source` `cgroup`;
+`dispatch_cpu_s` (the role's `cpu_s` over the window, which `window_s` then holds);
+`idle_cores_before` (the 30 s before `window_start`); `cores_full_rate` and
+`cores_full_rate_idle_corrected` by the formulas above with `inputs.rate_factor`; `drain_cpu_s`
+(from `window_end` to `meta.json` `end`, at most 300 s); and `saturated` and `saturated_reasons`:
+`loadgen run`'s `timeouts` and `inflight_at_end` reasons stay, and `dispatch_cpu` is added when the
+5 s cores reach 0.9 × the Dispatch container's CPU limit in at least 10% of the window's sample
+intervals. A figure the samples cannot give stays `null`, never 0: the window's needs the role's
+`cpu_s`, the idle and drain spans need good reads on both sides with no gap over 30 s. A re-run
+gives the same block, and the rest of `summary.json` keeps its bytes. A block with `cpu_source`
+`proc` (the local stack) is left as it is.
+
+`all` runs `replay r16` on the 16 vCPU database after the hour, and `replay r4` on the 4 vCPU
+database after `1x-db4`, both over 0 to 5 min under `quick` and 0 to 39 min under `full`, at
+F = 1. The replay steps are the phase `replay`. `curves` leaves them out: they are not points of
+the scaling curves.
+
 ### Profiles and timings
 
-| Profile | Step window | Hour | Refinement | Time |
-| --- | --- | --- | --- | --- |
-| `quick` | 2 min | 5 min | none; `all` prints one line that says so | 47 min, measured on 2026-10-28: `up` about 5 min, the seed 183 s, each reset 23 to 39 s, each 2-minute step about 3.8 min |
-| `full` | 10 min | 60 min | until `refine.txt` is empty | About 2.8 h, and about 12 min for each refinement step. [INFERENCE] Not measured: it is the quick run's time for each step added to the full windows. |
+| Profile | Step window | Hour | Replays | Refinement | Time |
+| --- | --- | --- | --- | --- | --- |
+| `quick` | 2 min | 5 min | 0 to 5 min | none; `all` prints one line that says so | 47 min without the replay, measured on 2026-10-28: `up` about 5 min, the seed 183 s, each reset 23 to 39 s, each 2-minute step about 3.8 min. The replay is not measured. |
+| `full` | 10 min | 60 min | 0 to 39 min | until `refine.txt` is empty | About 2.8 h without the replay, and about 12 min for each refinement step. [INFERENCE] Not measured: it is the quick run's time for each step added to the full windows. Each replay adds its 39 min, its reset and up to 5 min of drain; `replay-prepare` is not measured. |
 
 ### Output files
 
@@ -1243,14 +1317,16 @@ the worker pod.
 | `postgres-settings.txt`, `postgres-version.txt` | Postgres's `SHOW ALL` (after `up` and after `db-size`) and `select version()`. |
 | `cgroup.jsonl` | The sampler's reads: every 5 s, for each copy container (`dispatch`, `pprof`, `postgres`, `nats-0`, `nats-1`, `nats-2`, `listener`, `runner`), one line with `at` (the worker's clock), `role`, `pod`, `container`, `usage_usec`, `throttled_usec`, `cpu_max`, `memory_current` and `inactive_file`. A failed read is a line with `error` and no number. |
 | `steps/<name>/` | One step directory (below). |
-| `phases/<phase>` | The steps of each phase (`series`, `refinement`, `soak`, `db4`, and `steps` for the `step` subcommand), in the order they started. |
+| `phases/<phase>` | The steps of each phase (`series`, `refinement`, `soak`, `replay`, `db4`, and `steps` for the `step` subcommand), in the order they started. |
+| `replay/` | `replay-prepare`'s inputs: `parts/` (INFRA-639's parts), `bundle/` and `bundle.unpacked.json`. |
+| `replay-prepared.json` | `replay-prepare`'s record: `template`, `manifest`, `seed_dump_sha256`, `bundle_tar_zst_sha256`, `bundle_meta_sha256`, `dispatch_commit`, `dispatch_image`, `migration_before`, `migration_after`, `schema_version` (`/healthz`'s), `checksum` (`loadgen replay-checksum` of the template), `postgres_version`, `prepared_at`, and `seconds` for `inputs`, `stream`, `restore`, `migrate`, `backfill`, `quiet`, `vacuum`, `checksum` and `total`. |
 | `TABLES.md` | The tables (The tables, above) of every step, in the order the steps ran. |
 | `curves/CURVES.md`, `curves/curves.csv` | One row per step: the six series (delivery latency, throughput, CPU, memory, database connections, database CPU), pool waiters, commit-order lock waiters, failed rows, the Pass table, and the control's and the 4 vCPU step's comparisons. |
 | `curves/KNEES.md` | Each knee: the criteria it tripped, its bracket, the measured limit and the evidence files. |
 | `curves/refine.txt` | The refinement's factors, one per line. Empty when no knee needs another step. |
 | `curves/TREND.md` | Only with an hour step: the trend of Dispatch's cores, working set and Go heap in use over minutes 5 to 60. |
 | `upload/` | The tar parts, `cluster-load-test-<date>-raw-<phase>.tar.zst.partNN`, each under 24 MiB, and the markers `<phase>.packed` and `<phase>.uploaded`. The phase `results` holds `curves/`, `TABLES.md`, and each step's `CODEPATHS.md` and `codepaths.json`. |
-| `logs/` | The heartbeat's and the sampler's logs, `seed.log`, `seed-finish.log`, and the reset record of each `redeploy`. |
+| `logs/` | The heartbeat's and the sampler's logs, `seed.log`, `seed-finish.log`, `replay-restore.log` (`pg_restore`'s output), and the reset record of each `redeploy`. |
 
 A step directory holds the files of `loadgen run` (The step directory, above). `TABLES.md` takes
 its cores and working set from `cgroup.json`. It also holds:
@@ -1260,13 +1336,15 @@ its cores and working set from `cgroup.json`. It also holds:
 | `meta.json` | Also `copy` (`copy-meta.json`, as given) and `pg_clock`: at the start and after the window, the reads, `rtt_ms_min`, `rtt_ms_p50` and `offset_ms` (Postgres's clock minus `loadgen`'s), or `error`. The delivery latency from commit spans the two clocks. |
 | `copy-meta.json` | The copy at the step's start: the namespace, the run id, the commit, the deployment repository, the Postgres major, the images, Postgres's version, the SHA-256 of its `SHOW ALL`, its tier and settings, the node CPU model in the Dispatch and Postgres containers, and each pod's node and each container's image and resources. |
 | `postgres-settings.txt` | Postgres's `SHOW ALL` at the step's start. |
-| `reset.json` | The reset before the step: `started`, `ended`, `seconds`, the template, the stream `ENVOY_NOTIFICATIONS` on 3 replicas, and each KV bucket's replicas. |
+| `reset.json` | The reset before the step: `started`, `ended`, `seconds`, the template, the stream `ENVOY_NOTIFICATIONS` on 3 replicas, each KV bucket's replicas, and in a replay step `checksum` (`loadgen replay-checksum` of the new database before Dispatch started). |
+| `pg-stats-before.json`, `pg-stats-after.json` | Postgres's write-out counters just before and just after `loadgen run`: `at`, `bgwriter` (`pg_stat_bgwriter`) and, on Postgres 17 and later, `checkpointer` (`pg_stat_checkpointer`). The difference shows a disk-bound step: checkpoints, their write and sync times, and the buffers written. A failed read leaves no file. |
+| `replay-prepared.json`, `last-reset.json`, `envoy-dispatch.json` | Only in a replay step: `replay-prepare`'s record, and the two files written into the runner's `LOADTEST_ROOT` for `loadgen run` (above). |
 | `containers-before.tsv`, `containers-after.tsv` | Each sampled container's role, pod, container, `restartCount` and `lastState.terminated.reason`, before and after the step. |
 | `step-failed.json` | Only when the step failed: `reasons`, each with `kind`, `role` and `detail`. `restart`: a container of the copy restarted during the step. `loadgen_exit`: `loadgen run` exited non-zero. `sampler_gap`: a container had no good cgroup read for more than 30 s in the window. |
 | `cgroup.json` | `loadgen cgroup-merge` of `cgroup.jsonl` over the window: `window_start`, `window_end`, `window_s`, `failed` and `failures`, and for each role `pods`, `container`, `samples`, `failed_reads`, `restarts`, `cpu_max`, `limit_cores`, `cores_mean`, `cores_peak_5s`, `cpu_s`, `throttled_s`, `working_set_bytes_mean` and `working_set_bytes_max` (`memory.current` less `inactive_file`), `max_gap_s`, and `minutes` (each whole minute's cores and mean working set; `null` for a minute with a gap over 30 s). A figure the reads cannot give is `null`, never 0. |
 | `loadgen.out` | The output of `loadgen run` in the runner. |
 | `dispatch.log`, `listener.log`, `postgres.log`, `nats-0.log`, `nats-1.log`, `nats-2.log` | Each container's log from the step's start. |
-| `CODEPATHS.md`, `codepaths.json` | `collect`'s `loadgen codepaths`: Dispatch's CPU by entry point and by subsystem (cores = the share × the Dispatch container's `cores_mean`), its working set at the window's end split into heap by code path, heap idle, stacks, other runtime memory and non-Go memory, and the outage's 10-minute buckets beside it. |
+| `CODEPATHS.md`, `codepaths.json` | `loadgen codepaths` (a replay step's from `replay` and again from `collect`, with the replay's flags; every other step's from `collect`): Dispatch's CPU by entry point and by subsystem (cores = the share × the Dispatch container's `cores_mean`), its working set at the window's end split into heap by code path, heap idle, stacks, other runtime memory and non-Go memory, and the outage's 10-minute buckets beside it. |
 
 ### The pass rule and the knee rule
 
@@ -1299,13 +1377,16 @@ its cores and working set from `cgroup.json`. It also holds:
   worker: nodes are outside the Role.
 - The curves use the harness's synthetic data set (1,000 issues, specs of 4 to 50 KB) and its event
   mix from INFRA-512's counts (5 write kinds), not every event type of production.
-- The replay (when another branch adds it): reads assumed at ρ = 1; the edit and upload split
-  assumed at U = 0.25; version history that holds the 22:55 text with a marker line; anchors placed
-  on a substitute sentence where the logged quote is gone; not the 22:47Z restart's cold rooms; not
-  other projects' writes (2.6% of the window); not browser tabs beyond 2 streams; no embeddings.
+- The replay: reads assumed at ρ = 1; the edit and upload split assumed at U = 0.25; version
+  history that holds the 22:55 text with a marker line; anchors placed on a substitute sentence
+  where the logged quote is gone; not the 22:47Z restart's cold rooms; not other projects' writes
+  (2.6% of the window); not browser tabs beyond 2 streams; no embeddings. `cluster/replay-residual.md`
+  lists every difference, and `codepaths` prints it under the residual of each replay.
 - The database's disk is a 20Gi claim on `--storage-class` (`premium-rwo` for GKE). Production's
-  Cloud SQL disk is 14.7 GiB of PD_SSD. So the IOPS ceiling differs. The run records no checkpoint
-  timings: a disk-bound step shows only in Postgres's cores and the latencies.
+  Cloud SQL disk is 14.7 GiB of PD_SSD. So the IOPS ceiling differs. Each step and replay records
+  Postgres's write-out counters before and after it (`pg-stats-before.json`, `pg-stats-after.json`:
+  `pg_stat_bgwriter`, and `pg_stat_checkpointer` on Postgres 17 and later), so a disk-bound step
+  shows in them.
 
 ### An image for a commit
 
@@ -1349,9 +1430,9 @@ without `--run` refuses to remove the lock of another run.
     committed counts, receipts and the other latencies stay,
   - no reset per step. `cluster.sh` resets its copy before each step (Running on a cluster copy,
     above).
-- `cluster.sh` runs the 10-minute steps and the hour with its trend. The replay of production's
-  log is a hook that another branch fills (dispatch://INFRA-639). Sampling of the production
-  database and restarts during load are not in this package.
+- `cluster.sh` runs the 10-minute steps, the hour with its trend, and INFRA-639's replay of
+  LINUX's log on the 16 and the 4 vCPU database. Sampling of the production database and restarts
+  during load are not in this package.
 - INFRA-605 adds its browser-editor workload, its round-trip counter and its document-room sampler
   to this package.
 - INFRA-512's replay of LINUX's write log is this package's second request source

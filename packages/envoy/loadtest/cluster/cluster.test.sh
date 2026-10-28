@@ -5,29 +5,39 @@
 # `curl`, `go`, `uv`, `dispatch`, `hostname` and `sleep` on PATH. The fake kubectl records every
 # call and answers from files the test writes (the run's pods, the lock ConfigMap, cpu.max, the
 # errors an apply fails with), the fake curl answers registry manifest reads with a digest (or 404
-# for the refs the test lists), the fake gh serves the production repository's two files and a
-# commit's first parent, and the fake sleep returns at once from apply_manifest's 3 s wait.
+# for the refs the test lists) and serves the replay fixture's parts as Dispatch artifact
+# downloads, the fake gh serves the production repository's two files and a commit's first
+# parent, and the fake sleep returns at once from apply_manifest's 3 s wait.
 #
 # Asserts that: (a) every subcommand refuses a missing --namespace; (b) up refuses a commit that is
 # not 40 hex, a commit with no image (naming its newest first-parent ancestor with one) and a
 # --pg-major other than the production repository's (naming both), each before any kubectl call
 # creates anything, and refuses with exit 2 while the lock exists, naming the holder and the
 # heartbeat's age, and past 15 min calling it stale and naming the down command; down refuses
-# another run's lock; (c) up, seed, step, db-size, collect, status, down and all run through to
-# the end, and every kubectl call any of them makes, the background heartbeat and sampler
-# included, carries `-n <namespace>`; collect runs loadgen tables and curves over the steps in the
-# order they ran (meta.json start, not the directory names' order), loadgen codepaths in each step
-# directory, and packs and uploads curves/ and TABLES.md as phase results; all --profile quick runs
-# no refinement and says so, and all --profile full, given a refine.txt with one factor and then
-# an empty one, runs exactly one refinement step <factor>x; (d) up retries an apply the
-# namespace's ResourceQuota race refuses ("the object has been modified") 3 s later and goes on,
-# stops at once on any other apply error, naming the manifest and showing the error, and stops
-# after five races in a row; (e) every manifest renders with no placeholder left and every image
-# by digest, and a value of the wrong shape is refused; (f) a container restart between the
+# another run's lock; replay-prepare refuses a manifest whose seed is null and a seed check that
+# failed (check.passed false, version_size_mismatches or
+# anchors_outside_logged_block not 0), each before any kubectl call; (c) up, seed, step,
+# replay-prepare, replay, db-size, collect, status, down and all run through to the end, and every
+# kubectl call any of them makes, the background heartbeat and sampler included, carries
+# `-n <namespace>`; each step and replay writes pg-stats-before.json and pg-stats-after.json;
+# replay-prepare downloads and verifies the parts, streams the dump into the Postgres pod,
+# restores it and renames it to dispatch_replay, writing replay-prepared.json; a replay's loadgen
+# run holds -source replay -replay-rate 1 -replay-from 0 -replay-to 39m (5m under all --profile
+# quick), runs codepaths beside the outage, and is left out of curves; collect runs loadgen tables
+# and curves over the steps in the order they ran (meta.json start, not the directory names'
+# order), loadgen codepaths in each step directory, and packs and uploads curves/ and TABLES.md as
+# phase results; all with a null-seed manifest prints one line per skipped replay phase and goes
+# on, and with a seeded one runs replay r16 after soak and replay r4 after db-size and 1x-db4; all
+# --profile quick runs no refinement and says so, and all --profile full, given a refine.txt with
+# one factor and then an empty one, runs exactly one refinement step <factor>x; (d) up retries an
+# apply the namespace's ResourceQuota race refuses ("the object has been modified") 3 s later and
+# goes on, stops at once on any other apply error, naming the manifest and showing the error, and
+# stops after five races in a row; (e) every manifest renders with no placeholder left and every
+# image by digest, and a value of the wrong shape is refused; (f) a container restart between the
 # before and after reads writes step-failed.json with kind restart; (g) the sampler writes an
-# error line with no number when its exec fails, and a numeric line when it reads; (h) when go
-# and the network reach helm, render-nats.sh re-renders nats.yaml equal to the committed file
-# (else it says it skipped that).
+# error line with no number when its exec fails, and a numeric line when it reads; (h) when go and
+# the network reach helm, render-nats.sh re-renders nats.yaml equal to the committed file (else it
+# says it skipped that).
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -66,7 +76,7 @@ cat >"$bin/kubectl" <<'EOF'
 # The fake kubectl: records each call, flags one without -n <FAKE_NS>, answers from FAKE_DIR.
 set -u
 printf '%s\n' "$*" >>"$FAKE_DIR/kubectl.log"
-verb="" sel="" prev="" has_ns=false seen=false cmd=()
+verb="" sel="" ctr="" prev="" has_ns=false seen=false cmd=()
 for a in "$@"; do
   if $seen; then
     cmd+=("$a")
@@ -75,6 +85,7 @@ for a in "$@"; do
   else
     [ "$prev" = -n ] && [ "$a" = "$FAKE_NS" ] && has_ns=true
     [ "$prev" = -l ] && sel=$a
+    [ "$prev" = -c ] && ctr=$a
     if [ -z "$verb" ] && [ "$prev" != -n ] && [[ $a != -* ]]; then verb=$a; fi
   fi
   prev=$a
@@ -134,20 +145,45 @@ case $verb in
         ;;
       "sh -c name="*) printf '%s\n' "${cmd[*]:4}" >>"$FAKE_DIR/runner-starts" ;;
       "sh -c kill"*) ;;
-      *"/healthz") echo '{"ok":true,"nats":true}' ;;
+      # replay-prepare: the dump streamed into the Postgres pod, its sha256 there, the restore.
+      'sh -c cat >"$1" sh '*) cat >"$FAKE_DIR/pod-dump" ;;
+      "sha256sum "*) sha256sum "$FAKE_DIR/pod-dump" ;;
+      pg_restore*) printf '%s\n' "$c" >>"$FAKE_DIR/restores" ;;
+      "rm -f /var/lib/postgresql/copy/replay-seed.dump") ;;
+      # A replay step: the runner's directories, the bundle copied in and verified there.
+      "sh -c rm -rf /work/bundle"*) ;;
+      "tar -C /work -xf -") cat >/dev/null ;;
+      "/work/loadgen replay-checksum "*) echo '{"issues": 1047, "md5": "fakemd5"}' ;;
+      "/work/loadgen replay-verify-bundle "*) echo '{"files": 28}' ;;
+      *"/healthz")
+        echo '{"ok":true,"nats":true,"schema_version":121}'
+        # FAKE_QUIET: two good reads of an idle Dispatch, 40 s apart, after any quiet check's start.
+        if [ -n "${FAKE_QUIET:-}" ] && [ -f "$FAKE_DIR/lock.json" ]; then
+          for at in 2099-01-01T00:00:00.000000Z 2099-01-01T00:00:40.000000Z; do
+            printf '{"at":"%s","role":"dispatch","pod":"dispatch-5d9c","container":"envoy-dispatch","usage_usec":5000000,"throttled_usec":0,"cpu_max":"1600000 100000","memory_current":1048576,"inactive_file":0,"error":""}\n' \
+              "$at" >>"$LOADTEST_CLUSTER_ROOT/$(jq -r .data.run "$FAKE_DIR/lock.json")/cgroup.jsonl"
+          done
+        fi
+        ;;
       "nats --server nats://nats.$FAKE_NS.svc:4222 stream info "*" --json") echo '{"config":{"num_replicas":3}}' ;;
       "nats --server nats://nats.$FAKE_NS.svc:4222 stream ls --names") echo ENVOY_NOTIFICATIONS ;;
       "nats --server nats://nats.$FAKE_NS.svc:4222 kv ls --names") echo interests ;;
       "nats --server nats://nats.$FAKE_NS.svc:4222 "*) ;;
       *"datname = 'dispatch_seed'"*) if [ -f "$FAKE_DIR/seeded" ]; then echo 1; else echo 0; fi ;;
       *"rename to dispatch_seed"*) : >"$FAKE_DIR/seeded" ;;
+      *"datname = 'dispatch_replay'"*) if [ -f "$FAKE_DIR/replay-template" ]; then echo 1; else echo 0; fi ;;
+      *"rename to dispatch_replay"*) : >"$FAKE_DIR/replay-template" ;;
+      *"drop database if exists dispatch_replay"*) rm -f "$FAKE_DIR/replay-template" ;;
+      *"to_regclass('pg_catalog.pg_stat_checkpointer')"*) echo f ;;
+      *pg_stat_bgwriter*) echo '{"at": "2026-10-28T12:00:00+00:00", "bgwriter": {"buffers_clean": 0, "maxwritten_clean": 0}}' ;;
       *"select version()"*) echo 'PostgreSQL 16.4 (fake)' ;;
       *"show all"*) echo 'max_connections|800|Sets the maximum number of concurrent connections.' ;;
       *"max(version)"*) echo 121 ;;
       *json_build_object*) echo '{"projects": 4, "issues": 1000}' ;;
       psql*) ;;
       *cpuinfo*) printf 'model name\t: Fake CPU @ 2.00GHz\n' ;;
-      "cat /sys/fs/cgroup/cpu.max") cat "$FAKE_DIR/cpu.max" ;;
+      # Dispatch's container keeps its 16-core limit; Postgres's reads FAKE_DIR/cpu.max.
+      "cat /sys/fs/cgroup/cpu.max") if [ "$ctr" = envoy-dispatch ]; then echo '1600000 100000'; else cat "$FAKE_DIR/cpu.max"; fi ;;
       "cat /work/logs/"*.rc) echo 0 ;;
       "cat /work/logs/"*) echo 'fake runner log' ;;
       "cat /work/seed.json") echo '{"projects": ["LGA"]}' ;;
@@ -195,11 +231,22 @@ EOF
 cat >"$bin/curl" <<'EOF'
 #!/usr/bin/env bash
 # The fake curl: a registry manifest read answers 200 with a digest, or 404 for a ref listed in
-# FAKE_DIR/missing-refs; a token read answers a token.
+# FAKE_DIR/missing-refs; a token read answers a token; a Dispatch artifact version download (-o
+# OUT) writes FAKE_DIR/parts/<slug>, after it reads the bearer header from its standard input.
 printf '%s\n' "$*" >>"$FAKE_DIR/curl.log"
 url=${*: -1}
 case $url in
   */token\?*) echo '{"token": "anonymous"}' ;;
+  */api/v1/issues/*/artifacts/*/versions/*)
+    cat >/dev/null
+    out="" prev=""
+    for a in "$@"; do
+      [ "$prev" = -o ] && out=$a
+      prev=$a
+    done
+    slug=${url#*/artifacts/}
+    cp "$FAKE_DIR/parts/${slug%%/versions/*}" "$out" || exit 22
+    ;;
   */manifests/*)
     ref=${url##*/manifests/}
     if grep -qxF -- "$ref" "$FAKE_DIR/missing-refs" 2>/dev/null; then
@@ -245,7 +292,11 @@ for a in "$@"; do
 done
 case $1 in
   series-sessions) echo 400 ;;
-  run) [ "${2:-}" != -h ] || echo '  -events float' >&2 ;;
+  replay-unpack)
+    mkdir -p "$out"
+    echo '{"project": "FAKE"}' >"$out/bundle.meta.json"
+    ;;
+  replay-verify-bundle) echo '{"bundle_meta_sha256": "feed", "files": 1}' ;;
   tables) [ -z "$out" ] || echo '# Load test tables' >"$out" ;;
   curves)
     # refine.txt is the first fixture FAKE_DIR/refine.<n> left, which this call uses up; else empty.
@@ -298,7 +349,9 @@ export FAKE_DIR=$fake FAKE_NS=$ns
 export LOADTEST_CLUSTER_ROOT=$tmp/root
 export POD_UID=00000000-1111-2222-3333-444444444444 LEGION_ISSUE=TEST-1
 export PATH="$bin:$PATH"
-unset FAKE_EXEC_FAIL FAKE_SAMPLE FAKE_PROD_MAJOR FAKE_LOADGEN_FAIL FAKE_APPLY_FAIL
+unset FAKE_EXEC_FAIL FAKE_SAMPLE FAKE_PROD_MAJOR FAKE_LOADGEN_FAIL FAKE_APPLY_FAIL FAKE_QUIET
+export DISPATCH_URL=http://dispatch.invalid DISPATCH_TOKEN_FILE=$fake/token
+echo fake-token >"$fake/token"
 
 readonly commit_ok=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 readonly commit_none=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -308,6 +361,34 @@ printf '%s %s\n%s %s\n' "$commit_none" "$commit_parent" "$commit_parent" "$commi
 printf '%s\n%s\n' "$commit_none" "$commit_parent" >"$fake/missing-refs"
 jq -n '{window_start: "2026-10-28T10:00:00Z", window_end: "2026-10-28T10:01:00Z"}' >"$fake/stepdir/meta.json"
 echo '{"config": {"step": "fake"}}' >"$fake/stepdir/summary.json"
+
+# The replay's fixture: two bundle parts and one seed dump part, served by the fake curl by slug.
+mkdir -p "$fake/parts"
+for slug in fake-replay-tar-zst-part00 fake-replay-tar-zst-part01 fake-seed-dump-part00; do
+  head -c 3000 /dev/urandom >"$fake/parts/$slug"
+done
+
+# part_entry FILE SLUG: a manifest part entry for FAKE_DIR/parts/SLUG.
+part_entry() {
+  jq -n --arg f "$1" --arg s "$2" --arg sha "$(sha256sum <"$fake/parts/$2" | cut -d' ' -f1)" --argjson b "$(stat -c %s "$fake/parts/$2")" \
+    '{file: $f, slug: $s, ref: "dispatch://INFRA-639/artifact/\($s)", version: 1, bytes: $b, sha256: $sha}'
+}
+
+# write_manifest OUT [CHECK]: a schema 1 replay manifest of the fixture's parts whose seed (at
+# migration 121, the fake Postgres's) has the seed check CHECK (default: passed, both counts 0).
+write_manifest() {
+  local check=${2:-'{"passed": true, "version_size_mismatches": 0, "anchors_outside_logged_block": 0}'}
+  jq -n --argjson b0 "$(part_entry fake-replay.tar.zst.part00 fake-replay-tar-zst-part00)" \
+    --argjson b1 "$(part_entry fake-replay.tar.zst.part01 fake-replay-tar-zst-part01)" \
+    --argjson s0 "$(part_entry fake-seed.dump.part00 fake-seed-dump-part00)" \
+    --arg tar "$(cat "$fake/parts/fake-replay-tar-zst-part00" "$fake/parts/fake-replay-tar-zst-part01" | sha256sum | cut -d' ' -f1)" \
+    --arg dump "$(sha256sum <"$fake/parts/fake-seed-dump-part00" | cut -d' ' -f1)" --argjson check "$check" \
+    '{schema: 1, project: "FAKE", window: {from: "2026-10-26T22:55:00Z", to: "2026-10-26T23:34:00Z"}, issue: "INFRA-639",
+      bundle: {tar_zst_sha256: $tar, parts: [$b0, $b1]},
+      seed: {dump_sha256: $dump, migration: 121, check: $check, parts: [$s0]}}' >"$1"
+}
+readonly seeded=$fake/replay-seeded.json
+write_manifest "$seeded"
 
 # write_pods [DISPATCH_RESTARTS [DISPATCH_REASON]]: the run's pods as the fake kubectl lists them.
 write_pods() {
@@ -330,7 +411,7 @@ write_pods() {
 
 reset_fake() {
   rm -f -- "$fake/lock.json" "$fake/applied.yaml" "$fake/kubectl.log" "$fake/seeded" "$fake/runner-starts" "$fake/dispatch.log" "$fake/loadgen.log" "$fake"/refine.[0-9]* \
-    "$fake/sleep.log" "$fake/apply-errors"
+    "$fake/sleep.log" "$fake/apply-errors" "$fake/replay-template" "$fake/restores" "$fake/pod-dump"
   write_pods
   echo '1600000 100000' >"$fake/cpu.max"
 }
@@ -364,7 +445,7 @@ up_args=(--namespace "$ns" --storage-class premium-rwo --pg-major 16 --productio
 # ---- (a) every subcommand refuses a missing --namespace --------------------------------------------
 
 reset_fake
-for sub in up seed step series soak db-size redeploy collect status down all; do
+for sub in up seed step series soak db-size redeploy replay-prepare replay collect status down all; do
   run_cluster "$sub"
   ((RC != 0)) || fail "cluster.sh $sub without --namespace exited 0"
   grep -q -- '--namespace is required' "$tmp/out" || fail "cluster.sh $sub without --namespace did not name --namespace"
@@ -397,6 +478,25 @@ grep -q -- '--pg-major 18 differs from production.s Postgres 16' "$tmp/out" || f
 grep -q 'POSTGRES_16' "$tmp/out" || fail "up's refusal does not name production's databaseVersion"
 no_create || fail "up created something before refusing the Postgres major"
 pass "up refuses a --pg-major that differs from the production repository's, naming both"
+
+# ---- (b) replay-prepare's refusals ---------------------------------------------------------------------
+
+# The committed manifest's seed is null until INFRA-639 uploads it; a seed check that failed any of
+# the three conditions is refused too. Each before any kubectl call, so before any kubectl write.
+reset_fake
+jq '.seed = null' "$seeded" >"$fake/replay-null.json"
+write_manifest "$fake/replay-unpassed.json" '{"passed": false, "version_size_mismatches": 0, "anchors_outside_logged_block": 0}'
+write_manifest "$fake/replay-sizes.json" '{"passed": true, "version_size_mismatches": 2, "anchors_outside_logged_block": 0}'
+write_manifest "$fake/replay-anchors.json" '{"passed": true, "version_size_mismatches": 0, "anchors_outside_logged_block": 1}'
+for c in "null|seed is null): INFRA-639's seed is not uploaded yet" "unpassed|the seed check failed: check.passed is false" \
+  "sizes|the seed check failed: version_size_mismatches is 2" "anchors|the seed check failed: anchors_outside_logged_block is 1"; do
+  run_cluster replay-prepare --namespace "$ns" --manifest "$fake/replay-${c%%|*}.json"
+  ((RC != 0)) || fail "replay-prepare accepted the manifest replay-${c%%|*}.json"
+  grep -qF -- "${c#*|}; refusing before it touches the copy" "$tmp/out" || fail "replay-prepare's refusal of replay-${c%%|*}.json does not say '${c#*|}'"
+  [ ! -s "$fake/kubectl.log" ] || fail "replay-prepare called kubectl before refusing replay-${c%%|*}.json: $(cat "$fake/kubectl.log")"
+  [ ! -s "$fake/curl.log" ] || ! grep -q /api/v1/ "$fake/curl.log" || fail "replay-prepare downloaded a part before refusing replay-${c%%|*}.json"
+done
+pass "replay-prepare refuses a null seed and a seed check that failed any of its three conditions, before any kubectl call"
 
 # write_lock RUN HEARTBEAT [UID]: another run's lock ConfigMap.
 write_lock() {
@@ -449,7 +549,7 @@ run_cluster seed --namespace "$ns"
 
 run_cluster step --namespace "$ns" smoke 1 --duration 1m
 ((RC == 0)) || fail "step exited $RC"
-for f in reset.json copy-meta.json meta.json summary.json postgres-settings.txt containers-before.tsv containers-after.tsv; do
+for f in reset.json copy-meta.json meta.json summary.json postgres-settings.txt containers-before.tsv containers-after.tsv pg-stats-before.json pg-stats-after.json; do
   [ -f "$run_dir/steps/smoke/$f" ] || fail "the step directory has no $f"
 done
 [ ! -f "$run_dir/steps/smoke/step-failed.json" ] || fail "a step with no restart was marked failed"
@@ -460,11 +560,50 @@ for want in "run -allow-foreign" "-events 4 " "-sessions 400 " "-requests 60 " "
 done
 jq -e '.namespace == "'"$ns"'" and .postgres.version != "" and .postgres.settings_sha256 != "" and .node_cpu_model.dispatch == "Fake CPU @ 2.00GHz" and (.pods | length) == 8' \
   "$run_dir/steps/smoke/copy-meta.json" >/dev/null || fail "copy-meta.json lacks a field: $(cat "$run_dir/steps/smoke/copy-meta.json")"
+jq -e '.bgwriter.buffers_clean == 0' "$run_dir/steps/smoke/pg-stats-after.json" >/dev/null ||
+  fail "pg-stats-after.json does not hold pg_stat_bgwriter: $(cat "$run_dir/steps/smoke/pg-stats-after.json")"
 
 run_cluster step --namespace "$ns" reads 10 --duration 1m --reads-only
 ((RC == 0)) || fail "step --reads-only exited $RC"
 start=$(grep '^step-reads ' "$fake/runner-starts")
 [[ $start == *"-events 0 "* && $start == *"-requests 600 "* ]] || fail "a --reads-only step at 10x is not 0 events and 600 requests: $start"
+
+FAKE_QUIET=1 run_cluster replay-prepare --namespace "$ns" --manifest "$seeded"
+((RC == 0)) || fail "replay-prepare exited $RC"
+for slug in fake-replay-tar-zst-part00 fake-replay-tar-zst-part01 fake-seed-dump-part00; do
+  grep -q "/api/v1/issues/INFRA-639/artifacts/$slug/versions/1\$" "$fake/curl.log" || fail "replay-prepare did not download $slug"
+done
+cmp -s "$fake/pod-dump" "$fake/parts/fake-seed-dump-part00" || fail "the dump streamed into the Postgres pod is not the seed part"
+grep -q -- '^pg_restore --no-owner --no-privileges .*-d dispatch /var/lib/postgresql/copy/replay-seed.dump$' "$fake/restores" ||
+  fail "replay-prepare did not pg_restore --no-owner --no-privileges into database dispatch: $(cat "$fake/restores" 2>/dev/null)"
+[ -f "$fake/replay-template" ] || fail "replay-prepare did not rename the database to dispatch_replay"
+jq -e --arg dump "$(jq -r .seed.dump_sha256 "$seeded")" --arg tar "$(jq -r .bundle.tar_zst_sha256 "$seeded")" \
+  '.seed_dump_sha256 == $dump and .bundle_tar_zst_sha256 == $tar and .migration_before == 121 and .migration_after == 121
+    and .schema_version == 121 and .checksum.md5 == "fakemd5" and (.seconds | has("restore") and has("quiet") and has("total"))' \
+  "$run_dir/replay-prepared.json" >/dev/null || fail "replay-prepared.json lacks a field: $(cat "$run_dir/replay-prepared.json")"
+run_cluster replay --namespace "$ns" r16
+((RC == 0)) || fail "replay r16 exited $RC"
+start=$(grep '^replay-r16 ' "$fake/runner-starts") || fail "replay r16 started no loadgen run in the runner"
+for want in "env LOADTEST_ROOT=/work/root LOADTEST_GOMAXPROCS=16 /work/loadgen run -allow-foreign -source replay " \
+  "-events 0 -requests 0 -replay-inputs /work/bundle -replay-rate 1 -replay-from 0 -replay-to 39m -rng-seed 1 -warmup 30s " \
+  "-copy-meta /work/meta/r16.json" "-pprof http://dispatch-pprof.$ns.svc:6061" "-nats-server-name nats-0"; do
+  [[ $start == *"$want"* ]] || fail "replay r16's loadgen run lacks '$want': $start"
+done
+for f in reset.json replay-prepared.json last-reset.json envoy-dispatch.json pg-stats-before.json pg-stats-after.json summary.json CODEPATHS.md; do
+  [ -f "$run_dir/steps/r16/$f" ] || fail "the replay step directory has no $f"
+done
+jq -e '.template == "dispatch_replay" and .checksum.md5 == "fakemd5"' "$run_dir/steps/r16/reset.json" >/dev/null ||
+  fail "replay r16's reset is not from dispatch_replay with its checksum: $(cat "$run_dir/steps/r16/reset.json")"
+jq -e --arg dump "$(jq -r .seed.dump_sha256 "$seeded")" '.seed_dump_sha256 == $dump' "$run_dir/steps/r16/last-reset.json" >/dev/null ||
+  fail "last-reset.json does not name the seed dump"
+jq -e --arg c "$commit_ok" '.dispatch_commit == $c' "$run_dir/steps/r16/envoy-dispatch.json" >/dev/null || fail "envoy-dispatch.json does not name the commit"
+{ grep -q -- "cp $run_dir/steps/r16/last-reset.json runner:/work/root/replay/last-reset.json" "$fake/kubectl.log" &&
+  grep -q -- "cp $run_dir/steps/r16/envoy-dispatch.json runner:/work/root/bin/envoy-dispatch.json" "$fake/kubectl.log"; } ||
+  fail "replay r16 did not put last-reset.json and envoy-dispatch.json under the runner's LOADTEST_ROOT"
+grep -qx -- "codepaths -step $run_dir/steps/r16 -out $run_dir/steps/r16 -heap-start $run_dir/steps/r16/heap-start.pprof -heap-end $run_dir/steps/r16/heap-end.pprof -outage-cores 11.1,13.8 -outage-memory 13.8 -residual-notes $here/replay-residual.md -window-offset 0" \
+  "$fake/loadgen.log" || fail "replay r16 did not run loadgen codepaths beside the outage: $(grep '^codepaths ' "$fake/loadgen.log")"
+grep -qx r16 "$run_dir/phases/replay" || fail "replay r16 is not in the phase replay"
+pass "replay-prepare downloads, streams, restores and prepares dispatch_replay; replay r16 resets from it and runs loadgen run -source replay at rate 1 over 0-39m with codepaths beside the outage"
 
 echo '400000 100000' >"$fake/cpu.max"
 run_cluster db-size --namespace "$ns" 4 15Gi
@@ -481,21 +620,23 @@ run_cluster collect --namespace "$ns" --upload-issue TEST-1
 part=$(find "$run_dir/upload" -name 'cluster-load-test-*-raw-steps.tar.zst.part00' | head -n1)
 [ -n "$part" ] || fail "collect wrote no part of phase steps"
 grep -q -- "artifact --issue TEST-1 --name ${part##*/} --path $part" "$fake/dispatch.log" || fail "collect did not upload ${part##*/}"
-[ "$(logged_steps 'tables -tops=false')" = "smoke reads" ] ||
-  fail "collect's TABLES.md lists the steps as '$(logged_steps 'tables -tops=false')', not in the order they ran (smoke reads)"
+[ "$(logged_steps 'tables -tops=false')" = "smoke reads r16" ] ||
+  fail "collect's TABLES.md lists the steps as '$(logged_steps 'tables -tops=false')', not in the order they ran (smoke reads r16)"
 [ "$(logged_steps 'curves -out')" = "smoke reads" ] ||
   fail "collect's loadgen curves got the steps as '$(logged_steps 'curves -out')', not in the order they ran (smoke reads)"
 grep -qx -- "curves -out $run_dir/curves $run_dir/steps/smoke $run_dir/steps/reads" "$fake/loadgen.log" ||
-  fail "collect did not run loadgen curves -out <run>/curves over every step directory"
+  fail "collect did not run loadgen curves -out <run>/curves over every step directory but the replay's"
 [ -f "$run_dir/curves/CURVES.md" ] || fail "collect wrote no curves/CURVES.md"
 for s in smoke reads; do
   grep -qx -- "codepaths -step $run_dir/steps/$s -out $run_dir/steps/$s" "$fake/loadgen.log" ||
     fail "collect ran no loadgen codepaths -step <dir> -out <dir> in step $s"
   [ -f "$run_dir/steps/$s/CODEPATHS.md" ] || fail "collect wrote no CODEPATHS.md in step $s"
 done
+[ "$(grep -c -- "^codepaths -step $run_dir/steps/r16 .* -residual-notes " "$fake/loadgen.log")" = 2 ] ||
+  fail "collect did not run the replay step's loadgen codepaths beside the outage"
 results=$(find "$run_dir/upload" -name 'cluster-load-test-*-raw-results.tar.zst.part00' | head -n1)
 [ -n "$results" ] || fail "collect wrote no part of phase results"
-for f in curves/CURVES.md curves/refine.txt TABLES.md steps/smoke/CODEPATHS.md steps/reads/CODEPATHS.md; do
+for f in curves/CURVES.md curves/refine.txt TABLES.md steps/smoke/CODEPATHS.md steps/reads/CODEPATHS.md steps/r16/CODEPATHS.md; do
   tar -tf "$results" | grep -qx -- "$f" || fail "the results tar lacks $f: $(tar -tf "$results" | tr '\n' ' ')"
 done
 grep -q -- "artifact --issue TEST-1 --name ${results##*/} --path $results" "$fake/dispatch.log" || fail "collect did not upload ${results##*/}"
@@ -505,7 +646,7 @@ grep -q -- "artifact --issue TEST-1 --name ${results##*/} --path $results" "$fak
 FAKE_LOADGEN_FAIL=curves run_cluster collect --namespace "$ns" --upload-issue TEST-1
 ((RC == 1)) || fail "collect with a failing loadgen curves exited $RC, not 1"
 grep -q 'loadgen curves over the step directories failed' "$tmp/out" || fail "collect did not report the failed loadgen curves"
-[ "$(grep -c '^codepaths ' "$fake/loadgen.log")" = 4 ] || fail "collect did not go on to loadgen codepaths after curves failed"
+[ "$(grep -c '^codepaths ' "$fake/loadgen.log")" = 7 ] || fail "collect did not go on to loadgen codepaths after curves failed"
 grep -q -- "--name ${results##*/}" "$fake/dispatch.log" || fail "collect did not go on to pack and upload the results after curves failed"
 pass "collect runs tables, curves and codepaths over the steps in the order they ran and uploads the results; a loadgen failure is reported, the rest runs, and it exits 1"
 
@@ -521,12 +662,12 @@ grep -q "kubectl -n $ns get pods,services,deployments,statefulsets,replicasets,j
 for d in heartbeat sampler; do
   [ ! -f "$run_dir/$d.pid" ] || fail "down left the $d daemon's pidfile"
 done
-pass "up, seed, step, step --reads-only, db-size, collect, status and down run through"
+pass "up, seed, step, step --reads-only, replay-prepare, replay, db-size, collect, status and down run through"
 
 reset_fake
 echo '400000 100000' >"$fake/cpu.max"
 export LOADTEST_CLUSTER_ROOT=$tmp/root-all
-run_cluster all "${up_args[@]}" --dispatch-commit "$commit_ok" --profile quick
+run_cluster all "${up_args[@]}" --dispatch-commit "$commit_ok" --profile quick --manifest "$fake/replay-null.json"
 ((RC == 0)) || fail "all exited $RC"
 for line in 'skipped phase refinement: profile quick runs no refinement steps' 'skipped phase replay-prepare' 'skipped phase replay r16' 'skipped phase replay r4'; do
   grep -q "$line" "$tmp/out" || fail "all did not print '$line'"
@@ -543,13 +684,52 @@ grep -q '^step-1x-db4 .*-duration 2m ' "$fake/runner-starts" || fail "quick's st
   fail "all's TABLES.md lists the steps as '$(logged_steps 'tables -tops=false')', not in the order they ran"
 [ -f "$run_dir/steps/1x/CODEPATHS.md" ] || fail "all's collect wrote no CODEPATHS.md"
 [ ! -f "$fake/lock.json" ] || fail "all left the lock"
+! grep -q '^replay-' "$fake/runner-starts" || fail "all ran a replay on a manifest whose seed is null"
 pass "all runs up, seed, the series, soak, db-size, 1x-db4, collect and down, one line per skipped phase"
+
+# line_of PATTERN [first|last]: the line number in kubectl.log of PATTERN's first (or last) match.
+line_of() {
+  local n
+  n=$(grep -nF -- "$1" "$fake/kubectl.log" | cut -d: -f1 | if [ "${2:-first}" = last ]; then tail -n1; else head -n1; fi)
+  [ -n "$n" ] || fail "kubectl.log has no '$1'"
+  printf '%s\n' "$n"
+}
+
+reset_fake
+echo '400000 100000' >"$fake/cpu.max"
+export LOADTEST_CLUSTER_ROOT=$tmp/root-replay
+FAKE_QUIET=1 run_cluster all "${up_args[@]}" --dispatch-commit "$commit_ok" --profile quick --manifest "$seeded" --upload-issue TEST-1
+((RC == 0)) || fail "all with a seeded manifest exited $RC"
+! grep -q 'skipped phase replay' "$tmp/out" || fail "all skipped a replay phase with a seeded manifest: $(grep 'skipped phase replay' "$tmp/out")"
+run_dir=$(find "$LOADTEST_CLUSTER_ROOT" -mindepth 1 -maxdepth 1 -type d)
+for r in r16 r4; do
+  start=$(grep "^replay-$r " "$fake/runner-starts") || fail "all ran no replay $r"
+  for want in "-source replay " "-replay-rate 1 " "-replay-from 0 " "-replay-to 5m "; do
+    [[ $start == *"$want"* ]] || fail "all --profile quick's replay $r lacks '$want': $start"
+  done
+  for f in pg-stats-before.json pg-stats-after.json last-reset.json; do
+    [ -f "$run_dir/steps/$r/$f" ] || fail "replay $r's step directory has no $f"
+  done
+done
+hour=$(line_of ' sh step-10x-hour ') r16=$(line_of ' sh replay-r16 ') resize=$(line_of 'rollout status statefulset/postgres' last)
+db4=$(line_of ' sh step-1x-db4 ') r4=$(line_of ' sh replay-r4 ')
+((hour < r16 && r16 < resize && resize < db4 && db4 < r4)) ||
+  fail "all's order is not 10x-hour, replay r16, db-size, 1x-db4, replay r4 (kubectl.log lines $hour, $r16, $resize, $db4, $r4)"
+[ "$(tr '\n' ' ' <"$run_dir/phases/replay")" = "r16 r4 " ] || fail "the phase replay holds '$(cat "$run_dir/phases/replay")', not r16 and r4"
+part=$(find "$run_dir/upload" -name 'cluster-load-test-*-raw-replay.tar.zst.part00' | head -n1)
+{ [ -n "$part" ] && grep -q -- "--name ${part##*/} --path $part" "$fake/dispatch.log"; } || fail "all did not pack and upload the phase replay"
+tar -tf "$part" | grep -q '^\./r4/\|^r4/' || fail "the phase replay's tar lacks r4: $(tar -tf "$part" | head -n5)"
+[ -f "$run_dir/steps/1x/pg-stats-after.json" ] || fail "all's step 1x has no pg-stats-after.json"
+! grep -q -- "^curves -out .*/steps/r16" "$fake/loadgen.log" || fail "all's loadgen curves took a replay step"
+[ "$(logged_steps 'tables -tops=false')" = "1x 2x 3x 5x 7x 10x 10x-reads 10x-hour r16 1x-db4 r4" ] ||
+  fail "all's TABLES.md lists the steps as '$(logged_steps 'tables -tops=false')', not in the order they ran"
+pass "all with a seeded manifest runs replay-prepare and replay r16 after soak, replay r4 after db-size and 1x-db4, each over 0-5m under quick, and packs the phase replay"
 
 reset_fake
 echo '400000 100000' >"$fake/cpu.max"
 printf '8.5\n' >"$fake/refine.1"
 export LOADTEST_CLUSTER_ROOT=$tmp/root-full
-run_cluster all "${up_args[@]}" --dispatch-commit "$commit_ok" --profile full
+FAKE_QUIET=1 run_cluster all "${up_args[@]}" --dispatch-commit "$commit_ok" --profile full --manifest "$seeded"
 ((RC == 0)) || fail "all --profile full exited $RC"
 run_dir=$(find "$LOADTEST_CLUSTER_ROOT" -mindepth 1 -maxdepth 1 -type d)
 [ "$(cat "$run_dir/phases/refinement" 2>/dev/null)" = 8.5x ] ||
@@ -562,12 +742,15 @@ start=$(grep '^step-8.5x ' "$fake/runner-starts") || fail "the refinement starte
 [ "$(grep -c '^curves -out ' "$fake/loadgen.log")" = 3 ] ||
   fail "loadgen curves ran $(grep -c '^curves -out ' "$fake/loadgen.log") times, not twice in the refinement and once in collect"
 grep -q 'refinement done: refine.txt is empty; refinement steps run: 1;' "$tmp/out" || fail "all did not say the refinement is done"
-[ "$(logged_steps 'tables -tops=false')" = "1x 2x 3x 5x 7x 10x 10x-reads 8.5x 10x-hour 1x-db4" ] ||
+[ "$(logged_steps 'tables -tops=false')" = "1x 2x 3x 5x 7x 10x 10x-reads 8.5x 10x-hour r16 1x-db4 r4" ] ||
   fail "all --profile full's TABLES.md lists the steps as '$(logged_steps 'tables -tops=false')', not in the order they ran"
 grep -q '^step-10x-hour .*-duration 60m ' "$fake/runner-starts" || fail "full's hour is not 60 min"
+for r in r16 r4; do
+  grep -q "^replay-$r .*-replay-from 0 -replay-to 39m " "$fake/runner-starts" || fail "all --profile full's replay $r is not over 0-39m"
+done
 [ -n "$(find "$run_dir/upload" -name 'cluster-load-test-*-raw-refinement.tar.zst.part00')" ] || fail "all packed no phase refinement"
 [ ! -f "$fake/lock.json" ] || fail "all --profile full left the lock"
-pass "all --profile full runs one refinement step per refine.txt factor, then curves again, until refine.txt is empty"
+pass "all --profile full runs one refinement step per refine.txt factor, then curves again, until refine.txt is empty, and each replay over 0-39m"
 
 [ -s "$fake/kubectl.log" ] || fail "no kubectl call was recorded"
 if [ -s "$fake/kubectl-no-ns.log" ]; then

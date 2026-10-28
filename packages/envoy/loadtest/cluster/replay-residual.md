@@ -50,4 +50,4 @@
 - The copy has no tailnet front door.
 - `meta.json`'s `pg_clock` gives the copy's Postgres round trip, not the round trip of production's proxy path.
 - Each step records the CPU model of the copy's nodes. The worker cannot read production's machine type, because nodes are outside the load-test Role.
-- The database's disk is a 20Gi claim on the run's storage class. Production's Cloud SQL disk is 14.7 GiB of PD_SSD, so the IOPS ceiling differs.
+- The database's disk is a 20Gi claim on the run's storage class. Production's Cloud SQL disk is 14.7 GiB of PD_SSD, so the IOPS ceiling differs. Each step and replay records Postgres's write-out counters before and after it (`pg_stat_bgwriter`, and `pg_stat_checkpointer` on Postgres 17 and later) in `pg-stats-before.json` and `pg-stats-after.json`, so a disk-bound step shows in them.
