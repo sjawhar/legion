@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-717",
-  "completed": "2026-10-28T20:20:00Z",
+  "completed": "2026-10-28T20:55:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2476",
-  "codeHead": "ff7d97a444d2a766ddeaf72c5c79946aa5ca3d06",
-  "round": 2,
-  "roundReason": "Tester's failure: scripts/dispatch/README.md said any Postgres 18 works while its throwaway server (pgserver 0.1.4) is PostgreSQL 16.2, which stems English differently ('added' gives 'ad', production's 18.6 gives 'add'). The architect asked for the procedure to start a Postgres 18 server and to show 'add' through the paragraph's commands.",
+  "codeHead": "da02c91af7d686a22b0b264d300f61b4c94a2401",
+  "round": 3,
+  "roundReason": "Tester's round-2 failure: a second run of the README's lexeme-database block while its server ran extracted the binaries over the live server and initdb'd again; $TMPDIR is shared by every role of an issue pod. The architect asked: skip download, extraction and initdb when $pg/data exists; only print the socket path when the server is up; otherwise start the existing cluster; show two runs in a row leave one live 18.6 server giving 'add'.",
   "proof": [
     {
       "criterion": "No workflow under .github/workflows names the 0.8.7-pg16 digest or an '(until production runs Postgres 18)' job, and actionlint is clean.",
@@ -39,23 +39,33 @@
       "observed": "Block exit 0 with no warning (initdb, then 'server started'). psql: 180006|'add':1,2 'set':3|'add'. Bun: {\"v\":\"180006\",\"l\":[\"add\"],\"q\":\"'add'\"}. pg_ctl stop: 'server stopped'.",
       "headSha": "ff7d97a444d2a766ddeaf72c5c79946aa5ca3d06",
       "negativeControl": "The README's old command, uvx --python 3.12 --from pgserver==0.1.4, with the same query printed 160002 | 'ad':1,2 'set':3 | 'ad': the query tells the 16.2 server from the 18.6 one."
+    },
+    {
+      "criterion": "The README's lexeme-database block is safe to run again (architect, round 3): with $pg/data present it skips download, extraction and initdb; with the server up it only prints the socket path; otherwise it starts the existing cluster. Two runs in a row leave one live 18.6 server that gives 'add'.",
+      "surface": "The README's own bash block, extracted with awk and run as TMPDIR=<new dir> bash -c \"source <block>\", the way the tester ran it, in this pod.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && awk '/^### Lexeme database/{f=1} f&&/^```bash/{g=1;next} g&&/^```/{exit} g' scripts/dispatch/README.md > $TMPDIR/lexeme-block.sh; T=$TMPDIR/t717r3; TMPDIR=$T timeout 180 bash -c \"source $TMPDIR/lexeme-block.sh\" (run 1), the same again (run 2), head -1 $T/pg/data/postmaster.pid after each, ps for postgres from $T, psql -h $T/pg -U postgres -Atc \"select current_setting('server_version_num'), to_tsvector('english','added adding settings'), websearch_to_tsquery('english','added')\"; then pg_ctl -D data stop and run 3; then two runs started at the same time on a new directory $TMPDIR/t717c.",
+      "observed": "Run 1: initdb, 'server started', socket path printed, exit 0. Run 2: only the socket path, exit 0. postmaster.pid PID 2552 after both; ps lists one postgres; psql 180006|'add':1,2 'set':3|'add'; postgresql.conf has listen_addresses = '' once; TCP to 127.0.0.1:5432 refused; the server holds no fd on setup.lock. Run 3 after a stop: 'server started' with no download or initdb, exit 0, 180006|'add':1,2. Two concurrent first runs: one created and started the cluster, the other waited on the lock and printed only the socket path; both exit 0; one postgres; 180006|'add':1,2.",
+      "headSha": "da02c91af7d686a22b0b264d300f61b4c94a2401",
+      "negativeControl": "Without 9>&- on pg_ctl start, the postmaster inherited the lock (/proc/2456/fd/9 -> setup.lock) and run 2 blocked on flock until the 600 s command timeout. The round-2 block (ff7d97a4) run twice: 'initdb: error: directory \"data\" exists but is not empty', the binaries extracted again over the live server, and listen_addresses appended twice (grep -c 2)."
     }
   ],
   "filesChanged": [
     ".github/workflows/envoy-and-contracts.yaml: deleted jobs dispatch-go-postgres-16 and broker-go-postgres-16 with their comment blocks; three comments (filter list L52, envoy filter gate L402, envoy filter image-pull L429) now name only the remaining jobs.",
     ".github/workflows/pr-and-main.yaml: deleted job daemon-go-postgres-16 with its comment block; file ends at the test job's cache/save step.",
     ".dispatch/architecture/release-engineering.md: cut the clause and sentence about the three Postgres 16 jobs.",
-    "scripts/dispatch/README.md: line 328 now says 'Any Postgres 18 works, as production and CI run 18:' (task 5a from the architect via the planner). Round 2: the throwaway server is zonky's pinned PostgreSQL 18.6.0 Linux x86-64 binaries from Maven Central, unpacked with Python, initdb'd with user postgres, socket-only in $TMPDIR/pg; the 'printed URL' sentence went with pgserver, and a stop command is given."
+    "scripts/dispatch/README.md: line 328 now says 'Any Postgres 18 works, as production and CI run 18:' (task 5a from the architect via the planner). Round 2: the throwaway server is zonky's pinned PostgreSQL 18.6.0 Linux x86-64 binaries from Maven Central, unpacked with Python, initdb'd with user postgres, socket-only in $TMPDIR/pg; the 'printed URL' sentence went with pgserver, and a stop command is given. Round 3: the block runs in a subshell under flock on $TMPDIR/pg/setup.lock, downloads, extracts and runs initdb only when data/ is absent, sets listen_addresses and unix_socket_directories with initdb -c (no separate append), starts the cluster only when pg_ctl status fails, closes the lock fd for pg_ctl start, and prints the socket path."
   ],
   "trickyParts": [
     "No paths-filter, trigger or pull-test-images entry existed only for the deleted jobs, so every filter entry stays; envoy-go, envoy-infra-go and envoy-smoke still use pull-test-images.",
-    "The PR's Tests (40748621006) and Legion Envoy and Contracts (40748620346) runs at the code head were queued when this handoff was written: their job lists and envoy-go's 180006|0.8.7 line are not read here. The tester reads them if finished; the reviewer approves only after envoy-go finishes success."
+    "The PR's Envoy and Contracts runs at each code head listed only 'changes' when read; envoy-go's 180006|0.8.7 line is still not read. The reviewer approves only after envoy-go finishes success.",
+    "Round 3: the started postmaster inherits every open fd of the subshell, so pg_ctl start runs with 9>&-; without it the server holds the flock forever and every later run blocks."
   ],
   "deviations": [
     "The edits were made directly, not by a deep-worker subagent: the change is five deletions and four one-line text edits, each checked above.",
     "AC3's key grep uses word boundaries (\\b...\\b): the plan's unbounded regex matches 'SQL-18' in 'PostgreSQL-18', which is not a key and is on main already.",
     "scripts/dispatch/README.md line 328 is now 110 characters wide; the rest of that sentence is unchanged, as task 5a says.",
-    "Round 2 uses zonky's PostgreSQL 18.6.0 binaries, not packages/envoy/scripts/dev-postgres.sh as the architect suggested first: dev-postgres.sh needs Docker, which a worker pod lacks (no docker binary here), and gives a TCP container rather than the socket-only server under $TMPDIR/pg that the README's example invocation (line 266) names. The architect allowed 'another pinned Postgres 18 runner'. 18.6.0 is the version production runs; the binaries carry no pgvector, which the lexeme check does not use."
+    "Round 2 uses zonky's PostgreSQL 18.6.0 binaries, not packages/envoy/scripts/dev-postgres.sh as the architect suggested first: dev-postgres.sh needs Docker, which a worker pod lacks (no docker binary here), and gives a TCP container rather than the socket-only server under $TMPDIR/pg that the README's example invocation (line 266) names. The architect allowed 'another pinned Postgres 18 runner'. 18.6.0 is the version production runs; the binaries carry no pgvector, which the lexeme check does not use.",
+    "Round 3 adds a flock beyond the architect's three conditions: the tester's criterion names the concurrent run, and $TMPDIR is shared by every role of the pod, so two first runs at the same time must not both extract and initdb."
   ],
   "openQuestions": []
 }
