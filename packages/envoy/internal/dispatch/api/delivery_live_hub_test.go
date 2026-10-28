@@ -539,6 +539,7 @@ func TestAPRChecksRunMarksOnlyPipelineViews(t *testing.T) {
 		}
 	}
 
+	rig.settle(t)
 	start := rig.mark()
 	now := time.Now().UTC()
 	started, done := now.Add(-time.Hour), now.Add(-50*time.Minute)
@@ -1114,13 +1115,30 @@ func (r *hubRig) startCaughtUp(t *testing.T) int64 {
 	return head
 }
 
-// settle waits for the hub's event cursor to reach the log's head, so that the events the test's
-// setup wrote are all acted on before it measures what happens next. A transaction another package
-// holds open on the shared test Postgres can keep the safe horizon below them for a while, and a
-// catch-up that reaches them only then would count against the measurement.
+// settle waits until the hub has acted on everything the test's setup wrote, so none of it counts
+// against the measurement that follows: its change cursor at the delivery change log's newest
+// entry (settings and pull requests seeded through delivery.PutSettings and its kin), its event
+// cursor at the event log's head, and then no note for longer than a view's quiet window, by which
+// time a view either catch-up dirtied has begun and finished its recompute. The hub takes delivery
+// changes independently of the safe horizon it reads events up to, and a transaction another
+// package holds open on the shared test Postgres can keep that horizon below the setup's events
+// for a while, so either catch-up can land after the test's snapshots.
 func (r *hubRig) settle(t *testing.T) {
 	t.Helper()
+	latest, err := delivery.LatestChangeSeq(t.Context(), r.database.Pool)
+	if err != nil {
+		t.Fatalf("read the newest delivery change: %v", err)
+	}
+	for deadline := time.Now().Add(sseFrameWait); ; time.Sleep(10 * time.Millisecond) {
+		if changeSeq, _ := r.cursors(); changeSeq >= latest {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the hub's change cursor did not reach %d within %s", latest, sseFrameWait)
+		}
+	}
 	r.waitForEventCursor(t, eventHead(t, r.database), "the log's head before the measurement")
+	r.waitQuiet(t, 2*viewQuiet)
 }
 
 // waitForEventCursor waits for the hub's event cursor to reach want. The wait is generous: an open
