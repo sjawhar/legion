@@ -492,6 +492,52 @@ func TestARecoveredClaimResetsItsReclaimCount(t *testing.T) {
 	}
 }
 
+// (the publish lane's five-reset probe) Five separate listener resets each drop the architect's
+// role. Each time the notice publish meets ErrNoHolder and the pane is relaunched; once it has booted
+// and re-claimed, the held notice's retry is the first publish, under the same row, and the listener
+// accepts it. That acceptance is healing evidence: the clock starts, the incident ends a minute later,
+// and each reset is its own incident, so none adds up to the give-up. Before, the refusal raised
+// failedRow to the held row, so the row's own accepted retry never started the clock: no incident
+// after the first healed, and the default cap gave up on the fifth reset (4 resumes, 1 give-up).
+func TestEachResetHealedOnItsHeldNoticesRetryIsItsOwnIncident(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	clock := time.Now()
+	var logged bytes.Buffer
+	publisher := &holderPublisher{}
+	runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records,
+		notices: publisher, supervisor: sup, project: "legion", now: func() time.Time { return clock }}
+	token := reclaimArchitect(t, sup, "LEGION-1", supervise.StateReady, "ses_arch")
+	topic := architectTopic(t, "LEGION-1")
+
+	for reset := range 5 {
+		publisher.setAbsent(topic) // the listener reset dropped the role's holder
+		row := leasedOutboxRow(t, pool, records, mustOutboxRow(t, "LEGION-2", reclaimNotice(), clock))
+		before := len(rt.CallsOf("Resume"))
+		if err := runner.notice(context.Background(), row, reclaimNotice()); !errors.Is(err, errNoticeWaits) {
+			t.Fatalf("reset %d: notice() = %v, want the notice held (errNoticeWaits)", reset, err)
+		}
+		if len(rt.CallsOf("Resume")) > before {
+			driveClaimReady(t, sup, token) // the relaunch boots, and its claim boot re-claims the role
+		}
+		publisher.setAbsent()
+		if err := runner.notice(context.Background(), row, reclaimNotice()); err != nil { // the held row's retry
+			t.Fatalf("reset %d: the held notice's retry = %v, want it accepted", reset, err)
+		}
+		if err := runner.finish(context.Background(), row); err != nil {
+			t.Fatalf("reset %d: %v", reset, err)
+		}
+		clock = clock.Add(10 * time.Minute) // no failed forward follows: the pane took the notice
+	}
+
+	resumes, gaveUp := len(rt.CallsOf("Resume")), strings.Count(logged.String(), "gave up relaunching")
+	if resumes != 5 || gaveUp != 0 {
+		t.Fatalf("resumes = %d, give-ups = %d; want 5 and 0: each reset that healed on its held notice's accepted retry is an incident of its own", resumes, gaveUp)
+	}
+}
+
 // (Gate2432F B1) A pane that boots but keeps failing its forwards — the listener accepts each re-held
 // copy for its registered session and then reports the forward failed — is not relaunched for every
 // notice: an accepted publish that a failed forward follows is not evidence the pane healed, so the

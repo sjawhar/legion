@@ -560,8 +560,8 @@ func fillTable(t *builder) {
 		[]ClaimState{StateLaunching, StateFailed}, StateReady, StateIdle)
 	t.ignore(onRoleUnheld, "a turn is in flight: a relaunch would lose its work; the held message's retry catches the pane idle", StateWorking)
 	t.ignore(onRoleUnheld, "a booting claim's own claim boot takes the role the moment it is ready", StateLaunching, StateShimConnected, StateRegistered)
-	// SUSPENDED is left alone here: an idle-suspended worker is resumed by rule (RequestRuleResume)
-	// from the recognizer's suspended branch, which another lane adds.
+	// SUSPENDED is left alone: it runs no process to relaunch, and the relaunch that resumes it (the
+	// operator's resume, or the daemon's by rule) re-runs the claim boot, which takes the role.
 	t.ignore(onRoleUnheld, "no running pane holds a role to re-claim", StateQueued, StateLaunchUncertain, StateSuspended, StateFailed, StateRetired)
 
 	// Requests.
