@@ -1,4 +1,5 @@
 import { $prose } from "@milkdown/kit/utils";
+import { isHistoryTransaction } from "@milkdown/prose/history";
 import type { Fragment, ResolvedPos, Schema } from "@milkdown/prose/model";
 import { type EditorState, Plugin, TextSelection, type Transaction } from "@milkdown/prose/state";
 import { dropPoint } from "@milkdown/prose/transform";
@@ -199,9 +200,12 @@ export const brokenAskInputGuards: EditorProps = {
 /**
  * Whether `tr` drops, from the ask at `askPos` in `state.doc` that its content rule refuses, a
  * child block that lies wholly outside the selection: every step of `tr` replaces a range inside
- * the ask's content, and the mapping deletes a character of the block's text. Deleting only node
- * boundaries, as a Backspace joining the block to the one before it or a node's attributes being
- * set does, keeps every character and does not drop it.
+ * the ask's content, and some step deletes a leaf of the block, one character of its text or a
+ * leaf node such as an image or a hard break, so a block holding only an image is kept as one
+ * holding text is. Inserting into the block deletes none of its leaves, nor does deleting only
+ * node boundaries, as a Backspace joining the block to the one before it or a node's attributes
+ * being set does, and neither drops it. A block with no leaf at all (an empty paragraph) holds
+ * nothing a collaborator wrote, so a Backspace that removes it applies.
  */
 function dropsUnselectedAskBlock(tr: Transaction, state: EditorState, askPos: number): boolean {
   const ask = state.doc.nodeAt(askPos);
@@ -224,11 +228,13 @@ function dropsUnselectedAskBlock(tr: Transaction, state: EditorState, askPos: nu
     const start = askPos + 1 + offset;
     if (dropped || (start + block.nodeSize > from && start < to)) return;
     block.descendants((node, pos) => {
-      if (dropped || !node.isText) return !dropped;
-      // `deletedAfter` at a position: the character just after it is deleted.
-      const textStart = start + 1 + pos;
-      for (let at = textStart; at < textStart + node.nodeSize && !dropped; at++) {
-        dropped = tr.mapping.mapResult(at, 1).deletedAfter;
+      if (dropped || !node.isLeaf) return !dropped;
+      // A leaf unit `[at, at + 1]` is deleted when a step's deleted range ends at or spans its
+      // end (`deletedBefore`, the end mapped to the left); an insertion at either side, which
+      // `deletedAfter` also reports at the insertion point, deletes nothing.
+      const leafStart = start + 1 + pos;
+      for (let at = leafStart; at < leafStart + node.nodeSize && !dropped; at++) {
+        dropped = tr.mapping.mapResult(at + 1, -1).deletedBefore;
       }
       return false;
     });
@@ -250,17 +256,20 @@ function dropsUnselectedAskBlock(tr: Transaction, state: EditorState, askPos: nu
  * kept state (`view.updateState(view.state)` when `docView.dirty`), writing nothing to Yjs.
  *
  * Only transactions every step of which replaces a range inside one such ask's content are read:
- * edits elsewhere, whole-document replacements and the shared document's own changes
- * (y-prosemirror's sync, undo and redo among them) are not. Whether a block is kept is read from
- * the transaction's mapping, not from the text it leaves, so a block whose text another block
- * also holds is still seen as dropped. An edit that deletes none of an unselected block's
- * content (typing, Backspace joining the lists, a block id set on a node) applies.
+ * edits elsewhere, whole-document replacements, the shared document's own changes (y-prosemirror's
+ * sync, undo and redo among them) and prosemirror-history's undo and redo, which revert or redo
+ * the person's own edit wherever the caret now is, are not. Whether a block is kept is read from
+ * the transaction's steps, not from the text it leaves, so a block whose text another block also
+ * holds is still seen as dropped. An edit that deletes none of an unselected block's leaves
+ * (typing, inserting text into an unselected option, Backspace joining the lists, a block id set
+ * on a node) applies.
  */
 export const keepUnselectedAskBlocks = $prose(
   () =>
     new Plugin({
       filterTransaction(tr, state) {
-        if (!tr.docChanged || tr.getMeta(ySyncPluginKey)?.isChangeOrigin) return true;
+        if (!tr.docChanged || isHistoryTransaction(tr)) return true;
+        if (tr.getMeta(ySyncPluginKey)?.isChangeOrigin) return true;
         let refused = false;
         state.doc.descendants((node, pos) => {
           if (refused) return false;

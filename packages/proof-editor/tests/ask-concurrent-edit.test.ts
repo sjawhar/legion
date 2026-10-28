@@ -586,3 +586,88 @@ test("a whole-document replace and a Backspace joining the lists of a two-list a
     { blockSchema }
   );
 });
+
+test("text inserted into an option of a two-list ask the selection does not touch applies", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ view, ydoc }) => {
+      peerAppendsList(ydoc, true);
+      const question = textblockStart(view.state.doc, "Which one?") + 2;
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, question)));
+      // Into the middle of the second list's option, then at its start.
+      view.dispatch(view.state.tr.insertText("x", textblockStart(view.state.doc, "Option B") + 3));
+      expect(blocks(requireAsk(view.state.doc))[2]).toEqual(["bullet_list", "Optxion B"]);
+      view.dispatch(view.state.tr.insertText("y", textblockStart(view.state.doc, "Optxion B")));
+      expect(blocks(requireAsk(view.state.doc))).toEqual([
+        ["paragraph", "Which one?"],
+        ["bullet_list", "Option AAfter"],
+        ["bullet_list", "yOptxion B"],
+      ]);
+      expect(ydoc.getXmlFragment("prosemirror").toString()).toContain("yOptxion B");
+    },
+    { blockSchema }
+  );
+});
+
+test("deleting an image-only paragraph of a broken ask the selection does not touch is refused", async () => {
+  await withMarksEditor(
+    "Intro\n\n:::ask{#a1}\nWhich one?\n\n- Option A\n:::\n",
+    ({ view, ydoc }) => {
+      // A collaborator adds a paragraph holding only an image after the options.
+      const peer = peerOf(ydoc);
+      const paragraph = new Y.XmlElement("paragraph");
+      paragraph.setAttribute(BLOCK_ID_ATTR, crypto.randomUUID());
+      const image = new Y.XmlElement("image");
+      image.setAttribute("src", "https://example.com/x.png");
+      image.setAttribute("alt", "alt");
+      paragraph.insert(0, [image]);
+      const yAsk = requireYAsk(peer);
+      yAsk.insert(yAsk.length, [paragraph]);
+      deliver(peer, ydoc);
+      const ask = requireAsk(view.state.doc);
+      expect(ask.lastChild?.firstChild?.type.name).toBe("image");
+
+      const question = textblockStart(view.state.doc, "Which one?") + 2;
+      view.dispatch(
+        view.state.tr.setSelection(TextSelection.create(view.state.doc, question, question + 3))
+      );
+      let askPos = -1;
+      view.state.doc.descendants((node, pos) => {
+        if (node === ask) askPos = pos;
+        return askPos === -1;
+      });
+      const imageBlock = askPos + ask.nodeSize - 1 - (ask.lastChild?.nodeSize ?? 0);
+      const before = view.state.doc;
+      view.dispatch(view.state.tr.delete(imageBlock, askPos + ask.nodeSize - 1));
+      expect(view.state.doc).toBe(before);
+      expect(requireAsk(view.state.doc).lastChild?.firstChild?.type.name).toBe("image");
+      expect(yAskChildren(ydoc)).toEqual(["paragraph", "bullet_list", "paragraph"]);
+    },
+    { blockSchema }
+  );
+});
+
+test("undo and redo of a letter typed in the second option list apply with the selection in the question", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ press, view, ydoc }) => {
+      peerAppendsList(ydoc, true);
+      const option = textblockStart(view.state.doc, "Option B") + "Option ".length;
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, option)));
+      view.dispatch(view.state.tr.insertText("x"));
+      expect(blocks(requireAsk(view.state.doc))[2]).toEqual(["bullet_list", "Option xB"]);
+
+      const question = textblockStart(view.state.doc, "Which one?") + 2;
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, question)));
+      press("Mod-z");
+      expectTwoListAsk(view, ydoc);
+      expect(ydoc.getXmlFragment("prosemirror").toString()).not.toContain("Option xB");
+
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, question)));
+      press("Mod-Shift-z");
+      expect(blocks(requireAsk(view.state.doc))[2]).toEqual(["bullet_list", "Option xB"]);
+      expect(ydoc.getXmlFragment("prosemirror").toString()).toContain("Option xB");
+    },
+    { blockSchema }
+  );
+});

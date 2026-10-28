@@ -426,3 +426,44 @@ test(`document.execCommand("insertText") over a selection from the question into
     return ["Which ", first.slice("Opt".length), later, second];
   });
 });
+
+/** The second list's text on `page` without a collaborator's cursor label, which sits inside it
+ * (`contenteditable="false"`) wherever that collaborator's caret is. */
+function secondListText(page: Page): Promise<string> {
+  return optionList(page, 1).evaluate((list) => {
+    const copy = list.cloneNode(true) as Element;
+    for (const label of copy.querySelectorAll('[contenteditable="false"]')) label.remove();
+    return copy.textContent ?? "";
+  });
+}
+
+// Undo and redo revert or redo the person's own edit wherever the caret now is: a letter typed in
+// the second list is undone, and redone, with the caret in the question, and no other word moves.
+test("Ctrl+Z and Ctrl+Shift+Z with the caret in the question undo and redo a letter typed in the second list of an ask holding two lists", async ({
+  browser,
+}) => {
+  await withTwoLists(browser, async ({ alicePage, artifactId, first, pages, second }) => {
+    const typed = `${second.slice(0, -1)}x${second.slice(-1)}`;
+    const storedLines = async () => (await getArtifactText(artifactId)).markdown.split("\n");
+    const expectSecondList = async (text: string) => {
+      for (const page of pages) await expect.poll(() => secondListText(page)).toBe(text);
+      await expect.poll(storedLines).toContain(`* ${text}`);
+    };
+    // Past prosemirror-history's 500 ms group delay, so the letter is an undo step of its own.
+    await alicePage.waitForTimeout(600);
+    await placeCaret(alicePage, "after", second, optionList(alicePage, 1));
+    await alicePage.keyboard.press("ArrowLeft");
+    await alicePage.keyboard.type("x");
+    await expectSecondList(typed);
+
+    await placeCaret(alicePage, "after", "Which", questionParagraph(alicePage));
+    await alicePage.keyboard.press("ControlOrMeta+Z");
+    await expectSecondList(second);
+
+    // The undo put the caret back where the letter was; it goes to the question again.
+    await placeCaret(alicePage, "after", "Which", questionParagraph(alicePage));
+    await alicePage.keyboard.press("ControlOrMeta+Shift+Z");
+    await expectSecondList(typed);
+    return ["Which one?", first];
+  });
+});
