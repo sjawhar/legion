@@ -2116,8 +2116,11 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
 - the calls of the session consumers, one durable pull consumer per session named
   `s-<session id>` (`bus.SessionConsumers`), on any consumer of the stream:
   `$JS.API.CONSUMER.CREATE` (with and without a filter subject in its subject), `INFO`, `DELETE`
-  and `MSG.NEXT` on `ENVOY_NOTIFICATIONS.*`, and the acknowledgements
-  `$JS.ACK.ENVOY_NOTIFICATIONS.*.>`. A NATS wildcard is a whole token, so these entries reach every
+  and `MSG.NEXT` on `ENVOY_NOTIFICATIONS.*`, the acknowledgements
+  `$JS.ACK.ENVOY_NOTIFICATIONS.*.>`, and the stream's consumer list
+  `$JS.API.CONSUMER.LIST.ENVOY_NOTIFICATIONS`, which a listener that starts relaying every session
+  at once reads instead of one info per session (a grant without it costs that listener one info
+  per session). A NATS wildcard is a whole token, so these entries reach every
   consumer of the stream, other listeners' durables and Dispatch's included, and let the listener
   create a push consumer that delivers the stream's messages to any subject; that risk is accepted,
   since the listener, Dispatch and host users are the trusted users. The durable's own entries stay

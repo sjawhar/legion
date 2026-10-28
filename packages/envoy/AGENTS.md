@@ -2492,7 +2492,20 @@ listener's NATS user manages the consumer: it creates, reads, pulls, acknowledge
   per-session lock; a second listener knows nothing of the pending start, nor does a listener
   killed between the delete and the create. At most 32 relays of one listener restart at once
   (`relayRestartLimit`); the rest wait their turn, and a restart's 5 s call timeout starts only
-  once it holds its turn and the session's lock. Registrations take no turn.
+  once it holds its turn and the session's lock. Registrations take no turn. When the listener
+  starts or gains the durable binding it reads every session consumer at once with the paged
+  consumer list (`$JS.API.CONSUMER.LIST.ENVOY_NOTIFICATIONS`, 256 consumers a page;
+  `bus.SessionConsumers.ListSessionConsumers`), and each relay of that burst whose listed consumer
+  has nothing awaiting an ack, already carries the wanted filter and settings, and has no pending
+  start takes no turn and sends no call before it pulls (`bus.SessionConsumers.KeepListed`); every
+  other relay, and every relay started alone (a new `epoch`, a resume after a pause, a retry),
+  restarts through `RestartAtFloor`. A grant without the list costs one log line and one info per
+  session. Calls made at once share their reads of the stream's state (identity, first and last
+  sequence): each waits for a read that began after it was made, so a gap is still reported
+  exactly when a start lies below the stream's first sequence. A pull sends its own pull requests
+  (`$JS.API.CONSUMER.MSG.NEXT`, 1,024 messages, 30 s expiry, 15 s idle heartbeat) and costs no
+  consumer info: its first `Next` reports a missing consumer (`ErrSessionConsumerNotFound`), and a
+  pull that hears nothing for 30 s ends (`ErrSessionPullStalled`) and the relay restarts.
 - **Relay over NATS:** the owner pulls the consumer and publishes each message, in stream order, as
   a core frame on `notifications.envoy.deliver.<session id>` (`bus.DeliverSubject`; the stream does
   not store it, and the live topics lane skips it). The frame's data is the stored message's bytes,

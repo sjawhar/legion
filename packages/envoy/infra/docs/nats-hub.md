@@ -136,7 +136,9 @@ listener.
 
 `ListenerPermissions` also holds the session consumers' calls on every consumer of the stream
 (`$JS.API.CONSUMER.CREATE`, `INFO`, `DELETE` and `MSG.NEXT` on `ENVOY_NOTIFICATIONS.*`, the create
-with a filter subject on `ENVOY_NOTIFICATIONS.*.>`, and `$JS.ACK.ENVOY_NOTIFICATIONS.*.>`), with
+with a filter subject on `ENVOY_NOTIFICATIONS.*.>`, `$JS.ACK.ENVOY_NOTIFICATIONS.*.>`, and the
+stream's consumer list `$JS.API.CONSUMER.LIST.ENVOY_NOTIFICATIONS`, which a listener that starts
+relaying every session at once reads instead of one info each), with
 which a listener keeps one pull consumer per session, and subscribes to the role lanes in the queue
 group every listener shares, `envoy-roles`, beside its machine's own. A NATS wildcard is a whole
 token, so those entries reach every consumer of the stream, other listeners' and Dispatch's

@@ -3,7 +3,10 @@ package bus
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -517,6 +520,94 @@ func TestAStartBelowTheStreamsFirstSequenceIsAGap(t *testing.T) {
 	}
 }
 
+// Restarts made at once share their reads of the stream's state, and each still reports a gap
+// exactly when the consumer it kept goes on below the stream's first sequence.
+func TestRestartsAtOnceReportEachGap(t *testing.T) {
+	owner, consumers := sessionConsumersOnStream(t)
+	ctx := context.Background()
+	const sessions, gone = 24, 10
+	ids := make([]string, sessions)
+	seqs := make([]uint64, sessions)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("ses_burst_gap_%02d", i)
+		if _, err := consumers.Ensure(ctx, ids[i], []string{contracts.AgentSubject(ids[i])}, 0); err != nil {
+			t.Fatalf("ensure %s: %v", ids[i], err)
+		}
+		seqs[i] = publishStored(t, owner, contracts.AgentSubject(ids[i]), "aged out or not")
+	}
+	for _, seq := range seqs[:gone] {
+		if err := owner.JS().DeleteMsg(Stream, seq); err != nil {
+			t.Fatalf("delete %d: %v", seq, err)
+		}
+	}
+	streamID := streamIDOf(t, consumers)
+	starts := make([]SessionConsumerStart, sessions)
+	errs := make([]error, sessions)
+	var wg sync.WaitGroup
+	for i := range ids {
+		wg.Go(func() {
+			starts[i], errs[i] = consumers.RestartAtFloor(ctx, ids[i], []string{contracts.AgentSubject(ids[i])})
+		})
+	}
+	wg.Wait()
+	for i := range ids {
+		want := SessionConsumerStart{StartSeq: seqs[i], Gap: i < gone, StreamID: streamID}
+		if errs[i] != nil || starts[i] != want {
+			t.Errorf("RestartAtFloor of %s = %+v, %v; want %+v", ids[i], starts[i], errs[i], want)
+		}
+	}
+}
+
+// A pull sends its next pull request once the server has delivered the last one's whole batch or
+// it expired, and an idle heartbeat keeps a pull that waits longer than two heartbeats alive, so it
+// delivers every message in stream order however many requests that takes.
+func TestAPullRequestsAgainAfterABatchAndAnExpiry(t *testing.T) {
+	owner, consumers := sessionConsumersOnStream(t)
+	ctx := context.Background()
+	const session = "ses_pull_requests"
+	agent := contracts.AgentSubject(session)
+	if _, err := consumers.Ensure(ctx, session, []string{agent}, 0); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	consumers.pullExpires, consumers.pullHeartbeat = time.Second, 400*time.Millisecond
+	var want []uint64
+	for i := range sessionPullBatch + 76 {
+		want = append(want, publishStored(t, owner, agent, strconv.Itoa(i)))
+	}
+	pull := pullSession(t, consumers, session)
+	var got []uint64
+	for range want {
+		msg := next(t, pull)
+		got = append(got, msg.StreamSeq)
+		if err := msg.Ack(); err != nil {
+			t.Fatalf("ack %d: %v", msg.StreamSeq, err)
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("a pull across two batches delivered %d messages out of order or not each once", len(got))
+	}
+	// The request in flight expires while nothing waits; the next request takes the next message.
+	time.Sleep(2500 * time.Millisecond)
+	later := publishStored(t, owner, agent, "after an expiry")
+	if msg := next(t, pull); msg.StreamSeq != later {
+		t.Fatalf("after an expiry got %d, want %d", msg.StreamSeq, later)
+	}
+	pull.Stop()
+
+	// A request that outlives two heartbeats is kept alive by them.
+	consumers.pullExpires, consumers.pullHeartbeat = 5*time.Second, 500*time.Millisecond
+	quiet := pullSession(t, consumers, session)
+	idle, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if msg, err := quiet.Next(idle); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("an idle pull's Next = %+v, %v; want it to wait out its context", msg, err)
+	}
+	last := publishStored(t, owner, agent, "after the heartbeats")
+	if msg := next(t, quiet); msg.StreamSeq != last {
+		t.Fatalf("after the heartbeats got %d, want %d", msg.StreamSeq, last)
+	}
+}
+
 // JetStream refuses one consumer two filters that overlap and takes two that do not, which is why
 // Ensure reduces them first (ReduceFilterSubjects); the overlapping set reduced is taken.
 func TestConsumerFiltersMustNotOverlap(t *testing.T) {
@@ -650,8 +741,12 @@ func TestDeleteAndSessionsWithoutAConsumer(t *testing.T) {
 	if _, err := consumers.RestartAtFloor(ctx, "ses_delete", []string{contracts.AgentSubject("ses_delete")}); !errors.Is(err, ErrSessionConsumerNotFound) {
 		t.Fatalf("RestartAtFloor of a missing consumer = %v, want ErrSessionConsumerNotFound", err)
 	}
-	if _, err := consumers.Pull(ctx, "ses_delete"); !errors.Is(err, ErrSessionConsumerNotFound) {
-		t.Fatalf("Pull of a missing consumer = %v, want ErrSessionConsumerNotFound", err)
+	// A pull reads nothing before it starts: its first Next reports the consumer missing.
+	pull := pullSession(t, consumers, "ses_delete")
+	nextCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if msg, err := pull.Next(nextCtx); !errors.Is(err, ErrSessionConsumerNotFound) {
+		t.Fatalf("Next of a pull of a missing consumer = %+v, %v, want ErrSessionConsumerNotFound", msg, err)
 	}
 	if _, err := consumers.Ensure(ctx, "ses.dotted", []string{"notifications.agent.ses.dotted"}, 0); !errors.Is(err, ErrNoSessionConsumerName) {
 		t.Fatalf("Ensure of a dotted session id = %v, want ErrNoSessionConsumerName", err)
@@ -699,5 +794,71 @@ func TestEnsureWithoutTheCreateGrantIsErrConsumerNotGranted(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 3*time.Second {
 		t.Fatalf("Ensure took %s to report the refusal", elapsed)
+	}
+	started = time.Now()
+	if _, err := consumers.ListSessionConsumers(context.Background()); !errors.Is(err, ErrConsumerNotGranted) {
+		t.Fatalf("ListSessionConsumers without the list grant = %v, want ErrConsumerNotGranted", err)
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("ListSessionConsumers took %s to report the refusal", elapsed)
+	}
+}
+
+// The consumer list reads every session consumer across its pages, and a listed consumer that a
+// restart would keep unchanged is kept with no call, at the start RestartAtFloor's keep returns;
+// one with a message awaiting an ack, or whose filter no longer matches, is left to RestartAtFloor.
+func TestListedConsumersAreKeptWhenARestartWouldChangeNothing(t *testing.T) {
+	owner, consumers := sessionConsumersOnStream(t)
+	ctx := context.Background()
+	const sessions = 300 // more than one page of 256
+	ids := make([]string, sessions)
+	var wg sync.WaitGroup
+	turns := make(chan struct{}, 16)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("ses_listed_%03d", i)
+		turns <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-turns }()
+			if _, err := consumers.Ensure(ctx, ids[i], []string{contracts.AgentSubject(ids[i])}, 0); err != nil {
+				t.Errorf("ensure %s: %v", ids[i], err)
+			}
+		})
+	}
+	wg.Wait()
+	kept, held := ids[0], ids[1]
+	written := publishStored(t, owner, contracts.AgentSubject(kept), "written")
+	unacked := publishStored(t, owner, contracts.AgentSubject(held), "unacked")
+	pull := pullSession(t, consumers, kept)
+	if msg := next(t, pull); msg.StreamSeq != written {
+		t.Fatalf("pulled %d, want %d", msg.StreamSeq, written)
+	} else if err := msg.Ack(); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	pull.Stop()
+	waitForAckFloor(t, consumers, kept, written)
+	heldPull := pullSession(t, consumers, held)
+	if msg := next(t, heldPull); msg.StreamSeq != unacked {
+		t.Fatalf("pulled %d, want %d", msg.StreamSeq, unacked)
+	}
+	heldPull.Stop()
+
+	listed, err := consumers.ListSessionConsumers(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	for _, id := range ids {
+		if listed[id] == nil {
+			t.Fatalf("the list holds no consumer for %s (%d listed)", id, len(listed))
+		}
+	}
+	start, ok, err := consumers.KeepListed(ctx, kept, []string{contracts.AgentSubject(kept)}, listed[kept])
+	if want := (SessionConsumerStart{StartSeq: written + 1, StreamID: streamIDOf(t, consumers)}); err != nil || !ok || start != want {
+		t.Fatalf("KeepListed of an acked consumer = %+v, %t, %v; want %+v kept", start, ok, err, want)
+	}
+	if _, ok, err := consumers.KeepListed(ctx, held, []string{contracts.AgentSubject(held)}, listed[held]); err != nil || ok {
+		t.Fatalf("KeepListed of a consumer with a message awaiting an ack = %t, %v; want it left to RestartAtFloor", ok, err)
+	}
+	if _, ok, err := consumers.KeepListed(ctx, kept, []string{contracts.AgentSubject(kept), "notifications.github.o.r.>"}, listed[kept]); err != nil || ok {
+		t.Fatalf("KeepListed with a new filter = %t, %v; want it left to RestartAtFloor", ok, err)
 	}
 }

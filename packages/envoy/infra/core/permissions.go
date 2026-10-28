@@ -47,11 +47,14 @@ var listenerBuckets = []string{bus.InterestBucket, bus.RoleClaimBucket, bus.Sess
 //   - the session consumers' calls (bus.SessionConsumers): consumer create, with and without a
 //     filter subject in its subject, info, delete, pull (CONSUMER.MSG.NEXT) and acknowledgements,
 //     each on any consumer of the stream, since a session consumer is named for its session
-//     (bus.SessionConsumerName). A NATS wildcard is a whole token, so these reach every consumer of
-//     the stream, other listeners' durables and Dispatch's included: the listener, Dispatch and host
-//     users are the trusted ones, and a host user's sessions already share its listener's durable
-//     grants. The durable's own entries stay beside them, so a hub that takes the session
-//     consumers' entries away leaves the listener its durable, and its sessions core delivery;
+//     (bus.SessionConsumerName), and the stream's consumer list, which a listener that starts
+//     relaying every session at once reads instead of one info each
+//     (bus.SessionConsumers.ListSessionConsumers). A NATS wildcard is a whole token, so these
+//     reach every consumer of the stream, other listeners' durables and Dispatch's included: the
+//     listener, Dispatch and host users are the trusted ones, and a host user's sessions already
+//     share its listener's durable grants. The durable's own entries stay beside them, so a hub
+//     that takes the session consumers' entries away leaves the listener its durable, and its
+//     sessions core delivery;
 //   - JetStream's account info;
 //   - for each bucket of listenerBuckets in turn, the calls nats.go's KV makes: the bucket's stream
 //     info and create, direct and stream message gets, writes to its keys, its watchers' consumer
@@ -77,6 +80,7 @@ func ListenerPermissions(machineID string) Permissions {
 		jsAPI + "CONSUMER.INFO." + bus.Stream + ".*",
 		jsAPI + "CONSUMER.DELETE." + bus.Stream + ".*",
 		jsAPI + "CONSUMER.MSG.NEXT." + bus.Stream + ".*",
+		jsAPI + "CONSUMER.LIST." + bus.Stream,
 		jsAck + bus.Stream + ".*.>",
 		jsAPI + "INFO",
 	}

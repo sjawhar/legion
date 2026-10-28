@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
@@ -157,6 +158,12 @@ type sessionRelays struct {
 
 	// relays is each session's current relay; only the loop reads or writes it.
 	relays map[string]*relayRun
+	// listed holds, by session id, the consumers listed for the relays that gaining the durable
+	// binding starts together (listConsumers), until each relay's start takes its own; nil
+	// otherwise. listRefusedLogged is set once a list refused for want of the grant is logged.
+	// Only the loop reads or writes them.
+	listed            map[string]*jetstream.ConsumerInfo
+	listRefusedLogged bool
 
 	// restarts holds a token for each relay restarting its consumer, relayRestartLimit at most.
 	restarts chan struct{}
@@ -178,6 +185,10 @@ type relayRun struct {
 	// restarted is set once the run has restarted the consumer at its ack floor, so a new epoch
 	// heard after that needs a restart of its own, and one heard before it does not.
 	restarted atomic.Bool
+	// listed is the session's consumer as the burst that started the run listed it
+	// (sessionRelays.listed), which its first restart keeps without a call when it can
+	// (bus.SessionConsumers.KeepListed); nil for a run started alone, and after that first restart.
+	listed *jetstream.ConsumerInfo
 	// outstanding holds the run's frames awaiting done or nak, by token; unanswered holds, in the
 	// order they were sent, its frames the session may not have answered yet. Both under
 	// sessionRelays.framesMu.
@@ -349,10 +360,12 @@ func (m *sessionRelays) loop() {
 					events[entry.SessionID] = relayCheck
 				}
 			}
+			m.listed = m.listConsumers()
 		}
 		for sessionID, event := range events {
 			m.apply(sessionID, event)
 		}
+		m.listed = nil
 	}
 }
 
@@ -417,10 +430,35 @@ func (m *sessionRelays) wanted(sessionID string) (want, servingPort bool) {
 	return owner == m.machineID, true
 }
 
-// start starts a run of sessionID's relay, once the run it replaces, previous, has returned.
+// listConsumers reads every session consumer at once (bus.SessionConsumers.ListSessionConsumers)
+// for the relays that gaining the durable binding starts together, so a relay whose consumer a
+// restart would keep unchanged starts pulling with no call of its own (sessionRelays.restart). It
+// returns nil when the list fails, and each relay then reads its own consumer; a list the NATS
+// user may not make is logged once.
+func (m *sessionRelays) listConsumers() map[string]*jetstream.ConsumerInfo {
+	ctx, cancel := context.WithTimeout(m.ctx, sessionConsumerCallTimeout)
+	defer cancel()
+	listed, err := m.delivery.consumers.ListSessionConsumers(ctx)
+	switch {
+	case err == nil:
+		return listed
+	case consumerGrantRefused(err):
+		if !m.listRefusedLogged {
+			m.listRefusedLogged = true
+			m.logger.Warn("the NATS user may not list session consumers; each relay reads its own consumer at the listener's start", slog.String("error", err.Error()))
+		}
+	default:
+		m.logger.Warn("session relays could not list the session consumers; each relay reads its own", slog.String("error", err.Error()))
+	}
+	return nil
+}
+
+// start starts a run of sessionID's relay, once the run it replaces, previous, has returned. A run
+// started by the burst of gaining the durable binding takes the session's listed consumer.
 func (m *sessionRelays) start(sessionID string, servingPort bool, previous <-chan struct{}) {
 	ctx, cancel := context.WithCancel(m.ctx)
-	run := &relayRun{sessionID: sessionID, servingPort: servingPort, cancel: cancel, done: make(chan struct{})}
+	run := &relayRun{sessionID: sessionID, servingPort: servingPort, cancel: cancel, done: make(chan struct{}), listed: m.listed[sessionID]}
+	delete(m.listed, sessionID)
 	m.relays[sessionID] = run
 	m.runs.Go(func() {
 		defer close(run.done)
@@ -465,12 +503,35 @@ func (m *sessionRelays) relay(ctx context.Context, run *relayRun) {
 // missing at that start rather than pausing, and so does a registration's create meanwhile, so no
 // restart loses the session's position. Only a consumer missing with no start pending (never
 // created, or removed after its inactive threshold) pauses the relay until the next registration.
+//
+// The first restart of a run the burst of gaining the durable binding started has the session's
+// consumer as that burst listed it (relayRun.listed): when the restart would keep it unchanged
+// (bus.SessionConsumers.KeepListed), the relay takes no turn and sends no call before it pulls.
 func (m *sessionRelays) restart(ctx context.Context, run *relayRun) (bus.SessionConsumerStart, *bus.SessionPull, relayOutcome) {
 	sessionID := run.sessionID
 	topics, err := storedInterestTopics(ctx, m.registry, sessionID)
 	if err != nil {
 		m.logger.Warn("session relay could not read the session's interests; retrying", slog.String("session_id", sessionID), slog.String("error", err.Error()))
 		return bus.SessionConsumerStart{}, nil, relayRetry
+	}
+	filter := sessionConsumerFilter(sessionID, topics)
+	if listed := run.listed; listed != nil {
+		run.listed = nil
+		unlock := m.delivery.locks.lock(sessionID)
+		callCtx, cancel := context.WithTimeout(ctx, sessionConsumerCallTimeout)
+		defer cancel()
+		start, kept, err := m.delivery.consumers.KeepListed(callCtx, sessionID, filter, listed)
+		unlock()
+		if err == nil && kept {
+			run.restarted.Store(true)
+			var pull *bus.SessionPull
+			if pull, err = m.delivery.consumers.Pull(callCtx, sessionID); err == nil {
+				return start, pull, relayRetry
+			}
+		}
+		if err != nil {
+			return m.restartFailed(ctx, sessionID, err)
+		}
 	}
 	// The restart takes a turn (relayRestartLimit) first and its session's lock second, and only
 	// then starts its calls' timeout, so the time it waited in line times nothing out. A
@@ -485,7 +546,7 @@ func (m *sessionRelays) restart(ctx context.Context, run *relayRun) (bus.Session
 	unlock := m.delivery.locks.lock(sessionID)
 	callCtx, cancel := context.WithTimeout(ctx, sessionConsumerCallTimeout)
 	defer cancel()
-	start, err := m.delivery.consumers.RestartAtFloor(callCtx, sessionID, sessionConsumerFilter(sessionID, topics))
+	start, err := m.delivery.consumers.RestartAtFloor(callCtx, sessionID, filter)
 	unlock()
 	if err == nil {
 		run.restarted.Store(true)
@@ -494,6 +555,12 @@ func (m *sessionRelays) restart(ctx context.Context, run *relayRun) (bus.Session
 			return start, pull, relayRetry
 		}
 	}
+	return m.restartFailed(ctx, sessionID, err)
+}
+
+// restartFailed is the outcome of a restart (sessionRelays.restart) whose call or pull failed
+// with err.
+func (m *sessionRelays) restartFailed(ctx context.Context, sessionID string, err error) (bus.SessionConsumerStart, *bus.SessionPull, relayOutcome) {
 	switch {
 	case ctx.Err() != nil:
 		return bus.SessionConsumerStart{}, nil, relayEnded
