@@ -5,8 +5,9 @@ import (
 	"testing"
 )
 
-// BenchmarkFindMarks compares one FindMarks walk with a FindMark and MarkAttrs pair per key, the
-// loop a refresh ran before, at 10, 40 and 80 open anchors on real-size documents.
+// BenchmarkFindMarks compares one FindMarks walk with the base implementation's FindMark and
+// MarkAttrs pair per key (frozenFindMark, frozenMarkAttrs), the loop a refresh ran before, at 10,
+// 40 and 80 open anchors on real-size documents.
 func BenchmarkFindMarks(b *testing.B) {
 	for _, size := range realSizeDocuments {
 		// Each size is marked once and every count looks up the first refs of the one marked
@@ -27,14 +28,16 @@ func BenchmarkFindMarks(b *testing.B) {
 					}
 				}
 			})
+			// FindMark and MarkAttrs are lookups in FindMarks, so the per-key loop is measured on
+			// the frozen copies.
 			b.Run(fmt.Sprintf("%s/%d/FindMarkLoop", size.name, count), func(b *testing.B) {
 				b.ReportAllocs()
 				for b.Loop() {
 					for _, key := range keys {
-						if _, _, ok := FindMark(doc, key.Type, key.ID); !ok {
+						if _, _, ok := frozenFindMark(doc, key.Type, key.ID); !ok {
 							b.Fatalf("mark %s %s not found", key.Type, key.ID)
 						}
-						if _, ok := MarkAttrs(doc, key.Type, key.ID); !ok {
+						if _, ok := frozenMarkAttrs(doc, key.Type, key.ID); !ok {
 							b.Fatalf("mark %s %s has no attributes", key.Type, key.ID)
 						}
 					}

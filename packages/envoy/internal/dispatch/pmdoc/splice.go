@@ -231,14 +231,13 @@ func insertAt(doc *Node, pos int, with *Node) (*Node, error) {
 	return nil, fmt.Errorf("%w: %w", ErrSchema, ErrReplacementDoesNotFit)
 }
 
+// childBoundary is the index of node's child that starts at pos, by walk's position rules
+// (isOpaqueNodeType, boundaryTokens), or len(Children) when pos is the end of its last child.
 func childBoundary(node *Node, nodeStart, pos int) (int, bool) {
-	if node.Type == "text" || isLeafNodeType(node.Type) {
+	if isOpaqueNodeType(node.Type) {
 		return 0, false
 	}
-	childPos := nodeStart
-	if node.Type != "doc" {
-		childPos++
-	}
+	childPos := nodeStart + boundaryTokens(node.Type)/2
 	for index, child := range node.Children {
 		if childPos == pos {
 			return index, true

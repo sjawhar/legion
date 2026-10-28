@@ -117,19 +117,17 @@ func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpe
 }
 
 // readAnchored reads a persisted mark's covered text and containing block from tree;
-// ErrAnchorMissing when the mark is not there. FindMarks reads what FindMark does and stops once
-// the mark's first span has ended.
+// ErrAnchorMissing when the mark is not there.
 func readAnchored(tree *pmdoc.Node, kind MarkKind, id string) (Anchored, error) {
-	key := pmdoc.MarkRef{Type: string(kind), ID: id}
-	found, ok := pmdoc.FindMarks(tree, []pmdoc.MarkRef{key})[key]
-	if !ok {
+	r, quote, found := pmdoc.FindMark(tree, string(kind), id)
+	if !found {
 		return Anchored{}, ErrAnchorMissing
 	}
-	blockID, err := pmdoc.BlockIDForRange(tree, found.Range)
+	blockID, err := pmdoc.BlockIDForRange(tree, r)
 	if err != nil {
 		return Anchored{}, err
 	}
-	return Anchored{Quote: found.Quote, BlockID: blockID}, nil
+	return Anchored{Quote: quote, BlockID: blockID}, nil
 }
 
 // markQuoteInTxn finds quote in doc and writes the supplied mark within txn.
@@ -138,17 +136,10 @@ func markQuoteInTxn(txn *crdt.Transaction, fragment *crdt.YXmlFragment, doc *pmd
 	if err != nil {
 		return pmdoc.Range{}, err
 	}
-	if err := writeQuoteMark(txn, pmdoc.NewMarkWriter(fragment), range_, spec); err != nil {
-		return pmdoc.Range{}, err
+	if err := pmdoc.MarkRange(txn, fragment, range_, spec.pmMark()); err != nil {
+		return pmdoc.Range{}, documentSchemaError(err)
 	}
 	return range_, nil
-}
-
-// writeQuoteMark writes spec's mark over the range a quote resolved to. A refusal to read the
-// fragment's text is the stored document's: a peer can have left it outside the schema after the
-// write read its tree.
-func writeQuoteMark(txn *crdt.Transaction, writer *pmdoc.MarkWriter, range_ pmdoc.Range, spec MarkSpec) error {
-	return documentSchemaError(writer.Mark(txn, range_, spec.pmMark()))
 }
 
 // VerifyMark returns what a browser-written mark anchors to, now or after its next document

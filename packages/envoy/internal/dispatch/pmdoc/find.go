@@ -736,33 +736,16 @@ func MarkSpans(doc *Node, markType, id string) []Range {
 // FindMark finds the first document-contiguous range covered by a mark identity, the first of
 // its MarkSpans, and its text, the runs joined with a space where a block boundary lies between,
 // each U+0000 written as U+FFFD (nulAsReplacement): the text is what an anchor row stores as its
-// quote.
+// quote. It is FindMarks asked for the one identity, so one walk holds the rule for both.
 func FindMark(doc *Node, markType, id string) (Range, string, bool) {
-	spans := MarkSpans(doc, markType, id)
-	if len(spans) == 0 {
-		return Range{}, "", false
-	}
-	marked := spans[0]
-	var quote strings.Builder
-	last := -1
-	walk(doc, func(node *Node, _ []int, pos, end int) bool {
-		if pos >= marked.To {
-			return false
-		}
-		if node.Type != "text" || pos < marked.From {
-			return true
-		}
-		if last >= 0 && pos != last {
-			quote.WriteByte(' ')
-		}
-		quote.WriteString(node.Text)
-		last = end
-		return true
-	})
-	return marked, nulAsReplacement(quote.String()), true
+	key := MarkRef{Type: markType, ID: id}
+	f, ok := FindMarks(doc, []MarkRef{key})[key]
+	return f.Range, f.Quote, ok
 }
 
-// MarkFound is what FindMark and MarkAttrs read for one mark identity.
+// MarkFound is what FindMark and MarkAttrs read for one mark identity. Attrs is the attributes
+// map of the identity's first mark in the tree itself, not a copy: callers read it and must not
+// modify it.
 type MarkFound struct {
 	Range Range
 	Quote string
@@ -770,10 +753,10 @@ type MarkFound struct {
 }
 
 // FindMarks is FindMark and MarkAttrs for many mark identities in one walk: each key it finds maps
-// to the range and quote FindMark returns and the attributes MarkAttrs returns, and a key it does
-// not find is absent. A write refreshes every open anchor's range and quote, and a walk per anchor
-// would make that refresh quadratic in a document carrying many of them; here a run costs only its
-// own marks and the identities open at it.
+// to the range and quote FindMark returns and the attributes MarkAttrs reads, uncopied, and a key it
+// does not find is absent. A write refreshes every open anchor's range and quote, and a walk per
+// anchor would make that refresh quadratic in a document carrying many of them; here a run costs
+// only its own marks and the identities open at it.
 func FindMarks(doc *Node, keys []MarkRef) map[MarkRef]MarkFound {
 	if len(keys) == 0 {
 		return map[MarkRef]MarkFound{}
@@ -806,7 +789,7 @@ func FindMarks(doc *Node, keys []MarkRef) map[MarkRef]MarkFound {
 			search.run = run
 			if search.state == markUnseen {
 				search.state = markOpen
-				search.found = MarkFound{Range: Range{From: pos, To: pos}, Attrs: cloneAttrs(mark.Attrs)}
+				search.found = MarkFound{Range: Range{From: pos, To: pos}, Attrs: mark.Attrs}
 				open = append(open, search)
 			}
 			search.add(node.Text, pos, end)
@@ -854,17 +837,18 @@ type markSearch struct {
 	// carries from the open ones it ends.
 	run   int
 	quote strings.Builder
-	// last is the end of the last run written to quote, or -1 before the first, as FindMark keeps it.
+	// last is the end of the last run written to quote, or -1 before the first: a run starting
+	// anywhere else is parted from it by a space.
 	last int
-	// pending holds the positions of empty runs in the span that are not yet written. FindMark's
-	// quote walk takes a run only when its position lies before the span's end, so an empty run
-	// belongs to the quote, writing a separator where it lies apart from the run before it, only
-	// once a later run carries the span past it.
+	// pending holds the positions of empty runs in the span that are not yet written. The quote
+	// takes a run only when its position lies before the span's end, so an empty run belongs to the
+	// quote, writing a separator where it lies apart from the run before it, only once a later run
+	// carries the span past it.
 	pending []int
 }
 
-// add extends the open span over the run at pos..end and writes to the quote what FindMark's quote
-// walk writes for it and for the empty runs that the span now passes.
+// add extends the open span over the run at pos..end and writes to the quote what the quote takes
+// for it and for the empty runs that the span now passes.
 func (s *markSearch) add(text string, pos, end int) {
 	s.found.Range.To = end
 	flushed := 0
@@ -888,8 +872,8 @@ func (s *markSearch) write(text string, pos, end int) {
 	s.last = end
 }
 
-// close ends the span: empty runs still pending lie at or past its end, where FindMark's quote walk
-// stops.
+// close ends the span: empty runs still pending lie at or past its end, which the quote never
+// reaches.
 func (s *markSearch) close() {
 	s.state = markClosed
 	s.found.Quote = nulAsReplacement(s.quote.String())
@@ -1000,24 +984,12 @@ func ListMarks(doc *Node) []MarkRef {
 	return refs
 }
 
-// MarkAttrs returns a copy of the attributes on the first matching mark run.
+// MarkAttrs returns a copy of the attributes on the first matching mark run: FindMarks' Attrs,
+// copied so the caller may change them without changing the tree.
 func MarkAttrs(doc *Node, markType, id string) (Attrs, bool) {
-	var attrs Attrs
-	found := false
-	walk(doc, func(node *Node, _ []int, _, _ int) bool {
-		if node.Type != "text" {
-			return true
-		}
-		for _, mark := range node.Marks {
-			if markHasID(mark, markType, id) {
-				attrs = cloneAttrs(mark.Attrs)
-				found = true
-				return false
-			}
-		}
-		return true
-	})
-	return attrs, found
+	key := MarkRef{Type: markType, ID: id}
+	f, ok := FindMarks(doc, []MarkRef{key})[key]
+	return cloneAttrs(f.Attrs), ok
 }
 
 // nodeHasMarkID reports whether node carries a markType mark whose id is id. A record mark's type
@@ -1190,14 +1162,13 @@ func yTextRanges(frag *crdt.YXmlFragment) ([]yTextRange, error) {
 // yFragmentLocations appends each Yjs text among frag's children, which stand depth levels below
 // the document, to texts with the textblock holding it. When locations is not nil, it also appends
 // the range of each text node walk would visit among them in the Node shape the fragment reads as,
-// with each text's delta operations as text nodes and each element as a node of its name, where
-// the children start at ProseMirror position pos, and returns their size as nodeSize counts it.
-// Walk enters no text or leaf node, so an element named text is a text run of no width and a
-// leaf-named element one position, and no Yjs text inside either is located; an element named doc
-// adds no tokens of its own, as the document does not. It refuses a node past MaxTreeDepth as Read
-// does: an element, or a text holding anything, which Read makes a text node of. Its refusals, met
-// in document order during the one traversal, precede any refusal from aligning texts with
-// locations.
+// with each text's delta operations as text nodes and each element as a node of its name and no
+// text, where the children start at ProseMirror position pos, and returns their size as nodeSize
+// counts it. It sizes and enters elements by walk's own rules (isOpaqueNodeType, opaqueNodeSize,
+// boundaryTokens): an element named text is a text run of no width, and no Yjs text inside it or
+// a leaf-named element is located. It refuses a node past MaxTreeDepth as Read does: an element,
+// or a text holding anything, which Read makes a text node of. Its refusals, met in document order
+// during the one traversal, precede any refusal from aligning texts with locations.
 func yFragmentLocations(frag *crdt.YXmlFragment, textblock string, depth, pos int, texts *[]yTextNode, locations *[]textLocation) (int, error) {
 	start := pos
 	for _, child := range frag.Children() {
@@ -1235,31 +1206,24 @@ func yFragmentLocations(frag *crdt.YXmlFragment, textblock string, depth, pos in
 			case "paragraph", "heading", "code_block":
 				innerBlock = name
 			}
-			opaque := name == "text" || isLeafNodeType(name)
+			opaque := isOpaqueNodeType(name)
+			// walk visits an element named text as a text node holding no text, so it locates one of
+			// no width, and enters it no more than a leaf.
 			if name == "text" && locations != nil {
 				*locations = append(*locations, textLocation{pos: pos, end: pos})
-			}
-			childPos := pos + 1
-			if name == "doc" {
-				childPos = pos
 			}
 			innerLocations := locations
 			if opaque {
 				innerLocations = nil
 			}
-			size, err := yFragmentLocations(&current.YXmlFragment, innerBlock, depth+1, childPos, texts, innerLocations)
+			size, err := yFragmentLocations(&current.YXmlFragment, innerBlock, depth+1, pos+boundaryTokens(name)/2, texts, innerLocations)
 			if err != nil {
 				return 0, err
 			}
-			switch {
-			case name == "text":
-				// A text run of no width.
-			case opaque:
-				pos++
-			case name == "doc":
-				pos += size
-			default:
-				pos += size + 2
+			if opaque {
+				pos += opaqueNodeSize(name, "")
+			} else {
+				pos += size + boundaryTokens(name)
 			}
 		default:
 			return 0, fmt.Errorf("%w: unexpected Yjs child %T", ErrSchema, child)

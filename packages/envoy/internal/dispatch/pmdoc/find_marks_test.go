@@ -14,17 +14,65 @@ import (
 )
 
 // findMarksAbsentKeys are identities no document under test carries: FindMarks must leave them out
-// of its result, as FindMark finds nothing for them.
+// of its result, as frozenFindMark finds nothing for them.
 var findMarksAbsentKeys = []MarkRef{
 	{Type: "proofComment", ID: "\x00findmarks-absent"},
 	{Type: "dispatchAsk", ID: ""},
 }
 
+// frozenFindMark and frozenMarkAttrs are FindMark and MarkAttrs as they stood before both became
+// lookups in FindMarks (commit 59f6647d): the base implementation, one walk per identity, copied
+// verbatim but for their names and kept as the oracle FindMarks must agree with. frozenFindMark
+// reads the production MarkSpans, which stays as it was: rejecting a suggestion needs every span.
+func frozenFindMark(doc *Node, markType, id string) (Range, string, bool) {
+	spans := MarkSpans(doc, markType, id)
+	if len(spans) == 0 {
+		return Range{}, "", false
+	}
+	marked := spans[0]
+	var quote strings.Builder
+	last := -1
+	walk(doc, func(node *Node, _ []int, pos, end int) bool {
+		if pos >= marked.To {
+			return false
+		}
+		if node.Type != "text" || pos < marked.From {
+			return true
+		}
+		if last >= 0 && pos != last {
+			quote.WriteByte(' ')
+		}
+		quote.WriteString(node.Text)
+		last = end
+		return true
+	})
+	return marked, nulAsReplacement(quote.String()), true
+}
+
+func frozenMarkAttrs(doc *Node, markType, id string) (Attrs, bool) {
+	var attrs Attrs
+	found := false
+	walk(doc, func(node *Node, _ []int, _, _ int) bool {
+		if node.Type != "text" {
+			return true
+		}
+		for _, mark := range node.Marks {
+			if markHasID(mark, markType, id) {
+				attrs = cloneAttrs(mark.Attrs)
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return attrs, found
+}
+
 // assertFindMarksMatchesOracle asks FindMarks for keys, two absent identities and the first key a
-// second time, checks each against FindMark and MarkAttrs asked for that key alone, and returns how
-// many distinct keys were found. Its failures name the document, the key's index and type, ranges,
-// quote lengths and the first byte the quotes differ at, never the document's text: the anchor
-// corpus it also checks is private.
+// second time, checks each against frozenFindMark and frozenMarkAttrs asked for that key alone, as
+// it does FindMark and MarkAttrs, and returns how many distinct keys were found. Its failures name
+// the document, the key's index and type, ranges, quote lengths and the first byte the quotes
+// differ at, never the document's text: the anchor corpus it also checks is private.
 func assertFindMarksMatchesOracle(t testing.TB, name string, doc *Node, keys []MarkRef) int {
 	t.Helper()
 	query := make([]MarkRef, 0, len(keys)+len(findMarksAbsentKeys)+1)
@@ -37,29 +85,37 @@ func assertFindMarksMatchesOracle(t testing.TB, name string, doc *Node, keys []M
 	asked := make(map[MarkRef]bool, len(query))
 	found := 0
 	for index, key := range query {
-		r, quote, ok := FindMark(doc, key.Type, key.ID)
-		attrs, attrsOK := MarkAttrs(doc, key.Type, key.ID)
+		r, quote, ok := frozenFindMark(doc, key.Type, key.ID)
+		attrs, attrsOK := frozenMarkAttrs(doc, key.Type, key.ID)
 		if ok && !asked[key] {
 			found++
 		}
 		asked[key] = true
+		if oneRange, oneQuote, oneOK := FindMark(doc, key.Type, key.ID); oneRange != r || oneQuote != quote || oneOK != ok {
+			t.Errorf("%s: key %d (%s): FindMark range %v, quote of %d bytes, found %t; the frozen FindMark range %v, quote of %d bytes, found %t",
+				name, index, key.Type, oneRange, len(oneQuote), oneOK, r, len(quote), ok)
+		}
+		if oneAttrs, oneOK := MarkAttrs(doc, key.Type, key.ID); oneOK != attrsOK || !reflect.DeepEqual(oneAttrs, attrs) {
+			t.Errorf("%s: key %d (%s): MarkAttrs attributes (%d of them, found %t) are not the frozen MarkAttrs' (%d of them, found %t)",
+				name, index, key.Type, len(oneAttrs), oneOK, len(attrs), attrsOK)
+		}
 		hit, hitOK := got[key]
 		if hitOK != ok {
-			t.Errorf("%s: key %d (%s): FindMarks found it %t, FindMark %t", name, index, key.Type, hitOK, ok)
+			t.Errorf("%s: key %d (%s): FindMarks found it %t, the frozen FindMark %t", name, index, key.Type, hitOK, ok)
 			continue
 		}
 		if !ok {
 			continue
 		}
 		if hit.Range != r {
-			t.Errorf("%s: key %d (%s): FindMarks range %v, FindMark range %v", name, index, key.Type, hit.Range, r)
+			t.Errorf("%s: key %d (%s): FindMarks range %v, the frozen FindMark range %v", name, index, key.Type, hit.Range, r)
 		}
 		if hit.Quote != quote {
-			t.Errorf("%s: key %d (%s): FindMarks quote of %d bytes, FindMark quote of %d bytes, first differing at byte %d",
+			t.Errorf("%s: key %d (%s): FindMarks quote of %d bytes, the frozen FindMark quote of %d bytes, first differing at byte %d",
 				name, index, key.Type, len(hit.Quote), len(quote), firstDifferingByte(hit.Quote, quote))
 		}
 		if !attrsOK || !reflect.DeepEqual(hit.Attrs, attrs) {
-			t.Errorf("%s: key %d (%s): FindMarks attributes (%d of them) are not MarkAttrs' (%d of them, found %t)",
+			t.Errorf("%s: key %d (%s): FindMarks attributes (%d of them) are not the frozen MarkAttrs' (%d of them, found %t)",
 				name, index, key.Type, len(hit.Attrs), len(attrs), attrsOK)
 		}
 	}
@@ -84,7 +140,7 @@ func firstDifferingByte(left, right string) int {
 // The trees here are built by hand to reach what a parse rarely makes: overlapping marks of one
 // type, one identity twice on a run, non-string ids, leaf nodes and empty runs inside a span, and
 // spans across list and table boundaries. Each states the quote it expects as well as asking the
-// oracle, so a change to FindMark itself cannot pass unnoticed either.
+// oracle, so a change to the frozen copies cannot pass unnoticed either.
 func TestFindMarksMatchesFindMarkOnHandBuiltTrees(t *testing.T) {
 	comment := func(id string) Mark { return Mark{Type: "proofComment", Attrs: Attrs{"id": id, "by": "user:alice"}} }
 	run := func(text string, marks ...Mark) *Node { return &Node{Type: "text", Text: text, Marks: marks} }
@@ -240,14 +296,20 @@ func TestFindMarksMatchesFindMarkOnHandBuiltTrees(t *testing.T) {
 		})
 	}
 
-	// A caller keeps the attributes and writes them into another mark, so they must not be the
-	// tree's own map.
-	t.Run("the attributes are a copy", func(t *testing.T) {
+	// MarkAttrs hands its caller attributes it may change, while FindMarks shares the tree's own:
+	// a change to MarkAttrs' result must reach neither the tree nor a later read.
+	t.Run("MarkAttrs returns a copy", func(t *testing.T) {
 		tree := doc(paragraph(run("a", comment("c1"))))
-		hit := FindMarks(tree, []MarkRef{key("proofComment", "c1")})[key("proofComment", "c1")]
-		hit.Attrs["by"] = "user:mallory"
-		if attrs, _ := MarkAttrs(tree, "proofComment", "c1"); attrs["by"] != "user:alice" {
-			t.Fatalf("changing FindMarks' attributes changed the tree's mark to %v", attrs)
+		attrs, ok := MarkAttrs(tree, "proofComment", "c1")
+		if !ok {
+			t.Fatal("MarkAttrs found no c1")
+		}
+		attrs["by"] = "user:mallory"
+		if hit := FindMarks(tree, []MarkRef{key("proofComment", "c1")})[key("proofComment", "c1")]; hit.Attrs["by"] != "user:alice" {
+			t.Fatalf("changing MarkAttrs' result changed FindMarks' read of the tree's mark to %v", hit.Attrs)
+		}
+		if again, _ := MarkAttrs(tree, "proofComment", "c1"); again["by"] != "user:alice" {
+			t.Fatalf("changing MarkAttrs' result changed a later MarkAttrs read to %v", again)
 		}
 	})
 

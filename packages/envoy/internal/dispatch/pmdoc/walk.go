@@ -39,14 +39,11 @@ func walkNode(node *Node, path []int, pos int, visit func(n *Node, path []int, p
 	if !visit(node, path, pos, end) {
 		return false
 	}
-	if node.Type == "text" || isLeafNodeType(node.Type) {
+	if isOpaqueNodeType(node.Type) {
 		return true
 	}
 
-	childPos := pos
-	if node.Type != "doc" {
-		childPos++
-	}
+	childPos := pos + boundaryTokens(node.Type)/2
 	for index, child := range node.Children {
 		if !walkNode(child, append(path, index), childPos, visit) {
 			return false
@@ -60,20 +57,39 @@ func nodeSize(node *Node) int {
 	if node == nil {
 		return 0
 	}
-	if node.Type == "text" {
-		return len16(node.Text)
+	if isOpaqueNodeType(node.Type) {
+		return opaqueNodeSize(node.Type, node.Text)
 	}
-	if isLeafNodeType(node.Type) {
-		return 1
-	}
-	size := 0
-	if node.Type != "doc" {
-		size = 2
-	}
+	size := boundaryTokens(node.Type)
 	for _, child := range node.Children {
 		size += nodeSize(child)
 	}
 	return size
+}
+
+// isOpaqueNodeType reports whether a node of nodeType is one walk visits without entering its
+// children, which take no position: a text run or a leaf.
+func isOpaqueNodeType(nodeType string) bool {
+	return nodeType == "text" || isLeafNodeType(nodeType)
+}
+
+// opaqueNodeSize is the size of an opaque node (isOpaqueNodeType) of nodeType holding text: a text
+// run is its text's UTF-16 length, a leaf one position.
+func opaqueNodeSize(nodeType, text string) int {
+	if nodeType == "text" {
+		return len16(text)
+	}
+	return 1
+}
+
+// boundaryTokens is the positions a node of nodeType that is not opaque adds around its children:
+// an opening and a closing token, so its children start one past its own position, except for the
+// document, which has neither.
+func boundaryTokens(nodeType string) int {
+	if nodeType == "doc" {
+		return 0
+	}
+	return 2
 }
 
 func isLeafNodeType(nodeType string) bool {

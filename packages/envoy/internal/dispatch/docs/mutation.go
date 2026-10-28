@@ -416,11 +416,13 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 			for _, reanchor := range reanchors {
 				range_, err := finder.FindDiscardingMiss(reanchor.mark.anchor.Quote, nil, &reanchor.range_.From)
 				if err == nil {
-					err = writeQuoteMark(transaction, writer, range_, MarkSpec{
+					// A refusal to read the fragment's text is the stored document's: a peer can
+					// have left it outside the schema after the write read its tree.
+					err = documentSchemaError(writer.Mark(transaction, range_, MarkSpec{
 						Kind:  MarkKind(reanchor.mark.markType),
 						ID:    reanchor.mark.anchor.MarkID,
 						Attrs: reanchor.attrs,
-					})
+					}.pmMark()))
 				}
 				if errors.Is(err, pmdoc.ErrTargetNotFound) {
 					continue
