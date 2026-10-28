@@ -1134,17 +1134,9 @@ func CommentMentionIdempotencyKey(commentID, target, delivery string) string {
 
 // DeliveryClaimLapse is the lease on a pending delivery attempt (a comment_deliveries or
 // message_deliveries row): a sender's claim older than this was left by a sender that never came
-// back. Two readers depend on the one window and must agree. The API's claimLapsed
-// (internal/dispatch/api) lets another sender resume or settle an attempt whose claim is older,
-// and the outbox (mentionSendLapsed, internal/dispatch/outbox) settles failed a pending mention
-// attempt no sender ever claimed once its creation is older, before it publishes the mentioned
-// session's own-topic copy instead, so the outbox never waits on an attempt no sender started,
-// and a sender that claims it after that finds it settled. An attempt a sender did claim is left
-// to the mention sender's stranded pass, which resends it under its own idempotency key, so a
-// send that had already reached the listener is dropped there as a repeat; the outbox holds the
-// session's copy as a fallback row meanwhile, published only should that resend fail
-// (publishFallbackCopies, internal/dispatch/outbox). Both judge it in Postgres against Postgres's
-// own timestamps, through DeliveryClaimLapseInterval.
+// back, since a send is bounded by the listener client's own window and the short transaction that
+// records its outcome. The API's claim transactions and mention sender and the outbox's mention
+// rule read it through the delivery predicates below, so they agree on it.
 const DeliveryClaimLapse = time.Minute
 
 // DeliveryClaimLapseInterval is DeliveryClaimLapse as a Postgres interval literal in whole
@@ -1152,15 +1144,83 @@ const DeliveryClaimLapse = time.Minute
 var DeliveryClaimLapseInterval = fmt.Sprintf("interval '%d seconds'", int64(DeliveryClaimLapse/time.Second))
 
 // StrandedMentionWindow is how far back the API's mention sender resumes a stranded mention
-// attempt (strandedCommentMentions, internal/dispatch/api). It covers a deploy or a crash loop; an
-// older pending attempt has been in front of its author long enough that a late delivery is worse
-// than the retry the author already has. Past it no sender takes the attempt, so the outbox counts
-// it abandoned whoever claimed it (mentionSendLapsed, internal/dispatch/outbox).
+// attempt (MentionStrandedSQL). It covers a deploy or a crash loop; an older pending attempt has
+// been in front of its author long enough that a late delivery is worse than the retry the author
+// already has. Past it no sender takes the attempt, so the outbox counts it abandoned whoever
+// claimed it (MentionAbandonedSQL).
 const StrandedMentionWindow = time.Hour
 
 // StrandedMentionWindowInterval is StrandedMentionWindow as a Postgres interval literal in whole
 // seconds.
 var StrandedMentionWindowInterval = fmt.Sprintf("interval '%d seconds'", int64(StrandedMentionWindow/time.Second))
+
+// The delivery predicates are SQL over one delivery row that name its columns (claimed_at,
+// created_at) unqualified, so a statement applies them to that table alone or to a subquery over
+// it. Postgres judges each against the timestamps it wrote itself, so no process's clock moves
+// them: a task whose clock ran ahead would otherwise read every live claim as lapsed, and one that
+// ran behind would never resume a stranded attempt. MentionLiveSQL, MentionResumedSQL and
+// MentionAbandonedSQL split the pending attempts of comment_deliveries three ways, each attempt
+// into exactly one; a caller pairs each with state = 'pending'. Which process acts on an attempt
+// in each state, and what becomes of the mentioned session's copy of the comment meanwhile, is
+// described once, on publishFallbackCopies in internal/dispatch/outbox.
+
+// DeliveryClaimFreeSQL is true of a delivery attempt no sender holds: never claimed, or claimed
+// more than DeliveryClaimLapse ago. The API's claim transactions take a pending attempt that reads
+// so, a comment mention's and a targeted message's alike.
+var DeliveryClaimFreeSQL = `(claimed_at is null or claimed_at < now() - ` + DeliveryClaimLapseInterval + `)`
+
+// MentionLiveSQL is true of a pending mention attempt whose send is live: created within
+// StrandedMentionWindow, and claimed within DeliveryClaimLapse or, unclaimed, created within it
+// (the mention sender leaves an attempt unclaimed until its lane starts the send). The outbox
+// holds a mentioned session's copy back while its attempt is live.
+var MentionLiveSQL = `(not ` + MentionAbandonedSQL + ` and not ` + MentionResumedSQL + `)`
+
+// MentionResumedSQL is true of a pending mention attempt a sender claimed and never settled, whose
+// claim lapsed (more than DeliveryClaimLapse ago), created within StrandedMentionWindow: its sender
+// died with the send in flight, perhaps after the listener took it, and the API's stranded pass
+// resends it (MentionStrandedSQL) under its own idempotency key, which the listener drops as a
+// repeat when the first send landed.
+var MentionResumedSQL = `(claimed_at is not null and claimed_at < now() - ` + DeliveryClaimLapseInterval +
+	` and created_at >= now() - ` + StrandedMentionWindowInterval + `)`
+
+// MentionAbandonedSQL is true of a pending mention attempt whose send was abandoned: no sender
+// claimed it and it was created more than DeliveryClaimLapse ago (a send queued behind its lane
+// that long counts too), or it was created more than StrandedMentionWindow ago, past which no
+// sender resumes it. The outbox settles such an attempt failed before it publishes the copy in the
+// mention's place.
+var MentionAbandonedSQL = `((claimed_at is null and created_at < now() - ` + DeliveryClaimLapseInterval +
+	`) or created_at < now() - ` + StrandedMentionWindowInterval + `)`
+
+// MentionStrandedSQL is true of a pending mention attempt the API's stranded pass sends: free
+// (DeliveryClaimFreeSQL), created at least DeliveryClaimLapse ago and within
+// StrandedMentionWindow. That is every resumed attempt (MentionResumedSQL), since a claim is never
+// older than its attempt, and every unclaimed attempt within the window that the outbox counts
+// abandoned (MentionAbandonedSQL), which the pass and the outbox race for: whichever settles its row
+// first acts on it. An attempt younger than the lease is left to the process that accepted it,
+// which queued it behind that recipient's earlier comments.
+var MentionStrandedSQL = `(` + DeliveryClaimFreeSQL +
+	` and created_at > now() - ` + StrandedMentionWindowInterval +
+	` and created_at < now() - ` + DeliveryClaimLapseInterval + `)`
+
+// MentionSession is the one session a mention attempt counts under, ok false when it counts under
+// none: sessionID, the session the mention is pinned to ("" when it is pinned to none), or else
+// the <id> of a session:<id> target - an unpinned mention whose lookup went unanswered, or one
+// that failed before its sender resolved it - the one session that target can reach. An unpinned
+// role:X counts under no session: only the listener knows its holder. MentionSessionSQL is the
+// same rule over a comment_deliveries row.
+func MentionSession(sessionID, target string) (string, bool) {
+	if sessionID != "" {
+		return sessionID, true
+	}
+	if id, ok := strings.CutPrefix(target, "session:"); ok && id != "" {
+		return id, true
+	}
+	return "", false
+}
+
+// MentionSessionSQL is MentionSession over a comment_deliveries row, null when the attempt counts
+// under no session (substr drops the 8 bytes of "session:").
+const MentionSessionSQL = `coalesce(session_id, case when target like 'session:%' then substr(target, 9) end)`
 
 // CommentDelivery records one attempt to deliver a mention to its resolved session.
 type CommentDelivery struct {
@@ -1335,32 +1395,14 @@ type CommentEventPayload struct {
 	// without consulting the live session registry. It names a candidate only: a session the
 	// comment's mentions deliver it to as far as its creation knows - the session the mention's
 	// lookup pinned, or the <id> of a session:<id> mention whose lookup went unanswered within its
-	// bound (that mention itself stays unpinned). The outbox's other session routes (an author,
-	// the thread's sessions, the primary document's, the claimant, a follower) read the comment's
-	// own mentions as their candidates the same way. The mention's send runs after the commit and
-	// can fail, so the outbox applies one rule to each candidate's copy when it publishes: it skips
-	// the copy once comment_deliveries shows the mention was sent, holds it back while that send is
-	// still pending, and publishes it when the send failed or was abandoned. It reads an unpinned
-	// session:<id> mention's attempts as that <id>'s. A pending attempt no sender ever claimed,
-	// created more than DeliveryClaimLapse ago, is abandoned: the outbox settles it failed, in one
-	// transaction under the comment's owner lock, before it publishes the copy, and a sender's
-	// claim that lands first keeps it pending, so whichever acts first settles the attempt and the
-	// session gets the mention or the copy, not both. A send queued behind its lane that long is
-	// settled so too, and its sender's later claim finds it settled and sends nothing. An attempt
-	// a sender claimed - a send in flight when its process died, which may have reached the
-	// listener - is left to the stranded pass, which resends it under its own idempotency key, so
-	// the listener drops a repeat; the outbox takes it as abandoned only past
-	// StrandedMentionWindow, when no sender resumes it. Within that window the outbox publishes the
-	// event without the session's copy and holds each copy it skipped as a fallback row, which its
-	// fallback pass publishes to that one destination should the resend fail, and settles should
-	// it be sent; this payload and the event's publication are never touched again
-	// (publishFallbackCopies in internal/dispatch/outbox describes it). A copy on the session's own
-	// topic, and every fallback copy, carries the failed attempt's own dedupe key
-	// (contracts.AgentSendDedupeKey of CommentMentionIdempotencyKey) rather than the event's
-	// dispatch-<event id>, so a send the killed process had handed the listener before it died,
-	// whose resend then fails for good (the listener down after the restart), is not shown twice:
-	// the host that holds the mention drops the copy, and the stream stores it no second time
-	// within its duplicate window. A session no mention reached is shown the copy.
+	// bound (that mention itself stays unpinned; MentionSession). The outbox's other session routes
+	// (an author, the thread's sessions, the primary document's, the claimant, a follower) read the
+	// comment's own mentions as their candidates the same way. The mention's send runs after the
+	// commit and can fail, so the outbox decides each candidate's copy when it publishes by what
+	// that mention's attempts came to - the copy skipped once it was sent, held back while it is
+	// live, published, under the failed send's dedupe key, once it failed or was abandoned, and
+	// held for the fallback pass while the stranded pass resends it - as publishFallbackCopies in
+	// internal/dispatch/outbox describes; this payload is never touched again.
 	// SuppressRoute marks the issue route's copy as left to a mention: either the route names a
 	// candidate, because its lookup pinned it or because its own lookup went unanswered and it is
 	// session:<id> (SuppressedRoute is the route string, SuppressedRouteSessionID that candidate),

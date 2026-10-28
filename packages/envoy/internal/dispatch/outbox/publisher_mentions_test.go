@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -865,6 +868,136 @@ func TestAResumedMentionsHeldCopyFollowsItsResend(t *testing.T) {
 				t.Fatalf("held copy settled=%v published=%v, want settled and published=%v", settled, published, tc.wantCopy)
 			}
 		})
+	}
+}
+
+// denyingPublisher is a NATS whose grant denies every publish to deny and accepts the rest.
+type denyingPublisher struct {
+	mu       sync.Mutex
+	deny     string
+	accepted []contracts.Envelope
+	denials  int
+}
+
+func (p *denyingPublisher) Window() bus.Sender { return p }
+
+func (p *denyingPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if item.Topic == p.deny {
+		p.denials++
+		return answered(fmt.Errorf("publish %s: %w", item.Topic, bus.ErrPublishDenied))
+	}
+	p.accepted = append(p.accepted, item)
+	return answered(nil)
+}
+
+// seen is how many publishes to deny were denied, and the topics of those accepted.
+func (p *denyingPublisher) seen() (int, []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.denials, topicsOf(p.accepted)
+}
+
+// TestAFallbackCopyNATSAlwaysDeniesIsSettledUnpublishedAtTheDeadLetterThreshold: a held copy whose
+// publish NATS denies on every pass counts each denial on its row and is decided again on the next
+// pass, until its count reaches retry.DeadLetterAttempts, the threshold the event scan logs at. The
+// pass that brings it there settles the row unpublished and logs it at Error, and no later pass
+// publishes, counts or claims it.
+func TestAFallbackCopyNATSAlwaysDeniesIsSettledUnpublishedAtTheDeadLetterThreshold(t *testing.T) {
+	const (
+		issueTopic   = "notifications.dispatch.issue.T-1.comment.created"
+		sessionTopic = "notifications.agent.s1"
+		deadLetter   = `level=ERROR msg="dispatch outbox: fallback copy reached dead-letter threshold; settled unpublished"`
+	)
+	var logged lockedBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	ctx := store.WithTransactionTracking(context.Background())
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	route := "session:s1"
+	seedIssue(t, database, "T-1", &route)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	commentID := seedComment(t, database, "T-1", alice, "@s1 are you there?", nil)
+	appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"), Type: "comment.created", Actor: alice,
+		Payload: model.CommentEventPayload{
+			Comment: model.Comment{
+				ID: commentID, IssueKey: new("T-1"), Body: "@s1 are you there?", Mentions: mentionOf("s1"),
+			},
+			SuppressRoute: true, SuppressedRoute: route, SuppressedRouteSessionID: new("s1"),
+		},
+	})
+	seedMentionDelivery(t, database, commentID, "s1", "resumed")
+	publisher := &denyingPublisher{deny: sessionTopic}
+	deps := Deps{Store: database, Publisher: publisher, Broker: broker}
+
+	scan(ctx, deps)
+	if _, err := database.Pool.Exec(ctx, `update comment_deliveries set state = 'failed' where comment_id = $1`, commentID); err != nil {
+		t.Fatalf("fail the resend: %v", err)
+	}
+	heldCopy := func() (attempts int, settled, published, claimed bool) {
+		t.Helper()
+		if err := database.Pool.QueryRow(ctx, `
+			select attempt_count, settled_at is not null, published, next_attempt_at is not null
+			from comment_fallback_copies where comment_id = $1 and destination = $2
+		`, commentID, sessionTopic).Scan(&attempts, &settled, &published, &claimed); err != nil {
+			t.Fatalf("read the held copy: %v", err)
+		}
+		return attempts, settled, published, claimed
+	}
+	// pass runs a fallback pass once the claim a failed pass keeps on an unsettled row has lapsed.
+	pass := func() {
+		t.Helper()
+		if _, err := database.Pool.Exec(ctx, `
+			update comment_fallback_copies set next_attempt_at = now() - interval '1 second'
+			where comment_id = $1 and settled_at is null and next_attempt_at is not null
+		`, commentID); err != nil {
+			t.Fatalf("lapse the held copy's claim: %v", err)
+		}
+		publishFallbackCopies(ctx, deps)
+	}
+
+	for want := 1; want < retry.DeadLetterAttempts; want++ {
+		pass()
+		if attempts, settled, published, claimed := heldCopy(); attempts != want || settled || published || !claimed {
+			t.Fatalf("after %d denied passes the held copy has attempts=%d settled=%v published=%v claimed=%v, "+
+				"want %d attempts, unsettled and claimed", want, attempts, settled, published, claimed, want)
+		}
+	}
+	if strings.Contains(logged.String(), deadLetter) {
+		t.Fatalf("the held copy was dead-lettered before its %dth denied pass:\n%s", retry.DeadLetterAttempts, logged.String())
+	}
+
+	pass()
+	if attempts, settled, published, claimed := heldCopy(); attempts != retry.DeadLetterAttempts || !settled || published || claimed {
+		t.Fatalf("after %d denied passes the held copy has attempts=%d settled=%v published=%v claimed=%v, "+
+			"want it settled unpublished at %d attempts with no claim", retry.DeadLetterAttempts,
+			attempts, settled, published, claimed, retry.DeadLetterAttempts)
+	}
+	logLine := ""
+	for line := range strings.SplitSeq(logged.String(), "\n") {
+		if strings.Contains(line, deadLetter) {
+			logLine = line
+		}
+	}
+	if logLine == "" || !strings.Contains(logLine, "destination="+sessionTopic) ||
+		!strings.Contains(logLine, fmt.Sprintf("attempts=%d", retry.DeadLetterAttempts)) {
+		t.Fatalf("the dead-letter line = %q, want one naming %s at %d attempts; log:\n%s",
+			logLine, sessionTopic, retry.DeadLetterAttempts, logged.String())
+	}
+
+	publishFallbackCopies(ctx, deps)
+	if attempts, settled, published, claimed := heldCopy(); attempts != retry.DeadLetterAttempts || !settled || published || claimed {
+		t.Fatalf("a pass after the dead letter left the held copy attempts=%d settled=%v published=%v claimed=%v, want it untouched",
+			attempts, settled, published, claimed)
+	}
+	if denials, accepted := publisher.seen(); denials != retry.DeadLetterAttempts || !reflect.DeepEqual(accepted, []string{issueTopic}) {
+		t.Fatalf("NATS saw %d denied publishes and accepted %#v, want %d denials and the issue topic alone",
+			denials, accepted, retry.DeadLetterAttempts)
 	}
 }
 

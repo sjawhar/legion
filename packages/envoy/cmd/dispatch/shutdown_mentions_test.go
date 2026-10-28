@@ -14,12 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
-
-// claimLease is how long a mention send's claim outlives its sender (api.claimLease).
-const claimLease = time.Minute
 
 // strandedPassInterval is how often every Dispatch process runs the mention sender's stranded
 // pass after the one at start (api.strandedPassInterval).
@@ -317,10 +315,10 @@ func TestSIGKILLWithMentionSendsInFlightHandsEachRecipientTheCommentOnceTheClaim
 	t.Parallel()
 
 	waitForSent(t, database, next, []string{inFlight, queued}, 4,
-		killedAt.Add(claimLease+strandedPassInterval+strandedMargin))
+		killedAt.Add(model.DeliveryClaimLapse+strandedPassInterval+strandedMargin))
 	lastResend := listener.lastSend().Sub(killedAt)
 	t.Logf("the last resend reached the listener %v after the kill", lastResend)
-	if bound := claimLease + strandedPassInterval + strandedMargin; lastResend > bound {
+	if bound := model.DeliveryClaimLapse + strandedPassInterval + strandedMargin; lastResend > bound {
 		t.Errorf("the last resend reached the listener %v after the kill, want within %v", lastResend, bound)
 	}
 
@@ -404,10 +402,10 @@ func TestARollingUpdatesSuccessorHandsEachMentionTheOldProcessLeftOnce(t *testin
 	t.Parallel()
 
 	waitForSent(t, database, successor, []string{inFlight, queued, drained}, 3,
-		exited.Add(claimLease+strandedPassInterval+strandedMargin))
+		exited.Add(model.DeliveryClaimLapse+strandedPassInterval+strandedMargin))
 	lastSend := listener.lastSend().Sub(exited)
 	t.Logf("the last send reached the listener %v after the old process exited", lastSend)
-	if bound := claimLease + strandedPassInterval + strandedMargin; lastSend > bound {
+	if bound := model.DeliveryClaimLapse + strandedPassInterval + strandedMargin; lastSend > bound {
 		t.Errorf("the last send reached the listener %v after the old process exited, want within %v", lastSend, bound)
 	}
 

@@ -6,13 +6,39 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/retry"
 )
+
+// mentionPendingDelay is how long an event waits when a session route held its copy back for a
+// mention whose send is still undecided (errMentionPending): long enough for the handler that
+// holds the send to settle it, short enough that the copy follows a failed send promptly. The
+// retry ticker (retryInterval) is what picks the event up again, so in practice it waits until the
+// next tick after this delay. The wait is bounded: a pending attempt is live
+// (model.MentionLiveSQL) only for model.DeliveryClaimLapse, the minute its sender's claim holds;
+// past it the outbox settles the attempt failed and publishes the copy (attempt.leftTo).
+const mentionPendingDelay = 2 * time.Second
+
+// errMentionPending is what an attempt reports (attempt.err) when it failed nowhere but held back
+// a session's copy of a new comment because the comment's mention of that session is still being
+// sent: the mention may deliver it, or may fail and leave the copy to the outbox. Every other
+// destination was sent. It is a deferral, not a failure: settle records the event deferred, to be
+// tried again shortly without counting an attempt.
+//
+// The deferral holds back this one event, not the events after it. The same comment's
+// comment.edited, comment.resolved and comment.reopened are events of their own and publish at
+// once, so the held-back session's topic - as claimant, follower, document author or route - can
+// receive the edit before the creation: for as long as the mention's send stays undecided,
+// normally the listener's receipt timeout and at most model.DeliveryClaimLapse for an attempt
+// nobody finishes, plus mentionPendingDelay. A host that receives an edit, resolution or
+// reopening for a comment it has not seen is seeing this window, not a bug; the creation follows.
+var errMentionPending = errors.New("a mention's delivery is still undecided")
 
 // mentionDeliveries is what a new comment's mentions did, read from comment_deliveries when the
 // event is published (loadMentionDeliveries). A mention resolved at write time names only a
@@ -20,9 +46,9 @@ import (
 // session, the receipt times out, the handler is cancelled, the session lacks the delivery mode -
 // and a session whose mention failed has no copy but the outbox's.
 type mentionDeliveries struct {
-	// sessions is keyed by the session each attempt went to: its session_id, or, while a
-	// session:<id> mention is unpinned (its lookup went unanswered and no sender has resolved it
-	// yet), the <id> its target names.
+	// comment is the comment the attempts are of, which a settle or a hold writes through.
+	comment mentionComment
+	// sessions is keyed by the session each attempt counts under (model.MentionSessionSQL).
 	sessions mentionOutcomes
 	// targets is keyed by each attempt's target as written, for a route suppressed by that string
 	// alone (payloadSuppressedRouteTarget).
@@ -51,6 +77,50 @@ type mentionDeliveries struct {
 	held map[string]struct{}
 }
 
+// of is the outcomes of kind's keys and the dedupe keys a copy each of them decides carries.
+func (d mentionDeliveries) of(kind mentionKind) (mentionOutcomes, map[string]string) {
+	if kind == targetMentions {
+		return d.targets, d.targetFallbackKeys
+	}
+	return d.sessions, d.fallbackKeys
+}
+
+// mentionComment is the comment whose mention attempts a mentionDeliveries read, the
+// comment.created event that created it, and the context and store a settle or a hold of one of
+// its keys runs on (settleAbandoned, holdFallbackCopy). It lives as long as the one publish or
+// fallback pass that read it.
+type mentionComment struct {
+	ctx   context.Context
+	deps  Deps
+	event model.Event
+	id    string
+}
+
+// mentionKind is the key a comment's mention attempts are grouped under: the session each counts
+// under (model.MentionSession), or its target as written.
+type mentionKind int
+
+const (
+	sessionMentions mentionKind = iota
+	targetMentions
+)
+
+// attemptKey is the SQL expression of a comment_deliveries row's key of this kind.
+func (k mentionKind) attemptKey() string {
+	if k == targetMentions {
+		return "target"
+	}
+	return model.MentionSessionSQL
+}
+
+// fallbackColumn is the comment_fallback_copies column that names a row's key of this kind.
+func (k mentionKind) fallbackColumn() string {
+	if k == targetMentions {
+		return "target"
+	}
+	return "session_id"
+}
+
 // mentionState is what the attempts under one key of mentionDeliveries came to. The states are
 // in the order a key whose attempts came to several counts as the first of them.
 type mentionState int
@@ -58,12 +128,11 @@ type mentionState int
 const (
 	// mentionSent: an attempt reached the session, so the mention delivered the comment.
 	mentionSent mentionState = iota
-	// mentionResending: an attempt the API's stranded pass resends (mentionResumed).
+	// mentionResending: an attempt the API's stranded pass resends (model.MentionResumedSQL).
 	mentionResending
-	// mentionSending: an attempt whose send is live: pending, and claimed within
-	// model.DeliveryClaimLapse, or unclaimed and created within it.
+	// mentionSending: an attempt whose send is live (model.MentionLiveSQL).
 	mentionSending
-	// mentionAbandoned: a pending attempt mentionSendLapsed takes as abandoned.
+	// mentionAbandoned: an attempt whose send was abandoned (model.MentionAbandonedSQL).
 	mentionAbandoned
 	// mentionFailed: every attempt failed, or none was recorded.
 	mentionFailed
@@ -85,16 +154,11 @@ func mentionStateOf(sent, resending, sending, abandoned bool) mentionState {
 	return mentionFailed
 }
 
-// mentionOutcomes is what the attempts under each key of mentionDeliveries came to.
+// mentionOutcomes is what the attempts under each key of one kind came to.
 type mentionOutcomes struct {
+	kind mentionKind
 	// states holds the state of each key with an attempt; a key with none is mentionFailed.
 	states map[string]mentionState
-	// settle settles the abandoned attempts under key failed, and reports the state key's
-	// attempts are in once that commits (settleAbandonedMentions).
-	settle func(key string) (mentionState, error)
-	// hold records the fallback row of the copy of the comment at destination that key's
-	// attempts decide (holdFallbackCopy).
-	hold func(key, destination string) error
 }
 
 // state is the state of key's attempts.
@@ -126,26 +190,26 @@ func (a *attempt) leftToMention(sessionID string) bool {
 // skipped. A mention that reached the session delivered the comment, so the copy is skipped. A
 // mention still being sent may yet, so the copy is held back and the attempt marked deferred, to
 // be decided again on the next scan. A mention the stranded pass resends is that resend's: the
-// copy is skipped and held as a fallback row (outcomes.hold), which the fallback pass publishes
-// should the resend fail (publishFallbackCopies); an insert that fails holds the copy back and
-// fails the attempt, so the event is retried. A destination this event already reached gave the
-// session a copy, so it needs no row. A mention whose send was abandoned is settled by the outbox
-// first (outcomes.settle), and the copy follows what key's attempts are once that settle commits:
-// one a sender claimed before the settle took its row is pending, so the copy is held back and
-// the sender owns the outcome; one the settle took is failed, and the copy is the outbox's. Only
-// one of the two acts on an attempt, so the session gets the mention or the copy, not both. A
-// settle that fails holds the copy back and fails the attempt, so the event is retried. Any other
-// key - every attempt failed, or none was recorded - is published to as if it had not been
-// mentioned, except that a session copy for a failed attempt carries that attempt's dedupe key
-// (attempt.sessionCopy): a send that landed before its attempt failed has given the host the
-// comment already, and the host drops the copy.
+// copy is skipped and held as a fallback row (mentionComment.holdFallbackCopy), which the fallback
+// pass publishes should the resend fail (publishFallbackCopies); an insert that fails holds the
+// copy back and fails the attempt, so the event is retried. A destination this event already
+// reached gave the session a copy, so it needs no row. A mention whose send was abandoned is
+// settled by the outbox first (mentionComment.settleAbandoned), and the copy follows what key's
+// attempts are once that settle commits: one a sender claimed before the settle took its row is
+// pending, so the copy is held back and the sender owns the outcome; one the settle took is
+// failed, and the copy is the outbox's. Only one of the two acts on an attempt, so the session
+// gets the mention or the copy, not both. A settle that fails holds the copy back and fails the
+// attempt, so the event is retried. Any other key - every attempt failed, or none was recorded -
+// is published to as if it had not been mentioned, except that a session copy for a failed
+// attempt carries that attempt's dedupe key (attempt.sessionCopy): a send that landed before its
+// attempt failed has given the host the comment already, and the host drops the copy.
 func (a *attempt) leftTo(outcomes mentionOutcomes, key, destination string) bool {
 	if _, ok := a.mentions.held[destination]; ok {
 		return true
 	}
 	state := outcomes.state(key)
 	if state == mentionAbandoned {
-		settled, err := outcomes.settle(key)
+		settled, err := a.mentions.comment.settleAbandoned(outcomes.kind, key)
 		if err != nil {
 			a.failed = append(a.failed, err)
 			outcomes.states[key] = mentionSending
@@ -164,7 +228,7 @@ func (a *attempt) leftTo(outcomes mentionOutcomes, key, destination string) bool
 		if _, ok := a.delivered[destination]; ok {
 			return true
 		}
-		if err := outcomes.hold(key, destination); err != nil {
+		if err := a.mentions.comment.holdFallbackCopy(outcomes.kind, key, destination); err != nil {
 			a.failed = append(a.failed, err)
 			return true
 		}
@@ -174,54 +238,112 @@ func (a *attempt) leftTo(outcomes mentionOutcomes, key, destination string) bool
 	return false
 }
 
-// mentionSessionKey is the session a comment_deliveries row's attempt counts under: its
-// session_id, or, for an attempt with none whose target is session:<id> - an unpinned mention its
-// sender has not resolved yet, or one that failed before it was - that <id>, the one session that
-// target can reach (substr drops the 8 bytes of "session:"). An unpinned role:X counts under no
-// session, only under its target.
-const mentionSessionKey = `coalesce(session_id, case when target like 'session:%' then substr(target, 9) end)`
+// sessionCopy is item as sent to sessionID's own topic. Its dedupe key is item's, the event's
+// own (envelope), except for the copy of a new comment sent to a session one of whose mention
+// attempts failed - the copy that reaches it because its mention failed: that copy carries the
+// dedupe key the failed attempt's send went under (mentionDeliveries.fallbackKeys), and keeps the
+// event's own event id. A host drops a frame whose event id it has seen or whose dedupe key it
+// claimed (createDeliveryDedupe in packages/envoy-client), so a host the mention reached before
+// its attempt failed drops the copy, and one no mention reached shows it. The stream also stores
+// the copy no second time when the mention's message is on the same subject within its duplicate
+// window, its MsgId being the dedupe key and the subject (internal/bus).
+func (a *attempt) sessionCopy(item contracts.Envelope, sessionID string) contracts.Envelope {
+	item.Topic = contracts.AgentSubject(sessionID)
+	if key, ok := a.mentions.fallbackKeys[sessionID]; ok {
+		item.DedupeKey = key
+	}
+	return item
+}
 
-// mentionSendLapsed is true of a pending attempt whose send the outbox takes as abandoned: no
-// sender ever claimed it and it was created more than model.DeliveryClaimLapse ago (the mention
-// sender leaves an attempt unclaimed until its lane starts the send, so a send queued behind its
-// lane for longer than that lease reads abandoned too), or it is older than
-// model.StrandedMentionWindow, past which no sender resumes it. An attempt a sender claimed within
-// that window may have reached the listener before its sender died, so it is left to the API's
-// stranded pass (mentionResumed).
-var mentionSendLapsed = `((claimed_at is null and created_at < now() - ` + model.DeliveryClaimLapseInterval +
-	`) or created_at < now() - ` + model.StrandedMentionWindowInterval + `)`
+// suppressesCurrentRoute applies a create-time suppression to the route that was resolved
+// alongside the mention, including a later direct route to that same resolved session. A route
+// edit to any other target must still wake its new destination. A suppression that names the
+// session the route resolved to when the comment was written (suppressed_route_session_id) holds
+// only once the mention of that session delivered the comment, by the rule attempt.leftTo
+// applies. One that names the route string alone, the target of a mention whose lookup went
+// unanswered (payloadSuppressedRouteTarget), holds while the route is still that string and only
+// once the mention of that target delivered the comment, the same rule keyed by the target. Either
+// way the copy leftTo holds back is the route's own topic (routeTopic). A route whose mention
+// failed is published to.
+func suppressesCurrentRoute(payload any, current *string, a *attempt) bool {
+	if !payloadBool(payload, "suppress_route") || current == nil || *current == "" {
+		return false
+	}
+	topic := routeTopic(*current)
+	if topic == "" {
+		return false
+	}
+	sessionID := payloadString(payload, "suppressed_route_session_id")
+	if sessionID == "" {
+		target := payloadSuppressedRouteTarget(payload)
+		return target != "" && *current == target && a.leftTo(a.mentions.targets, target, topic)
+	}
+	if *current != payloadString(payload, "suppressed_route") && *current != "session:"+sessionID {
+		return false
+	}
+	return a.leftTo(a.mentions.sessions, sessionID, topic)
+}
 
-// mentionResumed is true of a pending attempt a sender claimed and never settled, whose claim
-// lapsed a lease ago, within model.StrandedMentionWindow: its sender died with the send in flight,
-// perhaps after the listener took it, and the API's stranded pass resends it under its own
-// idempotency key, which the listener drops as a repeat when the first send landed. The outbox
-// cannot tell a send that landed before the kill from one that did not, so it publishes no copy
-// for it and does not wait on it: it holds the copy as a fallback row, which the fallback pass
-// publishes only once the resend failed (publishFallbackCopies).
-var mentionResumed = `(claimed_at is not null and claimed_at < now() - ` + model.DeliveryClaimLapseInterval +
-	` and created_at >= now() - ` + model.StrandedMentionWindowInterval + `)`
+// payloadSuppressedRouteTarget is the mention target a comment payload suppresses the route copy
+// by, string alone: suppressed_route, when suppress_route is set, no suppressed_route_session_id
+// names a session, and one of the mentions' targets (mentions[].target) is that string - the route
+// was that mention's target and its lookup went unanswered. It is "" for every other payload.
+func payloadSuppressedRouteTarget(payload any) string {
+	route := payloadString(payload, "suppressed_route")
+	if !payloadBool(payload, "suppress_route") || route == "" || payloadString(payload, "suppressed_route_session_id") != "" {
+		return ""
+	}
+	values, _ := payload.(map[string]any)
+	mentions, _ := values["mentions"].([]any)
+	for _, entry := range mentions {
+		if payloadString(entry, "target") == route {
+			return route
+		}
+	}
+	return ""
+}
+
+// payloadMentionedSessions reads the sessions a comment payload's mentions count under
+// (model.MentionSession), as the scan decodes the payload from JSON: each mentions[].session_id,
+// and the <id> of a session:<id> mention that names none (its lookup went unanswered, so the
+// sender resolves it after the commit). These are candidates only: a session route skips one once
+// the mention delivered to it (attempt.leftToMention).
+func payloadMentionedSessions(payload any) map[string]struct{} {
+	values, ok := payload.(map[string]any)
+	if !ok {
+		return nil
+	}
+	mentions, _ := values["mentions"].([]any)
+	result := map[string]struct{}{}
+	for _, entry := range mentions {
+		if sessionID, ok := model.MentionSession(payloadString(entry, "session_id"), payloadString(entry, "target")); ok {
+			result[sessionID] = struct{}{}
+		}
+	}
+	return result
+}
 
 // mentionDeliveryQuery groups a comment's mention attempts by the session each counts under
-// (mentionSessionKey) and by its target, and reports of each group whether an attempt was sent,
-// is resent by the stranded pass (mentionResumed), is pending and live, and is pending and
-// abandoned (mentionSendLapsed), and the mode of its latest attempt that failed or is abandoned,
-// null when none did (mentionDeliveries.fallbackKeys).
+// (model.MentionSessionSQL) and by its target, and reports of each group whether an attempt was
+// sent, is resent by the stranded pass (model.MentionResumedSQL), is live (model.MentionLiveSQL),
+// and is abandoned (model.MentionAbandonedSQL), and the mode of its latest attempt that failed or
+// is abandoned, null when none did (mentionDeliveries.fallbackKeys).
 var mentionDeliveryQuery = `
-	select ` + mentionSessionKey + `,
+	select ` + model.MentionSessionSQL + `,
 	       target,
 	       bool_or(state = 'sent'),
-	       bool_or(state = 'pending' and ` + mentionResumed + `),
-	       bool_or(state = 'pending' and not (` + mentionSendLapsed + `) and not (` + mentionResumed + `)),
-	       bool_or(state = 'pending' and ` + mentionSendLapsed + `),
+	       bool_or(state = 'pending' and ` + model.MentionResumedSQL + `),
+	       bool_or(state = 'pending' and ` + model.MentionLiveSQL + `),
+	       bool_or(state = 'pending' and ` + model.MentionAbandonedSQL + `),
 	       (array_agg(delivery order by attempt desc)
-	           filter (where state = 'failed' or (state = 'pending' and ` + mentionSendLapsed + `)))[1]
+	           filter (where state = 'failed' or (state = 'pending' and ` + model.MentionAbandonedSQL + `)))[1]
 	from comment_deliveries
 	where comment_id = $1
 	group by 1, 2
 `
 
 // mentionAbandonedError is the error the outbox records on a mention attempt it settles failed
-// because its send was abandoned (settleAbandonedMentions).
+// because its send was abandoned (mentionComment.settleAbandoned).
 const mentionAbandonedError = "the outbox published the comment's own copy instead; the send was abandoned"
 
 // loadMentionDeliveries reads what a new comment's mentions delivered and which of its
@@ -251,19 +373,10 @@ func readMentionDeliveries(ctx context.Context, deps Deps, event model.Event, co
 		return failed(err)
 	}
 	defer rows.Close()
-	outcomes := func(keyColumn, rowColumn string) mentionOutcomes {
-		return mentionOutcomes{
-			states: map[string]mentionState{},
-			settle: func(key string) (mentionState, error) {
-				return settleAbandonedMentions(ctx, deps, event, commentID, keyColumn, key)
-			},
-			hold: func(key, destination string) error {
-				return holdFallbackCopy(ctx, deps, event.ID, commentID, rowColumn, key, destination)
-			},
-		}
-	}
 	result := mentionDeliveries{
-		sessions: outcomes(mentionSessionKey, "session_id"), targets: outcomes("target", "target"),
+		comment:      mentionComment{ctx: ctx, deps: deps, event: event, id: commentID},
+		sessions:     mentionOutcomes{kind: sessionMentions, states: map[string]mentionState{}},
+		targets:      mentionOutcomes{kind: targetMentions, states: map[string]mentionState{}},
 		fallbackKeys: map[string]string{}, targetFallbackKeys: map[string]string{},
 	}
 	fallbackTargets, fallbackSessions := map[string]string{}, map[string]string{}
@@ -312,36 +425,34 @@ func readMentionDeliveries(ctx context.Context, deps Deps, event model.Event, co
 	return result, nil
 }
 
-// holdFallbackCopy records the fallback row of the copy of commentID, which the event eventID
-// created, at destination, decided by the attempts under key in keyColumn (session_id or target),
-// unless the destination has one already (publishFallbackCopies). It commits before the attempt
-// that holds the copy back can mark the event published.
-func holdFallbackCopy(ctx context.Context, deps Deps, eventID int64, commentID, keyColumn, key, destination string) error {
-	if _, err := deps.Store.Pool.Exec(ctx, `
-		insert into comment_fallback_copies (comment_id, destination, event_id, `+keyColumn+`)
+// holdFallbackCopy records the fallback row of the copy of the comment at destination, decided by
+// the attempts under key of kind, unless the destination has one already (publishFallbackCopies).
+// It commits before the attempt that holds the copy back can mark the event published.
+func (c mentionComment) holdFallbackCopy(kind mentionKind, key, destination string) error {
+	if _, err := c.deps.Store.Pool.Exec(c.ctx, `
+		insert into comment_fallback_copies (comment_id, destination, event_id, `+kind.fallbackColumn()+`)
 		values ($1, $2, $3, $4)
 		on conflict (comment_id, destination) do nothing
-	`, commentID, destination, eventID, key); err != nil {
-		return fmt.Errorf("hold the fallback copy of comment %q at %s: %w", commentID, destination, err)
+	`, c.id, destination, c.event.ID, key); err != nil {
+		return fmt.Errorf("hold the fallback copy of comment %q at %s: %w", c.id, destination, err)
 	}
 	return nil
 }
 
-// settleAbandonedMentions settles failed, with mentionAbandonedError, every attempt of the comment
-// that event created whose keyColumn (mentionSessionKey or target) is key and whose send is
-// abandoned (mentionSendLapsed), appends each one's comment.delivery receipt as the API's sender
-// would (the comment's author its actor), and reports the state key's attempts are in then: sent,
-// resent by the stranded pass, being sent, or failed. It is one transaction, and it takes the
-// comment's owner lock before any attempt row, the order the API's claim and settle transactions
-// take them in (claimCommentDeliveryAttempt, settleDeliveryAttempt in internal/dispatch/api), so
-// it and a sender's claim of the same attempt run one after the other. A claim that commits first
-// leaves the row claimed just now, so the update's guard no longer matches it and the attempt
-// reads pending; an attempt this settles first is no longer pending when the claim reads it, and
-// the claim takes it as settled and sends nothing. The receipts reach the event log in the same
-// commit, so a reader sees the attempt fail, and the outbox publishes them like any event.
-func settleAbandonedMentions(
-	ctx context.Context, deps Deps, event model.Event, commentID, keyColumn, key string,
-) (state mentionState, err error) {
+// settleAbandoned settles failed, with mentionAbandonedError, every attempt of the comment whose
+// key of kind is key and whose send was abandoned (model.MentionAbandonedSQL), appends each one's
+// comment.delivery receipt as the API's sender would (the comment's author its actor), and reports
+// the state key's attempts are in then: sent, resent by the stranded pass, being sent, or failed.
+// It is one transaction, and it takes the comment's owner lock before any attempt row, the order
+// the API's claim and settle transactions take them in (claimCommentDeliveryAttempt,
+// settleDeliveryAttempt in internal/dispatch/api), so it and a sender's claim of the same attempt
+// run one after the other. A claim that commits first leaves the row claimed just now, so the
+// update's guard no longer matches it and the attempt reads pending; an attempt this settles first
+// is no longer pending when the claim reads it, and the claim takes it as settled and sends
+// nothing. The receipts reach the event log in the same commit, so a reader sees the attempt fail,
+// and the outbox publishes them like any event.
+func (c mentionComment) settleAbandoned(kind mentionKind, key string) (state mentionState, err error) {
+	ctx, deps, event, commentID := c.ctx, c.deps, c.event, c.id
 	defer func() {
 		if err != nil {
 			err = fmt.Errorf("settle the abandoned mention attempts of comment %q for %q: %w", commentID, key, err)
@@ -358,7 +469,7 @@ func settleAbandonedMentions(
 	}
 	rows, err := tx.Query(ctx, `
 		update comment_deliveries set state = 'failed', error = $3
-		where comment_id = $1 and `+keyColumn+` = $2 and state = 'pending' and `+mentionSendLapsed+`
+		where comment_id = $1 and `+kind.attemptKey()+` = $2 and state = 'pending' and `+model.MentionAbandonedSQL+`
 		returning target, attempt, delivery, session_id, reply_id::text
 	`, commentID, key, mentionAbandonedError)
 	if err != nil {
@@ -391,10 +502,10 @@ func settleAbandonedMentions(
 	var sent, resending, pending bool
 	if err := tx.QueryRow(ctx, `
 		select coalesce(bool_or(state = 'sent'), false),
-		       coalesce(bool_or(state = 'pending' and `+mentionResumed+`), false),
+		       coalesce(bool_or(state = 'pending' and `+model.MentionResumedSQL+`), false),
 		       coalesce(bool_or(state = 'pending'), false)
 		from comment_deliveries
-		where comment_id = $1 and `+keyColumn+` = $2
+		where comment_id = $1 and `+kind.attemptKey()+` = $2
 	`, commentID, key).Scan(&sent, &resending, &pending); err != nil {
 		return 0, err
 	}
@@ -408,14 +519,15 @@ func settleAbandonedMentions(
 }
 
 // fallbackCopy is one comment_fallback_copies row a fallback pass claimed: the copy of the comment
-// at destination, the comment.created event eventID's envelope, decided by the attempts under key,
-// a target when byTarget and a session otherwise.
+// at destination, the comment.created event eventID's envelope, decided by the attempts under key
+// of kind. attempts is how many of the row's passes have failed so far (attempt_count).
 type fallbackCopy struct {
 	commentID   string
 	destination string
 	eventID     int64
 	key         string
-	byTarget    bool
+	kind        mentionKind
+	attempts    int
 }
 
 // fallbackEvent is the comment.created event a fallback copy is the envelope of, and the slug of
@@ -426,22 +538,50 @@ type fallbackEvent struct {
 }
 
 // fallbackRecord is what a fallback pass came to for one row: settled, and published when it
-// published the copy. A record of a row not settled releases the row's claim for a later pass.
+// published the copy; failed when its decision or publish failed, which counts an attempt on the
+// row and keeps its claim unless it settles the row too (failedFallbackCopy). A record of a row
+// neither settled nor failed releases the row's claim for a later pass.
 type fallbackRecord struct {
 	held      fallbackCopy
 	settled   bool
 	published bool
+	failed    bool
+}
+
+// failedFallbackCopy is the record of a row whose decision or publish failed: one more attempt
+// counted on it, its claim kept until claimWindow lapses. The attempt that brings the row's count
+// to retry.DeadLetterAttempts, the threshold the event scan logs at (backOff), settles the row
+// unpublished instead and is logged at Error, so a copy NATS always denies, or one whose event
+// cannot be read, is not decided again for ever.
+func failedFallbackCopy(held fallbackCopy) fallbackRecord {
+	record := fallbackRecord{held: held, failed: true}
+	if attempts := held.attempts + 1; attempts >= retry.DeadLetterAttempts {
+		slog.Error("dispatch outbox: fallback copy reached dead-letter threshold; settled unpublished",
+			"comment_id", held.commentID, "destination", held.destination, "attempts", attempts)
+		record.settled = true
+	}
+	return record
 }
 
 // publishFallbackCopies is the fallback pass. This is the one description of how a mentioned
-// session still gets its copy of a new comment when its mention was in flight at a kill.
+// session gets a new comment once - by its mention, or by the outbox's copy - however the
+// mention's send ends; every other description points here.
 //
 // A comment's mention is sent by the API after the comment commits (mentionSender in
 // internal/dispatch/api), and every destination of the comment.created event that would reach a
 // mentioned session - the route, the claimant, an author, a follower - leaves that session's copy
-// to the mention by the rule attempt.leftTo applies. A mention attempt a sender claimed and never
-// settled, whose claim lapsed within model.StrandedMentionWindow (mentionResumed), is resent by
-// the API's stranded pass under the attempt's own idempotency key: its sender died with the send
+// to the mention by the rule attempt.leftTo applies to the attempts the session counts under
+// (model.MentionSession). A sent attempt delivered the comment, so the copy is skipped; a live one
+// (model.MentionLiveSQL) holds the copy back and defers the event (errMentionPending); a failed one
+// leaves the copy to the outbox, under the failed send's dedupe key. An abandoned attempt
+// (model.MentionAbandonedSQL) is settled failed by the outbox, with its comment.delivery receipt,
+// before it publishes the copy (mentionComment.settleAbandoned); a sender's claim of it runs
+// before or after that settle under the comment's owner lock, so whichever commits first acts on
+// the attempt and the other finds it taken.
+//
+// A mention attempt a sender claimed and never settled, whose claim lapsed within
+// model.StrandedMentionWindow (model.MentionResumedSQL), is resent by the API's stranded pass
+// (model.MentionStrandedSQL) under the attempt's own idempotency key: its sender died with the send
 // in flight, perhaps after the listener took it, and the listener drops the resend as a repeat
 // when it did. The outbox cannot tell which, so it neither publishes that copy nor waits on the
 // resend. It records the copy it held back as a comment_fallback_copies row instead, keyed by the
@@ -458,18 +598,20 @@ type fallbackRecord struct {
 // attempts, read as leftTo reads them (readMentionDeliveries): a sent attempt delivered the
 // comment, so the row is settled with nothing sent; an attempt still being sent or resent leaves
 // the row, its claim released, to a later pass; an abandoned attempt is settled failed first
-// (settleAbandonedMentions, which a sender's claim of it runs after or before under the owner
-// lock) and the row decided again; and when no attempt was sent and none is pending, the
+// (mentionComment.settleAbandoned, which a sender's claim of it runs after or before under the
+// owner lock) and the row decided again; and when no attempt was sent and none is pending, the
 // comment.created event's envelope is published to the row's destination alone, carrying the
 // dedupe key of the failed attempt's send (mentionDeliveries.fallbackKeys for a session,
 // targetFallbackKeys for a target), and the row is marked published. The pass never writes the
 // events row: the event's published_at, published_destinations and payload stay as its own
 // publish left them, and no destination but the row's is reached, whatever the issue's route,
-// claimant, followers or authors are by then. A decision or a publish that fails keeps the row's
-// claim, so it is decided again once claimWindow lapses, except one cut short by the process
-// stopping or by NATS being unreachable, which releases the claim for the next pass; a process
-// that dies between the publish and the mark leaves the claim too, and the repeat carries the same
-// dedupe key, which the host, and the stream within its duplicate window, drop.
+// claimant, followers or authors are by then. A decision or a publish that fails counts an attempt
+// on the row (attempt_count) and keeps its claim, so it is decided again once claimWindow lapses;
+// the attempt that brings the count to retry.DeadLetterAttempts settles the row unpublished and is
+// logged at Error (failedFallbackCopy). One cut short by the process stopping or by NATS being
+// unreachable counts nothing and releases the claim for the next pass; a process that dies between
+// the publish and the mark leaves the claim too, and the repeat carries the same dedupe key, which
+// the host, and the stream within its duplicate window, drop.
 //
 // Races. A person's Retry of the mention opens or resumes an attempt the pass reads as being
 // sent, so the row waits for it, and a Retry that is sent settles the row with nothing sent. A
@@ -502,13 +644,18 @@ func publishFallbackCopies(ctx context.Context, deps Deps) {
 	release := func(held fallbackCopy) {
 		records = append(records, fallbackRecord{held: held})
 	}
+	fail := func(held fallbackCopy) {
+		if ctx.Err() != nil {
+			release(held)
+			return
+		}
+		records = append(records, failedFallbackCopy(held))
+	}
 	events, err := loadFallbackEvents(ctx, deps, copies)
 	if err != nil {
 		slog.Error("dispatch outbox: read the events of fallback copies", "error", err)
-		if ctx.Err() != nil {
-			for _, held := range copies {
-				release(held)
-			}
+		for _, held := range copies {
+			fail(held)
 		}
 		return
 	}
@@ -526,15 +673,14 @@ func publishFallbackCopies(ctx context.Context, deps Deps) {
 		event, ok := events[held.eventID]
 		if !ok {
 			slog.Error("dispatch outbox: fallback copy names no event", "comment_id", held.commentID, "event_id", held.eventID)
+			fail(held)
 			continue
 		}
 		decision, item, err := decideFallbackCopy(ctx, deps, held, event)
 		switch {
 		case err != nil:
 			slog.Error("dispatch outbox: decide fallback copy", "comment_id", held.commentID, "destination", held.destination, "error", err)
-			if ctx.Err() != nil {
-				release(held)
-			}
+			fail(held)
 		case decision == fallbackPublishes:
 			sent = append(sent, sentCopy{held: held, answer: sender.PublishAsync(item)})
 		default:
@@ -560,8 +706,10 @@ func publishFallbackCopies(ctx context.Context, deps Deps) {
 			slog.Error("dispatch outbox: fallback copy refused", "comment_id", item.held.commentID, "destination", item.held.destination, "error", err)
 		default:
 			slog.Error("dispatch outbox: publish fallback copy", "comment_id", item.held.commentID, "destination", item.held.destination, "error", err)
-			if errors.Is(err, bus.ErrUnavailable) || ctx.Err() != nil {
+			if errors.Is(err, bus.ErrUnavailable) {
 				release(item.held)
+			} else {
+				fail(item.held)
 			}
 			continue
 		}
@@ -591,13 +739,10 @@ func decideFallbackCopy(
 	if err != nil {
 		return 0, contracts.Envelope{}, err
 	}
-	outcomes, keys := deliveries.sessions, deliveries.fallbackKeys
-	if held.byTarget {
-		outcomes, keys = deliveries.targets, deliveries.targetFallbackKeys
-	}
+	outcomes, keys := deliveries.of(held.kind)
 	state := outcomes.state(held.key)
 	if state == mentionAbandoned {
-		if state, err = outcomes.settle(held.key); err != nil {
+		if state, err = deliveries.comment.settleAbandoned(held.kind, held.key); err != nil {
 			return 0, contracts.Envelope{}, err
 		}
 	}
@@ -635,7 +780,7 @@ func claimFallbackCopies(ctx context.Context, deps Deps) ([]fallbackCopy, error)
 			limit $1
 			for update skip locked
 		)
-		returning comment_id::text, destination, event_id, session_id, target
+		returning comment_id::text, destination, event_id, session_id, target, attempt_count
 	`, batchSize, claimWindow)
 	if err != nil {
 		return nil, err
@@ -643,13 +788,13 @@ func claimFallbackCopies(ctx context.Context, deps Deps) ([]fallbackCopy, error)
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (fallbackCopy, error) {
 		var held fallbackCopy
 		var sessionID, target *string
-		if err := row.Scan(&held.commentID, &held.destination, &held.eventID, &sessionID, &target); err != nil {
+		if err := row.Scan(&held.commentID, &held.destination, &held.eventID, &sessionID, &target, &held.attempts); err != nil {
 			return fallbackCopy{}, err
 		}
 		if target != nil {
-			held.key, held.byTarget = *target, true
+			held.key, held.kind = *target, targetMentions
 		} else if sessionID != nil {
-			held.key = *sessionID
+			held.key, held.kind = *sessionID, sessionMentions
 		}
 		return held, nil
 	})
@@ -701,9 +846,9 @@ func loadFallbackEvents(ctx context.Context, deps Deps, copies []fallbackCopy) (
 }
 
 // recordFallbackCopies writes what a fallback pass came to, in one statement: each row settled is
-// marked so, published when it published the copy, and each row left for a later pass has its
-// claim released. A row a pass did not decide, or whose publish failed, is not written and keeps
-// its claim until claimWindow lapses.
+// marked so, published when it published the copy; each failed row counts one more attempt and,
+// unless that settled it, keeps its claim until claimWindow lapses; and each row left for a later
+// pass has its claim released. A row a pass did not reach is not written and keeps its claim.
 func recordFallbackCopies(ctx context.Context, deps Deps, records []fallbackRecord) error {
 	if len(records) == 0 {
 		return nil
@@ -712,19 +857,23 @@ func recordFallbackCopies(ctx context.Context, deps Deps, records []fallbackReco
 	destinations := make([]string, 0, len(records))
 	settled := make([]bool, 0, len(records))
 	published := make([]bool, 0, len(records))
+	failed := make([]bool, 0, len(records))
 	for _, record := range records {
 		commentIDs = append(commentIDs, record.held.commentID)
 		destinations = append(destinations, record.held.destination)
 		settled = append(settled, record.settled)
 		published = append(published, record.published)
+		failed = append(failed, record.failed)
 	}
 	_, err := deps.Store.Pool.Exec(ctx, `
 		update comment_fallback_copies c set
 			settled_at = case when o.settled then now() end,
 			published = o.published,
-			next_attempt_at = null
-		from unnest($1::uuid[], $2::text[], $3::bool[], $4::bool[]) as o(comment_id, destination, settled, published)
+			attempt_count = c.attempt_count + case when o.failed then 1 else 0 end,
+			next_attempt_at = case when o.failed and not o.settled then c.next_attempt_at end
+		from unnest($1::uuid[], $2::text[], $3::bool[], $4::bool[], $5::bool[])
+			as o(comment_id, destination, settled, published, failed)
 		where c.comment_id = o.comment_id and c.destination = o.destination and c.settled_at is null
-	`, commentIDs, destinations, settled, published)
+	`, commentIDs, destinations, settled, published, failed)
 	return err
 }

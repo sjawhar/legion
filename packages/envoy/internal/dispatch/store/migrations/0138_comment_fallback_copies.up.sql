@@ -9,7 +9,9 @@
 -- session an attempt counts under, or the target as written for a route the comment suppressed by
 -- that string alone. settled_at is when the fallback pass decided the row, published whether it
 -- published the copy then; next_attempt_at is the claim one pass holds on the row while it
--- decides it, so a second process skips it.
+-- decides it, so a second process skips it; attempt_count is how many of the pass's decisions or
+-- publishes of the row failed, and the row is settled unpublished once it reaches the outbox's
+-- dead-letter threshold (retry.DeadLetterAttempts).
 --
 -- The partial index holds the unsettled rows alone, in the order the pass reads them: a pass with
 -- nothing to decide reads an empty index, and a settled row leaves it.
@@ -25,6 +27,7 @@ create table comment_fallback_copies (
     target text,
     created_at timestamptz not null default now(),
     next_attempt_at timestamptz,
+    attempt_count integer not null default 0,
     settled_at timestamptz,
     published boolean not null default false,
     primary key (comment_id, destination),

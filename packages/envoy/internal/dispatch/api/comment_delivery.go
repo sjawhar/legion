@@ -36,17 +36,14 @@ type ResolvedMention struct {
 }
 
 // mentionedSession is the session this mention delivers the comment to, as far as the comment's
-// creation knows: the pinned session when its lookup found one, and otherwise, when the lookup
-// went unanswered, the <id> of a session:<id> target, which names its session without a lookup.
-// An unanswered role:X mention names no session: only the listener knows its holder.
+// creation knows: the session it counts under (model.MentionSession) when its lookup pinned one or
+// went unanswered. A lookup that ended without a pin for any other reason - no live session holds
+// the target, the listener failed, the target does not parse - fails the send, so it names none.
 func (m ResolvedMention) mentionedSession() (string, bool) {
-	if m.SessionID != nil {
-		return *m.SessionID, true
-	}
-	if !m.unanswered {
+	if m.SessionID == nil && !m.unanswered {
 		return "", false
 	}
-	return strings.CutPrefix(m.Target, "session:")
+	return model.MentionSession(deref(m.SessionID), m.Target)
 }
 
 // mentionLookupTimeout bounds each listener lookup a comment's creation makes before its
@@ -244,7 +241,7 @@ func (s *server) claimCommentDeliveryAttempt(
 	claimed := claimedCommentDelivery{comment: stored}
 	var lapsed bool
 	pending, err := scanCommentDelivery(tx.QueryRow(ctx, `
-		select `+commentDeliveryColumns+`, `+claimLapsed+`
+		select `+commentDeliveryColumns+`, `+model.DeliveryClaimFreeSQL+`
 		from comment_deliveries
 		where comment_id = $1 and target = $2 and state = 'pending'
 		order by attempt

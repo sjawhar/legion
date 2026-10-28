@@ -56,10 +56,11 @@ func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
 const acceptedAsUserTurn = "user_turn"
 
 // acceptFresh is one of the accept's checks, judged by Postgres against the created_at Postgres
-// wrote, as claimLapsed is: the attempt was opened within the last minute. created_at, not
-// claimed_at, because a resume moves claimed_at. So only an attempt a person has just asked for
-// can be taken, and one that reached its session as a card - an older plugin, a Claude Code
-// session, a card fallback of the last minute's accept - can never be taken as a turn later.
+// wrote, as model.DeliveryClaimFreeSQL is: the attempt was opened within the last minute.
+// created_at, not claimed_at, because a resume moves claimed_at. So only an attempt a person has
+// just asked for can be taken, and one that reached its session as a card - an older plugin, a
+// Claude Code session, a card fallback of the last minute's accept - can never be taken as a turn
+// later.
 // Inside that minute the session itself keeps a carded attempt a card, since only it knows that
 // frame already reached it (pi-envoy's handled attempts, `src/dispatch-user-turn.ts`).
 const acceptFresh = `created_at >= now() - interval '1 minute'`
@@ -272,7 +273,7 @@ func (s *server) messageDeliveryRoute(ctx context.Context, message model.Message
 	var pinned string
 	var lapsed bool
 	err := s.deps.Store.Pool.QueryRow(ctx, `
-		select session_id, `+claimLapsed+`
+		select session_id, `+model.DeliveryClaimFreeSQL+`
 		from message_deliveries
 		where message_id = $1 and state = 'pending'
 		order by attempt
@@ -336,7 +337,7 @@ func (s *server) recordPendingMessageDelivery(
 		var bound model.MessageDelivery
 		var free bool
 		err = tx.QueryRow(ctx, `
-			select attempt, delivery, session_id, `+claimLapsed+`
+			select attempt, delivery, session_id, `+model.DeliveryClaimFreeSQL+`
 			from message_deliveries
 			where message_id = $1 and attempt = $2 and state = 'pending'
 			for update
@@ -366,7 +367,7 @@ func (s *server) recordPendingMessageDelivery(
 	var stranded model.MessageDelivery
 	var lapsed bool
 	err = tx.QueryRow(ctx, `
-		select attempt, delivery, session_id, `+claimLapsed+`
+		select attempt, delivery, session_id, `+model.DeliveryClaimFreeSQL+`
 		from message_deliveries
 		where message_id = $1 and state = 'pending'
 		order by attempt

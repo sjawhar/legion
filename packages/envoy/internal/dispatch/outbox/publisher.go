@@ -62,15 +62,6 @@ const (
 	// destination suppresses the repeat inside the stream's duplicate window. Neither is fixed
 	// here.
 	claimWindow = time.Minute
-	// mentionPendingDelay is how long an event waits when a session route held its copy back
-	// for a mention whose send is still undecided (errMentionPending): long enough for the
-	// handler that holds the send to settle it, short enough that the copy follows a failed send
-	// promptly. The retry ticker (retryInterval) is what picks the event up again, so in practice
-	// it waits until the next tick after this delay. The wait is bounded: a pending attempt
-	// counts as undecided only for model.DeliveryClaimLapse, the minute its sender's claim holds
-	// (mentionSendLapsed); past it the outbox settles the attempt failed and publishes the copy
-	// (attempt.leftTo).
-	mentionPendingDelay = 2 * time.Second
 	// maxCommentThreadDepth bounds the reply_to walks (loadRootCommentAuthor and
 	// loadCommentRecipients) so a malformed cycle (comments.reply_to has no acyclicity
 	// constraint) cannot spin the recursive query and stall the outbox scan.
@@ -80,21 +71,6 @@ const (
 	// milliseconds, so a write that takes longer is a database the batch's claim is left to.
 	recordTimeout = 5 * time.Second
 )
-
-// errMentionPending is what an attempt reports (attempt.err) when it failed nowhere but held back
-// a session's copy of a new comment because the comment's mention of that session is still being
-// sent: the mention may deliver it, or may fail and leave the copy to the outbox. Every other
-// destination was sent. It is a deferral, not a failure: settle records the event deferred, to be
-// tried again shortly without counting an attempt.
-//
-// The deferral holds back this one event, not the events after it. The same comment's
-// comment.edited, comment.resolved and comment.reopened are events of their own and publish at
-// once, so the held-back session's topic - as claimant, follower, document author or route - can
-// receive the edit before the creation: for as long as the mention's send stays undecided,
-// normally the listener's receipt timeout and at most model.DeliveryClaimLapse for an attempt
-// nobody finishes, plus mentionPendingDelay. A host that receives an edit, resolution or
-// reopening for a comment it has not seen is seeing this window, not a bug; the creation follows.
-var errMentionPending = errors.New("a mention's delivery is still undecided")
 
 // Publisher is the NATS publication boundary used by the Dispatch outbox.
 type Publisher interface {
@@ -815,23 +791,6 @@ func publishSessionRoutes(deps Deps, eventID int64, item contracts.Envelope, a *
 	return nil
 }
 
-// sessionCopy is item as sent to sessionID's own topic. Its dedupe key is item's, the event's
-// own (envelope), except for the copy of a new comment sent to a session one of whose mention
-// attempts failed - the copy that reaches it because its mention failed: that copy carries the
-// dedupe key the failed attempt's send went under (mentionDeliveries.fallbackKeys), and keeps the
-// event's own event id. A host drops a frame whose event id it has seen or whose dedupe key it
-// claimed (createDeliveryDedupe in packages/envoy-client), so a host the mention reached before
-// its attempt failed drops the copy, and one no mention reached shows it. The stream also stores
-// the copy no second time when the mention's message is on the same subject within its duplicate
-// window, its MsgId being the dedupe key and the subject (internal/bus).
-func (a *attempt) sessionCopy(item contracts.Envelope, sessionID string) contracts.Envelope {
-	item.Topic = contracts.AgentSubject(sessionID)
-	if key, ok := a.mentions.fallbackKeys[sessionID]; ok {
-		item.DedupeKey = key
-	}
-	return item
-}
-
 // publishPreviousClaimant tells a session that lost an issue's claim, on its own topic: a
 // takeover (another agent claimed an issue this session's claim was on, because the listener
 // no longer lists this session as live) and a release somebody else made. Like the follower
@@ -1313,79 +1272,6 @@ func payloadBool(payload any, key string) bool {
 	}
 	value, _ := values[key].(bool)
 	return value
-}
-
-// suppressesCurrentRoute applies a create-time suppression to the route that was resolved
-// alongside the mention, including a later direct route to that same resolved session. A route
-// edit to any other target must still wake its new destination. A suppression that names the
-// session the route resolved to when the comment was written (suppressed_route_session_id) holds
-// only once the mention of that session delivered the comment, by the rule attempt.leftTo
-// applies. One that names the route string alone, the target of a mention whose lookup went
-// unanswered (payloadSuppressedRouteTarget), holds while the route is still that string and only
-// once the mention of that target delivered the comment, the same rule keyed by the target. Either
-// way the copy leftTo holds back is the route's own topic (routeTopic). A route whose mention
-// failed is published to.
-func suppressesCurrentRoute(payload any, current *string, a *attempt) bool {
-	if !payloadBool(payload, "suppress_route") || current == nil || *current == "" {
-		return false
-	}
-	topic := routeTopic(*current)
-	if topic == "" {
-		return false
-	}
-	sessionID := payloadString(payload, "suppressed_route_session_id")
-	if sessionID == "" {
-		target := payloadSuppressedRouteTarget(payload)
-		return target != "" && *current == target && a.leftTo(a.mentions.targets, target, topic)
-	}
-	if *current != payloadString(payload, "suppressed_route") && *current != "session:"+sessionID {
-		return false
-	}
-	return a.leftTo(a.mentions.sessions, sessionID, topic)
-}
-
-// payloadSuppressedRouteTarget is the mention target a comment payload suppresses the route copy
-// by, string alone: suppressed_route, when suppress_route is set, no suppressed_route_session_id
-// names a session, and one of the mentions' targets (mentions[].target) is that string - the route
-// was that mention's target and its lookup went unanswered. It is "" for every other payload.
-func payloadSuppressedRouteTarget(payload any) string {
-	route := payloadString(payload, "suppressed_route")
-	if !payloadBool(payload, "suppress_route") || route == "" || payloadString(payload, "suppressed_route_session_id") != "" {
-		return ""
-	}
-	values, _ := payload.(map[string]any)
-	mentions, _ := values["mentions"].([]any)
-	for _, entry := range mentions {
-		if payloadString(entry, "target") == route {
-			return route
-		}
-	}
-	return ""
-}
-
-// payloadMentionedSessions reads the sessions a comment payload's mentions resolved to, as the
-// scan decodes the payload from JSON: each mentions[].session_id, and, for a session:<id> mention
-// that names none (its lookup went unanswered, so the sender resolves it after the commit), the
-// <id> its target names. A role:X mention that resolved to no session names none. These are
-// candidates only: a session route skips one once the mention delivered to it
-// (attempt.leftToMention).
-func payloadMentionedSessions(payload any) map[string]struct{} {
-	values, ok := payload.(map[string]any)
-	if !ok {
-		return nil
-	}
-	mentions, _ := values["mentions"].([]any)
-	result := map[string]struct{}{}
-	for _, entry := range mentions {
-		sessionID := payloadString(entry, "session_id")
-		if named, unpinned := strings.CutPrefix(payloadString(entry, "target"), "session:"); sessionID == "" && unpinned {
-			sessionID = named
-		}
-		if sessionID != "" {
-			result[sessionID] = struct{}{}
-		}
-	}
-	return result
 }
 
 // askAnswerText renders an ask's answer as one line: the text alone, the selected options

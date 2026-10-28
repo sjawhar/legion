@@ -1308,7 +1308,7 @@ decides with the resolution only while the locked row still agrees, taking it on
 does not and answering a conflict after that. `api/envoy_resolve.go` owns that loop
 (`resolveThenLock`, `errStaleResolution`), the delivery read every send resolves through
 (`resolveDeliveryTarget`) and the settle half (`settleDeliveryAttempt`, `attemptClaim`,
-`claimLapsed`, `deliveryOutcome`, `receiptError`); its callers are `api/comment_create.go`
+`deliveryOutcome`, `receiptError`); its callers are `api/comment_create.go`
 (the mention and route resolution behind `suppress_route`), `api/comment_delivery.go` and
 `api/message_delivery.go` (a delivery's recipient, its claim and its settle) and
 `api/issue_claim.go` (the holder's liveness, on both the claim and the release route). Three of
@@ -1339,28 +1339,21 @@ issue's route because a mention delivers to it (`suppress_route`), or that a men
 comment names (`mentions`, which every other session route of the outbox reads: an author or
 thread session, a primary document's author, the claimant, a follower), hears the comment once:
 from the mention, or, when the mention's send fails, from the copy that route sends. The outbox decides
-that copy when it publishes, by the mention rule (`attempt.leftToMention`, below), which also
-finds an unanswered `session:<id>` mention's attempt by its `<id>` before the sender resolves it,
-and a route suppressed by its string alone by the mention of that target. The two-copy cases (an
-unanswered `role:X` mention whose holder an author or thread route, a primary-document route, the
-claimant route, a follower route or the route under another string names; a `role:X` route whose
-own lookup went unanswered while a mention of another string reaches its holder) remain. An
-attempt pending past `model.DeliveryClaimLapse` - by its
-claim, or by its creation while unclaimed: a killed sender's, or a send queued behind its lane
-that long - is the outbox's or the stranded pass's, whichever acts first on its row: the outbox
-settles it `failed` (with its `comment.delivery` receipt, under the comment's owner lock) before
-it publishes the copy, and a claim after that finds it settled and sends nothing; a claim that
-commits first leaves it claimed just now, and the outbox waits on the send. An attempt a killed
-sender claimed is the stranded pass's to resend, and the outbox publishes the comment without that
-session's copy meanwhile, holding each copy it skipped as a `comment_fallback_copies` row (migration
-`0138`) keyed by the comment and the exact destination topic; its fallback pass publishes the
-comment to that one destination, under the failed mention's dedupe key, once the resend fails, and
-settles the row with nothing sent once it is sent. A failed settle never touches the
-`comment.created` row, so its `published_at`, `published_destinations` and payload stay as its own
-publish left them, and a moved route, a new claimant or new followers get nothing of an old
-comment (`publishFallbackCopies` in `internal/dispatch/outbox/mentions.go` is the protocol's one
-description). So a mentioned session loses no comment through a kill, and hears it once unless the
-killed sender had already handed the frame over. The post-commit sender (`mentionSender`,
+that copy when it publishes, by the mention rule (`attempt.leftToMention`, below), which counts
+each attempt under one session (`model.MentionSession`, and `model.MentionSessionSQL` over a
+`comment_deliveries` row) - so it finds an unanswered `session:<id>` mention's attempt by its
+`<id>` before the sender resolves it - and a route suppressed by its string alone by the mention of
+that target. The two-copy cases (an unanswered `role:X` mention whose holder an author or thread
+route, a primary-document route, the claimant route, a follower route or the route under another
+string names; a `role:X` route whose own lookup went unanswered while a mention of another string
+reaches its holder) remain. What the attempt came to - sent, live, abandoned, or resumed by the
+stranded pass, each a predicate over its row in `internal/dispatch/model` (`MentionLiveSQL`,
+`MentionAbandonedSQL`, `MentionResumedSQL`, `MentionStrandedSQL`) - decides that copy and which of
+the outbox, a sender's claim and the stranded pass acts on the attempt; `publishFallbackCopies` in
+`internal/dispatch/outbox/mentions.go` is the protocol's one description, the
+`comment_fallback_copies` rows (migration `0138`) included. So a mentioned session loses no
+comment through a kill, and hears it once unless the killed sender had already handed the frame
+over. The post-commit sender (`mentionSender`,
 `api/comment_mention_sender.go`) runs after the response, one FIFO lane per recipient (the
 session the mention's lookup pinned, else its target as written: `role:X` shares
 `session:<X's holder>`'s lane only when its lookup found the holder, and an unanswered `role:X`
@@ -1372,8 +1365,8 @@ nothing more is queued - a comment that commits during the HTTP drain is answere
 send logged at WARN - no queued send starts, and the sends in flight get 10 s
 (`mentionDrainTimeout`) before their context is cancelled. Every process runs a stranded pass at
 startup and every 30 s after (`strandedPassInterval`, half the claim lease): it resumes the
-attempts that are `pending`, unclaimed or with a lapsed claim, and created between a claim lease
-(one minute) and an hour ago, whichever process left them, through the same claim, so an attempt a
+attempts `model.MentionStrandedSQL` reads - `pending`, unclaimed or with a lapsed claim, and
+created between a claim lease (one minute) and an hour ago - whichever process left them, through the same claim, so an attempt a
 live sender holds is not sent twice, and it skips the attempts its own sender has queued and not
 finished, so a busy sender does not queue its own unstarted sends twice. An attempt younger than
 the lease is left to the process that queued it, so a pass never takes a live process's queue out
@@ -1398,7 +1391,7 @@ event. Either way the pending row names the session its frame is going to before
 sent, and each of those statements is its own short transaction or single pooled read, so no
 step of a delivery holds a connection across another.
 
-A claim outlives its sender by a minute, which Postgres judges (`claimLapsed`) against the
+A claim outlives its sender by a minute, which Postgres judges (`model.DeliveryClaimFreeSQL`) against the
 `claimed_at` Postgres itself wrote, so no task's clock skew can read a live claim as lapsed or
 leave a stranded attempt unresumable. A retry beside a live claim takes an attempt of its own;
 one beside an abandoned claim resumes the original attempt under its original number. A resumed
@@ -2844,53 +2837,31 @@ the synchronous listener call records the sent or failed attempt instead of blin
   (`suppressesCurrentRoute`; `suppress_route` must be set). A comment whose route string equals
   the target of a mention whose lookup went unanswered records `suppress_route` with
   `suppressed_route` alone, no `suppressed_route_session_id`; `suppressesCurrentRoute` then applies
-  the rule to that target's attempts (`attempt.leftToMentionOf`) while the route is still that
-  string. A mention resolved at write time is a
+  the rule to that target's attempts (`attempt.leftTo` keyed by the target, the copy being the
+  route's own topic) while the route is still that string. A mention resolved at write time is a
   candidate only: its send runs after the comment commits and can fail. `loadMentionDeliveries`
   reads the comment's `comment_deliveries` in one query per attempt (`send`), grouped by session
   and by target (`mentionDeliveryQuery`), and only for a `comment.created` that names a mentioned
-  session or suppresses its route by a mention's target. An attempt with no `session_id` whose
-  target is `session:<id>` (an unanswered mention the sender has not resolved yet) counts as
-  `<id>`'s, so its copy waits on it like a pinned one's.
-  A session (or target) with a `sent` row is skipped: the mention delivered the comment. One with no
-  `sent` row and a `pending` one whose claim (its creation, while no sender claimed it) is younger
-  than `model.DeliveryClaimLapse` (a minute) has its copy held back while every other destination
-  is sent in the batch's window; the attempt then reports `errMentionPending` (`attempt.err`),
-  `settle` records the event `deferred`, and `recordBatch` adds the destinations it reached to
+  session or suppresses its route by a mention's target. Each attempt counts under one session
+  (`model.MentionSessionSQL`: its `session_id`, or the `<id>` of an unpinned `session:<id>`
+  target, an unanswered mention the sender has not resolved yet), so its copy waits on it like a
+  pinned one's.
+  A session (or target) with a `sent` row is skipped: the mention delivered the comment. One whose
+  attempt is live (`model.MentionLiveSQL`: created within the hour, and claimed, or created while
+  unclaimed, less than `model.DeliveryClaimLapse` ago) has its copy held back while every other
+  destination is sent in
+  the batch's window; the attempt then reports `errMentionPending` (`attempt.err`), `settle`
+  records the event `deferred`, and `recordBatch` adds the destinations it reached to
   `published_destinations`, moves `next_attempt_at` out by `mentionPendingDelay` (2 s) and leaves
   `published_at` null and `attempt_count` as it was, so waiting on a send never runs the event to
-  its dead letter. A `pending` one no sender ever claimed, past the minute (abandoned, by `mentionSendLapsed`;
-  the API's `claimLapsed` is built from the same `model.DeliveryClaimLapse`), is settled by the outbox
-  before it publishes the copy, only when a copy asks about that session or target
-  (`attempt.leftTo`), so a mention of a session no copy reaches is left to the stranded pass:
-  `settleAbandonedMentions` takes the comment's owner lock, sets each such attempt `failed` with
-  `mentionAbandonedError` where it is still pending and past the minute, appends each one's
-  `comment.delivery` receipt (the comment's author its actor) through `events.Broker` in the same
-  transaction, and re-reads the key: an attempt a sender claimed first is pending and holds the
-  copy back; one the outbox settled is failed. A sender's claim after the settle finds the
-  attempt settled and sends nothing (`claimCommentDeliveryAttempt`), and the stranded pass reads
-  pending attempts only, so the mention and the copy are exclusive per attempt. An attempt a
-  sender claimed and never settled (a send in flight when its process was killed, which may have
-  reached the listener) is left to the stranded pass, whose resend repeats the attempt's
-  idempotency key so the listener drops a repeat; the outbox counts it as resent
-  (`mentionResumed`), does not wait on it, and takes it as abandoned only past
-  `model.StrandedMentionWindow` (an hour), when no sender resumes it. For a resent attempt the
-  outbox skips the copy and holds it as a `comment_fallback_copies` row (migration `0138`), one
-  per comment and exact destination topic, naming the session or the suppressed route's target
-  whose attempts decide it, inserted idempotently before the event can be marked published (an
-  insert that fails fails the attempt). A destination with a row is the row's: the event's own
-  publish skips it on every retry (`mentionDeliveries.held`). The fallback pass
-  (`publishFallbackCopies`, at startup and on every retry tick, beside the event scan) claims a
-  bounded batch of unsettled rows (`for update skip locked`, `claimWindow`; a partial index of the
-  unsettled rows, so an idle pass reads nothing) and decides each as `leftTo` would: a `sent`
-  attempt settles the row with nothing sent, a live or resent one leaves it to a later pass, an
-  abandoned one is settled `failed` first (`settleAbandonedMentions`) and decided again, and when
-  every attempt failed it publishes the `comment.created` envelope to that one destination, with
-  the failed attempt's dedupe key, and marks the row published. It never writes the `events` row,
-  so `published_at`, `published_destinations` and the payload stay as the event's own publish left
-  them, and a route, claimant or follower that changed since gets nothing of the old comment. Its
-  doc comment in `internal/dispatch/outbox/mentions.go` is the protocol's one description, races
-  included.
+  its dead letter. An abandoned attempt (`model.MentionAbandonedSQL`) is settled `failed` by the
+  outbox, with its `comment.delivery` receipt, before it publishes the copy
+  (`mentionComment.settleAbandoned`), and an attempt the stranded pass resends
+  (`model.MentionResumedSQL`) has its copy held as a `comment_fallback_copies` row (migration
+  `0138`), which the fallback pass decides later; a row whose decision or publish fails
+  `retry.DeadLetterAttempts` times is settled unpublished and logged at Error. The doc comment of
+  `publishFallbackCopies` in `internal/dispatch/outbox/mentions.go` is that protocol's one
+  description, races included.
   Every other session - each attempt `failed`, or no row at all - is published to as if it had
   not been mentioned, but for the dedupe key of its copy: a copy on the own topic of a session
   with a `failed` attempt (or an abandoned one, which the outbox settles `failed` first) carries

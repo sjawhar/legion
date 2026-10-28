@@ -42,9 +42,8 @@ import (
 )
 
 var (
-	projectKeyPattern  = regexp.MustCompile(contracts.ProjectKeyPattern)
-	issueKeyPattern    = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}-[0-9]+$`)
-	externalRefPattern = regexp.MustCompile(`^([^/\s]+)/([^/\s#]+)#([1-9][0-9]*)$`)
+	projectKeyPattern = regexp.MustCompile(contracts.ProjectKeyPattern)
+	issueKeyPattern   = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}-[0-9]+$`)
 )
 
 // projectKeyProblem is every route's refusal of a value that is not a project key: the field it
@@ -340,12 +339,10 @@ type queryer interface {
 // under the same wrappers; a server without one (a test's) has neither, so nothing outlives the
 // test. Every server holds the event stream relay (INFRA-66), which every open SSE connection and
 // the hub read, and which runs its own listening connection while any of them subscribes, also on
-// Lifetime, and the comment mention sender, which sends on Lifetime and drains for at most
-// mentionDrainTimeout once it ends; a server with a Lifetime and a store also runs the sender's
-// stranded pass, at start and every strandedPassInterval, for the attempts any process left
-// pending. The returned wait blocks until the hub, every delivery socket, the relay, the mention
-// sends in flight and a stranded pass that is running have ended. Call it only after Lifetime has
-// been cancelled and before the database pool closes.
+// Lifetime, and the comment mention sender (startMentionSender). The returned wait blocks until
+// the hub, every delivery socket, the relay, the mention sends in flight and a stranded pass that
+// is running have ended. Call it only after Lifetime has been cancelled and before the database
+// pool closes.
 //
 // That wait is for a server given a Deps.Lifetime: it returns once that context is cancelled,
 // which is what ends the relay's goroutines and the hub's. A server built without a Deps.Lifetime
@@ -378,12 +375,9 @@ func (s *server) waitBackground() {
 func register(mux *http.ServeMux, deps Deps) *server {
 	s := &server{deps: deps, rosters: rosterCache{ttl: routeRosterTTL, silenceTTL: routeRosterSilenceTTL}}
 	s.eventRelay = newEventStreamRelay(s, s.lifetime())
-	s.mentions = newMentionSender(s.lifetime(), strandedPassInterval, s.sendCommentMention, s.strandedCommentMentions)
+	s.mentions = s.startMentionSender()
 	if deps.Lifetime != nil {
 		s.deliveryHub = newDeliveryHub(s, deps.Lifetime, deliveryHubClock{})
-		if deps.Store != nil && deps.Store.Pool != nil {
-			s.mentions.start()
-		}
 	}
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)
@@ -996,29 +990,4 @@ func (s *server) namedVersionDiff(ctx context.Context, tx pgx.Tx, artifactID str
 	}
 	diff := text.UnifiedDiff(previous, current)
 	return &diff, nil
-}
-
-func externalRef(ref string) (repo string, number string, err error) {
-	match := externalRefPattern.FindStringSubmatch(strings.TrimSpace(ref))
-	if match == nil {
-		return "", "", errorf(http.StatusBadRequest, "INVALID_ISSUE_REF", "invalid issue reference %q", ref)
-	}
-	return canonicalRepo(match[1], match[2]), match[3], nil
-}
-
-func canonicalRepo(owner, repo string) string {
-	owner = strings.ToLower(strings.TrimSpace(owner))
-	repo = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(repo)), ".git")
-	return owner + "/" + repo
-}
-
-func externalURL(repo, number string) string {
-	return "https://github.com/" + repo + "/issues/" + number
-}
-
-func externalURLs(repo, number string) []string {
-	return []string{
-		externalURL(repo, number),
-		"https://github.com/" + repo + "/pull/" + number,
-	}
 }

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,11 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
+
+// claimLease is model.DeliveryClaimLapse as the bare text of a Postgres interval literal
+// (`interval '` + claimLease + `'`), the spelling comment_delivery_silent_listener_test.go ages an
+// attempt's claim past the lease with.
+var claimLease = fmt.Sprintf("%d seconds", int64(model.DeliveryClaimLapse/time.Second))
 
 // senderTestSessions are the live sessions the mention sender's stand-in listener knows, each
 // able to receive a steer.
@@ -554,7 +560,7 @@ func TestAListenerThatAnswersNoLookupDelaysARoutedCommentByOneTimeoutAtMost(t *t
 func ageAttempts(t *testing.T, database *store.Store, commentIDs ...string) {
 	t.Helper()
 	if _, err := database.Pool.Exec(context.Background(), `
-		update comment_deliveries set created_at = created_at - interval '`+claimLease+`' - interval '1 second'
+		update comment_deliveries set created_at = created_at - `+model.DeliveryClaimLapseInterval+` - interval '1 second'
 		where comment_id = any($1)
 	`, commentIDs); err != nil {
 		t.Fatalf("age the attempts: %v", err)
@@ -696,7 +702,7 @@ func TestARollingUpdatesSuccessorSendsTheMentionTheOldProcessAcceptedWhileDraini
 	// A pass leaves an attempt younger than a claim lease to the process that accepted it; this
 	// one has waited that long once the test moves its creation back a lease.
 	if _, err := database.Pool.Exec(t.Context(), `
-		update comment_deliveries set created_at = created_at - interval '`+claimLease+`' - interval '1 second'
+		update comment_deliveries set created_at = created_at - `+model.DeliveryClaimLapseInterval+` - interval '1 second'
 		where comment_id = $1
 	`, drained.ID); err != nil {
 		t.Fatalf("age the drained attempt: %v", err)
@@ -755,7 +761,7 @@ func TestMentionRecoverySendsAnAttemptAKilledProcessHeldOnceItsClaimLapses(t *te
 
 	// The killed process's claim lapses: it was taken a lease and a second ago.
 	if _, err := database.Pool.Exec(context.Background(), `
-		update comment_deliveries set claimed_at = now() - interval '`+claimLease+`' - interval '1 second'
+		update comment_deliveries set claimed_at = now() - `+model.DeliveryClaimLapseInterval+` - interval '1 second'
 		where comment_id = $1
 	`, stranded.ID); err != nil {
 		t.Fatalf("lapse the killed process's claim: %v", err)
