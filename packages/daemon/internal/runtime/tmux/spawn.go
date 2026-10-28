@@ -501,17 +501,10 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	}
 	// The credential is minted before the launch lock, since a mint is a network call every other
 	// launch would wait out; only the writes into the claim's directories wait for the refusal.
-	ghRoot, ghDefault, ghWriter := "", "", strings.ToLower(spec.Repository.Owner())
-	var bundle ghconfig.Bundle
-	var noOwner bool
-	if r.gitHubCredential != nil {
-		ghRoot = runtime.GHConfigDir(r.stateDir, spec.Claim)
-		var err error
-		bundle, err = r.gitHubCredential(ctx, spec.Role, ghWriter)
-		noOwner = spec.Role == claim.RoleController && errors.Is(err, runtime.ErrNoGitHubOwner)
-		if err != nil && !noOwner {
-			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
-		}
+	ghWriter := strings.ToLower(spec.Repository.Owner())
+	credential, err := r.mintGitHubCredential(ctx, spec, ghWriter)
+	if err != nil {
+		return runtime.Locator{}, err
 	}
 	r.launchMu.Lock()
 	defer r.launchMu.Unlock()
@@ -522,24 +515,9 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	if err := runtime.WriteSecretFiles(r.stateDir, files); err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
-	switch {
-	case r.gitHubCredential == nil:
-	case noOwner:
-		// A project with no GitHub owner to mint for still runs its controller, with gh acting
-		// as nobody, as `legion controller start` and the sandbox runtime do there: its gh
-		// directory empty, so no token an earlier launch wrote outlives this one.
-		if err := emptyGitHubBundle(ghRoot); err != nil {
-			return runtime.Locator{}, fmt.Errorf("spawn %s: empty the github credential: %w", spec.Claim, err)
-		}
-		r.log.Info("tmux runtime: no GitHub owner to act for; the controller's gh acts as nobody", "claim", spec.Claim)
-	default:
-		if _, err := ghconfig.WriteBundle(ghRoot, bundle); err != nil {
-			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
-		}
-		ghDefault = bundle.Default
-		written := bundle.Owners[ghDefault]
-		r.log.Info("tmux runtime: github credential written", "claim", spec.Claim, "role", spec.Role, "app", written.App,
-			"expiresAt", written.ExpiresAt, "owners", bundle.OwnerNames())
+	ghDefault, err := r.writeGitHubCredential(spec, credential)
+	if err != nil {
+		return runtime.Locator{}, err
 	}
 	path := r.paneEnv["PATH"]
 	if spec.Env["PATH"] != "" {
@@ -553,10 +531,66 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	command := shimShellCommand(r.socket, path, workDir, r.legion, r.streamAddress, files[0].Path, r.providerEnvDir, inner)
 	pairs := panePairs(spec, PaneInputs{
 		StateDir: r.stateDir, Workspace: workDir, DaemonURL: r.daemonURL, EnvoyURL: r.envoyURL, NATSURLs: r.natsURLs,
-		DispatchURL: r.dispatchURL, DispatchTokenFile: r.dispatchToken, GHOwnersDir: ghRoot, GHDefault: ghDefault, GH: r.gh,
+		DispatchURL: r.dispatchURL, DispatchTokenFile: r.dispatchToken, GHOwnersDir: credential.root, GHDefault: ghDefault, GH: r.gh,
 		OperatorEnv: r.operatorEnv, PiConfigFiles: r.piConfigFiles, RoleConfigFiles: r.roleConfigFiles[spec.Role],
 	}, files)
 	return r.openPane(ctx, spec, ghWriter, paneCommand(append(pairs, backendPairs...), command))
+}
+
+// launchGitHubCredential is the GitHub credential a launch mints for its claim before the launch
+// lock (mintGitHubCredential) and writes into the claim's gh directory once the lock is held and
+// the refusal has passed (writeGitHubCredential).
+type launchGitHubCredential struct {
+	// root is the claim's gh directory, "" when the runtime mints no credential
+	// (Options.GitHubCredential nil: a daemon with no GitHub Apps).
+	root   string
+	bundle ghconfig.Bundle
+	// noOwner is set for a controller whose project has no GitHub owner to mint for
+	// (runtime.ErrNoGitHubOwner): its gh acts as nobody, and bundle goes unwritten.
+	noOwner bool
+}
+
+// mintGitHubCredential mints spec's role its GitHub credential with writer as the owner of its
+// write token. It writes nothing: a mint is a network call, made before the launch lock, and the
+// claim's directories are written only after the refusal (writeGitHubCredential).
+func (r *Runtime) mintGitHubCredential(ctx context.Context, spec runtime.SpawnSpec, writer string) (launchGitHubCredential, error) {
+	if r.gitHubCredential == nil {
+		return launchGitHubCredential{}, nil
+	}
+	bundle, err := r.gitHubCredential(ctx, spec.Role, writer)
+	noOwner := spec.Role == claim.RoleController && errors.Is(err, runtime.ErrNoGitHubOwner)
+	if err != nil && !noOwner {
+		return launchGitHubCredential{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
+	}
+	return launchGitHubCredential{root: runtime.GHConfigDir(r.stateDir, spec.Claim), bundle: bundle, noOwner: noOwner}, nil
+}
+
+// writeGitHubCredential writes credential, which mintGitHubCredential minted for spec, into the
+// claim's gh directory, its caller holding the launch lock past the refusal, and answers the
+// bundle's default owner, the directory GH_CONFIG_DIR names: "" when the runtime mints no
+// credential or the controller's gh acts as nobody.
+func (r *Runtime) writeGitHubCredential(spec runtime.SpawnSpec, credential launchGitHubCredential) (string, error) {
+	switch {
+	case credential.root == "":
+		return "", nil
+	case credential.noOwner:
+		// A project with no GitHub owner to mint for still runs its controller, with gh acting
+		// as nobody, as `legion controller start` and the sandbox runtime do there: its gh
+		// directory empty, so no token an earlier launch wrote outlives this one.
+		if err := emptyGitHubBundle(credential.root); err != nil {
+			return "", fmt.Errorf("spawn %s: empty the github credential: %w", spec.Claim, err)
+		}
+		r.log.Info("tmux runtime: no GitHub owner to act for; the controller's gh acts as nobody", "claim", spec.Claim)
+		return "", nil
+	}
+	bundle := credential.bundle
+	if _, err := ghconfig.WriteBundle(credential.root, bundle); err != nil {
+		return "", fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
+	}
+	written := bundle.Owners[bundle.Default]
+	r.log.Info("tmux runtime: github credential written", "claim", spec.Claim, "role", spec.Role, "app", written.App,
+		"expiresAt", written.ExpiresAt, "owners", bundle.OwnerNames())
+	return bundle.Default, nil
 }
 
 // openPane puts the pane on the server, its caller holding the launch lock: into the window of a
