@@ -430,7 +430,9 @@ export const dispatchToolSpecs = [
       "replaces the issue's own attachment. Closing an issue " +
       "(status done) requires reason, the note that says why: it is posted on the issue as a " +
       "message, then the issue closes, because a closed issue refuses messages, comments, and " +
-      "artifacts; reason goes only with status done. A closed issue takes only a board move " +
+      "artifacts; reason goes only with status done. Closing an issue withdraws every open ask " +
+      "it holds (resolution kind withdrawn, naming the closer), and reopening it brings exactly " +
+      "those asks back. A closed issue takes only a board move " +
       "(before, after), components, " +
       "a reopening status (any status but done), and an external_links write that adds no new " +
       "link (so a link can move to the issue that replaced it); everything else, priority " +
@@ -732,7 +734,9 @@ export const dispatchToolSpecs = [
       'closed in the document too. A reason beginning "removed from the document in version" is ' +
       "refused: that marks a retraction the document's own settlement wrote. Use retracted for an ask " +
       "a newer one replaces or the design made moot, resolved for one whose answer you found; an " +
-      "answered ask cannot be resolved, and resolving records no decision by a person.",
+      "answered ask cannot be resolved, and resolving records no decision by a person. An issue's " +
+      "close withdrew its open asks (kind withdrawn, which only Dispatch writes, never this tool); " +
+      "an ask on a closed issue is refused (409 ISSUE_CLOSED): reopen the issue first.",
     arguments: (z) => ({
       ask: z
         .string()
