@@ -130,15 +130,24 @@ func TestSharedRulesSitInCommonOnceAndRoleRulesInTheirCores(t *testing.T) {
 	}
 }
 
+// A finding outside the tree takes one of two paths (skill://legion-worker/references/findings.md):
+// a clear defect goes to the controller, and a finding that needs a decision is an ask. The headless
+// fragment composed into the same planner prompt says the same, so the core may not say "always an ask".
 func TestPlannerKeepsFindingsAndHumanToDoAsksOutsideDesignQuestions(t *testing.T) {
 	planner := rolePart(t, "core/planner.md")
 	for _, rule := range []string{
 		"Read the repository's `STRATEGY.md` when it has one",
-		"A finding outside the tree, and a to-do only a person can do, is always an ask.",
+		"A finding outside the tree is never an issue you file.",
+		"A clear defect in code this tree touches or depends on is fixed in this tree's own pull request.",
+		"Any other clear defect goes to whoever coordinates the project's work, with its evidence, and a finding that needs a decision is an ask.",
+		"A to-do only a person can do is always an ask.",
 	} {
 		if !strings.Contains(planner, rule) {
 			t.Errorf("core/planner.md does not contain %q", rule)
 		}
+	}
+	if strings.Contains(planner, "A finding outside the tree, and a to-do only a person can do, is always an ask.") {
+		t.Error("core/planner.md still makes every finding outside the tree an ask, which contradicts the headless fragment's clear-defect path")
 	}
 }
 

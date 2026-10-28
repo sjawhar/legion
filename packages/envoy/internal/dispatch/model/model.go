@@ -228,10 +228,11 @@ const (
 	RouteUnknown = "unknown"
 )
 
-// IssueRouteReach is whether an issue's route reaches anyone: resolved on read from one
-// listener roster per request, stored nowhere, and never part of an event payload, which is
-// why it sits beside Issue in a read response rather than in it. Both fields are null for an
-// issue with no route; RouteHolder names the session only when RouteStatus is RouteLive.
+// IssueRouteReach is whether an issue's route reaches anyone: resolved on read from the server's
+// copy of the listener's session list, at most 5 s old, stored in no table, and never part of an
+// event payload, which is why it sits beside Issue in a read response rather than in it. Both
+// fields are null for an issue with no route; RouteHolder names the session only when
+// RouteStatus is RouteLive.
 type IssueRouteReach struct {
 	RouteStatus *string `json:"route_status"`
 	RouteHolder *string `json:"route_holder"`
@@ -590,6 +591,22 @@ type ArtifactReviewEventPayload struct {
 	Actor      Actor   `json:"actor"`
 	Reason     *string `json:"reason"`
 	AskID      *string `json:"ask_id"`
+}
+
+// ArtifactHumanEditedEventPayload is the payload of artifact.human_edited, which Dispatch appends
+// once a document has been quiet for a while after a person's settled browser edit: the versions
+// the quiet window spans (FromVersion is the one before the window's first person's version,
+// ToVersion the window's last person's version), the people who wrote them, and the unified diff
+// of the two versions' stored markdown, cut at its last line end within 4,096 bytes, with
+// DiffTruncated saying it was cut.
+type ArtifactHumanEditedEventPayload struct {
+	ArtifactID    string   `json:"artifact_id"`
+	Name          string   `json:"name"`
+	FromVersion   int      `json:"from_version"`
+	ToVersion     int      `json:"to_version"`
+	Editors       []string `json:"editors"`
+	Diff          string   `json:"diff"`
+	DiffTruncated bool     `json:"diff_truncated"`
 }
 
 // ArtifactBlock is an addressable document block and its byte range in canonical markdown. Table
@@ -1365,13 +1382,58 @@ type ArtifactReferences struct {
 // GraphNode is one end of a reference-graph edge. IssueKey and Project locate it; an artifact an
 // agent's conversation owns has neither and is located by Ref alone
 // (`dispatch://agent/<session id>/artifact/<slug>`). Ref is its dispatch:// address and is empty
-// for session nodes, which have none.
+// for session nodes, which have none. The edges into and out of a node are the reads `?to=` and
+// `?from=` of its Ref.
+//
+// Every node carries six facts, whatever its kind: MadeBy and MadeAt, who made it and when;
+// ChangedBy and ChangedAt, who last changed its own text or fields and when (its maker while
+// nothing has changed it since); Parent, the node it belongs to; and ParentVersion, the version of
+// the parent it belongs to. A fact Dispatch never recorded is empty: MadeBy and ChangedBy are then
+// `[]`, never null, and the others null.
+//
+// A block node (kind `block`, id `<document ref_key>#<block id>`) also carries BlockID, its
+// document's reference as Document, and ChangedVersion, the document version in which its text
+// last changed (ChangedAt is that version's time). Text and Pin are set only on the node a
+// reference read names: Text is the block's whole current text, and Pin answers a reference pinned
+// to a version.
 type GraphNode struct {
-	Kind     string  `json:"kind"`
-	ID       string  `json:"id"`
-	IssueKey *string `json:"issue_key,omitempty"`
-	Project  string  `json:"project,omitempty"`
-	Ref      string  `json:"ref,omitempty"`
+	Kind           string      `json:"kind"`
+	ID             string      `json:"id"`
+	BlockID        string      `json:"block_id,omitempty"`
+	IssueKey       *string     `json:"issue_key,omitempty"`
+	Project        string      `json:"project,omitempty"`
+	Ref            string      `json:"ref,omitempty"`
+	Document       string      `json:"document,omitempty"`
+	ChangedVersion int         `json:"changed_version,omitempty"`
+	MadeBy         []Actor     `json:"made_by"`
+	MadeAt         *time.Time  `json:"made_at"`
+	ChangedBy      []Actor     `json:"changed_by"`
+	ChangedAt      *time.Time  `json:"changed_at"`
+	Parent         *NodeParent `json:"parent"`
+	ParentVersion  *int        `json:"parent_version"`
+	Text           string      `json:"text,omitempty"`
+	Pin            *BlockPin   `json:"pin,omitempty"`
+}
+
+// NodeParent names the node a graph node belongs to: its kind and its node id (an artifact's
+// uuid, an issue's key, a component's `<project>/<id>`), and Ref, its dispatch:// address,
+// absent for a parent that has none (a session, a direct message, a document no project owns).
+type NodeParent struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+	Ref  string `json:"ref,omitempty"`
+}
+
+// BlockPin is a block reference pinned to a version of its document (`#b-<id>@v<N>`): the
+// pinned reference, the block's whole text at that version, and how the block stands now. State
+// is "unchanged" when its current text equals Text, "changed" when it differs, and "removed"
+// when no current version holds the block; RemovedVersion is then the version that deleted it.
+type BlockPin struct {
+	Version        int    `json:"version"`
+	Ref            string `json:"ref"`
+	Text           string `json:"text"`
+	State          string `json:"state"`
+	RemovedVersion int    `json:"removed_version,omitempty"`
 }
 
 // GraphExcerpt is the text shown for an edge: the block containing a document mention (with its
@@ -1384,10 +1446,13 @@ type GraphExcerpt struct {
 // GraphEdge is one typed, timestamped edge of graph_edges seen from the queried node: Node is
 // the other end, Direction is "in" for edges pointing at the queried node and "out" for edges
 // it writes. SourceSeq is the events.id that introduced a mention; nil for structural edges.
+// Block, on a document's read, names the document's block at the queried end: the block an
+// inbound edge points at, or the block that holds an outbound link.
 type GraphEdge struct {
 	Kind      string        `json:"kind"`
 	Direction string        `json:"direction"`
 	Node      GraphNode     `json:"node"`
+	Block     *GraphNode    `json:"block,omitempty"`
 	Excerpt   *GraphExcerpt `json:"excerpt,omitempty"`
 	CreatedAt time.Time     `json:"created_at"`
 	SourceSeq *int64        `json:"source_seq"`
@@ -1397,6 +1462,25 @@ type GraphEdge struct {
 type GraphReferences struct {
 	Node  GraphNode   `json:"node"`
 	Edges []GraphEdge `json:"edges"`
+}
+
+// BlockLink is one link from a block of one document to a block of a document: its edge kind,
+// both block nodes, and when and in which version of its document the source block first held
+// it.
+type BlockLink struct {
+	Kind           string    `json:"kind"`
+	From           GraphNode `json:"from"`
+	To             GraphNode `json:"to"`
+	CreatedAt      time.Time `json:"created_at"`
+	CreatedVersion int       `json:"created_version"`
+}
+
+// BlockLinks is GET /api/v1/block-links: the two documents and the links from blocks of From to
+// blocks of To, newest first.
+type BlockLinks struct {
+	From  GraphNode   `json:"from"`
+	To    GraphNode   `json:"to"`
+	Links []BlockLink `json:"links"`
 }
 
 // Event is the immutable event-log record for a Dispatch mutation.

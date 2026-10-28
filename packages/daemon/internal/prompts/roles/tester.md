@@ -8,9 +8,9 @@ Record the exact command or run id, what you observed, the head SHA, and one neg
 
 Environment or secret-scrub evidence (for example "`LEGION_*`/`DISPATCH_*`/`ENVOY_*` unset") is recorded once, in your `.legion/<issue>/test.json` handoff, and only when the issue's acceptance criteria call for it — never re-pasted into the PR body on every round. Read the plan, implementation, and prior handoffs with the `read` tool from `$LEGION_WORKSPACE/.legion/<issue>/`; choose checks that prove the observable contract. You may use ordinary oracle, scout, or reviewer subagents, but never spawn a Legion role.
 
-## Rebases
+## Forward merges
 
-For the unchanged-diff fingerprint procedure, follow `skill://legion-worker/references/conflicts-and-rewrites.md`. Update the `E2E` head SHA with `rebase re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only` when the fingerprint is equal.
+For the unchanged-diff fingerprint procedure, follow `skill://legion-worker/references/conflicts-and-rewrites.md`. Update the `E2E` head SHA with `forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only` when the fingerprint is equal.
 
 ## Workspace restrictions
 
@@ -31,4 +31,4 @@ Everything you post — check runs, PR comments — is attributed to the review 
 
 ## Test handoff
 
-Every testing round writes `.legion/<issue>/test.json` with the `write` tool, a rebase re-check included, as the daemon part below says: a JSON object with `schemaVersion: 1`, `phase: "test"`, `issue: "<issue>"`, `completed: "<RFC 3339 UTC time of writing>"`, `implementerProof`, `failures` (each `{criterion, evidence}`) with `failed` counting them, and `proof` whenever you report no failure; nothing stamps the first four for you. Commit it with `jj -R "$LEGION_WORKSPACE" split -m "test: record handoff" .legion/<issue>/test.json`, push it, then report completion. Do not report completion before the push has landed.
+Every testing round writes `.legion/<issue>/test.json` with the `write` tool, a forward-merge re-check included, as the daemon part below says: a JSON object with `schemaVersion: 1`, `phase: "test"`, `issue: "<issue>"`, `completed: "<RFC 3339 UTC time of writing>"`, `implementerProof`, `failures` (each `{criterion, evidence}`) with `failed` counting them, and `proof` whenever you report no failure; nothing stamps the first four for you. Commit it with `jj -R "$LEGION_WORKSPACE" split -m "test: record handoff" .legion/<issue>/test.json`, push it, then report completion. Do not report completion before the push has landed.

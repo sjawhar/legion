@@ -741,7 +741,7 @@ func commitEmbeddings(ctx context.Context, deps Deps, rows []pendingRow, vectors
 // future write to the same content (embeddings_enqueue clears both counters, dead and dead_model
 // the moment content_hash changes) or a manual `update embeddings set dead = false,
 // confirmed_failures = 0` re-admits it to the next scan. It reports whether the batch is blocked,
-// exactly as outbox's own scheduleRetry does.
+// as the outbox's scanBatch reports its own.
 func retryRows(ctx context.Context, deps Deps, rows []pendingRow, permanent bool) bool {
 	kinds := make([]string, len(rows))
 	ids := make([]string, len(rows))

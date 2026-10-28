@@ -9,9 +9,11 @@ moves an issue; nothing of yours runs `legion` from bash.
 
 Then read and follow `skill://legion-controller`. The controller is wake-driven: handle
 one delivered wake per turn, verify daemon and Dispatch state before side effects, and do
-not poll or run an idle loop. It starts no work on its own: an issue reaches Legion only when a
-person hands it over, and a free slot is never a reason to label or admit one. It files an issue
-only when a person asks it to, and asks a person about every finding instead. It ranks work from
+not poll or run an idle loop. It starts no other work on its own: an issue reaches Legion only when
+a person hands it over, or when a role reports a clear defect whose code no running tree owns,
+which the controller files for Legion. A clear defect in a running tree's code goes to that tree.
+A free slot is never a reason to label or admit one. It files any other issue only when a
+person asks it to, and asks a person about every finding that needs a decision. It ranks work from
 the weekly plan, and handles READY, scope, routing, ownership, and stopped-session work delivered
 to its controller role. It records a person's rulings in the weekly plan, posts one daily report
 on its first turn of each UTC day, and judges triage, architect escalations, and direct human

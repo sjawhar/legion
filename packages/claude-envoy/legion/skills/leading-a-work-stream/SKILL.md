@@ -19,6 +19,7 @@ In a Legion tree, the daemon's workflow and your role prompt decide who starts a
 4. **Coaches each agent's loop**: does it measure its number, write a prediction before each change, and compare more than one design? Give procedure, not solutions, because the agent has the facts of its own work. Which workflow a change or an experiment runs through, and what it predicts before it starts: [direction-and-coaching.md](skill://leading-a-work-stream/references/direction-and-coaching.md).
 5. **Makes the stream faster**: finds where agents lose time and changes the skill, tool or step that causes it.
 6. **Proves its facts with a command.** A claim about what exists or what a thing can do rests on a command and its output, not on a reading. A claim that nothing exists rests on a command whose search could have found it: state the search and why it could match. A lead's facts about its own stream are the ones nobody else checks.
+7. **Keeps the stream's record of what each agent accepted.** At each check-in, read it against the agents' issues and open asks. An item that is neither done, in progress, nor an open ask is dropped work. The lead finds its owner and has it recorded at once.
 
 ## The speed loop
 

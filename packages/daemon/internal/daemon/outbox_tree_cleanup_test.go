@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -270,7 +271,7 @@ func TestANeverOpenedTreesLingerClosesFinishWithoutRetrying(t *testing.T) {
 		pool:            pool, records: records, supervisor: sup, trees: st, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "backlog"}}, handlers: []intake.Handler{engine, admission},
 		now: func() time.Time { return time.Now().Add(time.Hour) }, log: slog.New(slog.NewJSONHandler(&logs, nil)),
-		remove: func(context.Context, workspace.Workspace) error { return nil },
+		remove: func(context.Context, workspace.Workspace, sync.Locker) error { return nil },
 	}
 
 	// A person moves the waiting root to backlog: it leaves the line and lingers.
