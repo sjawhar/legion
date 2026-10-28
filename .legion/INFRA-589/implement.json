@@ -2,48 +2,33 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-589",
-  "completed": "2026-10-28T13:00:00Z",
-  "round": 7,
-  "answersReview": "review.json round 3 at code head d32d754f: four correctness findings and the listed wording/cleanup points, all fixed in one push (5edd1f88) per the architect's cap; 19 threads answered and resolved individually.",
+  "completed": "2026-10-28T13:45:00Z",
+  "round": 8,
+  "answersTestFailures": "test.json (tester round 7) failure 1: added text outside .legion/ carried Dispatch keys and dispatch:// links. Key cleanup only, no code change, per the architect's cap decision (8530db16).",
   "proof": [
     {
-      "criterion": "Findings 1 and 2: no refusal names a caller that is only waiting; a record with a foreign pidns and a live local pid is refused as not visible",
-      "surface": "packages/envoy/loadtest/common.sh through loadtest/common.test.sh on this pod (no stack needed)",
-      "command": "cd packages/envoy && bash loadtest/common.test.sh",
-      "observed": "7 PASS, including 'two callers that wait at once on a holder this PID namespace cannot see never name each other' and 'a record of another PID namespace whose pid runs here is refused as not visible, not naming that pid'; exit 0",
-      "headSha": "5edd1f88f1fd8141f8c062e2a802ae25c44d9be4",
-      "negativeControl": "on the old common.sh the two new cases failed: caller 2's refusal named caller 1's pid as holder without 'not visible', and a foreign-namespace record's pid was named as the holder"
+      "criterion": "Text this branch adds outside .legion/ carries no Dispatch key, project key or dispatch:// link, apart from the {key_ref} template lines",
+      "surface": "the branch diff against its fork point with main",
+      "command": "jj diff --git --from 'fork_point(main@origin | 8530db16)' --to 8530db16 -- '~.legion' | grep '^+' | grep -v '^+++' | grep -nE 'INFRA-[0-9]+|\\bLINUX\\b|dispatch://'",
+      "observed": "three lines, all the {key_ref} template: README.md '`{key_ref}`: `dispatch://<key>`', routes-2026-10-26-1719Z.txt's placeholder line, and routes.go's url.QueryEscape(\"dispatch://\"+is.Key); quoted in the PR body",
+      "headSha": "8530db16ff548fa0ab01d09e0182eef0f4ee3edb",
+      "negativeControl": "the same grep at 945d9940 found 19 lines (the tester's evidence)"
     },
     {
-      "criterion": "Finding 4 and the architect's decision: no step file or output holds a URL password or a token",
-      "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion pod, LOADTEST_ROOT=/legion/scratch/tmp/dispatch-loadtest",
-      "command": "stack.sh reset; stack.sh loadgen run -allow-foreign with the stack's real -token/-listener-token and a random password in the userinfo of -url, -listener, -nats, -nats-mon, -pprof and -pg; loadgen tables; grep -cF the password and both tokens over every step file, TABLES.md, stdout and stderr",
-      "observed": "exit 0; password matches 0, token matches 0; meta.json args normalized (-name=value) with '-token=<redacted>', '-listener-token=<redacted>' and user-only URLs such as '-pg=postgres://postgres@127.0.0.1:15432/dispatch?sslmode=disable'; 25 of 31 writes committed, 6 non-2xx (person writes carry no bearer, so Go sent the -url userinfo as Basic auth: 401), counted as such",
-      "headSha": "5edd1f88f1fd8141f8c062e2a802ae25c44d9be4",
-      "negativeControl": "user-only URLs remain in meta.json args (the user names are kept, only the password goes); TestAForeignRunsMetaHoldsNoTokenOrPassword and TestGuardPrintsNoURLPassword"
-    },
-    {
-      "criterion": "Finding 3: no NATS rate is computed from a failed read; a normal step still measures",
-      "surface": "same pod and CLI",
-      "command": "run-step.sh smoke-r12 --events 2 --sessions 50 --requests 10 --duration 60s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20; go test ./loadtest",
-      "observed": "exit 0; committed/offered 16/16, 22/22, 20/20, 35/35, 23/23; receipts 580/580; clock_anomalies 0; nats_in_msgs_per_s 10.3, nats_out_msgs_per_s 22.0, nats_read_errors 0; no mark in TABLES.md; unit tests cover rates from the first and last reads that worked (null below two) and context-cancelled reads neither counted nor marked",
-      "headSha": "5edd1f88f1fd8141f8c062e2a802ae25c44d9be4",
-      "negativeControl": "the NATS-rate unit test feeds a failed first and last read and expects the rate from the middle reads, and null with one good read"
+      "criterion": "The changelog fragment names the pull request, not a key",
+      "surface": "packages/envoy/.changes/unreleased/",
+      "command": "cd packages/envoy && go run github.com/miniscruff/changie@v1.26.0 new --kind Added --body <the previous body> --custom Issue=pr2369; compare the bodies",
+      "observed": "pr2369-Added-20261028-133210.yaml with kind Added and Issue: pr2369; its body is byte-identical to the previous fragment's (INFRA-589-load-test-harness.yaml, removed); the round-3 thread PRRT_kwDORFy7ds6xHEEn has a reply citing the architect's decision",
+      "headSha": "8530db16ff548fa0ab01d09e0182eef0f4ee3edb",
+      "negativeControl": "go test -count=1 ./loadtest ok, run-step.test.sh 4 PASS, common.test.sh 7 PASS: nothing but comments, README text and the fragment changed"
     }
   ],
   "filesChanged": [
-    "packages/envoy/loadtest/common.sh, common.test.sh, stack.sh, run-step.sh, run-series.sh, run-step.test.sh (history comment only)",
-    "packages/envoy/loadtest/guard.go, run.go, sample.go, tables.go, util.go and tests (tables_test.go, delivery_test.go, lockprobe_test.go, locksampler_test.go, sample_test.go, pgpoll_test.go, guard_test.go, run_test.go); commits_unread_test.go and pgreads_test.go removed with their tests moved",
-    "packages/envoy/loadtest/README.md, packages/envoy/AGENTS.md, .github/workflows/envoy-and-contracts.yaml",
-    "packages/envoy/.changes/unreleased/INFRA-589-load-test-harness.yaml (renamed from pr2369-Added-20261028-102101.yaml)"
+    "packages/envoy/.changes/unreleased/pr2369-Added-20261028-133210.yaml (replaces INFRA-589-load-test-harness.yaml)",
+    "packages/envoy/loadtest/README.md, events.go (comments), common.test.sh (comment), routes-2026-10-26-1719Z.txt (comment)"
   ],
-  "trickyParts": [
-    "Waiters try the lock on descriptor 8 and dup it to 9 only after flock succeeds, so lock_holders (which scans descriptor 9) sees only real holders.",
-    "Under -allow-foreign a URL flag whose value is not a URL is refused naming only the flag, so an error never echoes a keyword/value connection string with its password."
-  ],
-  "deviations": [
-    "At the reviewer's request the tester's red test TestTablesDoNotShowUnreadCommitsAsZero moved from commits_unread_test.go into tables_test.go, keeping its name and every assertion; and run-step.test.sh's history comment was reworded (no assertion changed)."
-  ],
+  "trickyParts": [],
+  "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": []
 }
