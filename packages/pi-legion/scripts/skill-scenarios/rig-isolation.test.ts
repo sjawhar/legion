@@ -22,7 +22,8 @@ import path from "node:path";
 //   - seed.ts: records the Dispatch that each seed reached, and writes the fixture;
 //   - tmux: runs the pane's command at once;
 //   - mise: answers `mise where <pin>` with a pin whose bin/omp is the agent, which records the
-//     Dispatch variables of its environment (a run names its pin's omp by path).
+//     Dispatch variables of its environment, and runs `mise x <pin> -- <command>` as the command
+//     (a run names its pin's omp by path).
 // Each run must get a database of its own, a server of its own and a DISPATCH_URL of its own, and
 // must stop its server when it ends.
 setDefaultTimeout(120_000);
@@ -132,7 +133,9 @@ put(
   path.join(bin, "mise"),
   [
     "#!/usr/bin/env bash",
-    `[ "$1" = where ] && echo ${JSON.stringify(path.join(bin, "pin"))}`,
+    `if [ "$1" = where ]; then echo ${JSON.stringify(path.join(bin, "pin"))}; exit 0; fi`,
+    'while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done',
+    'shift && exec "$@"',
     "",
   ].join("\n"),
   0o755
