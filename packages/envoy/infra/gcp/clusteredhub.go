@@ -44,9 +44,10 @@ const (
 	// The fixed sizes, request and limit, of each hub pod's two sidecars, the chart's config
 	// reloader and its Prometheus exporter, which Autopilot counts in the pod's request beside
 	// nats-server. Autopilot's floors and memory-per-CPU ratio apply to the pod's total
-	// (autopilotPodMinCPU and the rest), so the sidecars need only be large enough to run: the
-	// reloader watches one directory and signals one process, and the exporter holds one scrape of
-	// the server's JetStream report (-jsz=all), which grows with the streams and consumers.
+	// (clusteredHubPodMinCPU, autopilotPodMinMemory and the rest), so the sidecars need only be
+	// large enough to run: the reloader watches one directory and signals one process, and the
+	// exporter holds one scrape of the server's JetStream report (-jsz=all), which grows with the
+	// streams and consumers.
 	clusteredHubReloaderCPU    = "50m"
 	clusteredHubReloaderMemory = "64Mi"
 	clusteredHubExporterCPU    = "50m"

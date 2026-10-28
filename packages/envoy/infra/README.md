@@ -454,9 +454,15 @@ runtime lets the heap grow to about twice its live size before it collects, so a
 map of 3.4 GiB could reach the container's limit and have it OOM-killed; with it the runtime
 collects before the heap reaches the limit, which is why F divides by 0.8.
 
-Autopilot sizes a pod by its containers' sum, so the component holds each pod to the bounds
-`gcp:Dispatch` holds its app pod to: at least `500m` and `512Mi`, between 1 and 6.5 GiB of memory
-per CPU, and at most 30 CPU and `110Gi`. The hub pod counts nats-server with the reloader's `50m`
+Autopilot sizes a pod by its containers' sum, so the component holds each pod to Autopilot's
+general-purpose bounds for a pod with neither pod anti-affinity nor the safe-to-evict annotation,
+which none of the hub's pods carries (they spread by topology spread constraints alone): at least
+`250m` and `512Mi`, the minimum on a cluster without bursting (one with bursting runs pods from
+`50m` and `52Mi`), between 1 and 6.5 GiB of memory per CPU, and at most 30 CPU and `110Gi`
+([Autopilot resource requests](https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests)).
+`gcp:Dispatch`'s pods carry pod anti-affinity, so their floor is `500m` instead. The tailnet host
+pod's fixed containers already make `300m` and `576Mi`, so only the ratio and the ceilings can
+refuse its listener's size. The hub pod counts nats-server with the reloader's `50m`
 and `64Mi` and the exporter's `50m` and `128Mi`, so `5Gi` at the default `natsCpu` of 1 makes a
 pod of `1100m` and `5312Mi`, about 4.7 GiB per CPU, and a larger `natsMemory` may need `natsCpu`
 raised with it: the refusal names `natsCpu` then. The tailnet host pod counts the listener with the

@@ -46,9 +46,20 @@ type autopilotPod struct {
 // it before 's, such as "the reloader".
 type autopilotSidecar struct{ name, cpu, memory string }
 
+// clusteredHubPodMinCPU is the least CPU Autopilot runs one of the clustered hub's pods at without
+// raising its request: 250m, the general-purpose compute class's minimum for a pod with neither pod
+// anti-affinity nor the safe-to-evict annotation, without bursting
+// (https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests,
+// "Minimums and maximums for compute classes"). The hub's pods and its tailnet hosts carry
+// neither: they spread by topology spread constraints alone. gcp:Dispatch's pods carry pod
+// anti-affinity, so its floor is autopilotPodMinCPU, 500m. The memory floor, 512Mi, is the same for
+// both shapes (autopilotPodMinMemory). A cluster with bursting runs pods as small as 50m and 52Mi,
+// so these floors hold on a cluster with or without it.
+var clusteredHubPodMinCPU = big.NewRat(1, 4)
+
 // autopilotPodSize resolves pod's main container's CPU and memory (appQuantity's rules) and
 // refuses a size at which Autopilot would not run the pod as rendered: the pod's total, with its
-// sidecars', below autopilotPodMinCPU or autopilotPodMinMemory or outside the memory-per-CPU
+// sidecars', below clusteredHubPodMinCPU or autopilotPodMinMemory or outside the memory-per-CPU
 // ratio (Autopilot raises the smaller of the two, so the refusal names that one's input), or above
 // autopilotPodMaxCPU or autopilotPodMaxMemory (Autopilot rejects the pod). Each refusal is a
 // core.InputError naming cpuInput or memoryInput, and quotes the sidecars' sizes it counted.
@@ -81,9 +92,9 @@ func autopilotPodSize(pod autopilotPod) (cpu, memory string, err error) {
 	cpuOf := func(s autopilotSidecar) string { return s.cpu }
 	memoryOf := func(s autopilotSidecar) string { return s.memory }
 	switch {
-	case podCPU.Cmp(autopilotPodMinCPU) < 0:
-		return "", "", core.InputErrorf(pod.cpuInput, "%s %q must be at least %s: %s %s would request less than %s, below which Autopilot raises it",
-			pod.cpuInput, cpu, milliCPU(new(big.Rat).Sub(autopilotPodMinCPU, sidecarCPU)), with(cpuOf), pod.name, milliCPU(autopilotPodMinCPU))
+	case podCPU.Cmp(clusteredHubPodMinCPU) < 0:
+		return "", "", core.InputErrorf(pod.cpuInput, "%s %q must be at least %s: %s %s would request less than %s, below which Autopilot raises a pod with neither pod anti-affinity nor the safe-to-evict annotation",
+			pod.cpuInput, cpu, milliCPU(new(big.Rat).Sub(clusteredHubPodMinCPU, sidecarCPU)), with(cpuOf), pod.name, milliCPU(clusteredHubPodMinCPU))
 	case podCPU.Cmp(autopilotPodMaxCPU) > 0:
 		return "", "", core.InputErrorf(pod.cpuInput, "%s %q must be at most %s: %s %s would request above %s CPU, and Autopilot rejects such a pod",
 			pod.cpuInput, cpu, milliCPU(new(big.Rat).Sub(autopilotPodMaxCPU, sidecarCPU)), with(cpuOf), pod.name, autopilotPodMaxCPU.RatString())

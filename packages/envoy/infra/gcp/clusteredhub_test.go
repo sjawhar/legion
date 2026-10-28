@@ -361,6 +361,21 @@ func TestClusteredNatsHubTakesStreamMaxBytesWithoutTailnet(t *testing.T) {
 	require.Equal(t, 1<<30, s.StreamMaxBytes)
 }
 
+// The hub's pods and its tailnet hosts carry neither pod anti-affinity nor the safe-to-evict
+// annotation, so Autopilot's CPU floor for them is 250m, not gcp:Dispatch's 500m: a hub pod of
+// natsCpu 300m with its sidecars' 100m (400m) and a tailnet pod of listener cpu 150m with its
+// containers' 300m (450m) are taken as given. A hub pod of 200m is refused
+// (TestClusteredNatsHubResolverRefusesInvalidInputs).
+func TestClusteredNatsHubTakesPodsAboveTheirOwnAutopilotFloor(t *testing.T) {
+	args := clusteredArgs()
+	args.NatsCpu = pulumi.StringRef("300m")
+	listener(args).Cpu = pulumi.StringRef("150m")
+	s, err := gcp.ResolveClusteredNatsHub(args)
+	require.NoError(t, err)
+	require.Equal(t, "300m", s.NatsCPU)
+	require.Equal(t, "150m", s.Tailnet.ListenerCPU)
+}
+
 // A refused input stops the constructor, named as the component and its name, before it
 // registers anything.
 func TestClusteredNatsHubRefusesAnInvalidInputBeforeRegistering(t *testing.T) {
