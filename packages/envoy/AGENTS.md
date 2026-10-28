@@ -232,22 +232,26 @@ a room whose append is slow to store, or whose editor keeps sending updates, spe
 A room with an editor connected (a spec tab holds the document's websocket) is settled while it is still loaded, and its editors are closed only once that settlement has returned:
 ygo's `CloseRoom` evicts the room as it closes them, and a settlement does not load a room during shutdown, so closing the room first would leave its settlement to the next process.
 An edit an editor makes while its room settles is left to the next process the same way, and so is a settlement that has to write into its room (stamping block ids, or restoring an ask block's server-owned attributes):
-Shutdown refuses every write into the rooms it is closing, and such a settlement logs `dispatch: skip shutdown document settlement that has to write into its room` at WARN.
+Shutdown refuses every write into the rooms it is closing, and such a settlement logs `dispatch: skip shutdown document settlement that has to write into its
+room` at WARN.
 A settlement the last browser's leaving started (`settleLastPeer`) is joined like a timer's.
-Shutdown cancels the database work of any settlement the budget cuts short so its transaction rolls back, and logs for each document that owed one whether it settled or was left to resume (`dispatch: document settled before shutdown`, `dispatch: document settlement left to resume after shutdown` with `shutdown_budget_ended`).
+Shutdown cancels the database work of any settlement the budget cuts short so its transaction rolls back, and logs for each document that owed one whether it settled or was left to resume (`dispatch: document settled before shutdown`, `dispatch: document settlement left to resume
+after shutdown` with `shutdown_budget_ended`).
 A settlement cut short is not an error; a caller's deadline that passes before Shutdown can read that back is, and its error names the documents that owed one.
 A 1 MiB `a_b*` document's settlement took 4.5-6.8 s at load 90-170 on the development machine, inside the 9 s drain budget, though a slower load or a bigger burst could still leave it to resume.
 
 `cmd/dispatch/shutdown.go` orders the process's shutdown inside `stopGrace` (30 s:
 ECS's default stop timeout, which Dispatch's task definition leaves unset, `stop_grace_period` in `deploy/compose/dispatch.compose.yml`, and the pod `infra`'s `gcp:Dispatch` renders, whose `terminationGracePeriodSeconds` is this value plus its five-second pre-stop wait, which the kubelet spends inside the same period - `cmd/dispatch/pod_grace_period_test.go` fails when the pod's budget stops covering it).
 Every open event stream ends at the signal through `api.Deps.Lifetime`, so HTTP shutdown waits only for the requests in flight, and it waits for them first, with no deadline of its own.
-The document service starts when they are done, or 11 s after the signal with some still running (`httpDrainBeforeDocuments`, `dispatch: settle documents with requests still in flight`), and gets `documentShutdownTimeout`, 5 s more than its drain budget (14 s total - the reserve outlasting a settlement still committing when the budget ends, not only reading back what did), so it is done 5 s before the runtime's kill.
+The document service starts when they are done, or 11 s after the signal with some still running (`httpDrainBeforeDocuments`, `dispatch: settle documents with
+requests still in flight`), and gets `documentShutdownTimeout`, 5 s more than its drain budget (14 s total - the reserve outlasting a settlement still committing when the budget ends, not only reading back what did), so it is done 5 s before the runtime's kill.
 The database pool closes once every request has answered and no connection of the shared or document-rooms pool is in use.
 While the database answers, nothing but the runtime's kill bounds that wait, as with the deferred close of the pool this replaced:
 a write still waiting on a lock commits and is answered if it finishes before the kill.
 The database has stopped answering once three health probes in a row (`silentProbes`, each `store.Pool.Healthy`'s two seconds) have failed with no connection of those two pools taken back while they ran;
 a probe that answers, or a connection taken back, starts the count again.
-Then Dispatch exits without the connections waiting on it (`dispatch: exit with database connections still in use once the database stopped answering`), and the database rolls back what they held open;
+Then Dispatch exits without the connections waiting on it (`dispatch: exit with
+database connections still in use once the database stopped answering`), and the database rolls back what they held open;
 with nothing in flight over HTTP that is about 21 s after the signal.
 
 An issue's task counts (`issues.tasks_done`, `tasks_total`, `tasks_version`, added by the `issue_task_progress` migration;
@@ -260,7 +264,8 @@ Every version write records the count in its own transaction (`docs.RecordTaskPr
 issue creation and an upload call `docs.RecordTaskProgressMarkdown` after they insert their version row, so the count names it).
 The row the API reads (`model.IssueProgress`, on `IssueSummary` and the issue read, never on an event payload) can lag its document - every row the migration found, any the task a deploy replaces versions while both run (its code records no count), a row another writer held - so `cmd/dispatch` runs `docs.Service.RunTaskProgressReconciliation`, which at start and every five minutes (`TaskProgressReconcileInterval`) counts again every issue whose `tasks_version` is not its document's greatest `artifact_versions.number` (`taskProgressDrift`), in batches of 50 under `for no key update … skip locked`:
 a full batch with drift left goes straight to the next, and a short or failed one is retried a bounded number of times in the pass;
-so a stale or missing count lasts at most that interval, and `tasks: null` on the API means a spec with no task list (total 0) or one still inside that window.
+so a stale or missing count lasts at most that interval, and `tasks: null` on the API means a spec with no task list (total
+0) or one still inside that window.
 
 A write never puts one block id on two blocks.
 `EnsureBlockIDs` keeps a repeated id for the first holder in document order, and ask rows and anchors are keyed on block ids, so a block written ahead of an answered ask under its id would take the ask's row and answer, and the question would come back as a fresh open ask.
@@ -293,7 +298,8 @@ It returns before any read-back, so a table-row insert is not read back, and it 
 a row inserted under an aligned column is stored without alignment and reads back with the column's, and a row whose cells the upload path refuses for reading back otherwise (a fused emphasis run, a link inside a link) is stored as it renders.
 Every other insert is spliced and read back on the document it leaves against the one it started from, as an accept is (`400 INVALID_OP` on `markdown`), but with the tables' colspans and rowspans unwritten:
 it runs once for each insert of a batch, and an insert, written between document-level blocks, changes no table, so each span reads back the same on both.
-The reading rules refuse every shape they know first, so this refusal names one none of them reads, and each is logged (`pmdoc: refused a write whose markdown reads back otherwise`).
+The reading rules refuse every shape they know first, so this refusal names one none of them reads, and each is logged (`pmdoc: refused a
+write whose markdown reads back otherwise`).
 Wherever a check reads a write back - here, and in an accept's, a replace's and an ask edit's checks - only a refusal (`pmdoc.ErrSchema`) is a verdict;
 any other error, a panic (`pmdoc.ErrPanic`) among them, is `pmdoc`'s own and answers `500`.
 A tree a browser edit makes is not checked, so its rendering can still fail to read back when it is uploaded again.
@@ -308,8 +314,8 @@ A state is kept only when it reads back as the document that made it: decoded in
 That catches a re-encoding that renumbers or drops a client's clocks, as a decoder that integrated the items after a skipped clock range would;
 ygo parks them (upstream since v1.51.0, reearth/ygo#257).
 It does not catch a re-encoding that keeps every clock and moves text, such as a lost right origin, which `TestACompactedDocumentKeepsItsOrderThroughLaterUpdates` guards on each ygo bump.
-A state that reads back otherwise, or a log the fold's document cannot apply (one parking more than the pending queue below holds), is logged (`dispatch: a document's stored updates do not fold into a state that reads back as them`):
-the load serves the stored updates merged whole, which for a log the fold cannot apply is what `loadDocument` decodes and refuses as `ErrDocumentUnloadable`, offering the rebuild, and compaction leaves them as stored without building that merge.
+A state that reads back otherwise, or a log the fold's document cannot apply (one parking more than the pending queue below holds), is logged (`dispatch: a document's stored updates do not fold into a state that
+reads back as them`): the load serves the stored updates merged whole, which for a log the fold cannot apply is what `loadDocument` decodes and refuses as `ErrDocumentUnloadable`, offering the rebuild, and compaction leaves them as stored without building that merge.
 Compaction (`Compact`, which ygo runs as a room closes and as the server shuts down, and the outbox runs over every document every 24 hours, `CompactAll`) folds the whole log into one row holding that state (`compactKeep`), whose `content_changed` says whether any row it folded past the latest version's cursor changed content.
 A compacted `doc_updates`, and any backup of it taken later, therefore holds no text a write deleted:
 text deleted before a version captured it is gone (the operator's decision, LEGION-496).
@@ -379,8 +385,8 @@ Issue-state advice is computed in the write transaction after its event is appen
 A stored document's decision blocks and unparsed openers are read from one parse of the canonical Markdown after the write transaction commits (`readDocumentBlocks`).
 Advice queries run behind a savepoint with a 500 ms timeout that is restored before the savepoint is released:
 a failure of either session-scoped query is logged and omits `advice` without preventing the write from committing, while the `legion_managed_status` walk, which takes a savepoint of its own inside that one, is logged and omits that field alone, keeping the advice already assembled.
-That matters most on an issue creation, where `computeAndPersistSuggestions` runs only once the advice survives (`if advice != nil`, `issue_create.go`), after it:
-a fatal advice failure there means LEGION-550's suggestions are never computed and no row is ever written, so what the walk's tolerance saves is the whole of that offer rather than a copy of something already stored.
+That matters most on an issue creation, where `computeAndPersistSuggestions` runs only once the advice survives (`if advice
+!= nil`, `issue_create.go`), after it: a fatal advice failure there means LEGION-550's suggestions are never computed and no row is ever written, so what the walk's tolerance saves is the whole of that offer rather than a copy of something already stored.
 An ask is the other way round - `asks.go` computes its suggestions first and falls back to a suggestions-only advice, so they survive a fatal advice failure there.
 The consecutive-write query counts only the calling actor's own events (it runs for a session caller alone;
 any other actor reports zero with no query) and materializes the last-human fence so its `max(id)` runs once, and relies on the `events (issue_key, seq)` unique index's issue prefix and commit-ordered event ids;
@@ -677,8 +683,8 @@ That path stamps no block ids, because `EnsureBlockIDs` would also repair a repe
 A block's new text is written as one span of its old text replaced, the characters between the two texts' shared prefix and suffix (`pmdoc.simpleDiff`), with its index and length counted in the UTF-16 units Yjs counts in (`units16`).
 The span is of whole characters, so an emoji that shares one half of its UTF-16 pair with the one it replaces (U+1F4CA and U+1F4CB share a high surrogate) is replaced whole;
 a span placed by comparing units would begin or end inside a pair, and ygo would store each half as U+FFFD.
-Every writer that rewrites a block's text goes through it:
-an edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded new version of a live document (`docs.ReplaceText`), an accepted or rejected suggestion (`applySuggestion`) and an ask edit (`SetAskBlockText`).
+Every writer that rewrites a block's text goes through it: an edit (`POST
+/api/v1/artifacts/{id}/edits`), an uploaded new version of a live document (`docs.ReplaceText`), an accepted or rejected suggestion (`applySuggestion`) and an ask edit (`SetAskBlockText`).
 Since `BlocksGainingText` reads the same span, a replacement whose old and new characters shared a surrogate now counts as writing text (its span inserts the new character), where a span cut inside the pair could insert nothing, so the lost-edit check above covers it.
 A splice cuts a text node only where a range's edge falls between characters:
 `slice16` answers an edge inside a pair with an error of the package's own (a `500`, never the `ErrSchema` verdict on the write), and a quote's ambiguity context rounds outward to whole characters (`context16`).
@@ -700,7 +706,8 @@ an id that gains an ask is refused whatever it held, since the id repair would h
 A reject (`POST /api/v1/comments/{id}/reject`, the same `applySuggestion`) is never checked, its asks included, since removing the text a browser insert added gives back the document the insert started from.
 It deletes that text as the browser editor's reject does (`rejectedInsert`):
 the insert's runs that meet across a block boundary, nothing but the boundary between them, are one range (`pmdoc.MarkSpans`), so the blocks join, which undoes the split an insert made (Enter typed while suggesting), and a table the range cuts is padded to its width as the editor's table plugin pads it (`pmdoc.PadTables`, after prosemirror-tables' `fixTables`).
-A removal the document cannot hold, one the schema refuses or the renderer cannot write, is refused, `400 INVALID_OP` on `anchor`, advising accepting the suggestion or editing the document (`rejectSpliceRefusal`), with the document unchanged and the suggestion open.
+A removal the document cannot hold, one the schema refuses or the renderer cannot write, is refused, `400
+INVALID_OP` on `anchor`, advising accepting the suggestion or editing the document (`rejectSpliceRefusal`), with the document unchanged and the suggestion open.
 A reject is not read back.
 Where it stores otherwise than the browser's reject, or refuses what the browser stores:
 
@@ -882,7 +889,9 @@ its callers are `api/comment_create.go` (the mention and route resolution behind
 Three of those decisions now read one session by id rather than scanning the live list:
 a comment mention's `session:` target, each selected recipient of a broadcast (`resolveBroadcastSessions`, eight reads in flight under one five-second budget) and whether an issue's claim holder is still working (`fetchHolderLiveness`).
 A list is one listener's cache of the session registry, so only the per-session read tells a session that ended from one that cache has not refilled yet, and a read that did not answer never reports the session gone:
-a broadcast and a claim are refused `503 ENVOY_UNAVAILABLE`, the broadcast with nothing written, while a mention's comment is still created `201` and that mention's delivery is recorded `failed` with the listener's own `envoy listener: …` text.
+a broadcast and a claim are refused `503
+ENVOY_UNAVAILABLE`, the broadcast with nothing written, while a mention's comment is still created `201` and that mention's delivery is recorded `failed` with the listener's own `envoy
+listener: …` text.
 A write - `Envoy.Send`, `Unsubscribe` - runs after a commit, never inside:
 the attempt is committed first, sent, and settled by a second short transaction, so a process that dies in between leaves a record of the attempt rather than losing it.
 
@@ -1300,14 +1309,16 @@ The block is read-only there, since the copy has no ask row an answer or resolve
 `dispatch request-approval`'s refusal and the dashboard's decision card name the source, its document and its state from those attributes, reading no ask.
 A copy shows its source as of its own last settlement, and settles again when its own content changes, when a restart resumes a settlement it owed, when its source is answered or resolved, when settlement retracts its source, and when its source's decided wording is restored (below):
 the answer and resolve routes (`SettleCopiesOf`), a retracting or restoring settlement (`reconcileAskBlocks`) and the boot's restoration (`RestoreDecidedWordings`) mark owed, in one `doc_settlements_pending` upsert (`markSettlementPending`), and arm once they commit, the settlement of every other document of the owner whose latest version holds the block with no ask of its own under that id (`lockedCopiesOf`, which takes the copy lock of each project among the documents it is given, in the projects' order, through `owedCopiesOf` for all but the boot).
-Each time settlement writes a copy's attributes into a block - the block becoming a copy, or the state it shows changing - it logs, once its transaction commits, `dispatch: settled an ask block as a copy of another document's ask` with the copy's `artifact` and `block`, the `source_ask`, its `source_document` and the `source_state` it shows, never the question; a copy left as it was logs nothing.
+Each time settlement writes a copy's attributes into a block - the block becoming a copy, or the state it shows changing - it logs, once its transaction commits, `dispatch: settled an ask block as a copy of another
+document's ask` with the copy's `artifact` and `block`, the `source_ask`, its `source_document` and the `source_state` it shows, never the question; a copy left as it was logs nothing.
 That line is how a block taken for a copy that was meant as a new question is found, since it opens no ask and reaches nobody's Inbox:
 a recurring templated ask under an id its author chose, asking what an earlier document of the owner already asked, is one.
 After a retraction the first copy to settle opens the block's own ask, credited to the author who wrote the block into it, whom the room keeps owed while the block is a copy;
 every other copy then matches that ask and names it, so copies of one owner share one ask once their source is retracted and the question waits in one place, and a block pasted elsewhere and then cut, in either order, is open in one place.
 That needs the owner's copies to settle one at a time:
 an issue's documents do, under their issue's row (`lockArtifactOwner`), but a project document's owner row is the document itself, so a project's copy bookkeeping - a settlement's copy-source read, and every marking of copies owed - takes a transaction advisory lock keyed on the project (`lockProjectCopies`), so nothing that locks the project's row waits on it.
-It is the two-key form, `pg_advisory_xact_lock(copiedAsksLockNamespace, hashtext(project))`, whose key space Postgres keeps apart from the single-key locks every other advisory lock here takes (a document's room, a project's rank allocation, the events' commit order), so it never waits on one of those;
+It is the two-key form, `pg_advisory_xact_lock(copiedAsksLockNamespace,
+hashtext(project))`, whose key space Postgres keeps apart from the single-key locks every other advisory lock here takes (a document's room, a project's rank allocation, the events' commit order), so it never waits on one of those;
 two projects whose hashes collide only take turns on their copy bookkeeping.
 Every holder takes it before any `doc_settlements_pending` row and before the events' commit-order lock (`TestCopyLockComesBeforeEveryPendingRowAndEvent`, a static check of every Dispatch function's calls in statement order), and a settlement deletes its own pending row before it appends its first event, since a route marking that document owed holds the row while it waits for the commit-order lock.
 Every other writer of a document's own pending row takes it before it appends an event too:
@@ -1328,11 +1339,13 @@ one restored open takes its block's text, one restored with its answer keeps the
 A decided ask that a release before this rule reworded - its row holding a document's edit beside the decision made on the wording before it - gets back the wording its decision was given on, the previous wording of the first `ask.edited` after its latest `ask.answered` or `ask.resolved` with no `ask.opened` between, in code rather than by a migration, since the pre-deploy census refuses a migration that rewrites rows (`cmd/dispatch/README.md`, "Pre-deploy census"):
 once at boot over every decided ask (`docs.Service.RestoreDecidedWordings`), and at every settlement over its document's decided asks (`restoreDocumentDecidedWordings`), which also undoes a rewording a task of that release writes during a rolling deploy.
 Both run `decidedWordingRestore`, one statement whose `$1` names the asks it may restore, null at boot for every decided ask;
-both re-index the restored question's references, log each ask they restore, its document and the question it asks again (`dispatch: restored a decided ask's wording`), never the wording it replaced, and mark the restored asks' copies owed:
+both re-index the restored question's references, log each ask they restore, its document and the question it asks again (`dispatch:
+restored a decided ask's wording`), never the wording it replaced, and mark the restored asks' copies owed:
 a copy that settled while its source's row held the rewording matched that wording and shows the decision on it, and its next settlement opens the block's own ask.
 The boot also marks each restored block ask's own document owed in the same upsert, since its block still asks the rewording beside the decision and nothing else settles that document until someone edits it;
 the settlement it arms writes the decided wording back into the block (a settlement's own restoration does that in the same pass).
-The boot then logs the asks' and the copies' counts (`dispatch: restored decided asks' wordings`, `restored=<n> copies=<n>`).
+The boot then logs the asks' and the copies' counts (`dispatch:
+restored decided asks' wordings`, `restored=<n> copies=<n>`).
 A route that changes an ask's text or lifecycle writes both:
 `PATCH /api/v1/asks/{id}` on a block ask (an open one;
 a decided one is `409 ASK_NOT_OPEN`) writes the block through the document ledger and then takes the row's values from what the block parses back to, and `POST /api/v1/asks/{id}/resolve` writes the block's `state`.
@@ -2875,14 +2888,17 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
 The secrets broker (`cmd/broker`, `internal/broker/`) issues secret grants, each lasting until its session ends or for the shorter lifetime its request signed, and key-bound launcher credentials to enrolled agent sessions and pods;
 `cmd/agent-secrets` is its client (a box's or pod's own key, or a machine session's `cmd/agent-secrets-helper`), which enrolls a runtime, requests grants, polls a pending decision to completion, and either prints session/grant state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into its environment.
 Every line it prints about a secret names the store it answered from (`cmd/agent-secrets/source.go`):
-the broker `AGENT_SECRETS_URL` names, and the kind of that broker's own store, read once from the public `GET /v1/settings` (`AWS Secrets Manager`, `GCP Secret Manager`), the broker alone where those settings cannot be read, as `the broker AGENT_SECRETS_URL names (GCP Secret Manager)`.
-The injection form writes one line to stderr before it execs, naming the injected names and that source, never a value (`agent-secrets: NAME from the broker AGENT_SECRETS_URL names (GCP Secret Manager)`;
+the broker `AGENT_SECRETS_URL` names, and the kind of that broker's own store, read once from the public `GET /v1/settings` (`AWS Secrets Manager`, `GCP
+Secret Manager`), the broker alone where those settings cannot be read, as `the broker
+AGENT_SECRETS_URL names (GCP Secret Manager)`.
+The injection form writes one line to stderr before it execs, naming the injected names and that source, never a value (`agent-secrets: NAME from the
+broker AGENT_SECRETS_URL names (GCP Secret Manager)`;
 `packages/envoy-client/src/slack-post.ts` matches its `agent-secrets: NAME from ` prefix);
 `request`, `status` and `self` print it as `source:`, and every denial, pending request and refusal carries it, so no answer or refusal of this CLI's is read as another secrets CLI's about the same name.
 None of these lines names the broker's host or the store's account, region or project, since an agent's output is quoted wherever it goes, a public pull request among them;
 only a broker that could not be reached is named, by its URL through `redact.URL`, so a stale address reads as one.
-Only the secret forms, which a person runs under their own cloud sign-in, name the store's account or project (`AWS Secrets Manager account <id> in <region>`, `GCP Secret Manager project <number>`):
-`secret show` as `store:`, `secret list` one line on stderr, with `store` on each row under `--json`.
+Only the secret forms, which a person runs under their own cloud sign-in, name the store's account or project (`AWS Secrets Manager account
+<id> in <region>`, `GCP Secret Manager project <number>`): `secret show` as `store:`, `secret list` one line on stderr, with `store` on each row under `--json`.
 No line names a secret's version: a grant's release carries names and values alone, and a session holds no sign-in of its own to the store.
 No output of `agent-secrets`, `agent-secrets-helper` (`internal/broker/helper`'s broker calls included) or `agent-secrets-devrelay` prints a credential the broker's URL carries:
 a message names that URL through `internal/redact`'s `URL`, an allow-list that prints the value as written only when it is provably a plain http(s) URL (printable ASCII with no `@`, `%`, `?`, `#`, backslash or whitespace;
@@ -2892,7 +2908,8 @@ An error net/http or net/url makes passes through `redact.Error(err, base)` (or 
 it is err itself only when base is clean, the URL that error names is base followed by nothing or a plain `/v1/` path (`redact.Call`;
 a redirect's target on another host or path, or with a query, is not), and the error it wraps is a transport failure (`net.OpError`, name resolution, refused, timeout, TLS, `http.ErrSchemeMismatch`, EOF, a reset, a broken pipe:
 the set `peerAnswered` reads), an HTTP status answer, or text the allow-list passes (a malformed `Location`'s error quotes the target and is not).
-Otherwise its text is the class alone (`name resolution failed`, `connection refused`, `timed out`, `TLS failed`, `the broker answered HTTP <n>`, `not a valid URL`, `the request failed`), found with errors.Is and errors.As on err, and it unwraps to err so callers classify as before.
+Otherwise its text is the class alone (`name resolution failed`, `connection refused`, `timed out`, `TLS failed`, `the broker answered
+HTTP <n>`, `not a valid URL`, `the request failed`), found with errors.Is and errors.As on err, and it unwraps to err so callers classify as before.
 `agent-secrets` refuses an id that `url.PathEscape` would change (`pathID`) before any call, never escaping it:
 the proof signs the URL as built and the broker rebuilds the htu from the decoded path.
 That refusal is a `refusedBeforeCall`, which `refusalText` prints with no `asked the broker` ending.
@@ -2922,7 +2939,8 @@ The launcher whose proof authenticates the enrollment chooses the slot; a sessio
 So each slot of a pod holds its own key, lease, requests and grants, while a pod's `runtime_id` stays the pod UID its token proves.
 A pod token past its expiry is `403 POD_TOKEN_EXPIRED`, naming that expiry, and any other token that does not prove the pod is `403 POD_IDENTITY_MISMATCH`.
 Omitted or `""` is the runtime's one enrollment, every `session` enrollment's.
-The same key in the same slot gets its live enrollment back (200), a different key in a live slot is `409 ALREADY_ENROLLED`, and the policy never sees the slot:
+The same key in the same slot gets its live enrollment back (200), a different key in a live slot is `409
+ALREADY_ENROLLED`, and the policy never sees the slot:
 a pod is a requester with no operator, whose service is its launcher credential's only when its verified subject matches `BROKER_SERVICES`.
 Migration 0007 is forward-only: an older broker binary's conflict lookup reads one live row per runtime id, unsafe once a pod holds two slots, so the binary is never rolled back past it once a slotted enrollment exists.
 An older broker binary refuses a `BROKER_SERVICES` that names a service for more than one account (`must give each service once`), and the broker is one pod, so once the setting names a service twice the image is never rolled back past this change without moving the setting back in the same step.
@@ -3080,7 +3098,8 @@ the first `gcloud` on PATH (`exec.LookPath`) lists its logins (`gcloud auth list
 a person's is an account named by a plain email the broker accepts as a person owner (`personAccount`:
 `policy.ValidPersonOwner`), never a `.gserviceaccount.com` one or a workload or workforce identity federation login, which gcloud names by a `principal://` identifier;
 it takes the one `CLOUDSDK_CORE_ACCOUNT` names when that is one of them, else the only one, refusing none (naming `gcloud auth login`) or several (naming each, and `CLOUDSDK_CORE_ACCOUNT`).
-Its tokens are `gcloudTokenArgs`, `gcloud auth print-access-token --format=value[private](token) --impersonate-service-account= --access-token-file= --credential-file-override= <account>`, behind `oauth2.ReuseTokenSource`, each taken to last `gcloudTokenLife` (5 minutes:
+Its tokens are `gcloudTokenArgs`, `gcloud auth print-access-token --format=value[private](token) --impersonate-service-account=
+--access-token-file= --credential-file-override= <account>`, behind `oauth2.ReuseTokenSource`, each taken to last `gcloudTokenLife` (5 minutes:
 gcloud prints no expiry, and refreshes a token within 300 s of its expiry before printing it).
 gcloud prints a command's output through its logger, whose file handler keeps a copy in `logs/` under gcloud's configuration directory, so the `private` format attribute writes the token to the console stream alone, and every gcloud run has `CLOUDSDK_CORE_DISABLE_FILE_LOGGING=1` and `CLOUDSDK_CORE_DISABLE_PROMPTS=1`.
 The empty flags clear impersonation, an access token file and a credential file override, whichever of the environment and the configuration file sets them (a flag outranks both, and an empty value turns the property off), and `gcloudEnv` drops `gcloudIdentityOverrides` (`CLOUDSDK_AUTH_ACCESS_TOKEN`, which gcloud reads directly, and the three properties' variables);
@@ -3160,7 +3179,8 @@ AWS's tag calls take no condition, so its `setTags` and `removeTags` read the ta
 A retag on AWS is safe only with one writer at a time.
 The retag form lives in `secret_retag.go`.
 One that sets tags sends owner and tier in one `TagResource`, plus `kind` (with the rollback guard), `github-owners` and `max-grant` when the command sets them, so an IAM condition on the request's tags sees them;
-one that removes tags (`--kind none`, which also removes the rollback guard, `--github-owners none`, `--max-grant none`) is one `UntagResource` of those keys.
+one that removes tags (`--kind none`, which also removes the rollback guard, `--github-owners
+none`, `--max-grant none`) is one `UntagResource` of those keys.
 On `AccessDenied` for a retag that sets tags on a secret held shared, or a retag to `--owner shared`, it adds that a shared secret's owner and tier are an administrator's to change (a person's own secret may be made shared where their access allows the retag;
 only an existing shared secret's tags are reserved); `delete` schedules a 30-day recovery window, never forced, and prints `DeleteSecret`'s own `DeletionDate`.
 GCP `create` creates the secret with automatic replication under the broker's `kms_key_name` and owner, tier and any named kind, `github-owners`, max grant and the rollback guard beside a kind as annotations (never labels, so they carry no GCP label naming rules), then adds the value as its first version;
@@ -3235,23 +3255,26 @@ its expiry set to now and its OAuth tokens deleted in one transaction, so a reti
 The helper speaks no other login than the device grant, and the broker serves no other for a person's machine.
 `agent-secrets-helper install [--url URL] [--restart-with-sessions]` (`install.go`) writes the helper's user unit to `helper.UnitPath` (`$XDG_CONFIG_HOME/systemd/user/agent-secrets-helper.service`, else `~/.config/…`), with `ExecStart=<this binary, symlinks resolved> serve`, `Environment=AGENT_SECRETS_URL=<url>`, an `Environment=` line for each of `AGENT_SECRETS_HELPER_SOCK`, `AGENT_SECRETS_OPERATOR_FILE` and `AGENT_SECRETS_MACHINE_FILE` set in its environment, and `Restart=always`, refusing a URL, value or path a unit line would split or expand, and a relative path in any of those three variables (naming it:
 the unit's helper runs in another working directory).
-First, a helper answering on the socket while `systemctl --user is-active agent-secrets-helper.service` is not `active` was started some other way:
+First, a helper answering on the socket while `systemctl --user
+is-active agent-secrets-helper.service` is not `active` was started some other way:
 `install` lists its sessions and exits 2 (`stop it, then re-run install`), writing and starting nothing, whether or not the unit file already matches.
 Then it writes the unit when its bytes differ, and runs `systemctl --user daemon-reload` and `enable --now` when it wrote it or the unit is not active.
 Last, it restarts a helper that was already answering when `--restart-with-sessions` is given, even with the unit unchanged, or, without it, only when the unit changed and the `drain` op finds it has no sessions (it then refuses every later register and `enroll-session-key` `DRAINING` until it exits or is sent `undrain`, so none starts between the check and the restart;
 `agent-secrets register` retries `DRAINING` every 250 ms until the larger of its 10 s connect patience and `--wait` has passed, and `agent-secrets enroll --helper` for 30 s (`enrollRetryingDrain`), so a session or box launched then registers or enrolls with the restarted helper;
 a restart that fails after a drain sends `undrain` and exits with the restart's error).
 An unchanged, active unit without the flag does nothing.
-With sessions it prints them and `not restarted: <n> sessions are registered; a restart ends their grants. Re-run with --restart-with-sessions.` and exits 0.
+With sessions it prints them and `not restarted: <n> sessions are registered; a restart ends their grants. Re-run with
+--restart-with-sessions.` and exits 0.
 A helper older than `drain` answers it `unknown op`;
 it cannot refuse a register before the restart, so `install` never restarts it without `--restart-with-sessions`:
-it prints its `sessions`, then `not restarted: the running agent-secrets-helper predates drain, …`, and exits 0.
+it prints its `sessions`, then `not restarted: the running
+agent-secrets-helper predates drain, …`, and exits 0.
 `agent-secrets` reads that unit file as "the helper is installed" (`helperInstalled`).
 
 `agent-secrets renew --pod-token-file FILE` is the pod renewer:
 it re-reads and trims the projected token before every broker request, and sends it as `pod_token`.
-A blank or unreadable file makes no request:
-the renewer prints `ERROR: enrollment <id> cannot read its pod token (<reason>); nothing was sent, so its lease lapses unless the file becomes readable`, the only record naming the lapsing enrollment since the broker hears nothing, and retries rather than exiting 76 - at start it exits 2 and the shim starts it again, and after a renewal it waits and reads again.
+A blank or unreadable file makes no request: the renewer prints `ERROR: enrollment <id> cannot read its pod token
+(<reason>); nothing was sent, so its lease lapses unless the file becomes readable`, the only record naming the lapsing enrollment since the broker hears nothing, and retries rather than exiting 76 - at start it exits 2 and the shim starts it again, and after a renewal it waits and reads again.
 The worker shim passes its projected token file and writes the renewer's stderr to its own.
 The client works against a broker that predates the renewal body because that handler reads no body.
 The terminal renewal refusals are one set in `cmd/agent-secrets` (`terminalRenewal`):
@@ -3275,14 +3298,17 @@ A revoke refused 403 `OPERATOR_MISMATCH` (an enrollment made under another opera
 A re-login that is denied, expires unapproved or is still pending leaves the credential an earlier login installed in place, and the helper keeps enrolling sessions with it, so login-status still exits 0 and prints `issued`, and stderr names the most recent login and its code (`credential_held` beside `login_state`, the most recent login's state, which `machine login`'s own poll reads).
 A helper from before that field reports only the most recent login, so there a denied re-login still reads `denied` and exits 1 until the helper restarts on a release that carries it.
 While a credential is held, login-status's last stderr line says when it lapses and how long that is from now (`credential_expires_at`, from the expiry the broker's latest token answer named):
-`the machine login renews itself; without a refresh it lapses at <RFC 3339> (in <d>d<h>h<m>m)`, and a helper or broker from before that field gets a line saying the expiry is unknown.
+`the machine login renews itself; without a refresh it lapses at <RFC 3339> (in
+<d>d<h>h<m>m)`, and a helper or broker from before that field gets a line saying the expiry is unknown.
 With no credential held, login-status exits 1 and prints the most recent login's state (`pending`, `denied`, `expired`, or `none` before any login), except once the helper drops the held credential, because the broker refuses it (401 `LAUNCHER_INVALID`, which it answers for an expired or revoked credential and for any launcher proof it cannot verify, such as clock skew or an `AGENT_SECRETS_URL` that is not the broker's public URL), refuses its refresh (`invalid_grant`), or because it reaches the expiry the broker last named:
 from then until a login starts or settles, the helper reports every state but `pending` as `expired` (`login_state`), the word the dotfiles launcher gate matches, so an older client exits 1 on it too, with `login_refused` and the cause (`credential_dropped`).
 Stderr says why the helper holds no credential in the words its journal uses for the same state (`helper.NoCredentialReason`):
 a login awaiting approval, the cause it dropped the credential for, a broker refusal on a helper from before `credential_dropped` (which sets `login_refused` only for one), a denied login, a login that expired before anyone approved it, or no login since the helper started and none kept in its machine file.
 A re-login pending at the drop reports its own outcome once it settles, so its `machine login` prints `denied` for a denial.
 The helper logs every change of the credential:
-`machine login issued` (credential id, its `expires_at`, and the operator the login was signed with) when a login installs one, `the helper resumed the machine login it kept` at start, `machine login refreshed` (credential id, new `expires_at`) on each refresh, a WARN when a refresh did not reach the broker and an ERROR when the refreshed login could not be written to the file, a WARN that it lapses soon a day before its expiry (at once when less is left), and one ERROR when it drops it, `<cause>; cleared: no session can enroll until a human approves a new machine login`, the cause being `the launcher credential reached its expiry` (with the expiry), `the broker refused the launcher credential (…)` (with the broker's code) or `the broker refused the machine login's refresh: it was revoked, lapsed, or its refresh token was reused`.
+`machine login issued` (credential id, its `expires_at`, and the operator the login was signed with) when a login installs one, `the helper resumed the machine login it kept` at start, `machine login refreshed` (credential id, new `expires_at`) on each refresh, a WARN when a refresh did not reach the broker and an ERROR when the refreshed login could not be written to the file, a WARN that it lapses soon a day before its expiry (at once when less is left), and one ERROR when it drops it, `<cause>; cleared: no session can enroll until a human approves a new machine login`, the cause being `the launcher credential reached its expiry` (with the expiry), `the broker refused the
+launcher credential (…)` (with the broker's code) or `the broker refused the machine login's
+refresh: it was revoked, lapsed, or its refresh token was reused`.
 A refusal of a credential a newer login or a refresh has already replaced drops nothing, and the enrollment it failed retries at once with the new one after the ordinary `enroll failed; retrying` WARN.
 While it holds none, every enrollment attempt, a session's or an `enroll-session-key`'s (and every revoke a re-pinned or lapsed session needs before it enrolls), logs at ERROR `session cannot enroll` with that `why`;
 an attempt that failed for want of a credential a login has installed since logs the WARN instead.
@@ -3390,7 +3416,8 @@ with the GCP store, a prefix not of its form (a project id in place of the numbe
 the other store's key variable set; exactly one of `BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set;
 a `BROKER_API_ACCOUNTS`, `BROKER_SERVICE_LOGINS` or `BROKER_EXCHANGE_K8S_AUDIENCE` set with no cluster issuer, a `BROKER_EXCHANGE_ACCOUNTS` with no `BROKER_EXCHANGE_K8S_AUDIENCE` and a `BROKER_EXCHANGE_WORKFLOWS` with no `BROKER_EXCHANGE_GITHUB_ISSUER`, each naming the pair whose tokens its callers present;
 and a `_SECONDS` variable that isn't a whole number between the min and max its row of Load's `ints` table gives (non-numeric fails the same check as out of range).
-`cmd/broker/main.go` logs at boot, before it loads the AWS config or opens the database, how it signs in (`database sign-in method=rds-iam` when `Config.DatabaseIAM`, else `method=password`), then which store it built and under what (`secret store store=<store> credentials=aws-sdk|application-default|fake secrets file`;
+`cmd/broker/main.go` logs at boot, before it loads the AWS config or opens the database, how it signs in (`database sign-in method=rds-iam` when `Config.DatabaseIAM`, else `method=password`), then which store it built and under what (`secret store store=<store>
+credentials=aws-sdk|application-default|fake secrets file`;
 the AWS config is loaded only for the AWS store or an RDS-form database URL), and reads one thing `config.Load` does not:
 `BROKER_FAKE_SECRETS_FILE`, which makes the run a local one (above), the only kind that may set a `BROKER_PUBLIC_URL` on port 0.
 The broker takes no flags, and refuses any flag it is given.
@@ -3641,13 +3668,15 @@ The record's code is the provider's eight-symbol user code (`XXXX-XXXX`).
 The operator's UI resolves a pending login by that human-readable code alone (`LookupByCode` / `POST /v1/machine-logins/lookup`, which, like the decision's code check, takes the code as typed:
 `oauth.NormalizeUserCode`), and this is the *only* route that selects a machine record (ruling 13:
 a direct link can never approve a machine login, only the typed code selects it), so `code` is required and checked again on the decision itself, before the approver (`400 CODE_REQUIRED` / `403 CODE_MISMATCH`).
-`ApplyDecision` locks the record's row (`for no key update`, which an event insert's foreign-key check does not wait on), refuses any login the record's rule does not admit (`403 NOT_APPROVER`:
+`ApplyDecision` locks the record's row (`for no key
+update`, which an event insert's foreign-key check does not wait on), refuses any login the record's rule does not admit (`403 NOT_APPROVER`:
 only its person decides a person's machine login, and anyone signed in decides a service's) whatever the record's state, answers a record that already carries a terminal event, or is past its `expires_at` before the sweeper has recorded it expired, `409 RECORD_TERMINAL` before minting anything, as a decided `agent_secret` record answers, so a second click, a concurrent one and a late one all get it
 — but a record past its expiry, whether recorded expired by the sweeper or not, answers with a message saying it expired before its approver acted (`machine.ErrLoginExpired`), never that it was decided;
 refuses approving a service's login a broker before token logins opened, which anyone signed in may still deny, `400 SERVICE_LOGS_IN_WITH_TOKEN` (`machine.ErrServiceLogsInWithToken`);
 and, on approval, mints the launcher credential in the same transaction:
 bound to the request object's own key (its thumbprint and embedded JWK, never a bearer token), with lifetime `BROKER_LAUNCHER_CREDENTIAL_SECONDS` counted from the decision, so a crash between minting and recording the decision never orphans a credential no decision names.
-Approving a login whose key already holds a live launcher credential under another record (a machine that signed two logins with one key) is `409 KEY_HOLDS_LIVE_CREDENTIAL`, and that record stays pending.
+Approving a login whose key already holds a live launcher credential under another record (a machine that signed two logins with one key) is `409
+KEY_HOLDS_LIVE_CREDENTIAL`, and that record stays pending.
 No token is ever returned by a decision; the credential is usable only with proofs signed by the key the request object embedded.
 The earlier login, `POST /v1/launcher-credentials` and its poll `GET /v1/launcher-credentials/{pending}`, is gone (the POST `405`, since `GET /v1/launcher-credentials` remains, the poll `404`), and migration 0017 dropped its `machine_login_polls` table;
 a record such a broker opened and left pending is still decided by its code, and having no device code (`decideDevice`'s `oauth2.ErrNotFound`), records nothing on the provider.
@@ -3704,8 +3733,8 @@ Every row an operator revoke writes names the calling machine login, `record.Lau
 a UI revoke names `record.HumanActor(<login>)`.
 Revoking the calling credential itself ends that machine's access: its next launcher proof is `401 LAUNCHER_INVALID`.
 `POST /v1/operator/machines/{id}/retire` (`retireOperatorMachine`) is the helper's after a new login replaced the calling one:
-`{id}` must be the calling credential (`403 NOT_CALLING_CREDENTIAL` otherwise;
-it needs no operator, so it is the one machine route a service's login is not refused), and `enroll.Service.RetireCredential` sets its `expires_at` to now and deletes its OAuth tokens in one transaction (an inactive token would take the reuse path and revoke the credential), writing one `launcher_credential.retired` audit row, while its enrollments keep running:
+`{id}` must be the calling credential (`403
+NOT_CALLING_CREDENTIAL` otherwise; it needs no operator, so it is the one machine route a service's login is not refused), and `enroll.Service.RetireCredential` sets its `expires_at` to now and deletes its OAuth tokens in one transaction (an inactive token would take the reuse path and revoke the credential), writing one `launcher_credential.retired` audit row, while its enrollments keep running:
 a session renews with its own proof, as an expired credential's sessions do.
 It answers `204`, but a credential already expired or revoked fails the route's launcher authentication first, so retiring one already ended answers `401 LAUNCHER_INVALID`.
 
@@ -3740,7 +3769,8 @@ grant lifetimes and pending requests still run on wall-clock time;
 the table starts empty, so the first deploy restores nothing; and a pod whose renewer already exited 76 stays without one until it is relaunched.
 `internal/broker/enroll/serving_test.go`, `internal/broker/api/renew_liveness_test.go`, `cmd/broker/serving_start_test.go` and `cmd/broker/outage_test.go` (`TestABrokerOutageLongerThanALease`, the real broker and `agent-secrets` binaries across an outage longer than a lease) test it.
 
-Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd/broker/... ./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/... ./cmd/dev-oidc-issuer/...`.
+Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd/broker/...
+./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/... ./cmd/dev-oidc-issuer/...`.
 The Postgres-backed tests skip, rather than fail, when `BROKER_TEST_DATABASE_URL` is unset (`t.Skip`, e.g. `internal/broker/store`, `internal/broker/requests`);
 `packages/envoy/scripts/dev-postgres.sh` starts a local Postgres for them, the same script `cmd/dispatch/README.md` documents for its own Postgres-backed tests, and CI's `envoy-go` job (`.github/workflows/envoy-and-contracts.yaml`) points `BROKER_TEST_DATABASE_URL` at the same server as `DISPATCH_TEST_DATABASE_URL`.
 `storetest.URL` stays the helper for everything ordinary: a migrated schema of its own per test, cheaper than a database and isolating rows just as well.
@@ -3759,7 +3789,8 @@ Every client-facing lane's own test mounts the real broker handlers (`api.Regist
 `packages/envoy/scripts/dev-broker.sh`, `cmd/agent-secrets-devrelay` (a stand-in for Dispatch's relay:
 it presents a listed caller's ServiceAccount token, read from `--account-token-file` / `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, and a login, as Dispatch sends its own token and a login when a signed-in human clicks Approve) and `cmd/dev-oidc-issuer` (a stand-in for a cluster's ServiceAccount token issuer) run a whole local broker stack by hand for manual smoke testing, with no cluster and no Docker beyond the Postgres below;
 none ships in `docker/Dockerfile`, which builds exactly `envoy-listener`, `envoy-dispatch`, `envoy-broker`, and `agent-secrets`.
-`dev-oidc-issuer` serves `internal/oidc/oidctest`'s issuer, the Go tests' own, on a loopback port (a process `oidctest.TB` whose `Fatalf` exits), and keeps each `--token <audience>=<service account>=<file>` in its file, minted for `machine.MaxTokenLoginLifetime`, bound to a pod uid of its own, and rewritten by rename at four fifths of that life, as a kubelet rewrites a projected token;
+`dev-oidc-issuer` serves `internal/oidc/oidctest`'s issuer, the Go tests' own, on a loopback port (a process `oidctest.TB` whose `Fatalf` exits), and keeps each `--token
+<audience>=<service account>=<file>` in its file, minted for `machine.MaxTokenLoginLifetime`, bound to a pod uid of its own, and rewritten by rename at four fifths of that life, as a kubelet rewrites a projected token;
 it logs `issuer listening url=<url>` once every file is written.
 Its key lives in its memory alone, so its tokens stop verifying when it stops.
 `dev-broker.sh` starts it with two tokens, `account-token` for `system:serviceaccount:example-ns:example-dispatch` (the broker's `BROKER_API_ACCOUNTS` caller `dispatch`) and `exchange-token` for `system:serviceaccount:example-ns:example-worker`'s pod at the exchange audience (its `BROKER_EXCHANGE_ACCOUNTS` entry, project `EXAMPLE` for `ada@example.com`, no fixed session), points the broker's `BROKER_K8S_OIDC_ISSUER` at it, and stops it on exit.
@@ -3776,7 +3807,8 @@ Its `release_build` and `release_publish` jobs run only on `refs/heads/main`, so
 `release_publish` moves `:latest`, confirms the version against the tags inside its concurrency group (`release-push.sh version --expect`;
 `queue: max`, so every run's job waits its turn instead of being cancelled when another joins the queue), checks the hand-over (`release-push.sh handed`), tags with `release-push.sh push-tag` (the deploy key reaches only that step's `env`), attests the `agent-secrets-*.tar.gz` archives and creates the GitHub release.
 When another run took the version first, `release_publish` publishes nothing and stays green:
-nothing more is needed when a release holds the commit or nothing since the newest release bumps the version, a later run on `main` that holds the commit and has not finished releases it (or fails where a person sees it), and otherwise `release-push.sh restart` starts a new run on `main` (`gh workflow run`, with `actions: write`), which decides the version again and releases the commit.
+nothing more is needed when a release holds the commit or nothing since the newest release bumps the version, a later run on `main` that holds the commit and has not finished releases it (or fails where a person sees it), and otherwise `release-push.sh restart` starts a new run on `main` (`gh
+workflow run`, with `actions: write`), which decides the version again and releases the commit.
 A chain stops at its third started run: if that run loses too and no later run holds the commit, it fails with the command to start one by hand.
 
 The image's attestation is what says which run built a digest:
@@ -3794,7 +3826,8 @@ The certificate names the workflow whose job signed, so the `attest` job stays i
 in a called workflow it would name that file and this command would refuse every image.
 Its subject is the `envoy:<commit sha>` index digest a deployment pins, not a per-platform manifest.
 `latest` has no attestation: `release_publish` writes it as a new index with its own revision annotation, so its digest differs from the `envoy:<sha>` index it points at.
-To pin from `latest`, read that annotation (`docker buildx imagetools inspect --raw ghcr.io/sjawhar/legion/envoy:latest | jq -r '.annotations["org.opencontainers.image.revision"]'`) and pin `envoy:<that sha>`'s digest.
+To pin from `latest`, read that annotation (`docker buildx imagetools inspect --raw ghcr.io/sjawhar/legion/envoy:latest | jq -r
+'.annotations["org.opencontainers.image.revision"]'`) and pin `envoy:<that sha>`'s digest.
 `release_publish` does not wait for `attest`; when `attest` alone fails, re-run the failed jobs, which signs the same digest `docker` handed over.
 The attestation is separate from the BuildKit provenance the `docker` job attaches inside the index (`provenance: mode=min`), which a deployment reads to map a digest to its commit.
 

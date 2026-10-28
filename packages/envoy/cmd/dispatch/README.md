@@ -211,7 +211,8 @@ envoy-dispatch redeliver-webhooks --since 72h             # redeliver under the 
 
 It reads the same App credentials and NATS configuration as the server, but owns nothing on the bus:
 unlike the server it neither creates nor updates `ENVOY_NOTIFICATIONS`, and it refuses a NATS server that is not the machine it runs on, naming the URL.
-Run inside the Dispatch container it reaches that deployment's NATS with `ENVOY_ALLOW_REMOTE_NATS=1 envoy-dispatch redeliver-webhooks …`.
+Run inside the Dispatch container it reaches that deployment's NATS with `ENVOY_ALLOW_REMOTE_NATS=1
+envoy-dispatch redeliver-webhooks …`.
 It connects as the nkey user `NATS_NKEY_SEED_FILE` (or `NATS_NKEY_SEED`) names and runs no `!` command, so it never reads `envoy.natsSeed`:
 a run against a NATS that requires a user needs `NATS_NKEY_SEED_FILE`.
 
@@ -222,7 +223,8 @@ the files uploaded before it stay in their rows until `backfill-files` moves the
 it writes the object under the row's hash (a write S3 verifies against that hash, and the store refuses before any call when the bytes do not hash to it), reads it back and checks it, and only then clears the row's bytes, in one statement that clears only a row still holding them.
 A row it cannot move (a store failure, bytes that do not hash to the row's hash, a row with no hash) is printed as `FAILED version <id>` and passed over, so one bad row holds up no other;
 the run exits 1 when any row failed, and can be run again at any time, since each row is done or untouched and the server serves a row until its bytes are cleared.
-Two writing passes at once (`backfill-files` and `--restore`, in any pairing) are refused by an advisory lock (`another backfill-files pass holds the lock`).
+Two writing passes at once (`backfill-files` and `--restore`, in any pairing) are refused by an advisory lock (`another backfill-files pass holds the
+lock`).
 `--verify-only` reads back every cleared row against its hash, moves nothing, takes no lock (it runs beside either pass, reading only what that pass has finished), and exits 1 naming each row whose object is missing or wrong.
 
 `--restore` is the rollback, at any point before or after the clear:
@@ -536,11 +538,12 @@ the `previous` wording of the first `ask.edited` after its latest `ask.answered`
 No migration rewrites those rows, since the census refuses one that does (Pre-deploy census, below).
 Every boot runs the restoration over every decided ask in one statement (`docs.Service.RestoreDecidedWordings`, bounded at 30 s), reading `events` through `events_ask_payload_id` and writing only the rows whose wording differs;
 it logs `dispatch: restored a decided ask's wording` for each with the ask, its document and the question it asks again.
-In the same transaction it marks owed, in one upsert, the settlement of each restored block ask's own document, whose block still asks the rewording beside the decision, and of every other document of each restored ask's owner whose latest version holds the ask's block with no ask of its own under that id, a copy that may have matched the rewording and shown the decision on it, and arms those settlements once it commits;
-then it logs `dispatch: restored decided asks' wordings` with `restored=<n> copies=<n>`.
+In the same transaction it marks owed, in one upsert, the settlement of each restored block ask's own document, whose block still asks the rewording beside the decision, and of every other document of each restored ask's owner whose latest version holds the ask's block with no ask of its own under that id, a copy that may have matched the rewording and shown the decision on it, and arms those settlements once it commits; then it logs `dispatch: restored
+decided asks' wordings` with `restored=<n> copies=<n>`.
 On the 2026-10-11 production dump (3,739 asks, 82,153 events) it restores 5 asks, each a block ask on a document of its own, and marks 0 copies owed, in 0.17-0.77 s:
 the one other document holding one of those 5 blocks has an ask of its own under that id, so it is no copy, and the first boot of the release that carries it logs `restored=5 copies=0` and settles those 5 documents;
-each whose block still asks the rewording gets the decided wording written back and logs `dispatch: wrote a decided ask's wording back into its block`.
+each whose block still asks the rewording gets the decided wording written back and logs `dispatch: wrote a decided ask's wording back into its
+block`.
 Each document's settlement runs the same statement over its own decided asks before it reconciles them, and marks the restored asks' copies owed the same way, so a rewording a task of the earlier release writes during the roll is undone by that document's next settlement on this release, which also writes the decided wording back into the block and settles its copies again.
 
 Migration `0092_refs_excerpts` adds three nullable columns to `refs` with no default (`excerpt_block_id`, `excerpt_text`, `excerpt_version`), a catalog change that rewrites no row, and the partial index `refs_excerpt_drift` over the rows whose `excerpt_version` is null:
@@ -645,7 +648,8 @@ Its `event_seq > 0` check is a second statement, added `not valid` as the rule b
 an inline check would read every row of the table while it held that lock, and `not valid` still refuses every row written or updated after it.
 Nothing validates it later — every row below the migration carries no sequence at all — so the constraint stays `not valid` for good.
 
-`0120` also creates `artifact_reviews_by_artifact_event_seq` on `(artifact_id, event_seq desc nulls last, created_at desc, id desc)`, `docs.ReviewOrder` per document, so the newest-review reads (`docs.LatestApprovedReview`, `latestReviewBy`) take one index entry rather than sort every review of the document.
+`0120` also creates `artifact_reviews_by_artifact_event_seq` on `(artifact_id, event_seq desc nulls
+last, created_at desc, id desc)`, `docs.ReviewOrder` per document, so the newest-review reads (`docs.LatestApprovedReview`, `latestReviewBy`) take one index entry rather than sort every review of the document.
 It is a plain `create index`, not `concurrently`:
 the runner applies a migration inside one transaction (`internal/dispatch/store/store.go`, `pgmigrate.Exec`), where `concurrently` cannot run, and no migration of the set uses it.
 The build takes no lock the migration does not already hold
@@ -688,12 +692,13 @@ a comment any build writes that may cite a block is owed an index with the block
 The trigger takes `SHARE ROW EXCLUSIVE` on `comments` alone, so a comment write waits behind it while a read does not.
 It touches no row; its census answers `0`.
 
-Migration `0124_asks_block_grammar_trigger` does the same for `asks`, `after insert or update of question`, for a question that holds `#b-`.
+Migration `0124_asks_block_grammar_trigger` does the same for `asks`, `after insert or update of
+question`, for a question that holds `#b-`.
 Its trigger takes `SHARE ROW EXCLUSIVE` on `asks` alone, so an ask write waits behind it while a read does not.
 It touches no row; its census answers `0`.
 
-Migration `0125_messages_block_grammar_trigger` does the same for `messages`, `after insert or update of body`, for an issue message (`issue_key` set) whose body holds `#b-`;
-a direct message is indexed by nothing, so it owes nothing.
+Migration `0125_messages_block_grammar_trigger` does the same for `messages`, `after insert or
+update of body`, for an issue message (`issue_key` set) whose body holds `#b-`; a direct message is indexed by nothing, so it owes nothing.
 Its trigger takes `SHARE ROW EXCLUSIVE` on `messages` alone, so a message write waits behind it while a read does not.
 It touches no row; its census answers `0`.
 
@@ -787,7 +792,8 @@ Those tables are:
 
 - every table a foreign key reaches from a table whose rows it writes, or from a table it drops, read from `pg_constraint` when the census is taken, and from the `references` an earlier pending migration adds, which applies first at boot (in a `create table` or `alter table`, inside a `DO` block too, behind an `if not exists` over `pg_constraint` or not):
   a row inserted or updated (an upsert's `do update` included) is checked against the table its key references, a dropped table's own foreign keys go with it and take ACCESS EXCLUSIVE on each table they reference, and a row deleted, or one whose key an update changes, is checked against every table that references it or cascades into it, and on from there.
-  The report prints such a table as `touches <table> through a foreign key with <table>`, and checks its holders and that it can be read, but neither counts its rows nor holds it to the size limit:
+  The report prints such a table as `touches <table>
+  through a foreign key with <table>`, and checks its holders and that it can be read, but neither counts its rows nor holds it to the size limit:
   the migration locks it to check or act on the rows that key connects, or, for a drop, only for the catalog change, reading no row.
 
 A table a statement only reads (`insert … select from`, `create view … as`) is not listed: its ACCESS SHARE waits only behind an ACCESS EXCLUSIVE holder.
@@ -939,7 +945,8 @@ Meaning search, where an embedder is configured (below), ranks by an embedding o
 
 Meaning search embeds with Cohere Embed v4 at the place `DISPATCH_EMBEDDER` names:
 AWS Bedrock (`bedrock`, the default, on the AWS SDK's own region and credentials) or Azure AI Foundry (`azure`, the `DISPATCH_AZURE_*` settings, with the deployment's API key or a keyless sign-in that exchanges a federated token with Microsoft Entra).
-Bedrock with no AWS region logs `dispatch: meaning search unavailable` and leaves meaning search off;
+Bedrock with no AWS region logs `dispatch: meaning search
+unavailable` and leaves meaning search off;
 then, and whenever the query's embedding fails, a search answers by keyword alone with `degraded: embedder_unavailable`.
 Each vector records its embedder's identity in `embeddings.model`, `us.cohere.embed-v4:0` on Bedrock and `azure:<endpoint host>/<deployment>` on Azure, and search compares a query vector only with stored vectors of its own identity.
 A write enqueues its text through its table's trigger (0073–0077) in the same transaction.
@@ -1082,7 +1089,8 @@ every mounted `/api/v1` route with its `method`, `path`, `auth` (`public`, `any`
 `envoy-dispatch routes` prints the same body from the table alone, with no database or listener and never a test hook;
 the docs site's HTTP API reference is generated from it.
 The list below is a summary.
-An unknown path under `/api`, `/v1`, `/auth`, `/ws`, or `/healthz` is a JSON 404 `{"code":"NOT_FOUND","error":"no route for GET /v1/issues","hint":"GET /api/v1 lists every route"}`, never the dashboard shell.
+An unknown path under `/api`, `/v1`, `/auth`, `/ws`, or `/healthz` is a JSON 404 `{"code":"NOT_FOUND","error":"no route for GET
+/v1/issues","hint":"GET /api/v1 lists every route"}`, never the dashboard shell.
 When `DISPATCH_ASSET_STORE_BUCKET` is configured, a missing local file under `/assets/` is read whole from the same key in the retained-assets bucket before Dispatch answers;
 it never reads `index.html` or a non-asset path from that bucket.
 An absent object remains `404 {"error":"not found"}` and any other store failure is a 502 with no cache header;
