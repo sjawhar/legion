@@ -413,13 +413,15 @@ const (
 // first recorded one, resolves to a repository left out because its GitHub App installation read
 // failed (Options.RepositoryUnread) ends nothing, and is answered by what the daemon will do once
 // GitHub answers and it recovers that repository's issues from Dispatch's listing. When every
-// unrecorded issue of that chain is todo (Dispatch shows it, or this wave writes it: todoNow) and
-// the topmost of them, or the child when there is none, is on the unread repository, the recovery
-// records the chain under the recorded one, parents first: the child stands released, neither
-// started nor held, with nothing to retry, and the recovery tells the architect if it did not
-// record it after all. Otherwise the chain stops at a parent the recovery will not record (one in
-// backlog, say): the child stands released too, and the architect is told at once that it waits
-// for that parent's release. Either way the wave goes on: the answer is the unread repository
+// unrecorded issue of that chain is todo (Dispatch shows it, or this wave writes it: todoNow), on
+// any repository, the chain is recorded under the recorded one, parents first, by the recovery or
+// by those issues' own events (one on a served repository whose event the consumer has not
+// applied yet, or one on another unread repository that recovers later): the child stands
+// released, neither started nor held, with nothing to retry, and the recovery tells the architect
+// if it did not record it after all. Otherwise the chain stops at a parent that is not todo (one
+// in backlog, say), which nothing will record: the child stands released too, and the architect is
+// told at once that it waits for that parent's release. Either way the wave goes on: the answer is
+// the unread repository
 // (the child pending), and ok is false only when the answer was written (a read failed).
 // CHILD_NOT_RECORDED's few quick retries would run out in seconds of an outage and say the parent
 // never reached the daemon, and an error would leave the rest of the wave unreleased.
@@ -515,11 +517,11 @@ func (s *server) enterOnUnreadRepository(w http.ResponseWriter, r *http.Request,
 			break
 		}
 	}
-	top := resolved
-	if len(chain) != 0 {
-		top = chain[len(chain)-1].ResolvedRepo
-	}
-	if stop == nil && top != "" && s.unread(top) {
+	// Every unrecorded issue up to the recorded one is todo: the recovery, or those issues' own
+	// events on a served repository (a consumer behind, or another repository that recovers
+	// later), record the chain under the recorded one, parents first. Nothing is told now: a child
+	// still unrecorded when the repository's recovery has run is named then (tellReleaseWaits).
+	if stop == nil {
 		s.log.Info("api: release_children's todo child waits for GitHub to answer its repository's installation read; the daemon records it then",
 			"issue", child.Key, "tree", tree, "repo", repo)
 		if !s.clearChildReleaseRetry(w, r, child.Key) {
@@ -527,10 +529,7 @@ func (s *server) enterOnUnreadRepository(w http.ResponseWriter, r *http.Request,
 		}
 		return repo, s.tellReleaseWait(w, r, tree, child.Key, parent, repo, ""), true
 	}
-	blocker := chain[len(chain)-1]
-	if stop != nil {
-		blocker = *stop
-	}
+	blocker := *stop
 	if !s.clearChildReleaseRetry(w, r, child.Key) {
 		return "", false, true
 	}

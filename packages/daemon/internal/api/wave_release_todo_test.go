@@ -303,9 +303,43 @@ func TestWaveReleaseGoesOnPastAChildLeftForAnUnreadRepository(t *testing.T) {
 	}
 }
 
+// A todo child on an unread repository under a parent that Dispatch shows todo on a served
+// repository, but that the daemon has not recorded yet (its own event not applied: a consumer
+// behind), is answered released with no notice and left to the recovery: the parent's event
+// records the parent, and the recovery then records the child. Before, the architect was told at
+// once that the recovery would not record the child and to release the parent first, which was
+// false.
+func TestWaveReleaseSendsNoNoticeForAChildUnderATodoParentNotRecordedYet(t *testing.T) {
+	const parent, child = "LEGION-230", "LEGION-231"
+	u := newUnreadRelease(t, on(parent, "acme/widgets", "todo", unreadRoot, 2), on(child, "zeta/tools", "todo", parent, 3))
+	u.release(t, child)
+	if notices := u.notices(t); len(notices) != 0 {
+		t.Fatalf("notices = %q, want none: %s's own event records it, and the recovery then records %s", notices, parent, child)
+	}
+	if want := []string{"zeta/tools " + unreadRoot + " " + child}; !slices.Equal(u.awaited, want) {
+		t.Fatalf("children left to the recovery = %q, want %q", u.awaited, want)
+	}
+	if recordedChild(t, u.h, child) != nil || u.retryRow(t, child) {
+		t.Fatalf("%s has a record or a release-retry record while zeta/tools is unread, want neither", child)
+	}
+	// The parent's own event arrives; then GitHub answers and the recovery applies the child.
+	if _, err := intake.ApplyFact(context.Background(), u.h.store.Pool(), "dispatch", "event-"+parent, intake.ObservedIssue(u.statuses.issues[parent]), u.engine); err != nil {
+		t.Fatal(err)
+	}
+	u.unread.Store(false)
+	if _, err := intake.ApplyFact(context.Background(), u.h.store.Pool(), "daemon", "recovery-"+child, intake.ObservedIssue(u.statuses.issues[child]), u.engine); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{parent, child} {
+		if got := recordedChild(t, u.h, key); got == nil || got.Tree != unreadRoot {
+			t.Fatalf("%s = %+v after the serve, want it recorded in %s's tree", key, got, unreadRoot)
+		}
+	}
+}
+
 // A todo child left for an unread repository is answered released, with no notice, when the
-// recovery will record it: under the recorded root, or under a chain of todo issues up to it
-// whose topmost is on the unread repository. Under a parent the recovery will not record (one in
+// recovery will record it: under the recorded root, or under a chain of todo issues up to it.
+// Under a parent the recovery will not record (one in
 // backlog on a served repository), it is answered released too, with a notice naming the parent to
 // release first: the parent is unrecorded for a reason of its own, not for GitHub, so the message
 // says so. Once GitHub answers and the parent is recorded, the architect's release records the

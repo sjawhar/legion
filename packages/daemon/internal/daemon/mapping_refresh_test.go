@@ -1500,3 +1500,30 @@ func TestARecoveryTellsTheArchitectOfTheChildrenItDidNotRecord(t *testing.T) {
 		t.Fatalf("notices after the recovery = %d, want the one only", len(got))
 	}
 }
+
+// A child release_children left for unread zeta/tools under a parent todo on served acme/widgets
+// that the daemon had not recorded yet is recorded with its parent once both happen: the parent's
+// own event records the parent, the recovery records the child, and the architect is told
+// nothing, since nothing is left unrecorded.
+func TestARecoveryTellsNothingOnceAChildUnderALaggingTodoParentIsRecorded(t *testing.T) {
+	quickInstallReads(t)
+	installs := &installations{}
+	installs.setFailing(errors.New("GitHub answered 502"), "implement zeta/tools")
+	w, client, installs, _ := mappingRigWith(t, installs)
+	const tree, parent, child = "LEGION-1700", "LEGION-1701", "LEGION-1702"
+	liveRoot(t, w, client, tree)
+	client.show(issue(child, "zeta/tools", "todo", false, parent, 1))
+	w.awaitRecovery("zeta/tools", tree, child, parent)
+	deliver(t, w, client, issue(parent, "acme/widgets", "todo", false, tree, 1))
+	before := len(treeNotices(t, w, tree))
+	serveAndRecover(t, w, installs)
+	for _, key := range []string{parent, child} {
+		if got := recordedIssue(t, w, key); got == nil || got.Tree != tree {
+			t.Fatalf("%s = %+v once zeta/tools is recovered, want it recorded in %s's tree", key, got, tree)
+		}
+	}
+	time.Sleep(10 * installReadRetry.Max)
+	if got := treeNotices(t, w, tree)[before:]; len(got) != 0 {
+		t.Fatalf("notices after the recovery = %q, want none: nothing is left unrecorded", got)
+	}
+}
