@@ -120,7 +120,9 @@ func (r *PassReport) fail(out io.Writer, id string, err error) {
 // and passed over, so one bad row does not hold every newer one; a run stopped anywhere leaves
 // each row either done or untouched, and the next run picks up what is left. The server keeps
 // serving a row from its bytes until they are cleared. A database failure, or a cancelled context,
-// stops the pass with that error.
+// stops the pass with that error. A server process with no bucket serves a file only from its
+// row, so backfill-files runs this only while no live server process lacks one (cmd/dispatch,
+// bucketlessProcesses); RestoreRows and VerifyRows take no bytes out of a row and run beside one.
 func BackfillRows(ctx context.Context, pool Querier, store Store, out io.Writer) (PassReport, error) {
 	release, err := acquire(ctx, pool)
 	if err != nil {

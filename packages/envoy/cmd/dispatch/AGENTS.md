@@ -121,8 +121,10 @@ failed or throttled canary leaves those rows in place for the next pass and logs
 identity, the error and the counts left. `coverageSources` there is the one list of what meaning
 search covers, read by the pass and by `GET /api/v1/search/coverage` (`embedqueue.Coverage`); its
 texts are the triggers' (0073-0077) byte for byte, so a kind added to search changes both. There is
-no backfill subcommand: the pass is the only catch-up, and it takes no lease, so every process of a
-deployment takes the same embedder settings (README "Search").
+no backfill subcommand: the pass is the only catch-up, and it takes no lease. Processes may run
+different embedder settings during a release: one identity is active at a time (`embedder_active`,
+`embedqueue/active.go`, read from the live `server_processes` rows' `embedder_identity`), and only a
+process with that identity drops, re-admits, embeds or reserves tokens (README "Search").
 
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
 with comma-separated `owner/repo=KEY` entries (`api.SeedRepoProjects`). Stored dashboard mappings are

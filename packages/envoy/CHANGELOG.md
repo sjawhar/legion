@@ -961,6 +961,25 @@
 
 ### Changed
 
+- Dispatch processes configured with different embedders no longer drop each other's vectors in
+  turn. One embedder identity is active at a time, the one row of the new table `embedder_active`
+  (migration `0134_embedder_active`, census `0`): it stays active while a live server process
+  registers it as its `embedder_identity`; when none does, the identity of the earliest-started
+  live process that registers one becomes active, and with no row yet, the first process to look
+  records its own. Only a process whose identity is active drops other identities' vectors,
+  re-admits rows dead under another identity, embeds queue rows and reserves tokens; the coverage
+  pass of any other process logs `identityStepsSkipped=true` and `activeIdentity`, and its meaning
+  search answers with text matches only. An embedder change is therefore a release like any other:
+  the old identity embeds until its last process leaves, and then the new one drops and re-embeds.
+  A build before this one registers no identity and drops every identity but its own, so change
+  the embedder no sooner than the release after this one.
+- While a live server process has no file bucket (`file_store` false in `server_processes`, or a
+  build before this one, which registers none), an upload to a process with a bucket keeps its
+  bytes in `artifact_versions.content` as well as in the bucket, so the bucketless process serves
+  it, and `envoy-dispatch backfill-files` refuses with exit 1, naming each such process by its
+  instance id, its build and its start; `--verify-only` and `--restore` still run. Turning the
+  store off still takes `backfill-files --restore` before the release that unsets
+  `DISPATCH_FILE_STORE_BUCKET`.
 - A Dispatch route ignores a request-body member it does not declare, where it answered `400`
   before, and logs the ignored names at debug with the route; the JSON upload does too, and still
   refuses `primary` by name. The delivery socket ignores a frame member it does not declare, and
@@ -1121,8 +1140,8 @@
   since no server of any release reads it. Each vector now records its embedder's identity
   (`us.cohere.embed-v4:0` on Bedrock, the value every stored vector already carries, and
   `azure:<endpoint host>/<deployment>` on Azure), and search compares a query only with vectors of
-  its own identity: run one embedder configuration on every process of a deployment, since each
-  process's pass drops the others' vectors, and put a new model on Azure under a new deployment
+  its own identity: the coverage pass drops vectors another identity made (only on a process whose
+  identity is the active one, Changed above), and a new model on Azure goes under a new deployment
   name. A text with nothing to embed (empty or only white space) is settled with no vector rather
   than retried until it dies, and a row that died that way is settled by the pass (INFRA-393).
 - **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own

@@ -475,7 +475,14 @@ func (s *server) storeArtifact(
 		size := len(input.content)
 		content := input.content
 		if s.deps.Files != nil {
-			content = nil
+			keep, err := fleetServesFilesFromRows(r.Context(), tx)
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			if !keep {
+				content = nil
+			}
 		}
 		var versionAuthors []byte
 		if err := tx.QueryRow(r.Context(), `

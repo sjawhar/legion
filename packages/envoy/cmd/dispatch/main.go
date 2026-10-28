@@ -417,7 +417,10 @@ func main() {
 	// taking live search down with it (LEGION-549 round 5; embed.RateLimitedEmbedder's own doc
 	// comment has the AIMD mechanism and the headroom this leaves). A nil embedder (meaning
 	// search off) stays nil rather than becoming a non-nil wrapper around nothing, which
-	// embedqueue.Run's own nil check depends on.
+	// embedqueue.Run's own nil check depends on. The queue starts before this process registers
+	// below; it embeds and drops only while its embedder's identity is the active one, which every
+	// process decides from the live registry rows (embedqueue, active.go), so a process configured
+	// with another embedder than the fleet's leaves the vectors as they are.
 	var backgroundEmbedder embed.Embedder
 	if embedder != nil {
 		backgroundEmbedder = embed.NewRateLimitedEmbedder(embedder)
@@ -552,8 +555,10 @@ func main() {
 	}
 	// INFRA-558: the row also carries the document schema numbers this build reads and creates,
 	// which every process's document socket admission reads; the identity of its embedder, "" with
-	// none, the same string the embedding queue compares stored vectors with; and whether it
-	// stores files in a bucket.
+	// none, the same string the embedding queue compares stored vectors with, from which every
+	// process's queue takes the one identity that embeds and drops (embedqueue, active.go); and
+	// whether it stores files in a bucket, which keeps an upload's bytes in its row as well while
+	// any live process has none, and refuses backfill-files meanwhile.
 	embedderIdentity := ""
 	if embedder != nil {
 		embedderIdentity = embedder.Identity()
