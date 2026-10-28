@@ -509,8 +509,10 @@ const browserAnswerWithin = 2 * time.Minute
 // of its own reads every frame the server sends, so a socket held open while its room broadcasts
 // never fills the server's queue for it - ygo closes a peer whose queue fills
 // (provider/websocket/peer.go:763-810) - and hands on only the answers to what the test sent: a
-// SyncStatus, a Pong, a SyncStep2. The rest - the room's own step 1, awareness, other browsers'
-// updates - is read and dropped, so the test process keeps no document for a socket it holds.
+// SyncStatus, a Pong, a SyncStep2, among which a SyncStep2 another browser of the room handed back
+// and the room relayed, which await passes over. The rest - the room's own step 1, awareness, other
+// browsers' updates - is read and dropped, so the test process keeps no document for a socket it
+// holds.
 type browser struct {
 	room       string
 	connection *gws.Conn
@@ -613,28 +615,34 @@ func (b *browser) read() {
 	}
 }
 
-// await is the room's next answer, which must carry tag, or the reason the socket ended first.
+// await is the room's next answer, which must carry tag, or the reason the socket ended first. A
+// SyncStep2 the room relays from another browser of the room - the whole state that browser handed
+// back, which ygo relays to the room's other peers as the frame it arrived in (applySyncUpdate,
+// sjawhar/ygo v1.51.3-sami.7, provider/websocket/peer.go:247-264) - reads as the answer to a request
+// for the room's state would, so a wait for any other answer passes over it.
 func (b *browser) await(tag uint64) (browserAnswer, error) {
 	timer := time.NewTimer(browserAnswerWithin)
 	defer timer.Stop()
-	checked := func(answer browserAnswer) (browserAnswer, error) {
+	for {
+		var answer browserAnswer
+		select {
+		case answer = <-b.answers:
+		case <-b.ended:
+			select {
+			case answer = <-b.answers:
+			default:
+				return browserAnswer{}, b.end
+			}
+		case <-timer.C:
+			return browserAnswer{}, fmt.Errorf("the room sent nothing tagged %d within %s", tag, browserAnswerWithin)
+		}
+		if answer.tag == frameSync && tag != frameSync {
+			continue
+		}
 		if answer.tag != tag {
 			return answer, fmt.Errorf("the room answered with a frame tagged %d, want %d", answer.tag, tag)
 		}
 		return answer, nil
-	}
-	select {
-	case answer := <-b.answers:
-		return checked(answer)
-	case <-b.ended:
-		select {
-		case answer := <-b.answers:
-			return checked(answer)
-		default:
-			return browserAnswer{}, b.end
-		}
-	case <-timer.C:
-		return browserAnswer{}, fmt.Errorf("the room sent nothing tagged %d within %s", tag, browserAnswerWithin)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 	"weak"
 
 	"github.com/reearth/ygo/crdt"
@@ -1518,13 +1519,19 @@ type applyHeaps struct {
 }
 
 // hold waits until it holds heap of the bound, or the whole bound for a heap past it, and returns
-// what gives it back. With a context that is never done Acquire returns only once it holds what it
+// what gives it back, which logs the grant where it waited long or held the whole bound
+// (logHeapGrant). With a context that is never done Acquire returns only once it holds what it
 // asked for, so it cannot fail.
 func (h *applyHeaps) hold(heap uint64) (release func()) {
 	h.once.Do(func() { h.bound = semaphore.NewWeighted(applyHeapBound) })
 	held := int64(min(heap, applyHeapBound))
+	started := time.Now()
 	_ = h.bound.Acquire(context.Background(), held)
-	return func() { h.bound.Release(held) }
+	granted := time.Now()
+	return func() {
+		h.bound.Release(held)
+		logHeapGrant("apply", held, applyHeapBound, granted.Sub(started), time.Since(granted))
+	}
 }
 
 // applyHeap is the estimate of what ygo's apply of the walked update allocates, frame its bytes,

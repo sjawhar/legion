@@ -2,8 +2,10 @@ package docs
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sync/semaphore"
 )
@@ -115,6 +117,10 @@ func copyHeapWeight(bytes int) int64 {
 type copyGrant struct {
 	heaps *copyHeaps
 	held  int64
+	// waited is how long the grant waited for what it holds, and since when it has held it, both
+	// for its release's log line (logHeapGrant).
+	waited time.Duration
+	since  time.Time
 }
 
 // newCopyGrant is a grant of the pod's bound holding nothing.
@@ -134,6 +140,7 @@ func (g *copyGrant) cover(ctx context.Context, bytes int) error {
 	}
 	g.release()
 	bound := g.heaps.semaphore()
+	started := time.Now()
 	if !bound.TryAcquire(weight) {
 		if g.heaps.waiting != nil {
 			g.heaps.waiting(weight)
@@ -142,7 +149,8 @@ func (g *copyGrant) cover(ctx context.Context, bytes int) error {
 			return err
 		}
 	}
-	g.held = weight
+	g.held, g.since = weight, time.Now()
+	g.waited = g.since.Sub(started)
 	held := g.heaps.held.Add(weight)
 	if g.heaps.granted != nil {
 		g.heaps.granted(held)
@@ -150,13 +158,15 @@ func (g *copyGrant) cover(ctx context.Context, bytes int) error {
 	return nil
 }
 
-// release gives back what g holds. A grant holding nothing gives back nothing.
+// release gives back what g holds, and logs it where it waited long or held the whole bound
+// (logHeapGrant). A grant holding nothing gives back nothing.
 func (g *copyGrant) release() {
 	if g == nil || g.held == 0 {
 		return
 	}
 	g.heaps.held.Add(-g.held)
 	g.heaps.semaphore().Release(g.held)
+	logHeapGrant("copy", g.held, g.heaps.limit(), g.waited, time.Since(g.since))
 	g.held = 0
 }
 
@@ -199,4 +209,25 @@ func holdCopy(ctx context.Context, bytes int) (func(), error) {
 func holdServerCopy(bytes int) func() {
 	release, _ := holdCopy(context.Background(), bytes)
 	return release
+}
+
+// heapGrantLogged is how long a grant of the apply-heap bound (applyHeaps) or of the copy-heap
+// bound (copyHeaps) may have waited for its weight before its release is logged (logHeapGrant):
+// a tenth of a second, past any wait on a lock or the scheduler and short of the second or more a
+// heavy apply or decode takes, so the line names the turns a burst of heavy work made a holder
+// wait for and stays quiet while the bounds are not crowded.
+const heapGrantLogged = 100 * time.Millisecond
+
+// logHeapGrant logs a grant of bound, "apply" or "copy", as it is given back, where it waited
+// heapGrantLogged or longer for its weight, or held all size bytes of its bound and so ran alone
+// among that bound's holders: its weight, how long it waited, and how long it held it, the line's
+// time being when it gave it back. An operator reads from it how long a burst of heavy work made
+// each holder wait its turn; a real-process drive reads from it which holders ran at once and the
+// longest wait (cmd/dispatch, TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory).
+func logHeapGrant(bound string, weight, size int64, waited, held time.Duration) {
+	if waited < heapGrantLogged && weight < size {
+		return
+	}
+	slog.Info("dispatch: a heap bound's grant was given back",
+		"bound", bound, "weight", weight, "bound_bytes", size, "alone", weight >= size, "waited", waited, "held", held)
 }

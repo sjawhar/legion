@@ -518,7 +518,7 @@ func (r *renderedReplica) publishCounted(markdown *string, elements int64) {
 // could not read reads sizeUnmeasured elements until its count lands, which the budget does not
 // re-base on (storeCounted). A caller reading across a publication sees one rendering's bytes
 // beside the elements of the rendering before it too, which is within that same staleness.
-// Neither half makes the document bound a ceiling (peer_update.go:55-57).
+// Neither half makes the document bound a ceiling (peer_update.go:56-58).
 func (r *renderedReplica) size() (bytes, elements int64, measured bool) {
 	bytes, elements = r.bytes.Load(), r.elements.Load()
 	return bytes, elements, bytes != sizeUnmeasured
