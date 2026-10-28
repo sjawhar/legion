@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-28T18:50:00Z",
+  "completed": "2026-10-28T21:45:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "bf30591dd483da80b3cb0e3965416537535329c2",
-  "round": "7 (the head conflicted with main after #2366 merged): forward merge of main 20ba65a67 into the branch's batch model. #2366's thread recipients and primary-document authors are batched lookups (7 statements per batch, was 5); a failed recipient query fails only the events that needed it, after owner topic, route and claimant; suppressed_authors is gone. No new migration on main (0136_duty_holds and 0137_outbox_claim follow 0135_server_processes); connections per process stay 88. Fingerprint comment 6477528943.",
+  "head": "2f3bf214764c061c8c3c33ee074083afb03c79ac",
+  "round": "8 (the round-4 review, changes requested at bf30591d): a failed recipient read (comment recipients, primary-document authors, document credits) fails only the events that asked it, and a statement Postgres refuses runs again once per id; while such an event waits, planChains holds its owner's later events on every key its short list does not name, behind its back-off; a not-due event takes no recipient read; resolveLost is pinned; review-body cleanups done (09e871b6). Then a forward merge of main (GitHub reported CONFLICTING): migrations renumbered to 0137_duty_holds and 0138_outbox_claim above main's 0136_dashboard_assets; connections stay 88 (06960fb3); main's dispatch_server comment line kept as main has it (2f3bf214). Four threads answered and resolved.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -102,6 +102,14 @@
       "observed": "All packages ok (outbox 271.0 s, deliveryaudit 3.8 s, cmd/dispatch 240.8 s, listener 443.2 s, bus 247.8 s, store 145.7 s on a fresh database); multiprocess ok 642.9 s; TestTheBatchResolvesFollowersAuthorsRecipientsAndMentionDeliveriesInAtMostSevenStatements logs 'ran 7 ... lookups' for 98 events; #2366's expected session lists unchanged, with checkSessionRecipients reading destination order from published_destinations.",
       "headSha": "bf30591dd483da80b3cb0e3965416537535329c2",
       "negativeControl": "With eventDestinations' addPrimaryDocumentAuthors step removed, TestAFailedRecipientQueryBacksOffOnlyTheEventsThatNeededItAfterTheirOwnerTopic fails ('attempt_count 0 and next_attempt_at <nil>, want it backed off') and the seven-statement test reaches 161 sessions' subjects, want 175."
+    },
+    {
+      "criterion": "A failed recipient read keeps per-(owner, destination) order and isolates the failure: a later event of the same issue never reaches a session the failed event missed before that event's retry delivers; one permanently broken credit list backs off only its own event and holds only its owner's later session copies while other owners' events, including ones asking the same statement, publish; a not-due event takes no recipient read; the stop releases rather than backs off.",
+      "surface": "outbox package tests on pod Postgres 17 (fresh database) and the repository multiprocess harness (two real envoy-dispatch processes, one Postgres, one NATS)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -count=1 ./internal/dispatch/outbox/ ./internal/dispatch/deliveryaudit/ ./internal/dispatch/store/ ./cmd/dispatch/ ./cmd/listener/ ./internal/bus/ && CGO_ENABLED=1 go test -race -count=1 ./internal/dispatch/outbox/ && go test -tags multiprocess -count=1 -timeout 25m ./cmd/dispatch",
+      "observed": "All packages ok (outbox 270.8 s, store 191.2 s, cmd/dispatch 230.5 s, listener 405.4 s, bus 247.9 s); -race outbox ok (252.0 s at 09e871b6); multiprocess ok (653.2 s at 06960fb3); TestALaterEventReachesNoSessionTheFailedRecipientReadOfAnEarlierOneMissedBeforeIt (3 cases), TestABrokenCreditListBacksOffItsEventAndHoldsOnlyItsOwnersLaterSessionCopies, TestTheBatchTakesNoRecipientReadForAnEventThatIsNotDue, TestAReplyToAnIDThatIsNoUUIDReachesNoThreadSessionAndPublishes pass; the seven-statement test logs 'ran 7'.",
+      "headSha": "2f3bf214764c061c8c3c33ee074083afb03c79ac",
+      "negativeControl": "On bf30591d the new tests fail: 'the later event has published_at ... attempt_count 0 ... want it held back no later than the failed event's retry'; 'scan batch: load the batch's document session authors: ERROR: cannot extract elements from a scalar (SQLSTATE 22023)'; without the per-id retry, 'the other issue's comment on a healthy document has published_at <nil>, attempt_count 1'; with release := false the resolveLost subtest fails 'want it released: none, 0 and none'."
     }
   ],
   "filesChanged": [
@@ -115,7 +123,8 @@
     "packages/envoy/cmd/dispatch/main.go, main_test.go, multiprocess_test.go, outbox_load_steps_test.go, shutdown_test.go",
     "packages/envoy/internal/dispatch/store/pool.go, store/kv.go (DecodeRoleClaim exported), contracts/dedupe.go, pglisten/listener.go",
     ".dispatch/architecture/dispatch-outbox.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md, packages/envoy/cmd/dispatch/AGENTS.md, docs/site/src/content/docs/dispatch/running-dispatch.md, packages/envoy/infra/README.md, packages/envoy/internal/dispatch/outbox/THROUGHPUT.md, packages/envoy/CHANGELOG.md",
-    "Round 7 merge: packages/envoy/internal/dispatch/outbox/{publisher.go,lookups.go,recipients.go,batch.go,THROUGHPUT.md} and tests (publisher_test, publisher_document_authors_test, publisher_comment_recipients_test, order_test, throughput_test), internal/dispatch/deliveryaudit/deliveryaudit_test.go, packages/envoy/AGENTS.md"
+    "Round 7 merge: packages/envoy/internal/dispatch/outbox/{publisher.go,lookups.go,recipients.go,batch.go,THROUGHPUT.md} and tests (publisher_test, publisher_document_authors_test, publisher_comment_recipients_test, order_test, throughput_test), internal/dispatch/deliveryaudit/deliveryaudit_test.go, packages/envoy/AGENTS.md",
+    "Round 8: outbox/{lookups.go,batch.go,publisher.go,recipients.go}, outbox tests (publisher_comment_recipients_test, publisher_test, publisher_document_authors_test), deliveryaudit/README.md, scripts/dispatch/comment-delivery/classes.ts, packages/envoy/AGENTS.md, .dispatch/architecture/dispatch-outbox.md, the changelog fragment; merge: migrations renamed to 0137_duty_holds/0138_outbox_claim and references, cmd/dispatch/README.md, cmd/dispatch/multiprocess_test.go imports, .github/workflows/envoy-and-contracts.yaml comment"
   ],
   "trickyParts": [
     "Blocked events take their blocker's next_attempt_at (no attempt), so they are not re-read on every wake while the blocker waits out a back-off; an owner whose first 100 events all wait has its later due event deferred to the earliest of them (deferPastWindow).",
@@ -132,7 +141,9 @@
     "TestTheClaimSkipsPendingCommandsAndBackedOffRows keeps the plan's 0.5 ms bound by the fastest of 20 EXPLAIN ANALYZE runs; it measured 0.41-0.45 ms on the 2-core pod.",
     "Round 7: #2366's checkSessionRecipients reads each event's destination order from published_destinations, not from send order, since the batch sends each destination's chain beside the others; it also asserts the publisher was sent exactly those subjects. #2366's stop test waits for the comment's issue-topic send, which goes first in that topic's chain."
   ],
-  "openQuestions": [],
+  "openQuestions": [
+    "#2406 (INFRA-606) now replaces its reopen with migration 0137_comment_fallback_copies and a fallback pass (outbox/mentions.go publishFallbackCopies) that runs on the outbox's retry tick; #2395 removes that tick, so whichever merges second makes the pass run on the comment.delivery event insert the API's failed settle writes, and renumbers its migrations above the other's (both now use 0137)."
+  ],
   "discoveredComplexity": [
     "Ordering per (owner, destination) costs one NATS round trip per event per destination of one owner: with NATS behind 150 ms, a burst of 100 events on one issue drains in 16 s (THROUGHPUT.md)."
   ]
