@@ -2,50 +2,47 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-643",
-  "completed": "2026-10-28T14:13:00Z",
-  "testedHead": "b6e7764609575fc93338d69d9cc49dda10465165",
-  "handoffHead": "242939829254ea75ef479d87c3f2913981db29e0",
-  "fingerprint": "b9fa06ef0054809ba81f77e591e1ea0656002e5d49bc17def060f24f91a87158 (conflicts-and-rewrites unchanged-diff check at 242939829254 against main@origin's fork point; compare it at the head after the conflict merge: equal means bare gates only)",
-  "evidence": "dispatch://INFRA-643/artifact/tester-verification-md",
+  "completed": "2026-10-28T16:17:00Z",
+  "testedHead": "df8047c82fe4edda6994b49ca21af062c4dfb55d",
+  "codeHead": "da3572fd5d84c882e5e2b92fd9d2784a30baf76f",
+  "previousRound": "b6e7764609575fc93338d69d9cc49dda10465165 (verdict fail: the PR conflicted with main, so no CI ran)",
+  "fingerprint": "b2b4c3d572dbd727f2941ae5e28b45a55ebbb743fa48a1ca1fcefbc35ae516e2 at df8047c82fe4 (b9fa06ef... at 242939829254). The difference is only the changelog entry moving from packages/envoy/CHANGELOG.md into packages/envoy/.changes/unreleased/pr2453-Changed-20261028-141551.yaml: without those paths both heads give bd163f4462a1b06457d297124796aac2ac0e7a182d09b4085c01c8248fb0273a. Because the fingerprint differs, this was a full round, on the new base 7583347570a9, which includes #2416 in the same package.",
+  "evidence": "dispatch://INFRA-643/artifact/tester-verification-md (version 2)",
+  "ci": "Read on GitHub at da3572fd5d84 (df8047c82fe4 is handoff-only, so skip-checks applies). Green: lint, typecheck, test, build x2, changes, Dispatch/Daemon/Broker Go suites on Postgres 16, envoy-smoke, envoy-e2e-local, dispatch-memory, dispatch-multiprocess. Red: envoy-infra-go, on TestDispatchConnectionsPerPodIsTheServers (packages/envoy/infra/gcp). This PR does not touch that package; it is main's known red (red since #2233, fixed on main by #2464, per the INFRA-512 architect). Still running when read: dispatch, envoy-go, envoy-go-race.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surfaces independently: own base 59f6647db9d7 and head b6e776460957 builds, own alternating replay runs with the implementer's measure.sh (every head run below every base run, W12 to 0%, W6 roughly halved), own forced-GC heap pair (+2.9% under docs, inside 5%), and own equivalence runs on real LINUX specs through the HTTP API and a Hocuspocus/Yjs browser client instead of the package harness. Ran the implementer's TestRenderReuse* against a sabotaged head to confirm they catch a plausible bug (5 fail)."
+    "how": "Drove the same surfaces independently at the merged head: own builds of base 7583347570a9 and head df8047c82fe4, own alternating replay runs with the implementer's measure.sh (every head run below every base run), own forced-GC heap profiles, and own equivalence runs on real LINUX specs through the HTTP API and a Hocuspocus/Yjs browser client. The code diff equals the one the implementer proved at 85f2515596de/b6e776460957."
   },
-  "failures": [
-    {
-      "criterion": "The repository's CI is green at the tested head (lint, types, unit and integration lanes are read on GitHub, not re-run)",
-      "evidence": "gh api repos/sjawhar/legion/pulls/2453 -> mergeable false, mergeable_state dirty; gh pr view 2453 -> CONFLICTING; check-runs and workflow runs for b6e7764609575fc93338d69d9cc49dda10465165 and 242939829254ea75ef479d87c3f2913981db29e0: none (GitHub computes no merge ref and runs no check on a conflicting head). git merge-tree --write-tree 242939829254 origin/main: one conflict, packages/envoy/CHANGELOG.md (main is 47 commits past the base 59f6647db9d7; the four main commits touching internal/dispatch/docs and pmdoc auto-merge). Remedy: the implementer merges main into legion/INFRA-643 as conflicts-and-rewrites.md says and pushes; the real-surface verification below stands for the next round if the fingerprint is unchanged."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
       "criterion": "Equivalence: the observer's change records, every rendered markdown and every offset are identical to today's",
-      "surface": "Dispatch server (cmd/dispatch) built from base 59f6647db9d7 and head b6e776460957, fresh restore of the INFRA-512 replay database; agent writes through the HTTP API (as the dispatch CLI sends them) and browser edits through Hocuspocus/Yjs (as the web editor sends them)",
-      "command": "$TMPDIR/infra643t/run-scenario.sh {base2|head1|hits1} <binary> LINUX-129 LINUX-364 LINUX-70 (driver/scenario.ts: 48 steps per run: cold and warm replace, two-op edit, anchored comment, ask block, delete-only edit, browser typing / no-op transaction / delete while connected, cold anchored comment after idle eviction, warm replace after it); an insert trigger on doc_updates keeps every stored class before compaction; dump.sh diffed; oracle.test (TestZZTesterOracle, built from the base tree) folds the stored updates and renders after each",
-      "observed": "Base and head identical: 57 update classes (24 unchanged), 33 versions (number, markdown md5, length, doc_update_version, summary, authors), 6 ask records (all the agent's), 6 comment anchors (quote, block, version, resolved), 48 HTTP responses (ids/times removed). Head paths fired (counter build): observer reused 30, in room 9, rendered 18; before from replica 27, from previous op 6, rendered 6. Oracle: 0 class and 0 version mismatches on both builds. Concurrent agent/browser runs (4 specs, 40-60 rounds): head 0 class mismatches in 872 updates; one version on the counter build and one class on a base run differ from the oracle, both from stored order versus room commit order (a write's version stored before browser updates the room held first), code the diff does not touch.",
-      "headSha": "b6e7764609575fc93338d69d9cc49dda10465165",
-      "negativeControl": "Head build with the observer's reuse not moving the replica's rendering forward (tree.go changedBy, the askBlocks branch): 9 update classes differ from the base (true where base records false, on the anchored comment after a reused write) and the oracle flags the same 9; the implementer's TestRenderReuse* fail 5 tests on it ('after commit 2 the replica renders 410310 bytes and the shadow 410314 bytes')."
+      "surface": "Dispatch server (cmd/dispatch) built from base 7583347570a9 and head df8047c82fe4, fresh restore of the INFRA-512 replay database; agent writes through the HTTP API (as the dispatch CLI sends them) and browser edits through Hocuspocus/Yjs (as the web editor sends them)",
+      "command": "$TMPDIR/infra643t/run-scenario.sh {r2base|r2head|r2hits|r2sab} <binary> LINUX-129 LINUX-364 LINUX-70 (48 steps: cold and warm replace, two-op edit, anchored comment, ask block, delete-only edit, browser typing / no-op transaction / delete while connected, cold anchored comment after idle eviction, warm replace after it; an insert trigger keeps every stored update class before compaction); dump.sh diffed; oracle2.test TestZZTesterOracle (built from the base tree) folds the stored updates and renders after each; ROUNDS=60 run-stress.sh r2headS dispatch-hits2 LINUX-129 LINUX-364 LINUX-70 LINUX-122",
+      "observed": "Base and head (and head + counters) identical: 57 update classes (24 unchanged), 33 versions (number, markdown md5, length, doc_update_version, summary, authors), 6 ask records, 6 comment anchors, 48 HTTP responses. Oracle: 61 updates and 33 versions, 0 mismatches on both builds. Counters: observer reused 30, in room 13, rendered 18; before from replica 27, from previous op 6, rendered 10. Concurrent run (244 writes, 360 browser edits, all 200/201): 657 updates and 225 versions, 0 mismatches; observer reused 214, before from replica 146.",
+      "headSha": "df8047c82fe4edda6994b49ca21af062c4dfb55d",
+      "negativeControl": "Head build with the observer's reuse not moving the replica's rendering forward (tree.go changedBy, askBlocks branch): 9 update classes differ from the base (true where base records false) and the oracle flags the same 9."
     },
     {
       "criterion": "Merge rule of the shared context on LINUX's replay",
       "surface": "Dispatch server under the INFRA-512 replay of the production write log (tools/load.py F=0.3, one read per write, 2 SSE streams, minutes 27-35), GOMAXPROCS=2",
-      "command": "$TMPDIR/infra643t/measure.sh tb1:dispatch-base th1:dispatch-head tb2:dispatch-base th2:dispatch-head, then QUIET_HEAP=1 measure.sh tbm:dispatch-base thm:dispatch-head; go tool pprof -top -cum -show_from='docs\\.\\(\\*Service\\)\\.applyLive$' -focus='docs\\.documentMarkdown$' and -focus='docs\\.\\(\\*renderedReplica\\)\\.updateChangesMarkdown$'",
-      "observed": "CPU utime+stime base 443.24 / 468.94 / 445.42 s, head 413.25 / 423.42 / 429.45 s: every head run below every base run. W12 2.42% / 2.54% -> 0%; W6 1.58% / 1.59% -> 0.88% / 0.89%. Same TARGET_NOT_FOUND quote errors (1-2 per run) on both sides.",
-      "headSha": "b6e7764609575fc93338d69d9cc49dda10465165",
-      "negativeControl": "The base build on the same replay and inputs: every base run above every head run, and its profile holds the observer render (W12 9.90 s / 10.96 s) the head never runs."
+      "command": "QUIET_HEAP=1 $TMPDIR/infra643t/measure2.sh r2b1:dispatch-base2 r2h1:dispatch-head2 r2b2:dispatch-base2 r2h2:dispatch-head2; QUIET_HEAP=1 measure3.sh r2b3:dispatch-base2 r2h3:dispatch-head2; go tool pprof -top -cum -show_from='docs\\.\\(\\*Service\\)\\.applyLive$' -focus='docs\\.documentMarkdown$' and -focus='docs\\.\\(\\*renderedReplica\\)\\.updateChangesMarkdown$'",
+      "observed": "CPU utime+stime base 458.26 / 461.75 / 446.41 s, head 422.76 / 424.82 / 438.96 s: every head run below every base run (mean gain 26.6 s, 5.9%). W12 2.74% / 2.70% / 2.75% -> 0%; W6 1.83% / 1.60% / 1.67% -> 1.11% / 1.07% / 1.04%. Request errors 1-3 per run on both sides.",
+      "headSha": "df8047c82fe4edda6994b49ca21af062c4dfb55d",
+      "negativeControl": "The base build on the same replay and inputs: every base run above every head run, and its profile holds the observer render (W12 11.31-11.60 s) that the head never runs."
     },
     {
       "criterion": "No memory the server keeps resident is added",
-      "surface": "The same server under the replay, heap profile after a forced GC 20 s after the step",
-      "command": "QUIET_HEAP=1 measure.sh tbm:dispatch-base thm:dispatch-head; go tool pprof -sample_index=inuse_space -top -cum -focus='envoy/internal/dispatch/docs\\.' <binary> prof/{tbm,thm}.heapq.pb.gz",
-      "observed": "inuse_space under docs: 620.76 MB base, 638.47 MB head (+2.9%, inside the plan's 5%); all 638.79 vs 653.70 MB.",
-      "headSha": "b6e7764609575fc93338d69d9cc49dda10465165",
-      "negativeControl": "End-of-step heap profiles without a forced GC (tb1, th1, tb2, th2: 892-969 MB under docs, overlapping and unordered) hold in-flight request data, so only the forced-GC pair measures what stays resident."
+      "surface": "The same server under the replay, heap profile after a forced GC 20 s after the step, and again 75 s later once every room has idled out",
+      "command": "go tool pprof -sample_index=inuse_space -top -cum -focus='envoy/internal/dispatch/docs\\.' <binary> prof/<run>.heapq.pb.gz (and .heapidle.pb.gz for r2b3/r2h3); per-site foci publishLiveUpdate, renderedReplica, pmdoc.RenderWithBlockOffsets",
+      "observed": "Median run of each side (the plan's check): r2b1 658.57 MB, r2h2 639.83 MB (-2.8%, inside 5%). Pairs: 658.57/668.57, 551.14/639.83, 620.08/639.99 MB. The spread is in room documents and replicas still resident at the snapshot (publishLiveUpdate 318-411 MB base, 394-443 MB head), code the change does not touch. Render strings the change could retain are lower at the head in every pair (20.6-28.5 vs 26.3-31.4 MB). After idle: no room document or replica left on either build; the remainder is the byte-budgeted document-read cache (252.7 vs 275.9 MB).",
+      "headSha": "df8047c82fe4edda6994b49ca21af062c4dfb55d",
+      "negativeControl": "Base-vs-base spread under the same replay is 551-659 MB (18%), larger than any head-vs-base pair except r2b2/r2h2. So a single-pair difference measures room residency at the snapshot, not the change, and the median-run and per-site comparisons are what the criterion reads."
     }
   ],
   "notes": [
-    "Tester's own mistake, repaired: a pg-start.sh call from the tester's PID namespace removed postmaster.pid of the implementer's local Postgres ($TMPDIR/infra643/pg), which then shut down; the tester restarted it on the same data directory at 12:05Z and it served every later run.",
-    "Throwaway files live only under $TMPDIR/infra643t (driver, oracle, builds); nothing was added to the repository."
+    "Twice now, the services-start.sh call inside the implementer's measure.sh, run from the tester's PID namespace, made pg_ctl remove postmaster.pid of the implementer's Postgres. The postmaster cannot see the PID, so it takes the lock file as stale, and the live postmaster then shuts down. The first time (12:05Z) I restarted it. The second time (15:15Z) I rewrote the lock file with the live PID 44254 before its one-minute recheck, and it kept running. Round-two runs used measure2.sh/measure3.sh, which never call services-start.sh.",
+    "Throwaway files only under $TMPDIR/infra643t; nothing added to the repository."
   ]
 }
