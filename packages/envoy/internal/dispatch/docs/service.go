@@ -268,6 +268,9 @@ type Service struct {
 	// observer keeps (weak.Pointer[renderedReplica]), which the document's reads walk (readLive),
 	// keyed by a weak pointer to that document (keepReplica).
 	replicas sync.Map
+	// renderPaths counts how the renderings the rooms' update observers and the document writes
+	// need were had (renderPathCounts); every replica counts on it (keepReplica).
+	renderPaths renderPathCounts
 	// instances lists, for each resident room document, what that instance records about the
 	// durable history behind it (*roomInstance): the updates whose writes can have recorded a
 	// pending author, and the durable version the instance stands at, keyed by a weak pointer to

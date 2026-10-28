@@ -39,9 +39,18 @@ unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE
 # DISPATCH_E2E_LISTEN_FROM names, which e2e/harness-start.ts holds before it
 # starts the proxy, so the proxy can name it. B gets a web dist of its own in
 # DISPATCH_E2E_SERVER_WEB_DIST (a path from packages/envoy, where the server
-# runs), and both one DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY, required here: with a
-# key apiece, a person signed in on one process is signed out by the first
-# request the other answers.
+# runs), and both one DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY, required here under dev
+# sign-in: with a key apiece, a person signed in on one process is signed out by
+# the first request the other answers.
+#
+# Sign-in (DISPATCH_E2E_SIGNIN, e2e/harness-signin.ts): unset (or empty), the
+# server mounts its dev sign-in route (DISPATCH_DEV_SIGNIN=1, below). `oidc` is
+# the production sign-in instead, at the dev OIDC issuer the harness started
+# (e2e/run-signin-issuer.sh) on DISPATCH_E2E_SIGNIN_ISSUER_PORT: the server takes
+# it as DISPATCH_SIGNIN_ISSUER, with DISPATCH_E2E_SIGNIN_CLIENT_ID,
+# DISPATCH_E2E_SIGNIN_CLIENT_SECRET and DISPATCH_E2E_SIGNIN_GROUP as its client
+# and the group it admits, and DISPATCH_E2E_SIGNING_KEY as DISPATCH_SIGNING_KEY,
+# one key for every process of the run, all required, and no dev sign-in.
 case "${DISPATCH_E2E_PROCESSES:-1}" in
   1)
     own_port_variable=DISPATCH_E2E_PORT
@@ -49,7 +58,9 @@ case "${DISPATCH_E2E_PROCESSES:-1}" in
     dashboard_origin=""
     ;;
   2)
-    : "${DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY:?DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY must give both processes of DISPATCH_E2E_PROCESSES=2 one cookie key}"
+    if [ -z "${DISPATCH_E2E_SIGNIN:-}" ]; then
+      : "${DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY:?DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY must give both processes of DISPATCH_E2E_PROCESSES=2 one cookie key}"
+    fi
     : "${DISPATCH_E2E_PORT:?DISPATCH_E2E_PORT must name the round-robin proxy (e2e/round-robin-proxy.ts) both processes of DISPATCH_E2E_PROCESSES=2 serve behind}"
     own_port_variable=DISPATCH_E2E_SERVER_PORT
     own_port="${DISPATCH_E2E_SERVER_PORT:-}"
@@ -86,13 +97,36 @@ else
   port_env=()
 fi
 
-# This process's own web dist and cookie key, read before the sweep below: web/dist and a key of
-# its own unless two-process mode gave it others (above).
+# This process's own web dist and sign-in, read before the sweep below: web/dist and dev sign-in
+# with a cookie key of its own unless two-process mode or DISPATCH_E2E_SIGNIN gave it others
+# (above).
 web_dist="${DISPATCH_E2E_SERVER_WEB_DIST:-../dispatch/web/dist}"
-shared_key_env=()
-if [ -n "${DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY:-}" ]; then
-  shared_key_env=(DISPATCH_DEV_SIGNIN_SHARED_KEY="$DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY")
-fi
+case "${DISPATCH_E2E_SIGNIN:-}" in
+  "")
+    signin_env=(DISPATCH_DEV_SIGNIN=1)
+    if [ -n "${DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY:-}" ]; then
+      signin_env+=(DISPATCH_DEV_SIGNIN_SHARED_KEY="$DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY")
+    fi
+    ;;
+  oidc)
+    : "${DISPATCH_E2E_SIGNIN_ISSUER_PORT:?DISPATCH_E2E_SIGNIN_ISSUER_PORT must name the dev OIDC issuer (e2e/run-signin-issuer.sh) DISPATCH_E2E_SIGNIN=oidc signs in at}"
+    : "${DISPATCH_E2E_SIGNIN_CLIENT_ID:?DISPATCH_E2E_SIGNIN_CLIENT_ID must name the Dispatch client at the dev OIDC issuer}"
+    : "${DISPATCH_E2E_SIGNIN_CLIENT_SECRET:?DISPATCH_E2E_SIGNIN_CLIENT_SECRET must give the secret of that client}"
+    : "${DISPATCH_E2E_SIGNIN_GROUP:?DISPATCH_E2E_SIGNIN_GROUP must name the sign-in pool group the server admits}"
+    : "${DISPATCH_E2E_SIGNING_KEY:?DISPATCH_E2E_SIGNING_KEY must give every process of DISPATCH_E2E_SIGNIN=oidc one cookie key}"
+    signin_env=(
+      DISPATCH_SIGNIN_ISSUER="http://127.0.0.1:$DISPATCH_E2E_SIGNIN_ISSUER_PORT"
+      DISPATCH_SIGNIN_CLIENT_ID="$DISPATCH_E2E_SIGNIN_CLIENT_ID"
+      DISPATCH_SIGNIN_CLIENT_SECRET="$DISPATCH_E2E_SIGNIN_CLIENT_SECRET"
+      DISPATCH_SIGNIN_GROUP="$DISPATCH_E2E_SIGNIN_GROUP"
+      DISPATCH_SIGNING_KEY="$DISPATCH_E2E_SIGNING_KEY"
+    )
+    ;;
+  *)
+    echo "DISPATCH_E2E_SIGNIN must be oidc or unset, not '$DISPATCH_E2E_SIGNIN'" >&2
+    exit 1
+    ;;
+esac
 
 # DISPATCH_E2E_SERVER_BINARY, when set, is the envoy-dispatch this run starts in place of the one
 # it builds from this tree, also a path from packages/envoy: the harness sets it for B from
@@ -171,13 +205,16 @@ done
 # (DISPATCH_DEV_SIGNIN=1) with a signing key it generates for this process
 # alone, or in two-process mode derives from the shared key above, so no
 # signing key is passed and nothing reaches the caller's persistent data dir;
+# under DISPATCH_E2E_SIGNIN=oidc it mints it at /auth/callback, signed with the
+# run's DISPATCH_SIGNING_KEY, which keeps the data dir out of it too.
 # DISPATCH_INSECURE_COOKIE=1 keeps the cookie usable over plain HTTP in every
 # engine. DISPATCH_SERVER_URL is the dashboard origin above,
 # http://127.0.0.1:<port> of the port the server serves on, or in two-process
 # mode the round-robin proxy's: it is the origin the CSRF guard compares writes
-# against, the only Host the router serves under the flag, and the Playwright
-# config's baseURL. The flag also refuses a DATABASE_URL whose host is not
-# loopback or a unix socket, and any DISPATCH_SIGNIN_* setting.
+# against, the only Host the router serves under dev sign-in, the origin of the
+# sign-in's /auth/callback, and the Playwright config's baseURL. Dev sign-in
+# also refuses a DATABASE_URL whose host is not loopback or a unix socket, and
+# any DISPATCH_SIGNIN_* setting.
 app_pem="$(openssl genrsa 2048 2>/dev/null)"
 
 cd "$(dirname "$0")/../../envoy"
@@ -203,12 +240,11 @@ fi
 exec "${listen[@]}" env \
   "${broker_env[@]}" \
   "${file_store_env[@]}" \
-  "${shared_key_env[@]}" \
+  "${signin_env[@]}" \
   DATABASE_URL="$database_url" \
   DISPATCH_AGENT_TOKEN=e2e-token \
   DISPATCH_APP_CLIENT_ID=Iv1.e2efake \
   DISPATCH_APP_PEM_B64="$app_pem" \
-  DISPATCH_DEV_SIGNIN=1 \
   DISPATCH_GITHUB_API_BASE="http://127.0.0.1:$fake_github_port" \
   DISPATCH_IDENTITY=cookie \
   DISPATCH_INSECURE_COOKIE=1 \

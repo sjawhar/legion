@@ -13913,29 +13913,6 @@ var DispatchServerStartedPayloadSchema = strictObject({
   started_at: exports_iso.datetime()
 });
 var DEFAULT_ISSUE_READ_EVENTS = 10;
-var NO_ROUTE_MESSAGE_PREFIX = "no route for ";
-var NO_ROUTE_RETRY_DELAYS_MS = [1000, 2000, 4000];
-var NO_ROUTE_ROLLING_RELEASE_MESSAGE = "The Dispatch process that answered does not offer this action yet, because a new release of " + "Dispatch is in progress. Try again in one minute.";
-var sleep = (ms, signal) => {
-  const { promise, resolve, reject } = Promise.withResolvers();
-  if (signal?.aborted) {
-    reject(signal.reason);
-    return promise;
-  }
-  const abort = () => {
-    clearTimeout(timer);
-    reject(signal?.reason);
-  };
-  const timer = setTimeout(() => {
-    signal?.removeEventListener("abort", abort);
-    resolve();
-  }, ms);
-  signal?.addEventListener("abort", abort, { once: true });
-  return promise;
-};
-function jitteredDelay(ms) {
-  return ms * (0.75 + Math.random() * 0.5);
-}
 var DispatchEventSchema = object({
   issue_key: string2().nullable(),
   artifact_id: string2().nullish(),
@@ -14719,7 +14696,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_doc_read",
     example: { issue: "DSP-1" },
-    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
+    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " + "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -14766,7 +14743,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOC_NEWER_CONTENT` (this Dispatch " + "build cannot read an element of the document; try again in one minute), `DOCUMENT_UNLOADABLE` (the " + "document's stored history cannot load; a person decides whether to rebuild it) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "A block read prints `Block:`, `Document:`, `Changed in version:` and `Text:`, then those two sections; a pinned one adds " + "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " + "reads `No block <id> in <document>.` " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
+    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "A block read prints `Block:`, `Document:`, `Changed in version:` and `Text:`, then those two sections; a pinned one adds " + "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " + "reads `No block <id> in <document>.` " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -15631,13 +15608,7 @@ function isJson(response) {
   return response.headers.get("content-type")?.includes("application/json") ?? false;
 }
 function isNoRoute(error) {
-  return error instanceof DispatchServiceError && error.status === 404 && error.code === "NOT_FOUND" && error.message.startsWith(NO_ROUTE_MESSAGE_PREFIX);
-}
-
-class DispatchNoRouteError extends DispatchServiceError {
-  constructor() {
-    super("NOT_FOUND", 404, NO_ROUTE_ROLLING_RELEASE_MESSAGE);
-  }
+  return error instanceof DispatchServiceError && error.status === 404 && error.code === "NOT_FOUND" && error.message.startsWith("no route for ");
 }
 var ISSUE_EVENTS_PAGE_MAX = 200;
 var DISPATCH_TOOL_DEADLINE_MS = 60000;
@@ -15732,13 +15703,11 @@ class DispatchClient {
   #baseUrl;
   #resolvedIssues = new Map;
   #signal;
-  #sleep;
-  constructor(baseUrl, token, fetchImpl = fetch, signal, wait = sleep) {
+  constructor(baseUrl, token, fetchImpl = fetch, signal) {
     this.token = token;
     this.fetchImpl = fetchImpl;
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(signal);
-    this.#sleep = wait;
   }
   async issue(input) {
     return this.#json("POST", ["api", "v1", "issues"], input);
@@ -15855,7 +15824,7 @@ class DispatchClient {
     try {
       return await this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
     } catch (error) {
-      if (!(error instanceof DispatchNoRouteError))
+      if (!isNoRoute(error))
         throw error;
     }
     try {
@@ -15885,7 +15854,7 @@ class DispatchClient {
         "sync"
       ]);
     } catch (error) {
-      if (!(error instanceof DispatchNoRouteError))
+      if (!isNoRoute(error))
         throw error;
     }
     const source = await this.#json("POST", [
@@ -15989,18 +15958,17 @@ class DispatchClient {
   }
   async fileVersion(id, version) {
     const url = this.#url(["api", "v1", "artifacts", id, "versions", String(version)]);
-    return this.#send(url, {
+    const response = await this.fetchImpl(url, {
       method: "GET",
       headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` },
       signal: this.#signal
-    }, async (response) => {
-      if (!response.ok)
-        return this.#response("GET", url, response);
-      return {
-        mime: response.headers.get("Content-Type") ?? "application/octet-stream",
-        bytes: new Uint8Array(await response.arrayBuffer())
-      };
     });
+    if (!response.ok)
+      return this.#response("GET", url, response);
+    return {
+      mime: response.headers.get("Content-Type") ?? "application/octet-stream",
+      bytes: new Uint8Array(await response.arrayBuffer())
+    };
   }
   async artifactBlocks(id) {
     return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
@@ -16032,8 +16000,8 @@ class DispatchClient {
   async resolveComment(id, actor) {
     return this.#json("POST", ["api", "v1", "comments", id, "resolve"], { actor });
   }
-  async getComments(issue, artifact) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"], undefined, artifact ? { artifact } : undefined);
+  async getComments(issue) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"]);
   }
   async getIssueReferences(issue) {
     return this.#json("GET", [
@@ -16079,30 +16047,13 @@ class DispatchClient {
     if (body !== undefined)
       headers["Content-Type"] = "application/json";
     const url = this.#url(path, query);
-    return this.#send(url, {
+    const response = await this.fetchImpl(url, {
       method,
       headers,
       signal: this.#signal,
       ...body === undefined ? {} : { body: JSON.stringify(body) }
-    }, async (response) => ({
-      status: response.status,
-      payload: await this.#response(method, url, response)
-    }));
-  }
-  async#send(url, init, read) {
-    for (const delay of [...NO_ROUTE_RETRY_DELAYS_MS, undefined]) {
-      const response = await this.fetchImpl(url, init);
-      try {
-        return await read(response);
-      } catch (error) {
-        if (!isNoRoute(error))
-          throw error;
-        if (delay === undefined)
-          break;
-      }
-      await this.#sleep(jitteredDelay(delay), init.signal);
-    }
-    throw new DispatchNoRouteError;
+    });
+    return { status: response.status, payload: await this.#response(method, url, response) };
   }
   async#upload(path, input) {
     if ("content" in input)
@@ -16118,12 +16069,13 @@ class DispatchClient {
   }
   async#form(method, path, body) {
     const url = this.#url(path);
-    return this.#send(url, {
+    const response = await this.fetchImpl(url, {
       method,
       headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
       body,
       signal: this.#signal
-    }, (response) => this.#response(method, url, response));
+    });
+    return this.#response(method, url, response);
   }
   #url(path, query) {
     const url = new URL(`${path.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
@@ -18215,22 +18167,64 @@ function messageSummary({ message, replies }, graph) {
   ].join(`
 `);
 }
-async function openArtifactMarks(client, resolved) {
+async function openAnchoredThreads(client, resolved) {
   const asksPromise = resolved.owner.kind === "project" ? client.getArtifactAsks(resolved.artifact.id) : Promise.resolve(resolved.issue?.open_asks ?? []);
-  const commentsPromise = resolved.owner.kind === "project" ? client.getArtifactComments(resolved.artifact.id) : client.getComments(resolved.issue?.key ?? "", resolved.artifact.id);
+  const commentsPromise = resolved.owner.kind === "project" ? client.getArtifactComments(resolved.artifact.id) : client.getComments(resolved.issue?.key ?? "");
   const commentsResultPromise = commentsPromise.then((value) => ({ status: "fulfilled", value }), (reason) => ({ status: "rejected", reason }));
-  const asks = await asksPromise;
-  const marks = asks.filter((ask) => ask.state === "open" && ask.anchor?.artifact_id === resolved.artifact.id).map((ask) => `ask ${ask.id}`);
+  const asks = (await asksPromise).filter((ask) => ask.state === "open" && ask.anchor?.artifact_id === resolved.artifact.id);
   const commentsResult = await commentsResultPromise;
-  if (commentsResult.status === "rejected") {
-    if (dispatchAnswered(commentsResult.reason, 404))
-      return marks;
+  if (commentsResult.status === "rejected" && !dispatchAnswered(commentsResult.reason, 404)) {
     throw commentsResult.reason;
   }
-  return [
-    ...marks,
-    ...commentsResult.value.filter((comment) => !comment.resolved && comment.anchor?.artifact_id === resolved.artifact.id).map((comment) => `comment ${comment.id}`)
-  ];
+  const comments = commentsResult.status === "fulfilled" ? commentsResult.value : [];
+  const askReplies = new Map(asks.map((ask) => [ask.id, []]));
+  for (const comment of comments) {
+    if (comment.ask_id)
+      askReplies.get(comment.ask_id)?.push(comment);
+  }
+  const askThreads = asks.map((ask) => [
+    `ask ${ask.id} \xB7 ${actorText(ask.author)} \xB7 ${ask.created_at}`,
+    ...anchorLines(ask),
+    `Question: ${ask.question}`,
+    ...threadReplyLines(askReplies.get(ask.id) ?? [])
+  ].join(`
+`));
+  const byId = new Map(comments.map((comment) => [comment.id, comment]));
+  const roots = comments.filter((comment) => comment.reply_to === null && !comment.ask_id && !comment.resolved && comment.anchor?.artifact_id === resolved.artifact.id);
+  const replies = new Map(roots.map((root) => [root.id, []]));
+  for (const comment of comments) {
+    const root = comment.reply_to === null ? undefined : threadRootId(comment, byId);
+    if (root !== undefined)
+      replies.get(root)?.push(comment);
+  }
+  const commentThreads = roots.map((root) => [
+    `comment ${root.id} \xB7 ${actorText(root.author)} \xB7 ${root.created_at}`,
+    ...anchorLines(root),
+    `Body: ${root.body}`,
+    ...threadReplyLines(replies.get(root.id) ?? [])
+  ].join(`
+`));
+  return [...askThreads, ...commentThreads];
+}
+function threadReplyLines(replies) {
+  return replies.flatMap((reply) => [
+    `reply ${reply.id} \xB7 ${actorText(reply.author)} \xB7 ${reply.created_at}`,
+    `Body: ${reply.body}`
+  ]);
+}
+function threadRootId(comment, byId) {
+  const seen = new Set;
+  let current = comment;
+  while (current.reply_to !== null) {
+    if (seen.has(current.id))
+      return;
+    seen.add(current.id);
+    const parent = byId.get(current.reply_to);
+    if (parent === undefined)
+      return;
+    current = parent;
+  }
+  return current.id;
 }
 async function blockAsks(client, resolved, state) {
   const asks = await (resolved.issue === undefined ? client.getArtifactAsks(resolved.artifact.id, state) : client.listIssueAsks(resolved.issue.key, state));
@@ -18482,7 +18476,7 @@ async function executeDispatchTool(input) {
     throw new ToolInputError(input.tool, checked.problems);
   const ownerArguments = checked.owner;
   const pictures = checked.pictures;
-  const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal, input.sleep);
+  const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
   if (input.tool === "dispatch_open_asks") {
     const client = dispatchClient();
     const project = optionalString(ownerArguments.args, "project");
@@ -19195,24 +19189,27 @@ Document token: ${listed.token}`,
         } : { issue: resolved.issue?.key }, version, resolved.owner.kind === "project" ? resolved.owner.project : resolved.owner.issue, shown);
       }
       const documentPromise = client.docRead(resolved.artifact.id, version);
-      const marksPromise = openArtifactMarks(client, resolved);
-      const marksResultPromise = marksPromise.then((value) => ({ status: "fulfilled", value }), (reason) => ({ status: "rejected", reason }));
+      const threadsPromise = openAnchoredThreads(client, resolved);
+      const threadsResultPromise = threadsPromise.then((value) => ({ status: "fulfilled", value }), (reason) => ({ status: "rejected", reason }));
       const document = await documentPromise;
-      const marksResult = await marksResultPromise;
-      if (marksResult.status === "rejected")
-        throw marksResult.reason;
-      const marks = marksResult.value;
+      const threadsResult = await threadsResultPromise;
+      if (threadsResult.status === "rejected")
+        throw threadsResult.reason;
+      const threads = threadsResult.value;
       const approval = approvalLine(resolved.artifact);
       const trailer = [
         ..."token" in document && document.token !== undefined ? [`Document token: ${document.token}`] : [],
-        ...marks.length === 0 ? [] : [`Open anchored asks/comments: ${marks.join(", ")}`],
         ...approval === undefined ? [] : [approval]
       ];
       return {
-        text: trailer.length === 0 ? document.markdown : `${document.markdown}
+        text: [
+          document.markdown,
+          ...trailer.length === 0 ? [] : [trailer.join(`
+`)],
+          ...threads.length === 0 ? [] : ["Open anchored threads:", ...threads]
+        ].join(`
 
-${trailer.join(`
-`)}`,
+`),
         details: resolved.owner.kind === "project" ? {
           project: resolved.artifact.project,
           document: `${resolved.artifact.project}/${resolved.artifact.slug}`

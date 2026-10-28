@@ -267,7 +267,8 @@ export function useEventStream({
         // thing. Nothing is excluded from the refresh. A genuine reconnect after a gap refreshes on
         // the leading edge; `visibilitychange` reopening the stream repeatedly does not. That edge
         // is the reopen itself, which `reconnectDelayMs` already spreads after a dropped stream, so
-        // the refresh waits no further: tabs a restart dropped together refresh spread as well.
+        // a refresh waits no further: tabs a restart dropped together and the server does not
+        // replay in full refresh spread as well.
         if (!replayComplete) {
           refreshEverything();
         }
