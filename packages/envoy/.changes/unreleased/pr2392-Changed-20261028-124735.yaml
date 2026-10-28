@@ -25,6 +25,6 @@ body: |-
     back. A failed observation is logged (at most every 30 s), and a reader waiting on the horizon
     gets the error back once every observation has failed for 10 s. The horizon is read on the
     primary only.
-time: 2026-10-28T10:11:32.084745099Z
+time: 2026-10-28T12:47:35.880566588Z
 custom:
-    Issue: INFRA-591
+    Issue: pr2392

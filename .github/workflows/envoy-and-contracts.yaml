@@ -1094,8 +1094,8 @@ jobs:
       # package binaries makes all of their per-test database cleanup queue on the service's one
       # checkpointer, so run it before the rest of the module. It ran 410-572 s on main's runs of
       # 2026-10-28, against go test's default ten-minute package deadline, and its live-stream and
-      # delivery-hub tests wait for the event log's safe horizon (INFRA-591), which any open
-      # transaction on this job's Postgres delays; its deadline names its own margin.
+      # delivery-hub tests wait for the event log's safe horizon, which any open transaction on
+      # this job's Postgres delays; its deadline names its own margin.
       - name: Unit test envoy Go package
         run: |
           go test -timeout 20m ./internal/dispatch/api
