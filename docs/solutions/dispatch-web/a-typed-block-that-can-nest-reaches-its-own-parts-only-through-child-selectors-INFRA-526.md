@@ -48,6 +48,7 @@ direct child, never to any descendant.
   card in its own block" failed at `9439f4a8` (expected 2 outer option rows, got 0) and passes at
   `a1faafec`, where both slot lookups (`useRenderedMarkdown.tsx`, `features/doc/ask-block.ts`
   `slot()`) take `:scope >`.
+  Since INFRA-612 both lookups are `askShellSlots` in `features/doc/typed-block-drawing.ts`.
 - The reviewer's first body for that case used `:::ask` for both blocks and did not nest. The
   committed case uses `::::ask`, as `e2e/unknown-directive.e2e.ts` and
   `features/doc/decision-blocks.test.ts` already did.
