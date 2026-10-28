@@ -144,7 +144,7 @@ published still gets it when it reconnects
 | `notifications.github.<owner>.<repo>.pr.<n>.>` | Every event of one pull request. |
 | `notifications.legion.<project>.controller` | A Legion project's controller. |
 | `notifications.slack.*.<channel>.mention` | Every mention of the Slack app in one channel, whatever the team. |
-| `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, with the reason. |
+| `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, or a publish to a role `<topic>` the API refused because nobody holds it, with the reason. |
 | any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. Live only: it reaches every session subscribed to it when it is published, and is not retained, so a session whose connection was down when it was published never gets it. A session that holds its own NATS connection receives it directly, its own publish included; a session the listener delivers to over a serve port, such as an OpenCode agent, receives it through its machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`, which a host's own listener sets; the shared hub's listener does not), except a publish of its own, which the listener does not echo back. A topic outside `notifications.` is refused. |
 
 An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscription in the
@@ -152,8 +152,12 @@ listener. A subscription to `<subject>.>` also covers `<subject>` itself, so sub
 request's `.>` gets its lifecycle events as well as its comments and checks.
 
 A role message is not stored for later. If no live session holds the role, a publish through the
-API is refused with `404`. If the holder does not take a message, the listener publishes an
-exception naming the reason: `no_holder`, `delivery_failed`, or `receipt_timeout`.
+API is refused with `404`, and the listener also publishes one exception naming why it refused:
+`unclaimed` when nothing claims the role, or `holder_lapsed` when a claim exists but its holder is
+no longer live. That exception is only a bus signal: nothing re-sends a refused publish except the
+Legion daemon's own outbox notice, whose row retries by itself. If the API accepts the publish but
+the listener cannot show that the message reached a live holder, it publishes an exception naming
+why instead: `no_holder`, `delivery_failed`, or `receipt_timeout`.
 
 ## Messages a session missed
 

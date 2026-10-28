@@ -245,6 +245,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/identity/*'
               - 'packages/envoy/internal/dispatch/model/*'
               - 'packages/envoy/internal/dispatch/outbox/*'
+              - 'packages/envoy/internal/dispatch/processes/*'
               - 'packages/envoy/internal/dispatch/pmdoc/**'
               - 'packages/envoy/internal/dispatch/rank/*'
               - 'packages/envoy/internal/dispatch/redeliver/*'
@@ -260,10 +261,11 @@ jobs:
               - 'packages/envoy/internal/oidc/*'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
+              - 'packages/envoy/internal/redact/*'
               - 'packages/envoy/internal/routing/*'
               - 'packages/envoy/listenfd/*'
             # The listener's packages, `go list -deps ./cmd/listener` in packages/envoy
-            # (packages/envoy/listenfd: added by #2229).
+            # (packages/envoy/listenfd: added by #2229; packages/envoy/roleholder: added by #2434).
             listener_command: &listener_command
               - 'packages/envoy/cmd/listener/*'
               - 'packages/envoy/internal/bus/*'
@@ -282,10 +284,13 @@ jobs:
               - 'packages/envoy/internal/verify/*'
               - 'packages/envoy/internal/webhook/*'
               - 'packages/envoy/listenfd/*'
+              - 'packages/envoy/roleholder/*'
             # The Dispatch server's packages plus what `go test ./cmd/dispatch` adds under both its
             # memory and its multiprocess tag: the whole of cmd/dispatch and internal/dispatch,
             # whose .go files cmd/dispatch/settings_test.go:136 walks, the packages its tests
-            # compile, and the pod spec cmd/dispatch/pod_grace_period_test.go:17 reads.
+            # compile (internal/testnats from the untagged cmd/dispatch/nats_unreachable_test.go and
+            # from multiprocess_test.go), and the pod spec cmd/dispatch/pod_grace_period_test.go:17
+            # reads.
             dispatch_command_tests: &dispatch_command_tests
               - *dispatch_server
               - 'packages/envoy/cmd/dispatch/**'
@@ -293,6 +298,7 @@ jobs:
               - 'packages/envoy/internal/cmdtest/*'
               - 'packages/envoy/internal/contracts/**'
               - 'packages/envoy/internal/oidc/**'
+              - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/internal/testsocks5/*'
               - 'packages/envoy/infra/gcp/testdata/dispatch-pod.golden'
             # The envoy-infra module's own workspace (packages/envoy/infra/go.work binds it and
@@ -335,13 +341,11 @@ jobs:
               - '.github/workflows/envoy-and-contracts.yaml'
               - *go_workspace
               - *dispatch_command_tests
-            # `go test -tags multiprocess ./cmd/dispatch`, as dispatch_memory plus the in-process
-            # NATS its rows start.
+            # `go test -tags multiprocess ./cmd/dispatch`.
             dispatch_multiprocess:
               - '.github/workflows/envoy-and-contracts.yaml'
               - *go_workspace
               - *dispatch_command_tests
-              - 'packages/envoy/internal/testnats/*'
             # `go test -tags multiprocess ./cmd/broker`.
             broker_multiprocess:
               - '.github/workflows/envoy-and-contracts.yaml'
@@ -374,6 +378,7 @@ jobs:
               - 'packages/envoy/internal/oidc/**'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
+              - 'packages/envoy/internal/redact/*'
             contracts:
               - 'packages/contracts/**'
               - 'skills/dispatch/**'
@@ -572,8 +577,9 @@ jobs:
             #   the omp harness load beside this one, and whose sources the typecheck reaches;
             # - the daemon: its prompts are the skills guard's other linking root, and
             #   scripts/skill-scenarios/daemon-pane.test.ts runs daemon-pane.go inside the daemon
-            #   module in workspace mode, where the envoy module's requirements move the versions it
-            #   builds with and the worker image's Dockerfile pins the jj the tests drive;
+            #   module in workspace mode, which compiles packages/envoy/roleholder in (`go list -deps`
+            #   of daemon-pane.go) and where the envoy module's requirements move the versions it
+            #   builds with, and the worker image's Dockerfile pins the jj the tests drive;
             # - the guides and docs the skills guard sweeps for a claim that the controller holds no
             #   GitHub credential;
             # - the Dispatch e2e client scripts/skill-scenarios/seed.ts imports, which the
@@ -597,6 +603,7 @@ jobs:
               - 'go.work.sum'
               - 'packages/envoy/go.mod'
               - 'packages/envoy/go.sum'
+              - 'packages/envoy/roleholder/**'
               - '.github/actions/install-jj/**'
               - 'AGENTS.md'
               - 'README.md'
@@ -622,6 +629,7 @@ jobs:
               - 'packages/envoy/internal/oidc/**'
               - 'packages/envoy/internal/pgmigrate/**'
               - 'packages/envoy/internal/pglisten/**'
+              - 'packages/envoy/internal/redact/**'
               - 'packages/envoy/internal/routing/**'
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/internal/tests3/seaweedfs.go'

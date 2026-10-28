@@ -658,6 +658,7 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			}
 			if result.state != roleHolderLive {
 				record.refuseRoleHolder(w, role, result)
+				publishRefusalException(d.client, logger, item, result)
 				return
 			}
 			// The lane resolved: the session this role topic reaches is on the record from here

@@ -1,0 +1,13 @@
+kind: Changed
+body: |-
+  A role publish the listener refuses because no live session holds the role (`unclaimed` or
+  `holder_lapsed`) still answers the same `404`, and now also publishes one core-NATS exception on
+  `notifications.envoy.exceptions.<role topic>`. It is published after the `404` is written and does
+  not delay the answer. Its `payload` is left out when the refused payload is larger than 64 KiB.
+  This adds the bus signal only; no Legion consumer acts on a peer's refusal. **Upgrade every Legion
+  daemon before this listener**: an older daemon reads either reason as malformed and logs
+  `ERROR role-lane exception not re-held` once for each refused attempt to publish one of its own
+  notices. A held notice row tries again after 1, 2, 4, 8, 16 and 32 s and then every 64 s, and only
+  the oldest held notice of each architect publishes, so beside this listener an older daemon logs
+  about seven of these lines in the first minute and then one every 64 s for each architect whose
+  role is unheld while it has a notice to deliver.

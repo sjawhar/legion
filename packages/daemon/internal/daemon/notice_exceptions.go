@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/nats-io/nats.go"
 
+	"github.com/sjawhar/envoy/roleholder"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
@@ -88,6 +89,12 @@ func subscribeNoticeExceptions(conn *nats.Conn, rehold func(data []byte)) (*nats
 // process from the relaunched one, and a copy the session already has costs one frame its plugin
 // drops, where a skipped copy the relaunched process never saw is a notice lost.
 //
+// The listener also reports a publish it refused before forwarding anything, because no live
+// session held the role (`unclaimed`, `holder_lapsed`), and the executor's own notice publishes
+// are among those. Such a report queues nothing and logs nothing above debug: the publish was
+// answered 404, so its row is still held and retries on its own backoff, and a copy would send
+// the notice twice. Any reason other than these five is refused as malformed.
+//
 // The notice goes back through the executor as a new row of its issue, counted in its Resends,
 // so it is routed, fenced and held as any notice is, and it is published under the dedupe key of
 // the row it copies (Notice.Published), so a session that did get the forward recognises the copy.
@@ -132,6 +139,20 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 		return nil
 	}
 	issue, notice := reported.issue, reported.notice
+	if roleholder.IsNoHolderReason(exception.Reason) {
+		// The listener refused this publish itself, before forwarding anything, because no live
+		// session held the role, and answered it 404 (notify.ErrNoHolder). The executor that sent it
+		// still holds the row and retries it on its own backoff (errNoticeWaits), or finishes it once
+		// the architect will not hold its role again, so a copy queued here would send the notice
+		// twice. These reasons are never a re-hold, and they are not malformed: a positive match on
+		// the shared list the listener and notify.Publish both read (roleholder), so the switch below
+		// still refuses every other reason. It logs at debug alone: at hundreds of unheld roles,
+		// anything louder is a line every few hundred milliseconds about a state the executor
+		// already handles.
+		r.log.Debug("outbox notice not re-held: the listener refused its publish, and its row retries on its own",
+			"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "reason", exception.Reason)
+		return nil
+	}
 	switch exception.Reason {
 	case "delivery_failed", "no_holder", "receipt_timeout":
 	default:

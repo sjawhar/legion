@@ -54,6 +54,8 @@ COPY packages/envoy/internal ./internal
 # listenfd: the inherited listening socket envoy-dispatch and envoy-listener serve on
 # (DISPATCH_LISTEN_FD, ENVOY_LISTEN_FD).
 COPY packages/envoy/listenfd ./listenfd
+# roleholder: the no-holder reasons envoy-listener's role publish refusal names.
+COPY packages/envoy/roleholder ./roleholder
 # The Go contracts file is generated from packages/contracts/schemas; never
 # trust the copy checked into the tree over a fresh regeneration.
 COPY --from=web /repo/packages/envoy/internal/contracts/generated.go ./internal/contracts/generated.go

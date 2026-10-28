@@ -226,15 +226,23 @@ client returns from the receipt wait alone — never from the flush, whose own t
 role message is not retained for a future claimant.
 
 When a control delivery has no holder, cannot be forwarded, or draws no receipt, Envoy emits an
-envelope on `notifications.envoy.exceptions.<original-topic>`. The exception payload preserves
-the original delivery fields:
+envelope on `notifications.envoy.exceptions.<original-topic>`. So does a role-lane publish the API
+refuses because no live session holds the role: that refusal is still answered `404`, and the
+exception goes out behind the answer, on a goroutine of its own, so it never delays it. This adds
+a bus signal only: no Legion consumer acts on a peer's refusal. Upgrade every Legion daemon before
+the listener: an older daemon reads either refusal reason as malformed and logs
+`ERROR role-lane exception not re-held` once for each refused attempt to publish its own notice. A
+held notice row tries again after 1, 2, 4, 8, 16 and 32 s and then every 64 s, and only the oldest
+held notice of each architect publishes, so that is about seven ERROR lines in the first minute and
+then one every 64 s for each architect whose role is unheld while it has a notice to deliver. The
+exception payload preserves the original delivery fields:
 
 | Field | Meaning |
 | --- | --- |
 | `original_topic` | Original envelope topic |
 | `event_id` | Original envelope event ID |
-| `reason` | `no_holder`, `delivery_failed`, or `receipt_timeout` (defined above) |
-| `payload_summary`, `payload` | Original human summary and distinct machine payload |
+| `reason` | A delivery that failed: `no_holder`, `delivery_failed`, or `receipt_timeout` (defined above). A publish the API refused: `unclaimed` or `holder_lapsed`, the refusal's own state, told apart from `no_holder` because nothing was forwarded |
+| `payload_summary`, `payload` | Original human summary and distinct machine payload. A refusal's exception carries the payload only up to 64 KiB (`refusalExceptionBound`) and leaves a larger one out, so a refusal never becomes a publish NATS refuses whole |
 | `dedupe_key` | Original envelope dedupe key |
 | `source`, `source_session` | Original envelope source fields |
 

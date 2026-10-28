@@ -1,0 +1,10 @@
+kind: Changed
+body: |-
+  The `envoy` skill this plugin ships says how a role publish fails in a Legion pane and what the
+  publisher does next (`references/legion.md`). A refused publish sends nothing and returns
+  `envoy_publish`'s error, which is unchanged: `no holder for role <role>` or
+  `role <role> holder <session> lapsed; ...`. The publisher checks `envoy_role_get` or
+  `envoy_sessions` and sends the message again when a live session holds the role. A forward that
+  failed after `envoy_publish` returned the holder is reported only on
+  `notifications.envoy.exceptions.notifications.role.<role>`, which a publisher subscribes to before
+  it publishes to learn of such a failure.
