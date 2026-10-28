@@ -1,4 +1,4 @@
-# Dispatch census scripts
+# Dispatch scripts
 
 ## Ask census
 
@@ -251,3 +251,106 @@ these cases:
 - A line of `receipts-counts.txt` is missing, extra, out of order or not in its form; a sum of
   its numbers is not true; a number in it is not the number that `report.ts` counts; or
   `rows_without_id` is not 0. The report names the line.
+
+## Meaning search check
+
+`meaning-search-check.ts` is a production check of Dispatch meaning search, and anyone can run it
+again. A1 checks that a search answer was not degraded to keyword-only ranking.
+A2 checks that a query sharing no word with its issue finds that issue in the top five. A3 reads
+the coverage report: every item has a current vector from the expected model.
+
+```bash
+bun scripts/dispatch/meaning-search-check.ts \
+  --a1-query 'meaning search' \
+  --pair 'KEY=QUERY' \
+  --lexeme-database "$TMPDIR/pg/.s.PGSQL.5432" \
+  --coverage --expect-model '<the identity the deploy configures>' \
+  --coverage-wait 600
+```
+
+Each check runs only when its flags are given, and at least one must be. `--coverage` and
+`--expect-model` go together, and `--coverage-wait` (seconds, default 600) only with them.
+`--pair KEY=QUERY` repeats, one per pre-registered pair, and splits at the first `=`; the operator
+gives each pair's key at run time. Dispatch is resolved as for the census
+above (`sessionDispatchSettings` over the envoy.json `command` reads, `DISPATCH_URL` and
+`DISPATCH_TOKEN_FILE` or `DISPATCH_TOKEN` first). With Dispatch off it prints
+`unavailable: config` and exits 2; it never prints the resolution's notices, which name files.
+
+- **Build**, always: `GET /healthz`, sent no token, read on 200 and on 503. It prints
+  `build commit=<sha|null> schema=<n|null> ok=<true|false>`. Whether that commit carries a given
+  merge is checked outside the script, with
+  `gh api repos/sjawhar/legion/compare/<merge>...<commit> --jq .status` (`ahead` or `identical`).
+  An unreadable `/healthz` makes the run unavailable.
+- **A1** (`--a1-query`): `GET /api/v1/search?q=<query>` fails when the answer has a `degraded`
+  field, and passes when it has none and at least one result:
+  `A1 degraded=yes|no results=<n> pass|fail`. An empty answer without `degraded` prints
+  `A1 degraded=no results=0 unavailable: no-results`. A query with no indexable word gets an empty
+  answer without the embedder being tried, so an empty answer proves nothing.
+- **A2** (`--pair`): the issue's lexemes and the query's lexemes come from Postgres (below), and
+  `shared` counts the query's distinct lexemes that the issue's row also holds. Then
+  `GET /api/v1/search?q=<query>&limit=5`, with nothing else, gives `position`: where the issue's
+  own row (kind `issue`, owned by the issue) stands among the first five results. A document,
+  comment, ask or message the issue owns never counts. A pair passes when `shared=0` and the row
+  is at position 1 to 5, and fails otherwise. Without `--lexeme-database`, or when the database
+  fails, it prints `shared=unchecked` and is unavailable. When the issue read fails, it prints
+  `A2 <KEY> shared=unchecked position=<1-5|none> unavailable: <category>`. Each pair prints
+  `A2 <KEY> shared=<n|unchecked> position=<1-5|none> <verdict>`. When the pair's own search is
+  unavailable it prints `A2 <KEY> unavailable: <category>`, with no shared and no position. A2
+  passes when any pair passes, is unavailable when none passes and any is unavailable, and fails
+  otherwise.
+- **A3** (`--coverage`): `GET /api/v1/search/coverage`. A report that departs from its shape is
+  malformed: `identity` a string or null, `place` `bedrock`, `azure` or null, at least one kind,
+  each kind named `^[a-z][a-z0-9_]{0,31}$`, and `items = current + lacking + failed` for `total`
+  and each kind. The check takes whatever kinds the report lists. It passes when `identity` is
+  exactly `--expect-model`, `total.items` is above 0, and `total.failed` and `total.lacking` are 0
+  in one snapshot. A fresh write is embedded a few seconds later, so while lacking items are all
+  that is wrong it reads again every 5 seconds within `--coverage-wait`. When the wait runs out it
+  fails on the last snapshot, whose `oldest_lacking_s` tells a write in flight from a stall. It
+  prints `A3 identity=match|mismatch place=<place|none>`, the counts, `reads=<n>` and the verdict,
+  then the counts of each kind.
+
+The last line is `result pass|fail|unavailable exit=<code>`. Exit 0: every check asked for passed.
+Exit 1: a check failed and none was unavailable. Exit 2: a check was unavailable, or a usage
+error. An unavailable check
+(`unavailable: auth|refused|transport|malformed|not-found|no-results|lexeme-database`) is never a
+pass. `refused` is a 4xx refusal other than 401, 403, 404, 408 or 429, for example a query longer
+than search accepts. A 5xx, 408 or 429 can clear on its own, so it is `transport`.
+
+Output is allowlisted on stdout and stderr alike: keys, kind names, positions, counts, the build
+commit, match or mismatch, the place and the failure category. The script never prints a URL, the
+token, a response body, an issue title, a query, the coverage identity (on Azure it holds the
+endpoint host) or an exception's text. This repository is public, and a search result's link
+carries the private host while an issue title can carry a private name.
+
+### Lexeme database
+
+`--lexeme-database` takes a Postgres URL (`postgres://` or `postgresql://`) or the path of a
+server's `.s.PGSQL.5432` socket. Any Postgres 16 works, as production runs 16: the check uses only
+the built-in `english` configuration, in one statement per pair with every value bound, and
+reads or writes no table. The statement mirrors the issue row's vector
+(`migrations/0088_issues_title_lexemes.up.sql`, with `search_text` from
+`migrations/0056_search_text.up.sql`) and search's own `websearch_to_tsquery('english', q)`. A
+throwaway server that listens only on a unix socket:
+
+```bash
+uvx --python 3.12 --from pgserver==0.1.4 python -c 'import pgserver; print(pgserver.get_server("<dir under $TMPDIR>", cleanup_mode=None).get_uri())'
+```
+
+Pass it as `--lexeme-database <dir>/.s.PGSQL.5432`: Bun's `SQL` refuses the printed URL's
+`?host=<dir>` form.
+
+### The pre-registered pairs
+
+The pairs, each a query and the key of the issue it should find, are recorded on the deployment's
+issue; the keys are given only at run time. The queries:
+
+- watching a running bot, the screen keeps scrolling down whenever output arrives, so earlier
+  lines are impossible to study
+- language model vendor billing balance ran dry and automated code checks halted
+- flowchart markup inside pages shows as raw text instead of a drawn picture
+
+Each query was fixed before the deploy and matched nothing on production then. A2 is judged on
+the issue's own row because its key and title are the only text Dispatch indexes for that row
+(`migrations/0088_issues_title_lexemes.up.sql`), and each query shares no lexeme with them. Each
+query does share lexemes with its issue's spec, so a hit on a document the issue owns would be a
+keyword match, not meaning search.

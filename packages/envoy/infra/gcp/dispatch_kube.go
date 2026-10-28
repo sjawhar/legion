@@ -183,7 +183,17 @@ func sleepPreStop(seconds int) *corev1.LifecycleArgs {
 }
 
 func resources(cpu, memory string) *corev1.ResourceRequirementsArgs {
+	return sizedResources(cpu, memory, "")
+}
+
+// sizedResources is a container's equal requests and limits: its CPU and memory, and its
+// ephemeral storage when one is given. Without one none is rendered and Autopilot gives the
+// container its default.
+func sizedResources(cpu, memory, ephemeralStorage string) *corev1.ResourceRequirementsArgs {
 	values := pulumi.StringMap{"cpu": pulumi.String(cpu), "memory": pulumi.String(memory)}
+	if ephemeralStorage != "" {
+		values["ephemeral-storage"] = pulumi.String(ephemeralStorage)
+	}
 	return &corev1.ResourceRequirementsArgs{Requests: values, Limits: values}
 }
 
@@ -614,13 +624,13 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 			corev1.ContainerArgs{
 				Name: pulumi.String("cloud-sql-proxy"), Image: pulumi.String(s.images.proxy), RestartPolicy: pulumi.String("Always"),
 				Args:      pulumi.StringArray{pulumi.String("--private-ip"), pulumi.String("--structured-logs"), pulumi.String("--address=127.0.0.1"), pulumi.String("--port=5432"), pulumi.String("--health-check"), pulumi.String("--http-address=0.0.0.0"), pulumi.String("--http-port=9801"), cloud.instance.ConnectionName},
-				Resources: resources(s.appResources.proxyCPU, s.appResources.proxyMemory), SecurityContext: &corev1.SecurityContextArgs{RunAsNonRoot: pulumi.Bool(true)},
+				Resources: sizedResources(s.appResources.proxyCPU, s.appResources.proxyMemory, s.appResources.proxyEphemeralStorage), SecurityContext: &corev1.SecurityContextArgs{RunAsNonRoot: pulumi.Bool(true)},
 				StartupProbe: proxyStartup, LivenessProbe: proxyLiveness,
 			},
 		},
 		Containers: corev1.ContainerArray{
 			corev1.ContainerArgs{
-				Name: pulumi.String("envoy-dispatch"), Image: pulumi.String(s.images.envoy), Command: pulumi.StringArray{pulumi.String("/usr/local/bin/envoy-dispatch")}, Resources: resources(s.appResources.appCPU, s.appResources.appMemory), Env: appEnv, VolumeMounts: appMounts, Lifecycle: appPreStop,
+				Name: pulumi.String("envoy-dispatch"), Image: pulumi.String(s.images.envoy), Command: pulumi.StringArray{pulumi.String("/usr/local/bin/envoy-dispatch")}, Resources: sizedResources(s.appResources.appCPU, s.appResources.appMemory, s.appResources.appEphemeralStorage), Env: appEnv, VolumeMounts: appMounts, Lifecycle: appPreStop,
 				StartupProbe: answersProbe(8766, 10, 180), LivenessProbe: answersProbe(8766, 10, 3), ReadinessProbe: appReady,
 			},
 		},
