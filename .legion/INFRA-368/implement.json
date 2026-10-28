@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-368",
-  "completed": "2026-10-28T18:47:39Z",
+  "completed": "2026-10-28T19:28:22Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2463",
   "proof": [
+    {
+      "criterion": "Tester round 6 / A13: an open link or hover card to a block stops showing its text once an edit deletes the block (comment block and, on main's code too, a document block)",
+      "surface": "The Conversation tab in Chromium on the local harness built from 7fbf45cc",
+      "command": "cd packages/dispatch && DISPATCH_E2E_REUSE_SERVERS=1 … bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/block-references.e2e.ts e2e/hover-preview.e2e.ts e2e/references.e2e.ts e2e/conversation.e2e.ts",
+      "observed": "38 passed, 2 phone-only skipped, including the tester's 'a link to a block of a comment stops showing the block's text once its author deletes it, with no reload' and the new 'a link to a block of a spec stops showing the block's text once a document edit deletes it, with no reload'; driver exit 0, 133 PASS.",
+      "headSha": "7fbf45cc0b60",
+      "negativeControl": "With block: block.data restored in useReferenceData, both rows fail on a harness built from that source (cards read 'CORE-1 · Comment · aliceBeta soon deleted.' and 'CORE-1 · spec.mdGamma soon deleted.'), and 5 unit cases fail; a pinned removed block still shows 'Removed in version 4' and its pinned text, and a 500 keeps the last text."
+    },
     {
       "criterion": "Review round 4 / architect's round 5: (2b) a link or hover card to a comment block shows the block's new text after its author edits it, without a reload; (2a) one reconcile names moved links, a changed head and a reworded kept block's targets; (2c) an item block's card names its comment or message; (1) the Dispatch skills stay under 2,000 words",
       "surface": "Local Dispatch harness at b2d4017a (real Go server, migrations 0001-0138, production SPA, real CLI) in Chromium; Go api tests on Postgres 17; pi-envoy skills guard",
@@ -145,5 +153,8 @@
   "reviewRound4Answered": [
     "1 (PRRT_kwDORFy7ds6xOidK): skills/dispatch/SKILL.md drops the reply sentence (0df62d6d) and tightens two sentences without changing a rule (merge b2d4017a); skills guard 10/0 at 1,998 words.",
     "2: forward merge b2d4017a over main's #2324: ReplaceCountedItemEdit is the one reconcile for a comment edit (head naming + block index + carried ids + moved links + targets of a kept block whose 480-rune excerpt changed); event-refresh refreshes a comment's block reads on comment.edited (and a reply's named block); item blocks keep the early return in useReferenceData/useBlockDocument/prefetchReference. Main's two 'edit past the excerpt names nothing' tests now edit past 480 runes, the block excerpt the panel shows."
+  ],
+  "testerRound6Answered": [
+    "Red row 'a link to a block of a comment stops showing the block's text once its author deletes it, with no reload' (82f0b73e) passes unmodified: useReferenceData drops a block read's last data once the read answers 404 NOT_FOUND, so the link and card read as a fresh page does (comment, message and document blocks; pinned removed reads keep their pinned text; other errors keep the last data). A document-block row beside it is added (7fbf45cc)."
   ]
 }
