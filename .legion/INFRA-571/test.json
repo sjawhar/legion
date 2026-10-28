@@ -2,56 +2,48 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-571",
-  "completed": "2026-10-28T09:52:00Z",
-  "testedHead": "d2983ea18891 (code head); branch head 178ca81ded4b adds only .legion/",
-  "round": "8, a full round: the conflict merge of main b295a3fb (4991f2a7) changed the fingerprint d208a5164e8c69cd -> 7f8b11be208b3673; d2983ea1 changes CI comments only. Apart from main's own code, the branch's diff moved in two workflow comments and in skill-scenarios/rig.sh, where main's '-c max_connections=…' now follows the 18 image. The envoy CHANGELOG entry is still under [Unreleased]. The workspace was recreated before this round; my harness copies were rebuilt under /legion/scratch/tmp/infra571-test (p3.sh rewritten, since the implementer's p3-run.sh is gone)",
+  "completed": "2026-10-28T10:04:00Z",
+  "testedHead": "670e2054f960 (code head); branch head 691d7f53a3ee adds only .legion/",
+  "round": "9, a full round: the conflict merge of main 184897ac (670e2054) changed the fingerprint 7f8b11be208b3673 -> 2fdfecb1d9eca677. main's #2419 turned changelog entries into changie fragments: the branch's envoy-infra entry moved from CHANGELOG.md to packages/envoy/.changes/unreleased/INFRA-571-Changed-20261028-095229.yaml, and the release-engineering.md paragraph now extends main's new text. No code of the branch changed",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its pg-upgrade-run.sh with servers I built (main 7c1290a4 from git archive; this head, vcs.revision 178ca81d), the copied-ask and pgmigrate tests on fresh PGDG 18.6 and 16.15, and dev-postgres.test.sh on 18.6 and 16.15, with the same results as its proof."
+    "how": "Re-ran its pg-upgrade-run.sh with servers I built (main 7c1290a4; this head, vcs.revision 691d7f53), the copied-ask and pgmigrate tests on fresh PGDG 18.6 and 16.15, and dev-postgres.test.sh on 18.6 and 16.15, with the same results as its proof."
   },
   "failures": [],
   "failed": 0,
-  "ci": "At b76de444 every Postgres job was green: envoy-go, envoy-go-race, envoy-infra-go, test, and the Dispatch, Broker and Daemon Postgres 16 jobs. Its dispatch job failed one Bun web test, packages/dispatch/web/src/features/refs/AgentName.test.tsx 'names mounted at staggered times plus a polled useAgents caller fetch at most once per 15 s', at its 5000 ms timeout. git diff --name-only b295a3fb d2983ea1 -- packages/dispatch lists only README.md. At d2983ea1 (2026-10-28T09:48Z) lint, typecheck, build, changes and the Daemon Postgres 16 job had succeeded, and the rest was queued or running; not waited for. This push is handoff-only (skip-checks).",
+  "ci": "At 670e2054 (2026-10-28T10:00Z) every run was queued; not waited for. At d2983ea1, lint, typecheck, build, envoy-smoke and the Daemon Postgres 16 job succeeded, and the merge push cancelled the rest. The last complete Postgres CI is b76de444: envoy-go 180006|0.8.7 and every Postgres job green. This push is handoff-only (skip-checks).",
   "proof": [
+    {
+      "criterion": "The component's README and CHANGELOG say that moving a stack's plugin pin past this release upgrades a stack that leaves databaseVersion unset (spec bullet 1), in main's changelog-fragment form",
+      "surface": "changie v1.26.0 with packages/envoy/.changie.yaml, the renderer changelog-fold.yaml uses",
+      "command": "cd packages/envoy && go run github.com/miniscruff/changie@v1.26.0 batch patch --dry-run",
+      "observed": "prints '### Changed' and the '**Breaking:** envoy-infra:gcp:Dispatch's Cloud SQL instance runs PostgreSQL 18 by default …' bullet with continuation lines under it, word for word the entry the branch had in CHANGELOG.md; nothing written (jj status clean)",
+      "headSha": "670e2054f960",
+      "negativeControl": "a copy of the package's .changie.yaml and .changes with the fragment's kind set to 'Broke': changie exits 1 'kind not found but configuration expects one: 'Broke''"
+    },
     {
       "criterion": "A run that migrates a Postgres 16 database, upgrades it to 18 with pg_upgrade, then starts the server and runs a search and an issue creation, passes (spec acceptance 3)",
       "surface": "Dispatch server and dispatch CLI on local PGDG PostgreSQL 16.15 / 18.6 clusters with pgvector 0.8.7",
-      "command": "go build ./cmd/dispatch at 178ca81d -> /legion/scratch/tmp/infra571-test/dispatch-head5 and at 7c1290a4 -> dispatch-old; OLD=dispatch-old NEW=dispatch-head5 bash /legion/scratch/tmp/infra571-test/p5.sh (log p5-run5.log)",
-      "observed": "pg_upgrade exit 0; 18 180006; head server schema_version 134 with 35 rows 100..134 applied by its boot; dispatch search 'heron ledger' lists PGUP-1; dispatch issue without --force names PGUP-1, with --force creates PGUP-4; top-5 by <=> equal on 16 and 18; plan on 18 Index Scan using embeddings_cosine",
-      "headSha": "d2983ea18891",
-      "negativeControl": "pg_upgrade --check against a checksummed 18: exit 1 'old cluster does not use data checksums but the new one does'; against 18 without pgvector: exit 1"
+      "command": "go build ./cmd/dispatch at 691d7f53 -> /legion/scratch/tmp/infra571-test/dispatch-head6; OLD=dispatch-old (7c1290a4) NEW=dispatch-head6 bash /legion/scratch/tmp/infra571-test/p5.sh (log p5-run6.log)",
+      "observed": "pg_upgrade exit 0; 18 180006; head server schema_version 134, 35 rows 100..134 applied by its boot; dispatch search lists PGUP-1; dispatch issue without --force names PGUP-1, with --force creates PGUP-4; top-5 by <=> equal on 16 and 18; plan on 18 Index Scan using embeddings_cosine",
+      "headSha": "670e2054f960",
+      "negativeControl": "pg_upgrade --check against a checksummed 18 and against 18 without pgvector: exit 1 each"
     },
     {
       "criterion": "A 16 Dispatch database dumped and restored onto 18, as dev-postgres.sh prints it, serves Dispatch (spec bullet 2)",
       "surface": "PGDG 16.15 and 18.6 clusters with this head's server on both sides and the dispatch CLI",
-      "command": "NEW=dispatch-head5 bash /legion/scratch/tmp/infra571-test/p3.sh",
-      "observed": "head server on 16 migrated to 134 and seeded PTHREE-1; pg_dumpall (16 client) exit 0, 151549 bytes, completion line 1; restore (18 client) with only 'current user cannot be dropped' and 'role \"postgres\" already exists'; 180006, vector 0.8.7, 134 migrations, issues=1; head boot on 18 applied 0; dispatch read --issue PTHREE-1 returns 'Title: Restored petrel dump ledger'",
-      "headSha": "d2983ea18891",
-      "negativeControl": "the same dump into 18 without pgvector: 10 ERROR lines, first 'extension \"vector\" is not available', no embeddings table"
+      "command": "NEW=dispatch-head6 bash /legion/scratch/tmp/infra571-test/p3.sh",
+      "observed": "pg_dumpall (16 client) exit 0, completion line 1; restore with only 'current user cannot be dropped' and 'role \"postgres\" already exists'; 180006, vector 0.8.7, 134 migrations, issues=1; boot on 18 applied 0; dispatch read --issue PTHREE-1 returns its title",
+      "headSha": "670e2054f960",
+      "negativeControl": "the same dump into 18 without pgvector: 'extension \"vector\" is not available', no embeddings table"
     },
     {
-      "criterion": "The server's tests pass on 18 (spec acceptance 2's Go suite, locally for the package this PR changed)",
-      "surface": "internal/dispatch/docs and internal/pgmigrate against fresh PGDG 18.6 and 16.15 clusters",
-      "command": "cd packages/envoy && env -u DISPATCH_TOKEN_FILE DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55818/postgres?sslmode=disable go test ./internal/dispatch/docs/ -count=1 -timeout 40m; the 23 copied_asks*_test.go tests -v on 18 and 16; go test ./internal/pgmigrate/ on both",
-      "observed": "docs on 18: ok in 692.6 s; copied-ask tests 23 PASS on 18 and 23 PASS on 16; pgmigrate ok on both",
-      "headSha": "d2983ea18891",
-      "negativeControl": "round 6: main's NOT EXISTS form on 18 fails TestCopiedAskQueriesAvoidSequentialScans 'query plan sequentially scans asks'. A first whole-package run under go test's default 10 m timeout panicked at 600 s with some browser-edit tests failing on both 16 and 18; each passes alone, and the package passes under -timeout 40m (the implementer's proof and docs/testing.md use 40m)"
-    },
-    {
-      "criterion": "The pinned 18 image runs as the merged rig.sh line starts it",
-      "surface": "Kubernetes Job (gVisor, builds namespace, emptyDir medium Memory at /var/lib/postgresql) of mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11",
-      "command": "kubectl create -f /legion/scratch/tmp/infra571-test/p4/job-rig.yaml (docker-entrypoint.sh postgres -c max_connections=170); kubectl logs; kubectl delete jobs -l infra571-tester-run=<run>",
-      "observed": "pod Succeeded: svn=180006 max_connections=170 vector=0.8.7; Job deleted",
-      "headSha": "d2983ea18891",
-      "negativeControl": "round 2: the same image with the mount at /var/lib/postgresql/data is refused by its entrypoint, exit 1"
-    },
-    {
-      "criterion": "dev-postgres.sh's printed move refuses a failed, cut or empty dump and tells a lost restore from a whole one (test rounds 3-7)",
-      "surface": "dev-postgres.sh's printed lines replayed on two real PostgreSQL clusters by dev-postgres.test.sh",
-      "command": "(pgenv 18|16) bash packages/envoy/scripts/dev-postgres.test.sh; bash packages/envoy/scripts/dev-broker.test.sh",
-      "observed": "exit 0, 12 PASS on 18.6 and on 16.15; dev-broker passes",
-      "headSha": "d2983ea18891",
-      "negativeControl": "dev-postgres.sh with the completion-line check removed: the whole, empty and cut move cases FAIL"
+      "criterion": "The server's tests pass on 18; dev-postgres.sh's printed move refuses a failed, cut or empty dump",
+      "surface": "internal/dispatch/docs (copied asks), internal/pgmigrate and dev-postgres.test.sh against fresh PGDG 18.6 and 16.15",
+      "command": "cd packages/envoy && env -u DISPATCH_TOKEN_FILE DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:559{18,16}/postgres?sslmode=disable go test ./internal/dispatch/docs/ -count=1 -run '^(<the 23 Test funcs of copied_asks*_test.go>)$' -v; go test ./internal/pgmigrate/; (pgenv 18|16) bash scripts/dev-postgres.test.sh",
+      "observed": "23/23 copied-ask PASS on 18 and on 16; pgmigrate ok; dev-postgres.test.sh exit 0, 12 PASS on both",
+      "headSha": "670e2054f960",
+      "negativeControl": "round 8: dev-postgres.sh with the completion-line check removed fails the whole, empty and cut move cases; round 6: main's NOT EXISTS form fails the plan test on 18"
     }
   ]
 }
