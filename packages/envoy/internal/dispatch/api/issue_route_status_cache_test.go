@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 )
 
 // detailReach reads one issue's detail and answers its reach as reachText writes it.
@@ -48,6 +50,29 @@ func readRoster(t *testing.T, served *server, ctx context.Context) routeRoster {
 // calls again.
 func heldRosterServer(t *testing.T) (served *server, calls *atomic.Int32, release func()) {
 	t.Helper()
+	listenerURL, calls, release := heldRosterListener(t)
+	_, _, _, served = newRegisteredTestServer(t, testServerOptions{envoyURL: listenerURL, envoyTimeout: time.Minute})
+	served.rosters.ttl, served.rosters.timeout = time.Minute, time.Minute
+	return served, calls, release
+}
+
+// heldRosterMux is heldRosterServer mounted on mux over deps, whose Envoy it sets to the held
+// listener's client: deps carries the Store the stored answer is read from, and a test that serves
+// requests through mux gives it an Identity too.
+func heldRosterMux(t *testing.T, mux *http.ServeMux, deps Deps) (served *server, calls *atomic.Int32, release func()) {
+	t.Helper()
+	listenerURL, calls, release := heldRosterListener(t)
+	deps.Envoy = envoy.New(listenerURL, envoy.WithTimeout(time.Minute))
+	served = register(mux, deps)
+	served.rosters.ttl, served.rosters.timeout = time.Minute, time.Minute
+	return served, calls, release
+}
+
+// heldRosterListener is the listener heldRosterServer and heldRosterMux ask: its GET
+// /v1/sessions lists ses-sre holding sre once release is called, calls counting the requests that
+// reached it.
+func heldRosterListener(t *testing.T) (url string, calls *atomic.Int32, release func()) {
+	t.Helper()
 	calls = &atomic.Int32{}
 	gate := make(chan struct{})
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,9 +89,7 @@ func heldRosterServer(t *testing.T) (served *server, calls *atomic.Int32, releas
 	// Release before the close, which waits for every request in flight to finish.
 	t.Cleanup(listener.Close)
 	t.Cleanup(release)
-	_, _, _, served = newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL, envoyTimeout: time.Minute})
-	served.rosters.ttl, served.rosters.timeout = time.Minute, time.Minute
-	return served, calls, release
+	return listener.URL, calls, release
 }
 
 // awaitCalls waits until the listener has seen want calls, failing after a few seconds.

@@ -142,9 +142,11 @@ var settings = []setting{
 	{Name: "DISPATCH_TEST_DELIVERY_RESUME_INTERVAL", Default: "`10s`", Required: "no",
 		Description: "How often a test process's resume loop sends the delivery attempts a stopped request or process left pending; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
 	{Name: "DISPATCH_TEST_ROUTE_ROSTER_TTL", Default: "`5s`", Required: "no",
-		Description: "How long a test process's stored listener answer serves issue reads' `route_status`; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
+		Description: "How long a test process's stored listener answer serves issue reads' `route_status` and `GET /api/v1/agents`; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
 	{Name: "DISPATCH_TEST_EDIT_NOTICE_QUIET", Default: "`30s`", Required: "no",
 		Description: "How long a document stays quiet after a person's last settled version before its `artifact.human_edited` notice goes, for an end-to-end test process; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
+	{Name: "DISPATCH_TEST_ROSTER_UNCACHED", Required: "no",
+		Description: "Set to `1` so every read of the listener's session list (an issue's `route_status`, `GET /api/v1/agents`) asks the listener rather than Dispatch's five-second copy, for an end-to-end test process whose fake listener changes between reads. Set only with `DISPATCH_TEST_HOOKS=1`."},
 }
 
 // removedSettings are the variables a release stopped reading, each with what replaced it. None is

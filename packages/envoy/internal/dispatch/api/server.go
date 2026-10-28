@@ -113,10 +113,10 @@ type Deps struct {
 	// (whileCallerResolves), each closing once the caller no longer resolves, and a delivery
 	// socket pings its page and sends it a heartbeat frame.
 	StreamHeartbeat time.Duration
-	// RouteRosterTTL replaces how long a stored listener answer serves issue reads
-	// (routeRosterTTL, issue_route_status.go). Zero keeps five seconds; only a test process sets
-	// another (cmd/dispatch: DISPATCH_TEST_ROUTE_ROSTER_TTL, under the test hooks), so a row that
-	// reads two processes inside one answer's life needs no timing window.
+	// RouteRosterTTL replaces how long a stored listener answer serves issue reads and agents
+	// lists (routeRosterTTL, issue_route_status.go). Zero keeps five seconds; only a test process
+	// sets another (cmd/dispatch: DISPATCH_TEST_ROUTE_ROSTER_TTL, under the test hooks), so a row
+	// that reads two processes inside one answer's life needs no timing window.
 	RouteRosterTTL time.Duration
 	// ListenerTakeoverWindow replaces how long a sender keeps trying a listener that is being
 	// replaced (listenerTakeoverWindow, envoy_resolve.go). Zero keeps twelve seconds; neither
@@ -130,6 +130,12 @@ type Deps struct {
 	// the browser harness run ten seconds. Only this package's tests set another, so a test
 	// proving a silent process is named does not sleep the full timeout.
 	TestHookTimeout time.Duration
+	// ListenerRosterUncached is for end-to-end test processes only: every read of the listener's
+	// session list (route_status on an issue read, GET /api/v1/agents) asks the listener rather
+	// than reading the stored answer every process shares (the route_roster row), so a test that
+	// changes the listener's sessions sees the change at its next read. A deployment leaves it
+	// false.
+	ListenerRosterUncached bool
 }
 
 // defaultStreamHeartbeat is StreamHeartbeat when DepsInput leaves it zero.
@@ -174,8 +180,8 @@ type DepsInput struct {
 	// (Deps.StreamHeartbeat). Zero keeps fifteen seconds; a test proving a connection closes
 	// sets a short one.
 	StreamHeartbeat time.Duration
-	// RouteRosterTTL replaces the five seconds a stored listener answer serves issue reads; see
-	// Deps.RouteRosterTTL.
+	// RouteRosterTTL replaces the five seconds a stored listener answer serves issue reads and
+	// agents lists; see Deps.RouteRosterTTL.
 	RouteRosterTTL time.Duration
 	// ListenerTakeoverWindow replaces the twelve-second listener take-over window; see
 	// Deps.ListenerTakeoverWindow.
@@ -183,6 +189,9 @@ type DepsInput struct {
 	// TestHookTimeout replaces the ten-second test-hook acknowledgement timeout; see
 	// Deps.TestHookTimeout.
 	TestHookTimeout time.Duration
+	// ListenerRosterUncached is for end-to-end test processes only; see
+	// Deps.ListenerRosterUncached.
+	ListenerRosterUncached bool
 }
 
 // NewDeps parses boot configuration once and returns API dependencies.
@@ -251,6 +260,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		RouteRosterTTL:         input.RouteRosterTTL,
 		ListenerTakeoverWindow: input.ListenerTakeoverWindow,
 		TestHookTimeout:        input.TestHookTimeout,
+		ListenerRosterUncached: input.ListenerRosterUncached,
 	}, nil
 }
 
@@ -294,8 +304,8 @@ type server struct {
 	// test's choice rather than a race against five seconds of wall clock (INFRA-249).
 	broadcastResolveBudget time.Duration
 	// rosters is how this process reads and refreshes the stored listener answer every process's
-	// issue reads judge routes against (issue_route_status.go). Only register gives it non-zero
-	// TTLs.
+	// issue reads judge routes against and agents lists list (issue_route_status.go). Only
+	// register gives it non-zero TTLs.
 	rosters rosterCache
 	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); nil on a server
 	// with no Lifetime (register), which mounts no GET /ws/delivery.

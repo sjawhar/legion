@@ -117,6 +117,9 @@ type AppContextOptions struct {
 	// RouteRosterTTL replaces how long a stored listener answer serves issue reads; zero keeps the
 	// server's five seconds. See api.Deps.RouteRosterTTL.
 	RouteRosterTTL time.Duration
+	// ListenerRosterUncached is for end-to-end test processes only (cmd/dispatch:
+	// DISPATCH_TEST_ROSTER_UNCACHED); see api.DepsInput.
+	ListenerRosterUncached bool
 	// DevSignIn mounts GET /auth/_dev/signin, which issues the session cookie for any person
 	// named with no sign-in issuer exchange, and makes the whole router refuse a request whose Host
 	// is not the dashboard origin. cmd/dispatch sets it from DISPATCH_DEV_SIGNIN behind its boot
@@ -150,26 +153,27 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		devSignInHost = host
 	}
 	apiDeps, err := api.NewDeps(api.DepsInput{
-		Store:                 opts.Store,
-		Identity:              opts.Identity,
-		AgentTokens:           opts.AgentTokens,
-		DefaultProject:        opts.DefaultProject,
-		ServerURL:             opts.ServerURL,
-		EnvoyURL:              opts.EnvoyURL,
-		EnvoyToken:            opts.EnvoyToken,
-		Docs:                  opts.Docs,
-		Embedder:              opts.Embedder,
-		Events:                opts.Events,
-		App:                   opts.App,
-		GitHubAPIBase:         opts.GitHubAPIBase,
-		OIDC:                  opts.OIDC,
-		AgentStream:           opts.AgentStream,
-		Lifetime:              opts.Lifetime,
-		AgentSecretsURL:       opts.AgentSecretsURL,
-		AgentSecretsTokenFile: opts.AgentSecretsTokenFile,
-		Files:                 opts.Files,
-		TestHooksEnabled:      opts.TestHooksEnabled,
-		RouteRosterTTL:        opts.RouteRosterTTL,
+		Store:                  opts.Store,
+		Identity:               opts.Identity,
+		AgentTokens:            opts.AgentTokens,
+		DefaultProject:         opts.DefaultProject,
+		ServerURL:              opts.ServerURL,
+		EnvoyURL:               opts.EnvoyURL,
+		EnvoyToken:             opts.EnvoyToken,
+		Docs:                   opts.Docs,
+		Embedder:               opts.Embedder,
+		Events:                 opts.Events,
+		App:                    opts.App,
+		GitHubAPIBase:          opts.GitHubAPIBase,
+		OIDC:                   opts.OIDC,
+		AgentStream:            opts.AgentStream,
+		Lifetime:               opts.Lifetime,
+		AgentSecretsURL:        opts.AgentSecretsURL,
+		AgentSecretsTokenFile:  opts.AgentSecretsTokenFile,
+		Files:                  opts.Files,
+		TestHooksEnabled:       opts.TestHooksEnabled,
+		RouteRosterTTL:         opts.RouteRosterTTL,
+		ListenerRosterUncached: opts.ListenerRosterUncached,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("BuildAppContext: %w", err)
