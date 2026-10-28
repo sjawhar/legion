@@ -26,25 +26,23 @@
  * block at a lazy line as it did and a closed block at the line after its fence, and a closing
  * fence over an open block quote, or an opener on a line some container did not reach, marks its
  * line lazy.
- * Two readings differ, both of them micromark's order of work rather than the block's grammar: a
+ * Three readings differ, all of them micromark's order of work rather than the block's grammar: a
  * document construct cannot open after an unclosed front matter opener, which micromark tries to
- * the end of the document while it opens no container, and a footnote definition inside a block
- * now defines its footnote for a call in the text before the block, which the flow construct, by
- * tokenizing the block's content after that text, did not.
+ * the end of the document while it opens no container; a footnote definition inside a block now
+ * defines its footnote for a call in the text before the block; and a link reference definition
+ * inside a block now defines its reference for a reference in the text before the block. The flow
+ * construct, by tokenizing the block's content after that text, did neither: `[r]`, a blank line,
+ * then `:::callout{}`, `[r]: https://u.example` and `:::` read `[r]` as text there and as a link
+ * here. The document service refuses a link reference definition, so no document it stores reads
+ * differently; a body that is only displayed can.
  */
 
 import { factorySpace } from "micromark-factory-space";
-import { factoryWhitespace } from "micromark-factory-whitespace";
-import {
-  markdownLineEnding,
-  markdownLineEndingOrSpace,
-  markdownSpace,
-  unicodePunctuation,
-  unicodeWhitespace,
-} from "micromark-util-character";
+import { markdownLineEnding, markdownSpace } from "micromark-util-character";
 import type {
   Code,
   Construct,
+  ContainerState,
   Effects,
   Event,
   Extension,
@@ -52,8 +50,8 @@ import type {
   State,
   Token,
   TokenizeContext,
-  TokenType,
 } from "micromark-util-types";
+import { factoryAttributes, factoryLabel, factoryName } from "./directive-factories.js";
 
 declare module "micromark-util-types" {
   interface TokenTypeMap {
@@ -517,7 +515,7 @@ function tokenizeDirectiveContainerStart(
       : 0;
   let sizeOpen = 0;
   let depth = 0;
-  let opener: Token | undefined;
+  let opener: Token;
   return start;
 
   function start(code: Code): State | undefined {
@@ -565,8 +563,12 @@ function tokenizeDirectiveContainerStart(
       closed: false,
       contentStarts: [],
     };
-    if (self.containerState !== undefined) self.containerState.directive = block;
-    if (opener !== undefined) opener._directive = block;
+    const state = self.containerState;
+    if (state === undefined) {
+      throw new Error("micromark opened a directive container with no container state");
+    }
+    state.directive = block;
+    opener._directive = block;
     if (someContainerEnded(self, opener)) self.parser.lazy[block.line] = true;
     // A start that micromark ran inside `effects.check` runs again at once, after any exits.
     parseRecord(self).open = depth;
@@ -588,7 +590,7 @@ function tokenizeDirectiveContainerStart(
  * prefix, after the last line's content means the line is not one: a container opened on it first,
  * or a list went on with a new item.
  */
-function someContainerEnded(context: TokenizeContext, opener: Token | undefined): boolean {
+function someContainerEnded(context: TokenizeContext, opener: Token): boolean {
   if (context.interrupt !== undefined) return false;
   for (let index = context.events.length - 1; index >= 0; index--) {
     const [kind, token] = context.events[index];
@@ -606,12 +608,11 @@ function tokenizeDirectiveContainerContinuation(
   nok: State
 ): State {
   const self = this;
-  const state = self.containerState;
-  const block = state?.directive;
+  const state = directiveState(self);
+  const block = state.directive;
   return start;
 
   function start(code: Code): State | undefined {
-    if (state === undefined || block === undefined) return nok(code);
     if (block.closed) {
       parseRecord(self).reachedClosed = self.now().line;
       return nok(code);
@@ -627,7 +628,6 @@ function tokenizeDirectiveContainerContinuation(
   // content document ended, its document tokenizer marked the line lazy, and a fenced code block
   // inside ends before the last line ending rather than taking it as a line of code.
   function closed(code: Code): State | undefined {
-    if (state === undefined || block === undefined) return nok(code);
     block.closed = true;
     recordOpenAround(self, block.depth - 1);
     parseRecord(self).open = block.depth - 1;
@@ -642,17 +642,15 @@ function tokenizeDirectiveContainerContinuation(
   // mdast-util-from-markdown step over a `listItemIndent` where they step over a `linePrefix`
   // when they settle where a container or a list item ends.
   function unclosed(code: Code): State | undefined {
-    const indent = block?.indent ?? 0;
+    const indent = block.indent;
     return indent > 0
       ? factorySpace(effects, content, "listItemIndent", indent + 1)(code)
       : content(code);
   }
 
   function content(code: Code): State | undefined {
-    if (block !== undefined) {
-      const point = self.now();
-      block.contentStarts[point.line - block.line] = point.offset;
-    }
+    const point = self.now();
+    block.contentStarts[point.line - block.line] = point.offset;
     return ok(code);
   }
 }
@@ -663,7 +661,7 @@ function tokenizeClosingFence(
   ok: State,
   nok: State
 ): State {
-  const sizeOpen = this.containerState?.directive?.fenceSize ?? 0;
+  const sizeOpen = directiveState(this).directive.fenceSize;
   let size = 0;
   return factorySpace(
     effects,
@@ -697,12 +695,10 @@ function tokenizeClosingFence(
 }
 
 function exitDirectiveContainer(this: TokenizeContext, effects: Effects): undefined {
-  const block = this.containerState?.directive;
-  if (block !== undefined) {
-    const record = parseRecord(this);
-    record.open = Math.min(record.open, block.depth - 1);
-    if (block.closed) record.reachedClosed = 0;
-  }
+  const block = directiveState(this).directive;
+  const record = parseRecord(this);
+  record.open = Math.min(record.open, block.depth - 1);
+  if (block.closed) record.reachedClosed = 0;
   effects.exit("directiveContainer");
 }
 
@@ -718,6 +714,26 @@ function blockQuoteOpenInside(events: Event[], block: DirectiveBlock): boolean {
     else if (token.type === "blockQuote") return true;
   }
   return false;
+}
+
+/** The container state of a directive container that opened: `openAfter` put its block on it. */
+interface DirectiveState extends ContainerState {
+  directive: DirectiveBlock;
+}
+
+/**
+ * The state of the directive container whose continuation, closing fence or exit `context` runs.
+ * micromark sets a container's state before it runs any of them, and `openAfter` puts the block
+ * on that state when the container opens, so a state without one is a broken invariant rather
+ * than a line to read some other way: a fence size of 0, say, would let a blank line close it.
+ */
+function directiveState(context: TokenizeContext): DirectiveState {
+  const state = context.containerState;
+  if (state?.directive === undefined) {
+    throw new Error("micromark ran a directive container whose state holds no block");
+  }
+  // Checked just above: TypeScript narrows the property, not the state that holds it.
+  return state as DirectiveState;
 }
 
 function tokenizeLabel(this: TokenizeContext, effects: Effects, ok: State, nok: State): State {
@@ -752,428 +768,4 @@ function tokenizeAttributes(this: TokenizeContext, effects: Effects, ok: State, 
     "directiveContainerAttributeValueData",
     true
   );
-}
-
-/*
- * `factoryName`, `factoryLabel` and `factoryAttributes` below are copied from
- * micromark-extension-directive 4.0.0 (`lib/factory-name.js`, `lib/factory-label.js`,
- * `lib/factory-attributes.js`), which does not export them, typed and formatted for this file and
- * otherwise unchanged. They are under that package's MIT license (its `license` file):
- *
- * (The MIT License)
- *
- * Copyright (c) Titus Wormer <tituswormer@gmail.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining
- * a copy of this software and associated documentation files (the
- * 'Software'), to deal in the Software without restriction, including
- * without limitation the rights to use, copy, modify, merge, publish,
- * distribute, sublicense, and/or sell copies of the Software, and to
- * permit persons to whom the Software is furnished to do so, subject to
- * the following conditions:
- *
- * The above copyright notice and this permission notice shall be
- * included in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
- * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
- * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
- * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
- * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
-
-function factoryName(
-  this: TokenizeContext,
-  effects: Effects,
-  ok: State,
-  nok: State,
-  type: TokenType
-): State {
-  const self = this;
-  return start;
-
-  function start(code: Code): State | undefined {
-    if (
-      code === null ||
-      markdownLineEnding(code) ||
-      unicodePunctuation(code) ||
-      unicodeWhitespace(code)
-    ) {
-      return nok(code);
-    }
-    effects.enter(type);
-    effects.consume(code);
-    return name;
-  }
-
-  function name(code: Code): State | undefined {
-    if (
-      code === null ||
-      markdownLineEnding(code) ||
-      unicodeWhitespace(code) ||
-      (unicodePunctuation(code) && code !== 45 && code !== 95)
-    ) {
-      effects.exit(type);
-      return self.previous === 45 || self.previous === 95 ? nok(code) : ok(code);
-    }
-    effects.consume(code);
-    return name;
-  }
-}
-
-// This is a fork of:
-// <https://github.com/micromark/micromark/tree/main/packages/micromark-factory-label>
-// to allow empty labels, balanced brackets (such as for nested directives),
-// text instead of strings, and optionally disallows EOLs.
-function factoryLabel(
-  effects: Effects,
-  ok: State,
-  nok: State,
-  type: TokenType,
-  markerType: TokenType,
-  stringType: TokenType,
-  disallowEol?: boolean | undefined
-): State {
-  let size = 0;
-  let balance = 0;
-  let previous: Token | undefined;
-  return start;
-
-  function start(code: Code): State | undefined {
-    effects.enter(type);
-    effects.enter(markerType);
-    effects.consume(code);
-    effects.exit(markerType);
-    return afterStart;
-  }
-
-  function afterStart(code: Code): State | undefined {
-    if (code === 93) {
-      effects.enter(markerType);
-      effects.consume(code);
-      effects.exit(markerType);
-      effects.exit(type);
-      return ok;
-    }
-    effects.enter(stringType);
-    return lineStart(code);
-  }
-
-  function lineStart(code: Code): State | undefined {
-    if (code === 93 && !balance) {
-      return atClosingBrace(code);
-    }
-    const token = effects.enter("chunkText", {
-      _contentTypeTextTrailing: true,
-      contentType: "text",
-      previous,
-    });
-    if (previous) previous.next = token;
-    previous = token;
-    return data(code);
-  }
-
-  function data(code: Code): State | undefined {
-    if (code === null || size > 999) {
-      return nok(code);
-    }
-    if (code === 91 && ++balance > 32) {
-      return nok(code);
-    }
-    if (code === 93 && !balance--) {
-      effects.exit("chunkText");
-      return atClosingBrace(code);
-    }
-    if (markdownLineEnding(code)) {
-      if (disallowEol) {
-        return nok(code);
-      }
-      effects.consume(code);
-      effects.exit("chunkText");
-      return lineStart;
-    }
-    effects.consume(code);
-    return code === 92 ? dataEscape : data;
-  }
-
-  function dataEscape(code: Code): State | undefined {
-    if (code === 91 || code === 92 || code === 93) {
-      effects.consume(code);
-      size++;
-      return data;
-    }
-    return data(code);
-  }
-
-  function atClosingBrace(code: Code): State | undefined {
-    effects.exit(stringType);
-    effects.enter(markerType);
-    effects.consume(code);
-    effects.exit(markerType);
-    effects.exit(type);
-    return ok;
-  }
-}
-
-function factoryAttributes(
-  effects: Effects,
-  ok: State,
-  nok: State,
-  attributesType: TokenType,
-  attributesMarkerType: TokenType,
-  attributeType: TokenType,
-  attributeIdType: TokenType,
-  attributeClassType: TokenType,
-  attributeNameType: TokenType,
-  attributeInitializerType: TokenType,
-  attributeValueLiteralType: TokenType,
-  attributeValueType: TokenType,
-  attributeValueMarker: TokenType,
-  attributeValueData: TokenType,
-  disallowEol?: boolean | undefined
-): State {
-  let type: TokenType;
-  let marker: Code | undefined;
-  return start;
-
-  function start(code: Code): State | undefined {
-    effects.enter(attributesType);
-    effects.enter(attributesMarkerType);
-    effects.consume(code);
-    effects.exit(attributesMarkerType);
-    return between;
-  }
-
-  function between(code: Code): State | undefined {
-    if (code === 35) {
-      type = attributeIdType;
-      return shortcutStart(code);
-    }
-    if (code === 46) {
-      type = attributeClassType;
-      return shortcutStart(code);
-    }
-    if (disallowEol && markdownSpace(code)) {
-      return factorySpace(effects, between, "whitespace")(code);
-    }
-    if (!disallowEol && markdownLineEndingOrSpace(code)) {
-      return factoryWhitespace(effects, between)(code);
-    }
-    if (
-      code === null ||
-      markdownLineEnding(code) ||
-      unicodeWhitespace(code) ||
-      (unicodePunctuation(code) && code !== 45 && code !== 95)
-    ) {
-      return end(code);
-    }
-    effects.enter(attributeType);
-    effects.enter(attributeNameType);
-    effects.consume(code);
-    return name;
-  }
-
-  function shortcutStart(code: Code): State | undefined {
-    // Assume it’s registered.
-    const markerType = `${type}Marker` as TokenType;
-    effects.enter(attributeType);
-    effects.enter(type);
-    effects.enter(markerType);
-    effects.consume(code);
-    effects.exit(markerType);
-    return shortcutStartAfter;
-  }
-
-  function shortcutStartAfter(code: Code): State | undefined {
-    if (
-      code === null ||
-      code === 34 ||
-      code === 35 ||
-      code === 39 ||
-      code === 46 ||
-      code === 60 ||
-      code === 61 ||
-      code === 62 ||
-      code === 96 ||
-      code === 125 ||
-      markdownLineEndingOrSpace(code)
-    ) {
-      return nok(code);
-    }
-
-    // Assume it’s registered.
-    const valueType = `${type}Value` as TokenType;
-    effects.enter(valueType);
-    effects.consume(code);
-    return shortcut;
-  }
-
-  function shortcut(code: Code): State | undefined {
-    if (
-      code === null ||
-      code === 34 ||
-      code === 39 ||
-      code === 60 ||
-      code === 61 ||
-      code === 62 ||
-      code === 96
-    ) {
-      return nok(code);
-    }
-    if (code === 35 || code === 46 || code === 125 || markdownLineEndingOrSpace(code)) {
-      // Assume it’s registered.
-      const valueType = `${type}Value` as TokenType;
-      effects.exit(valueType);
-      effects.exit(type);
-      effects.exit(attributeType);
-      return between(code);
-    }
-    effects.consume(code);
-    return shortcut;
-  }
-
-  function name(code: Code): State | undefined {
-    if (
-      code === null ||
-      markdownLineEnding(code) ||
-      unicodeWhitespace(code) ||
-      (unicodePunctuation(code) && code !== 45 && code !== 46 && code !== 58 && code !== 95)
-    ) {
-      effects.exit(attributeNameType);
-      if (disallowEol && markdownSpace(code)) {
-        return factorySpace(effects, nameAfter, "whitespace")(code);
-      }
-      if (!disallowEol && markdownLineEndingOrSpace(code)) {
-        return factoryWhitespace(effects, nameAfter)(code);
-      }
-      return nameAfter(code);
-    }
-    effects.consume(code);
-    return name;
-  }
-
-  function nameAfter(code: Code): State | undefined {
-    if (code === 61) {
-      effects.enter(attributeInitializerType);
-      effects.consume(code);
-      effects.exit(attributeInitializerType);
-      return valueBefore;
-    }
-
-    // Attribute w/o value.
-    effects.exit(attributeType);
-    return between(code);
-  }
-
-  function valueBefore(code: Code): State | undefined {
-    if (
-      code === null ||
-      code === 60 ||
-      code === 61 ||
-      code === 62 ||
-      code === 96 ||
-      code === 125 ||
-      (disallowEol && markdownLineEnding(code))
-    ) {
-      return nok(code);
-    }
-    if (code === 34 || code === 39) {
-      effects.enter(attributeValueLiteralType);
-      effects.enter(attributeValueMarker);
-      effects.consume(code);
-      effects.exit(attributeValueMarker);
-      marker = code;
-      return valueQuotedStart;
-    }
-    if (disallowEol && markdownSpace(code)) {
-      return factorySpace(effects, valueBefore, "whitespace")(code);
-    }
-    if (!disallowEol && markdownLineEndingOrSpace(code)) {
-      return factoryWhitespace(effects, valueBefore)(code);
-    }
-    effects.enter(attributeValueType);
-    effects.enter(attributeValueData);
-    effects.consume(code);
-    marker = undefined;
-    return valueUnquoted;
-  }
-
-  function valueUnquoted(code: Code): State | undefined {
-    if (
-      code === null ||
-      code === 34 ||
-      code === 39 ||
-      code === 60 ||
-      code === 61 ||
-      code === 62 ||
-      code === 96
-    ) {
-      return nok(code);
-    }
-    if (code === 125 || markdownLineEndingOrSpace(code)) {
-      effects.exit(attributeValueData);
-      effects.exit(attributeValueType);
-      effects.exit(attributeType);
-      return between(code);
-    }
-    effects.consume(code);
-    return valueUnquoted;
-  }
-
-  function valueQuotedStart(code: Code): State | undefined {
-    if (code === marker) {
-      effects.enter(attributeValueMarker);
-      effects.consume(code);
-      effects.exit(attributeValueMarker);
-      effects.exit(attributeValueLiteralType);
-      effects.exit(attributeType);
-      return valueQuotedAfter;
-    }
-    effects.enter(attributeValueType);
-    return valueQuotedBetween(code);
-  }
-
-  function valueQuotedBetween(code: Code): State | undefined {
-    if (code === marker) {
-      effects.exit(attributeValueType);
-      return valueQuotedStart(code);
-    }
-    if (code === null) {
-      return nok(code);
-    }
-
-    // Note: blank lines can’t exist in content.
-    if (markdownLineEnding(code)) {
-      return disallowEol ? nok(code) : factoryWhitespace(effects, valueQuotedBetween)(code);
-    }
-    effects.enter(attributeValueData);
-    effects.consume(code);
-    return valueQuoted;
-  }
-
-  function valueQuoted(code: Code): State | undefined {
-    if (code === marker || code === null || markdownLineEnding(code)) {
-      effects.exit(attributeValueData);
-      return valueQuotedBetween(code);
-    }
-    effects.consume(code);
-    return valueQuoted;
-  }
-
-  function valueQuotedAfter(code: Code): State | undefined {
-    return code === 125 || markdownLineEndingOrSpace(code) ? between(code) : end(code);
-  }
-
-  function end(code: Code): State | undefined {
-    if (code === 125) {
-      effects.enter(attributesMarkerType);
-      effects.consume(code);
-      effects.exit(attributesMarkerType);
-      effects.exit(attributesType);
-      return ok;
-    }
-    return nok(code);
-  }
 }

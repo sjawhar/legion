@@ -1727,20 +1727,28 @@
   construct of `@legion/proof-editor`'s own reads that content once, and an opener inside 32 open
   blocks reads as the text it is, so each of those bodies now draws in well under a second, in
   every surface that shows one and in the document editor. A body nesting 32 blocks or fewer reads
-  as before, with two exceptions, since the browser now opens a `:::` block as it opens a quote or
-  a list: after a leading `---` that no later line closes, a `:::name{...}` line opens no typed
+  as before, with three exceptions, since the browser now opens a `:::` block as it opens a quote
+  or a list: after a leading `---` that no later line closes, a `:::name{...}` line opens no typed
   block at the document's level and reads as text, as a list, a quote or a footnote definition
-  there already did, and a document write reads it so too; and a footnote definition inside a
-  `:::` block also defines its footnote for a call in the text before the block, so a document
-  write no longer refuses a footnote definition inside a typed block and reads it where it is
-  written, as it reads one inside a quote. A rule opening a document that holds a typed block at
-  its level is now written `***`, so it no longer reads back as an unclosed front-matter opener
-  that turns the typed block into text (INFRA-581).
+  there already did, and a document write reads it so too; a footnote definition inside a `:::`
+  block also defines its footnote for a call in the text before the block, so a document write no
+  longer refuses a footnote definition inside a typed block and reads it where it is written, as
+  it reads one inside a quote; and a link reference definition inside a `:::` block also defines
+  its reference for the text before the block, so `[r]` before a block holding
+  `[r]: https://u.example` now shows as a link where it showed as the text `[r]`. A document write
+  refuses a link reference definition, so no stored document reads differently, only a body that
+  is displayed. A rule opening a document that holds a typed block at its level is now written
+  `***`, so it no longer reads back as an unclosed front-matter opener that turns the typed block
+  into text (INFRA-581).
 
 - A document write now reads an unclosed code fence inside a typed block in a list item, a quote
   or a footnote definition as the browser does, without the trailing newline it kept from the
   blank line its container ends at; one in a quote that a last `>` line with no line feed ends
   keeps that blank line, as the browser keeps it (INFRA-581).
+
+- A document write now reads the spacing of a list and its items around an unclosed code fence
+  inside a typed block in a list item, a quote or a footnote definition as the browser does
+  (INFRA-581).
 
 - A broker outage no longer ends the sessions whose leases ran out during it (INFRA-487). A session
   renews its lease through a broker, so while every broker process was down, or none could reach

@@ -9,10 +9,11 @@ release, an npm publish and a pin bump.
 
 Two different commits of `sjawhar/proof-sdk` matter here, and they are not the same fact.
 
-The files in the table below were copied byte for byte out of
-**24a5fc94915cda5704897c497af6312c140db40d**, the fork's v0.3.13 — the last commit that still
+The files in the table below, but for `src/directive-factories.ts`, were copied byte for byte out
+of **24a5fc94915cda5704897c497af6312c140db40d**, the fork's v0.3.13 — the last commit that still
 held them. The cut that followed deleted them from the fork, so that commit stays the audit
-source however far the fork line moves.
+source however far the fork line moves. `src/directive-factories.ts` comes from
+micromark-extension-directive 4.0.0 instead.
 
 The upstream modules this package imports at runtime come from the git dependency, pinned at
 **dc6a852b2ab45463dc9d3d17762235450c8ff0d6** on the fork's cleaned `library` line. Moving that
@@ -29,6 +30,7 @@ pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstre
 | `src/editor/schema/block-ids.ts` | Block ids: minting, the DOM attribute, the duplicate-id repair rule |
 | `src/lib.css` | The editor stylesheet |
 | `src/tests/*.test.ts` | The suites that came with those files |
+| `src/directive-factories.ts` | `factoryName`, `factoryLabel` and `factoryAttributes`, copied from micromark-extension-directive 4.0.0 (`lib/factory-name.js`, `lib/factory-label.js` and `lib/factory-attributes.js`), which does not export them: `src/directive-container.ts` tokenizes a `:::` opener's name, label and attributes with them. They are kept whole, the `disallowEol` branches for `false` that neither call takes included (INFRA-581) |
 
 Twelve files under `src/` are legion's own rather than copies, so the file-by-file audit below does
 not reach them:
@@ -45,10 +47,10 @@ not reach them:
 | `src/record-mark-target.ts` | Which mark a click or a hover in the document names: of the mark spans around the target, the record mark whose range is the smallest, the innermost span's among marks the same size, since which of two overlapping record marks nests inside the other follows the order they were made in (LEGION-458); it is also biome-checked |
 | `src/typed-block-drawing.ts` | The typed-block drawing both parse modes share: `markdownSource`, a file's text without one leading U+FEFF, which micromark drops before it counts the offsets the tree carries; the content-rule fit check, which maps each child to the node its `parseMarkdown.match` accepts (a mark node's children in its place) and calls `NodeType.createAndFill`, since Milkdown drops a node whose content breaks its rule, with all its text, without throwing; `drawDirective`, a directive drawn in place as a paragraph of its opening line, its content formatted (the label paragraph dropped) and a paragraph of its closing fence when the source closes it; and `remarkDecideTypedBlocks`, the transformer whose innermost-first walk keeps a container directive typed only when the caller accepts it and its processed content fits. `remarkUnfitTypedBlocks` (the headless engine's default mode) and `unfitTypedBlocksRemarkPlugin` (the live editor, reading the editor's schema when it parses, registered after the mark plugins) accept every directive `remarkTypedBlocks` let through, so an ask holding a heading is drawn as its lines instead of vanishing (INFRA-565); it is also biome-checked |
 | `src/read-only-directives.ts` | `remarkReadOnlyDirectives`, the headless engine's read-only stand-in for `remarkTypedBlocks`, built on `remarkDecideTypedBlocks`: a container directive the block schema refuses (or any, with no schema) is drawn in place, and the paragraph-line directive refusals are not applied, so a body only shown to a reader formats around a block Dispatch does not know instead of falling back whole to its raw source (INFRA-529). An accepted typed block whose content would break its content rule is drawn the same way; it is also biome-checked |
-| `src/directive-container.ts` | `directiveContainerSyntax`, the micromark extension `remarkContainerDirectives` registers for the `:::name[label]{attributes}` container: a micromark document construct, held on the document tokenizer's container stack as a block quote or a list item is, in place of micromark-extension-directive's flow construct, which tokenized a block's content once for each block around it, so a body nesting `:::` a few thousand deep froze a reader's tab for about a minute (INFRA-581). It emits that package's token types, so `mdast-util-directive` builds the same `containerDirective` nodes from them; its `resolveAll` (`resolveDirectiveContainers`) and the `lazyContentEnd` construct keep the flow construct's reading of blank lines, lazy lines and the line endings after fences; and an opener standing inside `maxDirectiveNesting` (32) open directive containers does not open, so its line reads as the text it is. Its `factoryName`, `factoryLabel` and `factoryAttributes` are copies from micromark-extension-directive 4.0.0, which does not export them, under that package's MIT license (below); it is also biome-checked |
+| `src/directive-container.ts` | `directiveContainerSyntax`, the micromark extension `remarkContainerDirectives` registers for the `:::name[label]{attributes}` container: a micromark document construct, held on the document tokenizer's container stack as a block quote or a list item is, in place of micromark-extension-directive's flow construct, which tokenized a block's content once for each block around it, so a body nesting `:::` a few thousand deep froze a reader's tab for about a minute (INFRA-581). It emits that package's token types, so `mdast-util-directive` builds the same `containerDirective` nodes from them; its `resolveAll` (`resolveDirectiveContainers`) and the `lazyContentEnd` construct keep the flow construct's reading of blank lines, lazy lines and the line endings after fences; and an opener standing inside `maxDirectiveNesting` (32) open directive containers does not open, so its line reads as the text it is. It reads an opener's name, label and attributes with the copied factories in `src/directive-factories.ts`; it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Twenty kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Twenty-one kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -98,12 +100,20 @@ gone and the plugin's doc comment rewritten to say which construct it registers 
 `src/block-schema.ts`'s default-mode refusal of a `:::name{...}` paragraph line standing inside
 `maxDirectiveNesting` directives (imported from `./directive-container`), an opener the tokenizer
 left as text — `rejectUnsupportedDirectiveSyntax` counts the `containerDirective` nodes around
-each paragraph and `unsupportedDirectiveReason` takes that count (INFRA-581); and annotations,
-casts and assertions that make a file type-check, each of which erases before runtime (below).
+each paragraph and `unsupportedDirectiveReason` takes that count (INFRA-581);
+`src/directive-factories.ts` joining micromark-extension-directive 4.0.0's `lib/factory-name.js`,
+`lib/factory-label.js` and `lib/factory-attributes.js` into one module, in that order, each after
+a comment naming its file, under the package's MIT notice, with the three files' imports one block
+at the top and each JSDoc `@import` an `import type` (INFRA-581); and annotations, casts and
+assertions that make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
-24a5fc94 root:src/<file>`; every file in the copied-files table has that counterpart, and the
-only lines that differ should be the twenty kinds.
+24a5fc94 root:src/<file>`; every file in the copied-files table but `src/directive-factories.ts`
+has that counterpart, and the only lines that differ should be the twenty-one kinds.
+`src/directive-factories.ts`'s counterparts are those three files of micromark-extension-directive
+4.0.0 (`node_modules/.bun/micromark-extension-directive@4.0.0` at the repository root, or the
+package's npm tarball); each function there differs from its source by the join and the type
+annotations and casts alone.
 
 `scripts/`, `tests/` and `upstream/` are legion's own. `scripts/` and `tests/` are linted and
 type-checked like any other package's; `upstream/` is generated, and Biome is off over it the
@@ -115,11 +125,9 @@ boundary is `any` again.
 
 The copied files are proof-sdk's and stay under its MIT license, as does `upstream/`, which tsc
 derives from proof-sdk's pinned sources; `LICENSE` beside this file is that license, taken from the
-fork at 24a5fc94. Legion's own files listed above, `scripts/` and `tests/` are under the
-repository's Apache-2.0 license, but for the three `factory*` helpers in
-`src/directive-container.ts` (`factoryName`, `factoryLabel`, `factoryAttributes`): they are
-copies from micromark-extension-directive 4.0.0 and stay under that package's MIT license, whose
-notice the file carries above them.
+fork at 24a5fc94. `src/directive-factories.ts` is micromark-extension-directive's instead and
+stays under that package's MIT license, whose notice the file carries at its top. Legion's own
+files listed above, `scripts/` and `tests/` are under the repository's Apache-2.0 license.
 
 `src/directive-container.ts` relies on two parts of micromark's document tokenizer: a container
 state's `_closeFlow`, which a closing fence sets to end the flow inside the block, and a
@@ -202,9 +210,10 @@ bun run upstream-declarations  # rewrite upstream/ from the pinned sources (only
 
 ## Conventions
 
-The copied tree keeps proof-sdk's style — single quotes, its own line width — and Biome's
+The copied tree keeps its sources' style — proof-sdk's single quotes and line width, and in
+`src/directive-factories.ts` micromark-extension-directive 4.0.0's published layout — and Biome's
 formatter, linter and `assist` are all turned off over it in the root `biome.json`, so a diff
-against the pinned commit stays readable. `assist` matters as much as the other two: its
+against the source stays readable. `assist` matters as much as the other two: its
 `organizeImports` is a safe fix, so one `biome check --write` or an editor with organize-on-save
 would reorder the copy's imports. `upstream/` is excluded the same way, for the same reason:
 it is tsc's output, not source. Anything legion writes here — `scripts/`, `tests/`,

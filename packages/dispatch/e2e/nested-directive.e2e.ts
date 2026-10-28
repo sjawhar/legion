@@ -8,6 +8,8 @@ declare global {
   interface Window {
     /** The largest gap, in milliseconds, between two ticks of the page's main-thread heartbeat. */
     __nestedDirectiveLongestGap?: number;
+    /** Starts the heartbeat's record again: no gap so far, and the last tick now. */
+    __nestedDirectiveResetGap?: () => void;
   }
 }
 
@@ -38,9 +40,10 @@ test.beforeEach(async () => {
 /**
  * Opens the issue's Conversation tab as alice, with a heartbeat installed before the page's own
  * scripts: a `setTimeout(0)` loop that records the largest gap between its ticks, which a parse
- * holding the main thread widens to the parse's length. The script runs again for each document
- * the page loads, so the record starts at the navigation. Answers the largest gap seen from the
- * navigation until the comment card has drawn a `:::a` line.
+ * holding the main thread widens to the parse's length. The record starts again when the page
+ * first asks for the issue's comments, before that request goes out: the bundle has been evaluated
+ * and the tab drawn by then, and the card cannot draw before the answer. Answers the largest gap
+ * seen from then until the comment card has drawn a `:::a` line.
  */
 async function longestGapUntilTheCommentDraws(browser: Browser, issueKey: string): Promise<number> {
   const alice = await asUser(browser, "alice");
@@ -49,6 +52,10 @@ async function longestGapUntilTheCommentDraws(browser: Browser, issueKey: string
     await page.addInitScript(() => {
       let last = performance.now();
       window.__nestedDirectiveLongestGap = 0;
+      window.__nestedDirectiveResetGap = () => {
+        last = performance.now();
+        window.__nestedDirectiveLongestGap = 0;
+      };
       const tick = () => {
         const now = performance.now();
         window.__nestedDirectiveLongestGap = Math.max(
@@ -60,12 +67,23 @@ async function longestGapUntilTheCommentDraws(browser: Browser, issueKey: string
       };
       setTimeout(tick, 0);
     });
+    // Only the first request resets: a later one could wait out the draw, then erase its gap.
+    let reset = false;
+    const comments = new RegExp(`/api/v1/issues/${issueKey}/comments(\\?.*)?$`);
+    await page.route(comments, async (route) => {
+      if (!reset && route.request().method() === "GET") {
+        reset = true;
+        await page.evaluate(() => window.__nestedDirectiveResetGap?.());
+      }
+      await route.continue();
+    });
     await page.goto(`/issues/${issueKey}/conversation`);
 
     const card = page.locator('[data-turn^="comment:"]');
     await expect(card).toHaveCount(1);
     await expect(card.getByText(":::a").first()).toBeVisible();
     await expect(card.locator("[data-markdown-fallback]")).toHaveCount(0);
+    if (!reset) throw new Error("the page never asked for the issue's comments");
     const gap = await page.evaluate(() => window.__nestedDirectiveLongestGap);
     if (gap === undefined) throw new Error("the main-thread heartbeat never started");
     return gap;
