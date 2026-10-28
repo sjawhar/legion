@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-652",
+  "completed": "2026-10-28T08:51:29Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "76dbf9108bb35f9c619728744d48486c6d4aa195",
+  "critical": 0,
+  "important": 2,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/agents.go:94",
+      "description": "Shutdown drain answers the agents list 503 from a healthy listener. The shared roster fetch runs on s.lifetime() (issue_route_status.go:141), which main.go:182/338 sets to the SIGTERM context, while shutdown.go:68-93 keeps serving requests in flight through http.Server.Shutdown. After SIGTERM, an agents list whose copy has expired gets an unanswered roster with 'context canceled' and answers 503 ENVOY_UNAVAILABLE (cached for the 5 s silence), where base, reading on the request's context, answered 200. Reproduced with a throwaway test: cancelled Lifetime + healthy listener -> answered=false, writeEnvoyError -> 503; Envoy.Sessions on the request context -> 1 session. Not among the failure paths the architect accepted. Fix in this PR, with a permanent test (cancelled Lifetime, healthy listener -> GET /api/v1/agents 200)."
+    },
+    {
+      "severity": "important",
+      "file": "PR body",
+      "description": "The PR adds a boot refusal at a process boundary (DISPATCH_TEST_ROSTER_UNCACHED without DISPATCH_TEST_HOOKS=1, cmd/dispatch/main.go:662-665) and carries no '## Contract change census'. Add one: the search for DISPATCH_TEST_ROSTER_UNCACHED, each hit with its disposition (run-server.sh:151 and the acceptance compose:47, both beside DISPATCH_TEST_HOOKS=1), and the rollout line (immediate refusal, naming what it closes: a test-only bypass of the roster copy reaching a deployment)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/issue_route_status.go:70",
+      "description": "routeRosterSilenceTTL comment still says every read in the window reads unknown and a failed fetch serves unknown; an agents list now answers the cached 503 there."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/agents.go:82",
+      "description": "'at most routeRosterTTL (5 s) old plus the fetch that answered it' disagrees with fetchRouteRoster, which counts the TTL from the moment the read was sent (issue_route_status.go:153-160), and with every other doc in the diff ('at most 5 s')."
+    }
+  ],
+  "declined": [
+    {
+      "source": "thermonuclear-code-quality, important 1",
+      "finding": "Fold DISPATCH_TEST_ROSTER_UNCACHED into DISPATCH_TEST_HOOKS.",
+      "reason": "Not a defect: the plan chose an explicit setting (plan task 4, plan review approved), the boot refusal keeps it test-only, and a hooks harness with the copy on stays a valid mode."
+    },
+    {
+      "source": "thermonuclear-code-quality, minor 4",
+      "finding": "routeRoster.err nil while unanswered (listener unconfigured).",
+      "reason": "Not a defect: listAgents answers the unconfigured case at agents.go:89-92 before reading the roster, and the routeRoster comment documents the nil case."
+    }
+  ],
+  "fastFollow": "Drop the agents tests that repeat existing coverage: agents_test.go:264-285 (TTL expiry, as issue_route_status_cache_test.go:122-141) and agents_test.go:439-461 (uncached flag, as settings_test.go's router subtest).",
+  "ci": "Required set lint, typecheck, test, pr-title (rulesets; no branch protection). CI head 76dbf9108bb3 (newest pull_request run): lint, typecheck, test success; pr-title success (run 40558843935; two earlier runs cancelled). Compare 76dbf9108bb3...0ba52b8c296: handoffsOnly true, 2 files.",
+  "e2eLines": "E2E (implementer) and E2E (tester) both present in the PR body.",
+  "threads": "0 review threads on GitHub at the time of review.",
+  "thermonuclear": "Both run at 76dbf9108bb3: deep review 0 critical / 0 important / 2 minor; code quality 0 critical / 1 important (declined) / 3 minor."
+}
