@@ -1,9 +1,11 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
+- `envoy-dispatch` serves `GET /livez`, answering 204 with no I/O, for liveness and startup probes
+  that must not wait on or fail with Postgres, NATS or the file store; `/healthz` is unchanged.
 - The listener answers `POST /v1/replay` with the messages `ENVOY_NOTIFICATIONS` stored for a
   session after a cursor per subject, so a session that receives on its own NATS subscriptions
   (pi-envoy, claude-envoy) reads back what it missed while they were down. It serves only the
@@ -151,6 +153,43 @@
   unchanged, and with neither set the component renders what it always did. The component
   refuses, naming the input, an `appPriorityClassName` that is empty, not a DNS subdomain or in
   the reserved `system-` prefix, and an `appPdbMinAvailable` below 1 or above `replicas`.
+- `envoy-infra:gcp:Dispatch` takes `proxyCpu` and `proxyMemory`, the Kubernetes quantities that
+  size the app pod's `cloud-sql-proxy` sidecar as both its request and its limit, so a deployment
+  sizes the proxy every database call of the pod passes through. They default to 1 CPU and `2Gi`
+  (see Changed), and the component judges them with `appCpu` and `appMemory` against Autopilot's
+  bounds for the pod's sum, refusing them as it refuses those, each refusal naming the inputs; a
+  size that is not above 0 is now refused too.
+- `envoy-infra:gcp:Dispatch` takes `frontDoorPdbMinAvailable` and `listenerPdbMinAvailable`, which
+  register a PodDisruptionBudget named for the front door (`<hostname>-tailnet`) or the listener
+  (`<hostname>-listener`), over that Deployment's pods alone, as `appPdbMinAvailable` does for the
+  app, each refused below 1 or above its Deployment's replica count. A pod template whose
+  Deployment has a budget no longer carries the cluster autoscaler's `safe-to-evict: "false"`
+  annotation, since the budget bounds the autoscaler's evictions too; a template with no budget
+  keeps it. A budget made by hand under one of those names must be deleted before the update that
+  sets its input, since the component's provider does not adopt it.
+- `envoy-infra:gcp:Dispatch` takes `frontDoorReplicas`, the front door's pod count, 2 by default,
+  and `listenerReplicas`, the listener's, 1 by default, each refused below 1. The front door runs
+  two by default, since with one pod every node drain, upgrade or scale-down that moves it takes
+  Dispatch off the tailnet until its replacement is ready. Raise `listenerReplicas` above 1 only on
+  an envoy image whose listener holds a delivery lease, where a standby pod is ready and serves
+  `/v1` while only the lease holder delivers.
+- `envoy-infra:gcp:Dispatch` takes `databaseAvailabilityType`, the Cloud SQL instance's
+  availability type: `ZONAL`, the default and the instance's value until now, or `REGIONAL`, a
+  standby in a second zone that Cloud SQL fails over to; anything else is refused by name.
+  Switching changes the instance in place, since the bridged Terraform provider declares
+  `settings.availability_type` without ForceNew: Cloud SQL restarts the instance once, and the
+  change cannot be stopped once started. `REGIONAL` roughly doubles the instance's cost.
+- `envoy-infra:gcp:Dispatch`'s front door runs `frontDoorReplicas` pods that host one Tailscale
+  Service, `svc:<hostname>`, each pod its own tailnet node, registered under the pod's name with its
+  state on an `emptyDir`, so `https://<hostname>.<tailnetDnsName>` and the SOCKS5 proxy the app and
+  the listener reach NATS through answer while any one pod serves. A pod advertises the Service
+  only through its advertiser, is ready only while it hosts the Service, and on stopping drains the
+  Service, waits 20 s and logs its node out inside a 60 s grace period. The Service's certificate
+  is kept in the Secret `<hostname>-tailnet-tls`, which a new pod seeds its cache from and the pods
+  publish a later certificate to, and a pod with no certificate more than 31 days from its end takes
+  one of 3 claims per 7 days recorded on that Secret before it may order one, under Let's Encrypt's
+  5 per name per week. `cert-publish` runs on `frontDoorToolsImage`; see the Breaking entry under
+  Changed for the move.
 - Dispatch writes one access-log line per served request, so the callers behind a load spike can
   be named: `dispatch: request` at INFO when the request ends, with the method, the route's own
   pattern, the escaped request path, the caller (a person's email, a bearer's session, a personal
@@ -233,18 +272,23 @@
   in total and per kind the searchable items with a current vector, lacking one or failed, and the
   oldest lacking item's wait (INFRA-393).
 - `agent-secrets` names the store it answered from, so no answer of its own is read as another
-  secrets CLI's about the same name: the broker `AGENT_SECRETS_URL` names, by host, and that
-  broker's store, read once from its public `GET /v1/settings` (`AWS Secrets Manager account <id>
-  in <region>`, or `GCP Secret Manager project <number>`), with the broker named alone where the
-  settings cannot be read. The injection form writes one line to standard error before it execs -
-  `agent-secrets: NAME, NAME from the broker at <host> (<store>)`, the names it injected and
-  nothing of their values; `request`, `status` and `self` print a `source:` line; `secret show`
-  prints a `store:` line and every row of `secret list` carries `store` in `--json` and a line
-  on standard error naming the store the table is from; `machine list` and `grant list` name
-  their broker the same way; and every refusal names where this CLI looked, from a denied request
-  to `UNKNOWN_SECRET` and a grant that released no value. `--json` output is unchanged for
-  `request`, `status`, `self`, `whoami`, `machine list` and `grant list`, which still print the
-  broker's own body verbatim and make no settings call; `secret list --json` and
+  secrets CLI's about the same name: the broker `AGENT_SECRETS_URL` names, and the kind of that
+  broker's store, read once from its public `GET /v1/settings` (`AWS Secrets Manager`, `GCP Secret
+  Manager`, or the store the broker names when this release does not know it), as `the broker
+  AGENT_SECRETS_URL names (<store kind>)`, with no `(<store kind>)` where the settings cannot be
+  read. The injection form writes one line to standard error before it execs -
+  `agent-secrets: NAME, NAME from the broker AGENT_SECRETS_URL names (<store kind>)`, the names it
+  injected and nothing of their values; `request`, `status` and `self` print a `source:` line;
+  `machine list` and `grant list` name their broker the same way; and every refusal names where
+  this CLI looked, from a denied or pending request to `UNKNOWN_SECRET` and a grant that released
+  no value. None of these lines names the broker's host or the store's account, region or
+  project, since an agent's output is quoted wherever it goes, a public pull request among them.
+  The secret forms, which a person runs under their own cloud sign-in, name the store's account or
+  project (`AWS Secrets Manager account <id> in <region>`, `GCP Secret Manager project <number>`):
+  `secret show` prints a `store:` line and every row of `secret list` carries `store` in `--json`
+  and a line on standard error naming the store the table is from. `--json` output is unchanged
+  for `request`, `status`, `self`, `whoami`, `machine list` and `grant list`, which still print
+  the broker's own body verbatim and make no settings call; `secret list --json` and
   `secret show --json` gain a `store` field. No line names a secret's version: the broker
   releases a grant's values as names and values alone, and a session holds no sign-in of its own
   to the store to read one with (`agent-secrets secret show`, which reads the store directly
@@ -258,6 +302,44 @@
   that inherited a stale address reads a stale address. Such a message carries no `asked the
   broker …` trailer: the broker refused nothing. A local helper refusal or dead helper socket names
   that socket instead, since no broker was asked.
+- No output of `agent-secrets`, `agent-secrets-helper` or `agent-secrets-devrelay` prints a
+  credential the broker's URL carries. Every message that names the URL names it through
+  `internal/redact`'s allow-list: the URL prints as written only when it is provably a plain
+  http(s) URL - printable ASCII with no `@`, `%`, `?`, `#`, backslash or whitespace, an http or
+  https scheme, a DNS name, IPv4 or bracketed IPv6 host with an optional numeric port, and a path
+  of letters, digits and `._~/-` alone - and as `(not printed: the value carries a credential or is
+  not a plain http(s) URL)` otherwise. No part of a value that fails the check prints, so no
+  separator, escape (single or double) or control byte in it can show a credential or forge a
+  line. For such a URL, the transport's own error prints as its class alone (`name resolution
+  failed`, `connection refused`, `timed out`, `TLS failed`, `the broker answered HTTP <n>`,
+  `not a valid URL`, `the request failed`), since its text can quote the URL; it still unwraps
+  to the original, so every classification reads as before, and a clean URL's errors print as
+  before. This covers a broker that could not be reached, the secret forms' refusal of a
+  plain-http broker, the helper's `listening` log line, and every error the helper's broker
+  calls make (a machine login, an enrollment, a renewal, a refresh or a revoke, which
+  `agent-secrets machine login`, `register --wait` and the helper's log print), the helper's
+  `sign-launcher` refusal of a URL that is not its broker's (which `machine` and `grant` list and
+  revoke print), `agent-secrets-helper install`'s refusal of a URL a unit line would need
+  escaped, Dispatch's two boot errors about `DISPATCH_AGENT_SECRETS_URL`, and the broker's own
+  refusals of `BROKER_PUBLIC_URL` and `BROKER_MACHINE_LOGIN_URL`. With a clean base, an error
+  prints as net/http wrote it only when the URL it names is that base followed by a plain `/v1/`
+  path and the error it wraps is a transport failure (a dial, name resolution, refused, timeout,
+  TLS, net/http's `http: server gave HTTP response to HTTPS client`, EOF, a reset or a broken
+  pipe), an HTTP status answer, or text the allow-list passes: a redirect's target (another host
+  or path, a query, or a malformed `Location` whose text quotes it) prints the class alone.
+  `agent-secrets` refuses an id that would not name one path segment as written - `"req%zz" is
+  not a request id`, with no `asked the broker` ending since nothing was sent - before any call,
+  since the proof signs the path as built and the broker checks it against the path it decoded;
+  before, such an id was blamed on the broker's address. An http server answering an https
+  `AGENT_SECRETS_URL` now reads as `the broker at … answered but the exchange failed`, as the
+  troubleshooting guide says: net/http reports it as its fixed `http.ErrSchemeMismatch`, which
+  the classification did not look for.
+  `agent-secrets-devrelay --broker` no longer takes `AGENT_SECRETS_URL` as its flag default,
+  which its usage text printed whole; it reads the variable after parsing. `agent-secrets-helper
+  install` writes its unit `0600`, not `0644`, since the unit's `Environment=` line holds the
+  URL, and narrows a unit an older install left `0644`. Before, net/http masked a password alone
+  and printed the user name and query, and the message about an unreachable broker printed the
+  whole URL, twice since the entry above.
 - The `ask.opened` or `ask.answered` Dispatch's settlement appends when an edit restores a decision
   block it retracted carries `restored: true`: the ask returns to the state it had, and the event
   records no new answer, so a reader that takes an `ask.answered` for a person's answer can tell
@@ -934,8 +1016,89 @@
 - The secrets broker logs at boot how it signs in to its database, `database sign-in
   method=rds-iam` or `method=password`, before it reaches for AWS or the database, so an operator
   tells a token sign-in from a password one in the log rather than the task's environment.
+- `GET /api/v1/search` gives every `ask` hit `ask`, where the ask stands when the search ran:
+  `open`, `answered` with its latest answer (who gave it, when, the options it chose and its
+  text), or `resolved` with its resolution and, when anyone answered it, the last answer it had,
+  which for an ask that document settlement retracted while it was answered is read from its
+  `ask.answered` events, since its row keeps none. One query reads every ask hit of a page, the
+  events are read only when the page holds a resolved ask, and a page with no ask hit reads
+  nothing more. The search palette shows it under each ask hit's excerpt: a badge (`Open`,
+  `Answered`, `Closed, no answer` or `Closed after an answer`), who closed the ask and when, and
+  its latest answer, with who gave it, when, the options chosen and its text cut to three lines
+  (INFRA-569).
 
 ### Changed
+
+- **Breaking:** `envoy-infra:gcp:Dispatch` takes two new required inputs: `tailnetService`, the
+  Tailscale Service the front door hosts, which must resolve to `svc:<hostname>` (pass the `Name`
+  output of the consumer's `tailscale.Service`, so the Serve ConfigMap and the front door wait for
+  the Service), and `frontDoorToolsImage`, the digest-pinned image `cert-publish` runs on, which
+  must carry `/bin/sh`, `curl`, `openssl` 3, `base64`, GNU `date`, `sed`, `grep` and `tr` (the
+  envoy image does). The front door's shape changed: its pods run as a ServiceAccount of their own,
+  `<hostname>-tailnet`, whose Role `<hostname>-tailnet-tls` may only get and patch the certificate
+  Secret, with the token mounted into `cert-publish` alone; the Role `<hostname>-tailscale-state`
+  is gone; and a Tailscale Service holds the name `<hostname>` rather than a node. Moving takes
+  steps before the update ("Moving from a single front-door node" in
+  `packages/envoy/infra/README.md`): give every client of Dispatch access to `svc:<hostname>` on
+  443 in the tailnet policy (a grant with that destination, or a tag on the Service their grants
+  already name), since grants on the front door's tags do not cover the Service's address, with
+  an auto-approval of the Service for the front door's tags; delete the tailnet machine that holds
+  `<hostname>`; declare `svc:<hostname>` with its port `tcp:443`; optionally seed
+  `<hostname>-tailnet-tls`; delete a hand-made budget named `<hostname>`; and back up, then
+  delete, the runtime Secret `<hostname>-tailscale-state`. The move is an outage while the old
+  node is gone and the new pods come up. New refusals, each naming its input before anything
+  registers: a resolved `tailnetService` other than `svc:<hostname>` (never echoing it), an
+  unpinned `frontDoorToolsImage`, a `databaseAvailabilityType` other than `ZONAL` or `REGIONAL`,
+  an `appCpu`, `appMemory`, `proxyCpu` or `proxyMemory` not above 0 or outside Autopilot's bounds
+  for the pod's sum, a `frontDoorReplicas` or `listenerReplicas` below 1, and a
+  `frontDoorPdbMinAvailable` or `listenerPdbMinAvailable` outside 1 to its Deployment's replica
+  count. The defaults changed size too: `databaseTier` is `db-custom-4-15360`
+  (was `db-custom-1-3840`) and the `cloud-sql-proxy` sidecar 1 CPU and `2Gi` (was `200m` and
+  `256Mi`), so a deployment that relied on either default changes size on its next update; set
+  `databaseTier` to the tier the instance runs to keep it. `appPriorityClassName` is renamed
+  `priorityClassName` and names the class of every pod of the three Deployments (the app, the
+  front door and the listener), read once, with all three Deployments waiting on the read and the
+  same refusals; a program that sets `appPriorityClassName` sets `priorityClassName` instead.
+- `envoy-infra:gcp:Dispatch` defaults `databaseTier` to `db-custom-4-15360` (4 vCPU, 15 GB), from
+  `db-custom-1-3840` (100 connections). During a roll, every app pod that holds connections (the
+  replicas, the surge pod and pods still terminating, for up to their grace period) times the
+  server's `store.ConnectionsPerProcess` must fit in the instance's `max_connections` less
+  PostgreSQL's 3 superuser-reserved slots, so a consumer sets `databaseTier` for its replica
+  count. It defaults the `cloud-sql-proxy` sidecar to 1 CPU and `2Gi`, the proxy's own sidecar
+  example's size for one pod's pools, through whose TLS every database call passes; with the
+  app's defaults the pod requests 2 CPU and `6Gi`.
+- `envoy-infra:gcp:Dispatch` takes each Deployment's update strategy from its own replica count:
+  `Recreate` at one pod, since a roll would run two builds side by side, and `RollingUpdate` with
+  `maxUnavailable: 0` and `maxSurge: 1` above one, so a new pod is ready before an old one goes
+  down. The front door and the listener were always recreated; the front door, at its default of
+  two pods, now rolls.
+- `envoy-infra:gcp:Dispatch` spreads each Deployment's pods: required pod anti-affinity on
+  `kubernetes.io/hostname`, so a node holds at most one, and a `topology.kubernetes.io/zone` spread
+  with `maxSkew: 1`, `DoNotSchedule` and `minDomains: 2`, without which Autopilot, which creates
+  nodes on demand, could place two pods in one zone.
+- `envoy-infra:gcp:Dispatch` gives every serving container a startup and a liveness probe that
+  fails only when the process does not answer: `envoy-dispatch` and `envoy-listener` run curl
+  without `-f` against their `/livez`, which reads nothing (`envoy-dispatch` answers it 204, the
+  listener 404 from its router), so neither a dependency outage nor a slow Postgres or NATS
+  restarts a pod, and `envoy-dispatch`'s startup allows 30 minutes for its migrations;
+  `cloud-sql-proxy` runs with `--health-check` and is probed on `/startup` and `/liveness` on port
+  9801; and the front door's `tailscale` container's liveness asks its LocalAPI. The listener's
+  readiness probe allows 6 s, and the listener waits 5 s before it stops, inside a 35 s grace
+  period.
+- `envoy-infra:gcp:Dispatch` rolls the pods that read one of its own Secrets when that Secret
+  changes: each pod template carries `checksum/<secret>`, the resourceVersion of
+  `<hostname>-dispatch` and `<hostname>-listener` on the app, `<hostname>-listener` on the
+  listener and `<hostname>-tailnet-auth-key` on the front door, so a rotated value no longer needs
+  a `kubectl rollout restart`. The NATS seed, the GitHub App key and the Azure key, which the
+  component does not own, still do.
+- Dispatch closes a client connection after its next response once the connection is 60 s old
+  (`Connection: close`), except a request carrying `Upgrade`, a websocket handshake. kube-proxy
+  and the front door spread load per connection, so while callers reuse keep-alive connections a
+  process that has just rolled in gets little traffic; the client's new connection is spread across
+  every ready process.
+- Dispatch accepts an ask question of up to 2,000 UTF-16 units, from 800, on `POST .../asks` and
+  `PATCH /api/v1/asks/{id}`, read from the generated `contracts.AskQuestionMax`; an approval
+  request's `summary` gets what its question leaves of the same limit.
 
 - `POST /v1/interests/subscribe` no longer stores a topic reaching a private stream subject other
   than the session's own agent subject (`bus.ReachesPrivateStreamSubject`): another session's
@@ -1758,6 +1921,16 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+
+- An ask hit's search excerpt, in `GET /api/v1/search` and in the write-time suggestions, is cut
+  from the text its search vector indexes - the question, the options' labels and descriptions,
+  the answer's text and the options it chose - where it was cut from the question, the options'
+  raw JSON and the answer's text, so the excerpt could show JSON keys and braces (INFRA-569).
+- An ask answer that chose no option reads `"selected": []` from `GET /api/v1/asks/{id}`, the ask
+  lists and `GET /api/v1/me/answers`, and an `ask.answered` event's `answer` and `previous_answer`
+  read it from `GET /api/v1/issues/{key}/events`, `GET /api/v1/artifacts/{id}/events` and the
+  `GET /api/v1/events` stream, where each read `null`, including the rows and `ask.answered`
+  events already stored with `null`; a new answer stores `[]` (INFRA-569).
 
 - A document now strikes tilde runs as a comment does. A run of `~` pairs only with a run of its
   own length, so `Plain ~a~~ text.` and `Plain ~~a~ text.` keep their tildes where a document

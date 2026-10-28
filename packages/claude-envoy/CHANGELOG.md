@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
@@ -65,8 +65,44 @@
   own copy of the `legion-architect` skill says a component file goes in the branch of the source
   repository that holds it, with an id no other source of the project uses, since `dist/` and
   `legion/` were regenerated (INFRA-391).
+- The `dispatch` command (`dist/dispatch.js`) prints, under each ask hit of `dispatch search`,
+  where the ask stands: `Answered by …` with the options chosen and `Answer text: …`, `Closed with
+  no answer: …`, `Closed after an answer: …` with `Last answer by …`, or `Open: no answer yet.`;
+  against a Dispatch older than this release, which reports no state, `Answer state not reported
+  by this Dispatch; open the link to read the ask.` The bundled `dispatch_search` description says
+  an ask hit says whether it is answered, since `dist/` was regenerated (INFRA-569).
 
 ### Changed
+
+- The linked `dispatch-writing-specs` skill holds text kept in a rewrite of an old spec to the
+  text rules: each retelling, quotation or unlinked attribution is restated as design or cut. The
+  lines it cuts to stay under the 2,000-word guard are listed in `@sjawhar/pi-envoy`'s changelog.
+
+- The linked `dispatch-writing-specs` skill tells a session to cite code in a spec by file and
+  symbol, never a line number, and to say, in each sentence that cites a gate passing, what the pass
+  does not show. To stay under the 2,000-word guard it cuts lines another loaded text already says:
+  the Legion reviewer names, design-gate pointer and description pointer that `legion-architect` and
+  `dispatch-first` hold, the approval Dispatch carries, "The spec is the issue's primary document",
+  "Name an issue by its `dispatch://` link", "resolve the ask it answers", "Write what is true now"
+  and "Length scales with the change" (`@sjawhar/pi-envoy`'s changelog says where each is held).
+  The generated `legion/skills/legion-architect/references/design-gate.md` has the approval
+  summary's review sentence also say what the reviews do not show.
+
+- The bundled `dispatch` command (`dist/dispatch.js`, rebuilt) carries AskGate's marker check:
+  before a gated write posts it reads the session's AskGate record (`askgate/`) and, under a live one,
+  needs a marker an Oh My Pi gate minted. A Claude Code session writes under host `claude`, whose
+  session id no Oh My Pi process records, so the check is inert here: nothing this plugin sends
+  needs a marker. The plugin has no Dispatch write tool over MCP. `dist/envoy-channel.js` is
+  rebuilt with the same shared state code, whose session pruning keeps a directory a live record
+  names.
+- `dist/` and the generated `legion/` skills are rebuilt with AskGate's file digests (the bundled
+  CLI checks each reviewed file's sha256 and refuses one changed after the review), its two-hour
+  marker age, its per-process record files and its prune of a crashed process's store, and with
+  the skill examples written in the literal form the gate reads (the finding ask and the retro
+  message). Nothing here asks for a marker under host `claude`.
+- The `dispatch` command (`dist/dispatch.js`) and the bundled tool descriptions take an ask
+  question of up to 2,000 characters and ask for its concrete case first; the generated
+  `legion/skills/legion-worker/references/findings.md` carries the concrete finding ask.
 
 - The plugin declares daemon API contract 40 in `package.json`'s `legion.daemonApiVersion`:
   `GET /legion/v1/state` gains the phase `awaiting_person`, a root that gave its admission slot up
@@ -215,6 +251,8 @@
 
 ### Changed
 
+- The session's start notice names an `askgate` section in a checkout's `.envoy/envoy.json` as
+  not read, and names the session's file to set it in.
 - The `legion/` plugin's skills fix a clear defect outside a role's issue in its own tree's pull
   request when the tree touches or depends on that code, and send any other to the controller,
   which hands it to the tree that owns the code and files it for Legion only when none does. A
@@ -225,7 +263,6 @@
   `legion-architect` runs both on a root spec before every approval request, and ends the
   request's `--summary` with their results. The bundled `dispatch request-approval` help names
   both reviewers.
-
 - The plugin ships `claude-envoy:dispatch-writing-specs` in place of
   `claude-envoy:dispatch-brainstorming`: `skills/dispatch-writing-specs` links the
   repository's new skill, and the old link is gone. The three Dispatch skills are under 2,000 words

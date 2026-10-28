@@ -59,7 +59,7 @@ test("an issue margin offers Comments and Pinned, Comments first", () => {
           pendingActionIds: new Set<string>(),
           pinnedIds: [],
           resolvedThreads: [],
-          retractedAskCount: 0,
+          foldedAskCount: 0,
           threads: [],
           viewerLogin: "alice",
           visibleArtifact: specArtifact,
@@ -163,7 +163,7 @@ test("a document owner shows the Comments tab and comment composer only", () => 
             pinnedConversations: [],
             pinnedIds: [],
             resolvedThreads: [],
-            retractedAskCount: 0,
+            foldedAskCount: 0,
             threads: [],
             viewerLogin: "alice",
             visibleArtifact: {
@@ -292,7 +292,7 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
               pinnedConversations: [],
               pinnedIds: [],
               resolvedThreads: [],
-              retractedAskCount: 0,
+              foldedAskCount: 0,
               threads: [
                 {
                   anchor: root.anchor,
@@ -449,7 +449,7 @@ test("the standalone document phone sheet shows each suggestion's diff and Accep
               pinnedConversations: [],
               pinnedIds: [],
               resolvedThreads: [],
-              retractedAskCount: 0,
+              foldedAskCount: 0,
               threads: [first, second].map((root) => ({
                 anchor: root.anchor,
                 key: root.id,

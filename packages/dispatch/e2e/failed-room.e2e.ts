@@ -107,12 +107,11 @@ async function anchoredComment(issueKey: string, body: string, quote: string): P
 
 test("a writer inside the docs layer when its room fails is told, and the room recovers", async ({
   browser,
-}, testInfo) => {
+}) => {
   test.skip(
     process.env.DISPATCH_FAILED_ROOM_PROBE !== "1",
     "the failed-room probe is opt-in: it holds a durable append for 20 s and cancels a backend"
   );
-  test.skip(testInfo.project.name === "iphone", "one browser is enough for a server behaviour");
   test.setTimeout(240_000);
   await resetDatabase();
   await createProject({ key: "CORE", name: "Core" });
