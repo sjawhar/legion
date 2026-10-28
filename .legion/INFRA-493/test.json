@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-493",
+  "completed": "2026-10-28T22:10:00Z",
+  "headTested": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran its W11 command (`cd packages/daemon && go test -count=1 ./internal/intake/ -run TestADeliveryNATSRefusedIsRedeliveredByTheSweepAndApplied -v`, real listener and real `dispatch redeliver-webhooks` binaries): listener 503, one redelivery request, github.8a4f2c10-… applied once, acme/widgets#7 open on ACME-7. Drove its `legion start` proof surface independently on a rig of my own (branch binary built at 55eb11c8, embedded Postgres 16.4, nats-server 2.10.22, project TPROOF): deleted consumer resumed by_start_time after the last applied message, webhook App missing line for installed:false and 404, consumer lag and STALLED lines, all as its proof says."
+  },
+  "failures": [
+    {
+      "criterion": "Required CI green at the head (the `test` job of pr-and-main.yaml and the Daemon Go suite on Postgres 16); acceptance 3.3's drain test",
+      "evidence": "TestABacklogOfOtherPullRequestsDrainsAndAppliesEveryLegionEvent (packages/daemon/internal/intake/drain_test.go:229-231) compares `processedGitHubEvents`, read with `select source || ':' || event_id from processed_events order by 1` (drain_test.go:386), against a list sorted with Go's byte order (slices.Sort, drain_test.go:228). The SQL order follows the database's collation, so on any database whose collation ignores punctuation the two orders differ (`legion-33-checks` sorts before `legion-3-checks`) and the test fails although the set is exactly right. Red at 55eb11c8 in the required `test` job (https://github.com/sjawhar/legion/actions/runs/40762777994/job/123078824809, drain_test.go:230 `processed events = [... legion-28-checks legion-33-checks legion-38-checks legion-3-checks ...], want exactly the 50 Legion events [... legion-28-checks legion-3-checks legion-33-checks ...]`) and in `Daemon Go suite on production's Postgres 16` (job 123078824276, same line). Reproduced in the pod: with template1 recreated `locale_provider icu icu_locale 'en-US-u-ka-shifted'` on an embedded Postgres 16.4, `cd packages/daemon && LEGION_TEST_PG_DSN=<that server> LEGION_TEST_NATS_URL=<idle nats-server 2.10.22> go test -count=1 ./internal/intake/ -run BacklogOfOtherPullRequests -v` fails at drain_test.go:230 with the same ordering; on the same server with template1 under the C collation it passes (drained 16.902 s, 17.170 s, 17.382 s with LEGION_TEST_DRAIN_MEASURE=1). The existing test is the red test: make the comparison independent of the collation (sort `got` in Go, or `order by 1 collate \"C\"`). No product code is wrong here; the head cannot merge while the required `test` job is red."
+    }
+  ],
+  "failed": 1,
+  "mainRedsNotThisChange": [
+    "packages/dispatch/e2e/recipients-claim.e2e.ts 'a route change that closes the issue…' (fixed by #2324)",
+    "packages/envoy/infra/gcp TestDispatchConnectionsPerPodIsTheServers 84 vs 83 (fixed by #2464)",
+    "packages/dispatch/e2e/mermaid.e2e.ts:194 'a diagram too large to draw in time…' (INFRA-138)",
+    "packages/envoy/internal/dispatch/pmdoc does not compile since #2448 (docstest.NestedValue moved; #2481 fixes it)"
+  ],
+  "ciAtHead": "Read on GitHub at 55eb11c8 at 22:05Z: lint, typecheck, build, changes, pr-title green; test and Daemon Go suite on Postgres 16 red (the failure above, the only failing Go test in each); the package lanes (envoy-go, contracts, pi-legion, dispatch and the rest) were still queued.",
+  "proof": [
+    {
+      "criterion": "Architect's requirement: the daemon drops a GitHub fact it already applied by the envelope's dedupe_key, so the same delivery published twice with different event_ids and no Nats-Msg-Id is applied once",
+      "surface": "the branch's real `legion start` binary (55eb11c8) on embedded Postgres 16.4 and nats-server 2.10.22, envelopes published straight to ENVOY_NOTIFICATIONS with no MsgId and a fresh event_id each",
+      "command": "natstool publish-pr opened 201 TPROOF-1 dup-guid-A … twice; natstool publish-pr closed 202 TPROOF-2 close-guid-1 … twice (TPROOF-2 recorded); after a restart with the consumer deleted, close-guid-1 a third time; psql processed_events, pull_requests, consumer_positions; natstool consumer-info",
+      "observed": "stream_seq 1 and 2 both dedupe_key github.dup-guid-A: processed_events holds one github.dup-guid-A row, consumer_positions legion-go-TPROOF-github = 2, ack_floor_stream 2; close-guid-1 at seq 5, 6 and 8: one row, TPROOF-2#202 closed once",
+      "headSha": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
+      "negativeControl": "the same pull request under another delivery (dup-guid-B, synchronize) is a second fact: processed_events gains github.dup-guid-B and the position moves to 3"
+    },
+    {
+      "criterion": "1.4 a missing consumer starts after the last event the daemon applied",
+      "surface": "the branch's real `legion start` and `legion stop` cycle on the same rig",
+      "command": "proc.sh stop daemon; natstool consumer-delete legion-go-TPROOF-github; publish opened #203 (TPROOF-3) and a redelivered close of #202; proc.sh start daemon; natstool consumer-info; psql",
+      "observed": "INFO `intake: a missing durable consumer is created at the last message it applied` start 2026-10-28T21:38:35.838538Z; deliver_policy=by_start_time, ack_floor_stream=8; github.gone-guid-1 applied (TPROOF-3#203 open), close-guid-1 still one row",
+      "headSha": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
+      "negativeControl": "the consumer created on the first boot, with no stored position, was deliver_policy=new"
+    },
+    {
+      "criterion": "2.2 the implementer's completion reads its branch's open pull request: HANDOFF_NO_PULL_REQUEST, recorded and moved when GitHub has it, never moves on a closed one, applied unread on a GitHub failure; 2 pull-request-missing to the architect",
+      "surface": "POST /legion/v1/handoff/complete of the whole daemon (run, as `legion start` calls it) booted in-process by a throwaway -tags e2e driver modelled on merged_root_waits_live_test.go, each implementer reached over the real worker stream, /claims/register, /claims/ready and /grants; GitHub a stand-in per branch",
+      "command": "go test -tags e2e -count=1 ./internal/daemon/ -run TestZZTesterHandoffLive -v (driver removed after the run)",
+      "observed": "no open PR: 409 HANDOFF_NO_PULL_REQUEST `no open pull request on acme/widgets legion/<KEY>; nothing was recorded. Open the pull request and complete again.`, phase implementing, no PR recorded; the same retry 409 again, then 200 once GitHub listed one and the issue moved to testing on it; recorded closed #883373 and none open: 409 with ` pull request #883373 is closed; your architect was told and decides this issue's phase.`; open on GitHub and unrecorded: 200, recorded open #883372, testing; GitHub 502: 200, WARN `the completion is applied unread`, issue stays implementing, and the next pass sent `pull-request-missing on <KEY>` to that issue's architect topic",
+      "headSha": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
+      "negativeControl": "GitHub listing a pull request on another ref (legion/<KEY>-other) for the branch filter: 409 HANDOFF_NO_PULL_REQUEST, nothing recorded"
+    },
+    {
+      "criterion": "2.1 a lost opened (done issue), close and merge heal within one pass",
+      "surface": "the real `legion start` binary's pass against a GitHub stand-in reached through HTTPS_PROXY (opened), and the whole daemon in-process (close, merge)",
+      "command": "standin open-pulls listing #204 on legion/TPROOF-4 (done issue, no record), restart; go test -tags e2e … -run TestZZTesterPassLive (GET /pulls/n closed unmerged for an implementing issue, merged with merge_commit_sha for an awaiting_merge issue)",
+      "observed": "WARN `GitHub lists an open pull request on an issue's branch that the daemon does not record open; applying the opened its webhook would` and TPROOF-4#204 open; close: PR state closed, issue stays implementing, notice `pr-closed-unmerged` to its architect; merge: PR merged, issue done",
+      "headSha": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
+      "negativeControl": "a listed pull request #205 on legion/TPROOF-5 whose head repository is stranger/widgets (a fork) is not recorded"
+    },
+    {
+      "criterion": "1.1 and 1.5 the sweep asks again for any failed delivery and stops only when delivered, expired or GitHub no longer has it",
+      "surface": "the real Envoy listener and `dispatch redeliver-webhooks` binaries built from packages/envoy at 55eb11c8, a fake GitHub delivery log, the daemon's consumer on Postgres",
+      "command": "throwaway intake test (removed): GitHub's first attempt signed with a secret the listener does not hold, then `dispatch redeliver-webhooks --since 1h` four times",
+      "observed": "listener 401; sweep 1 `webhook redelivered … status_code=401`, redelivery answered 200, github.8a4f2c10-… applied once; sweep 2 `webhook delivery recovered … requests=1`, no new request; a second 401 delivery whose redelivery GitHub answers 404: ERROR `webhook delivery expired undelivered … reason=\"GitHub no longer has the delivery\"`, and the next sweep asks for nothing (outcome closed)",
+      "headSha": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
+      "negativeControl": "the 404-answered delivery is never asked for again: GitHub's request list stays [3844000000000000017 3844000000000000051] across sweeps 6 and 7"
+    },
+    {
+      "criterion": "1.2 NATS refuses no push the daemon reads: a ref too long for a subject is published on a cut subject, Go and TypeScript cut alike",
+      "surface": "the real Envoy listener binary on nats-server 2.10.22, signed push webhooks posted to /webhook/github; the TypeScript githubPushSubject",
+      "command": "python3 push_post.py (refs of 5,018 ASCII bytes, two of 4,019 bytes sharing 4,000, 5,218 bytes of 4-byte runes, 4,218 bytes of 2-byte runes, a short one); natstool stream-msgs 'notifications.github.>' 1; bun run subj.ts on the same refs",
+      "observed": "every post 200 ok and stored; subjects of 4,032, 4,032, 4,032, 4,030 (cut between runes) and 4,032 bytes, each ending ~ and 16 hex, the two shared-prefix refs on distinct subjects (~0a5777741862992e, ~5d6b4b585b0b0c10); the TypeScript cut gives the same lengths and suffixes",
+      "headSha": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
+      "negativeControl": "a 23-byte ref keeps its uncut 58-byte subject `notifications.github.acme.widgets.push.branch.legion/short`"
+    },
+    {
+      "criterion": "1.3 and 3.1 legion state names a served repository without the webhook App and shows each consumer's waiting events, oldest and stall; the TypeScript contract 42 schema reads it",
+      "surface": "the real `legion state` / `legion state --json` against the real daemon; LegionStateResponse from packages/contracts",
+      "command": "legion state (webhook-app false, 404, true); a review whose permission read answers 503; bun run parse.ts on two `--json` outputs",
+      "observed": "`webhook App missing on acme/widgets: Dispatch's GitHub App is not installed on acme/widgets: …`, `… this Dispatch does not answer the webhook App check`, then `webhook App missing: none`; `consumer legion-go-TPROOF-github: 1 waiting, oldest 1m10s; STALLED: none handled for 23m0s, …` and `\"stalled\": true`, back to `0 waiting` once the read answered and github.review-guid-1 applied; both outputs, one with withoutWebhookApp and a waiting oldestAt, parse with LegionStateResponse",
+      "headSha": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
+      "negativeControl": "the stand-in answering {\"installed\": true} prints `webhook App missing: none`"
+    },
+    {
+      "criterion": "3.3 5,000 other pull requests' events and 50 Legion events drain in under 60 s at 3 ms per round trip (tester's three runs)",
+      "surface": "the daemon's real consumer and handlers (the drain test), embedded Postgres 16.4 under the C collation, idle nats-server 2.10.22",
+      "command": "cd packages/daemon && LEGION_TEST_DRAIN_MEASURE=1 go test -count=1 ./internal/intake/ -run BacklogOfOtherPullRequests -v (three runs)",
+      "observed": "drained in 16.902 s, 17.170 s, 17.382 s; PASS each",
+      "headSha": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
+      "negativeControl": "the same test on a database whose collation ignores punctuation fails at drain_test.go:230 (the failure recorded above)"
+    }
+  ],
+  "notes": [
+    "scripts/e2e/merged-root-waits.sh cannot run in this pod: the boot's relaunch provisions acme/widgets with `jj git clone https://github.com/acme/widgets`, which the pod's credential helper refuses; the throwaway drivers pre-created the shared clone and workspace instead.",
+    "Acceptance 3.4 (three read_state readings an hour apart) is the production check's, after the merge (architect 21:33Z)."
+  ]
+}
