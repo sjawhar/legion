@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-568",
-  "completed": "2026-10-28T17:05:07Z",
+  "completed": "2026-10-28T17:37:44Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2397",
   "proof": [
     {
@@ -156,6 +156,14 @@
       "observed": "ok: 87 = 64 shared + 4 rooms + 1 health + 13 lease + 1 outbox + 1 registry + 3 listeners after the merge with #2390; the default tier's 500 max_connections less 3 holds 5 app pods",
       "headSha": "25c14fd63081a250025ce39b21cf3a4a21a14c70",
       "negativeControl": "main's own value (86) or this branch's before the merge (85) makes the test fail with expected 87"
+    },
+    {
+      "criterion": "Review round 8: the pull request carries no change under packages/claude-envoy/dist or legion (main's #2423), and the texts no longer say dist/ is rebuilt here",
+      "surface": "the pull request's diff, and the plugin built from this head outside the repository",
+      "command": "jj diff --from main@origin --stat -- packages/claude-envoy/dist packages/claude-envoy/legion; bun scripts/build.ts --out $TMPDIR/ce-out; bun $TMPDIR/ce-out/dist/dispatch.js related --help; claude-envoy typecheck and bun test",
+      "observed": "0 files changed under dist/ and legion/; the out-of-tree build's dispatch related --help lists its options; claude-envoy typecheck and 220 tests pass",
+      "headSha": "9b1cba4fa9cee37648f96556b43adff97e0adff5",
+      "negativeControl": "at 402c06ae the same diff listed three dist/*.js files with 266 changed lines each"
     }
   ],
   "filesChanged": [
@@ -197,7 +205,8 @@
     "Merge of main 0a921021 (4b1f15ff): routes_table.go conflicted with #2225 (both route descriptions kept); fingerprint aed6caca… unchanged; migrations stay 0135/0136.",
     "Merge of main 5fbd8391 (6f585d36): main's issue-ask repair lease plus this pull request's search-term-stats make the lease pool 12 and the maintenance loops ten; fingerprint aed6caca… -> 429ff707… changed by those counts only; migrations stay 0135/0136.",
     "Round 6 (a7d9ad82, 25c14fd6): main's #2390 arrived mid-round with a registry prune lease and migration 0135, so leasePoolSize 13, ConnectionsPerProcess 87, eleven maintenance loops, migrations 0136/0137; envoy-infra's DataDisk tests need mkfs.ext4 and were not run in this pod.",
-    "Merge of main 53f39ba0 (402c06ae): dispatchConnectionsPerPod stays 87 = ConnectionsPerProcess (main's 86 after #2464 plus this branch's lease); asks.go and routes_table_test.go (144 routes) resolved; fingerprint 5d641f7c… -> a83c1ac7…."
+    "Merge of main 53f39ba0 (402c06ae): dispatchConnectionsPerPod stays 87 = ConnectionsPerProcess (main's 86 after #2464 plus this branch's lease); asks.go and routes_table_test.go (144 routes) resolved; fingerprint 5d641f7c… -> a83c1ac7….",
+    "Round 8: dist/ and legion/ are main's; the related-item check's client changes reach Claude Code with main's rebuild after the merge."
   ],
   "openQuestions": [
     "Latency on the full production copy was not measured: DISPATCH_BACKUP_BUCKET is unset, no AWS credentials, the pod's agent-secrets enrollment has no grants, and gcloud is not installed. The recall corpus holds issues and specs only.",
