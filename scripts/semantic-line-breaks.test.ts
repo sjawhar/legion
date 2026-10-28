@@ -299,39 +299,65 @@ test("--write refuses, writing nothing, a re-layout that a second re-layout woul
   expect(await readFile(path, "utf8")).toBe(text);
 });
 
-/** `--write` on `text`, which it must refuse: the refusal on stderr, the exit code, the file after. */
-async function refused(text: string) {
-  const path = await markdownFile(text);
-  const result = Bun.spawnSync(["bun", SCRIPT, "--write", path], { cwd: REPO_ROOT });
-  return {
-    path,
-    stderr: result.stderr.toString(),
-    exitCode: result.exitCode,
-    text: await readFile(path, "utf8"),
-  };
-}
-
-test("--write refuses a join inside a <pre> element on a blockquote's lazy line", async () => {
+test("--write leaves a <pre> element on a blockquote's lazy line as it is", async () => {
   const text = "> Quote <pre>\nline one\nline two</pre>\n";
-  const result = await refused(text);
-  expect(result.stderr).toContain(`${result.path}: refusing to write: the block at line 1`);
-  expect(result.exitCode).toBe(2);
+  const result = await written(text);
   expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
 });
 
-test("--write refuses a join inside a <pre> element in a footnote definition's text", async () => {
+test("--write leaves a <pre> element in a footnote definition's text as it is", async () => {
   const text = "[^1]: Run <pre>\nline one\nline two</pre>\n\nText[^1].\n";
-  const result = await refused(text);
-  expect(result.stderr).toContain(`${result.path}: refusing to write: the block at line 1`);
-  expect(result.exitCode).toBe(2);
+  const result = await written(text);
   expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
 });
 
-test("--write refuses a join inside a <code> element past an escaped close tag", async () => {
+test("--write leaves a <code> element that runs past an escaped close tag as it is", async () => {
   // `\</code>` is text, so the element runs to the second `</code>`, over the line break.
   const text = "Use <code>a \\</code> b\nc</code> here.\n";
-  const result = await refused(text);
-  expect(result.stderr).toContain(`${result.path}: refusing to write: the block at line 1`);
-  expect(result.exitCode).toBe(2);
+  const result = await written(text);
   expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
+});
+
+test("--write leaves a paragraph byte for byte when a nested <pre> closes before the outer one", async () => {
+  const text = "Use <pre>a <pre>b</pre> c. Then more text\nd</pre> here.\n";
+  const result = await written(text);
+  expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
+});
+
+test("--write leaves a paragraph byte for byte when a nested <code> closes before the outer one", async () => {
+  const text = "Use <code>a <code>b</code> c\nd</code> here.\n";
+  const result = await written(text);
+  expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
+});
+
+test("--write leaves the lines after a <pre> opened inside emphasis byte for byte", async () => {
+  const text = "> Quote *x <pre>y*\nline one\nline two</pre>\n";
+  const result = await written(text);
+  expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
+});
+
+test("--write leaves every block after an unclosed <pre> byte for byte, to the end of the file", async () => {
+  const text = "Use <pre>x\n\nNext b. Then c\nd.\n";
+  const result = await written(text);
+  expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
+});
+
+test("--write reads a <pre> tag followed by CR LF as an open tag", async () => {
+  const text = 'Use <pre\r\nclass="x">a. Then b\r\nc</pre> here.\r\n';
+  const result = await written(text);
+  expect(result.text).toBe(text);
+  expect(result.exitCode).toBe(0);
+});
+
+test("--write re-lays out the block after the one that closes a <pre>", async () => {
+  const result = await written("Use <pre>a\nb</pre> here.\n\nNext one. Then two.\n");
+  expect(result.text).toBe("Use <pre>a\nb</pre> here.\n\nNext one.\nThen two.\n");
+  expect(result.exitCode).toBe(0);
 });
