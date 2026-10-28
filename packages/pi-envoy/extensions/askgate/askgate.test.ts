@@ -729,11 +729,21 @@ describe("untrusted text (security)", () => {
     expect(ack).toContain('"a && b -> c &lt;/advisor-gate>"');
     expect(ack.match(/<\/advisor-gate>/g)).toHaveLength(1);
   });
-  test("a revise reason handed to the agent is capped at 2 KiB", async () => {
-    const g = bind({ complete: reviseWith(`failure 7: ${"r".repeat(10_000)}`) });
+  test("a revise reason handed to the agent is capped at 8 KiB", async () => {
+    const g = bind({ complete: reviseWith(`failure 7: ${"r".repeat(20_000)}`) });
     const context = (await g.device("t1", "dispatch_comment", COMMENT))?.additionalContext ?? "";
-    expect(bytes(context)).toBeLessThan(2048 + 512);
+    expect(bytes(context)).toBeGreaterThan(8 * 1024);
+    expect(bytes(context)).toBeLessThan(8 * 1024 + 512);
     expect(context).toMatch(/… \[elided \d+ bytes\]/);
+  });
+  test("a revise reason holding a full-length rewritten question in non-ASCII text arrives whole", async () => {
+    // 2,000 UTF-16 units (ASK_QUESTION_MAX) of three-byte characters is 6,000 bytes, and the reason
+    // names its failure and quotes the words on top: the recommendation at its end must survive.
+    const reason = `failure 13 (content): "Hi! I hope this finds you well." is a preamble. Send: ${"€".repeat(2_000)} I recommend A.`;
+    const g = bind({ complete: reviseWith(reason) });
+    const context = (await g.device("t1", "dispatch_comment", COMMENT))?.additionalContext ?? "";
+    expect(context).toContain(reason);
+    expect(context).not.toContain("[elided");
   });
   test("the primary's system prompt reaches the gate as escaped data in the user message, not as its system prompt", async () => {
     const g = bind({
@@ -4097,7 +4107,7 @@ describe("askgate.ts, the entry", () => {
     expect(completions[0]).toMatchObject({
       reasoning: "high",
       cacheRetention: "none",
-      maxTokens: 1200,
+      maxTokens: 4096,
     });
     expect(completions[0].signal).toBeInstanceOf(AbortSignal);
     expect(entries).toMatchObject([

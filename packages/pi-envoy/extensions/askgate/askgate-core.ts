@@ -148,7 +148,7 @@
 //     newest 256 KiB of its context (the fork's buildSessionContext), every piece XML-escaped
 //     inside its own block, then the call. The last line of the answer must be
 //     {"decision":"allow"} or {"decision":"revise","reason":"…"}. The reason reaches the agent
-//     verbatim but for a tag-opening `<` (see `agentFacing`), capped at 2 KiB, and is recorded
+//     verbatim but for a tag-opening `<` (see `agentFacing`), capped at 8 KiB, and is recorded
 //     as `deliveredReason`.
 // Every outcome other than an unscoped or subagent call appends one `advisor-gate` entry
 // (pi.appendEntry, never sent to the model) with the deadline it raced and every attempt's
@@ -251,7 +251,12 @@ const UNREVIEWED_OUTCOMES: ReadonlyArray<GateEntry["outcome"]> = [
 ];
 export const GATE_CONTEXT_MAX_BYTES = 256 * 1024;
 const GATE_ARGS_MAX_BYTES = 64 * 1024;
-const GATE_REASON_MAX_BYTES = 2 * 1024;
+// A revise reason carries a rewritten ask question of up to ASK_QUESTION_MAX (2,000) UTF-16 units,
+// up to about 6,000 UTF-8 bytes, with the failure names and quoted words on top. The cap holds a
+// full-length rewrite whole: a clip falls at its end, where the options and recommendation sit.
+const GATE_REASON_MAX_BYTES = 8 * 1024;
+// The output of a `dispatch` run the gate quotes in a failure.
+const GATE_PRINTED_MAX_BYTES = 2 * 1024;
 const GATE_BREAKER_REVISES = 2;
 const GATE_HALT_AFTER_FAILURES = 3;
 export const ADVISOR_GATE_ENTRY_TYPE = "advisor-gate";
@@ -1717,7 +1722,7 @@ function renderRequest(
 /**
  * The one transform for text handed to the agent (a model's reason, the agent's own rebuttal): verbatim,
  * except that a `<` which could start a tag (before a letter, `/`, `!` or `?`) becomes `&lt;`, then capped
- * at 2 KiB. The two defects are disjoint. A frame closed or a harness tag opened needs a tag-opening `<`,
+ * at 8 KiB (GATE_REASON_MAX_BYTES). The two defects are disjoint. A frame closed or a harness tag opened needs a tag-opening `<`,
  * and this rule stops it. Full escaping also turned `&&`, `->` and a `> ` quote line into entities, so a fix
  * sent back verbatim posted `&gt;` and a check for the quote failed; those now pass through unchanged. Text
  * rendered into the gate's own prompt is escaped in full instead (`escaped`). Nothing between here and
@@ -2475,7 +2480,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         if (run.timedOut)
           return { failure: `${what} did not finish within ${DRY_RUN_TIMEOUT_MS} ms` };
         if (run.exitCode !== 0) {
-          const printed = clipBytes((run.stdout || run.stderr).trim(), GATE_REASON_MAX_BYTES);
+          const printed = clipBytes((run.stdout || run.stderr).trim(), GATE_PRINTED_MAX_BYTES);
           return { failure: `${what} exited ${run.exitCode ?? "on a signal"}: ${printed}` };
         }
         return { stdout: run.stdout, stderr: run.stderr };
@@ -2604,7 +2609,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         // Not JSON: reported below.
       }
       if (args === undefined) {
-        const printed = clipBytes((dry.stdout || dry.stderr).trim(), GATE_REASON_MAX_BYTES);
+        const printed = clipBytes((dry.stdout || dry.stderr).trim(), GATE_PRINTED_MAX_BYTES);
         return { failure: `${scoped.label} --dry-run printed no JSON object: ${printed}` };
       }
       // The CLI's own predicate, over the arguments it will parse: an upload that is no markdown

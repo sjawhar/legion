@@ -362,6 +362,15 @@ failure it shows.
   font and was built in March." with options `20` / `50` → content 12. The
   reason names both facts, "uses the Inter font" and "was built in March",
   and gives the ask without them.
+- "Hope your week is going well! I spent the morning reading the build
+  logs and wanted to loop you in. The nightly build timed out in 9 of its
+  last 14 runs, all on the 2-CPU runners. Should it move to the 4-CPU
+  runners, for about $46 a month more? I recommend yes. To sum up, the build
+  is slow and more CPUs would help. Happy to dig deeper if that is useful!"
+  → content 13. The reason names the greeting and the account of the
+  morning, the "To sum up" restatement and the closing offer, and gives the
+  ask without them. The counts, the runners, the cost and the
+  recommendation stay.
 - `dispatch artifact --name review-notes.md` whose content is the person's
   Slack message, copied word for word, uploaded so that a later spec can
   link it → content 10. The fix: the spec links the Slack message itself,

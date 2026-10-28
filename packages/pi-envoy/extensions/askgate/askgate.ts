@@ -207,7 +207,11 @@ async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandle
               sessionId,
               reasoning: GATE_EFFORT,
               cacheRetention: "none",
-              maxTokens: 1200,
+              // Adaptive thinking spends this budget too: a revise that rewrote a 1,450-character
+              // question used 1,106 output tokens, thinking included. An answer cut off holds no
+              // verdict and the write posts unreviewed, so this leaves room for a full
+              // 2,000-character rewrite (ASK_QUESTION_MAX).
+              maxTokens: 4096,
               temperature: 0,
               signal,
               onAttempt,
