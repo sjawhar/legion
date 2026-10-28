@@ -7,10 +7,12 @@ builds it on every pull request and merge group whose change its `docs` filter m
 matches (its `paths:`, which `.github/scripts/check-ci-filters.sh` holds equal to the `docs` filter)
 and publishes that build to GitHub Pages.
 
-Every docs-selecting push to `main` builds and deploys, in push order: the workflow's runs share one
-concurrency group, `pages`, which runs one at a time and queues the rest first in, first out (up to
-100), so none is skipped or replaced and the last to deploy is the newest commit's build. If a
-build fails, the site stays at the last one published until a later push selects docs again.
+Docs-selecting pushes to `main` build and deploy in push order: the workflow's runs share one
+concurrency group, `pages`, which runs one at a time and queues the rest first in, first out. GitHub
+bounds that queue at 100 waiting runs, and a `paths:` filter skips a push whose diff holds more than
+3,000 files when none of the first 3,000 matches, so a push can go unbuilt. If a push is dropped or
+its build fails, the site stays at the last one published until the next docs-selecting push
+deploys it again.
 
 ## Run it
 

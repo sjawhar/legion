@@ -188,11 +188,13 @@ on:
       - 'scripts/third-party-notices.ts'
       - '.github/scripts/check-private-names.sh'
 
-# One run at a time, in push order, and every run's turn comes: `queue: max` keeps up to 100 runs
-# waiting in the group, first in, first out, where the default keeps one and replaces it with the
-# next arrival (docs.github.com, "Control the concurrency of workflows and jobs"), and
-# cancel-in-progress: false never cancels a running one. So every docs-selecting push to main
-# builds and deploys, none is skipped or replaced, and the last to deploy is the newest.
+# One run at a time, in push order: `queue: max` keeps up to 100 runs waiting in the group, first
+# in, first out, where the default keeps one and replaces it with the next arrival
+# (docs.github.com, "Control the concurrency of workflows and jobs"), and cancel-in-progress: false
+# never cancels a running one. GitHub promises two bounds and no more: a run past the 100 waiting
+# is not queued, and the `paths:` filter skips a push whose diff holds more than 3,000 files when
+# none of the first 3,000 matches (workflow syntax, "Git diff comparisons"). A push either bound
+# drops leaves the site at the last build published; the next docs-selecting push heals it.
 concurrency:
   group: pages
   cancel-in-progress: false
