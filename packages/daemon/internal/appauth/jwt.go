@@ -12,8 +12,10 @@ import (
 	"time"
 )
 
-// GenerateJWT creates the RS256 App JWT GitHub accepts. Its claims match the shipped daemon:
-// one minute of clock skew and a ten-minute lifetime (github-app-crypto.ts:45-58).
+// GenerateJWT creates the RS256 App JWT GitHub accepts: iat a minute back for clock skew, and exp
+// nine minutes on. GitHub refuses an exp more than ten minutes ahead of its own clock, so an exp of
+// exactly ten minutes fails on a host whose clock is ahead of GitHub's by any amount, even a second
+// ("'Expiration time' claim ('exp') is too far in the future"); the minute of margin absorbs that.
 func GenerateJWT(appID, privateKeyPEM string, now time.Time) (string, error) {
 	key, err := parsePrivateKey(privateKeyPEM)
 	if err != nil {
@@ -33,7 +35,7 @@ func GenerateJWT(appID, privateKeyPEM string, now time.Time) (string, error) {
 	}{
 		Issuer:  appID,
 		Issued:  now.Add(-time.Minute).Unix(),
-		Expires: now.Add(10 * time.Minute).Unix(),
+		Expires: now.Add(9 * time.Minute).Unix(),
 	})
 	if err != nil {
 		return "", fmt.Errorf("encode App JWT claims: %w", err)

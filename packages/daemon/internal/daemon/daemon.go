@@ -272,10 +272,10 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "store")
 	}
-	// The mapping read waits out an unreachable Dispatch without limit, and the mapping's
-	// installation check and the App mint wait out GitHub's transient failures within appMintRetry;
-	// the boot budget bounds none of them, as it does not bound the plugin gate or the image probe:
-	// the work after them has a budget of its own.
+	// The mapping read waits out an unreachable Dispatch without limit, and the App mint waits out
+	// GitHub's transient failures within appMintRetry; a repository whose installation read fails
+	// is left out and read again, never a refused boot. The boot budget bounds none of them, as it
+	// does not bound the plugin gate or the image probe: the work after them has a budget of its own.
 	workflow, err := openWorkflow(ctx, cfg, st, plan.project, plan.dispatchToken, plan.repositories, log, o.workflowTokens, o.githubAPI, build)
 	if err != nil {
 		st.Close()
@@ -757,7 +757,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 		if err != nil {
 			return err
 		}
-		p.gate = pluginGate{
+		gate := pluginGate{
 			env:            env,
 			workDir:        cfg.StateDir,
 			invocation:     invocation,
@@ -767,8 +767,16 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			contract:       api.DaemonAPIVersion,
 			roleReferences: p.roleReferences,
 			log:            log,
-		}.verify
+		}
 		image := capabilities.Image{Launch: omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation), Env: environPairs(env), WorkDir: cfg.StateDir}
+		// The role overlays first: a cheap read whose refusal names the operator's file, before the
+		// plugin gate's slower load probes.
+		p.gate = func(ctx context.Context) error {
+			if err := checkPaneRoleOverlays(ctx, cfg, image, log); err != nil {
+				return err
+			}
+			return gate.verify(ctx)
+		}
 		p.modelFallback = func(ctx context.Context) string {
 			state, err := capabilities.ReadModelFallback(ctx, image)
 			if err != nil {
@@ -778,6 +786,34 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			return state
 		}
 		p.newRuntime = tmuxRuntime(cfg, p.project, launchers, providerEnvDir, dispatchTokenFile, p.tools["gh"], p.repositories.Owners, log)
+	}
+	return nil
+}
+
+// checkPaneRoleOverlays is the boot gate's read of every role role_config_files names, as that
+// role's pane will start Oh My Pi: its PI_CONFIG_FILES, runtime.tmux.pi_config_files then its own
+// files, each file read and the role's own each read alone by image's Oh My Pi
+// (capabilities.CheckOverlays), so a file a pane's Oh My Pi would refuse refuses the boot, naming
+// the role and the file, rather than every launch of that role. The turn-scoping overlay the
+// runtime writes at each launch is Legion's own and is left out. A run that never reached an exit
+// of its own is logged, not refused, as the model-fallback read is.
+func checkPaneRoleOverlays(ctx context.Context, cfg config.Config, image capabilities.Image, log *slog.Logger) error {
+	var every []string
+	if block := cfg.Runtime.Tmux; block != nil {
+		every = block.PiConfigFiles
+	}
+	for _, role := range config.RoleConfigRoles {
+		own := cfg.RoleConfigFiles[role]
+		if len(own) == 0 {
+			continue
+		}
+		why, err := capabilities.CheckOverlays(ctx, image, slices.Concat(every, own), own)
+		if err != nil {
+			log.Warn("boot gate: Oh My Pi did not answer on some of a role's overlays; its files were read", "role", role, "error", err)
+		}
+		if why != "" {
+			return fmt.Errorf("boot gate: role_config_files.%s: the %s's Oh My Pi would not start: %s", role, role, why)
+		}
 	}
 	return nil
 }
@@ -838,7 +874,8 @@ func claimRepositoryOwner(issueOf func(context.Context, claim.Token) (string, er
 
 // tmuxOptions translates the configuration into the tmux runtime's Options, all but the worker
 // stream and the GitHub credential function, which boot hands the factory: the `runtime.tmux`
-// block's pane variables, Oh My Pi overlays and take_over among them.
+// block's pane variables, Oh My Pi overlays and take_over among them, and each role's own overlays
+// (role_config_files).
 func tmuxOptions(cfg config.Config, project string, launchers map[runtime.Backend]tmux.Launcher, providerEnvDir, dispatchTokenFile string, log *slog.Logger) tmux.Options {
 	opts := tmux.Options{
 		Project:           project,
@@ -853,6 +890,7 @@ func tmuxOptions(cfg config.Config, project string, launchers map[runtime.Backen
 		ProbeInterval:     cfg.ProbeInterval,
 		AdoptTimeout:      cfg.SlowCommandTimeout,
 		ProviderEnvDir:    providerEnvDir,
+		RoleConfigFiles:   cfg.RoleConfigFiles,
 		Log:               log,
 	}
 	if block := cfg.Runtime.Tmux; block != nil {
@@ -1424,10 +1462,12 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	var grants *credential.Grants
 	var claimReady func(supervise.Claim)
 	var prepare func(context.Context, intake.DispatchIssue) (intake.DispatchIssue, error)
+	var unread func(string) bool
+	var await func(repo, tree, child, parent string)
 	var githubAPI string
 	if workflow != nil {
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
-		claimReady, prepare = workflow.claimReady, workflow.prepareObserved
+		claimReady, prepare, unread, await = workflow.claimReady, workflow.prepareObserved, workflow.repositoryUnread, workflow.awaitRecovery
 		githubAPI = workflow.githubAPI
 	}
 	// Under `controller: daemon` the keeper launches and keeps the project's controller, and takes
@@ -1469,6 +1509,8 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Pool:               st.Pool(),
 		Handlers:           handlers,
 		PrepareRepository:  prepare,
+		RepositoryUnread:   unread,
+		AwaitRecovery:      await,
 		RoleFor:            phaseRole,
 		Record:             records,
 		Dispatch:           client,

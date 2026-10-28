@@ -2,8 +2,9 @@ import { expect, test } from "bun:test"
 import { mkdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import type { EnvoyClient, Interest } from "@legion/envoy-client/transport"
+import type { Interest } from "@legion/envoy-client/transport"
 import type {
+  ChannelConnectionStatus,
   ChannelForwarderConnection,
   ChannelInboundMessage,
   ChannelTopicSubscription,
@@ -15,6 +16,7 @@ import {
   startChannelSession,
 } from "../src/envoy-channel-server"
 import { roleStateFile, SessionIdentity } from "../src/session-identity"
+import { emptyReplay, type FakeClient } from "./channel-session-harness"
 
 class IdleNats implements ChannelForwarderConnection {
   subscribe(): ChannelTopicSubscription {
@@ -41,6 +43,8 @@ class IdleNats implements ChannelForwarderConnection {
   close(): Promise<void> {
     return Promise.resolve()
   }
+
+  async *status(): AsyncGenerator<ChannelConnectionStatus> {}
 }
 
 const notifier: ChannelNotifier = {
@@ -65,10 +69,7 @@ test("reasserts a restored role after a successful registration heartbeat loses 
   await writeFile(roleFile, JSON.stringify({ session_id: "ses_current", role: "reviewer" }))
   const setRoles: unknown[] = []
   const reasserted = Promise.withResolvers<void>()
-  const client: Pick<
-    EnvoyClient,
-    "subscribe" | "unsubscribe" | "unregisterSession" | "setRole" | "getRole" | "getInterest"
-  > = {
+  const client: FakeClient = {
     subscribe: async () => interest(),
     getInterest: async () => interest(),
     unsubscribe: async () => undefined,
@@ -79,6 +80,7 @@ test("reasserts a restored role after a successful registration heartbeat loses 
       return { claimed: true, interest: interest() }
     },
     getRole: async () => ({ role: "reviewer", holder: "ses_lost", last_seen: 1 }),
+    replay: emptyReplay,
   }
   const session = await startChannelSession({
     identity: new SessionIdentity("ses_current", "/tmp"),
@@ -108,10 +110,7 @@ test("runs the regain hook once a heartbeat's soft claim takes the held role bac
   let holder = "ses_current"
   const regains: string[] = []
   const regained = Promise.withResolvers<void>()
-  const client: Pick<
-    EnvoyClient,
-    "subscribe" | "unsubscribe" | "unregisterSession" | "setRole" | "getRole" | "getInterest"
-  > = {
+  const client: FakeClient = {
     subscribe: async () => interest(),
     getInterest: async () => interest(),
     unsubscribe: async () => undefined,
@@ -126,6 +125,7 @@ test("runs the regain hook once a heartbeat's soft claim takes the held role bac
       if (holder === "ses_current" && regains.length === 0) holder = "ses_lost"
       return answer
     },
+    replay: emptyReplay,
   }
   const session = await startChannelSession({
     identity: new SessionIdentity("ses_current", "/tmp"),
