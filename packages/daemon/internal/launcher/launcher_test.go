@@ -1190,10 +1190,12 @@ func TestAGenerationWhoseSessionDatabaseRefusesIsNotStarted(t *testing.T) {
 //
 // The bound has two halves, as proofTimeout splits the grace. The proof dial's half is read from
 // the stalled dial itself, its context's deadline against the time it was entered, never from a
-// clock around the whole start. The other half is the launcher's own work once the dial has given
-// up - the cleanup and the reply - timed from the dial's return to the reply's arrival: a refusal
-// that reached the daemon after it had stopped waiting fails here however correct the dial's
-// deadline was.
+// clock around the whole start. The other half is the rest of the start, the launcher's own work
+// before the dial (the generation directory, the credential, the proxy's listen) and after it (the
+// cleanup and the reply): the time from the start's send to the dial's entry plus the time from
+// the dial's return to the reply's arrival. A start that reached the daemon after it had stopped
+// waiting fails here however correct the dial's deadline was, whichever side of the dial it lost
+// its time on.
 func TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits(t *testing.T) {
 	dialer := &sessionDialer{addr: idleUpstream(t)}
 	dialer.stallAt(silentUpstream(t))
@@ -1204,6 +1206,7 @@ func TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits
 	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build, StopGrace: grace})
 	marker := filepath.Join(t.TempDir(), "marker")
 
+	sent := time.Now()
 	g.send(g.childStart(1, marker, nil))
 	stop := shimwire.LauncherStop{ID: "stop-1", Generation: 1, GraceMs: 1000}
 	g.send(stop)
@@ -1219,8 +1222,8 @@ func TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits
 		t.Fatal("generation 1's proof dial had no deadline")
 	} else if limit := proof.deadline.Sub(proof.entered); limit > grace/2 {
 		t.Fatalf("generation 1's proof dial was given %s, past half the %s stop grace", limit, grace)
-	} else if after := answered.Sub(proof.ended); proof.ended.IsZero() || after > grace/2 {
-		t.Fatalf("generation 1's refusal arrived %s after its proof dial gave up, past the other half of the %s stop grace", after, grace)
+	} else if before, after := proof.entered.Sub(sent), answered.Sub(proof.ended); proof.ended.IsZero() || before+after > grace/2 {
+		t.Fatalf("generation 1's start took %s outside its proof dial (%s before it, %s after it), past the other half of the %s stop grace", before+after, before, after, grace)
 	}
 	if !ok || got.OK || !strings.Contains(got.Error, "generation 1") || !strings.Contains(got.Error, testInstance) ||
 		!strings.Contains(got.Error, "no answer within "+(grace/2).String()) {
