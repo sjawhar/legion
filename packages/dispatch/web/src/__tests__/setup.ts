@@ -87,8 +87,9 @@ afterEach(resetReplyDrafts);
 // A write a test leaves out keeps writing what it keeps, and the next test's signed-in app would
 // take it up again (`Writes.resume`): each test's are let go, their trying stopped first, since a
 // store outlives its test and would go on retrying into the tests and files after it
-// (`watchWriteStores`), and so is the issue state the last pin answered, which the next pin would
-// otherwise write over.
+// (`watchWriteStores`). Without this, one process running every file saw two such leaks reach the
+// network guard - sends to an agent session and an issue PATCH - from more than one file. So is
+// the issue state the last pin answered let go, which the next pin would otherwise write over.
 const madeStores = new Set<Writes>();
 watchWriteStores((store) => madeStores.add(store));
 afterEach(() => {

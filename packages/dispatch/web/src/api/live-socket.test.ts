@@ -686,14 +686,19 @@ function startFeed(socket: FakeLiveSocket, since = "0", replayComplete = false) 
   });
 }
 
+/** The draw `restart` makes in the first attempt's spread: near its start but not at it, since a
+ *  timer of 0 ms on Bun's fake clock does not always fire. */
+const RESTART_DRAW = 0.01;
+
 /** Dispatch restarts under `socket` (close 1012), and the page's reconnect, which waits within the
- *  first attempt's spread, opens the next socket on the fake clock. The draw is near the spread's
- *  start but not at it: a timer of 0 ms on Bun's fake clock does not always fire. */
+ *  first attempt's spread, opens the next socket on the fake clock. The clock moves only to that
+ *  draw, not across the whole spread, so a timer the page set before the close and due later - a
+ *  refused subscription's retry - is still waiting when the next socket opens. */
 function restart(socket: FakeLiveSocket): void {
-  const random = spyOn(Math, "random").mockReturnValue(0.01);
+  const random = spyOn(Math, "random").mockReturnValue(RESTART_DRAW);
   try {
     socket.drop(1012);
-    jest.advanceTimersByTime(RECONNECT_SPREAD_MS);
+    jest.advanceTimersByTime(Math.ceil(RESTART_DRAW * RECONNECT_SPREAD_MS));
   } finally {
     random.mockRestore();
   }
