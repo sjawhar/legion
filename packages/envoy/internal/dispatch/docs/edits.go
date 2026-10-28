@@ -218,11 +218,10 @@ type treeTokens struct {
 	blocksErr   error
 }
 
-// documentTokens is tree's tokens from one encoding of the tree (encodedTokens). A block's token
-// refuses only a value inside that block while the document's refuses one anywhere, so when the
-// whole tree cannot be encoded the blocks are encoded each on its own, in pre-order, and the first
-// that cannot be is blocksErr; only a tree holding an unencodable value, or failing validation,
-// pays for that second pass.
+// documentTokens is tree's tokens from one encoding of the tree (encodedTokens); when the whole
+// tree cannot be encoded, the blocks are encoded each on its own, in pre-order, and the first that
+// cannot be is blocksErr. Only a tree holding an unencodable value, or failing validation, pays
+// for that second pass.
 func documentTokens(tree *pmdoc.Node) treeTokens {
 	document, blocks, err := encodedTokens(tree)
 	if err == nil {

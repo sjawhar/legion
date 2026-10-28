@@ -45,10 +45,7 @@ func parseTokenTree(t *testing.T, markdown string) *pmdoc.Node {
 	if err != nil {
 		t.Fatalf("parse %q: %v", markdown, err)
 	}
-	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
-		delete(node.Attrs, pmdoc.BlockIDAttr)
-		return true
-	})
+	removeBlockIDs(tree)
 	return tree
 }
 
