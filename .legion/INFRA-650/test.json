@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-650",
+  "completed": "2026-10-28T10:30:00Z",
+  "verdict": "pass",
+  "headTested": "bc58270c481d (code unchanged since 5cac746b9cfb; PR head 7e312a9c823f adds only .legion/INFRA-650/implement.json)",
+  "earlierRounds": "Round 1 at 2b85acda522f (dispatch://INFRA-650/artifact/infra650-tester-evidence-tgz) and the rebase re-check at 5cac746b9cfb: commits c4933f209015 and f8f0458310c0 on this branch.",
+  "fingerprint": {
+    "from": "5cac746b9cfb e46c830b18b2d33608708876d1338efc3c05df95fa74505e140799907cd01dfe",
+    "to": "7e312a9c823f 770a3f844d483ae2784d2bef9fc10863c0b1d7f918905619887f8af2509128f5",
+    "result": "changed, because packages/envoy/CHANGELOG.md and packages/envoy/.changes are in its scope. jj diff --from 5cac746b9cfb --to 7e312a9c823f --name-only lists only the two docs/solutions/*-pr2425.md files, the changie fragment, packages/envoy/CHANGELOG.md and .legion/, so this round tests the changed surface, the changelog fold, and the Dispatch checks of the earlier rounds still hold"
+  },
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Drove the same surface further: the implementer ran changie batch --dry-run in a scratch dir; I ran the repository's own fold (release-push.sh fold-plan, fold-notes, push-fold) on a merge of main aeeee6c029f6 and this head with changie v1.26.0, and it rendered the same bullet. The code-only claim checked by jj diff --name-only (above)."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "The changelog entry, now a changie fragment named by the pull request, folds into packages/envoy/CHANGELOG.md with the same text",
+      "surface": "The changelog fold of .github/workflows/changelog-fold.yaml (release-push.sh fold-plan, fold-notes, push-fold) with changie v1.26.0 from its release tarball, sha256 eab168c8287a6e91912e1c02e5260911232d945bfd3c89d8a0e1ace6bb7b6161 checked as .github/actions/install-changie does",
+      "command": "Scratch clone at $TMPDIR/infra650/tester/fold: git merge of 7e312a9c823f into main aeeee6c029f6 (clean), empty child commit tagged legion-envoy-v18.7.2, bare origin; then release-push.sh fold-plan, fold-notes $W/notes, push-fold <merge> $W/notes with spec packages/envoy=legion-envoy-v, DEPLOY_KEY a fresh key, GIT_CONFIG url.<origin>.insteadOf git@github.com:example/repo.git, stub gh first on PATH (the harness of .github/scripts/changelog-fold.test.sh)",
+      "observed": "fold-plan: 'packages/envoy 18.7.2 2026-10-28 packages/envoy/.changes/unreleased/pr2425-Changed-20261028-100834.yaml'. fold-notes: envoy_18.7.2.md with '### Changed' and the three-line bullet indented as before. push-fold: rc 0, pushed=true, origin main one commit 'chore: fold changelog fragments [skip ci]' over the merge, CHANGELOG.md gains '## [18.7.2] - 2026-10-28' with that bullet above '## Before changelog fragments', no fragment left under .changes/unreleased, no gh call",
+      "headSha": "bc58270c481d",
+      "negativeControl": "The same fragment with 'kind: Changes': fold-notes exits 1, '::error::release-push.sh fold-notes: changie could not render packages/envoy's notes for 18.7.2; refused alone: packages/envoy/.changes/unreleased/pr2425-Changed-20261028-100834.yaml; changie said: Error: kind not found but configuration expects one: 'Changes'...'"
+    },
+    {
+      "criterion": "No Dispatch key or private name in the new docs and changelog text",
+      "surface": "The three files the round added or renamed, as the repository's lint checks them",
+      "command": "grep -n 'INFRA-' packages/envoy/.changes/unreleased/*.yaml docs/solutions/*/*pr2425.md; bash .github/scripts/check-private-names.sh <those three files>",
+      "observed": "grep finds nothing (exit 1); check-private-names passes on the 3 files",
+      "headSha": "bc58270c481d",
+      "negativeControl": "The same grep over the two docs as retro committed them at 3c87033b1e52 (docs/solutions/*/*-INFRA-650.md) finds the key: 1 line in one, 3 in the other"
+    }
+  ],
+  "ci": "Read on GitHub at bc58270c481d at about 10:25Z: build, changes, lint, test, typecheck and pr-title queued (not waited for). 7e312a9c823f is handoff-only with skip-checks.",
+  "notes": [
+    "The fold workflow's header calls a fragment <ISSUE KEY>-<slug>.yaml; this one is named pr2425-..., by the architect's instruction. fold-plan and fold-notes read it with no complaint."
+  ]
+}
