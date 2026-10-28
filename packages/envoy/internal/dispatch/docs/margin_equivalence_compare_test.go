@@ -337,10 +337,7 @@ func (side *equivalenceSide) rowEffects(t *testing.T, document *equivalenceDocum
 			if effect.Markdown, err = documentMarkdown(tree); err != nil {
 				return err
 			}
-			if effect.DocumentToken, err = nodeToken(tree); err != nil {
-				return err
-			}
-			effect.BlockTokens, err = blockTokens(tree)
+			effect.DocumentToken, effect.BlockTokens, err = encodedTokens(tree)
 			return err
 		}(); err != nil {
 			effect.TreeErr = err.Error()

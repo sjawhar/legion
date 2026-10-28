@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"weak"
 
 	"github.com/jackc/pgx/v5"
@@ -57,9 +58,14 @@ func recoverMutation(room string, err *error) {
 // (openLiveOperation), change its fork (change) and record what it leaves (recordLiveOperation),
 // so the refusals both meet run in one order, and the append and the record exist once.
 type liveOperation struct {
-	tx       pgx.Tx
-	write    *liveWrite
-	fork     *crdt.Doc
+	tx    pgx.Tx
+	write *liveWrite
+	fork  *crdt.Doc
+	// read is the room replica's epoch and foreign count as this operation's own fork read found
+	// them (liveWrite.forkRead), copied when the fork is read: a later fork read in the same
+	// operation (a joined read's) must not pair this operation's rendering with another read's
+	// counters (publishedRendering).
+	read     forkReadMark
 	updates  [][]byte
 	recorded bool
 }
@@ -86,7 +92,7 @@ func (s *Service) openLiveOperation(ctx context.Context, artifactID string) (liv
 	if err != nil {
 		return liveOperation{}, err
 	}
-	return liveOperation{tx: tx, write: write, fork: fork}, nil
+	return liveOperation{tx: tx, write: write, fork: fork, read: write.forkRead}, nil
 }
 
 // abandon, deferred once the operation is open, undoes what an operation that changed the fork but
@@ -131,10 +137,13 @@ func (op *liveOperation) change(mutate func() error) (*marginWatch, error) {
 // write whose room failed before that append, keeps the rendering on the transaction's write for a
 // version it writes later, and refreshes the document's anchors against the tree in the same
 // transaction (writeVersionTx). Only once all of that is done is op recorded, so a refusal anywhere
-// in it leaves abandon to drop the fork and the rendering. marginRoom is recorded beside the
-// update (liveWrite.marginRooms): the room a margin write's fork was warm-built from, which its
-// publish tags the update against, and the zero pointer for every other write.
-func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, actor model.Actor, rendered renderedTree, contentChanged bool, marginRoom weak.Pointer[crdt.Doc]) error {
+// in it leaves abandon to drop the fork and the rendering. rendering and marginRoom are recorded
+// beside the update, index for index (liveWrite.renderings, liveWrite.marginRooms), so none of the
+// three can fall out of step with the others: rendering is what the room's update observer may take
+// in place of rendering the room after the update (publishedRendering), the zero value for a fork
+// read cold; marginRoom is the room a margin write's fork was warm-built from, which its publish
+// tags the update against, and the zero pointer for every other write.
+func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, actor model.Actor, rendered renderedTree, contentChanged bool, rendering publishedRendering, marginRoom weak.Pointer[crdt.Doc]) error {
 	// Every write is refused when the live state it leaves could not be decoded, the one check
 	// that decodes a whole second copy of the document. The caller has let go of whatever tree it
 	// held from before the change, so the decode runs beside the fork and the tree the change left,
@@ -173,6 +182,7 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 	op.write.anchorsTree = rendered.tree
 	op.write.updates = append(op.write.updates, update)
 	op.write.versions = append(op.write.versions, version)
+	op.write.renderings = append(op.write.renderings, rendering)
 	op.write.marginRooms = append(op.write.marginRooms, marginRoom)
 	op.recorded = true
 	return nil
@@ -208,27 +218,57 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 // the tree it writes (LEGION-504). current is applyLive's to compare with what the write leaves, so
 // a mutate never changes it: every pmdoc edit returns a copy. It is nil when the fork's tree is
 // outside the schema, where startTree reads the fork again for the refusal.
+//
+// The rendering of the fork before the operation, which only a write that changed the fork, or a
+// failure to classify, needs, is often known without rendering the fork again, and is then taken
+// as it is: forkLive's (liveWrite.forkMarkdown), the room replica's rendering of the very state
+// the fork was read from (warmFork says why that is exact), or else the transaction's previous
+// operation's (liveWrite.markdown), which is the fork's as it stands for as long as the write
+// keeps its tree. A fork moves only through forkLive, which drops that rendering whenever it does
+// (buildFork, releaseFork), and through an operation's mutate, after which that operation records
+// the rendering of what it left or abandons the fork with its rendering (releaseFork). Rendering
+// is deterministic over one state - pmdoc.Read and ReadForRendering differ only in copying
+// attributes, and both trees render through pmdoc.RenderWithBlockOffsets - so either is the very
+// string the render would make. A fork no rendering is known for is rendered here.
 func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error) error {
 	op, err := s.openLiveOperation(ctx, artifactID)
 	if err != nil {
 		return err
 	}
 	defer op.abandon()
-	fork := op.fork
+	fork, write := op.fork, op.write
 	// The tree the operation starts from. One outside the Proof schema - the reader refuses it, or
 	// only the renderer does - is the document's own refusal (OutsideSchemaError), which every
 	// schema refusal this operation meets is then answered with, unless the operation repairs it.
 	// Its rendering is taken only when something needs it: a failure to classify, or the content
-	// comparison of a write that changed the fork.
+	// comparison of a write that changed the fork. It may be known without rendering the fork
+	// (above), and is then picked up here, before mutate moves the fork it describes; only beside
+	// a readable tree, since one the reader refuses is the refusal, whatever else is known. The
+	// path it took is counted once, when it is first needed (renderPathCounts).
 	before, startErr := treeOf(fork)
 	if startErr != nil && !errors.Is(startErr, ErrDocOutsideSchema) {
 		return startErr
 	}
 	var beforeMarkdown string
+	var known *atomic.Uint64
+	if startErr == nil {
+		switch {
+		case write.forkMarkdown != nil:
+			beforeMarkdown, known = *write.forkMarkdown, &s.renderPaths.beforeFromReplica
+		case write.tree != nil:
+			beforeMarkdown, known = write.markdown, &s.renderPaths.beforeFromWrite
+		}
+	}
+	write.forkMarkdown = nil
 	rendered := startErr != nil
 	start := func() error {
 		if !rendered {
-			beforeMarkdown, startErr = documentMarkdown(before)
+			if known != nil {
+				known.Add(1)
+			} else {
+				beforeMarkdown, startErr = documentMarkdown(before)
+				s.renderPaths.beforeRendered.Add(1)
+			}
 			rendered = true
 		}
 		return startErr
@@ -277,6 +317,11 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 		return err
 	}
 	unchanged := beforeMarkdown == markdown
+	if unchanged {
+		// One string retained, not two equal ones: the write's rendering and the one it was
+		// compared with.
+		markdown = beforeMarkdown
+	}
 	if err == nil {
 		contentChanged, weighedFrom = !unchanged, before
 	}
@@ -294,7 +339,16 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	// The tree before the write has served every use it has, so it is let go before the record's
 	// decode check (LEGION-504).
 	before, weighedFrom = nil, nil
-	if err := s.recordLiveOperation(ctx, &op, actor, renderedTree{tree: tree, markdown: markdown, offsets: offsets}, contentChanged, weak.Pointer[crdt.Doc]{}); err != nil {
+	// What the room's update observer can take in place of rendering the room after this update
+	// (publishedRendering): this operation's rendering, when its fork was read warm.
+	var rendering publishedRendering
+	if op.read.warm {
+		rendering = publishedRendering{forkReadMark: op.read, markdown: markdown}
+		if contentChanged {
+			rendering.askBlocks = askBlockIDs(tree)
+		}
+	}
+	if err := s.recordLiveOperation(ctx, &op, actor, renderedTree{tree: tree, markdown: markdown, offsets: offsets}, contentChanged, rendering, weak.Pointer[crdt.Doc]{}); err != nil {
 		return err
 	}
 	// A server lifecycle write (withLifecycleWrite) is no edit of the document: it credits no
@@ -343,10 +397,13 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 //   - It records beside its update the room its fork was warm-built from (liveWrite.marginRooms),
 //     so the room's update observer, which would render the publish only to find the same
 //     markdown, keeps its rendering instead when the update reaches that same room
-//     (liveWriteOrigin.marginOnly says why that is exact).
+//     (liveWriteOrigin.marginOnly says why that is exact). For a warm fork it also records, as
+//     applyLive does, its rendering of the fork with the fork read's replica counters
+//     (publishedRendering): the rendering it records, which the margin write leaves as it was, with
+//     no ask blocks, since it changes no rendered markdown. A cold fork records neither.
 //
-// It returns websocket.ErrNoChanges when the write changed nothing, and a panic in it as its error
-// (recoverMutation), as applyLive does.
+// A marks-map Set always adds an item, so the write always changes the fork: unlike applyLive it
+// never answers websocket.ErrNoChanges. A panic in it is its error (recoverMutation), as there.
 func (s *Service) applyMargin(ctx context.Context, artifactID string, actor model.Actor, markID string, record map[string]any) error {
 	op, err := s.openLiveOperation(ctx, artifactID)
 	if err != nil {
@@ -363,9 +420,6 @@ func (s *Service) applyMargin(ctx context.Context, artifactID string, actor mode
 	if err != nil {
 		return err
 	}
-	if len(op.updates) == 0 {
-		return websocket.ErrNoChanges
-	}
 	rendered := renderedTree{tree: op.write.tree, markdown: op.write.markdown, offsets: op.write.offsets}
 	if rendered.tree == nil {
 		if rendered.tree, err = treeOf(op.fork); err != nil {
@@ -379,14 +433,19 @@ func (s *Service) applyMargin(ctx context.Context, artifactID string, actor mode
 		return err
 	}
 	// The room the fork was warm-built from, which the publish tags the update against
-	// (liveWriteOrigin.marginOnly). A cold fork was built from the stored document, with no room
-	// behind it, so it names none; write.cold says so directly rather than leaving it to coldFork
-	// to have cleared forkedFrom.
+	// (liveWriteOrigin.marginOnly), and the rendering the observer may take in its place
+	// (publishedRendering). A cold fork was built from the stored document, with no room behind
+	// it, so it names neither; write.cold says so directly rather than leaving it to coldFork to
+	// have cleared forkedFrom and forkLive the fork read's counters.
 	var room weak.Pointer[crdt.Doc]
+	var rendering publishedRendering
 	if !op.write.cold {
 		room = op.write.forkedFrom
+		if op.read.warm {
+			rendering = publishedRendering{forkReadMark: op.read, markdown: rendered.markdown}
+		}
 	}
-	return s.recordLiveOperation(ctx, &op, actor, rendered, false, room)
+	return s.recordLiveOperation(ctx, &op, actor, rendered, false, rendering, room)
 }
 
 // joinedSchemaError is the error a joined operation answers for err, a failure it met after it
@@ -747,30 +806,48 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 }
 
 // documentBlocks renders tree once into its canonical markdown and the blocks whose byte ranges
-// index into it, each with its token and, for a table, the blocks it holds and its rows.
+// index into it, each with its token and, for a table, the blocks it holds and its rows. It leaves
+// out the document's token, which none of its callers reads.
 func documentBlocks(tree *pmdoc.Node) (string, []model.ArtifactBlock, error) {
 	rows, err := pmdoc.TableRows(tree)
 	if err != nil {
 		return "", nil, documentSchemaError(err)
 	}
-	return renderedBlocks(tree, rows)
+	rendered, err := renderedBlocks(tree, rows)
+	if err != nil {
+		return "", nil, err
+	}
+	return rendered.markdown, rendered.blocks, nil
 }
 
-// renderedBlocks is documentBlocks with each table's rows already listed (pmdoc.TableRows). A
-// table block carries the rows of the table its id addresses: where two tables carry one id, the
-// first in document order, the one an edit naming that id changes.
-func renderedBlocks(tree *pmdoc.Node, rows map[string][]pmdoc.TableRow) (string, []model.ArtifactBlock, error) {
+// renderedDocument is a tree rendered (renderedBlocks): its canonical markdown, its blocks, and
+// its document token beside the error that refused that token. A tree holding a value no token can
+// encode outside every block still renders, so the document token's error is the caller's to
+// weigh rather than the rendering's.
+type renderedDocument struct {
+	markdown string
+	blocks   []model.ArtifactBlock
+	token    string
+	tokenErr error
+}
+
+// renderedBlocks is documentBlocks with each table's rows already listed (pmdoc.TableRows), and the
+// document's token, from the same one encoding of the tree as its blocks' tokens (documentTokens).
+// A table block carries the rows of the table its id addresses: where two tables carry one id, the
+// first in document order, the one an edit naming that id changes. Its error is a block token's or
+// the rendering's, never the document token's, which is tokenErr.
+func renderedBlocks(tree *pmdoc.Node, rows map[string][]pmdoc.TableRow) (renderedDocument, error) {
 	tableDescendants, err := pmdoc.TableDescendantIDs(tree)
 	if err != nil {
-		return "", nil, documentSchemaError(err)
+		return renderedDocument{}, documentSchemaError(err)
 	}
-	tokens, err := blockTokens(tree)
-	if err != nil {
-		return "", nil, documentSchemaError(err)
+	tokens := documentTokens(tree)
+	if tokens.blocksErr != nil {
+		return renderedDocument{}, documentSchemaError(tokens.blocksErr)
 	}
 	markdown, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
 	if err != nil {
-		return "", nil, documentSchemaError(err)
+		return renderedDocument{}, documentSchemaError(err)
 	}
 	tables := make(map[string]*model.BlockTable, len(rows))
 	blocks := make([]model.ArtifactBlock, len(offsets))
@@ -780,7 +857,7 @@ func renderedBlocks(tree *pmdoc.Node, rows map[string][]pmdoc.TableRow) (string,
 			Type:          offset.Type,
 			From:          offset.From,
 			To:            offset.To,
-			Token:         tokens[offset.ID],
+			Token:         tokens.blocks[offset.ID],
 			DescendantIDs: tableDescendants[offset.ID],
 		}
 		if offset.Type != "table" {
@@ -793,7 +870,7 @@ func renderedBlocks(tree *pmdoc.Node, rows map[string][]pmdoc.TableRow) (string,
 		}
 		blocks[index].Table = table
 	}
-	return markdown, blocks, nil
+	return renderedDocument{markdown: markdown, blocks: blocks, token: tokens.document, tokenErr: tokens.documentErr}, nil
 }
 
 // blockTable is a table's rows as the API carries them.
