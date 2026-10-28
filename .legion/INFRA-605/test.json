@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-605",
+  "completed": "2026-10-28T14:06:00Z",
+  "headTested": "411492d879e193aee210eda60af91069a79fd292 (its Go code is 59a3aeae's; the before/after runs used exports of 59a3aeae and of 9692d2fd with 59a3aeae's loadtest/)",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the 21 tests of the two red-test commits at the head against a real Postgres 16.2 on this pod (go test -count=1 -run '<the 21 names>' ./internal/dispatch/docs/ ./internal/dispatch/api/ ./cmd/dispatch/: ok 75.0 s / 4.9 s / 8.2 s, all 21 PASS), and drove editors-1x-over-0.25x once per side on a stack and seed of my own (LOADTEST_ROOT=$TMPDIR/t605/lt, seeded fresh in 840 s): room round trips per editor update 9.53 -> 2.96, connections held by rooms p99 9 -> 5, shared-pool share 100% -> 33%, durable ms p50/p99 62/284 -> 73/145, 7,193 of 7,193 acknowledged both, REST 100% 2xx both, 5,880 batches of 7,187 updates in 17,640 round trips (3.0 per batch). These match the implementer's medians (9.51 -> 2.98, p99 9 -> 4, 100% -> 32%, 60/264 -> 73/157)."
+  },
+  "failed": 7,
+  "failures": [
+    {
+      "criterion": "CI reads green at the head the round tests (the static lanes are CI's, never the tester's)",
+      "evidence": "gh pr view 2445 --repo sjawhar/legion: mergeable CONFLICTING, statusCheckRollup []; gh run list --repo sjawhar/legion --branch legion/INFRA-605: no runs at all. GitHub computes no merge ref for a conflicting head, so no lane of CI ran on 411492d8 or any earlier head of this branch. The branch's base is main a9f5c529 (2026-10-27); main is at 08572e01. The implementer merges main forward (no rebase) once #2369 is on main, and the next round reads CI at that head."
+    },
+    {
+      "criterion": "The pull request holds only INFRA-605's change",
+      "evidence": "The branch carries sjawhar/legion#2369 (INFRA-589's load harness, still OPEN) whole: its packages/envoy/loadtest/ files and .legion/INFRA-589/{plan,implement,test,review}.json (merge 59a3aeae brings legion/INFRA-589 9692d2fd in). The body's Chain line already says so ('stacked on legion/INFRA-589 (sjawhar/legion#2369, not yet merged) at 9692d2fd, merged forward'), which I checked; the stack itself still blocks the merge until #2369 is on main and main is merged forward."
+    },
+    {
+      "criterion": "A changelog entry is a changie fragment, never an edit of CHANGELOG.md",
+      "evidence": "jj diff --from 9692d2fd --to 59a3aeae: packages/envoy/CHANGELOG.md +20 lines (line 1690 at the head: '- Typing in a document no longer costs Dispatch a request connection per keystroke (INFRA-605).'). Main has packages/envoy/.changie.yaml and packages/envoy/.changes/unreleased/*.yaml, and its CHANGELOG.md opens with '## Before changelog fragments'. Move the entry to a packages/envoy/.changes/unreleased/ fragment and leave CHANGELOG.md as main has it."
+    },
+    {
+      "criterion": "INFRA-605's added text names no Dispatch key (the INFRA-514 architect's rule for this round)",
+      "evidence": "At the head: packages/envoy/CHANGELOG.md:1690 '(INFRA-605)'; packages/envoy/internal/dispatch/docs/room_appends.go:375 and :541 'INFRA-593's'; packages/envoy/loadtest/README.md:256 '([INFRA-605](dispatch://INFRA-605), plan D7.6)' and :915 '(INFRA-605 plan D6.5)'. The other keys in loadtest/README.md (INFRA-512, INFRA-324, INFRA-514, INFRA-591, INFRA-598) are INFRA-589's text, not this change's."
+    },
+    {
+      "criterion": "store.ConnectionsPerProcess and infra/gcp dispatchConnectionsPerPod count the new 8-connection room-appends pool",
+      "evidence": "Neither exists at the head: the branch predates them. On main 08572e01, packages/envoy/internal/dispatch/store/pool.go:307 'const ConnectionsPerProcess = sharedPoolSize + roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + permanentListeners' and packages/envoy/infra/gcp/dispatch.go:97 'const dispatchConnectionsPerPod = 83'. The merge of main forward must add roomAppendsPoolSize to ConnectionsPerProcess and raise dispatchConnectionsPerPod by the same 8; dispatch_connections_test.go only compares the two, so a merge that adds the pool to neither stays green while undercounting. (TestDispatchConnectionsPerPodIsTheServers, 84 vs 83, is red on main itself since #2233 and is main's, per the INFRA controller at 13:57Z.)"
+    },
+    {
+      "criterion": "DR-16: DISPATCH_MAX_LIVE_ROOMS and DISPATCH_MAX_DOC_CONNECTIONS are caps: 'Most document rooms the server holds in memory at once ... refused (503)' and 'Most browser connections ... refused (503)' (settings.go)",
+      "evidence": "Real surface: dispatch-after (59a3aeae) on my stack's database, DISPATCH_MAX_LIVE_ROOMS=2 DISPATCH_MAX_DOC_CONNECTIONS=1000, ten document sockets opened at once on ten cold specs (throwaway loadgen probe, gorilla websocket, Hocuspocus auth + sync step 1): upgraded=10 synced=10, /debug/vars dispatch_rooms resident_rooms 10 - five times the cap. With 2 and 3: upgraded=2, 'http 401:5 http 503:3', resident_rooms 3. With 1000 and 3, ten at once on one document: 3 admitted, 7 answered 503 or 401 (401 'unauthorized' comes from ygo's server.go:1902 when authorize's second canAddConnection refuses). Sequential opens are capped correctly (3 admitted, 4th 503, again admitted once they closed) and the counts drain (resident_rooms 3 -> 0 within 90 s). Red test (commit 13ecbd737052): cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<postgres> go test -count=5 -run TestConcurrentSocketOpensStayWithinTheCapsAndAreRefusedWith503 ./internal/dispatch/docs/ fails 5 of 5: '10 sockets opened at once on 10 documents: 10 admitted and 10 rooms live, want at most the room cap of 2' and '... 3 were admitted and the rest answered map[401:7]'. canOpenRoom/canAddConnection (roomstate.go:723,731) are checks before the load, not reservations; the room count rises only when ygo opens the room."
+    },
+    {
+      "criterion": "DR-08: the head tracker answers a cached cold read without the database only while it can trust itself ('trusted only while LISTEN is connected'; freshness bounded by notification delivery, the INFRA-514 architect's acceptance)",
+      "evidence": "Real surface ($TMPDIR/t605/halfopen.sh): two Dispatch processes on one database; B reads a spec twice (cached), then B's document LISTEN backend ('listen dispatch_doc_head; listen dispatch_doc_changed') is stopped with SIGSTOP - its TCP stays up and it answers nothing, a half-open connection - while every other connection of B works; A edits 'Revision token r0' -> 'rT605x' (POST /api/v1/artifacts/<id>/edits, 200). Head: B's GET /api/v1/artifacts/<id>/text kept answering r0 for 31.4 s, until the listener's idle ping (pglisten DefaultListenIdle 30 s + DefaultPingTimeout 5 s) found the connection dead; /debug/vars head_tracker {trusted:true} throughout. Base (9692d2fd), same steps on its listener backend: B fresh after 0.1 s. Red test (commit dd6530d27f9a): go test -count=1 -run TestAColdReadSeesAnotherServicesWriteWhileItsListenConnectionIsHalfOpen ./internal/dispatch/docs/ fails: 'the reader still reads \"Write 0.\\n\" 10.006s after the other service's write committed while its LISTEN connection was half-open, want \"Write 1.\\n\" within 10s' (the same bound TestAColdReadOnOneServiceSeesAnotherServicesWriteWithinTheNotificationDelay allows; its p99 here 31 ms)."
+    }
+  ],
+  "proof": [
+    {
+      "criterion": "Browser updates to one document are appended in batches on the room subsystem's own connections (round trips per update, connections held by rooms, update latency before/after)",
+      "surface": "INFRA-589's load reproduction on this pod, a stack and seed of the tester's own, Dispatch built from exports of each side",
+      "command": "LOADTEST_ROOT=$TMPDIR/t605/lt (ports 25432-29120) LOADTEST_SRC=<before|after> packages/envoy/loadtest/run-step.sh tester-editors-1x-over-0.25x-<side> --events 1 --sessions 100 --requests 15 --editors 20 --editor-docs 10; loadgen tables over both",
+      "observed": "room round trips per update 9.53 -> 2.96; connections held by rooms p50/p99/max 2/9/11 -> 1/5/7; shared-pool share 100% -> 33%; batches 5,880 / updates 7,187 / round trips 17,640; durable ms 62/284 -> 73/145; relay ms 5/115 -> 5/81; 7,193/7,193 acknowledged both; REST 100% 2xx, p50 29 ms both",
+      "headSha": "59a3aeae1864e6704815fd3f81677e8120a641b2",
+      "negativeControl": "the before build (9692d2fd): /debug/vars answers 404 ('not served by this build'), 100% of room-held connections on the shared request pool, 9.53 round trips per update"
+    },
+    {
+      "criterion": "DR-16 settings refuse a bad value at boot",
+      "surface": "envoy-dispatch's boot, the operator's environment",
+      "command": "env -i ... DISPATCH_MAX_LIVE_ROOMS=<v> ./dispatch-after for 0, -1, abc, 1.5, +5, 99999999999999999999, ' 7 ', ''; DISPATCH_MAX_DOC_CONNECTIONS=0",
+      "observed": "0, -1, abc, 1.5, +5 and 99999999999999999999 refused: 'dispatch: resolve boot config' error='DISPATCH_MAX_LIVE_ROOMS=\"0\" (expected a positive integer)'; ' 7 ' and '' pass the setting (the boot then stops at NATS, which the test gave none); DISPATCH_MAX_DOC_CONNECTIONS=0 refused the same way",
+      "headSha": "59a3aeae1864e6704815fd3f81677e8120a641b2",
+      "negativeControl": "the refused values themselves: each stops the process before it opens anything"
+    },
+    {
+      "criterion": "No regression of a room's durability across a database drop, a SIGTERM and two processes typing one document",
+      "surface": "dispatch-after vs dispatch-before on the tester stack through the latency proxy, a throwaway Hocuspocus editor typing Cyrillic-marked words (split-proof counts)",
+      "command": "$TMPDIR/t605/drop.sh, term.sh, twopod.sh <before|after> <db>",
+      "observed": "drop (proxy stopped 4 s mid-typing): the room fails and closes the socket on both builds, a new editor's 20 updates are then acknowledged and stored, no word doubled, the text identical across a restart; SIGTERM mid-typing: head stops in 0.7 s with 165 acknowledged and 165 stored (base: 14.0 s, 400/400); two processes: on both builds one process's room is closed after 3-4 updates and the other stores all 200, both processes read the same text, nothing doubled",
+      "headSha": "59a3aeae1864e6704815fd3f81677e8120a641b2",
+      "negativeControl": "the before build (9692d2fd) under the same scripts: the same failure-and-recovery shape, so none of it is the change's"
+    }
+  ],
+  "notMine": [
+    "packages/envoy/infra/gcp TestDispatchConnectionsPerPodIsTheServers (84 vs 83) and packages/dispatch/e2e/recipients-claim.e2e.ts are red on main since #2233 (INFRA controller, 13:57Z); main's, not this pull request's."
+  ]
+}
