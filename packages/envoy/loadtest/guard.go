@@ -138,56 +138,78 @@ var (
 	urlFlags   = []string{"-url", "-listener", "-nats", "-nats-mon", "-pprof", "-pg"}
 )
 
-// redactURL is raw without the userinfo of any of its comma-separated servers and without a
-// password query parameter (a Postgres URL can carry one), for every place that records or prints
-// an endpoint. The whole userinfo goes, the user name too: nats.go takes a user name with no
-// password as the auth token. A -nats value can list several servers (nats.Connect splits it at
-// commas) and a -pg value several hosts, so each element loses its own. An element that does not
-// parse is redacted whole, since no credential in it can be found for sure.
+// redactURL is raw without its userinfo and without a password query parameter (a Postgres URL
+// can carry one), for every place that records or prints an endpoint. The whole userinfo goes,
+// the user name too: nats.go takes a user name with no password as the auth token. raw is parsed
+// whole, as pgx parses a Postgres URL (a comma in its password or its password parameter is part
+// of the password, and its host list is one host field); only -nats is a comma-separated list
+// (redactEndpoint). A value that does not parse is redacted whole, since no credential in it can
+// be found for sure.
 func redactURL(raw string) string {
-	elements := strings.Split(raw, ",")
-	for i, element := range elements {
-		u, scheme, err := parseURLElement(element)
-		if err != nil {
-			elements[i] = redacted
-			continue
-		}
-		u.User = nil
-		if q := u.Query(); q.Has("password") {
-			q.Del("password")
-			u.RawQuery = q.Encode()
-		}
-		elements[i] = u.String()
-		if !scheme {
-			elements[i] = strings.TrimPrefix(elements[i], elementScheme)
-		}
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" {
+		return redacted
 	}
-	return strings.Join(elements, ",")
+	return withoutCredentials(u).String()
 }
 
-// elementScheme stands in for the scheme of a list element that has none (the hosts after the
-// first in a Postgres URL, "postgres://u@h1,h2/db"), so that url.Parse reads its host.
-const elementScheme = "x://"
-
-// parseURLElement parses one comma-separated element of an endpoint flag; scheme reports whether
-// the element named its own scheme.
-func parseURLElement(element string) (u *url.URL, scheme bool, err error) {
-	element = strings.TrimSpace(element)
-	scheme = strings.Contains(element, "://")
-	if !scheme {
-		element = elementScheme + element
+// redactEndpoint is redactURL for the value of endpoint flag flag: a -nats value is a server list
+// that nats.go splits at commas (processUrlString), each server with userinfo of its own, so each
+// loses its own; any other flag's value is one URL.
+func redactEndpoint(flag, raw string) string {
+	if flag != "-nats" {
+		return redactURL(raw)
 	}
-	u, err = url.Parse(element)
+	servers := strings.Split(raw, ",")
+	for i, server := range servers {
+		u, scheme, err := parseNATSServer(server)
+		if err != nil {
+			servers[i] = redacted
+			continue
+		}
+		servers[i] = withoutCredentials(u).String()
+		if !scheme {
+			servers[i] = strings.TrimPrefix(servers[i], natsScheme)
+		}
+	}
+	return strings.Join(servers, ",")
+}
+
+// withoutCredentials is u with no userinfo and no password query parameter.
+func withoutCredentials(u *url.URL) *url.URL {
+	u.User = nil
+	if q := u.Query(); q.Has("password") {
+		q.Del("password")
+		u.RawQuery = q.Encode()
+	}
+	return u
+}
+
+// natsScheme stands in for the scheme of a NATS server that names none ("host:4222", which
+// nats.go reads as nats://host:4222), so that url.Parse reads its host.
+const natsScheme = "nats://"
+
+// parseNATSServer parses one server of a -nats list; scheme reports whether it named its own.
+func parseNATSServer(server string) (u *url.URL, scheme bool, err error) {
+	server = strings.TrimSpace(server)
+	scheme = strings.Contains(server, "://")
+	if !scheme {
+		server = natsScheme + server
+	}
+	u, err = url.Parse(server)
 	return u, scheme, err
 }
 
-// isURLList reports whether v is a URL with a scheme and a host, or a comma-separated list whose
-// first element is one and whose every other element names a host (a NATS server list, or the
-// hosts of a Postgres URL).
-func isURLList(v string) bool {
-	for i, element := range strings.Split(v, ",") {
-		u, scheme, err := parseURLElement(element)
-		if err != nil || u.Host == "" || (i == 0 && !scheme) {
+// isEndpointURL reports whether v is a valid value of endpoint flag flag: for -nats, a
+// comma-separated server list whose every server names a host; for any other flag, one URL with
+// a scheme and a host (a Postgres URL's host list is one host field, "h1:5432,h2:5432").
+func isEndpointURL(flag, v string) bool {
+	if flag != "-nats" {
+		u, err := url.Parse(strings.TrimSpace(v))
+		return err == nil && u.Scheme != "" && u.Host != ""
+	}
+	for _, server := range strings.Split(v, ",") {
+		if u, _, err := parseNATSServer(server); err != nil || u.Host == "" {
 			return false
 		}
 	}
@@ -275,8 +297,8 @@ func resolveEndpoints(f endpointFlags, st *stackFile) (endpoints, error) {
 		case field.given != "":
 			// A foreign URL that does not parse would reach an error that prints it whole,
 			// credentials included; the refusal names the flag alone.
-			if slices.Contains(urlFlags, field.flag) && !isURLList(field.given) {
-				return endpoints{}, fmt.Errorf("%s is not a URL with a scheme and a host, or a comma-separated list of them", field.flag)
+			if slices.Contains(urlFlags, field.flag) && !isEndpointURL(field.flag, field.given) {
+				return endpoints{}, fmt.Errorf("%s is not a URL with a scheme and a host (for -nats, a comma-separated list of servers)", field.flag)
 			}
 			*field.dst = field.given
 		default:
