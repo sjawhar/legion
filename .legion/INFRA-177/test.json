@@ -2,34 +2,45 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-177",
-  "completed": "2026-10-28T16:03:00Z",
-  "round": 10,
-  "headTested": "e6980f49522675a1634de6ed65a6cbd7093d4470 (code head abdef8d9d4c2)",
-  "fingerprint": "unchanged in code: `git diff --stat 46727fbe e6980f49` lists only .legion/INFRA-177/{implement,review}.json and packages/claude-envoy/.changes/unreleased/pr2354-Changed-20261028-103904.yaml, a release-note fragment. Round 9's real-surface verification at 8ab4da93 stands for the code; this round checks the fragment and the bare gates.",
-  "fragment": "The claude-envoy Changed fragment no longer says dist/ and legion/ were regenerated or to install from the same commit: it says main's Rebuild Claude Envoy plugin workflow builds them after the merge, that until then the committed plugin is the contract-40 build a contract-41 daemon refuses at registration, and to install from main once the rebuild commit is there. That matches round 9's observation (the tracked bundle compiles in daemonApiVersion 40; a build from this source reports 41 and sends the handoff record). No Dispatch key in it; `changie batch v9.9.9 --dry-run` (v1.26.0) in packages/claude-envoy folds it, exit 0, wrapped under its bullet.",
-  "mergeability": "gh pr view 2354 -> MERGEABLE (BLOCKED: required checks not reported); git merge-tree of main 80cc97a6 with e6980f49 -> no conflict; contract 41, daemon 0062, Dispatch 0136 still free on main (40, 0061, 0135).",
-  "ci": "Read 16:02Z at code head abdef8d9: every lane queued (build x2, changes, lint, pr-title, test, typecheck, the Daemon Go suite on Postgres 16); the runs at e99901ae were cancelled by the newer push. Read as running, not waited for.",
+  "completed": "2026-10-28T17:39:40Z",
+  "round": 11,
+  "headTested": "850974c3c523571329a65eca52f189128c8c339f (code head 3f65b850a148)",
+  "fingerprint": "changed (implementer: ec24fe14… -> 66ef5deb…, forward merge with main 53f39ba0). Per the architect, the merge changed this PR's code in two places: the contract renumbered 41 -> 42 (main's #2300 took 41), and the handoff.recorded refresh rule moved into main's web/src/api/event-refresh.ts. This round checks those two and the bare gates.",
+  "contract42": "DaemonAPIVersion 42 (version.go:415, its history note says why 42), legion.daemonApiVersion 42 in pi-legion and claude-envoy package.json, contracts/fixtures/daemon-api/version.json 42; main is at 41. Every line this PR adds that names a daemon API contract number says 42 for the records, and 41 only for the release before (the rollback to 41, 'a 41 plugin posts a commit and no record', the contract-41 build main's rebuild replaces). A claude-envoy built with `scripts/build.ts --out` from this head compiles in daemonApiVersion 42 and handoffId; main's tracked bundle compiles in 41. pi-legion sends package.json's daemonApiVersion (claim-session.ts:67).",
+  "mergeability": "gh pr view 2354 -> MERGEABLE (BLOCKED: required checks not reported); git merge-tree of main 53f39ba0 with 850974c3 -> no conflict; contract 42, daemon 0062, Dispatch 0136 free on main (41, 0061, 0135); the PR changes nothing under packages/claude-envoy/dist or legion (git diff main..head empty).",
+  "ci": "Read 17:39Z at code head 3f65b850: every lane queued (build x2, changes, lint, pr-title, test, typecheck, the Daemon Go suite on Postgres 16). Read as running, not waited for.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Smoke at the head: `source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_t10?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh` -> 9 checks ok, `--- PASS: TestHandoffRecordsLive (30.10s)`, PASS in 45s."
+    "how": "`source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_t11?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh` -> 9 checks ok, PASS in 41s; `go test ./internal/handoffimport/` ok."
   },
   "failures": [],
   "failed": 0,
+  "notes": [
+    "The live refresh of a handoff written while the page is open has a unit lock (sse.test.ts 'a recorded handoff refreshes the issue's handoff list and its log, and no rollup', which passes) but no browser-suite test: handoffs.e2e.ts seeds before it opens the page. My throwaway spec below showed both directions; it is not committed."
+  ],
   "proof": [
     {
-      "criterion": "The claude-envoy release note states what #2423 makes true: main's rebuild builds the plugin after the merge, and the committed contract-40 build is refused until then",
-      "surface": "the fragment as changie folds it into packages/claude-envoy/CHANGELOG.md",
-      "command": "cd packages/claude-envoy (copied to a scratch directory) && go run github.com/miniscruff/changie@v1.26.0 batch v9.9.9 --dry-run",
-      "observed": "exit 0; the bullet ends 'Main's Rebuild Claude Envoy plugin workflow builds `dist/` and `legion/` from this commit's source after the merge; until that rebuild lands, the committed plugin is the contract-40 build, which a contract-41 daemon refuses at registration. Install the plugin from main once the rebuild commit is there…'",
-      "headSha": "e6980f49522675a1634de6ed65a6cbd7093d4470",
-      "negativeControl": "round 9 at 8ab4da93: the tracked dist/envoy-channel.js compiles in daemonApiVersion 40 and refuses a contract-41 state ('Unrecognized key: \"handoffRecord\"'), while the --out build reports 41 and sends handoffId/handoffVersion"
+      "criterion": "Contract 42: a daemon built at the head registers a contract-42 plugin, and refuses a contract-41 plugin",
+      "surface": "the whole daemon in scripts/e2e/handoff-records.sh, its claimants' POST /legion/v1/claims/register",
+      "command": "bash scripts/e2e/handoff-records.sh (registration with PluginContract = api.DaemonAPIVersion, 42); then the same run with the driver's registration temporarily set to 41 (TESTER_PLUGIN_CONTRACT=41, file restored after)",
+      "observed": "contract 42: every claim registers and readies, all 9 checks ok, PASS in 41s",
+      "headSha": "850974c3c523571329a65eca52f189128c8c339f",
+      "negativeControl": "contract 41: 'register legion-hr3768b2-hr3768b2-2-planner = 409 {\"error\":\"pi-legion speaks daemon API contract 41; this daemon requires 42: the daemon is relaunching this process onto the current plugin\"}'"
     },
     {
-      "criterion": "Smoke: A3, A6, A7, A10, HANDOFF_NOT_NEW on the whole daemon",
-      "surface": "scripts/e2e/handoff-records.sh",
-      "command": "LEGION_TEST_PG_DSN=…/legion_t10 … bash scripts/e2e/handoff-records.sh",
-      "observed": "9 checks ok, PASS in 45s",
-      "headSha": "e6980f49522675a1634de6ed65a6cbd7093d4470",
+      "criterion": "The handoff.recorded refresh rule in event-refresh.ts: a handoff written while the Conversation is open shows without a reload",
+      "surface": "the Dispatch dashboard in Chromium against the real Go server, SPA rebuilt from the head (dispatch-e2e.sh); a throwaway spec, deleted afterwards",
+      "command": "bash /legion/harness/dispatch-e2e.sh …/dispatch_e2e_t11 e2e/zz-tester-live-handoff.e2e.ts: open /issues/<KEY>/conversation with one test handoff, write version 2 through the API, expect two cards with no navigation",
+      "observed": "1 passed: the second card 'test handoff, version 2' appears with no page navigation",
+      "headSha": "850974c3c523571329a65eca52f189128c8c339f",
+      "negativeControl": "the same spec with event-refresh.ts's [\"handoffs\", key] target removed (restored after): failed, 'Expected: 2, Received: 1' cards after 15 s"
+    },
+    {
+      "criterion": "Bare gate smoke: A3, A6, A7, A10, HANDOFF_NOT_NEW on the whole daemon; the import",
+      "surface": "scripts/e2e/handoff-records.sh; go test ./internal/handoffimport/",
+      "command": "LEGION_TEST_PG_DSN=…/legion_t11 … bash scripts/e2e/handoff-records.sh; go test ./internal/handoffimport/",
+      "observed": "9 checks ok; handoffimport ok",
+      "headSha": "850974c3c523571329a65eca52f189128c8c339f",
       "negativeControl": "a 262,145-byte body -> 413 CAP_EXCEEDED (a6-control); another session's record -> 403 HANDOFF_SESSION_MISMATCH (a3)"
     }
   ]
