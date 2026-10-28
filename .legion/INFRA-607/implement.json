@@ -2,57 +2,58 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-607",
-  "completed": "2026-10-28T18:46:00Z",
+  "completed": "2026-10-28T21:16:00Z",
   "proof": [
     {
-      "criterion": "Each changed loop is driven by the change it serves and does nothing while nothing changes; every periodic statement left at idle is named",
-      "surface": "Two real head processes on one database and NATS beside two fork-point processes, every loop on (fake Azure embedder, fake GitHub App), statements counted by source from the Postgres statement log over a 10-minute idle window",
-      "command": "idle5/run.sh and analyze.py (dispatch://INFRA-607/artifact/idle-by-source-round-5-md, raw runs dispatch://INFRA-607/artifact/idle-by-source-round-5-raw-tar-gz)",
-      "observed": "Both processes, 10 minutes: 5,402 statements before, 4,011 after (4.50 -> 3.34 per second per process); CPU 0.0035/0.0032 -> 0.0029/0.0031 cores. Embedding scan 240 -> 0, coverage 34 -> 0, task progress 8 -> 0, reference excerpts 12 -> 0, suggestion outcomes 70 -> 0, edit notices 481 -> 0, delivery settings reads 42 -> 3; shared listener keep-alive 0 -> 40. The remaining timers (heartbeat 5 s, outbox 5 s, block index 30 s, standby durable reconcile 30 s, settlement 1 min, keep-alives 30 s, redelivery 2 min, reconcile and import 5 min) are named with why no event replaces each in the PR body.",
-      "headSha": "4f9bd6e85c54f4f94687cb90fa16a451bce8aaa0",
-      "negativeControl": "The fork point in the same window ran every changed loop on its timer (edit notices 238 lease attempts, 124 unlocks, 119 due queries; embedding scan 240)."
+      "criterion": "Shutdown waits for every running intake handler before the database pool closes (review thread PRRT_kwDORFy7ds6xSaz8)",
+      "surface": "The real envoy-dispatch binary, config B (fake GitHub holding a merged pull request's fetch), one idle process, SIGTERM during the hold",
+      "command": "headproof6 check 1 (dispatch://INFRA-607/artifact/stop-path-proof-md, raw runs stop-path-proof-raw-tar-gz); go test ./cmd/dispatch/ -run TestShutdownWaitsForAnIntakeHandlerBeforeClosingThePool",
+      "observed": "At 67c3d0f2: the fake answered 3 s after SIGTERM, the delivery_pull_requests row was written and last_event_at set, the message acknowledged (ack floor 1/1), and only then the process deregistered and closed its pool; exit 3.06 s after SIGTERM, no 'closed pool' line. The test passes.",
+      "headSha": "67c3d0f2d94b5aba9a588e4dbf42e5a312a8d198",
+      "negativeControl": "At 4f9bd6e8 the process deregistered 0.6 s after the signal while the handler waited on GitHub, then logged 'process event ... closed pool' and acknowledged the message with no row and a null last_event_at; the test failed on the old order with that output."
     },
     {
-      "criterion": "Edit notices are sent when a notice falls due, not on a five-second sweep",
-      "surface": "The head binary's HTTP API: a session writes a spec, a person writes a new version through POST /api/v1/artifacts/{id}/edits",
-      "command": "dispatch://INFRA-607/artifact/edit-notice-check-md",
-      "observed": "The person's edit opened a notice due 30 s later (18:39:11.959); the sweep ran once on the write's notify (nothing due), made no edit-notice statement from 18:38:42.036 to 18:39:11.969, then sent the notice 10 ms after due: 'dispatch: sent edit notices notices=1', row deleted, artifact.human_edited delivered on the spec author's agent topic.",
-      "headSha": "4f9bd6e85c54f4f94687cb90fa16a451bce8aaa0",
-      "negativeControl": "With no notice due, no statement mentioning edit-notices or document_edit_notices in 125 s."
+      "criterion": "A stop drains the subscription the bus holds after a connection replacement, not the dead original (review thread PRRT_kwDORFy7ds6xSa0G)",
+      "surface": "The real binary with its intake's NATS connection closed by a TCP proxy's -ERR so the client replaces it and restores the subscription, then SIGTERM while a pull request's fetch is held",
+      "command": "headproof6 check3.sh and check3b.sh; go test ./internal/dispatch/delivery/ -run TestAStopAfterTheConnectionWasReplacedDrainsTheRestoredSubscription; go test ./internal/bus/ -run TestDrainSubscriptionDrainsTheHandleARestoreBound",
+      "observed": "At 67c3d0f2: after 'resubscribing' and 'recovery successful', no drain ERROR at SIGTERM; the durable lost its subscriber 15 ms after the signal; a message published after SIGTERM was not delivered to the stopping process; the next process handled the held messages once each and wrote the row.",
+      "headSha": "67c3d0f2d94b5aba9a588e4dbf42e5a312a8d198",
+      "negativeControl": "At 4f9bd6e8: 'drain the intake's subscription error=\"nats: connection closed\"' right after the signal, the subscription stayed bound until the client closed, and the message published after SIGTERM was delivered to the stopping process; the delivery test failed on the old code ('the stopping intake's subscription stayed bound to the durable')."
     },
     {
-      "criterion": "The timers the plan keeps are jittered every period (the webhook redelivery sweep included)",
-      "surface": "The two head processes' and two fork-point processes' webhook-redelivery lease attempts in their Dispatch logs and the statement log",
-      "command": "idle-by-source-round-5-md, section 'Webhook redelivery'; go test ./internal/dispatch/redeliver/ -run TestTheRunningSweepSweepsAtStartThenWaitsBetweenOneAndOnePointOneIntervals",
-      "observed": "Head: the two processes' attempts fell 4.6, 0.8, 2.8, 10.7, 5.8, 2.1 and 0.6 s apart; one process's periods were 124.3, 129.8, 123.3, 129.0, 126.3 and 124.2 s. The test passes: a sweep at start, then gaps in [interval, 1.1 x interval).",
-      "headSha": "4f9bd6e85c54f4f94687cb90fa16a451bce8aaa0",
-      "negativeControl": "Fork point (plain ticker): both processes tried at exactly 120 s intervals, 24-41 ms apart, every period."
+      "criterion": "A handler cut off by the stop deadline hands its message back",
+      "surface": "The real binary, GitHub holding a fetch 50 s, SIGTERM 2 s after publishing",
+      "command": "headproof6 check 2",
+      "observed": "Exit 15.08 s after SIGTERM with the hand-back line; the message stayed unacknowledged (num_ack_pending 1); a fresh process was redelivered it once and wrote the row.",
+      "headSha": "67c3d0f2d94b5aba9a588e4dbf42e5a312a8d198",
+      "negativeControl": "With GitHub answering at once the process exits in about 0.07 s with no hand-back line (headproof4 and round 3 checks)."
     },
     {
-      "criterion": "The GitHub intake handles pull requests concurrently and in order across a hand-over; its stop fits the stop grace; a failed subscribe leaves nothing a reconnect binds; write-woken loops catch up after a listener outage",
-      "surface": "The real binary at c83c0851 in config B (same intake, listener and loop code as the head; the head adds the edit-notice wake and the redelivery jitter)",
-      "command": "dispatch://INFRA-607/artifact/head-proof-round-3-md and head-proof-round-3-raw-tar-gz",
-      "observed": "Comment embedded 288 ms after its POST; listener backend terminated, redial in 1.16 s, outage comment embedded 48 ms after the new LISTEN; GitHub holding a fetch 50 s: exit 15.06 s after SIGTERM with the hand-back line; three fetches of one pull request across a hand-over with no overlap; NATS down while subscribing: bound once on its own bind poll, no resubscribe, the pull request fetched once and acknowledged; 1x before 47/244/574 ms, after 48/254/843 ms.",
-      "headSha": "c83c0851a1bea9c96ace622d0bdabe57da68d319",
-      "negativeControl": "GitHub answering at once: exit 0.07 s after SIGTERM with no hand-back line; the fork point re-bound the failed subscription on reconnect ('envoy nats resubscribing')."
+      "criterion": "Every changed loop is silent at idle; the remaining timers are named",
+      "surface": "Two head and two fork-point processes side by side, statements by source over 10 minutes",
+      "command": "dispatch://INFRA-607/artifact/idle-by-source-round-5-md (raw runs idle-by-source-round-5-raw-tar-gz); dispatch://INFRA-607/artifact/edit-notice-check-md",
+      "observed": "4.50 -> 3.34 statements per second per process; embedding scan, coverage, task progress, reference excerpts, suggestion outcomes and edit notices at zero; edit notice sent 10 ms after it fell due with no statement before.",
+      "headSha": "4f9bd6e85c54f4f94687cb90fa16a451bce8aaa0",
+      "negativeControl": "The fork point in the same window ran each changed loop on its timer (edit notices 481 statements, embedding scan 240)."
     }
   ],
   "filesChanged": [
-    "Forward merge of main e82b013b (719a2dc7): AGENTS.md and refs/excerpts_test.go conflicts kept both sides; RecordExcerpts' new return adopted",
-    "packages/envoy/internal/dispatch/redeliver/sweep.go (+export_test.go, sweep_lease_test.go): sweep at start, then interval plus up to a tenth each period",
-    "packages/envoy/internal/dispatch/docs/edit_notices.go (+edit_notices_loop_test.go), store/migrations/0142_document_edit_notices_notify, cmd/dispatch/main.go: edit notices woken by a notify on document_edit_notices with the next due time as the loop's timer",
-    "Docs: cmd/dispatch/README.md, packages/envoy/AGENTS.md, .dispatch/architecture (dispatch-docs, dispatch-redeliver, dispatch-server, dispatch-store), two pr2391 changelog fragments"
+    "cmd/dispatch/shutdown.go, main.go, shutdown_test.go: shutdown waits for the intakes' stop (waitIntakes) before the pool closes; intakeStopDeadline removed, delivery.intakeStopBudget the one deadline",
+    "internal/bus/nats.go, recovery.go, release_test.go: Client.DrainSubscription drains the handle the client holds and keeps a draining registration from being re-bound",
+    "internal/dispatch/delivery/intake_delivery.go (moved from intake.go), intake_keyed_test.go, intakes.go: stop drains through DrainSubscription",
+    "Cleanups: migration header lines; pglisten Notification/OnNotification/OnDisconnected/Hub.Handle removed; duty.WokenLoop.HeldRetry removed (retry derived from MinGap)",
+    "Forward merge of main c24ea568 (14be5104): migrations renumbered to 0137-0143"
   ],
   "trickyParts": [
-    "The edit-notice loop's due time is read on the database's clock (min(due_at) - now()) and held to the 5 s MinGap, so under load it never sweeps more often than before.",
-    "The redelivery sweep keeps its sweep at start (the multiprocess overlap and staggered-start rows and the NATS-down boot test depend on it); only the waits after it are jittered."
+    "intakeDelivery.stopping is kept: it is set before the drain and keys.stop(), while released is set only after every handler returned; in between it keeps a message arriving during the drain from starting a handler.",
+    "A draining registration is skipped by restoreSubscriptions and subscriptionsHealthy, so a connection replaced during the stop does not re-bind it."
   ],
   "deviations": [
-    "The outbox's 5 s retry ticker stays: INFRA-590's #2395, which replaces it, is still open on GitHub, as the architect's step 3 allows.",
-    "The 1x step was not re-run at 4f9bd6e8: the changes since c83c0851 (edit-notice wake, redelivery jitter) touch no request path; the 1x pair at c83c0851 and the 26-run comparison stand."
+    "The outbox's 5 s retry ticker stays: INFRA-590's #2395 is still open.",
+    "Check 3 of the stop-path proof forces the connection replacement through a TCP proxy's -ERR: a NATS server restart alone reconnects in place (MaxReconnect -1) and never replaces the connection. The previous head showed the false drain ERROR and a post-signal delivery to the stopping process, but no repeated redelivery loop."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "At the fork point both processes bound the delivery-jobs durable at the same millisecond (each logged 'NATS consumer bound name=delivery-jobs'); the head's run had one holder. That double bind is main's intake race, which INFRA-558's holder lease closes."
+    "The committed load reproduction (#2369) reached main after this PR's measurements; the idle-by-source tooling stays in the attached archives."
   ]
 }
