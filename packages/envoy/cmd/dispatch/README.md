@@ -329,8 +329,9 @@ cd packages/envoy
 ```
 
 It prints the `DATABASE_URL` to use for development and tests.
-Run again, it starts or reuses the same `dispatch-pg` container.
-It refuses a `dispatch-pg` on any image but its pinned pgvector one, whose `vector` extension the migrations need, and prints the commands that move that container's data volume onto the pinned image.
+Run again, it starts or reuses the same `dispatch-pg` container, which runs its pinned image:
+pgvector on PostgreSQL 18, whose `vector` extension the migrations need.
+It refuses a `dispatch-pg` on any other image or major and prints the commands that dump that container's databases and restore them into a new container on the pinned image.
 The database retains the migrated schema; tests only truncate rows they create.
 
 
@@ -888,7 +889,7 @@ It runs as the service's own database role.
 The read-only transaction stops every write, and the census's statement is sent through the extended protocol whatever the connection string asks for, so it cannot carry a second statement (a `commit` of its own, then a write).
 Read-only does not stop `pg_terminate_backend` (which, as that role, ends the service's own sessions), `pg_cancel_backend`, advisory locks (`pg_try_advisory_*` included) or `pg_sleep`, nor a function that runs a query given as text (`query_to_xml` and its kin, `ts_stat`, `ts_rewrite`):
 `pgmigrate.Load` refuses a census naming any of them, bare or quoted and in any case, anywhere outside its comments and string literals, and refuses a Unicode escape (`U&"…"`, `U&'…'`) outright, since one can spell any name and no census needs it.
-`Load` finds the comments and literals as Postgres 16's lexer does (nested comments, `E'…'` escapes, continued and dollar-quoted literals), and the census runs with `standard_conforming_strings` on, so Postgres reads its literals the same way.
+`Load` finds the comments and literals as Postgres 18's lexer does (nested comments, `E'…'` escapes, continued and dollar-quoted literals), and the census runs with `standard_conforming_strings` on, so Postgres reads its literals the same way.
 Review is the control past that, since any non-zero integer a census answers is printed.
 
 **What the report prints:** counts, sizes (in KiB, MiB and GiB, or in bytes where a size above the limit would round to the limit's figure), versions, file names and session metadata (pid, role, application name, state, transaction age as Postgres measured it, to the microsecond, the figure the minute's bound is compared with;
@@ -1239,8 +1240,8 @@ Each item below names a path with its method and identity, then its purpose.
 
 - `/api/v1/agents` (GET; cookie, trusted header, or bearer)
 
-  List live Envoy sessions (`session_id`, `title`, `dir`, `machine_id`, `roles`, `capabilities`, `last_seen`), newest first;
-  `503 ENVOY_UNAVAILABLE` when the listener cannot be reached.
+  List live Envoy sessions (`session_id`, `title`, `dir`, `machine_id`, `roles`, `capabilities`, `last_seen`), newest first, from Dispatch's copy of the listener's session list, at most 5 s old;
+  `503 ENVOY_UNAVAILABLE` when the listener cannot be reached, and for up to 5 s after a failed listener read without asking the listener again.
 
 - `/api/v1/projects` (GET; cookie, trusted header, or bearer)
 
