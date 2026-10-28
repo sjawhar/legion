@@ -478,10 +478,11 @@ func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 // no open pull request on its branch (intake.PullRequestMissing, the required-checks pass's
 // listing): the issue waits in implementing for a pull request record (implementationReady), and
 // nothing else tells anybody it is missing - the implementer's completion was applied with GitHub
-// unread, or the pull request it read was closed or merged since. The notice names the issue, the
-// repository, the branch and the handoff commit, and says what to do. It tells nothing when the
-// issue has left implementing, its implementer's handoff is another commit, or an open pull
-// request is recorded: the pass listed GitHub before the record changed.
+// unread, or the pull request it read was closed without merging since. The notice names the
+// issue, the repository, the branch and the handoff commit, and says what to do. It tells nothing
+// when the issue has left implementing, its implementer's handoff is another commit, or an open or
+// merged pull request is recorded: the pass listed GitHub before the record changed, or the merge
+// told the architect (merged) and a completion moves the issue on it.
 func (e *Engine) pullRequestMissing(ctx context.Context, tx pgx.Tx, fact intake.PullRequestMissing) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil || issue.Phase != phase.Implementing {
@@ -492,7 +493,7 @@ func (e *Engine) pullRequestMissing(ctx context.Context, tx pgx.Tx, fact intake.
 		return intake.Result{}, err
 	}
 	pr, err := e.store.PullRequest(ctx, tx, issue.Key)
-	if err != nil || (pr != nil && pr.State == record.PullRequestOpen) {
+	if err != nil || (pr != nil && (pr.State == record.PullRequestOpen || pr.State == record.PullRequestMerged)) {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "pull-request-missing", Role: claim.RoleArchitect,

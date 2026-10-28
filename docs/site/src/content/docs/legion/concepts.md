@@ -282,8 +282,8 @@ Legion uses GitHub's own review mechanisms rather than labels:
   completed and the newest at least two minutes before, applies the settlement Envoy's listener
   would have published; the listener's own settlement arriving later changes nothing the pass
   learned. An issue in `implementing` whose implementer completed while GitHub lists no open pull
-  request on its branch is told to its architect as `pull-request-missing`, once per handoff
-  commit.
+  request on its branch, and whose record holds none merged, is told to its architect as
+  `pull-request-missing`, once per handoff commit.
 - **Review threads** close one by one, and only once the thread's opener (or, for a thread a bot
   opened, Legion's reviewer) accepts the reply.
 - Two limits flag a loop: after `review_round_cap` rounds (three by default), or once

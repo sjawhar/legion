@@ -660,14 +660,16 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   for a pull request that deletes it.
 - **An implementer's completion refused `HANDOFF_NO_PULL_REQUEST`.** The implementer's completion
   of implementing reads GitHub, as the implement App, for the open pull request on the issue's
-  branch, `legion/<KEY>`: the issue moves to testing only on an open pull request. One the daemon
-  has not recorded yet (its opened webhook lost or still waiting) is recorded there and the issue
-  moves on. With none, the completion is refused and nothing is recorded: `no open pull request on
-  <owner>/<repo> legion/<KEY>; nothing was recorded. Open the pull request and complete again.`
-  The implementer opens it and completes again at the same commit. When the record holds the
-  issue's pull request closed or merged, the refusal adds `pull request #<n> is <closed|merged>;
-  your architect was told and decides this issue's phase.`: the close or merge already told the
-  architect, and a recorded closed or merged pull request never moves an issue to testing. When
+  branch, `legion/<KEY>`: the issue moves to testing only on an open pull request, or one the
+  daemon recorded merged. One the daemon has not recorded yet (its opened webhook lost or still
+  waiting) is recorded there and the issue moves on. A pull request merged while the issue was in
+  `implementing` already told the architect (`pr-merged`), and the completion is applied and moves
+  the issue to testing. With none, the completion is refused and nothing is recorded: `no open pull
+  request on <owner>/<repo> legion/<KEY>; nothing was recorded. Open the pull request and complete
+  again.` The implementer opens it and completes again at the same commit. When the record holds
+  the issue's pull request closed without merging, the refusal adds `pull request #<n> is closed;
+  your architect was told and decides this issue's phase.`: the close already told the architect,
+  and a pull request closed without merging never moves an issue to testing. When
   GitHub cannot be read (the token mint or the read fails), the completion is applied unread and
   the daemon logs a warning, `api: read the open pull request on a completing implementer's
   branch; …`; the issue moves on once a pull request is recorded open, and when the next pass
@@ -800,10 +802,12 @@ consumer to catch up.
 The notice's reason names the issue, the repository, the branch and the handoff commit: `<KEY>'s
 implementer completed at <commit>, and GitHub shows no open pull request on <owner>/<repo>
 legion/<KEY>, so <KEY> stays in implementing.` The daemon's two-minute pass found an issue in
-`implementing` whose implementer recorded its handoff, with no open pull request recorded and
-none in GitHub's listing of the repository's open pull requests on its branch. That happens when
-the implementer's completion was applied without GitHub's answer (the read failed), or when the
-pull request was closed or merged since. The issue stays in `implementing` until a pull request
+`implementing` whose implementer recorded its handoff, with no open or merged pull request recorded
+and none in GitHub's listing of the repository's open pull requests on its branch. That happens
+when the implementer's completion was applied without GitHub's answer (the read failed), or when
+the pull request was closed without merging since. A pull request merged since tells the architect
+`pr-merged` instead, and the implementer's completion moves the issue on it. The issue stays in
+`implementing` until a pull request
 is open on the branch: the implementer opens it, and the daemon records it from its webhook or
 within one pass, and moves the issue to `testing`. When the work should not
 go on, the architect decides the issue's phase as for a pull request closed without merging. The

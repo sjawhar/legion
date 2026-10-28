@@ -316,20 +316,20 @@ func followActivity(activity []githubrest.Activity, from, to string) ([]githubre
 // waits for. Each listed pull request on an issue's branch of the repository itself, not a fork's
 // (githubrest.PullRequest.HeadIn), is applied as its webhook would have been (recordListed), the
 // first GitHub lists of each branch, as the workflow keeps one pull request per branch. Then each
-// issue of the repository in implementing whose implementer recorded its handoff, with no open pull
-// request recorded and none listed on its branch, is told to its architect (tellMissing). A
-// listing that fails tells nothing of its repository, and the next pass lists it again; a
-// rate-limit answer ends the pass there, since every later read on the installation meets the
-// same limit, and the panes share it. ctx bounds the pass.
+// issue of the repository in implementing whose implementer recorded its handoff, with no open or
+// merged pull request recorded and none listed on its branch, is told to its architect
+// (tellMissing). A listing that fails tells nothing of its repository, and the next pass lists it
+// again; a rate-limit answer ends the pass there, since every later read on the installation meets
+// the same limit, and the panes share it. ctx bounds the pass.
 func (w *workflowRuntime) readListings(ctx context.Context) {
 	var handedOff []record.HandedOff
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
 		var err error
-		handedOff, err = w.records.HandedOffWithoutOpenPullRequest(ctx, tx, w.dispatchProject)
+		handedOff, err = w.records.HandedOffWithoutOpenOrMergedPullRequest(ctx, tx, w.dispatchProject)
 		return err
 	}); err != nil {
 		if ctx.Err() == nil {
-			w.log.Warn("list the issues whose implementer completed with no open pull request recorded", "error", err)
+			w.log.Warn("list the issues whose implementer completed with no open or merged pull request recorded", "error", err)
 		}
 		return
 	}
@@ -424,10 +424,11 @@ func (w *workflowRuntime) recordListed(ctx context.Context, repo, key string, pu
 }
 
 // tellMissing applies the intake.PullRequestMissing of waiting, an issue of repo in implementing
-// whose implementer recorded its handoff, with no open pull request recorded and none GitHub lists
-// on its branch, and the workflow tells its architect (workflow's pullRequestMissing). Its event id
-// names the issue's generation and the handoff commit, so the architect is told once per handoff
-// commit, by this pass or any later one, and again only for a completion at another commit.
+// whose implementer recorded its handoff, with no open or merged pull request recorded and none
+// GitHub lists on its branch, and the workflow tells its architect (workflow's pullRequestMissing).
+// Its event id names the issue's generation and the handoff commit, so the architect is told once
+// per handoff commit, by this pass or any later one, and again only for a completion at another
+// commit.
 func (w *workflowRuntime) tellMissing(ctx context.Context, repo string, waiting record.HandedOff) {
 	key, branch := waiting.Issue.Key, claim.IssueBranch(waiting.Issue.Key)
 	eventID := fmt.Sprintf("pull-request-missing:%s:%s:%d:%s", w.dispatchProject, key, waiting.Issue.Generation, waiting.Commit)

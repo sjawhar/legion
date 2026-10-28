@@ -15,7 +15,8 @@ import (
 // The pass lists GitHub before it applies what it found, and the record can change in between, so
 // the workflow tells the architect a pull request is missing only while the issue still waits for
 // one at the completion the pass named: in implementing, its implementer's handoff at that commit,
-// and no open pull request recorded. A pull request recorded closed is not an open one.
+// and no open or merged pull request recorded. A pull request recorded closed is not an open one;
+// one recorded merged told the architect (pr-merged), and a completion moves the issue on it.
 func TestAMissingPullRequestIsToldOnlyWhileTheCompletionWaitsForOne(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -27,6 +28,7 @@ func TestAMissingPullRequestIsToldOnlyWhileTheCompletionWaitsForOne(t *testing.T
 		{"the completion waits with no pull request", phase.Implementing, "handoff", "", true},
 		{"the completion waits with its pull request closed", phase.Implementing, "handoff", record.PullRequestClosed, true},
 		{"an open pull request is recorded since", phase.Implementing, "handoff", record.PullRequestOpen, false},
+		{"its pull request merged since", phase.Implementing, "handoff", record.PullRequestMerged, false},
 		{"the implementer completed again at another commit", phase.Implementing, "later", "", false},
 		{"the issue moved on", phase.Testing, "handoff", "", false},
 	} {

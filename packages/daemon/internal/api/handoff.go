@@ -29,9 +29,9 @@ import (
 // daemon reads no handoff file and no branch head: what each handoff holds is the role prompt's to
 // spell, and the workflow refuses only a commit the role already reported for its previous phase
 // (HANDOFF_NOT_NEW). The implementer's completion of implementing is also held to an open pull
-// request on its branch (implementationPullRequest: HANDOFF_NO_PULL_REQUEST). A check report
-// carries no commit (nothing was pushed) and a Verdict of pass, pending or fail; a tester's
-// completion a Verdict of pass or fail.
+// request on its branch, or a merged one recorded (implementationPullRequest:
+// HANDOFF_NO_PULL_REQUEST). A check report carries no commit (nothing was pushed) and a Verdict of
+// pass, pending or fail; a tester's completion a Verdict of pass or fail.
 type HandoffCompleteRequest struct {
 	GrantID string `json:"grantId"`
 	Summary string `json:"summary"`
@@ -54,8 +54,9 @@ type HandoffCompleteResponse struct {
 // done, which no role works: the check is the work after the close) is a check report when the
 // issue's check is open, and is refused CHECK_NOT_OPEN otherwise; every other call is a phase
 // completion, held to its commit, its role's verdict rule and the run its claim serves, the
-// implementer's in implementing to an open pull request on its branch (implementationPullRequest),
-// and the engine refuses one of a phase its role does not run (HANDOFF_NOT_CURRENT_PHASE).
+// implementer's in implementing to an open pull request on its branch or a merged one recorded
+// (implementationPullRequest), and the engine refuses one of a phase its role does not run
+// (HANDOFF_NOT_CURRENT_PHASE).
 func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	var req HandoffCompleteRequest
 	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"summary", req.Summary}) {
@@ -212,22 +213,25 @@ func staleCompletion(issue string, current, serving uint64, pending *supervise.D
 }
 
 // implementationPullRequest is the implementer's completion's read of GitHub: in implementing, a
-// completion moves its issue to testing only on an open pull request recorded for it
-// (workflow's TriggerImplementationReady), which only the opened webhook, or the required-checks
-// pass reading for one that webhook lost, records. So before the completion is applied, the open
-// pull request on the issue's branch (claim.IssueBranch) is read as the implement App, minted for
-// the owner of the issue's repository in GitHub's spelling (record.Issue.GitHubRepo, which the
-// webhook's facts name it by), and it says whether the completion goes on:
+// completion moves its issue to testing only on a pull request recorded open or merged for it
+// (workflow's TriggerImplementationReady), and only the opened webhook, or the required-checks
+// pass reading for one that webhook lost, records one open. So before the completion is applied,
+// the open pull request on the issue's branch (claim.IssueBranch) is read as the implement App,
+// minted for the owner of the issue's repository in GitHub's spelling (record.Issue.GitHubRepo,
+// which the webhook's facts name it by), and it says whether the completion goes on:
 //
 //   - one open: when the record does not already hold it open, the intake.PullRequestOpened its
 //     webhook would have carried is applied first, a reopen when the record holds the same pull
 //     request closed, under the read's stable id (intake.OpenedReadEventID). The completion then
 //     moves the issue to testing. A failure to apply it is FACT_APPLY_FAILED, with the completion
 //     not applied.
-//   - none: HANDOFF_NO_PULL_REQUEST, 409, and nothing is applied, so the completion at the same
-//     commit is applied once the pull request is open. When the record holds a closed or merged
-//     pull request, the refusal names it: the close or merge told the architect, which decides
-//     the phase.
+//   - none, with the record holding the pull request merged: the completion is applied and moves
+//     the issue to testing. The work landed, its merge told the architect (pr-merged), and the
+//     workflow runs on.
+//   - none otherwise: HANDOFF_NO_PULL_REQUEST, 409, and nothing is applied, so the completion at
+//     the same commit is applied once the pull request is open. When the record holds the pull
+//     request closed without merging, the refusal names it: the close told the architect, which
+//     decides the phase.
 //   - unreadable (a repository the record cannot name, a failed token mint or a failed read,
 //     GitHub's rate limit among them): logged WARN, and the completion is applied as it was before
 //     this read, so GitHub's trouble never blocks it; the required-checks pass records the pull
@@ -278,9 +282,12 @@ func (s *server) implementationPullRequest(w http.ResponseWriter, r *http.Reques
 		return true
 	}
 	if !found {
+		if recorded != nil && recorded.State == record.PullRequestMerged {
+			return true
+		}
 		message := fmt.Sprintf("no open pull request on %s %s; nothing was recorded. Open the pull request and complete again.", issue.GitHubRepo, branch)
-		if recorded != nil && recorded.State != record.PullRequestOpen {
-			message += fmt.Sprintf(" pull request #%d is %s; your architect was told and decides this issue's phase.", recorded.Number, recorded.State)
+		if recorded != nil && recorded.State == record.PullRequestClosed {
+			message += fmt.Sprintf(" pull request #%d is closed; your architect was told and decides this issue's phase.", recorded.Number)
 		}
 		writeFailure(w, http.StatusConflict, "HANDOFF_NO_PULL_REQUEST", message)
 		return false

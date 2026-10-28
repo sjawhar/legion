@@ -579,10 +579,10 @@ func (PullRequestClosed) isFact() {}
 
 // PullRequestMissing is the required-checks pass finding, in its listing of Repo's open pull
 // requests, none on Branch, the branch of Issue, whose implementer recorded its handoff at
-// HandoffCommit while Issue is in implementing with no open pull request recorded: never decoded
-// from an event. The issue waits in implementing for a pull request nobody is told is missing, so
-// the workflow tells its architect (workflow's pullRequestMissing), once per handoff commit: the
-// pass applies it under an event id naming the issue and the commit.
+// HandoffCommit while Issue is in implementing with no open or merged pull request recorded: never
+// decoded from an event. The issue waits in implementing for a pull request nobody is told is
+// missing, so the workflow tells its architect (workflow's pullRequestMissing), once per handoff
+// commit: the pass applies it under an event id naming the issue and the commit.
 type PullRequestMissing struct {
 	Issue         string
 	Repo          string

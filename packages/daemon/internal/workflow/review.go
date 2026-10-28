@@ -602,8 +602,9 @@ func (e *Engine) stampRun(pr *record.PullRequest) {
 }
 
 // implementationReady moves issue from implementing to testing on the implementer's completion of
-// the round that row records, once the pull request pr is recorded open (TriggerImplementationReady:
-// a closed or merged record moves nothing), and then applies the CI rule to the head it hands on
+// the round that row records, once the pull request pr is recorded open or merged
+// (TriggerImplementationReady: a record closed without merging, or none, moves nothing), and then
+// applies the CI rule to the head it hands on
 // (standingRed). A red in implementing sends nothing back, since the implementer is at work there,
 // so a required check that settled red after the implementer's push and before its completion
 // stands for the head with nothing acted on it: the implementer pushes and completes without

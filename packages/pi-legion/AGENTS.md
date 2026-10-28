@@ -469,8 +469,9 @@ the daemon refuses it with `CHECK_NOT_OPEN`, `CHECK_LOOK_NOT_OPEN` or `CHECK_VER
 handoff file and no branch head: it refuses `HANDOFF_NOT_NEW` (the commit is the one the role
 reported for its previous phase); for the implementer's completion of implementing it reads the open
 pull request on `legion/<issue>` as the implement App, records one the webhook has not, and refuses
-`HANDOFF_NO_PULL_REQUEST` when there is none (naming a recorded closed or merged pull request,
-which is the architect's to decide), applying the completion unread when GitHub cannot be read;
+`HANDOFF_NO_PULL_REQUEST` when there is none and the record holds none merged (naming a recorded
+pull request closed without merging, which is the architect's to decide), applying the completion
+unread when GitHub cannot be read;
 and for the merger's `ready: true` it reads the pull request's
 head on GitHub and refuses a packet the workflow must not take on, each refusal named in the
 merger's role prompt

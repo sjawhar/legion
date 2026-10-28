@@ -801,7 +801,9 @@ func TestThePassAppliesAMergeLostInImplementing(t *testing.T) {
 // waits in implementing for one nobody would otherwise be told is missing. The pass tells its
 // architect once per handoff commit, naming the issue, the repository, the branch and the commit,
 // however many passes find it so, and again for a completion at another commit. A listing GitHub
-// fails tells nothing: it does not show the pull request missing.
+// fails tells nothing: it does not show the pull request missing. A pull request the record holds
+// closed without merging is missing too; one it holds merged is not: its merge told the architect
+// (pr-merged), and the implementer's completion moves the issue on it.
 func TestThePassTellsTheArchitectOfAPullRequestMissingOncePerHandoff(t *testing.T) {
 	t.Run("the listing shows none", func(t *testing.T) {
 		pool := isolatedOutboxPool(t)
@@ -832,6 +834,29 @@ func TestThePassTellsTheArchitectOfAPullRequestMissingOncePerHandoff(t *testing.
 			t.Fatalf("after a completion at another commit the notices are %q, want a second one naming it", reasons)
 		}
 	})
+	for _, tc := range []struct {
+		state record.PullRequestState
+		told  int
+	}{
+		{record.PullRequestClosed, 1},
+		{record.PullRequestMerged, 0},
+	} {
+		t.Run("the record holds the pull request "+string(tc.state), func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			seedUnrecorded(t, pool, "first")
+			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+				return record.NewStore().PutPullRequest(context.Background(), tx, record.PullRequest{State: tc.state, Issue: "CAPTURE-1", Repo: "acme/widgets",
+					Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: "first", Failing: []string{}})
+			}); err != nil {
+				t.Fatalf("seed the %s pull request: %v", tc.state, err)
+			}
+			w := requiredRuntime(pool, lostStandIn(t, nil, "[]", &pathReads{}).URL, quietLogger())
+			w.readRequiredChecks(context.Background())
+			if reasons := noticeReasons(t, pool, "pull-request-missing"); len(reasons) != tc.told {
+				t.Fatalf("a pass over a handoff with its pull request recorded %s told pull-request-missing %q, want %d notices", tc.state, reasons, tc.told)
+			}
+		})
+	}
 	t.Run("the listing fails", func(t *testing.T) {
 		pool := isolatedOutboxPool(t)
 		seedUnrecorded(t, pool, "first")

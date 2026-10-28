@@ -516,35 +516,56 @@ func TestHandoffCompleteAppliesTheCompletionWhenGitHubFailsTheRead(t *testing.T)
 	}
 }
 
-// A recorded pull request that was closed or merged is no open one: with none open on GitHub the
-// completion is refused naming it, since its close or merge told the architect, which decides the
-// issue's phase, and nothing is recorded.
-func TestHandoffCompleteNamesTheClosedOrMergedPullRequestTheRecordHolds(t *testing.T) {
-	for _, state := range []record.PullRequestState{record.PullRequestClosed, record.PullRequestMerged} {
-		t.Run(string(state), func(t *testing.T) {
-			github := newHandoffGitHub(t)
-			github.set(func(g *handoffGitHub) { g.pullState, g.merged = "closed", state == record.PullRequestMerged })
-			h := newWorkflowHandoffHarness(t, github, io.Discard)
-			seedIssueAt(t, h, "LEGION-208", phase.Implementing)
-			recorded := record.PullRequest{State: state, Issue: "LEGION-208", Repo: "acme/widgets", Number: 42, Branch: "legion/LEGION-208", HeadSHA: headSHA, Failing: []string{}}
-			if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
-				return record.NewStore().PutPullRequest(context.Background(), tx, recorded)
-			}); err != nil {
-				t.Fatalf("record the %s pull request: %v", state, err)
-			}
-			_, _, before := handoffRecord(t, h, "LEGION-208")
-			implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+// recordPullRequest records LEGION-208's pull request #42 on acme/widgets in state, at headSHA.
+func recordPullRequest(t *testing.T, h *harness, state record.PullRequestState) {
+	t.Helper()
+	recorded := record.PullRequest{State: state, Issue: "LEGION-208", Repo: "acme/widgets", Number: 42, Branch: "legion/LEGION-208", HeadSHA: headSHA, Failing: []string{}}
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		return record.NewStore().PutPullRequest(context.Background(), tx, recorded)
+	}); err != nil {
+		t.Fatalf("record the %s pull request: %v", state, err)
+	}
+}
 
-			message := refused(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented", Commit: headSHA}), http.StatusConflict, "HANDOFF_NO_PULL_REQUEST")
-			want := fmt.Sprintf("no open pull request on acme/widgets legion/LEGION-208; nothing was recorded. Open the pull request and complete again. pull request #42 is %s; your architect was told and decides this issue's phase.", state)
-			if message != want {
-				t.Fatalf("refusal = %q, want %q", message, want)
-			}
-			at, row, pr := handoffRecord(t, h, "LEGION-208")
-			if at != phase.Implementing || row != nil || !reflect.DeepEqual(pr, before) {
-				t.Fatalf("after the refusal LEGION-208 is in %s with implementer row %+v and pull request %+v, want implementing with no row and the record as it was, %+v", at, row, pr, before)
-			}
-		})
+// A recorded pull request closed without merging is no open one: with none open on GitHub the
+// completion is refused naming it, since its close told the architect, which decides the issue's
+// phase, and nothing is recorded.
+func TestHandoffCompleteNamesTheClosedPullRequestTheRecordHolds(t *testing.T) {
+	github := newHandoffGitHub(t)
+	github.set(func(g *handoffGitHub) { g.pullState = "closed" })
+	h := newWorkflowHandoffHarness(t, github, io.Discard)
+	seedIssueAt(t, h, "LEGION-208", phase.Implementing)
+	recordPullRequest(t, h, record.PullRequestClosed)
+	_, _, before := handoffRecord(t, h, "LEGION-208")
+	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+
+	message := refused(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented", Commit: headSHA}), http.StatusConflict, "HANDOFF_NO_PULL_REQUEST")
+	want := "no open pull request on acme/widgets legion/LEGION-208; nothing was recorded. Open the pull request and complete again. pull request #42 is closed; your architect was told and decides this issue's phase."
+	if message != want {
+		t.Fatalf("refusal = %q, want %q", message, want)
+	}
+	at, row, pr := handoffRecord(t, h, "LEGION-208")
+	if at != phase.Implementing || row != nil || !reflect.DeepEqual(pr, before) {
+		t.Fatalf("after the refusal LEGION-208 is in %s with implementer row %+v and pull request %+v, want implementing with no row and the record as it was, %+v", at, row, pr, before)
+	}
+}
+
+// A pull request merged while the issue was in implementing told the architect (pr-merged), and
+// the workflow runs on: GitHub lists no open pull request on the branch, and the completion is
+// applied and moves the issue to testing on the merged record, where a refusal would leave it in
+// implementing with nothing recorded and nobody told.
+func TestHandoffCompleteOnAMergedPullRequestMovesTheIssueToTesting(t *testing.T) {
+	github := newHandoffGitHub(t)
+	github.set(func(g *handoffGitHub) { g.pullState, g.merged = "closed", true })
+	h := newWorkflowHandoffHarness(t, github, io.Discard)
+	seedIssueAt(t, h, "LEGION-208", phase.Implementing)
+	recordPullRequest(t, h, record.PullRequestMerged)
+	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+
+	completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented", Commit: headSHA}))
+	at, row, pr := handoffRecord(t, h, "LEGION-208")
+	if at != phase.Testing || row == nil || row.HandoffCommit != headSHA || pr == nil || pr.State != record.PullRequestMerged || pr.Number != 42 {
+		t.Fatalf("after the completion LEGION-208 is in %s with implementer row %+v and pull request %+v, want testing at %s on #42 still merged", at, row, pr, headSHA)
 	}
 }
 

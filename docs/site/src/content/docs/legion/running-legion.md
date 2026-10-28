@@ -148,7 +148,7 @@ consumer, would have carried, so such an event leaves the record behind for at m
   least two minutes before, it applies the settlement the listener would have published, and the
   listener's own settlement of that head arriving later changes nothing the pass learned.
 - **A missing pull request.** An issue in `implementing` whose implementer completed, with no open
-  pull request recorded and none GitHub lists on its branch, is told to its architect as
+  or merged pull request recorded and none GitHub lists on its branch, is told to its architect as
   `pull-request-missing`, once per handoff commit
   ([Troubleshooting](/legion/legion/troubleshooting/#an-architect-is-told-pull-request-missing)).
 
@@ -157,7 +157,7 @@ observation is applied once however many passes read it, and the webhook arrivin
 nothing. These reads share the implement App's hourly limit with every pane's `gh`: a rate-limit
 answer ends the pass there, and the next pass starts over. The implementer's completion of
 implementing reads its branch's open pull request with the implement App too, and is refused
-`HANDOFF_NO_PULL_REQUEST` when there is none.
+`HANDOFF_NO_PULL_REQUEST` when there is none and the record holds none merged.
 
 `scripts/github-apps/create.ts` registers all three from the manifests beside it:
 `scripts/github-apps/implement.json` and `review.json` hold the permissions above and carry no
