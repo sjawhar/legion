@@ -88,9 +88,9 @@ type ErrPublishDenied struct {
 }
 
 // publishDeniedPrefix mirrors the listener's publishDeniedPrefix (packages/envoy/cmd/listener/api.go),
-// the opening of every answer it gives a publish its own NATS grant denies. A listener of main before
-// this daemon's release writes the same prefix, so a daemon that takes the release first reads its
-// denials too.
+// the opening of every answer it gives a publish its own NATS grant denies. Every listener since
+// sjawhar/legion#2167, which added the prefix, writes it, so a daemon that takes this release before
+// its listeners reads their denials too.
 const publishDeniedPrefix = "envoy: the message bus denied the publish under this listener's own permissions"
 
 func (e ErrPublishDenied) Error() string {

@@ -329,6 +329,15 @@
 
 ### Changed
 
+- The shipped `envoy` skill and the bundled `envoy_publish` description say when a publish errs,
+  now that the listener confirms a role or ad-hoc topic message with its recipients before it
+  answers: a role message errs when its holder did not confirm it within about 4 seconds (seen
+  after about 8, since the client tries once more), and a team or other ad-hoc topic errs naming
+  each session registered on it, the sender excepted, that did not confirm; a session named with
+  `receipt_timeout` gets the message back from its inbox through the replay once its connection
+  returns. The
+  README, `AGENTS.md` and the delivery comment say the listener's publish route waits for the
+  receipt the session sends for a forwarded frame (INFRA-547).
 - `dispatch-writing-specs` adds two rules for the text. A spec cites code by file and symbol, never
   a line number, since a line number is stale at the next edit. A sentence that cites a gate
   passing (a test, review, check or proof) also says, in that sentence, what the pass does not

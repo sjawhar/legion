@@ -734,9 +734,9 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 // role, and so does the listener's own NATS grant when it denies the forward
 // (notify.ErrPublishDenied) until an operator changes it, so waiting would retry forever; the
 // Dispatch message the same READY posted already carries the packet, and the issue's status shows
-// a withdrawal, so the issue is told the role had no holder, that its holder refused the packet,
-// or that the listener was denied the forward, as the merger's prompt says the daemon does
-// (internal/prompts/go/merger.md), and the row is done. A holder that did not confirm the packet
+// a withdrawal, so the issue is told the role had no holder (as the merger's prompt,
+// internal/prompts/go/merger.md, says the daemon does), that its holder refused the packet, or that
+// the listener was denied the forward, and the row is done. A holder that did not confirm the packet
 // in time (notify.ErrNotDelivered) is retried on the row's backoff as any failed publish is: the
 // holder, or the session that next claims the role, can take it.
 func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload record.MergeQueuePublish) error {

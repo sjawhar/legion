@@ -224,8 +224,11 @@ func writeNATSError(w http.ResponseWriter, err error, status int, message string
 const busUnansweredPrefix = "envoy: the message bus did not answer"
 
 // publishDeniedPrefix opens the body of every answer this listener gives a publish the NATS server
-// refused under its connection's own publish permissions, so one string matches in a test and in a
-// deployed log filter. It is deliberately not busUnansweredPrefix: the bus answered this publish,
+// refused under its connection's own publish permissions, so one string matches in a test, in a
+// deployed log filter and in the Legion daemon, whose notify.HTTPPublisher finishes a notice on a
+// 403 whose error opens with its copy of this string (publishDeniedPrefix,
+// packages/daemon/internal/notify/notify.go). Rewording it turns that denial back into a notice the
+// daemon retries without a cap, holding the architect's later notices behind it. It is deliberately not busUnansweredPrefix: the bus answered this publish,
 // and answered it with a denial, so "the message bus did not answer" would be false of it, and the
 // operator reading it would go looking for an outage instead of for the grant that forbids the
 // subject.

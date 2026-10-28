@@ -40,16 +40,10 @@ const (
 	// since the bus did answer and retrying reads the same record.
 	outcomeRoleClaimUnreadable requestOutcome = "role_claim_unreadable"
 	// outcomePublishDenied is a publish the server refused under this listener's own publish
-	// permissions (bus.ErrPublishDenied). Only the publish route can record it: bus.ErrPublishDenied
-	// is made in one place, confirmPublished (internal/bus/confirm.go), which only the core
-	// publishes reach. An ad-hoc topic reaches the core path because bus.UsesCoreTransport
-	// (internal/bus/nats.go) finds it outside streamSubjects (internal/bus/stream.go), and the route
-	// publishes it with PublishCoreContext; a role send's forward to its holder, and an ad-hoc
-	// topic's forward to each recipient, reach it because bus.Client.RequestCoreTo always publishes
-	// over core NATS, though notifications.agent.> captures the agent subject they go to. Only the
-	// send route's publish of contracts.AgentSubject(target), which goes through publishJetStream,
-	// is never denied this way. The publish route does not record it as outcomeBusUnavailable: the
-	// bus answered, with a denial no retry can get past.
+	// permissions (bus.ErrPublishDenied). Only refuseBusUnavailable records it, from the 403 that
+	// writeBusUnavailable writes; the replay route answers the same error as 503
+	// REPLAY_UNAVAILABLE and records nothing. It is not outcomeBusUnavailable: the bus answered,
+	// with a denial no retry can get past.
 	outcomePublishDenied requestOutcome = "publish_denied"
 	// outcomeReceiptTimeout, outcomeDeliveryFailed, outcomeNotConfirmed and outcomePublishFailed
 	// are the publish route's confirmed sends answered 504 (confirmed.go), each under the reason
