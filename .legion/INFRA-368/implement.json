@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-368",
+  "completed": "2026-10-28T12:40:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2463",
+  "proof": [
+    {
+      "criterion": "A7: a reply that names a block cites it and the thread shows the quoted block; a plain reply answers the whole comment (comment and message)",
+      "surface": "Local Dispatch harness (bun run dispatch:local: real Go server built from the head, migrations 0001-0137 on Postgres 17, real dispatch CLI) over HTTP and the CLI; the Conversation tab in Chromium",
+      "command": "env -u DISPATCH_TOKEN_FILE DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh; cd packages/dispatch && DISPATCH_E2E_REUSE_SERVERS=1 DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_local?sslmode=disable FAKE_ENVOY_PORT=9021 FAKE_GITHUB_PORT=9022 FAKE_BROKER_PORT=9024 DISPATCH_E2E_PORT=8777 PLAIN_HTTP_PORT=31720 PLAYWRIGHT_BROWSERS_PATH=/legion/scratch/tmp/ms-playwright bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/conversation.e2e.ts -g 'passage'",
+      "observed": "Driver exit 0, 133 PASS: 'A7 ?to=X#b-b2&kind=replies_to is the one reply naming b2', 'A7 dispatch read --ref <reply naming b2> prints Re: block b2: Beta.', 'A7 the plain reply's reply_block is null', and the same for a message reply (Re: block b2: Delta.). Playwright: 2 passed, 'a reply quotes the passage it names' shows 'Replying to alice's passage — Beta second.' and 'This passage was removed.' after the edit.",
+      "headSha": "cc471d1ddf7d",
+      "negativeControl": "Driver and rows against a harness built from base c210f10d with the head's test files: driver exits 1 at 'FAIL: A1 ?to=X lists block b1 of the comment citing X alone … got [[\"comment\",…]]'; both Playwright rows fail with 400 'unknown field \"reply_to_block\"'. At the head, reply_to_block b9 answers 400 INVALID_COMMENT naming b9."
+    },
+    {
+      "criterion": "A7 last sentence: replies written before this change still show under their comment and ask",
+      "surface": "Go API test against real Postgres (rows inserted by SQL as an older build writes them, then the server's reconciliation)",
+      "command": "cd packages/envoy && go test ./internal/dispatch/api/ -run TestRepliesWrittenBeforeThisChangeStillShow -count=1 -v",
+      "observed": "--- PASS: TestRepliesWrittenBeforeThisChangeStillShow; GET /api/v1/comments/{id}, the ask's replies and ?to= list both replies with reply_block null",
+      "headSha": "cc471d1ddf7d",
+      "negativeControl": "A reply naming a block in an ask's thread is refused 400 INVALID_COMMENT 'a reply in an ask's thread names no block yet' (TestAReplyNamesTheBlockItAnswers)."
+    },
+    {
+      "criterion": "A10 comment half and A11: a link in a comment's second paragraph starts at that block; comment and message block nodes carry R12's facts as the node and as an edge's other end",
+      "surface": "Local harness over HTTP and the real CLI's Node: line",
+      "command": "the block-graph.sh run above (sections '# A10 comment' and '# A11 item blocks')",
+      "observed": "PASS lines: ?from=<comment> lists the mention with block.block_id b2 and parent the comment; ?to=<spec> source is node comment/<id>#b2; node facts for comment/<x>#b2 (parent the comment, parent_version 1) and message/<m>#b1 (parent the message, parent_version null) read the same as an edge's other end; dispatch read --ref prints 'Block b2 of comment …' and the Node: line.",
+      "headSha": "cc471d1ddf7d",
+      "negativeControl": "A pinned message block on ?to= answers 400 INVALID_REFERENCE (driver line 'A15 comment … pinned message block')."
+    },
+    {
+      "criterion": "A13: a cited paragraph keeps its id through move, reword and split in the dashboard editor, shows as removed when deleted, is cited again when restored; block HTML reads back byte for byte and adding it elsewhere keeps the cited paragraph's id",
+      "surface": "The Conversation tab's comment editor in Chromium (signed-in author) and the PATCH wire over HTTP on the harness",
+      "command": "the Playwright command above (row 'the editor keeps a cited passage's id through move, reword, split, delete and restore') and the driver's '# A13' section",
+      "observed": "Playwright row passed: after keyboard cut/paste, reword, Enter-Enter split, delete and retype, each PATCH carried b2 (until deleted) and the reply's reply_block stayed b2 / removed:true / removed:false with the page quote following. Driver A13: b2 kept through move, reword, split; changed_revision of b2 unchanged after block HTML elsewhere; the HTML body read back byte for byte.",
+      "headSha": "cc471d1ddf7d",
+      "negativeControl": "A PATCH whose blocks names id b9 answers 400 INVALID_COMMENT and leaves the body unchanged (driver A13)."
+    },
+    {
+      "criterion": "A15 comment half: a pinned link to a comment block reads its revision",
+      "surface": "Local harness over HTTP and dispatch read",
+      "command": "the driver's '# A15 comment' section above; cd packages/envoy && go test ./internal/dispatch/api/ -run TestAPinnedCommentBlockReadsItsRevision -count=1 -v",
+      "observed": "pin.state unchanged, then changed with the revision-1 text 'Beta.', then removed with removed_version 3; dispatch read prints 'Removed in revision 3.'; the unpinned ref answers 404 after the deletion. Go test PASS.",
+      "headSha": "cc471d1ddf7d",
+      "negativeControl": "A pin past the comment's current revision answers 404 (TestAPinnedCommentBlockReadsItsRevision)."
+    },
+    {
+      "criterion": "R14 and rollout: graph readers keep working; an older build skips item-block rows; older comments and messages get blocks",
+      "surface": "Driver's existing A1-R12 sections on the harness; the server's block-index loop on the harness; Go tests",
+      "command": "the driver run above; psql insert of a comment into dispatch_local then curl -H 'Authorization: Bearer e2e-token' http://127.0.0.1:8777/api/v1/comments/<id>/blocks before and after one tick; go test ./internal/dispatch/refs/ -run TestAnOlderBuildSkipsItemBlockRows; go test ./internal/dispatch/docs/ -run TestTheBlockIndexIndexesItemsAnOlderBuildWrote",
+      "observed": "Every existing driver section PASS; the psql-inserted comment read indexed:false, then indexed:true revision 1 with b1 'Old one.' (0-8) and b2 'Old two.' (10-18) after one tick (log item_blocks=1); both Go tests PASS.",
+      "headSha": "cc471d1ddf7d",
+      "negativeControl": "Before the tick the blocks route answered {\"indexed\":false,\"blocks\":[]} and wrote nothing (the item stayed owed until the loop indexed it)."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/itemblocks/ (new): Split, Hash, BodySHA256, Align, Carry, ReadCarried, UTF-16 offsets",
+    "packages/envoy/internal/dispatch/pmdoc/parse.go: ParseWithSourceStarts",
+    "packages/envoy/internal/dispatch/store/migrations/0135_item_blocks, 0136_comments_item_blocks_trigger, 0137_messages_item_blocks_trigger (+census)",
+    "packages/envoy/internal/dispatch/refs/: item_blocks.go, item_block_nodes.go, reply_blocks.go (new); graph.go, refs.go, rebuild.go, closure.go, blocks.go, excerpts.go",
+    "packages/envoy/internal/dispatch/text/refs.go: item block reference grammar, text.Refs",
+    "packages/envoy/internal/dispatch/api/: item_blocks.go, reply_blocks.go (new); comment_create/actions/delivery/projection/queries, messages, message_delivery, broadcasts, references, routes_table",
+    "packages/envoy/internal/dispatch/docs/block_index.go: third batch for owed comments and messages",
+    "packages/envoy/internal/dispatch/model/model.go: ReplyBlock, ItemBlocks",
+    "packages/contracts/src/: dispatch-api.ts, dispatch-tools.ts, dispatch-href.ts, dispatch-text-references.ts and the regenerated JSON tables",
+    "packages/envoy-client/src/: dispatch-owner.ts, dispatch-execute.ts, dispatch-http.ts",
+    "packages/dispatch/web/src/features/: refs (routes, target-id, RefPreview, ReferencedBy, block-reference, reference-target), conversation (block-spans.ts new, MentionComposer, ReplyQuote, ReplyTurn, send-request, ConversationTab), margin (ThreadCard, useMarginItems, useMarginSheet), agents/AgentsPage; api/client.ts",
+    "packages/dispatch/e2e/: acceptance/block-graph.sh, conversation.e2e.ts, api.ts",
+    "packages/claude-envoy/dist/ rebuilt",
+    "docs: packages/envoy/AGENTS.md, cmd/dispatch/README.md and AGENTS.md, packages/contracts/AGENTS.md, packages/dispatch/AGENTS.md and README.md, skills/dispatch/SKILL.md, docs/site dispatch for-agents.md and documents.md",
+    "changelog fragments: packages/{envoy,contracts,envoy-client,pi-envoy,claude-envoy}/.changes/unreleased/pr2463-Added-*.yaml"
+  ],
+  "trickyParts": [
+    "Storage kinds comment_block/message_block (API kind block) so an older build skips item-block rows during the roll and after rollback.",
+    "Owed state via triggers (owed_at) that only this build drains; lock order owner, item, state; the reconciler takes the item row then the state row.",
+    "React 19's onBeforeInput is textInput, which no cut or deletion fires; the composer listens to the native beforeinput so cut/paste keeps a block's id (found by the Playwright row).",
+    "Carried offsets are UTF-16 units into the trimmed body; ReadCarried converts to bytes and refuses an offset inside a character."
+  ],
+  "deviations": [
+    "A pinned message block answers 400 INVALID_REFERENCE (the existing code for every unreadable reference), not a new INVALID_REF code.",
+    "The driver's negative control against the base build fails at its first block check (A1, a mention's source is now the block node), before any A7 line.",
+    "Migration seeds run in the trigger migrations 0136/0137 (after each trigger, same transaction) rather than in 0135, so no item written between 0135 and the triggers is left without a state row.",
+    "Changelog entries are changie fragments named pr2463-Added-<time>.yaml with custom Issue pr2463 (the controller's ruling), since main now folds fragments."
+  ],
+  "openQuestions": [
+    "#2394 (block[] attribute) also restates graph_edges as its own 0135: the PR that merges second carries both sets of arms, renumbers, and adds the block[] refusal of an item block reference (agreed with #2394's implementer)."
+  ],
+  "discoveredComplexity": [
+    "envoy-client's envoy-config.test.ts 'still running after 10 s' times out at 30 s in this pod's full suite runs (passes alone, 52/52); the file is untouched by this PR. CI's envoy-client job is the judge."
+  ]
+}
