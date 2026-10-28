@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-148",
-  "completed": "2026-10-28T12:19:25Z",
+  "completed": "2026-10-28T13:41:40Z",
   "proof": [
     {
       "criterion": "A1: a session whose ask a person answered carries that answer word for word in its next model request (Oh My Pi)",
@@ -83,6 +83,14 @@
       "observed": "envoy.json caught mid-edit, with answers.json and a fresh refresher outcome from another Dispatch: the hook prints the failure line naming envoy.json's error, never that Dispatch's list, and starts no refresher. A refresher outcome that read no Dispatch, with answers.json read for the Dispatch envoy.json names: the hook carries that cached list with `the refresher read no Dispatch, not the Dispatch envoy.json names now`, never the stale error line. The failing token command still carries its own `exited with status 3`.",
       "headSha": "9740c3f6153e5bc3f9139b41aae176d242c521a2",
       "negativeControl": "With the round-5 rule (other === null || dispatchUrl === undefined) both new tests fail: 0 pass, 2 fail."
+    },
+    {
+      "criterion": "Acceptance round: each item appears once in the list, also when both the route source and the mention source hold one comment",
+      "surface": "GET /api/v1/agents/{session_id}/answers on the repository Postgres, through the HTTP API and the real outbox",
+      "command": "cd packages/envoy && go test ./internal/dispatch/api -run SessionAnswers -count=1 (23 pass), incl. TestSessionAnswersListsACommentBothTheRouteAndAMentionHoldOnce",
+      "observed": "A comment on an issue routed to the session that mentions it: with the mention recorded failed at publish time the outbox publishes the route copy to the session's topic; once the delivery reads sent, the list holds the comment once, as `mentioned you`.",
+      "headSha": "6d96a55f97e02e8ee16e68a33baf4d8ce39e4099",
+      "negativeControl": "With the query's dedupe broken (`group by id, m`), the same test fails: Total 2, the comment listed as commented_on_an_issue and as mentioned_you."
     }
   ],
   "filesChanged": [
@@ -103,7 +111,8 @@
     "Round 6 (review 4): claude-envoy session-hook.ts records the targeted Dispatch URL and reports a mismatch only when both URLs are known and differ; ENVOY_ANSWERS_TIMING_FILE test seam; answers-hook.test.ts timing assertions on the hook's own bound, quick-token and cross-URL tests assert the outcome, failing-command test added; dist rebuilt",
     "Round 7 (merge): forward merges of main b295a3fb (merge 0e10ce38: claude-envoy dist rebuilt with Bun 1.4.4, envoy-client package.json build list, pi-envoy imports; askgate imports moved to dispatch-session-directory) and 4e55b2e0 (merge 8a2c0562, clean); answers-hook.test.ts accepts every design outcome (allowedOutcome); changelog entries moved to changie fragments pr2376-*.yaml with CHANGELOG.md as main has it; no Dispatch key in any added line (old-server message now 'its build is older than the answers route'); forward merge of main aeeee6c0 (merge 594b8de6): the three .dispatch/architecture conflicts keep both sides, claude-envoy dist rebuilt with Bun 1.4.4",
     "Round 8 (review 5): claude-envoy session-hook.ts strict URL comparison, no refresher when envoy.json names no Dispatch URL, timing-file write guarded; answers-hook.test.ts two carry-rule tests and the empty-list request count accepts a read that missed; dist rebuilt with Bun 1.4.4",
-    "Forward merge of main 0a921021 (merge 5c38603c, #2225's claimant route and delivered-mention rule): envoy AGENTS.md, model.go and publisher.go keep this PR's reply-on-a-document routing and suppressed_authors rule with main's leftToMention wording; the outbox reply-mention case now records the mention as sent, and the session-answers mention-plus-follower test expects the follower copy left to the delivered mention"
+    "Forward merge of main 0a921021 (merge 5c38603c, #2225's claimant route and delivered-mention rule): envoy AGENTS.md, model.go and publisher.go keep this PR's reply-on-a-document routing and suppressed_authors rule with main's leftToMention wording; the outbox reply-mention case now records the mention as sent, and the session-answers mention-plus-follower test expects the follower copy left to the delivered mention",
+    "Acceptance round: api/session_answers_test.go (stale paragraph dropped, follower+mention test renamed, new route+mention dedupe test with setCommentDelivery); claude-envoy answers-hook.test.ts request count compared against the expected count; forward merge of main 5fbd8391 (clean)"
   ],
   "trickyParts": [
     "A person's reply to a message is a message.answered event, so S1 and the 0121 index take message.answered as well as message.created.",
