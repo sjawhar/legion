@@ -162,17 +162,24 @@ func (r *registrar) register(ctx context.Context, i int) error {
 	return nil
 }
 
+// registrationBody is session s's registration with the listener: its directory, title and the
+// topics of the issues it watches.
+func (st *step) registrationBody(s session) []byte {
+	topics := []string{}
+	for _, w := range s.watched {
+		topics = append(topics, st.issueTopic(w))
+	}
+	b, _ := json.Marshal(map[string]any{"session_id": s.id, "dir": "/work/" + s.id, "title": "load " + s.id,
+		"topics": topics, "port": 0, "self_subscribed": true, "driving": false, "capabilities": []string{}})
+	return b
+}
+
 // registerSessions registers every session, 16 at a time.
 func (st *step) registerSessions(ctx context.Context) *registrar {
 	reg := &registrar{url: st.cfg.ep.listener, token: st.cfg.ep.listenerToken, client: &http.Client{Timeout: 10 * time.Second},
 		bodies: make([][]byte, len(st.sessions))}
 	for i, s := range st.sessions {
-		topics := []string{}
-		for _, w := range s.watched {
-			topics = append(topics, st.issueTopic(w))
-		}
-		reg.bodies[i], _ = json.Marshal(map[string]any{"session_id": s.id, "dir": "/work/" + s.id, "title": "load " + s.id,
-			"topics": topics, "port": 0, "self_subscribed": true, "driving": false, "capabilities": []string{}})
+		reg.bodies[i] = st.registrationBody(s)
 	}
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 16)

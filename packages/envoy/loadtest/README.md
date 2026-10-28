@@ -17,7 +17,7 @@ same step before and after its change, and compares the two rows.
 
 | File | What it is |
 | --- | --- |
-| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `run`, `tables`, `series-sessions`, `trigger-sql`, `box-busy`, `replay-fetch`, `replay-pack`, `replay-unpack`, `replay-seed`, `replay-check-seed`, `replay-checksum`, `replay-logical-dump` |
+| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `run`, `tables`, `series-sessions`, `trigger-sql`, `box-busy`, `replay-fetch`, `replay-pack`, `replay-unpack`, `replay-seed`, `replay-check-seed`, `replay-checksum`, `replay-logical-dump`, `replay-plan` |
 | `api.go` | The Dispatch HTTP client, with the request trace that gives the arrival time; `callRaw` sends a body of any type (a multipart upload) |
 | `seed.go` | The seed: 4 projects, 1,000 issues and 8,000 comments through Dispatch's API, and `seed.json` |
 | `run.go` | One step: its phases (the window, SSE streams, the event and request generators on one open-loop schedule, the probes) and `summary.json` |
@@ -42,6 +42,8 @@ same step before and after its change, and compares the two rows.
 | `replay_anchor.go` | The rest of the seed's pure decisions: `chooseAnchor`, where an anchor lands (its logged quote, else a sentence of its logged block or of the nearest surviving one), which the replay source calls as `substituteAnchor`; and `planHistory`, the size of every synthetic version so each changes as many bytes as production's, built from a padding paragraph and a removed run of sections |
 | `replay_seed.go` | `loadgen replay-seed`: recreates a bundle's state through Dispatch's API, mapping every logged id to its local one in `loadtest.replay_ids` and each anchor's rule in `loadtest.replay_anchors` as it goes, so a killed seed resumes; `-ops-log` writes one CSV row per write with Dispatch's CPU ticks around it |
 | `replay_check.go` | `loadgen replay-check-seed` (each seeded document's version, version size changes, open anchored items, text and anchors against the bundle, the open-anchored-root distribution of the window's written documents, and `-out`, the results file stack.sh keeps), `replay-checksum` (row counts and an md5 of the versions and comment bodies) and `replay-logical-dump` (a seed with every uuid and timestamp masked, for `cmp`) |
+| `replay_source.go` | The replay request source (`loadgen run -source replay`, The replay below): the pure plan of a bundle's window (transactions, issue sampling, each logged write's CLI requests, edit ops from the logged diff or a substitute, read actions), `loadgen replay-plan`, and the sending: id resolution through `loadtest.replay_ids` and the run's own responses, one connection and one 60 s deadline per action |
+| `replay_record.go` | The replay's per-run record: `summary.json` `replay` (Dispatch's CPU over the window from `/proc`, cores at the full rate, idle-corrected, drain, writes, saturation) and `meta.json` `replay` |
 | `commit-trigger.sql` | The commit-time trigger for the delivery latency from commit |
 | `routes-2026-10-26-1719Z.txt` | The default route mix |
 | `stack.sh` | The local stack: `setup`, `start`, `seed`, `reset`, `stop`, `status`, `build-info`, `loadgen`, `replay-seed-patch-check`, and `replay-seed`, which seeds the LINUX replay, runs `replay-check-seed` and dumps the database only when it passed |
@@ -463,6 +465,131 @@ report.
 A request that the generator cannot start because 25,000 requests are in flight is dropped and
 counted. 25,000 is more than 600 req/s × the 30 s client timeout.
 
+## The replay (`-source replay`)
+
+`loadgen run -source replay` replaces the request generator with a replay bundle's logged writes
+(dispatch://INFRA-639): LINUX's real write log of 2026-10-26 22:55:00Z-23:34:00Z, re-sent at the log's
+offsets from 22:55:00 as the dispatch CLI 10.25.1 sends each write, with read actions before each
+write at a stated assumption (no read was logged). It runs against a stack whose Dispatch database
+holds the restored replay seed (`stack.sh replay-seed`'s dump), whose `loadtest.replay_ids` maps
+every logged comment, artifact, ask and issue to its local id; `loadgen run` reads that table once,
+over the stack's Postgres URL, before the window.
+
+```bash
+# What a run would send, without a stack (counts only):
+loadgen replay-plan -replay-inputs "$TMPDIR/i639/bundle" -replay-rate 0.1
+# A run (Dispatch on the restored seed):
+stack.sh loadgen run -source replay -events 0 -requests 0 -replay-inputs "$TMPDIR/i639/bundle" \
+  -replay-rate 0.1 -out "$LOADTEST_ROOT/runs/replay-f0.1" -name replay-f0.1
+```
+
+| Flag | Default | What it sets |
+| --- | --- | --- |
+| `-replay-inputs` | (required) | The bundle directory. |
+| `-replay-rate` | `0.1` | The rate factor F, more than 0 and at most 1: the share of issues replayed, each issue kept or dropped whole (`keepIssue` of `-rng-seed` and the key; an issue created in the window is its own unit). Times are not scaled. |
+| `-replay-reads` | `1` | Read actions before each write, rho; a fraction is a Bernoulli draw per write. |
+| `-replay-read-mix` | `read=0.55,docread=0.30,commentref=0.10,search=0.05` | The read actions' kinds and weights. |
+| `-replay-uploads` | `0.25` | U: the share of named versions with a diff re-sent as a whole-document upload (the rest are edits), drawn per event from `-rng-seed`. |
+| `-replay-from`, `-replay-to` | `0`, `39m` | The sub-window, from 22:55:00: events with from <= offset < to. |
+| `-replay-roster` | `762` | Sessions registered with the listener: the bundle's roster ids, then `ses-replay-<n>`. |
+| `-replay-keys-file` | (none) | Replay only the issues the file lists (as `replay-seed -keys-file`). |
+
+With `-source replay`, `-events 0 -requests 0` are required, `-sessions` is refused (the roster is
+the sessions), `-duration` is ignored and set to to - from, the warm-up stays, and `-sse` defaults
+to 2. Every bad input is refused by name before any connection; a `-replay-*` flag without
+`-source replay` is refused too.
+
+**Planning** is pure: one bundle, one set of flags and one `-rng-seed` give one plan, which
+`loadgen replay-plan` prints as JSON counts (actions, requests per route, writes and reads per kind,
+events not sent by reason, substitutes). A logged write is one transaction: the events of one actor
+id at one `created_at`. Each becomes one action of one kind:
+
+| Logged write | Kind | Requests (`->` in order, `\|\|` in parallel) |
+| --- | --- | --- |
+| anchored root comment | `anchored` | `GET /issues/{key}` -> `POST /issues/{key}/comments` with `anchor {artifact, quote}`: the logged quote when the client's current text holds it exactly once, else `substituteAnchor`'s (counted in `substitutes.quote`) |
+| reply | `reply` | `POST /issues/{key}/comments` with `reply_to` |
+| plain root | `plain` | `POST /issues/{key}/comments` (with `ask_id` on an ask) |
+| named version with a diff, by a session | `upload` (share U) or `edit` | `POST /issues/{key}/artifacts {name, content, summary}` with the client's whole text after the edit; or `GET /issues/{key}` -> `POST /artifacts/{id}/edits {ops, summary}` |
+| unnamed version without a diff, by a session | `edit-unnamed` | `GET /issues/{key}` -> `POST /artifacts/{id}/edits {ops}` |
+| named version without a diff, or by a person | not sent | server settlement, or a browser |
+| status change by a session | `status` | `GET /issues/{key}` -> `PATCH /issues/{key}` |
+| issue update by `legion-daemon:*` (an `issue.closed` with no `issue.updated` in its transaction included) | `daemon` | `GET /issues/{key}` -> `PATCH /issues/{key}` |
+| other issue update | `fields` | `GET /issues/{key}` -> `PATCH` with the fields that changed from the previous snapshot (title, status, labels, priority, route, assignee, parent, blocked_by, repo, external_links); a write that changed none of them (a rank, claim or components change) sends the unchanged status and is counted `patch_unchanged` |
+| message by the daemon | `daemon-message` | `GET /issues/{key}/events?order=desc&limit=200` -> `POST /issues/{key}/messages` |
+| message by a session | `message` | `POST /issues/{key}/messages` |
+| issue created | `issue-create` | `POST /issues {project, title, parent, spec, force}` -> `GET /projects/LINUX/architecture-sources` (404 at 35efd326, which does not fail the action) -> `GET /projects/LINUX/architecture-source`; the spec is synthetic, of its first logged version's size, else of the window's created documents' median first version |
+| markdown artifact created | `doc-create` | `POST /issues/{key}/artifacts` with its `created-docs/` version 1 |
+| file artifact created, file version | `file-create`, `file-version` | multipart `POST /issues/{key}/artifacts` with deterministic bytes of the logged size |
+| comment resolved | `resolve` | `POST /comments/{id}/resolve` |
+| ask opened, answered, resolved; issue claimed | `ask-open`, `ask-answer`, `ask-resolve`, `claim` | `POST /issues/{key}/asks`; `GET /asks/{id}` -> `POST /asks/{id}/answer` as the answering person (`X-Dispatch-User`, with the ask's `edited_at`); `POST /asks/{id}/resolve`; `POST /issues/{key}/claim` |
+| `child.status`, `comment.anchor_refreshed`, `comment.reopened`, `issue.closed` beside its `issue.updated`, `message.delivery`/`accepted`, `user_state.*` | not sent | derived by the server |
+
+All paths are under `/api/v1`. The client keeps each document's text (the bundle's `docs/`, its
+own edits, the created documents), so an upload sends the current text with no read. An edit is
+the logged diff's hunks as `replace` (or `delete`) ops when the diff is complete (not cut at 4,094
+characters) and each hunk's removed text, widened by context lines while repeated, occurs exactly
+once in the client's text (`edits.diff`); else one `replace` of a unique sentence by synthetic words
+that change the length by the logged size change (`edits.substitute`). A version with no usable
+sentence is not sent (`no_edit`).
+
+**Reads** (the stated assumption): before each write, rho read actions on its issue (on the parent
+for a created issue), read j of n sent (n - j) s before the write, never before the sub-window:
+
+| Read | Requests |
+| --- | --- |
+| `read` | `GET /issues/{key}` \|\| `GET /issues/{key}/references` -> `GET /issues/{key}/events?after=<last_seq-10>&limit=10` -> `GET /references?to=dispatch://KEY` \|\| `?from=...` (\|\| `GET /agents` when a session holds the issue's claim) |
+| `docread` | `GET /issues/{key}` -> `GET /artifacts/{id}/text` \|\| `GET /issues/{key}/comments?artifact={id}` |
+| `commentref` | `GET /comments/{id}` -> `GET /references?to=<comment ref>` \|\| `?from=...` |
+| `search` | `GET /search?q=<two synthetic words>&project=LINUX&limit=20&offset=0` |
+
+A `docread` or `commentref` on an issue with no document or comment is a `read`.
+
+**Sending**: each action starts at window start + (offset - from) on its own goroutine, on its
+own connection (a fresh transport, as each CLI call is a new process), under one 60 s deadline over
+all its requests, with no retry; its first failed request ends it. Each request is one record of
+the Requests table, named `<method> <pattern> [<kind>]`. Replay writes carry no marker, so the
+delivery columns stay empty. A logged id resolves to the response of the run's own action that
+created it (waited for) or to `loadtest.replay_ids`; an action naming an object that neither has
+(a reply to a comment whose creation failed, say) is not sent and is counted in
+`skipped_missing_dep` by kind. The roster replaces the `ses-lg` sessions: each registers with a
+title, a directory and its home issue's topic (the issue its claim held at 22:55, else one of the
+kept issues) plus further issues' topics until its registration is about 458 bytes, and keeps the
+90 s heartbeat; each subscribes the same topics on NATS.
+
+**The record.** At the window start: one read of Dispatch's `/proc/<pid>/stat` (utime + stime),
+then `heap-start.pprof` (`/debug/pprof/heap`, no GC), then the first write. At its end:
+`heap-end.pprof`, then a `/proc` read, then the CPU profile's end, the goroutine dump and
+`heap.pprof`. `go tool pprof -sample_index=alloc_space -diff_base=heap-start.pprof heap-end.pprof`
+gives the bytes allocated in the window. `summary.json` `replay`:
+
+| Field | What it is |
+| --- | --- |
+| `inputs` | `rate_factor`, `reads_per_write`, `read_mix`, `upload_share`, `rng_seed`, `from_s`, `to_s`, `bundle_sha256` (of `bundle.meta.json`), `seed_dump_sha256` (from `$LOADTEST_ROOT/replay/last-reset.json`, else `""`), `gomaxprocs` (Dispatch's, from its environment, else `LOADTEST_GOMAXPROCS` or nproc), `dispatch_commit` (from `$LOADTEST_ROOT/bin/envoy-dispatch.json`) |
+| `window_s` | Between the two `/proc` reads. |
+| `cpu_source` | `proc`, or `none` with no Dispatch pid (`-allow-foreign`); the CPU fields are null then. |
+| `dispatch_cpu_s` | Dispatch's CPU-seconds over the window. |
+| `cores_full_rate` | `dispatch_cpu_s / window_s / rate_factor`. |
+| `idle_cores_before` | Dispatch's cores over the 30 s before the window (the warm-up: the roster's heartbeats and the SSE streams, no replay request). |
+| `cores_full_rate_idle_corrected` | `(dispatch_cpu_s - idle_cores_before × window_s) / window_s / rate_factor`. |
+| `drain_cpu_s` | Dispatch's CPU from the window's end until every action returned (at most 300 s). |
+| `writes` | By kind: `planned`, `sent`, `failed`. |
+| `skipped_missing_dep` | Actions (reads too) not sent for a missing object, by kind. |
+| `substitutes` | `quote`: anchored roots sent with a substitute quote; `edit`: versions (edits and uploads) whose content is a substitute. |
+| `edits` | Edit requests by derivation: `diff`, `substitute`. |
+| `inflight_at_end`, `timeouts` | Actions in flight at the window end; actions that hit the 60 s deadline. |
+| `saturated`, `saturated_reasons` | Saturated when Dispatch's 5 s cores reach 0.9 × GOMAXPROCS in at least 10% of the window's samples (`dispatch_cpu`), an action timed out (`timeouts`), or more than 20 actions were in flight at the end (`inflight_at_end`). |
+| `roster` | Sessions registered. |
+
+`meta.json` `replay` holds the same `inputs`, `cgroup_cpu_max` (`/sys/fs/cgroup/cpu.max`, `""`
+when absent), `heap_start_at`, `heap_end_at` and `dispatch_build` (the build JSON:
+`dispatch_commit`, `dispatch_tree`, `dispatch_pprof_overlay`, `dispatch_binary_sha256`,
+`go_version`); `nproc` and `build_commit` are `meta.json`'s own.
+
+**Not reproduced**: reads (assumed, above); browser document edits and settlements (not sent);
+the text of created issues' specs (synthetic, of the logged size); the content of cut diffs and of
+versions without a diff (a substitute of the logged size change); anchors whose logged quote the
+client's text lacks (substituted); the time a CLI process takes to start between its requests.
+
 ## Delivery latency
 
 A **receipt** is one envelope that one session gets on a topic it subscribes to. Its time is when
@@ -526,6 +653,7 @@ Every percentile in the harness is the lower nearest rank: the value at index
 | `samples.json` | The 5 s samples: CPU ticks and RSS per process, `/proc/stat` ticks, Postgres connections by state, goroutines, pool waiters, heap (every 15 s), NATS `/varz`. |
 | `cpu.pprof` | Dispatch's CPU profile over the whole window. |
 | `heap.pprof` | Dispatch's heap profile at the end of the window. |
+| `heap-start.pprof`, `heap-end.pprof` | Under `-source replay`: Dispatch's heap profile at the window's start and end (The replay, above). |
 | `heap.txt` | The same heap profile as text (`/debug/pprof/heap?debug=1`), with the runtime's memory statistics. |
 | `goroutines.txt` | Dispatch's goroutine dump (`debug=2`) at the end of the window, after the CPU profile. |
 | `goroutines.summary.txt` | The goroutines that wait for a pool connection, the goroutines in `events.(*Broker).Append`, other request and document goroutines, and the top states. |
@@ -548,9 +676,9 @@ series `TABLES.md`, because `run-step.sh` already wrote them for each step.
 
 ## The tables
 
-`TABLES.md` has eight tables, with one row per step. The window is the measured window
-(`--duration`). "Cores" means CPU-seconds per second. A cell is `-` when it has no value. A JSON
-path below is a field of the step's `summary.json`.
+`TABLES.md` has eight tables, with one row per step, and a ninth, Replay, when a step replayed.
+The window is the measured window (`--duration`). "Cores" means CPU-seconds per second. A cell is
+`-` when it has no value. A JSON path below is a field of the step's `summary.json`.
 
 ### Events, delivery and requests
 
@@ -729,8 +857,23 @@ There is one row per route and one column per step.
 
 | Column | Unit | What it shows | Source |
 | --- | --- | --- | --- |
-| `route` | name | The route name, `<caller> GET <path template>`. | the keys of `requests.routes` |
+| `route` | name | The route name, `<caller> GET <path template>`; under `-source replay`, `<method> <pattern> [<kind>]`. | the keys of `requests.routes` |
 | `<step name>` | ms, then count | Request latency p50 / p99 of the route in that step, then (failures / count). A failure is a status outside 2xx or a transport error. The count is the sent requests of the route. `-` when the step sent no request on the route. | `requests.routes.<route>.latency_ms`, `.failures`, `.count` |
+
+### Replay
+
+One row per step that replayed (`-source replay`); the table is absent otherwise.
+
+| Column | Unit | What it shows | Source |
+| --- | --- | --- | --- |
+| `F`, `rho`, `U` | factor, count, share | The rate factor, the read actions per write, the upload share. | `replay.inputs.rate_factor`, `.reads_per_write`, `.upload_share` |
+| `window s` | s | The window between the two `/proc` reads. | `replay.window_s` |
+| `Dispatch CPU s` | CPU-seconds | Dispatch's CPU over the window. | `replay.dispatch_cpu_s` |
+| `cores at full rate` | cores | CPU-seconds / window / F. | `replay.cores_full_rate` |
+| `idle-corrected` | cores | The same with the idle cores before the window taken off. | `replay.cores_full_rate_idle_corrected` |
+| `saturated` | yes (reasons) or no | The saturation rule (The replay, above). | `replay.saturated`, `.saturated_reasons` |
+| `writes sent / planned`, `failures` | count | Over every write kind. | `replay.writes` |
+| `substitutes quote / edit` | count | Substituted anchor quotes and version contents. | `replay.substitutes` |
 
 ## The guard
 
@@ -820,10 +963,10 @@ Compare the right rows:
     `track_commit_timestamp = on`,
   - no reset per step.
 - These belong to INFRA-598: 10-minute steps, one-hour soak trends (the 5 s series in
-  `samples.json` is there for them), the replay of production's log, sampling of the production
-  database and restarts during load.
+  `samples.json` is there for them), sampling of the production database and restarts during load.
 - INFRA-605 adds its browser-editor workload, its round-trip counter and its document-room sampler
   to this package.
-- INFRA-512's request generator (dispatch://INFRA-512) is to be built into this package, so that
-  one generator remains. The route-mix file and `routes.go` are this package's own GET generator
-  until then.
+- INFRA-512's replay of LINUX's write log is this package's second request source
+  (`-source replay`). The route-mix file and `routes.go` stay its GET generator.
+- `run-step.sh` and `run-series.sh` pass no `-replay-*` flag: a replay step runs `loadgen run`
+  through `stack.sh loadgen` after the replay seed is restored.

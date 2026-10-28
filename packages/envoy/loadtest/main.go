@@ -35,6 +35,8 @@ commands:
   replay-checksum  print row counts and an md5 of every version's markdown and comment body
   replay-logical-dump
                    write a replay seed's documents and comments with every uuid and timestamp masked
+  replay-plan      print, without a stack, the actions and requests a replay run would send (run's
+                   -replay-* flags and -rng-seed), as JSON counts
 
 Run "loadgen <command> -h" for a command's flags.
 `
@@ -70,6 +72,8 @@ func main() {
 		err = runReplayChecksum(os.Args[2:])
 	case "replay-logical-dump":
 		err = runReplayLogicalDump(os.Args[2:])
+	case "replay-plan":
+		err = runReplayPlan(os.Args[2:])
 	case "trigger-sql":
 		fmt.Print(commitTriggerSQL)
 	case "box-busy":
