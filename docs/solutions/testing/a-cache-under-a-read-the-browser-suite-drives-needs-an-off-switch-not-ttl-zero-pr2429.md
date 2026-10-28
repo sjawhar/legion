@@ -10,9 +10,6 @@ tags:
 date: 2026-10-28
 status: active
 module: packages/dispatch/e2e
-related_issues:
-  - "INFRA-652"
-  - "sjawhar/legion#2429"
 ---
 
 # A cache under a read the browser suite drives needs an off switch, not TTL zero
@@ -30,7 +27,7 @@ Extends docs/solutions/testing/a-test-only-knob-widens-the-value-production-runs
   fetch join it and get the answer from before the change. The switch makes every read call the
   dependency itself (the `uncached` branch of `readRouteRoster`, `api/issue_route_status.go`).
 - **Ship it as a `DISPATCH_TEST_*` setting.** A browser test of the real binary cannot reach an
-  unexported field, so the INFRA-56 rule of an unexported seam does not fit here. Use the
+  unexported field, so that document's rule of an unexported seam does not fit here. Use the
   `DISPATCH_TEST_SETTLE_DELAY` pattern instead (`cmd/dispatch/main.go`): a settings row; boot
   refused unless `DISPATCH_TEST_HOOKS=1`; a `TestEverySettingReachesItsReader` case that proves
   the value reaches the router (`routerFor(resolveWith(…))`); and the variable set in both

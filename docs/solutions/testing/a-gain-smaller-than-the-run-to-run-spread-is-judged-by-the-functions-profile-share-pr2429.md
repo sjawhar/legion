@@ -9,9 +9,6 @@ tags:
 date: 2026-10-28
 status: active
 module: packages/envoy/loadtest
-related_issues:
-  - "INFRA-652"
-  - "sjawhar/legion#2429"
 ---
 
 # A gain smaller than the run-to-run spread is judged by the function's profile share

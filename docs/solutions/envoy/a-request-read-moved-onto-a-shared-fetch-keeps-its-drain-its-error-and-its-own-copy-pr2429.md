@@ -10,9 +10,6 @@ tags:
 date: 2026-10-28
 status: active
 module: packages/envoy/internal/dispatch/api
-related_issues:
-  - "INFRA-652"
-  - "sjawhar/legion#2429"
 ---
 
 # A request read moved onto a shared fetch keeps its drain, its error and its own copy
