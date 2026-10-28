@@ -34,9 +34,9 @@ func walk(doc *Node, visit func(n *Node, path []int, pos, end int) bool) {
 	if doc == nil || visit == nil {
 		return
 	}
-	// Measuring every subtree once, up front, keeps the walk linear: asking nodeSize for each node's
-	// end as it is visited measured a node at depth d again for each of its d ancestors. The slice is
-	// sized once from a count of the nodes walked, which allocates half the bytes that growing it does.
+	// Every subtree is measured once, before the first visit, so the walk is linear in its nodes
+	// rather than in nodes times depth. walkedCount sizes the slice exactly, so it is allocated once
+	// and never grown.
 	sizes := make([]int, 0, walkedCount(doc))
 	measure(doc, &sizes)
 	walkNode(doc, nil, 0, sizes, 0, visit)

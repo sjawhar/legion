@@ -356,7 +356,9 @@ func TestWalkVisitsEveryNodeWithTodaysRange(t *testing.T) {
 			t.Errorf("%s: Size = %d, want %d", named.name, got, want)
 		}
 		for _, stopAt := range stopPoints(len(want)) {
-			want, wantPanicked := recordWalk(referenceWalk, named.tree, stopAt)
+			// A walk stopped at visit k makes the full walk's first k visits, and stops before any
+			// panic, since a panic follows a visit that let the walk go on.
+			want, wantPanicked := want[:stopAt], false
 			got, gotPanicked := recordWalk(walk, named.tree, stopAt)
 			if !compareVisits(t, fmt.Sprintf("%s stopped at visit %d", named.name, stopAt), got, want, gotPanicked, wantPanicked) {
 				break
@@ -624,7 +626,7 @@ func markedReadBack(parsed *Node) (*Node, int, error) {
 func middleThird(value string) (from, to int) {
 	runes := []rune(value)
 	first, last := len(runes)/3, len(runes)-len(runes)/3
-	return referenceLen16(string(runes[:first])), referenceLen16(string(runes[:last]))
+	return units16(runes[:first]), units16(runes[:last])
 }
 
 // The measured walk agrees with the walk it replaced on a corpus of real specs, as parsed and as
