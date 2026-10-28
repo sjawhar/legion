@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-568",
-  "completed": "2026-10-28T14:59:53Z",
+  "completed": "2026-10-28T17:05:07Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2397",
   "proof": [
     {
@@ -196,7 +196,8 @@
     "Review round 4 (da35e400): docs/ask_row.go restored to main's file (its diff against main is empty); an ask item with no state now prints main's 'Answer state not reported by this Dispatch' line where the branch printed nothing.",
     "Merge of main 0a921021 (4b1f15ff): routes_table.go conflicted with #2225 (both route descriptions kept); fingerprint aed6caca… unchanged; migrations stay 0135/0136.",
     "Merge of main 5fbd8391 (6f585d36): main's issue-ask repair lease plus this pull request's search-term-stats make the lease pool 12 and the maintenance loops ten; fingerprint aed6caca… -> 429ff707… changed by those counts only; migrations stay 0135/0136.",
-    "Round 6 (a7d9ad82, 25c14fd6): main's #2390 arrived mid-round with a registry prune lease and migration 0135, so leasePoolSize 13, ConnectionsPerProcess 87, eleven maintenance loops, migrations 0136/0137; envoy-infra's DataDisk tests need mkfs.ext4 and were not run in this pod."
+    "Round 6 (a7d9ad82, 25c14fd6): main's #2390 arrived mid-round with a registry prune lease and migration 0135, so leasePoolSize 13, ConnectionsPerProcess 87, eleven maintenance loops, migrations 0136/0137; envoy-infra's DataDisk tests need mkfs.ext4 and were not run in this pod.",
+    "Merge of main 53f39ba0 (402c06ae): dispatchConnectionsPerPod stays 87 = ConnectionsPerProcess (main's 86 after #2464 plus this branch's lease); asks.go and routes_table_test.go (144 routes) resolved; fingerprint 5d641f7c… -> a83c1ac7…."
   ],
   "openQuestions": [
     "Latency on the full production copy was not measured: DISPATCH_BACKUP_BUCKET is unset, no AWS credentials, the pod's agent-secrets enrollment has no grants, and gcloud is not installed. The recall corpus holds issues and specs only.",
