@@ -1,0 +1,10 @@
+kind: Changed
+body: |-
+    Editing an ask through the ask-edit route (`PATCH /api/v1/asks/{id}`, `dispatch edit-ask`) now
+    refuses, with HTTP 400 `ASK_BLOCK_TEXT`, an edit of a decision that breaks its
+    content rule, unless the edit sends `options`, which rebuilds them as one list and repairs the
+    ask. Before, an edit of only its urgency or `multiple` wrote its options, joined across both
+    lists, to the ask.
+time: 2026-10-28T10:53:52.572551815Z
+custom:
+    Issue: pr2433

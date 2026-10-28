@@ -1,9 +1,0 @@
-kind: Fixed
-body: |-
-  An ask that two people's concurrent edits leave holding two option lists, or a paragraph after
-  its options, now keeps every word in every editor and in the stored document, stays open, and
-  shows as a malformed decision until its text is fixed (INFRA-624). The browser editor refused to
-  build such an ask, so y-prosemirror deleted it, with all its text, from the shared document
-  every editor and the server read, and settlement then retracted it. The editor now builds an ask
-  holding any non-empty run of the blocks the server accepts in one; its own edits, input rules,
-  pastes and markdown imports still hold an ask to `paragraph+ bullet_list?`.

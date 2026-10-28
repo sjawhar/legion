@@ -1010,7 +1010,7 @@ then reads each ask by its id before and after the splice (`docs/ask_blocks.go` 
 children break the content rule `paragraph+ bullet_list?` (`pmdoc.AskContentError`: a paragraph
 after its options or a second bullet list parses, but the browser's card takes its question from
 the ask's first child and its options from its last, so settlement marks such an ask `invalid` and
-keeps its row as it was, `readAskBlockStrictly`), or when it repeats an earlier
+keeps its row as it was, open or decided, `readAskBlockStrictly`), or when it repeats an earlier
 ask's id. The first ask left unreadable whose id was readable before is `400 INVALID_ASK_BLOCK` with
 that reason, so a question given a code block, a paragraph after the options, a second list or an
 emptied question is refused. An ask under a held id is refused one step earlier, by the write's
@@ -2118,6 +2118,11 @@ markdown a version records, never a list of forbidden characters: whatever the b
 back unchanged is refused, and an option label containing `": "` - the separator between a label
 and its description - is one example rather than the only one. A single newline is
 carried as a hard break; surrounding whitespace is trimmed, as the parser trims it.
+An edit of an ask whose body breaks its content rule (`pmdoc.AskContentError`) is refused
+`400 ASK_BLOCK_TEXT` with field `block` (`ErrAskBlockUnrepresentable`), whatever else it names,
+unless it sends `options`, which rebuilds the options as one list and so repairs the ask; the
+reason is the content rule's text plus "send options to rebuild the options as one list". Before,
+an edit naming only `urgency` or `multiple` wrote the options joined across both lists to the row.
 Settlement retracts an ask whose block left the document in its own name,
 `{kind: "system", id: "document-settlement"}`, and restores only a retraction it wrote - a
 person's or a session's retract stands however the document moves, which is why `resolve`
@@ -2129,9 +2134,10 @@ rollback - carries none, so a missing mark does not prove a new answer.
 A browser-edited ask settlement cannot read (`readAskBlockStrictly`) - one its parse refuses, such
 as a heading or code block in it, an emptied question or an option without a label, or one that
 breaks its content rule, a second bullet list or a paragraph after its list, which concurrent edits
-can leave and the browser editor keeps - retains its indexed ask, open and unchanged, carries the
-server-owned `invalid` attribute naming the reason, and emits `block.invalid`; repairing its body
-clears `invalid` before updating the ask row.
+can leave and the browser editor keeps - carries the server-owned `invalid` attribute naming the
+reason and emits `block.invalid`. An open ask's indexed row stays open and unchanged; an answered
+or resolved ask keeps its decided row and answer. Repairing its body clears `invalid` before
+updating the ask row, and writes a decided ask's decided wording back into the block.
 Markdown that becomes a whole document - a spec at issue creation, an uploaded document or version -
 is refused with `400 INVALID_ASK_BLOCK` when an ask's body breaks its content rule,
 `paragraph+ bullet_list?` - one or more paragraphs, then at most one bullet list, last
