@@ -2,22 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-571",
-  "completed": "2026-10-27T17:19:53Z",
-  "round": 3,
-  "decision": "approved",
-  "reviewedCodeHead": "7ae2e23e7bb4 (branch head before this handoff: ce0ab537, which adds only .legion/)",
+  "completed": "2026-10-28T10:07:26Z",
+  "round": 6,
+  "decision": "changes_requested",
+  "reviewedCodeHead": "670e2054f960 (forward merge of main 184897ac; branch head before this handoff 9b85ff7f adds only .legion/)",
   "critical": 0,
-  "important": 0,
-  "minor": 0,
-  "keyFindings": [],
-  "verified": [
-    "Forward merge b481cb62 (main 2e8c68cd into 1772ba38) is clean: `jj diff -r b481cb62` against its auto-merge is empty.",
-    "copied_asks.go:211-232: `(select 1 ... limit 1) is null` returns the same rows as the NOT EXISTS it replaces; the saved EXPLAIN after the change reads asks through `Limit -> Index Scan using asks_block_id_unique` on 16 and on 18; before, both planned a hashed SubPlan over Seq Scan on asks (18 with Disabled: true).",
-    "dev-postgres.sh prints `grep -c -x -- '-- PostgreSQL database cluster dump complete' <dump>` before the old container stops; pg_dumpall writes that line last on REL_16 and REL_18 (thermonuclear deep review read pg_dumpall.c).",
-    "CI at 7ae2e23e (merge ref c83b66e5): required lint, typecheck, test and pr-title success; envoy-go attempt 2 (job 122284632205) 180006|0.8.7, 80 packages ok, 0 FAIL, the real-cluster move replay PASS for whole, empty and cut dumps; envoy-go-race success on 18; Dispatch, Broker and Daemon Postgres 16 jobs success, each 160015|0.8.7 (daemon 58 packages ok, 0 FAIL); dispatch, dispatch-memory, dispatch-multiprocess, broker-multiprocess, envoy-infra-go, envoy-smoke, envoy-e2e-local success. Compare 7ae2e23e...ce0ab537: 2 files, all under .legion/.",
-    "Attempt 1 at 7ae2e23e: envoy-go failed on internal/dispatch/api's 10-minute go test deadline (main on Postgres 16 fails the same way: runs 40503757570, 40500675840, 40490045265, 40487532785; tracked as dispatch://INFRA-523), and dispatch failed one Playwright case on the iphone project only (MESSAGE_NOT_FOUND race; the same case passed on chromium). Both passed on the one re-run.",
-    "Both E2E lines in the PR body name 7ae2e23e with negative controls; every review thread carries the reviewer's answer and is resolved."
+  "important": 1,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": ".github/workflows/envoy-and-contracts.yaml:1155,1157,1163,1448,1450,1457; .github/workflows/pr-and-main.yaml:461,463,468; .dispatch/architecture/release-engineering.md:6; packages/envoy/.changes/unreleased/INFRA-571-Changed-20261028-095229.yaml (name and line 16)",
+      "description": "The PR adds the deployment's Dispatch issue keys and dispatch:// links to files of a public repository: the three '(until INFRA-572)' job names, the six job comments naming INFRA-572 and INFRA-573, the architecture sentence, and the fragment's file name and Issue field. The INFRA controller's ruling (relayed by the INFRA-148 architect at 2026-10-28T10:05Z, under 'Stop new leaks only', INFRA-472) forbids any added line outside .legion/ naming one. Fix: describe the condition instead ('until production runs Postgres 18'), rename the fragment by `changie new --custom Issue=pr2364` (file pr2364-Changed-<time>.yaml, Issue: pr2364). Check: `jj diff --git --from <merge base> --to <head> '~glob:\".legion/**\"'` has no added line or path matching INFRA-[0-9]+, LEGION-[0-9]+ or dispatch://. Retro cannot carry this: it may touch only docs/solutions and .legion/."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/.changes/unreleased/INFRA-571-Changed-20261028-095229.yaml:5-6",
+      "description": "The fold files packages/envoy fragments under legion-envoy-v releases (changelog-fold.yaml:65-68), while the default ships on envoy-infra-v tags, so 'moves to this release or later' will sit under a listener version. Name the release explicitly, e.g. 'the first envoy-infra release after v2.9.1'."
+    }
   ],
-  "thermonuclear": "deep-review and code-quality ran once at 7ae2e23e: deep-review APPROVE, no critical or important, one minor (PR body staleness, fixed in the brief and named for the implementer); code-quality two minor test cleanups, on the Fast-follow line.",
-  "fastFollow": "dev-postgres.test.sh: lost_move compares against the whole move's .after instead of its own .before (the rule the refusal states); FAKE_DUMP is branched on twice with the :? guard only on the first. PR body: 'Proven by' still says migrations 100-120 where this head applies 100..129."
+  "verified": [
+    "The 670e2054 resolution keeps both sides of release-engineering.md:6, moves the Breaking entry out of CHANGELOG.md (equal to main's) into a fragment valid for packages/envoy/.changie.yaml; thermonuclear pair at 670e2054: both APPROVE, the deep review's one Minor is the second finding above.",
+    "CI at 670e2054 was queued when read at 2026-10-28T10:02Z; a request for changes does not wait on it."
+  ]
 }
