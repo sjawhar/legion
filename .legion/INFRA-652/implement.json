@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-652",
+  "completed": "2026-10-28T11:41:00Z",
+  "round": 4,
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2429",
+  "proof": [
+    {
+      "criterion": "Narrowed round (architect, 2026-10-28T11:40Z): the three docs/solutions learnings are named <slug>-pr2429.md and carry no Dispatch key in front matter or text; nothing else changes.",
+      "surface": "the pull request's diff between the READY head 733870d5 and head 143ec5b5, and the three files at head",
+      "command": "jj diff --from 733870d5 --to 143ec5b5 --stat; jj diff --from 733870d5 --to 143ec5b5 --git; grep -c INFRA-652 docs/solutions/*/*-pr2429.md; bash .github/scripts/check-private-names.sh",
+      "observed": "3 files changed, all renames under docs/solutions/ from -INFRA-652.md to -pr2429.md, +1/-10: each related_issues block (INFRA-652 and sjawhar/legion#2429) removed and one prose 'the INFRA-56 rule' reworded to \"that document's rule\". INFRA-652 occurs 0 times in each file. The only remaining keys are inside two 'Extends docs/solutions/...-INFRA-56.md' and '...-INFRA-228.md' lines, the exact paths of existing files another retro wrote, which the extends link needs and this retro may not rename.",
+      "headSha": "143ec5b5f6cc8645135dd7cf496fc5c91aec0c58",
+      "negativeControl": "At 733870d5 the same grep counted INFRA-652 in each of the three files (file names ending -INFRA-652.md and a related_issues entry); no path outside docs/solutions/ appears in the delta, so runtime code, tests and the earlier proofs (e66f2b32 drain, 76dbf910 load test) are untouched."
+    }
+  ],
+  "filesChanged": [
+    "docs/solutions/envoy/a-request-read-moved-onto-a-shared-fetch-keeps-its-drain-its-error-and-its-own-copy-pr2429.md",
+    "docs/solutions/testing/a-cache-under-a-read-the-browser-suite-drives-needs-an-off-switch-not-ttl-zero-pr2429.md",
+    "docs/solutions/testing/a-gain-smaller-than-the-run-to-run-spread-is-judged-by-the-functions-profile-share-pr2429.md"
+  ],
+  "deviations": [
+    "The two Extends lines keep the exact paths of existing files whose names end in -INFRA-56.md and -INFRA-228.md; told to the architect."
+  ],
+  "openQuestions": []
+}
