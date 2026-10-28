@@ -308,19 +308,19 @@ test("unfollowing a follower while a role route's holder is unknown says the rou
   }
 });
 
-test("a route change that closes the issue moves the open card's route row without a reload", async ({
+test("a route change in a status write moves the open card's route row without a reload, and the close that follows withdraws the card", async ({
   browser,
 }) => {
   const moved = "e2e-reach-routed-next";
   await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "The route moves as it closes" });
+  const issue = await createIssue({ project: "CORE", title: "The route moves, then it closes" });
   const ask = await createAsk(
     issue.key,
     { options: [{ label: "Ship" }, { label: "Hold" }], question: "Ship it?" },
     { actor: asker, as: "agent" }
   );
-  // No claim: closing a claimed issue releases it in the same write, and that `issue.released`
-  // would refresh the card on its own, so only `issue.closed` carries the route change here.
+  // No claim: a claim's `issue.released` would refresh the card on its own, so only the issue
+  // event of each PATCH carries what moves here.
   await patchIssue(issue.key, { route: `session:${routed}` });
   await setLiveSessions([
     { session_id: asker.id, title: "Asker (e2e)" },
@@ -337,19 +337,26 @@ test("a route change that closes the issue moves the open card's route row witho
     await expect(recipients).toContainText("Reaches 2");
     // Focus stays on this toggle inside the card's row. The Inbox lists an open ask only while its
     // issue is open, but it holds a row the reader's focus is in where they last saw it, so the
-    // card stays mounted in the Inbox after the close and its own thread is what must move.
+    // card stays mounted in the Inbox after the close below.
     await recipients.getByRole("button", { name: /^Reaches/ }).click();
     const viaIssue = recipients.getByRole("list", { name: "Via claim or route" });
     const routeRow = (session: string) =>
       viaIssue.getByRole("listitem").filter({ has: page.locator(`[title='${session}']`) });
     await expect(routeRow(routed)).toContainText("via route");
 
-    // One PATCH sets the new route and closes the issue: the server emits `issue.closed` alone.
-    await patchIssue(issue.key, { route: `session:${moved}`, status: "done" });
+    // One PATCH sets the new route and moves the status: one `issue.updated` names both, and the
+    // card's own thread is what must move.
+    await patchIssue(issue.key, { route: `session:${moved}`, status: "in_progress" });
     await expect(routeRow(moved)).toContainText("Routed next (e2e)");
     await expect(routeRow(moved)).toContainText("via route");
     await expect(recipients.locator(`[title='${routed}']`)).toHaveCount(0);
     await expect(recipients).toContainText("Reaches 2");
+
+    // The close withdraws the open ask: the mounted card says so and lists no recipients, since
+    // nobody can answer it any more.
+    await patchIssue(issue.key, { status: "done" });
+    await expect(card).toContainText("Withdrawn when alice closed the issue");
+    await expect(recipients).toHaveCount(0);
     await expect(card).toBeVisible();
   } finally {
     await alice.close();
