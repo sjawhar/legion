@@ -84,7 +84,8 @@ grant it writes and the one the consumer writes.
 
 GitHub does not redeliver a webhook delivery that failed. When NATS is configured and the App's
 private key (`DISPATCH_APP_PEM_B64`) is present, Dispatch redelivers them itself, following GitHub's
-documented approach. Every two minutes it lists the App webhook's attempts
+documented approach. At start and every two minutes after (Background loops, below: each sweep
+two minutes plus up to a tenth after the last) it lists the App webhook's attempts
 (`GET /app/hook/deliveries`) and judges each delivery by its GUID, as GitHub's own redelivery
 script does: a GUID with an `OK` attempt is delivered, whatever its failures, and it asks GitHub to
 redeliver each other GUID with an attempt whose status is not `OK`
@@ -477,18 +478,18 @@ What the two processes share, and what each keeps to itself:
   by, asking every two seconds, and takes the durable over within seconds of the holder dying.
 - No leased background loop runs a pass beside another process's pass of the same loop. Each
   pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a process
-  whose attempt lands inside another's pass finds it held and logs a skip. The eight timer loops —
+  whose attempt lands inside another's pass finds it held and logs a skip. The seven timer loops —
   the delivery reconcile, the architecture import, the webhook redelivery sweep, the outbox's
-  daily document compaction, the block index reconciliation, the edit notices, the repair of
-  closed and reopened issues' asks and the prune of the registry of live server processes — also
-  record each pass in `duty_passes` (migration `0115`) with the loop's own period, so a process
-  whose tick lands between another's passes — the ordinary case, since each ticker draws its phase
-  at boot and a rolling update starts the second process minutes after the first — finds the
-  period already served and logs the same skip: each runs once per period across the processes.
-  The two woken loops, the reference excerpts and the suggestion outcomes, take their lease with
-  no period: a process that finds it held tries again until a pass of its own runs, since the
-  other process's pass may have read before the change that woke this one (Background loops,
-  below). The settlement resumption, the delivery live hub, the event-stream relay, the
+  daily document compaction, the block index reconciliation, the repair of closed and reopened
+  issues' asks and the prune of the registry of live server processes — also record each pass in
+  `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick lands
+  between another's passes — the ordinary case, since each ticker draws its phase at boot and a
+  rolling update starts the second process minutes after the first — finds the period already
+  served and logs the same skip: each runs once per period across the processes. The three
+  woken loops, the reference excerpts, the edit notices and the suggestion outcomes, take their
+  lease with no period: a process that finds it held tries again until a pass of its own runs,
+  since the other process's pass may have read before the change that woke this one (Background
+  loops, below). The settlement resumption, the delivery live hub, the event-stream relay, the
   stale-room evictor, the shared wake listener and the document rooms' timers stay per-process by
   design, and the embedding queue, the task progress reconciliation and the outbox's own scan
   claim their own work; the embedding queue's coverage pass runs in every process with no lease,
@@ -568,7 +569,7 @@ classes at the call site.
 
 **Woken loops** run a pass at start and then only when a Postgres notification says their work
 may have changed, or when a due time their last pass asked for comes round. With nothing written
-and nothing due they hold no timer and send no statement. The three that run passes
+and nothing due they hold no timer and send no statement. The four that run passes
 (`duty.RunWoken`) start two passes no closer together than the period of the ticker each
 replaced, so under load each runs no more often than that ticker did.
 
@@ -592,6 +593,16 @@ replaced, so under load each runs no more often than that ticker did.
   failing neither hold the loop at 2 s nor keep the ones sorting after them waiting, and the
   earliest due time is the loop's only timer. Each process's first pass also marks owed the
   excerpts a pre-`0092` build left stale (`refs.MarkStaleExcerpts`), once.
+- The edit notice sweep (`docs.Service.RunEditNotices`, lease `edit-notices`) is woken by a row
+  trigger on `document_edit_notices` (`0142`) that notifies `dispatch_edit_notices` each time a
+  writer gives a notice a due time: a person's settled version opening or moving its quiet
+  window, from either build. A sweep sends the notices that are due, each as one
+  `artifact.human_edited` event, and then reads the earliest due time left
+  (`document_edit_notices_due`) and arms one timer for it, so a notice goes when its quiet window
+  ends. Sweeps start at least 5 s apart, the period of the timer it replaced: a notice still due
+  after a sweep (past a batch of 20, or one whose send failed) is swept again 5 s later, and a
+  notice goes at most 5 s after its due time. A held window, which names nobody and has no due
+  time, neither wakes it nor keeps a timer.
 - The suggestion outcome sweep (`api.RunSuggestionOutcomeSweep`, lease `suggestion-outcomes`) is
   woken by `dispatch_events` (`0107`), which every event commit notifies whichever process made
   it. Passes start at least 60 s apart. A pass reads the events after its cursor
@@ -612,10 +623,10 @@ replaced, so under load each runs no more often than that ticker did.
   a timer; a read that fails is tried again 30 s later. The release before this one polls the row
   every 30 s and may run beside it during a roll.
 
-The two leased woken loops take their lease with no period. A process that finds it held tries
-again — every 2 s for the excerpts, every minute for the suggestions, plus up to a tenth again —
-until a pass of its own runs, because the other process's pass may have read before the change
-that woke this one.
+The three leased woken loops take their lease with no period. A process that finds it held
+tries again — every 2 s for the excerpts, every 5 s for the edit notices, every minute for the
+suggestions, plus up to a tenth again — until a pass of its own runs, because the other process's
+pass may have read before the change that woke this one.
 
 **Boot passes** run once at start:
 
@@ -636,20 +647,19 @@ that woke this one.
 arrived, a delivery that failed, a source's branch head:
 
 - The delivery reconcile (`delivery.ReconcileInterval`) and the architecture import
-  (`architecture.SyncInterval`) run every 5 minutes through `duty.RunJittered`: the first pass
-  after a random delay within one interval, and each later one after the interval plus up to a
-  tenth again, drawn afresh every period, so two processes' passes drift apart rather than ticking
-  in step.
-- The webhook redelivery sweep (Webhook redelivery, above) runs every 2 minutes on a plain ticker.
+  (`architecture.SyncInterval`) run every 5 minutes through `duty.RunJittered`, the first pass
+  after a random delay within one interval. The webhook redelivery sweep (Webhook redelivery,
+  above; `redeliver.Interval`) runs every 2 minutes, its first sweep at start. Each waits the
+  interval plus up to a tenth again after every pass (`duty.Jittered`), drawn afresh every period,
+  so two processes' passes drift apart rather than ticking in step.
 
 Outside these classes, the outbox still scans on a 5 s retry ticker and compacts daily, the
 settlement resumption still runs every minute, the block index reconciliation (lease
-`block-index`) runs every 30 s (every 2 s while a batch is full), the edit notice sweep (lease
-`edit-notices`) every 5 s and the repair of closed and reopened issues' asks (lease
-`issue-ask-repair`, Database migrations below) every 10 minutes after its boot pass, each
-recording its passes in `duty_passes` with its period, and the per-feature listeners (the
-delivery live hub, the event stream relay, the stale-room evictor) keep their own connections
-and keep-alive pings.
+`block-index`) runs every 30 s (every 2 s while a batch is full) and the repair of closed and
+reopened issues' asks (lease `issue-ask-repair`, Database migrations below) every 10 minutes after
+its boot pass, each recording its passes in `duty_passes` with its period, and the per-feature
+listeners (the delivery live hub, the event stream relay, the stale-room evictor) keep their own
+connections and keep-alive pings.
 
 **One shared listener per process.** Every woken loop waits on one `pglisten.Hub` (owner
 `dispatch background wakes` in its log lines), which holds one connection from the store's
@@ -1200,7 +1210,7 @@ server processes, and `server_build_announcements`, each build the fleet has ann
 exists, and the release before it neither reads nor writes either table, so that release runs
 over the new schema unchanged and the census answers `0`.
 
-Migrations `0136`–`0141` let the background loops wait for a change instead of polling for one
+Migrations `0136`–`0142` let the background loops wait for a change instead of polling for one
 (Background loops, above). Each is additive: the release before them never reads the new tables
 or column, its writes reach the two replaced functions through the same triggers as before, it
 never listens on the new channels, and it keeps polling beside them during the roll. Every census
@@ -1229,6 +1239,12 @@ answers `0`.
   indexes: `write_suggestions_unswept`, the pass's read of the rows not yet swept, and
   `write_suggestions_pending_artifact`, its lookup of the pending suggestions by a new event's
   document.
+- `0142_document_edit_notices_notify` adds a row trigger on `document_edit_notices`, after an
+  insert or an update that leaves a notice with a due time, which notifies
+  `dispatch_edit_notices`. Every writer of such a row — a settlement, a named or snapshot version,
+  a person's rebuild — writes a version and appends its event in the same transaction, which
+  already notifies `dispatch_events`, so it adds no notify-queue lock at commit; a migration of
+  its own, so its transaction holds `document_edit_notices`' lock alone, for milliseconds.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a

@@ -366,34 +366,35 @@ func main() {
 	// whose loops would each run everywhere, so it ends here.
 	//
 	// The loops come in these shapes, so that a database nobody writes costs them nothing except
-	// where GitHub gives them nothing to wake on, and the four timers of the last shape:
+	// where GitHub gives them nothing to wake on, and the three timers of the last shape:
 	//   - woken loops, which run a pass at start and then only when a Postgres notification on the
 	//     shared listener below says their work may have changed, or when a due time their last
 	//     pass asked for comes round: the embedding queue (embedqueue.WakeChannel), the reference
-	//     excerpts (docs.ExcerptsOwedChannel), the suggestion outcomes (api.EventsChannel) and the
-	//     delivery settings both intakes route by (delivery.SettingsChannel). The two leased ones,
-	//     reference-excerpts and suggestion-outcomes, take their lease with no period
-	//     (duty.RunWoken): a process that finds it held retries until a pass of its own runs, since
-	//     the other process's pass may have read before the change that woke this one.
+	//     excerpts (docs.ExcerptsOwedChannel), the edit notices (docs.EditNoticesChannel), the
+	//     suggestion outcomes (api.EventsChannel) and the delivery settings both intakes route by
+	//     (delivery.SettingsChannel). The three leased ones, reference-excerpts, edit-notices and
+	//     suggestion-outcomes, take their lease with no period (duty.RunWoken): a process that
+	//     finds it held retries until a pass of its own runs, since the other process's pass may
+	//     have read before the change that woke this one.
 	//   - boot passes, which run once at start: the embedding coverage pass (embedqueue.Run starts
 	//     it, and repeats only its identity steps while another identity's rows remain) and the
 	//     task progress reconciliation (retrying, briefly, rows another writer held).
 	//   - timers that stay, because GitHub has no feed of what they would miss - a webhook that
 	//     never arrived, a delivery that failed, a source's branch head: the delivery reconcile
-	//     and the architecture import every 5 minutes, each waiting its interval plus up to a tenth
-	//     again drawn afresh every period (duty.RunJittered), so two processes' ticks drift apart
-	//     rather than staying in step; and the webhook redelivery sweep every 2 minutes, on a plain
-	//     ticker. Under the lease each of these passes is recorded with its loop's own period
-	//     (duty_passes, migration 0115), which is what makes it run once per period rather than
-	//     once per process: two tickers started minutes apart almost never meet inside a pass, so
-	//     the lease alone would exclude nothing.
+	//     and the architecture import every 5 minutes, each starting after a random delay within
+	//     one interval (duty.RunJittered), and the webhook redelivery sweep every 2, sweeping at
+	//     start (redeliver.Sweeper.Run); each then waits its interval plus up to a tenth again
+	//     drawn afresh every period (duty.Jittered), so two processes' ticks drift apart rather
+	//     than staying in step. Under the lease each of these passes is recorded with its loop's
+	//     own period (duty_passes, migration 0115), which is what makes it run once per period
+	//     rather than once per process: two tickers started minutes apart almost never meet inside
+	//     a pass, so the lease alone would exclude nothing.
 	//   - timers that poll the database: the block-index reconciliation (every 30 s, 2 s while a
-	//     batch is full), the edit-notice sweep (every 5 s), the repair of closed and reopened
-	//     issues' asks (api.RunIssueAskRepair, every 10 minutes on a plain ticker, after the
-	//     boot's own unleased pass) and the prune of the server process registry
-	//     (processes.RunPrune, every minute, which joinRegistry starts below), each recording its
-	//     passes in duty_passes like the timers above; each tick sends its statements whether or
-	//     not anything is owed.
+	//     batch is full), the repair of closed and reopened issues' asks (api.RunIssueAskRepair,
+	//     every 10 minutes on a plain ticker, after the boot's own unleased pass) and the prune of
+	//     the server process registry (processes.RunPrune, every minute, which joinRegistry starts
+	//     below), each recording its passes in duty_passes like the timers above; each tick sends
+	//     its statements whether or not anything is owed.
 	//
 	// The shared listener is one pglisten.Hub per process, on one held connection of the store's
 	// listener pool, carrying every woken loop's channel. Every wake is registered before it runs
@@ -465,6 +466,7 @@ func main() {
 		embeddingsWake = wakes.Wake(embedqueue.WakeChannel)
 	}
 	excerptsWake := wakes.Wake(docs.ExcerptsOwedChannel)
+	editNoticesWake := wakes.Wake(docs.EditNoticesChannel)
 	eventsWake := wakes.Wake(api.EventsChannel)
 	if natsClient != nil && appCtx.GitHub() != nil {
 		settingsWake = wakes.Wake(delivery.SettingsChannel)
@@ -494,8 +496,10 @@ func main() {
 	go documentService.RunReferenceExcerptReconciliation(ctx, leases, excerptsWake)
 	// Each document's edit notice goes once its quiet window after a person's last
 	// settled version ends, as one artifact.human_edited event; the window is a row, so a notice
-	// still pending when this process stops is sent by the next sweep of either process.
-	go documentService.RunEditNotices(ctx, leases)
+	// still pending when this process stops is sent by the next sweep of either process. The sweep
+	// is woken by the trigger that announces each notice given a due time, and waits for the
+	// earliest one.
+	go documentService.RunEditNotices(ctx, leases, editNoticesWake)
 	// The block index: each document version no block-aware write indexed - every document at
 	// migration 0121, each version a build without the block index writes during a roll, and each
 	// rebuild-refs marks - and each comment, ask and issue message citing a block (`#b-`) that such

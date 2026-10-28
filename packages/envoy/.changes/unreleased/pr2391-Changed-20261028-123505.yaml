@@ -13,7 +13,7 @@ body: |-
     minutes: coverage repeats only its identity steps, and only while another embedder identity's
     rows remain, and task progress retries the rows another writer held for about a minute. The
     delivery reconcile, the architecture import and the webhook redelivery sweep keep their timers;
-    the first two now draw their jitter afresh every period, so two processes' passes drift apart
+    all three now draw their jitter afresh every period, so two processes' passes drift apart
     (`cmd/dispatch/README.md`, "Background loops").
 time: 2026-10-28T12:35:05.203357249Z
 custom:

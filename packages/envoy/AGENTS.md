@@ -2782,9 +2782,11 @@ the synchronous listener call records the sent or failed attempt instead of blin
   human's new comment on a document it wrote.
 - `artifact.human_edited` goes to the issue's route and to each session the document credits,
   never to a person. Dispatch appends it once a document has been quiet for 30 seconds after a
-  person's last settled browser version (`document_edit_notices`, migration 0129, swept every 5 s
-  under the `edit-notices` lease by `docs.RunEditNotices`); its actor is the last person the
-  window knows edited, and its payload names the document, the two versions the quiet window spans, each person
+  person's last settled browser version (`document_edit_notices`, migration 0129, sent by
+  `docs.RunEditNotices` under the `edit-notices` lease, a woken loop that the row trigger of
+  migration 0142 wakes and that waits for the earliest due time, sweeps at least 5 s apart); its
+  actor is the last person the window knows edited, and its payload names the document, the two
+  versions the quiet window spans, each person
   who edited, and the unified diff of the two versions, cut at its last line end within 4,096
   bytes (`ArtifactHumanEditedEventPayload` in `packages/contracts/src/dispatch-api.ts`). The
   document is the payload's `artifact_id`, and its sessions are read as a comment's are

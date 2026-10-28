@@ -1209,9 +1209,10 @@ func lockTables(t *testing.T, database *store.Store, mode string, tables ...stri
 // IssueAskRepairInterval (10 min) in, the boot's repair taking no lease; architecture-import's
 // and delivery-reconcile's first pass is jittered uniformly over SyncInterval/ReconcileInterval
 // (5 min) and each process draws its own, so whether their passes ever overlap is a coin toss no
-// test should turn into a flake; and edit-notices' period is five seconds, so this window holds
-// many of its periods, each served once
-// (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce holds what its lease is for).
+// test should turn into a flake; and edit-notices is a woken loop whose passes here, with nothing
+// due, take milliseconds, so whether the two processes' boot passes meet is luck too
+// (docs.TestEditNoticeSweepRetriesAHeldLease holds its retry, and
+// docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce what its lease is for).
 func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
 	fake := startGitHubFake(t)
@@ -1268,7 +1269,7 @@ func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 		{"issue-ask-repair", "its first leased pass is one IssueAskRepairInterval (10 min) after each process started"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
 		{"delivery-reconcile", "its first pass is jittered over ReconcileInterval (5 min) and each process draws its own"},
-		{"edit-notices", "its period is 5 s, so the window holds many periods, each served once"},
+		{"edit-notices", "a woken loop whose passes take milliseconds here, so its boot passes meet by luck"},
 	} {
 		if ran := countLease(pair.a, leaseRan, unobserved.lease) + countLease(pair.b, leaseRan, unobserved.lease); ran > 0 {
 			t.Logf("%s ran %d times in the window, which this row does not hold to a count: %s",
