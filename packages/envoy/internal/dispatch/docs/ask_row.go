@@ -110,6 +110,33 @@ func queueAskResolution(b *store.WriteBatch, within, id string, encoded []byte) 
 	b.Queue(what, `update asks set state = 'resolved', resolution = $2 where id = $1`, id, encoded)
 }
 
+// WriteRestoredAsks writes back open each of restored, asks an issue's close withdrew whose rows
+// its reopen restores: each row gets state open with no answer and no resolution and keeps
+// everything else. The update is a write (write), queued on ctx's ledger when the caller joined
+// one; each block ask's row is recorded as it will stand (recordAskBlock), so a read of the block
+// asks or of a copy's source later in the transaction - the reopen's write of the asks' blocks and
+// copies (WriteIssueAskStates), which classifies them by the rows - reads it open, as it would
+// once the update had run.
+func WriteRestoredAsks(ctx context.Context, tx pgx.Tx, restored []model.Ask) error {
+	if len(restored) == 0 {
+		return nil
+	}
+	ids := make([]string, len(restored))
+	for index, ask := range restored {
+		ids[index] = ask.ID
+	}
+	if err := writeExec(ctx, tx, "restore withdrawn ask",
+		`update asks set state = 'open', answer = null, resolution = null where id = any($1::uuid[])`, ids); err != nil {
+		return err
+	}
+	for _, ask := range restored {
+		if ask.BlockArtifactID != nil {
+			recordAskBlock(ctx, tx, *ask.BlockArtifactID, ask)
+		}
+	}
+	return nil
+}
+
 // askTimestamp formats a nullable ask timestamp as the wire's RFC 3339 UTC text, nil for nil.
 func askTimestamp(value *time.Time) *string {
 	if value == nil {

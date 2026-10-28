@@ -36,9 +36,9 @@ type Config struct {
 	// check's bound_at is its open plus this. Zero takes the shipped 14 days.
 	ProductionCheckBound time.Duration
 	// BuiltFrom is the repository the daemon's binary is built from (`sjawhar/legion` in a release
-	// build): a build the daemon boots on, or Dispatch starts on, is compared only against the
-	// open production checks of that repository, since no other repository's merge can be in it.
-	// Empty, no build is compared.
+	// build): a build the daemon boots on, or Dispatch announces every server process serves
+	// (server.started), is compared only against the open production checks of that repository,
+	// since no other repository's merge can be in it. Empty, no build is compared.
 	BuiltFrom string
 	// Deploys are the project's deploy workflows (config.Project.Deploys, `projects.<KEY>.deploys`):
 	// a completed run of one on the default branch of its repository is read from GitHub for each
@@ -55,6 +55,11 @@ type Config struct {
 	// Repositories is the daemon's in-memory view of the project's repositories, which the workflow
 	// records an issue's repository and default branch from when it first records the issue.
 	Repositories Repositories
+	// NoteUnread is told, inside the fact's transaction, of each issue the workflow did not record
+	// because its repository resolved Unread (left out for now, GitHub not answering its
+	// installation read): the daemon takes it into that repository's recovery whatever it resolves
+	// to by then. It keeps no state of the issue's own. Nil notes none.
+	NoteUnread func(key, resolved string)
 }
 
 // Engine interprets Table and writes only records and outbox rows through the supplied Store.

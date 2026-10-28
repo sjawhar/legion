@@ -31,6 +31,7 @@ type streamInfoLookup interface {
 }
 
 type apiError struct {
+	Code     string   `json:"code,omitempty"`
 	Error    string   `json:"error"`
 	Expected []string `json:"expected,omitempty"`
 }
@@ -693,6 +694,10 @@ type sessionInfo struct {
 	Roles          []string `json:"roles"`
 	UpdatedAt      int64    `json:"updated_at"`
 	LastSeen       int64    `json:"last_seen"`
+	// The plugin the session registered through and its build; absent for a session whose plugin
+	// predates the fields.
+	Plugin        string `json:"plugin,omitempty"`
+	PluginVersion string `json:"plugin_version,omitempty"`
 }
 
 // sessionInterestReadTimeout bounds sessionInfoFor's read of one session's interest record from
@@ -732,6 +737,8 @@ func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID str
 		Roles:          roles,
 		UpdatedAt:      entry.UpdatedAt,
 		LastSeen:       entry.UpdatedAt,
+		Plugin:         entry.Plugin,
+		PluginVersion:  entry.PluginVersion,
 	}
 	readCtx, cancel := context.WithTimeout(ctx, sessionInterestReadTimeout)
 	defer cancel()
@@ -1253,14 +1260,38 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			writeJSONError(w, http.StatusBadRequest, "host is not a host name or address", "host")
 			return
 		}
-		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir))
+		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir), slog.String("plugin", body.Plugin), slog.String("plugin_version", body.PluginVersion))
+		// A topic reaching a private stream subject (another session's inbox, a failed-delivery
+		// lane, the Legion controller lane; bus.ReachesPrivateStreamSubject) is left out and named in
+		// a warning, the rest of the registration stored: the topics stored here drive the
+		// listener's fan-out to serve-port sessions (`store.Registry.Match`), and such a topic would
+		// hand this session messages meant for another session or for the controller's role holder;
+		// /v1/replay refuses such a subject on its own (`bus.SharedStreamTopic`). A registration
+		// naming one is not refused whole, since a released pi-envoy registers every subject it has
+		// open, a fork parent's agent subject and any topic its envoy_subscribe took included. The
+		// registry drops such a topic from the stored row too (`store.Registry.Upsert`), so a row an
+		// earlier build stored with one is cleaned by this registration.
+		warnings := make([]string, 0)
+		topics := make([]string, 0, len(body.Topics)+1)
+		for _, topic := range append(body.Topics, contracts.AgentSubject(body.SessionID)) {
+			if bus.ReachesPrivateStreamSubject(body.SessionID, topic) {
+				warnings = append(warnings, fmt.Sprintf("%s was not registered: it reaches a private stream subject (another session's inbox, a failed-delivery lane, or the Legion controller lane), and of those a session registers only its own agent subject, %s",
+					topic, contracts.AgentSubject(body.SessionID)))
+				continue
+			}
+			topics = append(topics, topic)
+		}
+		if len(warnings) > 0 {
+			logger.Warn("listener subscribe refused topics reaching private stream subjects",
+				slog.String("session_id", body.SessionID), slog.Any("refused", warnings))
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
 		item, err := d.registry.UpsertWithin(ctx, store.Interest{
 			SessionID: body.SessionID,
 			MachineID: machineID,
 			Dir:       body.Dir,
-		}, append(body.Topics, contracts.AgentSubject(body.SessionID)))
+		}, topics)
 		if err != nil {
 			logger.Warn("listener upsert failed",
 				slog.String("session_id", body.SessionID),
@@ -1278,7 +1309,6 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		}
 		warningCtx, cancelWarnings := context.WithTimeout(ctx, unwiredRepositoryWarningTimeout)
 		defer cancelWarnings()
-		warnings := make([]string, 0)
 		warnedRepositories := make(map[string]struct{})
 		for _, topic := range body.Topics {
 			parsed, ok := parseGithubRepositoryTopic(topic)
@@ -1348,6 +1378,7 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions))
 	v1.HandleFunc("/v1/messages/send", sendHandler(d, logger))
 	v1.HandleFunc("/v1/messages/publish", publishHandler(d, logger))
+	v1.HandleFunc("/v1/replay", replayHandler(d))
 	v1.HandleFunc("/v1", func(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "not found")
 	})

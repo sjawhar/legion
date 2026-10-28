@@ -82,11 +82,25 @@ func (b *Broker) Append(ctx context.Context, tx pgx.Tx, e model.Event) (model.Ev
 // queued after them is read. A statement queued right after these may name the event's id as
 // store.LatestEventID.
 func (b *Broker) QueueAppend(batch *store.WriteBatch, e model.Event, appended func(model.Event)) error {
+	return b.QueueAppendWithLogins(batch, e, nil, appended)
+}
+
+// QueueAppendWithLogins is QueueAppend for an event whose payload names thread_logins: the insert
+// itself reads them (logins) and writes them into the payload it stores, so they are what the
+// transaction's earlier statements, and the user_threads triggers those fired, left - what the
+// writer would read after its write - with no read in Go between the write and the event. The
+// appended event carries them too. A nil logins is QueueAppend.
+func (b *Broker) QueueAppendWithLogins(batch *store.WriteBatch, e model.Event, logins *Logins, appended func(model.Event)) error {
 	if b == nil {
 		return fmt.Errorf("event broker required")
 	}
 	if _, err := eventOwnerKey(e); err != nil {
 		return err
+	}
+	if logins != nil {
+		if _, err := withThreadLogins(e.Payload, nil); err != nil {
+			return err
+		}
 	}
 	e.Notify = b.Notify(e)
 	actor, err := json.Marshal(e.Actor)
@@ -112,7 +126,15 @@ func (b *Broker) QueueAppend(batch *store.WriteBatch, e model.Event, appended fu
 	// last_seq as the statements before it left it, and the owner's update writes the very
 	// sequence the insert took. Only the owner the event names matches a row: the other two keys
 	// are null, and an ownerless event (a session-addressed message) takes sequence 0 and advances
-	// nothing.
+	// nothing. The thread_logins the payload names are read in the same snapshot, which holds
+	// every write the transaction made before it.
+	storedPayload, storedLogins := `$6`, `null::jsonb`
+	args := []any{e.IssueKey, e.ArtifactID, e.ProjectKey, e.Type, actor, payload, e.Notify}
+	if logins != nil {
+		storedPayload = `$6::jsonb || jsonb_build_object('thread_logins', (` + logins.query("$8") + `))`
+		storedLogins = `payload->'thread_logins'`
+		args = append(args, logins.key)
+	}
 	batch.Queue("", `
 		with appended as (
 			insert into events (issue_key, artifact_id, project_key, seq, type, actor, payload, notify)
@@ -120,8 +142,8 @@ func (b *Broker) QueueAppend(batch *store.WriteBatch, e model.Event, appended fu
 				(select last_seq from issues where key = $1) + 1,
 				(select last_seq from artifacts where id = $2) + 1,
 				(select last_seq from projects where key = $3) + 1,
-				0), $4, $5, $6, $7)
-			returning id, seq, created_at
+				0), $4, $5, `+storedPayload+`, $7)
+			returning id, seq, created_at, `+storedLogins+` as thread_logins
 		), issue as (
 			update issues set last_seq = appended.seq, updated_at = greatest(issues.updated_at, appended.created_at)
 			from appended where issues.key = $1
@@ -130,10 +152,19 @@ func (b *Broker) QueueAppend(batch *store.WriteBatch, e model.Event, appended fu
 		), project as (
 			update projects set last_seq = appended.seq from appended where projects.key = $3
 		)
-		select id, seq, created_at from appended
-	`, e.IssueKey, e.ArtifactID, e.ProjectKey, e.Type, actor, payload, e.Notify).QueryRow(func(row pgx.Row) error {
-		if err := row.Scan(&event.ID, &event.Seq, &event.CreatedAt); err != nil {
+		select id, seq, created_at, thread_logins from appended
+	`, args...).QueryRow(func(row pgx.Row) error {
+		var threadLogins []string
+		if err := row.Scan(&event.ID, &event.Seq, &event.CreatedAt, &threadLogins); err != nil {
 			return fmt.Errorf("insert event: %w", err)
+		}
+		if logins != nil {
+			withLogins, err := withThreadLogins(event.Payload, threadLogins)
+			if err != nil {
+				return err
+			}
+			event.Payload = withLogins
+			opened.ThreadLogins = threadLogins
 		}
 		if event.Type != "ask.opened" {
 			appended(*event)

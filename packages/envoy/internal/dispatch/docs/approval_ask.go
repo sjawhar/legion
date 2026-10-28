@@ -152,7 +152,7 @@ func rewriteApprovalAsk(
 	if err != nil {
 		return err
 	}
-	changes, index, err := planAskReferences(ctx, tx, ask.ID, ask.Question, serverURL)
+	changes, index, err := planEditedAskReferences(ctx, tx, ask.ID, previous.Question, ask.Question, serverURL)
 	if err != nil {
 		return fmt.Errorf("index approval ask: %w", err)
 	}

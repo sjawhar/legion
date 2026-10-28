@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   type Artifact,
+  ASK_QUESTION_MAX,
   type BlockPath,
   dispatchToolSpecs,
   type IssueComponents,
@@ -457,18 +458,19 @@ describe("executeDispatchTool", () => {
       throw new Error("network must not be called");
     }) as unknown as typeof fetch;
 
-    // 790 + "\n\nRef: " (7) + 24 = 821 UTF-16 units.
+    // The question at the cap less 10, plus "\n\nRef: " (7) and the 24-unit ref, is 21 over.
     await expect(
       executeAsk(
         {
           issue: "DSP-41",
-          question: "x".repeat(790),
+          question: "x".repeat(ASK_QUESTION_MAX - 10),
           ref: "dispatch://DSP-41/ask/ab",
         },
         fetchImpl
       )
     ).rejects.toThrow(
-      "question plus ref is 21 characters over the 800-character limit (821/800); shorten the question or drop the ref"
+      `question plus ref is 21 characters over the ${ASK_QUESTION_MAX}-character limit ` +
+        `(${ASK_QUESTION_MAX + 21}/${ASK_QUESTION_MAX}); shorten the question or drop the ref`
     );
   });
 
@@ -2032,6 +2034,10 @@ describe("executeDispatchTool", () => {
     });
     expect(claimed.text).toContain("DSP-1: claimed by you since 2026-09-24T06:00:00Z");
     expect(claimed.text).toContain("move it to in_progress");
+    // The claim itself delivers a person's answers, comments and messages on the issue.
+    expect(claimed.text).toContain(
+      "A person's answers, comments and messages on DSP-1 now reach you directly."
+    );
     expect(claimed.details).toMatchObject({ issue: "DSP-1", status: "todo", claim });
 
     const released = await run({ issue: "DSP-1", release: true });
@@ -2075,12 +2081,16 @@ describe("executeDispatchTool", () => {
       "Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone"
     );
     expect(claimed.text).not.toContain("issue-update");
+    expect(claimed.text).toContain(
+      "Release the claim when you stop. A person's answers, comments and messages on DSP-1 now reach you directly."
+    );
 
     const released = await run({ issue: "DSP-1", release: true });
     expect(released.text).toContain(
       "Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone"
     );
     expect(released.text).not.toContain("issue-update");
+    expect(released.text).not.toContain("now reach you directly");
   });
 
   test("dispatch_claim reads an omitted legion_managed_status as not Legion-managed", async () => {
@@ -4235,7 +4245,7 @@ describe("executeDispatchTool", () => {
     await expect(
       executeDispatchTool({
         tool: "dispatch_ask",
-        args: { issue: "DSP-41", question: "x".repeat(801) },
+        args: { issue: "DSP-41", question: "x".repeat(ASK_QUESTION_MAX + 1) },
         cwd: "/workspace",
         host: "omp",
         config,
@@ -4952,6 +4962,84 @@ describe("executeDispatchTool", () => {
       );
     });
 
+    test("a block read prints the Node line, pinned and removed too", async () => {
+      const facts = {
+        made_by: [{ kind: "user", id: "alice@example.com" }],
+        made_at: "2026-10-18T00:00:00Z",
+        changed_by: [{ kind: "session", id: "s1" }],
+        parent: { kind: "artifact", id: "artifact-1", ref: "dispatch://CORE-1/spec" },
+      };
+      const current = {
+        ...blockNode,
+        ...facts,
+        changed_version: 3,
+        changed_at: "2026-10-20T00:00:00Z",
+        parent_version: 3,
+        text: "We ship on Friday.",
+      };
+      const head = [
+        "Block: décision:1",
+        "Document: dispatch://CORE-1/spec",
+        "Changed in version: 3",
+        "Text:",
+        "We ship on Friday.",
+      ];
+      const nodeLine = `Node: block ${blockRef} · made by user alice@example.com at 2026-10-18T00:00:00Z · changed by session s1 at 2026-10-20T00:00:00Z · part of dispatch://CORE-1/spec (version 3)`;
+      const sections = ["Referenced by:", "- none", "Links:", "- none"];
+
+      expect(
+        (await readBlock(blockRef, () => response({ node: current, edges: [] })).result).text
+      ).toBe([...head, nodeLine, ...sections].join("\n"));
+
+      const pinned = `${blockRef}@v3`;
+      const pin = { version: 3, ref: pinned, text: "We ship on Friday.", state: "unchanged" };
+      expect(
+        (await readBlock(pinned, () => response({ node: { ...current, pin }, edges: [] })).result)
+          .text
+      ).toBe(
+        [
+          ...head,
+          "Pinned to version: 3",
+          "Unchanged since version 3.",
+          "Text at version 3:",
+          "We ship on Friday.",
+          nodeLine,
+          ...sections,
+        ].join("\n")
+      );
+
+      // A removed block's last change is the version that removed it, and it belongs to the
+      // last version known to hold it.
+      const removedPin = `${blockRef}@v2`;
+      const removed = {
+        ...blockNode,
+        ...facts,
+        changed_at: "2026-10-21T00:00:00Z",
+        parent_version: 2,
+        pin: {
+          version: 2,
+          ref: removedPin,
+          text: "We ship on Friday.",
+          state: "removed",
+          removed_version: 3,
+        },
+      };
+      expect(
+        (await readBlock(removedPin, () => response({ node: removed, edges: [] })).result).text
+      ).toBe(
+        [
+          "Block: décision:1",
+          "Document: dispatch://CORE-1/spec",
+          "Pinned to version: 2",
+          "Removed in version 3.",
+          "Text at version 2:",
+          "We ship on Friday.",
+          `Node: block ${blockRef} · made by user alice@example.com at 2026-10-18T00:00:00Z · changed by session s1 at 2026-10-21T00:00:00Z · part of dispatch://CORE-1/spec (version 2)`,
+          ...sections,
+        ].join("\n")
+      );
+    });
+
     test("a block no current version holds is an error naming the block and its document", async () => {
       const absent = () => notFound('no block "décision:1" in dispatch://CORE-1/spec');
       const { result } = readBlock(blockRef, absent, absent);
@@ -5087,8 +5175,10 @@ describe("executeDispatchTool", () => {
             {
               id: "ask-1",
               state: "open",
+              author: { kind: "session", id: "session-1" },
               question: "Which API?",
-              anchor: { artifact_id: "artifact-42" },
+              anchor: { artifact_id: "artifact-42", quote: "the API" },
+              created_at: "2026-10-20T09:00:00Z",
             },
           ],
         });
@@ -5112,14 +5202,323 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result).toEqual({
-      text: "Version three\n\nOpen anchored asks/comments: ask ask-1",
+      text: [
+        "Version three",
+        "",
+        "Open anchored threads:",
+        "",
+        "ask ask-1 · session session-1 · 2026-10-20T09:00:00Z",
+        "> the API",
+        "Question: Which API?",
+      ].join("\n"),
       details: { issue: "DSP-42" },
     });
     expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual([
       "/api/v1/issues/DSP-42",
       "/api/v1/artifacts/artifact-42/versions/3",
-      "/api/v1/issues/DSP-42/comments?artifact=artifact-42",
+      "/api/v1/issues/DSP-42/comments",
+    ]);
+  });
+
+  // A reply carries no anchor, so a read of the comments anchored on the document misses every
+  // reply: a thread a person reopened by replying read as its root's id alone, and the reply's text
+  // never reached the agent (sjawhar/legion#2366). A person's reply under an open ask is the same:
+  // the ask printed its question alone.
+  test("dispatch_doc_read prints each open anchored thread with its root and every reply", async () => {
+    const requests: string[] = [];
+    const agent = { kind: "session", id: "session-1" };
+    const sami = { kind: "user", id: "sami" };
+    const comment = (fields: Record<string, unknown>) => ({
+      issue_key: "DSP-42",
+      author: agent,
+      anchor: null,
+      reply_to: null,
+      ask_id: null,
+      turn: null,
+      resolved: false,
+      resolved_by: null,
+      resolved_at: null,
+      edited_at: null,
+      suggestion: null,
+      mentions: [],
+      deliveries: [],
+      ...fields,
+    });
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-42",
+          artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+          open_asks: [
+            {
+              id: "ask-open",
+              state: "open",
+              author: agent,
+              question: "Which release carries it?",
+              anchor: { artifact_id: "artifact-42", quote: "the release" },
+              created_at: "2026-10-20T09:00:00Z",
+            },
+            {
+              id: "ask-elsewhere",
+              state: "open",
+              author: agent,
+              question: "Asked on another document?",
+              anchor: { artifact_id: "artifact-99", quote: "other" },
+              created_at: "2026-10-20T09:30:00Z",
+            },
+          ],
+        });
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/text") {
+        return response({ markdown: "# Spec", version: 4, token: "sha256:spec" });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/comments") {
+        return response([
+          comment({
+            id: "c-root",
+            body: "Can this ship Friday?",
+            anchor: { artifact_id: "artifact-42", mark_id: "m-1", quote: "ship Friday" },
+            created_at: "2026-10-20T10:00:00Z",
+          }),
+          comment({
+            id: "c-resolved",
+            body: "Old nit.",
+            anchor: { artifact_id: "artifact-42", mark_id: "m-2", quote: "nit" },
+            resolved: true,
+            resolved_by: agent,
+            resolved_at: "2026-10-20T12:00:00Z",
+            created_at: "2026-10-20T10:30:00Z",
+          }),
+          comment({
+            id: "c-other-document",
+            body: "On another document.",
+            anchor: { artifact_id: "artifact-99", mark_id: "m-3", quote: "other" },
+            created_at: "2026-10-20T10:40:00Z",
+          }),
+          comment({ id: "c-issue", body: "An issue comment.", created_at: "2026-10-20T10:50:00Z" }),
+          comment({
+            id: "c-ask-reply",
+            body: "The 4.2 release, if QA passes.",
+            ask_id: "ask-open",
+            author: sami,
+            created_at: "2026-10-20T10:55:00Z",
+          }),
+          comment({
+            id: "c-ask-elsewhere-reply",
+            body: "Reply under the ask on another document.",
+            ask_id: "ask-elsewhere",
+            author: sami,
+            created_at: "2026-10-20T10:56:00Z",
+          }),
+          comment({
+            id: "c-resolved-ask-reply",
+            body: "Reply under a resolved ask.",
+            ask_id: "ask-resolved",
+            author: sami,
+            created_at: "2026-10-20T10:57:00Z",
+          }),
+          comment({
+            id: "c-reply-agent",
+            body: "Closing: shipped.",
+            reply_to: "c-root",
+            created_at: "2026-10-21T10:00:00Z",
+          }),
+          comment({
+            id: "c-resolved-reply",
+            body: "Fixed.",
+            reply_to: "c-resolved",
+            created_at: "2026-10-21T11:00:00Z",
+          }),
+          // Sami's reply reopened the root, which reads resolved: false again.
+          comment({
+            id: "c-reply-sami",
+            body: "Not yet: QA found a crash on resume.",
+            reply_to: "c-root",
+            author: sami,
+            created_at: "2026-10-22T10:00:00Z",
+          }),
+        ]);
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { issue: "DSP-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result).toEqual({
+      text: [
+        "# Spec",
+        "",
+        "Document token: sha256:spec",
+        "",
+        "Open anchored threads:",
+        "",
+        "ask ask-open · session session-1 · 2026-10-20T09:00:00Z",
+        "> the release",
+        "Question: Which release carries it?",
+        "reply c-ask-reply · user sami · 2026-10-20T10:55:00Z",
+        "Body: The 4.2 release, if QA passes.",
+        "",
+        "comment c-root · session session-1 · 2026-10-20T10:00:00Z",
+        "> ship Friday",
+        "Body: Can this ship Friday?",
+        "reply c-reply-agent · session session-1 · 2026-10-21T10:00:00Z",
+        "Body: Closing: shipped.",
+        "reply c-reply-sami · user sami · 2026-10-22T10:00:00Z",
+        "Body: Not yet: QA found a crash on resume.",
+      ].join("\n"),
+      details: { issue: "DSP-42" },
+    });
+    // One read of the issue's comments, unfiltered, so the replies come back with their roots.
+    expect(requests).toEqual([
+      "/api/v1/issues/DSP-42",
+      "/api/v1/artifacts/artifact-42/text",
+      "/api/v1/issues/DSP-42/comments",
+    ]);
+  });
+
+  test("dispatch_doc_read prints a project document's open anchored threads with their replies", async () => {
+    const requests: string[] = [];
+    const agent = { kind: "session", id: "session-1" };
+    const sami = { kind: "user", id: "sami" };
+    const notes = {
+      id: "artifact-42",
+      issue_key: null,
+      project: "CORE",
+      ref_key: "CORE/notes",
+      slug: "notes",
+      name: "notes.md",
+      kind: "doc",
+      primary: false,
+      created_by: agent,
+      created_at: "2026-09-18T00:00:00Z",
+      versions: [],
+    };
+    const comment = (fields: Record<string, unknown>) => ({
+      issue_key: null,
+      artifact_id: "artifact-42",
+      author: agent,
+      anchor: null,
+      reply_to: null,
+      ask_id: null,
+      turn: null,
+      resolved: false,
+      resolved_by: null,
+      resolved_at: null,
+      edited_at: null,
+      suggestion: null,
+      mentions: [],
+      deliveries: [],
+      ...fields,
+    });
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/projects/CORE/artifacts/notes") return response(notes);
+      if (target.pathname === "/api/v1/projects/CORE/artifacts") return response([notes]);
+      if (target.pathname === "/api/v1/artifacts/artifact-42/text") {
+        return response({ markdown: "# Notes", version: 1 });
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/asks") {
+        return response([
+          {
+            id: "ask-answered",
+            state: "answered",
+            author: agent,
+            question: "Already settled?",
+            anchor: { artifact_id: "artifact-42", quote: "settled" },
+            created_at: "2026-10-19T09:00:00Z",
+          },
+          {
+            id: "ask-open",
+            state: "open",
+            author: agent,
+            question: "Keep the runbook?",
+            anchor: { artifact_id: "artifact-42", quote: "runbook" },
+            created_at: "2026-10-20T09:00:00Z",
+          },
+        ]);
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/comments") {
+        return response([
+          comment({
+            id: "c-root",
+            body: "Is step 3 still right?",
+            anchor: { artifact_id: "artifact-42", mark_id: "m-1", quote: "step 3" },
+            created_at: "2026-10-20T10:00:00Z",
+          }),
+          comment({
+            id: "c-reply",
+            body: "No: it now runs before step 2.",
+            reply_to: "c-root",
+            author: sami,
+            created_at: "2026-10-21T10:00:00Z",
+          }),
+          comment({
+            id: "c-answered-ask-reply",
+            body: "Settled: keep it.",
+            ask_id: "ask-answered",
+            anchor: { artifact_id: "artifact-42", quote: "settled" },
+            author: sami,
+            created_at: "2026-10-21T11:00:00Z",
+          }),
+          comment({
+            id: "c-ask-reply",
+            body: "Keep it, but trim the rollback section.",
+            ask_id: "ask-open",
+            author: sami,
+            created_at: "2026-10-21T12:00:00Z",
+          }),
+        ]);
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { project: "CORE", artifact: "notes" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result).toEqual({
+      text: [
+        "# Notes",
+        "",
+        "Open anchored threads:",
+        "",
+        "ask ask-open · session session-1 · 2026-10-20T09:00:00Z",
+        "> runbook",
+        "Question: Keep the runbook?",
+        "reply c-ask-reply · user sami · 2026-10-21T12:00:00Z",
+        "Body: Keep it, but trim the rollback section.",
+        "",
+        "comment c-root · session session-1 · 2026-10-20T10:00:00Z",
+        "> step 3",
+        "Body: Is step 3 still right?",
+        "reply c-reply · user sami · 2026-10-21T10:00:00Z",
+        "Body: No: it now runs before step 2.",
+      ].join("\n"),
+      details: { project: "CORE", document: "CORE/notes" },
+    });
+    expect(requests.filter((request) => request.endsWith("/comments"))).toEqual([
+      "/api/v1/artifacts/artifact-42/comments",
     ]);
   });
 
@@ -8119,6 +8518,119 @@ describe("executeDispatchTool", () => {
       "/api/v1/references?from=dispatch%3A%2F%2FDSP-42%2Fcomment%2Fcccccccc-0000-4000-8000-000000000042",
     ]);
   });
+
+  describe("the Node line of a read", () => {
+    const commentId = "cccccccc-0000-4000-8000-000000000042";
+    const commentRef = `dispatch://DSP-1/comment/${commentId}`;
+    /** The text of a read of `commentRef` against a server whose `?to=` answer names `node`. */
+    const readComment = async (node: Record<string, unknown>) => {
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === `/api/v1/comments/${commentId}`) {
+          return response({
+            comment: {
+              id: commentId,
+              issue_key: "DSP-1",
+              author: { kind: "session", id: "s1" },
+              body: "Ship it.",
+              anchor: null,
+              reply_to: null,
+              resolved: false,
+              suggestion: null,
+              created_at: "2026-10-24T10:00:00Z",
+            },
+            replies: [],
+          });
+        }
+        if (target.pathname === "/api/v1/references" && target.searchParams.has("to")) {
+          return response({
+            node: { kind: "comment", id: commentId, ref: commentRef, ...node },
+            edges: [],
+          });
+        }
+        if (target.pathname === "/api/v1/references") return response(emptyGraph("comment"));
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+      return (
+        await executeDispatchTool({
+          tool: "dispatch_read",
+          args: { ref: commentRef },
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: fetchImpl as typeof fetch,
+        })
+      ).text;
+    };
+
+    test("read prints the node's maker, last change and parent before its edges", async () => {
+      const text = await readComment({
+        made_by: [{ kind: "session", id: "s1" }],
+        made_at: "2026-10-24T10:00:00Z",
+        changed_by: [{ kind: "user", id: "alice@example.com" }],
+        changed_at: "2026-10-25T09:00:00Z",
+        parent: {
+          kind: "artifact",
+          id: "aaaaaaaa-0000-4000-8000-000000000001",
+          ref: "dispatch://DSP-1/spec",
+        },
+        parent_version: 3,
+      });
+
+      expect(text).toBe(
+        [
+          "Comment:",
+          `${commentId} · session s1`,
+          "Body: Ship it.",
+          "Reply chain:",
+          "- none",
+          `Node: comment ${commentRef} · made by session s1 at 2026-10-24T10:00:00Z · changed by user alice@example.com at 2026-10-25T09:00:00Z · part of dispatch://DSP-1/spec (version 3)`,
+          "Referenced by:",
+          "- none",
+          "Links:",
+          "- none",
+        ].join("\n")
+      );
+    });
+
+    test("a node with no recorded maker, no parent and no version says so", async () => {
+      const unrecorded = {
+        made_by: [],
+        made_at: null,
+        changed_by: [],
+        changed_at: null,
+        parent: null,
+        parent_version: null,
+      };
+
+      expect(await readComment(unrecorded)).toContain(
+        `\nNode: comment ${commentRef} · made by nobody recorded · changed by nobody recorded\nReferenced by:\n`
+      );
+      // A parent with no reference is named by its kind and id; several actors read as a list.
+      expect(
+        await readComment({
+          ...unrecorded,
+          made_by: [
+            { kind: "session", id: "s1" },
+            { kind: "user", id: "alice@example.com" },
+          ],
+          parent: { kind: "session", id: "s1" },
+        })
+      ).toContain(
+        `\nNode: comment ${commentRef} · made by session s1, user alice@example.com · changed by nobody recorded · part of session s1\nReferenced by:\n`
+      );
+    });
+
+    test("a server older than the facts prints no Node line", async () => {
+      const text = await readComment({ changed_at: "2026-10-25T09:00:00Z" });
+
+      expect(text).not.toContain("Node:");
+      expect(text).toEndWith("Reply chain:\n- none\nReferenced by:\n- none\nLinks:\n- none");
+    });
+  });
+
   test("prints where an anchored comment's block stands after its quote", async () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));

@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -170,12 +171,21 @@ func (s *server) createStoredMessage(
 	}
 	var references refs.Replacement
 	var referenceChanges model.ReferenceChanges
+	// An issue message's thread_logins are read by its event's insert, after the message's insert
+	// and the user_threads trigger it fires, on the thread root found here; a direct conversation
+	// has no Replies thread and names none.
+	var logins *events.Logins
 	var advice *writeAdvice
 	if issueKey != nil {
 		references, referenceChanges, err = s.planReferences(ctx, tx, "message", messageID, input.Body)
 		if err != nil {
 			return model.Message{}, nil, err
 		}
+		root, err := messageThreadRoot(ctx, tx, messageID, input.InReplyTo)
+		if err != nil {
+			return model.Message{}, nil, err
+		}
+		logins = events.ThreadLoginsOf(root)
 		advice = s.writeAdvice(
 			ctx, tx, "POST /api/v1/issues/{key}/messages", *issueKey, actor, "", status, eventType,
 		)
@@ -196,7 +206,7 @@ func (s *server) createStoredMessage(
 		if issueKey != nil {
 			references.Queue(b)
 		}
-		if err := s.deps.Events.QueueAppend(b, messageEvent(message, eventType, actor, thread.payload(message, referenceChanges)), func(appended model.Event) {
+		if err := s.deps.Events.QueueAppendWithLogins(b, messageEvent(message, eventType, actor, thread.payload(message, referenceChanges)), logins, func(appended model.Event) {
 			event = appended
 		}); err != nil {
 			return err

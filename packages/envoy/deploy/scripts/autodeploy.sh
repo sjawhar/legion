@@ -177,12 +177,17 @@ oauth_redirect_uri() {
     python3 -c 'import sys, urllib.parse as u; query = u.parse_qs(u.urlparse(sys.stdin.read()).query); print(query.get("redirect_uri", [""])[0])'
 }
 
+# wait_for_health waits up to 90 s for /healthz on port $1 to answer 200 with NATS connected, or
+# turned off (`nats` null). Dispatch serves while NATS is down or refuses its credential, so a 200
+# alone would keep an image whose NATS connection fails; reading `nats` rolls such an image back, as
+# when Dispatch exited at boot without NATS. A NATS outage fails the previous image's check too.
 wait_for_health() {
   local port="$1"
   local attempt
   for ((attempt = 0; attempt < 30; attempt++)); do
     sleep 3
-    if curl -sf --max-time 3 "http://127.0.0.1:$port/healthz" >/dev/null; then
+    if curl -sf --max-time 3 "http://127.0.0.1:$port/healthz" |
+      python3 -c 'import json, sys; sys.exit(json.load(sys.stdin).get("nats") is False)' 2>/dev/null; then
       return 0
     fi
   done
@@ -313,7 +318,7 @@ deploy() {
     return 1
   fi
   if ! wait_for_health "$dispatchPort"; then
-    log "deployed $sha but /healthz did not answer within 90s"
+    log "deployed $sha but /healthz did not answer 200 with NATS connected within 90s"
     roll_back_or_stop "$sha" "$previous" "$baseline" "$dispatchPort"
     return 1
   fi

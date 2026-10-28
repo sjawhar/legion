@@ -761,8 +761,9 @@ export function shortForm(route: DispatchReferenceRoute): string {
  *  block opens its document at the block (`#b-`); a pinned block opens the version of its document
  *  it pins, since a version's stored text holds no block ids to land on, the pin's digits written
  *  as the reference holds them. An issue's spec keeps its versions under its own slug, which a
- *  spec route does not carry: `specSlug` names it once the issue is read (`useReferencePath`), and
- *  until then a pinned block of the spec opens the live spec at the block. */
+ *  spec route does not carry: `specSlug` names it once the issue's summary is read
+ *  (`useReferencePath`), and until then a pinned block of the spec opens the live spec at the
+ *  block. */
 export function buildReferencePath(route: DispatchReferenceRoute, specSlug?: string): string {
   if (route.kind === "agent-artifact") {
     const artifact = `/agents/${encodeURIComponent(route.session)}/artifacts/${encodeURIComponent(route.slug)}`;

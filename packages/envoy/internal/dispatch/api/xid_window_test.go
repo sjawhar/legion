@@ -450,3 +450,14 @@ func TestXidWindowClaim(t *testing.T) {
 		return dispatchRequest(t, h, http.MethodPost, "/api/v1/issues/"+f.issueKey+"/claim", map[string]any{}, "alice")
 	})
 }
+
+// A close withdraws the issue's open asks: the eight anchored asks on its spec and the block ask
+// settlement opened from the spec's `:::ask` block, whose block and copies it writes resolved into
+// the spec (docs.WriteIssueAskStates) before it records each ask withdrawn. That document work
+// reads and rewrites the whole spec, so it is the close's read phase, before its first write.
+func TestXidWindowIssueCloseWithOpenAsks(t *testing.T) {
+	f, _ := newBlockAskFixture(t)
+	f.measure(t, http.StatusOK, func(h http.Handler) *httptest.ResponseRecorder {
+		return dispatchRequest(t, h, http.MethodPatch, "/api/v1/issues/"+f.issueKey, map[string]any{"status": "done"}, "alice")
+	})
+}

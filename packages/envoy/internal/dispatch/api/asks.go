@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -19,7 +20,7 @@ import (
 )
 
 const (
-	maxAskQuestion16 = 800
+	maxAskQuestion16 = contracts.AskQuestionMax
 	maxAskOptions    = 8
 )
 
@@ -255,29 +256,31 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
-	events := []*model.Event{}
+	appended := []*model.Event{}
 	if snapshot != nil {
 		snapshotEvent, err := s.commitArtifactVersionEvent(r.Context(), tx, ledger, owner, actor, anchor.ArtifactID, artifactName, *snapshot, nil)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		events = append(events, snapshotEvent)
+		appended = append(appended, snapshotEvent)
 	}
-	event, err := s.queueStampedEvent(r.Context(), tx, ledger, owner.event(
+	// The ask's thread_logins are read by its event's insert, after the ask's own insert and the
+	// user_threads trigger it fires.
+	event, err := s.queueLoggedEvent(r.Context(), tx, ledger, owner.event(
 		"ask.opened", actor, model.NewAskEventPayload(ask, askChanges),
-	), "ask", ask.ID)
+	), events.ThreadLoginsOf(ask.ID), "ask", ask.ID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	events = append(events, event)
+	appended = append(appended, event)
 	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	ask.OpenedEventID = &event.ID
-	s.publish(appendedEvents(events...)...)
+	s.publish(appendedEvents(appended...)...)
 	// LEGION-550. An ask on an issue searches that issue's project and, normally, rides its
 	// suggestions on the issue's own advice; one on an unlinked project document searches the
 	// document's and has no issue state to report, so its advice carries the suggestions alone.
@@ -470,7 +473,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ask.EditedAt = timestampPtr(&editedAt)
-	askChanges, err := s.queueReferences(documentCtx, tx, ledger, "ask", ask.ID, ask.Question)
+	askChanges, err := s.queueEditedReferences(documentCtx, tx, ledger, "ask", ask.ID, previous.Question, ask.Question)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -711,7 +714,7 @@ func (s *server) attachIssueAskThreads(ctx context.Context, rows []issueAskRow) 
 	for index := range rows {
 		askIDs[index] = rows[index].ID
 	}
-	threads, err := s.loadAskThreads(ctx, s.deps.Store.Pool, askIDs)
+	threads, err := s.loadAskThreads(ctx, askIDs)
 	if err != nil {
 		return err
 	}
@@ -792,13 +795,19 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	reaches, err := s.loadAskReaches(r.Context(), []string{ask.ID})
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	// The single-ask read is a thread with the ask beside it, so it and every Inbox or ask-list
+	// thread serialise through one definition and carry the same keys.
 	WriteJSON(w, http.StatusOK, struct {
-		Ask       model.Ask           `json:"ask"`
-		Replies   []model.Comment     `json:"replies"`
-		Edits     []model.AskEdit     `json:"edits"`
-		Answers   []model.AskAnswer   `json:"answers"`
-		Followers []model.AskFollower `json:"followers"`
-	}{Ask: ask, Replies: replies, Edits: edits, Answers: answers, Followers: followers})
+		Ask model.Ask `json:"ask"`
+		askThread
+	}{Ask: ask, askThread: askThread{
+		Replies: replies, Edits: edits, Answers: answers, Followers: followers, askReach: reaches[ask.ID],
+	}})
 }
 
 // loadAskEdits reads every rewording of an ask back from its ask.edited events,

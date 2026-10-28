@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -492,9 +493,11 @@ func (s *server) openApprovalAsk(
 	if err != nil {
 		return nil, model.Event{}, err
 	}
-	event, err := s.appendEvent(ctx, tx, owner.event(
-		"ask.opened", actor, model.NewAskEventPayload(ask, askChanges),
-	))
+	payload, err := events.AskEventPayload(ctx, tx, ask, askChanges)
+	if err != nil {
+		return nil, model.Event{}, err
+	}
+	event, err := s.appendEvent(ctx, tx, owner.event("ask.opened", actor, payload))
 	if err != nil {
 		return nil, model.Event{}, err
 	}

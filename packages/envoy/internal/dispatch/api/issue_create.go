@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/rank"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -400,14 +401,22 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	issue.LastSeq++
+	// A new issue's blocked_by edges move each blocker's count, beside what its spec cites.
+	blockerChanges, err := issueEdgeChanges(r.Context(), tx, unsetIssue, issue, false)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	// A new issue changed every field it holds a value in, measured from an issue with none.
+	payload, err := newIssueEventPayload(r.Context(), tx, issue, refs.MergeChanges(specChanges, blockerChanges), issueChangedFields(unsetIssue, issue))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	// The issue.created event and its stamp of the spec's new edges follow the spec's queued
 	// writes: the stamp needs the index's edges written, and the document's pending-settlement row
 	// comes before the events' commit-order lock.
-	event, err := s.queueStampedEvent(r.Context(), tx, ledger, issueOwner(key).event(
-		"issue.created",
-		actor,
-		model.NewIssueEventPayload(issue, specChanges),
-	), "artifact", artifactID)
+	event, err := s.queueStampedEvent(r.Context(), tx, ledger, issueOwner(key).event("issue.created", actor, payload), "artifact", artifactID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

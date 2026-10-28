@@ -443,11 +443,12 @@ func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, ar
 			ask.Answer = answered.Answer
 			return nil
 		})
-		if err := broker.QueueAppend(b, model.Event{
+		// The ask's thread_logins are read by the event's insert, after the answer's update.
+		if err := broker.QueueAppendWithLogins(b, model.Event{
 			IssueKey: ask.IssueKey, ArtifactID: ask.ArtifactID,
 			Type: "ask.answered", Actor: actor,
 			Payload: model.AskAnsweredEventPayload{AskEventPayload: model.NewAskEventPayload(answered, model.ReferenceChanges{})},
-		}, sink); err != nil {
+		}, events.ThreadLoginsOf(ask.ID), sink); err != nil {
 			return fmt.Errorf("append approval ask answer: %w", err)
 		}
 		return nil

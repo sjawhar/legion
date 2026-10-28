@@ -71,8 +71,27 @@ export interface SessionContext {
     readonly promptText: string;
     readonly signal?: AbortSignal;
   }) => Promise<{ readonly replyText: string }>;
+  /**
+   * Whether the host runs no turn now (`!session.isStreaming`). Measured on Oh My Pi 18.8.9: true
+   * already in the `agent_end` of an aborted run; `pi.sendMessage` returns while it still reads
+   * true for an idle card, before the host starts the card's run.
+   */
+  readonly isIdle?: () => boolean;
+  /**
+   * Whether the host holds a queued message for its turn to take (`queuedMessageCount > 0`): a
+   * steered or follow-up card or user message. Measured on Oh My Pi 18.8.9: false once an
+   * interrupt (`clearQueue({ forInterrupt: true })`) withdrew the queue, true at the `agent_end` of
+   * a plain abort, whose queue the next run takes.
+   */
+  readonly hasPendingMessages?: () => boolean;
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
+    /**
+     * The host's extension widget (`ExtensionUIContext.setWidget`): `lines` shown above the editor
+     * under `key`, in place of what that key showed, until set again; `undefined` removes it.
+     * Oh My Pi keeps it across `/new`'s transcript reset. Absent where the host has none.
+     */
+    readonly setWidget?: (key: string, lines: string[] | undefined) => void;
   };
 }
 
@@ -179,6 +198,13 @@ export interface ToolCallEventResult {
   readonly block?: boolean;
   readonly reason?: string;
   readonly input?: Record<string, unknown>;
+  /** Text the host hands the agent as context once the call runs (AskGate's warn mode). */
+  readonly additionalContext?: string;
+}
+
+/** A tool's execution ended, whatever its result; AskGate abandons a gate still waiting on it. */
+export interface ToolExecutionEndEvent {
+  readonly toolCallId: string;
 }
 
 export interface ResourcesDiscoverResult {
@@ -262,6 +288,10 @@ export interface PiEventContract {
   };
   readonly tool_call: { readonly event: ToolCallEvent; readonly result: ToolCallEventResult };
   readonly tool_result: { readonly event: ToolResultEvent; readonly result: undefined };
+  readonly tool_execution_end: {
+    readonly event: ToolExecutionEndEvent;
+    readonly result: undefined;
+  };
 }
 
 /** The context OMP hands a registered slash-command handler. Its `sessionManager` is the same
@@ -275,6 +305,8 @@ export interface CommandContext {
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
   };
+  /** The host's `ctx.isIdle()`: false while a turn runs. */
+  readonly isIdle: () => boolean;
 }
 
 /** The host's text block (`TextContent` in `@oh-my-pi/pi-ai`), as far as this package writes it. */
@@ -420,11 +452,12 @@ export interface PiApi {
   /**
    * Sends a user prompt, exactly as Enter at the terminal does: idle, it starts a turn; streaming,
    * it steers. `deliverAs: "aside"` lands it at the next step without interrupting the running
-   * tool batch. The host queues the send, so the prompt's `message_start` comes after this returns.
+   * tool batch; `deliverAs: "followUp"` queues it behind the running turn without starting one.
+   * The host queues the send, so the prompt's `message_start` comes after this returns.
    */
   readonly sendUserMessage: (
     content: string | readonly ContentBlock[],
-    options?: { readonly deliverAs: "aside" }
+    options?: { readonly deliverAs: "aside" | "followUp" }
   ) => void;
   /**
    * Runs text as if typed at the session's own terminal: a built-in its host can run headless, an

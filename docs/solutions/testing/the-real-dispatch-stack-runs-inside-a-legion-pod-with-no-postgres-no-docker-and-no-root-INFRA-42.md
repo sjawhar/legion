@@ -19,6 +19,14 @@ related_issues:
 
 # The real Dispatch stack runs inside a Legion pod with no Postgres, no docker and no root
 
+**Update (2026-10-26, INFRA-253): the harness ports below are no longer defaults.** Without
+`DISPATCH_E2E_PORT`, `run-server.sh` serves on a port the OS chooses (it reports it as
+`msg="dispatch: listening" addr=127.0.0.1:<port>`), and it now requires `FAKE_ENVOY_PORT` and
+`FAKE_GITHUB_PORT` (and `FAKE_BROKER_PORT` unless the broker switch is set); the fakes bind a
+port the OS chooses when theirs is unset and print it. `bun run dispatch:local`, or
+`bun e2e/run.ts -- <command>` from `packages/dispatch`, starts the whole stack that way. The
+recipe below is the record as it was written.
+
 A `packages/dispatch` change is proved by driving the dashboard — the real Go server, the
 production SPA bundle and a real browser — not by citing a CI run. An issue pod has no `psql`, no
 Postgres, no docker and no root, which reads like a blocker and is not. This recipe stood the whole

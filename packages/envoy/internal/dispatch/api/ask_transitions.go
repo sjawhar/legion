@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -24,7 +25,10 @@ type askTransition struct {
 	EventType      string
 	ReplacesAnswer *time.Time
 	Apply          func(context.Context, pgx.Tx, *docs.Ledger, model.Ask) (model.Ask, error)
-	Payload        func(model.Ask) any
+	// Payload builds the event's payload from the one every transition carries (the ask after
+	// the transition, whose thread_logins the event's insert reads); nil appends that payload as
+	// it is.
+	Payload func(model.AskEventPayload) any
 	// After runs once the transition's own event is appended, still inside the
 	// transaction; the events it returns are published with it.
 	After func(context.Context, pgx.Tx, *docs.Ledger, model.Ask) ([]*model.Event, error)
@@ -99,6 +103,10 @@ func answerTransition(actor model.Actor, selected []string, text *string, option
 					return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "answer requires a selected option or free-text answer")
 				}
 			}
+			// An answer that chose no option stores an empty list, never null.
+			if selected == nil {
+				selected = []string{}
+			}
 			answer := model.AskAnswer{User: actor.ID, Selected: selected, Text: text, At: time.Now().UTC()}
 			if options.WriteBlock != nil {
 				if err := options.WriteBlock(ctx, tx, ask, answer); err != nil {
@@ -116,9 +124,9 @@ func answerTransition(actor model.Actor, selected []string, text *string, option
 			ask.Answer = &answer
 			return ask, nil
 		},
-		Payload: func(ask model.Ask) any {
+		Payload: func(payload model.AskEventPayload) any {
 			return model.AskAnsweredEventPayload{
-				AskEventPayload: model.NewAskEventPayload(ask, model.ReferenceChanges{}),
+				AskEventPayload: payload,
 				PreviousAnswer:  previousAnswer,
 			}
 		},
@@ -275,7 +283,12 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := strings.TrimSpace(input.Kind)
 	reason := strings.TrimSpace(input.Reason)
-	if (kind != "retracted" && kind != "resolved") || reason == "" {
+	if kind != "retracted" && kind != "resolved" {
+		writeError(w, "INVALID_RESOLUTION", http.StatusBadRequest,
+			`resolution kind must be "retracted" or "resolved", not `+strconv.Quote(kind))
+		return
+	}
+	if reason == "" {
 		writeError(w, "INVALID_RESOLUTION", http.StatusBadRequest, "resolution requires a kind and reason")
 		return
 	}
@@ -348,14 +361,17 @@ func (s *server) closeAskTx(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger,
 	if err != nil {
 		return model.Ask{}, nil, err
 	}
-	// A transition writes no question text, so it moves no references and says so.
-	payload := any(model.NewAskEventPayload(ask, model.ReferenceChanges{}))
+	// A transition writes no question text, so it moves no references and says so. The answer
+	// it may have written is queued before the event, so the ask's Replies rows are read by the
+	// event's insert, after it.
+	base := model.NewAskEventPayload(ask, model.ReferenceChanges{})
+	payload := any(base)
 	if transition.Payload != nil {
-		payload = transition.Payload(ask)
+		payload = transition.Payload(base)
 	}
-	event, err := s.queueEvent(ctx, tx, ledger, ownerOf(ask.IssueKey, ask.ArtifactID).event(
+	event, err := s.queueLoggedEvent(ctx, tx, ledger, ownerOf(ask.IssueKey, ask.ArtifactID).event(
 		transition.EventType, actor, payload,
-	))
+	), events.ThreadLoginsOf(ask.ID), "", "")
 	if err != nil {
 		return model.Ask{}, nil, err
 	}

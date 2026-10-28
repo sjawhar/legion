@@ -262,7 +262,7 @@ function gatewayAdvice(method: string, status: number): string {
  * Whether a status that did not come from Dispatch can clear on its own: a gateway's 5xx, a
  * timeout or a rate limit can; any other status answers the same request the same way.
  */
-function transientStatus(status: number): boolean {
+export function transientStatus(status: number): boolean {
   return status >= 500 || status === 408 || status === 429;
 }
 
@@ -568,8 +568,9 @@ export class DispatchClient {
     return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
   }
 
-  /** `GET /api/v1/agents`: the Envoy listener's live sessions, for naming a session by the
-   *  title it is running under rather than the one it stamped on an old write. */
+  /** `GET /api/v1/agents`: the Envoy listener's live sessions, as of Dispatch's copy of its list
+   *  (at most 5 s old), for naming a session by the title it is running under rather than the
+   *  one it stamped on an old write. */
   async listAgents(): Promise<Agent[]> {
     return this.#json("GET", ["api", "v1", "agents"]);
   }
@@ -931,13 +932,8 @@ export class DispatchClient {
     return this.#json("POST", ["api", "v1", "comments", id, "resolve"], { actor });
   }
 
-  async getComments(issue: string, artifact?: string): Promise<Comment[]> {
-    return this.#json(
-      "GET",
-      ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"],
-      undefined,
-      artifact ? { artifact } : undefined
-    );
+  async getComments(issue: string): Promise<Comment[]> {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"]);
   }
 
   async getIssueReferences(issue: string): Promise<IssueReferences> {

@@ -2,10 +2,12 @@ package api
 
 import (
 	"context"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -56,9 +58,17 @@ func (s *server) queueEvent(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger,
 // left it: nothing comes between the event's insert and the stamp. An empty fromKind stamps
 // nothing.
 func (s *server) queueStampedEvent(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, event model.Event, fromKind, fromID string) (*model.Event, error) {
+	return s.queueLoggedEvent(ctx, tx, ledger, event, nil, fromKind, fromID)
+}
+
+// queueLoggedEvent is queueStampedEvent for an event whose payload names thread_logins, which the
+// event's insert reads (events.Broker.QueueAppendWithLogins): the logins the route's earlier
+// queued writes, and the user_threads triggers they fire, leave, as a read after those writes
+// would see them. A nil logins names none.
+func (s *server) queueLoggedEvent(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, event model.Event, logins *events.Logins, fromKind, fromID string) (*model.Event, error) {
 	appended := new(model.Event)
 	return appended, queueWrite(ctx, tx, ledger, func(b *store.WriteBatch) error {
-		if err := s.deps.Events.QueueAppend(b, event, func(written model.Event) { *appended = written }); err != nil {
+		if err := s.deps.Events.QueueAppendWithLogins(b, event, logins, func(written model.Event) { *appended = written }); err != nil {
 			return err
 		}
 		if fromKind != "" {
@@ -76,7 +86,24 @@ func (s *server) queueReferences(ctx context.Context, tx pgx.Tx, ledger *docs.Le
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
-	return changes, queueWrite(ctx, tx, ledger, func(b *store.WriteBatch) error {
+	return changes, queueReplacement(ctx, tx, ledger, replacement)
+}
+
+// queueEditedReferences is queueReferences for an edit of an ask's question or a comment's body
+// from previous to body: the counted targets also name every target the source still cites when
+// the edit moves the head of its text, which each of its edges shows (refs.EditedTargets).
+func (s *server) queueEditedReferences(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, fromKind, fromID, previous, body string) (model.ReferenceChanges, error) {
+	found := text.Extract(body, s.deps.ServerURL)
+	replacement, changes, err := planFoundReferences(ctx, tx, fromKind, fromID, found, refs.EditedTargets(previous, body, found))
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	return changes, queueReplacement(ctx, tx, ledger, replacement)
+}
+
+// queueReplacement queues replacement's delete and insert in tx's write phase.
+func queueReplacement(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, replacement refs.Replacement) error {
+	return queueWrite(ctx, tx, ledger, func(b *store.WriteBatch) error {
 		replacement.Queue(b)
 		return nil
 	})
@@ -84,16 +111,22 @@ func (s *server) queueReferences(ctx context.Context, tx pgx.Tx, ledger *docs.Le
 
 // planReferences is replaceReferences' read half: the reconciliation of fromKind/fromID's
 // references with body, planned against the edges the source holds, and the counted targets it
-// moves, for the caller to queue (Replacement.Queue) in its write phase. The resolution reads
-// issues and asks, which the reconciliation does not write, so it reads what it read after the
-// write. No document operation reconciles a comment's, an ask's or a message's references, so the
-// source's held edges are the stored ones.
+// moves, for the caller to queue (Replacement.Queue) in its write phase.
 func (s *server) planReferences(ctx context.Context, tx pgx.Tx, fromKind, fromID, body string) (refs.Replacement, model.ReferenceChanges, error) {
-	replacement, err := refs.PlanReplace(ctx, tx, fromKind, fromID, text.Extract(body, s.deps.ServerURL), nil)
+	return planFoundReferences(ctx, tx, fromKind, fromID, text.Extract(body, s.deps.ServerURL), nil)
+}
+
+// planFoundReferences plans the reconciliation of fromKind/fromID's references with found and
+// resolves the counted targets it and moved move. The resolution reads issues, asks and
+// artifacts, which the reconciliation does not write, so it reads what it read after the write.
+// No document operation reconciles a comment's, an ask's or a message's references, so the
+// source's held edges are the stored ones.
+func planFoundReferences(ctx context.Context, tx pgx.Tx, fromKind, fromID string, found []text.Ref, moved []refs.Target) (refs.Replacement, model.ReferenceChanges, error) {
+	replacement, err := refs.PlanReplace(ctx, tx, fromKind, fromID, found, nil)
 	if err != nil {
 		return refs.Replacement{}, model.ReferenceChanges{}, err
 	}
-	changes, err := refs.CountedChanges(ctx, tx, replacement.Changed())
+	changes, err := refs.CountedChanges(ctx, tx, slices.Concat(replacement.Changed(), moved))
 	if err != nil {
 		return refs.Replacement{}, model.ReferenceChanges{}, err
 	}
