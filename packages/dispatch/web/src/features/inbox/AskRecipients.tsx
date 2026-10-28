@@ -91,8 +91,10 @@ export interface IssueReachRow {
   /** Set on the route's row while the listener did not answer (`route_status: unknown`): the row
    *  carries the issue's `Route reach unknown` marker (`RouteReachUnknownMarker`) and claims
    *  neither that the route reaches someone nor that nobody holds it. A `session:<id>` route still
-   *  names and counts its session, which is published to either way; a role route names the bare
-   *  route, uncounted, and the count says the route reaches an unknown number more (`reachLabel`). */
+   *  names and counts its session, which
+   *  is published to either way (its running state is the registry's, as for every agent); a
+   *  role route names the bare route, uncounted, and the count says the route reaches an unknown
+   *  number more (`reachLabel`). */
   reachUnknown?: true;
   /** `via claim`, `via route`, or `via route (role:<name>)` on the session holding a role route. */
   via: string;
@@ -100,10 +102,13 @@ export interface IssueReachRow {
 
 /** Every row the card lists, each session once, and how many distinct sessions they reach. */
 export interface Reach {
-  /** Distinct sessions a person's answer and replies are known to reach now: the `Reaches N` count. */
+  /** Distinct sessions a person's answer and replies are known to reach now: the `Reaches N`
+   *  count. */
   count: number;
   issueRows: IssueReachRow[];
-  /** The session the route delivers to: its holder, else a `session:<id>` route's own session. */
+  /** The session the route delivers to: its holder, else a `session:<id>` route's own session
+   *  (offline or unjudged, since the listener does not list it). Undefined for no route or a role
+   *  route with no known holder. */
   routeSession: string | undefined;
   /** The owner's subscribers that are not followers, in the order the subscribers read lists them. */
   subscribers: Subscriber[];
@@ -111,11 +116,22 @@ export interface Reach {
   unknownRoute: boolean;
 }
 
-/** The card's `Reaches N` toggle, `Reaches N + route (unknown)` while a role route's reach is unknown. */
+/** The card's `Reaches N` toggle, `Reaches N + route (unknown)` while a role route's reach is
+ *  unknown, so the count never reads as the route reaching nobody. */
 export function reachLabel({ count, unknownRoute }: Pick<Reach, "count" | "unknownRoute">): string {
   return unknownRoute ? `Reaches ${count} + route (unknown)` : `Reaches ${count}`;
 }
 
+/**
+ * Lists each receiving session once: as a follower, else as a subscriber (both keep their
+ * control), else under `via claim`, else under `via route`. The route's receiving session goes
+ * through the same dedupe as the claimant's, so a role holder that is also the claimant, a
+ * follower or a subscriber is counted once. A role route no session holds is listed as the route
+ * itself and counted nowhere, since it reaches nobody now. While the listener did not answer
+ * (`routeStatus` `unknown`) the route's row is marked reach unknown: a role route is still the
+ * bare route, uncounted, and flagged `unknownRoute` so the count does not read as reaching nobody;
+ * a session route still counts its session, which is published to either way.
+ */
 export function reachRows({
   claimant,
   followers,
@@ -133,11 +149,15 @@ export function reachRows({
 }): Reach {
   const listed = new Set(followers.map((follower) => follower.session_id));
   const subscribers = subscriberRows.filter((subscriber) => !listed.has(subscriber.session_id));
-  for (const subscriber of subscribers) listed.add(subscriber.session_id);
+  for (const subscriber of subscribers) {
+    listed.add(subscriber.session_id);
+  }
   const issueRows: IssueReachRow[] = [];
   const unknown = route !== null && routeStatus === "unknown";
   const addIssueRow = (sessionId: string, via: string, reachUnknown = false): void => {
-    if (listed.has(sessionId)) return;
+    if (listed.has(sessionId)) {
+      return;
+    }
     listed.add(sessionId);
     issueRows.push(
       reachUnknown
@@ -145,18 +165,21 @@ export function reachRows({
         : { id: sessionId, reaches: true, via }
     );
   };
-  if (claimant !== null) addIssueRow(claimant, "via claim");
+  if (claimant !== null) {
+    addIssueRow(claimant, "via claim");
+  }
   const role = route?.startsWith("role:") === true;
   const routeSession =
     routeHolder ?? (route?.startsWith("session:") ? route.slice("session:".length) : undefined);
-  if (routeSession !== undefined)
+  if (routeSession !== undefined) {
     addIssueRow(routeSession, role ? `via route (${route})` : "via route", unknown);
-  else if (route !== null && role)
+  } else if (route !== null && role) {
     issueRows.push(
       unknown
         ? { id: route, reaches: false, reachUnknown: true, via: "via route" }
         : { id: route, reaches: false, via: "via route" }
     );
+  }
   return {
     count: listed.size,
     issueRows,
