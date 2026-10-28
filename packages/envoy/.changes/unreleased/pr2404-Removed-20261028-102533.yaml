@@ -1,0 +1,8 @@
+kind: Removed
+body: |-
+    The shutdown's `a KV bucket pass still running at shutdown` WARN is gone; a holder-only loop
+    still running when receiving ends logs `a holder-only loop was still running when receiving
+    ended`.
+time: 2026-10-28T10:25:33.653485153Z
+custom:
+    Issue: pr2404

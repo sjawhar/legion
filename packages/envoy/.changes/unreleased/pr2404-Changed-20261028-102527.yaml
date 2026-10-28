@@ -1,0 +1,10 @@
+kind: Changed
+body: |-
+    Every JSON line the listener writes carries `instance`, the process's name among its machine's
+    listeners (`ENVOY_INSTANCE_ID`, else the host name, a pod's name in Kubernetes), and its NATS
+    clients are named `envoy-listener <instance>`, `envoy-live-topics <instance>` and
+    `envoy-listener-lease <instance>`. Go's text log lines carry no prefix, so the deployed text
+    metric filters still match.
+time: 2026-10-28T10:25:27.88702609Z
+custom:
+    Issue: pr2404

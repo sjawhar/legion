@@ -1,0 +1,8 @@
+kind: Removed
+body: |-
+    The listener no longer logs `restored role claims` at start: `store.Open` takes no snapshot of
+    the role bucket, since a claim's grace counts from the machine's service start in its delivery
+    lease record.
+time: 2026-10-28T10:25:31.786581647Z
+custom:
+    Issue: pr2404

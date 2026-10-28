@@ -1,0 +1,8 @@
+kind: Changed
+body: |-
+    A delivery exception's `event_id` and `dedupe_key` are derived from the source event id, the
+    recipient session and the reason instead of minted, so a redelivery that fails the same way, on
+    any pod, publishes the same exception and the stream stores it once.
+time: 2026-10-28T10:25:06.106741331Z
+custom:
+    Issue: pr2404

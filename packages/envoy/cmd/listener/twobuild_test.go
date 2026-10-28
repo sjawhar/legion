@@ -38,7 +38,10 @@ const (
 
 // tbTargets is a topic on every subject the stream stores, the plain build's (bus.StreamSubjects)
 // and, with extra, tbExtraSubject, and tbLiveTopic, each with its own port session, named for the
-// subject so a report names the subject that lost or doubled a message.
+// subject so a report names the subject that lost or doubled a message. A subject no session may
+// follow is left out: /v1/interests/subscribe drops a topic reaching a private stream subject other
+// than the session's own agent subject (bus.ReachesPrivateStreamSubject: the Legion controller lane
+// and the failed-delivery lanes), so a port session on one would never be prompted.
 func tbTargets(extra bool) []mpTarget {
 	subjects := bus.StreamSubjects()
 	if extra {
@@ -53,7 +56,11 @@ func tbTargets(extra bool) []mpTarget {
 			targets = append(targets, mpInbox(sessionID))
 			continue
 		}
-		targets = append(targets, mpTarget{topic: prefix + "mp-twobuild", session: sessionID})
+		topic := prefix + "mp-twobuild"
+		if bus.ReachesPrivateStreamSubject(sessionID, topic) {
+			continue
+		}
+		targets = append(targets, mpTarget{topic: topic, session: sessionID})
 	}
 	return targets
 }

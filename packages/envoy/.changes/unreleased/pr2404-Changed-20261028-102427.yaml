@@ -1,0 +1,32 @@
+kind: Changed
+body: |-
+    `envoy-listener` runs as an active pod and standbys for any machine id: any number of
+    listeners may run with one `ENVOY_MACHINE_ID`, and only the holder of the machine's delivery
+    lease, the key `lease.listener-<machine id>` in the new KV bucket `envoy_listener` (created at
+    `ENVOY_NATS_REPLICAS`, 10 minute `MaxAge`), receives its durable consumer. The holder renews the
+    lease every second by compare-and-set and subscribes to the durable's deliver subject with a core
+    subscription of its own, never `nats.Bind`, handling a message only while it holds the lease; a
+    standby polls every 500 ms and takes an unreleased lease once it has not changed for 5 s, a
+    released one at once. Every pod serves `/v1`, the webhooks and the role lane; the interest and
+    role-claim reapers, the interest marker collector and the CI summary loop run on the holder
+    alone. A standby waits for as long as the active pod runs and never exits for it. A graceful
+    stop now ends receiving first (the holder-only loops stop, the subscription ends, the message in
+    hand gets 3 s before its prompt is cancelled, queued messages are NAKed, the lease is marked
+    released) and then stops HTTP, so a standby delivers within about 1 to 3 s and keeps each
+    session's order. A pod that takes the lease over a holder that was killed or lost its node
+    subscribes at once and holds what it receives until every message the durable has outstanding
+    is in its hands (its `NumAckPending` no more than what it holds, read every 250 ms, capped at
+    two ack waits and a second, 13 s), then delivers it in stream order, so a session's events stay
+    in order there too: messages arrive about 5 to 6 s after the dead holder's last renewal when
+    nothing was outstanding, about 12 s after it otherwise, and up to about 19 s when a NAK-delayed
+    retry is outstanding and holds the hold to its cap. The lease record carries `stale_binding` (its
+    holder subscribed beside a lingering push binding) and `unsettled` (its term's hold had not
+    ended, kept by a release), and a pod that takes a released record carrying either settles the
+    same way. A holder that takes an absent record, or a released one with neither flag, and finds
+    the durable push-bound by a listener build from before the lease waits for that binding to end
+    and subscribes within a second of it; past 135 s it logs `lease holder cannot deliver from the
+    durable` at ERROR, again every 5 minutes, and never exits for it.
+    `packages/envoy/cmd/listener/README.md` describes the run model.
+time: 2026-10-28T10:24:27.185064233Z
+custom:
+    Issue: pr2404

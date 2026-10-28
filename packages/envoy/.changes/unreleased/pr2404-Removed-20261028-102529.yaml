@@ -1,0 +1,10 @@
+kind: Removed
+body: |-
+    The listener no longer exits when its durable stays bound elsewhere: the 135 s bind deadline and
+    its line `subscribe failed after max attempts, shutting down` are gone with the start-time bind,
+    and so are `subscribe failed, retrying`, `durable bound` and `durable bind failed, shutting
+    down`. The lease holder's `lease holder cannot deliver from the durable` replaces the first as
+    the `subscribe-exhausted` alarm's line.
+time: 2026-10-28T10:25:29.98650824Z
+custom:
+    Issue: pr2404
