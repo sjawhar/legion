@@ -15,11 +15,11 @@ import {
   type Page,
 } from "@playwright/test";
 
-import { sessionIds } from "../../../packages/dispatch/e2e/session-ids";
 import type {
   Harness as E2eHarness,
   HarnessProcess,
 } from "../../../packages/dispatch/e2e/harness-start";
+import { sessionIds } from "../../../packages/dispatch/e2e/session-ids";
 import type { SeededWorkspace } from "../../../packages/dispatch/e2e/workspace";
 
 export const REPO = resolve(import.meta.dir, "../../..");
