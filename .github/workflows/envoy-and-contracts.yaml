@@ -1026,9 +1026,7 @@ jobs:
       - name: Build, check and pack the plugin as main's rebuild does
         run: bun run verify-build "$RUNNER_TEMP/claude-envoy-built.tar"
         working-directory: packages/claude-envoy
-      # The pack step packs the package's own dist/ and legion/, so the checked build goes into
-      # this job's disposable checkout first, which nothing commits, as the rebuild's build job puts
-      # it into its own.
+      # The pack step packs the package's own dist/ and legion/ (release-push.sh extract-built).
       - name: Put the checked build into CI's checkout for the pack
         run: .github/scripts/release-push.sh extract-built "$RUNNER_TEMP/claude-envoy-built.tar"
       - name: Test Claude Envoy plugin

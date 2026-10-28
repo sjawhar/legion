@@ -586,6 +586,27 @@ check "names the publish job, the step and the two commands a release allows" \
   "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^          DEPLOY_KEY:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at step 'Push tag' env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag or release-push.sh push-main, which release.yaml allows$")"
 check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
 
+for other in push-built push-main; do
+  echo "case: the deploy key in the fold's push step, which runs $other, another workflow's push"
+  root=$(fixture "fold-$other")
+  # shellcheck disable=SC2016 # the literal run lines the workflow carries, never expanded
+  mutate "$root/$FOLD" 'run: .github/scripts/release-push.sh push-fold "$BASE"' "run: .github/scripts/release-push.sh $other \"\$BASE\""
+  run_check "$root"
+  check "exits 1" "$(is "$status" 1)"
+  check "names the publish job, the step and the one command the fold allows" \
+    "$(contains "$out" "^::error::$FOLD:$(line_of "$root/$FOLD" '^          DEPLOY_KEY:'): job 'fold_publish' names secrets.DEPLOY_KEY at step 'Fold and push' env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-fold, which changelog-fold.yaml allows$")"
+  check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
+done
+
+echo "case: the deploy key in a release's push step, which runs push-fold, the fold's push"
+root=$(fixture release-push-fold)
+mutate "$root/$RELEASE" $'        run: .github/scripts/release-push.sh push-tag "$TAG"\n' $'        run: .github/scripts/release-push.sh push-fold "$TAG" notes\n' 1
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the publish job, the step and the two commands a release allows" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^          DEPLOY_KEY:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at step 'Push tag' env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag or release-push.sh push-main, which release.yaml allows$")"
+check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
+
 echo "case: a credentialed job runs bun install"
 root=$(fixture bun-install)
 add_publish_step "$root" $'      - name: Install the publish dependencies\n        run: bun install --frozen-lockfile\n'

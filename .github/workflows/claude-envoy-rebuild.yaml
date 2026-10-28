@@ -78,10 +78,7 @@ jobs:
       - name: Build, check and pack the plugin
         run: bun run verify-build "$RUNNER_TEMP/claude-envoy-built.tar"
         working-directory: packages/claude-envoy
-      # The checked build enters this job's own checkout as push-built puts it into the push job's:
-      # the tar is the whole of both directories, so a file it lacks is deleted. The claude-envoy job
-      # of envoy-and-contracts.yaml extracts it the same way, for its pack, in its own disposable
-      # checkout; nothing a person runs locally writes the two directories.
+      # What it writes: release-push.sh extract-built.
       - name: Put the checked build into the checkout
         run: .github/scripts/release-push.sh extract-built "$RUNNER_TEMP/claude-envoy-built.tar"
       # base is the commit this job built from, the only commit push lands onto. The build may
