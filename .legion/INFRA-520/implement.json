@@ -2,16 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-520",
-  "completed": "2026-10-27T10:07:19Z",
+  "completed": "2026-10-28T09:59:56Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2316",
   "proof": [
     {
-      "criterion": "The pull request can be tested and merged at its head, with every change main merged into a deleted workflow carried into ci.yaml (tester failure 1)",
+      "criterion": "The pull request can be tested and merged at its head, with every change main merged into a deleted workflow carried into ci.yaml",
       "surface": "GitHub on sjawhar/legion#2316",
-      "command": "forward merge jj new legion/INFRA-520 \"main\"@origin (main 719aae24) -> 0ae68a17; gh pr view 2316 --json mergeable,mergeStateStatus; gh run list --branch legion/INFRA-520 --workflow ci.yaml; coverage.py .github/workflows/ci.yaml",
-      "observed": "mergeable MERGEABLE (mergeStateStatus BLOCKED: waiting on checks and review), and CI run 40485844632 started at 0ae68a17. #2167's envoy-go-race changes are in ci.yaml: timeout-minutes 75 with its comment and the step 'Race-test the listener, the registry store and kvwatch'. The coverage script, given that step, first printed `envoy-go-race: 1 uncovered packages/contracts/fixtures/dispatch-targeted-delivery.json` (cmd/listener/api_test.go:191); the filter now names it and all 21 filters print 0 uncovered. Fingerprint comment: https://github.com/sjawhar/legion/pull/2316#issuecomment-6438995012",
-      "headSha": "0ae68a179d69f8e39b2e0ea865bb1b7d6138822d",
-      "negativeControl": "At b6561ba2 GitHub reported CONFLICTING/DIRTY and started no CI run; a trial merge listed envoy-and-contracts.yaml as a 2-sided conflict including 1 deletion"
+      "command": "two forward merges (cc8af3c4 with main b295a3fb, 863afe7b with main 184897ac); gh pr view 2316 --json mergeable,mergeStateStatus; .github/scripts/check-ci-filters.sh on the merged tree",
+      "observed": "MERGEABLE (BLOCKED only on checks and review). Main's #2356, #2325, #2229, #2328, #2159, 582cb2a2 and #2419 changes to the deleted workflows are in the ci.yaml jobs of the same ids; tests-closed.yaml cancels ci.yaml's run of a closed pull request; check-ci-filters.sh passes all 21 gates (e.g. test 3232 files, broker-multiprocess 278, 0 uncovered). Fingerprint comment https://github.com/sjawhar/legion/pull/2316#issuecomment-6465963425",
+      "headSha": "863afe7bc7fb1fd99c02d07d26af10ef7cfef366",
+      "negativeControl": "At 932ad88d GitHub reported CONFLICTING/DIRTY; the trial merge listed the deleted workflows as 2-sided conflicts including 1 deletion"
     },
     {
       "criterion": "Public text names no private host: the pull request body passes check-pr-text.sh (tester failure 2)",
@@ -34,7 +34,7 @@
       "surface": "ci.yaml's changes filters, read with .github/scripts/workflow_paths.py, and scratch pull requests on GitHub Actions",
       "command": "PYTHONPATH=.github/scripts coverage.py .github/workflows/ci.yaml (dispatch://INFRA-520/artifact/infra-520-coverage-tar-gz: live `go list -deps -test [-tags]` closures of every job's go commands, the closures of the go commands its tests start, repository-root reads, embeds, module files, and every non-Go step input); then 16 scratch pull requests stacked on legion/INFRA-520 (#2332, #2334-#2349), each changing one file, run up to `changes` and cancelled",
       "observed": "At 0ae68a17 (merged with main 719aae24) every one of the 21 filters prints `0 uncovered` (e.g. test 2981 files, docs 2885, envoy-go-race 1741, dispatch-memory 1034). Each scratch run selected exactly the jobs whose filter names its file: #2343 (a guide memory_profile_test.go reads) only dispatch-memory, at the filter of 6467a0a7 (at 6b0588e3 that guide left the filter: the test reads it only when DISPATCH_EDIT_PROFILE_OUT is set), #2348 (install-pulumi) only envoy-smoke, #2335 envoy-plugin only, #2341 claude-envoy only, #2339 (AGENTS.md) pi-legion only, #2346 (infra seed.go) envoy-infra-go, envoy-go, envoy-go-race and changes' log `Filter go_notices = true`, #2349 (a docs/solutions page) no job but lint (`Filter go_notices = false`, run 40449412482). The scratch runs used ci.yaml as of 6467a0a7 (the scratch pull requests' base when they were pushed)",
-      "headSha": "0ae68a179d69f8e39b2e0ea865bb1b7d6138822d",
+      "headSha": "863afe7bc7fb1fd99c02d07d26af10ef7cfef366",
       "negativeControl": "coverage.py --drop 'dispatch=packages/envoy/internal/routing/*' prints routing/match.go and match_test.go uncovered and exits 1; the docs/solutions-only scratch #2349 selected no test job"
     },
     {
@@ -66,7 +66,7 @@
       "surface": ".github/scripts tests and the checks on the tree",
       "command": "PATH=<pyyaml venv>:$PATH bash .github/scripts/check-image-trigger-paths.test.sh; bash .github/scripts/check-bun-version.test.sh; .github/scripts/check-image-trigger-paths.sh; .github/scripts/check-bun-version.sh",
       "observed": "image-trigger tests 'Results: 896 passed, 0 failed'; bun-version tests 'Results: 110 passed, 0 failed'; on the tree: 'every image trigger covers every input its build reads (4 image build(s))', the worker-image gate 'matches only files its image builds read', envoy-smoke's left alone as it does more than build",
-      "headSha": "0ae68a179d69f8e39b2e0ea865bb1b7d6138822d",
+      "headSha": "863afe7bc7fb1fd99c02d07d26af10ef7cfef366",
       "negativeControl": "The new tests against the unmodified checkers: 'Results: 829 passed, 17 failed' (event/draft/cache), 'Results: 863 passed, 33 failed' (reverse check, some-with-excludes), bun-version '108 passed, 2 failed'; the tree with one worker_image `!` line removed fails naming a .dockerignore-dropped file"
     },
     {
@@ -74,7 +74,7 @@
       "surface": "actionlint",
       "command": "GOFLAGS=-mod=mod go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/ci.yaml .github/workflows/worker-image.yaml .github/workflows/pr-title.yaml",
       "observed": "exit 0, no findings",
-      "headSha": "0ae68a179d69f8e39b2e0ea865bb1b7d6138822d",
+      "headSha": "863afe7bc7fb1fd99c02d07d26af10ef7cfef366",
       "negativeControl": "The same actionlint over release-envoy-listener.yaml reports `cache-mode`/`queue` keys it does not know (exit 1), so it does read and refuse"
     },
     {
@@ -92,6 +92,30 @@
       "observed": "changes success; worker-image skipped; the jobs that read internal/bus were selected (typecheck and docs passed, test, envoy-go, envoy-go-race, dispatch, dispatch-memory, dispatch-multiprocess, envoy-infra-go, envoy-smoke, envoy-e2e-local queued); the run was then cancelled",
       "headSha": "c1b200869a537d93961cc8cba045b55a9fd51692",
       "negativeControl": "#2344 (packages/envoy/internal/testsocks5/testsocks5.go, a non-test file the build reads) selected worker-image / build"
+    },
+    {
+      "criterion": "Filter drift: check-ci-filters.sh runs in CI and fails naming a file a job reads that its filter misses",
+      "surface": "stacked scratch pull request #2400 on GitHub Actions (ci.yaml as of 23ad9421)",
+      "command": "#2400 adds packages/envoy/internal/smoke/scratch_drift_test.go (//go:build smoke) importing github.com/sjawhar/envoy/testnatsimages; CI run 40499230272, ci-filters job 122201826871 and its check-run annotations",
+      "observed": "changes selected ci-filters (and envoy-go, envoy-go-race, envoy-smoke, lint); ci-filters failed: 'envoy-smoke: 171 files, 1 uncovered (filter envoy_smoke)' and the annotation 'envoy-smoke reads packages/envoy/testnatsimages/images.go, which its filter envoy_smoke does not match, so a change to it skips the job: ci.yaml envoy-smoke \"Container smoke test (testcontainers)\": go test -tags smoke -v -timeout 5m ./internal/smoke/ (go list -deps)'; every other gate 0 uncovered",
+      "headSha": "6e5c65512558e69b4e68c628884079ae09124d6a",
+      "negativeControl": "At 863afe7b, without the scratch import, the same check passes all 21 gates; its fixture tests: 'Results: 36 passed, 0 failed'"
+    },
+    {
+      "criterion": "Re-run safety: ci-ok is green after 'Re-run failed jobs' only if the selected jobs ran again and passed",
+      "surface": "stacked scratch pull requests #2412 (a selected envoy-plugin test fails on attempt 1 only) and #2413 (changes fails on attempt 1 only) on GitHub Actions, ci.yaml as of 932ad88d",
+      "command": "gh run rerun <run> --failed on runs 40534840724 and 40534854723; jobs and ci-ok annotations of attempts 1 and 2 (gh api repos/sjawhar/legion/actions/runs/<run>/attempts/<n>/jobs)",
+      "observed": "#2412 attempt 1: envoy-plugin failure, ci-ok failure ('envoy-plugin ended failure, but changes selected it \u2026'); attempt 2 re-ran envoy-plugin on a runner, success, ci-ok success (check run 122714965559). #2413 attempt 1: changes failure, every gated lane skipped, ci-ok failure ('changes ended failure \u2026'); attempt 2: GitHub re-ran changes and every job that needs it, all 22 selected jobs ran on runners and passed, ci-ok success (check run 122736976221). GitHub re-runs a failed job's dependents, so here no selected job stays skipped after the re-run",
+      "headSha": "6e466f9f37d86d4b358b6c2d1c5ac50287cf9d3f",
+      "negativeControl": "The case where a selected job stays skipped (changes success, its output true, the job skipped) fails ci-ok.sh: ci-ok.test.sh case 'a failed-only re-run left a selected job skipped' fails naming typecheck among 'Results: 33 passed, 0 failed'; the red run before ci-ok.sh existed was 'Results: 1 passed, 32 failed'"
+    },
+    {
+      "criterion": "A pull request's worker image build reads the main-scoped Actions cache (scope worker-image) and writes no cache entry",
+      "surface": "stacked scratch pull request #2407 on GitHub Actions (worker-image.yaml as of f374d27c)",
+      "command": "CI run 40520161451, worker-image / build job 122266626274 log; gh api 'repos/sjawhar/legion/actions/caches?ref=refs/pull/2407/merge' --jq .total_count after the run",
+      "observed": "the build ran `docker buildx build \u2026 --cache-from type=gha,scope=worker-image` with no --cache-to, logged '#9 importing cache manifest from gha:\u2026', and succeeded; refs/pull/2407/merge held 0 cache entries afterwards. Main's scope index-worker-image-1 entries exist on refs/heads/main only",
+      "headSha": "437730b6e09dab00fc7b2c25db694078fe62c402",
+      "negativeControl": "The earlier registry form (ghcr :buildcache) logged 'failed to configure registry cache importer: \u2026 not found' on scratch #2352; the registry form is gone at the architect's direction (GHSA-f2v9-hprr-32q3)"
     }
   ],
   "requiredChecksCutover": {
@@ -197,6 +221,8 @@
     ".github/scripts/check-bun-version.test.sh",
     ".github/scripts/check-bun-workspace-manifests.sh",
     ".github/scripts/check-bun-workspace-manifests.test.sh",
+    ".github/scripts/check-ci-filters.sh",
+    ".github/scripts/check-ci-filters.test.sh",
     ".github/scripts/check-gh-version.sh",
     ".github/scripts/check-gh-version.test.sh",
     ".github/scripts/check-heartbeat-margin.sh",
@@ -212,6 +238,10 @@
     ".github/scripts/check-release-credentials.test.sh",
     ".github/scripts/check-zod-version.sh",
     ".github/scripts/check-zod-version.test.sh",
+    ".github/scripts/ci-ok.sh",
+    ".github/scripts/ci-ok.test.sh",
+    ".github/scripts/ci_filter_coverage.py",
+    ".github/scripts/ci_job_reads.py",
     ".github/scripts/release-bump.test.sh",
     ".github/scripts/release-push.test.sh",
     ".github/scripts/workflow_paths.py",
@@ -222,6 +252,7 @@
     ".github/workflows/pr-title.yaml",
     ".github/workflows/release-envoy-infra.yaml",
     ".github/workflows/release.yaml",
+    ".github/workflows/tests-closed.yaml",
     ".github/workflows/worker-image.yaml",
     "AGENTS.md",
     "README.md",
@@ -274,10 +305,14 @@
     "The reverse check from #2305 is carried and widened to the router's image gates (architect's direction); worker_image drops what the .dockerignore drops with `!` patterns under some-with-excludes.",
     "dispatch-memory's filter leaves out four guides its tests read only when DISPATCH_EDIT_PROFILE_OUT is set (INFRA-583's review).",
     "release-envoy-listener.yaml's gha buildkit cache (about 1.6 GB of new entries per run) is INFRA-522's to move; acceptance 5 is restated by the architect as no refs/pull/ entry, notices p90 under 3 minutes, and totals reported by ref and family.",
-    "Round 2: main's #2167 edited envoy-and-contracts.yaml after the first merge; a second forward merge carries its envoy-go-race timeout and race step into ci.yaml, and envoy_go_race's filter gains the fixture the listener's tests read."
+    "Round 2: main's #2167 edited envoy-and-contracts.yaml after the first merge; a second forward merge carries its envoy-go-race timeout and race step into ci.yaml, and envoy_go_race's filter gains the fixture the listener's tests read.",
+    "Round 3: the worker image's cache returns to the Actions cache, cache-from type=gha,scope=worker-image, cache-to on main only with mode=min and ignore-error=true (INFRA-490 architect: a branch could write the ghcr :buildcache tag main's attested build reads; mode=min after main alone held 10.44 GB). This replaces the tester's registry-write probe.",
+    "Round 3: check-ci-filters.sh (spec 'Filter drift') and ci-ok's rule that every selected job must succeed (spec 'Re-run safety') are added; ci-ok's verdict lives in .github/scripts/ci-ok.sh with tests.",
+    "Round 3: two forward merges of main (#2356, #2325, #2229, #2328, #2159, 582cb2a2, #2419); #2356's draft handling in check-image-trigger-paths.sh is kept as the one draft implementation; restore-keys are set only off main (#2328's rule)."
   ],
   "openQuestions": [],
   "productionCheck": [
-    "Rows 3, 5, 7, 9 and the queue rows are read after the merge: first 100 pull_request runs of ci.yaml (minutes with a runner vs the reference sets), cache usage by ref and family for 7 days (no refs/pull/ entry after the merge), lint notices step p90, release start within 30 minutes of a merge, the PR Title run after a review getting a runner within 10 minutes at p90, the first pull requests through the merge queue, and main's two release worker builds both completing (row 6's negative control)."
+    "Rows 3, 5, 7, 9 and the queue rows are read after the merge: first 100 pull_request runs of ci.yaml (minutes with a runner vs the reference sets), cache usage by ref and family for 7 days (no refs/pull/ entry after the merge), lint notices step p90, release start within 30 minutes of a merge, the PR Title run after a review getting a runner within 10 minutes at p90, the first pull requests through the merge queue, and main's two release worker builds both completing (row 6's negative control).",
+    "Main's Actions cache by ref and key family, measured 2026-10-28 08:40Z before this change: refs/heads/main 10.91 GB in 206 entries total (buildkit-blob 5.97 GB in 177 entries, go-notices 2.22, go-envoy-infra 1.00, go-daemon 0.54, go-docs 0.49, setup-go 0.47, go-envoy 0.13, bun and binfmt 0.08). After the merge read main's total daily for 3 days: under 9 GB (worker image mode=min; release jobs no longer save setup-go)."
   ]
 }
