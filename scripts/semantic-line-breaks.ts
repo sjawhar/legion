@@ -7,7 +7,8 @@
 // `--write` is conservative by rule. It leaves a leading YAML front matter block byte for byte. It
 // never joins a line onto the one before when the line could open or interrupt a block, nor cuts
 // a line where the new line would start so. It never joins or cuts inside a code span or inline
-// HTML: a raw-text element such as `<pre>` keeps its line breaks through its close tag.
+// HTML: the content of `<pre>`, `<textarea>`, `<script>`, `<style>`, `<code>`, `<tt>`, `<kbd>` and
+// `<samp>` stays as it is through the close tag.
 //
 // `--write` then writes a file only when two guards hold: the text is the same once whitespace is
 // folded, and the file renders the same, parsed before and after with micromark and its GFM and
@@ -70,16 +71,19 @@ const HTML_TAG_LINE =
 /**
  * Text a paragraph line, after its indentation, may not start with when `--write` joins it onto the
  * line before or cuts a line before it, because under CommonMark or GFM it could open a block or
- * end the paragraph: a list marker, `#`, `>`, `|`, `<`, a fence, a footnote, a link reference
+ * end the paragraph: a list marker, `#`, `>`, `|`, a fence, a footnote, a link reference
  * definition's label, a task box, or a whole line that could be a setext underline, a rule or a
- * table delimiter row.
+ * table delimiter row. startsBlock adds the HTML that could.
  */
 const CONTINUATION_BLOCK_START =
-  /^(?:[-+*](?:[ \t]|$)|\d+[.)](?:[ \t]|$)|[#>|<]|`{3,}|~{3,}|\[\^|\[(?:[^\\\]]|\\.)+\]:|\[[ xX]\](?:[ \t]|$)|[-=*_|: \t]+$)/;
+  /^(?:[-+*](?:[ \t]|$)|\d+[.)](?:[ \t]|$)|[#>|]|`{3,}|~{3,}|\[\^|\[(?:[^\\\]]|\\.)+\]:|\[[ xX]\](?:[ \t]|$)|[-=*_|: \t]+$)/;
 /** A list item line whose content is only a task box: the line after it must stay apart. */
 const TASK_BOX_LINE = /^[ \t]*(?:(?:[-+*]|\d+[.)])[ \t]+)+\[[ xX]\][ \t]*$/;
-/** An open tag of a raw-text element, whose content runs as is through its close tag. */
-const RAW_TEXT_OPEN = /^<(pre|textarea|script|style)(?=[ \t\n/>])/i;
+/**
+ * An open tag of an element whose content `--write` keeps as it is through its close tag, never
+ * joined or cut: a raw-text element, or inline code, whose line breaks GitHub shows.
+ */
+const VERBATIM_OPEN = /^<(pre|textarea|script|style|code|tt|kbd|samp)(?=[ \t\n/>])/i;
 /** A YAML front matter block as micromark's front matter extension reads it: a closed one. */
 const CLOSED_FRONT_MATTER = /^---[ \t]*\r?\n(?:[^\n]*\n)*?---[ \t]*(?:\r?\n|$)/;
 
@@ -499,7 +503,10 @@ function destinationEnd(line: string, from: number): number {
   return -1;
 }
 
-/** Index just past the inline HTML that opens at `from`, or -1 when no `>` closes it. */
+/**
+ * Index just past the inline HTML that opens at `from`, or -1 when no `>` closes it. An element
+ * VERBATIM_OPEN opens runs through its close tag, so its content is never joined or cut.
+ */
 function htmlEnd(text: string, from: number): number {
   if (text.startsWith("<!--", from)) {
     const close = text.indexOf("-->", from + 4);
@@ -507,7 +514,7 @@ function htmlEnd(text: string, from: number): number {
   }
   const tagEnd = text.indexOf(">", from);
   if (tagEnd === -1) return -1;
-  const element = RAW_TEXT_OPEN.exec(text.slice(from, tagEnd + 1))?.[1];
+  const element = VERBATIM_OPEN.exec(text.slice(from, tagEnd + 1))?.[1];
   if (element === undefined) return tagEnd + 1;
   const close = new RegExp(`</${element}[ \\t\\n]*>`, "gi");
   close.lastIndex = tagEnd + 1;
@@ -517,7 +524,8 @@ function htmlEnd(text: string, from: number): number {
 
 /**
  * Which characters of the text are prose: outside inline code spans, inline HTML (a tag or an
- * autolink, and a raw-text element such as `<pre>` through its close tag) and link destinations.
+ * autolink, and an element such as `<pre>` or `<code>` through its close tag, as htmlEnd reads it)
+ * and link destinations.
  * A backtick run with no equal-length run after it in the text is literal text, and so is a `<`
  * no `>` closes. The text may be a whole paragraph, its lines joined with `\n`.
  */
@@ -564,14 +572,30 @@ interface Masked {
 }
 
 /**
+ * Whether a paragraph line, after its indentation, starts with text that could open a block or end
+ * the paragraph, so `--write` neither joins it onto the line before nor cuts a line before it, and
+ * no sentence starts there: CONTINUATION_BLOCK_START, an HTML block start that may interrupt a
+ * paragraph (kinds 1 to 6), or a tag alone on the line (kind 7). Other inline HTML may start it.
+ */
+function startsBlock(text: string): boolean {
+  return (
+    CONTINUATION_BLOCK_START.test(text) ||
+    HTML_BLOCKS.some(([opens]) => opens.test(text)) ||
+    HTML_BLOCK_TAG.test(text) ||
+    HTML_TAG_LINE.test(text)
+  );
+}
+
+/**
  * The index of each space on the line that separates two sentences (R1): a sentence mark, its
  * closers, then this one space, then a sentence start. A sentence that starts with a lowercase
  * word (`ygo's`, `envoy-dispatch`) follows only a bare `.`, maybe emphasised: after `?`, `!`, a
  * quote, a parenthesis or an ellipsis such a word goes on with the sentence (`asks "why?" and`,
- * `./... in`). No sentence starts with text `--write` may not cut before. The text may be a
- * paragraph, its lines joined with `\n`, read as `--write` reads it: a line that opens with a
- * list marker stays a line of its own, so the sentence before a mark starts no earlier than its
- * line. Check mode reports these and `--write` turns them into line breaks.
+ * `./... in`). A sentence may start with an inline HTML tag (`<kbd>Ctrl</kbd> opens it`). No
+ * sentence starts with text `--write` may not cut before. The text may be a paragraph, its lines
+ * joined with `\n`, read as `--write` reads it: a line that opens with a list marker stays a line
+ * of its own, so the sentence before a mark starts no earlier than its line. Check mode reports
+ * these and `--write` turns them into line breaks.
  */
 function sentenceBreaks(line: string, prose = proseMask(line)): number[] {
   const breaks: number[] = [];
@@ -580,10 +604,12 @@ function sentenceBreaks(line: string, prose = proseMask(line)): number[] {
     let space = mark + 1;
     while (prose[space] && SENTENCE_CLOSERS.includes(line.charAt(space))) space++;
     if (line[space] !== " " || !prose[space]) continue;
-    if (!SENTENCE_START.test(line.slice(space + 1, space + 3))) continue;
+    const tag =
+      line[space + 1] === "<" && !prose[space + 1] && /[A-Za-z]/.test(line.charAt(space + 2));
+    if (!tag && !SENTENCE_START.test(line.slice(space + 1, space + 3))) continue;
     const lineEnd = line.indexOf("\n", space);
     const rest = line.slice(space + 1, lineEnd === -1 ? line.length : lineEnd);
-    if (CONTINUATION_BLOCK_START.test(rest)) continue;
+    if (startsBlock(rest)) continue;
     const sentence = line.slice(line.lastIndexOf("\n", mark) + 1, mark + 1);
     const abbreviation = ABBREVIATIONS.find((word) => sentence.endsWith(word));
     const before = sentence.charAt(sentence.length - (abbreviation?.length ?? 0) - 1);
@@ -626,7 +652,7 @@ function cutLine(line: Masked, cuts: readonly number[]): Masked[] {
       const end = kept[n] ?? line.text.length;
       return { text: line.text.slice(start, end), prose: line.prose.slice(start, end) };
     });
-    const bad = pieces.findIndex((piece, n) => n > 0 && CONTINUATION_BLOCK_START.test(piece.text));
+    const bad = pieces.findIndex((piece, n) => n > 0 && startsBlock(piece.text));
     if (bad === -1) return pieces;
     kept = kept.filter((_, n) => n !== bad - 1);
   }
@@ -642,11 +668,7 @@ function wrapLongLine(line: Masked, indent: string): string[] {
   for (const cut of longLineBreaks(line)) {
     if ((start === lead ? lead : indent.length) + text.length - start <= MAX_LINE) break;
     const rest = text.slice(cut + 1);
-    if (
-      cut - start >= MIN_PART &&
-      rest.length >= MIN_PART &&
-      !CONTINUATION_BLOCK_START.test(rest)
-    ) {
+    if (cut - start >= MIN_PART && rest.length >= MIN_PART && !startsBlock(rest)) {
       cuts.push(cut);
       start = cut + 1;
     }
@@ -675,7 +697,7 @@ function joinParagraph(source: readonly string[]): Masked[] {
       previous === undefined ||
       HARD_BREAK.test(previous.text) ||
       mask[lineBreak] !== true ||
-      CONTINUATION_BLOCK_START.test(line.slice(indent)) ||
+      startsBlock(line.slice(indent)) ||
       TASK_BOX_LINE.test(source[n - 1] ?? "")
     ) {
       logical.push({ text: line, prose });
