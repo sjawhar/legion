@@ -2750,33 +2750,37 @@ the synchronous listener call records the sent or failed attempt instead of blin
   When a batch's recipient statement fails - its comment recipients, its primary document authors
   or its document credits (`loadDocumentSessionAuthors`) - unlike the other lookup kinds, whose
   failure fails the whole batch, only the events that asked an id the statement cannot answer
-  fail. A statement Postgres refuses (`refusedStatement`, a `*pgconn.PgError`) names no id, so
-  it is run again once for each of its ids alone (`loadRecipients`): an id whose own run answers
-  gets its sessions, and one whose own run fails has its error recorded against it
-  (`failRecipients`, `lookups.failed`), so the events of other owners asking the same statement
-  for healthy ids publish. A statement that fails for the process's stop or a lost connection is
-  not run again: every id it read is recorded failed. A failed event's destinations end with that
-  error at the primary-document or author step, after the owner topic, the route and the
-  claimant, which are sent and recorded as usual (`resolveErr`), and `settleEvent` backs the event
-  off, or releases it when the error is the process stopping (`resolveLost`) or a send of it met a
-  lost connection. Such an event is a failure, never `blocked` on a mention: the failure decides
-  its outcome. The sessions it is still bound for are unknown, so its list is incomplete
-  (`unansweredRecipients`, `batchEvent.incomplete`): every later event of its owner is held back
-  from each session key (`notifications.agent.*`, or a role route's key) the incomplete list does
-  not name, behind a blocker carrying the failed event's back-off (`planChains`), so the later
-  event is tried again no later than the failed one and reaches such a session after it; a key
-  the list names chains as usual, and the owner's topic family is never held this way. A batch
-  takes no recipient read for an event that is not due (`untaken`): `readBatchSQL` reads a chosen
-  owner's whole window, and the read of an event backed off on a row no read can take - a credit
-  list `jsonb_array_elements` refuses - would otherwise cost every batch a refused statement and
-  a run of each of its ids. Such a not-due event answers a recipient read only where a due event
-  of the batch asked the same id; otherwise its list is incomplete too, and holds its owner's later
-  events back the same way until its `next_attempt_at`. A row no recipient read can take so backs
-  off the events that read it and holds back their owners' later session copies, and the rest of
-  the outbox publishes. Every lookup kind but the issues' is a uuid, read and answered in its
-  canonical form (`validIDs`, `canonicalID`); an id that is no uuid is never sent to Postgres and
-  fails the event that asked it - except a reply's `reply_to`, which then replies under no
-  comment: the reply reaches no thread session, is not failed and holds nothing back.
+  fail. A statement Postgres refuses over the rows it read (`refusedStatement`: a
+  `*pgconn.PgError` outside SQLSTATE classes 08, 40, 53, 57 and 58, and not a
+  `*pgconn.ConnectError`) names no id, so its ids are run again in halves, and each refused half's
+  halves, until each refused row is run alone (`loadRecipients`, `bisectRecipients`): an id in a
+  run that answers gets its sessions, and one whose own run is refused has its error recorded
+  against it (`failRecipients`, `lookups.failed`), so the events of other owners asking the same
+  statement for healthy ids publish, and one broken row among n ids costs at most
+  2*ceil(log2(n)) more statements. A statement that fails for the process's stop or for the
+  connection - lost, refused (`too_many_connections`, `cannot_connect_now`) or ended by the server
+  (`admin_shutdown` during a failover) - is not run again: every id not yet answered is recorded
+  failed. A failed event's destinations end with that error at the primary-document or author
+  step, after the owner topic, the route and the claimant, which are sent and recorded as usual
+  (`resolveErr`), and `settleEvent` backs the event off, or releases it when the error is the
+  process stopping (`resolveLost`) or a send of it met a lost connection. Such an event is a
+  failure, never `blocked` on a mention: the failure decides its outcome. The sessions it is still
+  bound for are unknown, so its list is incomplete (`unansweredRecipients`,
+  `batchEvent.incomplete`): every later event of its owner is held back from each session key
+  (`notifications.agent.*`, or a role route's key) the incomplete event neither names in its list
+  nor already reached (`published_destinations`), behind a blocker carrying the failed event's
+  back-off (`planChains`), so the later event is tried again no later than the failed one and
+  reaches such a session after it; a key the list names chains as usual, a key the event already
+  reached holds nothing back, and the owner's topic family is never held this way. An event that
+  is not due reads its recipients as a due one does, since they are what it holds its owner's
+  later events back from: one whose reads answer holds back only the destinations it has not
+  reached, and one whose read fails holds back the same keys as a due one until its
+  `next_attempt_at`. A row no recipient read can take so backs off the events that read it and
+  holds back their owners' later session copies on the keys those events could still owe, and the
+  rest of the outbox publishes. Every lookup kind but the issues' is a uuid, read and
+  answered in its canonical form (`validIDs`, `canonicalID`); an id that is no uuid is never sent
+  to Postgres and fails the event that asked it - except a reply's `reply_to`, which then replies
+  under no comment: the reply reaches no thread session, is not failed and holds nothing back.
   A person's (`actor.kind` `user`) `ask.answered`, `ask.handed_back`, `ask.resolved`,
   `comment.created`, `comment.edited`, `comment.resolved`, `comment.reopened`, `message.created`
   or `message.answered` on an issue also takes the claimant route (`addClaimantRoute`): it is

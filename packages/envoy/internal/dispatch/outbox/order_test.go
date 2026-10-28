@@ -581,6 +581,65 @@ func TestTheBatchResolvesFollowersAuthorsRecipientsAndMentionDeliveriesInAtMostS
 	t.Logf("the batch of %d events ran %d follower, author, recipient and mention delivery lookups", len(seeded), len(lookups))
 }
 
+// One row no recipient read can take, among a batch's many ids of that read, fails only the event
+// that asked it, and costs the batch a run of each half of the refused statement's ids, and of each
+// refused half's halves down to that id alone (loadRecipients): at most 2*ceil(log2(n)) more
+// statements for n ids, where a run of each id alone would cost n.
+func TestOneBrokenRowOfARecipientReadCostsTheBatchAboutTwoStatementsPerHalving(t *testing.T) {
+	const n = 64
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	edits := make([]model.Event, n)
+	for index := range n {
+		issueKey := fmt.Sprintf("T-%d", index+1)
+		if index > 0 {
+			if _, err := database.Pool.Exec(context.Background(), `
+				insert into issues (key, project_key, number, title, created_by, rank)
+				values ($1, 'TT', $2, 'Another issue', '{"kind":"user","id":"alice"}', 'V')
+			`, issueKey, index+1); err != nil {
+				t.Fatalf("create issue %s: %v", issueKey, err)
+			}
+		}
+		author := model.Actor{Kind: "session", ID: fmt.Sprintf("author-%d", index)}
+		document := seedDocument(t, database, new(issueKey), "spec", author, []model.Actor{author})
+		if index == n/3 {
+			breakDocumentCredits(t, database, document)
+		}
+		edits[index] = appendEvent(t, database, broker, model.Event{
+			IssueKey: new(issueKey), Type: "artifact.human_edited", Actor: alice,
+			Payload: map[string]any{"artifact_id": document, "name": "spec.md", "from_version": 1, "to_version": 2, "editors": []any{alice.ID}},
+		})
+	}
+
+	tracer := &statementTracer{}
+	deps := Deps{Store: tracedStore(t, database, tracer), Publisher: &recordingPublisher{}}
+	if _, err := scanBatch(context.Background(), deps, unfenced{}, holding(t, deps).instance); err != nil {
+		t.Fatalf("scan batch: %v", err)
+	}
+	for index, edit := range edits {
+		row := readEventRow(t, database, edit.ID)
+		if index == n/3 {
+			if row.publishedAt != nil || row.attempts != 1 || row.nextAttempt == nil {
+				t.Fatalf("the edit of the broken document has published_at %v, attempt_count %d and next_attempt_at %v, want it backed off",
+					row.publishedAt, row.attempts, row.nextAttempt)
+			}
+			continue
+		}
+		want := []string{contracts.AgentSubject(fmt.Sprintf("author-%d", index))}
+		if row.publishedAt == nil || row.attempts != 0 || !slices.Equal(agentTopics(row.destinations), want) {
+			t.Fatalf("edit %d has published_at %v, attempt_count %d and published_destinations %v, want it published to %v",
+				index, row.publishedAt, row.attempts, row.destinations, want)
+		}
+	}
+	reads := len(tracer.matching("artifact_versions"))
+	if limit := 1 + 2*int(math.Ceil(math.Log2(n))); reads > limit {
+		t.Fatalf("the batch ran %d document credit reads for %d documents, one broken, want at most %d", reads, n, limit)
+	}
+	t.Logf("the batch ran %d document credit reads for %d documents, one broken", reads, n)
+}
+
 // An event is written once, when its batch records it: reading the batch writes nothing, so however
 // many destinations it has, a published event costs its row exactly one update.
 func TestAPublishedEventIsWrittenOnce(t *testing.T) {

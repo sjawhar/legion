@@ -3,11 +3,16 @@ package outbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"reflect"
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -754,8 +759,8 @@ func TestALaterEventReachesNoSessionTheFailedRecipientReadOfAnEarlierOneMissedBe
 // issue's later event reaches the claimant its failed event listed and waits for the failed
 // event's retry for the thread root's author, and another issue's events in the same batch
 // publish - among them a comment anchored on a healthy document, whose credits the batch reads in
-// the same statement as the broken document's (loadRecipients runs that statement again for each
-// id alone once Postgres refuses it).
+// the same statement as the broken document's (loadRecipients runs that statement again in halves,
+// here each id alone, once Postgres refuses it).
 func TestABrokenCreditListBacksOffItsEventAndHoldsOnlyItsOwnersLaterSessionCopies(t *testing.T) {
 	sami := model.Actor{Kind: "user", ID: "sami"}
 	writer := model.Actor{Kind: "session", ID: "session-writer"}
@@ -822,10 +827,13 @@ func TestABrokenCreditListBacksOffItsEventAndHoldsOnlyItsOwnersLaterSessionCopie
 	}
 }
 
-// An event that is not due is never sent, so the batch takes no recipient read for it: one backed
-// off on a thread whose document's credit list no read can take does not fail another issue's
-// reply read in the same batch, and its own issue's later events still publish.
-func TestTheBatchTakesNoRecipientReadForAnEventThatIsNotDue(t *testing.T) {
+// An event that is not due still reads its recipients, since they are what it holds its owner's
+// later events back from (resolveDestinations). One backed off on a thread whose document's credit
+// list no read can take puts that row in every batch's statement beside another issue's reply, and
+// the batch runs the refused statement again in halves (loadRecipients): the other issue's reply
+// publishes, and so does the broken reply's issue's message, bound for the claimant the broken
+// reply names.
+func TestABrokenRowOfAnEventThatIsNotDueFailsNoOtherOwnersRecipientRead(t *testing.T) {
 	sami := model.Actor{Kind: "user", ID: "sami"}
 	writer := model.Actor{Kind: "session", ID: "session-writer"}
 	other := model.Actor{Kind: "session", ID: "session-other"}
@@ -870,6 +878,203 @@ func TestTheBatchTakesNoRecipientReadForAnEventThatIsNotDue(t *testing.T) {
 	}
 	if row := readEventRow(t, database, broken.ID); row.attempts != 1 || row.publishedAt != nil {
 		t.Fatalf("the reply on the broken thread, not due, has attempt_count %d and published_at %v, want it left as it was", row.attempts, row.publishedAt)
+	}
+}
+
+// waitOut makes event an earlier attempt's: not due for the next hour, one attempt counted, and
+// reached already on each of reached.
+func waitOut(t *testing.T, database *store.Store, event model.Event, reached ...string) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `
+		update events set next_attempt_at = now() + interval '1 hour', attempt_count = 1, published_destinations = $2
+		where id = $1
+	`, event.ID, reached); err != nil {
+		t.Fatalf("back event %d off: %v", event.ID, err)
+	}
+}
+
+// A due event behind an earlier event of its issue that is waiting out a back-off is held back
+// only on the keys the earlier event could still owe. A session the earlier event already reached
+// is no such key, even when the earlier event's recipient read fails now; a session its failed
+// read may still name is, until the earlier event's retry; and an earlier event whose reads answer
+// holds back only the key it stalled on - a session whose send failed, or its role route - so the
+// later event reaches every other session at once. Each later event replies in a thread of its
+// own, so no due event asks the earlier event's recipient read.
+func TestAnEventBehindAnotherThatIsNotDueIsHeldOnlyOnTheKeysTheOtherCouldStillOwe(t *testing.T) {
+	sami := model.Actor{Kind: "user", ID: "sami"}
+	reached := model.Actor{Kind: "session", ID: "session-reached"}
+	unreached := model.Actor{Kind: "session", ID: "session-unreached"}
+	stalled := model.Actor{Kind: "session", ID: "session-stalled"}
+	topic := "notifications.dispatch.issue.T-1.comment.created"
+	// reply appends sami's reply in a new thread on the document on names, or on none, whose root
+	// author writes and each of members then replies in, and returns its event.
+	reply := func(t *testing.T, database *store.Store, broker *events.Broker, on string, author model.Actor, members ...model.Actor) model.Event {
+		t.Helper()
+		root := seedThreadComment(t, database, "T-1", on, author, nil)
+		for _, member := range members {
+			seedThreadComment(t, database, "T-1", "", member, &root)
+		}
+		comment := seedThreadComment(t, database, "T-1", "", sami, &root)
+		return appendCommentEvent(t, database, broker, "comment.created", sami, model.Comment{ID: comment, ReplyTo: &root})
+	}
+	for _, tc := range []struct {
+		name  string
+		route *string
+		// arrange appends the earlier event, backed off, and the later one.
+		arrange func(t *testing.T, database *store.Store, broker *events.Broker) (earlier, later model.Event)
+		// want is every subject the later event reaches in the batch, in order; the rest of its
+		// destinations wait for the earlier event's retry.
+		want []string
+	}{
+		{
+			// The earlier event reached the session in an attempt before its document's credit
+			// list broke; the later one is bound for it and for a session the earlier one never
+			// reached.
+			name: "the earlier event's recipient read fails",
+			arrange: func(t *testing.T, database *store.Store, broker *events.Broker) (model.Event, model.Event) {
+				spec := seedDocument(t, database, new("T-1"), "spec", reached, []model.Actor{reached})
+				breakDocumentCredits(t, database, spec)
+				earlier := reply(t, database, broker, spec, reached)
+				waitOut(t, database, earlier, topic, contracts.AgentSubject(reached.ID))
+				return earlier, reply(t, database, broker, "", reached, unreached)
+			},
+			want: []string{topic, contracts.AgentSubject(reached.ID)},
+		},
+		{
+			name: "the earlier event's reads answer and its send to one session failed",
+			arrange: func(t *testing.T, database *store.Store, broker *events.Broker) (model.Event, model.Event) {
+				earlier := reply(t, database, broker, "", reached, stalled)
+				waitOut(t, database, earlier, topic, contracts.AgentSubject(reached.ID))
+				return earlier, reply(t, database, broker, "", reached, unreached, stalled)
+			},
+			want: []string{topic, contracts.AgentSubject(reached.ID), contracts.AgentSubject(unreached.ID)},
+		},
+		{
+			name:  "the earlier event's reads answer and its role route is pending",
+			route: new("role:reviewer"),
+			arrange: func(t *testing.T, database *store.Store, broker *events.Broker) (model.Event, model.Event) {
+				earlier := reply(t, database, broker, "", reached)
+				waitOut(t, database, earlier, topic, contracts.AgentSubject(reached.ID))
+				return earlier, reply(t, database, broker, "", reached, unreached)
+			},
+			want: []string{topic, contracts.AgentSubject(reached.ID), contracts.AgentSubject(unreached.ID)},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := storetest.Open(t)
+			broker := events.NewBroker()
+			seedIssue(t, database, "T-1", tc.route)
+			earlier, later := tc.arrange(t, database, broker)
+			before := readEventRow(t, database, earlier.ID)
+
+			publisher := &recordingPublisher{}
+			deps := withHeldRoles(Deps{Store: database, Publisher: publisher})
+			if _, err := scanBatch(context.Background(), deps, unfenced{}, holding(t, deps).instance); err != nil {
+				t.Fatalf("scan batch: %v", err)
+			}
+			var sent []string
+			for _, item := range publisher.all() {
+				if item.SourceEventID == fmt.Sprint(later.ID) {
+					sent = append(sent, item.Topic)
+				}
+			}
+			if !slices.Equal(sent, tc.want) {
+				t.Fatalf("the later event was sent to %v, want %v", sent, tc.want)
+			}
+			got := readEventRow(t, database, later.ID)
+			if !slices.Equal(got.destinations, tc.want) {
+				t.Fatalf("the later event recorded published_destinations %v, want %v", got.destinations, tc.want)
+			}
+			if got.publishedAt != nil || got.attempts != 0 || got.nextAttempt == nil || !got.nextAttempt.Equal(*before.nextAttempt) {
+				t.Fatalf("the later event has published_at %v, attempt_count %d and next_attempt_at %v, want it held back until the earlier event's retry at %v",
+					got.publishedAt, got.attempts, got.nextAttempt, *before.nextAttempt)
+			}
+			if after := readEventRow(t, database, earlier.ID); !reflect.DeepEqual(after, before) {
+				t.Fatalf("the earlier event, not due, has %+v after the batch, want it left as it was: %+v", after, before)
+			}
+		})
+	}
+}
+
+// refusingServer listens for Postgres connections and refuses each at its startup message with a
+// FATAL error of code, as a server at max_connections (53300) or still starting (57P03) does, and
+// returns its address.
+func refusingServer(t *testing.T, code string) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				backend := pgproto3.NewBackend(conn, conn)
+				for {
+					startup, err := backend.ReceiveStartupMessage()
+					if err != nil {
+						return
+					}
+					switch startup.(type) {
+					case *pgproto3.SSLRequest, *pgproto3.GSSEncRequest:
+						if _, err := conn.Write([]byte("N")); err != nil {
+							return
+						}
+						continue
+					}
+					break
+				}
+				backend.Send(&pgproto3.ErrorResponse{Severity: "FATAL", Code: code, Message: "sorry, too many clients already"})
+				_ = backend.Flush()
+			}()
+		}
+	}()
+	return listener.Addr().String()
+}
+
+// A recipient statement is run again over fewer ids only when Postgres refused it over the rows it
+// read (refusedStatement). A connection Postgres refused - a *pgconn.ConnectError that carries the
+// server's too_many_connections as a *pgconn.PgError - and a server or connection failure on a live
+// connection, the admin_shutdown a failover sends or a connection_failure, would fail every run
+// alike, and so is no refused statement; nor is any error once ctx ended. invalid_parameter_value,
+// what jsonb_array_elements answers a credit list that is no array with, is.
+func TestARefusedConnectionOrAFailingServerIsNoRefusedStatement(t *testing.T) {
+	ctx := context.Background()
+	host, port, err := net.SplitHostPort(refusingServer(t, "53300"))
+	if err != nil {
+		t.Fatalf("split the server's address: %v", err)
+	}
+	_, refusedConnection := pgconn.Connect(ctx, fmt.Sprintf("host=%s port=%s user=outbox database=dispatch sslmode=disable connect_timeout=5", host, port))
+	var connect *pgconn.ConnectError
+	var carried *pgconn.PgError
+	if !errors.As(refusedConnection, &connect) || !errors.As(refusedConnection, &carried) || carried.Code != "53300" {
+		t.Fatalf("connecting to the refusing server answered %v, want a *pgconn.ConnectError carrying a *pgconn.PgError of code 53300", refusedConnection)
+	}
+	ended, end := context.WithCancel(ctx)
+	end()
+	statement := func(code string) error {
+		return fmt.Errorf("load document session authors: %w", &pgconn.PgError{Severity: "ERROR", Code: code})
+	}
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want bool
+	}{
+		{name: "a connection refused for too_many_connections (53300)", ctx: ctx, err: fmt.Errorf("load document session authors: %w", refusedConnection), want: false},
+		{name: "admin_shutdown (57P01) on a live connection", ctx: ctx, err: statement("57P01"), want: false},
+		{name: "connection_failure (08006)", ctx: ctx, err: statement("08006"), want: false},
+		{name: "invalid_parameter_value (22023)", ctx: ctx, err: statement("22023"), want: true},
+		{name: "invalid_parameter_value (22023) once ctx ended", ctx: ended, err: statement("22023"), want: false},
+	} {
+		if got := refusedStatement(tc.ctx, tc.err); got != tc.want {
+			t.Errorf("refusedStatement(%s) = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 

@@ -150,9 +150,9 @@ func failedAnswer(err error) <-chan error {
 // subject family it receives them on, while the sends to different owners or destination keys land
 // in whatever order their answers allow. A send that fails holds back only its own chain, and an
 // event that is not due holds back its owner's later events only from the destinations it has not
-// reached - and, when its list ends at a recipient read the batch has no answer for, from every
-// session it does not name, as an event whose recipient read failed does. What the batch came to
-// is written in one statement (recordBatch).
+// reached. An event whose recipient read failed holds them back too, from every session key its
+// list neither names nor it already reached, until its retry. What the batch came to is written in
+// one statement (recordBatch).
 //
 // A failure is classified once every answer is in. A send that met a lost or replaced connection
 // (bus.ErrUnavailable) is no fault of its event, and its event is released with no attempt
@@ -608,18 +608,15 @@ func recordBatch(ctx context.Context, deps Deps, outcomes []outcome, holder uuid
 
 // resolveDestinations gives every event of a batch that has an owner and can be read its envelope
 // and destinations (eventDestinations), reading the followers, authors, recipients and mention
-// deliveries all of them need at once (loadLookups). An event whose envelope cannot be built has no
-// destination, and the error backs it off. A lookup that failed because ctx ended - a recipient
-// read the process's stop cancelled (loadLookups) - marks its event resolveLost, which releases it
-// as a send the stop cut off does (settleEvent).
-//
-// A not-due event is never sent, so the batch takes no recipient read for it (untaken): its due
-// events ask first, and a not-due event's comment recipients, primary document authors and
-// document credits are answered only where a due event asked the same. An event whose list ends at
-// a recipient read the batch has no answer for, failed or untaken, is incomplete
-// (unansweredRecipients, batchEvent.incomplete).
+// deliveries all of them need at once (loadLookups), a not-due event's as a due one's: its
+// destinations are what it holds its owner's later events back from (planChains). An event whose
+// envelope cannot be built has no destination, and the error backs it off. A lookup that failed
+// because ctx ended - a recipient read the process's stop cancelled (loadLookups) - marks its event
+// resolveLost, which releases it as a send the stop cut off does (settleEvent). An event whose list
+// ends at a recipient read that failed is incomplete (unansweredRecipients, batchEvent.incomplete).
 func resolveDestinations(ctx context.Context, deps Deps, events []*batchEvent) error {
 	var resolvable []*batchEvent
+	want := newWanted()
 	for _, event := range events {
 		if event.failure != nil || event.owner == "" {
 			continue
@@ -636,35 +633,19 @@ func resolveDestinations(ctx context.Context, deps Deps, events []*batchEvent) e
 		}
 		event.item = item
 		resolvable = append(resolvable, event)
-	}
-	want := newWanted()
-	for _, due := range []bool{true, false} {
-		for _, event := range resolvable {
-			if event.due == due {
-				_, _, _ = eventDestinations(event.event, event.item.Topic, event.routing, lookupOf(event, want, want))
-			}
-		}
+		_, _, _ = eventDestinations(event.event, item.Topic, event.routing, want)
 	}
 	found, err := loadLookups(ctx, deps.Store.Pool, want)
 	if err != nil {
 		return err
 	}
 	for _, event := range resolvable {
-		event.destinationsOf, event.mentionPending, event.resolveErr = eventDestinations(event.event, event.item.Topic, event.routing, lookupOf(event, found, want))
+		event.destinationsOf, event.mentionPending, event.resolveErr = eventDestinations(event.event, event.item.Topic, event.routing, found)
 		event.resolveLost = event.resolveErr != nil && ctx.Err() != nil && errors.Is(event.resolveErr, ctx.Err())
 		var unanswered *unansweredRecipients
 		event.incomplete = errors.As(event.resolveErr, &unanswered)
 	}
 	return nil
-}
-
-// lookupOf is the lookup event's destinations read: look itself for a due event, and look through
-// untaken, with the recipient reads the due events of the batch took, for one that is not due.
-func lookupOf(event *batchEvent, look lookup, taken *wanted) lookup {
-	if event.due {
-		return look
-	}
-	return untaken{lookup: look, taken: taken}
 }
 
 // destinations collects an event's destinations, each subject once: a subject an earlier route

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -47,8 +48,7 @@ type mentionDeliveries struct {
 // wanted is the lookup a batch's first pass over its events runs: it answers nothing and records
 // every id asked for, so that the batch reads each kind once (loadLookups). An event's destinations
 // ask for the same ids whatever the answers are, so a second pass over resolved lookups asks for
-// exactly these. A not-due event asks through untaken, after every due event has asked, so its
-// recipient reads are the same taken or untaken ones in both passes (resolveDestinations).
+// exactly these.
 type wanted struct {
 	asks, comments, messages, documents, threads, issues, mentions map[string]struct{}
 }
@@ -98,54 +98,15 @@ func (w *wanted) mentionDeliveries(commentID string) (mentionDeliveries, error) 
 
 // unansweredRecipients is a recipient read - the sessions a reply under a comment reaches, the
 // sessions an issue's primary document credits, the sessions a document credits - that an event's
-// destinations needed and the batch has no answer for: the read of its id failed
-// (loadRecipients), or the event is not due and the batch did not take it (untaken). The event's
-// list ends there (eventDestinations), so it names none of the sessions the read would have added,
-// and planChains holds its owner's later events back from every session the list does not name
-// (batchEvent.incomplete).
+// destinations needed and whose read of its id failed (loadRecipients). The event's list ends
+// there (eventDestinations), so it names none of the sessions the read would have added, and
+// planChains holds its owner's later events back from every session key the list neither names nor
+// the event already reached (batchEvent.incomplete).
 type unansweredRecipients struct{ err error }
 
 func (e *unansweredRecipients) Error() string { return e.err.Error() }
 
 func (e *unansweredRecipients) Unwrap() error { return e.err }
-
-// errNotDue is what untaken answers a recipient read the batch did not take.
-var errNotDue = errors.New("the batch reads no recipients for an event that is not due")
-
-// untaken is the lookup a not-due event's destinations read (resolveDestinations). The batch takes
-// no recipient read for an event it does not send: readBatch reads an owner's whole window, so the
-// read of an event backed off on a row no read can take - a credit list jsonb_array_elements
-// refuses - would otherwise cost every batch a statement that fails and a run of each of its ids
-// alone (loadRecipients). Its comment recipients, primary document authors and document credits
-// answer from lookup only for an id a due event of the batch asked for (taken), and otherwise
-// unanswered (errNotDue) - except a reply_to that is no uuid, which no read takes for any event
-// (validIDs) and which answers from lookup, with no session. Every other read answers from lookup.
-type untaken struct {
-	lookup
-	taken *wanted
-}
-
-func (u untaken) documentAuthors(artifactID string) ([]string, error) {
-	if _, ok := u.taken.documents[artifactID]; !ok {
-		return nil, &unansweredRecipients{err: errNotDue}
-	}
-	return u.lookup.documentAuthors(artifactID)
-}
-
-func (u untaken) commentRecipients(commentID string) ([]string, error) {
-	_, taken := u.taken.threads[commentID]
-	if _, err := uuid.Parse(commentID); err == nil && !taken {
-		return nil, &unansweredRecipients{err: errNotDue}
-	}
-	return u.lookup.commentRecipients(commentID)
-}
-
-func (u untaken) primaryDocumentAuthors(issueKey string) ([]string, error) {
-	if _, ok := u.taken.issues[issueKey]; !ok {
-		return nil, &unansweredRecipients{err: errNotDue}
-	}
-	return u.lookup.primaryDocumentAuthors(issueKey)
-}
 
 // lookups is what a batch read for the ids its events asked for (loadLookups). Each map of a uuid
 // kind is keyed by the id's canonical form (canonicalID), as every read keys its rows, and
@@ -252,15 +213,16 @@ type queryer interface {
 //
 // A read of ask followers, thread root authors, message authors or mention deliveries that fails
 // fails the batch, which is then left unrecorded and read again. A recipient read - document
-// credits, comment recipients or primary document authors - that Postgres refuses is run again for
-// each of its ids alone (loadRecipients), and an id whose own run fails fails only the events that
-// asked it: each such event's destinations end at the step that needed it, after its owner topic,
-// route and claimant (eventDestinations), the event's owner's later events are held back from
-// every session its list does not name (planChains), and the batch's other events, those that
-// asked the same statement for other ids among them, are untouched. So a row no recipient read
-// can take - a credit list jsonb_array_elements refuses - backs off the events that read it and
-// holds back their owners' later session copies, and nothing else. A recipient read that fails
-// for the stop or a lost connection fails every event that asked it, as each run alone would.
+// credits, comment recipients or primary document authors - that Postgres refuses is run again
+// over halves of its ids until each refused row is run alone (loadRecipients), and an id whose own
+// run fails fails only the events that asked it: each such event's destinations end at the step
+// that needed it, after its owner topic, route and claimant (eventDestinations), the event's
+// owner's later events are held back from every session key its list neither names nor the event
+// already reached (planChains), and the batch's other events, those that asked the same statement
+// for other ids among them, are untouched. So a row no recipient read can take - a credit list
+// jsonb_array_elements refuses - backs off the events that read it and holds back their owners'
+// later session copies, and nothing else. A recipient read that fails for the stop or for the
+// connection fails every event that asked it, as each run alone would.
 func loadLookups(ctx context.Context, db queryer, want *wanted) (*lookups, error) {
 	found := &lookups{
 		asks: map[string][]string{}, roots: map[string]json.RawMessage{},
@@ -329,13 +291,14 @@ type recipientRead func(ctx context.Context, db queryer, ids []string) (map[stri
 
 // loadRecipients runs read over ids in one statement and adds each id's sessions to into. A
 // statement Postgres refuses (refusedStatement) - over a row of one id no read can take, a credit
-// list jsonb_array_elements refuses - names no id, so it is run again once for each id alone: an
-// id whose own run answers gets its sessions, and one whose own run Postgres refuses is recorded
-// failed (failRecipients) with that run's error. So one id's row fails only the events that asked
-// that id, whichever owners asked the statement's other ids. A statement that fails otherwise -
-// ctx ended, or the connection was lost or never made - would fail every run alike, so every id it
-// read is recorded failed with its error, which releases the events when it is the stop
-// (batchEvent.resolveLost); a run of one id that fails so records its id and every id not yet run.
+// list jsonb_array_elements refuses - names no id, so its ids are run again in halves
+// (bisectRecipients) until each refused row is run alone: an id in a run that answers gets its
+// sessions, and one whose own run Postgres refuses is recorded failed (failRecipients) with that
+// run's error. So one id's row fails only the events that asked that id, whichever owners asked the
+// statement's other ids, and costs about 2*log2(len(ids)) more statements. A statement that fails
+// otherwise - ctx ended, or the connection was lost, refused or never made - would fail every run
+// alike, so every id it read is recorded failed with its error, which releases the events when it
+// is the stop (batchEvent.resolveLost).
 func loadRecipients(ctx context.Context, db queryer, read recipientRead, ids []string, kind string, into map[string][]string, failed map[string]error) {
 	sessions, err := read(ctx, db, ids)
 	if err == nil {
@@ -346,26 +309,57 @@ func loadRecipients(ctx context.Context, db queryer, read recipientRead, ids []s
 		failRecipients(ids, kind, err, failed)
 		return
 	}
-	for i := range ids {
-		sessions, err := read(ctx, db, ids[i:i+1])
+	_ = bisectRecipients(ctx, db, read, ids, kind, into, failed)
+}
+
+// bisectRecipients runs read again over each half of ids, which Postgres refused as one statement
+// (loadRecipients): a half that answers adds its sessions to into, a half of one id that Postgres
+// refuses has that id recorded failed, and a larger refused half is split again the same way. A run
+// that fails otherwise (refusedStatement) would fail every later run alike, so it records its ids
+// and every id not yet run failed with its error, runs nothing more, and returns the error, on which
+// each caller records its own ids not yet run too.
+func bisectRecipients(ctx context.Context, db queryer, read recipientRead, ids []string, kind string, into map[string][]string, failed map[string]error) error {
+	for start, end := 0, len(ids)/2; start < len(ids); start, end = end, len(ids) {
+		half := ids[start:end]
+		sessions, err := read(ctx, db, half)
 		switch {
 		case err == nil:
 			maps.Copy(into, sessions)
-		case refusedStatement(ctx, err):
-			failRecipients(ids[i:i+1], kind, err, failed)
+		case !refusedStatement(ctx, err):
+			failRecipients(ids[start:], kind, err, failed)
+			return err
+		case len(half) == 1:
+			failRecipients(half, kind, err, failed)
 		default:
-			failRecipients(ids[i:], kind, err, failed)
-			return
+			if err := bisectRecipients(ctx, db, read, half, kind, into, failed); err != nil {
+				failRecipients(ids[end:], kind, err, failed)
+				return err
+			}
 		}
 	}
+	return nil
 }
 
-// refusedStatement reports whether err is Postgres refusing a statement it ran (a
-// *pgconn.PgError) while ctx is still live: a failure of the rows the statement read, which a run
-// over fewer ids may not meet. ctx ending, and a connection lost or never made, are not.
+// serverClasses are the SQLSTATE classes of a failure of the server or the connection rather than
+// of the rows a statement read: 08 connection exception, 40 transaction rollback, 53 insufficient
+// resources (too_many_connections among them), 57 operator intervention (admin_shutdown 57P01,
+// which a failover ends a live connection with, and cannot_connect_now 57P03) and 58 system error.
+// A run of the statement over any of its ids may meet one.
+var serverClasses = []string{"08", "40", "53", "57", "58"}
+
+// refusedStatement reports whether err is Postgres refusing a statement it ran over the rows it
+// read, while ctx is still live: a *pgconn.PgError of a class serverClasses does not name, which a
+// run over fewer ids may not meet. ctx ending is not; nor is a connection Postgres refused
+// (*pgconn.ConnectError, which carries the server's own error, too_many_connections or
+// cannot_connect_now, as a PgError), nor an error of a class serverClasses names: each would fail
+// every run alike.
 func refusedStatement(ctx context.Context, err error) bool {
+	var connect *pgconn.ConnectError
 	var refused *pgconn.PgError
-	return ctx.Err() == nil && errors.As(err, &refused)
+	if ctx.Err() != nil || errors.As(err, &connect) || !errors.As(err, &refused) {
+		return false
+	}
+	return !slices.ContainsFunc(serverClasses, func(class string) bool { return strings.HasPrefix(refused.Code, class) })
 }
 
 // failRecipients records err, a recipient read of ids that failed - document credits, comment
