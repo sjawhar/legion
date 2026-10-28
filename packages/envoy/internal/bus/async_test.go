@@ -58,7 +58,7 @@ func TestPublishAsyncKeepsSendOrder(t *testing.T) {
 	}
 	t.Cleanup(reader.Close)
 
-	window := client.Window()
+	window := client.WindowUntil(nil)
 	answers := make([]<-chan error, 0, count)
 	for index := range count {
 		answers = append(answers, window.PublishAsync(numberedEnvelope(orderedStreamTopic, index)))
@@ -121,7 +121,7 @@ func TestAWindowAnswersATopicTheStreamDoesNotCaptureAsNotCaptured(t *testing.T) 
 	}
 
 	select {
-	case err := <-client.Window().PublishAsync(numberedEnvelope(uncapturedTopic, 0)):
+	case err := <-client.WindowUntil(nil).PublishAsync(numberedEnvelope(uncapturedTopic, 0)):
 		if !errors.Is(err, bus.ErrNotCaptured) || errors.Is(err, bus.ErrRefused) || errors.Is(err, bus.ErrUnavailable) {
 			t.Fatalf("a publish to %s answered %v, want ErrNotCaptured, neither ErrRefused nor ErrUnavailable", uncapturedTopic, err)
 		}
@@ -143,7 +143,7 @@ func TestAWindowWhoseConnectionIsLostAnswersUnavailableBeforeSending(t *testing.
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(client.Close)
-	window := client.Window()
+	window := client.WindowUntil(nil)
 	if err := <-window.PublishAsync(numberedEnvelope(orderedStreamTopic, 0)); err != nil {
 		t.Fatalf("first publish answered %v", err)
 	}
@@ -180,7 +180,7 @@ func TestAWindowAnswersNoRespondersOnACurrentConnectionAsNotAcknowledged(t *test
 	}
 
 	select {
-	case err := <-client.Window().PublishAsync(numberedEnvelope(orderedStreamTopic, 0)):
+	case err := <-client.WindowUntil(nil).PublishAsync(numberedEnvelope(orderedStreamTopic, 0)):
 		if !errors.Is(err, bus.ErrNotAcknowledged) || !errors.Is(err, natsgo.ErrNoResponders) || errors.Is(err, bus.ErrUnavailable) {
 			t.Fatalf("a publish answered with no responders on a current connection answered %v, want ErrNotAcknowledged wrapping nats.ErrNoResponders, not ErrUnavailable", err)
 		}
@@ -202,7 +202,7 @@ func TestAWindowAnswersAnUnacknowledgedPublishOnACurrentConnectionAsNotAcknowled
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(client.Close)
-	window := client.Window()
+	window := client.WindowUntil(nil)
 	if err := <-window.PublishAsync(numberedEnvelope(orderedStreamTopic, 0)); err != nil {
 		t.Fatalf("first publish answered %v", err)
 	}

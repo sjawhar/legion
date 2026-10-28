@@ -14,10 +14,10 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
-// publishAcknowledgementTimeout bounds each send of a publish window (Client.Window): its wait for
-// a connection, a JetStream send's acknowledgement (the stream context's PublishAsyncTimeout), and
-// a Request's answer when its options set no timeout of their own. Publish and PublishCoreTo take
-// publishBound instead.
+// publishAcknowledgementTimeout bounds each send of a publish window (Client.WindowUntil): its wait
+// for a connection, a JetStream send's acknowledgement (the stream context's PublishAsyncTimeout),
+// and a Request's answer when its options set no timeout of their own. Publish and PublishCoreTo
+// take publishBound instead.
 const publishAcknowledgementTimeout = 5 * time.Second
 
 // ErrUnavailable is wrapped by the outcome of a window's send that NATS did not take because of
@@ -51,7 +51,7 @@ var ErrNotCaptured = errors.New("the stream does not capture the topic")
 // connection does.
 var ErrWindowDeadline = errors.New("the window's deadline has passed")
 
-// Sender sends envelopes without waiting for NATS's answers (Client.Window).
+// Sender sends envelopes without waiting for NATS's answers (Client.WindowUntil).
 type Sender interface {
 	// PublishAsync sends item to the stream and returns a channel that receives the outcome
 	// exactly once: nil once the stream acknowledged item, or why it did not. A topic the stream
@@ -80,11 +80,11 @@ type RequestOptions struct {
 	Timeout time.Duration
 }
 
-// Window returns a Sender whose sends all go out on one connection, or not at all. Its first send
-// waits, within publishAcknowledgementTimeout, for the client to have a connection, and pins the
-// window to it. Every later send checks that connection first and answers ErrUnavailable at once,
-// without sending, once it has been lost or has reconnected since, so a window does not go on
-// sending across a connection it saw fail.
+// WindowUntil returns a Sender whose sends all go out on one connection, or not at all. Its first
+// send waits, within publishAcknowledgementTimeout, for the client to have a connection, and pins
+// the window to it. Every later send checks that connection first and answers ErrUnavailable at
+// once, without sending, once it has been lost or has reconnected since, so a window does not go
+// on sending across a connection it saw fail.
 //
 // A window keeps no order of its own between its sends. Its answers come back in whatever order
 // the server and the stream give them, and a JetStream publish NATS did not acknowledge may still
@@ -110,17 +110,14 @@ type RequestOptions struct {
 //
 // A Request is a send of the window too, pinned and refused by the same rules, and a Probe pins
 // the window when nothing has yet (window.Request, window.Probe). The window's methods are safe to
-// call from several goroutines at once. Window is WindowUntil with no deadline.
-func (c *Client) Window() Sender {
-	return &window{client: c}
-}
-
-// WindowUntil returns a window (Window) whose sends never write at or past deadline, read again at
-// each check so a deadline that moves on (a hold's renewal) is the one in force. A send checks it
-// before anything else, its first send waits for a connection no later than it, and every send
-// checks it again once pinned, the last act before the write; a send that finds it passed at any
-// of these answers ErrWindowDeadline, in the channel when the send returns, and sends nothing. A
-// nil deadline is none. A Probe sends no envelope and does not check it.
+// call from several goroutines at once.
+//
+// The window's sends never write at or past deadline, read again at each check so a deadline that
+// moves on (a hold's renewal) is the one in force. A send checks it before anything else, its first
+// send waits for a connection no later than it, and every send checks it again once pinned, the
+// last act before the write; a send that finds it passed at any of these answers ErrWindowDeadline,
+// in the channel when the send returns, and sends nothing. A nil deadline is none. A Probe sends no
+// envelope and does not check it.
 func (c *Client) WindowUntil(deadline func() time.Time) Sender {
 	return &window{client: c, deadline: deadline}
 }

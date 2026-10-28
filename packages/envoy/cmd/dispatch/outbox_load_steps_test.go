@@ -55,10 +55,10 @@ var loadStepRates = []int{4, 40}
 
 // Each step writes comments at a fixed rate for a minute, with one process and then with two, on
 // 40 issues, one of which is routed to a role whose holder is the test's own session. A test
-// session receives every event on the issues' topic families, on the holder's agent subject (where
-// it answers a request with the empty receipt a session plugin sends) and on the role's subject,
-// and counts each event once, by its envelope's event id, when it first arrives. A burst then
-// writes 100 comments on one issue as fast as one process takes them.
+// session receives every event on the issues' topic families and on the holder's agent subject
+// (where it answers a request with the empty receipt a session plugin sends), and counts each
+// event once, by its envelope's event id, when it first arrives. A burst then writes 100 comments
+// on one issue as fast as one process takes them.
 //
 // Per step it reports the rate written, the publish rate (distinct events first received while the
 // step was writing, per second), the latency from the event's commit (the envelope's IssuedAt) to
@@ -173,9 +173,8 @@ type loadTarget struct {
 }
 
 // prepare creates a fresh project with issues issues through writer, subscribes the test session
-// to their topic families, to the holder's agent subject and to the role's subject, registers the
-// holder, routes the first issue to the role, and returns once the setup's own events are
-// published.
+// to their topic families and to the holder's agent subject, registers the holder, routes the
+// first issue to the role, and returns once the setup's own events are published.
 func (r *sessionRig) prepare(t *testing.T, writer *dispatchProcess, issues int) *loadTarget {
 	t.Helper()
 	project := uniqueProjectKey(t, "LS")
@@ -199,7 +198,6 @@ func (r *sessionRig) prepare(t *testing.T, writer *dispatchProcess, issues int) 
 		subscribe("notifications.dispatch.issue."+key+".>", loadTopic)
 	}
 	subscribe(contracts.AgentSubject(holder), loadRole)
-	subscribe(contracts.RoleTopicPrefix+target.role, loadRole)
 	t.Cleanup(target.unsubscribe)
 	if err := r.conn.Flush(); err != nil {
 		t.Fatalf("flush the test session's subscriptions: %v", err)
@@ -331,7 +329,7 @@ func (r *sessionRig) burst(t *testing.T, writers []*dispatchProcess) loadBurstRe
 // ───── what the test session received ──────────────────────────────────────
 
 // loadDestination is which of an event's destinations a message arrived on: its issue's topic
-// family, or the role holder (the role's subject, or the holder's agent subject).
+// family, or the role holder's agent subject.
 type loadDestination int
 
 const (

@@ -17,7 +17,7 @@ func TestASpentFlushWindowKeepsItsText(t *testing.T) {
 	}
 	t.Cleanup(client.Close)
 	const subject = "notifications.team.spent-flush-window"
-	w := client.Window().(*window)
+	w := client.WindowUntil(nil).(*window)
 	if err := w.pin(publishAcknowledgementTimeout); err != nil {
 		t.Fatalf("pin the window's connection: %v", err)
 	}

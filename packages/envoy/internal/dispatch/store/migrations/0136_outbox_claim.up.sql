@@ -25,7 +25,12 @@
 -- last, because each takes ACCESS EXCLUSIVE on events, which holds reads too: reads of events wait
 -- only for those last statements, which rewrite no row, and for the commit. The release before
 -- this one reads neither the new column nor the new indexes, and its claim, which read the two
--- dropped indexes, still runs without them.
+-- dropped indexes, still runs without them, at a cost: its predicate
+-- coalesce(payload ->> 'pending', 'false') <> 'true' proves none of these indexes' predicates, so
+-- each of its scans reads all of events in a sequential scan (125 ms on 1,000,000 rows, against
+-- 3.4 ms through events_unpublished). It pays that while it serves beside this release in a
+-- rolling update, one more reason to deploy this release with `strategy: Recreate`
+-- (cmd/dispatch/README.md).
 create index events_outbox_fresh on events (id)
   where published_at is null and next_attempt_at is null and (payload ->> 'pending') is distinct from 'true';
 

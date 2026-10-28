@@ -956,15 +956,22 @@ walks past neither. It adds `events.publish_error`, nullable text with no defaul
 that rewrites no row: why an event's last attempt failed, cleared once it is published. It drops
 `events_unpublished` (`0003`) and `events_unpublished_ready` (`0020`), which only the per-row claim
 read; the release before it reads neither the new column nor the new indexes, and its claim still
-runs without the dropped ones. The migration runs in one transaction, so every lock it takes is
-held until it commits. It builds the three indexes first: each reads every row of `events` under
-`SHARE`, which holds writes to `events` from then until the commit and lets reads go on (no
-`concurrently`, which a migration's transaction cannot run): 1.1 s on 1,000,000 event rows and
-7.2 s on 5,000,000, on Postgres 17 with two cores. It then adds the column and drops the two old
-indexes, each under `ACCESS EXCLUSIVE`, which holds reads of `events` too, so reads wait only for
-those last statements, which rewrite no row, and for the commit. Its census answers `0`, since it
-refuses and rewrites no row, and the census reports `events`, the table it locks, with its row
-count and size.
+runs without the dropped ones, at a cost. That claim's predicate,
+`coalesce(payload ->> 'pending', 'false') <> 'true'`, proves none of the three new indexes'
+`(payload ->> 'pending') is distinct from 'true'`, so the earlier release reads the whole of
+`events` in a sequential scan on every scan it makes: on 1,000,000 event rows, the last 100
+unpublished, on Postgres 17, 125 ms and every one of the table's 19,231 pages, where
+`events_unpublished` took 3.4 ms. It pays that while it serves beside this release in a rolling
+update, which is one more reason to deploy this release with `strategy: Recreate` (below), and
+for as long as a rollback to it lasts. The migration runs in one transaction, so every lock it
+takes is held until it commits. It builds the three indexes first: each reads every row of
+`events` under `SHARE`, which holds writes to `events` from then until the commit and lets reads
+go on (no `concurrently`, which a migration's transaction cannot run): 1.1 s on 1,000,000 event
+rows and 7.2 s on 5,000,000, on Postgres 17 with two cores. It then adds the column and drops the
+two old indexes, each under `ACCESS EXCLUSIVE`, which holds reads of `events` too, so reads wait
+only for those last statements, which rewrite no row, and for the commit. Its census answers
+`0`, since it refuses and rewrites no row, and the census reports `events`, the table it locks,
+with its row count and size.
 
 From `0136`'s release on, `next_attempt_at` is only a back-off, and an unpublished event holds back
 its owner's later events from each destination it has not reached. The rows that start doing so
@@ -975,8 +982,9 @@ release before it takes no publisher hold and still claims and publishes batches
 this release reads those one-minute claims as back-offs alone, so while a rolling update runs both
 the two publish side by side: an issue's events can arrive out of order, as they could between two
 processes of the earlier release, and one event can be sent by both, its second copy dropped by
-JetStream's MsgId or by its receiver's dedupe. A deployment that wants neither replaces the running
-server rather than rolling it for this one release (`strategy: Recreate`).
+JetStream's MsgId or by its receiver's dedupe. A deployment that wants neither, nor the earlier
+release's whole-table claim scans, replaces the running server rather than rolling it for this
+one release (`strategy: Recreate`).
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a

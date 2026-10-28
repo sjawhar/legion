@@ -76,7 +76,7 @@ func TestARequestReturnsOnTheReceiversEmptyReceipt(t *testing.T) {
 	subject := contracts.AgentSubject("ses_request_receipt")
 	responder(t, url, subject)
 
-	err := answerOf(t, client.Window().Request(subject, forwardEnvelope("receipt"), bus.RequestOptions{Timeout: 2 * time.Second}), 5*time.Second)
+	err := answerOf(t, client.WindowUntil(nil).Request(subject, forwardEnvelope("receipt"), bus.RequestOptions{Timeout: 2 * time.Second}), 5*time.Second)
 	if err != nil {
 		t.Fatalf("a Request its receiver answered returned %v, want nil", err)
 	}
@@ -90,7 +90,7 @@ func TestARequestNobodyAnswersIsNotAcknowledgedWithinItsTimeout(t *testing.T) {
 	_, _, client := requestClient(t)
 
 	started := time.Now()
-	err := answerOf(t, client.Window().Request("notifications.role.request-nobody", forwardEnvelope("nobody"), bus.RequestOptions{Timeout: timeout}), 5*time.Second)
+	err := answerOf(t, client.WindowUntil(nil).Request("notifications.role.request-nobody", forwardEnvelope("nobody"), bus.RequestOptions{Timeout: timeout}), 5*time.Second)
 	elapsed := time.Since(started)
 	if !errors.Is(err, bus.ErrNotAcknowledged) || !errors.Is(err, bus.ErrReceiptTimeout) || errors.Is(err, bus.ErrUnavailable) {
 		t.Fatalf("an unanswered Request returned %v, want ErrNotAcknowledged and ErrReceiptTimeout, not ErrUnavailable", err)
@@ -106,7 +106,7 @@ func TestARequestNobodyAnswersIsNotAcknowledgedWithinItsTimeout(t *testing.T) {
 func TestARequestCountsTheStreamsAcknowledgementOnlyWhenAskedTo(t *testing.T) {
 	_, _, client := requestClient(t)
 	subject := contracts.AgentSubject("ses_request_stored")
-	window := client.Window()
+	window := client.WindowUntil(nil)
 
 	err := answerOf(t, window.Request(subject, forwardEnvelope("stored-ignored"), bus.RequestOptions{Timeout: 300 * time.Millisecond}), 5*time.Second)
 	if !errors.Is(err, bus.ErrNotAcknowledged) || !errors.Is(err, bus.ErrReceiptTimeout) {
@@ -123,7 +123,7 @@ func TestARequestCountsTheStreamsAcknowledgementOnlyWhenAskedTo(t *testing.T) {
 // to another subject is a copy of its own there.
 func TestRequestsUnderOneMsgIDLeaveTheStreamOneCopy(t *testing.T) {
 	_, _, client := requestClient(t)
-	window := client.Window()
+	window := client.WindowUntil(nil)
 	item := forwardEnvelope("once")
 	holder := contracts.AgentSubject("ses_request_once")
 	other := contracts.AgentSubject("ses_request_other")
@@ -156,7 +156,7 @@ func TestRequestsUnderOneMsgIDLeaveTheStreamOneCopy(t *testing.T) {
 // sending anything.
 func TestARequestWhoseConnectionIsLostAnswersUnavailable(t *testing.T) {
 	server, _, client := requestClient(t)
-	window := client.Window()
+	window := client.WindowUntil(nil)
 
 	pending := window.Request("notifications.role.request-lost", forwardEnvelope("lost"), bus.RequestOptions{Timeout: 30 * time.Second})
 	server.Stop(t)
@@ -178,7 +178,7 @@ func TestARequestWhoseConnectionIsLostAnswersUnavailable(t *testing.T) {
 func TestARequestToASubjectNATSRefusesIsRefusedAtOnce(t *testing.T) {
 	_, _, client := requestClient(t)
 	select {
-	case err := <-client.Window().Request("notifications.agent..bad", forwardEnvelope("bad"), bus.RequestOptions{}):
+	case err := <-client.WindowUntil(nil).Request("notifications.agent..bad", forwardEnvelope("bad"), bus.RequestOptions{}):
 		if !errors.Is(err, bus.ErrRefused) {
 			t.Fatalf("a Request to an invalid subject answered %v, want ErrRefused", err)
 		}
@@ -194,7 +194,7 @@ func TestManyRequestsInFlightOnOneWindowEachTakeTheirOwnAnswer(t *testing.T) {
 	_, url, client := requestClient(t)
 	subject := contracts.AgentSubject("ses_request_many")
 	responder(t, url, subject)
-	window := client.Window()
+	window := client.WindowUntil(nil)
 
 	var wg sync.WaitGroup
 	failures := make(chan error, 2*senders)
@@ -225,7 +225,7 @@ func TestManyRequestsInFlightOnOneWindowEachTakeTheirOwnAnswer(t *testing.T) {
 // silent server), and ErrUnavailable once the connection is lost.
 func TestProbeAnswersWhetherTheWindowsConnectionStillAnswers(t *testing.T) {
 	server, _, client := requestClient(t)
-	window := client.Window()
+	window := client.WindowUntil(nil)
 
 	if err := window.Probe(time.Second); err != nil {
 		t.Fatalf("a Probe of a live connection returned %v, want nil", err)
