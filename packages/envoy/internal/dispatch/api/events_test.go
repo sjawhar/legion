@@ -316,15 +316,17 @@ func TestIssueEventsSayWhatTheWriteChanged(t *testing.T) {
 
 	// Alice writes in the thread of one of the issue's open asks, the rows a close or reopen moves
 	// between the Inbox and the Replies page; Bob writes only in a plain comment thread, which no
-	// close moves.
+	// close moves. A close withdraws the open ask before its own event, so the withdrawal's
+	// ask.resolved names the thread's logins and the close names nobody left open.
 	ask := createAnswerListAsk(t, handler, grandchild.Key, "Still needed?")
 	createThreadComment(t, handler, grandchild.Key, map[string]any{"body": "Is this still needed?", "ask_id": ask.ID}, "alice")
 	createThreadComment(t, handler, grandchild.Key, map[string]any{"body": "Unrelated."}, "bob")
 	patch(map[string]any{"status": "done"})
 	closed := newestEventPayload[issueEventFields](t, database, "issue.closed", grandchild.Key)
-	if !slices.Equal(closed.Changed, []string{"status", "closed_at"}) || !slices.Equal(closed.ThreadLogins, []string{"alice"}) {
-		t.Fatalf("issue.closed = %#v, want changed [status closed_at] and thread_logins [alice]", closed)
+	if !slices.Equal(closed.Changed, []string{"status", "closed_at"}) || closed.ThreadLogins == nil || len(closed.ThreadLogins) != 0 {
+		t.Fatalf("issue.closed = %#v, want changed [status closed_at] and thread_logins []", closed)
 	}
+	requireThreadLogins(t, database, "ask.resolved", ask.ID, "alice")
 	patch(map[string]any{"status": "backlog"})
 	reopened := newestEventPayload[issueEventFields](t, database, "issue.updated", grandchild.Key)
 	if !slices.Equal(reopened.Changed, []string{"status", "closed_at"}) || reopened.Status != "backlog" {
@@ -333,6 +335,9 @@ func TestIssueEventsSayWhatTheWriteChanged(t *testing.T) {
 	if !slices.Equal(reopened.ThreadLogins, []string{"alice"}) || slices.Contains(reopened.ThreadLogins, "bob") {
 		t.Fatalf("a reopen's thread_logins = %#v, want alice, who wrote in a thread, and not bob", reopened.ThreadLogins)
 	}
+	// The reopen restores the ask before its own event, and the restore's ask.opened names its
+	// thread's logins too.
+	requireThreadLogins(t, database, "ask.opened", ask.ID, "alice")
 	if want := []string{child.Key, root.Key}; !slices.Equal(reopened.Ancestors, want) {
 		t.Fatalf("a reopen's ancestors = %#v, want %#v", reopened.Ancestors, want)
 	}

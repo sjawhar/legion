@@ -13,7 +13,10 @@ import (
 // issueThreadLogins is the thread_logins of an issue event whose status moved: whose Replies count
 // the move can change. Only a close or a reopen (closedMoved) changes one, for the logins with a
 // Replies row on the issue's open asks (events.IssueThreadLogins); any other status move names
-// nobody, as [] rather than left out, so a reader knows the event says so.
+// nobody, as [] rather than left out, so a reader knows the event says so. A close withdraws the
+// issue's open asks and a reopen restores them before this read, and each of those ask events
+// names its own thread's logins, so after a close this names only an open ask a close by an older
+// release left behind.
 func issueThreadLogins(ctx context.Context, tx pgx.Tx, issueKey string, closedMoved bool) ([]string, error) {
 	if !closedMoved {
 		return []string{}, nil
