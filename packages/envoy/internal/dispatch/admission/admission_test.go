@@ -3,6 +3,7 @@ package admission
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -325,5 +326,22 @@ func TestClassOfMethods(t *testing.T) {
 		if got := ClassOf(method); got != want {
 			t.Errorf("ClassOf(%s) = %s, want %s", method, got, want)
 		}
+	}
+}
+
+// The server reads four at once per CPU it may use, at least four and at most MaxReadLimit, and
+// writes DefaultWriteLimit at once whatever the CPUs, each waiting DefaultWait.
+func TestTheDefaultLimitsFollowTheCPUs(t *testing.T) {
+	for procs, want := range map[int]int{0: 4, 1: 4, 2: 8, 3: 12, 7: 28, 8: 28, 64: 28} {
+		if got := readLimit(procs); got != want {
+			t.Errorf("readLimit(%d) = %d, want %d", procs, got, want)
+		}
+	}
+	limits := DefaultLimits()
+	if want := readLimit(runtime.GOMAXPROCS(0)); limits.Read != want {
+		t.Errorf("DefaultLimits().Read = %d, want %d for GOMAXPROCS %d", limits.Read, want, runtime.GOMAXPROCS(0))
+	}
+	if limits.Write != 8 || limits.Wait != 75*time.Millisecond {
+		t.Errorf("DefaultLimits() = %+v, want 8 writes and a 75 ms wait", limits)
 	}
 }

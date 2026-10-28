@@ -15838,14 +15838,13 @@ class DispatchClient {
       if (response.status !== 429 && response.status !== 503)
         return response;
       const text = await response.text();
-      const answered = new Response(text, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers
-      });
-      const refusal = asErrorShape(answerPayload(answered, text));
+      const refusal = asErrorShape(answerPayload(response, text));
       if (!isDispatchRefusal(refusal) || !waitsOut(method, response.status, refusal.code)) {
-        return answered;
+        return new Response(text, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers
+        });
       }
       const seconds = retryAfterSeconds(response);
       const wait = seconds * 1000 + Math.random() * RETRY_JITTER_MS;

@@ -197,9 +197,9 @@ func (s *Service) reconcileExcerptTick(ctx context.Context, started time.Time) t
 // document never holds back the rest of its batch; documents counts the ones recorded, and full
 // reports a batch that was full.
 func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int, full bool, err error) {
-	background, err := s.store.Pool.Background()
+	background, err := s.backgroundPool()
 	if err != nil {
-		return 0, false, fmt.Errorf("open the background pool: %w", err)
+		return 0, false, err
 	}
 	drifted, err := refs.DriftedExcerpts(ctx, background, referenceExcerptBatch)
 	if err != nil {
@@ -237,9 +237,9 @@ func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int
 // markStaleExcerpts marks owed the excerpts a version older than this binary left behind
 // (refs.MarkStaleExcerpts), on the background pool the reconciliation's statements run on.
 func (s *Service) markStaleExcerpts(ctx context.Context) (int64, error) {
-	background, err := s.store.Pool.Background()
+	background, err := s.backgroundPool()
 	if err != nil {
-		return 0, fmt.Errorf("open the background pool: %w", err)
+		return 0, err
 	}
 	return refs.MarkStaleExcerpts(ctx, background)
 }

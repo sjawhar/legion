@@ -134,9 +134,9 @@ type liveAheadDocuments map[string]owedDocument
 // documents it reads go through the rooms pool, as every document read does (TextWithBlocks).
 func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhead liveAheadDocuments) (BlockIndexTick, error) {
 	tick := BlockIndexTick{Cursor: after}
-	background, err := s.store.Pool.Background()
+	background, err := s.backgroundPool()
 	if err != nil {
-		return tick, fmt.Errorf("open the background pool: %w", err)
+		return tick, err
 	}
 	owed, err := owedDocuments(ctx, background, after)
 	if err != nil {

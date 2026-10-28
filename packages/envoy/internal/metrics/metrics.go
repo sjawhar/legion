@@ -37,12 +37,22 @@ var DefaultBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5,
 // Registry collects metrics and serves them in Prometheus text exposition format.
 type Registry struct {
 	mu             sync.RWMutex
+	scrapeHooks    []func()
 	counters       []*Counter
 	histograms     []*Histogram
 	gauges         []*Gauge
 	gaugeFuncs     []*GaugeFunc
 	sampleFuncs    []*sampleFunc
 	histogramFuncs []*histogramFunc
+}
+
+// OnScrape registers fn to run once at the start of each scrape, before any family is written,
+// so families read at scrape time can share one reading that fn takes, rather than each taking
+// its own.
+func (r *Registry) OnScrape(fn func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.scrapeHooks = append(r.scrapeHooks, fn)
 }
 
 // New creates an empty metrics registry.
@@ -322,6 +332,10 @@ func (r *Registry) Handler() http.Handler {
 		r.mu.RLock()
 		defer r.mu.RUnlock()
 
+		for _, hook := range r.scrapeHooks {
+			hook()
+		}
+
 		for _, c := range r.counters {
 			writeType(w, c.name, c.help, "counter")
 			c.mu.Lock()
@@ -415,7 +429,8 @@ func writeSumCount(w http.ResponseWriter, name, inner string, sum float64, count
 // writeHistogramSample writes one series of a histogram read at scrape time: a cumulative bucket
 // per bound, the +Inf bucket, the sum and the count.
 func writeHistogramSample(w io.Writer, name string, sample HistogramSample) {
-	inner := stripBraces(labelFormat(sample.Labels))
+	labels := labelFormat(sample.Labels)
+	inner := stripBraces(labels)
 	prefix := ""
 	if inner != "" {
 		prefix = inner + ","
@@ -427,22 +442,15 @@ func writeHistogramSample(w io.Writer, name string, sample HistogramSample) {
 	}
 	count := max(sample.Count, last)
 	fmt.Fprintf(w, "%s_bucket{%sle=\"+Inf\"} %d\n", name, prefix, count)
-	labels := labelFormat(sample.Labels)
 	fmt.Fprintf(w, "%s_sum%s %s\n", name, labels, formatValue(sample.Sum))
 	fmt.Fprintf(w, "%s_count%s %d\n", name, labels, count)
 }
 
 // formatValue writes v as the text format takes a value: a whole number below 2^53 as an integer,
-// infinities and NaN as Prometheus spells them, and any other number in Go's shortest form.
+// and any other number - infinities and NaN included, which Go spells as Prometheus does - in Go's
+// shortest form.
 func formatValue(v float64) string {
-	switch {
-	case math.IsInf(v, 1):
-		return "+Inf"
-	case math.IsInf(v, -1):
-		return "-Inf"
-	case math.IsNaN(v):
-		return "NaN"
-	case v == math.Trunc(v) && math.Abs(v) < 1<<53:
+	if v == math.Trunc(v) && math.Abs(v) < 1<<53 {
 		return strconv.FormatInt(int64(v), 10)
 	}
 	return strconv.FormatFloat(v, 'g', -1, 64)

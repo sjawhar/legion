@@ -1148,14 +1148,14 @@ export class DispatchClient {
       const response = await this.fetchImpl(url, { ...init, method, signal: this.#signal });
       if (response.status !== 429 && response.status !== 503) return response;
       const text = await response.text();
-      const answered = new Response(text, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
-      });
-      const refusal = asErrorShape(answerPayload(answered, text));
+      const refusal = asErrorShape(answerPayload(response, text));
       if (!isDispatchRefusal(refusal) || !waitsOut(method, response.status, refusal.code)) {
-        return answered;
+        // The body is read, so the answer goes back as a Response that still holds it.
+        return new Response(text, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
       }
       const seconds = retryAfterSeconds(response);
       const wait = seconds * 1000 + Math.random() * RETRY_JITTER_MS;

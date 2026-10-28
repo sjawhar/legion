@@ -69,10 +69,9 @@ type serverRewrite struct {
 
 // answerDecision is which of a reconciliation's written-back answers its document has room for:
 // answered, the indexes of the rewrites that wrote one back, and, unless every one of them fits,
-// the ones given back (returned) and why they did not all fit (reason).
+// the ones given back (returned, nil when every one fits) and why they did not all fit (reason).
 type answerDecision struct {
 	answered []int
-	keepAll  bool
 	returned map[int]bool
 	reason   error
 }
@@ -90,18 +89,19 @@ func (r *settlementReconciliation) answeredRewrites() []int {
 
 // weighAnswers decides which of the answers r wrote back into tree, the document it reconciled,
 // the document has room for, rendering tree to weigh them against before, and leaves tree as the
-// decision has it.
-func (r *settlementReconciliation) weighAnswers(tree *pmdoc.Node, before string) answerDecision {
+// decision has it. Where that rendering is tree's as the decision leaves it - every answer fits -
+// it returns the rendering too, and true.
+func (r *settlementReconciliation) weighAnswers(tree *pmdoc.Node, before string) (answerDecision, string, bool) {
 	answered := r.answeredRewrites()
-	decision := answerDecision{answered: answered, keepAll: true}
+	decision := answerDecision{answered: answered}
 	if len(answered) == 0 {
-		return decision
+		return decision, "", false
 	}
 	after, err := renderTree(tree)
 	rendered := err == nil
 	if rendered {
 		if err = weighRendering(before, after); err == nil {
-			return decision
+			return decision, after, true
 		}
 	}
 	for _, index := range answered {
@@ -109,11 +109,11 @@ func (r *settlementReconciliation) weighAnswers(tree *pmdoc.Node, before string)
 		rewrite.found.restore(rewrite.node)
 		setAskServerAttributes(rewrite.node, rewrite.ask, rewrite.copied, true)
 	}
-	decision.keepAll, decision.returned, decision.reason = false, map[int]bool{}, err
+	decision.returned, decision.reason = map[int]bool{}, err
 	if rendered {
 		decision.returned = r.returnAnswersWithRoom(tree, before, answered)
 	}
-	return decision
+	return decision, "", false
 }
 
 // applyAnswers makes decision, which weighAnswers made on a reconciliation of the same document and
@@ -124,7 +124,7 @@ func (r *settlementReconciliation) applyAnswers(artifactID string, decision answ
 	if !slices.Equal(r.answeredRewrites(), decision.answered) {
 		return false
 	}
-	if decision.keepAll {
+	if decision.returned == nil {
 		return true
 	}
 	// changes says whether each block repaired without its answer still changes from what

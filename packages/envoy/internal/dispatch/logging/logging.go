@@ -69,13 +69,9 @@ func New(out io.Writer, opts *slog.HandlerOptions) *Handler {
 }
 
 // Enabled reports whether a record of level is written: at or above opts.Level, INFO when unset,
-// as slog.TextHandler decides.
-func (h *Handler) Enabled(_ context.Context, level slog.Level) bool {
-	minimum := slog.LevelInfo
-	if h.opts.Level != nil {
-		minimum = h.opts.Level.Level()
-	}
-	return level >= minimum
+// as the writer's own slog.TextHandler, made with the same opts, decides.
+func (h *Handler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.writer.report.Enabled(ctx, level)
 }
 
 // Handle formats r in the caller and hands the line to the writer, or drops it when the writer is
@@ -195,19 +191,30 @@ func newWriter(out io.Writer, opts *slog.HandlerOptions) *writer {
 }
 
 func (w *writer) enqueue(level slog.Level, line []byte) {
+	// A full channel drops the line before it is copied; a line that finds room here and none at
+	// the send, taken by another caller meanwhile, is dropped there.
+	if len(w.lines) == cap(w.lines) {
+		w.drop(level)
+		return
+	}
 	buffer := w.buffers.Get().(*[]byte)
 	*buffer = append((*buffer)[:0], line...)
 	select {
 	case w.lines <- buffer:
 	default:
 		w.buffers.Put(buffer)
-		i := levelIndex(level)
-		w.dropped[i].Add(1)
-		w.unreported[i].Add(1)
-		select {
-		case w.wake <- struct{}{}:
-		default:
-		}
+		w.drop(level)
+	}
+}
+
+// drop counts a line of level dropped and wakes run to report it.
+func (w *writer) drop(level slog.Level) {
+	i := levelIndex(level)
+	w.dropped[i].Add(1)
+	w.unreported[i].Add(1)
+	select {
+	case w.wake <- struct{}{}:
+	default:
 	}
 }
 

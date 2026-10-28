@@ -61,8 +61,8 @@ func WriteRefused(w http.ResponseWriter, refusal *Refusal) {
 //   - the read's deadline passed (DeadlinePassed): 503 REQUEST_TIMEOUT, whatever err says,
 //     since every failure after the deadline is the deadline's;
 //   - the client went away (ctx cancelled): nothing is written, since nobody reads it;
-//   - a database connection did not come free within its pool's bound (store.IsPoolBusy), or a
-//     deadline other than the request's ran out while the request was still live: 503
+//   - a database connection did not come free within its pool's bound, or a deadline other than
+//     the request's ran out while the request was still live (store.Overloaded): 503
 //     DATABASE_BUSY.
 //
 // None of these is a fault of the server's to alarm an operator over, and under load every
@@ -74,7 +74,7 @@ func WriteUnserved(w http.ResponseWriter, ctx context.Context, err error) bool {
 		writeRetryable(w, http.StatusServiceUnavailable, CodeRequestTimeout, "the read ran past its deadline; retry after Retry-After")
 	case errors.Is(ctx.Err(), context.Canceled):
 		slog.Debug("dispatch: request's client went away", "error", err)
-	case store.IsPoolBusy(err) || errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil:
+	case store.Overloaded(ctx, err):
 		slog.Debug("dispatch: request found the database busy", "error", err)
 		writeRetryable(w, http.StatusServiceUnavailable, CodeDatabaseBusy, "the database had no connection free in time; retry after Retry-After")
 	default:

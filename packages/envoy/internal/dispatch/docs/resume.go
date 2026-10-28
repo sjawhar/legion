@@ -44,9 +44,9 @@ func (s *Service) RunSettlementResumption(ctx context.Context) {
 // documents it finds.
 func (s *Service) resumeOwedSettlements(ctx context.Context, age time.Duration) error {
 	ctx = store.WithTransactionTracking(ctx)
-	background, err := s.store.Pool.Background()
+	background, err := s.backgroundPool()
 	if err != nil {
-		return fmt.Errorf("open the background pool: %w", err)
+		return err
 	}
 	rows, err := background.Query(ctx, `
 		select p.artifact_id::text

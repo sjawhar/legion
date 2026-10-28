@@ -108,6 +108,14 @@ var ErrPoolBusy = errors.New("no connection of the pool came free within its acq
 // opposed to the caller's own deadline or cancellation.
 func IsPoolBusy(err error) bool { return errors.Is(err, ErrPoolBusy) }
 
+// Overloaded reports whether err is the server's want of room rather than a failure, with ctx,
+// the caller's own context, still live: ErrPoolBusy from a guarded pool, or a deadline other than
+// ctx's - the context.DeadlineExceeded a raw pgx pool (Rooms) reports for its acquire bound among
+// them. The caller may retry it.
+func Overloaded(ctx context.Context, err error) bool {
+	return IsPoolBusy(err) || errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil
+}
+
 // poolBusy wraps err as ErrPoolBusy when it is an acquire bound: a deadline exceeded while the
 // caller's own context is still live can only be the bound acquireTracer put on the acquire,
 // since the statement itself runs on the caller's context. A caller whose own deadline came first

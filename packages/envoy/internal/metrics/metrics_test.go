@@ -7,6 +7,7 @@ import (
 	"runtime"
 	runtimemetrics "runtime/metrics"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -117,6 +118,36 @@ test_pause_seconds_count 2
 `
 	if got := scrape(t, registry); got != want {
 		t.Fatalf("scrape =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// A scrape runs each OnScrape hook once, before it writes any family, so the families read at
+// scrape time all report the reading the hook took for that scrape.
+func TestOnScrapeRunsOnceAtTheStartOfEachScrape(t *testing.T) {
+	registry := New()
+	var scrapes, reading int64
+	registry.OnScrape(func() {
+		scrapes++
+		reading = scrapes * 10
+	})
+	registry.NewGaugeFunc("test_first", "Read first", func() int64 { return reading })
+	registry.NewGaugeVecFunc("test_second", "Read second", func() []Sample {
+		return []Sample{{Value: float64(reading)}}
+	})
+	for n := int64(1); n <= 2; n++ {
+		want := strings.ReplaceAll(`# HELP test_first Read first
+# TYPE test_first gauge
+test_first N
+# HELP test_second Read second
+# TYPE test_second gauge
+test_second N
+`, "N", strconv.FormatInt(n*10, 10))
+		if got := scrape(t, registry); got != want {
+			t.Fatalf("scrape %d =\n%s\nwant\n%s", n, got, want)
+		}
+		if scrapes != n {
+			t.Fatalf("after scrape %d the hook ran %d times, want once a scrape", n, scrapes)
+		}
 	}
 }
 

@@ -163,9 +163,9 @@ func (s *Service) ReconcileTaskProgress(ctx context.Context) {
 func (s *Service) reconcileTaskProgressBatch(
 	ctx context.Context,
 ) (counted int, remaining bool, err error) {
-	background, err := s.store.Pool.Background()
+	background, err := s.backgroundPool()
 	if err != nil {
-		return 0, false, fmt.Errorf("open the background pool: %w", err)
+		return 0, false, err
 	}
 	tx, err := background.Begin(ctx)
 	if err != nil {

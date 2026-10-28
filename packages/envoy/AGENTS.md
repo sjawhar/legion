@@ -1317,10 +1317,14 @@ transaction wrote.
 **Past capacity a request is refused, not queued.** Every table route but the two event streams
 and the test hooks is admitted before its handler runs (`api.serveRoute`,
 `internal/dispatch/admission`). Reads (GET, HEAD) and writes (every other method) each have a
-limit, 28 read units and 8 write units of the request pool's 48 connections, the other 12 being
-for the request-pool users admission does not count (the table above); a request takes its
-route's weight in units (`apiRoute.Weight`: two for the delivery timeline, measures and pipeline,
-which read side by side, one otherwise). A request that finds no room waits, first come first
+limit of the request pool's 48 connections: 4 read units per CPU the process may use
+(`runtime.GOMAXPROCS`, which follows the container's CPU limit) up to 28, so 8 on two CPUs, and 8
+write units, the other 12 or more being for the request-pool users admission does not count (the
+table above). Reads are CPU-bound, and past about four per CPU each read beside a write holding
+the events' commit-order lock slows every write behind it while reads gain little
+(`admission.DefaultLimits` has INFRA-589's measurement). A request takes its route's weight in
+units (`apiRoute.Weight`: two for the delivery timeline, measures and pipeline, which read side by
+side, one otherwise). A request that finds no room waits, first come first
 served, in a queue as long as its class's limit, for at most 75 ms (`admission.DefaultWait`); one
 that finds the queue full or waits that out is answered at once `429 OVERLOADED` with
 `Retry-After: 1` and `Cache-Control: no-store`. Nothing of it ran, so any method may send it

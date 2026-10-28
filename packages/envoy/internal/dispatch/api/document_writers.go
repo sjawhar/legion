@@ -135,7 +135,8 @@ func (s *server) commentDocuments(ctx context.Context, id string) ([]string, err
 
 // askDocuments is the document a block ask's block lives in, which its edits and transitions
 // write, or none for an ask with no block or an id no ask has.
-func (s *server) askDocuments(ctx context.Context, q queryer, id string) ([]string, error) {
+func (s *server) askDocuments(ctx context.Context, id string) ([]string, error) {
+	q := s.documentQueryer()
 	if q == nil || uuid.Validate(id) != nil {
 		return nil, nil
 	}

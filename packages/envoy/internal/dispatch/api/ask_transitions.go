@@ -319,7 +319,7 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, transition askTransition) (model.Ask, error) {
 	ask, _, release, err := gatedWrite(ctx, s.deps.Docs,
 		func(ctx context.Context) ([]string, error) {
-			return s.askDocuments(ctx, s.documentQueryer(), id)
+			return s.askDocuments(ctx, id)
 		},
 		func(ctx context.Context, gated []string) (model.Ask, error) {
 			return s.closeAskGated(ctx, gated, id, actor, transition)

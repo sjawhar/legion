@@ -16,8 +16,8 @@ import (
 // connections it never held two of at once. Pinned, a read waits once.
 //
 // It holds no connection admission does not already count. Admission takes a read's unit for the
-// read's whole length and counts each unit as one request-pool connection (admission's
-// DefaultReadLimit), so a read holding its connection from its first statement to its end is the
+// read's whole length and counts each unit as one request-pool connection (admission's read
+// limit), so a read holding its connection from its first statement to its end is the
 // connection admission set aside for it; and a pinned connection between statements holds no
 // lock and no transaction, so nothing waits on it but its own request. A route whose reads run
 // side by side (weight two) or whose request runs on without the database for minutes (a file
@@ -58,13 +58,10 @@ type pinnedConnection struct {
 	ended bool
 }
 
-// pinned is ctx's pinned connection when p is the request pool and ctx pins one, else nil.
-func (p *Pool) pinned(ctx context.Context) *pinnedConnection {
-	if p.name != RequestsPool {
-		return nil
-	}
-	state, ok := ctx.Value(holdingKey{}).(*holding)
-	if !ok {
+// pinned is the pinned connection of state, a context's hold mark, when p is the request pool and
+// the context pins one, else nil.
+func (p *Pool) pinned(state *holding) *pinnedConnection {
+	if p.name != RequestsPool || state == nil {
 		return nil
 	}
 	return state.pin

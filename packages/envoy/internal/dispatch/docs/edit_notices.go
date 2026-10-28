@@ -170,9 +170,9 @@ func (s *Service) RunEditNotices(ctx context.Context, leases duty.Leases) {
 // one document never holds back the others; err is the read of the due ids alone.
 func (s *Service) sendDueEditNotices(ctx context.Context) (int, error) {
 	ctx = store.WithTransactionTracking(ctx)
-	background, err := s.store.Pool.Background()
+	background, err := s.backgroundPool()
 	if err != nil {
-		return 0, fmt.Errorf("open the background pool: %w", err)
+		return 0, err
 	}
 	rows, err := background.Query(ctx, dueEditNotices, editNoticeBatch)
 	if err != nil {

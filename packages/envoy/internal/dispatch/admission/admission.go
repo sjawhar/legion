@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -74,17 +75,45 @@ func (r *Refusal) Error() string {
 // event streams' catch-up and their heartbeat's identity read, the websockets' identity checks
 // (whileCallerResolves), the browsers' durable document appends, the /auth routes and the GitHub
 // proxy, and the work a handler leaves running after it has answered. The other 36 are split so
-// that writes, which wait on each other at the commit order, hold at most 8, and reads the rest.
+// that writes, which wait on each other at the commit order, hold at most 8, and reads at most
+// the remaining 28 (MaxReadLimit).
+//
+// Reads get fewer than 28 on a small machine: readsPerCPU for each CPU the process may use
+// (runtime.GOMAXPROCS, which follows the container's CPU limit), so 8 on the production task's
+// two. Reads are CPU-bound, and every read running beside a write that holds the events'
+// commit-order lock slows that write while every other write waits on it (INFRA-591), so above
+// about four concurrent reads per CPU committed events fall while reads gain little. INFRA-589's
+// reproduction on 2 CPUs measured it, each step offered with the same seed (10x is 40 writes/s
+// and 600 reads/s), as committed events/s and successful reads/s:
+//
+//	read limit   2x            5x            10x
+//	28           4.47 / 116.4  2.18 / 142.6  1.91 / 121.7 (commit-order lock hold p50 492 ms)
+//	14                                       3.09 / 94.8  (hold p50 281 ms)
+//	12           4.71 / 98.7   3.65 / 98.7   3.29 / 86.5
+//	8            5.34 / 87.3   4.41 / 78.9   4.46 / 78.1  (hold p50 200 ms)
+//
+// With 8 reads on 2 CPUs committed events at 5x and 10x stay above 80% of the best step (5.34
+// at 2x), and successful reads above 80% of theirs.
 const (
-	DefaultReadLimit  = 28
+	MaxReadLimit      = 28
+	readsPerCPU       = 4
 	DefaultWriteLimit = 8
 )
+
+// readLimit is the read limit for procs usable CPUs: readsPerCPU each, at least one CPU's worth
+// and at most MaxReadLimit.
+func readLimit(procs int) int {
+	return min(MaxReadLimit, readsPerCPU*max(procs, 1))
+}
 
 // DefaultWait is how long a request waits in its class's queue for room before it is refused:
 // 75 ms, so a refused request has its answer within the 100 ms p99 the architect set for a refusal
 // (INFRA-514), with 25 ms left for the rest of the request's path. Room that does not come free in
 // that time is not coming free in time for the request either: an admitted request holds its unit
-// for the length of its work, tens of milliseconds at best.
+// for the length of its work, tens of milliseconds at best. A 25 ms wait was measured too, in
+// INFRA-589's 10x step with 8 reads on 2 CPUs: 3.88 committed events/s and 66.2 successful
+// reads/s against 75 ms's 4.46 and 78.1, for a refusal p99 of 130 ms against 140 ms, so the wait
+// stayed 75 ms.
 const DefaultWait = 75 * time.Millisecond
 
 // Limits are a Limiter's concurrency limits per class, in units (a request takes its route's
@@ -94,9 +123,10 @@ type Limits struct {
 	Wait        time.Duration
 }
 
-// DefaultLimits are the limits the server runs with.
+// DefaultLimits are the limits the server runs with: reads by the CPUs the process may use
+// (readLimit of runtime.GOMAXPROCS), DefaultWriteLimit writes and DefaultWait.
 func DefaultLimits() Limits {
-	return Limits{Read: DefaultReadLimit, Write: DefaultWriteLimit, Wait: DefaultWait}
+	return Limits{Read: readLimit(runtime.GOMAXPROCS(0)), Write: DefaultWriteLimit, Wait: DefaultWait}
 }
 
 // Limiter admits requests per class under Limits. Each class runs at most its limit's units at
@@ -325,7 +355,8 @@ func (g *gate) acquire(ctx context.Context, units int) error {
 	}
 	if _, refused := failure.(*Refusal); refused {
 		g.waitExceeded.Add(1)
-		for longest := g.longestRefusedWait.Load(); int64(waited) > longest && !g.longestRefusedWait.CompareAndSwap(longest, int64(waited)); longest = g.longestRefusedWait.Load() {
+		if int64(waited) > g.longestRefusedWait.Load() {
+			g.longestRefusedWait.Store(int64(waited))
 		}
 	}
 	return failure

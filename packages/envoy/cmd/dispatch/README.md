@@ -1575,8 +1575,9 @@ node type weighs:
 Past what it can serve, Dispatch refuses a request at once rather than queueing it without end,
 and tells the client when to ask again. Every `/api/v1` route but the two event streams and the
 test hooks is admitted before it runs: reads (GET, HEAD) and writes (every other method) each have
-a limit, 28 and 8 of the request pool's 48 connections, and the delivery timeline, measures and
-pipeline count twice, since each runs two reads side by side. A request that finds no room waits,
+a limit of the request pool's 48 connections, 4 reads per CPU the server may use up to 28 (8 on
+two CPUs) and 8 writes, and the delivery timeline, measures and pipeline count twice, since each
+runs two reads side by side. A request that finds no room waits,
 in arrival order, at most 75 ms in a queue as long as its class's limit. An admitted read has 20
 seconds to answer, and the four file version downloads 5 minutes; a write has no deadline and,
 once admitted, runs to completion. Every wait for a database connection is bounded too, at 3

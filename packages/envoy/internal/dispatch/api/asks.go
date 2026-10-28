@@ -391,7 +391,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 
 	// A block ask's text is written into its block, so the edit queues for the writer gate of the
 	// block's document before its transaction opens. A block ask never moves to another document.
-	documents, err := s.askDocuments(r.Context(), s.documentQueryer(), r.PathValue("id"))
+	documents, err := s.askDocuments(r.Context(), r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, r, err)
 		return

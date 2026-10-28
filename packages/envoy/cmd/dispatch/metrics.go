@@ -69,25 +69,37 @@ func startMetrics(ctx context.Context, addr string, sources metricsSources) (net
 	if addr == "" {
 		return nil, nil
 	}
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("DISPATCH_METRICS_ADDR: listen on %s: %w", addr, err)
-	}
 	lag := &outboxLag{}
-	go lag.sample(ctx, sources.Background, outboxLagInterval)
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", newDispatchMetrics(sources, lag).Handler())
-	server := &http.Server{Handler: mux, ReadHeaderTimeout: readHeaderTimeout}
+	bound, err := serveSide(ctx, addr, "DISPATCH_METRICS_ADDR", "metrics", mux)
+	if err != nil {
+		return nil, err
+	}
+	go lag.sample(ctx, sources.Background, outboxLagInterval)
+	return bound, nil
+}
+
+// serveSide binds addr and serves handler on it until ctx ends, when the listener and every open
+// connection close at once, for a listener beside the API's (metrics, pprof) named name in its log
+// lines. A bind that fails is an error naming variable, the setting addr came from, so a port
+// clash refuses the boot.
+func serveSide(ctx context.Context, addr, variable, name string, handler http.Handler) (net.Addr, error) {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("%s: listen on %s: %w", variable, addr, err)
+	}
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: readHeaderTimeout}
 	go func() {
 		<-ctx.Done()
 		_ = server.Close()
 	}()
 	go func() {
 		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
-			slog.Error("dispatch: metrics listener stopped", "addr", addr, "error", err)
+			slog.Error("dispatch: "+name+" listener stopped", "addr", addr, "error", err)
 		}
 	}()
-	slog.Info("dispatch: metrics listening", "addr", listener.Addr().String())
+	slog.Info("dispatch: "+name+" listening", "addr", listener.Addr().String())
 	return listener.Addr(), nil
 }
 
@@ -136,15 +148,29 @@ var gcPauseBuckets = []float64{
 }
 
 // newDispatchMetrics is the registry the metrics endpoint serves. Every series is read from
-// sources when a scrape comes, but the outbox lag, which is lag's latest sample. A pool's series
-// appear once the pool has opened: the ones opened on first use (rooms, settlements, the
-// listener's, the outbox's) are absent until something uses them, rather than reported as an
-// empty pool.
+// sources when a scrape comes, the pools' from one reading of their Stats a scrape, but the outbox
+// lag, which is lag's latest sample. A pool's series appear once the pool has opened: the ones
+// opened on first use (rooms, settlements, the listener's, the outbox's) are absent until
+// something uses them, rather than reported as an empty pool.
 func newDispatchMetrics(sources metricsSources, lag *outboxLag) *metrics.Registry {
 	registry := metrics.New()
+	// pools is the scrape's reading of every pool's Stats, taken once before any family is written
+	// (OnScrape) and read by each pool family. Two scrapes at once each store their own; a family
+	// reads whichever is latest, both of them whole.
+	var pools atomic.Pointer[[]store.PoolStats]
+	registry.OnScrape(func() {
+		stats := sources.Pool.Stats()
+		pools.Store(&stats)
+	})
+	poolStats := func() []store.PoolStats {
+		if stats := pools.Load(); stats != nil {
+			return *stats
+		}
+		return nil
+	}
 	poolGauge := func(name, help string, value func(store.PoolStats) float64) {
 		registry.NewGaugeVecFunc(metricPrefix+name, help, func() []metrics.Sample {
-			return poolSamples(sources.Pool.Stats(), value)
+			return poolSamples(poolStats(), value)
 		})
 	}
 	poolGauge("db_pool_max_conns", "Connections the pool may open.", func(s store.PoolStats) float64 { return float64(s.Stat.MaxConns()) })
@@ -154,7 +180,7 @@ func newDispatchMetrics(sources metricsSources, lag *outboxLag) *metrics.Registr
 	poolGauge("db_pool_waiting", "Acquires of the pool in progress now: callers waiting for a connection.", func(s store.PoolStats) float64 { return float64(s.Acquire.Waiting) })
 	registry.NewHistogramVecFunc(metricPrefix+"db_pool_acquire_seconds", "How long each acquire of the pool waited for a connection; its count is the pool's checkouts.", func() []metrics.HistogramSample {
 		bounds := store.AcquireBucketBounds()
-		stats := sources.Pool.Stats()
+		stats := poolStats()
 		samples := make([]metrics.HistogramSample, 0, len(stats))
 		for _, pool := range stats {
 			samples = append(samples, metrics.HistogramSample{
@@ -168,7 +194,7 @@ func newDispatchMetrics(sources metricsSources, lag *outboxLag) *metrics.Registr
 		return samples
 	})
 	registry.NewCounterVecFunc(metricPrefix+"db_pool_acquire_timeouts_total", "Acquires of the pool refused for running out its acquire bound (store.ErrPoolBusy).", func() []metrics.Sample {
-		return poolSamples(sources.Pool.Stats(), func(s store.PoolStats) float64 { return float64(s.Acquire.Timeouts) })
+		return poolSamples(poolStats(), func(s store.PoolStats) float64 { return float64(s.Acquire.Timeouts) })
 	})
 
 	registry.NewHistogramVecFunc(metricPrefix+"go_gc_pause_seconds", "Stop-the-world pauses of the garbage collector (/gc/pauses:seconds).", func() []metrics.HistogramSample {

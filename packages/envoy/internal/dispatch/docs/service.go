@@ -1293,12 +1293,13 @@ func copyTree(tree *pmdoc.Node) *pmdoc.Node {
 	return copied
 }
 
-// settlementOverloaded is whether err is a connection a settlement was refused because a pool had
-// none free within its acquire bound: store.ErrPoolBusy from the settlements pool, or the
-// context.DeadlineExceeded the rooms pool, a raw pgx pool, reports for its bound while the
-// settlement's own context is still live (store.Pool.Rooms). Its caller has checked that context.
-func settlementOverloaded(err error) bool {
-	return store.IsPoolBusy(err) || errors.Is(err, context.DeadlineExceeded)
+// backgroundPool is the store's pool for work no request waits on (store.Pool.Background).
+func (s *Service) backgroundPool() (*store.Pool, error) {
+	background, err := s.store.Pool.Background()
+	if err != nil {
+		return nil, fmt.Errorf("open the background pool: %w", err)
+	}
+	return background, nil
 }
 
 // settleRoomWithin settles room under parent: a timer's settlement under settleTimeout, the one
@@ -1309,7 +1310,8 @@ func settlementOverloaded(err error) bool {
 // it or counts it as a failure: the document's pending-settlement row leaves it to resume
 // (onLoadDocument, RunSettlementResumption). That is how a shutdown that cannot settle every room
 // within its budget leaves the rest to the next process. A settlement refused a connection for
-// overload (settlementOverloaded) is left to resume the same way, so overload fails no room
+// overload (store.Overloaded: the settlements pool's ErrPoolBusy, or the rooms pool's acquire
+// bound) is left to resume the same way, so overload fails no room
 // (maxSettleFailures). So is a settlement that has to write into a room Shutdown has begun closing,
 // which refuses the write (allowInject).
 //
@@ -1326,7 +1328,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		case parent.Err() != nil:
 			slog.Warn("dispatch: document settlement stopped at the shutdown budget", "room", room, "error", err)
 			return
-		case settlementOverloaded(err):
+		case store.Overloaded(parent, err):
 			slog.Warn("dispatch: document settlement found no connection free; the resumption settles it", "room", room, "error", err)
 			return
 		case s.shuttingDown(room) && errors.Is(err, ErrServiceUnavailable):
@@ -1528,8 +1530,7 @@ func (s *Service) settlePass(parent context.Context, room string, state *roomSta
 		if s.beforeSettleRender != nil {
 			s.beforeSettleRender(room)
 		}
-		stampedMarkdown, stampedErr := renderTree(stamped)
-		stampChanged = renderErr != nil || stampedErr != nil || stampedMarkdown != markdown
+		stampChanged = closureChangedMarkdown(markdown, renderErr, stamped)
 	}
 
 	ledger := &Ledger{service: s, settling: true}
@@ -1780,8 +1781,11 @@ func (s *Service) settlePass(parent context.Context, room string, state *roomSta
 			if s.beforeSettleRender != nil {
 				s.beforeSettleRender(room)
 			}
-			answers := reconciliation.weighAnswers(read, markdown)
-			repaired, repairedErr := renderTree(read)
+			answers, repaired, ok := reconciliation.weighAnswers(read, markdown)
+			var repairedErr error
+			if !ok {
+				repaired, repairedErr = renderTree(read)
+			}
 			*plan = &repairPlan{
 				heldThrough: take.heldThrough, markdown: markdown, answers: answers,
 				tree: read, repaired: repaired, repairedErr: repairedErr,

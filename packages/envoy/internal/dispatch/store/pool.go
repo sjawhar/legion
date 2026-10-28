@@ -407,11 +407,11 @@ func (p *Pool) Settlements() (*Pool, error) {
 // wrapped is the separate pool name, wrapped so the nested-acquire guard and the ErrPoolBusy
 // mapping apply to it as they do to the request pool.
 func (p *Pool) wrapped(name string, size int32) (*Pool, error) {
-	opened, err := p.separate(name, size)
+	opened, err := p.open(name, size)
 	if err != nil {
 		return nil, err
 	}
-	return NewPool(opened), nil
+	return &Pool{pool: opened.pool, name: opened.name, acquire: opened.acquire}, nil
 }
 
 // SetAcquireBoundForTest sets the acquire bound the separate pool named name opens with, in place
@@ -427,19 +427,28 @@ func (p *Pool) SetAcquireBoundForTest(name string, bound time.Duration) {
 	p.acquireBounds[name] = bound
 }
 
-// separate opens the pool named name on demand, sized at size, copied from this pool's
-// configuration and configured as its own (configurePool: its application_name and its acquire
-// bound, acquireBounds' or defaultAcquireBound's), and closes it with this pool. Each caller holds
-// mu for the whole check-and-open so two of them cannot open two pools, and one opened after Close
-// would be a pool nobody closes.
+// separate is the pgx pool of the separate pool named name (open).
 func (p *Pool) separate(name string, size int32) (*pgxpool.Pool, error) {
+	opened, err := p.open(name, size)
+	if err != nil {
+		return nil, err
+	}
+	return opened.pool, nil
+}
+
+// open opens the pool named name on demand, sized at size, copied from this pool's configuration
+// and configured as its own (configurePool: its application_name and its acquire bound,
+// acquireBounds' or defaultAcquireBound's), and closes it with this pool. Each caller holds mu for
+// the whole check-and-open so two of them cannot open two pools, and one opened after Close would
+// be a pool nobody closes.
+func (p *Pool) open(name string, size int32) (openedPool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
-		return nil, ErrPoolClosed
+		return openedPool{}, ErrPoolClosed
 	}
 	if opened, ok := p.separates[name]; ok {
-		return opened.pool, nil
+		return opened, nil
 	}
 	config := p.pool.Config()
 	config.MaxConns = size
@@ -453,14 +462,15 @@ func (p *Pool) separate(name string, size int32) (*pgxpool.Pool, error) {
 		bound = defaultAcquireBound(name)
 	}
 	acquire := configurePool(config, name, bound)
-	opened, err := pgxpool.NewWithConfig(context.Background(), config)
+	pool, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
-		return nil, fmt.Errorf("open %s pool: %w", name, err)
+		return openedPool{}, fmt.Errorf("open %s pool: %w", name, err)
 	}
 	if p.separates == nil {
 		p.separates = make(map[string]openedPool, len(poolNames))
 	}
-	p.separates[name] = openedPool{name: name, pool: opened, acquire: acquire}
+	opened := openedPool{name: name, pool: pool, acquire: acquire}
+	p.separates[name] = opened
 	return opened, nil
 }
 
@@ -577,11 +587,12 @@ type connection interface {
 // out a connection calls it directly, as guard is called, so a refusal records that method's
 // caller.
 func (p *Pool) target(ctx context.Context) (connection, func(), error) {
-	if holdsConnection(ctx) {
+	state, _ := ctx.Value(holdingKey{}).(*holding)
+	if state != nil && state.connection.Load() {
 		logRefusal()
 		return nil, nil, ErrNestedAcquire
 	}
-	pin := p.pinned(ctx)
+	pin := p.pinned(state)
 	if pin == nil {
 		return p.pool, nil, nil
 	}
@@ -719,11 +730,12 @@ func (p *Pool) Acquire(ctx context.Context) (*pgxpool.Conn, error) {
 // connection or a pinned connection a call runs on, the pinned connection where ctx pins an idle
 // one on this pool, and nil otherwise.
 func (p *Pool) handOver(ctx context.Context) (*pgxpool.Conn, error) {
-	if holdsConnection(ctx) {
+	state, _ := ctx.Value(holdingKey{}).(*holding)
+	if state != nil && state.connection.Load() {
 		logRefusal()
 		return nil, ErrNestedAcquire
 	}
-	pin := p.pinned(ctx)
+	pin := p.pinned(state)
 	if pin == nil {
 		return nil, nil
 	}

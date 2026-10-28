@@ -62,7 +62,7 @@ var errGateWhileHoldingGate = errors.New(
 type documentWriterGate struct {
 	mu sync.Mutex
 	// gates holds an entry for each document whose gate is held, with the writers waiting for it
-	// in order; a document no writer holds or waits for has none.
+	// in order - nil until one waits; a document no writer holds or waits for has none.
 	gates map[string]*list.List
 	// queued counts the writers waiting, over every document, for the doc_writer_queued gauge.
 	queued atomic.Int64
@@ -82,9 +82,13 @@ func (g *documentWriterGate) acquire(ctx context.Context, artifactID string, par
 		if g.gates == nil {
 			g.gates = make(map[string]*list.List)
 		}
-		g.gates[artifactID] = list.New()
+		g.gates[artifactID] = nil
 		g.mu.Unlock()
 		return nil
+	}
+	if waiters == nil {
+		waiters = list.New()
+		g.gates[artifactID] = waiters
 	}
 	if waiters.Len() >= maxQueuedDocumentWriters {
 		g.mu.Unlock()
@@ -121,11 +125,11 @@ func (g *documentWriterGate) release(artifactID string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	waiters := g.gates[artifactID]
-	front := waiters.Front()
-	if front == nil {
+	if waiters == nil || waiters.Len() == 0 {
 		delete(g.gates, artifactID)
 		return
 	}
+	front := waiters.Front()
 	waiters.Remove(front)
 	g.queued.Add(-1)
 	close(front.Value.(*gateWaiter).ready)
@@ -181,20 +185,13 @@ func (s *Service) AcquireDocumentWriter(ctx context.Context, artifactIDs ...stri
 		return nil, nil, errGateWhileHoldingGate
 	}
 	ticket := admission.TicketFrom(ctx)
-	parked := false
-	park := func() {
-		if !parked {
-			parked = true
-			ticket.Park()
-		}
-	}
 	releaseTaken := func(taken []string) {
 		for index := len(taken) - 1; index >= 0; index-- {
 			s.writers.release(taken[index])
 		}
 	}
 	for index, artifactID := range ids {
-		if err := s.writers.acquire(ctx, artifactID, park); err != nil {
+		if err := s.writers.acquire(ctx, artifactID, ticket.Park); err != nil {
 			releaseTaken(ids[:index])
 			if errors.Is(err, ErrPreconditionBusy) {
 				return nil, nil, fmt.Errorf("%w: document %s", err, artifactID)
@@ -202,11 +199,9 @@ func (s *Service) AcquireDocumentWriter(ctx context.Context, artifactIDs ...stri
 			return nil, nil, err
 		}
 	}
-	if parked {
-		if err := ticket.Resume(ctx); err != nil {
-			releaseTaken(ids)
-			return nil, nil, err
-		}
+	if err := ticket.Resume(ctx); err != nil {
+		releaseTaken(ids)
+		return nil, nil, err
 	}
 	hold := &documentWriterHold{artifactIDs: ids}
 	release := sync.OnceFunc(func() {
