@@ -5,7 +5,7 @@
 # Bun is pinned to the version the repo locks, like packages/daemon/docker/worker.Dockerfile:
 # bundler output differs across Bun releases, so a published SPA must not be built by whatever
 # 1.x is newest that day. .github/scripts/check-bun-version.sh keeps this equal to .bun-version.
-ARG BUN_VERSION=1.3.14
+ARG BUN_VERSION=1.4.4
 FROM mirror.gcr.io/oven/bun:${BUN_VERSION} AS web
 
 WORKDIR /repo
