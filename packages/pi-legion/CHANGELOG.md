@@ -43,6 +43,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   and per source and label beside the median fault counts, how many counted runs carry a flag
   (`outside=`, `skills=` or `writes_seen=`). A flagged run stays in the pass counts and the
   medians; the column says how many of them to read before trusting the numbers.
+- The skill-scenario scorer takes a run's own directory, work directory and profile from the cwd
+  its session's header records (`<run dir>/cwd`), not from where the run is scored. Scoring a copy
+  of the runs flagged nearly every run `outside=` and voided runs that read their own skills.
 - The skill-scenario scorer reads a spec-only check from the subagent's own transcript
   (`sessions/<session>/<name>.jsonl`), not only from a `task` tool call. A check the agent started
   from an eval cell (`tool.task(…)` with the spec pasted in, or the `agent(…)` helper) leaves no

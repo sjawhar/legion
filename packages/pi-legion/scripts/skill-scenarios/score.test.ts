@@ -1911,6 +1911,36 @@ specRun("spec-writing-head-108", {
     finish
   ),
 });
+// A run scored from a copy: it ran in another work directory, which its transcript's header (cwd
+// `<run dir>/cwd`) and every path it named record. Its own run directory, the work directory's other
+// runs and its own HOME's skills are still its own there.
+const ranIn = path.join(homedir(), "moved-work", "runs", "spec-writing-head-109");
+specRun("spec-writing-head-109", {
+  transcript: [
+    { ...specHeader[0], cwd: path.join(ranIn, "cwd") },
+    ...conversation(
+      routedRead,
+      sh(
+        "o7",
+        `cat ${path.join(ranIn, "home", "skills", "dispatch", "SKILL.md")}; cat ${path.join(ranIn, "..", "spec-writing-head-3", "spec.md")}`,
+        0,
+        "# Dispatch\n# Spec"
+      ),
+      checkOf("c1"),
+      specEdit("w1"),
+      askStep,
+      checkOf("c2"),
+      specEdit("w2"),
+      finish
+    ).slice(1),
+  ],
+});
+test("a run scored from a copy reads the paths it ran with as its own", () => {
+  expect(out).not.toContain("spec-writing-head-109\trig error");
+  expect(scoresOf("spec-writing-head-109")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-109")).not.toContain(" outside=");
+  expect(rowOf("spec-writing-head-109")).not.toContain(" skills=");
+});
 // A usage refusal the CLI both prints and logs (an unknown command, under tool `dispatch`), after a
 // skill read earlier in the same call. The ledger line and the printed refusal are one refusal:
 // counted once, at the command, so the read before it is no read between it and its fix.

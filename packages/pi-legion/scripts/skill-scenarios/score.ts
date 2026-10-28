@@ -2808,6 +2808,16 @@ function flagOf(name: string, reaches: Reach[], note: string): { inline: string;
   };
 }
 
+/** The directory a run had when it ran. rig.sh starts every agent in `<run dir>/cwd`, and its
+ * session's header records that cwd, so a run scored from a copy (another work directory) still
+ * reads its own paths as its own. A header whose cwd is not `…/runs/<this run's name>/cwd`, or no
+ * header, gives `dir` itself. */
+function ranAt(dir: string, entries: SessionEntry[]): string {
+  const cwd = entries.find((entry) => entry.type === "session")?.cwd;
+  return typeof cwd === "string" && cwd.endsWith(`/runs/${path.basename(dir)}/cwd`)
+    ? path.dirname(cwd)
+    : dir;
+}
 function scoreRuns(runsDir: string, only: string | undefined) {
   const rows: Row[] = [];
   const errors: { run: string; key: string; reason: string }[] = [];
@@ -2874,13 +2884,16 @@ function scoreRuns(runsDir: string, only: string | undefined) {
         );
       const dispatch = dispatchOf(dir);
       const calls = runCalls(dir);
-      const profile = path.join(path.dirname(runsDir), "profiles", label);
+      // The paths the run had when it ran, which its transcripts name, never those of a copy
+      // scored elsewhere (ranAt).
+      const ran = ranAt(dir, session(dir));
+      const work = path.dirname(path.dirname(ran));
+      const profile = path.join(work, "profiles", label);
       // The run's own skills: its HOME (in its directory), its label's profile and checkout.
-      const own = [dir, profile, labels.get(label) ?? profile].map((place) => `${place}/`);
+      const own = [ran, profile, labels.get(label) ?? profile].map((place) => `${place}/`);
       reason = unscored(dir, scenario, dispatch, label, labels, sharing, calls, own);
       if (reason === undefined) {
         const scored = score(dir, run, label, askCase);
-        const work = path.dirname(runsDir);
         const outside = outsideReaches(calls, [work, labels.get(label) ?? work]);
         const skills = skillReaches(calls, own, label, labels);
         const flags = [
