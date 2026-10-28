@@ -2,43 +2,32 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-607",
-  "completed": "2026-10-28T21:43:48Z",
-  "decision": "changes_requested",
-  "reviewedCodeHead": "14be510457eaef081b073580305df9f43a355f62",
-  "round": 2,
+  "completed": "2026-10-28T23:31:55Z",
+  "decision": "approved",
+  "reviewedCodeHead": "a56be7397f910bc0ec90d4b16fa1d73a9131bc77",
+  "round": 3,
   "critical": 0,
-  "important": 2,
+  "important": 0,
   "minor": 2,
-  "roundOneFindings": [
-    {"thread": "PRRT_kwDORFy7ds6xSaz8", "status": "fixed in 823f782f: shutdown runs waitIntakes before waitUntilIdle/pool.Close (cmd/dispatch/shutdown.go:133-136); TestShutdownWaitsForAnIntakeHandlerBeforeClosingThePool; implementer and tester drove it on the real binary"},
-    {"thread": "PRRT_kwDORFy7ds6xSa0G", "status": "fixed in 823f782f: bus.Client.DrainSubscription drains the handle the client holds and marks the registration draining so restoreSubscriptions and subscriptionsHealthy skip it (internal/bus/nats.go:539-560, recovery.go:326,361); intake_delivery.go:137 uses it; regression tests in bus and delivery"},
-    {"fastFollow": "done in 67c3d0f2: migration headers, pglisten Notification/OnNotification/OnDisconnected/Hub.Handle removed, WokenLoop.HeldRetry removed (retry pace unchanged: every leased loop had HeldRetry = minGap), intake delivery code moved to intake_delivery.go (intake.go 979 lines), intakeStopDeadline removed; intakeDelivery.stopping kept with a stated reason (covers the window before keys.stop)"}
+  "roundTwoFindings": [
+    {"thread": "PRRT_kwDORFy7ds6xVRpw", "status": "fixed in a56be739: main defers stopIntakesOnExit(cancel, waitIntakes) (cmd/dispatch/main.go:568, 637-640), which cancels before it waits; TestAPanicAfterTheIntakesStartEndsTheProcess"},
+    {"thread": "PRRT_kwDORFy7ds6xVRrU", "status": "fixed in a56be739: delivery.stopContext is armed at the start of Intake.Run and JobIntake.Run (intake.go:100, jobs.go:125) and ends intakeStopBudget after ctx ends; the reconcile's JetStream calls run under natsgo.Context(stopping) (intake.go:560-626), no subscribe starts once ctx has ended (intake.go:514-516), and StopDelivering takes the same deadline (intake.go:127); TestABindThatReturnsAfterTheSignalStopsByTheBudgetFromTheSignal; the tester froze NATS with SIGSTOP and every process exited and deregistered well inside the grace"}
   ],
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 14be5104 (one Medium: the startup-panic hang; two Minor: the stop budget counted from the bind's return, stale Look-at-first line)",
-    "codeQuality": "Verdict: CHANGES at 14be5104 (one correctness: the stop budget counted from the bind's return with no outer deadline; three cleanup-only: DrainSubscription/draining/Release as one call, StartIntakes stop(ctx) mode only a test uses, the defer's missing cancel)"
+    "deepReview": "Verdict: APPROVE at a56be739 (two Minor residuals, below)",
+    "codeQuality": "Verdict: CHANGES at a56be739, every finding cleanup-only (intake.go at 1005 lines with the durable-binding code movable to its own file; StopDelivering's multi-caller generality and the intakeDrainWait branch no production path reaches; the boundHook and panic tests guard less than their names), not raised per the architect's round decision (correctness or a red required check only)"
   },
-  "ci": "At 21:36Z every check at the code head 14be5104 was queued (runner backlog); compare 14be5104...169011c9 is .legion/ only (2 files). Not an approval round, so not waited for.",
+  "ci": "CI head a56be739 (newest pull_request run); compare a56be739...d06d7e47 is .legion/ only (2 files). Required lint, typecheck, test and pr-title completed success at 23:31Z. The non-required Go suites (envoy-go, envoy-go-race, dispatch, the Postgres 16 Dispatch and Broker suites, the multiprocess jobs) were still queued; the Daemon Go suite passed.",
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/envoy/cmd/dispatch/main.go:565-568",
-      "description": "defer waitIntakes() replaced the old defer that ran cancel() first. waitIntakes is stopIntakes(context.Background()), which waits in running.Wait for settings.Run, Intake.Run and JobIntake.Run, each of which returns only once ctx ends; the only cancel is the defer at main.go:196, which Go runs after this one. A panic in main's goroutine after line 568 (routes.New's mux registrations, newHTTPServer, joinRegistry) therefore hangs the process with the panic unprinted and the bound intake still consuming the durable, until a signal (the probe's kill) cancels ctx; at 0c22dd3f the same panic exited. Fix: defer func() { cancel(); waitIntakes() }()."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/delivery/intake.go:103,119-122",
-      "description": "Intake.Run makes its 15 s stop context only when it reaches the stop, after bind(ctx) returns, and the bind's reconcile and subscribe JetStream calls do not watch ctx (each up to nats.MaxWait 10 s, bus/nats.go:380). A signal during a standby's bind poll that then binds the durable stops at bind end + 15 s. This round removed the outer deadline (intakeStopDeadline, signal + 25 s) and moved waitIntakes before deregister/pool.Close, so that case can push the registry delete and the pool close past stopGrace (30 s), where the kill cuts them; shutdown.go:95-102, intake_delivery.go:77-92 and README.md:703-712 say 15 s after the signal at the latest. Start the budget when ctx ends (e.g. a stop context armed by context.AfterFunc(ctx, ...)), or correct the claim and restore a bound."
+      "severity": "minor",
+      "file": "packages/envoy/internal/bus/nats.go:542",
+      "description": "DrainSubscription's awaitBindLocked has no deadline, so a restore's bind (up to 10 s) in flight when the stop begins can push the stop to about signal + 20 s in a double fault (late subscribe and a connection replacement together); handlers are still given up at signal + 15 s and the shutdown stays inside the 25 s document budget. The same wait existed in round 2's Release."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/bus/nats.go:183-187,539-588, recovery.go:326,361",
-      "description": "Cleanup, not a gate: DrainSubscription, the draining flag and Release are always called in sequence by one caller (intake_delivery.go:137,171); DrainSubscription could give up the registration itself and drop the flag and both recovery checks."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/delivery/intakes.go:52,79",
-      "description": "Cleanup, not a gate: StartIntakes' stop(ctx) and its give-up AfterFunc are a mode only TestAHandlerTheStopGivesUpIsRedeliveredAtOnce uses now that main passes context.Background(); the docs at intakes.go:36-39 and intake_delivery.go:113-116 still describe it. The fix for the stop budget above may settle it."
+      "file": "packages/envoy/internal/dispatch/delivery/intake.go:602-609",
+      "description": "The legacy multi-subject durable replacement runs DeleteConsumer then AddConsumer under the stop deadline; a deadline between them leaves no durable, and the next holder recreates it with DeliverAll (a stream replay of idempotent upserts, not lost messages). Needs a legacy durable still present and a reconcile straddling signal + 15 s; an AddConsumer timeout already produced the same state."
     }
   ]
 }
