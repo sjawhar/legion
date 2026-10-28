@@ -203,7 +203,8 @@ func (w *workflowRuntime) headPushes(ctx context.Context, github githubrest.Clie
 // Each push's event id names the project, the repository, the branch and the push's two commits,
 // so a later pass skips it before any transaction, and the push webhook arriving later is the same
 // push recorded again, which the record keeps as its move's push or a repeat of it and which
-// changes no judgement (classify.ApplyPush).
+// changes no judgement (classify.ApplyPush): a webhook whose list GitHub cut short takes the paths
+// the compare listed here, so a handoff-only push stays one.
 //
 // unfollowed says why the pushes cannot be rebuilt, and then there are none: the page does not
 // lead back from head to the recorded head, an entry on the way is no push, or GitHub answered a
