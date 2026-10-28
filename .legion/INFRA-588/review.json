@@ -2,36 +2,15 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-588",
-  "completed": "2026-10-28T08:48:52Z",
-  "round": 3,
+  "completed": "2026-10-28T11:13:54Z",
+  "round": 4,
   "decision": "approved",
-  "codeHead": "5cfd1080069831382a886cc5e72666f5a1274275",
-  "ci": "Required set lint, typecheck, test, pr-title (rulesets). Newest pull_request run head 5cfd10800698: lint success 18:57Z, typecheck success 18:45Z, test success 19:01Z (2026-10-27); pr-title failed there on the old title, and success at c156b68bd6f6 (run 40658794266, pull_request_review, 08:43Z 2026-10-28) on the current conventional title. compare 5cfd10800698...b5494839 handoffsOnly true (2 files).",
-  "thermonuclear": "Pair run at ae4b7924 (code 5cfd10800698, identical to this head's code): deep-review APPROVE (3 Minor + 1 hardening note), code-quality CHANGES (2 Minor: open-list cap described as GitHub's search cap; a second sort in readPullRequests). All judged Minor, not defects.",
-  "round2Verified": "All 3 round-2 threads fixed at 5cfd10800698 and answered as accepted (PRRT_kwDORFy7ds6wzNZu, PRRT_kwDORFy7ds6wzNZ7, PRRT_kwDORFy7ds6wzNaB). Recreated workspace: 40 tests pass; P1 from the re-fetched before records 126 read / 80 carrying / 253 conflicting.",
+  "codeHead": "b5484b414155aebeb936fd32a64db319b151ccbe",
+  "scope": "Since the round-3 approval at 54cdb4deb12b: b5484b414155 changes only scripts/conflicts/README.md (the Dispatch key replaced by neutral text and a <KEY> placeholder, per the controller's ruling under INFRA-472); the PR title lost its key. Docs-only diff, so no thermonuclear pass.",
+  "ci": "Required lint, typecheck, test, pr-title (rulesets). At b5484b414155: lint success, typecheck success, test success (11:13Z), pr-title success. compare b5484b414155...6518fe7e handoffsOnly true (2 files).",
+  "checks": "No Dispatch key or dispatch:// reference in any file the PR adds outside .legion/ (grep of scripts/conflicts and the workflow); check-private-names.sh exit 0; title conventional and key-free; 12 threads, 0 unresolved.",
   "critical": 0,
   "important": 0,
-  "minor": 4,
-  "keyFindings": [
-    {
-      "severity": "minor",
-      "file": "scripts/conflicts/github.ts",
-      "description": "LIST_CAP's comment (4-6) and README 72-75 attribute the open list's 1000 limit to GitHub's search cap; gh pr list --state open does not search, so for that list it is the script's own --limit. No behaviour effect (102 open PRs)."
-    },
-    {
-      "severity": "minor",
-      "file": "scripts/conflicts/measure.ts",
-      "description": "readPullRequests sorts by number (139) although unionByNumber already sorts and mapLimit keeps input order."
-    },
-    {
-      "severity": "minor",
-      "file": "scripts/conflicts/__tests__/github.test.ts",
-      "description": "No test fails if the --state open list call is removed; the tester's live negative control (61 vs 19 PRs read) proves the behaviour."
-    },
-    {
-      "severity": "minor",
-      "file": "PR body",
-      "description": "The Change bullet on selection names merges but not force pushes as what keeps a later-opened PR in the window; README states it correctly."
-    }
-  ]
+  "minor": 0,
+  "keyFindings": []
 }
