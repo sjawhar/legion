@@ -221,10 +221,10 @@ jobs:
             # infra/core/permissions_live_test.go:298-299). packages/envoy/listenfd: added by
             # #2229 (cmd/dispatch, cmd/listener, internal/config and infra/host/heldportwrapper
             # import it). internal/dispatch/dashboard and internal/dispatch/processes: cmd/dispatch
-            # imports them (INFRA-559, INFRA-555). internal/roles and, through it, internal/store,
-            # internal/session and internal/kvwatch: added by #2395 (the outbox's role forward
-            # resolves the holder with roles.ResolveHolder); internal/redact: cmd/dispatch/main.go
-            # imports it.
+            # imports them (INFRA-559, INFRA-555).
+            # internal/roles and, through it, internal/store, internal/session and internal/kvwatch:
+            # added by #2395 (the outbox's role forward resolves the holder with
+            # roles.ResolveHolder); internal/redact: cmd/dispatch/main.go imports it.
             dispatch_server: &dispatch_server
               - 'packages/envoy/cmd/dispatch/*'
               - 'packages/envoy/internal/bus/*'
