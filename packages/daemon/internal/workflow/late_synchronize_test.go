@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -64,12 +65,12 @@ func sentPush(before, after, sender string) intake.Fact {
 	return push
 }
 
-// A synchronize older than the newest applied (classify.LateLifecycle) moves no head, opens and
-// reopens no head run, and wakes nobody. With no head run open, or with one none of whose arrivals
-// it can be a skipped move of (classify.NameMove), it changes nothing at all: every table reads as
-// before it. With an arrival that waits for it - a synchronize said the branch moved from a head
-// the record never held - it records the move's push by its sender on the head run and replays the
-// run, which can close it; no other table changes.
+// A synchronize older than the newest applied (classify.LateLifecycle) moves no head and opens and
+// reopens no head run. With no head run open, or with one none of whose arrivals it can be a
+// skipped move of (classify.NameMove), it changes nothing at all: every table reads as before it.
+// With an arrival that waits for it - a synchronize said the branch moved from a head the record
+// never held - it records the move's push by its sender on the head run and replays the run, which
+// can close it; the head stays where it was.
 func TestALateSynchronizeOnlyNamesTheMoveAWaitingArrivalTook(t *testing.T) {
 	const dev = "legion-implementer[bot]"
 	skipped, arrived := lateApplied.Add(time.Minute), lateApplied.Add(2*time.Minute)
@@ -77,23 +78,23 @@ func TestALateSynchronizeOnlyNamesTheMoveAWaitingArrivalTook(t *testing.T) {
 		name    string
 		facts   []intake.Fact
 		late    intake.Fact
-		changed []string
+		changes bool
 		closed  bool
 	}{
 		{name: "with no head run open",
-			late: namedSync("head-b", "head-x", dev, lateApplied.Add(-time.Minute)), changed: nil},
+			late: namedSync("head-b", "head-x", dev, lateApplied.Add(-time.Minute))},
 		{name: "older than every arrival of the head run",
 			facts: []intake.Fact{namedSync("head-x", "head-d", dev, arrived)},
-			late:  namedSync("head-b", "head-x", dev, lateApplied.Add(-time.Minute)), changed: nil},
+			late:  namedSync("head-b", "head-x", dev, lateApplied.Add(-time.Minute))},
 		{name: "named already",
 			facts: []intake.Fact{namedSync("head-x", "head-d", dev, arrived), namedSync("head-c", "head-x", dev, skipped)},
-			late:  namedSync("head-c", "head-x", dev, skipped), changed: nil},
+			late:  namedSync("head-c", "head-x", dev, skipped)},
 		{name: "the move an arrival waits for, its pushes still to come",
 			facts: []intake.Fact{namedSync("head-x", "head-d", dev, arrived)},
-			late:  namedSync("head-c", "head-x", dev, skipped), changed: []string{"pull_requests"}},
+			late:  namedSync("head-c", "head-x", dev, skipped), changes: true},
 		{name: "the move an arrival waits for, its pushes recorded",
 			facts: []intake.Fact{namedSync("head-x", "head-d", dev, arrived), sentPush("head-c", "head-x", dev), sentPush("head-x", "head-d", dev)},
-			late:  namedSync("head-c", "head-x", dev, skipped), changed: []string{"pull_requests"}, closed: true},
+			late:  namedSync("head-c", "head-x", dev, skipped), changes: true, closed: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := appliedEvents(t, record.PullRequestOpen, tc.facts...)
@@ -104,8 +105,12 @@ func TestALateSynchronizeOnlyNamesTheMoveAWaitingArrivalTook(t *testing.T) {
 			after := databaseRows(t, pool)
 			delete(before, "processed_events")
 			delete(after, "processed_events")
-			if got := changedTables(before, after); !slices.Equal(got, tc.changed) {
-				t.Fatalf("the late synchronize changed %v, want %v", got, tc.changed)
+			changed := changedTables(before, after)
+			if !tc.changes && len(changed) != 0 {
+				t.Fatalf("the late synchronize changed %v, want nothing", changed)
+			}
+			if tc.changes && !slices.Contains(changed, "pull_requests") {
+				t.Fatalf("the late synchronize changed %v, want the pull request's head run", changed)
 			}
 			var pr *record.PullRequest
 			seedRecord(t, pool, func(tx pgx.Tx) error {
@@ -122,4 +127,87 @@ func TestALateSynchronizeOnlyNamesTheMoveAWaitingArrivalTook(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A red that settles at a head whose arrival waits for a late synchronize is held; the late
+// synchronize then names the skipped move, the head run closes, and the red is decided at once, as
+// the push that closed a run would decide it (decideChecks): the issue in reviewing goes back to
+// implementing with checks-red, whichever of the late synchronize and the red comes first, as it
+// does with no move named. A synchronize never delivered leaves the red held until the hold lapses,
+// when the required-checks pass decides it.
+func TestARedHeldForALateSynchronizeIsDecidedWhenItArrives(t *testing.T) {
+	const dev = "legion-implementer[bot]"
+	skipped, arrived := time.Date(2026, 9, 22, 23, 50, 0, 0, time.UTC), time.Date(2026, 9, 22, 23, 51, 0, 0, time.UTC)
+	pushes := []intake.Fact{sentPush("head", "h1", dev), sentPush("h1", "h2", dev), namedSync("h1", "h2", dev, arrived)}
+	red := settledAt("h2", "ci", 2, "ci")
+	late := namedSync("head", "h1", dev, skipped)
+	for _, tc := range []struct {
+		name  string
+		facts []intake.Fact
+		pass  bool
+	}{
+		{"the late synchronize after the red", []intake.Fact{red, late}, false},
+		{"the late synchronize before the red", []intake.Fact{late, red}, false},
+		{"the synchronize never delivered", []intake.Fact{red}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedReviewOf(t, pool, "head", "green")
+			engine := testEngine(config.DesignGateRootIssues, nil)
+			applyRefusingNothing(t, pool, engine, pushes...)
+			applyRefusingNothing(t, pool, engine, tc.facts...)
+			if tc.pass {
+				if got := issuePhase(t, pool); got != phase.Reviewing {
+					t.Fatalf("the red held while its arrival waits: phase %s, want reviewing", got)
+				}
+				later := readyEngineAt("", time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC).Add(redHold+time.Minute))
+				applyRefusingNothing(t, pool, later, intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{"ci"}})
+			}
+			if got := issuePhase(t, pool); got != phase.Implementing {
+				t.Fatalf("phase %s, want implementing", got)
+			}
+			if got := noticeKinds(t, pool, "LEGION-208"); !containsNotice(got, "checks-red") {
+				t.Fatalf("notices %v, want checks-red", got)
+			}
+		})
+	}
+}
+
+// The push handler records each push's sender, and the synchronize's sender picks its move's push
+// by it: two pushes of head..h1 on their way, the review App's first and the implementer's second,
+// and h1's synchronize naming the implementer. The implementer's code onto the red counts a fix
+// attempt; the review App's push, which a push recorded with no sender would let stand for any,
+// would spare it.
+func TestASynchronizesSenderPicksItsPushInTheWorkflow(t *testing.T) {
+	const dev = "legion-implementer[bot]"
+	pool := migratedPool(t)
+	seedReviewOf(t, pool, "head", "red")
+	engine := testEngine(config.DesignGateRootIssues, nil)
+	before := probePullRequest(t, pool)
+	applyRefusingNothing(t, pool, engine, sentPush("head", "h1", testReviewApp), sentPush("head", "h1", dev),
+		namedSync("head", "h1", dev, time.Date(2026, 9, 22, 23, 51, 0, 0, time.UTC)))
+	after := probePullRequest(t, pool)
+	if after.HeadSHA != "h1" || after.Run != nil || after.FixAttempts != before.FixAttempts+1 || after.PlannedRed {
+		t.Fatalf("at %s, run open %v, fix=%d planned=%v; want h1, closed, fix=%d and unplanned: the implementer's push", after.HeadSHA, after.Run != nil, after.FixAttempts, after.PlannedRed, before.FixAttempts+1)
+	}
+	for _, p := range append(append([]record.ClassifiedPush{}, after.Pushes...), after.Moves[len(after.Moves)-1].Repeats...) {
+		if p.Before == "head" && p.SHA == "h1" && p.Sender == "" {
+			t.Fatalf("a push of head..h1 recorded with no sender: %+v", p)
+		}
+	}
+}
+
+// probePullRequest reads the pull request back.
+func probePullRequest(t *testing.T, pool *pgxpool.Pool) record.PullRequest {
+	t.Helper()
+	var pr *record.PullRequest
+	seedRecord(t, pool, func(tx pgx.Tx) error {
+		var err error
+		pr, err = record.NewStore().PullRequest(t.Context(), tx, "LEGION-208")
+		return err
+	})
+	if pr == nil {
+		t.Fatal("no pull request")
+	}
+	return *pr
 }

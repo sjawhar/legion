@@ -122,22 +122,29 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 // and re-asks nothing. A synchronize that moves no head because it is older than the newest applied
 // (classify.LateLifecycle), or because it returned the branch to the recorded head, still names the
 // push its move took, by its sender, while a head run is open (classify.NameMove): an arrival whose
-// synchronize said it moved from a head the record never held waits for it. That is all it records;
-// it wakes nobody, and the next fact or pass decides what the replay leaves. In implementing a head
-// that arrives once the implementer has completed is the pull request its completion waited for.
+// synchronize said it moved from a head the record never held waits for it. Late, it records that
+// alone, and moves and sets nothing else; when the replay it starts closes the run or changes the
+// judgement, the checks are decided as the push that did so would decide them (decideChecks): a
+// red held while the arrival waited is judged now, since the required-checks pass re-decides an
+// unchanged read only while a run's hold lapses (HoldLapsed), and the run is closed. In
+// implementing a head that arrives once the implementer has completed is the pull request its
+// completion waited for.
 func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact intake.PullRequestSynchronized) (intake.Result, error) {
 	pr, err := e.pullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
+	prior := *pr
 	named := record.Named{Before: fact.Before, SHA: fact.HeadSHA, Sender: fact.Sender, At: fact.UpdatedAt}
 	if classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
-		if replayed := classify.NameMove(*pr, named); replayed.Run != pr.Run {
-			return intake.Result{}, e.store.PutPullRequest(ctx, tx, replayed)
+		if *pr = classify.NameMove(*pr, named); pr.Run == prior.Run {
+			return intake.Result{}, nil
 		}
-		return intake.Result{}, nil
+		if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
+			return intake.Result{}, err
+		}
+		return intake.Result{}, e.decideReplayed(ctx, tx, prior, pr)
 	}
-	prior := *pr
 	arrival := classify.Arrival{Before: fact.Before, Sender: fact.Sender, At: fact.UpdatedAt}
 	moved := classify.MovesBy(*pr, arrival, fact.HeadSHA)
 	if moved {
@@ -149,6 +156,11 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.UpdatedAt)
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return intake.Result{}, err
+	}
+	if !moved {
+		if err := e.decideReplayed(ctx, tx, prior, pr); err != nil {
+			return intake.Result{}, err
+		}
 	}
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
 	if err != nil || issue == nil {
@@ -182,6 +194,16 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 		return intake.Result{}, e.implementationReady(ctx, tx, *issue, row, pr)
 	}
 	return intake.Result{}, nil
+}
+
+// decideReplayed decides the checks (decideChecks) when a fact that moved no head - a push, or a
+// synchronize naming a move late (classify.NameMove) - replayed pr's head run and the replay closed
+// it or changed the judgement prior held, as the settlement it replayed would have decided them.
+func (e *Engine) decideReplayed(ctx context.Context, tx pgx.Tx, prior record.PullRequest, pr *record.PullRequest) error {
+	if !classify.JudgementChanged(prior, *pr) && (prior.Run == nil || pr.Run != nil) {
+		return nil
+	}
+	return e.decideChecks(ctx, tx, pr, false)
 }
 
 func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.Result, error) {
