@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-632",
+  "completed": "2026-10-28T19:01:52Z",
+  "round": 1,
+  "reviewedCodeHead": "c353929367fca3efc894bbbb6cd8246f0b17d62b",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "scripts/semantic-line-breaks.ts",
+      "description": "R3's own-lines count charges the blank separator after a nested item to that item (owners at :563 gives it the innermost open item; the inside mask at :1131 keeps it because the parent's span covers it), so a nested item that is followed by a sibling may hold only 49 rows while the same item as the last child or at top level holds 50, and its verdict depends on what follows it. Repro: '- Parent item.' + blank + '  - First nested.' + 49 lines at indent 4 + blank + '  - Second nested.' -> 'R3: 51 screen rows: - First nested.', exit 1; the same item as the last child, or as a top-level item followed by a sibling, exits 0. Contradicts the comment at :1128-1130 ('from its first line to its last non-blank one'); scripts/semantic-line-breaks.test.ts:158 pins the count. Found by the reviewer and by both thermonuclear agents."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/semantic-line-breaks.ts",
+      "description": "The file-head comment at :5-6 still names only packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md as keeping the layout; the guides test now holds the root AGENTS.md, scripts/e2e/README.md and docs/kubernetes.md too."
+    }
+  ],
+  "verified": [
+    "restructure.ts --strict --report on main a409c128's three guides: exit 0, all three outputs cmp-identical to the head's guides",
+    "checker on the three guides and #2422's two guides at head: exit 0, nothing printed; on main a409c128's three guides: 2,411 R1, 295 R2, 7 R3",
+    "bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts: 105 pass, 0 fail",
+    "replay/run.sh: exit 0, 36 PASS",
+    "git diff 3b8fe46d (#2422's newest head) c3539293 outside the three guides and .legion: only the checker and its two test files, plus #2422's own retro docs absent here",
+    "CI at c3539293 queued at 18:51Z (lint, typecheck, test, pr-title among them); not read as green"
+  ],
+  "thermonuclear": "Pair run once on the checker delta (git diff 1feb1dc4 c3539293 -- scripts/semantic-line-breaks*): deep review 1 important (the R3 finding above) and 1 minor (header comment); code quality the same important finding and four minor cleanups (one guides list in guides.test.ts, a captured tag name in VERBATIM_OPEN, one way to pass blocks to check and relayout, the header comment)."
+}
