@@ -415,13 +415,7 @@ func (s *Service) ProjectMark(ctx context.Context, artifactID, markID string, re
 	if err != nil {
 		return err
 	}
-	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, _ *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
-		marks := doc.GetMap(marksMapName)
-		transact(func(txn *crdt.Transaction) {
-			marks.Set(txn, markID, plain)
-		})
-		return nil
-	})
+	return s.applyMargin(ctx, artifactID, actor, markID, plain)
 }
 
 func toPlain(record MarkRecord) (map[string]any, error) {
