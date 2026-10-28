@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-28T21:45:00Z",
+  "completed": "2026-10-28T23:45:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "2f3bf214764c061c8c3c33ee074083afb03c79ac",
-  "round": "8 (the round-4 review, changes requested at bf30591d): a failed recipient read (comment recipients, primary-document authors, document credits) fails only the events that asked it, and a statement Postgres refuses runs again once per id; while such an event waits, planChains holds its owner's later events on every key its short list does not name, behind its back-off; a not-due event takes no recipient read; resolveLost is pinned; review-body cleanups done (09e871b6). Then a forward merge of main (GitHub reported CONFLICTING): migrations renumbered to 0137_duty_holds and 0138_outbox_claim above main's 0136_dashboard_assets; connections stay 88 (06960fb3); main's dispatch_server comment line kept as main has it (2f3bf214). Four threads answered and resolved.",
+  "head": "2ba3ba486fcba9a4ae1f23c8c155914a7e4ae2d7",
+  "round": "9 (the round-5 review, changes requested at 2f3bf214): a not-due event reads its recipients again (untaken removed); a statement Postgres refuses is bisected (about 2*log2 N extra statements for one broken row among N); refusedStatement excludes ConnectError and SQLSTATE classes 08/40/53/57/58, so a refused connection fails the read for every asking event; an incomplete event holds only the keys it neither names nor reached (delivered keys join named); planChains doc, AGENTS.md, dispatch-outbox.md and the solutions note (0138) updated. Four threads answered and resolved, PRRT_kwDORFy7ds6xSfQa included.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -110,6 +110,14 @@
       "observed": "All packages ok (outbox 270.8 s, store 191.2 s, cmd/dispatch 230.5 s, listener 405.4 s, bus 247.9 s); -race outbox ok (252.0 s at 09e871b6); multiprocess ok (653.2 s at 06960fb3); TestALaterEventReachesNoSessionTheFailedRecipientReadOfAnEarlierOneMissedBeforeIt (3 cases), TestABrokenCreditListBacksOffItsEventAndHoldsOnlyItsOwnersLaterSessionCopies, TestTheBatchTakesNoRecipientReadForAnEventThatIsNotDue, TestAReplyToAnIDThatIsNoUUIDReachesNoThreadSessionAndPublishes pass; the seven-statement test logs 'ran 7'.",
       "headSha": "2f3bf214764c061c8c3c33ee074083afb03c79ac",
       "negativeControl": "On bf30591d the new tests fail: 'the later event has published_at ... attempt_count 0 ... want it held back no later than the failed event's retry'; 'scan batch: load the batch's document session authors: ERROR: cannot extract elements from a scalar (SQLSTATE 22023)'; without the per-id retry, 'the other issue's comment on a healthy document has published_at <nil>, attempt_count 1'; with release := false the resolveLost subtest fails 'want it released: none, 0 and none'."
+    },
+    {
+      "criterion": "Plan decision 5 holds as written: a stalled destination holds back that destination only; an event whose recipient read failed also holds its owner's later events on the agent and role keys it neither names nor reached, until its retry; one broken row among N costs about 2*log2 N extra statements and fails only its own events; a refused connection is no refused statement.",
+      "surface": "outbox package tests on pod Postgres 17 and the repository multiprocess harness (two real envoy-dispatch processes, one Postgres, one NATS)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -count=1 ./internal/dispatch/outbox/ ./internal/dispatch/deliveryaudit/ && CGO_ENABLED=1 go test -race -count=1 ./internal/dispatch/outbox/ && go test -tags multiprocess -count=1 -timeout 25m ./cmd/dispatch",
+      "observed": "outbox ok 232.9 s, deliveryaudit ok 2.5 s; -race outbox ok 250.1 s; multiprocess ok 645.0 s; TestAnEventBehindAnotherThatIsNotDueIsHeldOnlyOnTheKeysTheOtherCouldStillOwe (3 subtests), TestOneBrokenRowOfARecipientReadCostsTheBatchAboutTwoStatementsPerHalving (13 reads for 64 documents, one broken), TestARefusedConnectionOrAFailingServerIsNoRefusedStatement pass; the seven-statement test logs 'ran 7'.",
+      "headSha": "2ba3ba486fcba9a4ae1f23c8c155914a7e4ae2d7",
+      "negativeControl": "On 2f3bf214: 'the later event was sent to [notifications.dispatch.issue.T-1.comment.created], want [... notifications.agent.session-reached]'; 'the batch ran 65 document credit reads for 64 documents, one broken, want at most 13'; refusedStatement true for 53300, 57P01, 08006. Mutations: dropping the delivered keys, or the not-due blocker, each fail the first test."
     }
   ],
   "filesChanged": [
@@ -124,7 +132,8 @@
     "packages/envoy/internal/dispatch/store/pool.go, store/kv.go (DecodeRoleClaim exported), contracts/dedupe.go, pglisten/listener.go",
     ".dispatch/architecture/dispatch-outbox.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md, packages/envoy/cmd/dispatch/AGENTS.md, docs/site/src/content/docs/dispatch/running-dispatch.md, packages/envoy/infra/README.md, packages/envoy/internal/dispatch/outbox/THROUGHPUT.md, packages/envoy/CHANGELOG.md",
     "Round 7 merge: packages/envoy/internal/dispatch/outbox/{publisher.go,lookups.go,recipients.go,batch.go,THROUGHPUT.md} and tests (publisher_test, publisher_document_authors_test, publisher_comment_recipients_test, order_test, throughput_test), internal/dispatch/deliveryaudit/deliveryaudit_test.go, packages/envoy/AGENTS.md",
-    "Round 8: outbox/{lookups.go,batch.go,publisher.go,recipients.go}, outbox tests (publisher_comment_recipients_test, publisher_test, publisher_document_authors_test), deliveryaudit/README.md, scripts/dispatch/comment-delivery/classes.ts, packages/envoy/AGENTS.md, .dispatch/architecture/dispatch-outbox.md, the changelog fragment; merge: migrations renamed to 0137_duty_holds/0138_outbox_claim and references, cmd/dispatch/README.md, cmd/dispatch/multiprocess_test.go imports, .github/workflows/envoy-and-contracts.yaml comment"
+    "Round 8: outbox/{lookups.go,batch.go,publisher.go,recipients.go}, outbox tests (publisher_comment_recipients_test, publisher_test, publisher_document_authors_test), deliveryaudit/README.md, scripts/dispatch/comment-delivery/classes.ts, packages/envoy/AGENTS.md, .dispatch/architecture/dispatch-outbox.md, the changelog fragment; merge: migrations renamed to 0137_duty_holds/0138_outbox_claim and references, cmd/dispatch/README.md, cmd/dispatch/multiprocess_test.go imports, .github/workflows/envoy-and-contracts.yaml comment",
+    "Round 9: outbox/{lookups.go,batch.go,publisher.go,recipients.go}, outbox tests (publisher_comment_recipients_test, order_test), packages/envoy/AGENTS.md, .dispatch/architecture/dispatch-outbox.md, docs/solutions/database-issues/...-pr2395.md"
   ],
   "trickyParts": [
     "Blocked events take their blocker's next_attempt_at (no attempt), so they are not re-read on every wake while the blocker waits out a back-off; an owner whose first 100 events all wait has its later due event deferred to the earliest of them (deferPastWindow).",
