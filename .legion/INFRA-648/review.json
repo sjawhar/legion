@@ -2,28 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-648",
-  "completed": "2026-10-28T18:15:30Z",
-  "decision": "changes_requested",
-  "reviewedCodeHead": "b0d5039f89e75f11fd8e867cdb056521d4338153",
+  "completed": "2026-10-28T20:04:30Z",
+  "decision": "approved",
+  "round": 2,
+  "reviewedCodeHead": "a0a78bdcd3b8",
   "critical": 0,
-  "important": 1,
-  "minor": 4,
-  "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/settlement_read_invariant_test.go", "description": "Lines 89-92 say the read is unchanged by the settlement's 'listing of a recorded comment mark and of an unrecorded one the sweep tracks', and lines 102-103 and 109-113 set up and check those marks. The listing (sweepUnrecordedMarks -> recordedMarkRefs, pmdoc.ListMarks) runs at service.go:1829, after the reuse decision at :1674-1676 and after the commit, so the helper never compares anything the listing does. The comment claims that this PR's ListMarks change is guarded by the invariant, and the fixtures have no effect. Drop the clause and the two mark fixtures, or name only the ask-block reconciliation (service.go:1615)."},
-    {"severity": "minor", "file": "docs/solutions/envoy/a-settlement-reuses-an-earlier-result-only-for-the-same-tree-with-an-unshrinking-record-that-nothing-changed-it-pr2416.md", "description": "The bullet this PR rewrites (line 28) still points to service.go:1595-1598 for the invariant comment, which is at service.go:1669-1672 at this head. Name the comment by its place (the comment above the reuse decision in settleRoomWithin) instead of a line number."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/find.go", "description": "ListMarks is exported and does not validate its input, but its result is now correct only for a tree Validate accepts. Lines 792-793 explain why the diff is safe against the replaced walk. State the precondition instead: doc must be a tree Validate accepts."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/recorded_mark_refs_test.go", "description": "markedAnchor (lines 62-79) is a third copy of the mark-then-encode body of insertAnchoredAsk (marks_test.go:821-831) and insertAnchoredCommentWithID (marks_test.go:861-871). Move it to marks_test.go and make those two helpers call it. Its comment's 'so a settlement's anchor refresh finds the row's mark' names a settlement this test never runs."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/settlement_read_invariant_test.go", "description": "readSnapshot.err (lines 24-27, 62-63) stores an error that cannot occur: Node.JSON fails only when Validate fails, and read comes from liveTree, already validated (pmdoc/read.go:45). Report an encoding failure with t.Errorf in afterSettleTreeRead and keep map[string][]byte."}
-  ],
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "roundOneFindings": "All five fixed: 63ebec0987 (invariant test comment and fixtures, readSnapshot.err, ListMarks precondition, markedAnchor deduplicated) and a0a78bdcd3 (docs/solutions bullet names the comment by place). Each thread carries my reply naming the fixing commit; the implementer resolved all five.",
   "rejectedFindings": [
-    {"source": "thermonuclear-code-quality #2", "finding": "The helper's install in settlement_render_once_test.go only pins wiring.", "why": "Under the plausible regression, changedTree() not recording a repair, the helper's comparison runs in TestSettlementVersionsARepairTheRoomAlreadyHolds and fails (the implementer's negative control (b)); requireCounts(0, 1) proves the clean path is not vacuous. Kept."},
-    {"source": "thermonuclear-deep-review minor 2", "finding": "Add a schema CHECK that an ask never holds both anchor and block_artifact_id.", "why": "Two independent traces (deep review, tester notes) find no writer of both; the replay database has 0 such rows; the marks.go comment records the assumption. A constraint migration on production's asks table is scope beyond this issue with no observed risk."}
+    {"source": "thermonuclear-deep-review round 2 minor", "finding": "docs/solutions Evidence line 41 still quotes service.go:1599-1602 and the old condition.", "why": "The Evidence section records PR #2416's state; its line numbers were already wrong at base 3168cd8c. The prescriptive bullet this PR edits is current."}
   ],
   "verification": {
-    "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. CI head 56503792: every required check queued at 18:13Z (created 17:33Z); compare 56503792...df171c63 handoffsOnly true, 1 file. Not read as green: this round requests changes.",
-    "threads": "0 review threads at df171c63.",
-    "e2e": "E2E (implementer) and E2E (tester) both present in the PR body, each with surface, command, observation, head and negative control.",
-    "thermonuclear": "Both run at df171c63 (code b0d5039f): deep review APPROVE, no Medium/High; code quality CHANGES, all cleanup-only.",
-    "ownChecks": "Read service.go:1494-1690 and marks.go:741-845: sweepUnrecordedMarks (the only ListMarks and recordedMarkRefs caller) runs at :1829, after the reuse decision; the reuse condition is the De Morgan complement of the old one. Migration 0032 indexes match the new predicates."
+    "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. CI head 30b75cfd: lint, typecheck, test success; pr-title success (older pr-title events cancelled). Compare 30b75cfd...0ea49719 handoffsOnly true, 1 file. Non-required Dispatch/Envoy Go suites queued at 20:03Z.",
+    "threads": "5 threads, all mine, each with my reply naming the fix; all resolved by the implementer.",
+    "e2e": "E2E (implementer) and E2E (tester) present; the tester's round-2 line shows a reproducible cmd/dispatch build at b0d5039f and 30b75cfd with the same sha256, so round-1 runtime proofs carry over.",
+    "thermonuclear": "Both run at 0ea49719: deep review APPROVE (one Minor, rejected above); code quality APPROVE, no findings. Both ran go vet and the targeted tests on Postgres 17: pass."
   }
 }
