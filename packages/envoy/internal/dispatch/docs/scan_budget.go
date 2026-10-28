@@ -13,41 +13,46 @@ import (
 // and no right origin scans to the list's end, so an update of n such items scans n times the list:
 // ygo's release notes record 2,000 of them against a list of 20,000 taking 20.8 s. Every room
 // therefore gives each remote apply an allowance of scans, asked of the room as the apply begins,
-// under the document's lock and with the apply's origin (roomScans.budget, Doc.SetIntegrateScanBudget,
-// crdt/doc.go:175-212); an apply whose scans, the drain of the parked queue it ends with included,
-// would pass it is refused and taken back out whole, and a drain the allowance cannot hold is taken
-// back with the parked queue kept while the update stands (crdt/apply_rollback.go:9-34, :221-309).
+// under the document's lock and with the apply's origin (roomScans.budget,
+// Doc.SetIntegrateScanBudget, crdt/doc.go:175-212); an apply whose scans, the drain of the parked
+// queue it ends with included, would pass it is refused and taken back out whole, and a drain the
+// allowance cannot hold is taken back with the parked queue kept while the update stands
+// (crdt/apply_rollback.go:9-34, :221-309).
 // A browser's update scans at most the per-frame ceiling or what is left of the room's scan total,
 // whichever is less; the server's own remote applies scan at most the ceiling.
 
 // perFrameScanCeiling is the most items the scans of one remote apply may pass in a room, for a
 // browser's update the peer update hook weighs against applyHeapBound and for every remote apply
 // of the server's own. Measured on this pod (BenchmarkAnApplyJustUnderTheScanCeiling, GOMAXPROCS=1,
-// MEASURE_ME): a frame scanning MEASURE_ME items, each a distinct item of a list of 400,000, held the
-// room's lock MEASURE_ME, MEASURE_ME an item; a frame scanning a chain of 2,000 items 200
-// times, MEASURE_ME items, MEASURE_ME, MEASURE_ME an item, its marks one for each distinct item.
-// Both under the 500 ms past which this would have gone back to the architect. A browser's update
-// the hook does not weigh gets less, so that its scan marks stay within what it may hold unweighed
-// (scanCeiling).
+// 2026-10-28, three runs of three to five applies each): a frame scanning 399,999 items, each a
+// distinct item of a run of 400,000 keystrokes, held the room's lock 213 to 320 ms, about 496 ns
+// an item past the 16 ms an apply that scans nothing holds it; a frame scanning a run of 2,000
+// items 200 times, 399,999 items again, 55 to 58 ms, 145 ns an item, its marks one for each
+// distinct item. Both under the 500 ms past which this would have gone back to the architect. A
+// browser's update the hook does not weigh gets less, so that its scan marks stay within what it
+// may hold unweighed (scanCeiling).
 const perFrameScanCeiling = 400_000
 
 // bytesOfAScanMark is the heap a remote apply's scans hold for each distinct item they pass: the
 // mark ygo keeps for it in one map for the whole transaction (Transaction.scanMarks,
-// crdt/item.go:126-158), with the map's growth. MEASURE_ME
+// crdt/item.go:126-158), with the map's growth: 40 to 48 bytes measured on this pod for a frame
+// scanning 399,999 distinct items (BenchmarkAnApplyJustUnderTheScanCeiling, 2026-10-28), and the
+// ruling's 76, the most measured on the development machine, is kept as the price.
 const bytesOfAScanMark = 76
 
 // usedUpScanBudget is the allowance of a browser's apply in a room whose scan total is used up -
-// what is left of it is this or less: 64 items, past the 12 the most of any update of the honest
+// what is left of it is this or less: 64 items, past the 9 the most of any update of the honest
 // long session scanned (TestTheRoomScanTotalHoldsFifteenHonestLongSessions), so typing in place
 // goes on while every larger apply is refused as needing a rebuild (documentNeedsRebuild).
 const usedUpScanBudget = 64
 
 // roomScanTotal is the most items the conflict scans of a room's history may come to, counted from
 // a re-scan of its stored state at the room's load and from what each transaction the room commits
-// scans after it: fifteen times what the honest long session's updates scanned, 33,308 when the
-// ruling set it, and that test fails once fifteen times its count passes this
-// (TestTheRoomScanTotalHoldsFifteenHonestLongSessions). A room reaches it only past about fifteen
-// such sessions, and a rebuild is the way out (RebuildDocument).
+// scans after it: the ruling's fifteen times the 33,308 items an honest long session's updates
+// scanned on the development machine. TestTheRoomScanTotalHoldsFifteenHonestLongSessions holds
+// it to that rule, and on this pod (2026-10-28) its session scanned 42,401, fifteen times 636,015,
+// so it fails against this total until the architect rules on the figure. A rebuild is the way out
+// of a room that reaches it (RebuildDocument).
 const roomScanTotal = 506_000
 
 // honestHandoffScans is what one honest offline handoff scans: a browser that typed into a hundred
@@ -77,10 +82,11 @@ func scanCeiling(own uint64) int {
 // (rescanned), every transaction the room has committed since (observed) - a browser's apply, the
 // server's publish, an injected update, a repair, a local write - and every browser apply the room
 // refused, for what its scans passed before the refusal (settle). A copy of the room re-scans
-// about what the room's own applies scanned - the long session's 33,308 admitted scans re-scan as
-// 33,477 - so the total a reload counts from the stored state is the total the room had, give or
-// take a few hundred items, and the scans of applies the room refused, which the stored state does
-// not hold. Only a rebuild, which stores a fresh history, starts it again.
+// about what the room's own applies scanned - the long session's 42,401 admitted scans re-scan as
+// 42,611 (TestTheRoomScanTotalHoldsFifteenHonestLongSessions) - so the total a reload counts from
+// the stored state is the total the room had, give or take a few hundred items, and the scans of
+// applies the room refused, which the stored state does not hold. Only a rebuild, which stores a
+// fresh history, starts it again.
 //
 // A browser's apply is reserved its allowance before it applies and settled after (reserve,
 // settle), as the struct total reserves an update's addition: two browsers applying at once each

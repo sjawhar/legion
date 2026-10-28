@@ -1231,18 +1231,18 @@ const goMemoryLimitBytes = 4 << 30 * 9 / 10
 // handoff could not bound an update the editor never sends, whose apply allocates in proportion
 // to the values it carries whatever the room holds: 25,165,779 bytes of null values in one struct
 // for a client whose every clock the room held allocated 805,307,736 bytes in one apply, though it
-// inserted nothing and added no struct. Measured on MEASURE_ME
+// inserted nothing and added no struct. Measured on 2026-10-28
 // (TestEveryApplysTransientHeapIsWithinItsEstimate), the 5,360,879-byte handoff of the heaviest
-// document the server's own writes can leave is estimated at MEASURE_ME bytes into the room
-// holding it, against the MEASURE_ME it allocates there, so MEASURE_ME such handoffs apply at once,
-// and at MEASURE_ME into a fresh room, whose budget gives it the per-frame ceiling
+// document the server's own writes can leave is estimated at 71,356,658 bytes into the room
+// holding it, against the 33,410,168 it allocates there, so ten such handoffs apply at once, and
+// at 234,999,499 into a fresh room, whose budget gives it the per-frame ceiling
 // (perFrameScanCeiling) for the 49,156 items decoding a whole document into one holding nothing
-// scans, against the MEASURE_ME its apply allocates there. The 9,577,606-byte handoff of that
-// document grown through the creep allowance (maxMessageBytes,
-// TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor) is estimated at MEASURE_ME
-// into the room holding it, so MEASURE_ME apply at once, and at MEASURE_ME into a fresh room, one
-// at a time. That frame of nulls is estimated at MEASURE_ME bytes, and one at the message floor at
-// MEASURE_ME (TestAnUpdateHeavierThanTheApplyHeapBoundIsNeverApplied), each past the whole bound,
+// scans, against the 113,178,024 its apply allocates there, so three apply at once. The
+// 9,577,606-byte handoff of that document grown through the creep allowance (maxMessageBytes,
+// TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor) is estimated at 157,797,184
+// into the room holding it, so four apply at once, and at 482,930,134 into a fresh room, one at a
+// time. A frame of null values at the message floor, 56,623,059 bytes, is estimated at
+// 3,737,127,910 (TestAnUpdateHeavierThanTheApplyHeapBoundIsNeverApplied), past the whole bound,
 // and refused (errApplyTooHeavy).
 const applyHeapBound = (goMemoryLimitBytes - roomBudgetBytes - documentReadBudget) / 2
 

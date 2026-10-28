@@ -104,7 +104,9 @@ func anHonestLongSession(t *testing.T, seed []byte, take func(place int, update 
 // document of its own, fresh from the seed (anHonestLongSession says why the sum is the session's).
 // It logs what the session's states re-scan past the seed's own re-scan, the count a reload starts
 // the room's total at (roomScans.rescanned), beside what the rooms' applies scanned. Set
-// DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: MEASURE_ME on one processor.
+// DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 32 s here. Run on 2026-10-28: 97,600 updates at 38
+// places scanned 42,401 items, at most 9 in one, re-scanning as 42,611; fifteen times 42,401 is
+// 636,015, past roomScanTotal, so it fails until the architect rules on the total.
 func TestTheRoomScanTotalHoldsFifteenHonestLongSessions(t *testing.T) {
 	if os.Getenv(scanMeasurement) == "" {
 		t.Skip("set " + scanMeasurement + "=1 to run the long session's measurement")
@@ -164,7 +166,11 @@ func TestTheRoomScanTotalHoldsFifteenHonestLongSessions(t *testing.T) {
 // rewrote whole until the decode cap refused a write (agentRewrittenState), and of the long-edited
 // 5 KiB document typed on until its state reached the decode cap (longEditedAtCapState) is each at
 // most half of roomScanTotal, so each leaves people at least half the total to edit it with. Set
-// DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: the agent's rewrites take about 200 s, with the store.
+// DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 29 minutes here with the store, the long-edited
+// document's build 25 of them. Run on 2026-10-28: the heaviest document's 5,360,879-byte state
+// re-scans 49,156 items and the long-edited one's 16,090,083-byte state 10, each within half; the
+// agent-rewritten document's 12,596,348-byte state, 28 whole rewrites, re-scans 475,136, past half
+// and within one honest handoff of the whole total, so it fails until the architect rules on it.
 func TestNoStoredHeavyDocumentLoadsWithHalfItsScanTotalUsed(t *testing.T) {
 	if os.Getenv(scanMeasurement) == "" {
 		t.Skip("set " + scanMeasurement + "=1 to run the heavy documents' re-scans")
