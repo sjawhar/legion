@@ -26,9 +26,9 @@
 // where a line breaks inside text (not inside a code span, nor in the block whose HTML holds one of
 // the opens above or any block after it), and whether a list is loose (the blank lines R2 puts
 // between items). Only `--write` loads the parser, so check mode runs without `bun install`.
-// `--write` also refuses, before anything else, a file holding a vertical tab, a form feed or a
-// carriage return with no line feed after it, which GitHub's cmark-gfm reads where these rules do
-// not (ODD_WHITESPACE).
+// `--write` also refuses, before anything else, a file that is not valid UTF-8, and a file holding a
+// vertical tab, a form feed or a carriage return (CRLF line endings included), which GitHub's
+// cmark-gfm reads where these rules do not (ODD_WHITESPACE).
 //
 // Lengths are UTF-16 code units (JavaScript string length), and a tab counts as one column.
 import { existsSync } from "node:fs";
@@ -1101,13 +1101,22 @@ function check(text: string): Finding[] {
   return findings.sort((a, b) => a.line - b.line || a.rule - b.rule);
 }
 
-async function readText(path: string): Promise<string | undefined> {
+async function readBytes(path: string): Promise<Uint8Array | undefined> {
   try {
-    return await readFile(path, "utf8");
+    return await readFile(path);
   } catch (error) {
     process.stderr.write(`${path}: ${error instanceof Error ? error.message : String(error)}\n`);
     return undefined;
   }
+}
+
+/** Check mode reads invalid UTF-8 as U+FFFD; `--write` refuses it, since writing would replace it. */
+const LENIENT_UTF8 = new TextDecoder("utf-8", { ignoreBOM: true });
+const STRICT_UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+async function readText(path: string): Promise<string | undefined> {
+  const bytes = await readBytes(path);
+  return bytes === undefined ? undefined : LENIENT_UTF8.decode(bytes);
 }
 
 async function checkFiles(paths: readonly string[]): Promise<number> {
@@ -1125,23 +1134,31 @@ async function checkFiles(paths: readonly string[]): Promise<number> {
 
 /**
  * Whitespace GitHub's cmark-gfm reads where this script's rules do not: a vertical tab and a form
- * feed count as spaces there, and a carriage return with no line feed after it ends a line. A file
- * holding any of them is not written.
+ * feed count as spaces there, and a carriage return ends a line, while a join would leave one inside
+ * the new line. A file holding any of them is not written.
  */
-const ODD_WHITESPACE = /[\v\f]|\r(?!\n)/;
+const ODD_WHITESPACE = /[\v\f\r]/;
 
 async function writeFiles(paths: readonly string[]): Promise<number> {
   const parse = await loadParser();
   if (parse === undefined) return 2;
   let status = 0;
   for (const path of paths) {
-    const text = await readText(path);
-    if (text === undefined) return 2;
+    const bytes = await readBytes(path);
+    if (bytes === undefined) return 2;
+    let text: string;
+    try {
+      text = STRICT_UTF8.decode(bytes);
+    } catch {
+      process.stderr.write(`${path}: refusing to write: the file is not valid UTF-8\n`);
+      status = 2;
+      continue;
+    }
     const odd = ODD_WHITESPACE.exec(text);
     if (odd !== null) {
       const line = text.slice(0, odd.index).split("\n").length;
       process.stderr.write(
-        `${path}: refusing to write: line ${line} holds a vertical tab, a form feed or a carriage return with no line feed after it\n`
+        `${path}: refusing to write: line ${line} holds a vertical tab, a form feed or a carriage return\n`
       );
       status = 2;
       continue;

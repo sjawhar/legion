@@ -361,13 +361,6 @@ test("--write leaves every block after an unclosed <pre> byte for byte, to the e
   expect(result.exitCode).toBe(0);
 });
 
-test("--write reads a <pre> tag followed by CR LF as an open tag", async () => {
-  const text = 'Use <pre\r\nclass="x">a. Then b\r\nc</pre> here.\r\n';
-  const result = await written(text);
-  expect(result.text).toBe(text);
-  expect(result.exitCode).toBe(0);
-});
-
 test("--write leaves the block after the one that closes a <pre> as it is: close tags are not read", async () => {
   const text = "Use <pre>a\nb</pre> here.\n\nNext one. Then two.\n";
   const result = await written(text);
@@ -484,12 +477,14 @@ for (const name of ["prefix", "codex"]) {
   });
 }
 
-// GitHub's cmark-gfm reads a vertical tab and a form feed as spaces and a carriage return with no
-// line feed after it as a line ending; --write refuses a file that holds one.
+// GitHub's cmark-gfm reads a vertical tab and a form feed as spaces and a carriage return as a line
+// ending; --write refuses a file that holds one. Each input's first line is one the re-layout would
+// split, so a refusal that still wrote the file fails the last assertion.
 for (const [what, text] of [
-  ["a form feed after <source", "Some words here\n<source\fsrc=x> more words.\n"],
-  ["a carriage return with no line feed", "Some words here\n<source\rmore words.\n"],
-  ["a vertical tab", "Some words here\n<source\vsrc=x> more words.\n"],
+  ["a form feed after <source", "Some words. More words.\n<source\fsrc=x> more words.\n"],
+  ["a carriage return with no line feed", "Some words. More words.\n<source\rmore words.\n"],
+  ["a vertical tab", "Some words. More words.\n<source\vsrc=x> more words.\n"],
+  ["CRLF line endings", "Some words. More words.\nSome text. More text\r\nhere.\r\n"],
 ]) {
   test(`--write refuses a file that holds ${what}`, async () => {
     const path = await markdownFile(text);
@@ -504,4 +499,26 @@ test("check mode reads <source followed by a form feed as an HTML block start", 
   const path = await markdownFile("Some words here. More words\n<source\fsrc=x> one. Two.\n");
   const { stdout } = run([path]);
   expect(stdout).not.toContain(`${path}:2:`);
+});
+
+test("--write refuses a file that is not valid UTF-8, leaving its bytes as they are", async () => {
+  const path = await markdownFile("");
+  const bytes = Buffer.concat([
+    Buffer.from("Some words. More words.\nCaf"),
+    Buffer.from([0xe9]),
+    Buffer.from(" words here. More words follow.\n"),
+  ]);
+  await writeFile(path, bytes);
+  const result = Bun.spawnSync(["bun", SCRIPT, "--write", path], { cwd: REPO_ROOT });
+  expect(result.stderr.toString()).toContain(
+    `${path}: refusing to write: the file is not valid UTF-8`
+  );
+  expect(result.exitCode).toBe(2);
+  expect(Buffer.compare(await readFile(path), bytes)).toBe(0);
+});
+
+test("--write keeps a byte order mark", async () => {
+  const result = await written("\uFEFFSome words. More words.\n");
+  expect(result.text).toBe("\uFEFFSome words.\nMore words.\n");
+  expect(result.exitCode).toBe(0);
 });
