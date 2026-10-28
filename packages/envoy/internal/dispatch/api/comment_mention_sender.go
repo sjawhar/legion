@@ -352,7 +352,7 @@ func (s *server) sendCommentMention(ctx context.Context, item mentionSend) {
 // attempt the outbox settled abandoned is failed, not pending, so no pass reads it
 // (recoverStranded).
 //
-// The read of the attempts goes through comment_deliveries_pending (migration 0136: created_at
+// The read of the attempts goes through comment_deliveries_pending (migration 0137: created_at
 // where state = 'pending'), so a pass with nothing stranded is that one statement and reads no
 // row; otherwise it reads the rows of its window and each comment's comment.created event. It
 // runs on a timer because no event announces a stranded attempt: a killed process sends no
