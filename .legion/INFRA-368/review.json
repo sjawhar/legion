@@ -2,45 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-368",
-  "completed": "2026-10-28T14:13:50Z",
+  "completed": "2026-10-28T15:46:51Z",
+  "round": 2,
   "decision": "changes_requested",
-  "reviewedHead": "8c466c99935f1879ee200cb474f88b7a21c722c7",
-  "codeHead": "7dc21ecd997b3f889bd06fa762e83e783b465034",
+  "reviewedHead": "e9c483b31574edd96bb8e81a19a1cc1e7321eb2d",
+  "codeHead": "1a19ad77d1d8e02be3bad57c7d7750332565270c",
   "critical": 0,
-  "important": 3,
-  "minor": 3,
+  "important": 2,
+  "minor": 0,
+  "round1Findings": "All six round-1 findings were fixed (7cfb0dc9, 635552d3) and checked at 1a19ad77. I replied on each of the five threads; the implementer had already resolved them. The document-page `?comment=` rule is now the same in Go, web and envoy-client, and a project-document comment block links to `?comment=<id>` with no fragment (census (b) names this). Only the reference read's node carries an item block's text. IndexedBlock and itemBlocksKnown are gone, and valueOffset is one line.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/text/refs.go:554",
-      "description": "On a document page, `?comment=<id>#b-<id>` now names a comment block. The dashboard itself writes a document block's fragment onto a URL that still carries `?comment=` (ProofDocument.tsx:732, after a comment deep link; useMarginSheet.ts:117 says nothing strips `?comment=`). Before this change such a URL named the comment. Now it names `comment/<id>#<document block id>`, which never exists, so the link is dead and drops out of Referenced by. The block-index drain re-reads stored text, so stored links of this shape move too. In the other direction, ProofDocument.tsx:424 focuses a document block named by a comment block's fragment."
+      "file": "packages/envoy/cmd/dispatch/README.md:1335",
+      "description": "The forward merge 1a19ad77 renumbered the migrations to 0136-0138 after main's 0135_server_processes. Lines 1335 ('migrations `0135`-`0137`') and 1361 ('triggers of `0136` and `0137`') still give the old numbers, so they point an operator at main's server_processes migration. Lines 1073-1102 of the same README already give 0136-0138. The body's E2E (implementer) line also still says 'migrations 0001-0137'."
     },
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/refs/item_block_nodes.go:98",
-      "description": "Every comment-block and message-block node in an edge list carries its whole text (lines 98 and 151). model.go:1503-1505 and the GraphNode type in contracts say Text is set only on the node a reference read names, and a document block node follows that rule. Each graph read also runs itemblocks.Split over the whole body of every message in the batch (line 140). Set Text only in the reference read's node, as blockReferenceNode does for a document block."
-    },
-    {
-      "severity": "important",
-      "file": "PR body",
-      "description": "There is no `## Contract change census` with search commands and a rollout line. The change moves a mention's source on `?to=` from the comment node to a `block` node. It makes the dashboard URLs `/issues/K/comments/<id>#b-…` and `?comment=<id>#b-…`, which named the comment, name a block. It counts a comment that cites one target from two blocks as 2 (graph.go heldByABlock). The body's `## Census` lists the readers in this repository, but has no search a reviewer can run again, does not cover the URL grammar change or the count change, and has no rollout line for released CLIs (an older referenceLines prints `mentions block <ref>`)."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/refs/item_blocks.go:62",
-      "description": "IndexedBlock and IndexItem's first return value are dead weight: all four callers discard them, and no test reads them."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/refs/item_block_nodes.go:17",
-      "description": "itemBlocksKnown is always true in this binary (graph.go registers both loaders). It is false only under the test's asAnOlderBuild, yet it gates heldByABlock and itemRead on every graph read."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/conversation/block-spans.ts:81",
-      "description": "The valueOffset cursor resets on every block, because line 101 evaluates `to` before `from`. Replace it with `textareaValue(storedBody.slice(0, offset)).length`."
+      "file": "PR body: ## Contract change census",
+      "description": "I ran the census's own searches again at the head. Many hits are not listed: (a) web inbox-fixture.ts, margin/ThreadList.tsx, refs/RefLink.tsx; refs/graph.go, item_blocks.go, blocks.go, rebuild.go, docs/block_index.go and the migrations that match from_kind. (b) contracts dispatch-block-ref.ts, dispatch-tools.ts, dispatch-api.ts, dispatch-text-references.ts; web send-request.ts, ConversationTab.tsx, replies/replies-fixture.ts, margin/useMarginSheet.ts, refs/ReferencedBy.tsx, refs/target-id.ts, issue/useIssueDetail.ts, api/client.ts; envoy-client transport.ts, dispatch-http.ts; the two text testdata JSON files. (c) model.go, envoy CHANGELOG.md, dispatch/AGENTS.md, margin/margin-fixture.tsx, and two docs/solutions files. (d) most of the server and web hits are listed only by package. Each hit needs its own row with a disposition. Where a search matches noise (`node.parentElement`, `/v1/messages/send`), the search can be narrowed instead."
     }
   ],
-  "ci": "Required checks are lint, typecheck, test and pr-title (rulesets; base protection has none). The CI head is 7dc21ecd. Its lint, typecheck, test and pr-title runs were still queued when this review was written. The compare 7dc21ecd...8c466c99 is handoffs-only (1 file). The request for changes does not wait on CI.",
-  "thermonuclear": "deep-review: `Verdict: APPROVE at 8c466c99` (3 Minor; I count its findings 1 and 2 as Important, above). code-quality: `Verdict: CHANGES at 8c466c99` (structural; its dead-weight items are the three minors above)."
+  "ci": "Required checks are lint, typecheck, test and pr-title. The CI head is 1a19ad77, and every required check there was queued when this review was written. The compare 1a19ad77...e9c483b3 is handoffs only (2 files). The request for changes does not wait on CI. The architect reports that three failures in main's CI come from main itself: recipients-claim e2e, TestDispatchConnectionsPerPodIsTheServers, and mermaid.e2e.ts:194.",
+  "thermonuclear": "deep-review: `Verdict: APPROVE at e9c483b3` (3 Minor: stale lines in the body, the README migration numbers, and the envoy-client commentBlocks/messageBlocks client methods that only their own test calls. The plan names those methods, so they are not a defect). code-quality: `Verdict: CHANGES at e9c483b3` (structural: commentEventPayload hydrates in place, a pin regexp in api/references.go, ItemKind.tables() returns an error no input can produce, the reply preview is copied, and the blockItem predicate is copied). I asked for none of these structural items in round 1 either, and none of them changes behaviour beyond an error message's wording for a malformed `@v0` pin. The README numbers are finding 1."
 }
