@@ -587,6 +587,19 @@ const SPLITS: Split[] = [
       "the `/v1/interests/subscribe` item runs 65 screen rows on main; which listener owns a session stands alone",
   },
   {
+    id: "split-issue-events-claimant",
+    guide: "agents",
+    anchor: "A person's (`actor.kind` `user`) `ask.answered`",
+    reason:
+      "the Dispatch issue events item runs 104 screen rows on main 0a921021; the claimant route stands alone",
+  },
+  {
+    id: "split-issue-events-mention",
+    guide: "agents",
+    anchor: "The mention rule (`attempt.leftToMention`) is the one rule",
+    reason: "the Dispatch issue events item, continued: the mention rule stands alone",
+  },
+  {
     id: "split-github-live-settlement",
     guide: "agents",
     anchor: "A live settlement is a possibly incomplete view",
