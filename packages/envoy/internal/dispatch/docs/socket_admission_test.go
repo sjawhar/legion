@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	gws "github.com/gorilla/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -259,4 +261,105 @@ func TestTheConnectionAndRoomCapsCountWithoutScanning(t *testing.T) {
 	if scanned := scans.Load(); scanned != 0 {
 		t.Errorf("the socket opens above walked the rooms %d times, want none: each cap is a count kept as rooms and connections come and go", scanned)
 	}
+}
+
+// The caps DISPATCH_MAX_LIVE_ROOMS and DISPATCH_MAX_DOC_CONNECTIONS set hold for sockets that open
+// at once, as every browser of a room does after an eviction or a deploy, and not only for sockets
+// that open one after another: a burst of cold opens never leaves more rooms live, or more browsers
+// connected, than the cap, and every socket a cap turns away is answered 503, as the settings say,
+// never 401, which tells a browser it is not signed in. On a real Dispatch with the two settings at 2
+// and 1,000, ten sockets opened at once on ten documents were all admitted and left ten rooms live;
+// with 1,000 and 3, ten sockets on one document left three admitted and seven answered 401.
+func TestConcurrentSocketOpensStayWithinTheCapsAndAreRefusedWith503(t *testing.T) {
+	const burst = 10
+	open := func(t *testing.T, serverURL string, ids []string) (admitted []*gws.Conn, refusals map[int]int) {
+		t.Helper()
+		var mu sync.Mutex
+		refusals = map[int]int{}
+		start := make(chan struct{})
+		var dials sync.WaitGroup
+		for i := range burst {
+			dials.Add(1)
+			go func() {
+				defer dials.Done()
+				<-start
+				connection, response, err := gws.DefaultDialer.Dial(socketURL(serverURL, ids[i%len(ids)]), http.Header{"X-Dispatch-User": []string{"alice"}})
+				mu.Lock()
+				defer mu.Unlock()
+				if err == nil {
+					admitted = append(admitted, connection)
+					return
+				}
+				status := 0
+				if response != nil {
+					status = response.StatusCode
+				}
+				refusals[status]++
+			}()
+		}
+		close(start)
+		dials.Wait()
+		t.Cleanup(func() {
+			for _, connection := range admitted {
+				_ = connection.Close()
+			}
+		})
+		return admitted, refusals
+	}
+	serve := func(t *testing.T, rooms, connections int) (*Service, string) {
+		t.Helper()
+		database := storetest.Open(t)
+		service := New(Deps{
+			Store:             database,
+			Events:            events.NewBroker(),
+			Identity:          headerIdentity(database),
+			ServerURL:         "https://dispatch.example",
+			Settle:            time.Hour,
+			MaxLiveRooms:      rooms,
+			MaxDocConnections: connections,
+		})
+		t.Cleanup(func() {
+			if err := service.Shutdown(context.Background()); err != nil {
+				t.Errorf("shutdown document service: %v", err)
+			}
+		})
+		service.srv.RoomIdleTimeout = time.Hour
+		server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+		t.Cleanup(server.Close)
+		return service, server.URL
+	}
+	refusedOtherwise := func(refusals map[int]int) map[int]int {
+		other := map[int]int{}
+		for status, count := range refusals {
+			if status != http.StatusServiceUnavailable {
+				other[status] = count
+			}
+		}
+		return other
+	}
+
+	t.Run("room cap", func(t *testing.T) {
+		const roomCap = 2
+		service, serverURL := serve(t, roomCap, 1_000)
+		ids := createDocuments(t, service.store, burst)
+		admitted, refusals := open(t, serverURL, ids)
+		if live := len(service.srv.Rooms()); live > roomCap || len(admitted) > roomCap {
+			t.Errorf("%d sockets opened at once on %d documents: %d admitted and %d rooms live, want at most the room cap of %d (refusals by status: %v)", burst, burst, len(admitted), live, roomCap, refusals)
+		}
+		if other := refusedOtherwise(refusals); len(other) > 0 {
+			t.Errorf("sockets the room cap turned away were answered %v, want 503 for each", other)
+		}
+	})
+	t.Run("connection cap", func(t *testing.T) {
+		const connectionCap = 3
+		service, serverURL := serve(t, 1_000, connectionCap)
+		ids := createDocuments(t, service.store, 1)
+		admitted, refusals := open(t, serverURL, ids)
+		if len(admitted) > connectionCap {
+			t.Errorf("%d sockets opened at once on one document: %d admitted, want at most the connection cap of %d", burst, len(admitted), connectionCap)
+		}
+		if other := refusedOtherwise(refusals); len(other) > 0 {
+			t.Errorf("of %d sockets opened at once on one document with a connection cap of %d, %d were admitted and the rest answered %v: a socket a cap turns away is answered 503, never another status", burst, connectionCap, len(admitted), refusals)
+		}
+	})
 }
