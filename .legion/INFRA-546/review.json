@@ -2,21 +2,19 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-546",
-  "completed": "2026-10-28T16:38:31Z",
-  "round": 7,
-  "reviewedHead": "pushed with this handoff, above 0d37bdd7d2b7a674b1070840a558affdafabaca7",
-  "codeHead": "eaca35818b582a0fe044ef4146b5f46debef2bfd",
-  "decision": "changes_requested",
+  "completed": "2026-10-28T20:12:04Z",
+  "round": 8,
+  "reviewedHead": "pushed with this handoff, above 01e208058755ca73eca142a2dd965a85898aba23",
+  "codeHead": "8ec4e36436849c6f1161ced249de0486361c0be9",
+  "decision": "approved",
   "critical": 0,
-  "important": 2,
-  "minor": 2,
-  "whyNewRound": "The forward merge of main (eaca3581, fork point 690c0136) brought #2390's background-connecting Dispatch clients and rewired bus.newClient. The fingerprint changed (a47a7941... -> 82c154a6..., 158 diff lines), so this is a new round, with the thermonuclear pair run again.",
-  "ci": "At code head eaca3581 (compare to 0d37bdd7: handoffsOnly true), read 2026-10-28T16:22Z: runs queued. Not waited for, since changes are requested.",
-  "thermonuclear": "At 0d37bdd7 (code eaca3581): deep-review CHANGES (keeper before its own reconcile; doc log line); code-quality CHANGES (Dispatch tests run the synchronous path; docs).",
+  "important": 0,
+  "minor": 1,
+  "scope": "Narrowed by the INFRA-14 architect at the round cap: the two round-7 findings and correctness.",
+  "roundSevenFindings": "Both fixed in 8ec4e364. (1) The background client starts its keeper from ensureStreamOnce after its reconcile succeeds. startKeeper checks stopped() and writes keeperDone under c.mu, and awaitKeeper reads it under c.mu. Reconnect hooks run without c.mu (recovery.go:200-226), so there is no deadlock, and every Close/Drain interleaving ends with no leak and no endless wait. The deep agent's overlay mutation restoring the pre-fix start fails the gate test 7 of 10 times and the stop-before-connect test 20 of 20. (2) startDispatchStream connects with serverClient(dispatchStreamOptions(...)...) exactly as main.go:206 does. The round-7 mutation (background branch with plain streamCfg and no keeper) now fails three tests. Threads PRRT_kwDORFy7ds6xOPaw and PRRT_kwDORFy7ds6xOPa5 are accepted and resolved.",
+  "ci": "At code head 8ec4e364 (compare to 01e20805: handoffsOnly true), read 2026-10-28T20:11Z: lint, typecheck, test, envoy-go, envoy-go-race, envoy-smoke success; dispatch (Playwright, not required, no packages/dispatch change) still running.",
+  "thermonuclear": "At 01e20805 (code 8ec4e364): deep-review APPROVE, no finding (race run 272 s green); code-quality CHANGES on one test-validity item, judged Fast-follow below.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/bus/nats.go:447", "description": "On the background path (Dispatch) the keeper starts before the first-connection reconcile (ensureStreamOnce) succeeds and gates passes only on Connected(). A keeper pass can read the stream before the reconcile's update and write after it, putting back a subject the reconcile replaced; ensured is then true and the keeper never removes subjects, so it stays wrong until another owner starts. The deep agent reproduced it 23 of 30 times with a 1 ms period (overlay test). Before the reconcile, every pass also logs a false WARN 'could not restore the stream: stream not found'. Fix: no keeper pass until the reconcile succeeded (start it from ensureStreamOnce, or skip while not ensured), still awaited when Close comes first; add a test."},
-    {"severity": "important", "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:36", "description": "startDispatchStream says it connects as main does but omits serverClient, so every Dispatch stream test runs the synchronous path while main.go:206 runs the background one. The quality agent's overlay mutation (background path reconciles with plain streamCfg, no keeper) passed all of internal/bus and cmd/dispatch. That leaves the spec's acceptance line (a stream update from the Dispatch server keeps three copies, the byte limit and the id) untested on the path Dispatch runs. settings_test.go:916 asserts a connect error Dispatch no longer returns. Fix: build it with serverClient, wait for the reconcile, and assert copies, limit, id and the keeper there; assert the refusal through the logged error."},
-    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/settings.go:83", "description": "Fast-follow: 'envoy nats reconnect hook failed at each retry' is logged once per connection; the retries log 'envoy nats recovery resubscribe failed' (recovery.go:86, 279, 307). The same claim is at settings.go:85, AGENTS.md:2365 and pr-2362-stream-byte-limit.yaml:26-27. A refused redelivery bucket surfaces as 'webhook redelivery sweep failed' (sweep.go:263)."},
-    {"severity": "minor", "file": "packages/envoy/AGENTS.md:38", "description": "Fast-follow: 'a server's refusal of a create or raise stops the start' is false for Dispatch now, and the same claim is in pr-2362-bucket-update-grant.yaml:9-11 and the PR body's Rollout paragraph; it holds only for the listener."}
+    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:71", "description": "Fast-follow: on a second start, startDispatchStream returns once the stream looks reconciled, which the first start already made true, not once this client's ensureStreamOnce ran. So the 'second start writes nothing' check can miss a background-only extra write if the hook is slow (quality agent: an overlay mutation with a 150 ms hook delay passed 9 of 10). Not blocking: the reconcile both paths run is the one ensureStreamWithConfig, whose no-op on a matching stream the internal/bus tests check deterministically, and the hook adds no write of its own. Fix: wait for a signal that this client's first hook run finished."}
   ]
 }
