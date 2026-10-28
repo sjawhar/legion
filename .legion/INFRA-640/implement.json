@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-640",
-  "completed": "2026-10-28T17:35:20Z",
+  "completed": "2026-10-28T18:08:44Z",
   "proof": [
+    {
+      "criterion": "Second conflict round: the merge of main@origin 53f39ba0 keeps #2455's walk (measured-once sizes, no-copy len16) and this PR's equivalence and AC3",
+      "surface": "pmdoc suite with PMDOC_WALK_CORPUS and PMDOC_ANCHOR_CORPUS over 30 real LINUX specs against #2455's referenceWalk and this PR's frozen oracles; BenchmarkAnchoredWrite on Postgres 17 + pgvector",
+      "command": "cd packages/envoy && PMDOC_WALK_CORPUS=$TMPDIR/i640/linux-specs go test ./internal/dispatch/pmdoc/ -run TestWalkMatchesTheReferenceWalk -count=1 -v; PMDOC_ANCHOR_CORPUS=$TMPDIR/i640/linux-specs go test ./internal/dispatch/pmdoc/ -run 'FindMarks|Reanchor|YTextRanges' -count=1 -v; go test ./internal/dispatch/docs/ -run '^$' -bench BenchmarkAnchoredWrite -benchmem -count=5 -benchtime=3x",
+      "observed": "walk corpus: 30 files, mismatches 0, ok 126.181s; anchor-corpus oracles ok 307.601s, every test PASS; AC3 N80/N10 medians (ns, B/op, allocs) doc-edit 1.00/1.01/1.02, anchored comment 1.05/1.01/1.02, upload 0.88/1.02/1.02; FindMarks 1.1->1.2 ms (150 KB), 2.8->3.1 ms (400 KB); docs anchor/mark/upload/edit/settlement tests ok 187.2s",
+      "headSha": "0710aeb25214",
+      "negativeControl": "boundaryTokens returning 0 for blockquote fails TestWalkMatchesTheReferenceWalk, TestWalkMatchesTheReferenceWalkOnHandBuiltShapes and TestYTextRangesMatchesFrozenOnDocuments; the four pmdoc clock-ratio tests that fail here fail identically at main 53f39ba0"
+    },
     {
       "criterion": "Review round 1: one production implementation of the mark-quote and position rules, equivalence and AC3 unchanged",
       "surface": "pmdoc suite with the opt-in corpus of 30 real LINUX specs against frozen base oracles (FindMark, MarkAttrs, walk, yTextRanges); BenchmarkAnchoredWrite on Postgres 17 + pgvector",
@@ -94,7 +102,8 @@
     "openAnchoredMarks gained ORDER BY created_at, id at the INFRA-512 architect's request (defect found by INFRA-642's implementer), so refresh event order is now stable rather than unchanged.",
     "AC2c used a serial copy of the replay tool, because the tool's shared random generator makes two concurrent base runs differ.",
     "Conflict round: main@origin (5fbd8391) merged forward as f67fcb42; the CHANGELOG.md entry moved to a changie fragment (Issue=pr2447, per the architect). The replay CPU measurement ran at 8279d988, before the merge; main's applyLive change (#2416, forkHeld) drops only writes that leave the fork unchanged and does not touch refreshAnchors.",
-    "Review round 1: splice.go childBoundary, a third copy of walk's position rule the review did not name, now uses the same walk.go helpers."
+    "Review round 1: splice.go childBoundary, a third copy of walk's position rule the review did not name, now uses the same walk.go helpers.",
+    "Second conflict round: walk.go resolved onto main's #2455 walk; this branch's frozen walk oracle was replaced by #2455's referenceWalk, and its hand-built shapes moved to TestWalkMatchesTheReferenceWalkOnHandBuiltShapes."
   ],
   "openQuestions": []
 }
