@@ -224,18 +224,28 @@ type session struct {
 
 // reqRec is one request the request generator sent in the window.
 type reqRec struct {
-	route     string
-	status    int
+	route  string
+	status int
+	// code is the error code of a non-2xx answer's body ({"code": ...}); "" for none.
+	code string
+	// tolerated says the action expected this non-2xx answer (the CLI's own 404 on an absent
+	// optional resource): it is no failure.
+	tolerated bool
 	transport bool
 	latency   time.Duration // arrival (or start, when the write never completed) to response read
 	connWait  time.Duration
 }
 
 type routeSummary struct {
-	Count           int            `json:"count"`
-	Failures        int            `json:"failures"` // non-2xx or transport error
-	LatencyMs       stat           `json:"latency_ms"`
-	Status          map[string]int `json:"status"`
+	Count    int `json:"count"`
+	Failures int `json:"failures"` // non-2xx or transport error, tolerated answers apart
+	// Tolerated counts the non-2xx answers the action expected (reqRec.tolerated).
+	Tolerated int            `json:"tolerated,omitempty"`
+	LatencyMs stat           `json:"latency_ms"`
+	Status    map[string]int `json:"status"`
+	// Codes counts the non-2xx answers by "<status> <code>", the code read from the error body
+	// ("<status>" alone when the body named none).
+	Codes           map[string]int `json:"codes,omitempty"`
 	TransportErrors int            `json:"transport_errors"`
 }
 
@@ -577,7 +587,7 @@ func (st *step) runRequests(ctx context.Context, a *api) (load *requestLoad, don
 				if !in {
 					return
 				}
-				load.recs.add(reqRec{route: rt.Name, status: res.status, transport: res.err != nil, latency: time.Duration(res.end - res.arrival()), connWait: res.connWait})
+				load.recs.add(reqRec{route: rt.Name, status: res.status, code: res.errorCode(), transport: res.err != nil, latency: time.Duration(res.end - res.arrival()), connWait: res.connWait})
 			})
 		})
 	}()
@@ -763,10 +773,19 @@ func summarizeRequests(reqs []reqRec, dropped int, target, durationS float64) re
 		if r.transport {
 			rs.TransportErrors++
 		}
-		if r.transport || r.status/100 != 2 {
-			rs.Failures++
-		} else {
+		switch {
+		case !r.transport && r.status/100 == 2:
 			out.OK2xx++
+		case !r.transport && r.tolerated:
+			rs.Tolerated++
+		default:
+			rs.Failures++
+		}
+		if !r.transport && r.status/100 != 2 {
+			if rs.Codes == nil {
+				rs.Codes = map[string]int{}
+			}
+			rs.Codes[strings.TrimSpace(strconv.Itoa(r.status)+" "+r.code)]++
 		}
 		out.Routes[r.route] = rs
 	}

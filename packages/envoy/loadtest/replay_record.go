@@ -84,6 +84,9 @@ type replayRecord struct {
 	Saturated         bool                        `json:"saturated"`
 	SaturatedReasons  []string                    `json:"saturated_reasons"`
 	Roster            int                         `json:"roster"`
+	// RosterSkipped counts the bundle roster's ids the listener refuses as a key (natsKey), which
+	// synthetic sessions replace.
+	RosterSkipped int `json:"roster_skipped"`
 	// DocOrderWaits are the writes that found the previous write on their document still running
 	// and waited for it; DocOrderWaitS their waits in seconds.
 	DocOrderWaits int  `json:"doc_order_waits"`
@@ -251,6 +254,7 @@ func (rr *replayRun) record(ss []sample, windowS float64) *replayRecord {
 	rec := &replayRecord{
 		Inputs: rr.meta.Inputs, WindowS: windowS, CPUSource: "none", Writes: map[string]replayWriteCount{}, SkippedMissingDep: map[string]int{},
 		Substitutes: rr.subs, Edits: rr.edits, InflightAtEnd: rr.inflightAtEnd, Timeouts: int(rr.timeouts.Load()), Roster: len(rr.setup.roster),
+		RosterSkipped: rr.setup.rosterSkipped,
 		DocOrderWaits: len(rr.docWaits), DocOrderWaitS: mkStat(rr.docWaits), EndState: rr.endState,
 	}
 	for k, w := range rr.writes {

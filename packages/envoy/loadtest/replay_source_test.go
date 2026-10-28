@@ -213,7 +213,7 @@ func TestReplayNamedVersionUploadOrEdit(t *testing.T) {
 	wantRoutes(t, a, []string{"GET /api/v1/issues/{key} [edit]"}, []string{"POST /api/v1/artifacts/{id}/edits [edit]"})
 	b := lastBody(a)
 	ops := b["ops"].([]replayEditOp)
-	if !a.EditDiff || len(ops) != 1 || ops[0].Op != "replace" || ops[0].Find != "The quick brown fox jumps over the lazy dog today." || b["summary"] != "s" {
+	if !a.EditDiff || len(ops) != 1 || ops[0].Op != "replace" || ops[0].Find != "dog" || *ops[0].With != "cat" || b["summary"] != "s" {
 		t.Fatalf("edit: diff %v ops %+v summary %v", a.EditDiff, ops, b["summary"])
 	}
 	if a.Stages[1][0].Params["id"].Ref == nil || *a.Stages[1][0].Params["id"].Ref != (replayRef{idArtifact, "D1"}) {
@@ -664,51 +664,6 @@ func TestReplayReadsWithFractionAndMix(t *testing.T) {
 	p = rpPlan(t, o, []string{rpEvent(1, "comment.created", "LINUX-2", rpSession, time.Second, map[string]any{"id": "Q", "body": "b"})}, nil)
 	if r := p.Actions[0]; r.Kind == rkRead && !slices.Contains(routes(r)[2], "GET /api/v1/agents [read]") {
 		t.Fatalf("read of a session-claimed issue: %q", routes(r))
-	}
-}
-
-func TestPlanEditDiffAndSubstitute(t *testing.T) {
-	// A complete diff whose removed text occurs once: its hunks as replace ops.
-	ops, next, fromDiff, ok := planEdit(rpDocText, rpDiff, 0, 1, "D1", "e1")
-	if !ok || !fromDiff || len(ops) != 1 || next != strings.Replace(rpDocText, "lazy dog", "lazy cat", 1) {
-		t.Fatalf("diff edit: ok %v diff %v ops %d", ok, fromDiff, len(ops))
-	}
-	// A pure insertion takes the context line before it; a deletion is a delete op.
-	ins := "--- a\n+++ b\n@@ -3,1 +3,2 @@\n Alpha bravo charlie delta echo foxtrot golf. Hotel india juliet kilo lima mike november.\n+Inserted line here.\n@@ -7,1 +8,0 @@\n-The quick brown fox jumps over the lazy dog today.\n"
-	ops, next, fromDiff, ok = planEdit(rpDocText, ins, 0, 1, "D1", "e2")
-	if !ok || !fromDiff || len(ops) != 2 || ops[1].Op != "delete" || !strings.Contains(next, "november.\nInserted line here.") || strings.Contains(next, "lazy dog") {
-		t.Fatalf("insertion/deletion: ok %v diff %v ops %+v", ok, fromDiff, ops)
-	}
-	// A cut diff, or one whose removed text the client's text lacks: one substitute replace whose
-	// length change is exactly the logged size delta.
-	cut := rpDiff + "… (truncated)\n"
-	missing := "--- a\n+++ b\n@@ -1,1 +1,1 @@\n-No such line in the text.\n+Another.\n"
-	for _, d := range []string{cut, missing, ""} {
-		for _, delta := range []int{0, 37, -10, -150} {
-			ops, next, fromDiff, ok := planEdit(rpDocText, d, delta, 1, "D1", "e3")
-			if !ok || fromDiff || len(ops) != 1 || ops[0].Op != "replace" {
-				t.Fatalf("delta %d: ok %v diff %v ops %+v", delta, ok, fromDiff, ops)
-			}
-			if got := len(next) - len(rpDocText); got != delta {
-				t.Fatalf("delta %d: the text changed by %d bytes", delta, got)
-			}
-			if strings.Count(rpDocText, ops[0].Find) != 1 || len(*ops[0].With) < 1 {
-				t.Fatalf("delta %d: find not unique or empty replacement", delta)
-			}
-			if *ops[0].With == ops[0].Find {
-				t.Fatalf("delta %d: the replacement changes nothing", delta)
-			}
-		}
-	}
-	// One seed, one substitute.
-	a, _, _, _ := planEdit(rpDocText, "", 5, 1, "D1", "e4")
-	b, _, _, _ := planEdit(rpDocText, "", 5, 1, "D1", "e4")
-	if !reflect.DeepEqual(a, b) {
-		t.Fatal("the substitute is not deterministic")
-	}
-	// A diff of exactly the cap is cut.
-	if !diffCut(strings.Repeat("x", replayDiffCap)) || diffCut(rpDiff) {
-		t.Fatal("diffCut")
 	}
 }
 

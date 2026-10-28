@@ -30,6 +30,7 @@ import (
 	"net/textproto"
 	"net/url"
 	"os"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -37,7 +38,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -310,6 +310,9 @@ type replayAction struct {
 	// What the plan derived: a substituted anchor quote, an edit from the logged diff or a
 	// substitute, a version's content (edit or upload) from a substitute.
 	QuoteSub, EditDiff, EditSub, ContentSub bool
+	// text is an edit's document text once its ops applied, as the client holds it: what Dispatch
+	// then holds.
+	text string
 }
 
 // route is the request's name in summary.json and TABLES.md.
@@ -932,7 +935,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 			} else {
 				act.Kind = rkEditUnnamed
 			}
-			act.EditDiff, act.EditSub = fromDiff, !fromDiff
+			act.EditDiff, act.EditSub, act.text = fromDiff, !fromDiff, next
 			act.Stages = [][]*replayReq{{getIssue(key)}, {{Method: "POST", Path: "/api/v1/artifacts/{id}/edits",
 				Params: map[string]replayArg{"id": refArg(replayRef{idArtifact, v.ArtifactID})}, Person: person, Body: body}}}
 		}
@@ -1235,9 +1238,11 @@ func nullIfEmpty(x json.RawMessage) json.RawMessage {
 }
 
 // anchorQuote is the quote an anchored root comment sends: the logged quote when the client's text
-// holds it exactly once, else substituteAnchor's; "" when the text has no usable quote.
+// holds it exactly once and its rendered text (renderedLine) occurs at most once in the document's
+// (a quote Dispatch matches in two places is 409 TARGET_AMBIGUOUS), else substituteAnchor's; ""
+// when the text has no usable quote.
 func anchorQuote(text string, bm *replayBlockMap, blockID, quote string, rngSeed uint64, docID, itemID string) (string, bool) {
-	if quote != "" && strings.Count(text, quote) == 1 {
+	if quote != "" && strings.Count(text, quote) == 1 && strings.Count(scanMarkdown(text).rendered, renderedLine(quote)) <= 1 {
 		return quote, false
 	}
 	q, _, err := substituteAnchor(text, bm, blockID, quote, rngSeed, docID, itemID)
@@ -1245,159 +1250,6 @@ func anchorQuote(text string, bm *replayBlockMap, blockID, quote string, rngSeed
 		return "", false
 	}
 	return q, true
-}
-
-// --- edits -----------------------------------------------------------------------------------------
-
-// replayEditOp is one op of POST /api/v1/artifacts/{id}/edits.
-type replayEditOp struct {
-	Op   string  `json:"op"`
-	Find string  `json:"find"`
-	With *string `json:"with,omitempty"`
-}
-
-// planEdit is a version's edit of text: the logged diff's hunks as ops when the diff is complete
-// (not cut at production's 4,094 characters) and each hunk's removed text occurs exactly once in
-// the text, else one substitute replace that changes the length by delta (the logged size change).
-// It returns the ops, the text after them, whether they came from the diff, and false when no edit
-// can be made.
-func planEdit(text, diff string, delta int, rngSeed uint64, docID, itemID string) ([]replayEditOp, string, bool, bool) {
-	if diff != "" && !diffCut(diff) {
-		if ops, next, ok := diffOps(text, diff); ok {
-			return ops, next, true, true
-		}
-	}
-	op, next, ok := substituteEdit(text, delta, rngSeed, docID, itemID)
-	if !ok {
-		return nil, text, false, false
-	}
-	return []replayEditOp{op}, next, false, true
-}
-
-// diffCut says whether production cut the diff: it ends in the "… (truncated)" line or reaches the
-// cap.
-func diffCut(diff string) bool {
-	if len(diff) >= replayDiffCap {
-		return true
-	}
-	lines := strings.Split(strings.TrimRight(diff, "\n"), "\n")
-	return strings.HasPrefix(lines[len(lines)-1], "… (")
-}
-
-// diffOps turns a unified diff's hunks into ops on text, each the hunk's span from its first to its
-// last changed line (widened by one context line for a pure insertion, and by context lines on
-// both sides while its old side is repeated in the text): replace when the new side is not empty,
-// delete otherwise. Each find must occur exactly once in the text as the ops before it left it.
-func diffOps(text, diff string) ([]replayEditOp, string, bool) {
-	type line struct {
-		op   byte
-		text string
-	}
-	var hunks [][]line
-	inHunk := false
-	for _, l := range strings.Split(strings.TrimRight(diff, "\n"), "\n") {
-		switch {
-		case strings.HasPrefix(l, "@@"):
-			hunks = append(hunks, nil)
-			inHunk = true
-		case !inHunk:
-		case strings.HasPrefix(l, `\`):
-		case l == "":
-			hunks[len(hunks)-1] = append(hunks[len(hunks)-1], line{' ', ""})
-		case l[0] == ' ' || l[0] == '-' || l[0] == '+':
-			hunks[len(hunks)-1] = append(hunks[len(hunks)-1], line{l[0], l[1:]})
-		default:
-			return nil, "", false
-		}
-	}
-	if len(hunks) == 0 {
-		return nil, "", false
-	}
-	cur := text
-	var ops []replayEditOp
-	for _, h := range hunks {
-		lo, hi := -1, -1
-		removed := false
-		for i, l := range h {
-			if l.op != ' ' {
-				if lo < 0 {
-					lo = i
-				}
-				hi = i
-				removed = removed || l.op == '-'
-			}
-		}
-		if lo < 0 {
-			return nil, "", false
-		}
-		if !removed {
-			switch {
-			case lo > 0:
-				lo--
-			case hi < len(h)-1:
-				hi++
-			default:
-				return nil, "", false
-			}
-		}
-		// The span's old side must occur exactly once: a repeated one is widened by a context line
-		// on each side until it is unique or is the whole hunk.
-		var find, with string
-		for {
-			var oldSide, newSide []string
-			for _, l := range h[lo : hi+1] {
-				if l.op != '+' {
-					oldSide = append(oldSide, l.text)
-				}
-				if l.op != '-' {
-					newSide = append(newSide, l.text)
-				}
-			}
-			find, with = strings.Join(oldSide, "\n"), strings.Join(newSide, "\n")
-			n := strings.Count(cur, find)
-			if strings.TrimSpace(find) != "" && n == 1 {
-				break
-			}
-			if n == 0 || (lo == 0 && hi == len(h)-1) {
-				return nil, "", false
-			}
-			lo, hi = max(0, lo-1), min(len(h)-1, hi+1)
-		}
-		cur = strings.Replace(cur, find, with, 1)
-		if with == "" {
-			ops = append(ops, replayEditOp{Op: "delete", Find: find})
-		} else {
-			ops = append(ops, replayEditOp{Op: "replace", Find: find, With: &with})
-		}
-	}
-	return ops, cur, true
-}
-
-// substituteEdit is one replace of a unique sentence of text (fallbackCandidates, in fallbackOrder)
-// by synthetic words whose length is the sentence's plus delta; a shrink larger than the sentence
-// widens the find past it, so the replacement keeps at least one byte.
-func substituteEdit(text string, delta int, rngSeed uint64, docID, itemID string) (replayEditOp, string, bool) {
-	cands := fallbackOrder(rngSeed, docID, itemID, fallbackCandidates(text))
-	if len(cands) == 0 {
-		return replayEditOp{}, "", false
-	}
-	cand := cands[0]
-	i := strings.Index(text, cand)
-	n := max(len(cand), 1-delta)
-	if n > len(text) {
-		return replayEditOp{}, "", false
-	}
-	start := min(i, len(text)-n)
-	for start > 0 && !utf8.RuneStart(text[start]) {
-		start--
-	}
-	end := start + n
-	for end < len(text) && !utf8.RuneStart(text[end]) {
-		end++
-	}
-	find := text[start:end]
-	with := padText(len(find)+delta, int(replayHash(rngSeed, "edit", itemID)%1000))
-	return replayEditOp{Op: "replace", Find: find, With: &with}, text[:start] + with + text[end:], true
 }
 
 // replaySynthDoc is n bytes of synthetic markdown: numbered sentences of synthetic words in
@@ -1555,10 +1407,23 @@ type replaySetup struct {
 	opt    replayOptions
 	plan   *replayPlan
 	inputs replayInputs
-	// roster is the session ids registered with the listener: the bundle's roster, then
-	// synthetic ones; homes maps a roster session to the kept issue its claim holds at the instant.
-	roster []string
-	homes  map[string]string
+	// roster is the session ids registered with the listener: the bundle's roster ids the listener
+	// accepts as keys (natsKey), then synthetic ones; rosterSkipped counts the roster ids it would
+	// refuse (an actor id such as legion-daemon:LINUX is no session id); homes maps a roster session
+	// to the kept issue its claim holds at the instant.
+	roster        []string
+	rosterSkipped int
+	homes         map[string]string
+}
+
+// natsKeyAlphabet is the alphabet of a NATS KV key nats.go accepts (its validKeyRe); a key also
+// neither starts nor ends with a dot. The listener keys a session by its id and refuses any other
+// (internal/bus ErrInvalidKey).
+var natsKeyAlphabet = regexp.MustCompile(`^[-/_=.a-zA-Z0-9]+$`)
+
+// natsKey says whether the listener accepts id as a session's key.
+func natsKey(id string) bool {
+	return natsKeyAlphabet.MatchString(id) && !strings.HasPrefix(id, ".") && !strings.HasSuffix(id, ".")
 }
 
 func newReplaySetup(o replayOptions) (*replaySetup, error) {
@@ -1570,6 +1435,10 @@ func newReplaySetup(o replayOptions) (*replaySetup, error) {
 	for _, r := range b.Roster {
 		if len(s.roster) == o.roster {
 			break
+		}
+		if !natsKey(r.SessionID) {
+			s.rosterSkipped++
+			continue
 		}
 		s.roster = append(s.roster, r.SessionID)
 	}
@@ -1930,8 +1799,10 @@ func (rr *replayRun) do(ctx context.Context, base, token string, act *replayActi
 			if from != 0 {
 				start = from
 			}
-			recs.add(reqRec{route: r.route(act.Kind), status: res.status, transport: res.err != nil, latency: time.Duration(res.end - start), connWait: res.connWait})
-			if !res.ok() && (r.Tolerate == 0 || res.status != r.Tolerate || res.err != nil) {
+			tolerated := !res.ok() && r.Tolerate != 0 && res.status == r.Tolerate && res.err == nil
+			recs.add(reqRec{route: r.route(act.Kind), status: res.status, code: res.errorCode(), tolerated: tolerated, transport: res.err != nil,
+				latency: time.Duration(res.end - start), connWait: res.connWait})
+			if !res.ok() && !tolerated {
 				ok = false
 				continue
 			}
