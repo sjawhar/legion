@@ -44,7 +44,9 @@ var (
 // branchGitHub is GitHub's REST API for acme/widgets as an issue_branch row calls it: the
 // repository, naming defaultBranch (main unless a test sets another before its first request), the
 // ref of that branch, and each create of a ref answered by answer. It records each read's path, in
-// order, and each create, with the launches the runtime had made when it came.
+// order, and each create, with the launches the runtime had made when it came. A booted daemon's
+// required-checks pass lists the repository's open pull requests, none, and that listing is not
+// recorded as a read.
 type branchGitHub struct {
 	url           string
 	mu            sync.Mutex
@@ -63,6 +65,10 @@ func newBranchGitHub(t *testing.T, rt *fake.Runtime, answer func() (int, string)
 	t.Helper()
 	g := &branchGitHub{answer: answer, defaultBranch: "main"}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/pulls" {
+			_, _ = io.WriteString(w, `[]`)
+			return
+		}
 		g.mu.Lock()
 		base := g.defaultBranch
 		if r.Method == http.MethodGet {

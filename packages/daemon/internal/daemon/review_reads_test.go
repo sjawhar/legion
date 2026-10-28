@@ -86,7 +86,7 @@ func reviewReadRuntime(pool *pgxpool.Pool, api string) *workflowRuntime {
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories, ReviewRoundCap: 10, ReviewAppLogin: reviewReadApp}, quietLogger())
 	return &workflowRuntime{
 		pool: pool, records: projectRecords{Store: record.NewStore(), project: "CAPTURE"}, engine: engine, handlers: []intake.Handler{engine},
-		tokens: outboxTokens{}, dispatchProject: "CAPTURE", bootID: "test-boot", log: quietLogger(), githubAPI: api, reviewAppLogin: reviewReadApp,
+		tokens: outboxTokens{}, dispatchProject: "CAPTURE", bootID: "test-boot", log: quietLogger(), githubAPI: api, reviewAppLogin: reviewReadApp, repositories: servedAcme(),
 	}
 }
 

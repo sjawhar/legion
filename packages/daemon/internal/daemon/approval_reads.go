@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -48,7 +47,8 @@ func (w *workflowRuntime) readApprovalCarry(ctx, read context.Context, github gi
 		return false
 	}
 	compared := fmt.Sprintf("%s#%d:%s...%s", pr.Repo, pr.Number, approved, pr.HeadSHA)
-	if w.uncarried[compared] {
+	eventID := w.passEventID("approval-carry", pr.Repo, pr.Number, approved+"..."+pr.HeadSHA)
+	if w.uncarried[compared] || !w.unapplied(ctx, eventID) {
 		return false
 	}
 	push, aside, err := handoffPush(read, github, *pr, approved, pr.HeadSHA)
@@ -79,7 +79,6 @@ func (w *workflowRuntime) readApprovalCarry(ctx, read context.Context, github gi
 	}
 	w.log.Warn("workflow: only the issue's handoffs changed above the approved head, and no recorded push says so; applying the push GitHub's compare shows",
 		"repo", pr.Repo, "pullRequest", pr.Number, "issue", pr.Issue, "approved", approved, "head", pr.HeadSHA, "paths", *push.ChangedPaths)
-	eventID := fmt.Sprintf("approval-carry:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, pr.Repo, pr.Number, time.Now().UnixNano())
 	if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, push, w.handlers...); err != nil {
 		w.log.Warn("apply a handoff-only push read from GitHub's compare", "repo", pr.Repo, "pullRequest", pr.Number, "error", err)
 	}

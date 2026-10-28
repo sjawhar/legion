@@ -288,7 +288,7 @@ func (s *server) implementationPullRequest(w http.ResponseWriter, r *http.Reques
 	}
 	fact := intake.PullRequestOpened{Repo: issue.GitHubRepo, Number: pull.Number, Branch: branch, HeadSHA: pull.Head.SHA, Body: pull.Body,
 		URL: pull.HTMLURL, UpdatedAt: pull.UpdatedAt, Reopened: recorded != nil && recorded.Number == pull.Number}
-	read := intake.OpenedReadEventID(issue.Project, fact.Repo, pull.Number, pull.Head.SHA, pull.UpdatedAt)
+	read := intake.OpenedReadEventID(issue.Project, fact.Repo, pull.Number, pull.Head.SHA, pull.UpdatedAt, issue.Generation, recorded)
 	if _, err := intake.ApplyFact(ctx, s.pool, "github", read, fact, s.handlers...); err != nil {
 		s.log.Error("api: apply the open pull request a completing implementer's branch shows", "issue", issue.Key, "pullRequest", pull.Number, "error", err)
 		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", "could not apply the open pull request read from GitHub; this completion changed nothing")

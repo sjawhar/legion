@@ -149,6 +149,13 @@ func (i Issue) Repository() (ghrepo.Repository, error) {
 	return ghrepo.Parse("the repository of "+i.Key, i.Repo)
 }
 
+// HandedOff is an issue whose implementer recorded its handoff, with the commit the handoff
+// recorded (PhaseRow.HandoffCommit).
+type HandedOff struct {
+	Issue  Issue
+	Commit string
+}
+
 // RepoNote is what the daemon last said on a Dispatch issue about its repository: the resolved
 // repository the issue showed then ("" for none) and the note posted, so an event that resolves the
 // same way posts nothing again.
@@ -858,12 +865,12 @@ type Store interface {
 	// FillIssueRepository does.
 	UnnamedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
 	NameIssueRepository(ctx context.Context, tx pgx.Tx, key, repo, githubRepo string) error
-	// HandedOffWithoutPullRequest is every record of the Dispatch project key project in
+	// HandedOffWithoutOpenPullRequest is every record of the Dispatch project key project in
 	// implementing, named on its repository as GitHub spells it, whose implementer has recorded its
-	// handoff and which has no open or merged pull request recorded, by key: an issue whose
-	// completion waits for the pull request record that only its opened webhook writes. A merged
-	// one is left out, as GitHub never reopens it and a new generation removes it.
-	HandedOffWithoutPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
+	// handoff and which has no open pull request recorded, by key, each with its implementer's
+	// handoff commit: an issue whose completion waits for an open pull request record, which the
+	// required-checks pass tells the architect of when GitHub lists none on its branch.
+	HandedOffWithoutOpenPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]HandedOff, error)
 	// RepoNote is what the daemon last said on issue about its repository, nil for nothing;
 	// PutRepoNote records a note it posts.
 	RepoNote(ctx context.Context, tx pgx.Tx, issue string) (*RepoNote, error)

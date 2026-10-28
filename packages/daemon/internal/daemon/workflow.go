@@ -166,12 +166,6 @@ type workflowRuntime struct {
 	// changes its answer. It is held in memory only; a restart's first pass asks again. Only the
 	// pass touches it.
 	uncarried map[string]bool
-	// unrecordedOpened is, by issue, the open pull request the pass found for an issue with none
-	// recorded and applied, keyed by what the workflow decides it by (readUnrecordedPullRequests),
-	// that the workflow did not record: the pass applies it again only once one of those changes.
-	// It is held in memory only; a restart's first pass applies each again. Only the pass touches
-	// it.
-	unrecordedOpened map[string]string
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.

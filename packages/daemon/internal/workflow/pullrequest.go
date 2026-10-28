@@ -59,8 +59,14 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 		// GitHub sends opened once per pull request, so an opened for one already recorded is a
 		// redelivery whatever its clock; a reopen's clock is left to the fence above. GitHub never
 		// reopens a merged pull request, so a reopen of one is older than the merge, which carries
-		// no clock to fence it.
-		if !fact.Reopened || recorded.State == record.PullRequestMerged {
+		// no clock to fence it. A reopen of the pull request the record holds open, at the record's
+		// clock or before it, is the reopen that opened it delivered again - its webhook after the
+		// pass applied its read, or a redelivery - since a close between the two would have closed
+		// the record: applied again it would start the CI settlement afresh and disarm auto-merge
+		// once more. A reopen newer than an open record follows a close that never arrived, and
+		// applies.
+		if !fact.Reopened || recorded.State == record.PullRequestMerged ||
+			(recorded.State == record.PullRequestOpen && !fact.UpdatedAt.After(recorded.HeadUpdatedAt)) {
 			return intake.Result{}, nil
 		}
 		// The reopen keeps the count, the planned mark, the pushes - facts about commits - and the
@@ -413,4 +419,32 @@ func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	}
 	return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "pr-closed-unmerged", Role: claim.RoleArchitect,
 		Reason: fmt.Sprintf("pull request #%d closed without merging while %s was in %s", pr.Number, issue.Key, issue.Phase)})
+}
+
+// pullRequestMissing tells the architect that the issue's implementer completed and GitHub shows
+// no open pull request on its branch (intake.PullRequestMissing, the required-checks pass's
+// listing): the issue waits in implementing for a pull request record (implementationReady), and
+// nothing else tells anybody it is missing - the implementer's completion was applied with GitHub
+// unread, or the pull request it read was closed or merged since. The notice names the issue, the
+// repository, the branch and the handoff commit, and says what to do. It tells nothing when the
+// issue has left implementing, its implementer's handoff is another commit, or an open pull
+// request is recorded: the pass listed GitHub before the record changed.
+func (e *Engine) pullRequestMissing(ctx context.Context, tx pgx.Tx, fact intake.PullRequestMissing) (intake.Result, error) {
+	issue, err := e.store.Issue(ctx, tx, fact.Issue)
+	if err != nil || issue == nil || issue.Phase != phase.Implementing {
+		return intake.Result{}, err
+	}
+	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleImplementer)
+	if err != nil || row.HandoffCommit != fact.HandoffCommit {
+		return intake.Result{}, err
+	}
+	pr, err := e.store.PullRequest(ctx, tx, issue.Key)
+	if err != nil || (pr != nil && pr.State == record.PullRequestOpen) {
+		return intake.Result{}, err
+	}
+	return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "pull-request-missing", Role: claim.RoleArchitect,
+		Reason: fmt.Sprintf("%s's implementer completed at %s, and GitHub shows no open pull request on %s %s, so %s stays in implementing. "+
+			"Tell its implementer (envoy_publish to its role topic) to open the pull request from %s; the daemon records it and moves %s to testing once it is open. "+
+			"When the work should not go on, decide %s's phase as for a pull request closed without merging.",
+			issue.Key, fact.HandoffCommit, fact.Repo, fact.Branch, issue.Key, fact.Branch, issue.Key, issue.Key)})
 }

@@ -235,11 +235,38 @@ func (s *Postgres) UnnamedIssues(ctx context.Context, tx pgx.Tx, project string)
 	return s.issuesWhere(ctx, tx, "project = $1 and repo <> '' and github_repo = ''", project, "with no GitHub spelling of their repository")
 }
 
-func (s *Postgres) HandedOffWithoutPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
-	return s.issuesWhere(ctx, tx, "project = $1 and github_repo <> '' and phase = '"+string(phase.Implementing)+"'"+
+func (s *Postgres) HandedOffWithoutOpenPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]HandedOff, error) {
+	issues, err := s.issuesWhere(ctx, tx, "project = $1 and github_repo <> '' and phase = '"+string(phase.Implementing)+"'"+
 		" and key in (select issue from phases where role = '"+string(claim.RoleImplementer)+"' and handoff_commit <> '')"+
-		" and key not in (select issue from pull_requests where state in ('"+string(PullRequestOpen)+"', '"+string(PullRequestMerged)+"'))",
-		project, "in implementing with a recorded handoff and no open or merged pull request")
+		" and key not in (select issue from pull_requests where state = '"+string(PullRequestOpen)+"')",
+		project, "in implementing with a recorded handoff and no open pull request")
+	if err != nil || len(issues) == 0 {
+		return nil, err
+	}
+	keys := make([]string, len(issues))
+	for i, issue := range issues {
+		keys[i] = issue.Key
+	}
+	rows, err := tx.Query(ctx, "select issue, handoff_commit from phases where role = $1 and issue = any($2::text[])", string(claim.RoleImplementer), keys)
+	if err != nil {
+		return nil, fmt.Errorf("read the handoff commits of the issues of %s in implementing with no open pull request: %w", project, err)
+	}
+	commits, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) ([2]string, error) {
+		var pair [2]string
+		return pair, row.Scan(&pair[0], &pair[1])
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read the handoff commits of the issues of %s in implementing with no open pull request: %w", project, err)
+	}
+	commitOf := make(map[string]string, len(commits))
+	for _, pair := range commits {
+		commitOf[pair[0]] = pair[1]
+	}
+	handedOff := make([]HandedOff, len(issues))
+	for i, issue := range issues {
+		handedOff[i] = HandedOff{Issue: issue, Commit: commitOf[issue.Key]}
+	}
+	return handedOff, nil
 }
 
 // issuesWhere is every record of project the condition selects, by key; what names them in an

@@ -386,12 +386,20 @@ type PullRequestOpened struct {
 func (PullRequestOpened) isFact() {}
 
 // OpenedReadEventID is the event id, under source "github", of a PullRequestOpened built from a
-// read of GitHub rather than from its webhook: the project, the repository and number, and what
-// the read observed, the head and GitHub's updated_at. It holds no read time and no boot, so the
-// same observation applied twice is one fact (ApplyFact answers the second Duplicate), and a pull
-// request that changed since is a new one.
-func OpenedReadEventID(project, repo string, number int, head string, updatedAt time.Time) string {
-	return fmt.Sprintf("opened-read:%s:%s#%d:%s:%s", project, repo, number, head, updatedAt.UTC().Format(time.RFC3339Nano))
+// read of GitHub rather than from its webhook: the project, the repository and number, what the
+// read observed, the head and GitHub's updated_at, and what the workflow decides an opened by
+// beside it, the issue's generation and its pull request record as the read found it (nil for
+// none: its number, state and clock). It holds no read time and no boot, so the same observation
+// applied twice against the same record is one fact (ApplyFact answers the second Duplicate, and
+// Applied finds it before), whichever reader applies it - the required-checks pass or the
+// implementer's completion - while a pull request that changed since, or a record that changed
+// since (a new generation removes a closed one the opened was declined against), makes a new one.
+func OpenedReadEventID(project, repo string, number int, head string, updatedAt time.Time, generation uint64, recorded *record.PullRequest) string {
+	against := "none"
+	if recorded != nil {
+		against = fmt.Sprintf("%d/%s/%s", recorded.Number, recorded.State, recorded.HeadUpdatedAt.UTC().Format(time.RFC3339Nano))
+	}
+	return fmt.Sprintf("opened-read:%s:%s#%d:%s:%s:%d:%s", project, repo, number, head, updatedAt.UTC().Format(time.RFC3339Nano), generation, against)
 }
 
 // PullRequestSynchronized records a new observed head, including the fields the shipped reducer
@@ -558,6 +566,21 @@ type PullRequestClosed struct {
 }
 
 func (PullRequestClosed) isFact() {}
+
+// PullRequestMissing is the required-checks pass finding, in its listing of Repo's open pull
+// requests, none on Branch, the branch of Issue, whose implementer recorded its handoff at
+// HandoffCommit while Issue is in implementing with no open pull request recorded: never decoded
+// from an event. The issue waits in implementing for a pull request nobody is told is missing, so
+// the workflow tells its architect (workflow's pullRequestMissing), once per handoff commit: the
+// pass applies it under an event id naming the issue and the commit.
+type PullRequestMissing struct {
+	Issue         string
+	Repo          string
+	Branch        string
+	HandoffCommit string
+}
+
+func (PullRequestMissing) isFact() {}
 
 // MergeFailed is the merge queue taking issue's pull request Number out at Head, the head its
 // accepted READY named, because the merge failed (ghautomerge.MergeFailed), as the issue's

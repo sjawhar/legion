@@ -148,6 +148,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.merged(ctx, tx, fact)
 	case intake.PullRequestClosed:
 		return e.closed(ctx, tx, fact)
+	case intake.PullRequestMissing:
+		return e.pullRequestMissing(ctx, tx, fact)
 	case intake.MergeFailed:
 		return e.mergeFailed(ctx, tx, fact)
 	case intake.ClaimReady:
