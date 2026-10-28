@@ -189,6 +189,13 @@ func TestProbeImageRefusesWhenTheRoleNamespaceCheckFails(t *testing.T) {
 	}
 }
 
+func TestProbeImageRefusesANegativeProbeBudget(t *testing.T) {
+	code, stdout, stderr := probeImage("--plugin-root", t.TempDir(), "--envoy-plugin-root", t.TempDir(), "--probe-budget", "-1s")
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "--probe-budget must not be negative") {
+		t.Fatalf("probe-image with a negative budget = %d, stdout %q, stderr %q; want exit 1 naming --probe-budget", code, stdout, stderr)
+	}
+}
+
 // tableLines are stdout's lines before the NATS user line and the OK line: the capability table.
 // Each is one row of capabilities.Table, rendered by its Line, so stdout is split on the row shape.
 func tableLines(stdout string) []string {

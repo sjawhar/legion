@@ -1,0 +1,15 @@
+kind: Changed
+body: |-
+    A write to a Dispatch document with many open anchored comments and asks no longer costs a walk
+    of the whole document per anchor. Every edit, upload, version and new anchored comment refreshes
+    the open anchors from one walk (`pmdoc.FindMarks`) with the same quotes and rows as before. The
+    refresh now lists its rows in a stable order, the open asks and then the unresolved comments,
+    each by creation time and id, so one refresh announces its `*.anchor_refreshed` events in the
+    same order every time; before, the listing had no order. An upload re-anchors every row with
+    one quote finder and one mark writer, and a miss it drops no longer ranks the nearest blocks. A
+    new anchored comment or ask reads its anchor off the tree its write already read, and
+    `MarkRange` and `Unmark` read the document's text ranges in one pass. On a 150 KB document a
+    doc-edit, an anchored comment and an upload cost the same at 80 open anchors as at 10.
+time: 2026-10-28T13:44:48.185013317Z
+custom:
+    Issue: pr2447

@@ -105,6 +105,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	claudeCodePin := flags.String("claude-code-pin", imageClaudeCodePin, "the directory of the package.json and package-lock.json a pod installs Claude Code from at launch, which the Claude lane checks")
 	podSafety := flags.Bool("pod-safety", false, "run the probes on a pod's baseline (internal/podsafety), as a pod's shim starts Oh My Pi")
 	providerEnvDir := flags.String("provider-env-dir", "", "a directory whose files NAME=contents the probes' Oh My Pi gets, as a worker's shim exports them")
+	probeBudget := flags.Duration("probe-budget", 0, "the duration the daemon's probe pod reserves for this command")
 	skipAgentModels := flags.Bool("skip-agent-models", false, "leave the prompt-named task agents' models unresolved (the image build's probe)")
 	skipBrowser := flags.Bool("skip-browser", false, "leave the browser row unchecked: the build of an image for a deployment that turns Oh My Pi's browser off (browser.enabled: false), which carries no Chromium")
 	roleReferences := flags.String("role-references", "", "the task agents and skills the daemon's own role prompts name, resolved in place of the role prompts this binary embeds")
@@ -129,6 +130,16 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if *claudeRoot == "" || *claudeCodePin == "" {
 		fmt.Fprintln(stderr, "legion probe-image: --claude-root and --claude-code-pin each name a directory: the claude-envoy plugin and the Claude Code pin a worker on the `claude` backend needs, which the Claude lane checks")
 		return 2
+	}
+
+	if *probeBudget < 0 {
+		fmt.Fprintln(stderr, "legion probe-image: --probe-budget must not be negative")
+		return 1
+	}
+	if *probeBudget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, *probeBudget)
+		defer cancel()
 	}
 	if *roleNamespaces != "" {
 		self, err := os.Executable()
