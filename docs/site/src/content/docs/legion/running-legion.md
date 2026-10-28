@@ -58,14 +58,18 @@ live tree is recorded under it, parents before children, and a person's issue is
 with no one moving anything. A recovery whose listing fails is tried again, 30 seconds doubling to
 10 minutes; a restart's boot listing is that recovery. While the repository is unread,
 `release_children` never stops a wave on a child it cannot record for it: it answers the child
-released and goes on with the rest of the wave. When the child will be recorded (its parent is
-recorded, or every unrecorded issue up to the recorded one is `todo`, on any repository), nothing
-more is needed. Otherwise (a parent on that chain is not `todo`) the architect gets a
+released and goes on with the rest of the wave. When every unrecorded issue up to the recorded one
+is `todo`, on any repository, no notice is sent then: the recovery records the child, or, when a
+`todo` parent never gets recorded, names the child in its one notice. Otherwise (a parent on that
+chain is not `todo`) the architect gets a
 `child-release-stalled` notice at once naming the parent to release first; a child the wave would
 write `todo` under such a child is not written, and its notice says to release it again once that
 child is recorded. When the repository is recovered, each tree's architect gets one more
 `child-release-stalled` notice, listing every child the release left to the recovery that is
-still not recorded, with what to release.
+still not recorded, with what to release. That notice waits while the recovery's listing is held
+for the Dispatch consumer, but for five minutes at most: a hold that lasts longer (an event that
+fails at every delivery, say) gets the notice then, once, and the recovery still runs in full when
+the hold releases.
 A served repository whose read fails stays served on its last answer and is read again the same
 way. A project with no repository mapped does not boot; one whose every repository lacks an App
 boots serving none and admits nothing until an App is installed, and one whose every repository's

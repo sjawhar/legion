@@ -354,6 +354,11 @@ func checkMapping(ctx context.Context, mappings []dispatch.RepoProject, project 
 // doubling to 10 min, without limit (Attempts is unused), back to 30 s once none is left.
 var installReadRetry = bootprobe.Retry{Initial: 30 * time.Second, Max: 10 * time.Minute}
 
+// recoveryHoldBound is how long a recovery's release waits stay untold while its listing is held
+// for the Dispatch consumer (recoverRepositories): the hold watchdog's warning interval
+// (defaultHoldWarnEvery), by which a hold that has not released is a fault worth naming.
+var recoveryHoldBound = defaultHoldWarnEvery
+
 // installReadAttempt bounds one installation read: as long as any one GitHub call the boot waits
 // for (appMintAttempt), so a GitHub that answers slowly is still answered for, while a read GitHub
 // has not answered by then is a failed read, and a repository GitHub hangs on is left out for now
@@ -685,9 +690,13 @@ func (w *workflowRuntime) recoveringReasons() []string {
 // person's issue left as it is. A listing the consumer may still be behind is held as the boot's
 // is (admission's pending), and released by pollHoldRelease. Then each tree's architect is told,
 // once, of every child its release_children left unrecorded on one of them that is still
-// unrecorded (tellReleaseWaits). The repositories are let go once both commit; a failed one stays
-// to recover, tried again on the refresher's backoff. A restart loses the set, and the boot's
-// reconcile is that recovery; what a release left waiting is told to no one then.
+// unrecorded (tellReleaseWaits). While the listing stays held, that telling waits, but for
+// recoveryHoldBound at most: a hold that outlasts it (the consumer stuck below the stream's last
+// position, an event that fails at every delivery, say) is told the waits still unrecorded then,
+// once, and the full recovery still runs when the hold releases. The repositories are let go once
+// both commit; a failed one stays to recover, tried again on the refresher's backoff. A restart
+// loses the set, and the boot's reconcile is that recovery; what a release left waiting is told to
+// no one then.
 func (w *workflowRuntime) recoverRepositories(ctx context.Context) {
 	w.recoveringMu.Lock()
 	repos := maps.Clone(w.recovering)
@@ -710,8 +719,31 @@ func (w *workflowRuntime) recoverRepositories(ctx context.Context) {
 	}
 	if err == nil && len(waits) != 0 && w.admission != nil && w.admission.Held() {
 		// The listing waits on the consumer (admission's pending), so a child it records is not
-		// recorded yet: the waits are told on a later recovery, once nothing is held.
-		w.log.Info("workflow: the recovery's listing waits on the Dispatch consumer; its release waits are told once it is released", "repositories", names)
+		// recorded yet: the waits are told once it is released, or once the hold has lasted
+		// recoveryHoldBound, whichever comes first.
+		w.recoveringMu.Lock()
+		if w.recoveryHeldSince.IsZero() {
+			w.recoveryHeldSince = time.Now()
+		}
+		bounded := time.Since(w.recoveryHeldSince) >= recoveryHoldBound
+		w.recoveringMu.Unlock()
+		if !bounded {
+			w.log.Info("workflow: the recovery's listing waits on the Dispatch consumer; its release waits are told once it is released", "repositories", names)
+			return
+		}
+		if err := w.tellReleaseWaits(attempt, names, waits); err != nil {
+			w.log.Warn("workflow: the release waits of a recovery held past its bound were not told; telling them again", "repositories", names, "error", err)
+			return
+		}
+		w.log.Warn("workflow: the recovery's listing has waited on the Dispatch consumer past its bound, so its release waits still unrecorded are told now",
+			"repositories", names, "bound", recoveryHoldBound.String())
+		w.recoveringMu.Lock()
+		for _, repo := range names {
+			for key := range waits {
+				delete(w.releaseWaits[repo], key)
+			}
+		}
+		w.recoveringMu.Unlock()
 		return
 	}
 	if err == nil {
@@ -723,6 +755,7 @@ func (w *workflowRuntime) recoverRepositories(ctx context.Context) {
 		return
 	}
 	w.recoveringMu.Lock()
+	w.recoveryHeldSince = time.Time{}
 	for _, repo := range names {
 		delete(w.recovering, repo)
 		for key := range silenced {

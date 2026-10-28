@@ -119,21 +119,24 @@ type workflowRuntime struct {
 	// because the repository was unread (noteUnread), which the repository's recovery takes into its
 	// scope whatever the issue resolves to by then; releaseWaits is, by repository, each child a
 	// release_children left unrecorded on it (awaitRecovery), whose tree's architect the recovery
-	// tells of each it did not record. recheckAfter is refreshOnMappingChange's wait before a read
-	// of its own, time.After when nil; a test sees each wait through it.
-	repositories     *repositories
-	installs         appauth.Installations
-	mappingMu        sync.Mutex
-	mappingChanged   chan struct{}
-	mappingRequested atomic.Uint64
-	mappingApplied   atomic.Uint64
-	awaitingMu       sync.Mutex
-	awaiting         map[string]map[int64]uint64
-	recoveringMu     sync.Mutex
-	recovering       map[string]bool
-	silenced         map[string]map[string]bool
-	releaseWaits     map[string]map[string]releaseWait
-	recheckAfter     func(time.Duration) <-chan time.Time
+	// tells of each it did not record; recoveryHeldSince is when a recovery's listing was first
+	// found held with waits to tell (zero for none), so a hold past recoveryHoldBound tells them.
+	// recheckAfter is refreshOnMappingChange's wait before a read of its own, time.After when nil;
+	// a test sees each wait through it.
+	repositories      *repositories
+	installs          appauth.Installations
+	mappingMu         sync.Mutex
+	mappingChanged    chan struct{}
+	mappingRequested  atomic.Uint64
+	mappingApplied    atomic.Uint64
+	awaitingMu        sync.Mutex
+	awaiting          map[string]map[int64]uint64
+	recoveringMu      sync.Mutex
+	recovering        map[string]bool
+	silenced          map[string]map[string]bool
+	releaseWaits      map[string]map[string]releaseWait
+	recoveryHeldSince time.Time
+	recheckAfter      func(time.Duration) <-chan time.Time
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
 	// review it submits decides a round by that login and the reviewer's recorded session
 	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.
