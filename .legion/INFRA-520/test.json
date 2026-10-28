@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-520",
-  "completed": "2026-10-28T19:45:00Z",
-  "round": 11,
-  "headTested": "de79624f74b9b43d2a4d9391e2df597ed4d8c5ba (code head 20e98c18ba3f)",
-  "previousRound": "Review round 3 (review.json at cad74205) found three items. The architect decided them in dispatch://INFRA-520/comment/bafbc258-757d-4ef1-a6ab-1f3ad62b5bdd: (2) script lines read as bash does and (3) an env allowlist are fixed as 'falls to everything'; (1) environment writes inside local actions or repository scripts are the written boundary. 20e98c18 implements both fixes and the boundary text (check-ci-filters.sh:84-88, the router guide's line 175).",
-  "ci": "CI run 40752361615 at 20e98c18 (created 19:13:33Z) was queued at 19:40Z. No CI run of a #2316 head has completed. Read as queued; I did not wait for it.",
+  "completed": "2026-10-28T21:30:00Z",
+  "round": 12,
+  "headTested": "f527b883e2aa41ed0b45425431ba1e239fb9f43f (code head bb1a700af2f3, merge of main c24ea568)",
+  "previousRound": "Review round 4 (review.json at 48b844e1) asked for one thing: #2316 was CONFLICTING with main af1ff09c. bb1a700a merges main through c24ea568 and carries #2331, #2323 and #2369 into ci.yaml. The fingerprint changed (two new jobs), so this was a full round over what the merge changed. The code since round 11 is otherwise the same: the merge touches ci.yaml, ci_job_reads.py, a 3-line change to ci_filter_coverage.py, docs-pages.yaml (one line) and two docs.",
+  "ci": "CI run 40768558349 at bb1a700a (created 21:02:31Z) was queued at 21:20Z. No CI run of a #2316 head has completed. Read as queued; I did not wait for it.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "At de79624f. check-ci-filters.test.sh: 131 passed, 0 failed. check-ci-filters.sh on the tree exits 0 (24 gates; docs-pages.yaml's push paths equal the docs filter). ENV_ALLOWED (ci_filter_coverage.py:465-469) lists only test configuration (database URLs, image names, LEGION_E2E*, LEGION_TEST_*, TESTCONTAINERS_RYUK_DISABLED), none of which go reads. script_lines splits only on \\n and strips only space and tab, and script_reason refuses any character outside printable ASCII, tab and \\n. GitHub reports #2316 MERGEABLE. Main has no .github change after the last merge."
+    "how": "GitHub reports #2316 MERGEABLE (BLOCKED on checks and review), and main has no commit after c24ea568. A subagent compared each hunk of main's c24ea568 (#2369), af1ff09c (#2331, with its release.yaml change) and 8b6ea377 (#2323) on envoy-and-contracts.yaml with ci.yaml at bb1a700a. Every hunk is ported or moot, and nothing is missing. The ported items: the two loadtest steps in envoy-go; patches/** through bun_install and the other filters; the envoy_session_stall output, filter and job (in ci-ok needs and SELECTED_BY); release.yaml's --patch-path patches/; dispatch_server's dashboard and processes; the check:asset-sizes step; the dispatch-browser-multiprocess job with a filter of its own, in ci-ok needs and SELECTED_BY. PathsFilter finds no file main's new filters match that the branch's filter of the same job misses, except where main matched it only through its broad envoy filter for a job that does not read it. At f527b883: check-ci-filters.test.sh 131 passed, 0 failed; check-ci-filters.sh exit 0 with 26 gates (dispatch-browser-multiprocess 1915 files, envoy-session-stall 1173, 0 uncovered) and docs-pages' paths equal to the docs filter; check-image-trigger-paths.sh passes (5 image builds); check-release-credentials.sh passes (7 credentialed and 10 build jobs across 5 workflows); ci-ok.test.sh 42 passed; actionlint v1.7.7 on ci.yaml exit 0."
   },
   "failures": [],
   "failed": 0,
@@ -64,9 +64,13 @@
     }
   ],
   "notProven": [
-    "No CI run of a #2316 head has completed: run 40752361615 at 20e98c18 is queued.",
+    "No CI run of a #2316 head has completed: run 40768558349 at bb1a700a is queued.",
     "docs-pages.yaml runs only on a push to main. Its first run, queue order and deploy are the production check's.",
-    "By the architect's decision (comment bafbc258), the check does not read environment writes made inside local actions or repository scripts (the reviewer's install-uv GITHUB_ENV probe passes). check-ci-filters.sh:84-88 states this boundary: the check answers accidental drift, and a deliberate hidden write is the review's to catch.",
+    "By the architect's decision (comment bafbc258), the check does not read environment writes made inside local actions or repository scripts (check-ci-filters.sh:84-88).",
     "The Runs of an exact script entry are kept by hand. I read the three against their scripts and found them complete."
+  ],
+  "notes": [
+    "Unstated departure from main, for the reviewer and architect, not counted as a failure: main's dispatch-browser-multiprocess job (8b6ea377) runs Postgres pgvector@sha256:7b822b0a\u2026 (the Postgres 16 image, otherwise used only on the *-postgres-16 jobs). ci.yaml:2081 runs it on 2358fcba\u2026 (Postgres 18). #2323 merged at 19:56Z, after #2364 moved CI to Postgres 18 at 13:59Z, with no comment on the image. So main's 16 there reads as a stale digest, and 18 matches #2364's stated intent, but neither the merge commit nor the implement handoff states the change.",
+    "Both new jobs follow the branch's cache policy (setup-go cache: false, go-envoy restore, save only on push), as ci.yaml:20-30 states."
   ]
 }
