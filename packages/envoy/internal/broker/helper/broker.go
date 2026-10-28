@@ -311,7 +311,7 @@ func (b *Broker) Login(ctx context.Context, hostname string) (string, error) {
 	da, err := cfg.DeviceAuth(context.WithValue(ctx, oauth2.HTTPClient, b.httpClient()),
 		oauth2.SetAuthURLParam("request", compact), oauth2.SetAuthURLParam("dpop_jkt", thumbprint))
 	if err != nil {
-		return "", oauthBrokerError(redact.Error(err))
+		return "", oauthBrokerError(redact.Error(err, b.URL))
 	}
 	if da.DeviceCode == "" || da.UserCode == "" {
 		return "", errors.New("broker returned no device_code/user_code")
@@ -498,7 +498,7 @@ func (b *Broker) retireReplaced(old *machineCredential) {
 		}
 		req, err := http.NewRequest(http.MethodPost, url, nil)
 		if err != nil {
-			return redact.Error(err)
+			return redact.Error(err, b.URL)
 		}
 		req.Header.Set("Proof", compact)
 		return b.do(req, []int{http.StatusNoContent}, nil)
@@ -823,7 +823,7 @@ func (b *Broker) redeem(ctx context.Context, cred *machineCredential) (next *Mac
 	tok, err := b.oauthConfig().TokenSource(b.tokenContext(ctx, cred.key),
 		&oauth2.Token{RefreshToken: cred.refreshToken, Expiry: time.Unix(1, 0)}).Token()
 	if err != nil {
-		err = redact.Error(err)
+		err = redact.Error(err, b.URL)
 		var re *oauth2.RetrieveError
 		switch {
 		case errors.As(err, &re) && re.Response != nil && re.Response.StatusCode == http.StatusTooManyRequests:
@@ -1161,7 +1161,7 @@ func (b *Broker) enrollAs(ctx context.Context, kind, runtimeID, thumbprint strin
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return "", time.Time{}, redact.Error(err)
+		return "", time.Time{}, redact.Error(err, b.URL)
 	}
 	req.Header.Set("Proof", compact)
 	req.Header.Set("Content-Type", "application/json")
@@ -1186,7 +1186,7 @@ func (b *Broker) Renew(ctx context.Context, s *Session) (time.Time, error) {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
-		return time.Time{}, redact.Error(err)
+		return time.Time{}, redact.Error(err, b.URL)
 	}
 	req.Header.Set("Proof", compact)
 	var out leaseReply
@@ -1205,7 +1205,7 @@ func (b *Broker) Revoke(ctx context.Context, enrollmentID string) error {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
-		return redact.Error(err)
+		return redact.Error(err, b.URL)
 	}
 	req.Header.Set("Proof", compact)
 	if err := b.do(req, []int{http.StatusNoContent, http.StatusNotFound}, nil); err != nil {
@@ -1214,13 +1214,12 @@ func (b *Broker) Revoke(ctx context.Context, enrollmentID string) error {
 	return nil
 }
 
-// do sends req and decodes the broker's answer. An error that names req's URL names it through
-// redact.Error, so no message or log line the helper makes from it carries a credential
-// AGENT_SECRETS_URL holds.
+// do sends req and decodes the broker's answer. A failed exchange goes through redact.Error, so
+// no message or log line the helper makes from it carries a credential AGENT_SECRETS_URL holds.
 func (b *Broker) do(req *http.Request, ok []int, out any) error {
 	resp, err := b.httpClient().Do(req)
 	if err != nil {
-		return redact.Error(err)
+		return redact.Error(err, b.URL)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

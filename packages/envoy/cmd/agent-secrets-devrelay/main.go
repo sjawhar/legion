@@ -165,7 +165,7 @@ func (c *apiClient) do(ctx context.Context, method, path string, body any) ([]by
 	// carries prints.
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
 	if err != nil {
-		return nil, redact.Error(err)
+		return nil, redact.Error(err, c.base)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	if body != nil {
@@ -173,7 +173,7 @@ func (c *apiClient) do(ctx context.Context, method, path string, body any) ([]by
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, redact.Error(err)
+		return nil, redact.Error(err, c.base)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)

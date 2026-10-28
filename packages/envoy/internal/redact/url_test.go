@@ -1,167 +1,224 @@
 package redact
 
 import (
+	"context"
+	"crypto/tls"
 	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"syscall"
 	"testing"
+
+	"golang.org/x/oauth2"
 )
 
-// secretsIn are the credential-like values the rows below put in a URL; no redacted form may
-// hold one.
-var secretsIn = []string{"tokuser9f3", "hunter2pw", "hunt", "er2pw", "nter2pw", "qtok77", "frag9z", "AbCtok9f3", "dEfgh", "ij=", "1234", "2pwSECRET", "77SECRET", "9zSECRET", "p@ss", "f@g", "t@k"}
+// secretsIn are the credential-like values the probes below put in a URL; no output may hold
+// one.
+var secretsIn = []string{"tokuser9f3", "hunter2pw", "hunt", "er2pw", "qtok", "frag9z", "AbCtok9f3", "dEfgh", "ij=", "1234", "12/34",
+	"2pwSECRET", "77SECRET", "9zSECRET", "klSECRET", "p@ss", "f@g", "t@k", "cd==", "GRANT_ME", "ada@"}
 
-// TestURLHidesEveryPartThatCanCarryACredential: a user name, a password, a query and a fragment
-// each print as "xxxxx" after their separator, in a URL net/url reads and in one it does not;
-// the host stays named, and a URL with none of them prints unchanged.
-func TestURLHidesEveryPartThatCanCarryACredential(t *testing.T) {
-	for _, row := range []struct{ raw, want string }{
-		{"https://secrets.internal.example", "https://secrets.internal.example"},
-		{"http://127.0.0.1:13380/v1/requests", "http://127.0.0.1:13380/v1/requests"},
-		{"https://tokuser9f3:hunter2pw@secrets.internal.example/v1/requests", "https://xxxxx@secrets.internal.example/v1/requests"},
-		{"https://tokuser9f3@secrets.internal.example", "https://xxxxx@secrets.internal.example"},
-		{"https://secrets.internal.example/v1/requests?token=qtok77", "https://secrets.internal.example/v1/requests?xxxxx"},
-		{"https://secrets.internal.example#frag9z", "https://secrets.internal.example#xxxxx"},
-		{"https://secrets.internal.example/?token=qtok77#frag9z", "https://secrets.internal.example/?xxxxx#xxxxx"},
-		// An '@' inside the password, and a password percent-encoded.
-		{"https://tokuser9f3:hunt@er2pw@secrets.internal.example", "https://xxxxx@secrets.internal.example"},
-		{"https://tokuser9f3:hu%40nter2pw@secrets.internal.example", "https://xxxxx@secrets.internal.example"},
-		// A bad escape, which net/url refuses.
-		{"http://tokuser9f3:hunter2pw%zz@127.0.0.1:1", "http://xxxxx@127.0.0.1:1"},
-		// A password holding a character a URL must escape: net/url refuses these, and the
-		// value must not print whole because of it. A '?' or '#' before the '@' could as well
-		// start a query or fragment holding the '@', so all after the scheme hides.
-		{"https://tokuser9f3:hunt/er2pw@secrets.internal.example", "https://xxxxx@secrets.internal.example"},
-		{"https://tokuser9f3:hunt?er2pw@secrets.internal.example", "https://xxxxx"},
-		{"https://tokuser9f3:hunt#er2pw@secrets.internal.example", "https://xxxxx"},
-		{"http://tokuser9f3:hunter2pw@127.0.0.1:badport", "http://xxxxx@127.0.0.1:badport"},
-		// IPv6 hosts, with and without userinfo.
-		{"http://[::1]:13380/v1/requests", "http://[::1]:13380/v1/requests"},
-		{"http://tokuser9f3:hunter2pw@[::1]:13380/v1/requests", "http://xxxxx@[::1]:13380/v1/requests"},
-		// An '@' in the path hides everything before it, host included: a broker's base URL has
-		// no path, and a credential holding '/' reads the same way.
-		{"https://secrets.internal.example/v1/users/ada@example.com", "https://xxxxx@example.com"},
-		// An '@' in a query or fragment: nothing after it is a host, and none of the query or
-		// fragment prints.
-		{"https://secrets.internal.example/?next=ada@example.com", "https://xxxxx"},
-		{"https://secrets.example/?password=hunter@2pwSECRET", "https://xxxxx"},
-		{"https://secrets.example/?password=p@ss", "https://xxxxx"},
-		{"https://secrets.example/#f@g", "https://xxxxx"},
-		{"https://secrets.example/#frag@9zSECRET", "https://xxxxx"},
-		{"https://secrets.example/?a=1&token=t@k&b=2", "https://xxxxx"},
-		{"https://secrets.example/?a=1&token=qtok@77SECRET&b=2", "https://xxxxx"},
-		{"https://tokuser9f3:hunter2pw@secrets.example/?next=ada@example.com", "https://xxxxx"},
-		// A percent-encoded '@', and a whole URL percent-encoded: read decoded. An escaped '@'
-		// in a query alone leaves the host named.
-		{"http://tokuser9f3:hunter2pw%40127.0.0.1:1", "http://xxxxx@127.0.0.1:1"},
-		{"https%3A%2F%2Ftokuser9f3%3Ahunter2pw%40secrets.example", "https://xxxxx@secrets.example"},
-		{"https://secrets.example/?token=qtok77%40x", "https://secrets.example/?xxxxx"},
-		// No scheme at all, and no scheme with "://" later in the value.
-		{"tokuser9f3:hunter2pw@secrets.internal.example", "xxxxx@secrets.internal.example"},
-		{"tokuser9f3:hunter2pw@secrets.internal.example/?next=https://x", "xxxxx@secrets.internal.example/?xxxxx"},
-		{"secrets.internal.example/v1?next=https://tokuser9f3:hunter2pw@x", "xxxxx"},
-		{"tokuser9f3:hu://nter2pw@secrets.example", "xxxxx@secrets.example"},
-		// A mistyped scheme separator: one slash, or no colon.
-		{"http:/tokuser9f3:hunter2pw@127.0.0.1:1/v1", "http:/xxxxx@127.0.0.1:1/v1"},
-		{"https//tokuser9f3:hunter2pw@secrets.example", "https//xxxxx@secrets.example"},
-		{"http:tokuser9f3:hunter2pw@secrets.example", "xxxxx@secrets.example"},
-		// A token holding '/', '?' or '#', and a password that begins with digits, which reads
-		// as a port.
-		{"https://AbCtok9f3/dEfgh+ij=@secrets.example", "https://xxxxx@secrets.example"},
-		{"https://AbCtok9f3?dEfgh@secrets.example", "https://xxxxx"},
-		{"https://AbCtok9f3#dEfgh@secrets.example", "https://xxxxx"},
-		{"https://tokuser9f3:1234/hunter2pw@secrets.example", "https://xxxxx@secrets.example"},
-		{"", ""},
-	} {
-		got := URL(row.raw)
-		if got != row.want {
-			t.Errorf("URL(%q) = %q, want %q", row.raw, got, row.want)
+// cleanURLs are plain http(s) URLs URL prints unchanged.
+var cleanURLs = []string{
+	"https://secrets.internal.example",
+	"https://secrets.internal.example/",
+	"http://127.0.0.1:13380/v1/requests",
+	"http://127.0.0.1:1/v1/enrollments//renew",
+	"http://[::1]:13380/v1/requests",
+	"https://[fe80::1]",
+	"HTTPS://Secrets.Example:443/v1/a-b_c.d~e",
+	"http://localhost:13380",
+}
+
+// probes are every input the three gate rounds on this redactor printed a credential, a part of
+// one, or a forged line from, and the shapes around them: none is provably a plain http(s) URL,
+// so each prints as NotPrinted.
+var probes = []string{
+	// User info, a query, a fragment, and both.
+	"https://tokuser9f3:hunter2pw@secrets.internal.example/v1/requests",
+	"https://tokuser9f3@secrets.internal.example",
+	"https://secrets.internal.example/v1/requests?token=qtok77",
+	"https://secrets.internal.example#frag9z",
+	"https://secrets.internal.example/?token=qtok77#frag9z",
+	"http://127.0.0.1:1/?token=qtok77",
+	// An '@' in the password, escaped or not, and a bad escape.
+	"https://tokuser9f3:hunt@er2pw@secrets.internal.example",
+	"https://tokuser9f3:hu%40nter2pw@secrets.internal.example",
+	"http://tokuser9f3:hunter2pw%zz@127.0.0.1:1",
+	"http://tokuser9f3:hunter2pw@127.0.0.1:badport",
+	// IPv6 with user info, a zone, a bad port, an unclosed bracket.
+	"http://tokuser9f3:hunter2pw@[::1]:13380/v1/requests",
+	"http://tokuser9f3:hunter2pw@[fe80::1%25eth0]:1",
+	"http://[fe80::1%25eth0]:1",
+	"http://tokuser9f3:hunter2pw@[::1]:x",
+	"http://tokuser9f3:hunter2pw@[::1:1",
+	// Round one: a mistyped separator, a token with '/', '?' or '#', a password that begins with
+	// digits, "://" inside a password, no scheme.
+	"http:/tokuser9f3:hunter2pw@127.0.0.1:1/v1",
+	"https//tokuser9f3:hunter2pw@secrets.example",
+	"http:tokuser9f3:hunter2pw@secrets.example",
+	"//tokuser9f3:hunter2pw@secrets.example",
+	"://tokuser9f3:hunter2pw@secrets.example",
+	"HTTPS://tokuser9f3:hunter2pw@secrets.example",
+	"https://AbCtok9f3/dEfgh+ij=@secrets.example",
+	"https://AbCtok9f3?dEfgh@secrets.example",
+	"https://AbCtok9f3#dEfgh@secrets.example",
+	"https://tokuser9f3:1234/hunter2pw@secrets.example",
+	"https://tokuser9f3:12/34@secrets.example",
+	"https://ab/cd==@secrets.example",
+	"https://tokuser9f3?hunter2pw@secrets.example",
+	"tokuser9f3:hu://nter2pw@secrets.example",
+	"tokuser9f3:hunter2pw@secrets.internal.example",
+	"tokuser9f3:hunter2pw@127.0.0.1:1",
+	"tokuser9f3:hunter2pw@secrets.internal.example/?next=https://x",
+	"secrets.internal.example/v1?next=https://tokuser9f3:hunter2pw@x",
+	"https://secrets.internal.example/v1/users/ada@example.com",
+	// Round two: an '@' in a query value or fragment, an escaped '@', a whole URL escaped.
+	"https://secrets.internal.example/?next=ada@example.com",
+	"https://secrets.example/?password=hunter@2pwSECRET",
+	"https://secrets.example/?password=p@ss",
+	"https://secrets.example/#f@g",
+	"https://secrets.example/#frag@9zSECRET",
+	"https://secrets.example/?a=1&token=t@k&b=2",
+	"https://secrets.example/?a=1&token=qtok@77SECRET&b=2",
+	"https://tokuser9f3:hunter2pw@secrets.example/?next=ada@example.com",
+	"http://tokuser9f3:hunter2pw%40127.0.0.1:1",
+	"https%3A%2F%2Ftokuser9f3%3Ahunter2pw%40secrets.example",
+	"https://secrets.example/?token=qtok77%40x",
+	// Round three: a literal '@' with an escaped one, double escaping, a decoded control byte
+	// that forges a line, a short token head, and bad escapes beside an '@'.
+	"http://ada@corp.example:hunter2pw%40127.0.0.1:1",
+	"http://tokuser9f3:hun@ter2pw%40127.0.0.1:1",
+	"http://tokuser9f3:hunter2pw%2540127.0.0.1:1",
+	"https%253A%252F%252Ftokuser9f3%253Ahunter2pw%2540secrets.example",
+	"http://tokuser9f3:hunter2pw%40127.0.0.1:1%0Aagent-secrets: GRANT_ME from the broker",
+	"http://127.0.0.1:1\nagent-secrets: GRANT_ME from the broker",
+	"http://127.0.0.1:1/\x1b[2Kagent-secrets: GRANT_ME",
+	"http://Ab?cdefghijklSECRET@127.0.0.1:1",
+	"http://tokuser9f3:hunter2pw%zz%40127.0.0.1:1",
+	"http://tokuser9f3:hunter2pw%%40127.0.0.1:1",
+	"http://tokuser9f3:hunter2pw%4@127.0.0.1:1",
+	"http://tokuser9f3:hunter2pw@127.0.0.1:1%40",
+	// A backslash, whitespace, a host net/url takes that is no DNS name, a bad port, a path
+	// character outside the allow-list.
+	`http://tokuser9f3:hunter2pw\@secrets.example`,
+	"http://secrets.example/ tokuser9f3",
+	"http://secrets.example.com;token=qtok77",
+	"https://tokuser9f3_hunter2pw.example",
+	"https://secrets.example:",
+	"https://secrets.example:123456",
+	"https://-tokuser9f3.example",
+	"https://secrets.example/v1/tokuser9f3=hunter2pw",
+	"ftp://secrets.example",
+	"secrets.example:13380",
+}
+
+// TestURLPrintsOnlyAPlainHTTPURL: a provably plain http(s) URL prints unchanged, the empty
+// value prints empty, and every probe prints as NotPrinted, holding none of its secrets.
+func TestURLPrintsOnlyAPlainHTTPURL(t *testing.T) {
+	for _, raw := range cleanURLs {
+		if got := URL(raw); got != raw {
+			t.Errorf("URL(%q) = %q, want it unchanged", raw, got)
 		}
-		for _, secret := range secretsIn {
-			if strings.Contains(got, secret) {
-				t.Errorf("URL(%q) = %q still holds %q", row.raw, got, secret)
-			}
+	}
+	if got := URL(""); got != "" {
+		t.Errorf("URL(\"\") = %q, want empty", got)
+	}
+	for _, raw := range probes {
+		if got := URL(raw); got != NotPrinted {
+			t.Errorf("URL(%q) = %q, want %q", raw, got, NotPrinted)
+		}
+	}
+	for _, secret := range secretsIn {
+		if strings.Contains(NotPrinted, secret) {
+			t.Fatalf("NotPrinted holds %q", secret)
 		}
 	}
 }
 
-// TestErrorHidesTheURLAndACauseThatRepeatsIt: the errors net/http and net/url make name the URL
-// they were given, with the user name and query in clear; redact.Error leaves a message naming
-// the URL redacted, says only "not a valid URL" for one that did not parse (its cause quotes the
-// bad part), withholds any other cause that repeats a hidden part, and keeps every cause
-// reachable for errors.Is and errors.As.
-func TestErrorHidesTheURLAndACauseThatRepeatsIt(t *testing.T) {
-	_, parseErr := url.Parse("http://tokuser9f3:hunter2pw%zz@127.0.0.1:1/v1/requests")
-	_, schemeErr := http.Get("tokuser9f3:hunter2pw@127.0.0.1:1/v1/requests")
+// leakyTimeout is a net timeout whose text repeats a credential.
+type leakyTimeout struct{}
+
+func (leakyTimeout) Error() string   { return "dial tokuser9f3:hunter2pw@127.0.0.1:1: i/o timeout" }
+func (leakyTimeout) Timeout() bool   { return true }
+func (leakyTimeout) Temporary() bool { return true }
+
+// TestErrorPrintsOnlyTheClassForAURLItWillNotPrint: for a configured URL URL will not print, the
+// error names its operation, the URL as NotPrinted, and the class of failure, and no text of the
+// error itself; errors.Is and errors.As still find the cause, and a timeout still answers
+// Timeout through the *url.Error.
+func TestErrorPrintsOnlyTheClassForAURLItWillNotPrint(t *testing.T) {
+	const raw = "http://tokuser9f3:hunter2pw@127.0.0.1:1"
+	_, parseErr := url.Parse(raw + "%zz/v1")
+	urlErr := func(cause error) error { return &url.Error{Op: "Get", URL: raw + "/v1/enrollments/self", Err: cause} }
+	dns := &net.DNSError{Err: "no such host", Name: "tokuser9f3", IsNotFound: true}
+	refused := &net.OpError{Op: "dial", Net: "tcp", Err: &net.AddrError{Err: "x", Addr: "tokuser9f3"}}
+	refusedErr := &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+	retrieve := &oauth2.RetrieveError{Response: &http.Response{StatusCode: http.StatusTooManyRequests}, Body: []byte("tokuser9f3")}
+	want := func(class string) string { return `Get "` + NotPrinted + `": ` + class }
 	for _, row := range []struct {
-		name  string
-		err   error
-		want  string
-		cause error // a cause errors.Is must still find, nil for none
+		name, raw string
+		err       error
+		want      string
+		is        error // a cause errors.Is must still find, nil for none
 	}{
-		{"a refused call", &url.Error{Op: "Post", URL: "http://tokuser9f3:***@127.0.0.1:1/?token=qtok77/v1/requests", Err: syscall.ECONNREFUSED},
-			`Post "http://xxxxx@127.0.0.1:1/?xxxxx": connection refused`, syscall.ECONNREFUSED},
-		{"a bad escape in the password", parseErr, `parse "http://xxxxx@127.0.0.1:1/v1/requests": not a valid URL`, nil},
-		{"a user name read as a scheme", schemeErr, `Get "xxxxx@127.0.0.1:1/v1/requests": (withheld: it repeats a part of the URL that can carry a credential)`, nil},
-		{"wrapped", errors.Join(errors.New("enroll"), &url.Error{Op: "Get", URL: "http://tokuser9f3@127.0.0.1:1", Err: syscall.ECONNREFUSED}),
-			"enroll\nGet \"http://xxxxx@127.0.0.1:1\": connection refused", syscall.ECONNREFUSED},
-		// A piece shorter than minHidden ("u", "v1") is no repeat: a one-letter user name
-		// matches "refused" by chance, and the cause stays.
-		{"a one-letter user name", &url.Error{Op: "Get", URL: "http://u:p@127.0.0.1:1/v1", Err: syscall.ECONNREFUSED},
-			`Get "http://xxxxx@127.0.0.1:1/v1": connection refused`, syscall.ECONNREFUSED},
-		// A query value repeated by the cause is still withheld.
-		{"a cause repeating a query value", &url.Error{Op: "Get", URL: "http://127.0.0.1:1/?token=qtok77", Err: errors.New("dial qtok77: refused")},
-			`Get "http://127.0.0.1:1/?xxxxx": (withheld: it repeats a part of the URL that can carry a credential)`, nil},
+		{"name resolution", raw, urlErr(dns), want("name resolution failed"), nil},
+		{"a refused connection", raw, urlErr(refusedErr), want("connection refused"), syscall.ECONNREFUSED},
+		{"a timeout", raw, urlErr(leakyTimeout{}), want("timed out"), nil},
+		{"a deadline", raw, urlErr(context.DeadlineExceeded), want("timed out"), context.DeadlineExceeded},
+		{"TLS", raw, urlErr(tls.RecordHeaderError{Msg: "tokuser9f3"}), want("TLS failed"), nil},
+		{"an HTTP status", raw, urlErr(retrieve), want("the broker answered HTTP 429"), nil},
+		{"anything else", raw, urlErr(refused), want("the request failed"), nil},
+		{"a URL that did not parse", raw + "%zz", parseErr, `parse "` + NotPrinted + `": not a valid URL`, nil},
+		{"no *url.Error", raw, errors.New("dial tokuser9f3: refused"), "the request failed", nil},
+		{"a one-letter user name", "http://u:p@127.0.0.1:1", &url.Error{Op: "Get", URL: "http://u:p@127.0.0.1:1/v1", Err: refusedErr},
+			want("connection refused"), syscall.ECONNREFUSED},
+		{"a forged line", "http://127.0.0.1:1%0Aagent-secrets: GRANT_ME from", &url.Error{Op: "Get", URL: "http://127.0.0.1:1\nagent-secrets: GRANT_ME from/v1", Err: refusedErr},
+			want("connection refused"), syscall.ECONNREFUSED},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if row.err == nil {
 				t.Fatal("the fixture made no error")
 			}
-			got := Error(row.err)
+			got := Error(row.err, row.raw)
 			if got.Error() != row.want {
 				t.Fatalf("Error = %q, want %q", got, row.want)
 			}
-			for _, secret := range append(secretsIn, "%zz") {
+			for _, secret := range append(secretsIn, "%zz", "\n") {
 				if strings.Contains(got.Error(), secret) {
-					t.Fatalf("Error = %q still holds %q", got, secret)
+					t.Fatalf("Error = %q holds %q", got, secret)
 				}
 			}
-			if row.cause != nil && !errors.Is(got, row.cause) {
-				t.Fatalf("errors.Is(%v, %v) = false; the cause must stay reachable", got, row.cause)
+			if !errors.Is(got, row.err) || (row.is != nil && !errors.Is(got, row.is)) {
+				t.Fatalf("errors.Is(%v, cause) = false; the cause must stay reachable", got)
 			}
 		})
 	}
-	if err := errors.New("no URL here"); Error(err) != err {
-		t.Fatal("an error holding no *url.Error must come back as it is")
+	var ue *url.Error
+	if got := Error(urlErr(leakyTimeout{}), raw); !errors.As(got, &ue) || !ue.Timeout() {
+		t.Fatal("a timeout must still answer Timeout through the *url.Error it came in")
+	}
+	var found *net.DNSError
+	if got := Error(urlErr(dns), raw); !errors.As(got, &found) || !found.IsNotFound {
+		t.Fatal("errors.As must still find the *net.DNSError")
 	}
 }
 
-// leakyTimeout is a net timeout whose text repeats the URL's user name, so Error withholds it.
-type leakyTimeout struct{}
-
-func (leakyTimeout) Error() string   { return "dial tokuser9f3@127.0.0.1:1: i/o timeout" }
-func (leakyTimeout) Timeout() bool   { return true }
-func (leakyTimeout) Temporary() bool { return true }
-
-// TestErrorKeepsATimeoutItWithholds: (*url.Error).Timeout and Temporary ask the error it wraps
-// directly, so a cause Error withholds still answers them, and a caller still tells a broker
-// that did not answer in time from one it could not reach.
-func TestErrorKeepsATimeoutItWithholds(t *testing.T) {
-	ue := &url.Error{Op: "Get", URL: "http://tokuser9f3@127.0.0.1:1", Err: leakyTimeout{}}
-	got := Error(ue)
-	if strings.Contains(got.Error(), "tokuser9f3") {
-		t.Fatalf("Error = %q still holds the user name", got)
+// TestErrorLeavesACleanURLsErrorAsItIs: for a configured URL URL prints unchanged, a DNS, a
+// refused and a timeout error come back as they are, with their own text.
+func TestErrorLeavesACleanURLsErrorAsItIs(t *testing.T) {
+	const raw = "http://127.0.0.1:1"
+	for _, err := range []error{
+		&url.Error{Op: "Get", URL: raw + "/v1/enrollments/self", Err: &net.DNSError{Err: "no such host", Name: "broker.invalid", IsNotFound: true}},
+		&url.Error{Op: "Get", URL: raw + "/v1/enrollments/self", Err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}},
+		&url.Error{Op: "Get", URL: raw + "/v1/enrollments/self", Err: context.DeadlineExceeded},
+	} {
+		if got := Error(err, raw); got != err {
+			t.Errorf("Error(%v) = %v, want the error as it is", err, got)
+		}
 	}
-	if _, ok := ue.Err.(withheld); !ok {
-		t.Fatalf("the cause %T was not withheld", ue.Err)
-	}
-	if !ue.Timeout() || !ue.Temporary() {
-		t.Fatalf("Timeout() = %v, Temporary() = %v; want both true through the withheld cause", ue.Timeout(), ue.Temporary())
-	}
-	plain := &url.Error{Op: "parse", URL: "http://tokuser9f3:hunter2pw%zz@x", Err: errors.New("invalid URL escape")}
-	if Error(plain); plain.Timeout() || plain.Temporary() {
-		t.Fatal("a withheld cause that is no timeout must not read as one")
+	if Error(nil, "http://tokuser9f3:hunter2pw@127.0.0.1:1") != nil {
+		t.Fatal("a nil error must stay nil")
 	}
 }

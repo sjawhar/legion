@@ -26,6 +26,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 // TestASourceNamesTheBrokerAndTheStoreItsSettingsDescribe: as a session's forms print it, a
@@ -77,10 +78,10 @@ func TestASourceWithNoSettingsNamesTheBrokerItself(t *testing.T) {
 	if !strings.Contains(src.storeName(), "secrets.internal.example") {
 		t.Fatalf("store name = %q, want it to name the broker whose store it is", src.storeName())
 	}
-	// A URL no parser reads is named as it was given: the secret forms' line still says which
-	// value this process was pointed at.
-	if got := brokerSource("not a url").brokerAt(); !strings.Contains(got, "not a url") {
-		t.Fatalf("broker = %q, want the configured value named", got)
+	// A value that is no plain http(s) URL is not printed: the allow-list proves nothing about
+	// what it holds.
+	if got := brokerSource("not a url").brokerAt(); !strings.Contains(got, redact.NotPrinted) || strings.Contains(got, "not a url") {
+		t.Fatalf("broker = %q, want %q", got, redact.NotPrinted)
 	}
 }
 
@@ -146,11 +147,12 @@ func TestExecFormNamesItsSourceBeforeItExecs(t *testing.T) {
 	}
 }
 
-// TestNoFormPrintsACredentialTheBrokerURLCarries: a user name, password or query in
-// AGENT_SECRETS_URL reaches no output of any form - a refusal from a broker that answered, a
-// broker that was never reached, a URL no parser reads, a scheme-less URL whose user name net/url
-// reads as a scheme, the secret forms' own refusals, and a line naming a source - while a line
-// about an unreached broker still names the address it tried, with the credential masked.
+// TestNoFormPrintsACredentialTheBrokerURLCarries: AGENT_SECRETS_URL prints only when redact.URL
+// proves it a plain http(s) URL, and as redact.NotPrinted otherwise - in a refusal from a broker
+// that answered, a broker that was never reached, a URL no parser reads, a scheme-less URL, the
+// secret forms' own refusals, and a line naming a source - and for such a URL the transport's
+// cause prints as its class alone. A clean URL's messages read as before. No value forges a line
+// with a control byte, raw or escaped.
 func TestNoFormPrintsACredentialTheBrokerURLCarries(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	keyDir := newKeyDir(t)
@@ -159,41 +161,51 @@ func TestNoFormPrintsACredentialTheBrokerURLCarries(t *testing.T) {
 	answering := "http://tokuser9f3:hunter2pw@" + strings.TrimPrefix(broker.URL, "http://")
 	const unreached = "http://tokuser9f3:hunter2pw@127.0.0.1:1"
 	const badEscape = "http://tokuser9f3:hunter2pw%zz@127.0.0.1:1"
+	const np = redact.NotPrinted
+	names := "(AGENT_SECRETS_URL names " + np + ")"
 	injection := []string{"GRANT_ME", "--", "sh", "-c", "echo the-child-ran"}
 	for _, row := range []struct {
 		name, base string
 		args       []string
 		want       string // what the output must still name
 	}{
-		{"self, unreached", unreached, []string{"self"}, "GET http://xxxxx@127.0.0.1:1/v1/enrollments/self (AGENT_SECRETS_URL names http://xxxxx@127.0.0.1:1)"},
-		{"request, unreached", unreached, []string{"request", "GRANT_ME"}, "POST http://xxxxx@127.0.0.1:1/v1/requests"},
-		{"request --json, unreached", unreached, []string{"request", "--json", "GRANT_ME"}, "POST http://xxxxx@127.0.0.1:1/v1/requests"},
-		{"status, unreached", unreached, []string{"status", "req-approved"}, "GET http://xxxxx@127.0.0.1:1/v1/requests/req-approved"},
-		{"exec, unreached", unreached, injection, "POST http://xxxxx@127.0.0.1:1/v1/requests"},
-		{"secret list, unreached", unreached, []string{"secret", "list"}, "http://xxxxx@127.0.0.1:1"},
+		{"self, a clean URL unreached", "http://127.0.0.1:1", []string{"self"},
+			"nothing answered at 127.0.0.1:1: the connection was refused: GET http://127.0.0.1:1/v1/enrollments/self (AGENT_SECRETS_URL names http://127.0.0.1:1): dial tcp 127.0.0.1:1: connect: connection refused"},
+		{"self, unreached", unreached, []string{"self"}, "nothing answered at " + np + ": the connection was refused: GET " + np + " " + names + ": connection refused"},
+		{"request, unreached", unreached, []string{"request", "GRANT_ME"}, "POST " + np + " " + names + ": connection refused"},
+		{"request --json, unreached", unreached, []string{"request", "--json", "GRANT_ME"}, "POST " + np + " " + names},
+		{"status, unreached", unreached, []string{"status", "req-approved"}, "GET " + np + " " + names},
+		{"exec, unreached", unreached, injection, "POST " + np + " " + names},
+		{"secret list, unreached", unreached, []string{"secret", "list"}, np},
 		{"self, answered", answering, []string{"self"}, "source: the broker AGENT_SECRETS_URL names (GCP Secret Manager)"},
 		{"status, answered", answering, []string{"status", "req-approved"}, "source: the broker AGENT_SECRETS_URL names (GCP Secret Manager)"},
 		{"exec, refused by the broker", answering, injection, "asked the broker AGENT_SECRETS_URL names"},
-		{"a port no parser reads", "http://tokuser9f3:hunter2pw@127.0.0.1:badport", []string{"self"},
-			"the broker's address is not a valid URL: GET http://xxxxx@127.0.0.1:badport/v1/enrollments/self"},
-		{"a bad escape in the password", badEscape, []string{"self"}, "the broker's address is not a valid URL: GET http://xxxxx@127.0.0.1:1/v1/enrollments/self"},
+		{"a port no parser reads", "http://tokuser9f3:hunter2pw@127.0.0.1:badport", []string{"self"}, "the broker's address is not a valid URL: GET " + np},
+		{"a bad escape in the password", badEscape, []string{"self"}, "the broker's address is not a valid URL: GET " + np},
 		{"a bad escape in the password, injecting", badEscape, injection, "the broker's address is not a valid URL"},
-		{"a scheme-less URL", "tokuser9f3:hunter2pw@127.0.0.1:1", []string{"self"}, "GET xxxxx@127.0.0.1:1/v1/enrollments/self"},
-		{"a plain-http broker on the network, secret list", "http://tokuser9f3:hunter2pw@example.internal", []string{"secret", "list"}, `"http://xxxxx@example.internal" must be https`},
-		{"a token in the query", "http://127.0.0.1:1/?token=hunter2pw", []string{"self"}, "http://127.0.0.1:1/?xxxxx"},
-		{"one slash after the scheme", "http:/tokuser9f3:hunter2pw@127.0.0.1:1", []string{"self"}, "http:/xxxxx@127.0.0.1:1/v1/enrollments/self"},
-		{"no colon after the scheme", "http//tokuser9f3:hunter2pw@127.0.0.1:1", []string{"self"}, "xxxxx@127.0.0.1:1"},
-		{"a token holding a slash", "http://AbCtok9f3/dEfgh+ij=@127.0.0.1:1", []string{"self"}, "http://xxxxx@127.0.0.1:1"},
-		{"a password beginning with digits", "http://tokuser9f3:1234/hunter2pw@127.0.0.1:1", []string{"self"}, "http://xxxxx@127.0.0.1:1"},
-		{"an '@' in a query value", "http://127.0.0.1:1/?password=hunter@2pwSECRET", []string{"self"}, "AGENT_SECRETS_URL names http://xxxxx)"},
-		{"an '@' in one of several query values", "http://127.0.0.1:1/?a=1&token=qtok@77SECRET&b=2", []string{"self"}, "AGENT_SECRETS_URL names http://xxxxx)"},
-		{"an '@' in the fragment", "http://127.0.0.1:1/#frag@9zSECRET", []string{"self"}, "AGENT_SECRETS_URL names http://xxxxx)"},
-		{"a percent-encoded '@'", "http://tokuser9f3:hunter2pw%40127.0.0.1:1", []string{"self"}, "http://xxxxx@127.0.0.1:1"},
+		{"a scheme-less URL", "tokuser9f3:hunter2pw@127.0.0.1:1", []string{"self"}, "GET " + np + " " + names + ": the request failed"},
+		{"a plain-http broker on the network, secret list", "http://tokuser9f3:hunter2pw@example.internal", []string{"secret", "list"}, `AGENT_SECRETS_URL "` + np + `" must be https`},
+		{"a token in the query", "http://127.0.0.1:1/?token=hunter2pw", []string{"self"}, names + ": connection refused"},
+		{"one slash after the scheme", "http:/tokuser9f3:hunter2pw@127.0.0.1:1", []string{"self"}, names},
+		{"no colon after the scheme", "http//tokuser9f3:hunter2pw@127.0.0.1:1", []string{"self"}, names},
+		{"a token holding a slash", "http://AbCtok9f3/dEfgh+ij=@127.0.0.1:1", []string{"self"}, names + ": name resolution failed"},
+		{"a short token holding a slash", "http://ab/cd==@127.0.0.1:1", []string{"self"}, names},
+		{"a password beginning with digits", "http://tokuser9f3:1234/hunter2pw@127.0.0.1:1", []string{"self"}, names},
+		{"an '@' in a query value", "http://127.0.0.1:1/?password=hunter@2pwSECRET", []string{"self"}, names},
+		{"an '@' in one of several query values", "http://127.0.0.1:1/?a=1&token=qtok@77SECRET&b=2", []string{"self"}, names},
+		{"an '@' in the fragment", "http://127.0.0.1:1/#frag@9zSECRET", []string{"self"}, names},
+		{"a percent-encoded '@'", "http://tokuser9f3:hunter2pw%40127.0.0.1:1", []string{"self"}, names},
+		{"a literal '@' and an escaped one", "http://ada@corp.example:hunter2pw%40127.0.0.1:1", []string{"self"}, names},
+		{"a double-escaped '@'", "http://tokuser9f3:hunter2pw%2540127.0.0.1:1", []string{"self"}, names},
+		{"a short token head before a '?'", "http://Ab?cdefghijklSECRET@127.0.0.1:1", []string{"self"}, names},
+		{"an escaped newline forging a line", "http://tokuser9f3:hunter2pw%40127.0.0.1:1%0Aagent-secrets: GRANT_ME from FORGED", []string{"self"}, names},
+		{"a raw newline forging a line", "http://127.0.0.1:1\nagent-secrets: GRANT_ME from FORGED", []string{"self"}, names},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			stdout, stderr, _ := runAgentSecrets(t, binary, row.base, keyDir, nil, row.args...)
 			output := stdout + stderr
-			for _, secret := range []string{"tokuser9f3", "hunter2pw", "%zz", "AbCtok9f3", "dEfgh", "1234/", "2pwSECRET", "77SECRET", "9zSECRET", "qtok"} {
+			for _, secret := range []string{"tokuser9f3", "hunter2pw", "%zz", "AbCtok9f3", "dEfgh", "1234/", "2pwSECRET", "77SECRET", "9zSECRET", "klSECRET",
+				"qtok", "ada@corp", "2540", "cd==", "lookup Ab", "host ab", "FORGED"} {
 				if strings.Contains(output, secret) {
 					t.Fatalf("output names %q: stdout %q, stderr %q", secret, stdout, stderr)
 				}

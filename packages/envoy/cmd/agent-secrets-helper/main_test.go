@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 // registerEnv names the helper socket a child of this test binary registers with as a session
@@ -327,25 +328,26 @@ func TestServeLogsTheBrokerWithoutACredential(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if got := logged(); !strings.Contains(got, "broker=http://xxxxx@"+host) ||
+	if got := logged(); !strings.Contains(got, `broker="`+redact.NotPrinted+`"`) ||
 		strings.Contains(got, "tokuser9f3") || strings.Contains(got, "hunter2pw") {
-		t.Fatalf("stderr:\n%s\nwant the broker named as http://xxxxx@%s, with no user name or password", got, host)
+		t.Fatalf("stderr:\n%s\nwant the broker named as %q, with no user name or password", got, redact.NotPrinted)
 	}
 }
 
 // TestALoginTheBrokerNeverAnswersNamesNoCredential: a machine login against a broker that never
-// answers fails with the broker's address in its error, which `agent-secrets machine login`
-// prints, and that address names no user name, password or query AGENT_SECRETS_URL carries:
-// net/http's own error masks a password alone.
+// answers fails with an error `agent-secrets machine login` prints. For an AGENT_SECRETS_URL
+// redact.URL will not print, it names the URL as redact.NotPrinted and the failure's class
+// alone; for a clean one, it reads as net/http wrote it.
 func TestALoginTheBrokerNeverAnswersNamesNoCredential(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "agent-secrets-helper")
 	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 	for _, row := range []struct{ base, want string }{
-		{"http://tokuser9f3:hunter2pw@127.0.0.1:1", `"http://xxxxx@127.0.0.1:1/v1/oauth/device_authorization"`},
-		{"http://127.0.0.1:1/?token=qtok77", `"http://127.0.0.1:1/?xxxxx"`},
-		{"http://tokuser9f3:hunter2pw%zz@127.0.0.1:1", `"http://xxxxx@127.0.0.1:1/v1/oauth/device_authorization": not a valid URL`},
+		{"http://127.0.0.1:1", `"http://127.0.0.1:1/v1/oauth/device_authorization": dial tcp 127.0.0.1:1: connect: connection refused`},
+		{"http://tokuser9f3:hunter2pw@127.0.0.1:1", `"` + redact.NotPrinted + `": connection refused`},
+		{"http://127.0.0.1:1/?token=qtok77", `"` + redact.NotPrinted + `": connection refused`},
+		{"http://tokuser9f3:hunter2pw%zz@127.0.0.1:1", `"` + redact.NotPrinted + `": not a valid URL`},
 	} {
 		t.Run(row.base, func(t *testing.T) {
 			dir := shortTempDir(t)

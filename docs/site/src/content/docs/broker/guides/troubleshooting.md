@@ -11,8 +11,11 @@ generated from the code, lists every code. Every message about a secret also nam
 `agent-secrets` looked - `the broker AGENT_SECRETS_URL names (<store kind>)`, or `the broker
 AGENT_SECRETS_URL names` alone where the broker did not say what its store is - so a message of
 this CLI's is never read as another secrets CLI's about the same name. It names no host, account or
-project; a message about a broker that was never reached names the address it tried, with any
-user name, password or query in it as `xxxxx`. The messages below leave that part out.
+project; a message about a broker that was never reached names the address it tried when that
+address is a plain http(s) URL, and says `(not printed: the value carries a credential or is not a
+plain http(s) URL)` instead when it carries a user name, password, query, fragment or `%` escape,
+with the failure named by its class alone (`connection refused`, `name resolution failed`, `timed
+out`, and so on). The messages below leave that part out.
 
 ## The session has no broker identity
 

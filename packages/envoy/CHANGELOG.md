@@ -264,28 +264,30 @@
   broker …` trailer: the broker refused nothing. A local helper refusal or dead helper socket names
   that socket instead, since no broker was asked.
 - No output of `agent-secrets`, `agent-secrets-helper` or `agent-secrets-devrelay` prints a
-  credential the broker's URL carries: everything before the URL's last `@`, and any query or
-  fragment, print as `xxxxx` (`internal/redact`) in every message that names the URL, so a token
-  holding a `/`, a password that begins with digits, and a mistyped `http:/` or `https//` hide
-  whole too; when a `?` or `#` comes before that `@` (an `@` in a query or fragment value, say),
-  everything after the scheme prints as one `xxxxx`; and a URL whose `@` is percent-encoded is
-  read decoded - a broker
-  that could not be reached, the secret forms' refusal of a plain-http broker, the helper's
-  `listening` log line, and every error the helper's broker calls make (a machine login, an
-  enrollment, a renewal, a refresh or a revoke, which `agent-secrets machine login`, `register
-  --wait` and the helper's log print), the helper's `sign-launcher` refusal of a URL that is not
-  its broker's (which `machine` and `grant` list and revoke print), `agent-secrets-helper
-  install`'s refusal of a URL a unit line would need escaped, and Dispatch's two boot errors about
-  `DISPATCH_AGENT_SECRETS_URL`. `agent-secrets-devrelay --broker` no longer takes
-  `AGENT_SECRETS_URL` as its flag default, which its usage text printed whole; it reads the
-  variable after parsing. `agent-secrets-helper install` writes its unit `0600`, not `0644`, since
-  the unit's `Environment=` line holds the URL, and narrows a unit an older install left `0644`.
-  A URL the client cannot build a request from says `the
-  broker's address is not a valid URL` and nothing of the parser's own text, which quoted a bad
-  escape in a password; a timeout whose text is withheld still reads as `did not answer in time`.
-  Before, net/http masked a password alone and printed the user name and
-  query, and the message about an unreachable broker printed the whole URL, twice since the entry
-  above.
+  credential the broker's URL carries. Every message that names the URL names it through
+  `internal/redact`'s allow-list: the URL prints as written only when it is provably a plain
+  http(s) URL - printable ASCII with no `@`, `%`, `?`, `#`, backslash or whitespace, an http or
+  https scheme, a DNS name, IPv4 or bracketed IPv6 host with an optional numeric port, and a path
+  of letters, digits and `._~/-` alone - and as `(not printed: the value carries a credential or is
+  not a plain http(s) URL)` otherwise. No part of a value that fails the check prints, so no
+  separator, escape (single or double) or control byte in it can show a credential or forge a
+  line. For such a URL, the transport's own error prints as its class alone (`name resolution
+  failed`, `connection refused`, `timed out`, `TLS failed`, `the broker answered HTTP <n>`,
+  `not a valid URL`, `the request failed`), since its text can quote the URL; it still unwraps
+  to the original, so every classification reads as before, and a clean URL's errors print as
+  before. This covers a broker that could not be reached, the secret forms' refusal of a
+  plain-http broker, the helper's `listening` log line, and every error the helper's broker
+  calls make (a machine login, an enrollment, a renewal, a refresh or a revoke, which
+  `agent-secrets machine login`, `register --wait` and the helper's log print), the helper's
+  `sign-launcher` refusal of a URL that is not its broker's (which `machine` and `grant` list and
+  revoke print), `agent-secrets-helper install`'s refusal of a URL a unit line would need
+  escaped, and Dispatch's two boot errors about `DISPATCH_AGENT_SECRETS_URL`.
+  `agent-secrets-devrelay --broker` no longer takes `AGENT_SECRETS_URL` as its flag default,
+  which its usage text printed whole; it reads the variable after parsing. `agent-secrets-helper
+  install` writes its unit `0600`, not `0644`, since the unit's `Environment=` line holds the
+  URL, and narrows a unit an older install left `0644`. Before, net/http masked a password alone
+  and printed the user name and query, and the message about an unreachable broker printed the
+  whole URL, twice since the entry above.
 - The `ask.opened` or `ask.answered` Dispatch's settlement appends when an edit restores a decision
   block it retracted carries `restored: true`: the ask returns to the state it had, and the event
   records no new answer, so a reader that takes an `ask.answered` for a person's answer can tell

@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 // installRig is a temp XDG config dir, a fake systemctl on PATH that appends its argv to a log
@@ -382,8 +383,8 @@ func TestInstallRefusesWithoutAURL(t *testing.T) {
 func TestInstallRefusesAnEscapedURLWithoutNamingItsCredential(t *testing.T) {
 	r := newInstallRig(t)
 	err := r.run("--url", "https://tokuser9f3:hunter2pw%40x@broker.invalid")
-	if err == nil || !strings.Contains(err.Error(), "https://xxxxx@broker.invalid") {
-		t.Fatalf("install: %v; want a refusal naming the redacted URL", err)
+	if err == nil || !strings.Contains(err.Error(), redact.NotPrinted) {
+		t.Fatalf("install: %v; want a refusal naming the URL as not printed", err)
 	}
 	if strings.Contains(err.Error(), "hunter2pw") || strings.Contains(err.Error(), "tokuser9f3") {
 		t.Fatalf("install refusal names the URL's credential: %v", err)

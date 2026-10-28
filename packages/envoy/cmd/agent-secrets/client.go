@@ -124,7 +124,7 @@ func (e *unreachableError) Unwrap() error { return e.cause }
 // which TLS or a proxy fixes. An error that fits none says no more than that the request failed,
 // rather than name a layer it cannot prove.
 func unreachable(base, method, callURL string, err error) error {
-	cause := withoutURL(redact.Error(err))
+	cause := redact.Error(withoutURL(err), base)
 	host := brokerHost(base)
 	failed := func(what string) error { return &unreachableError{what, base, method, callURL, cause} }
 	var dns *net.DNSError
@@ -150,8 +150,8 @@ func unreachable(base, method, callURL string, err error) error {
 }
 
 // withoutURL is err without net/http's *url.Error wrapper, which repeats the URL the call was
-// made to, so every message that prints a URL prints it once, through redact.URL. The wrapped
-// cause is redact.Error's, withheld where its own text could repeat a credential.
+// made to, so every message that prints a URL prints it once, through redact.URL. redact.Error
+// then prints the cause as it is for a clean AGENT_SECRETS_URL, and as its class alone otherwise.
 func withoutURL(err error) error {
 	var wrapped *url.Error
 	if errors.As(err, &wrapped) {
@@ -202,7 +202,7 @@ func (c *client) do(ctx context.Context, method, url string, body []byte, header
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: read response: %w", method, redact.URL(url), err)
+		return nil, fmt.Errorf("%s %s: read response: %w", method, redact.URL(url), redact.Error(err, c.baseURL))
 	}
 	if resp.StatusCode/100 != 2 {
 		var envelope struct {

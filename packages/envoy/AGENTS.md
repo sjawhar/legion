@@ -2675,23 +2675,27 @@ matches its `agent-secrets: NAME from ` prefix); `request`, `status` and `self` 
 this CLI's is read as another secrets CLI's about the same name. None of these lines names the
 broker's host or the store's account, region or project, since an agent's output is quoted
 wherever it goes, a public pull request among them; only a broker that could not be reached is
-named, by its redacted URL, so a stale address reads as one. Only the secret forms, which a person runs
+named, by its URL through `redact.URL`, so a stale address reads as one. Only the secret forms, which a person runs
 under their own cloud sign-in, name the store's account or project (`AWS Secrets Manager account
 <id> in <region>`, `GCP Secret Manager project <number>`): `secret show` as `store:`, `secret list`
 one line on stderr, with `store` on each row under `--json`. No line names a secret's version: a
 grant's release carries names and values alone, and a session holds no sign-in of its own to the
 store. No output of `agent-secrets`, `agent-secrets-helper` (`internal/broker/helper`'s broker
-calls included) or `agent-secrets-devrelay` prints a user name, password, query or fragment the
-broker's URL carries: a message names that URL through `internal/redact`'s `URL`, which masks as
-`xxxxx` everything after the scheme up to the URL's last `@` (whatever it holds, so a token with a
-`/`, a password beginning with digits, or a mistyped `http:/` or `https//` hides whole) and any
-query or fragment; everything after the scheme, as one `xxxxx`, when a `?` or `#` comes before
-that `@`, since the `@` may sit in a query or fragment value; and a URL whose `@` is
-percent-encoded is read decoded. An error net/http or net/url makes passes through its `Error`,
-which redacts the URL it names and withholds a cause that repeats a user name, password, query
-value or fragment of four bytes or more (`not a valid URL` for one that did not parse; a
-withheld timeout still answers `Timeout()`). `agent-secrets-helper install` writes its unit
-`0600`, since its `Environment=` line holds the URL.
+calls included) or `agent-secrets-devrelay` prints a credential the broker's URL carries: a
+message names that URL through `internal/redact`'s `URL`, an allow-list that prints the value as
+written only when it is provably a plain http(s) URL (printable ASCII with no `@`, `%`, `?`, `#`,
+backslash or whitespace; net/url reads it back byte for byte as an http or https scheme, a DNS
+name, IPv4 or bracketed zone-less IPv6 host with an optional port of one to five digits, and a
+path of `[A-Za-z0-9._~/-]`), and as `redact.NotPrinted` otherwise, printing no part of it. A URL
+with user info prints as `NotPrinted` too, not as `xxxxx@host`: a host-less value whose password
+holds an `@` would print the password's tail as the host. An error net/http or net/url makes
+passes through `redact.Error(err, base)`: for a clean base it is err itself; otherwise its text is
+the class alone (`name resolution failed`, `connection refused`, `timed out`, `TLS failed`, `the
+broker answered HTTP <n>`, `not a valid URL`, `the request failed`), found with errors.Is and
+errors.As on err, and it unwraps to err so callers classify as before. Extend the allow-list
+only with a check a test proves, never a parser that prints part of a value it rejects.
+`agent-secrets-helper install` writes its unit `0600`, since its `Environment=` line holds the
+URL.
 `--json` on `request`, `status`, `self`, `whoami`, `machine list` and `grant list` is the broker's
 body verbatim as before, and makes no settings call. The other secrets CLI a box may hold,
 `secrets`, is secretsd, shipped from `sjawhar/forward` (the old `sjawhar/secretsd` repository is

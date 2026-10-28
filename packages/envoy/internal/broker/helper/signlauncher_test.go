@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 // TestSignLauncherRefusedInsideASessionAndSignsOutside: sign-launcher answers a process inside a
@@ -98,12 +99,12 @@ func TestSignLauncherSignsOnlyTheOperatorRoutesOfThisHelpersBroker(t *testing.T)
 
 // TestSignLauncherRefusalNamesNoCredentialTheCallersURLCarries: a caller whose AGENT_SECRETS_URL
 // differs from the helper's gets a BAD_REQUEST naming both URLs, and the CLI prints it as is, so
-// the caller's user name, password and query print redacted.
+// a caller's URL with user info or a query prints as redact.NotPrinted.
 func TestSignLauncherRefusalNamesNoCredentialTheCallersURLCarries(t *testing.T) {
 	r := startRig(t, "")
 	got := r.call(t, Request{Op: "sign-launcher", Method: "GET", URL: "https://tokuser9f3:hunter2pw@elsewhere.test/v1/operator/grants?token=qtok77"})
-	if got.Code != CodeBadRequest || !strings.Contains(got.Error, "https://xxxxx@elsewhere.test/v1/operator/grants?xxxxx") {
-		t.Fatalf("%+v, want BAD_REQUEST naming the redacted URL", got)
+	if got.Code != CodeBadRequest || !strings.Contains(got.Error, "not GET "+redact.NotPrinted) {
+		t.Fatalf("%+v, want BAD_REQUEST naming the URL as not printed", got)
 	}
 	for _, secret := range []string{"tokuser9f3", "hunter2pw", "qtok77"} {
 		if strings.Contains(got.Error, secret) {

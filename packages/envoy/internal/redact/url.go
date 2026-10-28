@@ -1,270 +1,203 @@
 // Package redact is how a URL a person configured is printed: in an error, a log line or a
 // message, with nothing in it that can carry a credential.
+//
+// It works by allow-list. A value prints only when it is provably a plain http(s) URL with no
+// place a credential can sit; any other value prints as NotPrinted, whatever it holds. No part of
+// a value that fails the check is ever printed, so no encoding, separator or control byte in it
+// can make the redactor print a piece it should have hidden.
 package redact
 
 import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"fmt"
+	"net"
+	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
+	"syscall"
+
+	"golang.org/x/oauth2"
 )
 
-// mask stands in for each part URL removes, so a reader still sees that the configured value
-// carries something there.
-const mask = "xxxxx"
+// NotPrinted stands in for a value URL will not print.
+const NotPrinted = "(not printed: the value carries a credential or is not a plain http(s) URL)"
 
-// parts is raw split as URL reads it. Each field is a slice of raw: prefix is the scheme with
-// its separator as written ("https://", or "http:/" and "https//" for a mistyped http(s)), and
-// the others hold no separator: userinfo ends before its '@', query follows its '?' and
-// fragment its '#'. When opaque, userinfo is everything after the prefix, and the rest is empty.
-type parts struct {
-	prefix, userinfo, rest, query, fragment string
-	hasUser, hasQuery, hasFragment, opaque  bool
-}
-
-// split reads raw as a string rather than through net/url, so a value no URL parser reads (a
-// misconfigured variable is the case it is printed for most) is read too, and errs toward hiding:
-//   - the prefix is a scheme name (a letter, then letters, digits, '+', '-' or '.') followed by
-//     "://", or "http" or "https" followed by ":/" or "//"; anything else has no prefix, so a
-//     user name before a ':' is never printed as a scheme;
-//   - the userinfo is everything after the prefix up to the last '@' anywhere in raw. A password
-//     or token holding a '/', ':' or digits (which a URL must escape, or which reads as a port)
-//     therefore hides whole; an '@' in a path hides the host before it too, which a broker's
-//     base URL, having no path, never shows;
-//   - when the text before that '@' holds a '?' or '#', the '@' may sit in a query or fragment
-//     (or in a password that holds one), so nothing after it can be told for a host: the whole
-//     value after the prefix is opaque, and prints as one mask;
-//   - otherwise the query is what follows the first '?' after the userinfo, up to a '#', and the
-//     fragment what follows the first '#'.
-func split(raw string) parts {
-	var p parts
-	p.prefix = prefix(raw)
-	s := raw[len(p.prefix):]
-	if at := strings.LastIndexByte(s, '@'); at >= 0 {
-		if strings.ContainsAny(s[:at], "?#") {
-			p.userinfo, p.opaque = s, true
-			return p
-		}
-		p.userinfo, s, p.hasUser = s[:at], s[at+1:], true
-	}
-	if i := strings.IndexAny(s, "?#"); i >= 0 {
-		tail := s[i+1:]
-		if s[i] == '?' {
-			p.hasQuery = true
-			if j := strings.IndexByte(tail, '#'); j >= 0 {
-				p.query, p.fragment, p.hasFragment = tail[:j], tail[j+1:], true
-			} else {
-				p.query = tail
-			}
-		} else {
-			p.fragment, p.hasFragment = tail, true
-		}
-		s = s[:i]
-	}
-	p.rest = s
-	return p
-}
-
-// readable is raw as split reads it: raw itself, or, when raw holds no '@' and the part before
-// its first '?' or '#' does once percent-decoded (an escaped "%40", or a whole URL escaped), raw
-// decoded, so an escaped separator hides no credential.
-func readable(raw string) string {
-	if strings.Contains(raw, "@") {
+// URL is raw when raw is provably clean, the empty string as it is, and NotPrinted for anything
+// else. raw is clean when all of these hold:
+//   - every byte is printable ASCII other than '@', '%', '?', '#' and '\' (so no user info, no
+//     escape, no query, no fragment, no whitespace and no control byte);
+//   - net/url parses it, with an http or https scheme (any case), no user, no opaque part;
+//   - it reads exactly as scheme "://" host path, with nothing net/url dropped or decoded;
+//   - the host is a DNS name, an IPv4 address or a bracketed IPv6 address with no zone, with an
+//     optional port of one to five digits;
+//   - the path is empty or only letters, digits, '.', '_', '~', '/' and '-'.
+//
+// A URL with user info (https://user:password@host) prints as NotPrinted too, rather than as
+// https://xxxxx@host: a value whose password holds an '@' and that names no host at all
+// (https://user:p@ssword) would print the password's tail as the host, and no check on the text
+// can tell the two apart.
+func URL(raw string) string {
+	if raw == "" || clean(raw) {
 		return raw
 	}
-	head := raw
-	if i := strings.IndexAny(raw, "?#"); i >= 0 {
-		head = raw[:i]
-	}
-	if strings.Contains(unescape(head), "@") {
-		return unescape(raw)
-	}
-	return raw
+	return NotPrinted
 }
 
-// unescape decodes each well-formed %XX in s and leaves any other '%' as it is, so a bad escape
-// (which url.PathUnescape refuses whole) does not stop the rest decoding.
-func unescape(s string) string {
-	if !strings.Contains(s, "%") {
-		return s
+// clean reports whether raw passes URL's allow-list.
+func clean(raw string) bool {
+	for i := range len(raw) {
+		if c := raw[i]; c <= ' ' || c >= 0x7f || strings.IndexByte(`@%?#\`, c) >= 0 {
+			return false
+		}
 	}
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		if s[i] == '%' && i+2 < len(s) {
-			if hi, lo := unhex(s[i+1]), unhex(s[i+2]); hi >= 0 && lo >= 0 {
-				b.WriteByte(byte(hi<<4 | lo))
-				i += 2
-				continue
+	u, err := url.Parse(raw)
+	if err != nil || u.User != nil || u.Opaque != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return false
+	}
+	if scheme := strings.ToLower(u.Scheme); scheme != "http" && scheme != "https" {
+		return false
+	}
+	n := len(u.Scheme) + len("://")
+	if len(raw) < n || !strings.EqualFold(raw[:n], u.Scheme+"://") || raw[n:] != u.Host+u.Path {
+		return false
+	}
+	return hostPort(u.Host) && plainPath(u.Path)
+}
+
+// hostPort reports whether hostport is a DNS name, an IPv4 address or a bracketed IPv6 address
+// without a zone, with an optional port of one to five digits.
+func hostPort(hostport string) bool {
+	host, port, hasPort := hostport, "", false
+	if strings.HasPrefix(hostport, "[") {
+		end := strings.IndexByte(hostport, ']')
+		if end < 0 {
+			return false
+		}
+		host = hostport[1:end]
+		if rest := hostport[end+1:]; rest != "" {
+			if rest[0] != ':' {
+				return false
+			}
+			port, hasPort = rest[1:], true
+		}
+		addr, err := netip.ParseAddr(host)
+		if err != nil || !addr.Is6() || addr.Zone() != "" {
+			return false
+		}
+	} else {
+		if i := strings.IndexByte(hostport, ':'); i >= 0 {
+			host, port, hasPort = hostport[:i], hostport[i+1:], true
+		}
+		if addr, err := netip.ParseAddr(host); err == nil {
+			if !addr.Is4() {
+				return false
+			}
+		} else if !dnsName(host) {
+			return false
+		}
+	}
+	if hasPort && (port == "" || len(port) > 5 || strings.Trim(port, "0123456789") != "") {
+		return false
+	}
+	return true
+}
+
+// dnsName reports whether name is a DNS name: dot-separated labels of 1 to 63 letters, digits
+// and '-', none starting or ending with '-', 253 bytes at most.
+func dnsName(name string) bool {
+	if name == "" || len(name) > 253 {
+		return false
+	}
+	for label := range strings.SplitSeq(name, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := range len(label) {
+			c := label[i]
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+				return false
 			}
 		}
-		b.WriteByte(s[i])
 	}
-	return b.String()
+	return true
 }
 
-func unhex(c byte) int {
-	switch {
-	case c >= '0' && c <= '9':
-		return int(c - '0')
-	case c >= 'a' && c <= 'f':
-		return int(c-'a') + 10
-	case c >= 'A' && c <= 'F':
-		return int(c-'A') + 10
+// plainPath reports whether path holds only letters, digits, '.', '_', '~', '/' and '-'.
+func plainPath(path string) bool {
+	for i := range len(path) {
+		c := path[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("._~/-", c) >= 0) {
+			return false
+		}
 	}
-	return -1
+	return true
 }
 
-// prefix is raw's scheme with its separator as split reads it, or "" for none.
-func prefix(raw string) string {
-	n := 0
-	for n < len(raw) {
-		c := raw[n]
-		letter := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
-		if !letter && (n == 0 || !(c >= '0' && c <= '9' || c == '+' || c == '-' || c == '.')) {
-			break
-		}
-		n++
+// Error is err as a message may print it, given raw, the configured URL err's request was built
+// from. For a clean raw (one URL prints unchanged) it is err itself, so every message reads as
+// before. For any other raw, no text of err is printed, since net/http's and net/url's errors
+// quote the URL and a cause can repeat any part of it: the error's text names only the class of
+// the failure (a URL that did not parse, failed name resolution, a refused connection, a
+// timeout, a TLS failure, an HTTP status, or a request that failed otherwise), found on err
+// itself, and the *url.Error's operation with its URL through URL. It unwraps to err, so
+// errors.Is and errors.As still classify the failure.
+func Error(err error, raw string) error {
+	if err == nil || raw == "" || clean(raw) {
+		return err
 	}
-	if n == 0 {
-		return ""
+	text := class(err)
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		text = ue.Op + " " + strconv.Quote(URL(ue.URL)) + ": " + text
 	}
-	name, after := raw[:n], raw[n:]
-	if strings.HasPrefix(after, "://") {
-		return name + "://"
-	}
-	if strings.EqualFold(name, "http") || strings.EqualFold(name, "https") {
-		for _, sep := range []string{":/", "//"} {
-			if strings.HasPrefix(after, sep) {
-				return name + sep
-			}
-		}
-	}
-	return ""
+	return &classified{text, err}
 }
 
-// URL is raw with everything that can carry a credential replaced by "xxxxx": the userinfo,
-// user name and password both (a token is often the user name alone), the query and the
-// fragment, each keeping its separator ("xxxxx@", "?xxxxx", "#xxxxx"), or everything after the
-// scheme for a value split reads as opaque. A URL that carries none of them prints unchanged.
-// split and readable say how raw is read.
-func URL(raw string) string {
-	p := split(readable(raw))
-	var b strings.Builder
-	b.WriteString(p.prefix)
-	if p.opaque {
-		b.WriteString(mask)
-		return b.String()
-	}
-	if p.hasUser {
-		b.WriteString(masked(p.userinfo) + "@")
-	}
-	b.WriteString(p.rest)
-	if p.hasQuery {
-		b.WriteString("?" + masked(p.query))
-	}
-	if p.hasFragment {
-		b.WriteString("#" + masked(p.fragment))
-	}
-	return b.String()
-}
-
-// masked is mask for a part that holds anything, and the empty part as it is.
-func masked(part string) string {
-	if part == "" {
-		return ""
-	}
-	return mask
-}
-
-// minHidden is the shortest piece hidden reports: a shorter one ("u", "v1") is a substring of
-// too many causes ("refused") to tell a repeat from chance, and withholding on it loses the
-// cause for nothing.
-const minHidden = 4
-
-// hidden is what URL hides of raw that a message could repeat: the userinfo (the whole opaque
-// value, for one split reads so) and each piece of it between separators, the query and each
-// of its values, and the fragment, as written and percent-decoded, each of at least minHidden
-// bytes.
-func hidden(raw string) []string {
-	p := split(readable(raw))
-	var out []string
-	add := func(s string) {
-		if len(s) < minHidden {
-			return
-		}
-		out = append(out, s)
-		if decoded := unescape(s); decoded != s && len(decoded) >= minHidden {
-			out = append(out, decoded)
-		}
-	}
-	if p.hasUser || p.opaque {
-		add(p.userinfo)
-		// Each piece between separators too, so a cause naming the host net/url read out of a
-		// token holding a '/' (a DNS lookup of it, say) is caught.
-		for _, piece := range strings.FieldsFunc(p.userinfo, func(r rune) bool { return strings.ContainsRune(":/?#@&=", r) }) {
-			add(piece)
-		}
-	}
-	add(p.query)
-	for pair := range strings.SplitSeq(p.query, "&") {
-		if _, value, ok := strings.Cut(pair, "="); ok {
-			add(value)
-		}
-	}
-	add(p.fragment)
-	return out
-}
-
-// withheld stands in for the error a *url.Error wraps when that error's text could repeat part
-// of the URL: its text says only why, and it unwraps to the original, so errors.Is and errors.As
-// still classify the failure.
-type withheld struct {
+// classified is an error whose text is its class alone.
+type classified struct {
 	text string
 	err  error
 }
 
-func (w withheld) Error() string { return w.text }
-func (w withheld) Unwrap() error { return w.err }
+func (c *classified) Error() string { return c.text }
+func (c *classified) Unwrap() error { return c.err }
 
-// Timeout and Temporary answer as the withheld error does, since (*url.Error).Timeout and
-// Temporary ask the error they wrap directly, not through Unwrap.
-func (w withheld) Timeout() bool {
-	t, ok := w.err.(interface{ Timeout() bool })
-	return ok && t.Timeout()
-}
-
-func (w withheld) Temporary() bool {
-	t, ok := w.err.(interface{ Temporary() bool })
-	return ok && t.Temporary()
-}
-
-// Error is err with the URL of the *url.Error it holds (net/http's and net/url's errors name the
-// URL they were given; net/http masks a password as "***" but prints the user name and the
-// query) printed through URL, and that error's own cause withheld when its text could repeat a
-// credential: always for a URL that did not parse (its cause quotes the part it could not read,
-// a bad escape in a password among them), which then reads "not a valid URL", and for any other
-// cause whose text names a part URL hides (a scheme-less value whose user name net/url read as a
-// scheme, say). It changes err in place and returns it; an err holding no *url.Error is returned
-// as it is.
-func Error(err error) error {
+// class names the kind of failure err is, in fixed text.
+func class(err error) string {
 	var ue *url.Error
-	if !errors.As(err, &ue) {
-		return err
+	var dns *net.DNSError
+	var timeout interface{ Timeout() bool }
+	var re *oauth2.RetrieveError
+	switch {
+	case errors.As(err, &ue) && ue.Op == "parse":
+		return "not a valid URL"
+	case errors.As(err, &dns):
+		return "name resolution failed"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "connection refused"
+	case errors.Is(err, context.DeadlineExceeded) || errors.As(err, &timeout) && timeout.Timeout():
+		return "timed out"
+	case tlsFailure(err):
+		return "TLS failed"
+	case errors.As(err, &re) && re.Response != nil:
+		return fmt.Sprintf("the broker answered HTTP %d", re.Response.StatusCode)
+	default:
+		return "the request failed"
 	}
-	raw := ue.URL
-	ue.URL = URL(raw)
-	if _, done := ue.Err.(withheld); done || ue.Err == nil {
-		return err
-	}
-	if ue.Op == "parse" {
-		ue.Err = withheld{"not a valid URL", ue.Err}
-		return err
-	}
-	text := ue.Err.Error()
-	for _, part := range hidden(raw) {
-		if strings.Contains(text, part) {
-			ue.Err = withheld{"(withheld: it repeats a part of the URL that can carry a credential)", ue.Err}
-			break
-		}
-	}
-	return err
+}
+
+// tlsFailure reports whether err is a TLS record, alert or certificate failure.
+func tlsFailure(err error) bool {
+	var record tls.RecordHeaderError
+	var alert tls.AlertError
+	var verify *tls.CertificateVerificationError
+	var authority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	return errors.As(err, &record) || errors.As(err, &alert) || errors.As(err, &verify) ||
+		errors.As(err, &authority) || errors.As(err, &hostname) || errors.As(err, &invalid)
 }

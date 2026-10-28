@@ -61,10 +61,9 @@ func brokerSource(base string) source {
 	return source{host: brokerHost(base)}
 }
 
-// brokerHost is base's host and port. A URL without a host (a bare host:port, say) is named
-// whole, so the source always says which broker the command was pointed at, even one pointed at
-// a value no URL parser reads; either way through redact.URL, so a credential in the variable
-// never prints.
+// brokerHost is base's host and port when redact.URL prints base, and redact.NotPrinted when it
+// does not (user info, a query, an escape, no http(s) scheme, anything its allow-list does not
+// prove clean), so a credential in the variable never prints.
 func brokerHost(base string) string {
 	base = redact.URL(strings.TrimSuffix(base, "/"))
 	parsed, err := url.Parse(base)

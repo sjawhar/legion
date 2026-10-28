@@ -39,6 +39,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 const (
@@ -196,21 +197,24 @@ func TestATokenFileItCannotUseSendsNothing(t *testing.T) {
 }
 
 // TestABrokerItCannotReachNamesNoCredentialTheURLCarries: devrelay's refusal for a broker that
-// never answers, or a --broker URL that does not parse, names the address with no user name,
-// password, query or bad escape the URL carries.
+// never answers, or a --broker URL that does not parse, names a URL redact.URL will not print as
+// redact.NotPrinted with the failure's class alone, and a clean URL as net/http wrote it.
 func TestABrokerItCannotReachNamesNoCredentialTheURLCarries(t *testing.T) {
 	token := tokenFile(t, "caller-token")
+	np := `"` + redact.NotPrinted + `": `
 	for _, row := range []struct{ base, want string }{
-		{"http://tokuser9f3:hunter2pw@127.0.0.1:1", `"http://xxxxx@127.0.0.1:1/`},
-		{"http://127.0.0.1:1/?token=qtok77", `"http://127.0.0.1:1/?xxxxx"`},
-		{"http://tokuser9f3:hunter2pw%zz@127.0.0.1:1", `not a valid URL`},
+		{"http://127.0.0.1:1", `Post "http://127.0.0.1:1/v1/credential-requests/record-1/approve": dial tcp 127.0.0.1:1: connect: connection refused`},
+		{"http://tokuser9f3:hunter2pw@127.0.0.1:1", np + "connection refused"},
+		{"http://127.0.0.1:1/?token=qtok77", np + "connection refused"},
+		{"http://tokuser9f3:hunter2pw%zz@127.0.0.1:1", np + "not a valid URL"},
+		{"http://ada@corp.example:hunter2pw%40127.0.0.1:1", np + "not a valid URL"},
 	} {
 		var stdout, stderr bytes.Buffer
 		code := run([]string{"approve", "--record", "record-1", "--broker", row.base, "--account-token-file", token, "--login", testApprover}, &stdout, &stderr)
 		if code != 1 || !strings.Contains(stderr.String(), row.want) {
 			t.Errorf("--broker %s: exit %d, stderr %q; want 1 naming %s", row.base, code, stderr.String(), row.want)
 		}
-		for _, secret := range []string{"tokuser9f3", "hunter2pw", "qtok77", "%zz"} {
+		for _, secret := range []string{"tokuser9f3", "hunter2pw", "qtok77", "%zz", "ada@corp"} {
 			if strings.Contains(stdout.String()+stderr.String(), secret) {
 				t.Errorf("--broker %s: output %q names %q", row.base, stdout.String()+stderr.String(), secret)
 			}
