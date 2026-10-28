@@ -2,65 +2,37 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-589",
-  "completed": "2026-10-28T13:35:00Z",
-  "round": 7,
-  "headTested": "945d99405cdbb1813991459bdded807435b52ac2 (code head 5edd1f88; meta.json build_commit 945d9940, build_dirty false)",
-  "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion issue pod, LOADTEST_ROOT=/legion/scratch/tmp/lt-tester (ports 25432-29120). The seed is at migration 134, this build's level, so I did not reseed. box_busy_before was 0.7-1.4%. The stack is stopped.",
+  "completed": "2026-10-28T13:55:00Z",
+  "round": 8,
+  "headTested": "405dfe703a15e99c73e329d7ce3a07a86c8ec1dd (code head 8530db16; meta.json build_commit 405dfe70, build_dirty false)",
+  "surface": "The branch diff, and the packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion issue pod: LOADTEST_ROOT=/legion/scratch/tmp/lt-tester (ports 25432-29120), seed at migration 134, box_busy_before 1.0%. The stack is stopped.",
+  "scope": "8530db16 changes comments, README.md prose, the header comments of the route-mix file built into the binary, and the changelog fragment's name. I checked that no non-comment line of a .go, .sh or .txt file changed. Behaviour was proven in round 7 at 945d9940, so this round re-checked the key search and ran one smoke step, which also proves the edited route-mix file still parses.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I drove the round-3 review fixes live. Two waiters at once on a hidden holder: neither named the other. A record from another PID namespace whose pid runs here: refused as not visible. A foreign run with a random password in the userinfo of all six URLs plus both real tokens: no secret in any of its files. NATS killed mid-step: rates come from the reads that worked, and failed reads are counted. I re-ran smoke, 1x, routes-alt, a 60 s series and the negative controls. The round-4 red test now lives in tables_test.go with its three assertions unchanged and new ones added. run-step.test.sh changed only in a comment that dropped an issue key. Both moves were what the reviewer asked for."
+    "how": "Re-ran the implementer's key search over the branch's added lines outside .legion/: 3 matches, all the {key_ref} placeholder (README.md:456, routes-2026-10-26-1719Z.txt:15, routes.go:148). Read the fragment: pr2369-Added-20261028-133210.yaml, Issue: pr2369. Ran a smoke step at this head."
   },
-  "failures": [
-    {
-      "criterion": "Text this branch adds outside .legion/ carries no Dispatch issue key, because the squash merge puts it on main (INFRA-514 architect's ruling from the controller: dispatch://INFRA-589/comment/97c87173-c8c1-4150-a2e2-32c210b081b1, dispatch://INFRA-589/comment/f739a13e-098d-4f25-b53f-dfec5e9796cd, and the architect's Envoy message of 12:49:48Z for this round). The changelog fragment's file name and Issue field carry the pull request number (pr2369), never a key. A template placeholder such as '{key_ref}: dispatch://<key>' is code syntax and stays.",
-      "evidence": "cd \"$LEGION_WORKSPACE\" && grep -rnE 'INFRA-[0-9]+|\\bLINUX\\b' packages/envoy/loadtest packages/envoy/.changes/unreleased/ finds 19 lines at head 945d9940. (1) packages/envoy/.changes/unreleased/INFRA-589-load-test-harness.yaml: the file name, and line 5 'Issue: INFRA-589'. Round 6 had it as pr2369-Added-20261028-102101.yaml; commit 5edd1f88 renamed it to the key. It must be pr2369-*, with Issue: pr2369, made with `go run github.com/miniscruff/changie@v1.26.0 new --custom Issue=pr2369`. (2) packages/envoy/loadtest/README.md, 14 lines: 8, 10, 11, 13, 417, 438, 474, 499, 714, 815, 873, 885, 888, 890 (dispatch:// links to INFRA-514, -512, -589, -324, -591, -598, and INFRA-<n> names). Its line 458, '`{key_ref}`: `dispatch://<key>`', is the placeholder and stays. (3) packages/envoy/loadtest/common.test.sh:7 'INFRA-589 review of PR #2369'. (4) packages/envoy/loadtest/events.go:46 and :50 ('INFRA-512 report', 'INFRA-512's counts for LINUX'; LINUX is a Dispatch project key). (5) packages/envoy/loadtest/routes-2026-10-26-1719Z.txt:4 'dispatch://INFRA-324/comment/...'; its line 15 placeholder 'dispatch://<key>' stays. No commit subject since the 10:13Z ruling carries a key (36f305c0, d32d754f, 5edd1f88). No red test in the suite: the repository's test rules exclude tests of document wording, and the deployment instructions forbid checks of committed text. The next round's check is the same grep, expecting no match (the placeholder lines hold no key)."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "Review round 3, findings 1 and 2: a waiter never names another waiter as the holder; a record from another PID namespace whose pid runs here is refused as not visible, not as that local pid",
-      "surface": "common.sh lock_root, as run-step.sh, run-series.sh and stack.sh call it, on a scratch root",
-      "command": "a helper holds <root>/.run.lock on fd 8 with a record 'pid=999999 pidns=pid:[4026539999]'; two lock_root callers start at once; then a record naming this shell's live pid with a foreign pidns, lock held; then the same after the helper ends",
-      "observed": "both waiters exit 1 with 'is locked by a process that is not visible in this PID namespace ... the lock file names that run as pid=999999 in PID namespace pid:[4026539999] ... Do not remove .../.run.lock'; neither refusal names the other waiter (0 matches for either caller's command). The foreign-pidns record with a live local pid: exit 1, refused as not visible, naming the record's pid only as 'in PID namespace pid:[4026539999]'. After the helper ended, the next caller took the lock",
-      "headSha": "945d99405cdbb1813991459bdded807435b52ac2",
-      "negativeControl": "with the lock no longer held, the stale record does not block: lock_root takes the lock"
+      "criterion": "Tester round-7 failure: text this branch adds outside .legion/ carries no Dispatch issue key, project key or dispatch:// link, apart from the {key_ref} placeholder; the changelog fragment names the pull request",
+      "surface": "the branch diff against main (what the squash merge puts on main)",
+      "command": "jj diff --from 'fork_point(main@origin | @-)' --to @- --git '~.legion' | grep '^+' | grep -v '^+++' | grep -cE 'INFRA-[0-9]+|\\bLINUX\\b|dispatch://'; grep -rnE 'INFRA-[0-9]+|\\bLINUX\\b|dispatch://' packages/envoy/loadtest packages/envoy/.changes/unreleased/; ls packages/envoy/.changes/unreleased/",
+      "observed": "3 added lines match, all the placeholder: README.md:456 '`{key_ref}`: `dispatch://<key>`', routes-2026-10-26-1719Z.txt:15 '(URL-escaped dispatch://<key>)', routes.go:148 'url.QueryEscape(\"dispatch://\"+is.Key)'. Fragment pr2369-Added-20261028-133210.yaml with kind Added and Issue: pr2369; INFRA-589-load-test-harness.yaml is gone. The new commit subject carries no key. No non-comment line of a loadtest .go, .sh or .txt file changed in 8530db16.",
+      "headSha": "405dfe703a15e99c73e329d7ce3a07a86c8ec1dd",
+      "negativeControl": "at round 7's head 945d9940 the same search found 19 lines, including the fragment's 'Issue: INFRA-589'"
     },
     {
-      "criterion": "Review round 3, finding 4: no step file or output holds a URL password or a token",
-      "surface": "stack.sh loadgen run -allow-foreign and loadgen tables on the real stack",
-      "command": "stack.sh reset; stack.sh loadgen run -allow-foreign with 'u:<random pw>@' in -url, -listener, -nats, -nats-mon, -pprof and 'postgres:<pw>@' in -pg, the stack's real -token and --listener-token=, -name foreign-pw ...; loadgen tables; grep -caF the password and both tokens over every step file, stdout, stderr and the tables output; then -pg with user nouser and the password",
-      "observed": "foreign-pw rc 0; 0 of 18 files hold any of the three secrets; meta.json args '-token=<redacted>', '-listener-token=<redacted>', '-url=http://u@127.0.0.1:28777', '-pg=postgres://postgres@127.0.0.1:25432/dispatch?sslmode=disable'; 25 of 31 writes committed, 6 non-2xx (the -url userinfo goes out as Basic auth on person writes, counted as non-2xx). foreign-badpg rc 1: 'the run's commit rows were not read ... failed to connect to `user=nouser database=dispatch` ...', with no password in its output or files",
-      "headSha": "945d99405cdbb1813991459bdded807435b52ac2",
-      "negativeControl": "-allow-foreign -url $DISPATCH_URL -listener $ENVOY_URL (production, the party the guard must refuse) with the stack's tokens: rc 1, 'answered 401', events max id 10004 before and after"
-    },
-    {
-      "criterion": "Review round 3, finding 3: no NATS rate comes from a failed read",
-      "surface": "run-step.sh on the real stack",
-      "command": "run-step.sh nats-killed-r7 --events 1 --sessions 20 --requests 5 --duration 60s; kill -KILL <stack.json pids.nats> 50 s into the window",
-      "observed": "EXIT=1 'nats (pid 56195) exited during the step ...'; resources.nats_in_msgs_per_s 4.95 and nats_out_msgs_per_s 8.15 (positive, from the reads that worked), nats_read_errors 8; row 'nats-killed-r7 (nats exited)'; README states that no column shows the NATS reads",
-      "headSha": "945d99405cdbb1813991459bdded807435b52ac2",
-      "negativeControl": "smoke-r7 and step-1x-r7: nats_read_errors 0, in/out 10.5/22.1 and 17.9/38.8 msgs/s; every series step nats_read_errors 0"
-    },
-    {
-      "criterion": "A1/A3 and A4 at this head",
+      "criterion": "A1/A3 and A5 still hold after the wording change, including the edited default route-mix file, which is built into the binary",
       "surface": "packages/envoy/loadtest CLI",
-      "command": "run-step.sh smoke-r7 --events 2 --sessions 50 --requests 10 --duration 90s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20; run-step.sh step-1x-r7 --events 4 --sessions 400 --requests 60",
-      "observed": "smoke-r7 exit 0: 29/29, 30/30, 30/30, 50/50, 34/34, receipts 865/865, delivery p50/p99 from arrival 398/2,278 ms, from commit 37/497, clock_anomalies 0, all read-error counts 0, no mark. step-1x-r7 exit 0: lock held 100%, waiters p50 45, 1.80 of 3.99 events/s, 1,620/1,620 receipts",
-      "headSha": "945d99405cdbb1813991459bdded807435b52ac2",
-      "negativeControl": "route mix POST on line 3 -> refused naming line 3, exit 1; --event-mix comment=50,bogus=10 -> '\"bogus\" is not a kind', exit 1"
-    },
-    {
-      "criterion": "A2, A5, A6 at this head",
-      "surface": "same; README.md",
-      "command": "run-series.sh --duration 60s; run-step.sh routes-alt-r7 --events 0 --sessions 20 --requests 5 --duration 60s --route-mix <'1 other agent GET /api/v1/projects'>; every header of the series and smoke-r7 TABLES.md searched in backticks in README.md",
-      "observed": "series-20261028T131020Z exit 0, six steps on build 945d9940, each with summary.json, TABLES.md, cpu.pprof, heap.pprof, 8 tables, 1x held 100% at 2.05 events/s, no commits_error, nats_read_errors 0; routes ['other GET /api/v1/projects'], 294/294 2xx, events offered 0; 47 headers, 0 missing",
-      "headSha": "945d99405cdbb1813991459bdded807435b52ac2",
-      "negativeControl": "the series' step-0.25x: 0.67 of 0.67 events/s committed at the 60 s window, lock held 25%"
+      "command": "run-step.sh smoke-r8 --events 2 --sessions 50 --requests 10 --duration 90s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20; README header search",
+      "observed": "exit 0; 29/29, 30/30, 30/30, 50/50, 34/34 committed/offered, receipts 865/865, clock_anomalies 0, all read-error counts 0; route mix 'routes-2026-10-26-1719Z.txt (embedded)' with 18 routes, 899/899 2xx; 47 table headers all defined in README.md",
+      "headSha": "405dfe703a15e99c73e329d7ce3a07a86c8ec1dd",
+      "negativeControl": "the route-mix parser refuses a bad file before any request (round 7 at 945d9940: POST on line 3 refused, exit 1); this round's file has only comment changes, and the run read all 18 routes"
     }
   ],
   "observations": [
-    "CI at code head 5edd1f88 when read: changes, lint, typecheck success; test in progress; pr-title queued; envoy-go, envoy-e2e-local, envoy-smoke queued. GitHub reports MERGEABLE at 945d9940.",
-    "The lock refusal's prefix is the calling script's name (common.sh die uses ${0##*/}), so my scratch harness's bash -c callers read 'bash:'. run-step.sh, run-series.sh and stack.sh name themselves."
+    "Wording only, for the reviewer: README.md lines 886-888 and 889-891, edited this round, break onto short lines ('document-room sampler', 'into this package, so that'), where the README elsewhere wraps at 100 characters.",
+    "CI at code head 8530db16 when read: changes, lint, typecheck, test and pr-title queued. GitHub reports MERGEABLE."
   ]
 }
