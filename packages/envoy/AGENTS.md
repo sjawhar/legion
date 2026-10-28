@@ -2159,6 +2159,10 @@ An edit of an ask whose body breaks its content rule (`pmdoc.AskContentError`) i
 unless it sends `options`, which rebuilds the options as one list and so repairs the ask; the
 reason is the content rule's text plus "send options to rebuild the options as one list". Before,
 an edit naming only `urgency` or `multiple` wrote the options joined across both lists to the row.
+An ask holding a non-list block after its first list (a paragraph after its options) is refused
+whatever the edit sends, `options` included (`refuseAskContentEdit` in `docs/ask_block_text.go`):
+the reason quotes that block's text and says the route will neither move it into the question nor
+delete it - move it above the options or delete it with a document edit, then edit the ask.
 Settlement retracts an ask whose block left the document in its own name,
 `{kind: "system", id: "document-settlement"}`, and restores only a retraction it wrote - a
 person's or a session's retract stands however the document moves, which is why `resolve`

@@ -50,7 +50,9 @@ trigger goes away. Then look for input that is now lost without any error.
   heading, pasted or imported, with all its text. The headless default mode now runs the same
   check after `remarkTypedBlocks` (`remarkUnfitTypedBlocks`), and the live editor runs it after
   the mark plugins (`liveTypedBlocksRemarkPlugin` in `src/lib.ts`, since INFRA-624 the read-only
-  drawing over the editor's schema); `packages/dispatch/e2e/typed-block-content-rule.e2e.ts`
+  parse's drawing decision, `remarkDecideTypedBlocks` with the shared `acceptedTypedBlock`, against
+  the editor's schema, keeping the `server` attributes that `remarkReadOnlyDirectives` drops);
+  `packages/dispatch/e2e/typed-block-content-rule.e2e.ts`
   pastes the block in a browser and keeps every word.
 - The tester's red test (commit `ee272bb6`) used an ask that holds a list and then an unknown
   `:::note`. Round 1's read-only parse rendered only `Lead` from it. Round 1's unit tests used a

@@ -4,7 +4,9 @@ body: |-
     refuses, with HTTP 400 `ASK_BLOCK_TEXT`, an edit of a decision that breaks its
     content rule, unless the edit sends `options`, which rebuilds them as one list and repairs the
     ask. Before, an edit of only its urgency or `multiple` wrote its options, joined across both
-    lists, to the ask.
+    lists, to the ask. A decision holding a paragraph after its options is refused whatever the
+    edit sends, `options` included, and the reason quotes that text: the route never moves it into
+    the question nor deletes it, so a document edit moves or deletes it first.
 time: 2026-10-28T10:53:52.572551815Z
 custom:
     Issue: pr2433

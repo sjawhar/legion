@@ -65,7 +65,9 @@ a parse that never threw for content (the editor's default mode) drops the block
 
 **Note 2026-10-27 (INFRA-624):** `unfitTypedBlocksRemarkPlugin` is gone. The live editor's step is
 now `liveTypedBlocksRemarkPlugin` in `packages/proof-editor/src/read-only-directives.ts`,
-`remarkReadOnlyDirectives` over the editor's schema (read on the first parse), still registered in
+which makes the read-only parse's drawing decision (`remarkDecideTypedBlocks` with the shared
+`acceptedTypedBlock`) against the editor's schema (read on the first parse) and keeps the `server`
+attributes, which `remarkReadOnlyDirectives` drops. It is still registered in
 `src/lib.ts` right after `remarkDispatchMarksPlugin`, and in place of `typedBlockRemarkPlugin` too,
 so the live editor also draws a container directive the block schema refuses as its lines rather
 than throwing. The ordering lock is now the test "the live editor decides typed blocks after the
