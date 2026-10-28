@@ -1867,9 +1867,8 @@ func snapshotAndCommitVersion(t *testing.T, service *Service, artifactID string,
 }
 
 // settleCurrentGeneration runs the room's settlement at its current generation once every live
-// update is durable. ygo persists live updates on its own worker, and a settlement that still
-// finds one queued defers itself to a retry timer instead of settling, so a caller that asserts on
-// the settlement's writes must not start it until that queue is empty.
+// update is durable, so it meets a room the room's own persistence has caught up with, as a
+// settlement after a quiet settle delay does; settleNow settles the room as it stands.
 func settleCurrentGeneration(t *testing.T, service *Service, artifactID string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1880,6 +1879,16 @@ func settleCurrentGeneration(t *testing.T, service *Service, artifactID string) 
 	if err := service.waitForDurableAppends(ctx, artifactID); err != nil {
 		t.Fatalf("wait for live updates to become durable: %v", err)
 	}
+	state := service.room(artifactID)
+	state.mu.Lock()
+	generation := state.roomGeneration
+	state.mu.Unlock()
+	service.settleRoom(artifactID, generation)
+}
+
+// settleNow runs the room's settlement at its current generation at once, whatever the room has not
+// stored yet: the settlement stores the room's updates through the point it reads it at itself.
+func settleNow(service *Service, artifactID string) {
 	state := service.room(artifactID)
 	state.mu.Lock()
 	generation := state.roomGeneration

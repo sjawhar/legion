@@ -1,7 +1,9 @@
 package docs
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"weak"
@@ -9,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
+
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 // A room's updates are stored in the order the room committed them (INFRA-707). The room's update
@@ -36,20 +40,29 @@ type roomPoint struct {
 // settlement, as their update observers would have. The caller holds no state lock and is not
 // inside a Yjs transaction on live.
 func (s *Service) readPoint(room string, live *crdt.Doc) ([]byte, roomPoint, error) {
+	state, point, settles, err := s.readPointQuietly(room, live)
+	if settles {
+		s.scheduleSettle(room)
+	}
+	return state, point, err
+}
+
+// readPointQuietly is readPoint for a settlement's own read of the room, which arms no settlement
+// for the updates it classified and reports instead whether any is one a settlement follows: the
+// settlement reading them is the one they would arm, and arming another moves the room's
+// generation under it, which ends it as superseded.
+func (s *Service) readPointQuietly(room string, live *crdt.Doc) ([]byte, roomPoint, bool, error) {
 	if live == nil {
-		return nil, roomPoint{}, errDocUnloaded
+		return nil, roomPoint{}, false, errDocUnloaded
 	}
 	point := roomPoint{cursor: s.cursorOf(live)}
 	replica := s.liveReplica(live)
 	if replica == nil {
-		return crdt.EncodeStateAsUpdateV1(live, nil), point, nil
+		return crdt.EncodeStateAsUpdateV1(live, nil), point, false, nil
 	}
 	state, seq, settles, _ := replica.readPoint(room, live, replica.classify)
-	if settles {
-		s.scheduleSettle(room)
-	}
 	point.seq = seq
-	return state, point, nil
+	return state, point, settles, nil
 }
 
 // liveReplica is the replica the update observer of live, a room's resident document, keeps, nil
@@ -59,6 +72,15 @@ func (s *Service) liveReplica(live *crdt.Doc) *renderedReplica {
 		return listed.(weak.Pointer[renderedReplica]).Value()
 	}
 	return nil
+}
+
+// stateTree is the tree of state, a room's state as a read point copied it (readPoint).
+func stateTree(state []byte) (*pmdoc.Node, error) {
+	doc := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
+		return nil, fmt.Errorf("decode the room's read state: %w", err)
+	}
+	return treeOf(doc)
 }
 
 // committedSince reports whether live, the room document resident for room, has committed anything
@@ -84,10 +106,12 @@ func (s *Service) committedSince(room string, live *crdt.Doc, point roomPoint) b
 
 // roomFlush is what one transaction's flushThrough calls stored of one room instance, the one
 // cursor names: the classes, in commit order, with the version each was appended at, the class it
-// was stored with (changed) and the credit its append took (credits; storedClasses). state is the
-// record whose queue the classes were last taken from, which a joined transaction's commit holds
-// locked while it commits and marks them (commitConsuming). through is the position through which
-// the transaction has stored every unstored durable class, once ran is set.
+// was stored with (changed) and the credit its append took (credits; storedClasses). repairs are
+// the versions of the repairs a settlement wrote into the instance and stored between its flushes
+// (storeRepair). state is the record whose queue the classes were last taken from, which a joined
+// transaction's commit holds locked while it commits and marks them (commitConsuming). through is
+// the position through which the transaction has stored every unstored durable class, once ran is
+// set.
 type roomFlush struct {
 	room     string
 	cursor   *roomCursor
@@ -98,13 +122,26 @@ type roomFlush struct {
 	versions []persistence.Version
 	changed  []bool
 	credits  []*UpdateCredit
+	repairs  []persistence.Version
+}
+
+// appended is every version the flush's transaction appended for the instance, ascending: the room
+// updates it flushed and the repairs it stored between them.
+func (f *roomFlush) appended() []persistence.Version {
+	if len(f.repairs) == 0 {
+		return f.versions
+	}
+	appended := slices.Concat(f.versions, f.repairs)
+	slices.Sort(appended)
+	return appended
 }
 
 // heldThrough is the durable version the flushed instance holds every update through as the
-// flush's transaction sees it: the instance's cursor with the versions the flush has appended
-// folded in, which gates each next append of the flush (appendingCursor).
+// flush's transaction sees it: the instance's cursor with the versions the transaction has
+// appended for it folded in (appended), which gates each next append of the flush
+// (appendingCursor).
 func (f *roomFlush) heldThrough() int64 {
-	return foldAppended(f.cursor.heldThrough(), f.versions)
+	return foldAppended(f.cursor.heldThrough(), f.appended())
 }
 
 // storedContentChange reports whether f stored an update as a change to the document's content,
@@ -260,12 +297,90 @@ func (l *Ledger) flushRead(ctx context.Context, write *liveWrite) error {
 	return l.flushThrough(ctx, l.tx, write.artifactID, write.point)
 }
 
-// flushFor is the flush this transaction keeps for room, nil while it has flushed nothing of it.
+// flushFor is the flush this transaction keeps for room, nil while it has flushed nothing of it
+// and for no transaction at all.
 func (l *Ledger) flushFor(room string) *roomFlush {
+	if l == nil {
+		return nil
+	}
 	for _, flush := range l.flushes {
 		if flush.room == room {
 			return flush
 		}
 	}
 	return nil
+}
+
+// storeRead stores, in l's transaction, every update of room through point, a read point of it
+// (readPoint), that no writer has stored yet (flushThrough): what a version written without a write
+// of its own - a settlement's, a snapshot's, a named version's - does before it records the room's
+// state at point (window C). The stored updates then fold to that state, so the head after them,
+// which the version records as its doc_update_version, holds every update its text does. A point
+// of no room instance stores nothing: no update of it was recorded. The caller holds the
+// document's advisory lock in tx from before point was read.
+func (l *Ledger) storeRead(ctx context.Context, tx pgx.Tx, room string, point roomPoint) error {
+	if point.cursor == nil {
+		return nil
+	}
+	return l.flushThrough(ctx, tx, room, point)
+}
+
+// errUnclassifiedRepair refuses to store a repair whose commit position in its room is unknown:
+// the room's update observer recorded no class for it (classifyDrained).
+var errUnclassifiedRepair = errors.New("the room recorded no class for a repair written into it")
+
+// storeRepair stores, in l's transaction, update, a repair a settlement wrote into the room
+// instance cursor names (applySuppressed), at its place in the room's commit order: every update
+// the room committed before it that no writer has stored first (flushThrough), then the repair,
+// with the class the room measured for it (repairClass). Stored ahead of those updates, the repair
+// would sit before updates made without it, and they after it. Its version joins the flush's
+// (roomFlush.repairs), which gate the transaction's later appends and which the instance takes in
+// just before the settlement commits (commitSettlement): a settlement can still end without
+// committing - its room closed under it - and the room's persistence then stores the room's
+// updates against the head the store still stands at.
+func (l *Ledger) storeRepair(ctx context.Context, tx pgx.Tx, room string, cursor *roomCursor, update []byte) error {
+	seq, changed, err := l.service.repairClass(room, cursor, update)
+	if err != nil {
+		return err
+	}
+	if err := l.flushThrough(ctx, tx, room, roomPoint{cursor: cursor, seq: seq - 1}); err != nil {
+		return err
+	}
+	version, err := l.service.persistence.AppendUpdateTx(ctx, tx, room, update, changed)
+	if err != nil {
+		return err
+	}
+	flush := l.flushFor(room)
+	flush.repairs = append(flush.repairs, version)
+	return nil
+}
+
+// repairClass is the commit position the room's update observer recorded for update, a repair
+// written into the instance cursor names, and whether it changed the rendered markdown: the class
+// the observer measured against the room as the commit before it left it (classifyDrained), which
+// is the state the stored updates before the repair fold to once they are stored in commit order.
+// A repair inside the window of the room's shadow is measured on the shadow, as each update stored
+// after a live write it was made without is (storedClasses). The observer runs on the repair's
+// committing goroutine before its Apply returns, so the class is queued by the time the repair's
+// writer asks.
+func (s *Service) repairClass(room string, cursor *roomCursor, update []byte) (uint64, bool, error) {
+	state := s.lockExistingState(room)
+	if state == nil {
+		return 0, false, errUnclassifiedRepair
+	}
+	var repair *queuedClass
+	for _, class := range state.updateClasses {
+		if !class.durable && class.cursor == cursor && bytes.Equal(class.update, update) {
+			repair = class
+		}
+	}
+	window := state.shadowWindowLocked()
+	s.unlockState(room, state)
+	if repair == nil {
+		return 0, false, errUnclassifiedRepair
+	}
+	if window.shadow != nil && window.provisional(cursor, repair.seq) {
+		return repair.seq, window.shadow.measure(room, repair, window.repairs), nil
+	}
+	return repair.seq, repair.contentChanged, nil
 }

@@ -1306,15 +1306,18 @@ func (s *Service) registerStampedAskBlocks(ctx context.Context, room string, sta
 }
 
 // captureLiveTextAndAuthors is the tree a version records and whom it lists, its authors taken
-// under the document's advisory lock and no later than it reads that tree. A transaction with a
-// write of its own versions that write's state (captureWrite). Without one, it takes the
-// document's locks in their order (see liveWrite) before anything else: the owner row and the
-// writer slot, the room loaded, then the advisory lock, which every write to the pending authors
-// and every in-flight credit's landing hold, so the authors it reads stay where it read them until
-// the version's transaction ends. It reads the room as of one moment under its document lock
-// (holdLive), after taking its authors under the room's state lock. A credit observed after the
-// take, for a change the version holds or not, stays pending for the next version (LEGION-503).
-// The room is taken inside the Apply that loads and as docTree reads it: a room looked up again
+// under the document's advisory lock. A transaction with a write of its own versions that write's
+// state (captureWrite). Without one, it takes the document's locks in their order (see liveWrite)
+// before anything else: the owner row and the writer slot, the room loaded, then the advisory lock,
+// which every write to the pending authors and every in-flight credit's landing hold, so the
+// authors it reads stay where it read them until the version's transaction ends. It reads the room
+// at an exact commit position (readPoint) and stores every update of the room through it that no
+// writer has stored yet before the version (Ledger.storeRead, window C), so the version's
+// doc_update_version, the head it reads in this transaction, holds every update its text does.
+// It lists the pending authors it reads after those appends, which wrote the authors of the
+// updates they stored, and the in-flight credits observed before its read: a credit observed
+// after, for a change the version does not hold, stays pending for the next version (LEGION-503).
+// The room is read inside the Apply that loads it, as docTree reads it: a room looked up again
 // once that Apply returned can have been evicted in between.
 //
 // A version is never rendered from a room behind the durable head (refuseRoomBehindHead): with two
@@ -1322,10 +1325,10 @@ func (s *Service) registerStampedAskBlocks(ctx context.Context, room string, sta
 // the version would record that update's cursor over text missing it, so no later settlement
 // would version those words (INFRA-218). A room found behind the head inside the Apply, under the
 // document's advisory lock this transaction holds, is versioned from the stored document instead,
-// as a write behind the head forks from it (coldFork). That holds no change still in flight in the
-// room, so the version lists none of the room's in-flight credits (withoutInflight): a credit whose
-// append lands later is owed then, and one whose append the gate refuses is credited again when
-// its browser resends the edit.
+// as a write behind the head forks from it (coldFork), and stores nothing of the room. That holds
+// no change still in flight in the room, so the version lists none of the room's in-flight credits
+// (withoutInflight): a credit whose append lands later is owed then, and one whose append the gate
+// refuses is credited again when its browser resends the edit.
 func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, actor *model.Actor) (renderedTree, authorCapture, error) {
 	tx, _ := txFromContext(ctx)
 	if write := joinedLiveWrite(ctx, room); write != nil {
@@ -1340,8 +1343,6 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	// The warmed-read hook deliberately evicts a loaded room in tests. It runs before this
 	// transaction takes the document lock: CloseRoom flushes a room's persistence, which may
 	// need that lock, so invoking it from the tree read while we hold the lock would be a cycle.
-	// The capture below takes the lock only after the hook returns, then reads R and F before
-	// it holds the current room's tree.
 	if s.afterReadWarm != nil {
 		s.afterReadWarm(room)
 	}
@@ -1350,19 +1351,21 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	}
 	// The head under the document's advisory lock, which this transaction holds from here to its
 	// end: every append, this process's own included, waits for it, so no room's cursor moves and
-	// the head stays where it is read.
+	// the head stays where it is read until this transaction's own appends move it.
 	head, err := currentUpdateCursor(ctx, tx, room)
 	if err != nil {
 		return renderedTree{}, authorCapture{}, err
 	}
-	capture, err := s.capturePendingAuthors(ctx, tx, room, nil, actor)
-	if err != nil {
-		return renderedTree{}, authorCapture{}, err
-	}
+	// An update observer credits a change only once the room holds it, so each in-flight credit
+	// observed by now is for a change the read below holds.
+	state := s.lockState(room)
+	through := state.creditSeq.Load()
+	s.unlockState(room, state)
 	if s.afterCaptureAuthorsTake != nil {
 		s.afterCaptureAuthorsTake(room)
 	}
-	var tree *pmdoc.Node
+	var read []byte
+	var point roomPoint
 	var readErr error
 	var behind bool
 	err = s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
@@ -1370,14 +1373,7 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 			behind = true
 			return
 		}
-		var doc *crdt.Doc
-		var release func()
-		doc, release, readErr = s.holdLive(room, live)
-		if readErr != nil {
-			return
-		}
-		defer release()
-		tree, readErr = treeOf(doc)
+		read, point, readErr = s.readPoint(room, live)
 	})
 	if readErr != nil {
 		return renderedTree{}, authorCapture{}, readErr
@@ -1385,11 +1381,21 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		return renderedTree{}, authorCapture{}, fmt.Errorf("warm live document: %w", err)
 	}
+	var tree *pmdoc.Node
+	if behind {
+		tree, err = s.storedTree(ctx, room)
+	} else if err = ledgerFrom(ctx).storeRead(ctx, tx, room, point); err == nil {
+		tree, err = stateTree(read)
+	}
+	if err != nil {
+		return renderedTree{}, authorCapture{}, err
+	}
+	capture, err := s.capturePendingAuthors(ctx, tx, room, nil, actor, through)
+	if err != nil {
+		return renderedTree{}, authorCapture{}, err
+	}
 	if behind {
 		capture = capture.withoutInflight(actor)
-		if tree, err = s.storedTree(ctx, room); err != nil {
-			return renderedTree{}, authorCapture{}, err
-		}
 	}
 	markdown, offsets, err := documentMarkdownWithOffsets(tree)
 	if err != nil {
@@ -1423,7 +1429,7 @@ func (s *Service) captureWrite(ctx context.Context, tx pgx.Tx, room string, writ
 	if err := ledgerFrom(ctx).flushRead(ctx, write); err != nil {
 		return renderedTree{}, authorCapture{}, fmt.Errorf("store the room's updates ahead of a version: %w", err)
 	}
-	capture, err := s.capturePendingAuthors(ctx, tx, room, write, actor)
+	capture, err := s.capturePendingAuthors(ctx, tx, room, write, actor, write.forkSeq)
 	if err != nil {
 		return renderedTree{}, authorCapture{}, err
 	}

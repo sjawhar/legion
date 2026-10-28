@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"runtime"
 	"slices"
 	"sync"
@@ -343,7 +344,8 @@ type roomCursor struct {
 //   - a live write's commit, for the versions its publish is about to apply to the room
 //     (Ledger.takeRoomCursors), and that publish itself (publishLiveUpdate), and a joined
 //     transaction's commit for the room updates it flushed (Ledger.takeRoomCursors);
-//   - settlement's own repair append, its superseded path included (settleRoomWithin);
+//   - a settlement's commit, for its repairs and the room updates it stored around them, its
+//     superseded path included (commitSettlement);
 //   - the block-id backfill's stamp (backfillBlockIDs).
 //
 // Only one of them records its version on a second instance as well: a live write's commit,
@@ -352,7 +354,7 @@ type roomCursor struct {
 // (Ledger.takeRoomCursors). That is sound there because the publish then applies the update to
 // that very room (publishLiveUpdate): the instance credited with the version ends up holding it.
 //
-// The repair appends - settlement's two and the backfill's - are the opposite case, and none of
+// The repair appends - a settlement's and the backfill's - are the opposite case, and none of
 // them calls tookResidentVersion. Their update is written into one room instance before it is
 // stored (applySuppressed), and nothing replays it into a room that loaded since: a room that
 // read the store before the repair committed does not hold the repair, so this advance must
@@ -444,7 +446,9 @@ func roomCursorFrom(ctx context.Context) *roomCursor {
 // own write to room when it has one, whose fork is what the write was made on; otherwise, for an
 // append flushThrough makes, the room instance its updates were made in with the versions the
 // flush has appended folded in (roomFlush); otherwise the room cursor its caller marked the
-// context with. Nil is an append no cursor gates.
+// context with, with the versions the caller's transaction has appended for that instance folded
+// in when it flushed the room (a settlement's repairs, storeRepair). Nil is an append no cursor
+// gates.
 //
 // A transaction's write decides for itself: a cold write, whose fork came from the store because
 // no room of this process held the document (coldFork), carries no cursor and is not gated. The
@@ -465,6 +469,9 @@ func appendingCursor(ctx context.Context, room string) documentCursor {
 		return flush
 	}
 	if cursor := roomCursorFrom(ctx); cursor != nil {
+		if flush := ledgerFrom(ctx).flushFor(room); flush != nil && flush.cursor == cursor {
+			return flush
+		}
 		return cursor
 	}
 	return nil
@@ -502,8 +509,9 @@ type uploadHold struct {
 
 // capturePendingAuthors reads R in tx, which holds the document's advisory lock, with the
 // document's latest person sender (readLastPerson), and takes whom a version lists
-// (captureAuthors) under room's state lock.
-func (s *Service) capturePendingAuthors(ctx context.Context, tx pgx.Tx, room string, write *liveWrite, actor *model.Actor) (authorCapture, error) {
+// (captureAuthors), with the in-flight credits observed through `through`, under room's state
+// lock.
+func (s *Service) capturePendingAuthors(ctx context.Context, tx pgx.Tx, room string, write *liveWrite, actor *model.Actor, through uint64) (authorCapture, error) {
 	owed, err := readPendingAuthors(ctx, tx, room)
 	if err != nil {
 		return authorCapture{}, err
@@ -514,17 +522,24 @@ func (s *Service) capturePendingAuthors(ctx context.Context, tx pgx.Tx, room str
 	}
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
-	return captureAuthors(state, owed, durableLatest, write, actor), nil
+	return captureAuthors(state, owed, durableLatest, write, actor, through), nil
 }
 
+// everyCredit bounds no in-flight credit: a capture through it takes every credit its room has
+// observed (captureAuthors).
+const everyCredit = math.MaxUint64
+
 // captureAuthors is whom a version lists: owed, the pending authors its transaction read under
-// the document's advisory lock; the room's in-flight credits no committed version has listed -
-// for a version of the calling transaction's own write, those observed by the write's read of the
-// room (liveWrite.forkSeq), whose changes its fork holds, and none for a fork read from the store;
-// the authors the calling transaction's own write records once it commits; and actor. The
-// version's commit deletes the pending authors it read and marks the in-flight credits it took
-// consumed (commitConsuming); a credit observed after this take, or after the write's read, is not
-// among them and stays pending for the next version. The caller holds state.mu.
+// the document's advisory lock; the room's in-flight credits no committed version has listed and
+// observed through `through`, a credit sequence (inflightCredit.seq) taken before the version read
+// the room, so each is for a change the version holds - for a version of the calling transaction's
+// own write, those observed by the write's read of the room (liveWrite.forkSeq), and none for a
+// fork read from the store; the authors the calling transaction's own write records once it
+// commits; and actor. The version's commit deletes the pending authors it read and marks the
+// in-flight credits it took consumed (commitConsuming); a credit observed after the bound is not
+// among them and stays pending for the next version, unless the version's transaction stored its
+// update (flushThrough), whose append wrote its authors to the pending authors read here. The
+// caller holds state.mu.
 //
 // It also names who made the document's latest change (authorCapture.latest), which is the sender
 // of the latest edit and never a name taken out of the credited set. Every edit this room
@@ -540,7 +555,7 @@ func (s *Service) capturePendingAuthors(ctx context.Context, tx pgx.Tx, room str
 // the in-flight credits within milliseconds, so the process that holds the room reads it as one
 // that never loaded the document does. actor, the version's writer, names nobody by itself: an
 // agent writing a named version over someone's edit did not make that edit.
-func captureAuthors(state *roomState, owed map[string]model.Actor, durableLatest *model.Actor, write *liveWrite, actor *model.Actor) authorCapture {
+func captureAuthors(state *roomState, owed map[string]model.Actor, durableLatest *model.Actor, write *liveWrite, actor *model.Actor, through uint64) authorCapture {
 	capture := authorCapture{
 		state:    state,
 		authors:  make(map[string]model.Actor, len(owed)+1),
@@ -549,10 +564,6 @@ func captureAuthors(state *roomState, owed map[string]model.Actor, durableLatest
 	for key, author := range owed {
 		capture.authors[key] = author
 		capture.rAuthors = append(capture.rAuthors, author)
-	}
-	through := state.creditSeq.Load()
-	if write != nil {
-		through = write.forkSeq
 	}
 	capture.inflight = state.unconsumedInflightLocked(through)
 	for _, record := range capture.inflight {
