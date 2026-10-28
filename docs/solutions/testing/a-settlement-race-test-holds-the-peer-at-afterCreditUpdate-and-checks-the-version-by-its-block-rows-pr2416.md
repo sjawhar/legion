@@ -33,7 +33,7 @@ module: packages/envoy/internal/dispatch/docs
 ## Evidence
 
 - With `beforeObserveUpdate`, both new tests wrote no version (`latest version = 2, want 3`).
-  With `afterCreditUpdate` they pass `-count=5 -race` (`settlement_render_once_test.go:44-51,111-115`;
+  With `afterCreditUpdate` they pass `-count=5 -race` (`settlement_render_once_test.go:44-51,110-115`;
   the hooks are documented at `service.go:161-174`).
 - Under the fix ranking's `len(slots) > 0`, the stamp test fails on the block rows: the pasted
   callout is still indexed under the id of the callout it copies. The markdown assertion would

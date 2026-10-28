@@ -24,9 +24,10 @@ module: packages/envoy/internal/dispatch/docs
   block and drops its repair from `repairs`, so `repairs` alone can end empty after the tree was
   touched. Count the list nothing shrinks as well (`rewrites`).
 - Write the invariant at the reuse site and in `packages/envoy/AGENTS.md`'s settlement paragraph.
-  Name the code paths that change the read and must keep it (`readSettlementTree`,
-  `sweepUnrecordedMarks`). No test enforces "only `reconcileAskBlocks` changes `read`". A new
-  in-place writer that is not recorded silently versions a stale tree.
+  Name where the read comes from (`readSettlementTree`, `liveTree`) and its one in-place writer
+  (`reconcileAskBlocks`, recorded by `changedTree`), as `service.go:1595-1598` and that paragraph
+  do, so a later change to the read path keeps it. No test enforces "only `reconcileAskBlocks`
+  changes `read`". A new in-place writer that is not recorded silently versions a stale tree.
 - Treat a reuse condition written in a parent issue's ranking or design note as a hypothesis.
   Check it against the code, and use the wrong condition as the negative control of your tests.
 

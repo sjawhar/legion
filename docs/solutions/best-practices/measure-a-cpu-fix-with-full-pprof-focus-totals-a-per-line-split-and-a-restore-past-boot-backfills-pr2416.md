@@ -31,11 +31,10 @@ module: packages/envoy
 ## Evidence
 
 - With `-nodecount=1`, the settlement's render row read 0.11-0.14 % of each base profile. With
-  `-nodecount=1000000` it read 3.29-3.33 %, matching the parent ranking's 3.42 % (PR #2416
-  evidence comment, W14 per run).
+  `-nodecount=1000000` it read 3.29-3.33 % (PR #2416 evidence comment, W14 per run).
 - `-lines -peek` over three profiles each: base 27.79 s at `service.go:1428` plus 27.09 s at the
   version render. Head 27.35 s at `:1429` and no samples at the version render (PR #2416 body).
 - Restored from the unwarmed seed dump, the first two runs measured the backfill of 1,137
-  documents: base 525.15, head 626.24 CPU-seconds, the head running more backfill passes. From
-  the warmed dump the six runs read base 567.90-576.00 and head 540.85-573.47 (PR #2416
-  evidence comment, "Departures").
+  documents: base 525.15, head 626.24 CPU-seconds (PR #2416 evidence comment, "Departures"). From
+  the warmed dump the six runs read base 567.90-576.00 and head 540.85-573.47 (the same
+  comment's table).
