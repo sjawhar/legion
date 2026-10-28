@@ -62,10 +62,11 @@ func TestSnapshotReusesTheTransactionsRenderedDocument(t *testing.T) {
 	}
 }
 
-// The reuse is only sound while the fork it was taken from still describes the document. A
-// browser update the room gains under the transaction moves that fork, and the snapshot must
-// render the moved document, not the rendering it cached before.
-func TestAForkThatGainsRoomContentIsRenderedAgain(t *testing.T) {
+// The reuse is sound because nothing moves the fork it was taken from but the transaction's own
+// operations: a browser update the room gains after the write read the document is not in the
+// transaction's version, which is the write's own state (captureWrite), and the settlement that
+// follows the write's publish versions it.
+func TestContentTheRoomGainsAfterAWritesReadIsVersionedAfterTheWrite(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
@@ -92,11 +93,15 @@ func TestAForkThatGainsRoomContentIsRenderedAgain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("capture live text: %v", err)
 	}
-	if !strings.Contains(markdown, "gained in the room") {
-		t.Fatalf("snapshot markdown = %q, want it to carry what the room gained", markdown)
+	if strings.Contains(markdown, "gained in the room") || !strings.Contains(markdown, "after") {
+		t.Fatalf("snapshot markdown = %q, want the transaction's own edit alone", markdown)
 	}
-	if !strings.Contains(markdown, "after") {
-		t.Fatalf("snapshot markdown = %q, want it to carry the transaction's own edit", markdown)
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit the joined edit: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if latest := latestVersionMarkdown(t, service, artifactID); !strings.Contains(latest, "gained in the room") || !strings.Contains(latest, "after") {
+		t.Fatalf("the settlement's version = %q, want what the room gained with the transaction's edit", latest)
 	}
 }
 
@@ -338,10 +343,10 @@ func boldBlock(t *testing.T, text string) func(*pmdoc.Node) *pmdoc.Node {
 	}
 }
 
-// A formatting change carries no new text, but it does change the canonical markdown the
-// version records, so the rendering cached from the fork before it no longer describes the
-// document.
-func TestAForkThatGainsRoomFormattingIsRenderedAgain(t *testing.T) {
+// A formatting change carries no new text, but it does change the canonical markdown a version
+// records. Made in the room after the write read the document, it is not in the transaction's
+// version, which is the write's own state, and the settlement that follows versions it.
+func TestFormattingTheRoomGainsAfterAWritesReadIsVersionedAfterTheWrite(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before\n\nplain paragraph")
@@ -368,10 +373,14 @@ func TestAForkThatGainsRoomFormattingIsRenderedAgain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("capture live text: %v", err)
 	}
-	if !strings.Contains(markdown, "**plain paragraph**") {
-		t.Fatalf("snapshot markdown = %q, want the browser's formatting", markdown)
+	if strings.Contains(markdown, "**plain paragraph**") || !strings.Contains(markdown, "after") {
+		t.Fatalf("snapshot markdown = %q, want the transaction's own edit without the browser's formatting", markdown)
 	}
-	if !strings.Contains(markdown, "after") {
-		t.Fatalf("snapshot markdown = %q, want it to carry the transaction's own edit", markdown)
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit the joined edit: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if latest := latestVersionMarkdown(t, service, artifactID); !strings.Contains(latest, "**plain paragraph**") || !strings.Contains(latest, "after") {
+		t.Fatalf("the settlement's version = %q, want the browser's formatting with the transaction's edit", latest)
 	}
 }

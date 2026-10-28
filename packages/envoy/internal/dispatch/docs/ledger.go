@@ -239,7 +239,7 @@ func (l *Ledger) takeRoomCursors() {
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
 		for _, version := range write.versions {
-			advances = append(advances, taken{cursor: write.forkCursor, version: version})
+			advances = append(advances, taken{cursor: write.point.cursor, version: version})
 		}
 	}
 	slices.SortStableFunc(advances, func(a, b taken) int { return cmp.Compare(a.version, b.version) })

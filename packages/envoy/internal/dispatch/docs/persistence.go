@@ -257,6 +257,19 @@ func lockDocumentRoom(ctx context.Context, tx pgx.Tx, room string) error {
 	return nil
 }
 
+// lockedHead takes the document's advisory lock in tx (lockDocumentRoom) and reads the durable
+// head under it, in that order and as one step: the head is then the one every append of tx meets,
+// since no other writer of the document appends while tx holds the lock. A transaction that must
+// hold the lock before it reads the document takes both here (readFork). They are two statements:
+// under read committed a statement reads the snapshot it started with, so a head read in the
+// lock's own statement could miss a commit the lock waited for.
+func lockedHead(ctx context.Context, tx pgx.Tx, room string) (int64, error) {
+	if err := lockDocumentRoom(ctx, tx, room); err != nil {
+		return 0, err
+	}
+	return currentUpdateCursor(ctx, tx, room)
+}
+
 func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err

@@ -139,13 +139,14 @@ type Service struct {
 	// afterCaptureAuthorsTake runs after a room-backed version capture takes its authors and before
 	// it copies the document. Nil outside tests; tests use it to edit the room in that window.
 	afterCaptureAuthorsTake func(room string)
-	// afterCaptureFork runs once a version's capture (captureLiveTextAndAuthors) has brought the
-	// calling transaction's fork up to date with the room, and before it renders the fork. Nil
+	// afterCaptureFork runs once a version's capture of the calling transaction's own write
+	// (captureWrite) has taken its authors and checked the write against what the room committed
+	// since the write read it (refuseLostWrite), and before it renders the write's fork. Nil
 	// outside tests; tests use it to edit the room in that window.
 	afterCaptureFork func(room string)
-	// afterForkRead runs once a write's fork has been brought up to date with the room
-	// (forkLive), before the write's operation runs on it. Nil outside tests; tests use it to edit
-	// the room after the fork read it.
+	// afterForkRead runs once a transaction's one read of a document has built its write's fork
+	// (forkLive), under the document's advisory lock, before the write's operation runs on it. Nil
+	// outside tests; tests use it to edit the room after the fork read it.
 	afterForkRead func(room string)
 	// afterSettleAuthorsTake runs after a settlement has taken its authors and before it copies
 	// the tree it will version. Nil outside tests; tests use it to edit the room in that window.

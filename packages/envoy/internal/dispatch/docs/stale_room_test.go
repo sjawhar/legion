@@ -1323,19 +1323,20 @@ func TestARoomWritesAgainAfterASupersededSettlementAppendsItsRepair(t *testing.T
 
 // A cold write is outside the gate: it holds no room, so nothing says the document it was made
 // on is behind the head. A browser that opens the document behind the write's store read and
-// types moves the head under it, and the write's own append still lands - its update is a Yjs
-// update, which commutes with the browser's, and the room that holds the document after the
-// publish holds both edits. Gated on the head its store read saw, the write answered 503 for a
-// conflict Yjs resolves (coldFork, appendingCursor).
-func TestAColdWriteAppendsAfterAnotherWriterMovedTheHead(t *testing.T) {
+// types reaches a room the write did not read; the browser's append waits on the advisory lock the
+// write holds from its read, so the head cannot move under the write, and the write's own append
+// lands, then the browser's - its update is a Yjs update, which commutes with the browser's, and
+// the room that holds the document after the publish holds both edits. Gated on that room, the
+// write would answer 503 for a conflict Yjs resolves (coldFork, appendingCursor).
+func TestAColdWriteAppendsUnderABrowserThatOpenedBehindItsRead(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
 	closeDocumentRoom(t, service, artifactID)
 	read := storedHead(t, service.store, artifactID)
 
-	// The browser opens the document behind the write's store read and types, and its append is
-	// durable before the write appends: the head the write meets is past the one it forked from.
+	// The browser opens the document behind the write's store read and types; its append queues
+	// behind the write's lock.
 	opened := false
 	service.afterForkRead = func(room string) {
 		if room != artifactID || opened || service.srv.GetDoc(artifactID) != nil {
@@ -1344,18 +1345,18 @@ func TestAColdWriteAppendsAfterAnotherWriterMovedTheHead(t *testing.T) {
 		opened = true
 		editAsConnectedPeer(t, service, artifactID, 1, model.Actor{Kind: "user", ID: "alice"},
 			appendBlocks(t, "Alice's paragraph.\n"))
-		waitForLandedAppends(t, service, artifactID)
 	}
 	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{
 		{Op: "insert", Markdown: "Agent's paragraph.", After: "Second."},
 	}, model.Actor{Kind: "session", ID: "agent-session"}, nil); err != nil {
-		t.Fatalf("a cold write whose head moved under it: %v", err)
+		t.Fatalf("a cold write under a browser that opened behind its read: %v", err)
 	}
 	if !opened {
-		t.Fatal("the write never read the store, so no head moved under it")
+		t.Fatal("the write never read the store, so no browser opened behind it")
 	}
+	waitForLandedAppends(t, service, artifactID)
 	if head := storedHead(t, service.store, artifactID); head <= read+1 {
-		t.Fatalf("the document's head is %d, want it past %d: the browser's append and the write's own", head, read+1)
+		t.Fatalf("the document's head is %d, want it past %d: the write's append and the browser's", head, read+1)
 	}
 	stored := storedMarkdown(t, service.store, artifactID)
 	for _, want := range []string{"Alice's paragraph.", "Agent's paragraph."} {

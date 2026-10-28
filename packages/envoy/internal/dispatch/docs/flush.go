@@ -40,10 +40,7 @@ func (s *Service) readPoint(room string, live *crdt.Doc) ([]byte, roomPoint, err
 		return nil, roomPoint{}, errDocUnloaded
 	}
 	point := roomPoint{cursor: s.cursorOf(live)}
-	var replica *renderedReplica
-	if listed, ok := s.replicas.Load(weak.Make(live)); ok {
-		replica = listed.(weak.Pointer[renderedReplica]).Value()
-	}
+	replica := s.liveReplica(live)
 	if replica == nil {
 		return crdt.EncodeStateAsUpdateV1(live, nil), point, nil
 	}
@@ -53,6 +50,36 @@ func (s *Service) readPoint(room string, live *crdt.Doc) ([]byte, roomPoint, err
 	}
 	point.seq = seq
 	return state, point, nil
+}
+
+// liveReplica is the replica the update observer of live, a room's resident document, keeps, nil
+// for a document whose load listed none.
+func (s *Service) liveReplica(live *crdt.Doc) *renderedReplica {
+	if listed, ok := s.replicas.Load(weak.Make(live)); ok {
+		return listed.(weak.Pointer[renderedReplica]).Value()
+	}
+	return nil
+}
+
+// committedSince reports whether live, the room document resident for room, has committed anything
+// since point, an earlier read point of it (readPoint). It drains the room's log as readPoint does,
+// classifying what it drains, but copies nothing, so a reader that needs the room's state only when
+// the room has moved pays for the copy only then. A point of another room instance, or of none,
+// is one the room has moved past, and so is any point of a room whose load listed no replica,
+// which cannot say. The caller holds no state lock and is not inside a Yjs transaction on live.
+func (s *Service) committedSince(room string, live *crdt.Doc, point roomPoint) bool {
+	if point.cursor == nil || point.cursor != s.cursorOf(live) {
+		return true
+	}
+	replica := s.liveReplica(live)
+	if replica == nil {
+		return true
+	}
+	seq, settles := replica.drainedSeq(room, replica.classify)
+	if settles {
+		s.scheduleSettle(room)
+	}
+	return seq != point.seq
 }
 
 // roomFlush is what one transaction's flushThrough calls stored of one room instance, the one
@@ -205,6 +232,20 @@ func (l *Ledger) flushThrough(ctx context.Context, tx pgx.Tx, room string, throu
 		return fmt.Errorf("%w: room %s was replaced since this transaction stored its updates", ErrRoomBehindHead, room)
 	}
 	return l.service.flushThrough(ctx, tx, flush, through.seq)
+}
+
+// flushRead stores, in l's transaction, the room's updates through write's read point that no
+// writer has stored yet (flushThrough): what write's fork holds beyond the store, stored ahead of
+// every append of the write (window A), so the write's own updates follow, in the store, the very
+// state they were made on. The write holds the document's advisory lock from that read on
+// (readFork), so nothing it stores here can have been stored by another writer since. A second
+// call stores nothing more, since the point never moves (forkLive). A cold fork has no read point
+// and stores nothing: it was read from the store.
+func (l *Ledger) flushRead(ctx context.Context, write *liveWrite) error {
+	if write.point.cursor == nil {
+		return nil
+	}
+	return l.flushThrough(ctx, l.tx, write.artifactID, write.point)
 }
 
 // flushFor is the flush this transaction keeps for room, nil while it has flushed nothing of it.

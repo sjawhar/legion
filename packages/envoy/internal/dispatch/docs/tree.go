@@ -476,6 +476,19 @@ func (r *renderedReplica) readPoint(room string, live *crdt.Doc, classify drainC
 	return crdt.EncodeStateAsUpdateV1(r.doc, nil), r.seq, settles, changed
 }
 
+// drainedSeq is readPoint without the copy: it drains the room's log as the update observer would,
+// classifying what it drains, and returns the commit position the replica then stands at, every
+// update through which has a class in the room's queue, with whether an update it classified is
+// one the room's settlement follows. A position equal to an earlier read point's says the room has
+// committed nothing since that read: in the recover state too, since the log hands over, and the
+// replica counts, every commit there is.
+func (r *renderedReplica) drainedSeq(room string, classify drainClassifier) (seq uint64, settles bool) {
+	r.lockForUpdate()
+	defer r.mu.Unlock()
+	settles, _ = r.drainLocked(room, classify)
+	return r.seq, settles
+}
+
 // keepReplica makes the replica live's update observer keeps, moving through log, live's update
 // log, and lists it for live's reads (readLive) while live is resident (listResident). The listing
 // holds the replica weakly too, and the observer, which live holds, holds the replica, so the

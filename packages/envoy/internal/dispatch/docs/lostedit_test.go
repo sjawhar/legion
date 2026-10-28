@@ -20,9 +20,9 @@ var lostEditAgent = model.Actor{Kind: "session", ID: "agent"}
 
 // editInFlight is one agent edit held open between the operations and the version render, the
 // window a browser's concurrent change merges into (LEGION-269's first window). The browser write
-// is driven explicitly rather than raced: the transaction's fork is only brought up to date with
-// the room when the version is captured, so a write made at any point before that lands in the
-// same merge.
+// is driven explicitly rather than raced: the version's capture checks the transaction's fork
+// against everything the room committed since the fork's read, so a write made at any point before
+// that lands in the same check.
 type editInFlight struct {
 	service    *Service
 	artifactID string
