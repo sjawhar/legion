@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-493",
-  "completed": "2026-10-28T21:35:00Z",
+  "completed": "2026-10-28T22:40:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2478",
   "proof": [
+    {
+      "criterion": "Tester's failure (round 2): the drain test (acceptance 3.3) is green on any database collation, so the required test job passes",
+      "surface": "the daemon's real consumer with the real handlers on real NATS and Postgres through the 3 ms proxy (TestABacklogOfOtherPullRequestsDrainsAndAppliesEveryLegionEvent)",
+      "command": "cd packages/daemon && go test -count=1 ./internal/intake/ -run BacklogOfOtherPullRequests -v",
+      "observed": "PASS, drained in 17.415s; processedGitHubEvents now reads processed_events with no SQL order and sorts in Go's byte order, the order of the expected list, so a collation that ignores punctuation (CI's en_US.utf8) no longer reorders legion-33-checks before legion-3-checks",
+      "headSha": "7aa6d1601741864b3d7eb03bc97e77245fb0c95e",
+      "negativeControl": "the same test with the SQL `order by 1` comparison was red in the required test job at 55eb11c8 (run 40762777994, job 123078824809: drain_test.go:230 `processed events = [... legion-28-checks ...]` out of byte order); this pod's Postgres has only C collations, so the reorder cannot be shown here, and CI at the new head is the check"
+    },
     {
       "criterion": "1.4 A consumer the daemon finds missing at boot starts after the last event the daemon applied; 3 legion state shows each consumer's waiting events, the oldest one's age and a stall",
       "surface": "the branch's real `legion start` binary and the `legion state` / `legion state --json` CLI, against a real Postgres (fresh database) and a real nats-server 2.10.22 of its own, with a Dispatch/Envoy/GitHub stand-in (GitHub reached through an HTTPS CONNECT proxy, so the binary's own App token mint and reads ran)",
@@ -41,7 +49,7 @@
       "criterion": "2 a lost pull-request event heals within one pass; a missed push is rebuilt from GitHub's repository activity with the pusher's login",
       "surface": "GitHub's REST repository activity API, read live as the implement App on sjawhar/legion; the pass's tests on the daemon's real workflow",
       "command": "gh api 'repos/sjawhar/legion/activity?ref=refs/heads/legion/INFRA-493&per_page=5'; cd packages/daemon && go test -count=1 ./internal/daemon/ -run 'Pass|Push|Budget|Settlement|Missing' -v",
-      "observed": "live read: {\"activity_type\":\"push\",\"actor\":\"legion-implementer[bot]\",\"after\":\"23dee11f…\",\"before\":\"aa738cd8…\"}, the same <slug>[bot] form as the webhook's pusher.name the workflow compares with the review App's login; the pass tests heal a lost opened in planning, testing and done, a reopen in reviewing, a close (one pr-closed-unmerged), a merge in awaiting_merge (issue closes) and in implementing (pr-merged), lost pushes (PlannedRed set and cleared as the webhook would), a lost CI settlement (red sends back from testing), and a late webhook of each changes nothing",
+      "observed": "live read: {\"activity_type\":\"push\",\"actor\":\"legion-implementer[bot]\",\"after\":\"23dee11f\u2026\",\"before\":\"aa738cd8\u2026\"}, the same <slug>[bot] form as the webhook's pusher.name the workflow compares with the review App's login; the pass tests heal a lost opened in planning, testing and done, a reopen in reviewing, a close (one pr-closed-unmerged), a merge in awaiting_merge (issue closes) and in implementing (pr-merged), lost pushes (PlannedRed set and cleared as the webhook would), a lost CI settlement (red sends back from testing), and a late webhook of each changes nothing",
       "headSha": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
       "negativeControl": "with the activity path disabled the push tests fail (head run left open, PlannedRed false); an activity page that does not reach the recorded head applies no push and logs the WARN"
     }
@@ -74,7 +82,8 @@
     "W2's ErrNotStored step is carried by sjawhar/legion#2362 (architect 15:27Z on 10-27)",
     "Daemon API contract is 42, since main took 41 for the controller start command",
     "A sweep with a saved cursor still lists back to its cursor (or the last hour); only a cursorless sweep looks back 72 h; open records older than the listing window are decided from the bucket",
-    "The local legion start proof uses its own stand-in rather than scripts/e2e/lib/live-daemon-proof.sh, which runs an in-process driver rather than the `legion start` binary"
+    "The local legion start proof uses its own stand-in rather than scripts/e2e/lib/live-daemon-proof.sh, which runs an in-process driver rather than the `legion start` binary",
+    "Round 2 changes only packages/daemon/internal/intake/drain_test.go (the tester's one failure); no production code changed, so the round-1 proofs at 55eb11c8 stand for the code"
   ],
   "openQuestions": [
     "Environment-only failures in this pod, not touched by this change: packages/daemon launcher session_store tests (the pod's OMP_SESSION_* variables), runtime/tmux TestNewRefusesLaunchersItCannotRun (no tmux), natsauth (Docker); packages/envoy agent-secrets CLI tests and dispatch/api TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (C collation); check-bun-version, check-image-trigger-paths and check-release-credentials need python's yaml module"
