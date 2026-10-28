@@ -67,10 +67,11 @@ write `todo` under such a child is not written, and its notice says to release i
 child is recorded. When the repository is recovered, each tree's architect gets one more
 `child-release-stalled` notice, listing every child the release left to the recovery that is
 still not recorded, with what to release. That notice waits while the recovery's listing is held
-for the Dispatch consumer, but for five minutes at most from the hold's start (the daemon times its
-next read of the mapping for it): a hold that lasts longer (an event that fails at every delivery,
-say) gets the notice then, once, and the recovery still runs in full when the hold releases. A
-hold that is released and made again counts its five minutes anew.
+for the Dispatch consumer, but for five minutes at most from the first held read (the daemon times
+its next read of the mapping for it), however often the hold is released and made again
+meanwhile: a hold that lasts or keeps coming back (an event that fails at every delivery, say) gets
+the notice then, once, and the recovery still runs in full when the hold releases. If that read
+fails, the daemon tries again on its usual backoff.
 A served repository whose read fails stays served on its last answer and is read again the same
 way. A project with no repository mapped does not boot; one whose every repository lacks an App
 boots serving none and admits nothing until an App is installed, and one whose every repository's

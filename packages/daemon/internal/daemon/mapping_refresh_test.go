@@ -1588,21 +1588,37 @@ func TestARecoveryHeldPastItsBoundTellsItsReleaseWaitsOnce(t *testing.T) {
 // redeliveries the consumer reads as idle, which would release the hold at random; one that
 // blocks would hold the fact lock the recovery's listing takes.)
 type heldRecovery struct {
-	w         *workflowRuntime
-	client    *mappingDispatch
-	js        jetstream.JetStream
-	installs  *installations
-	admission *admit.Admission
-	cancel    context.CancelFunc
-	done      chan error
-	seq       int64
+	w          *workflowRuntime
+	client     *mappingDispatch
+	js         jetstream.JetStream
+	installs   *installations
+	admission  *admit.Admission
+	cancel     context.CancelFunc
+	done       chan error
+	seq        int64
+	failNotice atomic.Bool
+}
+
+// noticeFailingStore is the rig's record store, its Enqueue failing for a notice while fail is set:
+// the write of a recovery's notice fails, as a database refusing it would.
+type noticeFailingStore struct {
+	record.Store
+	fail *atomic.Bool
+}
+
+func (s noticeFailingStore) Enqueue(ctx context.Context, tx pgx.Tx, row record.OutboxRow) error {
+	if s.fail.Load() && row.Kind == "notice" {
+		return errors.New("the notice's write fails")
+	}
+	return s.Store.Enqueue(ctx, tx, row)
 }
 
 const heldTree, heldParent, heldChild = "LEGION-1900", "LEGION-1901", "LEGION-1902"
 
 // newHeldRecovery opens the rig with installReadRetry at backoff (initial and cap) and
-// recoveryHoldBound at bound, the consumer paused.
-func newHeldRecovery(t *testing.T, backoff, bound time.Duration) *heldRecovery {
+// recoveryHoldBound at bound, the consumer paused. The hold poller reads the consumer's position,
+// or reader's when one is given.
+func newHeldRecovery(t *testing.T, backoff, bound time.Duration, reader ...positionReader) *heldRecovery {
 	t.Helper()
 	quickInstallReads(t)
 	installReadRetry.Initial, installReadRetry.Max = backoff, backoff
@@ -1613,13 +1629,18 @@ func newHeldRecovery(t *testing.T, backoff, bound time.Duration) *heldRecovery {
 	h.installs.setFailing(errors.New("GitHub answered 502"), "implement zeta/tools")
 	h.w, h.client, h.installs, _, h.js = mappingRigJS(t, h.installs)
 	_, h.admission = rigHandlers(h.w)
+	h.w.records = noticeFailingStore{Store: h.w.records, fail: &h.failNotice}
 	h.w.bootID, h.w.holdPollInterval = "held-clock-boot", 10*time.Millisecond
 	liveRoot(t, h.w, h.client, heldTree)
 	h.client.show(issue(heldParent, "acme/widgets", "todo", false, heldTree, 1), issue(heldChild, "zeta/tools", "todo", false, heldParent, 1))
 	h.w.awaitRecovery("zeta/tools", heldTree, heldChild, heldParent)
+	var poll positionReader = h.w.consumers
+	if len(reader) != 0 {
+		poll = reader[0]
+	}
 	run, cancel := context.WithCancel(context.Background())
 	polled := make(chan struct{})
-	go func() { h.w.pollHoldRelease(run); close(polled) }()
+	go func() { h.w.pollHoldReleaseWith(run, poll); close(polled) }()
 	t.Cleanup(func() { h.pause(); cancel(); <-polled })
 	return h
 }
@@ -1679,33 +1700,79 @@ func TestARecoveryHeldWithReleaseWaitsIsToldAtItsBoundNotItsBackoff(t *testing.T
 	}
 }
 
-// A hold that is released and made again starts the bound's clock anew: the first hold lasts less
-// than the bound and is released, the next recovery run is held again, and no notice comes until
-// the bound has passed from that second hold. Before, the clock kept the first hold's start and
-// the second, short hold was told at once.
-func TestARecoveryHoldReleasedAndMadeAgainStartsANewClock(t *testing.T) {
-	h := newHeldRecovery(t, 4*time.Second, time.Second)
+// A hold that flaps (held at each recovery run, released between them) is told at the bound all
+// the same: the clock runs from the first held run, so the notice comes once, at about the bound.
+// Here the consumer stays behind the stream, so each run's listing is held, and the hold poller
+// reads a position that has reached it, so each hold is released before the next run. A clock
+// that started anew at each hold released and made again never reached the bound.
+func TestARecoveryWhoseHoldFlapsIsToldOnceAtTheBound(t *testing.T) {
+	caughtUp := &failingPositionReader{position: intake.DispatchConsumerPosition{AckFloorStream: 1 << 40, Idle: true}}
+	h := newHeldRecovery(t, 100*time.Millisecond, time.Second, caughtUp)
 	before := h.notices(t)
 	h.behind(t, "LEGION-1960")
 	h.serve()
-	testwait.Eventually(t, "the first hold", func() bool { return served(h.w, "zeta/tools") && h.admission.Held() })
-	first := time.Now()
-	time.Sleep(300 * time.Millisecond)
-	h.consume()
-	testwait.Eventually(t, "the first hold released", func() bool { return !h.admission.Held() })
-	h.pause()
-	h.behind(t, "LEGION-1961")
-	testwait.Eventually(t, "the second hold, made by the recovery's next run", func() bool { return h.admission.Held() })
-	second := time.Now()
-	time.Sleep(600 * time.Millisecond)
-	if n := h.notices(t) - before; n != 0 {
-		t.Fatalf("notices %s after the first hold began and %s into the second = %d, want none before the second's bound",
-			time.Since(first), time.Since(second), n)
-	}
+	testwait.Eventually(t, "zeta/tools served", func() bool { return served(h.w, "zeta/tools") })
+	start := time.Now()
+	// Each run's hold is released at the next poll, so the flap is seen as Held turning false
+	// between runs that keep listing.
+	listings := h.client.listingCount()
+	testwait.Eventually(t, "the recovery's listing held and released at several runs", func() bool { return h.client.listingCount() >= listings+3 })
 	if !within(3*time.Second, func() bool { return h.notices(t) > before }) {
-		t.Fatal("no notice once the second hold outlasted its bound")
+		t.Fatalf("no notice %s after the flapping hold began, want one at about the 1s bound", time.Since(start))
 	}
+	time.Sleep(500 * time.Millisecond)
 	if n := h.notices(t) - before; n != 1 {
 		t.Fatalf("notices = %d, want one", n)
 	}
+}
+
+// failPastTheBound holds the recovery's listing, lets the bound pass with fault set, and then
+// checks the refresher waits its backoff (1 s here) between runs, not a busy loop: in 2 s, fewer
+// than five Dispatch listings and five installation reads of zeta/tools. It then clears the fault
+// with clear, and the notice comes once.
+func failPastTheBound(t *testing.T, fault, clear func(h *heldRecovery)) {
+	t.Helper()
+	h := newHeldRecovery(t, time.Second, 300*time.Millisecond)
+	before := h.notices(t)
+	h.behind(t, "LEGION-1970")
+	h.serve()
+	testwait.Eventually(t, "the recovery's listing held", func() bool { return served(h.w, "zeta/tools") && h.admission.Held() })
+	fault(h)
+	time.Sleep(2 * recoveryHoldBound)
+	listings, reads := h.client.listingCount(), h.installs.reads("implement zeta/tools")
+	time.Sleep(2 * time.Second)
+	if got, read := h.client.listingCount()-listings, h.installs.reads("implement zeta/tools")-reads; got >= 5 || read >= 5 {
+		t.Fatalf("in 2 s past the bound: %d Dispatch listings and %d installation reads of zeta/tools, want fewer than 5 each at a 1 s backoff", got, read)
+	}
+	if n := h.notices(t) - before; n != 0 {
+		t.Fatalf("notices while the fault lasts = %d, want none", n)
+	}
+	clear(h)
+	if !within(4*time.Second, func() bool { return h.notices(t) > before }) {
+		t.Fatal("no notice once the fault cleared")
+	}
+	time.Sleep(500 * time.Millisecond)
+	if n := h.notices(t) - before; n != 1 {
+		t.Fatalf("notices = %d, want one", n)
+	}
+}
+
+// A held recovery whose Dispatch listing keeps failing once its bound has passed waits the
+// refresher's backoff between runs, and tells its waits once the listing answers. Before, the wait
+// cut to the bound's zero time left made every failed run re-run at once.
+func TestARecoveryWhoseListingFailsPastItsBoundWaitsItsBackoff(t *testing.T) {
+	failPastTheBound(t, func(h *heldRecovery) {
+		h.client.mu.Lock()
+		h.client.listFailures = 1 << 30
+		h.client.mu.Unlock()
+	}, func(h *heldRecovery) {
+		h.client.mu.Lock()
+		h.client.listFailures = 0
+		h.client.mu.Unlock()
+	})
+}
+
+// The same when the write of the recovery's notice keeps failing past the bound.
+func TestARecoveryWhoseNoticeFailsPastItsBoundWaitsItsBackoff(t *testing.T) {
+	failPastTheBound(t, func(h *heldRecovery) { h.failNotice.Store(true) }, func(h *heldRecovery) { h.failNotice.Store(false) })
 }

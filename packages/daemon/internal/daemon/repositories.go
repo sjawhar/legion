@@ -587,9 +587,11 @@ func (w *workflowRuntime) requestMappingRead() uint64 {
 // recovery has not committed yet, it reads the mapping again of its own on installReadRetry's
 // backoff, 30 s doubling to 10 min, reset once nothing waits, so the repository is served, or
 // confirmed, and its issues recovered, once GitHub answers, with no restart and no mapping change.
-// While a held recovery has release waits to tell (recoveryHoldLeft), the next wait is cut to the
-// time left to recoveryHoldBound, so the bound is checked when it falls, not up to a backoff later;
-// such a cut wait does not move the backoff on.
+// While a held recovery has release waits to tell and time left to recoveryHoldBound
+// (recoveryHoldLeft), the next wait is cut to that time, so the bound is checked when it falls, not
+// up to a backoff later; such a cut wait does not move the backoff on. Once the bound has passed,
+// a run that did not tell the waits (its listing or its notice failed) waits the backoff as any
+// failed read does, so a failure past the bound never turns the refresher into a busy loop.
 func (w *workflowRuntime) refreshOnMappingChange(ctx context.Context) {
 	after := w.recheckAfter
 	if after == nil {
@@ -603,7 +605,7 @@ func (w *workflowRuntime) refreshOnMappingChange(ctx context.Context) {
 		if len(waiting) == 0 {
 			recheckIn = installReadRetry.Initial
 		} else {
-			if left, held := w.recoveryHoldLeft(); held && left < wait {
+			if left, held := w.recoveryHoldLeft(); held && left > 0 && left < wait {
 				wait, cut = left, true
 			}
 			recheck = after(wait)
@@ -722,10 +724,10 @@ func (w *workflowRuntime) recoveringReasons() []string {
 // unrecorded (tellReleaseWaits). While the listing stays held, that telling waits, but for
 // recoveryHoldBound at most: a hold that outlasts it (the consumer stuck below the stream's last
 // position, an event that fails at every delivery, say) is told the waits still unrecorded then,
-// once, and the full recovery still runs when the hold releases. The clock starts when a run finds
-// the listing held that it did not find held before it (a hold released between runs and made
-// again starts it anew), and stops when the recovery commits or a repository leaves the recovery
-// (markRecovered). The repositories are let go once
+// once, and the full recovery still runs when the hold releases. The clock starts when a run first
+// finds the listing held with waits to tell, and runs on across holds released and made again,
+// so a hold that flaps is told at the bound all the same; it stops when the recovery commits or a
+// repository leaves the recovery (markRecovered). The repositories are let go once
 // both commit; a failed one stays to recover, tried again on the refresher's backoff. A restart
 // loses the set, and the boot's reconcile is that recovery; what a release left waiting is told to
 // no one then.
@@ -745,9 +747,6 @@ func (w *workflowRuntime) recoverRepositories(ctx context.Context) {
 	names := slices.Sorted(maps.Keys(repos))
 	attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
 	defer cancel()
-	// heldBefore is whether a hold this recovery's listing finds was there before it: a hold that
-	// was released since the last run, and made again by this one, starts a new clock.
-	heldBefore := w.admission != nil && w.admission.Held()
 	issues, err := w.dispatch.ListIssues(attempt, w.dispatchProject, nil)
 	if err == nil {
 		err = w.reconcileListing(attempt, issues, recoveredOn(repos, silenced, issues), false)
@@ -757,7 +756,7 @@ func (w *workflowRuntime) recoverRepositories(ctx context.Context) {
 		// recorded yet: the waits are told once it is released, or once the hold has lasted
 		// recoveryHoldBound, whichever comes first.
 		w.recoveringMu.Lock()
-		if w.recoveryHeldSince.IsZero() || !heldBefore {
+		if w.recoveryHeldSince.IsZero() {
 			w.recoveryHeldSince = time.Now()
 		}
 		bounded := time.Since(w.recoveryHeldSince) >= recoveryHoldBound
