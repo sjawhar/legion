@@ -83,13 +83,12 @@ func dispatchSecretPasswords(t *testing.T, m *pulumitest.Mocks) []string {
 	return names
 }
 
-// A stack that sets neither input, or sets them to their defaults, registers what the component
+// A stack that sets neither input, or sets them to their defaults, keeps what the component
 // registered before rotation existed: the one RandomPassword <hostname>-agent-token with the same
-// arguments and no keepers, and DISPATCH_AGENT_TOKEN its result alone. Every registration's
-// inputs, parent, provider, dependencies and property dependencies are equal between the unset
-// and the explicit defaults, so a preview of either against the other's state shows no change.
-// (The same snapshot, taken of the component before these inputs existed, matched byte for byte;
-// the pod goldens pin every pod template.)
+// arguments and no keepers, DISPATCH_AGENT_TOKEN its result alone, and no other agent token the
+// Secret depends on; the pod goldens pin every pod template. Every registration's inputs, parent,
+// provider, dependencies and property dependencies are equal between the unset and the explicit
+// defaults, so a preview of either against the other's state shows no change.
 func TestDispatchAgentTokenUnsetRendersWhatItAlwaysDid(t *testing.T) {
 	defaults, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
