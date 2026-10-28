@@ -9,9 +9,6 @@ tags:
 date: 2026-10-28
 status: active
 module: packages/envoy
-related_issues:
-  - "INFRA-647"
-  - "sjawhar/legion#2416"
 ---
 
 # Measure a CPU fix with full pprof focus totals, a per-line split, and a restore past boot backfills

@@ -9,9 +9,6 @@ tags:
 date: 2026-10-28
 status: active
 module: packages/envoy/internal/dispatch/docs
-related_issues:
-  - "INFRA-647"
-  - "sjawhar/legion#2416"
 ---
 
 # A list attribute written into an in-memory pmdoc tree is never nil, or its version differs from the room

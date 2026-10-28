@@ -9,9 +9,6 @@ tags:
 date: 2026-10-28
 status: active
 module: packages/envoy/internal/dispatch/docs
-related_issues:
-  - "INFRA-647"
-  - "sjawhar/legion#2416"
 ---
 
 # A settlement race test holds the peer at afterCreditUpdate and checks the version by its block rows
