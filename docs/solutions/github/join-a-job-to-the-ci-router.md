@@ -137,9 +137,11 @@ fails the pull request that adds it.
 - `GATES`: per filter, the job, its go commands and its other steps' reads. Each go command is a
   `Run` pinned to its text: `step_run` for a `run:` step of the job, `script_run` for a script the
   job runs. The check fails when a job's `run:` step starts a go command (`go test`, `vet`,
-  `build`, `run`, `list`, `install`, `generate`) no `Run` claims, or one with a positional argument
-  that is not a flag, a flag's value or one of its `Run`'s packages (a package appended by path,
-  import path or on a backslash-continued line), when a pinned text is gone, and
+  `build`, `run`, `list`, `install`, `generate`) no `Run` claims, or one that is not exactly its
+  `Run`: a positional argument that is not a flag, a flag's value or one of the `Run`'s packages (a
+  package appended by path, import path or on a backslash-continued line), a last `-tags` other
+  than the `Run`'s tags, or a subcommand of another mode; it then also checks the closure the line
+  compiles. It fails too when a pinned text is gone, and
   when a job or step is gated on a filter neither `GATES` nor `EXCLUDED` lists. A job with no go
   commands still gets a gate with its reads.
 - `RULES`: per source file, what a test does outside its package: a go command it starts, or a
@@ -164,9 +166,12 @@ limit, where they evict main's entries.
 - Give `actions/setup-go` `cache: false` and `id: setup-go`.
 - Restore with `actions/cache/restore`, keyed on the Go version setup-go installed
   (`key: <family>-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}`), with the
-  family's prefix as `restore-keys` (`<family>-${{ runner.os }}-`; the families are `go-daemon`,
-  `go-docs`, `go-envoy`, `go-envoy-infra`, `go-notices`). Each family keeps one entry, refreshed
-  only when Go is bumped, and after a bump the prefix still serves the old entry's modules. Do not
+  family's prefix as `restore-keys` only off main:
+  `restore-keys: ${{ github.ref != 'refs/heads/main' && format('<family>-{0}-', runner.os) || '' }}`
+  (the families are `go-daemon`, `go-docs`, `go-envoy`, `go-envoy-infra`, `go-notices`). Main
+  restores by the exact key only, so the entry it saves after a Go bump holds nothing the older Go
+  built; a pull request still falls back to the prefix. Each family keeps one entry, refreshed only
+  when Go is bumped. Do not
   key on go.sum: every go.sum change would leave a whole entry, up to a gigabyte, for seven days. A
   go.sum change downloads only the changed modules, and Go's build cache is content-addressed, so a
   stale entry costs a run only what changed. Share a family only with the jobs that build the same
@@ -175,7 +180,8 @@ limit, where they evict main's entries.
   `if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'`.
   The workflow's only push trigger is main.
 - The release workflows' Go builds (release.yaml's `legion_build`, release-envoy-infra.yaml's
-  `build`) restore `go-daemon` and `go-envoy-infra` the same way and save nothing.
+  `build`) restore `go-daemon` and `go-envoy-infra` and save nothing, so they keep the prefix as
+  `restore-keys` on main too: an entry they never save cannot grow.
 - `.github/actions/setup-bun` reads and writes its cache only on main; use it as it is.
 
 ## The merge queue runs the router too
