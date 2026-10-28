@@ -493,6 +493,21 @@ func TestALinkReadFromABareAddressAfterPunctuationIsWrittenBack(t *testing.T) {
 		"Set \\<!x;a@b.cc> now\n",
 		"\\<!x;a@b.cc>\n",
 		"\\<a b=\x01;a@b.cc>\n",
+		// At a block's first character the engine also opens an HTML block (micromark's html-flow),
+		// whose start conditions accept more than inline raw HTML: a complete tag alone on its line
+		// whose unquoted value ends at `=` and reads another one, and a declaration, a comment, a
+		// processing instruction, a CDATA section, a raw or a block tag name with no closer at all.
+		"\\<span title=a=b;a@b.cc>\n",
+		"\\<a href=x?a=1&b=me@x.cc>\n",
+		"\\<a b=x=*y*>\n",
+		"\\<script x;a@b.cc\n",
+		"\\<!-- x;a@b.cc\n",
+		"\\<?x x;a@b.cc\n",
+		"\\<!x x;a@b.cc\n",
+		"\\<![CDATA[ x;a@b.cc\n",
+		"\\<div x;a@b.cc\n",
+		"> \\<span title=a=b;a@b.cc>\n",
+		"- \\<span title=a=b;a@b.cc>\n",
 	}
 	docs := make([]*Node, len(markdowns))
 	rendered := make([]string, len(markdowns))

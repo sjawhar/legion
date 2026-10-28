@@ -1996,7 +1996,12 @@ grammar decides, since an escaped `<` reads as text in both: goldmark reads a de
 `<!` and an uppercase letter, and an unquoted attribute value holding no control character, where
 CommonMark 0.31 and the engine also read a lowercase one (`<!doctype x;[a@b.cc](mailto:a@b.cc)>`)
 and a U+0001 in an unquoted value as raw HTML. Only a `<` the run's first writing reads so is
-escaped, so a run that reads back keeps its bytes. Marks are
+escaped, so a run that reads back keeps its bytes. A text `<` first after its line's container
+prefix is also escaped where micromark's html-flow start conditions open an HTML block there, judged
+in `endLine` on the line as written across nodes (`htmlBlockStart`), since goldmark can read a
+paragraph there: `<span title=a=b;[a@b.cc](mailto:a@b.cc)>` alone on a paragraph's first line is a
+complete tag to the engine, whose unquoted value ends at `=` and reads another, and `<!x` opens a
+declaration. Marks are
 written in one order - link, strong, emphasis - so where a text still carries a mark the text
 before it opened, and the order puts that mark after the text's other marks, the mark is closed and
 opened again; where that puts two runs of one delimiter character side by side (bold inside italic:

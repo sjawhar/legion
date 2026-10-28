@@ -73,6 +73,10 @@ type lineCandidate struct {
 	// afterLine reports whether the line continues its textblock, so the line before is read
 	// with it.
 	afterLine bool
+	// firstOnLine reports whether the character is the first the line writes after its prefix, no
+	// mark's marker or escaped indentation before it, where the engine opens an HTML block at a
+	// `<` it starts (htmlBlockStart).
+	firstOnLine bool
 	// closesTyped reports whether a lone `:::` line of the textblock is escaped as one that could
 	// close the typed block around it: the textblock is written at the typed block's own prefix, or,
 	// in a block fenced with three colons, less than four columns past it with no quote marker
@@ -968,10 +972,12 @@ func (r *renderer) writeInlineNodes(nodes []*Node, prefix string, context inline
 
 // endLine judges the line just written when its text began with a lineCandidate: the character is
 // escaped when the parser reads the line, markers and hard break included, as something other than
-// it reads with the character escaped (lineReadsAsText). A lone `:::` at the prefix of the typed
-// block around it closes that block, which the line read on its own cannot show. A line the
-// textblock goes on past, at a line ending in its text or a hard break (continues), is judged with
-// a line of text after it: a task marker opens a list item only where the paragraph goes on.
+// it reads with the character escaped (lineReadsAsText), or when it is a `<` the engine opens an
+// HTML block at (htmlBlockStart), as written out to the line's end across the run's later nodes,
+// which goldmark can read as a paragraph. A lone `:::` at the prefix of the typed block around it
+// closes that block, which the line read on its own cannot show. A line the textblock goes on past,
+// at a line ending in its text or a hard break (continues), is judged with a line of text after
+// it: a task marker opens a list item only where the paragraph goes on.
 func (r *renderer) endLine(continues bool) {
 	candidate := r.heldLineStart
 	if candidate == nil {
@@ -998,7 +1004,8 @@ func (r *renderer) endLine(continues bool) {
 		if readFrom == r.footnoteLineAt && r.footnoteLabel != "" {
 			footnote = r.footnoteLabel
 		}
-		if lineReadsAsText(before, judged, rewritten, candidate.prefix, footnote) {
+		htmlBlock := candidate.char == '<' && candidate.firstOnLine && htmlBlockStart(line[offset:], candidate.afterLine)
+		if !htmlBlock && lineReadsAsText(before, judged, rewritten, candidate.prefix, footnote) {
 			return
 		}
 	}
@@ -1170,7 +1177,7 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 				escape = true
 				lineStart = -1
 			case lineStartHeld:
-				r.holdLineStart(value[segmentStart:byteOffset], char, position, prefix)
+				r.holdLineStart(value[segmentStart:byteOffset], char, position, prefix, byteOffset == lineStart)
 				segmentStart = byteOffset
 				lineStart = -1
 			case lineStartAsIs:
@@ -1218,14 +1225,16 @@ func markdownLineStart(written []byte, offset int) int {
 }
 
 // holdLineStart writes the text before a line's first character and holds that character for
-// endLine to judge once the line is written.
-func (r *renderer) holdLineStart(before string, char rune, position *inlinePosition, prefix string) {
+// endLine to judge once the line is written. first reports whether no text of the line comes before
+// it.
+func (r *renderer) holdLineStart(before string, char rune, position *inlinePosition, prefix string, first bool) {
 	r.writeText(before)
 	typed := r.scope().typed
 	r.heldLineStart = &lineCandidate{
 		at:          r.b.Len(),
 		char:        char,
 		afterLine:   position.afterLine,
+		firstOnLine: first && !position.afterMarker,
 		closesTyped: typed != nil && (typed.prefix == prefix || typed.colons == 3 && typedFenceReach(typed.prefix, prefix)),
 		prefix:      prefix,
 	}
