@@ -2,13 +2,13 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-194",
-  "completed": "2026-10-28T09:18:40Z",
-  "round": "review round 1 re-test: code head 186e6b465a2821a886450c5e9ddb7903ff0737d1 (the A1 empty-answer fix, the refused category and the review's cleanups). The diff changed, so this is a full test round.",
-  "headTested": "7764f1f4b5dc14357a575a9ce74142d7daed011a",
-  "codeHead": "186e6b465a2821a886450c5e9ddb7903ff0737d1",
+  "completed": "2026-10-28T09:36:00Z",
+  "round": "review round 2 re-test: code head 8ab6478192f2b29d3eea1e494e9ac9eae0cec369 (408/429/5xx categorised as transport via the shared client's transientStatus, now exported from packages/envoy-client/src/dispatch-http.ts with no change to its body; a real-read malformed test; A1 carries its category). The diff changed, so this is a full test round.",
+  "headTested": "6dc7ee6b11d091ac1b6e2ea2108f6a00ac8a7175",
+  "codeHead": "8ab6478192f2b29d3eea1e494e9ac9eae0cec369",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's after command on production Dispatch at 2026-10-28T09:16:55Z, with a throwaway Postgres of my own and an --expect-model identity rebuilt from agent-infra main's dispatch/Pulumi.prod.yaml. I compared that identity with the implementer's without printing it. Same build (9b92ac14), same A1/A2/A3 verdicts, exit 0. I also re-ran its new negative controls (stopword A1 'the' gives no-results, an over-long query gives refused): same output. All five proof entries carry six non-empty fields at headSha 186e6b46."
+    "how": "Re-ran the implementer's after command on production Dispatch at 2026-10-28T09:34:18Z with my own throwaway Postgres and independently rebuilt --expect-model identity: same build 9b92ac14, same A1/A2/A3 verdicts, exit 0; re-ran its negative controls (stopword A1 → no-results, over-long query → refused, wrong model → mismatch fail, shared title word → shared=1 fail): same output. All proof entries carry six non-empty fields at headSha 8ab64781."
   },
   "failures": [],
   "failed": 0,
@@ -17,33 +17,33 @@
       "criterion": "Deployed build: production carries INFRA-393's merge f45fd5095930372b4150e9289aefe35484883531",
       "surface": "production Dispatch GET /healthz (the script's build line) and the GitHub compare API",
       "command": "bun scripts/dispatch/meaning-search-check.ts … (build line); gh api repos/sjawhar/legion/compare/f45fd5095930372b4150e9289aefe35484883531...9b92ac14351a926361c982edb7953e0325fab0de --jq '{status,ahead_by,behind_by}'",
-      "observed": "2026-10-28T09:16:55Z: 'build commit=9b92ac14351a926361c982edb7953e0325fab0de schema=120 ok=true'; compare {status: ahead, ahead_by: 46, behind_by: 0}.",
-      "headSha": "7764f1f4b5dc14357a575a9ce74142d7daed011a",
-      "negativeControl": "DISPATCH_URL=http://127.0.0.1:9 → 'build unavailable: transport', exit 2; DISPATCH_URL=https://example.com (no such routes) → 'build unavailable: not-found', exit 2."
+      "observed": "2026-10-28T09:34:18Z: 'build commit=9b92ac14351a926361c982edb7953e0325fab0de schema=120 ok=true'; compare {status: ahead, ahead_by: 46, behind_by: 0}.",
+      "headSha": "6dc7ee6b11d091ac1b6e2ea2108f6a00ac8a7175",
+      "negativeControl": "DISPATCH_URL=http://127.0.0.1:9 → 'build unavailable: transport', exit 2 (09:35:05Z)."
     },
     {
       "criterion": "A1: on production, dispatch search --query 'meaning search' answers with no 'Searched by keyword only' line, and only an answer that shows meaning search ran passes",
       "surface": "production Dispatch: the dispatch CLI and GET /api/v1/search through the script",
-      "command": "bun scripts/dispatch/meaning-search-check.ts --a1-query 'meaning search' …; dispatch search --query 'meaning search' > $TMPDIR/infra194t/r2/cli.out; grep -c 'Searched by keyword only' $TMPDIR/infra194t/r2/cli.out",
-      "observed": "09:16:55Z 'A1 degraded=no results=20 pass'. The CLI exited 0 with 0 keyword-only lines. --a1-query zzqxvplk (a string no item holds) → 'A1 degraded=no results=7 pass': meaning search answers where keyword search cannot.",
-      "headSha": "7764f1f4b5dc14357a575a9ce74142d7daed011a",
-      "negativeControl": "The review's finding on the live path, 09:17:15Z. Each of --a1-query 'the', 'the of and to a' and '!!! ???' gave 'A1 degraded=no results=0 unavailable: no-results', exit 2; at bc359229 that answer judged pass. A 1200-character --a1-query gave 'A1 unavailable: refused', exit 2. A wrong token gave 'A1 unavailable: auth'."
+      "command": "bun scripts/dispatch/meaning-search-check.ts --a1-query 'meaning search' …; dispatch search --query 'meaning search' > $TMPDIR/infra194t/r3/cli.out; grep -c 'Searched by keyword only' $TMPDIR/infra194t/r3/cli.out",
+      "observed": "09:34:18Z 'A1 degraded=no results=20 pass'; the CLI exited 0 with 0 keyword-only lines. --a1-query zzqxvplk → 'A1 degraded=no results=7 pass'.",
+      "headSha": "6dc7ee6b11d091ac1b6e2ea2108f6a00ac8a7175",
+      "negativeControl": "09:34:56Z --a1-query 'the' → 'A1 degraded=no results=0 unavailable: no-results', exit 2; a 1200-character --a1-query → 'A1 unavailable: refused', exit 2; a wrong token → 'A1 unavailable: auth'."
     },
     {
       "criterion": "A2: a query that shares no word with its target issue finds that issue in the top five",
       "surface": "production GET /api/v1/search?q=<query>&limit=5, lexemes from a throwaway Postgres 16.2 (pgserver 0.1.4, unix socket under $TMPDIR/infra194t/pg)",
       "command": "bun scripts/dispatch/meaning-search-check.ts --pair 'INFRA-43=<query>' --pair 'INFRA-30=<query>' --pair 'INFRA-32=<query>' --lexeme-database \"$TMPDIR/infra194t/pg/.s.PGSQL.5432\" … (queries as in the PR body table)",
-      "observed": "'A2 INFRA-43 shared=0 position=1 pass', 'A2 INFRA-30 shared=0 position=none fail', 'A2 INFRA-32 shared=0 position=none fail', 'A2 pass (pairs passed 1 of 3)'. These are the same as the first round, where plain SQL and the raw API also confirmed 0 shared lexemes and INFRA-43 at position 1.",
-      "headSha": "7764f1f4b5dc14357a575a9ce74142d7daed011a",
-      "negativeControl": "The INFRA-43 query plus one word of its title gave 'A2 INFRA-43 shared=1 position=1 fail', exit 1. A 1200-character pair query gave 'A2 INFRA-43 unavailable: refused', exit 2. No --lexeme-database, or postgres://…@db.internal.example:5999, gave 'shared=unchecked position=1 unavailable: lexeme-database', exit 2. INFRA-999999 gave 'shared=unchecked position=none unavailable: not-found', exit 2."
+      "observed": "'A2 INFRA-43 shared=0 position=1 pass', 'A2 INFRA-30 shared=0 position=none fail', 'A2 INFRA-32 shared=0 position=none fail', 'A2 pass (pairs passed 1 of 3)' (09:34:18Z), unchanged from the earlier rounds.",
+      "headSha": "6dc7ee6b11d091ac1b6e2ea2108f6a00ac8a7175",
+      "negativeControl": "The INFRA-43 query plus one word of its title → 'A2 INFRA-43 shared=1 position=1 fail', exit 1; a 1200-character pair query → 'A2 INFRA-43 unavailable: refused', exit 2; no --lexeme-database → 'shared=unchecked position=1 unavailable: lexeme-database', exit 2; INFRA-999999 → 'shared=unchecked position=none unavailable: not-found', exit 2."
     },
     {
       "criterion": "A3: every item search covers has a vector from the configured model, none failed",
       "surface": "production GET /api/v1/search/coverage (INFRA-393)",
       "command": "bun scripts/dispatch/meaning-search-check.ts --coverage --expect-model \"$(cat $TMPDIR/infra194t/expect-model)\" --coverage-wait 600 (identity azure:<endpoint host>/<deployment> from theorem-labs/agent-infra main, never printed)",
-      "observed": "'A3 identity=match place=azure items=43011 current=43011 lacking=0 oldest_lacking_s=none failed=0 reads=1 pass'. Kinds: issue 2600, document 6275, comment 29527, ask 1971, message 2638, each with lacking=0 and failed=0.",
-      "headSha": "7764f1f4b5dc14357a575a9ce74142d7daed011a",
-      "negativeControl": "--expect-model 'azure:wrong.example/embed-v-4-0' gave 'A3 identity=mismatch … reads=1 fail', exit 1. A wrong token gave 'A3 unavailable: auth reads=1'. A server without the route gave 'A3 unavailable: not-found reads=1'."
+      "observed": "'A3 identity=match place=azure items=43080 current=43080 lacking=0 oldest_lacking_s=none failed=0 reads=1 pass'; kinds issue 2601, document 6280, comment 29586, ask 1972, message 2641, each lacking=0 failed=0.",
+      "headSha": "6dc7ee6b11d091ac1b6e2ea2108f6a00ac8a7175",
+      "negativeControl": "--expect-model 'azure:wrong.example/embed-v-4-0' → 'A3 identity=mismatch … lacking=1 oldest_lacking_s=3 … reads=1 fail', exit 1 (a mismatch ends the read at once, even with a write in flight); a wrong token → 'A3 unavailable: auth reads=1'."
     },
     {
       "criterion": "A4: tests show fallback with notice, re-embed once the service answers, another model's vector never compared and re-embedded, a 32,000-character comment embedded whole",
@@ -54,18 +54,26 @@
       "negativeControl": "With DISPATCH_TEST_DATABASE_URL unset, TestSearchAndWritesRideOutAnAzureOutage printed '--- SKIP' ('DISPATCH_TEST_DATABASE_URL must be set to run Postgres-backed Dispatch tests'), so the PASS lines ran against Postgres."
     },
     {
+      "criterion": "Failure categories (this round's change): a gateway 408, 429 or 5xx is transport, a Dispatch 4xx refusal other than 401/403/404 is refused, a non-JSON 200 is malformed",
+      "surface": "the real script and DispatchClient against a throwaway local stub Dispatch (Bun.serve on 127.0.0.1, $TMPDIR/infra194t/r3/stub.ts) that answers /healthz healthy and every API route with one status",
+      "command": "STUB_STATUS=<s> STUB_KIND=<gateway|dispatch|html> STUB_PORT=18431 bun $TMPDIR/infra194t/r3/stub.ts & DISPATCH_URL=http://127.0.0.1:18431 bun scripts/dispatch/meaning-search-check.ts --a1-query 'meaning search' --pair 'INFRA-43=watching scrolling output' --lexeme-database <socket> --coverage --expect-model x --coverage-wait 0",
+      "observed": "429, 408, 502 and 503 (gateway text bodies) → 'A1 unavailable: transport', 'A2 INFRA-43 unavailable: transport', 'A3 unavailable: transport reads=1'; 400 and 422 (Dispatch JSON error) → 'refused' on all three; 401, 403 → 'auth'; 404 → 'not-found'; 200 text/html → 'malformed' on all three; every run 'result unavailable exit=2'.",
+      "headSha": "6dc7ee6b11d091ac1b6e2ea2108f6a00ac8a7175",
+      "negativeControl": "The production 1200-character query, a real Dispatch 400, still prints 'refused' (not transport), so the new transient branch did not swallow the refusal category."
+    },
+    {
       "criterion": "Output hygiene: no private host, name, URL, token, title, query or identity in the script's output",
       "surface": "the captured stdout and stderr of every production and refusal run of this round",
-      "command": ".github/scripts/check-private-names.sh $TMPDIR/infra194t/r2/after.out $TMPDIR/infra194t/r2/neg-*.out (20 files); grep -l -E 'secretpw|dsp_x|https?://' over the same files",
-      "observed": "The scan exits 0 on all 20 files, and the grep matches nothing. This covers the wrong-token run, the postgres URL that holds a password and an internal host, the 1200-character queries, and the usage refusals. The PR body passed the same scan before it was posted.",
-      "headSha": "7764f1f4b5dc14357a575a9ce74142d7daed011a",
+      "command": ".github/scripts/check-private-names.sh over the 23 script outputs of this round under $TMPDIR/infra194t/r3 (production runs and stub runs); grep -l -E 'secret|dsp_|internal\\.example|https?://|upstream|sign in' over the same files",
+      "observed": "Scan exit 0 on all 23; the grep matched nothing, though the stub's bodies carried a private-looking host and a dsp_ token and the wrong-token run sent a dsp_ token. The PR body passed the same scan before it was posted.",
+      "headSha": "6dc7ee6b11d091ac1b6e2ea2108f6a00ac8a7175",
       "negativeControl": "A control file that holds the production tailnet host makes the scan exit 1."
     }
   ],
-  "ci": "Read on GitHub, not re-run, at 2026-10-28T09:18Z. Code head 186e6b46: lint, typecheck and test are queued (run 40662381596), and pr-title is queued (several earlier runs were cancelled). Head 7764f1f4: no check runs yet. GitHub reports the PR MERGEABLE.",
+  "ci": "Read on GitHub, not re-run, at 2026-10-28T09:35Z: code head 8ab64781 has lint, typecheck, test, build (2), changes and pr-title queued (earlier pr-title runs cancelled); head 6dc7ee6b has no check runs yet.",
   "observations": [
-    "A2 does not read `degraded`. A pair whose search answer is degraded, or empty because the query has no indexable word (`--pair 'INFRA-43=the of and a to'` printed 'shared=0 position=none fail', exit 1), is judged fail. It is never a false pass. This is the plan's intended before-evidence shape for keyword-only answers. The pre-registered pairs all have indexable words.",
-    "errorCategory maps 429 to 'refused' with the other 4xx statuses. This is not a pass path.",
-    "The throwaway Postgres (pid 9145) was stopped by its exact PID after the runs."
+    "transientStatus is exported from packages/envoy-client/src/dispatch-http.ts with its body unchanged; its only callers are DispatchServiceError (:113), the gateway classifier (:212) and the script (:269).",
+    "A2 does not read `degraded`: a degraded or empty pair answer is judged fail, never a false pass (as recorded last round).",
+    "The throwaway Postgres (pid 9938) and every stub server were stopped by exact PID after the runs."
   ]
 }
