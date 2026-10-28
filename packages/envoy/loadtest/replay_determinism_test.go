@@ -25,7 +25,8 @@ const rpDetIssues = 24
 // rpDetBundle is a bundle whose window exercises every random draw of the plan: issue sampling,
 // the upload split, read counts and kinds, search words, comment and document picks, anchor
 // substitutes, edit substitutes (on existing, created and window-created documents), synthetic
-// specs and documents, and file bytes.
+// specs and documents, and file bytes; and every kind of document write: anchored roots, a reply
+// and a resolve in an anchored thread, edits, uploads, creates and a typed ask's answer.
 func rpDetBundle(t *testing.T) *replayBundle {
 	t.Helper()
 	st := replayState{Project: "LINUX", At: rpAt, Until: rpAt.Add(39 * time.Minute)}
@@ -42,12 +43,15 @@ func rpDetBundle(t *testing.T) *replayBundle {
 		text := replaySynthDoc(1500+37*i, uint64(i))
 		fsize := 100 + i
 		files["docs/DD"+n+".md"] = text
+		blk, dd := "ask-"+n, "DD"+n
 		st.Issues = append(st.Issues, replayIssue{Key: key, Number: i, Exists: true, Title: "t" + n, Status: "open",
 			Artifacts: []replayArtifact{
 				{ID: "DD" + n, Name: "spec", Kind: "doc", Primary: true, Version: 1, TextPath: "docs/DD" + n + ".md", TextVersion: 1, VersionSizes: []int{len(text)}},
 				{ID: "F" + n, Name: "blob.bin", Kind: "file", Version: 1, Size: &fsize},
 			},
-			Comments: []replayComment{{ID: "C" + n, Actor: rpSession, Body: "c", Open: true}}})
+			Comments: []replayComment{{ID: "C" + n, Actor: rpSession, Body: "c", Open: true}},
+			Asks: []replayAsk{{ID: "K" + n, Kind: "question", State: "open", Question: "q", Author: rpSession,
+				BlockID: &blk, BlockArtifactID: &dd}}})
 		quote := fallbackCandidates(text)[0]
 		child, cn := "LINUX-"+itoa(100+i), itoa(100+i)
 		at := func(k int) time.Duration { return time.Duration(i)*time.Millisecond + time.Duration(k)*20*time.Second }
@@ -75,6 +79,10 @@ func rpDetBundle(t *testing.T) *replayBundle {
 		ev("comment.resolved", key, rpSession, at(14), map[string]any{"id": "C" + n})
 		ev("issue.updated", key, rpSession, at(15), map[string]any{"key": key, "title": "t" + n, "status": "done", "parent": nil, "priority": nil,
 			"labels": []string{}, "route": nil, "blocked_by": []string{}})
+		ev("comment.created", key, rpSession, at(16), map[string]any{"id": "S" + n, "body": "b", "reply_to": "A" + n + "a"})
+		ev("ask.answered", key, rpUser, at(17), map[string]any{"id": "K" + n, "kind": "question", "state": "answered",
+			"block_id": "ask-" + n, "block_artifact": map[string]any{"id": "DD" + n}, "answer": map[string]any{"user": "person-a", "selected": []string{"a"}}})
+		ev("comment.resolved", key, rpSession, at(18), map[string]any{"id": "A" + n + "a"})
 	}
 	return rpBundle(t, st, lines, files)
 }
@@ -108,15 +116,25 @@ func actionDigests(t *testing.T, p *replayPlan, sent [][]string) []string {
 	return out
 }
 
-// sendShuffled sends every action of p, started in a random order, to a fake Dispatch that
+// rpDetRun is what sendShuffled saw: per action, its requests (method, resolved path, identity,
+// content type, body hash), sorted, as the requests of one stage go in parallel; per logged
+// document, the plan indices of the write actions whose write the server applied, in arrival
+// order; and how many writes waited for the previous write on their document.
+type rpDetRun struct {
+	sent    [][]string
+	applied map[string][]int
+	waits   int
+}
+
+// sendShuffled sends every action of p to a fake Dispatch that applies each write on arrival and
 // answers after a random delay with ids drawn from the request itself. Each action's base URL is
-// /a/<index>, so the server files each request under its action. It returns, per action, its
-// requests (method, resolved path, identity, content type, body hash), sorted: the requests of one
-// stage go in parallel.
-func sendShuffled(t *testing.T, p *replayPlan, o replayOptions, b *replayBundle) [][]string {
+// /a/<index>, so the server files each request under its action. The document writes start first,
+// each document's in reverse plan order, then the other actions in a random order, each after a
+// random jitter, so only the order rule makes a document's writes arrive in log order.
+func sendShuffled(t *testing.T, p *replayPlan, o replayOptions, b *replayBundle) rpDetRun {
 	t.Helper()
 	var mu sync.Mutex
-	sent := make([][]string, len(p.Actions))
+	run := rpDetRun{sent: make([][]string, len(p.Actions)), applied: map[string][]int{}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		uri := strings.TrimPrefix(r.URL.RequestURI(), "/a/")
@@ -129,10 +147,15 @@ func sendShuffled(t *testing.T, p *replayPlan, o replayOptions, b *replayBundle)
 		rest = "/" + rest
 		sum := sha256.Sum256(body)
 		rec := strings.Join([]string{r.Method, rest, r.Header.Get("X-Dispatch-User"), r.Header.Get("Content-Type"), hex.EncodeToString(sum[:])}, " ")
+		delay := rand.N(3 * time.Millisecond)
 		mu.Lock()
-		sent[i] = append(sent[i], rec)
+		run.sent[i] = append(run.sent[i], rec)
+		if doc := p.Actions[i].Doc; doc != "" && r.Method != "GET" {
+			run.applied[doc] = append(run.applied[doc], i)
+			delay = rand.N(8 * time.Millisecond)
+		}
 		mu.Unlock()
-		time.Sleep(rand.N(3 * time.Millisecond))
+		time.Sleep(delay)
 		h := sha256.Sum256([]byte(r.Method + " " + rest + " " + string(body)))
 		x := hex.EncodeToString(h[:])
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "loc-" + x[:12], "key": "LINUX-L" + x[:6], "primary_artifact_id": "pa-" + x[:12],
@@ -149,9 +172,12 @@ func sendShuffled(t *testing.T, p *replayPlan, o replayOptions, b *replayBundle)
 		for _, c := range is.Comments {
 			ids[[2]string{idComment, c.ID}] = "l-" + c.ID
 		}
+		for _, a := range is.Asks {
+			ids[[2]string{idAsk, a.ID}] = "l-" + a.ID
+		}
 	}
 	rr := &replayRun{setup: &replaySetup{plan: p, opt: o}, futures: map[replayRef]*replayFuture{}, ids: ids,
-		writes: map[string]*replayWriteCount{}, skipped: map[string]int{}}
+		writes: map[string]*replayWriteCount{}, skipped: map[string]int{}, turns: replayTurns(p.Actions), wrote: map[string]bool{}}
 	for _, a := range p.Actions {
 		if rr.writes[a.Kind] == nil {
 			rr.writes[a.Kind] = &replayWriteCount{}
@@ -164,12 +190,27 @@ func sendShuffled(t *testing.T, p *replayPlan, o replayOptions, b *replayBundle)
 			}
 		}
 	}
+	var docWrites, others []int
+	for i, a := range p.Actions {
+		if rr.turns[a] != nil {
+			docWrites = append(docWrites, i)
+		} else {
+			others = append(others, i)
+		}
+	}
+	slices.Reverse(docWrites)
+	rand.Shuffle(len(others), func(i, j int) { others[i], others[j] = others[j], others[i] })
 	recs := newCollector[reqRec](1 << 12)
+	at := time.Now()
 	var wg sync.WaitGroup
-	for _, i := range rand.Perm(len(p.Actions)) {
+	for _, i := range append(docWrites, others...) {
 		a := p.Actions[i]
 		base := srv.URL + "/a/" + itoa(i)
-		wg.Go(func() { rr.do(context.Background(), base, "tok", a, recs) })
+		jitter := rand.N(2 * time.Millisecond)
+		wg.Go(func() {
+			time.Sleep(jitter)
+			rr.do(context.Background(), base, "tok", a, at, recs)
+		})
 	}
 	wg.Wait()
 	for k, wc := range rr.writes {
@@ -180,15 +221,27 @@ func sendShuffled(t *testing.T, p *replayPlan, o replayOptions, b *replayBundle)
 	if len(rr.skipped) != 0 {
 		t.Fatalf("skipped %v: every logged object must resolve", rr.skipped)
 	}
-	for i := range sent {
-		slices.Sort(sent[i])
+	for i := range run.sent {
+		slices.Sort(run.sent[i])
 	}
-	return sent
+	run.waits = rr.record(nil, 0).DocOrderWaits
+	return run
+}
+
+// docOrder is, per logged document, the plan indices of the write actions on it, in plan order.
+func docOrder(p *replayPlan) map[string][]int {
+	out := map[string][]int{}
+	for i, a := range p.Actions {
+		if a.Write && a.Doc != "" {
+			out[a.Doc] = append(out[a.Doc], i)
+		}
+	}
+	return out
 }
 
 // TestReplayDeterministic: one bundle, one set of inputs and one rng seed send the same requests,
-// action by action, whatever order the actions start in and however long Dispatch takes; another
-// rng seed sends other content.
+// action by action, whatever order the actions start in and however long Dispatch takes, and the
+// writes to each document reach Dispatch in log order; another rng seed sends other content.
 func TestReplayDeterministic(t *testing.T) {
 	o := rpDetOptions(7)
 	b1, b2 := rpDetBundle(t), rpDetBundle(t)
@@ -215,17 +268,43 @@ func TestReplayDeterministic(t *testing.T) {
 	if c.Substitutes.Quote == 0 || c.Substitutes.Edit == 0 || c.Edits.Substitute == 0 || c.IssuesKept == rpDetIssues*2 || c.DroppedTransactions == 0 {
 		t.Fatalf("counts %+v", c)
 	}
+	onDoc := map[string]bool{}
+	for _, a := range p1.Actions {
+		if a.Doc != "" {
+			onDoc[a.Kind] = true
+		}
+	}
+	for _, k := range []string{rkAnchored, rkReply, rkResolve, rkAskAnswer, rkUpload, rkEdit, rkEditUnnamed, rkFileVersion, rkFileCreate, rkIssueCreate, rkDocCreate} {
+		if !onDoc[k] {
+			t.Fatalf("no %s write names its document: %v", k, onDoc)
+		}
+	}
 
 	d1, d2 := actionDigests(t, p1, nil), actionDigests(t, p2, nil)
 	if !slices.Equal(d1, d2) {
 		t.Fatal("two plans of one bundle, inputs and rng seed differ")
 	}
-	s1 := actionDigests(t, p1, sendShuffled(t, p1, o, b1))
-	s2 := actionDigests(t, p2, sendShuffled(t, p2, o, b2))
+	r1, r2 := sendShuffled(t, p1, o, b1), sendShuffled(t, p2, o, b2)
+	s1, s2 := actionDigests(t, p1, r1.sent), actionDigests(t, p2, r2.sent)
 	for i := range s1 {
 		if s1[i] != s2[i] {
 			a := p1.Actions[i]
 			t.Fatalf("action %d (%s on %s at %s) sent other requests in the second run", i, a.Kind, a.Issue, a.Offset)
+		}
+	}
+	// Each run applied every document's writes in log order, though they started in reverse.
+	want := docOrder(p1)
+	for n, r := range []rpDetRun{r1, r2} {
+		if r.waits == 0 {
+			t.Fatalf("run %d: no write waited for its document's previous write", n+1)
+		}
+		if len(r.applied) != len(want) {
+			t.Fatalf("run %d: writes applied on %d documents, planned on %d", n+1, len(r.applied), len(want))
+		}
+		for doc, seq := range want {
+			if !slices.Equal(r.applied[doc], seq) {
+				t.Fatalf("run %d: document %s's writes applied as actions %v, log order %v", n+1, doc, r.applied[doc], seq)
+			}
 		}
 	}
 
@@ -282,6 +361,39 @@ func TestReplayReadsPrecedeTheirWrite(t *testing.T) {
 			if strings.HasPrefix(ref.Logged, "W") && !created[ref.Logged] {
 				t.Fatalf("a %s read at %s names %s before the write that creates it", a.Kind, a.Offset, ref.Logged)
 			}
+		}
+	}
+}
+
+// TestEndStateDigest: two equal end states digest alike whatever their order; a changed version,
+// size, anchor quote or block, or a missing document digests otherwise.
+func TestEndStateDigest(t *testing.T) {
+	q := func(s string) string {
+		h := sha256.Sum256([]byte(s))
+		return hex.EncodeToString(h[:])
+	}
+	state := func() []replayEndDoc {
+		return []replayEndDoc{
+			{ArtifactID: "DD2", Version: 3, Size: 1200, Anchors: []replayEndAnchor{{q("beta"), "b2"}, {q("alpha"), "b1"}}},
+			{ArtifactID: "DD1", Version: 5, Size: 900, Anchors: []replayEndAnchor{}},
+		}
+	}
+	a, b := state(), state()
+	slices.Reverse(b)
+	slices.Reverse(b[0].Anchors)
+	base := endStateDigest(a)
+	if got := endStateDigest(b); got != base {
+		t.Fatalf("equal states digest %s and %s", base, got)
+	}
+	for name, change := range map[string]func([]replayEndDoc) []replayEndDoc{
+		"version": func(d []replayEndDoc) []replayEndDoc { d[0].Version++; return d },
+		"size":    func(d []replayEndDoc) []replayEndDoc { d[1].Size--; return d },
+		"quote":   func(d []replayEndDoc) []replayEndDoc { d[0].Anchors[0].QuoteSHA256 = q("gamma"); return d },
+		"block":   func(d []replayEndDoc) []replayEndDoc { d[0].Anchors[1].BlockID = "b3"; return d },
+		"missing": func(d []replayEndDoc) []replayEndDoc { return d[:1] },
+	} {
+		if got := endStateDigest(change(state())); got == base {
+			t.Fatalf("a changed %s digests as the base state", name)
 		}
 	}
 }

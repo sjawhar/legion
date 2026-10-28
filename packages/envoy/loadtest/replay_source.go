@@ -302,7 +302,11 @@ type replayAction struct {
 	Kind    string
 	Write   bool
 	EventID int64
-	Stages  [][]*replayReq
+	// Doc is the logged document the action's write lands on (an anchored root, a reply or
+	// resolve in an anchored thread, an edit, upload or create, an anchored ask, a typed ask's
+	// answer or resolve); "" when none. The run sends a document's writes in plan order.
+	Doc    string
+	Stages [][]*replayReq
 	// What the plan derived: a substituted anchor quote, an edit from the logged diff or a
 	// substitute, a version's content (edit or upload) from a substitute.
 	QuoteSub, EditDiff, EditSub, ContentSub bool
@@ -419,6 +423,10 @@ type replayPlanner struct {
 	// a read sent before it never names the object.
 	bornAt      map[string]time.Duration
 	specDefault int
+	// threadDoc is the document of each anchored thread's comments (its root's anchor), by
+	// logged comment id; askDoc the document of each typed ask block, by logged ask id.
+	threadDoc map[string]string
+	askDoc    map[string]string
 }
 
 // planReplay plans the bundle's window under o.
@@ -432,6 +440,7 @@ func planReplay(b *replayBundle, o replayOptions) (*replayPlan, error) {
 		artifacts: map[string]*replayArtifact{}, docs: map[string]*rpDoc{}, issueDocs: map[string][]string{},
 		issueComments: map[string][]string{}, snap: map[string]map[string]json.RawMessage{}, stateIssue: map[string]*replayIssue{},
 		claim: map[string]*replayActor{}, created: map[string]bool{}, firstSize: map[string]int{}, bornAt: map[string]time.Duration{},
+		threadDoc: map[string]string{}, askDoc: map[string]string{},
 	}
 	pl.key = func(k string) bool { return keepIssue(o.rngSeed, k, o.rate) && (o.keys == nil || o.keys[k]) }
 	kept := map[string]bool{}
@@ -453,10 +462,30 @@ func planReplay(b *replayBundle, o replayOptions) (*replayPlan, error) {
 		}
 		for _, c := range is.Comments {
 			pl.issueComments[is.Key] = append(pl.issueComments[is.Key], c.ID)
+			if c.Anchor != nil && c.ReplyTo == nil && c.ThreadRootID == nil {
+				pl.threadDoc[c.ID] = c.Anchor.ArtifactID
+			}
+		}
+		for _, a := range is.Asks {
+			if a.BlockID != nil && a.BlockArtifactID != nil {
+				pl.askDoc[a.ID] = *a.BlockArtifactID
+			}
 		}
 		if pl.key(is.Key) {
 			kept[is.Key] = true
 			pl.p.IssueKeys = append(pl.p.IssueKeys, is.Key)
+		}
+	}
+	// A reply's thread is its root's.
+	for i := range b.State.Issues {
+		for _, c := range b.State.Issues[i].Comments {
+			root := c.ThreadRootID
+			if root == nil {
+				root = c.ReplyTo
+			}
+			if root != nil && pl.threadDoc[*root] != "" {
+				pl.threadDoc[c.ID] = pl.threadDoc[*root]
+			}
 		}
 	}
 	sort.Strings(pl.p.IssueKeys)
@@ -736,14 +765,19 @@ type rpMessage struct {
 }
 
 type rpAsk struct {
-	ID         string            `json:"id"`
-	Question   string            `json:"question"`
-	Kind       string            `json:"kind"`
-	Options    []replayAskOption `json:"options"`
-	Multiple   bool              `json:"multiple"`
-	Urgency    string            `json:"urgency"`
-	Anchor     *rpAnchor         `json:"anchor"`
-	Answer     *replayAskAnswer  `json:"answer"`
+	ID       string            `json:"id"`
+	Question string            `json:"question"`
+	Kind     string            `json:"kind"`
+	Options  []replayAskOption `json:"options"`
+	Multiple bool              `json:"multiple"`
+	Urgency  string            `json:"urgency"`
+	Anchor   *rpAnchor         `json:"anchor"`
+	// BlockID and BlockArtifact name a typed ask block and its document.
+	BlockID       *string `json:"block_id"`
+	BlockArtifact *struct {
+		ID string `json:"id"`
+	} `json:"block_artifact"`
+	Answer     *replayAskAnswer `json:"answer"`
 	Resolution *struct {
 		Kind   string `json:"kind"`
 		Reason string `json:"reason"`
@@ -807,6 +841,9 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 			act.Kind = rkReply
 			body["reply_to"] = replayRef{idComment, *c.ReplyTo}
 			act.Stages = [][]*replayReq{{post}}
+			if doc := pl.threadDoc[*c.ReplyTo]; doc != "" {
+				act.Doc, pl.threadDoc[c.ID] = doc, doc
+			}
 		case c.Anchor != nil:
 			act.Kind = rkAnchored
 			d, err := pl.doc(c.Anchor.ArtifactID)
@@ -826,6 +863,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 			} else {
 				body["anchor"] = map[string]any{"artifact": replayRef{idArtifact, c.Anchor.ArtifactID}, "quote": quote}
 				act.QuoteSub = sub
+				act.Doc, pl.threadDoc[c.ID] = c.Anchor.ArtifactID, c.Anchor.ArtifactID
 			}
 			act.Stages = [][]*replayReq{{getIssue(key)}, {post}}
 		default:
@@ -845,6 +883,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 		if ev.Actor.Kind == "user" {
 			return nil, "browser:artifact.version", nil
 		}
+		act.Doc = v.ArtifactID
 		d, err := pl.doc(v.ArtifactID)
 		if err != nil {
 			return nil, "", err
@@ -994,6 +1033,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 			{{Method: "GET", Path: "/api/v1/projects/{project}/architecture-source", Params: project}},
 		}
 		pl.created[key] = true
+		act.Doc = docID
 		pl.docs[docID] = &rpDoc{text: spec, size: size}
 		pl.issueDocs[key] = append(pl.issueDocs[key], docID)
 		pl.bornAt[docID] = offset
@@ -1021,6 +1061,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 			mime = a.Versions[0].MIME
 		}
 		produce := []replayProduce{{Ref: replayRef{idArtifact, a.ID}, Field: "id"}}
+		act.Doc = a.ID
 		if a.Kind != "doc" {
 			act.Kind = rkFileCreate
 			act.Stages = [][]*replayReq{{pl.fileUpload(key, a.Name, mime, a.ID, size, actor, person, produce)}}
@@ -1056,6 +1097,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 			r.Body = map[string]any{"actor": actor}
 		}
 		act.Stages = [][]*replayReq{{r}}
+		act.Doc = pl.threadDoc[c.ID]
 	case "message.created":
 		var m rpMessage
 		if err := json.Unmarshal(ev.Payload, &m); err != nil {
@@ -1076,6 +1118,9 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 			return nil, "", fmt.Errorf("event %d: %w", ev.ID, err)
 		}
 		askParams := map[string]replayArg{"id": refArg(replayRef{idAsk, a.ID})}
+		if a.BlockID != nil && a.BlockArtifact != nil {
+			pl.askDoc[a.ID] = a.BlockArtifact.ID
+		}
 		switch ev.Type {
 		case "ask.opened":
 			act.Kind = rkAskOpen
@@ -1086,6 +1131,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 			body := withActorBody(map[string]any{"question": a.Question, "kind": a.Kind, "options": options, "multiple": a.Multiple, "urgency": a.Urgency}, actor)
 			if a.Anchor != nil {
 				body["anchor"] = map[string]any{"artifact": replayRef{idArtifact, a.Anchor.ArtifactID}, "quote": a.Anchor.Quote}
+				act.Doc = a.Anchor.ArtifactID
 			}
 			act.Stages = [][]*replayReq{{{Method: "POST", Path: "/api/v1/issues/{key}/asks", Params: keyParams(key), Person: person, Body: body,
 				Produces: []replayProduce{{Ref: replayRef{idAsk, a.ID}, Field: "id"}}}}}
@@ -1106,6 +1152,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 				{{Method: "GET", Path: "/api/v1/asks/{id}", Params: askParams, Person: who}},
 				{{Method: "POST", Path: "/api/v1/asks/{id}/answer", Params: askParams, Person: who, Body: body}},
 			}
+			act.Doc = pl.askDoc[a.ID]
 		default:
 			act.Kind = rkAskResolve
 			body := map[string]any{}
@@ -1113,6 +1160,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 				body["kind"], body["reason"] = a.Resolution.Kind, a.Resolution.Reason
 			}
 			act.Stages = [][]*replayReq{{{Method: "POST", Path: "/api/v1/asks/{id}/resolve", Params: askParams, Person: person, Body: withActorBody(body, actor)}}}
+			act.Doc = pl.askDoc[a.ID]
 		}
 	case "issue.claimed":
 		var c struct {
@@ -1612,6 +1660,31 @@ type replayFuture struct {
 	ok    bool
 }
 
+// replayTurn is an action's place in its document's write order: its write waits for prev (the
+// previous planned write on the document; nil for the first), and done closes once it returned.
+type replayTurn struct {
+	prev <-chan struct{}
+	done chan struct{}
+}
+
+// replayTurns chains each document's write actions in plan order.
+func replayTurns(actions []*replayAction) map[*replayAction]*replayTurn {
+	turns := map[*replayAction]*replayTurn{}
+	last := map[string]chan struct{}{}
+	for _, a := range actions {
+		if !a.Write || a.Doc == "" {
+			continue
+		}
+		t := &replayTurn{done: make(chan struct{})}
+		if prev, ok := last[a.Doc]; ok {
+			t.prev = prev
+		}
+		last[a.Doc] = t.done
+		turns[a] = t
+	}
+	return turns
+}
+
 // replayRun is one run's replay state.
 type replayRun struct {
 	setup   *replaySetup
@@ -1619,14 +1692,22 @@ type replayRun struct {
 	futures map[replayRef]*replayFuture
 	pid     int
 	pprof   string
+	pg      string // the stack's Postgres URL
 	out     string
 	lg      *log.Logger
+	// turns orders each document's writes (replayTurns); read-only once the run starts.
+	turns map[*replayAction]*replayTurn
 
 	mu      sync.Mutex
 	writes  map[string]*replayWriteCount
 	skipped map[string]int
 	subs    replaySubstitutes
 	edits   replayEdits
+	// docWaits are the waits (s) of the writes that found the previous write on their document
+	// still running; wrote the logged documents written to; endState what readEndState read.
+	docWaits []float64
+	wrote    map[string]bool
+	endState *replayEndState
 
 	inflight      atomic.Int64
 	timeouts      atomic.Int64
@@ -1640,8 +1721,9 @@ type replayRun struct {
 // inputs: the seed dump, Dispatch's GOMAXPROCS and build.
 func (st *step) prepareReplay(ctx context.Context) error {
 	rs := st.cfg.replay
-	rr := &replayRun{setup: rs, futures: map[replayRef]*replayFuture{}, pid: st.cfg.ep.pids["dispatch"], pprof: st.cfg.ep.pprof,
-		out: st.cfg.out, lg: st.lg, writes: map[string]*replayWriteCount{}, skipped: map[string]int{}, endRead: make(chan struct{})}
+	rr := &replayRun{setup: rs, futures: map[replayRef]*replayFuture{}, pid: st.cfg.ep.pids["dispatch"], pprof: st.cfg.ep.pprof, pg: st.cfg.ep.pg,
+		out: st.cfg.out, lg: st.lg, writes: map[string]*replayWriteCount{}, skipped: map[string]int{}, endRead: make(chan struct{}),
+		turns: replayTurns(rs.plan.Actions), wrote: map[string]bool{}}
 	conn, err := pgx.Connect(ctx, st.cfg.ep.pg)
 	if err != nil {
 		return fmt.Errorf("replay: postgres: %w", err)
@@ -1678,8 +1760,8 @@ func (st *step) prepareReplay(ctx context.Context) error {
 
 // runReplay sends the plan: at the window start one /proc read of Dispatch and heap-start.pprof,
 // then each action at winStart + (offset - from) on its own goroutine; at the window end
-// heap-end.pprof and a /proc read, then the drain. done closes once every action has returned and
-// the drain is read.
+// heap-end.pprof and a /proc read, then the drain, then the end state of the documents written.
+// done closes once every action has returned and the drain and the end state are read.
 func (st *step) runReplay(ctx context.Context, a *api) (load *requestLoad, done <-chan struct{}) {
 	rr := st.replay
 	load = &requestLoad{recs: newCollector[reqRec](1 << 16)}
@@ -1731,14 +1813,16 @@ func (st *step) runReplay(ctx context.Context, a *api) (load *requestLoad, done 
 		var wg sync.WaitGroup
 		from := rr.setup.opt.from
 		for _, act := range rr.setup.plan.Actions {
-			if !sleepUntil(ctx, st.winStart.Add(act.Offset-from)) {
+			at := st.winStart.Add(act.Offset - from)
+			if !sleepUntil(ctx, at) {
 				break
 			}
-			wg.Go(func() { rr.do(ctx, a.base, a.token, act, load.recs) })
+			wg.Go(func() { rr.do(ctx, a.base, a.token, act, at, load.recs) })
 		}
 		wg.Wait()
 		close(actionsDone)
 		<-endDone
+		rr.readEndState()
 	}()
 	return load, closed
 }
@@ -1790,12 +1874,18 @@ func (rr *replayRun) settle(act *replayAction, produced map[replayRef]string) {
 	}
 }
 
-// do sends one action on its own connection under one deadline over all its requests, with no
-// retry; the first failed request ends it.
-func (rr *replayRun) do(ctx context.Context, base, token string, act *replayAction, recs *collector[reqRec]) {
+// do sends one action, scheduled at at, on its own connection under one deadline over all its
+// requests (at + replayActionDeadline), with no retry; the first failed request ends it. A write
+// on a document first waits, after its reads, for the previous planned write on that document to
+// return; that wait is inside the deadline, and the write's latency counts from at.
+func (rr *replayRun) do(ctx context.Context, base, token string, act *replayAction, at time.Time, recs *collector[reqRec]) {
 	rr.inflight.Add(1)
 	defer rr.inflight.Add(-1)
-	ctx, cancel := context.WithTimeout(ctx, replayActionDeadline)
+	turn := rr.turns[act]
+	if turn != nil {
+		defer close(turn.done)
+	}
+	ctx, cancel := context.WithDeadline(ctx, at.Add(replayActionDeadline))
 	defer cancel()
 	produced := map[replayRef]string{}
 	defer func() { rr.settle(act, produced) }()
@@ -1833,6 +1923,21 @@ func (rr *replayRun) do(ctx context.Context, base, token string, act *replayActi
 	var state replayActionState
 	ok := true
 	for _, stg := range act.Stages {
+		from := int64(0) // when the stage's latency counts from; 0 for each request's arrival
+		if turn != nil && writeStage(stg) {
+			waited, alive := rr.awaitTurn(ctx, turn)
+			turn = nil
+			if !alive {
+				ok = false
+				break
+			}
+			if waited {
+				from = at.UnixNano()
+			}
+			rr.mu.Lock()
+			rr.wrote[act.Doc] = true
+			rr.mu.Unlock()
+		}
 		results := make([]callResult, len(stg))
 		if len(stg) == 1 {
 			results[0] = rr.send(ctx, ac, stg[0], local, &state)
@@ -1845,7 +1950,11 @@ func (rr *replayRun) do(ctx context.Context, base, token string, act *replayActi
 		}
 		for i, res := range results {
 			r := stg[i]
-			recs.add(reqRec{route: r.route(act.Kind), status: res.status, transport: res.err != nil, latency: time.Duration(res.end - res.arrival()), connWait: res.connWait})
+			start := res.arrival()
+			if from != 0 {
+				start = from
+			}
+			recs.add(reqRec{route: r.route(act.Kind), status: res.status, transport: res.err != nil, latency: time.Duration(res.end - start), connWait: res.connWait})
 			if !res.ok() && (r.Tolerate == 0 || res.status != r.Tolerate || res.err != nil) {
 				ok = false
 				continue
@@ -1873,6 +1982,35 @@ func (rr *replayRun) do(ctx context.Context, base, token string, act *replayActi
 	if !ok {
 		clear(produced)
 	}
+}
+
+// writeStage says whether a stage sends a write (any request but a GET).
+func writeStage(stg []*replayReq) bool {
+	return slices.ContainsFunc(stg, func(r *replayReq) bool { return r.Method != "GET" })
+}
+
+// awaitTurn waits until the previous write on the action's document has returned: waited is
+// whether it was still running (the wait is then counted in docWaits), alive false when the
+// action's deadline came first.
+func (rr *replayRun) awaitTurn(ctx context.Context, t *replayTurn) (waited, alive bool) {
+	if t.prev == nil {
+		return false, true
+	}
+	select {
+	case <-t.prev:
+		return false, true
+	default:
+	}
+	t0 := time.Now()
+	select {
+	case <-t.prev:
+		alive = true
+	case <-ctx.Done():
+	}
+	rr.mu.Lock()
+	rr.docWaits = append(rr.docWaits, time.Since(t0).Seconds())
+	rr.mu.Unlock()
+	return true, alive
 }
 
 // replayActionState is what an action's earlier responses tell its later requests.

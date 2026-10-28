@@ -5,13 +5,22 @@ package main
 // too: never rename them.
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // replayInputs are the inputs a replay run's result depends on.
@@ -75,6 +84,13 @@ type replayRecord struct {
 	Saturated         bool                        `json:"saturated"`
 	SaturatedReasons  []string                    `json:"saturated_reasons"`
 	Roster            int                         `json:"roster"`
+	// DocOrderWaits are the writes that found the previous write on their document still running
+	// and waited for it; DocOrderWaitS their waits in seconds.
+	DocOrderWaits int  `json:"doc_order_waits"`
+	DocOrderWaitS stat `json:"doc_order_wait_s"`
+	// EndState digests the documents the run wrote, read after the drain; null when that read
+	// failed (no Postgres reachable).
+	EndState *replayEndState `json:"end_state"`
 }
 
 // replayMetaRecord is meta.json's replay record.
@@ -235,6 +251,7 @@ func (rr *replayRun) record(ss []sample, windowS float64) *replayRecord {
 	rec := &replayRecord{
 		Inputs: rr.meta.Inputs, WindowS: windowS, CPUSource: "none", Writes: map[string]replayWriteCount{}, SkippedMissingDep: map[string]int{},
 		Substitutes: rr.subs, Edits: rr.edits, InflightAtEnd: rr.inflightAtEnd, Timeouts: int(rr.timeouts.Load()), Roster: len(rr.setup.roster),
+		DocOrderWaits: len(rr.docWaits), DocOrderWaitS: mkStat(rr.docWaits), EndState: rr.endState,
 	}
 	for k, w := range rr.writes {
 		rec.Writes[k] = *w
@@ -263,4 +280,129 @@ func (rr *replayRun) record(ss []sample, windowS float64) *replayRecord {
 	}
 	rec.Saturated, rec.SaturatedReasons = replaySaturation(dispatchCoreSamples(ss), rec.Inputs.GOMAXPROCS, rec.Timeouts, rec.InflightAtEnd)
 	return rec
+}
+
+// replayEndState is summary.json's replay.end_state: the documents the run wrote and the sha256
+// of their end-state lines (endStateDigest).
+type replayEndState struct {
+	Documents int    `json:"documents"`
+	SHA256    string `json:"sha256"`
+}
+
+// replayEndAnchor is an unresolved anchored root comment's anchor: its quote's sha256 and its
+// block id.
+type replayEndAnchor struct {
+	QuoteSHA256 string `json:"quote_sha256"`
+	BlockID     string `json:"block_id"`
+}
+
+// replayEndDoc is one written document's end state, by its logged id (stable across runs, unlike
+// the local id of a document the run creates): its highest version number and that version's
+// size, both 0 when the document does not exist locally, and its anchors.
+type replayEndDoc struct {
+	ArtifactID string            `json:"artifact_id"`
+	Version    int               `json:"version"`
+	Size       int               `json:"size"`
+	Anchors    []replayEndAnchor `json:"anchors"`
+}
+
+// replayEndStateFile is end_state.json: ids, numbers and hashes only.
+type replayEndStateFile struct {
+	Documents []replayEndDoc `json:"documents"`
+	SHA256    string         `json:"sha256"`
+}
+
+// endStateDigest sorts the documents by id and each one's anchors, and returns the sha256 of one
+// line per document: "<artifact id> <version> <size> <quote sha256>@<block id>,...".
+func endStateDigest(docs []replayEndDoc) string {
+	slices.SortFunc(docs, func(a, b replayEndDoc) int { return strings.Compare(a.ArtifactID, b.ArtifactID) })
+	h := sha256.New()
+	for _, d := range docs {
+		slices.SortFunc(d.Anchors, func(a, b replayEndAnchor) int {
+			if c := strings.Compare(a.QuoteSHA256, b.QuoteSHA256); c != 0 {
+				return c
+			}
+			return strings.Compare(a.BlockID, b.BlockID)
+		})
+		anchors := make([]string, len(d.Anchors))
+		for i, a := range d.Anchors {
+			anchors[i] = a.QuoteSHA256 + "@" + a.BlockID
+		}
+		fmt.Fprintf(h, "%s %d %d %s\n", d.ArtifactID, d.Version, d.Size, strings.Join(anchors, ","))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// readEndState reads, over the stack's Postgres URL, the end state of every document the run
+// wrote, writes end_state.json and sets the record's end_state; a failed read leaves it null.
+func (rr *replayRun) readEndState() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	rr.mu.Lock()
+	logged := slices.Sorted(maps.Keys(rr.wrote))
+	rr.mu.Unlock()
+	docs, err := rr.queryEndState(ctx, logged)
+	if err != nil {
+		rr.lg.Printf("replay: end state not read (end_state is null): %v", err)
+		return
+	}
+	f := replayEndStateFile{Documents: docs, SHA256: endStateDigest(docs)}
+	writeJSONFile(filepath.Join(rr.out, "end_state.json"), f, 0o644, rr.lg)
+	rr.mu.Lock()
+	rr.endState = &replayEndState{Documents: len(docs), SHA256: f.SHA256}
+	rr.mu.Unlock()
+	rr.lg.Printf("replay: end state of %d documents, sha256 %s", len(docs), f.SHA256)
+}
+
+func (rr *replayRun) queryEndState(ctx context.Context, logged []string) ([]replayEndDoc, error) {
+	if rr.pg == "" {
+		return nil, errors.New("no Postgres URL")
+	}
+	conn, err := pgx.Connect(ctx, rr.pg)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: %w", err)
+	}
+	defer conn.Close(context.Background())
+	docs := make([]replayEndDoc, 0, len(logged))
+	for _, id := range logged {
+		d := replayEndDoc{ArtifactID: id, Anchors: []replayEndAnchor{}}
+		if local, ok := rr.localNow(replayRef{idArtifact, id}); ok {
+			if err := conn.QueryRow(ctx, `select coalesce(max(number), 0),
+				coalesce((select coalesce(size, octet_length(markdown), octet_length(content), 0) from artifact_versions
+					where artifact_id = $1 order by number desc limit 1), 0)
+				from artifact_versions where artifact_id = $1`, local).Scan(&d.Version, &d.Size); err != nil {
+				return nil, fmt.Errorf("artifact_versions: %w", err)
+			}
+			rows, err := conn.Query(ctx, `select coalesce(anchor->>'quote', ''), coalesce(anchor->>'block_id', '') from comments
+				where anchor is not null and reply_to is null and not resolved and anchor->>'artifact_id' = $1`, local)
+			if err != nil {
+				return nil, fmt.Errorf("comments: %w", err)
+			}
+			var quote, block string
+			if _, err := pgx.ForEachRow(rows, []any{&quote, &block}, func() error {
+				sum := sha256.Sum256([]byte(quote))
+				d.Anchors = append(d.Anchors, replayEndAnchor{QuoteSHA256: hex.EncodeToString(sum[:]), BlockID: block})
+				return nil
+			}); err != nil {
+				return nil, fmt.Errorf("comments: %w", err)
+			}
+		}
+		docs = append(docs, d)
+	}
+	return docs, nil
+}
+
+// localNow is the local id of a logged object once the run is over: the response of the run's
+// own action that created it, else loadtest.replay_ids.
+func (rr *replayRun) localNow(ref replayRef) (string, bool) {
+	if f, ok := rr.futures[ref]; ok {
+		select {
+		case <-f.done:
+			return f.local, f.ok
+		default:
+			return "", false
+		}
+	}
+	v, ok := rr.ids[[2]string{ref.Kind, ref.Logged}]
+	return v, ok
 }

@@ -280,7 +280,7 @@ series directory.
 | `stack.sh seed [--force]` | Makes the seed template `dispatch_seed` (The seed, below). It does nothing when `dispatch_seed` and `seed.meta.json` exist. `--force` drops the old seed and seeds again. |
 | `stack.sh reset [LOG]` | Resets the stack to the seed and starts Dispatch, with its log in `LOG` (default `$LOADTEST_ROOT/logs/dispatch.log`). `run-step.sh` does this before each step. |
 | `stack.sh reset --replay [LOG]` | The same from this build's prepared replay template (The replay, below), refused without one; before Dispatch starts, `loadgen replay-checksum -db dispatch` into `$LOADTEST_ROOT/replay/last-reset.json`. |
-| `stack.sh replay-manifest --bundle-pack FILE --bundle DIR [--seed-dir DIR]` | Prints a replay manifest from `replay-pack`'s JSON, the bundle's `bundle.meta.json` and `replay-seed`'s `seed.meta.json` (`"seed": null` without `--seed-dir`). |
+| `stack.sh replay-manifest --bundle-pack FILE --bundle DIR [--seed-dir DIR] [--part-version N]` | Prints a replay manifest from `replay-pack`'s JSON, the bundle's `bundle.meta.json` and `replay-seed`'s `seed.meta.json` (`"seed": null` without `--seed-dir`), every part at version N (default 1). |
 | `stack.sh replay-get [--manifest FILE] [--from-dir DIR]` | Gets, verifies and unpacks the manifest's bundle, and restores its seed dump into the template `dispatch_replay_seed` (The replay, below). |
 | `stack.sh replay-prepare` | Makes this build's replay template `dispatch_replay_<key>` from `dispatch_replay_seed` (The replay, below). |
 | `stack.sh stop [NAME...]` | Stops `dispatch`, `listener`, `nats`, `proxy` and `postgres`, or only the named ones. |
@@ -658,10 +658,10 @@ packages/envoy/loadtest/stack.sh replay-manifest --bundle-pack pack.json --bundl
   >packages/envoy/loadtest/replay-2026-10-26.json
 ```
 
-`replay-manifest` writes `version` 1 for every part. A part uploaded again under the same name is
-a new version of the same artifact: set its `version` to the one its upload made (the 2026-10-26
-bundle's parts are at version 2). The seed's wall time is `seed_seconds` in `seed.meta.json` and
-in the manifest's `seed`.
+`replay-manifest` writes `--part-version N` (default 1) as every part's `version`. A part uploaded
+again under the same name is a new version of the same artifact: pass the version its upload made
+(the 2026-10-26 bundle's parts are at version 2, so `--part-version 2`). The seed's wall time is
+`seed_seconds` in `seed.meta.json` and in the manifest's `seed`.
 
 **`stack.sh replay-get`** keeps each part at `$LOADTEST_ROOT/replay/parts/<file>` when its sha256
 matches; else it copies it from `--from-dir DIR` or downloads `GET
@@ -732,9 +732,11 @@ run creates, the events cursor (`last_seq`) and an ask's `edited_at` come from r
 roster is the bundle's ids then `ses-replay-<n>`. Two runs of one bundle, flags and rng seed send
 the same requests, action by action, whatever the timing (`TestReplayDeterministic`); another rng
 seed sends other content. They end with the same anchors and versions when Dispatch takes the
-writes to each document in log order and none fails: no action waits for an earlier one on its
-document, so a write taken after a later one, or one that fails (`writes.failed`), can change what
-the later writes to that document store, or make them fail.
+writes to each document in log order and none fails, so each document's writes are sent in plan
+order (Sending, below): `TestReplayDeterministic` starts each document's writes in reverse, against
+a fake Dispatch with random delays, and checks that both runs apply them in log order. A write that
+fails (`writes.failed`) can still change what the later writes to its document store, or make them
+fail. `replay.end_state` records what the run left (The record, below), so two runs can be compared.
 
 A logged write is one transaction: the events of one actor id at one `created_at`. Each becomes
 one action of one kind:
@@ -783,8 +785,14 @@ documents that exist at 22:55 or whose creating write is sent before them, so no
 later write.
 
 **Sending**: each action starts at window start + (offset - from) on its own goroutine, on its
-own connection (a fresh transport, as each CLI call is a new process), under one 60 s deadline over
-all its requests, with no retry; its first failed request ends it. Each request is one record of
+own connection (a fresh transport, as each CLI call is a new process), under one 60 s deadline from
+that time over all its requests, with no retry; its first failed request ends it. A write on a
+document (an anchored root; a reply or resolve in an anchored thread, whose projection writes the
+root's document; an edit, upload or create; an anchored ask; a typed ask's answer or resolve) sends
+its reads at their times, then, before its write, waits until the previous planned write on that
+document has returned, succeeded or failed. The wait counts inside the 60 s deadline, and the
+write's latency then counts from its scheduled time, so a slow Dispatch still shows as latency and
+saturation (`doc_order_waits`, `doc_order_wait_s`). Each request is one record of
 the Requests table, named `<method> <pattern> [<kind>]`. Replay writes carry no marker, so the
 delivery columns stay empty. A logged id resolves to the response of the run's own action that
 created it (waited for) or to `loadtest.replay_ids`; an action naming an object that neither has
@@ -797,7 +805,8 @@ kept issues) plus further issues' topics until its registration is about 458 byt
 **The record.** At the window start: one read of Dispatch's `/proc/<pid>/stat` (utime + stime),
 then `heap-start.pprof` (`/debug/pprof/heap`, no GC), then the first write. At its end:
 `heap-end.pprof`, then a `/proc` read, then the CPU profile's end, the goroutine dump and
-`heap.pprof`. In the step directory,
+`heap.pprof`. After the drain, the end state of every document the run wrote is read over the
+stack's Postgres URL into `end_state.json`. In the step directory,
 `go tool pprof -sample_index=alloc_space -diff_base=heap-start.pprof -top envoy-dispatch heap-end.pprof`
 gives the bytes allocated in the window alone, by function, where `envoy-dispatch` is the step's
 Dispatch binary (`$LOADTEST_ROOT/bin/envoy-dispatch` until the next `stack.sh setup` rebuilds it;
@@ -820,6 +829,9 @@ Dispatch binary (`$LOADTEST_ROOT/bin/envoy-dispatch` until the next `stack.sh se
 | `inflight_at_end`, `timeouts` | Actions in flight at the window end; actions that hit the 60 s deadline. |
 | `saturated`, `saturated_reasons` | Saturated when Dispatch's 5 s cores reach 0.9 × GOMAXPROCS in at least 10% of the window's samples (`dispatch_cpu`), an action timed out (`timeouts`), or more than 20 actions were in flight at the end (`inflight_at_end`). |
 | `roster` | Sessions registered. |
+| `doc_order_waits` | Writes that found the previous write on their document still running and waited for it (Sending, above). |
+| `doc_order_wait_s` | Those waits in seconds: `n`, `p50`, `p90`, `p99`, `max`. |
+| `end_state` | {`documents`, `sha256`}: the documents the run wrote and the sha256 over one sorted line per document (its logged artifact id, its highest version number, that version's size, and the sorted sha256 of the quote and block id of each unresolved anchored root comment on it). `end_state.json` in the step directory holds the lines' fields (ids, numbers and hashes, no quote text). Null when the Postgres read failed (`-allow-foreign` with no Postgres reachable). |
 
 `meta.json` `replay` holds the same `inputs`, `cgroup_cpu_max` (`/sys/fs/cgroup/cpu.max`, `""`
 when absent), `heap_start_at`, `heap_end_at`, `dispatch_build` (the build JSON:
@@ -840,11 +852,12 @@ for i in 1 2 3; do
 done
 ```
 
-The spread is the highest base run's `replay.dispatch_cpu_s` less the lowest. The change merges
-when every head run uses less CPU than every base run, or, where its expected gain is smaller than
-the spread, when the changed function's share of CPU in a profile at its head is lower than in one
-at its base by at least half the expected gain. The pull request quotes the runs, the spread, the
-command and the inputs (`replay.inputs`).
+The spread is the highest base run's `replay.dispatch_cpu_s` less the lowest. The runs'
+`replay.end_state.sha256` are compared: equal hashes show that every run did the same work. The
+change merges when every head run uses less CPU than every base run, or, where its expected gain
+is smaller than the spread, when the changed function's share of CPU in a profile at its head is
+lower than in one at its base by at least half the expected gain. The pull request quotes the runs,
+the spread, the command and the inputs (`replay.inputs`).
 
 **What the replay does not reproduce:**
 
@@ -949,6 +962,7 @@ Every percentile in the harness is the lower nearest rank: the value at index
 | `cpu.pprof` | Dispatch's CPU profile over the whole window. |
 | `heap.pprof` | Dispatch's heap profile at the end of the window. |
 | `heap-start.pprof`, `heap-end.pprof` | Under `-source replay`: Dispatch's heap profile at the window's start and end (The replay, above). |
+| `end_state.json` | Under `-source replay`: the end state of every document the run wrote, read after the drain, and its sha256 (`replay.end_state`, The replay, above). |
 | `last-reset.json` | A `--replay` step's copy of `$LOADTEST_ROOT/replay/last-reset.json` (The replay, above). |
 | `heap.txt` | The same heap profile as text (`/debug/pprof/heap?debug=1`), with the runtime's memory statistics. |
 | `goroutines.txt` | Dispatch's goroutine dump (`debug=2`) at the end of the window, after the CPU profile. |

@@ -42,10 +42,11 @@
 #                           gzip:9 and the zstd levels this pg_dump accepts), split it into 24 MiB
 #                           parts linux-replay-seed-0114.dump.partNN under DIR of --out (default
 #                           $LOADTEST_ROOT/replay-seed) and write seed.meta.json there.
-#   stack.sh replay-manifest --bundle-pack FILE --bundle DIR [--seed-dir DIR] > MANIFEST
+#   stack.sh replay-manifest --bundle-pack FILE --bundle DIR [--seed-dir DIR] [--part-version N] > MANIFEST
 #                           a replay manifest (schema 1, replay-2026-10-26.json) from replay-pack's
 #                           JSON, the bundle's bundle.meta.json and replay-seed's seed.meta.json
-#                           (without --seed-dir, "seed": null). No lock, no stack.
+#                           (without --seed-dir, "seed": null); every part's version is N (default
+#                           1). No lock, no stack.
 #   stack.sh replay-get [--manifest FILE] [--from-dir DIR]
 #                           the manifest's parts (default replay-2026-10-26.json) under
 #                           $LOADTEST_ROOT/replay/parts, each kept when its sha256 matches, else
@@ -1044,22 +1045,24 @@ json_set() {
 }
 
 cmd_replay_manifest() {
-  local usage="usage: stack.sh replay-manifest --bundle-pack FILE --bundle DIR [--seed-dir DIR] > MANIFEST"
-  local pack="" bundle="" seed_dir=""
+  local usage="usage: stack.sh replay-manifest --bundle-pack FILE --bundle DIR [--seed-dir DIR] [--part-version N] > MANIFEST"
+  local pack="" bundle="" seed_dir="" part_version=1
   while [ $# -gt 0 ]; do
     case $1 in
-      --bundle-pack | --bundle | --seed-dir)
+      --bundle-pack | --bundle | --seed-dir | --part-version)
         if [ $# -lt 2 ] || [ -z "$2" ]; then die "$1 needs a value; $usage"; fi
         case $1 in
           --bundle-pack) pack=$2 ;;
           --bundle) bundle=$2 ;;
           --seed-dir) seed_dir=$2 ;;
+          --part-version) part_version=$2 ;;
         esac
         shift 2
         ;;
       *) die "unknown argument '$1'; $usage" ;;
     esac
   done
+  [[ $part_version =~ ^[1-9][0-9]*$ ]] || die "--part-version must be a positive integer, not '$part_version'; $usage"
   { [ -n "$pack" ] && [ -n "$bundle" ]; } || die "--bundle-pack and --bundle are required; $usage"
   [ -f "$pack" ] || die "no replay-pack output at $pack"
   [ -f "$bundle/$BUNDLE_META" ] || die "no $BUNDLE_META in $bundle"
@@ -1068,13 +1071,14 @@ cmd_replay_manifest() {
     [ -f "$seed_dir/seed.meta.json" ] || die "no seed.meta.json in $seed_dir"
     seed_args=(--slurpfile seed "$seed_dir/seed.meta.json")
   fi
-  # A part's slug is its file name lower-cased with every character outside [a-z0-9] a '-'; each is
-  # uploaded once, so its version is 1. The seed check's *_list fields are dropped: a passing check
-  # has none, and they would name production issues.
+  # A part's slug is its file name lower-cased with every character outside [a-z0-9] a '-'; its
+  # version is --part-version (default 1: each part uploaded once; a part uploaded again under the
+  # same name is a later version of the same artifact). The seed check's *_list fields are dropped:
+  # a passing check has none, and they would name production issues.
   # shellcheck disable=SC2016
-  jq -n --arg issue "$REPLAY_ISSUE" --slurpfile pack "$pack" --slurpfile meta "$bundle/$BUNDLE_META" "${seed_args[@]}" '
+  jq -n --arg issue "$REPLAY_ISSUE" --argjson version "$part_version" --slurpfile pack "$pack" --slurpfile meta "$bundle/$BUNDLE_META" "${seed_args[@]}" '
     def part: (.file | ascii_downcase | gsub("[^a-z0-9]"; "-")) as $s |
-      {file, slug: $s, ref: "dispatch://\($issue)/artifact/\($s)", version: 1, bytes, sha256};
+      {file, slug: $s, ref: "dispatch://\($issue)/artifact/\($s)", version: $version, bytes, sha256};
     $meta[0] as $m | $pack[0] as $p | $seed[0] as $s |
     {schema: 1, project: $m.project, window: {from: $m.at, to: $m.until}, issue: $issue,
      bundle: {tar_zst_sha256: $p.tar_zst_sha256, bytes: $p.bytes, fetched_at: $m.fetched_at,
