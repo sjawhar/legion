@@ -2804,7 +2804,13 @@ func TestSSEStreamOpensAndHeartbeatsWhileTheHorizonIsHeld(t *testing.T) {
 	open := func() <-chan string {
 		t.Helper()
 		request := sseRequest(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, since), func(*http.Request) {})
-		return sseLines(t, openSSEResponse(t, request, time.Second).Body)
+		response := openSSEResponse(t, request, time.Second)
+		// Opened before its subscription, it is still replayed every event after since, so it
+		// says its replay is complete (eventReplayHeader) and the browser skips its gap refresh.
+		if got := response.Header.Get(eventReplayHeader); got != "complete" {
+			t.Fatalf("%s of a connection resuming while the horizon is held = %q, want \"complete\"", eventReplayHeader, got)
+		}
+		return sseLines(t, response.Body)
 	}
 
 	release := holdClusterTransactionID(t, 3*time.Second)

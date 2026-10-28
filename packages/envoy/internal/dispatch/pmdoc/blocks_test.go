@@ -314,3 +314,54 @@ func shortTableForPadding(width, bodyRows int) *Node {
 func emptyTableCellForPadding(kind string) *Node {
 	return &Node{Type: kind, Children: []*Node{{Type: "paragraph"}}}
 }
+
+// Each table with a block id lists every block id below it once, in document order: not its own,
+// not an inline node's, and not twice for an id two of its blocks carry. A table without an id has
+// no entry.
+func TestTableDescendantIDsListsEachTablesBlockIDsOnce(t *testing.T) {
+	block := func(typ, id string, children ...*Node) *Node {
+		node := &Node{Type: typ, Children: children}
+		if id != "" {
+			node.Attrs = Attrs{BlockIDAttr: id}
+		}
+		return node
+	}
+	cell := func(typ, cellID, paragraphID string, inline ...*Node) *Node {
+		if len(inline) == 0 {
+			inline = []*Node{{Type: "text", Text: "x"}}
+		}
+		return block(typ, cellID, block("paragraph", paragraphID, inline...))
+	}
+	image := &Node{Type: "image", Attrs: Attrs{BlockIDAttr: "image", "src": "https://example.com/i.png"}}
+	first := block("table", "t1",
+		block("table_header_row", "t1-head", cell("table_header", "t1-h1", "t1-h1-p"), cell("table_header", "", "t1-h2-p")),
+		block("table_row", "t1-row1", cell("table_cell", "dup", "t1-c1-p", image), cell("table_cell", "dup", "t1-c2-p")),
+		block("table_row", "", cell("table_cell", "t1-c3", ""), cell("table_cell", "t1-c4", "t1-c4-p")),
+	)
+	second := block("table", "t2",
+		block("table_header_row", "", cell("table_header", "", "t2-h1-p")),
+		block("table_row", "t2-row1", cell("table_cell", "t2-c1", "t1-c1-p")),
+	)
+	anonymous := block("table", "",
+		block("table_header_row", "a-head", cell("table_header", "a-h1", "a-h1-p")),
+		block("table_row", "a-row1", cell("table_cell", "a-c1", "a-c1-p")),
+	)
+	doc := block("doc", "", block("paragraph", "before", &Node{Type: "text", Text: "Before."}), first, anonymous, second)
+
+	got, err := TableDescendantIDs(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{
+		"t1": {"t1-head", "t1-h1", "t1-h1-p", "t1-h2-p", "t1-row1", "dup", "t1-c1-p", "t1-c2-p", "t1-c3", "t1-c4", "t1-c4-p"},
+		"t2": {"t2-h1-p", "t2-row1", "t2-c1", "t1-c1-p"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("TableDescendantIDs = %v, want %v", got, want)
+	}
+	for table, ids := range want {
+		if !equalStrings(got[table], ids) {
+			t.Fatalf("table %q: descendant ids %v, want %v", table, got[table], ids)
+		}
+	}
+}

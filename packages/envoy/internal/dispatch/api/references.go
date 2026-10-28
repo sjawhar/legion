@@ -30,6 +30,16 @@ func (s *server) replaceReferences(
 	return refs.ReplaceCounted(ctx, tx, fromKind, fromID, body, s.deps.ServerURL)
 }
 
+// replaceEditedReferences is refs.ReplaceCountedEdit bound to this server's URL: an edit of an
+// ask's question or a comment's body from previous to body.
+func (s *server) replaceEditedReferences(
+	ctx context.Context,
+	tx pgx.Tx,
+	fromKind, fromID, previous, body string,
+) (model.ReferenceChanges, error) {
+	return refs.ReplaceCountedEdit(ctx, tx, fromKind, fromID, previous, body, s.deps.ServerURL)
+}
+
 // referencesSinceWait bounds how long a since read waits for the safe horizon to pass every event
 // committed before the read (events.Horizon.Await). Only a transaction held open on the Postgres
 // instance keeps the horizon back that long, and a poller would rather have the mentions at or

@@ -76,6 +76,17 @@ func parseEventListOptions(r *http.Request) (eventListOptions, error) {
 	}, nil
 }
 
+// eventReplayHeader is the response header GET /api/v1/events answers "complete" on a resuming
+// connection (since=, or Last-Event-ID) whose since is at or below the event log's newest id when
+// it connects, which is the connection that opens early (streamEvents' opensEarly): the stream
+// replays every event after since before it goes live, so the client has missed nothing. A cold
+// connect and a since above the newest id (a replaced log) open only once their subscription is
+// in place, start at the relay's published cursor and carry no header. A connection that opened
+// early and then finds the log reset while it subscribes ends rather than replay a log that no
+// longer exists, so the client reconnects. The browser reads it same-origin, so no CORS exposure
+// is needed.
+const eventReplayHeader = "X-Dispatch-Event-Replay"
+
 func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -187,7 +198,7 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if opensEarly && openEventStream(w, flusher) != nil {
+	if opensEarly && openEventStream(w, flusher, true) != nil {
 		return
 	}
 	subscribing, stopSubscribing := context.WithCancel(reads)
@@ -235,7 +246,7 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 				// A cold client asked for no backlog, and a clamped one's since is of a log this
 				// one replaced: both start at published, the handover this connection holds.
 				since = published
-				if openEventStream(w, flusher) != nil {
+				if openEventStream(w, flusher, false) != nil {
 					return
 				}
 			}
@@ -297,11 +308,16 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 // resolved its fetch of this stream only once a body byte arrived, and a connection with no
 // backlog and no new event sends none until the first heartbeat: until then the page held its
 // "Reconnecting…" state and skipped the refresh a reconnect owes every query, so what committed
-// while it was away stayed unshown. An error is a client already gone.
-func openEventStream(w http.ResponseWriter, flusher http.Flusher) error {
+// while it was away stayed unshown. replayComplete adds eventReplayHeader: the caller passes it
+// for a connection that opens early, whose since is at or below the log's newest id and which is
+// replayed every event after it. An error is a client already gone.
+func openEventStream(w http.ResponseWriter, flusher http.Flusher, replayComplete bool) error {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	if replayComplete {
+		w.Header().Set(eventReplayHeader, "complete")
+	}
 	w.WriteHeader(http.StatusOK)
 	if _, err := fmt.Fprint(w, ": open\n\n"); err != nil {
 		return err
