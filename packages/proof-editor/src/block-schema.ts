@@ -1,5 +1,5 @@
 import { $nodeSchema } from '@milkdown/kit/utils';
-import type { DOMOutputSpec, Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
+import { DOMParser, type DOMOutputSpec, type Fragment, type Node as ProseMirrorNode, type Schema } from '@milkdown/kit/prose/model';
 import type { MarkdownNode as ParsedMarkdownNode, NodeSchema } from '@milkdown/kit/transformer';
 
 import { withBlockIdSpec } from './editor/schema/block-ids.js';
@@ -57,6 +57,64 @@ export function creatable(version: number, element: BlockElementVersions | undef
 export function creatableValue(version: number, attribute: BlockAttributeSchema, value: unknown): boolean {
   if (!creatable(version, attribute)) return false;
   return attribute.kind !== 'enum' || typeof value !== 'string' || creatable(version, attribute.choice_versions?.[value]);
+}
+
+/**
+ * The manifest's numbers of the node or mark `name` of the Proof schema (a typed block is a
+ * node), or undefined when the manifest names none.
+ */
+function elementVersions(schema: BlockSchema, kind: 'node' | 'mark', name: string): BlockElementVersions | undefined {
+  if (kind === 'mark') return schema.marks?.find((mark) => mark.name === name);
+  return schema.nodes?.find((node) => node.name === name) ?? schema.types.find((type) => type.name === name);
+}
+
+/** Why an editor built from `schema` may not create `node` itself, its marks or its attributes. */
+function uncreatableNode(schema: BlockSchema, node: ProseMirrorNode): string | undefined {
+  const name = node.type.name;
+  const type = schema.types.find((candidate) => candidate.name === name);
+  if (!creatable(schema.version, elementVersions(schema, 'node', name))) {
+    return `this editor cannot create ${type ? 'typed block' : 'node'} ${JSON.stringify(name)} yet`;
+  }
+  for (const mark of node.marks) {
+    if (!creatable(schema.version, elementVersions(schema, 'mark', mark.type.name))) {
+      return `this editor cannot create mark ${JSON.stringify(mark.type.name)} yet`;
+    }
+  }
+  for (const [attributeName, attribute] of Object.entries(type?.attributes ?? {})) {
+    const value: unknown = node.attrs[attributeName];
+    if (value !== undefined && value !== null && !creatableValue(schema.version, attribute, value)) {
+      return `this editor cannot write ${JSON.stringify(value)} into typed block ${JSON.stringify(name)} attribute ${JSON.stringify(attributeName)} yet`;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Throws when `content`, which an editor built from `schema` is about to write, holds a node, a
+ * mark, a typed block, an attribute or an enum choice that the editor may not create yet. A typed
+ * block holds such an attribute only when its source names one (`schemaAttrs`).
+ */
+export function assertCreatable(schema: BlockSchema, content: Fragment): void {
+  let refusal: string | undefined;
+  content.descendants((node) => {
+    refusal ??= uncreatableNode(schema, node);
+    return refusal === undefined;
+  });
+  if (refusal !== undefined) throw new Error(refusal);
+}
+
+/**
+ * `schema`'s DOM parser, which reads pasted and dropped HTML, without the rules of each node and
+ * mark that an editor built from `blockSchema` may not create yet: such an element is not read,
+ * and its content is kept without it, as a typed block's section with an attribute the editor
+ * may not write is (`parsedDomAttrs`).
+ */
+export function creatableDomParser(schema: Schema, blockSchema: BlockSchema): DOMParser {
+  const rules = DOMParser.fromSchema(schema).rules.filter((rule) => {
+    if ('node' in rule && rule.node !== undefined) return creatable(blockSchema.version, elementVersions(blockSchema, 'node', rule.node));
+    return rule.mark === undefined || creatable(blockSchema.version, elementVersions(blockSchema, 'mark', rule.mark));
+  });
+  return new DOMParser(schema, rules);
 }
 
 export type HostBlockRenderer = (node: ProseMirrorNode, type: BlockTypeSchema) => DOMOutputSpec;
@@ -199,10 +257,11 @@ function domAttrs(type: BlockTypeSchema, node: ProseMirrorNode): Record<string, 
 
 /**
  * The client-owned attributes a typed block's section carries, parsed as its markdown would be;
- * the others keep their defaults. A section whose attribute the schema refuses is not read as the
- * typed block at all (the rule does not match), since this editor never writes one.
+ * the others keep their defaults. A section whose attribute the schema refuses, or holds a value an
+ * editor of schema version `version` may not write yet, is not read as the typed block at all (the
+ * rule does not match), since this editor never writes one.
  */
-function parsedDomAttrs(type: BlockTypeSchema, dom: HTMLElement): Record<string, unknown> | false {
+function parsedDomAttrs(type: BlockTypeSchema, dom: HTMLElement, version: number): Record<string, unknown> | false {
   const attributes: Record<string, unknown> = {};
   for (const [name, definition] of Object.entries(type.attributes)) {
     if (definition.server) continue;
@@ -213,6 +272,7 @@ function parsedDomAttrs(type: BlockTypeSchema, dom: HTMLElement): Record<string,
     } catch {
       return false;
     }
+    if (!creatableValue(version, definition, attributes[name])) return false;
   }
   return attributes;
 }
@@ -230,7 +290,7 @@ export function typedBlockSpec(type: BlockTypeSchema, renderBlock?: HostBlockRen
     isolating: true,
     parseDOM: [{
       tag: `section[data-proof-block-type="${type.name}"]`,
-      getAttrs: (dom) => parsedDomAttrs(type, dom),
+      getAttrs: (dom) => parsedDomAttrs(type, dom, version),
       contentElement: (dom) => dom.querySelector('[data-proof-block-content]') ?? dom,
     }],
     toDOM: (node) => withDomAttributes(renderBlock?.(node, type) ?? [

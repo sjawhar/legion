@@ -2827,13 +2827,28 @@ export const NO_ROUTE_ROLLING_RELEASE_MESSAGE =
   "The Dispatch process that answered does not offer this action yet, because a new release of " +
   "Dispatch is in progress. Try again in one minute.";
 
-/** Waits `ms` milliseconds. A client takes one so that a test does not wait. */
-export type Sleep = (ms: number) => Promise<void>;
+/** Waits `ms` milliseconds, or until `signal` aborts. A client takes one so that a test does not
+ *  wait. */
+export type Sleep = (ms: number, signal?: AbortSignal | null) => Promise<void>;
 
-/** The `Sleep` a client waits with when its caller gives none: a timer. */
-export const sleep: Sleep = (ms) => {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  setTimeout(resolve, ms);
+/** The `Sleep` a client waits with when its caller gives none: a timer. When `signal` aborts,
+ *  before or during the wait, the wait rejects at once with the signal's reason, so an aborted
+ *  request sends nothing more. */
+export const sleep: Sleep = (ms, signal) => {
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  if (signal?.aborted) {
+    reject(signal.reason);
+    return promise;
+  }
+  const abort = () => {
+    clearTimeout(timer);
+    reject(signal?.reason);
+  };
+  const timer = setTimeout(() => {
+    signal?.removeEventListener("abort", abort);
+    resolve();
+  }, ms);
+  signal?.addEventListener("abort", abort, { once: true });
   return promise;
 };
 

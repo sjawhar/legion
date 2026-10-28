@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { NO_ROUTE_ROLLING_RELEASE_MESSAGE } from "@legion/contracts";
+import { NO_ROUTE_ROLLING_RELEASE_MESSAGE, type Sleep, sleep } from "@legion/contracts";
 
 import { ApiError, createApiClient, type FetchImplementation, isNoRoute } from "./client";
 
@@ -121,4 +121,27 @@ test("a 404 NOT_FOUND for a resource the server does not know is not sent again"
   });
   expect(stub.requests).toHaveLength(1);
   expect(wait.waits).toEqual([]);
+});
+
+test("a request aborted during a no-route wait rejects at once with the abort and is not sent again", async () => {
+  const stub = scriptedFetch([
+    () => noRoute("GET", "/auth/whoami"),
+    () => Response.json({ kind: "user", login: "alice" }),
+  ]);
+  const controller = new AbortController();
+  const reason = new Error("a newer read replaced this one");
+  // The shared wait, with the caller's abort arriving once the wait has begun.
+  const wait: Sleep = (ms, signal) => {
+    const waiting = sleep(ms, signal);
+    controller.abort(reason);
+    return waiting;
+  };
+  // No method of the client takes a signal yet, so the test sends through the one request path
+  // every method shares.
+  const client = createApiClient(stub.fetch, wait) as unknown as {
+    response(path: string, init: RequestInit): Promise<Response>;
+  };
+
+  await expect(client.response("/auth/whoami", { signal: controller.signal })).rejects.toBe(reason);
+  expect(stub.requests).toHaveLength(1);
 });

@@ -13626,9 +13626,21 @@ var DEFAULT_ISSUE_READ_EVENTS = 10;
 var NO_ROUTE_MESSAGE_PREFIX = "no route for ";
 var NO_ROUTE_RETRY_DELAYS_MS = [1000, 2000, 4000];
 var NO_ROUTE_ROLLING_RELEASE_MESSAGE = "The Dispatch process that answered does not offer this action yet, because a new release of " + "Dispatch is in progress. Try again in one minute.";
-var sleep = (ms) => {
-  const { promise, resolve } = Promise.withResolvers();
-  setTimeout(resolve, ms);
+var sleep = (ms, signal) => {
+  const { promise, resolve, reject } = Promise.withResolvers();
+  if (signal?.aborted) {
+    reject(signal.reason);
+    return promise;
+  }
+  const abort = () => {
+    clearTimeout(timer);
+    reject(signal?.reason);
+  };
+  const timer = setTimeout(() => {
+    signal?.removeEventListener("abort", abort);
+    resolve();
+  }, ms);
+  signal?.addEventListener("abort", abort, { once: true });
   return promise;
 };
 function jitteredDelay(ms) {
@@ -15803,7 +15815,7 @@ class DispatchClient {
         if (delay === undefined)
           break;
       }
-      await this.#sleep(jitteredDelay(delay));
+      await this.#sleep(jitteredDelay(delay), init.signal);
     }
     throw new DispatchNoRouteError;
   }

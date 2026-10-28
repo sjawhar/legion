@@ -1050,7 +1050,8 @@ export class DispatchClient {
    * NOT_FOUND`, "no route for …") is sent again with the same `init`, so the same body, after each
    * of `NO_ROUTE_RETRY_DELAYS_MS`: while a release rolls out, two builds of Dispatch answer, and
    * the next attempt may reach the build that serves the route. No handler ran, so this is safe
-   * for every method. After the last attempt it throws `DispatchNoRouteError`.
+   * for every method. After the last attempt it throws `DispatchNoRouteError`. An abort of
+   * `init.signal` during a wait rejects at once with the abort's reason and sends nothing more.
    */
   async #send<T>(
     url: string,
@@ -1065,7 +1066,7 @@ export class DispatchClient {
         if (!isNoRoute(error)) throw error;
         if (delay === undefined) break;
       }
-      await this.#sleep(jitteredDelay(delay));
+      await this.#sleep(jitteredDelay(delay), init.signal);
     }
     throw new DispatchNoRouteError();
   }

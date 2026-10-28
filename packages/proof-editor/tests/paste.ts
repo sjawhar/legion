@@ -1,4 +1,6 @@
+import { Slice } from "@milkdown/kit/prose/model";
 import type { EditorView } from "@milkdown/kit/prose/view";
+import * as prosemirrorView from "@milkdown/kit/prose/view";
 
 /** The clipboard event a plain-text paste delivers: no `text/html`, so the markdown is parsed. */
 export function plainTextPasteEvent(text: string): ClipboardEvent {
@@ -18,6 +20,39 @@ export function pastePlainText(view: EditorView, text: string): void {
   view.someProp("handlePaste", (handlePaste) =>
     handlePaste(view, plainTextPasteEvent(text), undefined as never)
   );
+}
+
+/** prosemirror-view's own clipboard read, which it exports for tests but does not declare. */
+const { __parseFromClipboard: parseFromClipboard } = prosemirrorView as unknown as {
+  __parseFromClipboard(
+    view: EditorView,
+    text: string,
+    html: string | null,
+    plainText: boolean,
+    $context: EditorView["state"]["selection"]["$from"]
+  ): Slice | null;
+};
+
+/**
+ * What a browser paste of `html` (with `text` as its plain-text flavour) does, as
+ * prosemirror-view's `doPaste` does it: the view parses the HTML with the schema's DOM parser,
+ * offers the slice to every `handlePaste` (the clipboard plugin's takes it), and inserts the slice
+ * itself when none does. happy-dom does not deliver a synthetic paste event to ProseMirror's own
+ * listener, so this makes the same calls.
+ */
+export function pasteHtml(view: EditorView, html: string, text = ""): void {
+  const event = {
+    clipboardData: {
+      getData: (type: string) => (type === "text/html" ? html : type === "text/plain" ? text : ""),
+    },
+  } as unknown as ClipboardEvent;
+  const slice = parseFromClipboard(view, text, html, false, view.state.selection.$from);
+  if (
+    view.someProp("handlePaste", (handlePaste) => handlePaste(view, event, slice ?? Slice.empty))
+  ) {
+    return;
+  }
+  if (slice) view.dispatch(view.state.tr.replaceSelection(slice));
 }
 
 /** `@milkdown/preset-gfm`'s `table_header_row.parseDOM` and `@milkdown/preset-commonmark`'s

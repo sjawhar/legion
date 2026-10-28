@@ -37,6 +37,7 @@ import {
   type MyRepliesResponse,
   type ReferenceChangesPayload,
   serviceSubjectLabel,
+  sleep,
   type UserStateUpdatedEventPayload,
   type UserThreadStateUpdatedEventPayload,
 } from "./dispatch-api";
@@ -1000,4 +1001,21 @@ test("a Kubernetes service subject renders as namespace/name, and anything else 
     "system:serviceaccount:legion:default:extra"
   );
   expect(serviceSubjectLabel("kubernetes-admin")).toBe("kubernetes-admin");
+});
+
+test("a client's wait ends when its timer fires", async () => {
+  await expect(sleep(0, new AbortController().signal)).resolves.toBeUndefined();
+});
+
+test("a client's wait rejects at once with the reason its request was aborted for", async () => {
+  const controller = new AbortController();
+  const reason = new Error("a newer read replaced this one");
+  const waiting = sleep(60_000, controller.signal);
+  controller.abort(reason);
+  await expect(waiting).rejects.toBe(reason);
+});
+
+test("a client's wait for a request already aborted rejects at once", async () => {
+  const reason = new Error("the caller gave up");
+  await expect(sleep(60_000, AbortSignal.abort(reason))).rejects.toBe(reason);
 });

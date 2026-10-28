@@ -330,7 +330,8 @@ export class DispatchApiClient {
   ) {}
 
   // A no-route answer is sent again after each of NO_ROUTE_RETRY_DELAYS_MS, with the same init, so
-  // the same body. After the last attempt it throws NO_ROUTE_ROLLING_RELEASE_MESSAGE.
+  // the same body. After the last attempt it throws NO_ROUTE_ROLLING_RELEASE_MESSAGE. An abort of
+  // init.signal during a wait rejects at once with the abort's reason and sends nothing more.
   private async response(path: string, init: RequestInit = {}): Promise<Response> {
     const request: RequestInit = { credentials: "same-origin", ...init };
     for (const delay of [...NO_ROUTE_RETRY_DELAYS_MS, undefined]) {
@@ -339,7 +340,7 @@ export class DispatchApiClient {
       const error = await errorFrom(response);
       if (!isNoRoute(error)) throw error;
       if (delay === undefined) break;
-      await this.sleep(jitteredDelay(delay));
+      await this.sleep(jitteredDelay(delay), request.signal);
     }
     throw new ApiError(404, { code: "NOT_FOUND", error: NO_ROUTE_ROLLING_RELEASE_MESSAGE });
   }

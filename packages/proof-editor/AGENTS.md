@@ -91,13 +91,20 @@ drawing keeps the block's copy attributes (INFRA-526); `src/block-schema.ts`'s
 `remarkTypedBlocks` reading its source through `markdownSource` from `./typed-block-drawing`,
 `src/lib-headless.ts`'s default branch installing `remarkUnfitTypedBlocks` after
 `remarkTypedBlocks`, and `src/lib.ts` installing `unfitTypedBlocksRemarkPlugin` after the mark
-plugins (INFRA-565); `src/block-schema.ts` and `src/typed-block-commands.ts` reading the
-manifest's `since` and `creatable_since` (INFRA-558): the `BlockSchema` types name the manifest's
-nodes and marks and each element's numbers, a block the editor makes takes no default of an
-attribute that the editor may not create yet (`typedBlockSpec`'s `version`), and the commands
+plugins (INFRA-565); `src/block-schema.ts`, `src/typed-block-commands.ts` and `src/lib.ts`
+reading the manifest's `since` and `creatable_since` (INFRA-558): the `BlockSchema` types name the
+manifest's nodes and marks and each element's numbers, a block the editor makes takes no default
+of an attribute that the editor may not create yet (`typedBlockSpec`'s `version`), the commands
 offer, insert, retype into and write only the typed blocks, attributes and enum values the editor
-may create (`creatable`, `creatableValue`); and annotations, casts and assertions that make a file
-type-check, each of which erases before runtime (below).
+may create (`creatable`, `creatableValue`), and the editor's other writes keep to the same rule:
+`src/lib.ts`'s `installCreationGate` makes a markdown parse through `parserCtx` (a text/plain
+paste, a suggestion's accept) and an editable editor's `setMarkdown` throw for content holding a
+node, mark, typed block, attribute or enum value the editor may not create yet
+(`assertCreatable`), and puts `creatableDomParser` in `schema.cached`, so an HTML paste or drop
+does not read such a node or mark, and `parsedDomAttrs` does not read a typed block's section
+holding such an attribute or value; a read-only editor's `setMarkdown` (a version view), the
+collab sync and the headless engine still read all of them; and annotations, casts and assertions
+that make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table has that counterpart, and the

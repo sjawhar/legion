@@ -3,6 +3,8 @@ import {
   type ArchitectureSource,
   type IssueSummary,
   NO_ROUTE_ROLLING_RELEASE_MESSAGE,
+  type Sleep,
+  sleep,
 } from "@legion/contracts";
 import { DispatchClient, DispatchGatewayError, DispatchNoRouteError } from "../dispatch-http";
 import { fakeSearchResponse } from "./fake-search-response";
@@ -1310,5 +1312,30 @@ describe("a request a Dispatch process answers with no route", () => {
     expect(requests.map((request) => request.init.method)).toEqual(["POST", "POST"]);
     expect(requestBody(requests[1] as RecordedRequest)).toEqual({ key: "CORE", name: "Core" });
     expect(requests[1]?.init.body).toBe(requests[0]?.init.body);
+  });
+
+  test("rejects at once with the abort, and is not sent again, when aborted during the wait", async () => {
+    const { fetchImpl, requests } = fakeFetch([
+      noRoute("GET", "/api/v1/projects"),
+      jsonResponse([{ key: "CORE", name: "Core" }]),
+    ]);
+    const controller = new AbortController();
+    const reason = new Error("a newer read replaced this one");
+    // The shared wait, with the caller's abort arriving once the wait has begun.
+    const wait: Sleep = (ms, signal) => {
+      const waiting = sleep(ms, signal);
+      controller.abort(reason);
+      return waiting;
+    };
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      "secret",
+      fetchImpl,
+      controller.signal,
+      wait
+    );
+
+    await expect(client.listProjects()).rejects.toBe(reason);
+    expect(requests).toHaveLength(1);
   });
 });
