@@ -65,6 +65,10 @@ type escapeContext struct {
 	// flankFirst and flankLast report whether the text's first and last character are written as
 	// character references, for the delimiter run beside each to open or close (runSpelling).
 	flankFirst, flankLast bool
+	// pairBackslash reports whether a literal backslash right before a flanking character
+	// reference is written `\\`, and tildeBackslash whether an escaped tilde is written `\~`
+	// (runSpelling).
+	pairBackslash, tildeBackslash bool
 }
 
 // endsBareURL reports whether the character is ASCII punctuation opening text written right after
@@ -156,15 +160,16 @@ func escaped(char rune) string {
 }
 
 // textEscape is how the text writer spells an escaped character: a tilde as its numeric reference,
-// and anything else as escaped spells it - except the character that ends a bare URL
-// (endsBareURL), which is always a backslash, since linkify continues a URL through the `&` that
-// opens either reference. Both delimiter rules read a `~` run after the reference as they read one
-// after any punctuation, where a run right after `\~` may open or close by the browser editor's
-// rules and is text by goldmark's, and the writer takes first a spelling both read back
-// (inlineWithEscapes). The writer has also always written the reference, and writing anything else
-// would change the bytes of every stored document that holds an escaped tilde.
-func textEscape(char rune, endsBareURL bool) string {
-	if endsBareURL {
+// and anything else as escaped spells it - except where backslash asks for a backslash: the
+// character that ends a bare URL (endsBareURL), since linkify continues a URL through the `&` that
+// opens either reference, and a tilde in a spelling that writes it `\~` (lastResorts). Both
+// delimiter rules read a `~` run after the reference as they read one after any punctuation, where
+// a run right after `\~` may open or close by the browser editor's rules and is text by goldmark's,
+// and the writer takes first a spelling both read back (inlineWithEscapes). The writer has also
+// always written the reference, and writing anything else would change the bytes of every stored
+// document that holds an escaped tilde.
+func textEscape(char rune, backslash bool) string {
+	if backslash {
 		return "\\" + string(char)
 	}
 	if char == '~' {
@@ -188,11 +193,19 @@ const (
 // delimitersInText is the first escape a run's text could need: delimitersTildes when a text node
 // outside a code span holds a tilde; delimitersAll when asterisks or underscores could pair - two
 // free runs of one of them, or one free run of asterisks beside bold or italic text, whose markers
-// are asterisks too; and delimitersAsRuled otherwise, when nothing is read back.
-func delimitersInText(nodes []*Node) delimiterEscapes {
+// are asterisks too, a bold or italic code span counted as such text only where codeMarks; and
+// delimitersAsRuled otherwise, when nothing is read back.
+func delimitersInText(nodes []*Node, codeMarks bool) delimiterEscapes {
 	stars, underscores := 0, 0
 	for _, node := range nodes {
-		if node.Type != "text" || nodeHasMark(node, "inlineCode") {
+		if node.Type != "text" {
+			continue
+		}
+		marked := nodeHasMark(node, "strong") || nodeHasMark(node, "emphasis")
+		if nodeHasMark(node, "inlineCode") {
+			if codeMarks && marked {
+				stars++
+			}
 			continue
 		}
 		if strings.ContainsRune(node.Text, '~') {
@@ -200,7 +213,7 @@ func delimitersInText(nodes []*Node) delimiterEscapes {
 		}
 		stars += freeDelimiterRuns(node.Text, '*')
 		underscores += freeDelimiterRuns(node.Text, '_')
-		if nodeHasMark(node, "strong") || nodeHasMark(node, "emphasis") {
+		if marked {
 			stars++
 		}
 	}

@@ -110,50 +110,66 @@ type lineCandidate struct {
 // (readBackDepth), and the writer keeps the earliest writing of the greatest depth, the first
 // writing counting first. Each depth asks more than the writer before INFRA-534 asked at that
 // step, so wherever its choice reads back under inlineMarkdown this writer makes it too.
+//
+// Only where no writing so far reads back under inlineMarkdown is a run written again in each of
+// lastResorts' spellings, so that none changes the bytes of a run another writing stores. A run
+// none of the cases above reads back, but whose free asterisk run stands beside a bold or italic
+// code span (delimitersInText with codeMarks), is read back as well, and written again only there.
 func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlineContext) {
 	from := r.b.Len()
 	fused := r.writeInlineRun(nodes, prefix, context, runSpelling{})
-	held := delimitersInText(nodes)
+	held := delimitersInText(nodes, false)
+	lastHeld := delimitersInText(nodes, true)
 	bareURL := writesBareURL(nodes, context.tableCell)
 	flanking := delimiterBesidePunctuation(nodes, context.tableCell)
-	if r.err != nil || held == delimitersAsRuled && !bareURL && !fused && !flanking {
+	misread := held != delimitersAsRuled || bareURL || fused || flanking
+	if r.err != nil || !misread && lastHeld == delimitersAsRuled {
 		return
 	}
 	depth := r.readBackDepth(from, prefix, nodes)
-	if depth == len(readBackReaders) {
+	if depth == len(readBackReaders) || !misread && depth > 0 {
 		return
 	}
 	kept := string(r.b.Bytes()[from:])
-	spellings := respellings(held, bareURL, false)
-	if fused {
-		spellings = append(spellings, respellings(held, bareURL, true)...)
-	}
-	if flanking {
-		flanked := []runSpelling{{flanking: true}}
-		for _, spelling := range spellings {
-			spelling.flanking = true
-			flanked = append(flanked, spelling)
+	var spellings, flanked []runSpelling
+	if misread {
+		spellings = respellings(held, bareURL, marksAsWritten)
+		if fused {
+			spellings = append(spellings, respellings(held, bareURL, marksKeptOpen)...)
 		}
-		spellings = append(spellings, flanked...)
+		if flanking {
+			flanked = []runSpelling{{flanking: true}}
+			for _, spelling := range spellings {
+				spelling.flanking = true
+				flanked = append(flanked, spelling)
+			}
+			spellings = append(spellings, flanked...)
+		}
 	}
 	// Every writing leaves the renderer in the same state but for the bytes: writeInlineRun closes
 	// its marks, which clears the open code fence, and ends its line, which clears the held line
 	// start, and the link label verdict it leaves is read only inside a link, which a later run
 	// opens again first. So the kept bytes written back after other spellings write what writing
 	// them last would.
-	for _, spelling := range spellings {
-		r.b.Truncate(from)
-		fusedAgain := r.writeInlineRun(nodes, prefix, context, spelling)
-		if r.err != nil || spelling.keepOpen && fusedAgain {
-			continue
+	readsBack := func(spellings []runSpelling) bool {
+		for _, spelling := range spellings {
+			r.b.Truncate(from)
+			fusedAgain := r.writeInlineRun(nodes, prefix, context, spelling)
+			if r.err != nil || spelling.order != marksAsWritten && fusedAgain {
+				continue
+			}
+			reads := r.readBackDepth(from, prefix, nodes)
+			if reads == len(readBackReaders) {
+				return true
+			}
+			if reads > depth {
+				depth, kept = reads, string(r.b.Bytes()[from:])
+			}
 		}
-		reads := r.readBackDepth(from, prefix, nodes)
-		if reads == len(readBackReaders) {
-			return
-		}
-		if reads > depth {
-			depth, kept = reads, string(r.b.Bytes()[from:])
-		}
+		return false
+	}
+	if readsBack(spellings) || depth == 0 && readsBack(lastResorts(held, lastHeld, flanked)) {
+		return
 	}
 	r.b.Truncate(from)
 	r.b.WriteString(kept)
@@ -166,39 +182,96 @@ var readBackReaders = [...]inlineReader{inlineMarkdown, storedMarkdown, flanking
 // runSpelling is how writeInlineRun writes a run beyond the escape rules: the delimiters in its
 // text it escapes, whether it escapes the character after each bare URL goldmark's parser reads
 // (endsBareURL), whether it writes each bare URL the tokenizer reads (literalLength) as an autolink
-// (`<href>`, whose text both parsers read as written and whose `>` ends it), whether a mark the
-// next text still carries stays open around that text's other marks (keepingOpen), and whether a
-// letter beside a delimiter run that punctuation stands inside is a character reference
-// (flanking).
+// (`<href>`, whose text both parsers read as written and whose `>` ends it), the order it opens
+// each text's marks in (markOrder), whether a letter beside a delimiter run that punctuation stands
+// inside is a character reference (flanking), whether a literal backslash right before such a
+// reference is written `\\` (pairBackslash), and whether an escaped tilde is written `\~`
+// (tildeBackslash) rather than as its reference.
 type runSpelling struct {
-	escapes      delimiterEscapes
-	afterBareURL bool
-	angleURLs    bool
-	keepOpen     bool
-	flanking     bool
+	escapes        delimiterEscapes
+	afterBareURL   bool
+	angleURLs      bool
+	order          markOrder
+	flanking       bool
+	pairBackslash  bool
+	tildeBackslash bool
 }
 
-// respellings is every spelling, open marks kept open or not, that inlineWithEscapes writes a run
-// in after its first writing, in the order it tries them: the delimiter escapes from the fewest,
-// then each again with the character after a bare URL escaped, then each with every bare URL the
+// markOrder is the order writeInlineRun opens a text's marks in, after those written open before it
+// that the text shares from the outermost.
+type markOrder int
+
+const (
+	// marksAsWritten: in their written order (visibleMarks).
+	marksAsWritten markOrder = iota
+	// marksKeptOpen: keepingOpen.
+	marksKeptOpen
+	// marksByReach: byReach.
+	marksByReach
+	// marksReopened: reopening.
+	marksReopened
+)
+
+// respellings is every spelling, its marks opened in order, that inlineWithEscapes writes a run in
+// after its first writing, in the order it tries them: the delimiter escapes from the fewest, then
+// each again with the character after a bare URL escaped, then each with every bare URL the
 // tokenizer reads written as an autolink.
-func respellings(held delimiterEscapes, bareURL, keepOpen bool) []runSpelling {
+func respellings(held delimiterEscapes, bareURL bool, order markOrder) []runSpelling {
+	var spellings []runSpelling
+	for _, url := range []runSpelling{{}, {afterBareURL: true}, {angleURLs: true}} {
+		if url != (runSpelling{}) && !bareURL {
+			continue
+		}
+		for _, delimiters := range escapesFrom(held) {
+			spelling := runSpelling{escapes: delimiters, afterBareURL: url.afterBareURL, angleURLs: url.angleURLs, order: order}
+			if spelling != (runSpelling{}) {
+				spellings = append(spellings, spelling)
+			}
+		}
+	}
+	return spellings
+}
+
+// escapesFrom is the delimiter escapes a run whose text first needs held is written in, from the
+// fewest: the rules alone, then held and each after it.
+func escapesFrom(held delimiterEscapes) []delimiterEscapes {
 	escapes := []delimiterEscapes{delimitersAsRuled}
 	if held != delimitersAsRuled {
 		for next := held; next <= delimitersAll; next++ {
 			escapes = append(escapes, next)
 		}
 	}
+	return escapes
+}
+
+// lastResorts is every spelling inlineWithEscapes writes a run in only where no writing before
+// reads back under inlineMarkdown, so that no run another writing stores changes its bytes, in the
+// order it tries them: flanked, the flanking spellings tried before, again with a literal
+// backslash right before a character reference written `\\`, where it would otherwise escape the
+// reference's `&`; the delimiter escapes respellings did not try, with an asterisk run beside a bold
+// or italic code span counted as one beside a bold or italic text (delimitersInText, lastHeld for
+// held); then the escapes from the fewest with each escaped tilde written `\~`, which the browser
+// editor reads as a tilde beside which a `*` run may open or close, where its reference ends in
+// `;`; then with the marks ordered by reach (byReach); then reopened (reopening).
+func lastResorts(held, lastHeld delimiterEscapes, flanked []runSpelling) []runSpelling {
 	var spellings []runSpelling
-	for _, url := range []runSpelling{{}, {afterBareURL: true}, {angleURLs: true}} {
-		if url != (runSpelling{}) && !bareURL {
-			continue
+	for _, spelling := range flanked {
+		spelling.pairBackslash = true
+		spellings = append(spellings, spelling)
+	}
+	if held == delimitersAsRuled && lastHeld != delimitersAsRuled {
+		for _, delimiters := range escapesFrom(lastHeld)[1:] {
+			spellings = append(spellings, runSpelling{escapes: delimiters})
 		}
-		for _, delimiters := range escapes {
-			spelling := runSpelling{escapes: delimiters, afterBareURL: url.afterBareURL, angleURLs: url.angleURLs, keepOpen: keepOpen}
-			if spelling != (runSpelling{}) {
-				spellings = append(spellings, spelling)
-			}
+	}
+	for _, delimiters := range escapesFrom(lastHeld) {
+		if delimiters >= delimitersTildes {
+			spellings = append(spellings, runSpelling{escapes: delimiters, tildeBackslash: true})
+		}
+	}
+	for _, order := range []markOrder{marksByReach, marksReopened} {
+		for _, delimiters := range escapesFrom(lastHeld) {
+			spellings = append(spellings, runSpelling{escapes: delimiters, order: order})
 		}
 	}
 	return spellings
@@ -208,12 +281,10 @@ func respellings(held delimiterEscapes, bareURL, keepOpen bool) []runSpelling {
 // after it still carries is closed and opened again between them: the longest run of active, the
 // marks written open before it, from the outermost, whose every mark it carries comes first, as
 // active holds them; then its other marks that following, the next text's marks, carries; then
-// the rest, each group in its written order, opened inside the one before.
+// the rest, each group in its written order, opened inside the one before; and a code span's mark,
+// whose span holds no syntax, innermost (codeInnermost).
 func keepingOpen(active, marks, following []Mark) []Mark {
-	kept := 0
-	for kept < len(active) && containsSameMark(marks, active[kept]) {
-		kept++
-	}
+	kept := sharedOpenMarks(active, marks)
 	ordered := append(make([]Mark, 0, len(marks)), active[:kept]...)
 	for _, carried := range []bool{true, false} {
 		for _, mark := range marks {
@@ -222,7 +293,74 @@ func keepingOpen(active, marks, following []Mark) []Mark {
 			}
 		}
 	}
-	return ordered
+	return codeInnermost(ordered)
+}
+
+// sharedOpenMarks is how long a run of active, the marks written open before a text, from the
+// outermost, marks, the text's marks, carries every mark of.
+func sharedOpenMarks(active, marks []Mark) int {
+	kept := 0
+	for kept < len(active) && containsSameMark(marks, active[kept]) {
+		kept++
+	}
+	return kept
+}
+
+// byReach orders marks, the marks nodes[index] is written under, so that a mark the texts after it
+// carry further is opened outside one they carry less far, and is not closed and opened again
+// where the nearer one ends (`***a**b*`, never `***a****b*`): the longest run of active, the
+// marks written open before it, from the outermost, whose every mark it carries comes first, as
+// active holds them; then its other marks, the one carried over the most texts in a row outermost,
+// ties in their written order; and a code span's mark innermost (codeInnermost).
+func byReach(active, marks []Mark, nodes []*Node, index int, escapePipes, wwwBare bool) []Mark {
+	kept := sharedOpenMarks(active, marks)
+	ordered := append(make([]Mark, 0, len(marks)), active[:kept]...)
+	rest := make([]Mark, 0, len(marks))
+	reach := make([]int, 0, len(marks))
+	for _, mark := range marks {
+		if containsSameMark(active[:kept], mark) {
+			continue
+		}
+		texts := 1
+		for texts+index < len(nodes) && containsSameMark(writtenMarks(nodes[index+texts], escapePipes, wwwBare), mark) {
+			texts++
+		}
+		at := len(rest)
+		for at > 0 && reach[at-1] < texts {
+			at--
+		}
+		rest, reach = slices.Insert(rest, at, mark), slices.Insert(reach, at, texts)
+	}
+	return codeInnermost(append(ordered, rest...))
+}
+
+// reopening orders marks, the marks a text is written under, so that none of active, the marks
+// written open before it, stays open around a mark the text opens: the marks active does not hold
+// come first, then those it holds, each group in its written order, and a code span's mark
+// innermost (codeInnermost). A mark both texts carry is then closed and opened again inside the
+// new ones (`*a*~~*b*~~`), so that its delimiter run stands beside the new one's rather than a
+// letter.
+func reopening(active, marks []Mark) []Mark {
+	ordered := make([]Mark, 0, len(marks))
+	for _, held := range []bool{false, true} {
+		for _, mark := range marks {
+			if containsSameMark(active, mark) == held {
+				ordered = append(ordered, mark)
+			}
+		}
+	}
+	return codeInnermost(ordered)
+}
+
+// codeInnermost is marks with a code span's mark, if any, moved innermost: a code span holds no
+// syntax, so a mark opened inside it would be written as its text.
+func codeInnermost(marks []Mark) []Mark {
+	for index, mark := range marks {
+		if mark.Type == "inlineCode" && index < len(marks)-1 {
+			return append(append(marks[:index:index], marks[index+1:]...), mark)
+		}
+	}
+	return marks
 }
 
 // writesBareURL reports whether nodes write a link as its bare URL (isBareURLLink, isBareWWWLink),
@@ -386,7 +524,8 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				if index+1 < len(nodes) {
 					following = writtenMarks(nodes[index+1], escapePipes, wwwBare)
 				}
-				if spelling.keepOpen {
+				switch spelling.order {
+				case marksKeptOpen:
 					next = keepingOpen(active, next, following)
 					if index+1 < len(nodes) {
 						var after []Mark
@@ -395,6 +534,14 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 						}
 						following = keepingOpen(next, following, after)
 					}
+				case marksByReach:
+					next = byReach(active, next, nodes, index, escapePipes, wwwBare)
+					if index+1 < len(nodes) {
+						following = byReach(next, following, nodes, index+1, escapePipes, wwwBare)
+					}
+				case marksReopened:
+					next = reopening(active, next)
+					following = reopening(next, following)
 				}
 				common = sharedMarks(active, next)
 				for i := len(active) - 1; i >= common; i-- {
@@ -458,6 +605,8 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				closer:         adjacentDelimiter(next[sharedMarks(next, following):]),
 				flankFirst:     flankFirst,
 				flankLast:      flankLast,
+				pairBackslash:  spelling.pairBackslash,
+				tildeBackslash: spelling.tildeBackslash,
 			})
 		case "hardbreak":
 			r.closeMarks(active, escapePipes)
@@ -553,6 +702,11 @@ func (r *renderer) closeMarks(marks []Mark, escapePipes bool) {
 func (r *renderer) openInlineMark(mark Mark, nodes []*Node, index int) {
 	if mark.Type == "link" {
 		r.labelBrackets = linkLabelBrackets(linkLabel(nodes, index, mark))
+		// A text `!` right before the link's `[` would open an image, so it is written `\!`.
+		if r.endsWith('!') && !escapedByBackslashes(r.b.Bytes(), r.b.Len()-1) {
+			r.b.Truncate(r.b.Len() - 1)
+			r.writeSyntax(`\!`)
+		}
 	}
 	if mark.Type != "inlineCode" {
 		r.writeSyntax(openMark(mark))
@@ -712,13 +866,18 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 		flank := byteOffset == 0 && context.flankFirst || byteOffset+width == len(value) && context.flankLast
 		if flank {
 			// A character reference is punctuation to the flanking rules, where the letter or
-			// digit it stands for keeps the delimiter run beside it from opening or closing.
+			// digit it stands for keeps the delimiter run beside it from opening or closing. A
+			// literal backslash written right before it escapes its `&`, so that the writing never
+			// reads back, unless the spelling writes that backslash `\\` (pairBackslash).
 			r.writeText(value[segmentStart:byteOffset])
+			if context.pairBackslash && escapedByBackslashes(r.b.Bytes(), r.b.Len()) {
+				r.writeSyntax(`\`)
+			}
 			r.writeSyntax(numericEntity(char))
 			segmentStart = byteOffset + width
 		} else if escape {
 			r.writeText(value[segmentStart:byteOffset])
-			r.writeSyntax(textEscape(char, endsBareURL(byteOffset, char, context)))
+			r.writeSyntax(textEscape(char, endsBareURL(byteOffset, char, context) || char == '~' && context.tildeBackslash))
 			segmentStart = byteOffset + width
 		}
 		lineEnd := char == '\n'

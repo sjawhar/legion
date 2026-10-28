@@ -656,11 +656,18 @@ func emptyCode(node *Node) bool {
 	return true
 }
 
+// codeBlockFence is a code block's fence: backticks, one more than the longest run of them in its
+// text and at least three - or, where its language holds a backtick, which a backtick fence's info
+// string cannot, tildes counted the same way.
 func codeBlockFence(node *Node) string {
+	fence := byte('`')
+	if language, _ := node.Attrs["language"].(string); strings.Contains(language, "`") {
+		fence = '~'
+	}
 	longest := 0
 	for _, child := range node.Children {
 		for run, char := 0, 0; ; {
-			if char < len(child.Text) && child.Text[char] == '`' {
+			if char < len(child.Text) && child.Text[char] == fence {
 				run++
 				if run > longest {
 					longest = run
@@ -678,7 +685,7 @@ func codeBlockFence(node *Node) string {
 	if longest < 2 {
 		longest = 2
 	}
-	return strings.Repeat("`", longest+1)
+	return strings.Repeat(string(fence), longest+1)
 }
 
 func isBareURLLink(node *Node, marks []Mark, escapePipes bool) bool {

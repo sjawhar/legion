@@ -1786,7 +1786,23 @@ of either length paired, a run after any `~` refused, every run in one loop; `fl
 the same with flanking alone), and failing that under the first two, and failing that under
 that parser's alone (`inlineWithEscapes`), so wherever the bytes the writer before INFRA-534 wrote
 read back as that parser reads them they stay: the one rule is that the writer keeps the earliest
-spelling of the greatest read-back prefix depth under `readBackReaders` (`readBackDepth`). An
+spelling of the greatest read-back prefix depth under `readBackReaders` (`readBackDepth`). A text
+`!` written right before a link's `[` is written `\!`, since `![` opens an image (`openInlineMark`).
+A code block whose language holds a backtick is fenced with tildes, since a backtick fence's info
+string cannot hold one (`codeBlockFence`). Every order the writer opens marks in opens a code span's
+mark innermost, since a mark opened inside the span would be its text (`codeInnermost`). Only where
+no spelling before reads back under `inlineMarkdown` does the writer try `lastResorts`, so that no
+stored run's bytes change. A letter written as a character reference for the flanking rules takes
+one more backslash there where the bytes before it end in an odd run of backslashes, since
+`\&#97;` reads as an escaped `&` (`pairBackslash`). A run whose one free asterisk run stands beside
+a bold or italic code span is read back and written there with every `*` and `_` escaped
+(`delimitersInText` with `codeMarks`). An escaped tilde is written `\~` there, beside which the
+browser editor's parser lets a `*` run open or close, where the `;` ending `&#126;` is punctuation
+that keeps it from closing before a letter (`tildeBackslash`). Marks are opened by reach there, the
+one the texts after carry furthest outermost, so that a nearer one ending closes no other
+(`byReach`). And marks a text shares with the one before are closed and opened again there inside
+the marks it opens (`*a*~~*b*~~`), so that the new run stands beside a delimiter run rather than a
+letter (`reopening`). An
 image's alt text is kept the same way under `Parse` and `storedMarkdown` (`altReadsBack`). A code
 span keeps the whitespace that starts each of its later lines past the prefix of the containers
 around it, as the browser editor's

@@ -9,23 +9,30 @@ import (
 // engine alike (dispatch://INFRA-535). Each row is a document of the
 // writer-spells-a-flanked-letter-after-a-backslash corpus document taken alone - a letter right
 // after a literal backslash, beside an emphasis run - or the same shape after two backslashes, in a
-// heading or in a table cell, and the bytes the writer stores it as. For each row Parse reads it as
-// the engine does, ParseForWrite stores it, Render's bytes read back as Parse's tree in both
-// parsers, and those bytes are want.
+// heading or in a table cell, or a document of each other shape the writer refused to store, and
+// the bytes the writer stores it as. For each row Parse reads it as the engine does, ParseForWrite
+// stores it, Render's bytes read back as Parse's tree in both parsers, and those bytes are want.
 func TestTheWriterSpellsEveryTreeItReadsAsTheEngine(t *testing.T) {
 	rows := []struct {
 		name, markdown, want string
 	}{
-		{"escaped tilde then a backslash before a letter", "p \\~\\a*~* q\n", ""},
-		{"a backslash before a letter then an escaped asterisk", "p \\a*~*\\* q\n", ""},
-		{"escaped asterisk then a backslash before a letter", "p \\*\\a*~a* q\n", ""},
-		{"a backslash before a letter beside an underscore", "p \\a*_a* q\n", ""},
+		{"escaped tilde then a backslash before a letter", "p \\~\\a*~* q\n", "p &#126;\\\\&#97;*&#126;* q\n"},
+		{"a backslash before a letter then an escaped asterisk", "p \\a*~*\\* q\n", "p \\\\&#97;*&#126;*\\* q\n"},
+		{"escaped asterisk then a backslash before a letter", "p \\*\\a*~a* q\n", "p \\*\\\\&#97;*&#126;a* q\n"},
+		{"a backslash before a letter beside an underscore", "p \\a*_a* q\n", "p \\\\&#97;*\\_a* q\n"},
 		{"a footnote document", "Plain a_~`c`~~www.a.com/~x\\~~\\~ end.\n\n[^a_b]: n\n", ""},
-		{"a link closer then escaped tildes", "**](u)\\~\\\\~***b***\n", ""},
+		{"a link closer then escaped tildes", "**](u)\\~\\\\~***b***\n", "**]\\(u)\\~\\\\\\~***b***\n"},
 		{"a table of www links", "| h |\n| --- |\n| *www.a.com/~x\\~~www.a.com/~xb**~ |\n", ""},
-		{"escaped tilde then two backslashes before a letter", "p \\~\\\\a*~* q\n", ""},
-		{"in a heading", "# p \\~\\a*~* q\n", ""},
-		{"in a table cell", "| h |\n| --- |\n| p \\~\\a*~* q |\n", ""},
+		{"escaped tilde then two backslashes before a letter", "p \\~\\\\a*~* q\n", "p &#126;\\\\&#97;*&#126;* q\n"},
+		{"in a heading", "# p \\~\\a*~* q\n", "# p &#126;\\\\&#97;*&#126;* q\n"},
+		{"in a table cell", "| h |\n| --- |\n| p \\~\\a*~* q |\n", "| h |\n| --- |\n| p &#126;\\\\&#97;*&#126;* q |\n"},
+		{"an escaped bang before a link", "[\\![ ](u)\n", "[\\![ ](u)\n"},
+		{"a code block whose language holds a backtick", "- ~~~~`c`\n", "- ~~~`c`\n  \n  ~~~\n"},
+		{"an asterisk after italic code", "_`c`_*![\n", "*`c`*\\*![\n"},
+		{"an asterisk before italic code in a heading", "# _ \\**`c`*`c`\n", "# \\_ \\**`c`*`c`\n"},
+		{"italic around bold code that ends first", "***![\\![`c`**\\**\n", "***![![`c`**\\**\n"},
+		{"bold italic code then italic code", "Plain ***`c`**`c`*](u) end.\n\n[^a_b]: n\n", "Plain ***`c`**`c`*]\\(u) end.\n\n[^a_b]: n\n"},
+		{"a struck tilde in italic after italic", "p a*a*~*~*~ q\n", "p a*a*~~*~*~~ q\n"},
 	}
 	markdowns := make([]string, len(rows))
 	for index, row := range rows {
