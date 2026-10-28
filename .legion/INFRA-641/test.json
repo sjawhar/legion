@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-641",
+  "completed": "2026-10-28T12:55:11Z",
+  "headTested": "64a0d9845186 (code); PR head 2aa76f134c4e adds only .legion/INFRA-641/implement.json",
+  "fingerprint": "21368ea8fc6d1011133bfd3ec04a56f9842527de2e04d6fbaedeac7b43ed3a07 at 2aa76f134c4eb3245a8cc6a17132ce51d23a98d4 (conflicts-and-rewrites.md command, base main)",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran each proof on my own inputs and builds. A1: built dispatch-base (fork point 59f6647d) and dispatch-head (64a0d984) myself from git archive exports, copied the INFRA-512 replay harness to my own directory, ports and Postgres copy (55500/4300/8800/9300), and ran four interleaved replays: base 378.88 / 386.01 CPU-s, head 240.24 / 240.47 CPU-s, 293 write events each, box_busy_before 0.63-4.33%, server alive, 0 pending actions; alloc_space over each run base 93.97 / 94.18 GB, head 50.32 / 50.98 GB. A2: fetched the LINUX corpus myself (1,203 specs today; 1,199 of the implementer's 1,200 byte-identical); TestWalkMatchesTodaysWalkOnACorpus: 0 mismatches over 3,693,317 parsed + 3,777,939 read-back nodes. A3: FuzzLen16 for 5 min (1,363,431 execs) passed. A6: benchstat base vs head matches the implementer's numbers."
+  },
+  "failed": 1,
+  "failures": [
+    {
+      "criterion": "CI green at the head (the repository's required checks; tester reads it on GitHub)",
+      "evidence": "No CI has ever run for pull request #2455. `gh pr view 2455 --repo sjawhar/legion --json mergeable,mergeStateStatus` -> CONFLICTING / DIRTY at 2026-10-28T11:26Z and again at 12:5xZ; `gh api repos/sjawhar/legion/actions/runs?branch=legion/INFRA-641` -> total_count 0; check-runs on 64a0d9845186 and 2aa76f134c4e -> 0. GitHub computes no merge ref for a conflicting head and runs no pull_request workflow. `git merge-tree --write-tree --name-only aeeee6c029f6 2aa76f134c4e` names one conflicting file: packages/envoy/CHANGELOG.md (main's #2368 and later entries under Unreleased against this branch's Unreleased / Changed entry). All other files, the three runtime files included, merge cleanly. The PR body's Suites line says the branch does not take main in without a conflict; GitHub reports that conflict now. Fix: forward-merge main@origin into legion/INFRA-641 (conflicts-and-rewrites.md, 'Reintegrating the base'), keep the CHANGELOG entry, push, and post the fingerprint comment. If the fingerprint is unchanged (expected: only CHANGELOG context moves, and --context 0 drops it), the re-test is the bare gates: CI green at the new head and a smoke check."
+    }
+  ],
+  "proof": [
+    {
+      "criterion": "A1: merge rule on the replay of production's writes (every head run below every base run)",
+      "surface": "Local Dispatch server, my own builds of base 59f6647d (the branch's fork point, = b2ac1c41's code) and head 64a0d984 (binary sha256 90edcc57... base, 33458653... head), Postgres 17.11 + pgvector (my copy of the settled seed), NATS 2.12.1 JetStream, fake Envoy listener, INFRA-512 replay tools/load.py F=0.3 rho=1 window 27-35 min, 2 SSE streams, GOMAXPROCS=2",
+      "command": "$TMPDIR/tester/replay/tools/four.sh (tools/run-x2.sh tbase-1, thead-1, tbase-2, thead-2, interleaved)",
+      "observed": "Dispatch CPU-s over 481 s: base 378.88 / 386.01, head 240.24 / 240.47 (every head below every base; fall about 37%). 293 write events each; box_busy_before 4.33 / 0.80 / 0.63 / 0.90%; server alive, 0 pending actions. alloc_space (pprof diff of allocs before/after each run): base 93.97 / 94.18 GB, head 50.32 / 50.98 GB (about -46%).",
+      "headSha": "64a0d9845186",
+      "negativeControl": "The base build, same seed, inputs and harness, interleaved: 378.88-386.01 CPU-s against head 240.24-240.47."
+    },
+    {
+      "criterion": "A2: identical sizes and positions over every node of the real specs",
+      "surface": "go test over my own read-only fetch of every LINUX primary spec (dispatch issues --project LINUX --all, then dispatch doc-read per issue into $TMPDIR/tester/corpus; 1,203 specs, 0 without a spec)",
+      "command": "cd packages/envoy && PMDOC_WALK_CORPUS=$TMPDIR/tester/corpus go test ./internal/dispatch/pmdoc -run TestWalkMatchesTodaysWalkOnACorpus -count=1 -v -timeout 3h",
+      "observed": "1203 files; 0 parse refusals; 0 Update/mark/Read failures; nodes 3,693,317 parsed + 3,777,939 read back; text nodes 2,383,721 + 2,468,343; 48,265 marks; max depth 12; mismatches 0; PASS (1454.8 s). Also TestWalkVisitsEveryNodeWithTodaysRange PASS.",
+      "headSha": "64a0d9845186",
+      "negativeControl": "Mutation run on a scratch export of the head, each judged by the pmdoc tests failing beyond the unmutated export's baseline: walkNode advancing a child by the wrong slot -> 11 tests fail (TestBlockRangeCoversTheBlock, TestMarkRangeThenFindMark, ...); nodeSize no longer sharing walk's rule -> TestWalkVisitsEveryNodeWithTodaysRange, TestSpliceMatchesEngineReplaceRange, TestFindHeadingMatchesTitleAcrossLevels fail."
+    },
+    {
+      "criterion": "A3: len16 equal to today's for every string and allocation-free",
+      "surface": "go test (table, AllocsPerRun, fuzz)",
+      "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc -run 'TestWalk|Len16' -count=1 -v; go test ./internal/dispatch/pmdoc -run '^$' -fuzz FuzzLen16 -fuzztime 300s -parallel 1",
+      "observed": "TestLen16CountsTheUnitsUTF16EncodingWrites, TestLen16DoesNotAllocate PASS; fuzz 5 min: 1,363,431 execs, 31 interesting inputs, no failure.",
+      "headSha": "64a0d9845186",
+      "negativeControl": "Mutation: len16 counting a character above U+FFFF as one unit -> FuzzLen16, TestLen16CountsTheUnitsUTF16EncodingWrites and TestWalkVisitsEveryNodeWithTodaysRange fail."
+    },
+    {
+      "criterion": "A5: insertAt results unchanged (doc-edit inserts at boundaries via the Dispatch API, base vs head)",
+      "surface": "dispatch doc-edit insert through the real API (dispatch CLI against the local server), base build then head build, each on a fresh copy of the same seed",
+      "command": "python3 $TMPDIR/tester/insert_probe.py probe-base|probe-head <84 pmdoc/testdata/corpus docs + 7 LINUX specs (3 largest, 4 spread)>: per document, create the issue with that spec, then one insert per call at start, end, up to 8 spread blocks and up to 12 nested blocks (block:<id>, after/before alternating) and one quote anchor, cycling paragraph, bullet, ordered, quote, heading, inline, table and task fragments; then doc-read",
+      "observed": "91 documents, 1,190 inserts on each build: every result code and message identical (1,182 applied; 8 refused identically: 5 ambiguous quote anchors and 3 inserts at the start of a front-matter document that would read back otherwise); the only differences were the CLI's advisory lines ('still in triage', 'you still have an open ask'), which depend on session state; all 91 final documents byte-identical after normalising ids, tokens and keys.",
+      "headSha": "64a0d9845186",
+      "negativeControl": "Refused inputs: an ambiguous quote anchor ('FR (this group):' matching 4 places) and an insert at the start of a front-matter document are refused with the same INVALID_OP message on both builds. Mutations of the early return (pos <= start, pos >= end) each make TestSpliceMatchesEngineReplaceRange fail (insert-block-at-doc-start / -end)."
+    },
+    {
+      "criterion": "A6: each walk measures each subtree once",
+      "surface": "BenchmarkPositionedWalk, base export (with this test file and a referenceLen16 shim) against head export",
+      "command": "go test ./internal/dispatch/pmdoc -run '^$' -bench BenchmarkPositionedWalk -benchmem -count 8 at each; go run golang.org/x/perf/cmd/benchstat@v0.0.0-20261009192801-be2c69fb417e bench-base.txt bench-head.txt",
+      "observed": "generated 44.35 ms -> 2.61 ms (-94.1%), 14.6 MiB -> 894 KiB, 298.55k -> 17.28k allocs/op; depth=5 22.25 -> 6.02 ms; depth=20 26.29 -> 5.07 ms. Base grows with depth at equal node count, head does not.",
+      "headSha": "64a0d9845186",
+      "negativeControl": "The base build in the same export is the control."
+    }
+  ],
+  "notes": [
+    "Visitor audit: no walk visitor in pmdoc writes Text or Children during a walk (StripServerOwnedAttrs writes Attrs only; every Children assignment near a walk runs after it returns), so walk's new 'visitors must not change unvisited nodes' rule holds for every caller; walk is unexported and no exported function passes a caller's visitor.",
+    "The corpus holds no character above U+FFFF and no empty text (checked over all 1,203 files); those cases rest on the synthetic trees and the fuzz run.",
+    "The 13 pmdoc tests that fail in my packages/envoy-only export fail because '@legion/proof-editor' is absent there; one of them passes in the workspace."
+  ]
+}
