@@ -1,0 +1,8 @@
+kind: Added
+body: |-
+    A `GET /api/v1/events` response carries `X-Dispatch-Event-Replay: complete` when its replay is
+    everything the reconnecting client lacks. A client that reconnects and finds it missing
+    refetches what it shows.
+time: 2026-10-28T11:32:59.69121561Z
+custom:
+    Issue: pr2406
