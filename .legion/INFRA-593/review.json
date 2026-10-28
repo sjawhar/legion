@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-593",
+  "completed": "2026-10-28T22:58:34Z",
+  "round": 1,
+  "headReviewed": "d1939c8689f53e46ea10804b353f13aa312425aa",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 4,
+  "minor": 7,
+  "ci": "At 22:57 UTC every required check (lint, typecheck, test, pr-title) at the CI head d1939c86 was queued; a request for changes does not wait for CI.",
+  "thermonuclear": "Both run once at d1939c86: deep review CHANGES (2 medium, 6 minor), code quality CHANGES (4 important, 3 minor). Core data safety (version/xmin recheck, doc_compaction_owed upkeep, load read-back, failRoom, tail rule on every production path) checked clean.",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/store/pool.go", "description": "compactionPoolSize is not in ConnectionsPerProcess (still 86), and infra/gcp/dispatch.go dispatchConnectionsPerPod stays 86, so TestDispatchConnectionsPerPodIsTheServers cannot catch the new pool; the docs and CHANGELOG say 88."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/fold.go", "description": "foldRead commits and then folds up to 32 MiB per load with no connection held; at base the rooms pool (4) bounded concurrent load folds, now nothing does (cold reads of distinct documents, room loads)."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/compaction_queue.go", "description": "A retry step that finds no aged row returns compactionDone even when young rows remain (later > 0), and note() drops a note while its room is in flight; both drop a room whose rows will come due, so the 15-minute / 16-row bound the PR body states becomes the hourly sweep's."},
+    {"severity": "important", "file": "PR body", "description": "No Contract change census: docs.API loses CompactAll, outbox.Deps loses Docs and Leases, VersionedStore gains pgVersioned(), and doc_compaction_owed is a schema the previous release does not write during a roll."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/fold.go", "description": "memoryUpdates never checks ctx, so coldReadTimeout and Shutdown's deadline no longer interrupt a buffered fold."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/compaction_queue.go", "description": "noteStoredUpdates' oldest argument is unused, yet readStoredLog runs an extra min(version) subquery on every load to fill it."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/persistence.go", "description": "Load and LoadDocument duplicate the read-then-foldRead-then-note sequence and already differ in how they wrap the empty-history commit error."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/compaction_sweep.go", "description": "The queue and the sweep each map compactOutcome to retry/leave; and a failed forgetCompactionCandidate logs as a failed check."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/service.go", "description": "Comment says every committed append notes its room; settlement-repair and block-id backfill appends through AppendUpdateTx do not."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/store/migrations/0137_doc_compaction_owed.census.sql", "description": "Comment says 0136 creates doc_compaction_owed; it is 0137."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/compaction.go", "description": "PgVersioned.Compact's comment says an older build sharing the database runs it; an older build runs its own binary's Compact."}
+  ],
+  "notDefects": [
+    "pending_authors.go passing 1000 lines: moving its room-load code now would conflict with the trees editing the same file (INFRA-556, INFRA-605); not a defect of this change.",
+    "A failed room's eviction waits for the lock while holding a compaction-pool connection: latency only, no deadlock (transactions never wait on recovery).",
+    "A compaction that fails the same way is retried at most once a minute, logged each time: no error is hidden."
+  ]
+}
