@@ -100,7 +100,7 @@ func (s *server) listAgents(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if !roster.answered && s.lifetime().Err() != nil {
+	if !roster.answered && s.lifetime.Err() != nil {
 		// The process is shutting down: the shared fetch runs on its lifetime, so it has ended or
 		// failed at once, and its silence says nothing about the listener. A request the drain
 		// still serves asks the listener on its own context instead, as every agents list did

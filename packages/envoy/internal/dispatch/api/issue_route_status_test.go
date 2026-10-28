@@ -363,12 +363,10 @@ func secondRouteStatusServer(t *testing.T, served *server) (http.Handler, *serve
 	deps := served.deps
 	deps.Store = storetest.SecondProcess(t, served.deps.Store)
 	mux := http.NewServeMux()
-	other := register(mux, deps)
+	other := register(mux, served.lifetime, deps)
 	t.Cleanup(other.eventRelay.wait)
-	if other.deliveryHub != nil {
-		t.Cleanup(other.deliveryHub.wait)
-		t.Cleanup(other.deliverySockets.wait)
-	}
+	t.Cleanup(other.deliveryHub.wait)
+	t.Cleanup(other.deliverySockets.wait)
 	other.rosters.ttl, other.rosters.silenceTTL = served.rosters.ttl, served.rosters.silenceTTL
 	other.rosters.timeout = served.rosters.timeout
 	return mux, other

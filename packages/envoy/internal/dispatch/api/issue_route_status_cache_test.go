@@ -63,7 +63,7 @@ func heldRosterMux(t *testing.T, mux *http.ServeMux, deps Deps) (served *server,
 	t.Helper()
 	listenerURL, calls, release := heldRosterListener(t)
 	deps.Envoy = envoy.New(listenerURL, envoy.WithTimeout(time.Minute))
-	served = register(mux, deps)
+	served = register(mux, t.Context(), deps)
 	served.rosters.ttl, served.rosters.timeout = time.Minute, time.Minute
 	return served, calls, release
 }
@@ -109,7 +109,7 @@ func awaitCalls(t *testing.T, calls *atomic.Int32, want int32) {
 // by routeRosterTimeout, no test's override. It reads the server register mounts, the only one a
 // deployment runs.
 func TestTheDeploymentsRosterCacheKeepsAnAnswerAndASilenceFiveSeconds(t *testing.T) {
-	rosters := &register(http.NewServeMux(), Deps{}).rosters
+	rosters := &register(http.NewServeMux(), t.Context(), Deps{}).rosters
 	if rosters.ttl != 5*time.Second || rosters.silenceTTL != 5*time.Second {
 		t.Fatalf("the server a deployment runs keeps an answer %s and a silence %s, want 5s and 5s", rosters.ttl, rosters.silenceTTL)
 	}
@@ -247,8 +247,8 @@ func TestAListenerThatDoesNotAnswerHoldsAReadOnlyForTheFetchBound(t *testing.T) 
 // timedRosterServer is a test server on a database of its own whose listener answers GET
 // /v1/sessions with ses-sre holding sre after delay, or, when hang is set, not until the test
 // ends. calls counts the requests that reached it. The listener client's own window is a minute,
-// so only the fetch's bound ends a call early. lifetime is the server's Deps.Lifetime, nil for the
-// test's own context.
+// so only the fetch's bound ends a call early. lifetime is the lifetime the server runs on, nil
+// for the test's own context.
 func timedRosterServer(t *testing.T, delay time.Duration, hang bool, lifetime context.Context) (*server, *atomic.Int32) {
 	t.Helper()
 	calls := &atomic.Int32{}

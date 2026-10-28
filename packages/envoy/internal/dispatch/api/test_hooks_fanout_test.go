@@ -109,14 +109,13 @@ func secondHookProcess(t *testing.T, database *store.Store) *httptest.Server {
 		Docs:             documents,
 		Events:           broker,
 		TestHooksEnabled: true,
-		Lifetime:         t.Context(),
 		AgentStream:      agentstream.NewMemory(),
 	})
 	if err != nil {
 		t.Fatalf("second process's dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	served := register(mux, deps)
+	served := register(mux, t.Context(), deps)
 	t.Cleanup(served.waitBackground)
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)

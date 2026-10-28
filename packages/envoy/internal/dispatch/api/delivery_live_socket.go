@@ -23,7 +23,7 @@ import (
 // its own.
 //
 // It closes with:
-//   - 1012 (service restart) when Dispatch shuts down (Deps.Lifetime) or the test hook drops it;
+//   - 1012 (service restart) when Dispatch shuts down (server.lifetime) or the test hook drops it;
 //   - 1008 (policy violation) once its caller no longer resolves (whileCallerResolves);
 //   - 1013 (try again later) when the page falls deliverySocketQueue frames behind;
 //   - 1009 (message too big) for a frame over deliverySocketReadLimit, which gorilla writes;
@@ -208,7 +208,7 @@ func (s *server) serveDeliverySocket(w http.ResponseWriter, r *http.Request) {
 	writerDone := make(chan struct{})
 	go func() {
 		defer close(writerDone)
-		socket.write(r.Context(), s.deps.Lifetime.Done(), s.deps.StreamHeartbeat, readerDone)
+		socket.write(r.Context(), s.lifetime.Done(), s.deps.StreamHeartbeat, readerDone)
 	}()
 
 	var readErr error

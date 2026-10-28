@@ -37,7 +37,9 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   probe refuses an image whose Envoy plugin does. A human debugging inside a pod with a bare `omp` has
   the CodeGraph tool and the repository's extensions but no Legion or Envoy tools unless it passes
   `--extension /opt/legion/pi-envoy --extension /opt/legion/pi-legion`;
-- `@bopstack/pi-codegraph` (from npm, pinned), the one plugin linked into the OMP profile `legion`
+- `@bopstack/pi-codegraph`, installed at `/opt/omp-plugins` from the committed lockfile at
+  `packages/daemon/docker/omp-plugins` (its `package.json` is the pin; the build resolves nothing from
+  npm), the one plugin linked into the OMP profile `legion`
   (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`),
   backed by the CodeGraph CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the
   `codegraph` tool a tester queries for `affected` tests and a reviewer for `impact`/`callers` blast
@@ -180,9 +182,9 @@ the OMP fork release has no linux/arm64 build. One commit ⇒ one image, with on
 fresh pod still loads the image's own copies of `@sjawhar/pi-envoy` and `@sjawhar/pi-legion`, from
 the commit, never from an npm release, but a role relaunched onto a newer plugin contract in a
 kept pod loads the release's published pair, installed from npm under the generation directory
-("Contract discipline" below) — what the image does take from npm (the CodeGraph plugin and
-CLI, TypeScript and the two npm language servers) is pinned by the `ARG`s at the top of
-`worker.Dockerfile`.
+("Contract discipline" below) — what the image does take from npm is pinned: the CodeGraph CLI by an
+`ARG` at the top of `worker.Dockerfile`, and the CodeGraph plugin, TypeScript and the two npm language
+servers by the committed lockfiles under `packages/daemon/docker/` (`omp-plugins`, `language-servers`).
 
 ### The tools a role's own work needs
 
@@ -276,8 +278,16 @@ The image probe's own wait is derived from the same key: each attempt's budget i
 `slow_command_timeout_seconds` (300 s by default), or, when `worker_boot_timeout_seconds` plus a
 60 s margin is larger, that instead (`ProbeBudget`, `packages/daemon/internal/daemon/kubernetes.go`)
 — so the capacity stop below (under "The image is probed before it publishes") always has room,
-within one attempt, to see a probe pod's Unschedulable age pass the boot timeout. The boot log
-names the derived bound when it applies, and so does `legion start --check-config`.
+within one attempt, to see a probe pod's Unschedulable age pass the boot timeout. From Sandbox
+creation through the probe container starting, the daemon allows a separate 300 s startup phase:
+the documented 213 s cold start fits that bound. Once it observes the probe container running, it
+starts the command phase for the attempt budget and gives `probe-image` a relative command budget
+60 s shorter, leaving the command's deadline to report before the daemon collects its exit and log.
+Pod scheduling and image pull consume the startup phase, so the worst-case boot wait is the 300 s
+startup bound plus the attempt budget. The TLS clients each have their own 20 s bound except
+Chromium's 90 s cold-start bound. A command stopped by the aggregate budget is unavailable with
+`probe deadline`, so the image probe fails closed naming its client and site. The boot log names a
+derived bound when it applies, and so does `legion start --check-config`.
 Oh My Pi's boot after it fits the registration deadline,
 `worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals` (360 s by default). The
 stage 4a harness's `image-probe` and `root-ready` checks (`scripts/e2e/README.md`) are where a

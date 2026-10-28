@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 func TestGetDeliveryTimelineWithoutSettingsIs404(t *testing.T) {
@@ -742,10 +743,8 @@ func TestDeliveryReadsWarnOnceForAMainRunWithNoProductionJob(t *testing.T) {
 		}
 	}
 
-	previous := slog.Default()
 	logs := &storetest.LockedLog{}
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 
 	const window = "from=2026-10-10T00:00:00Z&to=2026-10-11T00:00:00Z"
 	for range 2 {
@@ -820,10 +819,8 @@ func TestAConfigurationWarningIsLoggedOnceAcrossServers(t *testing.T) {
 		}
 	}
 
-	previous := slog.Default()
 	logs := &storetest.LockedLog{}
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 
 	const window = "from=2026-10-10T00:00:00Z&to=2026-10-11T00:00:00Z"
 	for _, handler := range []http.Handler{first, second, first, second} {

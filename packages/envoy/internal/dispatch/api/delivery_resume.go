@@ -63,21 +63,12 @@ const strandedAttempt = `d.state = 'pending'
 // its own over deps, the dependencies the routes serve requests with (routes.AppContext), so a
 // resumed send goes to the same listener and its receipt to the same event broker as any other.
 func RunDeliveryResume(ctx context.Context, deps Deps, interval time.Duration, leases duty.Leases) {
-	s := &server{deps: deps}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			duty.Exclusive(ctx, leases, deliveryResumeLease, interval, func(ctx context.Context) {
-				if err := s.resumeStrandedDeliveries(ctx); err != nil {
-					slog.Warn("dispatch: resume stranded delivery attempts", "error", err)
-				}
-			})
+	s := &server{deps: deps, lifetime: ctx}
+	duty.RunLeased(ctx, leases, deliveryResumeLease, interval, duty.TickAfterInterval, func(ctx context.Context) {
+		if err := s.resumeStrandedDeliveries(ctx); err != nil {
+			slog.Warn("dispatch: resume stranded delivery attempts", "error", err)
 		}
-	}
+	})
 }
 
 // strandedMessageAttempt is one message attempt a pass resumes, with what its send carries.
