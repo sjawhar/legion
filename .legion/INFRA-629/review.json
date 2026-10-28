@@ -2,24 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-629",
-  "completed": "2026-10-27T18:04:00Z",
-  "round": 2,
-  "reviewedCodeHead": "6b255451bb62dbf8b678b0fd93852e7018f53ab5",
-  "decision": "changes_requested",
+  "completed": "2026-10-28T08:38:30Z",
+  "round": 3,
+  "scope": "Narrowed by the INFRA-588 architect (Envoy 8e2a563ce16b1776540056af86322832): the three round-2 items, approve when fixed and no correctness defect.",
+  "reviewedCodeHead": "460a6f9e021bc096228b046d71240d8f63d27a27",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 2,
-  "roundOneFindings": "All six fixed at 6b255451 and accepted by reply on each thread (PRRT_kwDORFy7ds6wzhh7, PRRT_kwDORFy7ds6wzhiA, PRRT_kwDORFy7ds6wzhiF, PRRT_kwDORFy7ds6wzhiL, PRRT_kwDORFy7ds6wzhiT, PRRT_kwDORFy7ds6wzhiX); the implementer had already resolved them.",
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI head 6b255451bb62: lint, typecheck, test, build, changes still queued at review time; compare 6b255451...ec154d08 handoffs-only (2 files). Not read as green; a request for changes does not wait on it. Locally at 6b255451: release-push.test.sh 411 passed, 0 failed; the deep review ran changelog-fold.test.sh 12/12 and check-release-credentials.test.sh 244/244.",
-  "thermonuclear": "Both run once at 6b255451. deep-review: CHANGES (rename mislabels a fragment's release; the comment claims the credential check pins the github.sha checkout; stale PR body lines). code-quality: CHANGES (pushed=true has no reader; 'shared with the other commands' claim; the same comment).",
-  "keyFindings": [
-    {"severity": "important", "file": ".github/scripts/release-push.sh:485", "description": "A fragment's label comes from `git log -1 --diff-filter=A` without --follow, so a renamed fragment gets the release after the rename, not the release that shipped it. The new refusal at :502 tells people to rename a refused entry, and a refused entry reaches main (no PR check) after its release is cut. Reproduced: fragment added at M, tagged p-v1.0.0, renamed, then p-v1.1.0 -> fold-plan labels it 1.1.0; with --follow the add commit is M. Fix: --follow, plus a test of a fragment renamed after its release."},
-    {"severity": "minor", "file": ".github/workflows/changelog-fold.yaml:27", "description": "After the reorder, 'check-release-credentials.sh pins this shape' follows the github.sha sentence, but the check has no rule on a checkout ref; restoring the round-1 shape passes it. Correct the comment."},
-    {"severity": "minor", "file": ".github/scripts/release-push.sh:267", "description": "'shared with the other commands that land one commit built from a base': push-fold is the only caller at this head."}
-  ],
+  "important": 0,
+  "minor": 0,
+  "roundTwoFindings": "All three fixed at 460a6f9e and accepted by reply on each thread (PRRT_kwDORFy7ds6w0ZVB, PRRT_kwDORFy7ds6w0ZVJ, PRRT_kwDORFy7ds6w0ZVQ); the implementer had resolved them.",
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI head 460a6f9e021b: lint, typecheck, test success; pr-title success (runs 40558174037, 40558237437; three earlier pr-title runs cancelled). Compare 460a6f9e...9cf029de handoffs-only (2 files). Non-required envoy-go failed with a 10-minute timeout in internal/dispatch/api; the PR changes no Go file. Locally at 460a6f9e: release-push.test.sh 413/413, changelog-fold.test.sh 12/12.",
+  "thermonuclear": "Both run once at 460a6f9e, narrowed: deep-review APPROVE (two minor, judged not defects below), code-quality APPROVE (none).",
+  "keyFindings": [],
   "notBlocking": [
-    "pushed=true has no reader in this PR or #2423; kept identical to INFRA-630's land_on_main text, which is a reasonable reason.",
-    "Adding packages/*/.changes/** to the pull_request trigger would be a fragment check on every PR, which the spec's 'No CI gate' and the Actions-queue constraint argue against; not requested.",
-    "land_on_main is now identical to #2423's; the two PRs still conflict textually in release-push.sh, its tests, check-release-credentials.* and AGENTS.md, which the second to merge resolves."
+    "first_added returns nothing when an earlier name of a fragment was added by a merge commit itself; unreachable on this repository, which allows only squash merges (allow_merge_commit false) and whose main has 0 merge commits; the old code behaved the same for the current name.",
+    "A git config log.follow=true on a person's machine makes the first `git log` in first_added follow copies; CI and the tests set no such config. Adding --no-follow would remove it."
   ]
 }
