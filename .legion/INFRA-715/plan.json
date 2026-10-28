@@ -1,0 +1,136 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-715",
+  "completed": "2026-10-28T18:11:09Z",
+  "planDocument": "dispatch://INFRA-715/artifact/plan-md (version 1): the full plan, evidence tables, tasks T0-T10 and acceptance checks",
+  "base": "main 8b4a862b",
+  "summary": "A live room holds exactly its stored history decoded (room == fresh decode of its own state; room+replica 1.9-2.2x), so retiring rooms or compacting rows frees nothing. What grows is history, and an upload adds about 491 KB of room+replica heap per write on a 25 KB spec (vs 0.3-4.8 KB for every other write) because ParseForWrite mints a fresh blockId for every untyped block (1,653 attribute tombstones per upload) and ReplaceText strips and re-adds every open anchor. Fix at the write: F-A carry live ids onto unchanged untyped blocks in pmdoc.ParseForWrite; F-B (if T3 shows anchor churn) build the final tree with anchors in a scratch doc and write it with one pmdoc.Update. No room lifecycle, compaction, rebuild or append change.",
+  "causes": {
+    "cause1_items_stay_in_room": "Holds; the items are the history each write adds; dominated by uploads re-minting block ids and re-marking anchors. Fixed at the write (F-A, F-B).",
+    "cause2_len16": "Allocation/GC load, not retention (soak profile fetched without gc=1; len16 returns an int). Ruled out as retention by a gc=1 profile in T7; its allocation fix is INFRA-641 (sjawhar/legion#2455), not repeated here.",
+    "cause3_compaction": "Holds by construction: compaction touches stored rows only and a reload decodes the same tombstones (ygo keeps ContentDeleted items; fold.go:19-26). Measured throwaway in T6. Nothing added: once uploads stop writing tombstones there is nothing for it to free."
+  },
+  "change": {
+    "F-A": "pmdoc.ParseForWrite with live != nil: parse unstamped -> RepeatedBlockID on named ids (as today) -> carry: pair target and live blocks with pmdoc.Update's alignment, blockIds masked and live anchor marks stripped; copy live blockId onto each paired UNTYPED block whose type, attrs and subtree are unchanged (ids masked), unless the markdown names that id elsewhere; recurse into changed paired blocks -> EnsureBlockIDs (as today). Never inside pmdoc.Update (settlement repairs, ApplyOps, ask writes and the seed call it). Identity rule: an id stays with unchanged content at its position and never moves onto other content; moved, swapped, retyped or edited blocks and typed blocks without a named id get fresh ids as today.",
+    "F-B": "ReplaceText: write the target into a scratch newDocumentCopy, re-apply each open anchor there with today's markQuoteInTxn call (same FindQuote near old From, same MarkAttrs, ErrTargetNotFound skipped, other errors fail the upload), pmdoc.Read the scratch tree, then one pmdoc.Update into the room. Implemented when T3 shows an upload over 100 open anchors retains more than 1.1x one over 0 anchors after F-A.",
+    "files": [
+      "packages/envoy/internal/dispatch/pmdoc/parse.go",
+      "packages/envoy/internal/dispatch/pmdoc/carry_block_ids.go (new)",
+      "packages/envoy/internal/dispatch/docs/mutation.go (ReplaceText, F-B)",
+      "packages/envoy/AGENTS.md (:57-58, block-id paragraph near :234)",
+      "packages/envoy/.changes/unreleased/INFRA-715-upload-keeps-block-ids.yaml"
+    ]
+  },
+  "tests": {
+    "bound": "Every room test checks acceptance 2's form: delta retained heap of room+replica (runtime.GC x2 + HeapAlloc, least of passes, read_cache_weight_test.go:48-66 pattern) <= delta stored bytes of the document (doc_updates.update + doc_checkpoints.state + doc_snapshots.state, net) + C_room 2 MiB; log main value, head value, bound; margin >= 1.5x each side or raise N.",
+    "pmdoc": "packages/envoy/internal/dispatch/pmdoc/carry_block_ids_test.go TestAnUploadKeepsTheIDsOfTheBlocksItLeavesUnchanged (one-token upload of a 25 KB table-heavy spec changes only the changed block and its ancestors' ids; cases: ask replaced by another ask with no id gets a fresh id; named id held elsewhere refused as today; [A,B]->[B,A] both fresh; live repeat handled as EnsureBlockIDs today; retyped block fresh). go test ./internal/dispatch/pmdoc/ -run TestAnUploadKeepsTheIDsOfTheBlocksItLeavesUnchanged -count=1",
+    "docs": "packages/envoy/internal/dispatch/docs/upload_memory_test.go: TestUploadsToARoomInUseKeepMemoryWithinTheBound (200 token uploads; main 98 MB retained vs ~17 MB stored), TestUploadsOverOpenAnchorsKeepMemoryWithinTheBound (100 open anchored comments with real comment rows, 100 uploads; also F-B trigger), TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound (400 writes in the load mix). DISPATCH_TEST_DATABASE_URL=<local Postgres from the pgserver wheel> go test ./internal/dispatch/docs/ -run KeepMemoryWithinTheBound -count=1 -v",
+    "F-B oracle": "after an upload, StripAnchorMarks(treeOf(room)) equals the target with ids ignored and each open anchor's FindMark range equals FindQuote(target, quote, near old From); cases: table-cell anchors, overlapping anchors of one type, moved quote, quote now in a code block (upload fails as today)."
+  },
+  "acceptance": {
+    "A1": "Local harness (INFRA-589's, from a read-only clone at legion/INFRA-598 under $TMPDIR): run-step.sh <name> --events 4 --sessions 400 --requests 0 --human 0 --duration 20m at base and head (LOADTEST_DISPATCH_COMMIT), plus base with upload=0 in --event-mix; gc=1 heap profiles by hand at minute 1 and 19 (curl /debug/pprof/heap?gc=1 at the address in stack.json); report diff_base top -cum, committed writes per kind, retained bytes per committed write per kind, cores. Cluster: 2026-10-28 heap.pprof as before (no gc=1, stated), head run's gc=1 profiles at minutes 5 and 60. Per-cause table with bytes per write.",
+    "A2": "Cluster copy (cluster.sh up --dispatch-commit <head sha> / seed / soak --duration 60m / collect / down; branch image via gh workflow run release-envoy-listener.yaml --ref legion/INFRA-715; same settings as 2026-10-28, no GOMEMLIMIT). Delta memory = 1-minute mean working set at minute 60 minus minute 5, and trend slope x 55 min; both <= delta stored (SQL sum of doc_updates.update + doc_checkpoints.state + doc_snapshots.state at minute 60 minus minute 5) + C = 1 GiB (derivation: ~2.1 KB/committed event retained -> ~0.25 GB live -> ~0.5 GB working set at GOGC=100; 0.5 GiB for in-flight heap). Curve by minute beside 2026-10-28 (8.3 -> 21.0 GiB, +10.1 GiB/h), normalised per committed write of each kind; say whether #2455 is in the head. If it fails: gc=1 diff m5->m60; room/write retention is fixed here; in-flight heap of queued requests (event-lock collapse, INFRA-591/592) goes to the architect as a decision, never reported as a pass.",
+    "A3": "The pmdoc test and the three KeepMemoryWithinTheBound tests fail at base and pass at head, values and margins quoted.",
+    "A4": "No compaction or history rewrite added (nothing to route through INFRA-179's rebuild route); INFRA-179 R3's per-update charge sees smaller upload updates; INFRA-593 room loads and INFRA-605 append batching untouched; fewer anchors move per upload. docs/mutation.go also edited by #2453, #2414, #2468: whichever merges second resolves. One Envoy note each to the architects of INFRA-179, INFRA-514 (for INFRA-593/605), INFRA-512 (pmdoc lane) and INFRA-63 (INFRA-556)."
+  },
+  "dependencies": [
+    "INFRA-589 harness (sjawhar/legion#2369) and INFRA-598 cluster harness (#2462, draft) are unmerged: run from a read-only clone at legion/INFRA-598 under $TMPDIR.",
+    "The cluster copy is shared and locked by ConfigMap dispatch-loadtest-lock (held by INFRA-598's run at 16:21Z on 2026-10-28); ask the holder and INFRA-599's tree on Envoy for the slot; never delete another run's lock; report to the architect if no slot opens. T9 needs about 1.5 h.",
+    "Docs tests need Postgres: no container runtime in the pod; run Postgres from the pgserver wheel (pgserver==0.1.4) as packages/envoy/loadtest/stack.sh does, and set DISPATCH_TEST_DATABASE_URL."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: proof entries, PR body, push and handoff rules (pr-body.md, default-branch-check.md)",
+      "dispatch: posting the measurement tables or artifacts to the issue and messages that land",
+      "envoy: the agreement notes to the INFRA-179, INFRA-514, INFRA-512 and INFRA-63 architects and the cluster-copy slot request",
+      "asd-ste100: the deployment requires ASD-STE100 for messages to other agents",
+      "ce-simplify-code: the simplify pass pr-body.md asks for before the proof at the head"
+    ],
+    "test": [
+      "legion-worker: re-running the named commands at the head, proof entries with negative controls, the test handoff",
+      "dispatch: recording the cluster and harness evidence on the issue"
+    ],
+    "review": [
+      "legion-worker: merge-gate.md and review-threads.md for the approval of the head and judging the proofs against acceptance 1-4"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "Acceptance 2's bound is ambiguous: literal vs proportional, net vs appended stored bytes, slope vs end-minus-start, no source for C, GOGC 2x.",
+        "answer": "Literal per the spec's words (flagged to the architect as a decision with the proportional alternative); net stored bytes (doc_updates+doc_checkpoints+doc_snapshots, SQL at minute 5 and 60; compaction can only tighten it); both end-minus-start of 1-minute means and slope x 55 min must pass; C = 1 GiB derived from the measured per-event retention, GOGC 2x and in-flight margin; predicted head ~0.5 GB."
+      },
+      {
+        "finding": "The cluster growth (13.9 GB working set) is not reconciled by E3's per-write bytes (~2.5 GB live); in-flight heap, reloads and anchor re-marking are unmeasured; the hour collapsed.",
+        "answer": "T7 isolates the upload term (base with upload=0) and reconciles with gc=1 diffs; T9 takes gc=1 profiles at minutes 5 and 60 and normalises per committed write by kind; T1 test 2 measures anchor re-marking with real comment rows; plan states what happens if the head fails (write retention fixed here, queued-request heap to the architect)."
+      },
+      {
+        "finding": "Carrying ids onto typed blocks without a named id would hand an old ask's identity to a new ask.",
+        "answer": "F-A carries ids only to untyped blocks; tested with an ask replaced by a different ask that names no id."
+      },
+      {
+        "finding": "Carry must come after RepeatedBlockID and skip ids the markdown names; live repeats.",
+        "answer": "Order fixed: parse, RepeatedBlockID on named ids, carry except named ids, EnsureBlockIDs; tests for each case including a live repeat."
+      },
+      {
+        "finding": "F-A cannot go inside pmdoc.Update (shared callers; equalYElementPNode compares blockId so pairing is circular).",
+        "answer": "F-A lives in pmdoc.ParseForWrite with its own pairing that mirrors Update's alignment with ids masked; version markdown is unchanged because untyped ids do not render."
+      },
+      {
+        "finding": "Moved and swapped blocks: does an id follow position or content? Stale anchor.block_id, {block:id} and ref#id would silently point at other text.",
+        "answer": "Identity rule decided: an id is carried only to a block whose content is unchanged at its paired position; moved, swapped, retyped and edited blocks get fresh ids as today; swap test included."
+      },
+      {
+        "finding": "F-B is equivalent to today's re-anchoring only under unstated conditions (split runs, refusals, attrs).",
+        "answer": "F-B reuses today's markQuoteInTxn on a scratch document, so FindQuote, MarkAttrs and MarkRange's refusals are the same code; an oracle test covers table cells, overlapping anchors, moved quotes and a quote in a code block; F-B is triggered by measurement (T3)."
+      },
+      {
+        "finding": "Acceptance 3 tests: service-level same-markdown re-upload already writes nothing; three different bounds; 2.5x headroom thin; no tolerance; no commands.",
+        "answer": "One bound form for every room test (acceptance 2's, C_room 2 MiB), one-token uploads not identical re-uploads, margins >= 1.5x or raise N, commands named."
+      },
+      {
+        "finding": "Acceptance 1 lacks bytes per write for cause 3 and a gc=1 measurement for cause 2; before and after must share base and profile mode.",
+        "answer": "T6 measures compaction and reload heap through the service; T7 takes gc=1 profiles by hand at base and head on the same harness; the cluster before (2026-10-28, no gc=1) is stated as such."
+      },
+      {
+        "finding": "Cause 2 left to INFRA-641 needs a measurement and counts in acceptance 2's working set.",
+        "answer": "Ruled out as retention by gc=1 (T7); the PR states whether #2455 is in the head and the curve includes it either way; no rebase for it."
+      },
+      {
+        "finding": "Dependencies: unmerged harness branches, locked cluster copy, POD_UID/LEGION_ISSUE, branch image permission, time.",
+        "answer": "Order T1..T9; harness from a read-only clone; slot asked on Envoy, never break a lock, report if blocked; the pod sets POD_UID and LEGION_ISSUE; the implement App has dispatched release-envoy-listener.yaml on a branch before (INFRA-522)."
+      },
+      {
+        "finding": "Docs and changelog: AGENTS.md:57-58, block-id docs, IndexBlocks changes, tests pinning re-minting.",
+        "answer": "T5 updates AGENTS.md and adds the changelog fragment; tests that pin re-minting every id are updated as they pin the defect; fewer block-text rows and surviving block refs are the intended effect."
+      },
+      {
+        "finding": "Unverified claims: 1,653 attributes (diff output not saved), utf16.Encode 1.72 TB, 68% under createComment.",
+        "answer": "The pmdoc test re-establishes the id-change count; the createComment share is explained in the plan (first publish after a room load decodes the replica base under whichever write came first) and re-measured by T7's gc=1 diffs."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "Causes to measure and fix: each agent write's items stay in a live room that never retires; compaction not freeing what the writes added.",
+      "plan": "Fixes the retention at the write: an upload keeps the ids of unchanged untyped blocks (F-A) and leaves anchors on kept text in place (F-B). Room retirement, residency and compaction are not changed, and no history rewrite is added.",
+      "evidence": "A room's heap equals a fresh decode of its own stored state (ratio 0.9-1.0; room+replica 1.9-2.2x), so retiring, reloading or compacting frees nothing. Per write retained by room+replica on a 25 KB spec: upload 491,060 B, anchored 4,839 B, comment 2,067 B, reply 1,752 B, edit 268 B. One token-only upload changes 1,653 blockId attributes (pmdoc/parse.go:145-155, pmdoc/update.go:164-178).",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "Causes to measure and fix: refreshAnchors' len16/utf16.Encode copies.",
+      "plan": "Measured with a gc=1 profile and ruled out as retention; the allocation fix is INFRA-641's pull request sjawhar/legion#2455, not repeated here.",
+      "evidence": "len16 returns an int and nothing keeps its slices (pmdoc/position.go:8-10); the soak's heap was fetched without gc=1 (HeapAlloc 16.75 GB vs 9.70 GB in the profile).",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    }
+  ]
+}
