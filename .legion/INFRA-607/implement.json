@@ -2,65 +2,57 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-607",
-  "completed": "2026-10-28T16:20:00Z",
+  "completed": "2026-10-28T18:46:00Z",
   "proof": [
     {
-      "criterion": "Each changed loop is driven by the change it serves and does nothing while nothing changes; a write made while the shared listener has no connection is caught up",
-      "surface": "The real envoy-dispatch binary at the head in config B (fake Azure embedder, fake GitHub App) through its HTTP API and Postgres; idle side-by-side windows against the fork point",
-      "command": "comment-embed.sh; select pg_terminate_backend(<hub backend>) then comment-embed.sh in the outage (dispatch://INFRA-607/artifact/head-proof-round-3-md, raw runs head-proof-round-3-raw-tar-gz); idle pairs of round 3 (dispatch://INFRA-607/artifact/measurements-round-3-md, raw runs round3-raw-tar-gz-part0 and -part1)",
-      "observed": "One backend listens on dispatch_embeddings, dispatch_excerpts_owed, dispatch_events and dispatch_delivery_settings. A comment POSTed through the API was embedded 288 ms later; after the hub backend was terminated, the redial line was logged, a new LISTEN backend came up 1.16 s later and the outage's comment was embedded 48 ms after it. Idle per process (round 3, bead55d4, same loops): no embedder or App 2.288 -> 2.169 statements/s; every loop on 2.813 -> 2.315 statements/s, CPU 0.00127 -> 0.00117 cores; embedding scan 12/min, coverage 1.70/min, task progress 0.80/min, excerpts 1.20/min, suggestion outcomes 7.00/min -> 0; settings reads 2.20 -> 0.20/min; shared keep-alive +2/min.",
-      "headSha": "c83c0851a1bea9c96ace622d0bdabe57da68d319",
-      "negativeControl": "update comments set body = body (text unchanged): no embedder call in 8 s and the embeddings row unchanged."
+      "criterion": "Each changed loop is driven by the change it serves and does nothing while nothing changes; every periodic statement left at idle is named",
+      "surface": "Two real head processes on one database and NATS beside two fork-point processes, every loop on (fake Azure embedder, fake GitHub App), statements counted by source from the Postgres statement log over a 10-minute idle window",
+      "command": "idle5/run.sh and analyze.py (dispatch://INFRA-607/artifact/idle-by-source-round-5-md, raw runs dispatch://INFRA-607/artifact/idle-by-source-round-5-raw-tar-gz)",
+      "observed": "Both processes, 10 minutes: 5,402 statements before, 4,011 after (4.50 -> 3.34 per second per process); CPU 0.0035/0.0032 -> 0.0029/0.0031 cores. Embedding scan 240 -> 0, coverage 34 -> 0, task progress 8 -> 0, reference excerpts 12 -> 0, suggestion outcomes 70 -> 0, edit notices 481 -> 0, delivery settings reads 42 -> 3; shared listener keep-alive 0 -> 40. The remaining timers (heartbeat 5 s, outbox 5 s, block index 30 s, standby durable reconcile 30 s, settlement 1 min, keep-alives 30 s, redelivery 2 min, reconcile and import 5 min) are named with why no event replaces each in the PR body.",
+      "headSha": "4f9bd6e85c54f4f94687cb90fa16a451bce8aaa0",
+      "negativeControl": "The fork point in the same window ran every changed loop on its timer (edit notices 238 lease attempts, 124 unlocks, 119 due queries; embedding scan 240)."
     },
     {
-      "criterion": "The GitHub intake handles pull requests concurrently and in order per pull request, also across a hand-over; its stop fits the stop grace",
-      "surface": "Two real head binaries on one database and NATS fed through the Envoy listener, fake GitHub holding pulls/<n>",
-      "command": "hand-over check (PR 201 x3 and 202-205, fetch held 3 s, SIGTERM to the bound process); shutdown-test.sh d1-delay 50s and d2-nodelay; DISPATCH_INTAKE_BURST=1 go test ./internal/dispatch/delivery/ -run TestIntakeBurstOfMergedPullRequests in both exports (round 3)",
-      "observed": "Three GETs of pulls/201 with no overlap (the second started 266 ms after the first ended, in the other process). With GitHub holding a fetch 50 s, exit 15.06 s after SIGTERM with 'the intake stopped before the event's handling finished; handing it back'. Intake burst of 20 merged pull requests, 200 ms per GitHub call: 12.594 s before, 3.53 s after.",
-      "headSha": "c83c0851a1bea9c96ace622d0bdabe57da68d319",
-      "negativeControl": "GitHub answering at once: exit 0.07 s after SIGTERM with no hand-back line."
+      "criterion": "Edit notices are sent when a notice falls due, not on a five-second sweep",
+      "surface": "The head binary's HTTP API: a session writes a spec, a person writes a new version through POST /api/v1/artifacts/{id}/edits",
+      "command": "dispatch://INFRA-607/artifact/edit-notice-check-md",
+      "observed": "The person's edit opened a notice due 30 s later (18:39:11.959); the sweep ran once on the write's notify (nothing due), made no edit-notice statement from 18:38:42.036 to 18:39:11.969, then sent the notice 10 ms after due: 'dispatch: sent edit notices notices=1', row deleted, artifact.human_edited delivered on the spec author's agent topic.",
+      "headSha": "4f9bd6e85c54f4f94687cb90fa16a451bce8aaa0",
+      "negativeControl": "With no notice due, no statement mentioning edit-notices or document_edit_notices in 125 s."
     },
     {
-      "criterion": "A failed intake subscribe leaves nothing a reconnect binds",
-      "surface": "The head binary in config B with its NATS server down at boot while another session holds the intake's consumer lease, so the subscribe itself fails",
-      "command": "f-test.sh with HOLD_LEASE=1 for the head and the fork point (head-proof-round-3-md, check f2)",
-      "observed": "Head: five 'bind NATS consumer' errors during the outage, then bound 2.3 s after NATS started by its own bind poll with no 'envoy nats resubscribing' line; the published pull request was fetched once and acknowledged (num_ack_pending 0, delivered = ack floor), no negative acknowledgement.",
-      "headSha": "c83c0851a1bea9c96ace622d0bdabe57da68d319",
-      "negativeControl": "The fork point under the same run logged 'envoy nats resubscribing' 0.8 s after NATS started: the bus restored the failed registration (which on the previous head re-bound the intake's abandoned callback, handing messages back until the next bind)."
+      "criterion": "The timers the plan keeps are jittered every period (the webhook redelivery sweep included)",
+      "surface": "The two head processes' and two fork-point processes' webhook-redelivery lease attempts in their Dispatch logs and the statement log",
+      "command": "idle-by-source-round-5-md, section 'Webhook redelivery'; go test ./internal/dispatch/redeliver/ -run TestTheRunningSweepSweepsAtStartThenWaitsBetweenOneAndOnePointOneIntervals",
+      "observed": "Head: the two processes' attempts fell 4.6, 0.8, 2.8, 10.7, 5.8, 2.1 and 0.6 s apart; one process's periods were 124.3, 129.8, 123.3, 129.0, 126.3 and 124.2 s. The test passes: a sweep at start, then gaps in [interval, 1.1 x interval).",
+      "headSha": "4f9bd6e85c54f4f94687cb90fa16a451bce8aaa0",
+      "negativeControl": "Fork point (plain ticker): both processes tried at exactly 120 s intervals, 24-41 ms apart, every period."
     },
     {
-      "criterion": "Before and after at tonight's step on the committed load reproduction",
-      "surface": "INFRA-589's 1x step (400 sessions, 4 events/s, 60 requests/s), config A, one process at a time",
-      "command": "series.sh s1-before:before s2-after:after and holdtime.py (head-proof-round-3-md); four runs of round 3; 26 alternating runs (bisect-findings-md)",
-      "observed": "At the head: before p50/p90/p99 47/244/574 ms, after 48/254/843 ms; commit-order lock hold p50 65 vs 69 ms; statements/s 481 vs 491; Dispatch CPU 0.58 vs 0.56. Over 26 alternating runs the collapse episode occurred once in 12 runs of each build.",
+      "criterion": "The GitHub intake handles pull requests concurrently and in order across a hand-over; its stop fits the stop grace; a failed subscribe leaves nothing a reconnect binds; write-woken loops catch up after a listener outage",
+      "surface": "The real binary at c83c0851 in config B (same intake, listener and loop code as the head; the head adds the edit-notice wake and the redelivery jitter)",
+      "command": "dispatch://INFRA-607/artifact/head-proof-round-3-md and head-proof-round-3-raw-tar-gz",
+      "observed": "Comment embedded 288 ms after its POST; listener backend terminated, redial in 1.16 s, outage comment embedded 48 ms after the new LISTEN; GitHub holding a fetch 50 s: exit 15.06 s after SIGTERM with the hand-back line; three fetches of one pull request across a hand-over with no overlap; NATS down while subscribing: bound once on its own bind poll, no resubscribe, the pull request fetched once and acknowledged; 1x before 47/244/574 ms, after 48/254/843 ms.",
       "headSha": "c83c0851a1bea9c96ace622d0bdabe57da68d319",
-      "negativeControl": "Single pairs differ by more than the builds do (round 3's s1-before p90 1,940 ms against s3-before 216 ms), so only the per-transaction hold and the episode counts compare the builds."
-    },
-    {
-      "criterion": "No deployment Dispatch key in the public tree; the per-process connection count holds",
-      "surface": "The pull request's diff and the store and infra/gcp constants",
-      "command": "gh pr diff 2391 | grep '^+' | grep -E 'INFRA-[0-9]+|dispatch://' outside .legion/; cd packages/envoy/infra && go test ./gcp/ -run Connections -count=1",
-      "observed": "One line, the test fixture dispatch://CORE-1 in refs/excerpts_test.go. store.ConnectionsPerProcess = 64+4+1+12+1+1+4 = 87 and dispatchConnectionsPerPod = 87; TestDispatchConnectionsPerPodIsTheServers passes.",
-      "headSha": "c83c0851a1bea9c96ace622d0bdabe57da68d319",
-      "negativeControl": "At the tested head 92f0eaa3 the same grep printed 28 added lines with INFRA- keys, and permanentListeners was 3, one short of the listeners a process opens."
+      "negativeControl": "GitHub answering at once: exit 0.07 s after SIGTERM with no hand-back line; the fork point re-bound the failed subscription on reconnect ('envoy nats resubscribing')."
     }
   ],
   "filesChanged": [
-    "Forward merges of main (bead55d4, 68edeacb): migrations renumbered to 0136-0141; conflicts kept both sides",
-    "packages/envoy/internal/dispatch/store/pool.go: permanentListeners 3 -> 4; packages/envoy/infra/gcp/dispatch.go: dispatchConnectionsPerPod 87; docs/site running-dispatch.md connection figure",
-    "packages/envoy/.changes/unreleased/pr2391-Changed-*.yaml (seven, via changie, Issue=pr2391); deployment keys removed from README, main.go, suggestion_outcomes.go, migrations, packages/envoy/AGENTS.md",
-    "packages/envoy/internal/bus/nats.go, recovery.go, release_test.go, drain_late_bind_test.go; packages/envoy/internal/dispatch/delivery/intake.go: Client.ReleaseFailed after a failed intake subscribe"
+    "Forward merge of main e82b013b (719a2dc7): AGENTS.md and refs/excerpts_test.go conflicts kept both sides; RecordExcerpts' new return adopted",
+    "packages/envoy/internal/dispatch/redeliver/sweep.go (+export_test.go, sweep_lease_test.go): sweep at start, then interval plus up to a tenth each period",
+    "packages/envoy/internal/dispatch/docs/edit_notices.go (+edit_notices_loop_test.go), store/migrations/0142_document_edit_notices_notify, cmd/dispatch/main.go: edit notices woken by a notify on document_edit_notices with the next due time as the loop's timer",
+    "Docs: cmd/dispatch/README.md, packages/envoy/AGENTS.md, .dispatch/architecture (dispatch-docs, dispatch-redeliver, dispatch-server, dispatch-store), two pr2391 changelog fragments"
   ],
   "trickyParts": [
-    "dispatchConnectionsPerPod must equal main's sum plus the wake listener at merge time; INFRA-590's #2395 and INFRA-592's #2402 add connections too, and whichever merges later re-sums.",
-    "ReleaseFailed tells a failed registration a restore bound apart from a later successful Subscribe by `subscribed`, which only a Subscribe's own bind now sets (endBind's returned argument)."
+    "The edit-notice loop's due time is read on the database's clock (min(due_at) - now()) and held to the 5 s MinGap, so under load it never sweeps more often than before.",
+    "The redelivery sweep keeps its sweep at start (the multiprocess overlap and staggered-start rows and the NATS-down boot test depend on it); only the waits after it are jittered."
   ],
   "deviations": [
-    "The PR title no longer carries the issue key (the squash makes it main's subject); earlier commit subjects with the key are left as pushed, never rewritten."
+    "The outbox's 5 s retry ticker stays: INFRA-590's #2395, which replaces it, is still open on GitHub, as the architect's step 3 allows.",
+    "The 1x step was not re-run at 4f9bd6e8: the changes since c83c0851 (edit-notice wake, redelivery jitter) touch no request path; the 1x pair at c83c0851 and the 26-run comparison stand."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "CI's dispatch browser job fails on main's own tests: recipients-claim.e2e.ts:310 since #2233 (closing an issue withdraws its asks, so the open card the test expects becomes a completion card) and mermaid.e2e.ts:194 from #2311 (CI runners draw the 800-node diagram inside the 5 s limit); reproduced 3/3 on main without this PR; reported to the controller with the evidence.",
-    "The job intake (delivery/jobs.go) keeps a failed subscribe's registration as before; its callback is not abandoned, so a restore delivers through it normally."
+    "At the fork point both processes bound the delivery-jobs durable at the same millisecond (each logged 'NATS consumer bound name=delivery-jobs'); the head's run had one holder. That double bind is main's intake race, which INFRA-558's holder lease closes."
   ]
 }
