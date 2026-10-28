@@ -176,3 +176,90 @@ func TestTablesResourcesShowFailedSamplerReadsAsMissing(t *testing.T) {
 	}
 	checkRowWidths(t, md)
 }
+
+// TestTablesMarkEveryCellThatDependsOnUnreadCommitRows: beyond the Events and kinds cells of
+// TestTablesDoNotShowUnreadCommitsAsZero, a step whose commit rows were not read shows "-" and the
+// mark in the delivery-from-sent, SSE-from-write-response and CPU-per-operation cells, a note under
+// each marked table names events.commits_error, and a step whose rows were read is not marked.
+func TestTablesMarkEveryCellThatDependsOnUnreadCommitRows(t *testing.T) {
+	perOp := 0.0123
+	read := stepData{name: "read", sum: summary{
+		Config:    summaryConfig{Step: "read", EventsPerS: 1},
+		Events:    eventsSummary{Committed: 30, CommittedPerS: 1, DeliveryMsFromSent: stat{N: 60, P50: 120, P99: 900}},
+		Resources: &resourcesSummary{DispatchCPUSPerOp: &perOp},
+		SSE:       sseSummary{Frames: 40, FrameMsFromWriteResponse: stat{N: 30, P50: 5, P99: 60}},
+	}}
+	// What an older summary.json of an unread step can hold: values beside commits_error.
+	unread := stepData{name: "unread", sum: summary{
+		Config: summaryConfig{Step: "unread", EventsPerS: 1},
+		Events: eventsSummary{Offered: 31, OfferedPerS: 1.03, DeliveryMsFromSent: stat{N: 2, P50: 1, P99: 2},
+			CommitsError: "read loadtest.event_commits: failed to connect"},
+		Resources: &resourcesSummary{DispatchCPUSPerOp: &perOp},
+		SSE:       sseSummary{Frames: 40, FrameMsFromCreatedAt: stat{N: 40, P50: 30, P99: 80}, FrameMsFromWriteResponse: stat{N: 1, P50: 5, P99: 5}},
+	}}
+	md := renderTables([]stepData{read, unread})
+
+	const mark = "unread " + commitsUnreadMark
+	for _, c := range []struct {
+		title string
+		cols  []int // the cells that depend on the commit rows
+	}{
+		{"Events, delivery and requests", []int{5, 6, 7}},
+		{"Write latency by kind", nil},
+		{"Resources", []int{15}},
+		{"Delivery from sending, and SSE frames", []int{1, 3}},
+	} {
+		text := section(md, c.title)
+		cells := rowCells(text, "unread")
+		if cells == nil || cells[0] != mark {
+			t.Errorf("section %q: the unread step's row is not marked %q:\n%s", c.title, commitsUnreadMark, text)
+			continue
+		}
+		for _, col := range c.cols {
+			if cells[col] != "-" {
+				t.Errorf("section %q: cell %d of the unread step reads %q, want -:\n%s", c.title, col, cells[col], text)
+			}
+		}
+		if note := noteLine(text, commitsUnreadMark); !strings.Contains(note, "`events.commits_error`") {
+			t.Errorf("section %q has no note of the mark that names summary.json `events.commits_error`:\n%s", c.title, text)
+		}
+		if r := rowCells(text, "read"); r == nil || r[0] != "read" {
+			t.Errorf("section %q: the step whose commit rows were read is marked:\n%s", c.title, text)
+		}
+	}
+	// The cells that do not depend on the commit rows keep their values.
+	if cells := rowCells(section(md, "Delivery from sending, and SSE frames"), "unread"); cells[2] != "30 / 80" || cells[4] != "40" {
+		t.Errorf("the unread step's SSE frames and their latency from created_at: %q", cells)
+	}
+	if cells := rowCells(section(md, "Events, delivery and requests"), "unread"); cells[3] != "1.00 / 1.03 / -" {
+		t.Errorf("the unread step's events/s: %q, want the target and offered rates and - committed", cells[3])
+	}
+	// The tables that no commit row feeds carry no mark.
+	for _, title := range []string{"Commit-order lock", "Ungranted locks", "Transaction ids"} {
+		if strings.Contains(section(md, title), commitsUnreadMark) {
+			t.Errorf("section %q, which no commit row feeds, carries the mark:\n%s", title, md)
+		}
+	}
+	checkRowWidths(t, md)
+}
+
+// TestTablesMarkAFailedTransactionIDRead: a step whose transaction-id probe failed shows "-" with
+// the failed-reads mark, and the note names resources.xid_read_error; a step with no resources
+// shows "-" unmarked, as every cell of its Resources row.
+func TestTablesMarkAFailedTransactionIDRead(t *testing.T) {
+	md := renderTables([]stepData{
+		{name: "xid-failed", sum: summary{Config: summaryConfig{Step: "xid-failed"}, Resources: &resourcesSummary{XIDReadError: "xid probe: failed to connect"}}},
+		{name: "no-window", sum: summary{Config: summaryConfig{Step: "no-window"}}},
+	})
+	text := section(md, "Transaction ids")
+	if cells := rowCells(text, "xid-failed"); cells == nil || cells[0] != "xid-failed (1 failed reads)" || cells[1] != "-" {
+		t.Errorf("the failed transaction-id read is not '-' with the mark: %q\n%s", cells, text)
+	}
+	if cells := rowCells(text, "no-window"); cells == nil || cells[0] != "no-window" || cells[1] != "-" {
+		t.Errorf("the step with no resources: %q\n%s", cells, text)
+	}
+	if note := noteLine(text, "(<n> failed reads)"); !strings.Contains(note, "`resources.xid_read_error`") {
+		t.Errorf("no note of the failed-reads mark names summary.json `resources.xid_read_error`:\n%s", text)
+	}
+	checkRowWidths(t, md)
+}

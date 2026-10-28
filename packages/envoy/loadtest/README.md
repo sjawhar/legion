@@ -163,6 +163,18 @@ measure the load`. `run-step.sh` renders `TABLES.md` for diagnosis, with the mar
 message and at `run.log`. A Dispatch crash or out-of-memory kill at a high step thus never reads as
 the overload that the series measures.
 
+**A step whose commit rows cannot be read fails.** The committed counts, the receipts and the
+delivery latencies all come from the run's rows of `loadtest.event_commits` (Delivery latency,
+below). When `loadgen` cannot read them, because the database has no `commit-trigger.sql` or
+Postgres does not answer, it still writes `summary.json` with `events.commits_error` (why the read
+failed), `meta.json` and `samples.json`. Then it exits with status 1, naming the commit-row read and
+`events.commits_error`. `run-step.sh` renders `TABLES.md` for diagnosis, where every cell that
+depends on those rows shows `-` and the step name carries the mark `(commit rows not read)` (The
+tables, below), and exits with status 1; `run-series.sh` stops there. The other reads of the
+database (the lock probe, the ungranted-lock sampler, the 5 s sampler's `pg_stat_activity`, the
+transaction-id probe and the Postgres version in `meta.json`) feed none of those columns. A failure
+of one of them marks its own table, or `meta.json`, and the step does not fail.
+
 To run a step name again, remove its step directory first.
 
 `loadgen run` also takes `-nats-conns` (default 50), the NATS connections that the sessions share.
@@ -514,6 +526,15 @@ The counts:
 - **`commit_times_missing`**: the primary events with no commit time. They get no latency from
   commit.
 
+When `loadgen` cannot read the run's rows of `loadtest.event_commits`, `events.commits_error` holds
+why. Then every count and latency above but offered is 0 because nothing was read, not measured:
+committed (also per kind), the issue-topic and agent-topic receipts, the expected receipts,
+`missing`, `other_events`, `other_receipts`, `commit_times_missing`, `clock_anomalies` and every
+delivery latency. So is `sse.sse_frame_ms_from_write_response`, and
+`resources.dispatch_cpu_s_per_op` is null. The tables show those cells as `-` with the mark
+`(commit rows not read)`, and the step fails (Run one step, above). A step with no write in the
+window reads no rows: nothing depends on them.
+
 Every percentile in the harness is the lower nearest rank: the value at index
 ⌊p/100 × (n − 1)⌋ of the sorted values.
 
@@ -521,10 +542,10 @@ Every percentile in the harness is the lower nearest rank: the value at index
 
 | File | What it holds |
 | --- | --- |
-| `summary.json` | The step's results. Every table cell comes from it (The tables, below). `config.marker_nonce` is the run's marker nonce (Event kinds, above). `stack_exits` is there only when a stack process exited during the step: each entry's `name`, `pid` and `first_seen_gone`. Such a step failed. |
+| `summary.json` | The step's results. Every table cell comes from it (The tables, below). `config.marker_nonce` is the run's marker nonce (Event kinds, above). `stack_exits` is there only when a stack process exited during the step: each entry's `name`, `pid` and `first_seen_gone`. Such a step failed. `events.commits_error` is there only when the run's commit rows could not be read (Delivery latency, above). Such a step failed too. |
 | `TABLES.md` | The tables of this step. `loadgen tables` writes it. |
-| `meta.json` | Mode 600 (owner only). The step name and arguments (`args`, with the values of `-token` and `-listener-token`, in every spelling that `loadgen run` accepts, replaced by `<redacted>`: no file of the step holds a token), `start`, `window_start`, `window_end`, `end`, `nproc`, CPU model, kernel, `box_busy_before` and `box_busy_before_window_s` (5), `GOMAXPROCS` of Dispatch (`unset` by default), the Postgres version, the build commit and `build_dirty`, the seed meta, the `stack.json` path, `pg_direct` (always `false` under `-allow-foreign`, which takes nothing about the target from `stack.json`), `allow_foreign`, the pids and `marker_nonce`. `box_busy_before` is the share of the box's CPU time, all CPUs, that was not idle or I/O wait over 5 s just before the step, from two `/proc/stat` reads: `run-step.sh` reads it with `loadgen box-busy` before its reset and passes it as `-box-busy-before`; a `loadgen run` without that flag reads it itself (Requirements, above). `null` when `/proc/stat` gave no ticks. |
-| `run.log` | `loadgen run`'s log: the configuration with the marker nonce, the guard, a warning when `box_busy_before` is above 10%, the sampler's pids, the NATS subscriptions, the registrations, the window, failed writes, the first three failed reads of each Postgres probe and of the 5 s sampler's Postgres and pprof reads (and each one's total, past three), the result line, and the failure line when a stack process exited. |
+| `meta.json` | Mode 600 (owner only). The step name and arguments (`args`, with the values of `-token` and `-listener-token`, in every spelling that `loadgen run` accepts, replaced by `<redacted>`: no file of the step holds a token), `start`, `window_start`, `window_end`, `end`, `nproc`, CPU model, kernel, `box_busy_before` and `box_busy_before_window_s` (5), `GOMAXPROCS` of Dispatch (`unset` by default), the Postgres version (`postgres_version`: empty when it could not be read, and then `postgres_version_error` says why), the build commit and `build_dirty`, the seed meta, the `stack.json` path, `pg_direct` (always `false` under `-allow-foreign`, which takes nothing about the target from `stack.json`), `allow_foreign`, the pids and `marker_nonce`. `box_busy_before` is the share of the box's CPU time, all CPUs, that was not idle or I/O wait over 5 s just before the step, from two `/proc/stat` reads: `run-step.sh` reads it with `loadgen box-busy` before its reset and passes it as `-box-busy-before`; a `loadgen run` without that flag reads it itself (Requirements, above). `null` when `/proc/stat` gave no ticks. |
+| `run.log` | `loadgen run`'s log: the configuration with the marker nonce, the guard, a warning when `box_busy_before` is above 10%, the sampler's pids, the NATS subscriptions, the registrations, the window, failed writes, the first three failed reads of each Postgres probe and of the 5 s sampler's Postgres and pprof reads (and each one's total, past three), a failed read of the commit rows, of the transaction ids or of the Postgres version, the result line, and the failure line when a stack process exited or the commit rows were not read. |
 | `samples.json` | The 5 s samples: CPU ticks and RSS per process, `/proc/stat` ticks, Postgres connections by state, goroutines, pool waiters, heap (every 15 s), NATS `/varz`. `failed_reads` names a sample's reads that failed (`postgres`, `goroutines`, `heap`); their values in that sample are 0 and enter no statistic. |
 | `cpu.pprof` | Dispatch's CPU profile over the whole window. |
 | `heap.pprof` | Dispatch's heap profile at the end of the window. |
@@ -551,21 +572,23 @@ series `TABLES.md`, because `run-step.sh` already wrote them for each step.
 ## The tables
 
 `TABLES.md` has eight tables, with one row per step. The window is the measured window
-(`--duration`). "Cores" means CPU-seconds per second. A cell is `-` when it has no value. A JSON
-path below is a field of the step's `summary.json`.
+(`--duration`). "Cores" means CPU-seconds per second. A cell is `-` when it has no value, and also
+when the read that it comes from failed; a failed read also marks the step name with
+`(commit rows not read)` or `(<n> failed reads)` (below), so no cell shows a failed read as a
+measured 0. A JSON path below is a field of the step's `summary.json`.
 
 ### Events, delivery and requests
 
 | Column | Unit | What it shows | Source |
 | --- | --- | --- | --- |
-| `step` | name | The step name, with the mark `(<process> exited)` when a stack process exited during the step. | `config.step`, `stack_exits` |
+| `step` | name | The step name, with the mark `(<process> exited)` when a stack process exited during the step, and `(commit rows not read)` when the run's commit rows could not be read (below). | `config.step`, `stack_exits`, `events.commits_error` |
 | `start (UTC)` | date and time | The start of the window. | `meta.json` `window_start` |
 | `sessions` | count | The simulated sessions. | `config.sessions` |
-| `events/s target / offered / committed` | writes per second | The target rate, then the offered writes and the committed writes, each divided by the window. `0` when the target is 0. | `config.events_per_s`, `events.offered_per_s`, `events.committed_per_s` |
+| `events/s target / offered / committed` | writes per second | The target rate, then the offered writes and the committed writes, each divided by the window. `0` when the target is 0. Committed is `-` when the commit rows were not read. | `config.events_per_s`, `events.offered_per_s`, `events.committed_per_s` |
 | `write errors non-2xx / transport` | count | The offered writes that got a status outside 2xx, then the offered writes that ended with no complete response: a connection error, the 30 s client timeout, or a failed read of the spec before an upload. | `events.write_errors.non_2xx`, `events.write_errors.transport` |
-| `delivery ms from arrival p50 / p99` | ms | Delivery latency from arrival, over every issue-topic receipt of a primary event. | `events.delivery_ms_from_arrival` |
-| `delivery ms from commit p50 / p99` | ms | Delivery latency from commit, over the same receipts. | `events.delivery_ms_from_commit` |
-| `issue-topic receipts got / expected` | count | The issue-topic receipts of primary events, then the expected number. | `events.issue_topic_receipts`, `events.expected_issue_topic_receipts` |
+| `delivery ms from arrival p50 / p99` | ms | Delivery latency from arrival, over every issue-topic receipt of a primary event. `-` when the commit rows were not read. | `events.delivery_ms_from_arrival` |
+| `delivery ms from commit p50 / p99` | ms | Delivery latency from commit, over the same receipts. `-` when the commit rows were not read. | `events.delivery_ms_from_commit` |
+| `issue-topic receipts got / expected` | count | The issue-topic receipts of primary events, then the expected number. `-` when the commit rows were not read. | `events.issue_topic_receipts`, `events.expected_issue_topic_receipts` |
 | `req/s target / sent` | requests per second | The target rate, then the requests sent in the window divided by the window. `0` when the target is 0. The mark `(below 95%)` follows when the sent rate is below 95% of the target. | `config.requests_per_s`, `requests.sent_per_s`, `requests.below_target` |
 | `req 2xx` | percent | The share of sent requests that got a 2xx status. | `requests.ok_2xx` ÷ `requests.sent` |
 | `req ms p50 / p99` | ms | Request latency, from arrival (as for a write) to the end of the response body, over every sent request, failures included. A failed request counts with the time it took to fail: about 30,000 for the client timeout, and about 5,000 for the 5 s connect timeout. A request that never connected has no arrival, so its time starts when the client began the request. | `requests.latency_ms` |
@@ -581,6 +604,16 @@ named stack process (`dispatch`, `listener`, `nats`, `proxy` or `postgres`) exit
 numbers show a stack without that process. `TABLES.md` repeats this under the first table when a
 row has the mark.
 
+**The commit-rows mark.** `(commit rows not read)` after the step name, in this table, the
+write-latency-by-kind table, the resources table and the delivery-from-sending table, means that
+`loadgen` could not read the run's rows of `loadtest.event_commits`: the database has no
+`commit-trigger.sql`, or Postgres did not answer. `events.commits_error` says why. Every cell that
+depends on those rows shows `-`, not a measured 0: here the committed rate, both delivery
+latencies and the receipts; per kind the committed count; in the resources table the Dispatch
+CPU-s per operation; and the delivery from sent and the SSE frame latency from write response. The
+step failed (Run one step, above). `TABLES.md` repeats this under each table where a row has the
+mark.
+
 **Connect timeouts above 1x.** At 10x on the 2-vCPU pod (series run of 2026-10-27, step
 `step-10x`), most requests and writes ended with `dial tcp …: i/o timeout` after 5 s, and
 `req ms p50` was about 5,000. During a second 10x run, a second client (`curl` to `/healthz` from
@@ -595,8 +628,8 @@ There is one column per kind, in this order: `comment`, `anchored`, `reply`, `ed
 
 | Column | Unit | What it shows | Source |
 | --- | --- | --- | --- |
-| `step` | name | The step name. | `config.step` |
-| `comment ms p50 / p99 (committed / offered)` | ms, then count | Write latency of the kind's writes that got a 2xx status: from arrival to the end of the response body. Then the committed and offered writes of the kind. `-` alone when the step offered no write of the kind. `-` before the counts when no write of the kind got a 2xx status. | `events.by_kind.comment.write_ms`, `.committed`, `.offered` |
+| `step` | name | The step name, with the mark `(commit rows not read)` when the run's commit rows could not be read (Events, delivery and requests, above). | `config.step`, `events.commits_error` |
+| `comment ms p50 / p99 (committed / offered)` | ms, then count | Write latency of the kind's writes that got a 2xx status: from arrival to the end of the response body. Then the committed and offered writes of the kind. `-` alone when the step offered no write of the kind. `-` before the counts when no write of the kind got a 2xx status. `-` for committed when the commit rows were not read. | `events.by_kind.comment.write_ms`, `.committed`, `.offered` |
 | `anchored ms p50 / p99 (committed / offered)` | ms, then count | The same for `anchored`. | `events.by_kind.anchored` |
 | `reply ms p50 / p99 (committed / offered)` | ms, then count | The same for `reply`. | `events.by_kind.reply` |
 | `edit ms p50 / p99 (committed / offered)` | ms, then count | The same for `edit`. | `events.by_kind.edit` |
@@ -612,7 +645,7 @@ divided by 100 ticks per second and by the seconds between the two samples.
 
 | Column | Unit | What it shows | Source |
 | --- | --- | --- | --- |
-| `step` | name | The step name, with the mark `(<n> failed reads)` when n of the sampler's Postgres and pprof reads in the window failed (below). | `config.step`, `resources.pg_read_errors`, `resources.pprof_read_errors` |
+| `step` | name | The step name, with the mark `(commit rows not read)` when the run's commit rows could not be read (Events, delivery and requests, above), then `(<n> failed reads)` when n of the sampler's Postgres and pprof reads in the window failed (below). | `config.step`, `events.commits_error`, `resources.pg_read_errors`, `resources.pprof_read_errors` |
 | `Dispatch cores mean / peak 5 s` | cores | Dispatch's mean cores in the window, then its highest cores in one 5 s sample interval. | `resources.cpu_cores_mean.dispatch`, `resources.cpu_cores_peak_5s.dispatch` |
 | `Postgres cores` | cores | Mean cores of the stack's Postgres: the postmaster, its live children and the postmaster's time for children that exited. | `resources.cpu_cores_mean.postgres` |
 | `listener cores` | cores | Mean cores of the listener. | `resources.cpu_cores_mean.listener` |
@@ -627,7 +660,7 @@ divided by 100 ticks per second and by the seconds between the two samples.
 | `goroutines waiting for a pool connection p50 / max` | count | Dispatch's goroutines with a pgx pool `Acquire` frame (puddle) in their stack. | `resources.pool_acquire_goroutines` |
 | `Postgres connections max` | count | The highest number of `pg_stat_activity` rows for database `dispatch`. It includes up to 4 connections of `loadgen`: the sampler, the lock probe, the ungranted-lock sampler and the transaction-id probe. | `resources.pg_conns_total.max` |
 | `connections waiting on a lock p50` | count | The p50 of `dispatch` connections with state `active` and wait event type `Lock`, over the samples that saw at least one. `0` when no sample saw one. An advisory lock wait has this type. | `resources.pg_conns_by_state["active\|Lock"]` |
-| `Dispatch CPU-s per operation` | CPU-seconds | Dispatch's mean cores divided by the operation rate. An operation is a committed write or a sent request in the window. | `resources.dispatch_cpu_s_per_op` |
+| `Dispatch CPU-s per operation` | CPU-seconds | Dispatch's mean cores divided by the operation rate. An operation is a committed write or a sent request in the window. `-` when the commit rows were not read. | `resources.dispatch_cpu_s_per_op` |
 
 `resources` also holds every process's RSS, Postgres connections by state, and NATS messages in and
 out per second and slow consumers. Under `-allow-foreign`, `loadgen` has no stack pids, so only
@@ -665,7 +698,10 @@ a failed connect, which counts as one and leaves the probe with no sample. `comm
 and `ungranted_locks.errors` count them, and `run.log` shows the first three of each probe and
 their total. The probe's samples miss those reads, so its shares are over the reads that worked,
 and a row with no sample reads `-`, not 0: a probe that failed is never shown as a lock nobody
-held. `TABLES.md` repeats this under the table when a row has the mark.
+held. `TABLES.md` repeats this under the table when a row has the mark. The transaction-ids table
+uses the same mark, `(1 failed reads)`, for its probe (Transaction ids, below). None of these
+probes feeds the committed, receipt or delivery columns, so a failed read marks its own table and
+does not fail the step.
 
 When dispatch://INFRA-591 removes the commit-order lock, this table reads 0 by construction. No
 backend can hold or wait for a lock that Dispatch does not take. The ungranted-locks table
@@ -680,10 +716,10 @@ count. A frame's event id is the `id` in its `data`, or the `id` line when the d
 
 | Column | Unit | What it shows | Source |
 | --- | --- | --- | --- |
-| `step` | name | The step name. | `config.step` |
-| `NATS delivery ms from sent p50 / p99` | ms | Delivery latency from sent (Delivery latency, above), over every issue-topic receipt of a primary event. | `events.delivery_ms_from_sent` |
+| `step` | name | The step name, with the mark `(commit rows not read)` when the run's commit rows could not be read (Events, delivery and requests, above). | `config.step`, `events.commits_error` |
+| `NATS delivery ms from sent p50 / p99` | ms | Delivery latency from sent (Delivery latency, above), over every issue-topic receipt of a primary event. `-` when the commit rows were not read. | `events.delivery_ms_from_sent` |
 | `SSE frame ms from created_at p50 / p99` | ms | The frame time minus the `created_at` of the frame's event, over every frame with a `created_at`. | `sse.sse_frame_ms_from_created_at` |
-| `SSE frame ms from write response p50 / p99` | ms | The frame time minus the time when the client read the write's response. Only the frame of a primary event counts. Its write must be in the window, have a 2xx status and be committed. A write with no complete response has no response time, so its frames do not count. | `sse.sse_frame_ms_from_write_response` |
+| `SSE frame ms from write response p50 / p99` | ms | The frame time minus the time when the client read the write's response. Only the frame of a primary event counts. Its write must be in the window, have a 2xx status and be committed. A write with no complete response has no response time, so its frames do not count. `-` when the commit rows were not read. | `sse.sse_frame_ms_from_write_response` |
 | `SSE frames` | count | The frames of all SSE streams that arrived in the window. | `sse.sse_frames` |
 | `SSE order violations` | count | The frames whose event id is not more than the event id of the previous frame on the same connection. The check starts again on each new connection. A value above 0 means that a stream sent events out of id order. | `sse.sse_order_violations` |
 
@@ -732,8 +768,8 @@ step whose sampler took no sample has `-` in every cell.
 
 | Column | Unit | What it shows | Source |
 | --- | --- | --- | --- |
-| `step` | name | The step name. | `config.step` |
-| `transaction ids per s` | transaction ids per second | The transaction ids that Postgres assigned per second in the window, in all databases of the server. The transaction-id probe reads the next transaction id (`pg_snapshot_xmax(pg_current_snapshot())`) at the window start and at the window end. It divides the difference by the seconds between the two reads. The probe assigns no transaction id itself. `-` when a read failed, or when `resources` is null. | `resources.xids_per_s` |
+| `step` | name | The step name, with the mark `(1 failed reads)` when the transaction-id probe's connect or one of its two reads failed (Commit-order lock, above). | `config.step`, `resources.xid_read_error` |
+| `transaction ids per s` | transaction ids per second | The transaction ids that Postgres assigned per second in the window, in all databases of the server. The transaction-id probe reads the next transaction id (`pg_snapshot_xmax(pg_current_snapshot())`) at the window start and at the window end. It divides the difference by the seconds between the two reads. The probe assigns no transaction id itself. `-` with the mark when a read failed (`resources.xid_read_error` holds the error, and `run.log` shows it); `-` alone when `resources` is null. | `resources.xids_per_s` |
 
 ### Requests by route
 
@@ -828,8 +864,14 @@ Compare the right rows:
 - A cluster run (dispatch://INFRA-598) can use `loadgen run -allow-foreign` with every endpoint and
   token flag and its own seed. It gets:
   - no `/proc` CPU or RSS columns, because it has no pids,
-  - no delivery latency from commit, unless its database has the trigger and
-    `track_commit_timestamp = on`,
+  - no committed counts, issue-topic receipts or delivery latencies at all when its database lacks
+    `loadtest.event_commits`. The read of the commit rows fails, every cell that depends on them
+    shows `-` with the mark `(commit rows not read)` (The tables, above), and `loadgen run` exits
+    non-zero naming the read (`events.commits_error`). Such a database needs `commit-trigger.sql`
+    (`loadgen trigger-sql` prints it) installed before the run, and `track_commit_timestamp = on`,
+  - no delivery latency from commit when its database has the trigger but
+    `track_commit_timestamp` is off: `commit_times_missing` counts those events, and the
+    committed counts, receipts and the other latencies stay,
   - no reset per step.
 - These belong to INFRA-598: 10-minute steps, one-hour soak trends (the 5 s series in
   `samples.json` is there for them), the replay of production's log, sampling of the production

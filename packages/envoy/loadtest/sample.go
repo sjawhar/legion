@@ -467,38 +467,46 @@ func natsVarz(mon string) map[string]float64 {
 }
 
 // xidRate reads the next transaction id to be assigned at from and at to, over one direct
-// Postgres connection, and returns the transaction ids assigned per second between the two reads;
-// nil when the connect or either read failed, each logged, or ctx ended first.
-// pg_current_snapshot assigns no transaction id, so the probe does not count itself.
-func xidRate(ctx context.Context, url string, from, to time.Time, lg *log.Logger) *float64 {
+// Postgres connection, and returns the transaction ids assigned per second between the two reads.
+// When the connect or either read fails, or ctx ends first, it returns no rate and the error,
+// logged. pg_current_snapshot assigns no transaction id, so the probe does not count itself.
+func xidRate(ctx context.Context, url string, from, to time.Time, lg *log.Logger) (*float64, error) {
+	r, err := readXIDRate(ctx, url, from, to)
+	if err != nil {
+		err = fmt.Errorf("xid probe: %w", err)
+		lg.Print(err)
+		return nil, err
+	}
+	return &r, nil
+}
+
+func readXIDRate(ctx context.Context, url string, from, to time.Time) (float64, error) {
 	conn, err := pgx.Connect(ctx, url)
 	if err != nil {
-		lg.Printf("xid probe: %v", err)
-		return nil
+		return 0, err
 	}
 	defer conn.Close(context.Background())
-	read := func(at time.Time) (xid int64, readAt time.Time, ok bool) {
+	read := func(at time.Time) (xid int64, readAt time.Time, err error) {
 		if !sleepUntil(ctx, at) {
-			return 0, time.Time{}, false
+			return 0, time.Time{}, fmt.Errorf("the step ended before the read at %s: %w", at.UTC().Format(time.RFC3339), context.Cause(ctx))
 		}
 		if err := conn.QueryRow(ctx, `select pg_snapshot_xmax(pg_current_snapshot())::text::bigint`).Scan(&xid); err != nil {
-			if ctx.Err() == nil {
-				lg.Printf("xid probe: %v", err)
-			}
-			return 0, time.Time{}, false
+			return 0, time.Time{}, err
 		}
-		return xid, time.Now(), true
+		return xid, time.Now(), nil
 	}
-	x0, t0, ok := read(from)
-	if !ok {
-		return nil
+	x0, t0, err := read(from)
+	if err != nil {
+		return 0, err
 	}
-	x1, t1, ok := read(to)
-	if !ok || !t1.After(t0) {
-		return nil
+	x1, t1, err := read(to)
+	if err != nil {
+		return 0, err
 	}
-	r := float64(x1-x0) / t1.Sub(t0).Seconds()
-	return &r
+	if !t1.After(t0) {
+		return 0, fmt.Errorf("the read at the window end (%s) is not after the read at its start (%s)", t1.UTC().Format(time.RFC3339Nano), t0.UTC().Format(time.RFC3339Nano))
+	}
+	return float64(x1-x0) / t1.Sub(t0).Seconds(), nil
 }
 
 // --- statistics -------------------------------------------------------------------------------
@@ -544,11 +552,13 @@ type resourcesSummary struct {
 	NATSInMsgsPerS        float64            `json:"nats_in_msgs_per_s"`
 	NATSSlowConsumers     float64            `json:"nats_slow_consumers"`
 	// DispatchCPUSPerOp is Dispatch's CPU-seconds per committed event or sent request; null
-	// with no operations or no Dispatch pid.
+	// with no operations, no Dispatch pid, or when the commit rows were not read
+	// (events.commits_error), which leaves the committed events unknown.
 	DispatchCPUSPerOp *float64 `json:"dispatch_cpu_s_per_op"`
 	// XIDsPerS is the transaction ids Postgres assigned per second from the window start to its
-	// end (xidRate); null when a read failed.
-	XIDsPerS *float64 `json:"xids_per_s"`
+	// end (xidRate); null when a read failed, and then XIDReadError is why.
+	XIDsPerS     *float64 `json:"xids_per_s"`
+	XIDReadError string   `json:"xid_read_error,omitempty"`
 	// PGReadErrors counts the in-window samples whose pg_stat_activity read failed, a failed
 	// connect included; PprofReadErrors the in-window reads of Dispatch's goroutine and heap
 	// profiles that failed. A failed read enters no statistic above.

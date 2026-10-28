@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -274,10 +275,13 @@ type metaFile struct {
 	Kernel      string    `json:"kernel"`
 	// BoxBusyBefore is the box's busy fraction over the BoxBusyBeforeWindowS seconds before the
 	// step, from /proc/stat; null when /proc/stat gave no ticks.
-	BoxBusyBefore        *float64        `json:"box_busy_before"`
-	BoxBusyBeforeWindowS float64         `json:"box_busy_before_window_s"`
-	GOMAXPROCS           string          `json:"gomaxprocs"`
+	BoxBusyBefore        *float64 `json:"box_busy_before"`
+	BoxBusyBeforeWindowS float64  `json:"box_busy_before_window_s"`
+	GOMAXPROCS           string   `json:"gomaxprocs"`
+	// PostgresVersion is select version() on -pg, "" when it could not be read, and then
+	// PostgresVersionError is why.
 	PostgresVersion      string          `json:"postgres_version"`
+	PostgresVersionError string          `json:"postgres_version_error,omitempty"`
 	BuildCommit          string          `json:"build_commit"`
 	BuildDirty           bool            `json:"build_dirty"`
 	SeedMeta             json.RawMessage `json:"seed_meta,omitempty"`
@@ -344,10 +348,13 @@ func execute(cfg runConfig, sf seedFile) error {
 	writeJSONFile(filepath.Join(cfg.out, "summary.json"), sum, 0o644, lg)
 	meta.End = time.Now()
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
-	lg.Printf("step %s done: events offered %d committed %d, receipts %d of %d, requests sent %d (%.1f/s of %g)",
-		cfg.name, sum.Events.Offered, sum.Events.Committed, sum.Events.IssueTopicReceipts, sum.Events.ExpectedIssueTopicReceipts,
-		sum.Requests.Sent, sum.Requests.SentPerS, cfg.requests)
-	if err := errStackExits(sum.StackExits); err != nil {
+	committed := fmt.Sprintf("committed %d, receipts %d of %d", sum.Events.Committed, sum.Events.IssueTopicReceipts, sum.Events.ExpectedIssueTopicReceipts)
+	if sum.Events.commitsUnread() {
+		committed = "committed and receipts not read"
+	}
+	lg.Printf("step %s done: events offered %d %s, requests sent %d (%.1f/s of %g)",
+		cfg.name, sum.Events.Offered, committed, sum.Requests.Sent, sum.Requests.SentPerS, cfg.requests)
+	if err := stepFailure(sum); err != nil {
 		lg.Print(err)
 		return err
 	}
@@ -531,6 +538,7 @@ type probes struct {
 	lp       *lockProbe
 	ls       *lockSampler
 	xidsPerS *float64
+	xidErr   error          // why xidsPerS is nil
 	wg       sync.WaitGroup // every probe but the sampler
 }
 
@@ -548,7 +556,7 @@ func (st *step) startProbes(ctx context.Context) *probes {
 	pg := st.cfg.ep.pg
 	p.wg.Go(func() { p.lp.loop(ctx, pg, lockFrom, st.winEnd, st.lg) })
 	p.wg.Go(func() { p.ls.loop(ctx, pg, lockFrom, st.winEnd, st.lg) })
-	p.wg.Go(func() { p.xidsPerS = xidRate(ctx, pg, st.winStart, st.winEnd, st.lg) })
+	p.wg.Go(func() { p.xidsPerS, p.xidErr = xidRate(ctx, pg, st.winStart, st.winEnd, st.lg) })
 	p.wg.Go(func() { st.profile(ctx) })
 	return p
 }
@@ -627,9 +635,37 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 	sum.Resources = summarizeResources(ss, sum.Events.Committed+sum.Requests.Sent, durS)
 	if sum.Resources != nil {
 		sum.Resources.XIDsPerS = pr.xidsPerS
+		if pr.xidErr != nil {
+			sum.Resources.XIDReadError = pr.xidErr.Error()
+		}
+		if commitsErr != nil {
+			// Its operations count the committed events, which were not read.
+			sum.Resources.DispatchCPUSPerOp = nil
+		}
 	}
 	sum.StackExits = pr.smp.stackExits()
 	return sum
+}
+
+// stepFailure is why the step failed, nil when it did not: a stack process exited during it
+// (errStackExits), or the run's commit rows were not read (events.commits_error), so its
+// committed, receipt and delivery columns measure nothing. The other reads of the run's database,
+// the lock probe, the ungranted-lock sampler, the 5 s sampler's pg_stat_activity, the
+// transaction-id probe and the Postgres version, feed none of those columns: a failure of one
+// marks its own table, or meta.json, and does not fail the step.
+func stepFailure(sum summary) error {
+	var why []string
+	if err := errStackExits(sum.StackExits); err != nil {
+		why = append(why, err.Error())
+	}
+	if sum.Events.commitsUnread() {
+		why = append(why, fmt.Sprintf("the run's commit rows were not read (summary.json events.commits_error: %s); the step's committed, receipt and delivery columns do not measure the load",
+			sum.Events.CommitsError))
+	}
+	if len(why) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(why, "; "))
 }
 
 // errStackExits is the step's failure when a stack process exited during it, nil otherwise.
@@ -739,16 +775,26 @@ func collectMeta(ctx context.Context, cfg runConfig, lg *log.Logger) metaFile {
 	}
 	pgCtx, pgCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer pgCancel()
-	if conn, err := pgx.Connect(pgCtx, cfg.ep.pg); err == nil {
-		if err := conn.QueryRow(pgCtx, "select version()").Scan(&m.PostgresVersion); err != nil {
-			lg.Printf("meta: postgres version: %v", err)
-		}
-		conn.Close(context.Background())
+	if v, err := postgresVersion(pgCtx, cfg.ep.pg); err != nil {
+		m.PostgresVersionError = err.Error()
+		lg.Printf("meta: postgres version: %v", err)
 	} else {
-		lg.Printf("meta: postgres: %v", err)
+		m.PostgresVersion = v
 	}
 	if b, err := os.ReadFile(filepath.Join(loadtestRoot(), "seed.meta.json")); err == nil && json.Valid(b) {
 		m.SeedMeta = b
 	}
 	return m
+}
+
+// postgresVersion reads select version() on the Postgres at url.
+func postgresVersion(ctx context.Context, url string) (string, error) {
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close(context.Background())
+	var v string
+	err = conn.QueryRow(ctx, "select version()").Scan(&v)
+	return v, err
 }

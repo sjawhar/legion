@@ -19,9 +19,9 @@
 # the proxy, NATS and the listener keep running (stack.sh stop stops them).
 #
 # One run at a time per LOADTEST_ROOT (common.sh): a run-step.sh or run-series.sh on a root that
-# another run holds is refused before it touches the stack. A step in which a stack process exited
-# fails: loadgen run exits non-zero naming the process, and so does this script; it still renders
-# TABLES.md, where the row carries the mark.
+# another run holds is refused before it touches the stack. A step in which a stack process exited,
+# or whose commit rows (loadtest.event_commits) could not be read, fails: loadgen run exits non-zero
+# naming why, and so does this script; it still renders TABLES.md, where the row carries the mark.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -100,7 +100,8 @@ trap - EXIT
 cp -- "$ROOT/logs/listener.out" "$out/listener.log"
 cp -- "$ROOT/logs/nats.out" "$out/nats.log"
 if ((rc != 0)); then
-  # loadgen run printed why above (a stack process that exited during the step, or its error).
+  # loadgen run printed why above (a stack process that exited during the step, commit rows it
+  # could not read, or its error).
   [ -f "$out/summary.json" ] || die "step $name failed: loadgen run exited $rc before it wrote summary.json (its message above says why); see $out/run.log"
   "$stack" loadgen tables "$out" || true
   die "step $name failed: loadgen run exited $rc (its message above says why); $out/TABLES.md holds the step's row for diagnosis; see $out/run.log"

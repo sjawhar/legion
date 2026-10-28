@@ -105,3 +105,51 @@ func TestAForeignRunsMetaHoldsNoToken(t *testing.T) {
 		}
 	}
 }
+
+// TestStepFailsWhenItsCommitRowsWereNotRead: the committed, receipt and delivery columns depend on
+// the commit rows, so a step whose read of them failed fails, naming it; a failed read of the other
+// probes marks its own table and does not fail the step.
+func TestStepFailsWhenItsCommitRowsWereNotRead(t *testing.T) {
+	const commitsErr = `read loadtest.event_commits (is commit-trigger.sql installed?): ERROR: relation "loadtest.event_commits" does not exist (SQLSTATE 42P01)`
+	err := stepFailure(summary{Events: eventsSummary{CommitsError: commitsErr}})
+	if err == nil {
+		t.Fatal("a step whose commit rows were not read does not fail")
+	}
+	if !strings.Contains(err.Error(), commitsErr) || !strings.Contains(err.Error(), "events.commits_error") {
+		t.Fatalf("error %q does not name the commit-row read and its summary.json key", err)
+	}
+
+	gone := stackExit{Name: "dispatch", PID: 4242, FirstSeenGone: time.Date(2026, 10, 27, 9, 0, 15, 0, time.UTC)}
+	both := stepFailure(summary{Events: eventsSummary{CommitsError: commitsErr}, StackExits: []stackExit{gone}})
+	if both == nil || !strings.Contains(both.Error(), "pid 4242") || !strings.Contains(both.Error(), commitsErr) {
+		t.Fatalf("error %v does not name both the stack exit and the commit-row read", both)
+	}
+
+	otherReads := summary{
+		Resources:       &resourcesSummary{PGReadErrors: 5, PprofReadErrors: 2, XIDReadError: "xid probe: failed to connect"},
+		CommitOrderLock: lockSummary{Errors: 1},
+		UngrantedLocks:  ungrantedSummary{Errors: 160},
+	}
+	if err := stepFailure(otherReads); err != nil {
+		t.Fatalf("failed reads that feed no committed, receipt or delivery column fail the step: %v", err)
+	}
+}
+
+// TestMetaRecordsAFailedPostgresVersionRead: meta.json's postgres_version is empty when it could not
+// be read, and postgres_version_error says why, so an empty version is never a silent gap.
+func TestMetaRecordsAFailedPostgresVersionRead(t *testing.T) {
+	t.Setenv("LOADTEST_ROOT", t.TempDir())
+	var logged bytes.Buffer
+	cfg := runConfig{boxBusyBefore: 0, ep: endpoints{pg: "postgres://postgres@127.0.0.1:1/dispatch?sslmode=disable", pids: map[string]int{}}}
+	meta := collectMeta(context.Background(), cfg, log.New(&logged, "", 0))
+	if meta.PostgresVersion != "" || meta.PostgresVersionError == "" {
+		t.Fatalf("postgres_version %q, postgres_version_error %q: want empty and the error", meta.PostgresVersion, meta.PostgresVersionError)
+	}
+	b, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"postgres_version_error":`) {
+		t.Fatalf("meta.json lacks postgres_version_error:\n%s", b)
+	}
+}
