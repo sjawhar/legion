@@ -155,7 +155,15 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 	if err != nil {
 		return nil, err
 	}
-	_, err = sql.NewUser(ctx, s.hostname, &sql.UserArgs{Instance: instance.Name, Name: pulumi.String("dispatch"), Password: password.Result}, child)
+	// The user's database roles: cloudsqlsuperuser, which Cloud SQL grants a built-in user created
+	// without database roles, as this one was before the list existed, and pg_read_all_stats, so
+	// that `envoy-dispatch census`, which runs as this user, reads the state and transaction start
+	// of a session of another role (cloudsqladmin, postgres, an operator, a dump) instead of
+	// refusing every lock such a session holds on a table a migration touches
+	// (cmd/dispatch/README.md, "Pre-deploy census"). The list is the whole set: the bridged
+	// provider sends a change to it with revokeExistingRoles, which drops every role it does not
+	// name, so cloudsqlsuperuser is named too.
+	_, err = sql.NewUser(ctx, s.hostname, &sql.UserArgs{Instance: instance.Name, Name: pulumi.String("dispatch"), Password: password.Result, DatabaseRoles: pulumi.ToStringArray([]string{"cloudsqlsuperuser", "pg_read_all_stats"})}, child)
 	if err != nil {
 		return nil, err
 	}
