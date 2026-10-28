@@ -2,14 +2,30 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-648",
-  "completed": "2026-10-28T18:03:30Z",
+  "completed": "2026-10-28T18:42:00Z",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-drove each proof independently on my own builds of base 3168cd8c and head (workspace at 56503792, code identical to b0d5039f): one replay pair reproduces A1 rule 2 and A6 (changed share 1.97 % -> 1.11 %, ListMarks 2.85 s -> 0.02 s, walk under ListMarks at base, Walk at head); EXPLAIN and an all-artifact row comparison reproduce the recordedMarkRefs claim; the implementer's equivalence harness, extended with anchored and dangling asks and an upper-case anchor, gives identical base and head dumps on the same 24 LINUX specs (A2); the A3 tests pass and fail on a negative control of my own. A5 (benchmem) not re-run: the replay's ListMarks drop and the diff (only two nil-outside-tests hook fields) support it."
+    "how": "Round 2 (review fixes 63ebec09, a0a78bdc; handoff 30b75cfd): the implementer reports no runtime change, and I confirmed it. A reproducible build of cmd/dispatch at b0d5039f and at 30b75cfd has the same sha256, so the round-1 replay, EXPLAIN and equivalence proofs (below, at 56503792) carry over. I re-ran the changed tests and the implementer's negative controls (a) and (b) on the reworked invariant test at 30b75cfd. Round 1: Re-drove each proof independently on my own builds of base 3168cd8c and head (workspace at 56503792, code identical to b0d5039f): one replay pair reproduces A1 rule 2 and A6 (changed share 1.97 % -> 1.11 %, ListMarks 2.85 s -> 0.02 s, walk under ListMarks at base, Walk at head); EXPLAIN and an all-artifact row comparison reproduce the recordedMarkRefs claim; the implementer's equivalence harness, extended with anchored and dangling asks and an upper-case anchor, gives identical base and head dumps on the same 24 LINUX specs (A2); the A3 tests pass and fail on a negative control of my own. A5 (benchmem) not re-run: the replay's ListMarks drop and the diff (only two nil-outside-tests hook fields) support it."
   },
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "Round 2: no runtime change since the round-1 proofs (the server binary is the one round 1 drove)",
+      "surface": "cmd/dispatch, the Dispatch server binary, built from git archives of each commit",
+      "command": "git archive <commit> go.work go.work.sum packages/envoy | tar -x; GOWORK=off go build -trimpath -buildvcs=false -ldflags=-buildid= ./cmd/dispatch; sha256sum",
+      "observed": "b0d5039f and 30b75cfd: both a1102d47aa926c0aa4d03067d67ea054aafea700c123214e881e951f64774fae; the Go diff b0d5039f..30b75cfd touches only marks_test.go, recorded_mark_refs_test.go, settlement_read_invariant_test.go and a comment in pmdoc/find.go",
+      "headSha": "30b75cfd11643305da5d5336e9c04631721db234 (code a0a78bdcd3b8)",
+      "negativeControl": "The same build of base 3168cd8c hashes b0008773032afb4d948cb8fcf08aa57a3c5aa2ef11aaba9a9fd6a2df48b539d2, so the hash does change when the runtime code does"
+    },
+    {
+      "criterion": "A3 (round 2): the reworked invariant test still fails if read is changed before the version is rendered",
+      "surface": "go test ./internal/dispatch/docs/ on Postgres 17",
+      "command": "DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable GOWORK=off go test ./internal/dispatch/docs/ ./internal/dispatch/pmdoc/ -count=1 -run 'TestSettlementReusesTheRenderOnlyOfAnUntouchedRead$|TestSettlementVersionsARepairTheRoomAlreadyHolds$|TestSettlementVersionsTheTreeOfAStampThatMintedNothing$|TestRecordedMarkRefsListsOnlyTheDocumentsAnchoredRows$|ListMarks|Sweep|Unrecorded|Anchored' -v",
+      "observed": "19 PASS, 0 FAIL, including the tests whose helpers now call markedAnchor (TestTransactionalApplyRefreshesAnchoredComment, the sweep tests and TestRecordedMarkRefsListsOnlyTheDocumentsAnchoredRows)",
+      "headSha": "30b75cfd11643305da5d5336e9c04631721db234",
+      "negativeControl": "(a) '!' appended to read's first text run right after the afterSettleTreeRead hook: TestSettlementReusesTheRenderOnlyOfAnUntouchedRead fails at settlement_read_invariant_test.go:67 'changed after the read'; (b) changedTree() returns false: TestSettlementVersionsARepairTheRoomAlreadyHolds fails at :67 and at settlement_render_once_test.go:71 'reused ... 1 times and rendered again 0 times'; both reverted with jj restore, working copy clean"
+    },
     {
       "criterion": "A1 Merge rule on LINUX's replay; A6 removed CPU gone where it was",
       "surface": "Local Dispatch server (cmd/dispatch, GOWORK=off go build) base 3168cd8c vs head on Postgres 17.11 + pgvector 0.8.7 (fsync off), NATS JetStream on 4222, the tools' fake listener on 9021, the INFRA-512 replay tools under $TMPDIR/infra512-profile",
@@ -47,6 +63,7 @@
     "ListMarks' only caller is sweepUnrecordedMarks (marks.go:803); every tree it gets passed Validate (read.go:45, blocks.go/splice.go outputs), and Validate refuses children under text and the five leaf types (node.go:181-184), the only nodes walkNode skips.",
     "recordedMarkRefs' $1::uuid cannot fail on a settled room: every room reaching settlement passed issueOpen's `a.id = $1` against a uuid column (service.go:2654).",
     "No code writes both anchor and block_artifact_id on an ask (inserts at api/asks.go:211, api/reviews.go:482, docs/ask_blocks.go:718; no update sets either), so the coalesce predicate drops no anchored ask.",
-    "CI at 56503792 was queued when read; the handoff commit carried no skip-checks trailer, so CI runs on it."
+    "Round 2: my round-1 own control (marks cleared on read) no longer applies, because the review removed the test's mark fixtures (the mark listing runs after the reuse decision, service.go:1829); I used the text-append control (a) instead. CI at 30b75cfd: every required check queued when read at 18:41Z.",
+    "Round-1 proofs below are at 56503792 (code b0d5039f), which builds the same binary as 30b75cfd."
   ]
 }
