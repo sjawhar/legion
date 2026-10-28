@@ -9,9 +9,6 @@ tags:
 date: 2026-10-28
 status: active
 module: packages/dispatch/e2e
-related_issues:
-  - "INFRA-492"
-  - "sjawhar/legion#2324"
 ---
 
 # Prove a browser handled an event at both the base and the head with a repeated visible write, before and after the event under test
@@ -26,6 +23,6 @@ A test asserting "this event caused at most N reads" must tell "the page handled
 
 ## Evidence
 
-INFRA-492's budget and sidebar tests use this barrier. The same file (sha256 `253c18d8…7290`) failed on its counts at the base `16e4bb0f758e`: 1,120 reads against a limit of 5, and each held sidebar read sent twice. It passed at every head, on Chromium and iPhone.
+The budget and sidebar tests of sjawhar/legion#2324 use this barrier. The same file (sha256 `253c18d8…7290`) failed on its counts at the base `16e4bb0f758e`: 1,120 reads against a limit of 5, and each held sidebar read sent twice. It passed at every head, on Chromium and iPhone.
 
 One later test, the 25-document budget test in `e2e/refresh-freshness.e2e.ts`, counts reads after its event without a closing barrier, so a stream that dropped the event would pass it. That gap is why this document asks for a barrier after the event under test.

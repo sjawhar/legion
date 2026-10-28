@@ -9,9 +9,6 @@ tags:
 date: 2026-10-28
 status: active
 module: packages/dispatch/web/src/api
-related_issues:
-  - "INFRA-492"
-  - "sjawhar/legion#2324"
 ---
 
 # Narrowing a broad cache invalidation starts from every read and the writes that move what it shows, diffed against what the broad refresh covered
@@ -29,7 +26,7 @@ That document takes a census of the writers of one predicate. Here the census is
 
 ## Evidence
 
-INFRA-492 replaced "every event refetches every issue the page links" with per-event rules. Freshness gaps that the old broad refresh had covered surfaced one round at a time:
+This pull request replaced "every event refetches every issue the page links" with per-event rules. Freshness gaps that the old broad refresh had covered surfaced one round at a time:
 - Tester round 1 found seven: a document's Referenced by panel, a reference read in flight while you leave the page, an Inbox close during its fetch, the Architecture work list, a snooze from another tab, the Replies page title, and a child's active time in the parent's Children tab (red tests in `e2e/refresh-freshness.e2e.ts`; fixed by `d649b640`).
 - Tester round 2 found a comment edit in a document's panel (fixed by `fe1e97d2`).
 - The reviewer found the blocker's `Referenced by (N)` count (fixed by `c04118f6`, `issueEdgeChanges` in `api/issue_event_fields.go`).

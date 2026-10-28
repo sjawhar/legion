@@ -9,9 +9,6 @@ tags:
 date: 2026-10-28
 status: active
 module: packages/envoy/internal/dispatch
-related_issues:
-  - "INFRA-492"
-  - "sjawhar/legion#2324"
 ---
 
 # What an event payload may carry: per-kind caps that name what they cut, and nothing private on a stream every reader receives
@@ -26,7 +23,7 @@ related_issues:
 
 ## Evidence
 
-On INFRA-492, round 2's fix for a document's Referenced by panel put document and block entries into `references_changed`, under a shared cap of 20. An index document citing 25 documents then truncated the list, and every open tab refetched its issue details, asks and Inbox: the fan-out the change existed to remove. Round 3 moved to per-kind caps (`fe1e97d2`).
+On sjawhar/legion#2324, round 2's fix for a document's Referenced by panel put document and block entries into `references_changed`, under a shared cap of 20. An index document citing 25 documents then truncated the list, and every open tab refetched its issue details, asks and Inbox: the fan-out the change existed to remove. Round 3 moved to per-kind caps (`fe1e97d2`).
 
 The same round 2 added `ask_id` and the writer's issue state to the snooze event, against plan decision 4 ("`user_state.updated` gets `changed`, not an issue key, so it does not broadcast which issue each person reads"). Round 3 removed both.
 

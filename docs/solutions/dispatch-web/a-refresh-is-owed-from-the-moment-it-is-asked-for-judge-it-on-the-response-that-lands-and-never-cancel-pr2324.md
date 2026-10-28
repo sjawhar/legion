@@ -9,9 +9,6 @@ tags:
 date: 2026-10-28
 status: active
 module: packages/dispatch/web/src/api
-related_issues:
-  - "INFRA-492"
-  - "sjawhar/legion#2324"
 ---
 
 # A refresh is owed from the moment it is asked for: judge it on the response that lands, keep it across an unmount, and never cancel
@@ -24,7 +21,7 @@ TanStack's state while a fetch is in flight does not tell you whether that fetch
 - **Never cancel.** `invalidateQueries` defaults to `cancelRefetch: true`, which restarts a running request and leaves the first one running on the server. Fetch with `cancelRefetch: false`, and when a fetch is already out, fetch again after it settles. Do the same in a `QueryClient` subclass so mutations' invalidations follow the same rule (`DispatchQueryClient` in `api/query-client.ts`).
 - **A refresh conditioned on data waits for the landed response.** A predicate such as "does this list hold issue K" must not run on the data a fetch in flight is about to replace. Defer it while *any* fetch is out (a first load or a refetch), run it on the response, and refetch if it holds and that fetch started before the request. If the refetch fails, run the predicate on the data still on screen.
 - **Keep the debt across an unmount.** TanStack's success clears `isInvalidated` even for a body composed before the event. A query left while it owes a refresh must be marked stale again after the in-flight fetch lands, or a `staleTime: Infinity` read stays wrong until the next event that names it.
-- **Test these races with a body composed before the event.** Hold the response with `route.fetch()` when the request arrives and `route.fulfill({ response })` on release (`e2e/refresh-freshness.e2e.ts`, the held-read helper). The INFRA-303 document's `route.continue()` on release lets the server compose the body *after* the event, which hides this whole class of bug.
+- **Test these races with a body composed before the event.** Hold the response with `route.fetch()` when the request arrives and `route.fulfill({ response })` on release (`e2e/refresh-freshness.e2e.ts`, the held-read helper). The extended document's `route.continue()` on release lets the server compose the body *after* the event, which hides this whole class of bug.
 
 ## Evidence
 
