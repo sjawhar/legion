@@ -55,7 +55,7 @@ entry, writes the notices and stages this package's partition of `skills/`. It r
 the committed manifest, whose `omp.extensions` names `extensions/legion.ts`; the release workflow's
 `pi_legion_build` job (`.github/workflows/release.yaml`), the worker image and the e2e pack step
 rewrite it to `["dist/legion.js"]` before `bun pm pack`. Only the e2e pack step restores it
-afterwards: the build job's tree is discarded, and `pi_legion_publish` commits the version bump to
+afterwards: the build job's tree is discarded, and the `publish` job commits the version bump to
 the committed manifest, touching `.version` alone. The manifest's `legion` key carries the daemon
 API contract the plugin was built against; `src/daemon-api-version.test.ts` pins it to the daemon's
 golden fixture.
