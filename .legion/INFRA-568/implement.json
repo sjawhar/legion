@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-568",
-  "completed": "2026-10-28T11:47:54Z",
+  "completed": "2026-10-28T11:58:12Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2397",
   "proof": [
     {
@@ -185,7 +185,8 @@
     "Merge of main 2df3353c (34719431): main's migrations reached 0134, so this branch's are 0135_related_checks and 0136_issue_embedding_spec; fingerprint e3e9b588… -> 620fbdda… changed by the renumbering only (https://github.com/sjawhar/legion/pull/2397#issuecomment-6446703938). Earlier entries in this file that name 0129-0131 for this branch's migrations predate it.",
     "Merge of main b295a3fb (9d82a849): claude-envoy dist regenerated with main's newly pinned Bun 1.4.4 (the build refuses another Bun), which alone changed the fingerprint 620fbdda… -> 5860ba95…; migrations stay 0135/0136 (main still at 0134).",
     "Acceptance round (62c33b14): adopted main's SearchAsk/attachAskStates from #2363 (this branch's copies dropped; the check calls the helper once per check). Main's helper leaves a nil Answer.Selected as null; the client already reads a missing selected as no option chosen. A merge commit pushed earlier (f9688cd2) names the branch legion/INFRA-568 in its subject; pushed commits are not rewritten.",
-    "Review round 4 (da35e400): docs/ask_row.go restored to main's file (its diff against main is empty); an ask item with no state now prints main's 'Answer state not reported by this Dispatch' line where the branch printed nothing."
+    "Review round 4 (da35e400): docs/ask_row.go restored to main's file (its diff against main is empty); an ask item with no state now prints main's 'Answer state not reported by this Dispatch' line where the branch printed nothing.",
+    "Merge of main 0a921021 (4b1f15ff): routes_table.go conflicted with #2225 (both route descriptions kept); fingerprint aed6caca… unchanged; migrations stay 0135/0136."
   ],
   "openQuestions": [
     "Latency on the full production copy was not measured: DISPATCH_BACKUP_BUCKET is unset, no AWS credentials, the pod's agent-secrets enrollment has no grants, and gcloud is not installed. The recall corpus holds issues and specs only.",
