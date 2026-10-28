@@ -2,43 +2,36 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-717",
-  "completed": "2026-10-28T19:52:00Z",
-  "testedHead": "839a67cb5ae5a704eb1cce2abbd8729a0cacab05",
+  "completed": "2026-10-28T20:55:00Z",
+  "round": 2,
+  "testedHead": "ff7d97a444d2a766ddeaf72c5c79946aa5ca3d06",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its commands at code head 839a67cb: grep -rnE '7b822b0a|until production runs Postgres 18|postgres-16' .github/workflows (no output, exit 1); pinned actionlint v1.7.12 with shellcheck 0.10.0 on the two edited workflows (exit 0, no output); the same actionlint -oneline over the whole directory at the head and over main a409c128's .github/workflows (exported into a git-initialised $TMPDIR copy) gave 9 findings each, diff empty, none in the two edited files."
+    "how": "Ran the README's Lexeme database bash block verbatim (extracted with the implementer's awk, sourced in bash with TMPDIR=/legion/scratch/tmp/t717r2): exit 0, initdb then 'server started'. psql against $TMPDIR/pg printed 180006|'add':1,2 'set':3|'add', the implementer's observation. The workflows are byte-identical between 839a67cb and ff7d97a (jj diff --stat lists only scripts/dispatch/README.md and .legion/); pinned actionlint v1.7.12 on the two workflows at ff7d97a exited 0 and the postgres-16/digest grep printed nothing. Round 1's whole-directory parity with main stands for the unchanged workflows."
   },
   "failures": [
     {
-      "criterion": "scripts/dispatch/README.md (architect's task 5a, in this diff): the Lexeme database paragraph must not tell a reader something false about the server the lexeme check needs.",
-      "evidence": "Line 328 now says 'Any Postgres 18 works, as production and CI run 18', and line 336, unchanged, gives the throwaway server to use: uvx --python 3.12 --from pgserver==0.1.4 ... get_server(...). That server is PostgreSQL 16.2: s.psql('show server_version_num') printed 160002. Postgres 16.2 and 18.6 stem English differently, so on that server the check computes lexemes production does not: psql -Atc \"select current_setting('server_version_num'), to_tsvector('english','added adding settings'), websearch_to_tsquery('english','added')\" printed 160002|'ad':1,2 'set':3|'ad' on pgserver 16.2 and 180006|'add':1,2 'set':3|'add' on Postgres 18.6 (zonky embedded-postgres-binaries-linux-amd64 18.6.0 from Maven Central, the version production runs). Over 18,957 distinct words of docs/ and skills/ markdown, ts_lexize('english_stem', w) differs for 3 (added, adding, ettings). The line was true before this change (the pgserver server and production were both 16); the diff made it contradict the command beneath it. No red test: a test that reads README prose is a source-text test, which this repository's rules forbid; the command above is the reproduction. Fix is the implementer's choice, for example a throwaway command that starts Postgres 18 (the zonky 18.6.0 jar works in this pod, with psql from the image) in place of pgserver 0.1.4."
+      "criterion": "scripts/dispatch/README.md's Lexeme database procedure, the second and the concurrent run: running the setup block again must not break a server it already started.",
+      "evidence": "With the server from the first run still up in $TMPDIR/pg, a second run of the same block (bash -c 'source <block>') re-extracts the tarball over server/ in place. The live server's shared libraries are overwritten under it: the output was 'initdb: error: program \"postgres\" is needed by initdb but was not found', 'pg_ctl: another server might be running; trying to start server anyway', '/legion/scratch/tmp/t717r2/pg/server/bin/postgres: error while loading shared libraries: /legion/scratch/tmp/t717r2/pg/server/lib/liblzma.so.5: file too short'. Then psql -h $TMPDIR/pg -U postgres -Atc 'select 1' failed: 'server closed the connection unexpectedly'. Afterwards, ps listed no postgres process from that directory: the first server was dead, and the directory held a half-written server/. The old pgserver command (get_server) reused a running server, so a rerun was safe before this change. In this deployment $TMPDIR is /legion/scratch/tmp, which every role of an issue pod shares, so two roles that follow the README at the same time hit this. No red test: the defect is in README prose, and a test that reads source text is forbidden here. Reproduce: run the block, then run it again in a second shell. A fix: make the block start the existing cluster and skip the download, extraction and initdb when \"$pg/data\" already exists, or refuse with a message when pg_ctl status reports a running server."
     }
   ],
   "failed": 1,
   "proof": [
     {
-      "criterion": "No workflow under .github/workflows names the 0.8.7-pg16 digest or an '(until production runs Postgres 18)' job, and actionlint is clean.",
-      "surface": "The job graph GitHub Actions builds from the workflows (the PR's Tests run at the code head against main's Tests run at the base), and the workflow files at the head.",
-      "command": "gh run view 40748621006 -R sjawhar/legion --json status,jobs --jq '.status, (.jobs[] | [.name, .status] | @tsv)'; the same for main's Tests run 40741954129 at base a409c128; python/pyyaml read of both edited workflows (every needs names an existing job; every needs.changes.outputs.X used is declared and every declared one used); pinned actionlint v1.7.12 on the two files and over the directory against main.",
-      "observed": "PR Tests run 40748621006 (queued, jobs created): typecheck, lint, test only. Main's Tests run 40741954129: typecheck, 'Daemon Go suite on production's Postgres 16 (until production runs Postgres 18)', lint, test. envoy-and-contracts.yaml: 17 jobs, no dangling needs, no unused or undeclared changes output; envoy-go is the only job gated on the envoy filter, and envoy-go, envoy-infra-go and envoy-smoke are the only users of pull-test-images, so the three rewritten comments are true. actionlint: exit 0 on the two files; 9 findings at head and at main, identical. Legion Envoy and Contracts run 40748620346 lists only 'changes' (queued), so its job list is not yet read.",
-      "headSha": "839a67cb5ae5a704eb1cce2abbd8729a0cacab05",
-      "negativeControl": "A $TMPDIR copy of the head's envoy-and-contracts.yaml with the first four lines of main's dispatch-go-postgres-16 job appended (a half-done deletion): actionlint exits 1, '\"runs-on\" section is missing in job \"dispatch-go-postgres-16\"' and '\"steps\" section is missing'."
+      "criterion": "The README's procedure gives the lexeme check a server whose English stemming matches production's PostgreSQL 18.6, through the check itself.",
+      "surface": "The README's bash block run as written, then bun scripts/dispatch/meaning-search-check.ts --pair ... --lexeme-database \"$TMPDIR/pg/.s.PGSQL.5432\" against the Dispatch this pod is configured for (read-only GETs).",
+      "command": "awk '/^### Lexeme database/{f=1} f&&/^```bash/{g=1;next} g&&/^```/{exit} g' scripts/dispatch/README.md > $TMPDIR/lexblock717.sh; TMPDIR=/legion/scratch/tmp/t717r2 bash -c 'source $TMPDIR/lexblock717.sh'; psql -h $TMPDIR/pg -U postgres -d postgres -Atc \"select current_setting('server_version_num'), to_tsvector('english','added adding settings'), websearch_to_tsquery('english','added')\"; bun scripts/dispatch/meaning-search-check.ts --pair 'INFRA-717=adding production jobs' --lexeme-database \"$TMPDIR/pg/.s.PGSQL.5432\"",
+      "observed": "Block exit 0. psql: 180006|'add':1,2 'set':3|'add'. The check: 'build commit=9b92ac14351a926361c982edb7953e0325fab0de schema=120 ok=true', 'A2 INFRA-717 shared=2 position=none fail': the lexer connected over the README's socket path as postgres/postgres and counted 2 shared lexemes (product, job), as expected for a query that repeats words of the title. The documented stop, server/bin/pg_ctl -D data stop from $TMPDIR/pg in a new shell with LD_LIBRARY_PATH unset, printed 'server stopped'.",
+      "headSha": "ff7d97a444d2a766ddeaf72c5c79946aa5ca3d06",
+      "negativeControl": "The same check with --lexeme-database \"$TMPDIR/nopg/.s.PGSQL.5432\" (no server there) printed 'A2 INFRA-717 shared=unchecked position=none unavailable: lexeme-database' and 'result unavailable exit=2'."
     },
     {
-      "criterion": "The required checks (lint, typecheck, test, pr-title) pass on the pull request, and envoy-go still reports 180006|0.8.7.",
-      "surface": "The PR's checks on GitHub at the code head, and main's ruleset.",
-      "command": "gh api repos/sjawhar/legion/rules/branches/main --jq '.[] | select(.type==\"required_status_checks\") | .parameters.required_status_checks[].context'; gh api repos/sjawhar/legion/commits/839a67cb5ae5a704eb1cce2abbd8729a0cacab05/check-runs",
-      "observed": "Required contexts: lint, typecheck, test, pr-title; none of the removed jobs is required, so the deletion cannot leave a required check that never reports. At the code head at 19:50Z: lint, typecheck, test, changes queued; pr-title queued (an earlier pr-title cancelled). envoy-go not yet created: its 180006|0.8.7 line is not yet read. The reviewer approves only once envoy-go at the code head finished success with that line.",
-      "headSha": "839a67cb5ae5a704eb1cce2abbd8729a0cacab05",
-      "negativeControl": "Main's Tests run 40741954129 lists the Postgres 16 job, so the same job-list read shows the job when it exists."
-    },
-    {
-      "criterion": "No added line or path names the deployment's Dispatch keys or dispatch:// links; no fragment; new commit subjects carry no key.",
-      "surface": "The PR's diff, files and commits on GitHub (PR #2476).",
-      "command": "jj diff --git --from a409c128 --to legion/INFRA-717@origin .github .dispatch scripts | grep -E '^\\+' | grep -vE '^\\+\\+\\+ ' | grep -oE '[A-Z][A-Z0-9]+-[0-9]+|dispatch://'; gh pr view 2476 -R sjawhar/legion --json title,commits,files",
-      "observed": "One match, 'SQL-18' inside 'PostgreSQL-18' on main's existing text, not a key. Title and commit subjects: no key (grep exit 1). Files: the 4 changed files plus .legion/INFRA-717/, none under /.changes/.",
-      "headSha": "839a67cb5ae5a704eb1cce2abbd8729a0cacab05",
-      "negativeControl": "printf '+# see dispatch://X-1\\n' | grep -nE '[A-Z][A-Z0-9]+-[0-9]+|dispatch://' printed the line."
+      "criterion": "No workflow under .github/workflows names the 0.8.7-pg16 digest or an '(until production runs Postgres 18)' job.",
+      "surface": "The job graph GitHub Actions builds at the new code head.",
+      "command": "gh run view 40750676679 -R sjawhar/legion --json status,jobs --jq '.status, (.jobs[] | [.name, .status] | @tsv)'",
+      "observed": "Tests run 40750676679 at ff7d97a (queued, jobs created): typecheck, lint, test only. Legion Envoy and Contracts 40750676530 lists only 'changes' (queued), so its job list and envoy-go's 180006|0.8.7 line are not read. The round-1 runs at 839a67cb were cancelled by the new push.",
+      "headSha": "ff7d97a444d2a766ddeaf72c5c79946aa5ca3d06",
+      "negativeControl": "Main's Tests run 40741954129 at a409c128 lists 'Daemon Go suite on production's Postgres 16 (until production runs Postgres 18)' (read in round 1)."
     }
   ]
 }
