@@ -2,15 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-548",
-  "completed": "2026-10-28T10:28:28Z",
-  "round": 4,
+  "completed": "2026-10-28T12:32:29Z",
+  "round": 5,
   "decision": "approved",
-  "reviewedHead": "291a248a09f8a6aa0f771af448d241ad11a80ff9",
-  "codeHead": "daa4e51373c458fe17944118b29299ba88fc6014",
+  "reviewedHead": "10cee132b8440a69337315187291a9775cb64a5b",
+  "codeHead": "bb869e980064227a3844cde2bc81c865c6fe024a",
+  "previousApprovedHead": "815c711a9bee9a5ccae7b16dbd21e4135169b8dc",
+  "fingerprint": "815c711a 86ee20ea19d7246f2cf2cd16d418426b2ab32ebf45b362bcdf10d2af56388ab1 -> 10cee132 d4c90c021fe1fa1beea9555513faf0558b6c02828bfa2f1d5abf90543c192fcb: changed (the conflict merge d26157e2 of main aeeee6c0 moved the CHANGELOG entries into changie fragments), so a new round",
   "critical": 0,
   "important": 0,
-  "minor": 3,
+  "minor": 4,
   "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/*/.changes/unreleased/pr2331-*.yaml",
+      "description": "Naming only: the 12 fragments are named and tagged Issue=pr2331 where AGENTS.md:151 asks for the issue key (INFRA-548), and their bodies dropped the (INFRA-548) reference the old entries carried. Nothing reads the name or Issue field (release-push.sh fold_plan needs only a .yaml file; changeFormat renders only the body; push-fold deletes the files), so no behaviour, error or gate is affected."
+    },
     {
       "severity": "minor",
       "file": "packages/envoy-client/test/stall-proxy.ts",
@@ -27,11 +34,16 @@
       "description": "Cleanup (Fast-follow): name handleAuthError as the other caller of the patched disconnect()."
     }
   ],
-  "roundThreeFindings": [
-    "setup-go cache in envoy-session-stall: fixed in c2db0543; steps match envoy-e2e-local line for line; no setup-go in the file keeps cache-dependency-path; caches API for refs/pull/2331/merge total_count 0. Thread PRRT_kwDORFy7ds6xDx3g answered and accepted (resolved by the implementer).",
-    "Stale implementer negative control: E2E (implementer) now records row C at 32 MiB on Bun 1.4.4 at c2db0543 with the protocol.js hunk reverted: 'reconnect none ... [60268.24ms]', passing at 30.0 s with the patch restored."
+  "verified": [
+    "Per-file interdiff of this issue's change, old b295a3fb->c2db0543 vs new aeeee6c0->d26157e2: every source, test, workflow, patch and dist file is identical; the five CHANGELOG.md edits left the diff (each equals main's); 12 changie fragments were added, one per old entry with the same kinds; .dispatch/architecture/claude-envoy-bridge.md and envoy-client.md keep main's new sentence word for word with this issue's text after it.",
+    "Both thermonuclear agents rendered the fragments with changie v1.26.0 (the fold's pinned binary): every kind valid, continuation lines indented, no '## ' line; no CI check reads fragments on a pull request."
   ],
-  "thermonuclear": "Not run this round: the change since round 3's review (c2db0543) touches only .github/workflows/envoy-and-contracts.yaml's envoy-session-stall cache steps, no runtime code; the reviewer compared it with envoy-e2e-local's steps by hand. The pair ran at c6eb2bda in round 3 over the merge (deep-review APPROVE; code-quality CHANGES only for this cache step).",
-  "ci": "Required checks at code head daa4e513 (newest pull_request run's head): lint, typecheck, test and pr-title completed success at 10:28Z; compare daa4e513...291a248a changes only .legion/ (1 file). Non-required jobs, envoy-session-stall among them, were still queued under the repository's runner backlog.",
-  "proofLines": "E2E (implementer) names c2db0543 on Bun 1.4.4 with a negative control observed there; E2E (tester) names c2db0543 (round 5), actionlint exit 0, restore key equal to main's entry, 0 PR-ref cache entries."
+  "thermonuclear": {
+    "head": "10cee132",
+    "deepReview": "Verdict: APPROVE at 10cee132 (Minor: fragment naming)",
+    "codeQuality": "Verdict: CHANGES at 10cee132, its one finding the fragment naming, marked cleanup-only; judged Minor by the reviewer"
+  },
+  "ci": "Required checks at code head bb869e98 (newest pull_request run's head): lint, typecheck, pr-title success; test failed in attempt 1 on TestARateLimitedPermissionReadWaitsTheTimeGitHubNames (packages/daemon/internal/intake, 'the permission was read 3 times, want twice'), a known load flake tracked as dispatch://INFRA-400 in code this PR does not touch; re-run once with gh run rerun --failed, attempt 2 completed success at 12:32Z. Compare bb869e98...10cee132 changes only .legion/.",
+  "threads": "All four threads (PRRT_kwDORFy7ds6wkMTK, PRRT_kwDORFy7ds6wkMTS, PRRT_kwDORFy7ds6wkMTU, PRRT_kwDORFy7ds6xDx3g) carry the reviewer's answer and are resolved; no new thread this round; no bot threads.",
+  "proofLines": "E2E (implementer) and E2E (tester) both name d26157e2 on Bun 1.4.4."
 }
