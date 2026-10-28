@@ -795,11 +795,16 @@ const (
 		delete from doc_conditional_edit_queue where artifact_id = $1 and process_id = $2`
 )
 
-// conditionalEditGate is one document's conditional-edit queue in this process: the turn every
-// admitted edit waits for, first come first served, and how many it has admitted.
+// conditionalEditGate is one document's conditional-edit queue in this process: the admission
+// every edit takes in turn, the turn every admitted edit waits for, first come first served, and
+// how many it has admitted.
 type conditionalEditGate struct {
-	turn chan struct{}
-	mu   sync.Mutex
+	// admit is held, by taking its one token, through one admission's whole transaction, so at
+	// most one connection of this process waits on the document's queue lock however many
+	// requests queue for it; the rest wait here, in memory, and leave when their context ends.
+	admit chan struct{}
+	turn  chan struct{}
+	mu    sync.Mutex
 	// users is the callers holding the gate - admitting, admitted, or writing the count their
 	// release left - so the gate leaves conditionalGates only once none does.
 	users int
@@ -811,15 +816,25 @@ type conditionalEditGate struct {
 	write sync.Mutex
 }
 
-// AcquireConditionalEdit queues one conditional edit before it can acquire a database connection
-// for its own transaction, keeping stale retries from exhausting pgx. The edits of one document
-// take turns in this process, in the order they were admitted, and at most
-// maxQueuedConditionalEdits are admitted across every process at once; one past that is refused
-// with ErrPreconditionBusy. The admission is a short transaction of its own on the shared pool,
-// so the caller must hold none of its connections (its request's transaction begins once this
-// returns): under the document's queue lock it sums the counts of the other member processes
-// (roomSyncMembers) and writes this process's own. The returned release gives the turn to the
-// next edit and writes this process's count again.
+// full is whether this process's own queue of the document holds maxQueuedConditionalEdits,
+// whatever the others hold.
+func (g *conditionalEditGate) full() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.queued >= maxQueuedConditionalEdits
+}
+
+// AcquireConditionalEdit queues one conditional edit before its request acquires a database
+// connection for its own transaction, keeping stale retries from exhausting pgx. The edits of one
+// document are admitted one at a time in this process, each waiting in memory for the one before
+// it, and take turns in the order they were admitted; at most maxQueuedConditionalEdits are
+// admitted across every process at once, and one past that is refused with ErrPreconditionBusy.
+// The admission is a short transaction of its own on the shared pool, so the caller must hold
+// none of its connections (its request's transaction begins once this returns): under the
+// document's queue lock it sums the counts of the other member processes (roomSyncMembers) and
+// writes this process's own. A retry storm on one document therefore holds at most one shared
+// connection per process while it waits for that lock. The returned release gives the turn to
+// the next edit and writes this process's count again.
 func (s *Service) AcquireConditionalEdit(ctx context.Context, artifactID string) (func(), error) {
 	gate := s.joinConditionalGate(artifactID)
 	if err := s.admitConditionalEdit(ctx, artifactID, gate); err != nil {
@@ -838,7 +853,8 @@ func (s *Service) AcquireConditionalEdit(ctx context.Context, artifactID string)
 // joinConditionalGate is artifactID's gate, counted as one more user.
 func (s *Service) joinConditionalGate(artifactID string) *conditionalEditGate {
 	for {
-		created := &conditionalEditGate{turn: make(chan struct{}, 1)}
+		created := &conditionalEditGate{admit: make(chan struct{}, 1), turn: make(chan struct{}, 1)}
+		created.admit <- struct{}{}
 		created.turn <- struct{}{}
 		value, _ := s.conditionalGates.LoadOrStore(artifactID, created)
 		gate := value.(*conditionalEditGate)
@@ -864,15 +880,25 @@ func (s *Service) leaveConditionalGate(artifactID string, gate *conditionalEditG
 
 // admitConditionalEdit admits one more conditional edit of artifactID into gate's queue, or
 // refuses it with ErrPreconditionBusy when the processes' queues hold maxQueuedConditionalEdits
-// already. Admissions of one document, on every process, take its queue lock in turn, so each
-// reads the counts the earlier ones wrote; a release writes without it and only ever lowers a
-// count, so a sum read beside one can only overstate the queue.
+// already. It first waits for gate's admission, in memory and until ctx ends, and holds it until
+// its transaction ends, so this process's admissions of the document begin their transactions one
+// at a time. Admissions of one document, on every process, then take its queue lock in turn, so
+// each reads the counts the earlier ones wrote; a release writes without it and only ever lowers
+// a count, so a sum read beside one can only overstate the queue.
 func (s *Service) admitConditionalEdit(ctx context.Context, artifactID string, gate *conditionalEditGate) error {
-	gate.mu.Lock()
-	full := gate.queued >= maxQueuedConditionalEdits
-	gate.mu.Unlock()
-	if full {
-		// This process's own queue is full, whatever the others hold.
+	// Refused at once, without queuing for the admission, when this process's own queue is full.
+	if gate.full() {
+		return ErrPreconditionBusy
+	}
+	select {
+	case <-gate.admit:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	// Deferred first, so it runs after the transaction's rollback has returned its connection.
+	defer func() { gate.admit <- struct{}{} }()
+	// The admissions this one waited behind may have filled this process's queue meanwhile.
+	if gate.full() {
 		return ErrPreconditionBusy
 	}
 	tx, err := s.store.Pool.Begin(ctx)
@@ -883,6 +909,11 @@ func (s *Service) admitConditionalEdit(ctx context.Context, artifactID string, g
 	if _, err := tx.Exec(ctx, conditionalEditQueueLock, conditionalEditQueueLockNamespace, artifactID); err != nil {
 		return fmt.Errorf("lock the document's conditional edit queue: %w", err)
 	}
+	// write is taken before the sum, whose deletion takes this process's own row when it is no
+	// member: a release writes that row holding write, so taking write after the row would leave
+	// each waiting on the other until the release's timeout.
+	gate.write.Lock()
+	defer gate.write.Unlock()
 	members, err := roomSyncMembers(ctx, tx)
 	if err != nil {
 		return err
@@ -891,8 +922,6 @@ func (s *Service) admitConditionalEdit(ctx context.Context, artifactID string, g
 	if err := tx.QueryRow(ctx, conditionalEditQueueOthers, artifactID, members, s.processID).Scan(&others); err != nil {
 		return fmt.Errorf("count the other processes' conditional edits: %w", err)
 	}
-	gate.write.Lock()
-	defer gate.write.Unlock()
 	gate.mu.Lock()
 	queued := gate.queued
 	gate.mu.Unlock()

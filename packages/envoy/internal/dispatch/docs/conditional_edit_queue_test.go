@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -144,5 +145,83 @@ func TestANonMembersConditionalEditsCountForNothingAndAreDeleted(t *testing.T) {
 	release()
 	if queued, rows := queuedAcrossProcesses(t, database, artifactID); queued != maxQueuedConditionalEdits-1 || rows != 1 {
 		t.Fatalf("after task A's edit left, the queue holds %d edits in %d rows, want task B's %d alone", queued, rows, maxQueuedConditionalEdits-1)
+	}
+}
+
+// A retry storm on one document holds one of the process's shared connections, not one per
+// request: while another session holds the document's queue lock, twenty admissions on one
+// process wait for it through one connection, the rest waiting in memory, and an admission whose
+// context ends while it waits there leaves. Once the lock is released every admission completes.
+func TestConditionalEditAdmissionsOfADocumentWaitOnItsQueueLockThroughOneConnection(t *testing.T) {
+	const storm = 20
+	// pileUpWindow is how long the test leaves the admissions to pile onto the lock: far longer
+	// than twenty goroutines take to reach Begin, and it is only the passing case that waits it out.
+	const pileUpWindow = time.Second
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	// The service's pool is its own, so its acquired connections are the admissions' alone.
+	service, _ := newTestServiceInstance(t, storetest.SecondProcess(t, database))
+	holder, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin the queue lock's holder: %v", err)
+	}
+	defer holder.Rollback(context.Background())
+	if _, err := holder.Exec(context.Background(), conditionalEditQueueLock, conditionalEditQueueLockNamespace, artifactID); err != nil {
+		t.Fatalf("hold the document's conditional edit queue lock: %v", err)
+	}
+
+	type acquired struct {
+		release func()
+		err     error
+	}
+	results := make(chan acquired, storm)
+	for range storm {
+		go func() {
+			release, err := service.AcquireConditionalEdit(context.Background(), artifactID)
+			results <- acquired{release: release, err: err}
+		}()
+	}
+	if waiting := storetest.WaitForLockWaiters(t, holder, 1, roomWait(t)); waiting < 1 {
+		t.Fatal("no admission came to wait on the document's queue lock")
+	}
+	if waiting := storetest.WaitForLockWaiters(t, holder, storm, pileUpWindow); waiting != 1 {
+		t.Fatalf("%d of the service's connections wait on the document's queue lock, want 1", waiting)
+	}
+	if inUse := service.store.Pool.Stat().AcquiredConns(); inUse != 1 {
+		t.Fatalf("%d admissions hold a shared connection, want 1", inUse)
+	}
+
+	leaving, leave := context.WithCancel(context.Background())
+	left := make(chan error, 1)
+	go func() {
+		_, err := service.AcquireConditionalEdit(leaving, artifactID)
+		left <- err
+	}()
+	leave()
+	select {
+	case err := <-left:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("an admission whose context ended while it waited = %v, want its context's cancellation", err)
+		}
+	case <-time.After(roomWait(t)):
+		t.Fatal("an admission whose context ended stayed queued behind the document's queue lock")
+	}
+
+	if err := holder.Commit(context.Background()); err != nil {
+		t.Fatalf("release the document's conditional edit queue lock: %v", err)
+	}
+	for range storm {
+		select {
+		case result := <-results:
+			if result.err != nil {
+				t.Fatalf("a conditional edit within the cap: %v", result.err)
+			}
+			result.release()
+		case <-time.After(roomWait(t)):
+			t.Fatal("an admission did not complete once the document's queue lock was released")
+		}
+	}
+	if queued, rows := queuedAcrossProcesses(t, database, artifactID); queued != 0 || rows != 0 {
+		t.Fatalf("after every edit left, the queue holds %d edits in %d rows, want none", queued, rows)
 	}
 }
