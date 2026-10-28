@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-632",
-  "completed": "2026-10-28T20:07:16Z",
-  "round": 5,
+  "completed": "2026-10-28T20:24:09Z",
+  "round": 6,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2474",
-  "codeHead": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
+  "codeHead": "746077c027a18f4b19949c3f0ab265dfeda6d291",
   "answers": [
-    "Review round 3 (CONFLICTING only): merge bb0690b9 forward-merges main 8b6ea377 through sjawhar/legion#2422's merge 1f92d90f and takes its two Envoy guides byte for byte (cmp against 1f92d90f), as the architect directed (20:02Z). This pull request's six files are byte-identical at afaa9c18 and bb0690b9. Fingerprint 529eb132… → 3e74ab78…, changed only in the two carried Envoy guides; posted as issuecomment-6479344297. GitHub reports MERGEABLE."
+    "Review at bb0690b9 (CONFLICTING only, main af1ff09c #2331 on packages/envoy/AGENTS.md): by the architect's decision (20:18Z), merge fd2a2c44 takes main af1ff09c and regenerates that guide with sjawhar/legion#2422's restructure.ts --strict (pinned at 1b2ea974, #2422's checker at 4ad029aa); merge 746077c0 then brings in #2422's own merge cd9ecf51, whose two Envoy guides are byte-identical to this branch's, so the tree is unchanged. This pull request's six files are byte-identical at d598951e and 746077c0. Fingerprint 3e74ab78… → dbfd73b8…, changed only in the carried Envoy guide; posted as issuecomment-6479809548. GitHub reports MERGEABLE."
   ],
   "proof": [
     {
@@ -15,15 +15,15 @@
       "surface": "the checker as a contributor runs it, and the on-demand guides test that reads each guide as GitHub's Markdown parser does",
       "command": "bun scripts/semantic-line-breaks.ts AGENTS.md scripts/e2e/README.md docs/kubernetes.md; awk '/^## /{s=$0} /^```/ && s==\"## Commands\"{print FILENAME\":\"NR; bad=1} END{exit bad}' AGENTS.md; grep -n '^ *<dir>' docs/kubernetes.md; bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts",
       "observed": "checker exit 0, stdout 0 B, stderr 0 B; awk exit 0; grep prints nothing; 107 tests pass, 0 fail, among them the tester's two red tests and the R3 tests for a nested item's verdict and for a one-line parent with 50 nested children; R3 on main a409c128's old-layout guides lists the same seven items before and after",
-      "headSha": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
-      "negativeControl": "the same checker on main 8b6ea377's three files exits 1 with 2,411 R1, 295 R2 and 7 R3 findings; the reviewer's repro (a one-line parent, 50 children) on the checker at 362ba0e9 reports `R3: 51 screen rows: - Parent item.` and exits 1, and the new test fails there"
+      "headSha": "746077c027a18f4b19949c3f0ab265dfeda6d291",
+      "negativeControl": "the same checker on main af1ff09c's three files exits 1 with 2,411 R1, 295 R2 and 7 R3 findings; the reviewer's repro (a one-line parent, 50 children) on the checker at 362ba0e9 reports `R3: 51 screen rows: - Parent item.` and exits 1, and the new test fails there"
     },
     {
       "criterion": "Acceptance 2: nothing lost; every difference is a named edit; head regenerates byte for byte; headings, anchors and pinned phrases unchanged",
-      "surface": "the regeneration script and the difference and rendered-text checks (micromark + GFM, as GitHub renders) on main 8b6ea377's files and the head's",
-      "command": "bun .legion/INFRA-632/restructure.ts --strict --report r.json <main 8b6ea377 files> <outs>; cmp outs head; bun .legion/INFRA-632/check-differences.ts --file <out> <base> <head> r.json; bun .legion/INFRA-632/check-rendered.ts <base> <head>; heading/link/pinned-phrase diffs",
+      "surface": "the regeneration script and the difference and rendered-text checks (micromark + GFM, as GitHub renders) on main af1ff09c's files and the head's",
+      "command": "bun .legion/INFRA-632/restructure.ts --strict --report r.json <main af1ff09c files> <outs>; cmp outs head; bun .legion/INFRA-632/check-differences.ts --file <out> <base> <head> r.json; bun .legion/INFRA-632/check-rendered.ts <base> <head>; heading/link/pinned-phrase diffs",
       "observed": "restructure exit 0 and all three outputs identical to head; check-differences: AGENTS 78, README 265, kubernetes 40 entries applied (2 html-block entries, whitespace only), 0 unexplained hunks; check-rendered: 0 missing words (15,849 / 71,962 / 86,257 base words), 109 Commands placeholders present; headings identical (10/55/56); in-file anchor links identical (0/131/170); every pinned phrase present",
-      "headSha": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
+      "headSha": "746077c027a18f4b19949c3f0ab265dfeda6d291",
       "negativeControl": "head AGENTS.md with one word ('own') deleted: check-differences exit 1, 'UNEXPLAINED ... [-own-]'; head AGENTS.md with `<tailnet>.ts.net` taken out of its code span: check-rendered exit 1, 'MISSING base word 8701 ... [tailnet]'"
     },
     {
@@ -31,23 +31,23 @@
       "surface": "git merge-tree --write-tree in a throwaway repository seeded from commit 6b75da30's three guides (main a409c128 regenerated)",
       "command": "TMPDIR=/legion/scratch/tmp bash .legion/INFRA-632/replay/run.sh",
       "observed": "exit 0, 36 lines PASS: 20 real pairs classified different sentences or items merge clean (7 root, 8 README, 5 Kubernetes), three two-place appends (Commands, e2e index, capability-check tool list) merge clean; b1d8a21b1e8f (root) is an insertion directly before a command line the other side edits, classified adjacent, conflicts (ruled not counted by the architect); every patched file passes the checker; shellcheck clean",
-      "headSha": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
+      "headSha": "746077c027a18f4b19949c3f0ab265dfeda6d291",
       "negativeControl": "every control conflicts: 760468db6c78 and 82fd7d27b4f2 (root), 3ac0f1f0ca6e and 9164e75b4c3c (README), e0ab76dcd45f (ported again onto the re-laid-out lines), 702806bf4da7 and eceefebffe3f (Kubernetes), and two items appended at one point of each of the three lists"
     },
     {
       "criterion": "Acceptance 4: every citation of a moved section still resolves; tests and checks that read the files pass",
       "surface": "the repository's own tests that parse or scan the guides, and its lint and public-name checks",
       "command": "cd packages/daemon && go test ./internal/runtime/sandbox -run 'TestTheReclaimParagraph|TestTheBootCensusRefusesEverySandboxOfTheTreeVolumeLayout' -count=1 && go test ./internal/config -run TestLoadForValidationRefusesUnderKubernetes -count=1; cd packages/pi-legion && bun test src/skills-guard.test.ts; bash .github/scripts/check-private-names.sh; bunx biome check .",
-      "observed": "sandbox ok, config ok; skills-guard 13 pass; check-private-names exit 0; biome exit 0; GitHub reports the pull request MERGEABLE at bb0690b9, so CI runs on it",
-      "headSha": "bb0690b9d0a3b96dc7ebb5b355906e6a9d4298d1",
+      "observed": "sandbox ok, config ok; skills-guard 13 pass; check-private-names exit 0; biome exit 0; GitHub reports the pull request MERGEABLE at 746077c0, so CI runs on it",
+      "headSha": "746077c027a18f4b19949c3f0ab265dfeda6d291",
       "negativeControl": "docs/kubernetes.md with the reclaim paragraph's anchor sentence reworded ('The remedy' -> 'The cure', restored afterwards, round 1): TestTheReclaimParagraphNamesEveryDirectoryTheRendererPutsOnTheIssueVolume and TestTheReclaimParagraphNeverDeletesWhatItExempts FAIL"
     }
   ],
   "filesChanged": [
-    "packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md (taken from sjawhar/legion#2422 merge 1f92d90f)"
+    "packages/envoy/AGENTS.md (regenerated by #2422's recipe on main af1ff09c; equal to #2422's cd9ecf51)"
   ],
   "trickyParts": [
-    "The fingerprint changes across this merge only because the carried Envoy guides took main #2323's text through #2422's regeneration; this pull request's own six files are unchanged."
+    "Proofs ran on fd2a2c44, whose tree equals 746077c0's (jj diff empty)."
   ],
   "deviations": [
     "Checker changes on #2422's paths are three, each with tests, as the architect accepted (2026-10-28 18:27Z): R3 counts an item's own lines, the verbatim warning, `(` as a sentence start.",
