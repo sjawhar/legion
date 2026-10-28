@@ -2,35 +2,45 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-624",
-  "completed": "2026-10-28T20:17:10Z",
-  "round": 5,
-  "reviewedHead": "b25a193437b5d8821fcfe8f3c5d6e5c447156974",
-  "codeHead": "4deb955e216a",
+  "completed": "2026-10-28T21:59:52Z",
+  "round": 6,
+  "reviewedHead": "22b46b022121ba0a404d2a1f59d654c32890541f",
+  "codeHead": "57f8b42132c6",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
-  "minor": 1,
-  "scope": "Narrowed by the INFRA-138 architect to round 4's list (review 5687991449): insertions and undo through the filter, options compared as whole items, text-less blocks protected; plus the architect's request on the repeated-label refusal's wording; correctness defects anywhere still fixed here; other points on Fast-follow.",
-  "ci": "CI head f32723d4 (newest pull_request run; compare to b25a1934 handoffsOnly true, 1 file): required lint, typecheck, test, pr-title queued at 20:17Z. GitHub reports MERGEABLE.",
-  "roundFourItems": "All fixed and accepted. Filter (b5ba307b): insertions, drops and prosemirror-history undo/redo apply, the substring read-back is still refused, and the imported prosemirror-history is the single instance the live editor's plugin uses (PRRT_kwDORFy7ds6xOIJo, PRRT_kwDORFy7ds6xRbG-). Options as whole items (e32713fa): label and description compared, quoted whole, repeated labels refused (PRRT_kwDORFy7ds6xOIJu, PRRT_kwDORFy7ds6xRbHK). Image-only block (b5ba307b) refused (PRRT_kwDORFy7ds6xRbHV).",
+  "important": 3,
+  "minor": 2,
+  "scope": "Round 5's list (review 5689129907), as the INFRA-138 architect has narrowed each round since the cap; correctness defects anywhere still fixed here; other points on Fast-follow.",
+  "ci": "CI head 5e1477d1 (newest pull_request run; compare to 22b46b02 handoffsOnly true, 1 file): required lint, typecheck, test, pr-title queued at 21:59Z. GitHub reports MERGEABLE.",
+  "roundFiveItems": "Divider in the read-back filter (d47ad385): fixed, PRRT_kwDORFy7ds6xTgj3 accepted. Repeated-label path (0862174a): the wording now names only removal, but removal is refused when the duplicate's list holds another option; PRRT_kwDORFy7ds6xTgja unresolved. Protected item with more than its text (0862174a, 2b79f496, 57f8b421): refused and its lists quoted by id with ops, but a protected option in the kept list is never shown and the printed ops do not escape a quote in a document-sourced block id; PRRT_kwDORFy7ds6xTgjr unresolved.",
   "keyFindings": [
     {
       "severity": "important",
       "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
-      "description": "The repeated-label refusal (:557) tells the caller to 'rename or remove one with a document edit'. The tester showed a doc-edit rename is always refused, because it leaves the decision broken; removing one with doc-edit, then edit-ask, works (https://github.com/sjawhar/legion/pull/2433#issuecomment-6479217133). Name only the path that works. Requested by the architect."
+      "description": "The repeated-label refusal (:565) says to remove one item with doc-edit, but doc-edit refuses any edit that leaves the decision broken; when the duplicate's list also holds another option, removing the item still leaves two lists. Reviewer's re-run of the deep-review probe against Postgres: ask '- Ship: Release it / - Hold' + '* Ship: Only on Fridays / * Defer: Wait a week'; doc-edit delete of either Ship -> 'apply live document operations: … holds a second bullet list'; block unchanged. The working path, deleting a whole list by id, is not named, and Defer is never quoted."
     },
     {
       "severity": "important",
       "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
-      "description": "refuseAskContentEdit compares items read by parseAskBlock, which takes only an item's first paragraph as plain text. A protected item's nested sub-list or second paragraph is not in the quote, so sending the quote back deletes it (Go probes against Postgres: 'only if finance agrees' and 'Finance must sign off first.' deleted); a link target and bold are flattened. The comment at :535, the Changed fragment and packages/envoy/AGENTS.md:2181-2187 say sending what it quotes loses nothing."
+      "description": "When listsToDelete fires (:569-579), only the lists to delete are quoted; a protected option in the list that stays is never shown, and once the doc-edit leaves the decision valid no guard applies while the row is still the pre-break one. Deep-review probe P1 (re-read by the reviewer): a collaborator's '- Ext: added after the break' in the first list; following the refusal (doc-edit, then edit-ask with row + quote) stores a block with no Ext."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
+      "description": "Security[untrusted-input]: quotedLists (:660-668) prints doc-edit ops inside shell single quotes, '[…]', with the document-sourced block id JSON-encoded; json.Marshal does not escape a single quote. Reviewer's re-run: a list id \"x'; touch …/PWNED; echo '\" survives settlement and the refusal prints it inside the quoted ops, so an agent that pastes the ops runs the payload (deep review: pasted into bash it created the file). Escape ' (\\u0027) or print no ready ops for an id outside a safe set."
     },
     {
       "severity": "minor",
-      "file": "packages/proof-editor/src/ask-content.ts",
-      "description": "block.descendants (:230) never visits the block itself, so an unselected hr child of a broken ask is not protected (both reviewers' happy-dom probes: deleting it with the selection in the question applies, and the Yjs ask loses it); reachable only through a raw Yjs write. The comment at :207-208 says a block with no leaf holds nothing a collaborator wrote."
+      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
+      "description": "The comment at :543 still says sending what the refusal quotes loses nothing, which round 5 asked to narrow (a link target is dropped: code-quality probe TestZZProbeLinkInProtectedItem)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/service_test.go",
+      "description": "TestSetAskBlockTextNewItemContentRefusalNamesStepsThatApply (:875) builds its own delete instead of reading the ops from the refusal, so a wrong block id in quotedLists passes every test (code-quality probe)."
     }
   ],
-  "fastFollow": "ask_block_text.go: one optionLine helper shared by quotedItems and optionList, one local refuse(why) for the four ErrAskBlockUnrepresentable builds, and the comment at :68-69 naming descriptions too; service_test.go: drop the duplicate 'changed' row (:744-753), use sendAskOptions/assertAskEditRefusedQuoting at :716-729, assert Field and the quote at :723, remove the leftover t.Logf; dropsUnselectedAskBlock maps every character on each local transaction",
-  "thermonuclear": "Both run at b25a1934 (code 4deb955e): deep review CHANGES, code quality CHANGES; findings above. Main's options edit on a valid ask flattens nested item content the same way; that is main's behaviour, named to the architect, not a finding of this pull request.",
-  "security": "authz: no new route; the refusal runs inside SetAskBlockText (ask_block_text.go:70, 86) behind the unchanged ask-edit handler. untrusted-input: askRowOptions binds its parameters (ask_block_text.go:501-504); document text goes back quoted with %q (ask_block_text.go:589) to a caller already allowed to edit the ask; the editor filter reads only local transactions and skips y-sync and history transactions by meta (ask-content.ts:271-272). supply-chain: @milkdown/prose/history comes from the existing @milkdown/prose dependency (packages/proof-editor/package.json:48); no lockfile change, one prosemirror-history@1.5.0 in the store."
+  "fastFollow": "listsToDelete indexes items by position and relies on parseAskBlock making one option per item: say so in the doc comment or pair items with their nodes",
+  "thermonuclear": "Both run at 22b46b02 (code 57f8b421): deep review CHANGES (items 1-3), code quality CHANGES (items 4-5).",
+  "security": "untrusted-input: the new refusal prints document-sourced block ids inside shell-quoted doc-edit ops (ask_block_text.go:660-668) without escaping a single quote: finding 3 (ASVS v5.0.0 1.2.5). authz: no new route; the refusal runs inside SetAskBlockText behind the unchanged ask-edit handler (api/asks.go:393-413)."
 }
