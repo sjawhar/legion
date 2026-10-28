@@ -330,14 +330,22 @@ the built-in `english` configuration, in one statement per pair with every value
 reads or writes no table. The statement mirrors the issue row's vector
 (`migrations/0088_issues_title_lexemes.up.sql`, with `search_text` from
 `migrations/0056_search_text.up.sql`) and search's own `websearch_to_tsquery('english', q)`. A
-throwaway server that listens only on a unix socket:
+throwaway PostgreSQL 18.6, the version production runs, that listens only on a unix socket in
+`$TMPDIR/pg`, from zonky's pinned Linux x86-64 binaries on Maven Central:
 
 ```bash
-uvx --python 3.12 --from pgserver==0.1.4 python -c 'import pgserver; print(pgserver.get_server("<dir under $TMPDIR>", cleanup_mode=None).get_uri())'
+pg="$TMPDIR/pg" v=18.6.0 && mkdir -p "$pg" && cd "$pg"
+curl -fsSL -o pg.jar "https://repo1.maven.org/maven2/io/zonky/test/postgres/embedded-postgres-binaries-linux-amd64/$v/embedded-postgres-binaries-linux-amd64-$v.jar"
+python3 -c 'import zipfile; zipfile.ZipFile("pg.jar").extract("postgres-linux-x86_64.txz")'
+python3 -c 'import lzma, tarfile; tarfile.open(fileobj=lzma.open("postgres-linux-x86_64.txz")).extractall("server", filter="data")'
+export LD_LIBRARY_PATH="$pg/server/lib"
+server/bin/initdb -D data -U postgres --auth=trust -E UTF8
+printf "listen_addresses = ''\nunix_socket_directories = '%s'\n" "$pg" >> data/postgresql.conf
+server/bin/pg_ctl -D data -l pg.log start
 ```
 
-Pass it as `--lexeme-database <dir>/.s.PGSQL.5432`: Bun's `SQL` refuses the printed URL's
-`?host=<dir>` form.
+Pass it as `--lexeme-database "$TMPDIR/pg/.s.PGSQL.5432"`; the check connects as `postgres` to the
+`postgres` database. Stop it with `server/bin/pg_ctl -D data stop` from `$TMPDIR/pg`.
 
 ### The pre-registered pairs
 
