@@ -299,6 +299,18 @@ type SearchIssue struct {
 	Status string `json:"status"`
 }
 
+// SearchAsk is where an ask hit stands, read when the search ran, so a reader of the hit knows
+// whether the question still waits on a human and, once it does not, how it was settled.
+// Answer is the ask's current answer when it is answered; on a resolved ask it is the last
+// answer its ask.answered events recorded, the only place the answer survives on a row that
+// document settlement retracted while it was answered, and nil when nobody answered.
+// Answer.Selected is an empty list, never null, when the answer chose no option.
+type SearchAsk struct {
+	State      string         `json:"state"` // "open" | "answered" | "resolved"
+	Answer     *AskAnswer     `json:"answer,omitempty"`
+	Resolution *AskResolution `json:"resolution,omitempty"`
+}
+
 // SearchResult is one ranked Dispatch search hit.
 type SearchResult struct {
 	Kind  string      `json:"kind"`
@@ -312,6 +324,9 @@ type SearchResult struct {
 	Snippet  string          `json:"snippet"`
 	Rank     float64         `json:"rank"`
 	Href     string          `json:"href"`
+	// Ask is set on ask hits and nil on every other kind; an ask removed between the search and
+	// the read of its state keeps it nil too.
+	Ask *SearchAsk `json:"ask,omitempty"`
 }
 
 // SearchResponse is one page of the fused search result list.
@@ -985,6 +1000,25 @@ type AskAnswer struct {
 	Selected []string  `json:"selected"`
 	Text     *string   `json:"text"`
 	At       time.Time `json:"at"`
+}
+
+// UnmarshalJSON decodes an answer and reads a null or absent selected as an empty list: an answer
+// that chose no option sends `"selected":[]`, never null, though rows and ask.answered events
+// written before answers stored an empty list hold null there.
+func (a *AskAnswer) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil
+	}
+	type plain AskAnswer
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	if value.Selected == nil {
+		value.Selected = []string{}
+	}
+	*a = AskAnswer(value)
+	return nil
 }
 
 // OpenAskOwner identifies the issue or standalone project document holding an ask.
