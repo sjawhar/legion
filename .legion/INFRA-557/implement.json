@@ -2,66 +2,35 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-557",
-  "completed": "2026-10-29T00:30:00Z",
-  "round": "review round 1",
+  "completed": "2026-10-29T00:02:00Z",
+  "round": "forward merge after review round 1",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2404",
-  "codeHead": "d19302d35a50e3fe765f9847937fda6b3be3dd65",
-  "answersReview": "225443a5e8d6311a3a03fa3416c0505112283348",
+  "codeHead": "6ee80831f50a14efe4e22f531466409ecc13688b",
   "proof": [
     {
-      "criterion": "Review finding 1: under the grant this PR renders, a pod holds the lease and delivers; envoy_listener writes are scoped to the machine's own keys",
-      "surface": "real cmd/listener binaries as NATS nkey users holding exactly core.ListenerPermissions (fixture checked byte for byte in infra/core), in-process nats-server; and a real nats-server 2.10.29 process whose only user holds that grant",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; go test -run 'Grant' ./cmd/listener/; bash $TMPDIR/smoke/smoke.sh $TMPDIR/listener-head r6-term TERM / r6-kill KILL",
-      "observed": "26 rows PASS (ok 536.707s); grant tests pass; smoke SIGTERM 40/40 in order (last 3.64 s), SIGKILL 40/40 in order (last 5.35 s), 0 permission violations. https://github.com/sjawhar/legion/pull/2404#issuecomment-6483359326",
-      "headSha": "d19302d35a50e3fe765f9847937fda6b3be3dd65",
-      "negativeControl": "fix reverted: 'grant_test.go:35: the listener never became healthy and active ... Permissions Violation for Publish to \"$JS.API.DIRECT.GET.KV_envoy_listener\"'; old grant: 'box-a's user wrote lease.listener-box-b'"
+      "criterion": "The head merges into main so CI can run (PR no longer conflicting)",
+      "surface": "GitHub pull request #2404",
+      "command": "gh api repos/sjawhar/legion/pulls/2404 --jq '{mergeable,mergeable_state}'",
+      "observed": "{\"mergeable\":true,\"mergeable_state\":\"blocked\"} after merge commit 6ee80831 (main 571f729b) was pushed. Fingerprints: https://github.com/sjawhar/legion/pull/2404#issuecomment-6483454966",
+      "headSha": "6ee80831f50a14efe4e22f531466409ecc13688b",
+      "negativeControl": "at d19302d3 GitHub gave mergeable_state dirty; git merge-tree against main 571f729b conflicted in packages/envoy/docs/architecture.md and packages/envoy/internal/session/registry.go (tester)"
     },
     {
-      "criterion": "Review finding 2: a pod's own attempted record never acks a message it did not prompt (failed Clear, lost Create reply)",
-      "surface": "internal/dedupe KV ledger against in-process NATS with fault-injecting KV; cmd/listener delivery handler with a Delete-failing ledger",
-      "command": "cd packages/envoy && go test -count=1 ./internal/dedupe/... && go test -count=1 -run 'Ledger|Redelivery|Duplicate|Unplaceable|Attempt' ./cmd/listener/",
-      "observed": "ok; TestARedeliveryAfterAFailedPromptWhoseClearFailedPromptsTheSession passes; lost-create and failed-clear retries answer Proceed",
-      "headSha": "d19302d35a50e3fe765f9847937fda6b3be3dd65",
-      "negativeControl": "before the fix: 'kv_test.go:174: Attempt(\"publish.abc\", \"ses_target\") = in_flight, want proceed'"
-    },
-    {
-      "criterion": "Review finding 3: a message in a NAK delay does not hold the settle hold to its cap; graceful within 10 s, hard within 15 s",
-      "surface": "two real listener binaries under the rendered grant, one session whose prompts fail (30 s retry outstanding) during SIGTERM and SIGKILL",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=2 -run '^(TestTwoPodsGracefulStopWithARetryOutstandingDeliversWithin10s|TestTwoPodsSIGKILLWithARetryOutstandingHandsOverInOrderWithin15s)$' ./cmd/listener",
-      "observed": "both rows pass (in the full run 9.87 s and 15.56 s row times); hold caps 7 s after an expired or stale-binding take-over, 3 s after a graceful hand-back, counted from the subscribe",
-      "headSha": "d19302d35a50e3fe765f9847937fda6b3be3dd65",
-      "negativeControl": "before the fix: 'pod-b delivered \"fresh\" 12.965s after it subscribed, want the fresh message once the 7s cap ended the hold'"
-    },
-    {
-      "criterion": "Review finding 4: a holder stuck preparing its durable alarms and gives the lease up",
-      "surface": "two in-process receivers, one whose NATS user is denied CONSUMER.INFO",
-      "command": "cd packages/envoy && go test -count=1 -run 'CannotPrepare' ./cmd/listener/",
-      "observed": "ERROR 'lease holder cannot deliver from the durable' with reason; the lease passes to the other pod, which delivers; a sole pod takes it back and retries; a pod without a lease answers 503 past the bound",
-      "headSha": "d19302d35a50e3fe765f9847937fda6b3be3dd65",
-      "negativeControl": "before the fix: 'receive_test.go:1266: timed out waiting for pod-stuck's /healthz to report its failing durable' (only the WARN 'durable consumer read failed; retrying')"
-    },
-    {
-      "criterion": "Review finding 5: the unplaceable deferral expiry covers how long a redelivery can wait in the local queue",
-      "surface": "cmd/listener unplaceable deferral bounds",
-      "command": "cd packages/envoy && go test -count=1 -run 'Unplaceable' ./cmd/listener/",
-      "observed": "TestUnplaceableRetryWindowFitsTheBoundsItDependsOn passes with the fixed 125 s expiry",
-      "headSha": "d19302d35a50e3fe765f9847937fda6b3be3dd65",
-      "negativeControl": "before the fix: 'a deferral slot expires after 17s, no later than the 51s a deferred message can legitimately stay pending'"
+      "criterion": "Every behaviour of the change holds after the merge",
+      "surface": "real cmd/listener binaries per row, each pod a NATS user holding exactly the rendered core.ListenerPermissions grant, in-process nats-server, relays that cut, freeze or slow links",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; untagged go test -count=1 -timeout 20m (four Postgres-backed TestDispatch* skipped) ./cmd/listener/",
+      "observed": "26 rows PASS, ok 532.418s; untagged ok 627.851s; internal/session ok",
+      "headSha": "6ee80831f50a14efe4e22f531466409ecc13688b",
+      "negativeControl": "review round 1 fail-first runs and base 819dc283 rows: https://github.com/sjawhar/legion/pull/2404#issuecomment-6483359326"
     }
   ],
   "filesChanged": [
-    "28d478d5: lease.go and session/registry.go read back by key; infra/core/permissions.go per-machine envoy_listener write scope, tests and gcp goldens; internal/testnats grant fixtures and StartGranted; multiprocess and twobuild harness under the rendered grant; cmd/listener/grant_test.go; bus key-name constants",
-    "18779a03: internal/dedupe own-attempt holds (kv.go, memory.go, Ledger.Keep), delivery.go keepAttempt, ledger tests",
-    "21a1dd2b: receive.go per-case settle caps, catcher re-NAKs repeats, mid-hold stop marks stale_binding; lease.go HandedBack; two new multiprocess rows; receive tests",
-    "d19302d3: receive.go failure timing, alarm and lease give-up (lease.GiveUp), /healthz degraded/unhealthy; unplaceableDeferralExpiry 125 s; metricfilters description; tests",
-    "README, AGENTS.md (only the affected lines), infra docs, pr2404 changie fragments"
+    "merge of main 571f729b: packages/envoy/internal/session/registry.go (main's Plugin and PluginVersion beside AcceptedHost and the unknown-key handling), packages/envoy/docs/architecture.md (both bucket lines)",
+    "packages/envoy/internal/dispatch/pmdoc/reanchor_test.go: docstest -> crafted import, as #2481 does, while #2481 is open"
   ],
-  "trickyParts": [
-    "Fixes run on the grants already deployed (Get by key is granted; the bare DIRECT.GET subject is not), so no hub grant change is needed for them to work; the scoped write grant tightens what is granted."
-  ],
+  "trickyParts": [],
   "deviations": [
-    "Finding 2: a prompt still running holds its attempt as in flight for TakeoverAfter (35 s), not only unknown outcomes, so a duplicate during a running prompt is not prompted twice.",
-    "Finding 4: a pod does not re-take the record it gave up for two standby polls; a sole pod then retries."
+    "pmdoc compiles again; its differential.ts and linearity tests still fail in this pod, as in round 1 (environment, not this change)."
   ],
   "openQuestions": [],
   "discoveredComplexity": []
