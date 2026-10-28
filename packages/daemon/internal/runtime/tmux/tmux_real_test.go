@@ -1109,7 +1109,22 @@ var procFile = regexp.MustCompile(`^/proc/[0-9]+/(stat|cmdline)$`)
 // Panes of one issue share its window, while a pane there still verifies; another issue gets a
 // window of its own; and one claim never has two processes.
 func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
-	r := newRig(t)
+	// Each mint is a fresh token, as a daemon's re-minted lease is, so a refused launch that
+	// wrote its credential would change the live pane's gh files.
+	var mintMu sync.Mutex
+	mints := 0
+	minting := func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+		bundle, err := staticCredential(ctx, role, owner)
+		mintMu.Lock()
+		mints++
+		token := fmt.Sprintf("ghs_mint_%d", mints)
+		mintMu.Unlock()
+		written := bundle.Owners[bundle.Default]
+		bundle.Owners[bundle.Default] = ghconfig.Render(token, written.App, staticCredentialExpiry)
+		return bundle, err
+	}
+	withMinting := func(o *Options) { o.GitHubCredential = minting }
+	r := newRig(t, withMinting)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -1163,6 +1178,17 @@ func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
 			}
 			contents[file.Variable] = string(raw)
 		}
+		root := runtime.GHConfigDir(r.stateDir, testerSpec.Claim)
+		if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			raw, err := os.ReadFile(path)
+			contents[path] = string(raw)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
 		return contents
 	}
 	before := readSecrets()
@@ -1173,12 +1199,15 @@ func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
 	if after := readSecrets(); !maps.Equal(after, before) {
 		t.Errorf("the refused second spawn rewrote the live tester's secret files from %q to %q", before, after)
 	}
-	impatient := r.newRuntime(func(o *Options) { o.StopGrace = 300 * time.Millisecond })
+	impatient := r.newRuntime(withMinting, func(o *Options) { o.StopGrace = 300 * time.Millisecond })
 	resume := r.spec("LEGION-2", "LEGION-2", claim.RoleTester)
 	resume.ResumeSessionFile = r.rolePrompt
 	if _, err := impatient.Resume(ctx, &tester, resume); err == nil ||
 		!strings.Contains(err.Error(), "previous incarnation "+tester.Incarnation+" is still running") {
 		t.Errorf("a resume over a live incarnation = %v", err)
+	}
+	if after := readSecrets(); !maps.Equal(after, before) {
+		t.Errorf("the refused resume rewrote the live tester's secret files from %q to %q", before, after)
 	}
 }
 
