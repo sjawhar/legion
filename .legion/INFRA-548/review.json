@@ -2,13 +2,13 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-548",
-  "completed": "2026-10-28T13:57:58Z",
-  "round": 6,
+  "completed": "2026-10-28T15:09:39Z",
+  "round": 7,
   "decision": "approved",
-  "reviewedHead": "5e3b80ec9382e4cd3787adc822222033a9504a54",
-  "codeHead": "90142b43da37b0502a1549953a225b832512c9df",
-  "previousApprovedHead": "478ede921fbb0b7a20ab1a5fa3262d8b8db5235f",
-  "fingerprint": "478ede92 d4c90c021fe1fa1beea9555513faf0558b6c02828bfa2f1d5abf90543c192fcb -> 5e3b80ec 9e0d4632c5b38aca59db47f8d78f3b69ede1300904b066c746db4e98ea3245f9: changed (the conflict merge 5384eb84 of main 2d872499 moved this PR's release.yaml hunk into main's restructured file), so a new round",
+  "reviewedHead": "bab3f21c19a61dd562ab5aeadcccae7f6cb55441",
+  "codeHead": "6fc807bf506d20123be5e5ba407343001e905a79",
+  "previousApprovedHead": "779dba57fcd8019c026ef7097e5a1c39ed6e17a8",
+  "fingerprint": "779dba57 9e0d4632c5b38aca59db47f8d78f3b69ede1300904b066c746db4e98ea3245f9 -> bab3f21c b83926c318f76dbd36980d410f7a38667112f2d6b25ab2070c4d0f3574b4ed05: changed (the conflict merge dfd2ff0a of main 139c61b3 rebased this PR's sentence in .dispatch/architecture/envoy-listener.md onto main's rewritten line), so a new round",
   "critical": 0,
   "important": 0,
   "minor": 4,
@@ -35,15 +35,15 @@
     }
   ],
   "verified": [
-    "Per-file interdiff of this issue's change, old aeeee6c0->d26157e2 vs new 2d872499->5384eb84: every file identical but .github/workflows/release.yaml.",
-    "release.yaml resolution: --patch-path patches/ and positional patches/ in main's PI_ENVOY_VERSION_ARGS (release.yaml:109-117), satisfying release-bump.sh:56-61; main's on.push.paths already lists patches/** (release.yaml:9) and pi_envoy_build is gated only on main, so the old pi_envoy paths-filter entry has no counterpart to carry. packages/pi-shared/test/skills-partition.test.ts passes (7/7). The deep-review agent ran release-bump 46/46, release-push 437/437 and check-release-credentials 240/240 tests, and a scratch-clone patches/-only commit bumped pi-envoy 99.0.0 -> 99.0.1."
+    "Per-file interdiff of this issue's change, old 2d872499->5384eb84 vs new 139c61b3->dfd2ff0a: every file identical but .dispatch/architecture/envoy-listener.md, whose line 7 is main's line 7 verbatim followed by the same plugin/plugin_version sentence as before.",
+    "Both thermonuclear agents: main's changes between 2d872499 and 139c61b3 touch none of this PR's code paths (listener main.go help text and comments, an export of transientStatus, an envoy-plugin version bump read at runtime, new Postgres-16 jobs); check-dist fresh on Bun 1.4.4; the PR's Go listener tests and envoy-client transport tests pass."
   ],
   "thermonuclear": {
-    "head": "5e3b80ec",
-    "deepReview": "Verdict: APPROVE at 5e3b80ec",
-    "codeQuality": "Verdict: APPROVE at 5e3b80ec"
+    "head": "bab3f21c",
+    "deepReview": "Verdict: APPROVE at bab3f21c",
+    "codeQuality": "Verdict: APPROVE at bab3f21c"
   },
-  "ci": "Required checks at code head 90142b43 (newest pull_request run's head): lint, typecheck, test and pr-title completed success at 13:57Z; compare 90142b43...5e3b80ec changes only .legion/ (1 file).",
+  "ci": "Required checks at code head 6fc807bf (newest pull_request run's head): lint, typecheck, test and pr-title completed success at 15:09Z; compare 6fc807bf...bab3f21c changes only .legion/ (1 file).",
   "threads": "All four threads carry the reviewer's answer and are resolved; none new; no bot threads.",
-  "proofLines": "E2E (implementer) and E2E (tester) both name 5384eb84."
+  "proofLines": "E2E (tester) names dfd2ff0a. E2E (implementer) names 5384eb84, whose only descendant change in this branch's code is the merge of main and the one architecture-doc line; the code its suites ran is byte-identical."
 }
