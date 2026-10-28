@@ -6,6 +6,7 @@ import {
   DISPATCH_TOOL_DEADLINE_MS,
   DispatchClient,
   DispatchServiceError,
+  transientStatus,
 } from "../../packages/envoy-client/src/dispatch-http";
 import {
   sessionConfigFile,
@@ -158,11 +159,14 @@ interface CheckDependencies {
   readonly out: (line: string) => void;
 }
 
-interface A1Judgement {
-  readonly degraded: boolean;
-  readonly results: number;
-  readonly verdict: Verdict;
-}
+type A1Judgement =
+  | { readonly degraded: boolean; readonly results: number; readonly verdict: "pass" | "fail" }
+  | {
+      readonly degraded: false;
+      readonly results: 0;
+      readonly verdict: "unavailable";
+      readonly category: Category;
+    };
 
 interface PairFound {
   readonly shared: number | null;
@@ -262,6 +266,7 @@ function errorCategory(error: unknown): Category {
   if (!(error instanceof DispatchServiceError || error instanceof HttpStatusError)) {
     return "transport";
   }
+  if (transientStatus(error.status)) return "transport";
   if (error.status === 401 || error.status === 403) return "auth";
   if (error.status === 404) return "not-found";
   if (error.status >= 400 && error.status < 500) return "refused";
@@ -310,7 +315,8 @@ function judgeA1(response: unknown): A1Judgement {
   const degraded = Object.hasOwn(answer, "degraded");
   const results = answer.results.length;
   if (degraded) return { degraded, results, verdict: "fail" };
-  return { degraded, results, verdict: results > 0 ? "pass" : "unavailable" };
+  if (results > 0) return { degraded, results, verdict: "pass" };
+  return { degraded: false, results: 0, verdict: "unavailable", category: "no-results" };
 }
 
 /**
@@ -492,7 +498,7 @@ async function checkA1(
   }
   const degraded = judgement.degraded ? "yes" : "no";
   const verdict =
-    judgement.verdict === "unavailable" ? "unavailable: no-results" : judgement.verdict;
+    judgement.verdict === "unavailable" ? `unavailable: ${judgement.category}` : judgement.verdict;
   out(`A1 degraded=${degraded} results=${judgement.results} ${verdict}`);
   return judgement.verdict;
 }
@@ -552,7 +558,7 @@ export async function runChecks(options: Options, deps: CheckDependencies): Prom
 }
 
 /** Parsed JSON from one of the script's own reads, with a status `accept` admits. A body that is
- * not JSON is answered as its text, as `DispatchClient` does, so its schema reports it malformed. */
+ * not JSON is returned as its text so the schema reports it malformed. */
 async function readJson(
   url: string,
   headers: Record<string, string>,
@@ -571,7 +577,7 @@ async function readJson(
   }
 }
 
-function liveDispatch(config: DispatchConfig): DispatchReads {
+export function liveDispatch(config: DispatchConfig): DispatchReads {
   // `dispatchSettings` already trimmed the URL's trailing slashes.
   // A client's deadline runs from its construction, so each read gets a client of its own.
   const client = () => new DispatchClient(config.url, config.token);
@@ -647,7 +653,8 @@ async function main(argv: readonly string[]): Promise<number> {
   }
   const config = resolveDispatch();
   if (config === null) {
-    console.error("unavailable: config");
+    const category: Category = "config";
+    console.error(`unavailable: ${category}`);
     return 2;
   }
   const lexer =

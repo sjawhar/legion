@@ -102,7 +102,8 @@ above (`sessionDispatchSettings` over the envoy.json `command` reads, `DISPATCH_
   own row (kind `issue`, owned by the issue) stands among the first five results. A document,
   comment, ask or message the issue owns never counts. A pair passes when `shared=0` and the row
   is at position 1 to 5, and fails otherwise. Without `--lexeme-database`, or when the database
-  fails, it prints `shared=unchecked` and is unavailable. Each pair prints
+  fails, it prints `shared=unchecked` and is unavailable. When the issue read fails, it prints
+  `A2 <KEY> shared=unchecked position=<1-5|none> unavailable: <category>`. Each pair prints
   `A2 <KEY> shared=<n|unchecked> position=<1-5|none> <verdict>`. When the pair's own search is
   unavailable it prints `A2 <KEY> unavailable: <category>`, with no shared and no position. A2
   passes when any pair passes, is unavailable when none passes and any is unavailable, and fails
@@ -122,8 +123,8 @@ The last line is `result pass|fail|unavailable exit=<code>`. Exit 0: every check
 Exit 1: a check failed and none was unavailable. Exit 2: a check was unavailable, or a usage
 error. An unavailable check
 (`unavailable: auth|refused|transport|malformed|not-found|no-results|lexeme-database`) is never a
-pass. `refused` is a 4xx refusal other than 401, 403 or 404, for example a query longer than
-search accepts.
+pass. `refused` is a 4xx refusal other than 401, 403, 404, 408 or 429, for example a query longer
+than search accepts. A 5xx, 408 or 429 can clear on its own, so it is `transport`.
 
 Output is allowlisted on stdout and stderr alike: keys, kind names, positions, counts, the build
 commit, match or mismatch, the place and the failure category. The script never prints a URL, the

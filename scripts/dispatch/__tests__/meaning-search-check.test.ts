@@ -8,6 +8,7 @@ import {
   type DispatchReads,
   HttpStatusError,
   type Lexer,
+  liveDispatch,
   parseArguments,
   queryTreeLexemes,
   runChecks,
@@ -521,10 +522,36 @@ describe("A3", () => {
     expect(result.code).toBe(2);
   });
 
-  test("a body that is not JSON is malformed", async () => {
-    const result = await coverage(["<html>sign in</html>"]);
-    expect(result.out).toContain("A3 unavailable: malformed reads=1");
+  test("a 429 on the first read is transport", async () => {
+    const result = await coverage([new HttpStatusError(429)]);
+    expect(result.out).toContain("A3 unavailable: transport reads=1");
     expect(result.code).toBe(2);
+  });
+
+  test("a body that is not JSON is malformed on the real read", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch: () =>
+        new Response("<html>sign in</html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        }),
+    });
+    try {
+      const out: string[] = [];
+      const code = await runChecks(
+        parseArguments(["--coverage", "--expect-model", "X", "--coverage-wait", "0"]),
+        {
+          dispatch: liveDispatch({ url: `http://127.0.0.1:${server.port}`, token: "t" }),
+          out: (line) => out.push(line),
+        }
+      );
+      expect(out).toContain("build unavailable: malformed");
+      expect(out).toContain("A3 unavailable: malformed reads=1");
+      expect(code).toBe(2);
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("a 404 on the first read is unavailable", async () => {
@@ -618,6 +645,8 @@ describe("output hygiene", () => {
   test.each([
     [502, "transport"],
     [401, "auth"],
+    [429, "transport"],
+    [408, "transport"],
   ])("a %i gateway error prints only its category", async (status, category) => {
     const result = await run(argv, { dispatch: failing(status), lexer: lexer() });
     const printed = result.out.join("\n");
