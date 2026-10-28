@@ -6,3 +6,5 @@ body: |-
   rather than finding the workspace quietly empty. Whether the notice has been sent rides in the
   same state file, so a server Claude Code restarts inside one `claude` process does not repeat
   it, and a launch that recreated nothing clears it, so a later recreation is told again.
+custom:
+  Issue: pr2186

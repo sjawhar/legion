@@ -14,3 +14,5 @@ body: |-
   measures the same, with the `npm` and `node` the install and its check run, in place of `claude`
   on `PATH`. `scripts/e2e/claude-backend-sandbox.sh` now holds the worker to the binary its
   generation's install left.
+custom:
+  Issue: pr2186

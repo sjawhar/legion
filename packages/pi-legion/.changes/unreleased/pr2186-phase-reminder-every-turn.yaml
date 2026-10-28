@@ -1,7 +1,7 @@
 kind: Changed
 body: |-
   A phase worker whose turn ends with its Legion phase still open is now reminded at the end of
-  **every** turn, for as long as that phase stays open (INFRA-220). It used to get one follow-up,
+  **every** turn, for as long as that phase stays open. It used to get one follow-up,
   and a second only when it answered the first by writing the tool call as text again, after which
   a stalled worker sat silent: in Stage 3 two trees waited six hours each on a worker that had had
   its one follow-up. The first reminder of a run is still the `session_stop` continuation, one more
@@ -28,3 +28,5 @@ body: |-
   now in the pods wrote — reads as an open phase with no reminder yet, so it is reminded rather
   than left alone. Daemon API contract 41 carries the four variables (and, in a pod, Claude Code's
   three): install this release's pair with a `legion` built from the same commit.
+custom:
+  Issue: pr2186

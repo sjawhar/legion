@@ -1,6 +1,6 @@
 kind: Added
 body: |-
-  The Legion phase reminder runs on Claude Code (INFRA-220). A phase worker in a Legion pane whose
+  The Legion phase reminder runs on Claude Code. A phase worker in a Legion pane whose
   turn ends with its phase still open — no successful `handoff_complete` since its assignment — is
   reminded at the end of every turn, for as long as that phase stays open, as an Oh My Pi worker
   is. The machine is `@legion/pi-shared`'s, one copy for both harnesses; this plugin is its Claude
@@ -20,3 +20,5 @@ body: |-
   four `LEGION_STALL_*` numbers come from the worker's environment. The hook entries are the Legion
   plugin's alone: a plain `@sjawhar/claude-envoy` install registers no `legion` server, so
   `hooks/hooks.json` carries none of them. `package.json`'s `legion.daemonApiVersion` is 41.
+custom:
+  Issue: pr2186

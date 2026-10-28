@@ -9,3 +9,5 @@ body: |-
   the pod loads it from the one container's filesystem. No workflow releases this package, so the
   image is a Kubernetes deployment's only source of it, and a plugin-contract change for such a role
   is answered by a new image rather than by an install (`docs/kubernetes.md`).
+custom:
+  Issue: pr2186

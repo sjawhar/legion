@@ -745,18 +745,21 @@ LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file holding
   bash scripts/e2e/claude-backend-tmux.sh     # the same through an Anthropic-compatible model gateway: no Anthropic key
 ```
 
-The key-file route's file may come from the agent-secrets broker, which serves
-`LEGION_ANTHROPIC_API_KEY` to a session without an approval wait. The key is written 0600, never
-printed and never in an argv, and the subshell's `EXIT` trap removes the file however the run ends
-(a failure, Ctrl-C, or a deadline that kills the shell), where a plain `rm` at the end would leave
-it behind:
+The key file may come from a secret store whose runner puts the key in one command's environment
+(the form `LEGION_E2E_APP_KEY_RUNNER` takes: `<runner> <NAME> -- <command>`). Name the gateway key
+your deployment issues for proof runs, never a vendor key: a run on a vendor key exercises no
+gateway, and the preflight's alias note shows which key the endpoint saw. The key is written 0600,
+never printed and never in an argv, and the subshell's `EXIT` trap removes the file however the run
+ends (a failure, Ctrl-C, or a deadline that kills the shell), where a plain `rm` at the end would
+leave it behind:
 
 ```sh
 (
   key=$(mktemp)   # 0600 already
   trap 'rm -f "$key"' EXIT
-  agent-secrets LEGION_ANTHROPIC_API_KEY -- sh -c 'umask 077; printf %s "$LEGION_ANTHROPIC_API_KEY" >"$1"' sh "$key" &&
-    LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_CLAUDE_KEY_FILE=$key LEGION_E2E_ANTHROPIC_KEY_FILE=$key \
+  <runner> <GATEWAY_KEY_NAME> -- sh -c 'umask 077; printf %s "$<GATEWAY_KEY_NAME>" >"$1"' sh "$key" &&
+    LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_MODEL_BASE_URL=<gateway base URL> \
+      LEGION_E2E_CLAUDE_KEY_FILE=$key LEGION_E2E_ANTHROPIC_KEY_FILE=$key \
       bash scripts/e2e/claude-backend-tmux.sh
 )
 ```
