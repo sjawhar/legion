@@ -415,7 +415,10 @@ type replayPlanner struct {
 	claim         map[string]*replayActor
 	created       map[string]bool // issue keys a kept issue.created makes
 	firstSize     map[string]int  // the first logged version size of each artifact in the window
-	specDefault   int
+	// bornAt is the offset of the write that creates each comment and document the window creates:
+	// a read sent before it never names the object.
+	bornAt      map[string]time.Duration
+	specDefault int
 }
 
 // planReplay plans the bundle's window under o.
@@ -428,7 +431,7 @@ func planReplay(b *replayBundle, o replayOptions) (*replayPlan, error) {
 		}},
 		artifacts: map[string]*replayArtifact{}, docs: map[string]*rpDoc{}, issueDocs: map[string][]string{},
 		issueComments: map[string][]string{}, snap: map[string]map[string]json.RawMessage{}, stateIssue: map[string]*replayIssue{},
-		claim: map[string]*replayActor{}, created: map[string]bool{}, firstSize: map[string]int{},
+		claim: map[string]*replayActor{}, created: map[string]bool{}, firstSize: map[string]int{}, bornAt: map[string]time.Duration{},
 	}
 	pl.key = func(k string) bool { return keepIssue(o.rngSeed, k, o.rate) && (o.keys == nil || o.keys[k]) }
 	kept := map[string]bool{}
@@ -549,6 +552,21 @@ func planReplay(b *replayBundle, o replayOptions) (*replayPlan, error) {
 				pl.p.Counts.NotSent["no_issue:"+ev.Type]++
 				continue
 			}
+			// The reads before a write are planned before it, so they never pick the comment or
+			// document the write creates, nor see the claim it changes; an issue.created's reads
+			// are on its parent.
+			readsOn := *ev.IssueKey
+			if ev.Type == "issue.created" {
+				readsOn = ""
+				var is rpIssueCreated
+				if json.Unmarshal(ev.Payload, &is) == nil && is.Parent != nil {
+					readsOn = *is.Parent
+				}
+			}
+			var reads []*replayAction
+			if readsOn != "" {
+				reads = pl.planReads(readsOn, ev.ID, offset)
+			}
 			act, reason, err := pl.planWrite(ev, offset)
 			if err != nil {
 				return nil, err
@@ -557,16 +575,8 @@ func planReplay(b *replayBundle, o replayOptions) (*replayPlan, error) {
 				pl.p.Counts.NotSent[reason]++
 				continue
 			}
-			readsOn := act.Issue
-			if act.Kind == rkIssueCreate {
-				readsOn = ""
-				var is rpIssueCreated
-				if json.Unmarshal(ev.Payload, &is) == nil && is.Parent != nil {
-					readsOn = *is.Parent
-				}
-			}
-			if readsOn != "" {
-				pl.planReads(readsOn, ev.ID, offset)
+			for _, r := range reads {
+				pl.add(r)
 			}
 			pl.add(act)
 			issuesWithWrites[act.Issue] = true
@@ -826,6 +836,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 			act.Stages = [][]*replayReq{{post}}
 		}
 		pl.issueComments[key] = append(pl.issueComments[key], c.ID)
+		pl.bornAt[c.ID] = offset
 	case "artifact.version":
 		var v rpVersion
 		if err := json.Unmarshal(ev.Payload, &v); err != nil {
@@ -985,6 +996,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 		pl.created[key] = true
 		pl.docs[docID] = &rpDoc{text: spec, size: size}
 		pl.issueDocs[key] = append(pl.issueDocs[key], docID)
+		pl.bornAt[docID] = offset
 		var snap map[string]json.RawMessage
 		_ = json.Unmarshal(ev.Payload, &snap)
 		pl.snap[key] = snap
@@ -1032,6 +1044,7 @@ func (pl *replayPlanner) planWrite(ev replayEvent, offset time.Duration) (*repla
 		act.Stages = [][]*replayReq{{{Method: "POST", Path: "/api/v1/issues/{key}/artifacts", Params: keyParams(key), Person: person, Body: body, Produces: produce}}}
 		pl.docs[a.ID] = &rpDoc{text: text, size: size}
 		pl.issueDocs[key] = append(pl.issueDocs[key], a.ID)
+		pl.bornAt[a.ID] = offset
 	case "comment.resolved":
 		var c rpComment
 		if err := json.Unmarshal(ev.Payload, &c); err != nil {
@@ -1381,27 +1394,37 @@ func replaySynthDoc(n int, salt uint64) string {
 
 // planReads plans the read actions before a write on key at offset: the integer part of the reads
 // per write plus a Bernoulli draw for its fraction, each of a kind drawn from the mix.
-func (pl *replayPlanner) planReads(key string, eventID int64, offset time.Duration) {
+func (pl *replayPlanner) planReads(key string, eventID int64, offset time.Duration) []*replayAction {
 	eid := strconv.FormatInt(eventID, 10)
 	whole, frac := math.Modf(pl.o.reads)
 	n := int(whole)
 	if frac > 0 && replayUnit(pl.o.rngSeed, "reads", eid) < frac {
 		n++
 	}
+	reads := make([]*replayAction, 0, n)
 	for j := range n {
 		u := replayUnit(pl.o.rngSeed, "read-kind", eid, strconv.Itoa(j))
 		at := max(pl.o.from, offset-time.Duration(n-j)*replayReadSpacing)
-		pl.add(pl.readAction(key, pl.o.mix.pick(u), eid, j, at))
+		reads = append(reads, pl.readAction(key, pl.o.mix.pick(u), eid, j, at))
 	}
+	return reads
 }
 
 func (pl *replayPlanner) readAction(key, kind, eid string, j int, at time.Duration) *replayAction {
 	act := &replayAction{Offset: at, Issue: key, Kind: kind}
 	pick := func(ids []string, what string) string {
-		if len(ids) == 0 {
+		// ids are in log order: those born at or after the read are a suffix.
+		n := len(ids)
+		for n > 0 {
+			if born, ok := pl.bornAt[ids[n-1]]; !ok || born < at {
+				break
+			}
+			n--
+		}
+		if n == 0 {
 			return ""
 		}
-		return ids[int(replayHash(pl.o.rngSeed, what, eid, strconv.Itoa(j))%uint64(len(ids)))]
+		return ids[int(replayHash(pl.o.rngSeed, what, eid, strconv.Itoa(j))%uint64(n))]
 	}
 	params := keyParams(key)
 	issueURI := map[string]replayArg{"key_ref": {Ref: &replayRef{idIssue, key}, URI: true}}
@@ -1963,10 +1986,16 @@ func renderBody(v any, local map[replayRef]string, state *replayActionState) any
 	return v
 }
 
-// multipartFile is the multipart body of a file upload: name, actor and the file's bytes.
+// multipartFile is the multipart body of a file upload: name, actor and the file's bytes, under a
+// boundary drawn from the rng seed and the file's seed (multipart.NewWriter's own is random), so
+// one plan sends one body.
 func multipartFile(rngSeed uint64, f *replayFile) (string, []byte, error) {
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
+	boundary := fmt.Sprintf("replay%016x%016x", replayHash(rngSeed, "boundary", f.Seed), replayHash(rngSeed, "boundary2", f.Seed))
+	if err := mw.SetBoundary(boundary); err != nil {
+		return "", nil, err
+	}
 	_ = mw.WriteField("name", f.Name)
 	if f.Actor != nil {
 		actor, _ := json.Marshal(f.Actor)
