@@ -2,34 +2,34 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-631",
-  "completed": "2026-10-28T13:50:40Z",
-  "round": 5,
-  "headReviewed": "the handoff commit this file is pushed in (code head 1a3678ac, on the merge of main 5fbd8391)",
+  "completed": "2026-10-28T14:13:34Z",
+  "round": 6,
+  "headReviewed": "the handoff commit this file is pushed in (code head c862a036, on the merge of main 5fbd8391)",
   "decision": "changes_requested",
   "critical": 0,
   "important": 2,
   "minor": 0,
-  "roundFourFindings": "fixed: nested <pre> and <code>, an open tag inside emphasis, a link or a footnote, an unclosed <pre> across paragraphs and list items, and CRLF and tab after the tag name all leave the file unchanged with exit 0, stable on a second --write; the pi-envoy citation says list",
+  "roundFiveFindings": "fixed: '</pre>' in a comment, an attribute value, a processing instruction, CDATA or a declaration no longer closes; the nesting-count and guard-only tests exist, and each fails when its code path is mutated (nesting count, exactBlocks returning false, VERBATIM_TAG unanchored), checked in a scratch copy",
   "verified": [
-    "restructure.ts --strict on main 5fbd8391's two files: exit 0, byte-identical to the head guides",
-    "checker exit 0 on both guides; bun test of the two test files: 47 pass, 0 fail",
-    "every reproduction from rounds 1-4 leaves the file unchanged or refuses, and a second --write changes nothing",
-    "required checks (lint, typecheck, test, pr-title) at CI head 1a3678ac all queued at 13:50Z; compare 1a3678ac...fdcff9c8 is .legion/ only; PR MERGEABLE"
+    "restructure.ts --strict on main 5fbd8391's two files: exit 0, byte-identical to the head guides; on main 139c61b3's files: exit 0",
+    "checker exit 0 on both guides; bun test of the two test files: 51 pass, 0 fail",
+    "GitHub reports the pull request CONFLICTING with main 139c61b3: git merge-tree conflicts in packages/envoy/cmd/dispatch/README.md (main changed it by 10 lines)",
+    "required checks (lint, typecheck, test, pr-title) at CI head c862a036 queued at 14:07Z; compare c862a036...f2754507 is .legion/ only"
   ],
   "keyFindings": [
     {
       "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts:272",
-      "description": "verbatimCount counts any '</pre>' substring of a raw-HTML span as a close, including one inside an HTML comment or a quoted attribute value, in both markVerbatim and exactBlocks. '<pre>\\n<!-- </pre> -->\\n\\nThis sentence starts on one line\\nand ends on the next.' and 'Intro <pre> then <span title=\"</pre>\">x</span>\\n\\n…' are joined with exit 0; GitHub's POST /markdown renders the joined text inside the still-open <pre>, before with its line break and after without. Fix: count a close only from a token that is exactly a close tag (a whole raw-HTML span or inline html node '</name>'); in HTML block values, skip comments, processing instructions, declarations, CDATA and quoted attribute values before counting closes. Opens may stay loose."
+      "file": "scripts/semantic-line-breaks.ts:977",
+      "description": "Both counters read tags with CommonMark's grammar, but GitHub's output goes through an HTML5 parser, which opens and closes elements elsewhere. Writes with exit 0 and a changed rendering inside a still-open <pre> (GitHub POST /markdown): an open hidden from CommonMark ('Use <?a > <pre> ?> b\\n\\nNext x. Then y.', CDATA and '--!>' comment variants) or rejected by OPEN_TAG ('<span>\\nx <pre class=\"a\"b>\\n\\nNext x. Then y.', '<pre a=b\"c>'), which round 5's guard refused; and a close HTML5 swallows ('<pre>\\n<!-x </pre>\\n\\nNext x. Then y.', '<?x </pre>', '<span a=1 </pre>'). Fix that ends the class: the guard reads every html node's raw value loosely for opens (any '<name' then whitespace, '/' or '>', case-insensitive) and counts no close, so every block from the first such node to the end of the file compares exactly. Only html node values reach GitHub's HTML parser unescaped, so no verbatim element can open before that point."
     },
     {
       "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts:955",
-      "description": "Two load-bearing paths have no test (code quality mutated each; 46 of 46 still passed): the nesting count across blocks (:282; 'Use <pre>a <pre>b</pre>\\n\\nNext x. Then y.\\n\\nz</pre>' must stay unchanged) and exactBlocks, the only refusal for an open tag the block scanner cannot see ('<span>\\n`<pre>`\\n</span>\\n\\nNext x. Then y.' must refuse at line 5). Add both, with the two reproductions above."
+      "file": "packages/envoy/cmd/dispatch/README.md",
+      "description": "The head conflicts with main 139c61b3. Merge main and regenerate the guides with restructure.ts --strict on main's files (exit 0 there today)."
     }
   ],
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at fdcff9c8 (1 High: close counted inside a comment or attribute; 1 Minor: stale brief). Segmentation alone leaves no gap: a tag markVerbatim misses is still counted by exactBlocks",
-    "codeQuality": "Verdict: CHANGES at fdcff9c8 (nesting count and exactBlocks untested; one cleanup: always-true branch and optional chains in verbatimCount and markVerbatim)"
+    "deepReview": "Verdict: CHANGES at f2754507 (2 High: opens HTML5 reads that CommonMark does not, six of them new in round 6; closes HTML5 swallows). script, style, textarea and xmp do not reproduce: GitHub's tagfilter escapes them",
+    "codeQuality": "Verdict: CHANGES at f2754507 (rawHtmlTokens drops a tag OPEN_TAG rejects, a regression; its token skip at :307 is untested)"
   }
 }
