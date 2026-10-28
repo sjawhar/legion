@@ -868,21 +868,23 @@ describe("the related-item check", () => {
         createdLine,
         "Related items (searched by meaning and keywords):",
         "- DSP-1 [in_progress] Billing retries → http://dispatch.test/issues/DSP-1#ask-a1",
-        "  Ask: open",
+        "  Open: no answer yet.",
         "- DSP-2 [in_progress] Billing retries → http://dispatch.test/issues/DSP-2#ask-a2",
-        '  Ask: answered by alice at 2026-09-12T13:20:00Z, chose "Exponential", "Capped"',
+        "  Answered by alice at 2026-09-12T13:20:00Z · options chosen: Exponential, Capped",
         "  Answer text: Back off.",
         "    Cap at an hour.",
         "- DSP-3 [in_progress] Billing retries → http://dispatch.test/issues/DSP-3#ask-a3",
-        "  Ask: answered by alice at 2026-09-12T13:20:00Z, chose no option",
+        "  Answered by alice at 2026-09-12T13:20:00Z · options chosen: none",
         "  Answer text: Never retry.",
         "- DSP-4 [in_progress] Billing retries → http://dispatch.test/issues/DSP-4#ask-a4",
-        "  Ask: closed with no answer: retracted",
+        "  Closed with no answer: retracted by user bob at 2026-09-13T08:00:00Z: Superseded.",
         "- DSP-5 [in_progress] Billing retries → http://dispatch.test/issues/DSP-5#ask-a5",
-        '  Ask: closed after an answer: resolved; last answered by alice at 2026-09-12T13:20:00Z, chose "Linear"',
+        "  Closed after an answer: resolved by user bob at 2026-09-13T08:00:00Z: Superseded.",
+        "  Last answer by alice at 2026-09-12T13:20:00Z · options chosen: Linear",
         "  Answer text: none",
-        // An older server sends no state; the item reads as it did.
+        // An older server sends no state, and the item says so, as a search hit does.
         "- DSP-6 [in_progress] Billing retries → http://dispatch.test/issues/DSP-6#ask-a6",
+        "  Answer state not reported by this Dispatch; open the link to read the ask.",
       ].join("\n")
     );
   });
@@ -974,7 +976,7 @@ describe("the related-item check", () => {
         "Related items (searched by meaning and keywords):",
         "- DSP-9 [in_progress] Billing retries → http://dispatch.test/issues/DSP-9",
         "A past decision may already answer this: DSP-9 [in_progress] Billing retries, answered by alice on 2026-09-12T13:20:00Z → http://dispatch.test/issues/DSP-9#ask-ask-old",
-        '  Ask: answered by alice at 2026-09-12T13:20:00Z, chose "Exponential", "Capped"',
+        "  Answered by alice at 2026-09-12T13:20:00Z · options chosen: Exponential, Capped",
         "  Answer text: Changed my mind.",
         "    Back off exponentially.",
         followsLine,
@@ -982,7 +984,7 @@ describe("the related-item check", () => {
     );
   });
 
-  test("an older server's past decision, with no ask state, prints only its line", async () => {
+  test("an older server's past decision, with no ask state, says its state was not reported", async () => {
     const decision: WriteSuggestion = {
       ...askItem("DSP-9", "ask-old"),
       answered_by: "alice",
@@ -1007,6 +1009,7 @@ describe("the related-item check", () => {
         "Related items (searched by meaning and keywords):",
         "- DSP-9 [in_progress] Billing retries → http://dispatch.test/issues/DSP-9",
         "A past decision may already answer this: DSP-9 [in_progress] Billing retries, answered by alice on 2026-09-12T13:20:00Z → http://dispatch.test/issues/DSP-9#ask-ask-old",
+        "  Answer state not reported by this Dispatch; open the link to read the ask.",
         followsLine,
       ].join("\n")
     );

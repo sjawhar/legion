@@ -663,8 +663,9 @@ func milliseconds(d time.Duration) *int {
 }
 
 // fillRelatedItems turns the search's results into Related and Decision. Everything the input
-// excludes is left out first; the rest carry their ask state (attachAskStates), which a failure
-// to read leaves nil rather than failing the check. Each owner (an issue, or a project document)
+// excludes is left out first; the rest carry their ask state (attachAskStates). A failure to read
+// those states leaves every item's nil, and so no Decision, rather than failing the check or
+// keeping the states read before it. Each owner (an issue, or a project document)
 // keeps only its best-ranked item, so an issue matched through its title, its spec and a comment
 // fills one place, not three. Related then takes the best suggestionRelatedCount with every item
 // on an open owner ahead of every item on a done issue, keeping the search's order within each;
@@ -681,7 +682,12 @@ func (s *server) fillRelatedItems(
 		}
 	}
 	if err := s.attachAskStates(ctx, s.deps.Store.Pool, candidates); err != nil {
+		// attachAskStates sets each row's state before it reads resolved asks' answers, so a
+		// failure partway would leave a resolved ask that was answered showing no answer.
 		slog.Warn("dispatch: related items carry no ask state", "error", err)
+		for index := range candidates {
+			candidates[index].Ask = nil
+		}
 	}
 
 	seen := map[string]bool{}

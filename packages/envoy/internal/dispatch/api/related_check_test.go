@@ -726,6 +726,108 @@ func TestRelatedCheckShowsAnOpenAsk(t *testing.T) {
 	}
 }
 
+// A failure partway through reading the asks' states leaves no item an ask state. An ask answered
+// and then retracted keeps its answer only in its events, read after every row's state; with
+// events locked past the read's deadline, keeping the states already read would show that ask as
+// closed with no answer and still name the answered one the decision.
+func TestRelatedCheckCarriesNoAskStateWhenTheAnswersCannotBeRead(t *testing.T) {
+	fixture := newAskStateFixture(t, "PARTIAL")
+	fixture.answer(t, "twice", "alice", map[string]any{"selected": []string{"Brass"}})
+	retractedAnswer := fixture.answer(t, "closed", "alice", map[string]any{"selected": []string{"Steel"}, "text": "Steel pilots."})
+	if _, err := fixture.database.Pool.Exec(context.Background(), `
+		update asks
+		set state = 'resolved', answer = null,
+		    resolution = jsonb_build_object(
+		      'kind', 'retracted',
+		      'reason', 'removed from the document in version 2',
+		      'actor', jsonb_build_object('kind', 'system', 'id', 'document-settlement'),
+		      'at', now()
+		    )
+		where id = $1
+	`, fixture.asks["closed"]); err != nil {
+		t.Fatalf("retract the answered ask: %v", err)
+	}
+	var results []model.SearchResult
+	for _, name := range []string{"twice", "closed"} {
+		var issueKey string
+		if err := fixture.database.Pool.QueryRow(context.Background(),
+			`select issue_key from asks where id = $1`, fixture.asks[name]).Scan(&issueKey); err != nil {
+			t.Fatalf("read the %s ask's issue: %v", name, err)
+		}
+		results = append(results, model.SearchResult{
+			Kind: "ask", ID: fixture.asks[name], Owner: model.SearchOwner{Kind: "issue", Key: issueKey, Status: "todo"},
+		})
+	}
+	fill := func(ctx context.Context) (model.Suggestions, map[string]map[string]json.RawMessage) {
+		suggestions := model.Suggestions{}
+		fixture.srv.fillRelatedItems(ctx, relatedInput{project: "PARTIAL"}, slices.Clone(results), &suggestions)
+		encoded, err := json.Marshal(suggestions)
+		if err != nil {
+			t.Fatalf("encode the related items: %v", err)
+		}
+		var wire struct {
+			Related []map[string]json.RawMessage `json:"related"`
+		}
+		if err := json.Unmarshal(encoded, &wire); err != nil {
+			t.Fatalf("decode the related items: %v", err)
+		}
+		byID := map[string]map[string]json.RawMessage{}
+		for _, item := range wire.Related {
+			byID[rawString(t, item["id"])] = item
+		}
+		return suggestions, byID
+	}
+
+	t.Run("answers read", func(t *testing.T) {
+		suggestions, wire := fill(context.Background())
+		if _, ok := wire[fixture.asks["closed"]]["ask"]; !ok {
+			t.Fatalf("related = %v, want the retracted ask's state", wire)
+		}
+		for _, item := range suggestions.Related {
+			if item.ID != fixture.asks["closed"] {
+				continue
+			}
+			if item.Ask == nil || item.Ask.State != "resolved" || item.Ask.Answer == nil ||
+				!item.Ask.Answer.At.Equal(retractedAnswer.Answer.At) || !slices.Equal(item.Ask.Answer.Selected, []string{"Steel"}) {
+				t.Fatalf("ask state = %+v, want resolved with alice's Steel answer", item.Ask)
+			}
+		}
+		if suggestions.Decision == nil || suggestions.Decision.ID != fixture.asks["twice"] {
+			t.Fatalf("decision = %+v, want the answered ask", suggestions.Decision)
+		}
+	})
+
+	t.Run("answers locked", func(t *testing.T) {
+		lockTx, err := fixture.database.Pool.Begin(context.Background())
+		if err != nil {
+			t.Fatalf("begin lock tx: %v", err)
+		}
+		t.Cleanup(func() { _ = lockTx.Rollback(context.Background()) })
+		if _, err := lockTx.Exec(context.Background(), "lock table events in access exclusive mode"); err != nil {
+			t.Fatalf("lock events: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		suggestions, wire := fill(ctx)
+		if len(suggestions.Related) != 2 {
+			t.Fatalf("related = %+v, want both asks listed", suggestions.Related)
+		}
+		for _, item := range suggestions.Related {
+			if item.Ask != nil {
+				t.Fatalf("ask %s state = %+v, want none once the answers could not be read", item.ID, item.Ask)
+			}
+		}
+		for id, item := range wire {
+			if _, ok := item["ask"]; ok {
+				t.Fatalf("related item %s = %v, want no ask key", id, item)
+			}
+		}
+		if suggestions.Decision != nil {
+			t.Fatalf("decision = %+v, want none once the ask states could not be read", suggestions.Decision)
+		}
+	})
+}
+
 // An issue matched through its title and through its spec fills one place, so the other places go
 // to other owners.
 func TestRelatedCheckListsOneItemPerOwner(t *testing.T) {

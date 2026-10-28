@@ -16789,6 +16789,117 @@ ${body}${fence}${note ? `
 ${HUMAN_EDIT_DIFF_CUT_NOTE}` : ""}`;
 }
 
+// ../envoy-client/src/search-answer.ts
+function pageSummaryText(offset, count, total) {
+  return `showing ${offset + 1}-${offset + count} of ${total}`;
+}
+function searchHitLine(result, baseUrl) {
+  const href = new URL(result.href, baseUrl).toString();
+  const { owner } = result;
+  if (owner.kind === "document") {
+    const reference = dispatchDocumentRef(owner.project, owner.slug);
+    return `${reference} [document] ${owner.name} - ${result.kind}: ${snippetText(result.snippet)} -> ${href}`;
+  }
+  const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
+  const label = `${owner.key} [${owner.status}] ${owner.title} - ${result.kind}${artifactName}`;
+  return `${label}: ${snippetText(result.snippet)} -> ${href}`;
+}
+function indentedText(text) {
+  return text.split(/\r?\n/u).join(`
+    `);
+}
+function answerLines(lead, answer) {
+  const selected = answer.selected.length === 0 ? "none" : answer.selected.join(", ");
+  const text = answer.text === null || answer.text === "" ? "none" : indentedText(answer.text);
+  return [
+    `  ${lead} by ${answer.user} at ${answer.at} \xB7 options chosen: ${selected}`,
+    `  Answer text: ${text}`
+  ];
+}
+function resolutionText(resolution) {
+  return `${resolution.kind} by ${actorText(resolution.actor)} at ${resolution.at}: ${indentedText(resolution.reason)}`;
+}
+function askStateLines(ask) {
+  if (ask === undefined) {
+    return ["  Answer state not reported by this Dispatch; open the link to read the ask."];
+  }
+  switch (ask.state) {
+    case "open":
+      return ["  Open: no answer yet."];
+    case "answered":
+      return answerLines("Answered", ask.answer);
+    case "resolved":
+      return ask.answer === undefined ? [`  Closed with no answer: ${resolutionText(ask.resolution)}`] : [
+        `  Closed after an answer: ${resolutionText(ask.resolution)}`,
+        ...answerLines("Last answer", ask.answer)
+      ];
+  }
+}
+function searchResultLine(result, baseUrl) {
+  const line = searchHitLine(result, baseUrl);
+  return result.kind === "ask" ? [line, ...askStateLines(result.ask)].join(`
+`) : line;
+}
+function searchAnswer(search, query, offset, configUrl) {
+  const results = search.results;
+  const count = results.length;
+  const lines = results.map((result) => searchResultLine(result, configUrl));
+  const noun = count === 1 ? "result" : "results";
+  const noResults = `No results for "${query}".`;
+  const degraded = search.degraded === SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE ? "Searched by keyword only: meaning search was unavailable for this request." : undefined;
+  if (typeof search.total !== "number") {
+    if (offset !== undefined && offset > 0) {
+      throw new Error(`Dispatch answered without a total: it predates search paging and ignored offset ${offset}, so this would be its first page again.`);
+    }
+    return {
+      text: count === 0 ? [noResults, ...degraded === undefined ? [] : [degraded]].join(`
+`) : [
+        `${count} ${noun} for "${query}" (${search.took_ms} ms)`,
+        ...degraded === undefined ? [] : [degraded],
+        ...lines
+      ].join(`
+`),
+      details: { query, results, ...degraded === undefined ? {} : { degraded: search.degraded } }
+    };
+  }
+  const { total, reachable, offset: pageOffset } = search;
+  const end = pageOffset + count;
+  const cut = reachable < total ? `Each kind lists only its best ${SEARCH_KIND_DEPTH} matches, so ${reachable} of the ${total} can be paged to; narrow the query or name a project to reach the rest.` : undefined;
+  const details = {
+    query,
+    results,
+    total,
+    reachable,
+    offset: pageOffset,
+    limit: search.limit,
+    ...degraded === undefined ? {} : { degraded: search.degraded }
+  };
+  if (count === 0) {
+    return {
+      text: total === 0 ? [noResults, ...degraded === undefined ? [] : [degraded]].join(`
+`) : [
+        `No results for "${query}" at offset ${pageOffset}: it matches ${total}, and the pages reach the first ${reachable}.`,
+        ...degraded === undefined ? [] : [degraded],
+        ...cut === undefined ? [] : [cut]
+      ].join(`
+`),
+      details
+    };
+  }
+  const showing = pageOffset === 0 && count === total ? "" : `${pageSummaryText(pageOffset, count, total)}, `;
+  return {
+    text: [
+      `${count} ${noun} for "${query}" (${showing}${search.took_ms} ms)`,
+      ...degraded === undefined ? [] : [degraded],
+      ...cut === undefined ? [] : [cut],
+      ...lines,
+      ...end < reachable ? [`Next page: offset ${end}.`] : []
+    ].join(`
+`),
+    details
+  };
+}
+
 // ../envoy-client/src/related-check.ts
 function relatedCheckLines(suggestions, context) {
   if (suggestions === null || suggestions === undefined) {
@@ -16807,9 +16918,7 @@ function relatedCheckLines(suggestions, context) {
     if (decision !== undefined && decision !== null) {
       const when = decision.answered_at === undefined ? "" : ` on ${decision.answered_at}`;
       lines.push(`A past decision may already answer this: ${suggestionLabel(decision)}, answered by ${decision.answered_by}${when} \u2192 ${absoluteHref(decision.href, context.configUrl)}`);
-      if (decision.ask !== undefined && decision.ask !== null) {
-        lines.push(...askStateLines(decision.ask));
-      }
+      lines.push(...askLines(decision.ask));
     }
     for (const match of suggestions.title_matches ?? []) {
       lines.push(`Title overlaps you forced past: ${match.key} [${match.status}] ${match.title} \u2192 ${absoluteHref(match.href, context.configUrl)}`);
@@ -16878,8 +16987,8 @@ function searchModeWords(suggestions) {
 function relatedItemLines(item, configUrl) {
   try {
     const lines = [`- ${suggestionLabel(item)} \u2192 ${absoluteHref(item.href, configUrl)}`];
-    if (item.kind === "ask" && item.ask !== undefined && item.ask !== null) {
-      lines.push(...askStateLines(item.ask));
+    if (item.kind === "ask") {
+      lines.push(...askLines(item.ask));
     }
     return lines;
   } catch (error) {
@@ -16887,36 +16996,15 @@ function relatedItemLines(item, configUrl) {
     return [`- ${String(href)} (this client could not show it: ${messageFor(error)})`];
   }
 }
-function askStateLines(ask) {
+function askLines(ask) {
   try {
-    if (ask.state === "open")
-      return ["  Ask: open"];
-    if (ask.state === "answered") {
-      return [`  Ask: answered by ${answerSummary(ask.answer)}`, ...answerTextLines(ask.answer)];
-    }
-    if (ask.answer === undefined || ask.answer === null) {
-      return [`  Ask: closed with no answer: ${ask.resolution.kind}`];
-    }
-    return [
-      `  Ask: closed after an answer: ${ask.resolution.kind}; last answered by ${answerSummary(ask.answer)}`,
-      ...answerTextLines(ask.answer)
-    ];
+    const lines = askStateLines(ask ?? undefined);
+    if (!Array.isArray(lines))
+      throw new Error(`unknown ask state ${String(ask?.state)}`);
+    return lines;
   } catch (error) {
-    return [`  Ask: this client could not show it: ${messageFor(error)}`];
+    return [`  This client could not show where the ask stands: ${messageFor(error)}`];
   }
-}
-function answerSummary(answer) {
-  const selected = answer.selected ?? [];
-  const chose = selected.length === 0 ? "chose no option" : `chose ${selected.map((label) => JSON.stringify(label)).join(", ")}`;
-  return `${answer.user} at ${answer.at}, ${chose}`;
-}
-function answerTextLines(answer) {
-  const text = answer.text?.trim() ?? "";
-  if (text === "")
-    return ["  Answer text: none"];
-  return [`  Answer text: ${text.split(`
-`).join(`
-    `)}`];
 }
 function suggestionLabel(item) {
   if (item.owner.kind === "issue") {
@@ -16938,117 +17026,6 @@ function notMadeLine(reason, context, searchQuery) {
 }
 function searchWords(text) {
   return (text.match(/[\p{L}\p{N}_]+/gu) ?? []).filter((word) => (word.match(/\p{L}/gu) ?? []).length >= 4).slice(0, 3).join(" ");
-}
-
-// ../envoy-client/src/search-answer.ts
-function pageSummaryText(offset, count, total) {
-  return `showing ${offset + 1}-${offset + count} of ${total}`;
-}
-function searchHitLine(result, baseUrl) {
-  const href = new URL(result.href, baseUrl).toString();
-  const { owner } = result;
-  if (owner.kind === "document") {
-    const reference = dispatchDocumentRef(owner.project, owner.slug);
-    return `${reference} [document] ${owner.name} - ${result.kind}: ${snippetText(result.snippet)} -> ${href}`;
-  }
-  const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
-  const label = `${owner.key} [${owner.status}] ${owner.title} - ${result.kind}${artifactName}`;
-  return `${label}: ${snippetText(result.snippet)} -> ${href}`;
-}
-function indentedText(text) {
-  return text.split(/\r?\n/u).join(`
-    `);
-}
-function answerLines(lead, answer) {
-  const selected = answer.selected.length === 0 ? "none" : answer.selected.join(", ");
-  const text = answer.text === null || answer.text === "" ? "none" : indentedText(answer.text);
-  return [
-    `  ${lead} by ${answer.user} at ${answer.at} \xB7 options chosen: ${selected}`,
-    `  Answer text: ${text}`
-  ];
-}
-function resolutionText(resolution) {
-  return `${resolution.kind} by ${actorText(resolution.actor)} at ${resolution.at}: ${indentedText(resolution.reason)}`;
-}
-function askStateLines2(ask) {
-  if (ask === undefined) {
-    return ["  Answer state not reported by this Dispatch; open the link to read the ask."];
-  }
-  switch (ask.state) {
-    case "open":
-      return ["  Open: no answer yet."];
-    case "answered":
-      return answerLines("Answered", ask.answer);
-    case "resolved":
-      return ask.answer === undefined ? [`  Closed with no answer: ${resolutionText(ask.resolution)}`] : [
-        `  Closed after an answer: ${resolutionText(ask.resolution)}`,
-        ...answerLines("Last answer", ask.answer)
-      ];
-  }
-}
-function searchResultLine(result, baseUrl) {
-  const line = searchHitLine(result, baseUrl);
-  return result.kind === "ask" ? [line, ...askStateLines2(result.ask)].join(`
-`) : line;
-}
-function searchAnswer(search, query, offset, configUrl) {
-  const results = search.results;
-  const count = results.length;
-  const lines = results.map((result) => searchResultLine(result, configUrl));
-  const noun = count === 1 ? "result" : "results";
-  const noResults = `No results for "${query}".`;
-  const degraded = search.degraded === SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE ? "Searched by keyword only: meaning search was unavailable for this request." : undefined;
-  if (typeof search.total !== "number") {
-    if (offset !== undefined && offset > 0) {
-      throw new Error(`Dispatch answered without a total: it predates search paging and ignored offset ${offset}, so this would be its first page again.`);
-    }
-    return {
-      text: count === 0 ? [noResults, ...degraded === undefined ? [] : [degraded]].join(`
-`) : [
-        `${count} ${noun} for "${query}" (${search.took_ms} ms)`,
-        ...degraded === undefined ? [] : [degraded],
-        ...lines
-      ].join(`
-`),
-      details: { query, results, ...degraded === undefined ? {} : { degraded: search.degraded } }
-    };
-  }
-  const { total, reachable, offset: pageOffset } = search;
-  const end = pageOffset + count;
-  const cut = reachable < total ? `Each kind lists only its best ${SEARCH_KIND_DEPTH} matches, so ${reachable} of the ${total} can be paged to; narrow the query or name a project to reach the rest.` : undefined;
-  const details = {
-    query,
-    results,
-    total,
-    reachable,
-    offset: pageOffset,
-    limit: search.limit,
-    ...degraded === undefined ? {} : { degraded: search.degraded }
-  };
-  if (count === 0) {
-    return {
-      text: total === 0 ? [noResults, ...degraded === undefined ? [] : [degraded]].join(`
-`) : [
-        `No results for "${query}" at offset ${pageOffset}: it matches ${total}, and the pages reach the first ${reachable}.`,
-        ...degraded === undefined ? [] : [degraded],
-        ...cut === undefined ? [] : [cut]
-      ].join(`
-`),
-      details
-    };
-  }
-  const showing = pageOffset === 0 && count === total ? "" : `${pageSummaryText(pageOffset, count, total)}, `;
-  return {
-    text: [
-      `${count} ${noun} for "${query}" (${showing}${search.took_ms} ms)`,
-      ...degraded === undefined ? [] : [degraded],
-      ...cut === undefined ? [] : [cut],
-      ...lines,
-      ...end < reachable ? [`Next page: offset ${end}.`] : []
-    ].join(`
-`),
-    details
-  };
 }
 
 // ../envoy-client/src/dispatch-execute.ts

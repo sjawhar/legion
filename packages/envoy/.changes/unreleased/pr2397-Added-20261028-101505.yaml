@@ -10,7 +10,8 @@ body: |-
     it did: `outcome` `found`, `none` or `not_made` (with the reason in `missing`), `search`
     `meaning_and_keywords` or `keywords_only` (with `search_note` saying why), `search_query` for a
     reader's own `dispatch search`, `related` (each ask item with `ask`, its state, latest answer,
-    who gave it, when and the options chosen) and `decision`; a forced issue create also lists the
+    who gave it, when and the options chosen; no item carries `ask`, and there is no `decision`,
+    when the asks' states could not be read) and `decision`; a forced issue create also lists the
     titles it forced past in `title_matches`. A document edit's advice gains
     `decision_block_checks`, `{block_id, question, suggestions}` for each block it added in
     document order, the first five checked together under the one 5 s bound and the rest answered

@@ -1,11 +1,6 @@
-import type {
-  AskAnswer,
-  SearchAsk,
-  Suggestions,
-  WriteAdvice,
-  WriteSuggestion,
-} from "@legion/contracts";
+import type { SearchAsk, Suggestions, WriteAdvice, WriteSuggestion } from "@legion/contracts";
 import { messageFor } from "./errors";
+import { askStateLines } from "./search-answer";
 
 /** What a not-made line needs to name the search to run by hand. */
 export interface RelatedCheckContext {
@@ -53,11 +48,9 @@ export function relatedCheckLines(
       lines.push(
         `A past decision may already answer this: ${suggestionLabel(decision)}, answered by ${decision.answered_by}${when} → ${absoluteHref(decision.href, context.configUrl)}`
       );
-      // One item per owner can collapse the decision's ask out of the related items, so its latest
-      // answer and options print here; an older server sends no state and gets the line alone.
-      if (decision.ask !== undefined && decision.ask !== null) {
-        lines.push(...askStateLines(decision.ask));
-      }
+      // One item per owner can collapse the decision's ask out of the related items, so where it
+      // stands prints here, as under any ask item.
+      lines.push(...askLines(decision.ask));
     }
     for (const match of suggestions.title_matches ?? []) {
       lines.push(
@@ -152,8 +145,8 @@ function searchModeWords(suggestions: Suggestions): string | undefined {
 function relatedItemLines(item: WriteSuggestion, configUrl: string): string[] {
   try {
     const lines = [`- ${suggestionLabel(item)} → ${absoluteHref(item.href, configUrl)}`];
-    if (item.kind === "ask" && item.ask !== undefined && item.ask !== null) {
-      lines.push(...askStateLines(item.ask));
+    if (item.kind === "ask") {
+      lines.push(...askLines(item.ask));
     }
     return lines;
   } catch (error) {
@@ -164,42 +157,18 @@ function relatedItemLines(item: WriteSuggestion, configUrl: string): string[] {
 }
 
 /**
- * Where an ask stands, under the line that names it: open, its latest answer, or how it closed.
- * Never throws: a state this client cannot read costs only these lines, never the item above them.
+ * Where an ask stands, under the line that names it, as under a search hit (`askStateLines`), so
+ * an ask with no state says the server did not report one. Never throws: a state this client
+ * cannot read costs only these lines, never the line above them.
  */
-function askStateLines(ask: SearchAsk): string[] {
+function askLines(ask: SearchAsk | null | undefined): string[] {
   try {
-    if (ask.state === "open") return ["  Ask: open"];
-    if (ask.state === "answered") {
-      return [`  Ask: answered by ${answerSummary(ask.answer)}`, ...answerTextLines(ask.answer)];
-    }
-    if (ask.answer === undefined || ask.answer === null) {
-      return [`  Ask: closed with no answer: ${ask.resolution.kind}`];
-    }
-    return [
-      `  Ask: closed after an answer: ${ask.resolution.kind}; last answered by ${answerSummary(ask.answer)}`,
-      ...answerTextLines(ask.answer),
-    ];
+    const lines = askStateLines(ask ?? undefined);
+    if (!Array.isArray(lines)) throw new Error(`unknown ask state ${String(ask?.state)}`);
+    return lines;
   } catch (error) {
-    return [`  Ask: this client could not show it: ${messageFor(error)}`];
+    return [`  This client could not show where the ask stands: ${messageFor(error)}`];
   }
-}
-
-/** `<who> at <time>, chose "<a>", "<b>"`, or `chose no option`. */
-function answerSummary(answer: AskAnswer): string {
-  const selected = answer.selected ?? [];
-  const chose =
-    selected.length === 0
-      ? "chose no option"
-      : `chose ${selected.map((label) => JSON.stringify(label)).join(", ")}`;
-  return `${answer.user} at ${answer.at}, ${chose}`;
-}
-
-/** The answer's text under its summary, each later line indented under the first. */
-function answerTextLines(answer: AskAnswer): string[] {
-  const text = answer.text?.trim() ?? "";
-  if (text === "") return ["  Answer text: none"];
-  return [`  Answer text: ${text.split("\n").join("\n    ")}`];
 }
 
 function suggestionLabel(item: WriteSuggestion): string {

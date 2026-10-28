@@ -1551,10 +1551,11 @@ export interface DuplicateCandidate {
 
 /**
  * One item the related-item check (LEGION-550) judges like what was just filed: a
- * search hit over the same project. `ask` is where an ask item stands (absent from an older
- * Dispatch). `answered_by`/`answered_at` are set only when this is `Suggestions.decision` — the
- * "past decision" case, where the agent needs who answered and when, not just a link — and repeat
- * `ask.answer`'s user and time for clients built before `ask`.
+ * search hit over the same project. `ask` is where an ask item stands, absent from an older
+ * Dispatch and when the check could not read the asks' states (no item then carries `ask`, and
+ * there is no `decision`). `answered_by`/`answered_at` are set only when this is
+ * `Suggestions.decision` — the "past decision" case, where the agent needs who answered and when,
+ * not just a link — and repeat `ask.answer`'s user and time for clients built before `ask`.
  */
 export interface WriteSuggestion {
   readonly kind: SearchResultKind;
