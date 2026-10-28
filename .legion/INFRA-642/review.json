@@ -2,25 +2,17 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-642",
-  "completed": "2026-10-28T18:30:33Z",
-  "round": 3,
-  "decision": "changes_requested",
-  "reviewedCodeHead": "f5035f9e07af4aeb6c225ca9af4d824053ac1fc6",
-  "roundTwoFindings": "All three fixed at f5035f9e: main's no-change check is back in applyLive only (it matches main 08572e01 line for line); docs/crafted holds NestedLinkUpdate, FirstText and NestedValue once, with no production caller; the ledger.go, persistence.go and livewrite.go comments name recordLiveOperation.",
-  "ci": "Required set (lint, typecheck, test, pr-title) success at CI head f5035f9e; compare to 7825d253 handoffsOnly true. But the run's merge ref bae11d23 fails to build the docs tests: 'margin_equivalence_compare_test.go:343:30: undefined: blockTokens' (Dispatch Go suite on Postgres 16, envoy-go-race), because main's #2451 replaced blockTokens with encodedTokens. GitHub reports the PR dirty (conflicting) against main a409c128.",
+  "completed": "2026-10-28T20:34:09Z",
+  "round": 4,
+  "scope": "Narrowed by the INFRA-512 architect (2026-10-28T18:32Z) to the merge with main and round 3's items.",
+  "decision": "approved",
+  "reviewedCodeHead": "9346736e045f124f7454180ad4b8e50e017ff189",
+  "ci": "Required set (lint, typecheck, test, pr-title) completed success at CI head 9346736e; compare to 7b627b00 handoffsOnly true, 2 files. At approval the non-required envoy/dispatch lanes were still queued on GitHub's runners (queued since 19:07Z); the implementer and tester ran the whole docs package and TestRenderReuse* locally at 9346736e.",
+  "threads": "4 threads, all answered by the reviewer as accepted and resolved by the implementer: PRRT_kwDORFy7ds6xNCXg, PRRT_kwDORFy7ds6xNCXs (fixed in f5035f9e), PRRT_kwDORFy7ds6xQ9x4, PRRT_kwDORFy7ds6xQ9yD (fixed in 9346736e).",
+  "roundThreeItems": "Each checked against the code: renderings appended with updates/versions/marginRooms in recordLiveOperation and cleared together in finishLiveWrite; applyLive in main's form (op.read after forkLive, forkMarkdown taken before mutate, snapshot/change/drop order); applyMargin's warm-fork publishedRendering {op.read, rendered.markdown}, zero for a cold fork; marginOnly skip in changedBy after consumed, r.markdown nil still renders, nil asks, observerMarginOnly counted; marginOnly set in Apply beside inRoom; render_reuse_test E2 and accounting updated; AGENTS.md says three cases; encodedTokens in place of blockTokens; applyMargin doc states it never answers ErrNoChanges.",
+  "thermonuclear": "At 7b627b00 (code 9346736e): deep review and code quality both report no defect.",
   "critical": 0,
-  "important": 1,
-  "minor": 1,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/docs/margin_equivalence_compare_test.go",
-      "description": "The PR conflicts with main, and its docs tests do not build against main (line 343 calls blockTokens, which #2451 removed; use encodedTokens). Merge main. #2453 rewrote the same record step and observer loop, so the merge must: append renderings beside updates/versions/marginRooms in recordLiveOperation and clear them together in finishLiveWrite; keep applyLive in main's form, with the forkRead/forkMarkdown handling and the no-change snapshot, change and drop in main's order; give applyMargin a warm-fork rendering of {read, write.markdown} with no ask blocks, and zero for a cold fork; place the marginOnly skip after consumed(update), keep the r.markdown == nil render, hand classify nil asks, and count the skip in renderPathCounts; set marginOnly inside Apply beside inRoom; update render_reuse_test expectations (E2 beforeFromWrite) and AGENTS.md's 'two cases'."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/mutation.go",
-      "description": "Lines 348-349: applyMargin's doc promises websocket.ErrNoChanges for a write that changed nothing; a marks-map Set always adds an item, and all five ProjectMark callers treat every error as a failure. State the real rule there (the reason is now written in applyLive at 239-240)."
-    }
-  ]
+  "important": 0,
+  "minor": 0,
+  "keyFindings": []
 }
