@@ -327,9 +327,9 @@ func judgeSuggestionPageInTransaction(ctx context.Context, pool *store.Pool, pag
 // events.Broker.Append takes the database-wide commit-order lock before its insert and holds it
 // until its transaction commits, and nothing else inserts an event
 // (TestOnlyTheBrokerInsertsEvents), so no id at or below a committed one can still commit, and a
-// page holds only committed events. dispatch://INFRA-591 removes that lock and lists this sweep
-// among the event log's readers it moves to events.Horizon, which names the id below which
-// nothing can still commit.
+// page holds only committed events. That rests on the commit-order lock in events.Broker.Append,
+// which a later change may replace: one that does must move this sweep, with the event log's
+// other readers by id, to reading only below the id under which nothing can still commit.
 func judgeSuggestionPage(ctx context.Context, tx pgx.Tx, page int, settle time.Duration) (full bool, settlesIn time.Duration, err error) {
 	var cursor *int64
 	if err := tx.QueryRow(ctx, `select event_id from suggestion_outcome_cursor for update`).Scan(&cursor); err != nil {

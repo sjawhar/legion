@@ -291,6 +291,11 @@ func main() {
 		EditNoticeQuiet: boot.EditNoticeQuiet,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
+	// The asks a close or a reopen by a release older than the withdrawal left: at boot, then on an
+	// interval below. It appends events and takes no copy lock, so it runs after
+	// restoreDecidedWordings, which takes the copy lock (see below).
+	issueAskRepairDeps := api.Deps{Store: database, Docs: documentService, Events: broker}
+	repairIssueAsks(ctx, issueAskRepairDeps, issueAskRepairBootTimeout)
 	// The seed appends events, so it runs after restoreDecidedWordings, which takes the copy lock:
 	// TestCopyLockComesBeforeEveryPendingRowAndEvent reads main as one transaction.
 	if err := api.SeedRepoProjects(store.WithTransactionTracking(ctx), database, broker, boot.RepoProjects); err != nil {
@@ -341,16 +346,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Two envoy-dispatch processes serve one Postgres and one NATS (INFRA-66), so each background
+	// Two envoy-dispatch processes serve one Postgres and one NATS, so each background
 	// loop below either runs once overall or is deliberately per-process. The ones that must run
 	// once overall take a named lease on this pool for the length of their pass (duty.Exclusive):
 	// a lease is a session-level advisory lock on a connection of its own, so it needs a pool the
 	// shared one's request connections are not spent on. A boot that cannot open it is a boot
 	// whose loops would each run everywhere, so it ends here.
 	//
-	// The loops come in these shapes (INFRA-607), so that a database nobody writes costs them
-	// nothing except where GitHub gives them nothing to wake on, and the two timers of the last
-	// shape:
+	// The loops come in these shapes, so that a database nobody writes costs them nothing except
+	// where GitHub gives them nothing to wake on, and the three timers of the last shape:
 	//   - woken loops, which run a pass at start and then only when a Postgres notification on the
 	//     shared listener below says their work may have changed, or when a due time their last
 	//     pass asked for comes round: the embedding queue (embedqueue.WakeChannel), the reference
@@ -372,9 +376,10 @@ func main() {
 	//     once per process: two tickers started minutes apart almost never meet inside a pass, so
 	//     the lease alone would exclude nothing.
 	//   - timers that poll the database: the block-index reconciliation (every 30 s, 2 s while a
-	//     batch is full) and the edit-notice sweep (every 5 s), each recording its passes in
-	//     duty_passes like the timers above; each tick sends its statements whether or not
-	//     anything is owed.
+	//     batch is full), the edit-notice sweep (every 5 s) and the repair of closed and reopened
+	//     issues' asks (api.RunIssueAskRepair, every 10 minutes on a plain ticker, after the
+	//     boot's own unleased pass), each recording its passes in duty_passes like the timers
+	//     above; each tick sends its statements whether or not anything is owed.
 	//
 	// The shared listener is one pglisten.Hub per process, on one held connection of the store's
 	// listener pool, carrying every woken loop's channel. Every wake is registered before it runs
@@ -398,8 +403,9 @@ func main() {
 	//     rooms resident in this process that the other process's writes left behind the
 	//     durable head, so it has to run wherever a room is resident).
 	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
-	//     retirePlainRefreshTokens, restoreDecidedWordings and SeedRepoProjects above, and the
-	//     embedding coverage pass (two processes' passes at once leave what one leaves).
+	//     retirePlainRefreshTokens, restoreDecidedWordings, repairIssueAsks and SeedRepoProjects
+	//     above, and the embedding coverage pass (two processes' passes at once leave what one
+	//     leaves).
 	leases, err := database.Pool.Leases()
 	if err != nil {
 		slog.Error("dispatch: open the lease pool for the maintenance loops", "error", err)
@@ -481,6 +487,9 @@ func main() {
 	// rebuild-refs marks - and each comment, ask and issue message citing a block (`#b-`) that such
 	// a build indexed without the block grammar.
 	go documentService.RunBlockIndexReconciliation(ctx, leases)
+	// The asks a process older than the withdrawal leaves on an issue it closes or
+	// reopens during a roll are withdrawn or restored every interval after the boot's own pass.
+	go api.RunIssueAskRepair(ctx, issueAskRepairDeps, leases)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {
@@ -944,6 +953,28 @@ func restoreDecidedWordings(ctx context.Context, documents *docs.Service, timeou
 				return nil, err
 			}
 			return []any{"restored", restored, "copies", copies}, nil
+		})
+}
+
+// issueAskRepairBootTimeout bounds the boot's repair of the asks of closed and reopened issues.
+// Each issue commits on its own, so a repair cut short keeps what it repaired, and the interval
+// pass (api.RunIssueAskRepair) repairs what it left.
+const issueAskRepairBootTimeout = 30 * time.Second
+
+// repairIssueAsks is the boot's repair of the asks a close or a reopen by a release older than
+// the withdrawal left (api.RepairIssueAsks), bounded by timeout: open asks on closed issues are
+// withdrawn, and withdrawn asks on open issues are restored. It sweeps only the closed issues'
+// documents marked owing a settlement within the last api.IssueAskRepairInterval, so a boot does
+// not read every closed issue's documents before it serves; the interval pass's first run sweeps
+// them all. Each issue it repairs has its own line; this logs the counts. A repair that fails or
+// runs out of time is logged and the start goes on, since api.RunIssueAskRepair repairs the rest
+// every api.IssueAskRepairInterval.
+func repairIssueAsks(ctx context.Context, deps api.Deps, timeout time.Duration) {
+	bootTask(ctx, timeout, "dispatch: repair the asks of closed and reopened issues", "dispatch: repaired the asks of closed and reopened issues",
+		func(ctx context.Context) ([]any, error) {
+			markedSince := time.Now().Add(-api.IssueAskRepairInterval)
+			repair, err := api.RepairIssueAsks(ctx, deps, &markedSince)
+			return repair.LogArgs(), err
 		})
 }
 

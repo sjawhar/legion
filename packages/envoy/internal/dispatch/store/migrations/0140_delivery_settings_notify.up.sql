@@ -1,4 +1,4 @@
--- INFRA-607: the delivery intakes (internal/dispatch/delivery, SettingsCache) reload
+-- The delivery intakes (internal/dispatch/delivery, SettingsCache) reload
 -- delivery_settings when it changes instead of reading it every 30 seconds. delivery_settings_changed
 -- now also announces on dispatch_delivery_settings when a column other than the freshness ones
 -- changed: the same branch that logs the change, so a GitHub event or a reconcile pass, which

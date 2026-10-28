@@ -1,4 +1,4 @@
--- INFRA-607: the embedding queue (internal/dispatch/embedqueue) scans when something is pending
+-- The embedding queue (internal/dispatch/embedqueue) scans when something is pending
 -- instead of every 5 seconds. embeddings_enqueue, which every embedding trigger (0073-0077) calls,
 -- now announces on dispatch_embeddings each time its upsert writes a row: a new item, or a text
 -- whose hash changed. An update that leaves the text as it was writes no row and announces
