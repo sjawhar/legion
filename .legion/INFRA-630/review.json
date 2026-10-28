@@ -2,39 +2,41 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-630",
-  "completed": "2026-10-27T18:37:06Z",
-  "round": 3,
-  "headReviewed": "7e41852e6bab692c5681268c048e06855f0b87eb",
+  "completed": "2026-10-28T09:21:26Z",
+  "round": 4,
+  "headReviewed": "79c191d13e4f67fe1acb9016463e96d27f6c5c1e",
   "decision": "changes_requested",
   "critical": 0,
   "important": 2,
-  "minor": 2,
-  "ci": "Code head 7e41852e (only .legion/ above it, compare handoffsOnly true): required lint, typecheck, test and pr-title queued at 18:30Z; the runs of 7fb39f1e were cancelled before they finished. Not waited for: this round requests changes.",
-  "roundTwoFindings": "Fixed in 7e41852e: check-built carries push-built's member checks without a credential, verify-build refuses an ignored generated file, and all three jobs run verify-build. Thread PRRT_kwDORFy7ds6w0L1D answered and accepted.",
+  "minor": 1,
+  "scope": "Narrow, per the INFRA-588 architect: the round-3 findings, the conflict merge cae91dd8, then end the round with REQUEST_CHANGES naming the architect's post-INFRA-629 list plus any correctness defect.",
+  "ci": "Code head 79c191d1 (only .legion/ above it, compare handoffsOnly true): required lint, typecheck, test and pr-title completed success at 09:21Z; the non-required claude-envoy job was still queued.",
+  "roundThreeFindings": "Both fixed. verify-build builds twice with --out into a scratch directory, refuses a tar inside the repository, reports a second-build difference as non-reproducible, and writes no file of the checkout; build.ts drops --in-place (the only remaining reference is the test that it exits 2); only the rebuild's build job and the claude-envoy job's disposable checkout extract the checked tar. docs/deployment.md points LEGION_CLAUDE_PLUGIN_DIR at an --out build. Proof recorded: implementer's and tester's git/jj status clean after verify-build, test, check-dist and --out on trees with plugin-source edits; tester's operator checkout pulls fast-forward. Both thermonuclear agents reproduced it.",
+  "merge": "cae91dd8 resolved correctly: merge-tree of 2fe74f7a and b295a3fb conflicts only in packages/claude-envoy/CHANGELOG.md, and the resolution differs only by the markers; per-file patch-ids of the PR diff match across the merge except that CHANGELOG hunk's position; head's dist/ and legion/ equal main's.",
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 7e41852e (High: verify-build writes tracked dist/ and legion/ when run locally, jj records it; Minors: stale body claims and census lines, docs/deployment.md in-place refresh blocks the next git pull, the second-build failure reports 'stale', check-private-names.sh comment)",
-    "codeQuality": "Verdict: CHANGES at 7e41852e (the same in-place leak, plus a relative tar inside the package; land_on_main's unread pushed=true and its repeated base check; verify-build's steps restated in workflow comments)"
+    "deepReview": "Verdict: APPROVE at 79c191d1 (Minors: stale PR body, 'only the rebuild extracts' wording, dead git init with a false comment, nested .gitignore in a shipped skill not checked)",
+    "codeQuality": "Verdict: CHANGES at 79c191d1 (extract duplicated in three places; dead git init; find failure masked by the check-ignore pipeline status; nested .gitignore not applied)"
   },
   "keyFindings": [
     {
       "severity": "important",
       "file": "packages/claude-envoy/scripts/verify-build.sh",
-      "description": "Line 43 builds in place, and line 27 and README.md:270 present it as the required check's command. Run locally on a pull request's tree (reproduced by the tester and both thermonuclear agents in scratch clones: a skills edit, then verify-build, leaves M packages/claude-envoy/legion/skills/... and jj st lists it in @), it rewrites tracked dist/ and legion/ into the pull request's commit, the conflict INFRA-630 removes; a relative <tar> lands untracked in packages/claude-envoy too. The plan's design was that nothing a pull request runs writes the tracked files. Required: verify-build leaves tracked files untouched by default (build into a scratch directory or restore, refuse a <tar> inside the repository), only the rebuild workflow writes the checkout (extract the checked tar, or an explicit flag pull-request jobs never pass), and the second build's failure says two builds differed rather than 'stale'. Proof: jj status clean after each documented local command."
+      "description": "Lines 83-85: git -C repo_root check-ignore reads only the checkout's ignore files, but build.ts copies whole skill directories into legion/, a skill's own .gitignore included, and push-built's git add -A applies it, so the files it matches are silently left out of main (reproduced by deep review: skills/legion-worker/.gitignore naming notes.md passes verify-build). The in-place check of round 3 saw it. No skill ships one today. Fix: check against a git repository laid out like the build (which gives line 75's git init a job) or refuse a built .gitignore."
     },
     {
       "severity": "important",
-      "file": "docs/deployment.md",
-      "description": "Lines 255-257 tell an operator to refresh a main checkout with bun scripts/build.ts --in-place during the lag; that leaves tracked files modified, and the next git pull over the rebuild commit is refused ('Your local changes ... would be overwritten'). Point LEGION_CLAUDE_PLUGIN_DIR at an --out build for that window, or say to restore the two directories before pulling."
+      "file": "packages/claude-envoy/scripts/verify-build.sh",
+      "description": "Lines 83-97: with pipefail the pipeline status is check-ignore's 1 when find fails and check-ignore matches nothing, and also 1 when find fails partway while check-ignore matches a path, so the '1)' branch passes with an error hidden. List the files first so a find failure stops the script."
+    },
+    {
+      "severity": "important",
+      "file": "PR #2423",
+      "description": "The architect's list after #2419 (INFRA-629) merged as 184897ac: merge main; one land_on_main definition whose header names push-fold and push-built; drop land_on_main's unread pushed=true and its assertions and its copy of push-built's base check; cut the workflow comments that restate verify-build.sh's steps; correct check-private-names.sh:23-25; correct the PR body's Change bullet (no in-place build) and the 'only the rebuild extracts' wording (README, packages/claude-envoy/AGENTS.md, claude-envoy-rebuild.yaml:83), since the claude-envoy job extracts too; fix verify-build.sh:21-23's comment (check-private-names.sh reads with find and grep when given paths)."
     },
     {
       "severity": "minor",
-      "file": "PR body",
-      "description": "Census line numbers for the rebuild and test-job hits are stale at 7e41852e and verify-build.sh is not listed; the risk field described the round-2 gap (the reviewer refreshed Look at first and Not proven / risk)."
-    },
-    {
-      "severity": "minor",
-      "file": ".github/scripts/release-push.sh",
-      "description": "Fast-follow: land_on_main writes pushed=true that no workflow reads now, and repeats push-built's base check; workflow comments restate verify-build's step list; check-private-names.sh:23-25 names two build jobs, now three."
+      "file": ".github/workflows/claude-envoy-rebuild.yaml",
+      "description": "Fast-follow: the rm -rf + tar -xf extraction is in claude-envoy-rebuild.yaml:85-88, envoy-and-contracts.yaml:1031-1034 and release-push.sh push-built; one release-push.sh extract-built subcommand would keep the build job's changed output computed the way push-built extracts."
     }
   ]
 }
