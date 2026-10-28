@@ -450,11 +450,12 @@ the known ones, not every one: a failure they do not name is yours to explain.
   (`inappropriate ioctl for device`), and the `SigCgt` line of `/proc/<pid>/status`, which the
   pods' gVisor lacked on 2026-10-28; upstream gVisor added that line on 2026-09-24, so a node on a
   later release may have it. A timing test can fail too: `internal/dispatch/pmdoc`'s linearity
-  tests can measure the small input at 0 s on gVisor's coarse clock and report `+Inf times`.
+  tests time a call by the process's CPU time, which gVisor counts in 10 ms ticks, so a call under
+  10 ms can measure 0 s and the test reports `+Inf times`.
 - **No Docker.** The image carries no container runtime, so a test that starts one through
-  testcontainers panics `rootless Docker not found`: in `packages/envoy`, every test that uses
-  `internal/testnats` or `internal/tests3` (`internal/dispatch/files` is one), and `internal/testpg`
-  unless `DISPATCH_TEST_DATABASE_URL` names a Postgres.
+  testcontainers panics `rootless Docker not found`: in `packages/envoy`, the tests that use
+  `internal/tests3` (`internal/dispatch/files`, which `DISPATCH_TEST_NO_CONTAINERS=1` skips) and
+  `internal/testpg` (unless `DISPATCH_TEST_DATABASE_URL` names a Postgres).
 - **The rest, by package.** For the Dispatch server's suites (a Postgres whose only collation is
   byte order, which `internal/dispatch/api` refuses, and `@legion/proof-editor` missing until
   `bun install` has run):
