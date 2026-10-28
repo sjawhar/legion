@@ -40,15 +40,16 @@ type envoyEnvelope struct {
 	TraceID        string `json:"trace_id"`
 }
 
-// serverStartedSubject is the one subject Dispatch publishes its own start on (not an issue's):
-// the daemon's third durable filters on it (OpenConsumers), and decodeMessage matches it whole.
+// serverStartedSubject is the one subject Dispatch announces its server fleet's build on (not an
+// issue's): the daemon's third durable filters on it (OpenConsumers), and decodeMessage matches it
+// whole.
 const serverStartedSubject = "notifications.dispatch.server.started"
 
 // decodeMessage decodes the Envoy envelope first, then the subject's source-specific payload.
 // project is the daemon's Dispatch project: another project's issue event is a nil Fact.
 // repositories are its configured repositories: a GitHub event whose payload names another
-// repository is a nil Fact, whatever subject carried it. Dispatch's own start is matched before
-// the issue subjects, which it is not one of.
+// repository is a nil Fact, whatever subject carried it. Dispatch's announcement of its fleet's
+// build is matched before the issue subjects, which it is not one of.
 func decodeMessage(subject, project string, repositories []ghrepo.Repository, data []byte) (decodedMessage, error) {
 	var envelope envoyEnvelope
 	if err := json.Unmarshal(data, &envelope); err != nil {
@@ -115,10 +116,11 @@ func (e envoyEnvelope) valid() error {
 	return nil
 }
 
-// decodeServerStarted decodes Dispatch's server.started: the build commit Dispatch started on
-// (ServerStarted), which the workflow compares against the open production checks. A start naming
-// no commit — a Dispatch built without one stamped — is no fact, not poison: there is nothing to
-// compare, and the daemon's own boot covers its own build.
+// decodeServerStarted decodes Dispatch's server.started: the build commit every live Dispatch
+// server process serves, announced once each time that commit changes (ServerStarted), which the
+// workflow compares against the open production checks. An announcement naming no commit — which
+// Dispatch never makes, since a fleet with an unstamped build has no build to name — is no fact,
+// not poison: there is nothing to compare, and the daemon's own boot covers its own build.
 func decodeServerStarted(payload string) (Fact, error) {
 	var started struct {
 		Commit string `json:"commit"`

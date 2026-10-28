@@ -335,6 +335,14 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			want:    DispatchClaim{Key: "CAPTURE-4", Seq: 12},
 		},
 		{
+			// Shared with packages/envoy/internal/dispatch/startup, whose test requires the
+			// envelope Dispatch builds for this announcement to equal it field for field.
+			name:    "Dispatch server fleet build announced (shared with Dispatch)",
+			subject: "notifications.dispatch.server.started",
+			file:    "dispatch/server-started.json",
+			want:    ServerStarted{Commit: "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"},
+		},
+		{
 			name:    "pull request opened",
 			subject: "notifications.github.sjawhar.legion.pr.42",
 			file:    "github/pr-opened.json",
@@ -979,10 +987,11 @@ func TestAJobEnvelopeIsNoFact(t *testing.T) {
 	}
 }
 
-// Dispatch's own start is not an issue event: it arrives on its one subject, read before the issue
-// subjects, and decodes to the build commit it names. A start naming no commit — a Dispatch built
-// without one stamped — is no fact and no poison, since there is nothing to compare; an envelope
-// from another source on that subject, or a payload that is not the start's object, is poison.
+// Dispatch's announcement that every server process serves a build (server.started) is not an
+// issue event: it arrives on its one subject, read before the issue subjects, and decodes to the
+// build commit it names. An announcement naming no commit — a Dispatch built without one stamped —
+// is no fact and no poison, since there is nothing to compare; an envelope from another source on
+// that subject, or a payload that is not the announcement's object, is poison.
 func TestDecodeServerStartedNamesTheBuildOrIsNoFact(t *testing.T) {
 	const build = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
 	for _, tc := range []struct {
@@ -1065,10 +1074,10 @@ func TestDecodeIssueDeployedCarriesTheRunAndRefusesAMalformedPayload(t *testing.
 	}
 }
 
-// Dispatch's start reaches the daemon through a durable of its own, on the start's one subject:
-// a start naming a build is applied and acknowledged there, and one naming none is acknowledged
-// without reaching a handler. The issue durable's filter never matches the subject, so neither
-// durable's position depends on the other's.
+// Dispatch's announcement that every server process serves a build reaches the daemon through a
+// durable of its own, on the announcement's one subject: one naming a build is applied and
+// acknowledged there, and one naming none is acknowledged without reaching a handler. The issue
+// durable's filter never matches the subject, so neither durable's position depends on the other's.
 func TestConsumeAppliesADispatchStartThroughItsOwnDurable(t *testing.T) {
 	pool := migratedPool(t)
 	createWrites(t, pool)

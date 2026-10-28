@@ -570,8 +570,9 @@ export class DispatchClient {
     return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
   }
 
-  /** `GET /api/v1/agents`: the Envoy listener's live sessions, for naming a session by the
-   *  title it is running under rather than the one it stamped on an old write. */
+  /** `GET /api/v1/agents`: the Envoy listener's live sessions, as of Dispatch's copy of its list
+   *  (at most 5 s old), for naming a session by the title it is running under rather than the
+   *  one it stamped on an old write. */
   async listAgents(): Promise<Agent[]> {
     return this.#json("GET", ["api", "v1", "agents"]);
   }

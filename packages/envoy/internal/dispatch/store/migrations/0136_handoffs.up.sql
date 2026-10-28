@@ -1,4 +1,4 @@
--- 0135_handoffs.up.sql — phase handoffs recorded on their issue.
+-- 0136_handoffs.up.sql — phase handoffs recorded on their issue.
 --
 -- INFRA-177: Legion's phase handoffs move from committed `.legion/<KEY>/<phase>.json` files to
 -- records on the Dispatch issue. One row per handoff a session writes

@@ -183,7 +183,17 @@ func sleepPreStop(seconds int) *corev1.LifecycleArgs {
 }
 
 func resources(cpu, memory string) *corev1.ResourceRequirementsArgs {
+	return sizedResources(cpu, memory, "")
+}
+
+// sizedResources is a container's equal requests and limits: its CPU and memory, and its
+// ephemeral storage when one is given. Without one none is rendered and Autopilot gives the
+// container its default.
+func sizedResources(cpu, memory, ephemeralStorage string) *corev1.ResourceRequirementsArgs {
 	values := pulumi.StringMap{"cpu": pulumi.String(cpu), "memory": pulumi.String(memory)}
+	if ephemeralStorage != "" {
+		values["ephemeral-storage"] = pulumi.String(ephemeralStorage)
+	}
 	return &corev1.ResourceRequirementsArgs{Requests: values, Limits: values}
 }
 
@@ -434,9 +444,10 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		// The budget covers its own Deployment's pods alone, by the label that Deployment's
 		// selector matches, under the Deployment's own name. It keeps the default
 		// unhealthyPodEvictionPolicy (IfHealthyBudget), so it also holds a pod that is not ready
-		// while the budget is not met: envoy-dispatch and envoy-listener report not ready whenever
-		// NATS or Postgres is briefly unreachable, a front-door pod's own eviction in the same drain
-		// among the causes, and evicting then would turn a blip into a cold restart.
+		// while the budget is not met: envoy-dispatch reports not ready whenever Postgres is
+		// briefly unreachable (a Cloud SQL failover, the proxy sidecar restarting) and
+		// envoy-listener whenever NATS is, a front-door pod's own eviction in the same drain among
+		// the causes, and evicting then would turn a blip into a cold restart.
 		if pdbMinAvailable > 0 {
 			if _, err := policyv1.NewPodDisruptionBudget(ctx, name, &policyv1.PodDisruptionBudgetArgs{
 				Metadata: metadata(name),
@@ -475,10 +486,13 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	}
 
 	// Both other workloads dial the NATS hub through the front door's proxy, so each waits for its
-	// pod and its Service: envoy-dispatch exits 1 when it cannot reach NATS and answers 503 on
-	// /healthz until it connects, and envoy-listener exits on a failed initial connect
-	// (packages/envoy/cmd/listener/main.go), so a pod started before the proxy exists never goes
-	// ready and the rollout waits it out.
+	// pod and its Service, for a reason of its own. envoy-listener exits on a failed initial
+	// connect (packages/envoy/cmd/listener/main.go), so a listener pod started before the proxy
+	// exists never goes ready and the rollout waits it out. envoy-dispatch serves without NATS:
+	// its /healthz readiness reads only Postgres, reporting nats false meanwhile, and its bus
+	// clients connect in the background once the proxy answers. So an app pod started first would
+	// go ready and serve without the bus (no outbox publish, no delivery intake) until then; the app
+	// waits for the front door only so that it starts connected.
 	frontDoor := pulumi.DependsOn([]pulumi.Resource{tailnet, tailnetService})
 	// Both also mount the NATS seed, which the pod can read only once its principal holds
 	// roles/secretmanager.secretAccessor on the secret, so each waits for that grant too rather
@@ -614,13 +628,13 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 			corev1.ContainerArgs{
 				Name: pulumi.String("cloud-sql-proxy"), Image: pulumi.String(s.images.proxy), RestartPolicy: pulumi.String("Always"),
 				Args:      pulumi.StringArray{pulumi.String("--private-ip"), pulumi.String("--structured-logs"), pulumi.String("--address=127.0.0.1"), pulumi.String("--port=5432"), pulumi.String("--health-check"), pulumi.String("--http-address=0.0.0.0"), pulumi.String("--http-port=9801"), cloud.instance.ConnectionName},
-				Resources: resources(s.appResources.proxyCPU, s.appResources.proxyMemory), SecurityContext: &corev1.SecurityContextArgs{RunAsNonRoot: pulumi.Bool(true)},
+				Resources: sizedResources(s.appResources.proxyCPU, s.appResources.proxyMemory, s.appResources.proxyEphemeralStorage), SecurityContext: &corev1.SecurityContextArgs{RunAsNonRoot: pulumi.Bool(true)},
 				StartupProbe: proxyStartup, LivenessProbe: proxyLiveness,
 			},
 		},
 		Containers: corev1.ContainerArray{
 			corev1.ContainerArgs{
-				Name: pulumi.String("envoy-dispatch"), Image: pulumi.String(s.images.envoy), Command: pulumi.StringArray{pulumi.String("/usr/local/bin/envoy-dispatch")}, Resources: resources(s.appResources.appCPU, s.appResources.appMemory), Env: appEnv, VolumeMounts: appMounts, Lifecycle: appPreStop,
+				Name: pulumi.String("envoy-dispatch"), Image: pulumi.String(s.images.envoy), Command: pulumi.StringArray{pulumi.String("/usr/local/bin/envoy-dispatch")}, Resources: sizedResources(s.appResources.appCPU, s.appResources.appMemory, s.appResources.appEphemeralStorage), Env: appEnv, VolumeMounts: appMounts, Lifecycle: appPreStop,
 				StartupProbe: answersProbe(8766, 10, 180), LivenessProbe: answersProbe(8766, 10, 3), ReadinessProbe: appReady,
 			},
 		},
