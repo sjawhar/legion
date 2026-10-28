@@ -347,3 +347,131 @@ test("Backspace over a selection from the question into an option of a two-list 
     { blockSchema }
   );
 });
+
+/**
+ * Cuts the selection as ProseMirror's cut listener does: every `handleDOMEvents.cut` first, then,
+ * unless one takes the event, its own cut, which deletes the selection. Returns the event.
+ */
+function cutSelection(view: EditorView): ClipboardEvent {
+  const cut = new window.ClipboardEvent("cut", { bubbles: true, cancelable: true });
+  if (!view.someProp("handleDOMEvents", (handlers) => handlers.cut?.(view, cut))) {
+    view.dispatch(view.state.tr.deleteSelection());
+  }
+  return cut;
+}
+
+/**
+ * Types `text` over the selection as ProseMirror's keypress listener does: every
+ * `handleTextInput` first, then its own `insertText` over the selection when none takes it.
+ * happy-dom does not deliver a synthetic keypress to that listener, so the harness makes the calls
+ * itself.
+ */
+function typeText(view: EditorView, text: string): void {
+  const { from, to } = view.state.selection;
+  const deflt = () => view.state.tr.insertText(text);
+  if (!view.someProp("handleTextInput", (handle) => handle(view, from, to, text, deflt))) {
+    view.dispatch(deflt());
+  }
+}
+
+test("typing over a selection from the question into an option of a two-list ask keeps every word", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ view, ydoc }) => {
+      peerAppendsList(ydoc, true);
+      const from = textblockStart(view.state.doc, "Which one?") + "Which".length;
+      const to = textblockStart(view.state.doc, "Option A") + "Opt".length;
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, from, to)));
+      expect(() => typeText(view, "x")).not.toThrow();
+      expectTwoListAsk(view, ydoc);
+    },
+    { blockSchema }
+  );
+});
+
+test("typing at a caret in a two-list ask inserts the text", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ view, ydoc }) => {
+      peerAppendsList(ydoc, true);
+      const optionEnd = textblockStart(view.state.doc, "Option B") + "Option B".length;
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, optionEnd)));
+      typeText(view, "!");
+      expect(blocks(requireAsk(view.state.doc))[2]).toEqual(["bullet_list", "Option B!"]);
+      expectEveryWord(view, ydoc);
+    },
+    { blockSchema }
+  );
+});
+
+test("cutting a selection from the question into an option of a two-list ask keeps every word", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ view, ydoc }) => {
+      peerAppendsList(ydoc, true);
+      const from = textblockStart(view.state.doc, "Which one?") + "Which".length;
+      const to = textblockStart(view.state.doc, "Option A") + "Opt".length;
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, from, to)));
+      let cut: Event | undefined;
+      expect(() => {
+        cut = cutSelection(view);
+      }).not.toThrow();
+      expect(cut?.defaultPrevented).toBe(true);
+      expectTwoListAsk(view, ydoc);
+    },
+    { blockSchema }
+  );
+});
+
+test("cutting a selection inside one block of a two-list ask deletes it", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ view, ydoc }) => {
+      peerAppendsList(ydoc, true);
+      const from = textblockStart(view.state.doc, "Which one?") + "Which".length;
+      view.dispatch(
+        view.state.tr.setSelection(TextSelection.create(view.state.doc, from, from + " one".length))
+      );
+      expect(cutSelection(view).defaultPrevented).toBe(false);
+      expect(blocks(requireAsk(view.state.doc))[0]).toEqual(["paragraph", "Which?"]);
+    },
+    { blockSchema }
+  );
+});
+
+/**
+ * Offers a `beforeinput` of `inputType` (carrying `data`) to every `handleDOMEvents.beforeinput`,
+ * as ProseMirror's listener does, and returns it; a browser applies its own edit to the DOM unless
+ * one prevented it.
+ */
+function beforeInput(view: EditorView, inputType: string, data: string | null): InputEvent {
+  const event = new window.InputEvent("beforeinput", { cancelable: true, data, inputType });
+  view.someProp("handleDOMEvents", (handlers) => handlers.beforeinput?.(view, event));
+  return event;
+}
+
+test("input without a keypress over a selection across blocks of a two-list ask is ProseMirror's own edit, not the browser's", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ view, ydoc }) => {
+      peerAppendsList(ydoc, true);
+      const from = textblockStart(view.state.doc, "Which one?") + "Which".length;
+      // Into the first list, which keeps an item after it: ProseMirror's edit throws and is declined.
+      const intoFirst = textblockStart(view.state.doc, "Option A") + "Opt".length;
+      view.dispatch(
+        view.state.tr.setSelection(TextSelection.create(view.state.doc, from, intoFirst))
+      );
+      expect(beforeInput(view, "insertText", "x").defaultPrevented).toBe(true);
+      expectTwoListAsk(view, ydoc);
+
+      // Into the second list, past the whole first one: ProseMirror deletes the range.
+      const intoSecond = textblockStart(view.state.doc, "Option B") + "Opt".length;
+      view.dispatch(
+        view.state.tr.setSelection(TextSelection.create(view.state.doc, from, intoSecond))
+      );
+      expect(beforeInput(view, "deleteContentBackward", null).defaultPrevented).toBe(true);
+      expect(blocks(requireAsk(view.state.doc))).toEqual([["paragraph", "Whichion B"]]);
+    },
+    { blockSchema }
+  );
+});

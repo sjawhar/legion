@@ -58,7 +58,7 @@ import { frontmatterSchema } from 'proof-sdk-upstream/src/editor/schema/frontmat
 import { libraryRemarkFrontmatterPlugin } from './lib-remark-frontmatter-plugin';
 import { libraryRemarkDirectivePlugin } from './lib-remark-directive-plugin';
 import { liveTypedBlocksRemarkPlugin } from './read-only-directives';
-import { guardBrokenAskKeys, relaxAskContentCheck } from './ask-content';
+import { brokenAskInputGuards, relaxAskContentCheck } from './ask-content';
 import { remarkProofMarksPlugin } from 'proof-sdk-upstream/src/editor/schema/remark-proof-marks-plugin';
 import { proofMarkHandler } from 'proof-sdk-upstream/src/formats/remark-proof-marks';
 
@@ -376,7 +376,7 @@ export async function createProofEditor(
 
   let currentReadOnly = Boolean(opts.readOnly);
   view.setProps({ editable: () => !currentReadOnly });
-  view.setProps({ handleKeyDown: guardBrokenAskKeys }); // no key throws in an off-rule ask (./ask-content.ts)
+  view.setProps(brokenAskInputGuards); // no input throws in an off-rule ask (./ask-content.ts)
   const setReadOnly = (readOnly: boolean) => {
     currentReadOnly = readOnly;
     view.setProps({ editable: () => !currentReadOnly });

@@ -261,8 +261,11 @@ test("Enter in the question of an ask holding two lists keeps every word", async
   });
 });
 
-// Each keystroke below throws inside ProseMirror's command on a block off its content rule; the
-// editor's key guard declines it, so no page error escapes and the browser makes no edit of its own.
+// Each input below, on a block off its content rule, either throws inside ProseMirror (a key
+// command; the edit a typed letter, a cut, a composition's start or a drop builds) or is an edit
+// the browser makes itself, which ProseMirror reads back with a replace that drops the second
+// list. The editor's input guards decline the input, or apply ProseMirror's own edit in place of
+// the browser's, so no page error escapes and no word outside the input's range is lost.
 
 test("Enter twice at the end of the second list of an ask holding two lists keeps every word", async ({
   browser,
@@ -286,15 +289,89 @@ test("Backspace at the start of the first list of an ask holding two lists keeps
   });
 });
 
+/** Gives the first list a second item, so the block would still hold two lists after a deletion
+ * of the range, then selects from after "Which " in the question to after "Opt" in the first
+ * list's first item. Answers the words outside the selection. */
+async function selectQuestionIntoFirstList(
+  page: Page,
+  first: string,
+  second: string
+): Promise<string[]> {
+  await addOptionToFirstList(page, first);
+  await selectTextIn(page, askContent(page), "one?Opt");
+  return ["Which ", first.slice("Opt".length), "Option C", second];
+}
+
 test("Backspace over a selection from the question into the first list of an ask holding two lists keeps the words outside it", async ({
   browser,
 }) => {
   await withTwoLists(browser, async ({ alicePage, first, second }) => {
-    // The first list keeps an item after the deleted range, so the block would hold two lists.
-    await addOptionToFirstList(alicePage, first);
-    // From after "Which " to after "Opt" in the first list's first item.
-    await selectTextIn(alicePage, askContent(alicePage), "one?Opt");
+    const words = await selectQuestionIntoFirstList(alicePage, first, second);
     await alicePage.keyboard.press("Backspace");
-    return ["Which ", first.slice("Opt".length), "Option C", second];
+    return words;
+  });
+});
+
+test("typing over a selection from the question into the first list of an ask holding two lists keeps the words outside it", async ({
+  browser,
+}) => {
+  await withTwoLists(browser, async ({ alicePage, first, second }) => {
+    const words = await selectQuestionIntoFirstList(alicePage, first, second);
+    await alicePage.keyboard.type("x");
+    return words;
+  });
+});
+
+test("cutting a selection from the question into the first list of an ask holding two lists keeps the words outside it", async ({
+  browser,
+}) => {
+  await withTwoLists(browser, async ({ alicePage, first, second }) => {
+    const words = await selectQuestionIntoFirstList(alicePage, first, second);
+    await alicePage.keyboard.press("ControlOrMeta+X");
+    return words;
+  });
+});
+
+test("text input without a keypress over a selection from the question into the first list of an ask holding two lists keeps the words outside it", async ({
+  browser,
+}) => {
+  await withTwoLists(browser, async ({ alicePage, first, second }) => {
+    const words = await selectQuestionIntoFirstList(alicePage, first, second);
+    // An input method's commit or dictation: a beforeinput and the browser's own edit, no keypress.
+    await alicePage.keyboard.insertText("x");
+    return words;
+  });
+});
+
+test("an input method composing over a selection from the question into the first list of an ask holding two lists keeps the words outside it", async ({
+  browser,
+}) => {
+  await withTwoLists(browser, async ({ alicePage, first, second }) => {
+    const words = await selectQuestionIntoFirstList(alicePage, first, second);
+    const cdp = await alicePage.context().newCDPSession(alicePage);
+    await cdp.send("Input.imeSetComposition", { selectionEnd: 1, selectionStart: 1, text: "x" });
+    await cdp.send("Input.insertText", { text: "x" });
+    return words;
+  });
+});
+
+test("dragging a selection from the question into the first list of an ask holding two lists to its second list keeps every word", async ({
+  browser,
+}) => {
+  await withTwoLists(browser, async ({ alicePage, first, second }) => {
+    await selectQuestionIntoFirstList(alicePage, first, second);
+    const from = await alicePage.evaluate(() => {
+      const box = window.getSelection()?.getRangeAt(0).getBoundingClientRect();
+      return box && { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    });
+    const to = await optionList(alicePage, 1).getByText(second).boundingBox();
+    if (!from || !to) throw new Error("the selection or the second list's option has no box");
+    await alicePage.mouse.move(from.x, from.y);
+    await alicePage.mouse.down();
+    await alicePage.mouse.move(from.x + 5, from.y + 5, { steps: 3 });
+    await alicePage.mouse.move(to.x + to.width - 2, to.y + to.height / 2, { steps: 10 });
+    await alicePage.mouse.up();
+    // Bob's page draws alice's caret after "Opt", inside the first option.
+    return ["Which one?", first.slice("Opt".length), "Option C", second];
   });
 });

@@ -1,5 +1,7 @@
 import type { Fragment, ResolvedPos, Schema } from "@milkdown/prose/model";
-import type { EditorView } from "@milkdown/prose/view";
+import { TextSelection, type Transaction } from "@milkdown/prose/state";
+import { dropPoint } from "@milkdown/prose/transform";
+import type { EditorProps, EditorView } from "@milkdown/prose/view";
 
 /**
  * Makes `schema`'s `ask` node (when it has one) accept, as a node's content, what the document
@@ -45,12 +47,11 @@ function inBrokenAsk($pos: ResolvedPos): boolean {
  * an ask its content rule refuses (see `relaxAskContentCheck`). Commands such as Enter on an empty
  * list item or Backspace across blocks read the ask's content rule (`contentMatchAt`, `canReplace`)
  * and throw on such an ask. ProseMirror's keydown listener does not catch, so the event's default
- * is never prevented and the browser applies its own edit to the document's DOM. Installed as a
- * direct view prop, which ProseMirror consults before every plugin's, it offers the keystroke to
- * every other `handleKeyDown` in their order and declines it (handled: no edit, default prevented)
- * when one throws. Outside such an ask it does nothing.
+ * is never prevented and the browser applies its own edit to the document's DOM. It offers the
+ * keystroke to every other `handleKeyDown` in their order and declines it (handled: no edit,
+ * default prevented) when one throws. Outside such an ask it does nothing.
  */
-export function guardBrokenAskKeys(view: EditorView, event: KeyboardEvent): boolean {
+function guardBrokenAskKeys(view: EditorView, event: KeyboardEvent): boolean {
   const { $from, $to } = view.state.selection;
   if (!inBrokenAsk($from) && !inBrokenAsk($to)) return false;
   try {
@@ -63,3 +64,132 @@ export function guardBrokenAskKeys(view: EditorView, event: KeyboardEvent): bool
     return true;
   }
 }
+
+/**
+ * A `handleTextInput` view prop that keeps typed text from throwing out of its input event
+ * inside an ask its content rule refuses. Typing over a selection that runs from one block into
+ * another has no key command: ProseMirror's keypress listener builds `insertText` over the
+ * selection, which reads the ask's content rule and throws there before the event's default is
+ * prevented, so the browser's own edit lands. It offers the text to every other `handleTextInput`
+ * (input rules among them) in their order and, when none takes it, dispatches ProseMirror's
+ * default edit itself. When any of that throws (an edit, or a plugin's appended transaction such
+ * as a block id set on a node the rule refuses, which fails before the view's state changes), it
+ * declines the text (handled: no edit, default prevented). Outside such an ask it does nothing.
+ */
+function guardBrokenAskTextInput(
+  view: EditorView,
+  from: number,
+  to: number,
+  text: string,
+  deflt: () => Transaction
+): boolean {
+  const { doc } = view.state;
+  if (!inBrokenAsk(doc.resolve(from)) && !inBrokenAsk(doc.resolve(to))) return false;
+  try {
+    const handled = view.someProp("handleTextInput", (handleTextInput) =>
+      handleTextInput === guardBrokenAskTextInput
+        ? undefined
+        : handleTextInput(view, from, to, text, deflt)
+    );
+    if (!handled) view.dispatch(deflt());
+  } catch {
+    // Declined: nothing applied.
+  }
+  return true;
+}
+
+/**
+ * Whether deleting the selection, with the transactions plugins append to that, throws: applied
+ * to the state without dispatching it, so nothing changes either way.
+ */
+function deletionThrows(view: EditorView): boolean {
+  try {
+    view.state.apply(view.state.tr.deleteSelection());
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * The view props that keep user input inside an ask its content rule refuses from throwing, and
+ * from letting the browser apply its own edit: `guardBrokenAskKeys` and `guardBrokenAskTextInput`
+ * above, and the handlers below. Installed as direct view props (`view.setProps`), which
+ * ProseMirror consults before every plugin's; the editor sets no other direct `handleKeyDown`,
+ * `handleTextInput`, `handleDrop` or `handleDOMEvents`, so none is replaced.
+ *
+ * - `cut`: ProseMirror's cut handler fills the clipboard, then dispatches the selection's
+ *   deletion, which across blocks of such an ask throws; when it would, the cut is cancelled
+ *   (nothing copied, nothing deleted) before that handler runs.
+ * - `beforeinput`: input that comes with no keypress (an input method's commit, dictation, mobile
+ *   keyboards) is the browser's own edit, which ProseMirror reads back from the DOM; over a
+ *   selection across blocks of such an ask that read-back replace drops the blocks after the
+ *   selection (the second option list among them). Over such a selection, as ProseMirror's
+ *   keypress handler does for any selection across blocks, the browser's edit is prevented and
+ *   ProseMirror's own is dispatched instead (typed text through `handleTextInput`, a deletion as
+ *   `deleteSelection`), or declined when it throws; any other insertion is declined.
+ * - `compositionstart`: ProseMirror deletes a selection across blocks when an input method starts
+ *   composing over it, and that deletion throws in such an ask; when it would, the selection is
+ *   collapsed to its start first, so the composed text lands there and nothing is deleted.
+ * - `handleDrop`: ProseMirror's drop handler prevents the browser's drop, then finds the drop
+ *   point (`dropPoint` reads each ancestor's content rule) and deletes a moved selection, either
+ *   of which throws in such an ask; when its edit would, the drop is declined.
+ */
+export const brokenAskInputGuards: EditorProps = {
+  handleKeyDown: guardBrokenAskKeys,
+  handleTextInput: guardBrokenAskTextInput,
+  handleDrop(view, event, slice, moved) {
+    const target = view.posAtCoords({ left: event.clientX, top: event.clientY });
+    if (target === null) return false;
+    const { doc, selection } = view.state;
+    const $target = doc.resolve(target.pos);
+    const movesFromBrokenAsk =
+      moved && (inBrokenAsk(selection.$from) || inBrokenAsk(selection.$to));
+    if (!inBrokenAsk($target) && !movesFromBrokenAsk) return false;
+    // ProseMirror's own drop edit, applied to the state without dispatching it.
+    try {
+      const tr = view.state.tr;
+      if (moved) tr.deleteSelection();
+      const at = tr.mapping.map(dropPoint(doc, $target.pos, slice) ?? $target.pos);
+      view.state.apply(tr.replaceRange(at, at, slice));
+      return false;
+    } catch {
+      return true;
+    }
+  },
+  handleDOMEvents: {
+    cut(view, event) {
+      const { $from, $to } = view.state.selection;
+      if ((!inBrokenAsk($from) && !inBrokenAsk($to)) || !deletionThrows(view)) return false;
+      event.preventDefault();
+      return true;
+    },
+    beforeinput(view, event) {
+      const { $from, $to, from, to } = view.state.selection;
+      if (!event.cancelable || $from.sameParent($to)) return false;
+      if (!inBrokenAsk($from) && !inBrokenAsk($to)) return false;
+      const { data, inputType } = event;
+      if (!inputType.startsWith("insert") && !inputType.startsWith("delete")) return false;
+      event.preventDefault();
+      if (inputType === "insertText" && data) {
+        guardBrokenAskTextInput(view, from, to, data, () =>
+          view.state.tr.insertText(data).scrollIntoView()
+        );
+      } else if (inputType.startsWith("delete")) {
+        try {
+          view.dispatch(view.state.tr.deleteSelection().scrollIntoView());
+        } catch {
+          // Declined: nothing applied.
+        }
+      }
+      return true;
+    },
+    compositionstart(view) {
+      const { $from, $to } = view.state.selection;
+      if ($from.sameParent($to) || (!inBrokenAsk($from) && !inBrokenAsk($to))) return false;
+      if (!deletionThrows(view)) return false;
+      view.dispatch(view.state.tr.setSelection(TextSelection.between($from, $from)));
+      return false;
+    },
+  },
+};
