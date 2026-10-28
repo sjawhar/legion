@@ -514,12 +514,16 @@ test("a mermaid source the renderer refuses shows the reason and its source, and
 
 // ELK's layout time grows faster than the diagram: a flowchart of 800 nodes with 2 edges each
 // takes over a minute. Drawn on the page's own thread it held every reader of the comment there;
-// in the worker the page keeps answering and the time limit refuses it. The worker here never
-// answers, so the refusal does not depend on how fast the machine draws.
+// in the worker the page keeps answering and the time limit refuses it.
 test("a diagram too large to draw in time shows the reason, and the page keeps responding @phone", async ({
   browser,
 }, testInfo) => {
-  const body = largeFlowchart("Large:");
+  const nodes = 800;
+  const edges = Array.from(
+    { length: nodes },
+    (_, node) => `  n${node} --> n${(node + 1) % nodes}\n  n${node} --> n${(node + 7) % nodes}`
+  );
+  const body = `Large:\n\n\`\`\`mermaid\ngraph TD\n${edges.join("\n")}\n\`\`\`\n`;
   // Within Dispatch's 32,000-character body limit.
   expect(body.length).toBeLessThan(32_000);
   await createProject({ key: "CORE", name: "Core" });
@@ -528,7 +532,6 @@ test("a diagram too large to draw in time shows the reason, and the page keeps r
 
   const alice = await asUser(browser, "alice");
   try {
-    const stalled = await stallMermaidWorker(alice);
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
     const card = await openCommentThread(page, testInfo, comment.id, "Large:");
@@ -554,7 +557,6 @@ test("a diagram too large to draw in time shows the reason, and the page keeps r
       "Unable to render Mermaid diagram: it did not finish within 5 seconds"
     );
     await expect(card.locator("pre code").filter({ hasText: "n799 --> n0" })).toBeVisible();
-    expect(stalled).toHaveLength(1);
     await expect(diagramIn(card)).toHaveCount(0);
   } finally {
     await alice.close();
