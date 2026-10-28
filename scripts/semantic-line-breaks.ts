@@ -4,12 +4,13 @@
 // packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md keep this layout, and
 // `--write` fixes it by changing only whitespace.
 //
-// `--write` is conservative by rule. It leaves a leading YAML front matter block and the text of a
-// setext heading byte for byte, and R1 does not read them. It never joins a line onto the one
-// before when the line could open or interrupt a block, nor cuts a line where the new line would
-// start so. It never joins or cuts inside a code span or inline HTML (a tag runs through its
-// quoted attribute values): the content of `<pre>`, `<textarea>`, `<script>`, `<style>`, `<code>`,
-// `<tt>`, `<kbd>` and `<samp>` stays as it is through the close tag.
+// `--write` is conservative by rule. It leaves a leading YAML front matter block (closed by `---`
+// or by YAML's `...`) and the text of a setext heading byte for byte, and R1 does not read them.
+// It never joins a line onto the one before when the line could open or interrupt a block, nor
+// cuts a line where the new line would start so. It never joins or cuts inside a code span or
+// inline HTML (a tag runs through its quoted attribute values): the content of `<pre>`,
+// `<textarea>`, `<script>`, `<style>`, `<code>`, `<tt>`, `<kbd>` and `<samp>` stays as it is
+// through the close tag.
 //
 // `--write` then writes a file only when two guards hold: the text is the same once whitespace is
 // folded, and the file renders the same, parsed before and after with micromark and its GFM and
@@ -90,6 +91,11 @@ const VERBATIM_OPEN = /^<(pre|textarea|script|style|code|tt|kbd|samp)(?=[ \t\n/>
  * the opener on the first line and the closer: `---`, then only spaces or tabs.
  */
 const FRONT_MATTER_FENCE = /^---[ \t]*\r?$/;
+/**
+ * YAML's document end marker, `...` then only spaces or tabs, which Jekyll and YAML also read as
+ * the closer of front matter.
+ */
+const YAML_DOCUMENT_END = /^\.\.\.[ \t]*\r?$/;
 
 const SENTENCE_MARKS = ".!?";
 const SENTENCE_CLOSERS = ")]\"'*_”’";
@@ -243,11 +249,23 @@ function definitionTail(rest: string): DefinitionTail | undefined {
 
 /**
  * The index of the line that closes the YAML front matter block the document opens with, or -1
- * when there is none: micromark's front matter extension reads one only when a fence closes it.
+ * when there is none. The block opens with a `---` fence on the first line and ends at the first
+ * later line that `closers` accepts, so the two readings share one definition:
+ *
+ * - "micromark": `---` only, as micromark's front matter extension reads it, which closes no block
+ *   at `...`. The guard picks its parser with this. It parses a block `...` closes as ordinary
+ *   text (a rule, then a paragraph), and since scanBlocks leaves that block byte for byte, the text
+ *   it compares is the same on both sides.
+ * - "yaml": `---` or `...`, as Jekyll and YAML read it. scanBlocks reads front matter with this:
+ *   check mode does not read the block and `--write` leaves it byte for byte.
  */
-function frontMatterEnd(lines: readonly string[]): number {
+function frontMatterEnd(lines: readonly string[], closers: "micromark" | "yaml"): number {
   if (!FRONT_MATTER_FENCE.test(lines[0] ?? "")) return -1;
-  return lines.findIndex((line, index) => index > 0 && FRONT_MATTER_FENCE.test(line));
+  return lines.findIndex(
+    (line, index) =>
+      index > 0 &&
+      (FRONT_MATTER_FENCE.test(line) || (closers === "yaml" && YAML_DOCUMENT_END.test(line)))
+  );
 }
 
 /**
@@ -321,7 +339,7 @@ function scanBlocks(source: readonly string[]): Blocks {
   let html: RegExp | undefined;
   let definition: DefinitionTail | undefined;
   let table = false;
-  const frontMatter = frontMatterEnd(source);
+  const frontMatter = frontMatterEnd(source, "yaml");
 
   const info = (kind: LineKind, itemStart = false): LineInfo => ({ kind, itemStart });
 
@@ -838,11 +856,12 @@ type Parse = (text: string) => ParsedNode[];
 
 /**
  * The parser `--write` compares renderings with: micromark with GFM and, where the file opens
- * with a YAML front matter block frontMatterEnd finds, the front matter extension. After an opener
- * with no closing fence that extension misreads every block (a list becomes a paragraph), where
- * GitHub reads the opener as a rule. The parser is imported only once a node_modules directory
- * holding it is in the script's directory or above: where there is none, Bun would install an
- * unpinned copy itself. Undefined, after saying why on stderr, when it is not installed.
+ * with a YAML front matter block frontMatterEnd finds for micromark, the front matter extension.
+ * After an opener with no closing fence that extension misreads every block (a list becomes a
+ * paragraph), where GitHub reads the opener as a rule. The parser is imported only once a
+ * node_modules directory holding it is in the script's directory or above: where there is none,
+ * Bun would install an unpinned copy itself. Undefined, after saying why on stderr, when it is not
+ * installed.
  */
 async function loadParser(): Promise<Parse | undefined> {
   let installed = false;
@@ -874,7 +893,7 @@ async function loadParser(): Promise<Parse | undefined> {
       return (text) =>
         markdown.fromMarkdown(
           text,
-          frontMatterEnd(splitLines(text).lines) === -1 ? gfmOptions : matterOptions
+          frontMatterEnd(splitLines(text).lines, "micromark") === -1 ? gfmOptions : matterOptions
         ).children;
     } catch (error) {
       failure = `\n${error instanceof Error ? error.message : String(error)}`;

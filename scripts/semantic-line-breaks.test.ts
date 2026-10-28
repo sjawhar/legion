@@ -226,3 +226,14 @@ test("front matter whose opener has trailing spaces is front matter to check and
   expect(result.text).toBe("--- \ntitle: One. Two\ntags: x\n---\n\nBody.\nMore.\n");
   expect(result.exitCode).toBe(0);
 });
+
+test("front matter closed by ... is front matter to check and --write", async () => {
+  const text = "---\ntitle: One. Two\ndescription: x\n...\n\nBody. More.\n";
+  const path = await markdownFile(text);
+  const checked = run([path]);
+  expect(checked.stdout).toBe(`${path}:6: R1: Body. More.\n`);
+  expect(checked.exitCode).toBe(1);
+  const result = await written(text);
+  expect(result.text).toBe("---\ntitle: One. Two\ndescription: x\n...\n\nBody.\nMore.\n");
+  expect(result.exitCode).toBe(0);
+});
