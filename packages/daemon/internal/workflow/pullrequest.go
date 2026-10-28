@@ -227,13 +227,18 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	// Past its bound the record lets the oldest push waiting for a link go (classify.ApplyPush): a
 	// webhook behind it never arrived, and the move it would have linked into is judged without it.
 	// A move past its bound on the pushes of its two heads made again lets the oldest go too: the
-	// next arrival by that move takes the oldest kept.
+	// next arrival by that move takes the oldest kept. Past the bound on pushes of the same two heads
+	// on their way, before their move is made, the oldest after the first goes.
 	for _, gone := range dropped.Waiting {
 		e.warnOnCommit(ctx, "workflow: a pull request holds the most pushes waiting for a link; the oldest is let go",
 			"issue", pr.Issue, "pullRequest", pr.Number, "before", gone.Before, "after", gone.SHA)
 	}
 	if gone := dropped.Repeat; gone != nil {
 		e.warnOnCommit(ctx, "workflow: a move holds the most pushes of its two heads made again; the oldest is let go",
+			"issue", pr.Issue, "pullRequest", pr.Number, "before", gone.Before, "after", gone.SHA)
+	}
+	if gone := dropped.Copy; gone != nil {
+		e.warnOnCommit(ctx, "workflow: a pull request holds the most pushes of the same two heads on their way; the oldest after the first is let go",
 			"issue", pr.Issue, "pullRequest", pr.Number, "before", gone.Before, "after", gone.SHA)
 	}
 	// A push classified after its head arrived can complete the carry of a code head's red to the

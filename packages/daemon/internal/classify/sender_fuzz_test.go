@@ -96,8 +96,17 @@ type sentDeliveries struct {
 // before the synchronize of the head its move left, and the pushes of the same two heads in the
 // order they were made.
 func sentFacts(rng *rand.Rand, steps []sentStep, bounded bool) sentDeliveries {
+	// GitHub's clock is to the second: each synchronize is in the second of the one before it or the
+	// next, so moves share a second about half the time.
 	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
-	clock := func(k int) time.Time { return base.Add(time.Duration(k+1) * time.Minute) }
+	ticks := make([]time.Duration, len(steps))
+	for k := range ticks {
+		ticks[k] = time.Second
+		if k > 0 {
+			ticks[k] = ticks[k-1] + time.Duration(rng.IntN(2))*time.Second
+		}
+	}
+	clock := func(k int) time.Time { return base.Add(ticks[k]) }
 	labels := make([]string, len(steps))
 	latest, used := map[string]string{"h0": "h0"}, map[[2]string]bool{}
 	label := func(i int) string {

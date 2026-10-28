@@ -41,9 +41,11 @@ func AdvancePullRequestHead(pr record.PullRequest, arrival Arrival, headSHA stri
 
 // MovesBy is whether a synchronize to head is a move of the head the record holds (pr.HeadSHA): a
 // head other than it, or the same head reached from another, named by its sender and newer than
-// the newest applied - the branch left the recorded head and came back, the synchronizes between
-// skipped. A listener that names no sender, or no before, makes a synchronize to the recorded head
-// no move, as the release before did.
+// the newest applied, when the move away to that other head is known (movedAway) - the branch left
+// the recorded head and came back, the synchronizes between skipped. Without that it is a copy of
+// the synchronize that reached the head: GitHub can send two for one push. A listener that names
+// no sender, or no before, makes a synchronize to the recorded head no move, as the release before
+// did.
 func MovesBy(pr record.PullRequest, arrival Arrival, head string) bool {
 	if head == "" {
 		return false
@@ -51,7 +53,30 @@ func MovesBy(pr record.PullRequest, arrival Arrival, head string) bool {
 	if head != pr.HeadSHA {
 		return true
 	}
-	return arrival.Sender != "" && arrival.Before != "" && arrival.Before != head && !arrival.At.IsZero() && arrival.At.After(pr.HeadUpdatedAt)
+	return arrival.Sender != "" && arrival.Before != "" && arrival.Before != head && !arrival.At.IsZero() &&
+		arrival.At.After(pr.HeadUpdatedAt) && movedAway(pr, head, arrival.Before)
+}
+
+// movedAway is whether the record knows the branch moved from head to the head before: a push of
+// those two heads recorded, waiting or queued on their move, or a late synchronize that named the
+// move (record.HeadRun.Names).
+func movedAway(pr record.PullRequest, head, before string) bool {
+	for _, p := range pr.Pushes {
+		if p.Before == head && p.SHA == before {
+			return true
+		}
+	}
+	if i := moveIndex(pr.Moves, head, before); i >= 0 && len(pr.Moves[i].Repeats) > 0 {
+		return true
+	}
+	if pr.Run != nil {
+		for _, n := range pr.Run.Names {
+			if n.Before == head && n.SHA == before {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // NameMove records the move a synchronize names that moves no head - one older than the newest
@@ -76,10 +101,11 @@ func NameMove(pr record.PullRequest, named record.Named) record.PullRequest {
 	return replayRun(pr)
 }
 
-// namedAlready is whether names holds named: a synchronize delivered again names nothing new.
+// namedAlready is whether names holds named (sameName): a synchronize delivered again names
+// nothing new.
 func namedAlready(names []record.Named, named record.Named) bool {
 	for _, n := range names {
-		if n.Before == named.Before && n.SHA == named.SHA && n.Sender == named.Sender && n.At.Equal(named.At) {
+		if sameName(n, named) {
 			return true
 		}
 	}
@@ -88,21 +114,31 @@ func namedAlready(names []record.Named, named record.Named) bool {
 
 // inAGap is whether named can be a move of an arrival of run whose synchronize skipped it: a head
 // step naming its move by its sender whose synchronize GitHub's clock puts named no later than, and
-// after the head before it (record.HeadRun.Since for the first). A clock unknown on either side
-// fences nothing.
+// no earlier than the head before it (record.HeadRun.Since for the first) - GitHub's clock is to
+// the second, so a skipped move can share the second of either - unless named is that head's own
+// move, at its own clock (inWindow). A clock unknown on either side fences nothing.
 func inAGap(run record.HeadRun, named record.Named) bool {
-	since := run.Since
+	since, prev := run.Since, run.Anchor.HeadSHA
 	for _, s := range run.Steps {
 		if s.Head == "" {
 			continue
 		}
-		if s.Before != "" && s.Sender != "" && !LateLifecycle(s.SyncedAt, named.At) &&
-			(named.At.IsZero() || since.IsZero() || named.At.After(since)) {
+		if s.Before != "" && s.Sender != "" && !LateLifecycle(s.SyncedAt, named.At) && inWindow(named, prev, since) {
 			return true
 		}
-		since = s.SyncedAt
+		since, prev = s.SyncedAt, s.Head
 	}
 	return false
+}
+
+// inWindow is whether named comes no earlier than since, GitHub's clock of the head the window
+// starts at (start), and is not that head's own move at that clock: a copy of the synchronize that
+// reached it.
+func inWindow(named record.Named, start string, since time.Time) bool {
+	if named.At.IsZero() || since.IsZero() {
+		return true
+	}
+	return !named.At.Before(since) && !(named.At.Equal(since) && named.SHA == start)
 }
 
 // advance moves the pull request to a new head, by the move arrival names, and says whether a
@@ -303,9 +339,10 @@ func pushedMoves(moves []record.Move, push record.ClassifiedPush) ([]record.Move
 //     before that takes the oldest repeat of each move (beforeChain).
 //   - One that names both takes the push of its own move by its sender (pushOf), and, when the
 //     record's head is not before - the synchronizes of the moves between were skipped - the pushes
-//     their own late synchronizes named (NameMove): the run's named moves GitHub's clock puts after
-//     the record's head (Since) and no later than this synchronize, in that clock's order, which must lead one by one from the
-//     record's head to before (gapPath), each push by its sender. Those named moves are spent by the
+//     their own late synchronizes named (NameMove): the run's named moves GitHub's clock puts no
+//     earlier than the record's head (Since, inWindow) and no later than this synchronize, in that
+//     clock's order, which must lead one by one from the record's head to before (gapPath), each
+//     push by its sender. Those named moves are spent by the
 //     arrival. Until its own push, that path and each of its pushes are recorded it waits, judged
 //     meanwhile by the pushes it has (provisional): a named move's push, and for two heads no
 //     synchronize named, the newest recorded push (the release before's). A synchronize lost for
@@ -318,23 +355,26 @@ func arrivalPushes(pr record.PullRequest, arrival Arrival, head string, names []
 	if arrival.Sender == "" || pr.HeadSHA == "" {
 		return arrivalRead{pushes: beforeChain(pr, before, head), names: names}
 	}
-	var seen, rest []record.Named
+	var required, optional []record.Named
+	later := func(n record.Named) bool { return !arrival.At.IsZero() && !n.At.IsZero() && n.At.After(arrival.At) }
 	for _, n := range names {
 		switch {
-		case !arrival.At.IsZero() && !n.At.IsZero() && n.At.After(arrival.At):
-			rest = append(rest, n)
-		case arrival.Since.IsZero() || n.At.IsZero() || n.At.After(arrival.Since):
-			seen = append(seen, n)
+		case later(n) || !inWindow(n, pr.HeadSHA, arrival.Since):
+		case !n.At.IsZero() && (n.At.Equal(arrival.At) || n.At.Equal(arrival.Since)):
+			optional = append(optional, n)
+		default:
+			required = append(required, n)
 		}
 	}
+	seen := append(clone(required), optional...)
 	waiting := func(own *record.ClassifiedPush) arrivalRead {
-		return arrivalRead{pushes: provisional(pr, seen, own), waits: true, names: rest}
+		return arrivalRead{pushes: provisional(pr, seen, own), waits: true, names: names}
 	}
 	own := pushOf(pr, before, head, arrival.Sender)
 	if own == nil {
 		return waiting(nil)
 	}
-	path, ok := gapPath(seen, pr.HeadSHA, before)
+	path, ok := gapPath(required, optional, pr.HeadSHA, before)
 	if !ok {
 		return waiting(own)
 	}
@@ -346,7 +386,20 @@ func arrivalPushes(pr record.PullRequest, arrival Arrival, head string, names []
 		}
 		gap = append(gap, *p)
 	}
-	return arrivalRead{pushes: append(gap, *own), path: true, names: rest}
+	// The arrival spends the moves on its path and every earlier one; a move of its own second it
+	// did not take is the next arrival's, as is every later move.
+	var left []record.Named
+	for _, n := range names {
+		if later(n) || (!arrival.At.IsZero() && n.At.Equal(arrival.At) && !namedAlready(path, n)) {
+			left = append(left, n)
+		}
+	}
+	return arrivalRead{pushes: append(gap, *own), path: true, names: left}
+}
+
+// sameName is whether a and b name the same move by the same sender at the same clock.
+func sameName(a, b record.Named) bool {
+	return a.Before == b.Before && a.SHA == b.SHA && a.Sender == b.Sender && a.At.Equal(b.At)
 }
 
 // arrivalRead is what an arrival is judged with (arrivalPushes): pushes, which are the move's own
@@ -368,19 +421,24 @@ func (read arrivalRead) chained(previous, head string) bool {
 	return chained
 }
 
-// gapPath is the moves the branch made from from to before whose synchronizes were skipped: seen,
-// in the order GitHub's clock puts them, and whether they lead one by one from from to before - each
-// move from the head the one before it reached. Named moves of unknown clock are taken as the
-// shortest chain of the newest of each two heads. A move missing from the middle, the start or the
-// end of the path leaves it unled, so the arrival waits for it; a loop the branch made inside the
-// path, a head left and returned to, whose synchronizes are still to come, is not seen missing
-// (TestAMoveMadeAgainInTheGapOfASkippedSynchronize).
-func gapPath(seen []record.Named, from, before string) ([]record.Named, bool) {
-	for _, n := range seen {
+// gapPath is the moves the branch made from from to before whose synchronizes were skipped, and
+// whether they lead one by one from from to before - each move from the head the one before it
+// reached - in the order GitHub's clock puts them: every move of required, and those of optional
+// that lead there. Optional are the moves in the second the window starts or ends in, which can be
+// the window's before them or after them: GitHub's clock is to the second. Moves of one second are
+// taken in the one order of them that so leads, when exactly one path does; none, or more than one,
+// leaves the path unled (as does trying more than maxTiedOrders). Named moves of unknown clock are
+// taken as the shortest chain of the newest of each two heads. A move missing from the middle, the
+// start or the end of the path leaves it unled, so the arrival waits for it; a loop the branch made
+// inside the path, a head left and returned to, whose synchronizes are still to come, is not seen
+// missing (TestAMoveMadeAgainInTheGapOfASkippedSynchronize).
+func gapPath(required, optional []record.Named, from, before string) ([]record.Named, bool) {
+	all := append(clone(required), optional...)
+	for _, n := range all {
 		if n.At.IsZero() {
 			byKey := map[[2]string]record.Named{}
 			var named []record.ClassifiedPush
-			for _, m := range newestOfEachName(seen) {
+			for _, m := range newestOfEachName(all) {
 				byKey[[2]string{m.Before, m.SHA}] = m
 				named = append(named, record.ClassifiedPush{Before: m.Before, SHA: m.SHA})
 			}
@@ -392,17 +450,70 @@ func gapPath(seen []record.Named, from, before string) ([]record.Named, bool) {
 			return path, chain != nil || from == before
 		}
 	}
-	path := clone(seen)
-	sort.SliceStable(path, func(i, j int) bool { return path[i].At.Before(path[j].At) })
-	at := from
-	for _, n := range path {
-		if n.Before != at {
-			return nil, false
-		}
-		at = n.SHA
+	sorted := make([]candidate, 0, len(all))
+	for i, n := range all {
+		sorted = append(sorted, candidate{n, i >= len(required)})
 	}
-	return path, at == before
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].named.At.Before(sorted[j].named.At) })
+	var paths [][]record.Named
+	tries := 0
+	var walk func(start int, at string, acc []record.Named)
+	walk = func(start int, at string, acc []record.Named) {
+		if len(paths) > 1 || tries > maxTiedOrders {
+			return
+		}
+		if start == len(sorted) {
+			if at == before {
+				paths = append(paths, acc)
+			}
+			return
+		}
+		end := start
+		for end < len(sorted) && sorted[end].named.At.Equal(sorted[start].named.At) {
+			end++
+		}
+		var order func(left []candidate, at string, acc []record.Named)
+		order = func(left []candidate, at string, acc []record.Named) {
+			if tries++; tries > maxTiedOrders {
+				return
+			}
+			if onlyOptional(left) {
+				walk(end, at, acc)
+			}
+			for k, c := range left {
+				if c.named.Before == at {
+					rest := append(append(make([]candidate, 0, len(left)-1), left[:k]...), left[k+1:]...)
+					order(rest, c.named.SHA, append(clone(acc), c.named))
+				}
+			}
+		}
+		order(sorted[start:end], at, acc)
+	}
+	walk(0, from, nil)
+	if len(paths) != 1 || tries > maxTiedOrders {
+		return nil, false
+	}
+	return paths[0], true
 }
+
+// candidate is a move gapPath may put on a path: one the path must take, or an optional one.
+type candidate struct {
+	named    record.Named
+	optional bool
+}
+
+// onlyOptional is whether every move of left is optional, so a path may leave them all.
+func onlyOptional(left []candidate) bool {
+	for _, c := range left {
+		if !c.optional {
+			return false
+		}
+	}
+	return true
+}
+
+// maxTiedOrders bounds the orders gapPath tries of moves GitHub's clock puts in one second.
+const maxTiedOrders = 4096
 
 // provisional is the pushes an arrival that still waits is judged with: one push of each two heads
 // recorded, waiting or a repeat - own for its own move when it is recorded, the push a named move
@@ -813,18 +924,20 @@ func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullReq
 }
 
 // Dropped is what a push lets go (ApplyPushDropping): Waiting, the pushes waiting for a link past
-// the bound (boundedPushes), oldest first; and Repeat, the repeat a move let go past maxRepeats, if
-// any.
+// the bound (boundedPushes), oldest first; Repeat, the repeat a move let go past maxRepeats, if
+// any; and Copy, a push of two heads on their way past maxCopies of them, if any (cappedCopies).
 type Dropped struct {
 	Waiting []record.ClassifiedPush
 	Repeat  *record.ClassifiedPush
+	Copy    *record.ClassifiedPush
 }
 
 // ApplyPushDropping is ApplyPush, and what it let go (Dropped).
 func ApplyPushDropping(pr record.PullRequest, push record.ClassifiedPush) (record.PullRequest, Dropped) {
 	var dropped Dropped
 	pr.Moves, dropped.Repeat = pushedMoves(pr.Moves, push)
-	unspent := unspentPushes(withPush(pr.Pushes, push), pr.Moves, false)
+	unspent, copied := cappedCopies(unspentPushes(withPush(pr.Pushes, push), pr.Moves, false), push)
+	dropped.Copy = copied
 	var gone map[[2]string]bool
 	pr.Pushes, gone = boundedPushes(unspent, pr.HeadSHA)
 	dropped.Waiting = newestOfKeys(unspent, gone)
@@ -836,12 +949,37 @@ func ApplyPushDropping(pr record.PullRequest, push record.ClassifiedPush) (recor
 	if !carriesApproval(push) {
 		run.Pushes = append(run.Pushes, push)
 	}
-	run.Pushes = withoutKeys(run.Pushes, gone)
+	run.Pushes, _ = cappedCopies(withoutKeys(run.Pushes, gone), push)
 	if dropped.Repeat != nil {
 		run.Pushes = withoutCopies(run.Pushes, []record.ClassifiedPush{*dropped.Repeat})
 	}
 	pr.Run = &run
 	return replayRun(pr), dropped
+}
+
+// maxCopies bounds the code pushes of the same two heads a pull request keeps on their way, before
+// a move of those heads is made: the one the move will take and the maxRepeats it will queue as
+// repeats (madeMoves).
+const maxCopies = maxRepeats + 1
+
+// cappedCopies is pushes with at most maxCopies code pushes of push's two heads, and the one it let
+// go, if any: past the bound the oldest after the first goes, as the move made of them would keep
+// the first for its own push and let the oldest repeat go (pushedMoves).
+func cappedCopies(pushes []record.ClassifiedPush, push record.ClassifiedPush) ([]record.ClassifiedPush, *record.ClassifiedPush) {
+	if carriesApproval(push) {
+		return pushes, nil
+	}
+	var at []int
+	for i, p := range pushes {
+		if pushKey(p) == pushKey(push) && !carriesApproval(p) {
+			at = append(at, i)
+		}
+	}
+	if len(at) <= maxCopies {
+		return pushes, nil
+	}
+	gone := pushes[at[1]]
+	return append(append(make([]record.ClassifiedPush, 0, len(pushes)-1), pushes[:at[1]]...), pushes[at[1]+1:]...), &gone
 }
 
 // withPush is pushes with push recorded, after every earlier push. A push that carries an approval

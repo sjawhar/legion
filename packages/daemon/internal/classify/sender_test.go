@@ -157,3 +157,109 @@ func TestAMoveLetsItsOldestRepeatGoFirst(t *testing.T) {
 		}
 	}
 }
+
+// secondAt is a synchronize naming its move and sender at second of GitHub's clock, late or not.
+func secondAt(before, head, sender string, second int, late bool) runFact {
+	return runFact{head: head, before: before, sender: sender, at: time.Date(2026, 10, 1, 0, 0, second, 0, time.UTC), late: late}
+}
+
+// GitHub's clock is to the second, so a skipped move can share its second with the record's head,
+// and two skipped moves can share one second and be delivered in either order. Each closes the
+// head run the moment the moves are named, judged as the same history in distinct seconds.
+func TestSkippedMovesInOneSecondCloseTheirHeadRun(t *testing.T) {
+	dev, app := "dev", "app"
+	pushes := []runFact{pushed(record.ClassifiedPush{SHA: "h1", Before: "h0", Sender: dev}), pushed(record.ClassifiedPush{SHA: "c1", Before: "h1", Sender: dev}),
+		pushed(record.ClassifiedPush{SHA: "c2", Before: "c1", ByReviewApp: true, Sender: app}), pushed(record.ClassifiedPush{SHA: "c3", Before: "c2", Sender: dev})}
+	for _, tc := range []struct {
+		name          string
+		tied, control []runFact
+	}{
+		{"a skipped move in the second of the record's head",
+			[]runFact{secondAt("h0", "h1", dev, 1, false), settles("h1", 2, "ci"), secondAt("c2", "c3", dev, 3, false), secondAt("c1", "c2", app, 2, true), secondAt("h1", "c1", dev, 1, true)},
+			[]runFact{secondAt("h0", "h1", dev, 1, false), settles("h1", 2, "ci"), secondAt("c2", "c3", dev, 4, false), secondAt("c1", "c2", app, 3, true), secondAt("h1", "c1", dev, 2, true)}},
+		{"two skipped moves in one second, delivered in the reverse of their order",
+			[]runFact{secondAt("h0", "h1", dev, 1, false), settles("h1", 2, "ci"), secondAt("c2", "c3", dev, 3, false), secondAt("c1", "c2", app, 2, true), secondAt("h1", "c1", dev, 2, true)},
+			[]runFact{secondAt("h0", "h1", dev, 1, false), settles("h1", 2, "ci"), secondAt("c2", "c3", dev, 4, false), secondAt("c1", "c2", app, 3, true), secondAt("h1", "c1", dev, 2, true)}},
+	} {
+		got := delivered(t, redAtH0(), append(append([]runFact{}, pushes...), tc.tied...)...)
+		want := delivered(t, redAtH0(), append(append([]runFact{}, pushes...), tc.control...)...)
+		if got.Run != nil || JudgementChanged(want, got) || got.HeadSHA != "c3" {
+			t.Errorf("%s: run open %v, %s at %s; want closed and %s", tc.name, got.Run != nil, judged(got, "", ""), got.HeadSHA, judged(want, "", ""))
+		}
+	}
+}
+
+// Moves of one second that lead from the record's head to before in two orders leave the path
+// unled, and the arrival waits for good, judged meanwhile by the newest push of each two heads:
+// h0..c1 and c1..h0 in one second, then c1 arriving from h0's later move, cannot tell which loop
+// the branch made.
+func TestTiedMovesInTwoOrdersLeaveThePathUnled(t *testing.T) {
+	names := []record.Named{
+		{Before: "h0", SHA: "c1", Sender: "dev", At: time.Date(2026, 10, 1, 0, 0, 2, 0, time.UTC)},
+		{Before: "c1", SHA: "h0", Sender: "dev", At: time.Date(2026, 10, 1, 0, 0, 2, 0, time.UTC)},
+		{Before: "h0", SHA: "c1", Sender: "app", At: time.Date(2026, 10, 1, 0, 0, 2, 0, time.UTC)},
+	}
+	if path, ok := gapPath(names, nil, "h0", "c1"); ok {
+		t.Errorf("gapPath %v led, want unled: two orders of one second lead from h0 to c1", path)
+	}
+	if path, ok := gapPath(names[:2], nil, "h0", "h0"); !ok || len(path) != 2 || path[0].Before != "h0" {
+		t.Errorf("gapPath %v, %v; want h0>c1>h0, the one order that leads", path, ok)
+	}
+}
+
+// A second copy of the synchronize that reached the recorded head - GitHub can send two for one
+// push - is no move, whatever its clock: the record knows of no move away from the head to the head
+// the copy names. h0>h1 applied, then a copy of h0>h1 a second later, counts no fix attempt and
+// opens no head run; a return to h1 whose move away, h1..h0, was pushed is a move.
+func TestACopyOfTheSynchronizeThatReachedTheHeadIsNoMove(t *testing.T) {
+	code := record.ClassifiedPush{SHA: "h1", Before: "h0", Sender: "dev"}
+	start := delivered(t, redAtH0(), pushed(code), secondAt("h0", "h1", "dev", 1, false), settles("h1", 2, "ci"))
+	copied := delivered(t, start, secondAt("h0", "h1", "dev", 2, false))
+	if copied.Run != nil || copied.FixAttempts != start.FixAttempts {
+		t.Errorf("a copy of h0>h1 a second later: run open %v, fix %d; want closed and %d", copied.Run != nil, copied.FixAttempts, start.FixAttempts)
+	}
+	if MovesBy(start, Arrival{Before: "h0", Sender: "dev", At: time.Date(2026, 10, 1, 0, 0, 2, 0, time.UTC)}, "h1") {
+		t.Error("a copy of h0>h1 with no move away known is a move, want none")
+	}
+	away := delivered(t, start, pushed(record.ClassifiedPush{SHA: "h0", Before: "h1", Forced: true, Sender: "dev"}))
+	if !MovesBy(away, Arrival{Before: "h0", Sender: "dev", At: time.Date(2026, 10, 1, 0, 0, 3, 0, time.UTC)}, "h1") {
+		t.Error("a return to h1 whose move away h1..h0 was pushed is no move, want one")
+	}
+}
+
+// Pushes of the same two heads on their way, before their move is made, are bounded as they arrive
+// (maxCopies): the first, which the move will take, and the newest maxRepeats, the oldest after the
+// first let go and named (Dropped.Copy). One hundred pushes of h1..h2 while a head run waits leave
+// at most maxCopies in the record and in the run.
+func TestCopiesOfTwoHeadsOnTheirWayAreBounded(t *testing.T) {
+	pr := delivered(t, redAtH0(), arrivesFrom("h0", "h1"))
+	if pr.Run == nil {
+		t.Fatal("no head run waits for h0..h1")
+	}
+	var named []string
+	for i := range 100 {
+		var dropped Dropped
+		pr, dropped = ApplyPushDropping(pr, record.ClassifiedPush{SHA: "h2", Before: "h1", Sender: fmt.Sprintf("s%d", i)})
+		if dropped.Copy != nil {
+			named = append(named, dropped.Copy.Sender)
+		}
+	}
+	count := func(pushes []record.ClassifiedPush) int {
+		n := 0
+		for _, p := range pushes {
+			if p.Before == "h1" && p.SHA == "h2" {
+				n++
+			}
+		}
+		return n
+	}
+	if got := count(pr.Pushes); got != maxCopies {
+		t.Errorf("the record holds %d pushes of h1..h2, want %d", got, maxCopies)
+	}
+	if pr.Run == nil || count(pr.Run.Pushes) != maxCopies {
+		t.Errorf("the head run holds %v pushes of h1..h2, want %d", pr.Run, maxCopies)
+	}
+	if len(named) != 100-maxCopies || named[0] != "s1" || pr.Pushes[0].Sender != "s0" {
+		t.Errorf("let go %d (first %v), the record's first is %s's; want %d, s1's first, and s0's kept", len(named), named[:1], pr.Pushes[0].Sender, 100-maxCopies)
+	}
+}

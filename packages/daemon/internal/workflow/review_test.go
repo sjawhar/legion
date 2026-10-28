@@ -1357,6 +1357,43 @@ func TestAPushTheBoundLetsGoIsWarnedByName(t *testing.T) {
 	}
 }
 
+// A pull request holds at most seventeen pushes of the same two heads on their way, before their
+// move is made (classify's maxCopies): the eighteenth lets the oldest after the first go, logged as
+// a warning that names it, once, and no push waiting for a link is let go with it.
+func TestACopyOfTwoHeadsOnTheirWayLetGoIsWarnedByName(t *testing.T) {
+	const message = "workflow: a pull request holds the most pushes of the same two heads on their way; the oldest after the first is let go"
+	pool := migratedPool(t)
+	seedReviewOf(t, pool, "head", "green")
+	var logged bytes.Buffer
+	apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, slog.New(slog.NewTextHandler(&logged, nil))))
+	for i := 1; i <= 18; i++ {
+		logged.Reset()
+		if result := apply(fmt.Sprintf("push-%d", i), pushedFromTo("head", "h1", "src/widget.go", "legion-implementer[bot]")); result.Refusal != nil {
+			t.Fatalf("push %d was refused: %+v", i, result.Refusal)
+		}
+		var warned []string
+		for _, line := range strings.Split(logged.String(), "\n") {
+			if strings.Contains(line, "let go") {
+				warned = append(warned, line)
+			}
+		}
+		if i < 18 {
+			if len(warned) != 0 {
+				t.Fatalf("copy %d of 17 warned %q, want nothing", i, warned)
+			}
+			continue
+		}
+		if len(warned) != 1 || !strings.Contains(warned[0], message) {
+			t.Fatalf("the copy past the bound warned %q, want the one copy let go", warned)
+		}
+		for _, want := range []string{"level=WARN", "issue=LEGION-208", "pullRequest=42", "before=head", "after=h1"} {
+			if !strings.Contains(warned[0], want) {
+				t.Fatalf("the warning %q does not name %s, want the copy let go named", warned[0], want)
+			}
+		}
+	}
+}
+
 // A move holds at most sixteen later pushes of its two heads (classify's maxRepeats), each the
 // move made again or its push delivered again; the seventeenth lets the oldest go, logged as a
 // warning that names it, once, and no push waiting for a link is let go with it.
