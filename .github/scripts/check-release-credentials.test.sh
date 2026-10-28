@@ -4,12 +4,11 @@
 # dependency code, uses only allow-listed actions, restores no cache and holds the deploy key only
 # in the env of a step that runs one of its workflow's push commands (a release's push-tag or
 # push-main, the fold's push-fold, the rebuild's push-built); a job that runs dependency code holds
-# no credential and ends in the no-credential tripwire; every checkout persists no credential; the
-# two release orderings (pi_legion_publish after pi_envoy_publish, release_publish in its
-# concurrency group) stay; and a job condition downstream of a skippable job calls `always()` and
-# tests the result of every job whose outputs it reads. The check is a tripwire over named patterns
-# (the commands, actions and paths its lists hold), not a proof that no other code runs, and these
-# cases exercise those patterns, on each side of each line.
+# no credential and ends in the no-credential tripwire; every checkout persists no credential;
+# release_publish stays in its concurrency group; and a job condition downstream of a skippable job
+# calls `always()` and tests the result of every job whose outputs it reads. The check is a tripwire
+# over named patterns (the commands, actions and paths its lists hold), not a proof that no other
+# code runs, and these cases exercise those patterns, on each side of each line.
 #
 # Each case builds a miniature repository under a temporary directory, with the real script
 # symlinked into it and the five workflows written green, and mutates one file.
@@ -82,17 +81,20 @@ INFRA=.github/workflows/release-envoy-infra.yaml
 FOLD=.github/workflows/changelog-fold.yaml
 REBUILD=.github/workflows/claude-envoy-rebuild.yaml
 
-# write_green <workflows dir>: the five workflows in their intended shape. release.yaml: a build
-# job (install, setup-bun, a `go build` behind `&&`, upload, tripwire) with an `if:` of its own,
-# two credentialed publish jobs (setup-node, `npm publish` of the handed tarball, the tag push, a
-# GitHub release and the bump push) whose `if:` calls `always()` and tests the result of the build
-# whose outputs it reads, a plain job that runs no dependency code and a reusable-workflow call
-# with no steps and no `if:`. The listener: a docker build job (`packages: write`, a build-push)
-# and release_publish in its concurrency group, with `docker buildx imagetools create`. Infra: a
-# build job (install-pulumi, `pulumi package get-schema`, tripwire) and a publish job. The fold: a
-# build job (install-changie, fold-plan, fold-notes, upload, tripwire) with no `if:`, and
-# fold_publish (`actions: write`, the deploy key in the env of its push-fold step) whose `if:` reads
-# the build's outputs without `always()`. The rebuild: a build job (setup-bun, `bun run
+# write_green <workflows dir>: the five workflows in a shape every rule passes, not a copy of the
+# real files. release.yaml: a build job (install, setup-bun, a `go build` behind `&&`, upload,
+# tripwire) with an `if:` of its own, two credentialed publish jobs (setup-node, `npm publish` of
+# the handed tarball, the tag push, a GitHub release and the bump push) whose `if:` calls `always()`
+# and tests the result of the build whose outputs it reads, a plain job that runs no dependency
+# code and a reusable-workflow call with no steps and no `if:`. pi_legion_publish needing
+# pi_envoy_publish and testing its result is a generic rule-5 shape, a chain of skippable jobs,
+# which the if-two-needs-one-result and if-steps-less-job cases below mutate; the real release.yaml
+# publishes every package from one job. The listener: a docker build job (`packages: write`, a
+# build-push) and release_publish in its concurrency group, with `docker buildx imagetools
+# create`. Infra: a build job (install-pulumi, `pulumi package get-schema`, tripwire) and a publish
+# job. The fold: a build job (install-changie, fold-plan, fold-notes, upload, tripwire) with no
+# `if:`, and fold_publish (`actions: write`, the deploy key in the env of its push-fold step) whose
+# `if:` reads the build's outputs without `always()`. The rebuild: a build job (setup-bun, `bun run
 # verify-build`, `release-push.sh extract-built`, upload, tripwire) with an `if:` of its own, and a
 # push job (`actions: write`, the deploy key in the env of its `push-built` step) whose `if:` calls
 # `always()` and tests build's result.
@@ -509,7 +511,7 @@ add_push_tag_step() {
   add_publish_step "$1" "      - name: $2"$'\n        env:\n          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n          TAG: ${{ steps.handed.outputs.tag }}\n        run: |\n'"$3"$'          .github/scripts/release-push.sh push-tag "$TAG"\n'
 }
 
-echo "case: the five workflows in their intended shape"
+echo "case: the five workflows in a shape every rule passes"
 root=$(fixture green)
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
@@ -850,21 +852,6 @@ run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "wants the tripwire last" "$(contains "$out" "job 'pi_envoy_build' runs dependency code (.*), so its last step must be the tripwire")"
 
-echo "case: pi_legion_publish not needing pi_envoy_publish"
-root=$(fixture needs-lacks-envoy)
-mutate "$root/$RELEASE" $'    needs: [pi_legion_build, pi_envoy_build, pi_envoy_publish]\n' $'    needs: [pi_legion_build, pi_envoy_build]\n'
-run_check "$root"
-check "exits 1" "$(is "$status" 1)"
-check "names the needs at its line" \
-  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    needs: \[pi_legion_build, pi_envoy_build\]$'): job 'pi_legion_publish' must need 'pi_envoy_publish'")"
-
-echo "case: no pi_legion_publish"
-root=$(fixture no-pi-legion-publish)
-mutate "$root/$RELEASE" $'  pi_legion_publish:\n' $'  pi_legion_release:\n'
-run_check "$root"
-check "exits 1" "$(is "$status" 1)"
-check "names the missing job" "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^jobs:$'): no job 'pi_legion_publish'")"
-
 echo "case: release_publish with cancel-in-progress: true"
 root=$(fixture cancel-true)
 mutate "$root/$LISTENER" $'      cancel-in-progress: false\n' $'      cancel-in-progress: true\n'
@@ -910,7 +897,7 @@ run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the missing job" "$(contains "$out" "^::error::$LISTENER:$(line_of "$root/$LISTENER" '^jobs:$'): no job 'release_publish'")"
 
-# The green job-level conditions of the two publish jobs, for the rule-6 cases to replace.
+# The green job-level conditions of the two publish jobs, for the rule-5 cases to replace.
 envoy_if=$'    if: always() && needs.pi_envoy_build.result == \'success\' && needs.pi_envoy_build.outputs.skip != \'true\'\n'
 legion_if=$'    if: always() && needs.pi_legion_build.result == \'success\' && needs.pi_legion_build.outputs.skip != \'true\' && (needs.pi_envoy_publish.result == \'success\' || needs.pi_envoy_publish.result == \'skipped\')\n'
 
