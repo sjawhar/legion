@@ -110,7 +110,7 @@ func runReplayCheckSeed(args []string) error {
 	fmt.Printf("version sizes: %d changes compared, %d mismatches, %d sign flipped, %d without a listed size\n",
 		sa.SizeChanges, len(sa.SizeMismatches), sa.SignFlipped, sa.SizesMissing)
 	fmt.Printf("anchors: %d recorded, %d outside the block their rule chose; by rule %s\n", sa.Anchors, len(sa.Outside), fmtCounts(sa.Rules))
-	fmt.Printf("documents with typed ask blocks %d, compared with answered_at masked: %d equal\n", r.AskBlockDocs, r.AskBlockDocsEqual)
+	fmt.Printf("documents with answered or resolved typed ask blocks %d, compared with answered_at masked: %d equal\n", r.AskBlockDocs, r.AskBlockDocsEqual)
 	for _, d := range r.Distribution {
 		fmt.Printf("open anchored roots on written primary documents (%s): documents %d, median %.1f, write-weighted mean %.2f\n",
 			d.When, d.Documents, d.Median, d.WeightedMean)
@@ -191,7 +191,8 @@ type sizeAnchorCheck struct {
 // lies, once, inside the span of the text at At its rule chose. An answer version's expected
 // change counts its answers' answered_at as the seed's answer wrote it: Dispatch writes the time
 // of the answer with its trailing zeros trimmed, so its length is not production's (the same
-// attribute the text comparison masks).
+// attribute the text comparison masks). A resolve version needs no such count: a resolve writes
+// only state="resolved" into its block, no time.
 func checkSizesAndAnchors(ctx context.Context, conn *pgx.Conn, b *replayBundle, plans []seedIssuePlan, ids map[[2]string]string) (sizeAnchorCheck, error) {
 	r := sizeAnchorCheck{Rules: map[string]int{}}
 	type anchorRow struct {
@@ -244,11 +245,11 @@ func checkSizesAndAnchors(ctx context.Context, conn *pgx.Conn, b *replayBundle, 
 				return r, err
 			}
 			answeredAt := map[int]int{} // version -> seeded less production answered_at bytes
-			for v, asks := range plan.AnswerAt {
-				for _, i := range asks {
-					ask := &is.Asks[i]
+			for v, steps := range plan.AskAt {
+				for _, st := range steps {
+					ask := &is.Asks[st.Ask]
 					localAsk, ok := ids[[2]string{idAsk, ask.ID}]
-					if !ok || ask.Answer == nil {
+					if st.Resolve || !ok || ask.Answer == nil {
 						continue
 					}
 					var seeded string
@@ -432,12 +433,13 @@ func checkSeed(ctx context.Context, conn *pgx.Conn, b *replayBundle, plans []see
 			}
 			want, masked := maskAnsweredAt(string(raw))
 			got, _ := maskAnsweredAt(latest)
-			if masked {
+			stepped := masked || resolvedBlock.MatchString(want)
+			if stepped {
 				r.AskBlockDocs++
 			}
 			if want != got {
 				diff(p.Key, a.Name, "text", textDigest(want), textDigest(got))
-			} else if masked {
+			} else if stepped {
 				r.AskBlockDocsEqual++
 			}
 		}

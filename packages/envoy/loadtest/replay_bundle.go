@@ -187,7 +187,8 @@ type replayAnchor struct {
 	Orphaned   bool    `json:"orphaned"`
 }
 
-// replayAsk is one ask open at At, with what re-creating it needs. POST
+// replayAsk is one ask at At, with what re-creating it needs: an ask open or answered at At, or a
+// typed ask block resolved before At whose block is in its document's text at At. POST
 // /api/v1/issues/{key}/asks takes question, kind, options, multiple, urgency, anchor
 // {artifact, quote} and actor; an approval ask is opened by the server when a document's review is
 // requested (Approval), and a typed ask block lives in its document (BlockID, BlockArtifactID),
@@ -195,7 +196,7 @@ type replayAnchor struct {
 type replayAsk struct {
 	ID        string            `json:"id"`
 	Kind      string            `json:"kind"`  // question or approval
-	State     string            `json:"state"` // open or answered
+	State     string            `json:"state"` // open, answered, or resolved (a typed ask block only)
 	Question  string            `json:"question"`
 	Options   []replayAskOption `json:"options,omitempty"`
 	Multiple  bool              `json:"multiple"`
@@ -213,6 +214,11 @@ type replayAsk struct {
 	// settlement carried the answer (the first listed version created at or after the answer); 0
 	// when the listing names none at or below the document's Version.
 	AnswerVersion int `json:"answer_version,omitempty"`
+	// Resolution is a resolved typed ask block's resolution; ResolveVersion the version of its
+	// block's document the resolve wrote (the first listed version created at or after the
+	// resolve), 0 when the listing names none at or below the document's Version.
+	Resolution     *replayAskResolution `json:"resolution,omitempty"`
+	ResolveVersion int                  `json:"resolve_version,omitempty"`
 }
 
 // replayAskOption is one answer choice.
@@ -227,6 +233,14 @@ type replayAskAnswer struct {
 	Selected []string  `json:"selected,omitempty"`
 	Text     *string   `json:"text,omitempty"`
 	At       time.Time `json:"at"`
+}
+
+// replayAskResolution is how and by whom an ask was resolved: kind is resolved or retracted.
+type replayAskResolution struct {
+	Kind   string      `json:"kind"`
+	Reason string      `json:"reason"`
+	By     replayActor `json:"by"`
+	At     time.Time   `json:"at"`
 }
 
 // replayAskApproval is the document version an approval ask asks a human to approve.
@@ -274,8 +288,10 @@ type replayCounts struct {
 	CommentsOpen      int `json:"comments_open"`
 	CommentsResolved  int `json:"comments_resolved"`
 	AnchoredOpen      int `json:"anchored_open"`
-	AsksOpen          int `json:"asks_open"`
-	WindowEvents      int `json:"window_events"`
+	AsksOpen          int `json:"asks_open"` // asks open or answered at At
+	// AsksResolvedBlocks counts the resolved typed ask blocks the state keeps.
+	AsksResolvedBlocks int `json:"asks_resolved_blocks"`
+	WindowEvents       int `json:"window_events"`
 	// WindowByType counts window events per event type.
 	WindowByType          map[string]int `json:"window_by_type"`
 	CreatedDocs           int            `json:"created_docs"`

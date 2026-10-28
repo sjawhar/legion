@@ -144,13 +144,14 @@ func TestPlanHistorySizes(t *testing.T) {
 	if !strings.HasPrefix(text[p.RunStart:], "## ") && p.RunStart != 0 {
 		t.Fatal("a run starts at a section")
 	}
-	// Answers: the answer's version keeps its place, and one past the end takes the last version.
-	p, err = planHistory(text, real, 5, []int{0, 1}, []int{3, 0})
+	// Ask steps: an answer's or resolve's version keeps its place, and one past the end takes the
+	// last free version.
+	p, err = planHistory(text, real, 5, []askStep{{Ask: 0}, {Ask: 1, Resolve: true}}, []int{3, 0})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(p.AnswerAt[3], []int{0}) || !slices.Equal(p.AnswerAt[5], []int{1}) || p.Restore != 4 {
-		t.Fatalf("answers %v restore %d", p.AnswerAt, p.Restore)
+	if !slices.Equal(p.AskAt[3], []askStep{{Ask: 0}}) || !slices.Equal(p.AskAt[5], []askStep{{Ask: 1, Resolve: true}}) || p.Restore != 4 {
+		t.Fatalf("ask steps %v restore %d", p.AskAt, p.Restore)
 	}
 	// A missing size counts and is taken as unchanged.
 	if p, _ := planHistory(text, []int{300, -1, len(text)}, 3, nil, nil); p.Missing != 1 {

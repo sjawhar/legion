@@ -61,6 +61,7 @@ const (
 	idComment         = "comment"
 	idAsk             = "ask"
 	idResolve         = "resolve"
+	idAskResolve      = "ask-resolve"
 	idAnswer          = "answer"
 	idFallbackComment = "fallback-comment"
 	idFallbackAsk     = "fallback-ask"
@@ -546,45 +547,53 @@ type issueDoc struct {
 	is    *replayIssue
 }
 
-// answeredBlocks are the indexes into is.Asks of the answered typed ask blocks on document a, and
-// the version each answer lands at.
-func answeredBlocks(is *replayIssue, a *replayArtifact) (asks, versions []int) {
+// blockSteps are the ask steps of the typed ask blocks on document a, each with the version it
+// lands at: an answered block's answer; a resolved block's answer, if it was answered, then its
+// resolve.
+func blockSteps(is *replayIssue, a *replayArtifact) (steps []askStep, versions []int) {
 	for i, ask := range is.Asks {
-		if ask.BlockID != nil && ask.State == "answered" && ask.BlockArtifactID != nil && *ask.BlockArtifactID == a.ID {
-			asks = append(asks, i)
+		if ask.BlockID == nil || ask.BlockArtifactID == nil || *ask.BlockArtifactID != a.ID {
+			continue
+		}
+		if ask.State == "answered" || (ask.State == "resolved" && ask.Answer != nil) {
+			steps = append(steps, askStep{Ask: i})
 			versions = append(versions, ask.AnswerVersion)
 		}
+		if ask.State == "resolved" {
+			steps = append(steps, askStep{Ask: i, Resolve: true})
+			versions = append(versions, ask.ResolveVersion)
+		}
 	}
-	return asks, versions
+	return steps, versions
 }
 
 func docPlan(is *replayIssue, a *replayArtifact, text string) (historyPlan, error) {
-	asks, versions := answeredBlocks(is, a)
-	p, err := planHistory(text, a.VersionSizes, a.Version, asks, versions)
+	steps, versions := blockSteps(is, a)
+	p, err := planHistory(text, a.VersionSizes, a.Version, steps, versions)
 	if err != nil {
 		return p, fmt.Errorf("document %s: %w", a.ID, err)
 	}
 	return p, nil
 }
 
-// blockIDs are the block ids of the asks at the given indexes.
-func blockIDs(is *replayIssue, asks []int) map[string]bool {
+// blockIDs are the block ids of the steps' asks.
+func blockIDs(is *replayIssue, steps []askStep) map[string]bool {
 	ids := map[string]bool{}
-	for _, i := range asks {
-		ids[*is.Asks[i].BlockID] = true
+	for _, st := range steps {
+		ids[*is.Asks[st.Ask].BlockID] = true
 	}
 	return ids
 }
 
 // firstVersionText is what a document is created with: its text at At when its whole history is
-// that version, else the base (the text less the plan's run, every answer stripped) and a
-// padding paragraph that makes version 1 plan.Sizes[0] bytes.
+// that version, else the base (the text less the plan's run, every answered or resolved block
+// stripped to open) and a padding paragraph that makes version 1 plan.Sizes[0] bytes.
 func firstVersionText(is *replayIssue, a *replayArtifact, text string, p historyPlan) string {
-	asks, _ := answeredBlocks(is, a)
+	steps, _ := blockSteps(is, a)
 	if p.Restore == 1 {
 		return text
 	}
-	base := stripAnswers(baseText(text, p.RunStart, p.RunEnd), blockIDs(is, asks))
+	base := stripAnswers(baseText(text, p.RunStart, p.RunEnd), blockIDs(is, steps))
 	pad := padText(p.Sizes[0]-len(base)-padOverhead(len(base)), 1)
 	if base == "" {
 		return pad + "\n"
@@ -796,11 +805,11 @@ func (s *replaySeeder) ensureFile(ctx context.Context, key string, a *replayArti
 // history takes a document from the version it stands at to its logged version as its plan says
 // (planHistory): each padded version resizes the padding paragraph so the version changes size by
 // its planned change from the version Dispatch stored before it (historyPlan.padLen; a version
-// whose size does not change gets padding of the same length with other words); an answer version
-// re-sends that typed ask block's answer, a change Dispatch makes; the restore version removes the
-// padding and puts the run back. Version 1's own size is free: no change is compared for it. Every
-// step must write exactly one version, and each padded or restored version must change size by
-// exactly its planned change.
+// whose size does not change gets padding of the same length with other words); an ask step
+// version re-sends that typed ask block's answer or resolve, a change Dispatch makes; the restore
+// version removes the padding and puts the run back. Version 1's own size is free: no change is
+// compared for it. Every step must write exactly one version, and each padded or restored version
+// must change size by exactly its planned change.
 func (s *replaySeeder) history(ctx context.Context, key string, docs map[string]*issueDoc, d *issueDoc) error {
 	p := d.plan
 	cur, err := s.maxVersion(ctx, d.local)
@@ -833,19 +842,28 @@ func (s *replaySeeder) history(ctx context.Context, key string, docs map[string]
 		}
 		pad := currentPad(markdown)
 		switch {
-		case len(p.AnswerAt[n]) > 0:
+		case len(p.AskAt[n]) > 0:
+			// The version's answers and resolves are sent back to back, inside Dispatch's settle
+			// delay, so that together they write exactly one version, as production's did.
 			if err := s.waitSettled(ctx, key, []string{d.local}); err != nil {
 				return err
 			}
-			for _, i := range p.AnswerAt[n] {
-				a := &d.is.Asks[i]
+			for _, st := range p.AskAt[n] {
+				a := &d.is.Asks[st.Ask]
 				local, err := s.ensureAsk(ctx, key, docs, a)
 				if err != nil {
 					return err
 				}
-				if err := s.answer(ctx, key, docs, a, local); err != nil {
+				step := s.answer
+				if st.Resolve {
+					step = s.resolveAsk
+				}
+				if err := step(ctx, key, docs, a, local); err != nil {
 					return err
 				}
+			}
+			if err := s.waitVersion(ctx, d, n); err != nil {
+				return fmt.Errorf("history %s: the answers and resolves of version %d: %w", d.a.ID, n, err)
 			}
 			continue
 		case n == p.Restore:
@@ -872,19 +890,19 @@ func (s *replaySeeder) history(ctx context.Context, key string, docs map[string]
 			if err != nil {
 				return err
 			}
-			var later []int
-			for v, asks := range p.AnswerAt {
+			var later []askStep
+			for v, steps := range p.AskAt {
 				if v > n {
-					later = append(later, asks...)
+					later = append(later, steps...)
 				}
 			}
 			want := stripAnswers(d.text, blockIDs(d.is, later))
 			if !sameMasked(got, want) {
-				return fmt.Errorf("history %s: the restored version %d has %d bytes and differs from the text at At less its later answers (%d bytes)", d.a.ID, n, len(got), len(want))
+				return fmt.Errorf("history %s: the restored version %d has %d bytes and differs from the text at At less its later answers and resolves (%d bytes)", d.a.ID, n, len(got), len(want))
 			}
 			if len(later) > 0 {
-				// Its size rests on the later answers' changes matching production's; the
-				// check compares them.
+				// Its size rests on the later answers' and resolves' changes matching
+				// production's; the check compares them.
 				continue
 			}
 		default:
@@ -1403,8 +1421,7 @@ func (s *replaySeeder) ensureAsk(ctx context.Context, key string, docs map[strin
 
 // answer re-sends an answered ask's answer as the answering user: an approval through a review, a
 // question (a typed ask block's too) through POST /asks/{id}/answer. A typed ask block's answer
-// rewrites its block, which Dispatch versions once settled: it must write exactly one version, the
-// one historyTarget left for it.
+// rewrites its block, which Dispatch versions once settled; history waits for that version.
 func (s *replaySeeder) answer(ctx context.Context, key string, docs map[string]*issueDoc, a *replayAsk, local string) error {
 	if _, ok := s.ids.get(idAnswer, a.ID); ok {
 		return nil
@@ -1444,26 +1461,46 @@ func (s *replaySeeder) answer(ctx context.Context, key string, docs map[string]*
 		if a.Answer.Text != nil {
 			body["text"] = *a.Answer.Text
 		}
-		docBytes, docID, before := 0, "", 0
+		docBytes, docID := 0, ""
 		if block != nil {
 			docBytes, docID = len(block.text), block.local
-			if err := s.waitSettled(ctx, key, []string{block.local}); err != nil {
-				return err
-			}
-			if before, err = s.maxVersion(ctx, block.local); err != nil {
-				return err
-			}
 		}
 		if _, err := s.write(ctx, "answer", key, docBytes, docID, "answer", a.ID, "POST", "/api/v1/asks/"+local+"/answer", w, jsonBody(body)); err != nil {
 			return err
 		}
-		if block != nil {
-			if err := s.waitVersion(ctx, block, before+1); err != nil {
-				return fmt.Errorf("answer %s: %w", a.ID, err)
-			}
-		}
 	}
 	return s.ids.put(ctx, idAnswer, a.ID, local)
+}
+
+// resolveAsk resolves a resolved typed ask block as its resolving actor through POST
+// /asks/{id}/resolve with the logged resolution's kind and reason. Dispatch writes state="resolved"
+// into the block, which it versions once settled; history waits for that version.
+func (s *replaySeeder) resolveAsk(ctx context.Context, key string, docs map[string]*issueDoc, a *replayAsk, local string) error {
+	if _, ok := s.ids.get(idAskResolve, a.ID); ok {
+		return nil
+	}
+	if a.Resolution == nil {
+		return fmt.Errorf("ask %s is resolved with no resolution in the bundle", a.ID)
+	}
+	if a.BlockArtifactID == nil || docs[*a.BlockArtifactID] == nil {
+		return fmt.Errorf("ask %s: a resolved typed ask block names no seeded document", a.ID)
+	}
+	block := docs[*a.BlockArtifactID]
+	var state string
+	if err := s.pool.QueryRow(ctx, `select state from asks where id = $1`, local).Scan(&state); err != nil {
+		return err
+	}
+	if state != "resolved" {
+		w, actor, err := actorOf(&a.Resolution.By)
+		if err != nil {
+			return fmt.Errorf("ask-resolve %s: %w", a.ID, err)
+		}
+		body := withActor(map[string]any{"kind": a.Resolution.Kind, "reason": a.Resolution.Reason}, actor)
+		if _, err := s.write(ctx, "resolve", key, len(block.text), block.local, "ask-resolve", a.ID, "POST", "/api/v1/asks/"+local+"/resolve", w, jsonBody(body)); err != nil {
+			return err
+		}
+	}
+	return s.ids.put(ctx, idAskResolve, a.ID, local)
 }
 
 // waitVersion waits (up to two minutes) until the document owes no settlement and stands at

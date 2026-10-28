@@ -141,7 +141,7 @@ func planComments(is *replayIssue) commentPlan {
 	plan := commentPlan{ByAsk: map[string][]commentStep{}}
 	openAsk := map[string]bool{}
 	for _, a := range is.Asks {
-		openAsk[a.ID] = true
+		openAsk[a.ID] = a.State != "resolved"
 	}
 	roots := map[string]*replayComment{}
 	for i := range is.Comments {
@@ -457,7 +457,11 @@ func claimWanted(cur liveIssue, want *replayIssue) bool {
 
 // --- checks --------------------------------------------------------------------------------------
 
-var answeredAtAttr = regexp.MustCompile(`answered_at="[^"]*"`)
+var (
+	answeredAtAttr = regexp.MustCompile(`answered_at="[^"]*"`)
+	// resolvedBlock matches a typed ask block directive whose state is resolved.
+	resolvedBlock = regexp.MustCompile(`(?m)^:::ask\{#[^}]* state="resolved"`)
+)
 
 // maskAnsweredAt blanks every typed ask block's answered_at attribute, which the seed cannot set
 // through the API (the answer's time is the seed's own).

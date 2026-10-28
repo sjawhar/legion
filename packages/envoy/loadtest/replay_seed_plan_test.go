@@ -105,7 +105,9 @@ func resolvedC(windowRefs bool) func(*replayComment) {
 func onAsk(ask string) func(*replayComment) { return func(c *replayComment) { c.AskID = new(ask) } }
 
 func TestPlanCommentsSelectionAndOrder(t *testing.T) {
-	is := &replayIssue{Key: "PRJ-1", Asks: []replayAsk{{ID: "ask-open"}}, Comments: []replayComment{
+	// ask-gone is a resolved typed ask block the bundle keeps: its thread is skipped like a thread
+	// on an ask the bundle does not hold.
+	is := &replayIssue{Key: "PRJ-1", Asks: []replayAsk{{ID: "ask-open"}, {ID: "ask-gone", State: "resolved", BlockID: new("b1")}}, Comments: []replayComment{
 		cmt("r1", 1, anchoredOn("d1", "quote one")),
 		cmt("r2", 2, resolvedC(false)),
 		cmt("r3", 3, resolvedC(true), anchoredOn("d1", "quote three")),

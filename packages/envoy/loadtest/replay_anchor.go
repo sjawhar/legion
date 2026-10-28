@@ -198,24 +198,31 @@ func substituteAnchor(text string, bm *replayBlockMap, blockID, quote string, rn
 
 // historyPlan is how a document's synthetic history reproduces production's version sizes. Every
 // version below Restore is the base (the text at At with the run [RunStart, RunEnd) removed and the
-// answers not yet given stripped) plus a padding paragraph of synthetic words at the end, sized so
-// the version has Sizes[n-1] bytes. Version Restore removes the padding and inserts the run back
-// (before the heading at RunEnd, or at the end), giving the text at At less the answers still to
-// come; the versions after it are those answers. AnswerAt maps a version to the answered typed ask
-// blocks (indexes into the issue's asks) whose answer it carries.
+// typed ask blocks still to be answered or resolved stripped) plus a padding paragraph of synthetic
+// words at the end, sized so the version has Sizes[n-1] bytes. Version Restore removes the padding
+// and inserts the run back (before the heading at RunEnd, or at the end), giving the text at At
+// less the ask steps still to come. AskAt maps a version to the ask steps (a typed ask block's
+// answer or resolve, a change Dispatch makes) it carries.
 type historyPlan struct {
 	Final            int
 	Sizes            []int
 	Restore          int
 	RunStart, RunEnd int
-	AnswerAt         map[int][]int
+	AskAt            map[int][]askStep
 	// Flipped counts versions whose size change is production's with the sign flipped, because
 	// the base cannot be made small enough; Missing the versions production lists no size for
-	// (taken as unchanged); Fixed the answer versions, whose change Dispatch decides.
+	// (taken as unchanged).
 	Flipped, Missing int
 	// Unreachable counts versions no sign can reach: raised to the smallest size the base and a
 	// padding paragraph take, so their change differs from production's.
 	Unreachable int
+}
+
+// askStep is one write of a typed ask block that Dispatch versions: the answer of the issue's ask
+// at index Ask, or its resolve.
+type askStep struct {
+	Ask     int
+	Resolve bool
 }
 
 // padMin is the shortest padding paragraph a version carries.
@@ -224,7 +231,7 @@ const padMin = 8
 // padLen is the length of padded version n's padding paragraph: version n-1's (prevPad bytes)
 // changed by the planned size change, so version n changes size by exactly the plan's change
 // whatever size Dispatch stored version n-1 at: version 1's base canonicalised to other bytes than
-// sent, or an answer version whose change differs from production's. A padding paragraph is plain
+// sent, or an ask step version whose change differs from production's. A padding paragraph is plain
 // words, which Dispatch stores as sent. The stored padding, not the seeder's memory, is prevPad,
 // so a resumed seed continues alike.
 func (p historyPlan) padLen(n, prevPad int) int { return prevPad + p.Sizes[n-1] - p.Sizes[n-2] }
@@ -314,11 +321,10 @@ func baseText(text string, runStart, runEnd int) string {
 
 // planHistory plans a document's history from production's version sizes (sizes[n-1] for version
 // n, -1 when unlisted), its text at At (whose size Dispatch keeps, so local size n is sizes[n-1] -
-// sizes[final-1] + len(text)), and the version each answered typed ask block's answer lands at
-// (answerVersions[i] for ask index answerAsks[i]; one under 2 or past final takes the last free
-// version).
-func planHistory(text string, sizes []int, final int, answerAsks, answerVersions []int) (historyPlan, error) {
-	p := historyPlan{Final: final, AnswerAt: map[int][]int{}}
+// sizes[final-1] + len(text)), and the version each typed ask block's answer or resolve lands at
+// (versions[i] for steps[i]; one under 2 or past final takes the last free version).
+func planHistory(text string, sizes []int, final int, steps []askStep, versions []int) (historyPlan, error) {
+	p := historyPlan{Final: final, AskAt: map[int][]askStep{}}
 	real := make([]int, final)
 	for n := range final {
 		switch {
@@ -332,23 +338,23 @@ func planHistory(text string, sizes []int, final int, answerAsks, answerVersions
 		}
 	}
 	free := final
-	for i, ask := range answerAsks {
-		v := answerVersions[i]
+	for i, st := range steps {
+		v := versions[i]
 		if v < 2 || v > final {
-			for free > 1 && len(p.AnswerAt[free]) > 0 {
+			for free > 1 && len(p.AskAt[free]) > 0 {
 				free--
 			}
 			v = free
 		}
-		p.AnswerAt[v] = append(p.AnswerAt[v], ask)
+		p.AskAt[v] = append(p.AskAt[v], st)
 	}
 	p.Restore = final
-	for p.Restore > 1 && len(p.AnswerAt[p.Restore]) > 0 {
+	for p.Restore > 1 && len(p.AskAt[p.Restore]) > 0 {
 		p.Restore--
 	}
-	for v := range p.AnswerAt {
+	for v := range p.AskAt {
 		if v <= 1 {
-			return p, fmt.Errorf("an answer cannot land at version %d", v)
+			return p, fmt.Errorf("an answer or resolve cannot land at version %d", v)
 		}
 	}
 	local := func(n int) int { return real[n-1] - real[final-1] + len(text) }
@@ -357,14 +363,14 @@ func planHistory(text string, sizes []int, final int, answerAsks, answerVersions
 		p.Sizes[n-1] = local(n)
 	}
 	if p.Restore == 1 {
-		if len(p.AnswerAt) > 0 {
-			return p, fmt.Errorf("every version is an answer: no version is left to create the document")
+		if len(p.AskAt) > 0 {
+			return p, fmt.Errorf("every version is an answer or resolve: no version is left to create the document")
 		}
 		return p, nil
 	}
 	// The run: long enough that the smallest padded version still holds padMin bytes of padding
 	// over the base. The floor is taken over the unstripped base, the largest any version's base
-	// gets as answers land.
+	// gets as ask steps land.
 	smallest := len(text)
 	for n := 1; n < p.Restore; n++ {
 		smallest = min(smallest, local(n))
@@ -378,7 +384,7 @@ func planHistory(text string, sizes []int, final int, answerAsks, answerVersions
 	for n := p.Restore - 1; n >= 1; n-- {
 		d := real[n] - real[n-1]
 		size := p.Sizes[n] - d
-		if len(p.AnswerAt[n+1]) == 0 && size < floor && d != 0 {
+		if len(p.AskAt[n+1]) == 0 && size < floor && d != 0 {
 			size = p.Sizes[n] + d
 			p.Flipped++
 		}
@@ -397,8 +403,9 @@ var (
 	stateAttr    = regexp.MustCompile(` state="[^"]*"`)
 )
 
-// stripAnswers is text with the typed ask blocks named in ids written as Dispatch stores an
-// unanswered block: no answered_by, answered_at, selected or answer, and state "open".
+// stripAnswers is text with the typed ask blocks named in ids written as Dispatch stores an open
+// block: no answered_by, answered_at, selected or answer, and state "open" (an answered or a
+// resolved block alike).
 func stripAnswers(text string, ids map[string]bool) string {
 	if len(ids) == 0 {
 		return text

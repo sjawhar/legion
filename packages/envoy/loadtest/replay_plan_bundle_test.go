@@ -55,8 +55,8 @@ func TestPlanHistoryBundle(t *testing.T) {
 						askBytes += len(line)
 					}
 				}
-				t.Logf("short %s doc %s: %d unreachable, %d sign flipped, of %d versions; text %d bytes, removed run %d bytes, base %d bytes, smallest planned %d, ask directive lines %d bytes, answers %d, restore at %d",
-					is.Key, a.ID[:8], p.Unreachable, p.Flipped, a.Version, len(text), p.RunEnd-p.RunStart, len(baseText(text, p.RunStart, p.RunEnd)), smallest, askBytes, len(p.AnswerAt), p.Restore)
+				t.Logf("short %s doc %s: %d unreachable, %d sign flipped, of %d versions; text %d bytes, removed run %d bytes, base %d bytes, smallest planned %d, ask directive lines %d bytes, ask step versions %d, restore at %d",
+					is.Key, a.ID[:8], p.Unreachable, p.Flipped, a.Version, len(text), p.RunEnd-p.RunStart, len(baseText(text, p.RunStart, p.RunEnd)), smallest, askBytes, len(p.AskAt), p.Restore)
 			}
 		}
 	}

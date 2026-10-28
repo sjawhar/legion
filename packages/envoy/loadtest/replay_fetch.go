@@ -364,7 +364,7 @@ func (f *replayFetcher) run(ctx context.Context, project string, at, until time.
 			byID[la.ID] = la
 		}
 	}
-	setAnswerVersions(&rec.State, byID)
+	setBlockVersions(&rec.State, byID)
 
 	for _, d := range []string{bundleDocsDir, bundleCreatedDir} {
 		if err := os.RemoveAll(filepath.Join(out, d)); err != nil {
@@ -454,11 +454,12 @@ func (f *replayFetcher) run(ctx context.Context, project string, at, until time.
 	}
 	f.lg.Printf("created: %d documents, %d specs", len(created), len(specs))
 
-	mapsUnavailable, err := f.fetchBlockMaps(ctx, &rec.State, rec.Window, byID, out)
+	docTexts, err := readDocTexts(out, docs)
 	if err != nil {
 		return counts, err
 	}
-	docTexts, err := readDocTexts(out, docs)
+	dropResolvedOutsideText(&rec.State, docTexts)
+	mapsUnavailable, err := f.fetchBlockMaps(ctx, &rec.State, rec.Window, byID, out)
 	if err != nil {
 		return counts, err
 	}
@@ -676,8 +677,14 @@ type wireAsk struct {
 	BlockArtifact *struct {
 		ID string `json:"id"`
 	} `json:"block_artifact"`
-	Answer   *replayAskAnswer   `json:"answer"`
-	Approval *replayAskApproval `json:"approval"`
+	Answer     *replayAskAnswer   `json:"answer"`
+	Approval   *replayAskApproval `json:"approval"`
+	Resolution *struct {
+		Kind   string      `json:"kind"`
+		Reason string      `json:"reason"`
+		Actor  replayActor `json:"actor"`
+		At     time.Time   `json:"at"`
+	} `json:"resolution"`
 }
 
 // commentStates are the comment.* events whose payload is the whole comment.
@@ -828,6 +835,9 @@ func replayIssueAt(lg issueLog, at, until time.Time, rec *reconstruction) (repla
 			if a.BlockArtifact != nil {
 				ra.BlockArtifactID = &a.BlockArtifact.ID
 			}
+			if a.Resolution != nil {
+				ra.Resolution = &replayAskResolution{Kind: a.Resolution.Kind, Reason: a.Resolution.Reason, By: a.Resolution.Actor, At: a.Resolution.At}
+			}
 			if i, ok := asks[a.ID]; ok {
 				askList[i] = ra
 			} else {
@@ -849,8 +859,11 @@ func replayIssueAt(lg issueLog, at, until time.Time, rec *reconstruction) (repla
 	if !is.Exists {
 		return replayIssue{Key: lg.Key, Number: lg.Number}, window, nil
 	}
+	// A resolved typed ask block is kept while its block may be in its document's text at At,
+	// where its state is the resolve's; dropResolvedOutsideText drops the rest once the texts are
+	// read.
 	for _, a := range askList {
-		if a.State == "open" || a.State == "answered" {
+		if a.State == "open" || a.State == "answered" || (a.State == "resolved" && a.BlockID != nil && a.Resolution != nil) {
 			is.Asks = append(is.Asks, a)
 		}
 	}
@@ -1092,7 +1105,13 @@ func stateCounts(st replayState, window []replayEvent) replayCounts {
 				}
 			}
 		}
-		c.AsksOpen += len(is.Asks)
+		for _, a := range is.Asks {
+			if a.State == "resolved" {
+				c.AsksResolvedBlocks++
+			} else {
+				c.AsksOpen++
+			}
+		}
 	}
 	written := map[string]bool{}
 	for _, ev := range window {
@@ -1160,9 +1179,10 @@ func versionSizesMissing(docs []*replayArtifact) int {
 	return n
 }
 
-// setAnswerVersions sets each answered typed ask block's AnswerVersion: the first version of its
-// document listed at or after the answer, at most the document's version at At.
-func setAnswerVersions(st *replayState, byID map[string]listedArtifact) {
+// setBlockVersions sets each typed ask block's AnswerVersion (answered) and ResolveVersion
+// (resolved): the first version of its document listed at or after the answer or resolve, at most
+// the document's version at At.
+func setBlockVersions(st *replayState, byID map[string]listedArtifact) {
 	for i := range st.Issues {
 		is := &st.Issues[i]
 		final := map[string]int{}
@@ -1171,18 +1191,51 @@ func setAnswerVersions(st *replayState, byID map[string]listedArtifact) {
 		}
 		for j := range is.Asks {
 			a := &is.Asks[j]
-			if a.BlockID == nil || a.State != "answered" || a.Answer == nil || a.BlockArtifactID == nil {
+			if a.BlockID == nil || a.BlockArtifactID == nil {
 				continue
 			}
-			best := 0
-			for _, v := range byID[*a.BlockArtifactID].Versions {
-				if !v.CreatedAt.Before(a.Answer.At) && v.Number <= final[*a.BlockArtifactID] && (best == 0 || v.Number < best) {
-					best = v.Number
+			first := func(at time.Time) int {
+				best := 0
+				for _, v := range byID[*a.BlockArtifactID].Versions {
+					if !v.CreatedAt.Before(at) && v.Number <= final[*a.BlockArtifactID] && (best == 0 || v.Number < best) {
+						best = v.Number
+					}
 				}
+				return best
 			}
-			a.AnswerVersion = best
+			if a.Answer != nil && a.State != "open" {
+				a.AnswerVersion = first(a.Answer.At)
+			}
+			if a.State == "resolved" && a.Resolution != nil {
+				a.ResolveVersion = first(a.Resolution.At)
+			}
 		}
 	}
+}
+
+// dropResolvedOutsideText drops each resolved typed ask block whose block is not in its
+// document's text at At (texts by document id): nothing at At shows it.
+func dropResolvedOutsideText(st *replayState, texts map[string]string) {
+	for i := range st.Issues {
+		is := &st.Issues[i]
+		is.Asks = slices.DeleteFunc(is.Asks, func(a replayAsk) bool {
+			if a.State != "resolved" {
+				return false
+			}
+			return a.BlockArtifactID == nil || !slices.Contains(askBlockIDs(texts[*a.BlockArtifactID]), *a.BlockID)
+		})
+	}
+}
+
+// askBlockIDs are the block ids of the typed ask block directives in markdown.
+func askBlockIDs(markdown string) []string {
+	var ids []string
+	for _, line := range strings.Split(markdown, "\n") {
+		if m := askDirective.FindStringSubmatch(line); m != nil {
+			ids = append(ids, m[1])
+		}
+	}
+	return ids
 }
 
 // readDocTexts reads the bundle's texts at At by document id.
