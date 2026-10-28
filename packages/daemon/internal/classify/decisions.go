@@ -1128,12 +1128,17 @@ func LateLifecycle(observed, applied time.Time) bool {
 // clock at, is late: it names a move the record has already passed, so it moves no head and only
 // names its move (NameMove). It is late when GitHub's clock puts it before the newest applied
 // (LateLifecycle); and, since that clock is to the second, when it is in the newest applied second,
-// names its sender and a before other than the record's head, and its head is one the record has
-// passed (passed): two moves of one second whose synchronizes arrived in the reverse of their
-// order. A synchronize of one second delivered after a later one whose head the record cannot yet
-// tell it passed - one in the middle of skipped moves, its pushes still to come - is read as a move
-// (the floor of synchronizes of one second delivered reversed, unspentPushes). A synchronize naming
-// no sender is late by the clock alone, as the release before read it. The workflow decides
+// names its sender and a before other than the record's head, no chain of recorded pushes leads
+// from the record's head to its before, and its head is one the current path skipped (skipped): two
+// moves of one second whose synchronizes arrived in the reverse of their order. A chain of pushes
+// from the record's head to its before shows the branch went on from the head there, so the
+// synchronize is a new move; and one the record cannot tell either way - its head no skip of the
+// current path it can see, as one in the middle of skipped moves whose pushes are still to come,
+// or a move after a reset whose push and synchronize were both missed - is a move too, which waits
+// as any arrival does that its moves before have not reached, judged meanwhile by the release
+// before's rule (provisional): never dropped. Read as a move, a stale one moves the record's head
+// back (the floor of synchronizes of one second delivered reversed, unspentPushes). A synchronize
+// naming no sender is late by the clock alone, as the release before read it. The workflow decides
 // lateness with this, and the tests deliver every synchronize through it.
 func LateSynchronize(pr record.PullRequest, before, sender, head string, at time.Time) bool {
 	if LateLifecycle(at, pr.HeadUpdatedAt) {
@@ -1142,37 +1147,39 @@ func LateSynchronize(pr record.PullRequest, before, sender, head string, at time
 	if sender == "" || before == "" || head == "" || at.IsZero() || !at.Equal(pr.HeadUpdatedAt) || before == pr.HeadSHA || head == pr.HeadSHA {
 		return false
 	}
-	return passed(pr, head)
+	if chainOf(pr.Pushes, pr.HeadSHA, before) != nil {
+		return false
+	}
+	return skipped(pr, head)
 }
 
-// passed is whether the record has passed head: a head it held or moved from - its head, a move it
-// made, its head run's anchor and arrivals - or one a chain of recorded pushes and moves named late
-// leads from to such a head. A move the branch makes next leads away from the record's head, so its
-// head is passed only when the branch made a loop.
-func passed(pr record.PullRequest, head string) bool {
-	reached := map[string]bool{pr.HeadSHA: true}
-	links := clone(pr.Pushes)
-	for _, m := range pr.Moves {
-		reached[m.Before], reached[m.SHA] = true, true
+// skipped is whether head is one the current path skipped: the head an arrival of the open head run
+// said it moved from when that was not the head before it - a move whose synchronize the record
+// has not had - or one a chain of recorded pushes and moves named late leads from to such a head.
+// Heads the record held, or held in an earlier run, are not: the branch can return to them.
+func skipped(pr record.PullRequest, head string) bool {
+	if pr.Run == nil {
+		return false
 	}
-	if pr.Run != nil {
-		reached[pr.Run.Anchor.HeadSHA] = true
-		for _, s := range pr.Run.Steps {
-			if s.Head != "" {
-				reached[s.Head] = true
-				if s.Before != "" {
-					reached[s.Before] = true
-				}
-			}
+	awaited := map[string]bool{}
+	prev := pr.Run.Anchor.HeadSHA
+	for _, s := range pr.Run.Steps {
+		if s.Head == "" {
+			continue
 		}
-		for _, n := range pr.Run.Names {
-			links = append(links, record.ClassifiedPush{Before: n.Before, SHA: n.SHA})
+		if s.Before != "" && s.Before != prev {
+			awaited[s.Before] = true
 		}
+		prev = s.Head
 	}
-	if reached[head] {
+	if awaited[head] {
 		return true
 	}
-	for r := range reached {
+	links := clone(pr.Pushes)
+	for _, n := range pr.Run.Names {
+		links = append(links, record.ClassifiedPush{Before: n.Before, SHA: n.SHA})
+	}
+	for r := range awaited {
 		if chainOf(links, head, r) != nil {
 			return true
 		}

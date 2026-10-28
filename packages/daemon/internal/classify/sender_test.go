@@ -289,3 +289,36 @@ func TestALoopInASkippedGapIsReadAsTheReleaseBeforeReadsIt(t *testing.T) {
 		t.Errorf("the loop in the gap: %s at %s, run open %v; want %s, as with no move named", judged(got, "", ""), got.HeadSHA, got.Run != nil, judged(asBefore, "", ""))
 	}
 }
+
+// A move after a reset whose synchronize was missed is a move, though GitHub's clock puts it in the
+// newest applied second and its head was held before: h0..h1 and h1..h2 arrive, the branch is reset
+// h2..h0 - its synchronize missed - and moves h0..h1 again in the same second as h2's. With the
+// reset's push recorded, a push chain leads from the record's head h2 to the move's before h0, so it
+// is a new move; with the reset's push missed too, nothing tells it from a stale synchronize, and it
+// is a move too. Either way the head is h1, as on main, and its run waits for the reset's
+// synchronize (the floor of a synchronize never delivered).
+func TestAMoveAfterAMissedResetInTheSameSecondIsAMove(t *testing.T) {
+	const dev = "dev"
+	t1, t2 := time.Date(2026, 10, 1, 0, 0, 1, 0, time.UTC), time.Date(2026, 10, 1, 0, 0, 2, 0, time.UTC)
+	reset := record.ClassifiedPush{Before: "h2", SHA: "h0", Sender: dev, Forced: true}
+	for _, tc := range []struct {
+		name  string
+		reset []runFact
+		open  bool
+	}{
+		{"the reset's push delivered", []runFact{pushed(reset)}, true},
+		{"the reset's push missed too", nil, true},
+	} {
+		facts := []runFact{pushed(record.ClassifiedPush{Before: "h0", SHA: "h1", Sender: dev}), {head: "h1", before: "h0", sender: dev, at: t1}, settles("h1", 2, "ci"),
+			pushed(record.ClassifiedPush{Before: "h1", SHA: "h2", Sender: dev}), {head: "h2", before: "h1", sender: dev, at: t2}, settles("h2", 3, "ci")}
+		facts = append(append(facts, tc.reset...), pushed(record.ClassifiedPush{Before: "h0", SHA: "h1", Sender: dev}))
+		pr := delivered(t, redAtH0(), facts...)
+		if LateSynchronize(pr, "h0", dev, "h1", t2) {
+			t.Errorf("%s: the move h0>h1 after the reset is late, want a move", tc.name)
+		}
+		pr = delivered(t, pr, runFact{head: "h1", before: "h0", sender: dev, at: t2})
+		if pr.HeadSHA != "h1" || (pr.Run != nil) != tc.open {
+			t.Errorf("%s: head %s, run open %v; want h1, open %v: the move waits for the reset's synchronize", tc.name, pr.HeadSHA, pr.Run != nil, tc.open)
+		}
+	}
+}

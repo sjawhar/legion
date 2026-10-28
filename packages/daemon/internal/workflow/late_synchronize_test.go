@@ -198,6 +198,35 @@ func TestTwoMovesInOneSecondDeliveredReversedLeaveTheHeadAtTheNewer(t *testing.T
 	}
 }
 
+// A move after a reset whose synchronize was missed moves the head though GitHub's clock puts its
+// synchronize in the second of the newest applied and its head was held before: head..h1 and
+// h1..h2 arrive, the branch is reset h2..head with its synchronize missed - its push delivered, or
+// missed too - and moves head..h1 again in the second of h2's synchronize. The pull request is at h1,
+// as on main, not left at h2.
+func TestAMoveAfterAMissedResetInTheSameSecondMovesTheHead(t *testing.T) {
+	const dev = "legion-implementer[bot]"
+	first, second := time.Date(2026, 9, 22, 23, 50, 0, 0, time.UTC), time.Date(2026, 9, 22, 23, 51, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name  string
+		reset []intake.Fact
+	}{
+		{"the reset's push delivered", []intake.Fact{sentPush("h2", "head", dev)}},
+		{"the reset's push missed too", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedReviewOf(t, pool, "head", "green")
+			engine := testEngine(config.DesignGateRootIssues, nil)
+			applyRefusingNothing(t, pool, engine, sentPush("head", "h1", dev), namedSync("head", "h1", dev, first), sentPush("h1", "h2", dev), namedSync("h1", "h2", dev, second))
+			applyRefusingNothing(t, pool, engine, tc.reset...)
+			applyRefusingNothing(t, pool, engine, sentPush("head", "h1", dev), namedSync("head", "h1", dev, second))
+			if pr := probePullRequest(t, pool); pr.HeadSHA != "h1" {
+				t.Fatalf("pull request at %s, want h1: the move after the reset is a move", pr.HeadSHA)
+			}
+		})
+	}
+}
+
 // The push handler records each push's sender, and the synchronize's sender picks its move's push
 // by it: two pushes of head..h1 on their way, the review App's first and the implementer's second,
 // and h1's synchronize naming the implementer. The implementer's code onto the red counts a fix
