@@ -15,8 +15,14 @@ earlier than the next release, once no running build reads the old shape. No mig
 exception: a change that cannot be written that way is split into releases that can, so no
 release stops every server process. The same rule holds for everything else the two builds share
 (request bodies and routes, query values, socket frames, response members, stored documents, NATS
-stream and consumer settings and subjects, and settings), and the two-build test checks it
-(`go test -tags twobuild ./cmd/dispatch`).
+stream and consumer settings and subjects, messages, and settings), and the two-build test checks
+it (`go test -tags twobuild ./cmd/dispatch`). **Messages:** envelope and payload members are
+additive, and every consumer ignores a member it does not know; a consumer ignores an event type
+or `kind` it does not know, and acks it; a member or a kind is removed only after no running build
+reads it. The decoders that make this true are the listener's (`cmd/listener/delivery.go`), the
+session plugins' (`packages/envoy-client/src/delivery.ts`, `renderInbound`), the Legion daemon's
+(`packages/daemon/internal/intake/decode.go`) and the delivery intakes'
+(`internal/dispatch/delivery/intake.go` and `jobs.go`).
 
 `../../../cmd/dispatch/README.md` has the rule for each surface ("Two builds at once") and for
 migrations with their examples ("Database migrations"), the naming and numbering a set is refused

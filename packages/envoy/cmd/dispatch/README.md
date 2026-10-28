@@ -24,7 +24,7 @@ below add only what a setting's one line cannot say.
 | `DISPATCH_TEST_HOOKS` | Set to `1` to mount test-only routes: `POST /api/v1/events/_test/disconnect` closes every open SSE connection; `POST /api/v1/artifacts/_test/quiesce` closes every live document and waits for settlements; `POST /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed document e2e uses; and `POST /api/v1/artifacts/{id}/_test/newer-content` appends an element no build knows, so the document holds newer content. Leave unset in every real deployment. |
 | `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<email>&next=<path>`, which signs any person in by the email it names, with no sign-in pool, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, no `DISPATCH_SIGNIN_*` setting is set, the listen address is a loopback IP literal, the dashboard origin (`DISPATCH_SERVER_URL` or `dispatch.serverUrl`) names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, `DISPATCH_AGENT_SECRETS_URL`, when set, names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, never from the `pem` in `app.json`, where a developer keeps the real App's key: a signed-in session can have the App probe and import any repository it is installed on, and read GitHub through the App's proxy. That key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, since every App call hands a signed App JWT to whatever listens at that base. While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`). The session cookie is signed with a key generated for that process alone, so it is worthless on any other server, unless `DISPATCH_DEV_SIGNIN_SHARED_KEY` (below) gives the processes of one local harness one key; what a signed-in session writes to the database is not. It can mint a `dsp_` personal agent token, and its sign-out advances the person's session generation, and every server on the same database honours those rows. Give a dev-sign-in server a database no other server uses: the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on. Without `DISPATCH_DEV_SIGNIN_SHARED_KEY` it generates its key at every start, so a dev-sign-in server refuses to start beside any other live server on its database, and any other server refuses to start beside it (Running more than one process, below); a restart after a kill, which leaves the killed process's row behind, waits up to about 20 seconds for that row to lapse. The processes given one shared value start beside each other. Any value other than `1` or unset is refused. |
 | `DISPATCH_DEV_SIGNIN_SHARED_KEY` | Only with `DISPATCH_DEV_SIGNIN=1`, which every fence above still applies to; boot refuses it otherwise. Every process given the same value signs session cookies with one key, so a person signed in on one of them stays signed in on the others: the browser suite's two-process mode (`packages/dispatch/e2e/run-server.sh`) gives both of its servers one random value per run. The key is not the value but the base64url of HMAC-SHA256 keyed by it over the fixed label `dispatch dev sign-in` (`devSignInSharedSigningKey`), so a production `DISPATCH_SIGNING_KEY` placed here signs no cookie, and seals no refresh token, that the production server accepts, and that server's cookies sign nobody in here. `DISPATCH_SIGNING_KEY` stays refused beside it. Unset, each dev-sign-in process generates a key of its own. |
-| `DISPATCH_FILE_STORE_BUCKET` | Files are stored under `files/sha256/<hash>`, one object however often a file is uploaded; a document's markdown never leaves Postgres. The credential chain on Fargate is the task role, which needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket: without `ListBucket`, S3 answers a missing object 403, which Dispatch reads as a store failure. The SDK must also find a region (`AWS_REGION`, or the shared config); without one the boot is refused. An upload writes its object before its row and before any lock or connection is taken, within 30 seconds, so a store that refuses answers 502 `FILE_STORE_UNAVAILABLE` and writes no version. While a live server process has no bucket (one without the setting, or one of a build that does not register `file_store`), an upload's row keeps its bytes as well as the bucket, so that process serves it. The version route serves a row still holding bytes from the row and any other from the bucket: it opens the object within 30 seconds, sends its headers and `Content-Length` only then, and streams the body at the client's pace, checking it against the row's hash as it goes; a bucket that does not answer is 502, a row whose object the bucket does not hold is 500 `FILE_MISSING` (a restore from the bucket's versioning, not a retry), a cleared row on a server with the setting unset is 503, and a body that fails or hashes wrong mid-stream is cut off rather than ended as if whole. `/healthz` reports `files`: null when unset, else whether the bucket answered a two-second `HeadBucket`; it never decides `ok`, since a bucket outage must not take the one task, and with it documents and asks, down. `envoy-dispatch backfill-files` moves the rows uploaded before the bucket, and `--restore` is the rollback ("Moving uploaded files to the bucket", below). |
+| `DISPATCH_FILE_STORE_BUCKET` | Files are stored under `files/sha256/<hash>`, one object however often a file is uploaded; a document's markdown never leaves Postgres. The credential chain on Fargate is the task role, which needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket: without `ListBucket`, S3 answers a missing object 403, which Dispatch reads as a store failure. The SDK must also find a region (`AWS_REGION`, or the shared config); without one the boot is refused. An upload writes its object before its row and before any lock or connection is taken, within 30 seconds, so a store that refuses answers 502 `FILE_STORE_UNAVAILABLE` and writes no version. While a live server process has no bucket (one without the setting, or one of a build that writes a `server_processes` row with no `file_store`), an upload's row keeps its bytes as well as the bucket, so that process serves it. A process of a build that writes no `server_processes` row is not counted, so set this no sooner than the release after the first one that carries that rule ("Two builds at once", below). The version route serves a row still holding bytes from the row and any other from the bucket: it opens the object within 30 seconds, sends its headers and `Content-Length` only then, and streams the body at the client's pace, checking it against the row's hash as it goes; a bucket that does not answer is 502, a row whose object the bucket does not hold is 500 `FILE_MISSING` (a restore from the bucket's versioning, not a retry), a cleared row on a server with the setting unset is 503, and a body that fails or hashes wrong mid-stream is cut off rather than ended as if whole. `/healthz` reports `files`: null when unset, else whether the bucket answered a two-second `HeadBucket`; it never decides `ok`, since a bucket outage must not take the one task, and with it documents and asks, down. `envoy-dispatch backfill-files` moves the rows uploaded before the bucket, and `--restore` is the rollback ("Moving uploaded files to the bucket", below). |
 | `DISPATCH_EMBEDDER`, `DISPATCH_AZURE_EMBED_*`, `DISPATCH_AZURE_TENANT_ID`, `DISPATCH_AZURE_CLIENT_ID`, `DISPATCH_AZURE_FEDERATED_TOKEN_FILE` | Where meaning search embeds, and with what credential. The processes may take different values during a release that changes them: one embedder identity is active at a time, and only the processes configured with it embed (Search, below). A model change on Azure takes a new deployment name, since each vector records an identity that names the deployment and not the model behind it. A model service or Entra that is down refuses no boot: search answers by keyword and says so, and the queue retries. |
 
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
@@ -166,13 +166,16 @@ lock`). `--verify-only` reads back every cleared row against its hash, moves not
 whose object is missing or wrong.
 
 While a live server process has no bucket (a process without `DISPATCH_FILE_STORE_BUCKET`, or one
-of a build that does not register `file_store` in `server_processes`), that process serves a file
+of a build that writes a `server_processes` row with no `file_store`), that process serves a file
 only from its row. So an upload to a process with a bucket keeps its bytes in its row as well as in
 the bucket, and the move refuses before it touches a row, with exit 1 and a line that names each such
 process by its instance id, its build and when it started. `--verify-only` and `--restore` take no
 bytes out of a row and run beside such a process. A release that rolls the bucket out, or that runs
-beside a build before it, therefore serves every upload from every process; run `backfill-files`
-once every process has the bucket.
+beside a build before it that writes a `server_processes` row, therefore serves every upload from
+every process; run `backfill-files` once every process has the bucket. A build that writes no
+`server_processes` row (every release before migration `0135_server_processes`) is not seen by
+either check, so set the bucket no sooner than the release after the first one that carries this
+rule, and only after every process of the earlier release is gone ("Two builds at once", below).
 
 `--restore` is the rollback, at any point before or after the clear: it reads every cleared row's
 object back, verified against the row's hash, and writes the bytes into the row again, so a server
@@ -665,6 +668,29 @@ each surface the two builds share, this is what build N+1 may change while build
   stream too, with its message id. No subject is retired while a running build publishes to it:
   retiring one is an operator step (`internal/bus/stream.go`, `streamReconciliation`). Each
   delivery durable has one intake holder at a time, the process that holds its `duty.Hold` (above).
+- **Messages.** Envelope and payload members are additive: the members of the Dispatch events the
+  outbox publishes (`internal/dispatch/outbox/publisher.go`, `envelope`), of `server.started`
+  (`internal/dispatch/startup`) and of the GitHub envelopes the delivery intakes read
+  (`internal/contracts/normalize.go`). Every consumer ignores a member it does not know. The
+  listener decodes an envelope into the members it declares and hands the payload on unread
+  (`cmd/listener/delivery.go`, `listenerDeliveryHandler`). The session plugins parse the envelope
+  and the Dispatch event with schemas that drop or carry through every other member
+  (`packages/envoy-client/src/delivery.ts`, `renderInbound`; `DispatchEventSchema` in
+  `packages/contracts/src/dispatch-api.ts`). The Legion daemon decodes each envelope and payload
+  into the members it declares (`packages/daemon/internal/intake/decode.go`, `decodeMessage`). The
+  intakes decode an envelope into the members it declares, read a payload's string members and
+  skip every other member (`internal/dispatch/delivery/intake.go`, `flatPayload`; `jobs.go`,
+  `receive`). A consumer ignores an event type or `kind` it does not know, and acks it: the daemon
+  decodes it to no fact and acks it (`decodeDispatchEvent`, `decodeDispatchProjectFact`,
+  `decodeGitHubFact`; `consume.go`, `consumeMessage`), and the intakes ack it with no write and no
+  GitHub call (`route`, `receive`). The session plugins refuse no type either: they show an event
+  of a type they do not know with its type and payload as they came (`dispatchPayload`). So a
+  member whose loss changes what a message means ships as a new type or kind, never as a new
+  member: a consumer that does not know the member would act on the message without it. A member
+  or a kind is removed only after no running build reads it. A new envelope `source`, `urgency`
+  or `expects_reply` value is reader-first: the listener drops an envelope that holds a value it
+  does not know and delivers it to no session (`internal/contracts/generated.go`,
+  `Envelope.Validate`).
 - **Settings.** A loop interval may change: a periodic loop records its passes per lease and period
   (`duty_passes`, the row `<lease>/<period_ns>`; `duty/exclusive.go`), so two builds with different
   intervals for one loop each run it once per their own period, and two builds at one interval
@@ -672,13 +698,21 @@ each surface the two builds share, this is what build N+1 may change while build
   time (`embedder_active`, migration `0139_embedder_active`), it stays active while a live process
   carries it, and only the processes configured with it embed, drop or reserve tokens (Search,
   below), so two builds with different embedders do not drop each other's vectors. So is the file
-  store: while a live process has no bucket (`file_store` false, or a build that does not register
-  it), an upload keeps its bytes in its row as well as in the bucket, and `backfill-files` refuses;
-  turning the store off takes `backfill-files --restore` before the release that unsets it (Moving
-  uploaded files to the bucket, above). A build before this rule registers no embedder identity
-  and no `file_store`, so it counts as carrying no identity and as having no bucket, and it drops
-  the vectors of every identity but its own whatever the active one is: change the embedder no
-  sooner than the release after the first one that carries the rule.
+  store: while a live process has no bucket (`file_store` false or unset), an upload keeps its
+  bytes in its row as well as in the bucket, and `backfill-files` refuses; turning the store off
+  takes `backfill-files --restore` before the release that unsets it (Moving uploaded files to the
+  bucket, above). Both decisions read only the live rows of `server_processes`
+  (`internal/dispatch/processes`, `Live`). A build that writes a row but predates the fleet
+  columns (migration `0138_server_processes_schema`) registers no embedder identity and no
+  `file_store`, so it counts as carrying no identity and as having no bucket. A build that writes
+  no `server_processes` row at all (every release before migration `0135_server_processes`, such
+  as `legion-envoy-v19.0.0`, which stops at migration `0134`) is invisible to both decisions:
+  while it serves, every process that has a row can have a bucket, so an upload keeps no bytes in
+  its row and `backfill-files` does not refuse, and a process of that build with no bucket then
+  answers `503 FILE_STORE_UNAVAILABLE` for an upload whose bytes are only in the bucket. Every
+  build before this rule drops the vectors of every identity but its own, whatever the active one
+  is. So turn on the file store, or change the embedder, no sooner than the release after the
+  first one that carries the rule, and only after every process of the earlier release is gone.
 - **SQL.** Expand-then-contract across two releases (Database migrations, below), unchanged.
 
 The two-build test checks this rule (`cmd/dispatch/twobuild_test.go`, `go test -tags twobuild
@@ -693,7 +727,12 @@ Generations and holds protect from the release after the first one that carries 
 before them compares stream and consumer settings with no generation, binds its delivery durable
 by lookup with no hold, and refuses a request member it does not declare. So the release that
 introduces them changes no request member, document element, stream or consumer setting, or loop
-interval, and each protection binds from the release after it.
+interval, and each protection binds from the release after it. The file store and the embedder
+work the same way: a build before the rule writes no embedder identity and no `file_store`, or no
+`server_processes` row at all, and drops the vectors of every identity but its own. So turn on the
+file store, or change the embedder, no sooner than the release after the first one that carries
+the rule, and only after every process of the earlier release is gone.
+
 ## Database migrations
 
 Boot applies `internal/dispatch/store/migrations/*.up.sql` in version order and records each

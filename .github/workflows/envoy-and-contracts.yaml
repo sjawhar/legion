@@ -230,7 +230,7 @@ jobs:
             # infra/core/permissions_live_test.go:298-299). packages/envoy/listenfd: added by
             # #2229 (cmd/dispatch, cmd/listener, internal/config and infra/host/heldportwrapper
             # import it). internal/dispatch/dashboard and internal/dispatch/processes: cmd/dispatch
-            # imports them (INFRA-559, INFRA-555).
+            # imports them (INFRA-559, INFRA-555). internal/redact: cmd/dispatch/main.go imports it.
             dispatch_server: &dispatch_server
               - 'packages/envoy/cmd/dispatch/*'
               - 'packages/envoy/internal/bus/*'
@@ -273,6 +273,7 @@ jobs:
               - 'packages/envoy/internal/oidc/*'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
+              - 'packages/envoy/internal/redact/*'
               - 'packages/envoy/internal/routing/*'
               - 'packages/envoy/listenfd/*'
             # The listener's packages, `go list -deps ./cmd/listener` in packages/envoy
@@ -361,8 +362,9 @@ jobs:
             # the previous build. Then the browser half,
             # `bun run e2e:multiprocess -- cross-build.multiprocess` in packages/dispatch: the
             # harness and spec under e2e/, the two SPA builds (web/, the editor package and the
-            # patches it takes, the notices script the build runs) and the Dispatch server
-            # e2e/run-server.sh builds (dispatch_command_tests holds its packages).
+            # patches it takes, the notices script the build runs), the Dispatch server
+            # e2e/run-server.sh builds (dispatch_command_tests holds its packages) and the script
+            # that holds each server's socket (run-server.sh:69, e2e/harness-start.ts:33).
             dispatch_two_builds:
               - '.github/workflows/envoy-and-contracts.yaml'
               - *go_workspace
@@ -374,6 +376,7 @@ jobs:
               - 'packages/dispatch/**'
               - 'packages/proof-editor/**'
               - 'scripts/third-party-notices.ts'
+              - 'scripts/e2e/lib/held-port.py'
               - *bun_install
             # `go test -tags multiprocess ./cmd/broker`.
             broker_multiprocess:
