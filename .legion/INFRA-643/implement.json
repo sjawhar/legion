@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-643",
-  "completed": "2026-10-28T12:05:00Z",
+  "completed": "2026-10-28T15:00:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2453",
   "proof": [
     {
@@ -36,6 +36,14 @@
       "observed": "inuse_space under docs.*: 409.32 MB base, 396.07 MB head (-3.2%); all 645.38 vs 625.32 MB. After commit, write.fork, tree, updates, renderings and forkMarkdown are nil (warm and cold).",
       "headSha": "85f2515596dee6ddffd99ed3e2678af454567008",
       "negativeControl": "End-of-step heap profiles taken without a forced GC (b2 706 MB, h2 750 MB under docs.*) held in-flight request allocations (applyLive +151 MB, room loads -95 MB), showing the forced-GC profile is the one that measures resident memory."
+    },
+    {
+      "criterion": "The branch merges with main and keeps the equivalence and merge-rule evidence (conflict round)",
+      "surface": "the docs package's Service write and room observer path, at the merged head, against the independent shadow render",
+      "command": "cd packages/envoy && go test ./internal/dispatch/docs/ -count=1 -timeout 60m; CGO_ENABLED=1 go test -race ./internal/dispatch/docs/ -count=1 -run '^TestRenderReuse'",
+      "observed": "ok (658.7 s) and ok under -race (447.0 s). The code diff against main's fork point is identical to b6e776460957's apart from the changelog entry moving into a fragment.",
+      "headSha": "da3572fd5d84c882e5e2b92fd9d2784a30baf76f",
+      "negativeControl": "The pre-merge head 61ec9418c1e8 against main: GitHub reports it CONFLICTING (mergeable_state dirty) and runs no check. The merged head da3572fd5d84 is a descendant of main@origin."
     }
   ],
   "filesChanged": [
@@ -48,7 +56,7 @@
     "packages/envoy/internal/dispatch/docs/render_reuse_test.go",
     "packages/envoy/internal/dispatch/docs/cold_edit_test.go",
     "packages/envoy/AGENTS.md",
-    "packages/envoy/CHANGELOG.md"
+    "packages/envoy/.changes/unreleased/pr2453-Changed-20261028-141551.yaml"
   ],
   "trickyParts": [
     "The fork read's mark (epoch, foreign) is taken inside srv.Apply before EncodeStateAsUpdateV1, and copied into a local in applyLive right after forkLive, so a later joined read cannot pair an operation's rendering with another read's counters.",
@@ -66,5 +74,15 @@
   "openQuestions": [],
   "discoveredComplexity": [
     "INFRA-642 also adds a field to liveWriteOrigin and a branch in renderedReplica.observe; its implementer was told the field names (rendering, inRoom); whichever merges second adapts."
+  ],
+  "rounds": [
+    {
+      "round": 2,
+      "reason": "Tester's verdict fail: the pull request conflicted with main (packages/envoy/CHANGELOG.md), so GitHub ran no check.",
+      "change": "Forward merge da3572fd5d84 of main@origin into legion/INFRA-643. The merge keeps main's CHANGELOG.md, and the same entry is the changie fragment packages/envoy/.changes/unreleased/pr2453-Changed-20261028-141551.yaml (changie new --kind Changed --custom Issue=pr2453).",
+      "fingerprint": "61ec9418c1e8 b9fa06ef0054809ba81f77e591e1ea0656002e5d49bc17def060f24f91a87158 -> da3572fd5d84 b2b4c3d572dbd727f2941ae5e28b45a55ebbb743fa48a1ca1fcefbc35ae516e2 (changed only by the changelog moving into a fragment: the diff without the changelog and fragment is identical line for line; PR comment 6471509203).",
+      "checks": "At da3572fd5d84: go build ./..., go vet ./internal/dispatch/..., gofmt -l . clean; go test ./internal/dispatch/docs/ ok (658.7 s); CGO_ENABLED=1 go test -race -run '^TestRenderReuse' ok (447.0 s).",
+      "overlap": "tree.go, livewrite.go and mutation.go merged with no conflict. Main's own lines there (the forkHeld check after mutate that drops a write which changed nothing, and the lifecycle-write credit rule) touch none of this change's lines. A dropped no-op write keeps write.tree, so the next operation's before-rendering stays exact."
+    }
   ]
 }
