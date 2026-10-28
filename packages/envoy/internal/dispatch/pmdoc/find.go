@@ -956,11 +956,12 @@ type MarkRef struct {
 }
 
 // ListMarks returns each distinct Proof or Dispatch mark identity in document
-// order.
+// order. doc must be a tree Validate accepts: the walk descends into every
+// node's children and computes no positions.
 func ListMarks(doc *Node) []MarkRef {
 	seen := make(map[MarkRef]struct{})
 	var refs []MarkRef
-	walk(doc, func(node *Node, _ []int, _, _ int) bool {
+	Walk(doc, func(node *Node) bool {
 		if node.Type != "text" {
 			return true
 		}

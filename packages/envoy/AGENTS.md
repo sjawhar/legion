@@ -78,7 +78,9 @@ too. A settlement that wrote nothing into the room and repaired nothing in the t
 versions the rendering it made of that read, offsets included, and renders no second time; it
 renders again when a stamp's tree replaced the read, when it read the document again after a
 write, or when `reconcileAskBlocks` repaired the read in place (`changedTree`), so nothing but
-`reconcileAskBlocks` may change that read. A document's pending authors are in one of two places:
+`reconcileAskBlocks` may change that read. The settlement tests (`settlement_read_invariant_test.go`,
+`settlement_render_once_test.go`) check, for each settlement they drive that reuses the rendering,
+that the read is unchanged since it was read. A document's pending authors are in one of two places:
 F, the room's local in-flight credits (`roomState.inflight`), or R, the durable
 `doc_pending_authors` rows from migration `0084`.
 `creditContentChange` puts a browser update's connected peers in F. Its append takes the document's
@@ -333,7 +335,7 @@ stays one measure where a rendering is reused rather than made again: a write ta
 of its fork before the operation from the room's replica or from its own previous operation, and
 the observer takes a published write's own rendering, only where each is the rendering of the very
 state being measured (`warmFork`, `applyLive`, `renderedReplica.changedBy`), since rendering is
-deterministic over one state.
+deterministic over one state; a margin write (`applyMargin`) renders nothing before it writes.
 Indexing an ask block fails the second half: it writes an `asks` row and an `ask.opened` event
 over words the edit that wrote the block already versioned, and a settlement that versioned the
 document for that event alone would write a byte-identical version credited to nobody, staling an
@@ -350,7 +352,13 @@ An update that changes only what no rendering carries therefore versions no docu
 a margin projection, the attributes a reader's browser editor derives on its own - each heading's
 `id` when it opens the document, and each ordered list item's `label` and `listType` on the first
 keyboard caret move or edit - or a comment's, suggestion's or ask's anchor mark, wherever it splits
-the text it covers. Routes that write a version on request do so whatever changed, so each can write
+the text it covers. A margin record changes the marks map alone, never the text, so its
+transactional write (`applyMargin`) records `false` without rendering the document again, and the
+room's update observer keeps its rendering for the publish of one whose fork was built from that
+same room (`liveWriteOrigin.marginOnly`). One forked from the store (`coldFork`) can carry deletes
+the room never took, since ygo encodes an update with its document's whole delete set, so its
+publish is rendered as any other update is.
+Routes that write a version on request do so whatever changed, so each can write
 a version whose markdown equals the previous one's and stale an approval pinned to it: an upload to
 an existing document (`POST /api/v1/issues/{key}/artifacts`,
 `POST /api/v1/projects/{key}/artifacts`) always inserts one; `POST /artifacts/{id}/versions` and
@@ -377,12 +385,17 @@ the rendering carries causes no version and cannot stale an approval.
 A handler joins its document operations to its transaction with `Docs.Join`, which returns the
 transaction's ledger (`docs/ledger.go`), the only way to give a document operation a transaction:
 every document write takes its transaction from the ledger and refuses a context that was not
-joined (`errUnjoined`): `SeedText`, a rebuild (`RebuildDocument`), the version writes, and every
+joined (`errUnjoined`): `SeedText`, a rebuild (`RebuildDocument`), the version writes, every
 write that runs through `applyLive` (`docs/mutation.go`) - an upload's replacement, an edit batch,
 an accepted or rejected suggestion, an ask's edited text and its answer or resolution, a comment's
-anchor mark and its margin record - each of which `applyLive` also weighs by what it leaves
-(`docs/growth.go`). An answer the document has no room for is left out of its block, which records
-who answered and when, and kept on its ask. The server writes outside `applyLive` are a rebuild,
+anchor mark - and a comment's or suggestion's margin record, which runs through `applyMargin` on
+the same steps that open and record an `applyLive` write (`openLiveOperation`,
+`recordLiveOperation`). `applyLive` weighs each of its writes by what it leaves
+(`docs/growth.go`); a margin record leaves the rendering and the anchor marks as they were, so
+`applyMargin` weighs it by the margin bound alone and reuses the rendering the transaction's last
+operation kept (`liveWrite.tree`) rather than reading and rendering the document again. An answer
+the document has no room for is left out of its block, which records who answered and when, and
+kept on its ask. The server writes outside `applyLive` and `applyMargin` are a rebuild,
 settlement's repairs, the block-id backfill and the sweep of unrecorded marks. Of those, a rebuild
 and settlement's repairs carry caller text. A rebuild's supplied markdown is weighed as a new
 document's rendering is (`SeedText`), and its latest version, the server's own text, is restored
@@ -848,16 +861,20 @@ update log under the document's lock, before any observer of that transaction ru
 (`crdt.UpdateLog`, sjawhar/ygo v1.51.3-sami.4), and the observer that holds the replica's lock drains
 the log, applying each update in turn and comparing the rendering it leaves with the one before it
 (`renderedReplica.changedBy`). It renders the replica for that only when it cannot know the
-rendering otherwise, and two cases it knows exactly. A published live write's update carries its
+rendering otherwise, and three cases it knows exactly. A margin write's publish into the room
+instance its fork was warm-built from changes no text (`liveWriteOrigin.marginOnly`, the margin
+record paragraph above), so it is unchanged. A published live write's update carries its
 operation's rendering, taken when the replica still stands at the epoch and foreign-commit count
 the operation's fork read found before it encoded the room: the replica has then consumed nothing
 since that read but published writes' commits, which under the writer slot are this write's own
 earlier updates, so after the update it is the fork the write rendered. ygo encodes the room's
 whole delete set in every update, so that holds only on the room instance the fork was read from:
-a cold fork carries no rendering, and a reloaded room's replica has a fresh epoch. And an update
-whose version is at or below the head the room instance's load folded (`roomInstance.loadedHead`)
-is already in the replica, which starts from the room as of its first commit, so applying it
-changes nothing: a cold write's publish into the room its own publish loaded is never rendered.
+a cold fork carries no rendering, and a reloaded room's replica has a fresh epoch; for the same
+reason a margin write forked cold, or published into a replaced room, is not taken as margin-only.
+And an update whose version is at or below the head the room instance's load folded
+(`roomInstance.loadedHead`) is already in the replica, which starts from the room as of its first
+commit, so applying it changes nothing: a cold write's publish into the room its own publish
+loaded is never rendered.
 So every committed update is classified, and its authors credited, exactly once, by whichever
 observer reaches the log first, against the room as the
 commit before it left it. Catching the replica up to the room instead took in every commit since
@@ -1987,13 +2004,15 @@ Front matter is read as the browser editor's parser reads it (`pmdoc.parseFrontm
 first line that is `---`, with any spaces or tabs after it, opens it, the first later line that is
 the same closes it, and its text is stored between plain `---` fences with line feeds between its
 lines. A `---` opener nothing closes is a thematic break. That parser, having tried such an opener
-as front matter to the document's end, reads no list, quote or footnote definition at the
-document's level in the rest, since no container opens inside front matter; the lines read as the
-other blocks they make, so `---\n- a\n- b` is a rule and one paragraph holding both lines. Parse
-reads them so too (`pmdoc.frontmatterAttempt`); a typed block's content opens them as anywhere.
-So the renderer writes a rule that opens a document as `***` where `---` would be misread - a
-later `---` line would close front matter, or the document holds a list, quote or footnote
-definition at its level (`holdsAContainerTheBrowserDrops`) - and `---` everywhere else.
+as front matter to the document's end, reads no list, quote, footnote definition or typed block at
+the document's level in the rest, since no container opens inside front matter; the lines read as
+the other blocks they make, so `---\n- a\n- b` is a rule and one paragraph holding both lines, and
+`---\n:::callout{kind="note" title="T"}\na\n:::` a rule and one paragraph holding the three lines
+after it. Parse reads them so too (`pmdoc.frontmatterAttempt`); a typed block's content opens them
+as anywhere. So the renderer writes a rule that opens a document as `***` where `---` would be
+misread - a later `---` line would close front matter, or the document holds a list, quote,
+footnote definition or typed block at its level (`holdsAContainerTheBrowserDrops`) - and `---`
+everywhere else.
 
 Two lists of one kind side by side read back as one when written with one marker, so the
 renderer writes a list whose kind matches the block before it - past an empty paragraph, which
@@ -2081,7 +2100,9 @@ holds writes its blocks with the item's tight lines, since that parser reads the
 (`itemBlocks`). Where the lines alone do not decide
 the spread - a typed block holding a blank line in a list item, a blank line at the end of a quote
 after a list, or at or after a list in a typed block in a footnote definition, whatever quotes or
-typed blocks stand between - a document holding
+typed blocks stand between - or where this reader does not read them - the blank lines that would
+spread a quoted list item ending in a footnote definition whose typed block holds a fence no fence
+closed, which that parser reads as the code's (`quotedDefinitionFenceBlank`) - a document holding
 one of those shapes, or a footnote definition that ends in a block other than a paragraph, is
 refused, and so it is where goldmark reads its blocks otherwise: an empty list item and a blank
 line before a block an item around it holds, however far out, since goldmark ends every item around
@@ -2095,10 +2116,17 @@ footnote definition is refused there too, unless goldmark spreads every item a b
 A footnote definition is read where it is written, as that parser keeps it: inside another block,
 ahead of other blocks, in any order, and whether or not anything refers to it. One inside another
 footnote definition is refused, since that parser reads a line of `=` or `-` continuing the inner
-one's paragraph as a heading's underline, where CommonMark reads it as the paragraph's text, and so
-is one inside a typed block, which that parser's references reach only from inside a typed block or
-after it. A definition whose label holds whitespace is refused, which that parser reads as a
-paragraph. A label is stored as that parser reads it, its escapes and character references decoded
+one's paragraph as a heading's underline, where CommonMark reads it as the paragraph's text. One
+inside a typed block is read like one inside a quote: that parser reads a typed block as a
+container, so a reference anywhere in the document reaches it. One inside a typed block with a list
+item around it, inside the typed block or outside it, is refused, since that parser counts the
+definition's lines and the blank lines next to it otherwise when it decides whether the item is
+spread: it reads the first line of a definition opening on a later line, or of an empty one, as a
+blank line of the typed block, and a blank line inside the typed block as spacing the item. So
+is one inside a typed block that holds any block but paragraphs (a list, a quote, code): that
+parser reads a list there spread where this one stores it tight, so only a definition of
+paragraphs is read alike by both. A definition whose label holds whitespace is refused, which that parser reads as a paragraph. A label
+is stored as that parser reads it, its escapes and character references decoded
 (`[^a\*]` is `a*`, `[^f&amp;g]` is `f&g`), while a reference still finds its definition by the
 label as written; the writer escapes a bracket, a pipe, a backslash before punctuation or at the
 end, an ampersand opening a character reference, and white space as a numeric one, so each label
