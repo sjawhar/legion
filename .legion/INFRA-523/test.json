@@ -2,120 +2,27 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-523",
-  "completed": "2026-10-28T18:51:00Z",
-  "round": 7,
-  "headSha": "0a38d434e74e7024957fd1e9023dc0252236f886",
-  "ci": "read on GitHub at 0a38d434 at 18:50Z: Tests 40747034353, Legion Envoy and Contracts 40747034612, Worker Image 40747034297, Docs 40747034270 and PR Title 40747126321 queued - read as running, no verdict; nothing re-run. At f0259648 Tests, Worker Image, Docs and PR Title were success and Legion Envoy and Contracts 40730687005 was cancelled by this push, as it was at ec4448fb: the Envoy lanes have given no verdict since f26dca26.",
-  "scope": "f0259648 -> 0a38d434 (the reviewer's round-3 fast-follow): duty.RunLeased is a time.NewTicker loop again and its pass returns nothing (callers in issue_ask_repair, suggestion_outcomes, outbox, processes, redeliver), nextDue/sleepUntil and their test removed, comments corrected, and storetest.WaitForQueuedBehind always takes a bound (suggestions_test passes 3 x the 5 s allowance). The tester's red test run_leased_period_test.go changed only by the pass signature (the func returns nothing; 'return interval' dropped); its assertions are untouched.",
+  "completed": "2026-10-28T20:23:00Z",
+  "round": 8,
+  "headSha": "a95753b12e6adcb0030477c759e70a1131a811f2",
+  "ci": "read on GitHub at 20:20Z: no workflow run exists for a95753b1 or the branch tip 131a11af; GitHub reports the pull request mergeable=false, mergeable_state=dirty against main af1ff09c (pushed 20:15Z), so it builds no merge ref and starts no pull_request workflow. At 0a38d434 Tests, Worker Image, Docs and PR Title were success and Legion Envoy and Contracts 40747034612 has stayed queued since 18:38Z. Nothing re-run.",
+  "scope": "0a38d434 -> a95753b1 is comments only (every changed line under packages/ is a // comment: ticker.go, the five RunLeased callers, suggestion_outcomes_lease_test.go and the comment above the tester's red test, whose code is untouched).",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at 0a38d434: the red test 5/5 and every RunLeased/RunLeasedAfterEachPass test 5/5; re-arming the ticker after each pass fails the red test 2/2; probes at 90% load and 150% overrun; multiprocess leased loops pass; lone runner and two-runner tests -race 5/5; the WaitForQueuedBehind callers 3/3; duty, redeliver, processes and outbox packages pass; go vet -tags multiprocess ./... clean."
+    "how": "The change is comments only, so the bare gates: go vet ./internal/dispatch/... clean and the RunLeased tests 2/2 at a95753b1 in a scratch copy; the new wording ('a ticker delivers the first tick a pass overran at once and drops only the ones after it') matches round 7's 150% overrun probe, where passes ran back to back about 753 ms apart with period steps of 500 ms and 1 s alternating. Round 7's verification at 0a38d434 stands for the code."
   },
-  "failures": [],
-  "failed": 0,
+  "failures": [
+    {
+      "criterion": "The pull request's head can be merged and its required checks can run at the head that merges",
+      "evidence": "gh api repos/sjawhar/legion/pulls/2396 -> mergeable=false, mergeable_state=dirty (base c44c1469, head 131a11af); main is at af1ff09c (2026-10-28T20:15:02Z). gh api 'repos/sjawhar/legion/actions/runs?branch=legion/INFRA-523' lists no run for a95753b1 or 131a11af: GitHub runs no pull_request workflow on a conflicting head, so no required check can pass until main is merged into the branch on this real conflict (skill://legion-worker/references/conflicts-and-rewrites.md), after which the tester compares the unchanged-diff fingerprint at a95753b1 and the new head."
+    }
+  ],
+  "failed": 1,
   "observations": [
     "The round-6 wall-clock observation is resolved: RunLeased's due times are the ticker's values, read from the wall clock at each tick (time/sleep.go:154).",
     "The census nit and routes.BuildAppContext's late refusal of a missing Lifetime (round 5) stand as observations.",
     "deep-links.e2e.ts keeps its read-mark pre-read (dispatch://INFRA-662), with no retry or sleep.",
     "T6: no suite test fails main's wakeLane order deterministically.",
     "A3 (re-run minutes over [merge, merge+7d)) is measured after the merge by the implementer's production check."
-  ],
-  "proof": [
-    {
-      "criterion": "A2 T2 and round-5 finding 1 on the ticker form of RunLeased: a lone fixed-cadence leased loop serves every period however long its passes take, an overrunning pass runs no backlog, and a wall-clock step moves its due times",
-      "surface": "packages/envoy duty.RunLeased against Postgres 17.11 in the issue pod",
-      "command": "cd packages/envoy && go test -count=5 -v -run '^(TestRunLeased.*)$' ./internal/dispatch/duty/; a throwaway probe of RunLeased (interval 500 ms; passes of 450 ms x8 and 750 ms x7, each reading the period its predecessor recorded); read of $(go env GOROOT)/src/time/sleep.go:147-157 (Go 1.27.1)",
-      "observed": "TestRunLeasedServesEveryPeriodOfALoneLoopWhosePassesTakeTime, TestRunLeasedWaitsAnIntervalBeforeTheFirstTickWhenAsked and TestRunLeasedAfterEachPassTicksAtStartAndThenAtTheWaitEachPassAsksFor 5/5 each; at 90% load passes begin 499-501 ms apart and each recorded period is the next (500 ms steps); at 150% passes run back to back 753-755 ms apart with period steps alternating 500 ms and 1 s, so overrun ticks are dropped and none queue; the ticker sends Now().Add(-delta) at each fire, the wall clock read then, so a step of the wall clock reaches the due times",
-      "headSha": "0a38d434e74e7024957fd1e9023dc0252236f886",
-      "negativeControl": "scratch copy, the ticker re-armed after each pass (due = time.Now() at receipt, ticker.Reset(interval) after the pass): the red test fails 2/2 'pass 3 served the period at 18:43:12.000 and the pass after it the period at 18:43:14.000, 2s later: 1 period(s) between them got no pass'"
-    },
-    {
-      "criterion": "Leased loops across two processes still run once per period, and the lock-wait helper's bound adds no failure mode",
-      "surface": "two envoy-dispatch processes on one Postgres (cmd/dispatch multiprocess tests); internal/dispatch/api tests in the issue pod",
-      "command": "go test -tags multiprocess -count=1 -v -run '^(TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses|TestALeasedLoopRunsOnceAcrossAStaggeredStart)$' ./cmd/dispatch; CGO_ENABLED=1 go test -race -count=5 -run '^(TestALoneRunnerMakesAPassOnEveryTick|TestTwoSweepRunnersRunThePassOnceAndSkipOnce)$' ./internal/dispatch/api/; go test -count=3 -run '^(TestComputeAndPersistSuggestionsRespectsDeadlineUnderLock|TestComputeAndPersistSuggestionsRespectsDeadlineWhenProjectLookupIsLocked|TestAReplyThatWaitedForTheOwnerRowIsTheNewest)$' ./internal/dispatch/api/",
-      "observed": "block-index, webhook-redelivery, reference-excerpts, suggestion-outcomes each 'A ran 1 skipped 0, B ran 0 skipped 1' (staggered start too); lone and two-runner ok under -race; the three lock-wait callers 3/3 each. The new 15 s bound (3 x lockedSuggestionAllowance) is reached only by a call that neither queued nor answered: the call ends on its own when its 5 s allowance does, and the helper returns at once on that answer",
-      "headSha": "0a38d434e74e7024957fd1e9023dc0252236f886",
-      "negativeControl": "round 5: with a 300 ms delay before the call, a transaction_timestamp() mutant at comment_create.go:493 passes under a no-op helper and fails 3/3 under the real one ('ask detail waiting_on = \"agent\", want human')"
-    },
-    {
-      "criterion": "Round-5 finding 2: a refused tmux spawn or resume rewrites none of the live pane's per-claim files, the gh bundle included",
-      "surface": "packages/daemon go test with a real tmux 3.5a in the issue pod",
-      "command": "PATH=<tmux 3.5a>:$PATH go test -count=5 -v -run '^TestRealTmuxSplitsIntoTheIssueWindow$' ./internal/runtime/tmux/",
-      "observed": "5/5 pass (each mint a fresh token; the snapshot reads the secret files and the claim's gh directory, after the refused spawn and after the refused resume)",
-      "headSha": "f0259648f4e14441e1dee1b53a59c70bd72c0330",
-      "negativeControl": "scratch copy, writeGitHubCredential moved above refuseLiveIncarnation: FAIL 2/2 'tmux_real_test.go:1200: the refused second spawn rewrote the live tester's secret files from map[\".../legion-...-tester-gh/acme/config.yml\":...' and ':1210: the refused resume rewrote ...'"
-    },
-    {
-      "criterion": "Round 5 (full round after two merges of main): the census entry api.Register(mux, lifetime, deps), the merges and every cause's loop",
-      "surface": "the Dispatch binary, go test, bun test and Playwright in the issue pod",
-      "command": "see round 5's run list in this handoff's history (3eb261a5): server boot, stream and SIGTERM; T6-T14 and the Envoy loops; claude-envoy, VersionView, Playwright chromium and webkit; image checks",
-      "observed": "server exited 0.036 s after SIGTERM with backends 10 -> 0; nil lifetime panics naming the parameter; the PR's daemon diff identical to round 4's but spawn.go (817ed0ce); every loop passes",
-      "headSha": "ec4448fbab0d9890d70d75b4b78494869d7e4f48",
-      "negativeControl": "main's write-before-refusal spawn order fails the real-tmux test 3/3; strict queryTmux fails 2/3 on Bun 1.3.14"
-    },
-    {
-      "criterion": "Review finding 1: the queryTmux bound test requires the kill to arrive, under the Bun the repository pins",
-      "surface": "packages/claude-envoy bun test in the issue pod",
-      "command": "bun test --timeout=60000 tests/session-title.test.ts -t 'ignores SIGTERM' --rerun-each 30 with Bun 1.4.4 (.bun-version) and --rerun-each 10 with the pod image's Bun 1.3.14",
-      "observed": "Bun 1.4.4: 30 pass 0 fail",
-      "headSha": "621cf3e59315b4e1b828a73d93dc0fc53e8a09bf",
-      "negativeControl": "Bun 1.3.14, which sometimes sends no kill on a timed-out execFileSync: 4 of 10 fail 'Expected: < 3000, Received: 5017' (5018, 5019)"
-    },
-    {
-      "criterion": "A2 T12 (round-2 finding 1): the launcher test fails a start that reaches the daemon after it stopped waiting, whichever side of the proof dial lost the time",
-      "surface": "packages/daemon go test in the issue pod",
-      "command": "cd packages/daemon && CGO_ENABLED=1 go test -race -count=20 -timeout 0 -run '^TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits$' ./internal/launcher/",
-      "observed": "ok 20 of 20 (22.7 s) under sibling load",
-      "headSha": "55265661df7cdd206ee52e58c0edf0c957c93a62",
-      "negativeControl": "scratch copy, time.Sleep(m.cfg.StopGrace) just before sessionproxy.Start (passed 2/2 at f26dca26): FAIL 2/2 'launcher_test.go:1226: generation 1's start took 2.002165766s outside its proof dial (2.001202036s before it, 963.73\u00b5s after it), past the other half of the 2s stop grace'; time.Sleep(StopGrace*6/10) after the proxy error: FAIL 2/2 'took 1.203274779s outside its proof dial (1.08473ms before it, 1.202190049s after it)'"
-    },
-    {
-      "criterion": "T17 (round-2 finding 3): the claude-envoy per-test timeout is above the longest chain of waits one test makes, so a stuck wait names its step",
-      "surface": "packages/claude-envoy bun test (Bun 1.4.4) in the issue pod",
-      "command": "cd packages/claude-envoy && bun run test (bun test --timeout=60000), and a count of the waits in envoy-channel-replay.test.ts:600 'a stored frame the channel never takes is named in one notice\u2026'",
-      "observed": "218 pass 0 fail (21.2 s); that test makes 11 waits of up to 5 s (boot's first sweep twice, 6 reconnect sweeps, 3 named waits at :615 :617 :620), 55 s + 5 s = 60 s as the comment says",
-      "headSha": "55265661df7cdd206ee52e58c0edf0c957c93a62",
-      "negativeControl": "round 2: a wait made unsatisfiable fails with the named error 'timed out waiting for the heartbeat reclaiming the held role (holder now ...)' under the package timeout and only 'this test timed out after 5000ms' under bun's default; the 15 s figure was below this test's 55 s chain"
-    },
-    {
-      "criterion": "A2 product races T1, T2, T6, T10, T11 and the claude-envoy heartbeat: fixed at their root (round 2, full round after the merge with main)",
-      "surface": "packages/envoy, packages/daemon and packages/claude-envoy tests against Postgres 17.11 + pgvector, nats-server 2.10.29, a real tmux 3.5a and Bun 1.4.4 in the issue pod",
-      "command": "go test -count=20 the two Exclusive boundary tests; -race -count=10 TestALoneRunnerMakesAPassOnEveryTick; -tags multiprocess -count=2 the leased-loop tests; -count=10 the T1 tests; -race -count=5 the four outbox lane tests; -race -count=30 TestARefusedProofLogsInAgain; -count=5 TestRealTmuxSplitsIntoTheIssueWindow with tmux; -count=10 TestARewrittenSecretFileIsNeverReadEmptyOrShort; bun test --rerun-each 100 the reconciliation test",
-      "observed": "all pass: 40/40, 10/10, 2/2 each ('A ran 1 skipped 0, B ran 0 skipped 1' for every leased loop), 20/20, 20/20, 30/30, 5/5, 10/10, 100/100",
-      "headSha": "f26dca264d6ef9339b5c68165df77de3e67349a6",
-      "negativeControl": "periodBoundary(time.Now()) at the gate fails the late-tick test 13/13; main's two-statement eventCursorCheck fails the new T1 test 3/3 (round 1); a 20 ms split in LoginStatus fails 5/5 'no token login yet'; main's spawn order fails the real-tmux test 2/2 'the refused second spawn rewrote the live tester's secret files'; an unconditional heartbeat fails the reconciliation test 50/400 'Expected: 3 Received: 4'"
-    },
-    {
-      "criterion": "A2 test causes T3-T5, T7-T9, T12-T16, T24 and the deep-links WebKit test: each waits on the state it asserts (round 2)",
-      "surface": "go test, bun test and Playwright chromium and webkit against the real Dispatch stack in the issue pod",
-      "command": "-count=10/5 T3 T4; pmdoc -race -count=2 and Linear -count=2; -race -count=5 T7+T8; -count=5 TestConsume*, TestFetchKeepsAFeedAfterGitGC, the two bridge tests; VersionView --rerun-each 100; playwright --project=chromium -g 'agent-view-settings' --repeat-each=5, -g 'issue header keeps every control' --repeat-each=5, --project=webkit -g 'withdraws its report' --repeat-each=10",
-      "observed": "all pass: 10/10, 5/5, 4/4, 12/12, 25/25, 55/55, 5/5, 10/10, 100/100, 50/50, 5/5, 20/20 (webkit)",
-      "headSha": "f26dca264d6ef9339b5c68165df77de3e67349a6",
-      "negativeControl": "New mark hidden on pointerdown: the old deep-links test fails 5/10 at :606 after the View in document click, the new one passes 10/10; 1 s fake-Envoy delay: main's agent-view-settings fails 3/30 at :747, the new one passes 30/30; a quadratic freeDelimiterRuns fails the merged render test; setHighlightMissing(false) fails VersionView 3/3"
-    },
-    {
-      "criterion": "A2 T19, T20: the worker image needs no external Dockerfile frontend and installs CodeGraph from a committed lockfile, under the Bun 1.4.4 main now pins",
-      "surface": "Bun 1.4.4 frozen install of packages/daemon/docker/omp-plugins as worker.Dockerfile:168-170 runs it; BuildKit v0.33.1's dockerfile2llb; the repository's check scripts",
-      "command": "bun install --frozen-lockfile --ignore-scripts in a copy of the two files; check-bun-version.sh, check-bun-workspace-manifests.sh, check-image-trigger-paths.sh; dockerfile2llb parse of worker.Dockerfile (round 1)",
-      "observed": "exit 0, pi-codegraph 0.1.1, 122 packages, lockfile sha256 unchanged; the three scripts pass; the Dockerfile converts with the built-in frontend 1.27 and no lint warnings",
-      "headSha": "f26dca264d6ef9339b5c68165df77de3e67349a6",
-      "negativeControl": "an added dependency: 'lockfile had changes, but lockfile is frozen', exit 1; ARG BUN_VERSION=1.3.14: check-bun-version refuses 'but .bun-version locks 1.4.4'"
-    },
-    {
-      "criterion": "A1: the catalog lists every job attempt in the window that failed with a later attempt of that job, each once",
-      "surface": "GitHub Actions API; dispatch://INFRA-523/artifact/rerun-measure-py v2 and dispatch://INFRA-523/artifact/rerun-catalog-md (latest)",
-      "command": "python3 rerun-measure.py --from 2026-10-19T23:50:00Z --to 2026-10-26T23:50:00Z --cache <round-1 cache> --list; job ids compared with the catalog's table",
-      "observed": "109 job ids, each once; identical to the catalog's 109; totals 13112 runs, 177 re-run runs, 1630 test-or-code minutes, as the catalog header says",
-      "headSha": "f26dca264d6ef9339b5c68165df77de3e67349a6",
-      "negativeControl": "v1 of the script on the same cache prints job 120771000438 twice and 13117 runs"
-    },
-    {
-      "criterion": "A2a: no retry, no race-hiding timeout, no skip, no workflow file",
-      "surface": "the pull request's diff against main 4e55b2e0 plus round 3",
-      "command": "gh pr diff 2396 --repo sjawhar/legion --name-only; scan of every added line for t.Skip, .skip(, retries, toPass, waitForTimeout, time.Sleep, retry, timeout",
-      "observed": "no .github/workflows/ file; no skip, retry or toPass; the waits added poll an observable state; the two raised timeouts are the T12 grace (its bounds now read from the dial and the start's send) and claude-envoy's per-test 60 s, above eleven 5 s named waits, so each wait still fails first with its name",
-      "headSha": "55265661df7cdd206ee52e58c0edf0c957c93a62",
-      "negativeControl": "check-private-names.sh over the changed files and check-pr-text.sh pass, and refuse a planted private host and repository name (round 2)"
-    }
   ]
 }
