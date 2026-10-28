@@ -2,26 +2,26 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-568",
-  "completed": "2026-10-28T22:14:00Z",
-  "testedHead": "ec1525141574e7872ca0c6768f95ba95d728f9ad",
-  "codeHead": "e64224e5503c79febb49fbb03946b3bda72dce3b",
-  "round": "Round 11, full: forward merge of main bb9fe49c (e64224e5) after retro (8e58845b removed .legion/INFRA-568/; this file is new on the branch). Fingerprint 66f1787d a0b437d3… → ec152514 03557e7b… changed: migrations renumbered 0137_related_checks / 0138_issue_embedding_spec after main's 0136_dashboard_assets, route-count base 141 → 142, migration numbers in comments and docs, and one stray jj conflict-marker line in cmd/dispatch/README.md. Every row driven again with a CLI built from this head's source.",
+  "completed": "2026-10-28T22:17:00Z",
+  "testedHead": "cb22a5bc05ab4799935deda682ae05a4a112b311",
+  "codeHead": "1d89163d5f616f3a593ee5fa566302dea37ca474",
+  "round": "Round 12: the fix for round 11's one failure (1d89163d deletes the conflict-marker line from packages/envoy/cmd/dispatch/README.md). jj diff ec152514..cb22a5bc outside .legion/ is that one deleted line, so no server, client or migration code changed since round 11, whose real-server runs at ec152514 (every acceptance row, the upgrade 0136 → 0138, the connection count, recall 4 → 5 of 9) stand. Fingerprint 03557e7b… → 1b7f7441…, changed by that line alone.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove every row independently at this head: fresh dispatch:local (http://127.0.0.1:62514), main bb9fe49c's server (8787), the head binary with a fake Azure embedder on a database main migrated to 0136 first (8788), the CLI built from this head's source outside the tree."
+    "how": "Read the README at this head around the old line 1108 (main's 0136 paragraph, a blank line, then this branch's 0137 paragraph) and searched every tracked text file for jj or git conflict markers: none."
   },
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "The forward merge of main leaves no conflict residue: a reader of packages/envoy/cmd/dispatch/README.md (the server's operator documentation, where the related-item check's migrations are described) reads prose, not a jj conflict marker",
-      "evidence": "Merge e64224e5 (`merge: resolve conflict against main@origin`) left a jj conflict-marker line in the README. `grep -n -E '^(\\+{7}|-{7}|%{7}|<{7}|>{7}) ' packages/envoy/cmd/dispatch/README.md` at head ec152514 prints `1108:+++++++ uxwtkurr 8e58845b \"retro: remove the issue's handoff directory under .legion/ before READY\"`, between main's `0136_dashboard_assets` paragraph and this branch's `0137_related_checks` paragraph; `jj diff --from main@origin --to ec152514 -- packages/envoy/cmd/dispatch/README.md` shows it as an added line. Neither parent carries it (8e58845b: 0 such lines, main bb9fe49c: 0), so the merge resolution added it. The fix is to delete that one line. No red test: a test that reads a document's text is what this repository's test rules forbid; the grep above is the check."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "resolvedFailures": [
     {
       "round": 1,
       "criterion": "The check says what it did (issue title); plan task 7: an existing external issue answers not_made 'Dispatch already holds this issue; nothing was created'. The output of that write must not claim it created the issue.",
       "resolution": "Fixed in 247b43fd: the client reads Dispatch's status (201 created, 200 already held) and prints `Dispatch already holds <KEY>: … ; nothing was created` with no related-item line. The red test c1a975c1 is unchanged and passes."
+    },
+    {
+      "round": 11,
+      "criterion": "The forward merge of main leaves no conflict residue: a reader of packages/envoy/cmd/dispatch/README.md (the server's operator documentation, where the related-item check's migrations are described) reads prose, not a jj conflict marker",
+      "resolution": "Fixed in 1d89163d: the line is deleted, and no tracked text file holds a conflict marker."
     }
   ],
   "collationTest": {
@@ -45,6 +45,14 @@
     "verdict": "passes on this branch and on main; the implementer's 'known C-collation test' fails only on the pod's byte-order database"
   },
   "proof": [
+    {
+      "criterion": "Round 11 failure: the Dispatch server README carries no conflict residue from the merge of main",
+      "surface": "packages/envoy/cmd/dispatch/README.md at this head, the operator documentation of the related-item check's migrations",
+      "command": "git ls-files -z | xargs -0 grep -n -I -E '^(\\+{7}|-{7}|%{7}|<{7}|>{7}|\\\\{7}) '; sed -n 1104,1112p packages/envoy/cmd/dispatch/README.md; jj diff --stat --from ec152514 --to cb22a5bc -- '~.legion'",
+      "observed": "no tracked file holds a conflict marker; the README reads main's `0136_dashboard_assets` paragraph, a blank line, then `Migration \\`0137_related_checks\\` adds three tables …`; the only change since round 11 outside .legion/ is that one deleted line",
+      "headSha": "cb22a5bc05ab4799935deda682ae05a4a112b311",
+      "negativeControl": "the same grep at ec152514 printed `packages/envoy/cmd/dispatch/README.md:1108:+++++++ uxwtkurr 8e58845b …`"
+    },
     {
       "criterion": "Migrations renumbered to 0137/0138 after main's 0136_dashboard_assets: a database main bb9fe49c migrated (0136) upgrades to 0138 and a title-only issue embedding becomes title + spec",
       "surface": "main bb9fe49c's server on fresh dispatch_tester_upg (8788), then the head binary on it with DISPATCH_EMBEDDER=azure at a local fake Azure endpoint",
@@ -167,7 +175,8 @@
     }
   ],
   "observations": [
-    "CI at code head e64224e5 when read at 22:12Z: build, changes, lint, test, typecheck and the daemon's Postgres 16 suite queued. Not waited for. mermaid.e2e.ts:194 in CI's dispatch job is main's known failure (#2311).",
+    "CI at code head 1d89163d when read at 22:16Z: see the run list in the report (queued or cancelled-and-replaced). Not waited for. mermaid.e2e.ts:194 in CI's dispatch job is main's known failure (#2311).",
+    "Round 11's proof entries keep headSha ec152514: the code they exercised is unchanged at cb22a5bc.",
     "This head merged main bb9fe49c, before 1767c9af (#2448), so pmdoc's broken import on main is not here: go vet ./internal/dispatch/pmdoc/ is clean at this head. A later merge of main needs #2481's one-line import fix if #2481 has not merged.",
     "Before a project's first leased refresh a 10,000-word spec's keyword stage took 274 ms (probe mode), as in earlier rounds.",
     "Harness: $TMPDIR/tester568 (d.sh runs ce-head/dist/dispatch.js; L.sh = dispatch:local at 62514; Postgres 5433 C and 5434 en-US under pg/)."
