@@ -2,14 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-632",
-  "completed": "2026-10-28T19:55:41Z",
+  "completed": "2026-10-28T19:57:35Z",
   "round": 3,
   "reviewedCodeHead": "7cf8f4e43456cbcbe3f43cfbe9a94a5a569433e9",
-  "decision": "approved",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
+  "important": 1,
   "minor": 0,
-  "keyFindings": [],
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/AGENTS.md",
+      "description": "No code finding stands at 7cf8f4e4. But GitHub reports #2474 CONFLICTING (mergeStateStatus DIRTY) at 19:57Z: main 8b6ea377 (#2323) edits packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md, the two guides this branch carries from sjawhar/legion#2422, which conflicts on them too. The architect's queued-CI rule allows approval only with no conflict. Merge main as the real conflict allows. Resolve the two Envoy guides as #2422 resolves them: regenerate main's files with #2422's recipe, never by hand. The three guides and the checker merge clean (git merge-tree)."
+    }
+  ],
   "verified": [
     "round-2 finding fixed: a one-line parent with 50 nested children exits 0 (test at scripts/semantic-line-breaks.test.ts:144); 50 top-level items exit 0",
     "round-1 repros still hold: a 50-row nested item passes and a 51-row one fails at the nested item, whatever follows it; '- - x' passes",
