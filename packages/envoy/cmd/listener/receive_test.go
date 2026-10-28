@@ -26,23 +26,26 @@ import (
 const receiveTestSubject = "notifications.github.acme.widgets.push.branch.main"
 
 // testReceiveTiming is the receive loop's production timing with its waits shortened, so a test
-// sees each of them in well under a second; the settle hold's cap stays the production one, two of
-// the durable's own ack waits and a second, and so do a graceful stop's hand-back delay and linger
-// cap. A stopping holder waits 250 ms, five of testLeaseTiming's standby polls, for another pod to
-// take its released lease; a test of the hand-over itself takes handBackTiming.
+// sees each of them in well under a second; the settle hold's caps stay the production ones, one
+// of the durable's own ack waits and a second after a hard take-over and the hand-back delay and a
+// second after a graceful one, and so do a graceful stop's hand-back delay and linger cap. A
+// stopping holder waits 250 ms, five of testLeaseTiming's standby polls, for another pod to take
+// its released lease; a test of the hand-over itself takes handBackTiming.
 func testReceiveTiming() receiveConfig {
+	production := productionReceiveConfig()
 	return receiveConfig{
-		settlePoll:      50 * time.Millisecond,
-		settleCap:       productionReceiveConfig().settleCap,
-		bindPoll:        50 * time.Millisecond,
-		alarmAfter:      time.Hour,
-		alarmEvery:      time.Hour,
-		inProgressEvery: inProgressEvery,
-		inflightGrace:   300 * time.Millisecond,
-		handBackDelay:   handBackDelay,
-		lingerPoll:      50 * time.Millisecond,
-		lingerMax:       lingerMax,
-		lingerUntaken:   250 * time.Millisecond,
+		settlePoll:        50 * time.Millisecond,
+		settleCap:         production.settleCap,
+		handBackSettleCap: production.handBackSettleCap,
+		bindPoll:          50 * time.Millisecond,
+		alarmAfter:        time.Hour,
+		alarmEvery:        time.Hour,
+		inProgressEvery:   inProgressEvery,
+		inflightGrace:     300 * time.Millisecond,
+		handBackDelay:     handBackDelay,
+		lingerPoll:        50 * time.Millisecond,
+		lingerMax:         lingerMax,
+		lingerUntaken:     250 * time.Millisecond,
 	}
 }
 
@@ -229,7 +232,7 @@ func TestADurableMessageReceivedWithoutTheLeaseIsDroppedAndRedeliveredToTheHolde
 	if err != nil {
 		t.Fatalf("create the durable: %v", err)
 	}
-	if err := stray.receiver.begin(info.Config.DeliverSubject, 0, 0); err != nil {
+	if err := stray.receiver.begin(info.Config.DeliverSubject, settleHold{}, 0); err != nil {
 		t.Fatalf("subscribe the stray pod: %v", err)
 	}
 
@@ -608,6 +611,14 @@ func TestAGracefulStopLingersToItsCapForATakerThatNeverReceives(t *testing.T) {
 // returns a client to publish and read the durable with.
 func bindAsADeadHolder(t *testing.T, uri, machineID string) *bus.Client {
 	t.Helper()
+	client, _ := bindAsAHolder(t, uri, machineID, func(*natsgo.Msg) {})
+	return client
+}
+
+// bindAsAHolder is bindAsADeadHolder with handle taking each message the holder receives, and the
+// holder's subscription returned beside the client.
+func bindAsAHolder(t *testing.T, uri, machineID string, handle natsgo.MsgHandler) (*bus.Client, *natsgo.Subscription) {
+	t.Helper()
 	setup := testnats.Connect(t, uri)
 	t.Cleanup(setup.Close)
 	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
@@ -620,12 +631,44 @@ func bindAsADeadHolder(t *testing.T, uri, machineID string) *bus.Client {
 	if err != nil {
 		t.Fatalf("create the durable: %v", err)
 	}
-	if _, err := setup.Subscribe(info.Config.DeliverSubject, func(*natsgo.Msg) {}); err != nil {
-		t.Fatalf("subscribe as the dead holder: %v", err)
+	sub, err := setup.Subscribe(info.Config.DeliverSubject, handle)
+	if err != nil {
+		t.Fatalf("subscribe as the holder: %v", err)
 	}
 	waitFor(t, 5*time.Second, "the durable to read push-bound", func() bool {
 		info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
 		return err == nil && info.PushBound
+	})
+	return client, sub
+}
+
+// leaveARetryOutstanding publishes data to machineID's durable and has a holder on a connection
+// of its own NAK it for a retry a minute later, as the delivery handler NAKs a prompt that failed,
+// then go: the message stays outstanding, counted in the durable's NumAckPending, for that minute.
+// It returns a client to publish and read the durable with.
+func leaveARetryOutstanding(t *testing.T, uri, machineID, data string) *bus.Client {
+	t.Helper()
+	naked := make(chan struct{}, 1)
+	client, holder := bindAsAHolder(t, uri, machineID, func(msg *natsgo.Msg) {
+		if msg.NakWithDelay(time.Minute) == nil {
+			select {
+			case naked <- struct{}{}:
+			default:
+			}
+		}
+	})
+	publishDurable(t, client, data)
+	select {
+	case <-naked:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the holder never NAKed %q", data)
+	}
+	if err := holder.Unsubscribe(); err != nil {
+		t.Fatalf("unsubscribe the holder: %v", err)
+	}
+	waitFor(t, 5*time.Second, "the retry to stay outstanding with no subscriber", func() bool {
+		info, err := client.JS().ConsumerInfo(bus.Stream, bus.ListenerDurable(machineID))
+		return err == nil && !info.PushBound && info.NumAckPending == 1 && info.NumPending == 0
 	})
 	return client
 }
@@ -744,11 +787,15 @@ func TestASettleHoldWithNothingOutstandingEndsAtOnce(t *testing.T) {
 }
 
 // The settle hold ends at its cap even while a message is still outstanding, then delivers what it
-// holds; the outstanding message follows when it comes back. In production the cap is two of the
-// durable's ack waits and a second, 13 s.
+// holds; the outstanding message follows when it comes back. In production the cap is one of the
+// durable's ack waits and a second, 7 s, after a hard take-over, and the hand-back delay and a
+// second, 3 s, after a graceful one.
 func TestASettleHoldEndsAtItsCap(t *testing.T) {
-	if got := productionReceiveConfig().settleCap; got != 13*time.Second {
-		t.Fatalf("the production settle cap is %s, want 13s: two %s ack waits and a second", got, consumerAckWait)
+	if got := productionReceiveConfig().settleCap; got != 7*time.Second {
+		t.Fatalf("the production settle cap is %s, want 7s: a %s ack wait and a second", got, consumerAckWait)
+	}
+	if got := productionReceiveConfig().handBackSettleCap; got != 3*time.Second {
+		t.Fatalf("the production settle cap after a hand-back is %s, want 3s: the %s hand-back delay and a second", got, handBackDelay)
 	}
 	uri := testnats.URL(t)
 	const machineID = "box-expired-cap"
@@ -776,24 +823,177 @@ func TestASettleHoldEndsAtItsCap(t *testing.T) {
 	rig.awaitRecord(t, "settled", func(record leaseRecord) bool { return record.Holder == "pod-b" && !record.Unsettled })
 }
 
-// A released record that is unsettled (its holder stopped mid-hold) or carries stale_binding (its
-// holder subscribed beside an expired holder's lingering binding) tells the next holder that a
-// binding it finds is a pod of this build's, not a pre-lease build's: it subscribes at once beside
-// the binding and settles, delivering a message the binding had before a newer one. A released
-// record with neither flag still counts a binding as a pre-lease build's, and waits it out.
-func TestAReleasedRecordUnsettledOrWithAStaleBindingSettlesBesideTheBinding(t *testing.T) {
+// A settle hold lasts at most as long as the previous holder can still have messages outstanding,
+// counted from the subscribe: one ack wait and a second after a take-over over an expired record or
+// from a released one carrying stale_binding, the hand-back delay and a second after a graceful
+// hand-back (a released record carrying unsettled alone). A message NAKed for a retry a minute
+// later stays outstanding past either, so the hold runs to its cap and then delivers what it holds;
+// at the old cap of two ack waits and a second, 13 s, a graceful take-over delivered 14 s after the
+// stop and a hard one 19 s after the kill.
+func TestASettleHoldsCapIsWhatThePreviousHolderCanStillHaveOutstanding(t *testing.T) {
 	for _, row := range []struct {
 		name, machineID, record string
-		settle                  bool
+		how                     leaseAcquisition
+		limit                   time.Duration
 	}{
-		{"unsettled", "box-released-unsettled", `{"holder":"pod-gone","boot":"0123456789abcdef","released":true,"unsettled":true}`, true},
-		{"stale binding", "box-released-stale", `{"holder":"pod-gone","boot":"0123456789abcdef","released":true,"stale_binding":true}`, true},
-		{"neither flag", "box-released-plain", `{"holder":"pod-gone","boot":"0123456789abcdef","released":true}`, false},
+		{"expired", "box-cap-expired", `{"holder":"pod-dead","boot":"0123456789abcdef"}`, leaseTakenExpired, consumerAckWait + settleMargin},
+		{"released with a stale binding", "box-cap-stale", `{"holder":"pod-gone","boot":"0123456789abcdef","released":true,"stale_binding":true}`, leaseTakenReleased, consumerAckWait + settleMargin},
+		{"handed back", "box-cap-handed-back", `{"holder":"pod-gone","boot":"0123456789abcdef","released":true,"unsettled":true}`, leaseTakenReleased, handBackDelay + settleMargin},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			uri := testnats.URL(t)
 			putLeaseRecord(t, uri, row.machineID, row.record)
-			client := bindAsADeadHolder(t, uri, row.machineID)
+			client := leaveARetryOutstanding(t, uri, row.machineID, "retry")
+			handle, received := recordingHandler()
+			rig := startReceiverRig(t, uri, row.machineID, "pod-b", handle, testReceiveTiming(), testLeaseTiming())
+			subscribed := rig.awaitState(t, receiveActive, 10*time.Second)
+			if status := rig.lease.Status(); status.How != row.how || !status.Settle {
+				t.Fatalf("pod-b's lease = %+v, want taken from a record %s, settling", status, row.how)
+			}
+			publishDurable(t, client, "fresh")
+
+			first := awaitReceived(t, received, 15*time.Second, "pod-b's first message")
+			if after := first.at.Sub(subscribed); first.data != "fresh" || after < row.limit-200*time.Millisecond || after > row.limit+700*time.Millisecond {
+				t.Fatalf("pod-b delivered %q %s after it subscribed, want the fresh message once the %s cap ended the hold", first.data, after.Round(time.Millisecond), row.limit)
+			}
+			if end := rig.settleHoldEnd(t, time.Second); end["outcome"] != "cap" || end["messages"] != float64(1) || end["ack_pending"] != float64(2) {
+				t.Fatalf("the settle hold ended %v, want at the cap holding one message of two outstanding", end)
+			}
+			noneReceived(t, received, time.Second, "while the retry's delay runs")
+		})
+	}
+}
+
+// A graceful stop of a pod during a settle hold over an expired record, the dead holder's binding
+// gone with its connection (a SIGKILL), marks the released record stale_binding as well as
+// unsettled: the message the dead holder had comes back one ack wait after its delivery, so the
+// next holder's hold must wait that long too, not the hand-back delay a record carrying unsettled
+// alone allows. The next holder then delivers it before the newer message the stopped pod handed
+// back.
+func TestAGracefulStopDuringAnAckWaitHoldMarksTheRecordStale(t *testing.T) {
+	uri := testnats.URL(t)
+	const machineID = "box-stop-in-ack-wait-hold"
+	putLeaseRecord(t, uri, machineID, `{"holder":"pod-dead","boot":"0123456789abcdef"}`)
+	client, dead := bindAsAHolder(t, uri, machineID, func(*natsgo.Msg) {})
+	publishToTheDeadHolder(t, client, machineID, "older")
+	if err := dead.Unsubscribe(); err != nil {
+		t.Fatalf("unsubscribe the dead holder: %v", err)
+	}
+	waitFor(t, 5*time.Second, "the dead holder's binding to go", func() bool {
+		info, err := client.JS().ConsumerInfo(bus.Stream, bus.ListenerDurable(machineID))
+		return err == nil && !info.PushBound
+	})
+
+	stopping := startReceiverRig(t, uri, machineID, "pod-b", func(_ context.Context, msg *natsgo.Msg) {
+		t.Errorf("pod-b delivered %q during its hold", msg.Data)
+	}, testReceiveTiming(), testLeaseTiming())
+	stopping.awaitState(t, receiveActive, 10*time.Second)
+	if status := stopping.lease.Status(); status.How != leaseTakenExpired || !status.Settle {
+		t.Fatalf("pod-b's lease = %+v, want taken over an expired record, settling", status)
+	}
+	publishDurable(t, client, "newer")
+	waitFor(t, 5*time.Second, "pod-b to hold the newer message", func() bool {
+		info, err := client.JS().ConsumerInfo(bus.Stream, bus.ListenerDurable(machineID))
+		return err == nil && info.NumAckPending == 2 && info.NumPending == 0
+	})
+	time.Sleep(200 * time.Millisecond) // past pod-b's intake of what the server sent it
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	stopping.receiver.Stop(ctx)
+	if end := handBackEnd(t, stopping); end["handed_back"] != float64(1) || end["linger_end"] != "not taken" {
+		t.Fatalf("pod-b's hand-back ended %v, want the newer message handed back and the linger ended with no pod to take the lease", end)
+	}
+	stopping.awaitRecord(t, "released, unsettled, with a stale binding", func(record leaseRecord) bool {
+		return record.Holder == "pod-b" && record.Released && record.Unsettled && record.StaleBinding
+	})
+
+	handle, received := recordingHandler()
+	next := startReceiverRig(t, uri, machineID, "pod-c", handle, testReceiveTiming(), testLeaseTiming())
+	if must := next.logRecord(t, "listener lease term must settle; receiving at once and holding what arrives until the durable's outstanding messages are in hand", 5*time.Second); must["cap"] != (consumerAckWait + settleMargin).String() {
+		t.Fatalf("pod-c's settle hold = %v, want the %s cap of a hard take-over", must, consumerAckWait+settleMargin)
+	}
+	for _, want := range []string{"older", "newer"} {
+		if message := awaitReceived(t, received, consumerAckWait+5*time.Second, "pod-c's "+want); message.data != want {
+			t.Fatalf("pod-c delivered %q, want %q: the messages in the order they were published", message.data, want)
+		}
+	}
+	if end := next.settleHoldEnd(t, time.Second); end["outcome"] != "settled" {
+		t.Fatalf("pod-c's settle hold ended %v, want settled", end)
+	}
+}
+
+// A stopping pod that gets back, alone, a message it already handed back (the server redelivered it
+// before any other pod subscribed) NAKs it with the hand-back delay again rather than dropping it,
+// so the pod that takes the lease next delivers it after that delay instead of one ack wait later,
+// which its hold, the hand-back delay and a second, does not wait for.
+func TestAStoppingPodHandsARepeatBackAgain(t *testing.T) {
+	uri := testnats.URL(t)
+	const machineID = "box-repeat"
+	inHand := make(chan struct{}, 1)
+	active := startReceiverRig(t, uri, machineID, "pod-a", func(ctx context.Context, msg *natsgo.Msg) {
+		inHand <- struct{}{}
+		<-ctx.Done()
+		_ = msg.Nak()
+	}, handBackTiming(), testLeaseTiming())
+	active.awaitState(t, receiveActive, 10*time.Second)
+	// pod-b runs its lease alone at first: it takes the released record and subscribes only once
+	// pod-a has let go, so every redelivery during pod-a's linger reaches pod-a alone.
+	handle, received := recordingHandler()
+	next := newReceiverRig(t, uri, machineID, "pod-b", handle, testReceiveTiming(), testLeaseTiming())
+	next.lease.Start(context.Background())
+	waitFor(t, 5*time.Second, "pod-b to read pod-a's lease", func() bool {
+		return next.lease.Status().ActiveInstance == "pod-a"
+	})
+	publishDurable(t, active.client, "first")
+	select {
+	case <-inHand:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pod-a never took the message")
+	}
+
+	stopped := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	active.receiver.Stop(ctx)
+	end := handBackEnd(t, active)
+	if end["handed_back"] != float64(1) || end["linger_end"] != "timeout" || end["dropped_repeats"] != float64(0) {
+		t.Fatalf("pod-a's hand-back ended %v, want the message handed back, its repeat handed back again rather than dropped, and the linger run to its cap", end)
+	}
+
+	next.receiver.Start()
+	message := awaitReceived(t, received, 15*time.Second, "pod-b's message")
+	if after := message.at.Sub(stopped); message.data != "first" || after >= consumerAckWait {
+		t.Fatalf("pod-b delivered %q %s after pod-a's stop, want the repeat handed back again, before an ack wait", message.data, after.Round(time.Millisecond))
+	}
+}
+
+// A released record that is unsettled (its holder handed its messages back, and lingers on its
+// subscription) or carries stale_binding (its holder subscribed beside an expired holder's
+// lingering binding) tells the next holder that a binding it finds is a pod of this build's, not a
+// pre-lease build's: it subscribes at once beside the binding and settles, delivering a message the
+// binding had before a newer one. A released record with neither flag still counts a binding as a
+// pre-lease build's, and waits it out.
+func TestAReleasedRecordUnsettledOrWithAStaleBindingSettlesBesideTheBinding(t *testing.T) {
+	for _, row := range []struct {
+		name, machineID, record string
+		settle                  bool
+		// handBack has the binding NAK the first message it receives with the hand-back delay,
+		// as a graceful stop does before it releases the record unsettled.
+		handBack bool
+	}{
+		{"unsettled", "box-released-unsettled", `{"holder":"pod-gone","boot":"0123456789abcdef","released":true,"unsettled":true}`, true, true},
+		{"stale binding", "box-released-stale", `{"holder":"pod-gone","boot":"0123456789abcdef","released":true,"stale_binding":true}`, true, false},
+		{"neither flag", "box-released-plain", `{"holder":"pod-gone","boot":"0123456789abcdef","released":true}`, false, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			uri := testnats.URL(t)
+			putLeaseRecord(t, uri, row.machineID, row.record)
+			var handedBack atomic.Bool
+			client, _ := bindAsAHolder(t, uri, row.machineID, func(msg *natsgo.Msg) {
+				if row.handBack && handedBack.CompareAndSwap(false, true) {
+					_ = msg.NakWithDelay(handBackDelay)
+				}
+			})
 			pushed := publishToTheDeadHolder(t, client, row.machineID, "older")
 			handle, received := recordingHandler()
 			rig := startReceiverRig(t, uri, row.machineID, "pod-b", handle, testReceiveTiming(), testLeaseTiming())

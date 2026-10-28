@@ -60,52 +60,61 @@ wait only once the pod holding it has died or lost the lease.
   NAKs those messages with a 2 s delay (`handBackDelay`), as one batch in stream order, and
   releases the lease marked `unsettled`. A standby takes the released lease at its next poll and
   settles (below): it subscribes at once and holds what it receives until every outstanding
-  message is in its hands, then delivers in stream order, so per-session order is kept. The
-  stopping pod keeps its subscription meanwhile, since nats-server loses a message whose first
-  delivery is still in its send queue when the deliver subject's last subscriber goes: it NAKs
-  with the same delay each message that reaches it after the stop, the first time it sees it,
-  drops a repeat with neither ack nor NAK, and reads the lease record every 250 ms (`lingerPoll`)
-  until it names another holder with `receiving` true (which the holder writes once its
-  subscription is up), or for 3 s (`lingerMax`) after the batch at most. When no other pod has
-  taken the record 1 s after the release (`lingerUntaken`, two standby polls), there is no
-  standby to wait for and it stops waiting. Then it drains the subscription. The standby delivers
-  about 2 to 3 s after the stop (the hand-back delay and a settle read), plus the message in
-  hand's grace when it takes it. The tests bound it at 10 s.
+  message is in its hands, or for the hand-back delay and a second (3 s) after it subscribed at
+  most, then delivers in stream order, so per-session order is kept. The stopping pod keeps its
+  subscription meanwhile, since nats-server loses a message whose first delivery is still in its
+  send queue when the deliver subject's last subscriber goes: it NAKs with the same delay each
+  message that reaches it after the stop, a repeat of one it already handed back included (three
+  NAKs of one message at most, `handBackNaksMax`, then it drops it), and reads the lease record
+  every 250 ms (`lingerPoll`) until it names another holder with `receiving` true (which the holder
+  writes once its subscription is up), or for 3 s (`lingerMax`) after the batch at most. When no
+  other pod has taken the record 1 s after the release (`lingerUntaken`, two standby polls), there
+  is no standby to wait for and it stops waiting. Then it drains the subscription. So everything it
+  handed back is back within the standby's 3 s cap. The standby delivers about 2 to 3 s after the
+  stop (the hand-back delay and a settle read), about 3 to 4 s after it when a message waits out a
+  retry's delay and holds the hold to its cap, plus the message in hand's grace when it takes it.
+  The tests bound it at 10 s.
 - **Hard stop** (SIGKILL, node or network loss): a standby takes the expired lease about 5 to 6 s
   after the last renewal (the TTL and one poll). Its term must settle: it subscribes at once,
   beside the dead pod's push binding when the server still counts a lost node's connection, and
   holds every message it receives, keeping it alive with `InProgress`, until every message the
   durable has outstanding is in its hands. It reads the durable every 250 ms (`settlePoll`) and
-  ends the hold once `NumAckPending` is no more than the messages it holds, or at the cap of two ack
-  waits and a second (`settleMargin`), 13 s; then it delivers the held batch in stream order and
-  goes on live. The messages the dead pod had in hand, and those the server went on pushing to a
-  lost node's connection, come back once their ack wait runs out, so they land in the held batch
-  and a session keeps the order of its events. With nothing outstanding the hold ends at its first
-  read and messages reach their sessions about 5 to 6 s after the last renewal; otherwise once the
-  dead pod's messages are back, about 12 s after it. The tests bound it at 15 s. A message a
-  handler NAKed with a delay stays outstanding until its delay ends and holds the hold to its cap,
-  so messages can then take up to about 19 s.
+  ends the hold once `NumAckPending` is no more than the messages it holds, or at the cap of one ack
+  wait and a second (`settleMargin`), 7 s after it subscribed; then it delivers the held batch in
+  stream order and goes on live. The messages the dead pod had in hand come back one ack wait
+  after its last `InProgress`, and those the server pushed to a lost node's connection alone before
+  the standby subscribed one ack wait after that push, so all are back within the cap: they land in
+  the held batch and a session keeps the order of its events. With nothing outstanding the hold
+  ends at its first read and messages reach their sessions about 5 to 6 s after the last renewal;
+  otherwise once the dead pod's messages are back, and at the cap, about 12 to 13 s after it, when
+  a message waits out a retry's delay (a failed prompt's 30 s, an unplaceable delivery's 5 s): that
+  message stays outstanding until its delay ends and arrives after the hold, as it would have on
+  the dead pod. The tests bound it at 15 s.
 - **Graceful stop after a hard one.** The lease record carries two flags for the next holder.
   `stale_binding` is set by a holder that subscribed beside a push binding it did not wait out (a
   lost node's lingering connection, or a stopping pod's subscription it keeps until this one
-  receives), carried by every renewal, release and take-over, and cleared by a holder that finds
+  receives), and by a holder stopped gracefully before the end of a hold that waits out an ack
+  wait, carried by every renewal, release and take-over, and cleared by a holder that finds
   the durable not push-bound. `unsettled` is written from the acquiring write of a term that must
   settle until its hold ends, and a release keeps it, so a pod stopped mid-hold hands the hold on;
   a graceful stop that hands messages back always releases it set. A pod that takes a released
   record carrying either flag settles too, subscribing at once beside any binding rather than
-  waiting it out as a pre-lease build's. The messages the stopping pod handed back come back after
-  the hand-back delay to the next pod and to a lingering binding alike; one that went to such a
-  binding alone comes back one ack wait later, and the next pod's hold waits for it.
+  waiting it out as a pre-lease build's. Its cap is the hand-back delay and a second when the
+  record carries `unsettled` alone, and one ack wait and a second when it carries `stale_binding`:
+  the messages the stopping pod handed back come back after the hand-back delay to the next pod
+  and to a lingering binding alike, but one that went to such a binding alone, or that a dead pod
+  before the stopping one still held, comes back one ack wait later, and the next pod's hold waits
+  for it.
 
 The lines to read are `listener lease acquired` (with `from`: `absent`, `released` or `expired`,
-and `settle` and `stale_binding`), `listener lease term must settle; receiving at once and holding
-what arrives until the durable's outstanding messages are in hand`, `durable still push-bound by an
-earlier lease holder; receiving beside it`, `settle hold ended; delivering the held messages in
-stream order` (with `outcome` `settled` or `cap`, `held_ms`, `messages` and `ack_pending`),
-`durable receiving` (with `lease`, `waited_ms` and `settle`), `handed the durable's messages back to
-the next holder` (with `handed_back`, `lingered_ms`, `linger_end` `receiving holder seen`,
-`not taken` or `timeout`, and `dropped_repeats`), `listener lease lost: another listener holds it`
-and `listener lease released`.
+and `settle`, `stale_binding` and `handed_back`), `listener lease term must settle; receiving at
+once and holding what arrives until the durable's outstanding messages are in hand` (with `cap`),
+`durable still push-bound by an earlier lease holder; receiving beside it`, `settle hold ended;
+delivering the held messages in stream order` (with `outcome` `settled` or `cap`, `held_ms`,
+`messages` and `ack_pending`), `durable receiving` (with `lease`, `waited_ms` and `settle`),
+`handed the durable's messages back to the next holder` (with `handed_back`, `lingered_ms`,
+`linger_end` `receiving holder seen`, `not taken` or `timeout`, `renaked_repeats` and
+`dropped_repeats`), `listener lease lost: another listener holds it` and `listener lease released`.
 
 ### Graceful stop order
 

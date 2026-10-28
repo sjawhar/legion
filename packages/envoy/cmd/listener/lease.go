@@ -152,11 +152,13 @@ func sameLastError(a, b error) (same bool) {
 // messages or a push binding, so that a binding it finds is not a pre-lease build's and its term
 // must settle (leaseAcquisition). stale_binding is set by a holder that subscribed while the
 // durable was push-bound by a binding it did not wait out (an expired holder's lingering
-// connection), and cleared by one that finds the durable not push-bound before it subscribes;
-// every other write carries it on. unsettled is set from the acquiring write of a term that must
-// settle until that term's settle hold ends, and a release keeps it as it stands, so a holder
-// stopped mid-hold hands the duty on; a graceful stop that hands messages back sets it before its
-// release (Unsettle), so a release after one always carries it.
+// connection), and by a holder stopped gracefully before the end of a settle hold that waited for
+// messages coming back at their ack wait, and cleared by one that finds the durable not push-bound
+// before it subscribes; every other write carries it on. Either way the next holder's hold waits
+// as long as an ack wait (durableReceiver.serve). unsettled is set from the acquiring write of a
+// term that must settle until that term's settle hold ends, and a release keeps it as it stands,
+// so a holder stopped mid-hold hands the duty on; a graceful stop that hands messages back sets it
+// before its release (Unsettle), so a release after one always carries it.
 //
 // receiving says the holder's subscription to the durable's deliver subject is up: every
 // acquiring write and every release writes it false, the holder sets it once it has subscribed
@@ -278,6 +280,11 @@ type leaseStatus struct {
 	// an expired record, resumed after a lapse, or taken from a record carrying stale_binding or
 	// unsettled.
 	Settle bool
+	// HandedBack is whether Term was taken from a released record carrying unsettled and not
+	// stale_binding: its holder stopped gracefully and NAKed what it held with the hand-back delay,
+	// so nothing outstanding waits out an ack wait (durableReceiver.serve picks the settle hold's
+	// cap by it).
+	HandedBack bool
 }
 
 // lease is one pod's view of its machine's delivery lease, the record lease.<durable> in the
@@ -311,6 +318,7 @@ type lease struct {
 	term           uint64
 	how            leaseAcquisition
 	settle         bool
+	handedBack     bool
 	record         leaseRecord
 	deliverSubject string
 	// staleBinding, unsettled and receiving are the holder's stale_binding, unsettled and
@@ -396,6 +404,7 @@ func (l *lease) Status() leaseStatus {
 		How:          l.how,
 		ServiceSince: l.record.ServiceSince,
 		Settle:       l.settle,
+		HandedBack:   l.handedBack,
 	}
 	if !l.record.Released {
 		status.ActiveInstance = l.record.Holder
@@ -411,9 +420,10 @@ func (l *lease) SetDeliverSubject(subject string) {
 	l.mu.Unlock()
 }
 
-// SetStaleBinding records whether term's holder subscribed while the durable was push-bound by a
-// binding it did not wait out (stale_binding), written into the record from the next renewal or
-// release on. A term that is no longer current changes nothing.
+// SetStaleBinding records stale_binding for term (leaseFields): whether its holder subscribed
+// while the durable was push-bound by a binding it did not wait out, or stops before a settle hold
+// that waits out an ack wait ended, written into the record from the next renewal or release on.
+// A term that is no longer current changes nothing.
 func (l *lease) SetStaleBinding(term uint64, stale bool) {
 	l.mu.Lock()
 	if l.term == term {
@@ -626,7 +636,7 @@ func (l *lease) renew() time.Duration {
 	if lapsed {
 		l.term++
 		l.how = leaseTakenExpired
-		l.settle, l.unsettled, l.receiving = true, true, false
+		l.settle, l.handedBack, l.unsettled, l.receiving = true, false, true, false
 	}
 	term := l.term
 	l.mu.Unlock()
@@ -737,6 +747,7 @@ func (l *lease) acquire(previous nats.KeyValueEntry, record leaseRecord, how lea
 	}
 	record.Holder, record.Boot, record.Released, record.AcquiredAt = l.instance, l.boot, false, time.Time{}
 	settle := how == leaseTakenExpired || record.StaleBinding || record.Unsettled
+	handedBack := how == leaseTakenReleased && record.Unsettled && !record.StaleBinding
 	record.Unsettled, record.Receiving = settle, false
 	value, err := record.encode()
 	if err != nil {
@@ -778,13 +789,13 @@ func (l *lease) acquire(previous nats.KeyValueEntry, record leaseRecord, how lea
 	l.validUntil = start.Add(l.cfg.ttl - l.cfg.margin)
 	l.term++
 	l.how = how
-	l.settle, l.staleBinding, l.unsettled, l.receiving = settle, record.StaleBinding, settle, false
+	l.settle, l.handedBack, l.staleBinding, l.unsettled, l.receiving = settle, handedBack, record.StaleBinding, settle, false
 	term := l.term
 	l.mu.Unlock()
 	l.seenRev, l.lapseSignalled = 0, false
 	l.logger.Info("listener lease acquired", slog.String("lease", l.key), slog.String("from", how.String()),
 		slog.Uint64("term", term), slog.Uint64("revision", rev), slog.Time("service_since", record.ServiceSince),
-		slog.Bool("settle", settle), slog.Bool("stale_binding", record.StaleBinding))
+		slog.Bool("settle", settle), slog.Bool("stale_binding", record.StaleBinding), slog.Bool("handed_back", handedBack))
 	l.signal()
 	return l.renew()
 }

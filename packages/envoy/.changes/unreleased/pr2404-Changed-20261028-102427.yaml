@@ -20,15 +20,17 @@ body: |-
     first delivery is still queued when a push consumer's last subscriber goes. A pod that takes
     the lease over a holder that was killed or lost its node subscribes at once and holds what it
     receives until every message the durable has outstanding is in its hands (its `NumAckPending`
-    no more than what it holds, read every 250 ms, capped at two ack waits and a second, 13 s),
-    then delivers it in stream order, so a session's events stay in order there too: messages
-    arrive about 5 to 6 s after the dead holder's last renewal when nothing was outstanding, about
-    12 s after it otherwise, and up to about 19 s when a NAK-delayed retry is outstanding and holds
-    the hold to its cap. The lease record carries `stale_binding` (its holder subscribed beside a
-    lingering push binding),
-    `unsettled` (its term's hold had not ended, kept by a release, or its holder handed messages
-    back on a graceful stop) and `receiving` (its holder's subscription is up), and a pod that
-    takes a released record carrying either of the first two settles the same way. A holder that
+    no more than what it holds, read every 250 ms, capped at one ack wait and a second, 7 s, after
+    it subscribed), then delivers it in stream order, so a session's events stay in order there
+    too: messages arrive about 5 to 6 s after the dead holder's last renewal when nothing was
+    outstanding and about 12 to 13 s after it otherwise; a NAK-delayed retry stays outstanding,
+    holds the hold to its cap and arrives after it. After a graceful stop the cap is the 2 s
+    hand-back delay and a second, 3 s. The lease record carries `stale_binding` (its holder
+    subscribed beside a lingering push binding, or stopped during a hold that waits out an ack
+    wait), `unsettled` (its term's hold had not ended, kept by a release, or its holder handed
+    messages back on a graceful stop) and `receiving` (its holder's subscription is up), and a pod
+    that takes a released record carrying either of the first two settles the same way, capped at
+    7 s when it carries `stale_binding` and at 3 s when it carries `unsettled` alone. A holder that
     takes an absent record, or a released one with neither flag, and finds the durable push-bound
     by a listener build from before the lease waits for that binding to end and subscribes within
     a second of it; past 135 s it logs `lease holder cannot deliver from the durable` at ERROR,

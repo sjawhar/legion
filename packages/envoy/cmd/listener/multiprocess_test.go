@@ -294,20 +294,23 @@ type mpPrompt struct {
 // mpServingPort is the fake serve process every port session of a row lives on. It answers each
 // POST /session/<id>/prompt_async 204 and records it, under the session, once the answer is
 // written. A prompt held (hold) is not answered until the listener gives up on it, and is not
-// recorded: the session never took it.
+// recorded: the session never took it. A prompt to a failing session (fail) is answered 500 and
+// counted apart: the session never took it either.
 type mpServingPort struct {
 	port int
 
 	mu         sync.Mutex
 	prompts    map[string][]mpPrompt
 	holds      map[string]chan struct{}
+	failing    map[string]bool
+	failed     map[string]int
 	unexpected []string
 	stopping   chan struct{}
 }
 
 func mpStartServingPort(t *testing.T) *mpServingPort {
 	t.Helper()
-	serving := &mpServingPort{prompts: map[string][]mpPrompt{}, holds: map[string]chan struct{}{}, stopping: make(chan struct{})}
+	serving := &mpServingPort{prompts: map[string][]mpPrompt{}, holds: map[string]chan struct{}{}, failing: map[string]bool{}, failed: map[string]int{}, stopping: make(chan struct{})}
 	server := httptest.NewServer(http.HandlerFunc(serving.serve))
 	t.Cleanup(server.Close)
 	// Runs before server.Close, which waits for every held prompt to return.
@@ -352,6 +355,10 @@ func (s *mpServingPort) serve(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	held, hold := s.holds[sessionID]
 	delete(s.holds, sessionID)
+	failing := s.failing[sessionID]
+	if failing && !hold {
+		s.failed[sessionID]++
+	}
 	s.mu.Unlock()
 	if hold {
 		close(held)
@@ -359,6 +366,10 @@ func (s *mpServingPort) serve(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 		case <-s.stopping:
 		}
+		return
+	}
+	if failing {
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -375,6 +386,21 @@ func (s *mpServingPort) hold(sessionID string) <-chan struct{} {
 	arrived := make(chan struct{})
 	s.holds[sessionID] = arrived
 	return arrived
+}
+
+// fail answers every prompt to sessionID 500 from now on, so the listener counts each a failed
+// prompt and NAKs its message for a retry 30 s later.
+func (s *mpServingPort) fail(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failing[sessionID] = true
+}
+
+// failures is how many prompts to sessionID the serving port answered 500.
+func (s *mpServingPort) failures(sessionID string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.failed[sessionID]
 }
 
 // counts is how many prompts the serving port answered for each event id.
@@ -2034,5 +2060,101 @@ func TestTwoPodsSIGKILLMidPromptKeepsTheSessionsOrderWithin15s(t *testing.T) {
 	serving.awaitAll(t, messages, mpHardBound+30*time.Second)
 	serving.requireOrder(t, messages)
 	serving.requireWithin(t, messages, mpHardBound, killed)
+	mpWaitActive(t, b, time.Second)
+}
+
+// mpRetryOutstanding registers on pod a a session whose prompts fail and two healthy sessions,
+// named after row, and has a prompt the failing session and NAK its message for the delivery
+// handler's 30 s retry, which keeps that message in the durable's pending until its delay ends. It
+// returns the serving port, the publisher and the healthy sessions.
+func mpRetryOutstanding(t *testing.T, uri string, a *mpPod, row string) (serving *mpServingPort, publisher *mpPublisher, healthy []string) {
+	t.Helper()
+	serving = mpStartServingPort(t)
+	failing := "ses_mp_" + row + "_failing"
+	healthy = []string{"ses_mp_" + row + "_one", "ses_mp_" + row + "_two"}
+	for _, sessionID := range append([]string{failing}, healthy...) {
+		a.registerPort(t, serving, sessionID)
+	}
+	publisher = mpConnectPublisher(t, uri)
+	serving.fail(failing)
+	retry := publisher.mustPublish(t, failing)
+	a.awaitEventLine(t, 10*time.Second, "listener agent delivery failed", retry.event)
+	time.Sleep(500 * time.Millisecond) // past the NAK that follows the failure's record
+	if pending := publisher.ackPending(); pending != 1 {
+		t.Fatalf("the durable has %d messages outstanding after the failed prompt, want its retry alone", pending)
+	}
+	return serving, publisher, healthy
+}
+
+// mpTo is the messages published to the sessions given.
+func mpTo(messages []mpMessage, sessions ...string) []mpMessage {
+	var to []mpMessage
+	for _, m := range messages {
+		if slices.Contains(sessions, m.session) {
+			to = append(to, m)
+		}
+	}
+	return to
+}
+
+// A graceful stop of the active pod while a message to a session whose prompts fail waits out its
+// 30 s retry delay, with a message published every 100 ms to two healthy sessions. The retry stays
+// in the durable's pending until its delay ends, so the standby's settle hold never finds every
+// outstanding message in hand: it ends at what the stopping pod can still have outstanding, the
+// 2 s hand-back delay and a second after the subscribe, and every message to a healthy session
+// published after the SIGTERM reaches it within 10 s, each session's in order. At 18779a03 (INFRA-557
+// review finding) the hold runs to its 13 s cap, and those messages arrive about 14 s after the
+// SIGTERM.
+func TestTwoPodsGracefulStopWithARetryOutstandingDeliversWithin10s(t *testing.T) {
+	uri := mpNATS(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a, b := mpStartPair(t, binary, uri)
+	serving, publisher, healthy := mpRetryOutstanding(t, uri, a, "retrystop")
+
+	stop := publisher.every(100*time.Millisecond, healthy...)
+	mpEventually(t, 10*time.Second, "the first healthy messages to arrive", func() bool {
+		sent := mpTo(publisher.all(), healthy...)
+		return len(sent) >= 10 && serving.tookAll(sent[:10])
+	})
+	signalled := a.Terminate(t)
+	time.Sleep(6 * time.Second) // publish on through the hand-over
+	stop()
+
+	messages := mpTo(publisher.all(), healthy...)
+	serving.awaitAll(t, messages, mpGracefulBound+10*time.Second)
+	serving.requireWithin(t, mpTo(publisher.since(signalled), healthy...), mpGracefulBound, signalled)
+	serving.requireOrder(t, messages)
+	serving.requireKnown(t, publisher.all())
+	a.WaitExit(t, "SIGTERM")
+	mpWaitActive(t, b, time.Second)
+}
+
+// SIGKILL of the active pod while a message to a session whose prompts fail waits out its 30 s
+// retry delay, with a message published every 100 ms to two healthy sessions. The standby takes the
+// expired lease and its settle hold never finds every outstanding message in hand: it ends at what
+// the killed pod can still have outstanding, one 6 s ack wait and a second after the subscribe, and
+// every message to a healthy session published after the kill reaches it within 15 s, each
+// session's in order. At 18779a03 (INFRA-557 review finding) the hold runs to its 13 s cap, and
+// those messages arrive about 19 s after the kill.
+func TestTwoPodsSIGKILLWithARetryOutstandingHandsOverInOrderWithin15s(t *testing.T) {
+	uri := mpNATS(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a, b := mpStartPair(t, binary, uri)
+	serving, publisher, healthy := mpRetryOutstanding(t, uri, a, "retrykill")
+
+	stop := publisher.every(100*time.Millisecond, healthy...)
+	mpEventually(t, 10*time.Second, "the first healthy messages to arrive", func() bool {
+		sent := mpTo(publisher.all(), healthy...)
+		return len(sent) >= 10 && serving.tookAll(sent[:10])
+	})
+	killed := a.kill(t)
+	time.Sleep(3 * time.Second) // publish on after the kill
+	stop()
+
+	messages := mpTo(publisher.all(), healthy...)
+	serving.awaitAll(t, messages, mpHardBound+10*time.Second)
+	serving.requireWithin(t, mpTo(publisher.since(killed), healthy...), mpHardBound, killed)
+	serving.requireOrder(t, messages)
+	serving.requireKnown(t, publisher.all())
 	mpWaitActive(t, b, time.Second)
 }
