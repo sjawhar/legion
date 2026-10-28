@@ -164,14 +164,13 @@ func Run(ctx context.Context, deps Deps) {
 // Each compaction runs under documentCompactionLease, so that one process does that walk however
 // many serve the database, once per compactInterval and not once per process: the period is this
 // loop's own interval, so a process whose tick comes hours after the other's finds the day's
-// compaction already done and skips it. The ticks are duty.RunLeased's, on a fixed schedule: the
-// first one interval after the call, then each one interval after the moment the tick before it
-// was due, however long its compaction took.
+// compaction already done and skips it. The ticks are duty.RunLeased's, a ticker's: the first one
+// interval after the call, then one each interval however long a compaction takes, the ticks a
+// compaction overruns dropped.
 func compactDaily(ctx context.Context, deps Deps) {
 	ctx = store.WithTransactionTracking(ctx)
-	duty.RunLeased(ctx, deps.Leases, documentCompactionLease, compactInterval, duty.TickAfterInterval, func(ctx context.Context) time.Duration {
+	duty.RunLeased(ctx, deps.Leases, documentCompactionLease, compactInterval, duty.TickAfterInterval, func(ctx context.Context) {
 		compactDocuments(ctx, deps)
-		return compactInterval
 	})
 }
 

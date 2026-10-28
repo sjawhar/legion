@@ -53,71 +53,37 @@ const (
 
 // RunLeased runs pass under the lease named name, once per tick, until ctx ends: each tick is one
 // Exclusive call, so pass runs only when this process takes the lease and no process has already
-// served the tick's period. first says whether the first tick is at start or one interval after.
+// served the tick's period, which is always interval. first says whether the first tick is at
+// start or one interval after.
 //
-// pass returns the wait before the next tick, which must be positive: interval, for the loops of a
-// fixed cadence this serves. A tick whose pass did not run - the lease held elsewhere, the period
-// already served, the lease or the record unreadable - waits interval, since the process that
-// holds the lease is doing this work. A pass that shutdown cut short still returns its wait, which
-// goes unused: the loop returns.
-//
-// The ticks keep a fixed schedule, as a ticker's do: each is due its wait after the moment the
-// tick before it was due, not after that tick returned, and that scheduled moment is the due time
-// it hands Exclusive; its period is that wait, interval for the first. A lone loop of a fixed
-// cadence therefore has due times exactly one interval apart, which fall in consecutive periods on
-// this process's clock (periodBoundary), so no period is lost however long each pass takes. A tick
-// armed only once the pass before it returned would be due one interval plus that pass's time
-// after it, and as those delays add up its due times would drift across the period boundaries and
-// jump over a period no pass serves. A pass that overruns its wait gets what a ticker gives a slow
-// receiver: the next tick comes at once, due at the latest scheduled moment not after now
-// (nextDue), and the moments it overran are dropped rather than run late one after another, so
-// due times stay whole waits apart and lag never accumulates.
+// The ticks are a ticker's, time.NewTicker(interval): TickAfterInterval starts at the ticker's
+// first tick, and TickAtStart makes one tick at the moment the loop starts before it. A tick's due
+// time, the moment it hands Exclusive, is the value the ticker delivered, the clock read at that
+// tick and not a moment worked out from a reading taken at start, so a step of the wall clock
+// while the loop runs moves the due times after it with it. The ticker's ticks are one interval
+// apart however long each pass takes, so a lone loop's due times fall in consecutive periods on
+// this process's clock (periodBoundary) and no period is lost. A tick armed only once the pass
+// before it returned would be due one interval plus that pass's time after it, and as those delays
+// add up its due times would drift across the period boundaries and jump over a period no pass
+// serves. A pass that overruns the interval gets what a ticker gives a slow receiver: the ticks it
+// overran are dropped, not run late one after another.
 //
 // ctx ending returns at once from a wait, and from a tick once its pass returns.
-func RunLeased(ctx context.Context, leases Leases, name string, interval time.Duration, first FirstTick, pass func(context.Context) time.Duration) {
-	period := interval
-	due := time.Now()
-	if first == TickAfterInterval {
-		due = due.Add(interval)
-		if !sleepUntil(ctx, due) {
-			return
-		}
+func RunLeased(ctx context.Context, leases Leases, name string, interval time.Duration, first FirstTick, pass func(context.Context)) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	if first == TickAtStart {
+		// Read after the ticker started, so the ticker's first tick is no more than one interval
+		// after this one: in the next period, or in this one and refused, but never one beyond.
+		Exclusive(ctx, leases, name, time.Now(), interval, pass)
 	}
 	for {
-		wait := interval
-		Exclusive(ctx, leases, name, due, period, func(ctx context.Context) {
-			wait = pass(ctx)
-		})
-		period = wait
-		due = nextDue(due, wait, time.Now())
-		if !sleepUntil(ctx, due) {
+		select {
+		case <-ctx.Done():
 			return
+		case due := <-ticker.C:
+			Exclusive(ctx, leases, name, due, interval, pass)
 		}
-	}
-}
-
-// nextDue is the moment RunLeased's next tick is due at now, after a tick due at due whose wait is
-// wait: due plus wait while that is not yet past, and otherwise the latest due plus a whole number
-// of waits not after now - the tick a ticker delivers to a receiver that overran, the moments
-// before it dropped.
-func nextDue(due time.Time, wait time.Duration, now time.Time) time.Time {
-	next := due.Add(wait)
-	if late := now.Sub(next); late > 0 {
-		next = next.Add(late - late%wait)
-	}
-	return next
-}
-
-// sleepUntil waits until t, returning at once when ctx ends first, and reports whether ctx is
-// still live: a t already past returns at once too.
-func sleepUntil(ctx context.Context, t time.Time) bool {
-	timer := time.NewTimer(time.Until(t))
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return ctx.Err() == nil
 	}
 }
 

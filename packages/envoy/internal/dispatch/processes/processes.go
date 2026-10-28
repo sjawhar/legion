@@ -430,18 +430,16 @@ func (r *Registration) Deregister(ctx context.Context) error {
 // RunPrune deletes, every PruneInterval until ctx ends, the rows whose heartbeat is older than
 // PruneAge by the database's clock: what processes that died without deregistering left behind.
 // Each pass runs under pruneLease, so one process prunes per period however many serve the
-// database. The ticks are duty.RunLeased's, on a fixed schedule: the first one interval after the
-// call, then each one interval after the moment the tick before it was due, however long its pass
-// took.
+// database. The ticks are duty.RunLeased's, a ticker's: the first one interval after the call,
+// then one each interval however long a pass takes, the ticks a pass overruns dropped.
 func RunPrune(ctx context.Context, pool *store.Pool, leases duty.Leases) {
-	duty.RunLeased(ctx, leases, pruneLease, PruneInterval, duty.TickAfterInterval, func(ctx context.Context) time.Duration {
+	duty.RunLeased(ctx, leases, pruneLease, PruneInterval, duty.TickAfterInterval, func(ctx context.Context) {
 		pruned, err := prune(ctx, pool)
 		if err != nil {
 			slog.Warn("dispatch: prune the server process registry", "error", err)
 		} else if pruned > 0 {
 			slog.Info("dispatch: pruned server processes gone without deregistering", "rows", pruned)
 		}
-		return PruneInterval
 	})
 }
 

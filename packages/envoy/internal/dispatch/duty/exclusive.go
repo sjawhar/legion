@@ -48,14 +48,15 @@ const (
 // Postgres: ran 7 skipped 3, ran 6 skipped 4, ran 6 skipped 4 over ten one-second ticks).
 //
 // The boundary is the one the tick was due in - floor(due / period) * period, from the Unix epoch,
-// the value its timer delivered (RunLeased, RunJittered) - and nothing measured after that moment
-// enters it. A boundary read at the moment the gate runs carries every delay before it in: a tick
-// due just before a boundary whose lease took longer than the time left lands in the next period,
-// and the next tick, on time one period later, finds that period served and is refused - a lone
-// loop losing a period (measured: ran 9 skipped 1 over ten one-second ticks). The database's now()
-// less a duration measured before the query has the same fault, narrowed to whatever stalls
-// between the measure and the database reading its clock (a descheduled or paused process, a slow
-// socket write): a tick due within that stall of a boundary lands in the next period
+// the value its ticker delivered (RunLeased) or its timer delivered (RunJittered,
+// RunLeasedAfterEachPass) - and nothing measured after that moment enters it. A boundary read at
+// the moment the gate runs carries every delay before it in: a tick due just before a boundary
+// whose lease took longer than the time left lands in the next period, and the next tick, on time
+// one period later, finds that period served and is refused - a lone loop losing a period
+// (measured: ran 9 skipped 1 over ten one-second ticks). The database's now() less a duration
+// measured before the query has the same fault, narrowed to whatever stalls between the measure
+// and the database reading its clock (a descheduled or paused process, a slow socket write): a
+// tick due within that stall of a boundary lands in the next period
 // (TestExclusiveCountsATickStalledAfterItsMeasureInThePeriodItWasDueIn). Taken from due alone, a
 // lone loop's ticks at least one period apart are always in different periods, whatever any
 // tick's delay, and no tolerance constant has to be chosen to make that true.
@@ -144,14 +145,14 @@ var errLeaseNotHeld = errors.New("the unlock reports this session did not hold t
 // would let every process run the whole pass every period.
 //
 // period is the loop's own interval, the time it means to leave between passes, and due is the
-// moment this tick was scheduled for - the value its timer delivered (RunLeased, RunJittered), not
-// the moment the pass got round to running. The tick is placed in the period-aligned bucket due
-// falls in, and that bucket is compared against the database's record of the bucket this lease's
-// last pass served (duty_passes, migration 0115; readPeriod). A period of zero or less is no
-// period at all - mutual exclusion and nothing else - which is what the delivery consumers'
-// reconciliation wants: it is not a periodic loop, since it runs on every bind poll, and it
-// carries a throttle of its own (delivery.bindThrottle). Such a pass reads and records nothing,
-// and due is not read.
+// moment this tick was scheduled for - the value its ticker delivered (RunLeased) or its timer
+// delivered (RunJittered, RunLeasedAfterEachPass), not the moment the pass got round to running.
+// The tick is placed in the period-aligned bucket due falls in, and that bucket is compared
+// against the database's record of the bucket this lease's last pass served (duty_passes,
+// migration 0115; readPeriod). A period of zero or less is no period at all - mutual exclusion and
+// nothing else - which is what the delivery consumers' reconciliation wants: it is not a periodic
+// loop, since it runs on every bind poll, and it carries a throttle of its own
+// (delivery.bindThrottle). Such a pass reads and records nothing, and due is not read.
 //
 // The lease is a session-level two-key advisory lock, leaseNamespace and the name's hashtext, taken
 // on a connection of its own with pg_try_advisory_lock: a lease the database reports held elsewhere

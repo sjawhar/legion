@@ -266,8 +266,8 @@ const lockedSuggestionAllowance = 5 * time.Second
 // which queues behind the same locks on the shared pool, so that count passed a call that never
 // waited (sjawhar/legion#2217 review). It fails at once when the call answers before its own
 // backend has queued behind that lock, so a passing caller's answer is one the allowance ended
-// while the query waited there. Nothing here times the call: a step run outside the allowance
-// waits behind the lock until go test's -timeout ends the run, naming the test.
+// while the query waited there. Nothing here times the call once it has queued: a step run outside
+// the allowance waits behind the lock until go test's -timeout ends the run, naming the test.
 func suggestionsBehindLock(
 	t *testing.T, deps Deps, table, project, text string, source suggestionSource,
 ) *model.Suggestions {
@@ -311,7 +311,10 @@ func suggestionsBehindLock(
 	go func() {
 		answered <- srv.computeAndPersistSuggestions(context.Background(), project, text, source)
 	}()
-	if s, early := storetest.WaitForQueuedBehind(t, lockTx, callPID, answered, 0); early {
+	// The call queues within milliseconds, and it ends on its own once its allowance does: the wait
+	// returns at once when it answers. So the bound, three allowances, is reached only by a call
+	// that neither queued nor answered in all that time, one stuck somewhere other than this lock.
+	if s, early := storetest.WaitForQueuedBehind(t, lockTx, callPID, answered, 3*lockedSuggestionAllowance); early {
 		t.Fatalf("computeAndPersistSuggestions answered %+v before its query waited behind the lock on %s, want the %s allowance to end while it waits", s, table, lockedSuggestionAllowance)
 	}
 	return <-answered

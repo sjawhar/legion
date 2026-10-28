@@ -116,13 +116,15 @@ func TestTwoSweepRunnersRunThePassOnceAndSkipOnce(t *testing.T) {
 // loop's work that no pass of any process did - the loop running slower than it is configured to,
 // with one process, which is what this deployment runs today.
 //
-// It is the loop's own shape that is at stake. Every leased loop passes as its period the wait
-// before its tick (duty.RunLeased, duty.RunJittered), so two ticks' due times are as little as one
-// period apart - that wait, plus the time the earlier tick took - and the record of a pass is
-// stamped a moment after the tick that made it - the time it takes to take the lease. Judged by
-// that moment, a tick whose own delay is shorter than the previous one's falls inside the period
-// that pass recorded and is dropped. Ten ticks are driven because one skip is what this is about
-// and a shorter window could miss it.
+// It is the loop's own shape that is at stake. Two ticks' due times are as little as one period
+// apart: a loop of a fixed cadence (duty.RunLeased) passes its interval as its period and its
+// ticker's ticks as its due times, exactly one interval apart, and a loop paced by its passes
+// (duty.RunLeasedAfterEachPass, duty.RunJittered) passes the wait before its tick, its due times
+// that wait plus the time the earlier tick took apart. The record of a pass is stamped a moment
+// after the tick that made it - the time it takes to take the lease. Judged by that moment, a tick
+// whose own delay is shorter than the previous one's falls inside the period that pass recorded
+// and is dropped. Ten ticks are driven because one skip is what this is about and a shorter window
+// could miss it.
 func TestALoneRunnerMakesAPassOnEveryTick(t *testing.T) {
 	ctx, stop := context.WithCancel(context.Background())
 	database := storetest.Open(t)

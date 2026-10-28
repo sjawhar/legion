@@ -34,7 +34,7 @@ func TestRunLeasedServesEveryPeriodOfALoneLoopWhosePassesTakeTime(t *testing.T) 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunLeased(ctx, leases, name, interval, TickAtStart, func(ctx context.Context) time.Duration {
+		RunLeased(ctx, leases, name, interval, TickAtStart, func(ctx context.Context) {
 			var boundary time.Time
 			err := database.Pool.QueryRow(ctx, `select boundary from duty_passes where lease = $1`, name).Scan(&boundary)
 			if err == nil {
@@ -43,7 +43,6 @@ func TestRunLeasedServesEveryPeriodOfALoneLoopWhosePassesTakeTime(t *testing.T) 
 				t.Errorf("read the loop's last recorded period: %v", err)
 			}
 			time.Sleep(passTime)
-			return interval
 		})
 	}()
 	defer func() { stop(); <-done }()

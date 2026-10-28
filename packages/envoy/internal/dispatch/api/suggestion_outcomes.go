@@ -162,13 +162,12 @@ func sweepSuggestionOutcomes(ctx context.Context, pool *store.Pool) error {
 // first's rather than on it, finds that interval swept; leases is required, as it is of every
 // leased loop (cmd/dispatch exits at boot if the lease pool cannot be opened). The period is
 // interval itself and not SuggestionSweepInterval: this loop ticks on what its caller asked for.
-// The ticks are duty.RunLeased's, on a fixed schedule: the first one interval after the call, then
-// each one interval after the moment the tick before it was due, however long its pass took.
+// The ticks are duty.RunLeased's, a ticker's: the first one interval after the call, then one each
+// interval however long a pass takes, the ticks a pass overruns dropped.
 func RunSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, interval time.Duration, leases duty.Leases) {
-	duty.RunLeased(ctx, leases, suggestionOutcomeLease, interval, duty.TickAfterInterval, func(ctx context.Context) time.Duration {
+	duty.RunLeased(ctx, leases, suggestionOutcomeLease, interval, duty.TickAfterInterval, func(ctx context.Context) {
 		if err := sweepSuggestionOutcomes(ctx, pool); err != nil {
 			slog.Warn("dispatch: suggestion outcome sweep failed", "error", err)
 		}
-		return interval
 	})
 }
