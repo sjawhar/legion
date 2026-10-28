@@ -1448,7 +1448,13 @@
   `doc_updates` and any backup of it hold no text a write deleted, now holds within about 75
   minutes of the write (the 2-minute tail, the 15-minute age rule, the hourly sweep) rather than
   as a room closes, as the server shuts down and daily. ygo's `CompactEvery` setting and the
-  outbox's daily compaction are removed.
+  outbox's daily compaction are removed. The room's own decode of a document many writers
+  touched is faster too: the ygo fork pin moves from `v1.51.3-sami.4` to `v1.51.3-sami.7`, whose
+  decoder integrates an update's deferred items in dependency order instead of re-scanning every
+  deferred item once per dependency, so the state of a 400-paragraph spec after 240 versions
+  decodes in about 143 ms rather than 433 ms. The tag also caps parked delete ranges as parked
+  items are, retries them only once they can apply, and loads a room's stored state with the
+  pending cap lifted; its opt-in hooks and scan bounds are off, and Dispatch sets none.
 
 - Every `envoy-infra` component refuses a number in an integer input that is not a whole number
   within the 64-bit integer range, at any depth (an object type's property, an array element, a
