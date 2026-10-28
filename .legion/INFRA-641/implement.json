@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-641",
-  "completed": "2026-10-28T13:11:05Z",
+  "completed": "2026-10-28T14:48:39Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2455",
   "proof": [
+    {
+      "criterion": "Review round 1 answered with the runtime unchanged; equivalence still holds on the real specs under the renamed tests",
+      "surface": "go test over the 1,200 real specs (parsed and read back from a Y fragment under comment marks) and the synthetic and generated trees; the Dispatch server build",
+      "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc -run 'TestWalk|Len16' -count=1 -v && PMDOC_WALK_CORPUS=$TMPDIR/x2-corpus go test ./internal/dispatch/pmdoc -run TestWalkMatchesTheReferenceWalkOnACorpus -count=1 -v; GOWORK=off go build ./cmd/dispatch from exports at 914ac117 and cfec98cf, sha256sum",
+      "observed": "TestWalkMatchesTheReferenceWalk, TestLen16DoesNotAllocate, FuzzLen16 seeds PASS; corpus: 1200 files, 0 parse refusals, 0 Update/mark/Read failures, 3,693,264 + 3,777,882 nodes, 48,263 marks, 0 mismatches (872.6 s). Server binary sha256 9aa858a887e6...a4b9 at both 914ac117 and cfec98cf (the walk.go change is a comment of the same line count).",
+      "headSha": "cfec98cf76f0",
+      "negativeControl": "Unchanged test logic: measure's +2 set to 0 fails the reference-walk test at 'corpus/adjacent-lists.md: visit 0: got {type doc ... end 62 ...}, want {... end 170 ...}' (recorded at 64a0d984, and the corpus test on the 40 largest specs fails on all 40); an anchored comment whose quote is absent -> 404 TARGET_NOT_FOUND at 914ac117, whose server binary this head's equals."
+    },
     {
       "criterion": "Conflict resolved with the code unchanged, so the earlier real-surface proofs stand at the new head; CI can run",
       "surface": "GitHub pull request state; the Dispatch server built at 914ac117 on a copy of the replay seed (Postgres 17.11 + pgvector, NATS, fake listener) driven through its HTTP API",
@@ -23,17 +31,17 @@
     },
     {
       "criterion": "A2: identical sizes and positions over every node of the real specs, astral characters and empty texts included",
-      "surface": "go test over the 1,200 primary specs of the project INFRA-512 replays (fetched read-only into $TMPDIR/x2-corpus with dispatch issues --all and dispatch doc-read; not committed), each parsed and also written into a Y fragment, marked with proofComment over the middle third of every 50th text, and read back; plus the synthetic and generated trees of TestWalkVisitsEveryNodeWithTodaysRange",
-      "command": "cd packages/envoy && PMDOC_WALK_CORPUS=$TMPDIR/x2-corpus go test ./internal/dispatch/pmdoc -run TestWalkMatchesTodaysWalkOnACorpus -count=1 -v; go test ./internal/dispatch/pmdoc -run 'TestWalk|Len16' -count=1 -v",
+      "surface": "go test over the 1,200 primary specs of the project INFRA-512 replays (fetched read-only into $TMPDIR/x2-corpus with dispatch issues --all and dispatch doc-read; not committed), each parsed and also written into a Y fragment, marked with proofComment over the middle third of every 50th text, and read back; plus the synthetic and generated trees of TestWalkMatchesTheReferenceWalk",
+      "command": "cd packages/envoy && PMDOC_WALK_CORPUS=$TMPDIR/x2-corpus go test ./internal/dispatch/pmdoc -run TestWalkMatchesTheReferenceWalkOnACorpus -count=1 -v; go test ./internal/dispatch/pmdoc -run 'TestWalk|Len16' -count=1 -v",
       "observed": "1200 files; 0 parse refusals; 0 Update/mark/Read failures; nodes 3,693,264 parsed + 3,777,882 read back; text nodes 2,383,694 + 2,468,312; 48,263 marks; max depth 12; mismatches 0 (800.7 s). The corpus has no character above U+FFFF and no empty text; those are covered by the synthetic trees (astral, invalid bytes, empty texts, mark-split texts, every leaf, texts/leaves with children, nil child, non-doc roots, MaxTreeDepth chain, 5,000 blocks) and the generated 427 KB, 14-level document, each also stopped early at 11 points: PASS.",
       "headSha": "64a0d9845186",
-      "negativeControl": "measure's size = 2 for a non-doc node set to 0: TestWalkVisitsEveryNodeWithTodaysRange fails at 'corpus/adjacent-lists.md: visit 0: got {type doc ... end 62 ...}, want {... end 170 ...}' and the corpus test on the 40 largest specs fails on all 40 ('<spec>.md: 2 mismatches; first: walk: visit 0: got {type doc ... end 428930 ...}, want {... end 441858 ...}'); no spec text printed; restored with jj restore."
+      "negativeControl": "measure's size = 2 for a non-doc node set to 0: TestWalkMatchesTheReferenceWalk fails at 'corpus/adjacent-lists.md: visit 0: got {type doc ... end 62 ...}, want {... end 170 ...}' and the corpus test on the 40 largest specs fails on all 40 ('<spec>.md: 2 mismatches; first: walk: visit 0: got {type doc ... end 428930 ...}, want {... end 441858 ...}'); no spec text printed; restored with jj restore."
     },
     {
       "criterion": "A3: len16 equal to today's for every string and allocation-free",
       "surface": "go test (table, fuzz seeds, AllocsPerRun)",
       "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc -run Len16 -count=1 -v; go test ./internal/dispatch/pmdoc -run '^$' -fuzz FuzzLen16 -fuzztime 60s",
-      "observed": "TestLen16CountsTheUnitsUTF16EncodingWrites, TestLen16DoesNotAllocate (0 allocs for ASCII, multibyte and invalid-byte strings) and FuzzLen16's 22 seeds PASS. Fuzz 60 s: 745,644 execs, 30 interesting inputs, no failure (PASS).",
+      "observed": "TestLen16DoesNotAllocate (0 allocs for ASCII, multibyte and invalid-byte strings) and FuzzLen16's 22 seeds PASS. Fuzz 60 s: 745,644 execs, 30 interesting inputs, no failure (PASS).",
       "headSha": "64a0d9845186",
       "negativeControl": "The corpus and unit equivalence tests compare every text's len16 with the utf16.Encode reference, and the negative control above shows a size change is reported; FuzzLen16 compares against the same reference on arbitrary bytes."
     },
@@ -68,6 +76,6 @@
     "The changelog entry is a changie fragment named pr2455 with no Dispatch key in its name or text, per the architect's 2026-10-28T12:57Z message relaying the controller's ruling, rather than main's AGENTS.md line naming the issue key."
   ],
   "openQuestions": [],
-  "round": 2,
-  "roundSummary": "Answers the tester's fail (no CI: PR conflicting on packages/envoy/CHANGELOG.md). Forward-merged main adee0aba into the branch (merge 6075f457), took main's CHANGELOG.md unchanged, and moved the entry to the changie fragment packages/envoy/.changes/unreleased/pr2455-Changed-20261028-125858.yaml (commit 914ac117), as the architect directed. GitHub now reports the PR MERGEABLE, so CI runs at 914ac117."
+  "round": 3,
+  "roundSummary": "Answers review round 1 (changes requested at code head 914ac117): walk's doc comment now forbids a visitor changing any node's Type, Text or Children, the visited node's included (commit 32065ac7, comment only); the frozen reference walk uses isLeafNodeType, the two equivalence tests are renamed TestWalkMatchesTheReferenceWalk and TestWalkMatchesTheReferenceWalkOnACorpus, the header line about compiling at the base is gone, and TestLen16CountsTheUnitsUTF16EncodingWrites is deleted since FuzzLen16's seeds repeat it (commit cfec98cf). The review opened no GitHub threads."
 }
