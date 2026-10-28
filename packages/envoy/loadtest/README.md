@@ -17,10 +17,13 @@ same step before and after its change, and compares the two rows.
 
 | File | What it is |
 | --- | --- |
-| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `run`, `tables`, `series-sessions`, `trigger-sql`, `box-busy` |
+| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `run`, `tables`, `seed-finish`, `cgroup-merge`, `curves`, `codepaths`, `series-sessions`, `trigger-sql`, `box-busy` |
 | `api.go` | The Dispatch HTTP client, with the request trace that gives the arrival time |
 | `seed.go` | The seed: 4 projects, 1,000 issues and 8,000 comments through Dispatch's API, and `seed.json` |
+| `seedfinish.go` | `loadgen seed-finish`: the steps after the seed (the wait for the outbox, the wait for the block-index backfill, `vacuum analyze`, the commit-time trigger), which `stack.sh seed` and `cluster.sh seed` both run |
 | `run.go` | One step: its phases (the window, SSE streams, the event and request generators on one open-loop schedule, the probes) and `summary.json` |
+| `pgclock.go` | `meta.json`'s `pg_clock`: Postgres's clock against `loadgen`'s, from 10 timed reads at the step's start and after its window |
+| `copymeta.go` | `loadgen run -copy-meta`: the cluster copy's description, which `meta.json` records under `copy` |
 | `sessions.go` | The simulated sessions: their NATS subscriptions and receipts, their listener registrations and heartbeats |
 | `events.go` | The five write kinds, the event mix and each write's plan |
 | `marker.go` | The write marker `lgm<nonce><counter>x`: its format, the run's nonce and the parse that keeps one run's markers |
@@ -33,6 +36,12 @@ same step before and after its change, and compares the two rows.
 | `sse.go` | The parser of the dashboard SSE frames, and the SSE frame latencies |
 | `proxy.go` | The TCP latency proxy toward Postgres |
 | `tables.go` | `TABLES.md` from one or more `summary.json` files, the pprof tops and the goroutine summary |
+| `cgroup.go` | `loadgen cgroup-merge`: a step's `cgroup.json` from the cluster sampler's `cgroup.jsonl` (cores, working set and per-minute figures per container, and the sampler-gap failure) |
+| `cgrouptables.go` | How `tables` and `curves` read a step's `cgroup.json` and `step-failed.json` |
+| `curves.go` | `loadgen curves`: `CURVES.md`, `curves.csv`, `KNEES.md` and `refine.txt` from cluster step directories (the pass rule, the knee rule and the refinement factors) |
+| `curvetrend.go` | `TREND.md`: the hour step's least-squares trend of Dispatch's cores, working set and heap |
+| `codepaths.go` | `loadgen codepaths`: `CODEPATHS.md` and `codepaths.json`, Dispatch's CPU and memory by code path beside the outage |
+| `outage-2026-10-26-buckets.csv` | Production's 10-minute buckets of the outage (Dispatch's cores and memory, mean and max), the default of `codepaths -outage-buckets` |
 | `guard.go` | `stack.json`, the endpoint flags and the check that every endpoint is the stack's own |
 | `util.go` | Helpers that several files share: the sleep, the profile fetch, the JSON file write and the collector of a step's records |
 | `commit-trigger.sql` | The commit-time trigger for the delivery latency from commit |
@@ -44,6 +53,10 @@ same step before and after its change, and compares the two rows.
 | `*_test.go` | Unit tests. They need no Postgres and no NATS: `cd packages/envoy && go test ./loadtest/` |
 | `run-step.test.sh` | The test of the run lock. It fakes `go` and `uv` and needs no stack: `cd packages/envoy && bash loadtest/run-step.test.sh` |
 | `common.test.sh` | The test of `lock_root`: a series step keeps the lock after its parent dies, a refusal names the live holder, a token without the holder's descriptor is refused, a lock held by a process that this PID namespace cannot see is refused as held (never as free), and a caller takes the lock once its holder has ended. It needs no stack: `cd packages/envoy && bash loadtest/common.test.sh` |
+| `cluster/cluster.sh` | The load test on a full-size copy in a Kubernetes namespace (Running on a cluster copy, below) |
+| `cluster/manifests/` | The copy's templates: `postgres.yaml`, `dispatch.yaml`, `listener.yaml`, `runner.yaml`, `secrets.yaml.tmpl`, and `nats.yaml`, the committed render of chart `nats/nats` 2.15.1 |
+| `cluster/render-nats.sh`, `cluster/nats-values.yaml` | The render of `manifests/nats.yaml` from the chart and its values, with every image pinned by digest |
+| `cluster/cluster.test.sh` | The test of `cluster.sh`. It fakes `kubectl`, `gh`, `curl`, `go`, `uv` and `dispatch` and needs no cluster: `cd packages/envoy && bash loadtest/cluster/cluster.test.sh` |
 
 ## Requirements
 
@@ -308,12 +321,15 @@ does these steps:
      has 4 anchored and 4 plain root comments.
    - The route of each issue, in key order: issue i goes to session `ses-lg-<i>` (4 digits). Thus
      no step spends its warm-up on route changes.
-3. It waits until the outbox publishes every seed event (at most 900 s). Then it waits until
-   Dispatch's block-index backfill owes nothing (`document_block_versions` with a null version and
-   `block_grammar_owed` both empty, at most 900 s; a build older than migration 0121 has neither
-   table and skips this wait). Then it stops Dispatch. A seed that still owed the backfill would
-   give every step about 100 s of it in its window: Dispatch indexes 20 documents every 2 s.
-4. It runs `vacuum analyze`, then installs the commit-time trigger (`loadgen trigger-sql`).
+3. `loadgen seed-finish` (`seedfinish.go`) runs while Dispatch still runs. It reaches Postgres
+   directly, not through the proxy. It waits until the outbox publishes every seed event (at most
+   900 s). Then it waits until Dispatch's block-index backfill owes nothing
+   (`document_block_versions` with a null version and `block_grammar_owed` both empty, at most
+   900 s; a build older than migration 0121 has neither table and skips this wait). A seed that
+   still owed the backfill would give every step about 100 s of it in its window: Dispatch indexes
+   20 documents every 2 s. Then it runs `vacuum analyze` and installs the commit-time trigger
+   (`loadgen trigger-sql`). `cluster.sh seed` runs the same command.
+4. It stops Dispatch.
 5. It writes `seed.meta.json` and renames the database to `dispatch_seed`, the template.
 
 The seed content does not depend on the clock. Each issue's text comes from a generator seeded by
@@ -859,10 +875,219 @@ Compare the right rows:
 - Dispatch is built from this checkout. The report built a branch with a patched pool size, which
   main now has (`sharedPoolSize = 64`).
 
+## Running on a cluster copy
+
+`cluster/cluster.sh` runs this load on a full-size copy of Dispatch in a Kubernetes namespace
+([INFRA-598](dispatch://INFRA-598)). It runs from a Legion worker pod. The copy is Postgres at the
+Cloud SQL tier's size, Dispatch at the size of production's pod, the Envoy listener, a three-pod
+NATS JetStream hub, and a runner pod in which `loadgen` runs. Every pod of the copy carries the
+label `dispatch-loadtest/run=<run id>`. The copy holds only the harness's synthetic seed. It takes
+no production credential: every token and password is random and made for the run.
+
+### Prerequisites
+
+- **A namespace.** `--namespace` names it on every subcommand. There is no default: a Legion pod's
+  own namespace is `builds`. Every `kubectl` call names the namespace.
+- **These rights in the namespace.** Check each row with `kubectl -n <ns> auth can-i <verb>
+  <resource>`:
+
+  | Resource | Verbs | What `cluster.sh` does with it |
+  | --- | --- | --- |
+  | `configmaps` | `create`, `get`, `list`, `watch`, `patch`, `delete` | The lock, and NATS's configuration |
+  | `secrets`, `services` | `create`, `get`, `list`, `watch`, `patch`, `delete` | The run's random credentials, and the copy's Services (all ClusterIP) |
+  | `deployments.apps`, `statefulsets.apps` | `create`, `get`, `list`, `watch`, `patch`, `delete` | Dispatch, the listener and nats-box; Postgres and NATS. `kubectl rollout status` watches them. |
+  | `deployments.apps/scale` | `patch` | `kubectl scale` in each reset |
+  | `pods` | `create`, `get`, `list`, `watch`, `delete` | The runner pod; `kubectl wait`; the pod lookups of the sampler and the crash check |
+  | `pods/exec` | `create` | `psql` in Postgres, the `nats` CLI in nats-box, Dispatch's `/healthz`, the sampler's cgroup reads, `kubectl cp` into the runner, and `loadgen` in the runner |
+  | `pods/log` | `get` | Each step's container logs |
+  | `persistentvolumeclaims`, `jobs.batch` | `get`, `list`, `delete` | `down` |
+  | `replicasets.apps` | `get`, `list` | `down`'s listing of what is left |
+
+  `down` names these kinds one by one. `kubectl get all` also lists kinds such as
+  replicationcontrollers and daemonsets, which such a Role may not list, so it is refused.
+- **The lock.** One copy runs in a namespace at a time. `up` creates the ConfigMap
+  `dispatch-loadtest-lock` with six data keys: `holder-pod`, `holder-uid`, `issue`, `run`,
+  `started` and `heartbeat`. `up` reads the uid and the issue from `POD_UID` and `LEGION_ISSUE`,
+  which a Legion pod sets. The heartbeat changes every 60 s while the run is up. While the lock
+  exists, `up` refuses with exit status 2 and names the holder and the heartbeat's age. A heartbeat
+  older than 15 min is stale (Clean up after a killed run, below). prove-loadtest's pod mode
+  refuses to run while this ConfigMap exists, so its quota fill cannot starve a running copy. The
+  name and the six keys are that contract: do not change them.
+- **The quota.** The copy at the 16-vCPU tier requests 47.2 CPUs, 121.25Gi of memory, 14.25Gi of
+  ephemeral storage, 8 pods, 6 Services, and 4 claims of 20Gi (80Gi) on `--storage-class`. At the
+  4-vCPU tier (`db-size 4 15Gi`) Postgres requests 12 CPUs and 45Gi less. No Service is a
+  LoadBalancer or a NodePort, and no pod has a priority class.
+- **The tools on the worker's `PATH`:** `kubectl`, `jq`, `curl`, `gh`, `go`, `setsid`, `timeout`,
+  `uv` (collect's zstd compression) and `dispatch` (only for `--upload-issue`). `gh` must read the
+  deployment repository that `--production-repo` names: `up` reads its main's
+  `dispatch/main.go` (`databaseVersion`) and `dispatch/Pulumi.prod.yaml` (`<project>:listenerImage`).
+- **An image of the commit** (An image for a commit, below).
+
+### The one command
+
+```bash
+packages/envoy/loadtest/cluster/cluster.sh all --namespace loadtest --storage-class premium-rwo \
+  --dispatch-commit <sha> --pg-major <n> --production-repo <owner/repo> --profile full
+```
+
+`<owner/repo>` is the deployment repository. `all` runs `up`, `seed`, the series (1x, 2x, 3x, 5x,
+7x, 10x, then the control `10x-reads`), the refinement (profile `full` only), the hour
+`10x-hour`, `db-size 4 15Gi`, the step `1x-db4`, `collect` and `down`. It packs each phase when the
+phase ends. The replay phases print one line each that says they are skipped. Any exit runs `down`,
+unless `--keep`. A full run takes hours: start it with `setsid`, with its output in a file.
+
+| Flag | What it sets |
+| --- | --- |
+| `--namespace` | The namespace of the copy. Required. |
+| `--storage-class` | The storage class of the Postgres and NATS claims. Required. For GKE: `premium-rwo`. |
+| `--dispatch-commit` | The full 40-hex commit whose envoy image Dispatch runs. Required. |
+| `--pg-major` | `16` or `18`. Required. It must equal production's major (`databaseVersion` in the deployment repository), else `up` refuses and names both. |
+| `--production-repo` | The deployment repository, `owner/repo`. Required. |
+| `--listener-image` | The listener's image. Default: production's `listenerImage` from the deployment repository. |
+| `--profile` | `quick` or `full` (Profiles, below). Required. |
+| `--upload-issue` | A Dispatch issue key. Each phase's tar parts go to that issue with `dispatch artifact`. |
+| `--keep` | No `down` at the end or on a failure. The run stays up for debugging. |
+
+### Subcommands
+
+Each subcommand needs `--namespace`. After `up`, a subcommand finds its run from the lock's `run`
+key, or from `--run <id>`.
+
+| Subcommand | What it does |
+| --- | --- |
+| `up <up's flags>` | Refuses, before it creates anything, a commit with no image, a `--pg-major` other than production's, and an image tag that does not resolve to a digest. Refuses with exit status 2 while the lock exists. Then takes the lock, installs the copy, starts the heartbeat and the sampler, and prints each container's requests and limits. |
+| `seed` | `loadgen seed` from the runner through Dispatch's Service, then `loadgen seed-finish`. Then it stops Dispatch and the listener and renames the database to the template `dispatch_seed`. |
+| `step NAME FACTOR [--duration 10m] [--reads-only]` | The reset, then one `loadgen run` at FACTOR × (4 events/s, 60 requests/s) with the `series-sessions` count, then the crash check, `cgroup-merge` and `tables`. FACTOR can be fractional (`8.5`). `--reads-only` sends 0 events. |
+| `series [--duration 10m]` | 1x, 2x, 3x, 5x, 7x, 10x and `10x-reads`, then the refinement (below). |
+| `soak [--duration 60m]` | The step `10x-hour`. |
+| `db-size CPU MEMORY` | Postgres at the Cloud SQL tier of CPU and MEMORY (for example `4 15Gi`), restarted on the same claim. Postgres's `cpu.max` must then read the new limit. |
+| `redeploy --dispatch-commit SHA` | Dispatch on the image of another commit, then a reset. A before-and-after pair runs on one copy. |
+| `collect [--upload-issue KEY]` | The cross-step outputs, with every step in the order the steps ran (`meta.json` `start`): `TABLES.md`, `loadgen curves` into `curves/`, and `loadgen codepaths` in each step directory that holds `summary.json`. Then it packs each phase and the phase `results`. A failed `loadgen` command is reported, the rest still runs, and `collect` exits with status 1. |
+| `status` | The lock, the run, its heartbeat and sampler, and its pods. |
+| `down [--run ID]` | Stops the heartbeat and the sampler, deletes everything labelled with the run id (the claims, the Secrets and the lock too), waits until nothing of the run is left, and prints that listing. It removes the lock of another run only when `--run` names that run. |
+| `all <up's flags> --profile quick\|full [--upload-issue KEY] [--keep]` | The one command (above). |
+
+**The refinement** (profile `full`, and `series`): `loadgen curves` over the steps of the series
+and of the refinement writes `refine.txt`. Each line is one factor at which a refinement step
+narrows a knee's bracket. `cluster.sh` runs each factor F as the step `<F>x` (for example `8.5x`)
+for the grid's duration, then runs `curves` again. It stops when `refine.txt` is empty. `curves`
+gives at most two refinement steps per knee.
+
+### Profiles and timings
+
+| Profile | Step window | Hour | Refinement | Time |
+| --- | --- | --- | --- | --- |
+| `quick` | 2 min | 5 min | none; `all` prints one line that says so | 47 min, measured on 2026-10-28: `up` about 5 min, the seed 183 s, each reset 23 to 39 s, each 2-minute step about 3.8 min |
+| `full` | 10 min | 60 min | until `refine.txt` is empty | About 2.8 h, and about 12 min for each refinement step. [INFERENCE] Not measured: it is the quick run's time for each step added to the full windows. |
+
+### Output files
+
+The run directory is `${LOADTEST_CLUSTER_ROOT:-$TMPDIR/dispatch-loadtest-cluster}/<run id>/`, on
+the worker pod.
+
+| File | What it holds |
+| --- | --- |
+| `state.json` | Mode 600. The namespace, the run id, the storage class, the commit, the Postgres major, the deployment repository, the start time, the holder pod, every image by digest, the Postgres tier and its settings, and the run's random credentials. |
+| `loadgen` | The static `loadgen` of this checkout, which the runner also gets. |
+| `seed.json`, `seed.meta.json` | The seed (The seed, above), and its migration, build commit, start time, `seed_seconds` and counts. |
+| `postgres-settings.txt`, `postgres-version.txt` | Postgres's `SHOW ALL` (after `up` and after `db-size`) and `select version()`. |
+| `cgroup.jsonl` | The sampler's reads: every 5 s, for each copy container (`dispatch`, `pprof`, `postgres`, `nats-0`, `nats-1`, `nats-2`, `listener`, `runner`), one line with `at` (the worker's clock), `role`, `pod`, `container`, `usage_usec`, `throttled_usec`, `cpu_max`, `memory_current` and `inactive_file`. A failed read is a line with `error` and no number. |
+| `steps/<name>/` | One step directory (below). |
+| `phases/<phase>` | The steps of each phase (`series`, `refinement`, `soak`, `db4`, and `steps` for the `step` subcommand), in the order they started. |
+| `TABLES.md` | The tables (The tables, above) of every step, in the order the steps ran. |
+| `curves/CURVES.md`, `curves/curves.csv` | One row per step: the six series (delivery latency, throughput, CPU, memory, database connections, database CPU), pool waiters, commit-order lock waiters, failed rows, the Pass table, and the control's and the 4 vCPU step's comparisons. |
+| `curves/KNEES.md` | Each knee: the criteria it tripped, its bracket, the measured limit and the evidence files. |
+| `curves/refine.txt` | The refinement's factors, one per line. Empty when no knee needs another step. |
+| `curves/TREND.md` | Only with an hour step: the trend of Dispatch's cores, working set and Go heap in use over minutes 5 to 60. |
+| `upload/` | The tar parts, `cluster-load-test-<date>-raw-<phase>.tar.zst.partNN`, each under 24 MiB, and the markers `<phase>.packed` and `<phase>.uploaded`. The phase `results` holds `curves/`, `TABLES.md`, and each step's `CODEPATHS.md` and `codepaths.json`. |
+| `logs/` | The heartbeat's and the sampler's logs, `seed.log`, `seed-finish.log`, and the reset record of each `redeploy`. |
+
+A step directory holds the files of `loadgen run` (The step directory, above). `TABLES.md` takes
+its cores and working set from `cgroup.json`. It also holds:
+
+| File | What it holds |
+| --- | --- |
+| `meta.json` | Also `copy` (`copy-meta.json`, as given) and `pg_clock`: at the start and after the window, the reads, `rtt_ms_min`, `rtt_ms_p50` and `offset_ms` (Postgres's clock minus `loadgen`'s), or `error`. The delivery latency from commit spans the two clocks. |
+| `copy-meta.json` | The copy at the step's start: the namespace, the run id, the commit, the deployment repository, the Postgres major, the images, Postgres's version, the SHA-256 of its `SHOW ALL`, its tier and settings, the node CPU model in the Dispatch and Postgres containers, and each pod's node and each container's image and resources. |
+| `postgres-settings.txt` | Postgres's `SHOW ALL` at the step's start. |
+| `reset.json` | The reset before the step: `started`, `ended`, `seconds`, the template, the stream `ENVOY_NOTIFICATIONS` on 3 replicas, and each KV bucket's replicas. |
+| `containers-before.tsv`, `containers-after.tsv` | Each sampled container's role, pod, container, `restartCount` and `lastState.terminated.reason`, before and after the step. |
+| `step-failed.json` | Only when the step failed: `reasons`, each with `kind`, `role` and `detail`. `restart`: a container of the copy restarted during the step. `loadgen_exit`: `loadgen run` exited non-zero. `sampler_gap`: a container had no good cgroup read for more than 30 s in the window. |
+| `cgroup.json` | `loadgen cgroup-merge` of `cgroup.jsonl` over the window: `window_start`, `window_end`, `window_s`, `failed` and `failures`, and for each role `pods`, `container`, `samples`, `failed_reads`, `restarts`, `cpu_max`, `limit_cores`, `cores_mean`, `cores_peak_5s`, `cpu_s`, `throttled_s`, `working_set_bytes_mean` and `working_set_bytes_max` (`memory.current` less `inactive_file`), `max_gap_s`, and `minutes` (each whole minute's cores and mean working set; `null` for a minute with a gap over 30 s). A figure the reads cannot give is `null`, never 0. |
+| `loadgen.out` | The output of `loadgen run` in the runner. |
+| `dispatch.log`, `listener.log`, `postgres.log`, `nats-0.log`, `nats-1.log`, `nats-2.log` | Each container's log from the step's start. |
+| `CODEPATHS.md`, `codepaths.json` | `collect`'s `loadgen codepaths`: Dispatch's CPU by entry point and by subsystem (cores = the share × the Dispatch container's `cores_mean`), its working set at the window's end split into heap by code path, heap idle, stacks, other runtime memory and non-Go memory, and the outage's 10-minute buckets beside it. |
+
+### The pass rule and the knee rule
+
+- A step passes when each of these holds: (a) committed events/s ≥ 0.95 × offered; (b) requests
+  2xx ≥ 0.99 × sent, and sent/s ≥ 0.95 × the target; (c) delivery p99 from arrival ≤ 1,000 ms;
+  (d) no container's mean cores ≥ 0.9 × its CPU limit (`cgroup.json`); (e) Dispatch's pool acquire
+  waiters have a p50 of 0; (f) no failed row: no `step-failed.json`, and `cgroup.json` is present
+  and not failed.
+- The knee series is the grid and refinement steps, in factor order. A knee is a step of it that
+  fails after a step that passed, or 1x when 1x fails. The control, the hour and the 4 vCPU step
+  are judged, but are not in the series.
+
+### Differences from production
+
+- The commit is `--dispatch-commit`. INFRA-598's run measures 9b92ac14, not the outage's 35efd326:
+  #2302's pipelined outbox and 64-connection pool, and every other change of
+  `git log 35efd326..9b92ac14 -- packages/envoy/cmd/dispatch packages/envoy/internal/dispatch`.
+- GOMAXPROCS is 16, from the container's CPU limit, as in production.
+- No cloud-sql-proxy sidecar (0.14 to 0.19 cores in production, BG-11).
+- Postgres runs in a pod, not in Cloud SQL, with `track_commit_timestamp` on and the commit-time
+  trigger. A setting that Cloud SQL's documentation does not give stays at PostgreSQL's default.
+- The copy's database carries only Dispatch. Production's instance also serves the secrets broker
+  and Legion's daemons. No synthetic load stands for them, also not on the 4 vCPU database.
+- Dispatch reaches NATS directly, not through the tailnet SOCKS5 proxy.
+- NATS has no auth, and runs on three pods, not on one e2-small VM.
+- Header identity, not cookies. No tailnet front door.
+- `meta.json`'s `pg_clock` gives the copy's Postgres round trip, not that of production's proxy
+  path.
+- The node CPU model is read in the containers. Production's machine type is not readable by the
+  worker: nodes are outside the Role.
+- The curves use the harness's synthetic data set (1,000 issues, specs of 4 to 50 KB) and its event
+  mix from INFRA-512's counts (5 write kinds), not every event type of production.
+- The replay (when another branch adds it): reads assumed at ρ = 1; the edit and upload split
+  assumed at U = 0.25; version history that holds the 22:55 text with a marker line; anchors placed
+  on a substitute sentence where the logged quote is gone; not the 22:47Z restart's cold rooms; not
+  other projects' writes (2.6% of the window); not browser tabs beyond 2 streams; no embeddings.
+- The database's disk is a 20Gi claim on `--storage-class` (`premium-rwo` for GKE). Production's
+  Cloud SQL disk is 14.7 GiB of PD_SSD. So the IOPS ceiling differs. The run records no checkpoint
+  timings: a disk-bound step shows only in Postgres's cores and the latencies.
+
+### An image for a commit
+
+`up` resolves `--dispatch-commit` to `ghcr.io/sjawhar/legion/envoy:<full sha>` by digest. A main
+commit that touches the image's inputs (`packages/envoy` among them) gets its image on push. A
+branch head gets one from:
+
+```bash
+gh workflow run release-envoy-listener.yaml --ref <branch>
+```
+
+That run publishes `envoy:<sha>` of the branch head and releases nothing off main. `up` refuses a
+commit with no image before it creates anything. It names the commit and the newest first-parent
+ancestor on main that has an image.
+
+### Clean up after a killed run
+
+A run killed with no `down` leaves the copy and the lock. Its heartbeat stops. 15 min later, `up`
+in that namespace says: `that heartbeat is older than 15 min, so the holder is stale. Clear its
+copy and the lock with: cluster.sh down --namespace <ns> --run <id>`. Run that command:
+
+```bash
+packages/envoy/loadtest/cluster/cluster.sh down --namespace <ns> --run <id>
+```
+
+It deletes everything labelled with the run id and the lock, and prints the empty listing. `down`
+without `--run` refuses to remove the lock of another run.
+
 ## What this harness does not do
 
-- A cluster run (dispatch://INFRA-598) can use `loadgen run -allow-foreign` with every endpoint and
-  token flag and its own seed. It gets:
+- A run of `loadgen run -allow-foreign` against another stack, with every endpoint and token flag
+  and its own seed, gets:
   - no `/proc` CPU or RSS columns, because it has no pids,
   - no committed counts, issue-topic receipts or delivery latencies at all when its database lacks
     `loadtest.event_commits`. The read of the commit rows fails, every cell that depends on them
@@ -872,10 +1097,11 @@ Compare the right rows:
   - no delivery latency from commit when its database has the trigger but
     `track_commit_timestamp` is off: `commit_times_missing` counts those events, and the
     committed counts, receipts and the other latencies stay,
-  - no reset per step.
-- These belong to INFRA-598: 10-minute steps, one-hour soak trends (the 5 s series in
-  `samples.json` is there for them), the replay of production's log, sampling of the production
-  database and restarts during load.
+  - no reset per step. `cluster.sh` resets its copy before each step (Running on a cluster copy,
+    above).
+- `cluster.sh` runs the 10-minute steps and the hour with its trend. The replay of production's
+  log is a hook that another branch fills (dispatch://INFRA-639). Sampling of the production
+  database and restarts during load are not in this package.
 - INFRA-605 adds its browser-editor workload, its round-trip counter and its document-room sampler
   to this package.
 - INFRA-512's request generator (dispatch://INFRA-512) is to be built into this package, so that
