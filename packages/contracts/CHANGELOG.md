@@ -1,8 +1,17 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
+
+- `SearchResult.ask` (`SearchAsk`), where an ask hit stands when the search ran:
+  `{state: "open"}`, `{state: "answered", answer}` with its latest answer, or
+  `{state: "resolved", resolution, answer?}`, whose `answer` is the last one the ask had before it
+  was closed and is absent when nobody answered it. It is present on every `ask` hit from a
+  Dispatch of this release and absent on every other kind and on any hit from an older Dispatch.
+  The `dispatch_search` description says an ask hit says whether it is answered: an answered one
+  shows the latest answer, who gave it, when, the options chosen and its text, and a closed one
+  says it was closed with no answer or shows the last answer it had (INFRA-569).
 
 - The event `artifact.human_edited` and its payload, `ArtifactHumanEditedEventPayload` and
   `ArtifactHumanEditedEventPayloadSchema`: `artifact_id`, `name`, `from_version`, `to_version`,

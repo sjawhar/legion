@@ -26,7 +26,8 @@ function AskEventBody({
 }): ReactNode {
   const { answer, question, options, resolution, created_at } = event.payload;
   const resolutionReason = resolution === undefined ? undefined : askResolutionReason(resolution);
-  // A changed answer names the one it replaced; the first answer's event carries none.
+  // A changed answer names the one it replaced; the first answer's event carries none. An event
+  // written before answers stored an empty list holds null for either's selected: no option.
   const previous = event.type === "ask.answered" ? event.payload.previous_answer : undefined;
   return (
     <>
@@ -52,7 +53,7 @@ function AskEventBody({
             <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
               <s>
                 was:{" "}
-                {[previous.selected.join(", "), previous.text ?? ""]
+                {[(previous.selected ?? []).join(", "), previous.text ?? ""]
                   .filter((part) => part !== "")
                   .join(" - ")}
               </s>

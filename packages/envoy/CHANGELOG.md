@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
@@ -977,6 +977,16 @@
 - The secrets broker logs at boot how it signs in to its database, `database sign-in
   method=rds-iam` or `method=password`, before it reaches for AWS or the database, so an operator
   tells a token sign-in from a password one in the log rather than the task's environment.
+- `GET /api/v1/search` gives every `ask` hit `ask`, where the ask stands when the search ran:
+  `open`, `answered` with its latest answer (who gave it, when, the options it chose and its
+  text), or `resolved` with its resolution and, when anyone answered it, the last answer it had,
+  which for an ask that document settlement retracted while it was answered is read from its
+  `ask.answered` events, since its row keeps none. One query reads every ask hit of a page, the
+  events are read only when the page holds a resolved ask, and a page with no ask hit reads
+  nothing more. The search palette shows it under each ask hit's excerpt: a badge (`Open`,
+  `Answered`, `Closed, no answer` or `Closed after an answer`), who closed the ask and when, and
+  its latest answer, with who gave it, when, the options chosen and its text cut to three lines
+  (INFRA-569).
 
 ### Changed
 
@@ -1806,55 +1816,16 @@
 
 ### Fixed
 
-- Closing an issue withdraws its open asks, and reopening it brings them back (INFRA-158). Every
-  close through `PATCH /api/v1/issues/{key}` - a person's Close or board drag,
-  `dispatch issue-update --status done`, the Legion daemon's close when a pull request merges -
-  withdraws every open ask of the issue, whoever's turn it is: decision blocks in its documents,
-  plain asks and requests to approve one of its documents. Each is recorded `resolved` with
-  resolution kind `withdrawn`, the closer as its actor and the reason
-  `Withdrawn by the close of <KEY>.`, and gets one `ask.resolved` before `issue.closed`; its
-  block, and each copy in another document of the issue, reads `state="resolved"` in the live
-  document, with no version written. Asks answered or resolved before the close are left as they
-  were, and a withdrawn approval request writes no review. The close first settles the issue's
-  documents that owe a settlement, so a decision block written seconds before the close is
-  withdrawn with a record. A reopen opens again exactly the asks the close withdrew, each with one
-  `ask.opened` before `issue.updated`, and they return to the Inbox. An ask resolved in the moment
-  between the close's settlement and its taking the issue keeps its resolver's record, and the
-  close's sweep writes each copy of its block in another document of the issue `resolved`, as the
-  copy's own settlement would have, since none runs while the issue is closed. An ask answered in
-  that moment keeps its answer, and the sweep writes each such copy `state="answered"` with who
-  answered and when but not the answer itself, which the reopen's settlement writes in.
-  `withdrawn` is the server's alone: `POST /api/v1/asks/{id}/resolve` still takes only `retracted`
-  and `resolved`, and any other kind is `400 INVALID_RESOLUTION` saying so and naming the kind it
-  got; an ask on a closed issue is still `409 ISSUE_CLOSED`. A repair pass,
-  `api.RepairIssueAsks`, runs at boot (bounded at 30 s) and then every 10 minutes under the lease
-  `issue-ask-repair`: it withdraws the asks left open on issues closed before this release, each
-  naming its issue's earlier closer, restores the withdrawn asks of an issue a process of the
-  earlier release reopened during the roll, and logs `withdrawn`, `restored` and `swept` counts.
-  A pass that finds nothing to change writes nothing: it appends no update to any document and
-  leaves each document's owed settlement marked when it was, so an interval pass does not sweep
-  the closed issues' documents again. An issue whose repair fails no longer holds that bound back:
-  each interval pass moves it and carries the issues it did not repair into the next pass, so the
-  next pass retries them and sweeps only the other documents marked since. A document of the issue
-  whose stored history cannot load is left as it is and logged, so the close, the reopen and the
-  repair go on without it rather than answer `409 DOCUMENT_UNLOADABLE` until it is rebuilt.
-  The dashboard, which ships in this server, shows a withdrawn decision block on a closed issue's
-  current document with the badge `Withdrawn` and `Withdrawn when <closer> closed the issue`, as
-  the activity feed's `ask.resolved` line reads; a saved version shows its own attributes, so a
-  later withdrawal never appears on it.
-- A document write whose transaction changes nothing appends no update, refreshes no anchors and
-  leaves the document's owed settlement marked when it was, for every writer (INFRA-158). ygo hands
-  a document's observers an update for every transaction, one that changes nothing included, and
-  every such update used to be appended and to mark the document owing a settlement again.
-- A closed issue's document no longer tells a person who typed nothing that "1 edit saved in this
-  browser can't be sent: this document is read-only" (INFRA-158). The editor stamps each heading's
-  id from its text as it loads, and the dashboard stored that stamp as an unsent edit even on a
-  read-only document. The dashboard now never counts an update that changes only what the editor
-  derives (a heading's id, an ordered list item's label and list type), whatever the order of a
-  reconnect, a close and a reopen. It holds such an update in memory and stores it only ahead of a
-  later edit a person makes in the same client, so that edit's stored row still applies after a
-  reload. It drops a stored row an earlier read-only load left that changes nothing; an edit a
-  person typed while the document was writable is still kept and named.
+- An ask hit's search excerpt, in `GET /api/v1/search` and in the write-time suggestions, is cut
+  from the text its search vector indexes - the question, the options' labels and descriptions,
+  the answer's text and the options it chose - where it was cut from the question, the options'
+  raw JSON and the answer's text, so the excerpt could show JSON keys and braces (INFRA-569).
+- An ask answer that chose no option reads `"selected": []` from `GET /api/v1/asks/{id}`, the ask
+  lists and `GET /api/v1/me/answers`, and an `ask.answered` event's `answer` and `previous_answer`
+  read it from `GET /api/v1/issues/{key}/events`, `GET /api/v1/artifacts/{id}/events` and the
+  `GET /api/v1/events` stream, where each read `null`, including the rows and `ask.answered`
+  events already stored with `null`; a new answer stores `[]` (INFRA-569).
+
 - A document now strikes tilde runs as a comment does. A run of `~` pairs only with a run of its
   own length, so `Plain ~a~~ text.` and `Plain ~~a~ text.` keep their tildes where a document
   written through the API struck `a`; a run directly after an escaped tilde may open or close, so

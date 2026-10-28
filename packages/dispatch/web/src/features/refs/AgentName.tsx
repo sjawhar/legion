@@ -273,13 +273,20 @@ function resolutionFrame(resolution: AskResolution): readonly [before: string, a
 
 /** `Resolved by <agent>` / `Retracted by <agent>` / `Withdrawn when <agent> closed the issue`:
  *  the actor sentence of a resolution, for callers that render its reason (`askResolutionReason`)
- *  with their own markup. */
-export function AskResolutionLine({ resolution }: { resolution: AskResolution }): ReactNode {
+ *  with their own markup. `agent="static"` names the agent without its link, for a host that is
+ *  itself one control (a listbox option). */
+export function AskResolutionLine({
+  agent,
+  resolution,
+}: {
+  agent?: "link" | "static";
+  resolution: AskResolution;
+}): ReactNode {
   const [before, after] = resolutionFrame(resolution);
   return (
     <>
       {before}
-      <AgentName actor={resolution.actor} inline />
+      <AgentName actor={resolution.actor} inline kind={agent} />
       {after}
     </>
   );
