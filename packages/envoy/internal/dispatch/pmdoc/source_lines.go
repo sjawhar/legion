@@ -254,10 +254,16 @@ func (l sourceLines) blanksThroughOuterQuotes(position, depth int) int {
 }
 
 // blankInside reports whether a line between typed block directive's opening and closing fences
-// is blank, outside the code it holds; one that runs to its parent's end runs to the next block. A
+// is blank, outside the code it holds (blanksInside).
+func (l sourceLines) blankInside(directive *typedDirective) bool {
+	return len(l.blanksInside(directive)) > 0
+}
+
+// blanksInside is the lines between typed block directive's opening and closing fences that are
+// blank, outside the code it holds; one that runs to its parent's end runs to the next block. A
 // blank line of code is the code's text, as are the blank lines a fenced code block no fence closed
 // takes up to the next block, which space nothing (keepsBlankLinesAfter).
-func (l sourceLines) blankInside(directive *typedDirective) bool {
+func (l sourceLines) blanksInside(directive *typedDirective) []int {
 	// In a quote, a line blank but for the quote's markers is blank, and a line without them ends
 	// the quote and the typed block with it.
 	blank := whitespaceLine
@@ -265,9 +271,9 @@ func (l sourceLines) blankInside(directive *typedDirective) bool {
 		blank = quoteBlankLine
 	}
 	if !directive.Closed {
-		return len(l.blanksOutsideCode(directive, l.blankLines(directive, nextBlock(directive), blank))) > 0
+		return l.blanksOutsideCode(directive, l.blankLines(directive, nextBlock(directive), blank))
 	}
-	return len(l.blanksOutsideCode(directive, l.blanks(l.lineOf(directive.Pos())+1, l.lineOf(directive.closer), blank))) > 0
+	return l.blanksOutsideCode(directive, l.blanks(l.lineOf(directive.Pos())+1, l.lineOf(directive.closer), blank))
 }
 
 // markersOrWhitespace reports whether line holds nothing but whitespace and quote markers.

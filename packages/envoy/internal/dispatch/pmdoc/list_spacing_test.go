@@ -2,6 +2,8 @@ package pmdoc
 
 import (
 	"errors"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -157,5 +159,59 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 				t.Fatalf("Parse(%q): %v", test.readable, err)
 			}
 		})
+	}
+}
+
+// The corpus-errors documents whose list item the browser editor spreads otherwise than this parser
+// would store it are refused by every reader of caller markdown: the blank lines after a quoted item
+// ending in a footnote definition whose typed block holds a fence no fence closed, which that
+// parser reads as the code's; a definition opening on a later line inside a typed block inside an
+// item, whose first line that parser reads as a blank line spacing the item; a definition inside a
+// typed block in an item that holds a blank line its stored markdown would not, and, with a quote
+// around the item, an empty one before another block there, whose line that parser reads as a blank
+// line; and a definition in an item where a typed block stands in a quote, next to a blank line or
+// to its own empty line, which that parser reads as spacing the item.
+func TestCorpusErrorsOfItemSpreadReadOtherwiseAreRefused(t *testing.T) {
+	const (
+		fenceBlanks     = "blank lines after a list item in a quote ending in a footnote definition whose typed block holds a fenced code block no fence closed"
+		definitionLine  = "a footnote definition whose first line holds nothing past its label, inside a typed block inside a list item"
+		typedBlank      = "a footnote definition inside a typed block holding a blank line inside a list item"
+		typedEmptyLine  = "an empty footnote definition before another block of a typed block inside a list item in a quote"
+		quotedTypedLine = "a footnote definition in a list item where a typed block stands in a quote, next to a blank line or its own empty line"
+	)
+	for name, refusal := range map[string]string{
+		"quoted-star-item-definition-callout-unclosed-fence-then-blank-lines":                     fenceBlanks,
+		"quoted-star-item-unspaced-definition-callout-unclosed-fence-then-blank-lines":            fenceBlanks,
+		"quoted-star-item-definition-unspaced-callout-unclosed-fence-then-blank-lines":            fenceBlanks,
+		"quoted-item-definition-callout-unclosed-fence-then-blank-lines":                          fenceBlanks,
+		"quoted-item-definition-callout-unclosed-fence-then-blank-lines-and-text":                 fenceBlanks,
+		"quoted-item-definition-callout-unclosed-tilde-fence-holding-code-then-blank-lines":       fenceBlanks,
+		"ordered-item-callout-holding-a-definition-opening-on-a-later-line":                       definitionLine,
+		"item-callout-holding-a-definition-opening-on-a-later-line":                               definitionLine,
+		"item-text-then-callout-holding-a-definition-opening-on-a-later-line":                     definitionLine,
+		"referenced-item-callout-holding-a-definition-opening-on-a-later-line":                    definitionLine,
+		"item-unclosed-callout-holding-a-definition-opening-on-a-later-line":                      definitionLine,
+		"quoted-item-callout-holding-a-definition-opening-on-a-later-line":                        definitionLine,
+		"item-callout-opening-with-a-blank-line-before-a-definition":                              typedBlank,
+		"item-callout-opening-with-a-blank-line-before-an-empty-definition-at-the-end":            typedBlank,
+		"item-callout-definition-then-blank-line-and-text":                                        typedBlank,
+		"ordered-item-nested-callout-opening-with-a-blank-line-before-a-definition":               typedBlank,
+		"ordered-item-nested-callout-opening-with-a-whitespace-line-before-a-rule-and-definition": typedBlank,
+		"item-callout-quote-then-two-blank-lines-before-a-list-and-definition":                    typedBlank,
+		"quoted-item-callout-empty-definition-before-text":                                        typedEmptyLine,
+		"quoted-callout-quoted-item-empty-definition-before-text":                                 quotedTypedLine,
+		"quoted-ordered-item-callout-quoted-item-empty-definition-before-text":                    quotedTypedLine,
+		"quoted-callout-item-definition-then-blank-line-and-text":                                 quotedTypedLine,
+		"quoted-callout-item-empty-definition-before-next-item":                                   quotedTypedLine,
+	} {
+		markdown, err := os.ReadFile("testdata/corpus-errors/" + name + ".md")
+		if err != nil {
+			t.Fatalf("read %s corpus: %v", name, err)
+		}
+		for _, reader := range blockMarkdownReaders() {
+			if _, err := reader.parse(string(markdown)); !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), refusal) {
+				t.Errorf("%s of %s: %v, want ErrSchema saying %q", reader.name, name, err, refusal)
+			}
+		}
 	}
 }
