@@ -691,10 +691,11 @@ the consumers' updates between:
    them: every app pod logs `dispatch: request authenticated with a previous shared agent token`,
    at WARN, with the caller's `address`, `user_agent` and `path`, the first time a caller presents
    the old token and again at most once every ten minutes per caller while it keeps doing so.
-   Read every app pod's log for it:
+   Read every app pod's whole log for it, with `--tail=-1`, since with a label selector
+   `kubectl logs` otherwise shows only each pod's last 10 lines:
 
    ```sh
-   kubectl -n <namespace> logs -l app=<hostname> -c envoy-dispatch --prefix --since=1h \
+   kubectl -n <namespace> logs -l app=<hostname> -c envoy-dispatch --prefix --since=1h --tail=-1 \
      | grep 'previous shared agent token'
    ```
 
