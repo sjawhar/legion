@@ -2,53 +2,61 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-549",
-  "completed": "2026-10-27T09:53:18Z",
-  "round": 4,
-  "headSha": "c6a616fb7b934583229474ff0958af4bb95d9eff",
-  "codeHeadSha": "f589463471e3f9d0c9dca4a732c9a427c2cb4006",
+  "completed": "2026-10-28T14:04:07Z",
+  "round": 5,
+  "headSha": "f5176373f7ff720a5bf7817d3f0d58111aef66e0",
+  "codeHeadSha": "253b920c5f57c4e78a5b768b0f627d79df9ee7ea",
   "evidence": [
+    "https://github.com/sjawhar/legion/pull/2371#issuecomment-6471097545",
     "https://github.com/sjawhar/legion/pull/2371#issuecomment-6438746050",
     "https://github.com/sjawhar/legion/pull/2371#issuecomment-6437726062",
     "https://github.com/sjawhar/legion/pull/2371#issuecomment-6436632084",
     "https://github.com/sjawhar/legion/pull/2371#issuecomment-6436052083"
   ],
-  "ci": "Read on GitHub at f589463 when this was written: build, changes, lint, test, typecheck queued (superseded pr-title runs cancelled). Read as queued, not as a pass. The PR is MERGEABLE/CLEAN.",
-  "scope": "f589463 changes the README, docs/nats-hub.md, the CHANGELOG, a code comment in clusteredhub_kube.go and test assertions; Go behaviour does not change. This round drove the documented procedure and claims it changed.",
+  "rebaseCheck": "Fingerprint (skill://legion-worker/references/conflicts-and-rewrites.md) at my round-4 head c6a616fb: f4aefcc804759aa87c582b4742997c64a3cf434d3827e4f4846d25a6dc4a4070 (fork 5fbe7ca5); at f5176373: 2ad25775e35fda34d9de0a7d90270a37ab2a15a8ae371b4eacb36d58a2c6b386 (fork 91d30dea). Changed: new gcp/clusteredhub_autopilot.go (podPriorityClass and autopilotPodSize moved out of the base's rewritten dispatch.go), tailnet_service.go and dispatch.go out of the diff (now the base's, from #2368), the live test's port picking, .changelog entries in place of the CHANGELOG. So this is a full test round.",
+  "ci": "Read on GitHub at 253b920c when this was written: build, changes, lint, pr-title, test, typecheck queued. Read as queued, not as a pass. f5176373 is a handoff-only push. The PR is MERGEABLE/CLEAN and approved.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command at f589463: cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/ -> ok 41.451s (leader kill at 212/1000 acks, a new leader in 4.8 s, users reloaded with cid 28 and 0 reconnects, (f) lower store reload refused). The README procedure the round changed was driven independently on a real control plane (proof[0])."
+    "how": "Re-ran the implementer's command at 253b920c: cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/ -> ok 30.385s (leader kill at 210/1000 acks with a new leader in 6.62 s, users reloaded with cid 20 and 0 reconnects, (f) lower store reload refused, admitted after a restart). The surfaces the merge touched were driven independently (proofs below)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review finding (round 3): the README's disk-growth steps keep the running pods when the file store's limit follows diskSizeGb, by pinning maxFileStoreGb in step 5, and raise the limit in a separate step 6 that rolls the pods.",
-      "surface": "The plugin built at f589463 run by the Pulumi CLI v3.268.0 on the README's program without streamMaxBytes (10Gi disk, 9Gi store), against a real kube-apiserver v1.33.0 + etcd + kube-controller-manager v1.33.0 (StatefulSet controller and garbage collector; no scheduler or kubelet, so pods stay Pending)",
-      "command": "README steps as written: kubectl -n envoy get pod envoy-nats-0 -o jsonpath='{.metadata.annotations.envoy-infra\\.sjawhar\\.dev/max-file-store}'; kubectl -n envoy delete statefulset envoy-nats --cascade=orphan; pulumi state unprotect/delete <StatefulSet URN>; diskSizeGb: 20 + maxFileStoreGb: 9, pulumi preview, pulumi up; then maxFileStoreGb removed, pulumi preview, pulumi up; kubectl get sts/pods -o json (revisions, uids, owners)",
-      "observed": "The annotation command prints 9Gi. Step 3 leaves the three pods without an owner. Step 5's preview plans only a protected create with a 20Gi template and annotation 9Gi. After up, the StatefulSet's revision is envoy-nats-5f66bfc646 (the running one) and all three pods are adopted with unchanged uids (6865b09a, 7e75d187, 795ee21e). Step 6 plans nats.conf plus the max-file-store annotation. The ConfigMap updated first (0.08 s, max_file_store 18Gi), then the controller replaced envoy-nats-2 (uid 75f4bed7, revision envoy-nats-7587c5ddb6, 18Gi); the others wait for it to become ready.",
-      "headSha": "f589463471e3f9d0c9dca4a732c9a427c2cb4006",
-      "negativeControl": "A second stack (namespace envoy-b) doing step 5 without the pin, as the old README said: preview plans nats.conf plus a create with annotation 18Gi. After up, the revision is envoy-nats-7587c5ddb6 and the controller deleted and recreated envoy-nats-2 (SuccessfulDelete / SuccessfulCreate events, uid e834976f -> 2d19f4bd)."
+      "criterion": "Users are applied by reload alone; a change of the no-credential session user or the store limit rolls the pods after the ConfigMap; the StatefulSet is protected.",
+      "surface": "The plugin built at 253b920c run by the Pulumi CLI v3.268.0 on the README's YAML program against a real kube-apiserver v1.33.0 + etcd + kube-controller-manager v1.33.0 (StatefulSet and Deployment controllers; no scheduler or kubelet)",
+      "command": "pulumi up; pulumi preview --json after: one user added; sessionUser.nkey changed; streamMaxBytes 40000000000 with diskSizeGb 53 and natsMemory 5Gi held; the current values; diskSizeGb 60. Then pulumi up of the session-user change and kubectl get cm/sts/pods -o json",
+      "observed": "In state the StatefulSet depends on envoy-nats-config and is protected; pod annotations max-file-store 47Gi and no-auth-user; 53Gi claim, 5Gi limit, GOMEMLIMIT 4096MiB. User add -> only data[\"auth.conf\"]. Session change -> auth.conf plus the no-auth-user annotation. Store lower -> nats.conf, the max-file-store annotation and the listener's ENVOY_STREAM_MAX_BYTES. Current values -> no change. Applied session change: the ConfigMap updated first (0.04 s, new no_auth_user), then the StatefulSet. The controller went to revision envoy-nats-c7f7d8dcd and replaced envoy-nats-2 (uid c2f76c02 -> be423ee7, annotation UBIFC2TL).",
+      "headSha": "253b920c5f57c4e78a5b768b0f627d79df9ee7ea",
+      "negativeControl": "diskSizeGb 60 -> preview fails: the StatefulSet 'is currently marked for protection'."
     },
     {
-      "criterion": "Review finding (round 3): the docs say that with an earlier listener build a second host waits 135 s for the durable and then exits, answering /healthz 200 'starting' and serving /v1 meanwhile (so it is advertised).",
-      "surface": "envoy-listener built from this branch, two processes with the tailnet Deployment's exact environment and one machine id, on three nats-server v2.15.1 that use the engine-rendered config",
-      "command": "run.sh servers; run.sh listener 3; second listener on PORT=9021; curl http://127.0.0.1:9021/healthz and -H 'Host: envoy-hub.example-tailnet.ts.net:9020' /v1/sessions at t+20/60/120 s",
-      "observed": "The second listener answered /healthz 200 'starting' and /v1/sessions 200 at t+20, t+60 and t+120 s. It logged 'consumer is already bound to a subscription' 61 times, then 'listener durable bind exhausted after 69 attempts in 2m15.004s', and exited with status 1.",
-      "headSha": "f589463471e3f9d0c9dca4a732c9a427c2cb4006",
-      "negativeControl": "The first listener, which holds the durable, stayed 'healthy' throughout. In round 1, killing the holder made the second bind the durable and go healthy, so the wait ends early only when the holder goes."
+      "criterion": "Every refusal names its input before anything registers, including the Autopilot sizing and priority-class rules now in gcp/clusteredhub_autopilot.go, and no seed is echoed.",
+      "surface": "pulumi preview of the README's program against the same API server, one input broken per run",
+      "command": "python3 ../mutate.py <case> && pulumi preview --non-interactive (20 cases)",
+      "observed": "Each exits 1 naming its input: natsCpu 100m (at least 400m), natsCpu 40 (at most 29900m), natsCpu 8 with 5Gi (1-6.5 GiB per CPU), tailnet.listener.cpu 100m (at least 200m), priorityClassName system-node-critical (system- prefix), a missing PriorityClass, tailnetAuthKey without tailnet, a tag-pinned image, natsReplicas 4, tailnet.replicas 1, natsMemory 4Gi (floor 4.31 GiB), maxFileStoreGb 46 (needs 46.1), seeds in storageClassName/users[0].machineId/tailnetAuthKey ('holds an nkey seed (not echoed)'), a 45-byte name, duplicate clientNamespaces, a durable collision. The seed appears in no output.",
+      "headSha": "253b920c5f57c4e78a5b768b0f627d79df9ee7ea",
+      "negativeControl": "Boundary inputs are accepted: natsReplicas 1, and natsCpu 4 with natsMemory 5Gi (1.27 GiB per CPU) -> preview exit 0."
+    },
+    {
+      "criterion": "The tailnet session listener takes the replica count and byte limit, and the hub's grants include INFRA-546's bucket update grant, which the listener's 30 s keeper now uses.",
+      "surface": "envoy-listener built at 253b920c with the tailnet Deployment's exact environment (only NATS_URLS and the seed path changed) on three nats-server v2.15.1 that use the engine-rendered nats.conf and auth.conf",
+      "command": "run.sh servers; run.sh listener 1; run.sh listener 3; nats req '$JS.API.STREAM.UPDATE.KV_envoy_interests' <config with num_replicas 1>; curl localhost:1822{0,1,2}/jsz?streams=true&config=true; curl -H 'Host: <h>' http://127.0.0.1:9020/v1/sessions",
+      "observed": "ENVOY_NOTIFICATIONS at R3/max_bytes 44023414784 and KV_envoy_interests/sessions/roles at R3 on all three servers after the R1 start and the R3 restart, with no permission violation. /v1/sessions 200 for envoy-hub.example-tailnet.ts.net:9020, 421 for evil.example.com. KV_envoy_interests lowered to R1 while the listener ran -> back at R3 within 20 s.",
+      "headSha": "253b920c5f57c4e78a5b768b0f627d79df9ee7ea",
+      "negativeControl": "With $JS.API.STREAM.UPDATE.KV_envoy_interests removed from the listener user (servers reloaded) and the bucket lowered to R1 by the host user -> the keeper got 'Publish Violation - Subject \"$JS.API.STREAM.UPDATE.KV_envoy_int...\"' and the bucket stayed R1 for the 54 s watched."
     },
     {
       "criterion": "The rendered NATS configuration is run by three local nats-server processes: they form a cluster, a stream created at three copies survives one server's kill with a leader and no lost publish, and a user added and removed through the rendered auth file reloads with no restart and no client reconnect.",
       "surface": "Three local nats-server v2.15.1 processes with the real nats-server-config-reloader v0.24.0 and prometheus-nats-exporter v0.20.2, on the helm v3.20.2 render of the component's values",
       "command": "cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/",
-      "observed": "ok 41.451s. SIGKILL of R3 leader envoy-nats-2 after 212 of 1000 acks; envoy-nats-1 led 4.815 s later; every acknowledged message stored exactly once. Users reloaded with cid 28 and 0 reconnects, and the PIDs did not change.",
-      "headSha": "f589463471e3f9d0c9dca4a732c9a427c2cb4006",
-      "negativeControl": "(e) and (f) of the same run: a no_auth_user change and a lower max_file_store are each refused by reload."
+      "observed": "ok 30.385s. SIGKILL of R3 leader envoy-nats-1 after 210 of 1000 acks; envoy-nats-2 led 6.62 s later; every acknowledged message stored exactly once. Users reloaded with cid 20 and 0 reconnects, and the PIDs did not change.",
+      "headSha": "253b920c5f57c4e78a5b768b0f627d79df9ee7ea",
+      "negativeControl": "(e) and (f) of the same run: a no_auth_user change and a lower max_file_store are each refused by reload, and only a restart applies them."
     }
   ],
   "observations": [
-    "Steps 1-2 of the disk growth (claim expansion) were not driven: the control plane has no storage provisioner, so the claims stay Pending.",
-    "Resolved since round 3: tailnet_service.go and its test at f589463 are identical to legion/INFRA-560@origin (e0889829) and to 6151bc54 (jj diff --stat: 0 files changed), and the PR body's Chain line now says so.",
-    "Not reachable on this surface: a real tailscaled and the Linux PID-1 signal drop, the README PromQL, and GKE-only behaviour (GMP, Dataplane V2, Autopilot) belong to INFRA-551's live proof."
+    "The workspace was recreated before this round, so every tool was installed again under $TMPDIR. One early command ran in the workspace root because its cd failed, and left a go.work.sum change and a throwaway nkey seed file in the working copy. Neither was committed or pushed; the commit holding them was abandoned, and jj status is clean.",
+    "Not reachable on this surface, unchanged: claim expansion (no storage provisioner), a real tailscaled and the Linux PID-1 signal drop, the README PromQL, and GKE-only behaviour (GMP, Dataplane V2, Autopilot scheduling) belong to INFRA-551's live proof."
   ]
 }
