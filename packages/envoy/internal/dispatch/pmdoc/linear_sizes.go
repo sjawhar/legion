@@ -16,9 +16,6 @@ const (
 	// renderFullTarget is smaller: large enough for growthStep's quadratic margin, small enough
 	// that even the slowest shape (`<a`) stays fast - rendering is not bound by MaxDocumentBytes.
 	renderFullTarget = 512 << 10
-	// runFullTarget is TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds's full size: the
-	// mebibyte a document may hold, of a run, of footnote labels or of line feeds.
-	runFullTarget = 1 << 20
 	// updateSeedTarget is TestUpdateIsLinearInTheBlockCount's seed of one-word paragraphs: the
 	// mebibyte a document may hold, which a rebuild from a stored rendering writes whole.
 	updateSeedTarget = 1 << 20

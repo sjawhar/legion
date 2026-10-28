@@ -48,7 +48,7 @@ import (
 // TurnScopeOverlay is the one settings overlay every Legion role's Oh My Pi gets, pod or pane
 // (turnscope.yml, which says why): bash.autoBackground and async, both off, and nothing else. Apply
 // writes it for a pod; a runtime with no overlay mechanism of its own (runtime/tmux) writes it
-// directly, named first in a pane's PI_CONFIG_FILES.
+// directly, named last in a pane's PI_CONFIG_FILES.
 //
 //go:embed turnscope.yml
 var TurnScopeOverlay []byte
@@ -137,6 +137,25 @@ func Apply(environ []string, stateDir string) ([]string, error) {
 // removed is environ without its entries for name.
 func removed(environ []string, name string) []string {
 	return slices.DeleteFunc(environ, func(pair string) bool { return strings.HasPrefix(pair, name+"=") })
+}
+
+// CheckOverlay refuses file, a settings overlay a role's PI_CONFIG_FILES names, unless it is a
+// regular file this process can open, as the role's Oh My Pi must: Oh My Pi refuses to start on an
+// overlay it cannot read ("Config overlay not found"). A symbolic link is followed, since a
+// ConfigMap's file is one.
+func CheckOverlay(file string) error {
+	info, err := os.Stat(file)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", file)
+	}
+	opened, err := os.Open(file)
+	if err != nil {
+		return err
+	}
+	return opened.Close()
 }
 
 // EnsureStateHome makes the directory Oh My Pi's state root resolves to under environ's

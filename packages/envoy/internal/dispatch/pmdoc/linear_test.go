@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -70,6 +71,46 @@ func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 			})
 		})
 	}
+	// Two-part shapes: an opener half repeated, then a closer half repeated, so each closer looks
+	// back past every run before it. goldmark's ProcessDelimiters walks a closer back over every
+	// earlier run of either character, so `~~a ` then `a* ` and `*a ` then `a~ ` took 3.8-4.2 s at
+	// 112 KB, and pairing `~` runs by length makes `~~a ` then `a~ ` and `~a ` then `a~~ ` the same
+	// walk (dispatch://INFRA-534). The rule of three keeps every `*` of `a*a`, which can both open
+	// and close, from every `**` before it, so a walk passed each of them: `**a ` then `a*a` took
+	// 100 s at 437 KiB. Each is read as a rendering is and as a caller's write is; a write of a
+	// mebibyte may be refused for the elements it makes, and a shape nesting past maxInlineNesting
+	// for that, each timed all the same.
+	for _, shape := range []struct{ before, open, close, after string }{
+		{"", "~~a ", "a~ ", ""},
+		{"", "~a ", "a~~ ", ""},
+		{"", "~~a ", "a* ", ""},
+		{"", "*a ", "a~ ", ""},
+		{"~a [", "~~a ", "a~ ", "](u)"},
+		{"", "*~a", "~*", ""},
+		{"", "**a ", "a*a", ""},
+		{"", "a**a*a ", "a*a**a", ""},
+	} {
+		pair := len(shape.open) + len(shape.close)
+		full := parseFullTarget / pair
+		small := full / growthStep
+		name := fmt.Sprintf("%s%s…%s…%s", shape.before, shape.open, shape.close, shape.after)
+		for _, reader := range []struct {
+			name  string
+			parse func(string) (*Node, error)
+		}{{"ParseRendering", ParseRendering}, {"Parse", Parse}} {
+			t.Run(reader.name+" "+name, func(t *testing.T) {
+				growsLinearly(t, fmt.Sprintf("%s of %q", reader.name, name), []int{small * pair, full * pair}, linearSlack, func(size int) (time.Duration, error) {
+					repeats := size / pair
+					text := shape.before + strings.Repeat(shape.open, repeats) + strings.Repeat(shape.close, repeats) + shape.after
+					return cpuTimeOf(again(func() {
+						if _, err := reader.parse(text); err != nil && !refusedForItsMarks(err) {
+							t.Fatalf("%s of %d bytes of %q: %v", reader.name, size, name, err)
+						}
+					}))
+				})
+			})
+		}
+	}
 	for _, shape := range []string{"[a", "a_b&", "<a", "[^a"} {
 		full := renderFullTarget / len(shape)
 		small := full / growthStep
@@ -87,6 +128,13 @@ func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 			})
 		})
 	}
+}
+
+// refusedForItsMarks reports whether err refuses markdown for the inline marks it makes: more
+// elements than a write may make, or marks nested past maxInlineNesting.
+func refusedForItsMarks(err error) bool {
+	nesting := nestingError{}
+	return errors.Is(err, ErrTooManyElements) || errors.As(err, &nesting) && nesting.inline
 }
 
 // growthStep is the size ratio TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText's two
@@ -148,58 +196,77 @@ const linearSlack = 3
 // labels; a text of many line feeds, whose every line joined the rest of the text to ask whether
 // only whitespace followed; and a run of `~` in a paragraph, which goldmark's strikethrough parser
 // scanned again from every `~` in it. Before the fix 128 KiB of each text took 18-115 s to render
-// and 32 KiB of `[^a` 7.7 s. Each shape is timed at growthStep's fraction of runFullTarget and at
-// the whole of it, and the parse of a run of `~` at parseFullTarget's, through growsLinearly, as
-// TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText times its shapes: no wall-clock bound
-// holds on every runner, and under -race the work at the full non-race size alone outlasted one.
+// and 32 KiB of `[^a` 7.7 s.
+//
+// Each shape runs at two sizes through growsLinearly, measuring process CPU time rather than a
+// fixed wall-clock budget. The sizes are eightfold apart, so a quadratic renderer grows 64x where
+// a linear renderer may grow 24x (linearSlack*growthStep). renderFullTarget and parseFullTarget
+// use smaller targets under -race, where the instrumentation makes healthy work slower but cannot
+// change its growth ratio.
 func TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds(t *testing.T) {
 	paragraph := func(text string) *Node {
 		return &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: text}}}
 	}
+	doc := func(blocks ...*Node) *Node {
+		return &Node{Type: "doc", Children: blocks}
+	}
 	definition := func(label string) *Node {
 		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": label}, Children: []*Node{paragraph("x")}}
 	}
-	run := func(unit string) func(size int) []*Node {
-		return func(size int) []*Node { return []*Node{paragraph(strings.Repeat(unit, size/len(unit)))} }
-	}
-	labels := func(after ...*Node) func(size int) []*Node {
-		return func(size int) []*Node {
-			return append([]*Node{paragraph(strings.Repeat("[^a", size/3) + "]")}, after...)
-		}
+	labels := func(size int) string {
+		label := strings.Repeat("[^a", (size-1)/3) + "]"
+		return label + strings.Repeat("x", size-len(label))
 	}
 	for _, test := range []struct {
-		name   string
-		blocks func(size int) []*Node
+		name string
+		doc  func(int) *Node
 	}{
-		{"a run of *", run("*")},
-		{"a run of _", run("_")},
-		{"a run of ~", run("~")},
-		{"[^a before one ] with no footnote", labels()},
-		{"[^a before one ] with a short label defined", labels(definition("a"))},
-		{"[^a before one ] with a long label defined", labels(definition(strings.Repeat("b", 1000)))},
-		{"line feeds", run("a\n")},
+		{"a run of *", func(size int) *Node { return doc(paragraph(strings.Repeat("*", size))) }},
+		{"a run of _", func(size int) *Node { return doc(paragraph(strings.Repeat("_", size))) }},
+		{"a run of ~", func(size int) *Node { return doc(paragraph(strings.Repeat("~", size))) }},
+		{"[^a before one ] with no footnote", func(size int) *Node { return doc(paragraph(labels(size))) }},
+		{"[^a before one ] with a short label defined", func(size int) *Node {
+			return doc(paragraph(labels(size)), definition("a"))
+		}},
+		{"[^a before one ] with a long label defined", func(size int) *Node {
+			return doc(paragraph(labels(size)), definition(strings.Repeat("b", 1000)))
+		}},
+		{"line feeds", func(size int) *Node { return doc(paragraph(strings.Repeat("a\n", size/2))) }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			growsLinearly(t, "rendering "+test.name, []int{runFullTarget / growthStep, runFullTarget}, linearSlack, func(size int) (time.Duration, error) {
-				doc := &Node{Type: "doc", Children: test.blocks(size)}
+			growsLinearly(t, "rendering "+test.name, []int{renderFullTarget / growthStep, renderFullTarget}, linearSlack, func(size int) (time.Duration, error) {
+				document := test.doc(size)
 				return cpuTimeOf(again(func() {
-					if _, err := Render(doc); err != nil {
-						t.Fatalf("render %s of %s: %v", sizeText(size), test.name, err)
+					if _, err := Render(document); err != nil {
+						t.Fatalf("render %s at %s: %v", test.name, sizeText(size), err)
 					}
 				}))
 			})
 		})
 	}
-	t.Run("parsing a run of ~", func(t *testing.T) {
-		growsLinearly(t, "parsing a run of ~", []int{parseFullTarget / growthStep, parseFullTarget}, linearSlack, func(size int) (time.Duration, error) {
-			markdown := "a" + strings.Repeat("~", size)
-			return cpuTimeOf(again(func() {
-				if _, err := Parse(markdown); err != nil {
-					t.Fatalf("parse a run of %s of ~: %v", sizeText(size), err)
-				}
-			}))
+	// A run after an escaped `~` may open or close, so its run is scanned rather than refused. A
+	// write of a mebibyte of escapes is refused for the elements they make, so `a\~~` repeated is
+	// read as a rendering is, which counts none and reads all of it.
+	for _, test := range []struct {
+		name     string
+		markdown func(int) string
+		parse    func(string) (*Node, error)
+	}{
+		{"a run of ~", func(size int) string { return "a" + strings.Repeat("~", size-1) }, Parse},
+		{"\\~ and a run of ~", func(size int) string { return "\\~" + strings.Repeat("~", size-2) }, Parse},
+		{"a\\~~ repeated", func(size int) string { return strings.Repeat("a\\~~", size/4) }, ParseRendering},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			growsLinearly(t, "parsing "+test.name, []int{parseFullTarget / growthStep, parseFullTarget}, linearSlack, func(size int) (time.Duration, error) {
+				markdown := test.markdown(size)
+				return cpuTimeOf(again(func() {
+					if _, err := test.parse(markdown); err != nil {
+						t.Fatalf("parse %s at %s: %v", test.name, sizeText(size), err)
+					}
+				}))
+			})
 		})
-	})
+	}
 }
 
 // A table whose every row holds an escaped pipe in a code span parses in time linear in its size,

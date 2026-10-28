@@ -288,9 +288,9 @@ Project issue filters live once, in the URL, and apply to both views (`?unclaime
 The text filter is capped at `SEARCH_QUERY_MAX` (`@legion/contracts/dispatch-tools`, 1,000 characters), because `?q=` lands in the page URL the load balancer refuses past 16 K: typing and pasting stop at the limit, and a longer `?q=` from a link is cut to it, on a code point, at the first edit.
 Once open, the strip stays as the reader left it while they filter in it — clearing the search box or removing the last chip included — until they close it or leave the project or its Issues tab, both of which unmount it (`ProjectPage` keys the strip by project and renders it only while Issues is showing). The stored preference is the only owner of that state: the strip reads it when it mounts, which covers the filters a route from another page, tab or project brings, and again when the signed-in identity resolves, never because the filter count moved. On a strip that is up the count also moves when the view toggle folds a `?status=` in or out (the List counts it, the Board does not) and when Back or Forward crosses entries of the Issues tab (the project key pill pushes a filterless entry beside a filtered one); none of these opens or closes the strip, whose trigger and chips keep every active filter visible and removable. Closing an empty strip stores `collapsed`, so filters arriving on a strip the reader closed show as chips beside a closed trigger instead of opening it. An active-filter chip longer than its row ends in an ellipsis and carries its whole text as `title`, so a 1,000-character search never widens the page.
 
-Resolved asks leave the Inbox and open-ask badges, but their thread and Conversation card remain available with the actor and reason. `features/refs/MarkdownBody.tsx` renders every question, answer, comment, reply, message and broadcast through Proof's own parser, in every surface that shows one (Inbox, margin, Conversation, the Agents and Broadcast pages, the phone review sheet, and the live view's turns of every kind, the session's own, the viewer's, another sender's and a reply sent through Dispatch, each re-parsed as the streamed text grows, at most once an animation frame); its `inline` variant drops the wrapping block for option labels and a resolution reason inline in a metadata line. A surface that cuts text to a line or two - a search hit's snippet, a reference hover card's body, an unfurl card, a reply quote, the margin's collapsed thread roots, the Broadcasts list and the per-recipient Sends strip - renders through `features/refs/MarkdownPreview.tsx` instead: the same engine and schema, every inline mark kept across every block (a heading's words, then the paragraph's bold, code, links and references, then each list item, on one line), and a CSS `line-clamp` on the rendered element after the parse, so a cut the preview makes never leaves half a mark and no surface shows the syntax of the text it formats. A fragment the server cut before the client saw it (a search hit's `ts_headline` snippet at its 24-word window) can arrive with a mark open on one side; `features/refs/markdown-fragment.ts` balances only such a fragment (`searchSnippetMarkdown`: a body under the window came back whole, and every character in it is the author's), pairs delimiter runs as CommonMark would and drops only the run or part of a run that could have matched across the cut, so a `**`, `*` or `` ` `` the parser reads as literal text (`Use ** for bold`, `2 * 3`, `press the \` key`) and anything inside a code span stay as written; a search hit's matched words are re-marked on the rendered text (`highlight`), and a reply quote's `Replying to <author> —` is a plain `lead` the parse never sees. Both components are one `useRenderedMarkdown` (`features/refs/useRenderedMarkdown.tsx`: the layout-phase parse, the literal-text fallback, the reference link pass, the `RefLink` portals and the `DispatchPicture` portals) over a paint function of their own, and load through `features/refs/markdown-engine.ts` (one headless engine per schema version, its soft-break policy chosen per parse: `softBreaks="space"`, the default, reads a single newline inside a paragraph as a space, as a hard-wrapped document means it, and `"line"`, which the live view's turns use, keeps it as a line break, as a model's prose means it; the headless parser drops its own ParserState on a parse it refuses, so the next parse builds a fresh one and a body the parser refuses never blanks the formatting of the next turn or card someone else is reading; the engine is built read-only (`createHeadlessProof({ blockSchema, readOnly: true })`), so a container directive the block schema refuses (`:::note` … `:::`), or a typed block whose content breaks its content rule (an ask holding a heading), is drawn as its literal fence lines around its formatted content and a Pandoc `::: warning` fence or a `::leaf` / `:text{` line reads as paragraph text, where a refused directive or such a line once sent the whole body to the literal-text fallback, which raw HTML still takes, and a typed block whose content broke its rule vanished with its text; `@legion/proof-editor`'s headless parser resolves CommonMark's reference-style links and images, `[text][id]` with its `[id]: url`, which Milkdown's preset has no node for, to the link or image they name, and leaves an undefined reference as the literal text its author wrote; `useMarkdownHeadline` projects Markdown to the plain words a link's text or a card's title can hold, which is what a reference link to an ask or comment shows), and `features/refs/reference-target.ts` holds the reference queries `RefLink`, `Unfurl`, `RefPreview` and `issue/useItemLanding.ts` share, outside `Unfurl.tsx` so the preview's import of `RefLink` closes no cycle. `features/refs/markdown-surfaces.test.tsx` lists each clamped surface and every kind of transcript turn, fails on a literal markdown character for one formatted fixture, and holds a Dispatch picture to its shape on each: a block `<img>` captioned by its file name on a transcript turn, a 40 px thumbnail beside the caption on the six preview surfaces (the hover card, the unfurl card, a reply quote, the margin's thread preview, a search snippet, the broadcasts list). Once the schema and the headless engine are loaded (the first body on the page loads them), a body renders synchronously in the layout phase of the commit that mounts it, so a list inserting a turn sees the turn's full height in that commit and `ViewportAnchor` compensates in one measurement; the browser's own scroll anchoring never has to adjust for growth landing in the frame after a programmatic scroll. Only the very first render on a page, or a schema that failed to load, takes the asynchronous path.
+Resolved asks leave the Inbox and open-ask badges, but their thread and Conversation card remain available with the actor and reason. `features/refs/MarkdownBody.tsx` renders every question, answer, comment, reply, message and broadcast through Proof's own parser, in every surface that shows one (Inbox, margin, Conversation, the Agents and Broadcast pages, the phone review sheet, and the live view's turns of every kind, the session's own, the viewer's, another sender's and a reply sent through Dispatch, each re-parsed as the streamed text grows, at most once an animation frame); its `inline` variant drops the wrapping block for option labels and a resolution reason inline in a metadata line. In the block variant a task item (`- [x] done`) draws a disabled checkbox ticked as its source is (`features/refs/task-checkboxes.ts`), while the `inline` variant and `MarkdownPreview` draw no list and so no box. A surface that cuts text to a line or two - a search hit's snippet, a reference hover card's body, an unfurl card, a reply quote, the margin's collapsed thread roots, the Broadcasts list and the per-recipient Sends strip - renders through `features/refs/MarkdownPreview.tsx` instead: the same engine and schema, every inline mark kept across every block (a heading's words, then the paragraph's bold, code, links and references, then each list item, on one line), and a CSS `line-clamp` on the rendered element after the parse, so a cut the preview makes never leaves half a mark and no surface shows the syntax of the text it formats. A fragment the server cut before the client saw it (a search hit's `ts_headline` snippet at its 24-word window) can arrive with a mark open on one side; `features/refs/markdown-fragment.ts` balances only such a fragment (`searchSnippetMarkdown`: a body under the window came back whole, and every character in it is the author's), pairs delimiter runs as CommonMark would and drops only the run or part of a run that could have matched across the cut, so a `**`, `*` or `` ` `` the parser reads as literal text (`Use ** for bold`, `2 * 3`, `press the \` key`) and anything inside a code span stay as written; a search hit's matched words are re-marked on the rendered text (`highlight`), and a reply quote's `Replying to <author> —` is a plain `lead` the parse never sees. Both components are one `useRenderedMarkdown` (`features/refs/useRenderedMarkdown.tsx`: the layout-phase parse, the literal-text fallback, the reference link pass, the `RefLink` portals and the `DispatchPicture` portals) over a paint function of their own, and load through `features/refs/markdown-engine.ts` (one headless engine per schema version, its soft-break policy chosen per parse: `softBreaks="space"`, the default, reads a single newline inside a paragraph as a space, as a hard-wrapped document means it, and `"line"`, which the live view's turns use, keeps it as a line break, as a model's prose means it; the headless parser drops its own ParserState on a parse it refuses, so the next parse builds a fresh one and a body the parser refuses never blanks the formatting of the next turn or card someone else is reading; the engine is built read-only (`createHeadlessProof({ blockSchema, readOnly: true })`), so a container directive the block schema refuses (`:::note` … `:::`), or a typed block whose content breaks its content rule (an ask holding a heading), is drawn as its literal fence lines around its formatted content and a Pandoc `::: warning` fence or a `::leaf` / `:text{` line reads as paragraph text, where a refused directive or such a line once sent the whole body to the literal-text fallback, which raw HTML still takes, and a typed block whose content broke its rule vanished with its text; `@legion/proof-editor`'s headless parser resolves CommonMark's reference-style links and images, `[text][id]` with its `[id]: url`, which Milkdown's preset has no node for, to the link or image they name, and leaves an undefined reference as the literal text its author wrote; `useMarkdownHeadline` projects Markdown to the plain words a link's text or a card's title can hold, which is what a reference link to an ask or comment shows), and `features/refs/reference-target.ts` holds the reference queries `RefLink`, `Unfurl`, `RefPreview` and `issue/useItemLanding.ts` share, outside `Unfurl.tsx` so the preview's import of `RefLink` closes no cycle. `features/refs/markdown-surfaces.test.tsx` lists each clamped surface and every kind of transcript turn, fails on a literal markdown character for one formatted fixture, and holds a Dispatch picture to its shape on each: a block `<img>` captioned by its file name on a transcript turn, a 40 px thumbnail beside the caption on the six preview surfaces (the hover card, the unfurl card, a reply quote, the margin's thread preview, a search snippet, the broadcasts list). Once the schema and the headless engine are loaded (the first body on the page loads them), a body renders synchronously in the layout phase of the commit that mounts it, so a list inserting a turn sees the turn's full height in that commit and `ViewportAnchor` compensates in one measurement; the browser's own scroll anchoring never has to adjust for growth landing in the frame after a programmatic scroll. Only the very first render on a page, or a schema that failed to load, takes the asynchronous path.
 
-A typed block in a body is drawn as a document draws it (INFRA-526). `markdown-engine.ts` hands the headless engine a `renderBlock` (`features/doc/typed-block-drawing.ts`, below), which becomes each typed block's `toDOM`: a callout gets `renderTypedBlock`'s header (the block's name, its `kind` badge and its `title`), and an `ask` block gets the decision shell (`renderAskBlockShell`). `useRenderedMarkdown` mounts the read-only decision card into the shell's slots. That is `TextAskBlockCard`, `AskBlockCard` with `readOnly` and `detached`, which the app provides through the `TextAskCard` context (`features/refs/markdown-cards.ts`). It is a context because `AskBlockCard` → `AskOptionRow` → `MarkdownBody` → `useRenderedMarkdown` would be an import cycle. The hook folds the source option list (`data-dispatch-ask-options="rows"`) only on a shell where it mounted a card, so a body with no provider keeps the options as a list. `detached` drops the malformed card's "re-activates once it parses" line, since no server reads a body. The engine's parse resets every attribute the block schema marks `server` to its default: no server wrote one in a body, so a body never shows an answer, a choice or a copy source that its author typed. The header and card rules in `styles.css` apply under `.dispatch-markdown` as under `.dispatch-doc`. The `inline` variant, `MarkdownPreview` and `useMarkdownHeadline` draw no header or card and stay one line of text.
+A typed block in a body is drawn as a document draws it (INFRA-526). `markdown-engine.ts` hands the headless engine a `renderBlock` (`features/doc/typed-block-drawing.ts`, below), which becomes each typed block's `toDOM`: a callout gets `renderTypedBlock`'s header (the block's name, its `kind` badge and its `title`), and an `ask` block gets the decision shell (`renderAskBlockShell`). `useRenderedMarkdown` mounts the read-only decision card into the shell's slots. That is `TextAskBlockCard`, `AskBlockCard` with `readOnly` and `detached`, which the app provides through the `TextAskCard` context (`features/refs/markdown-cards.ts`). It is a context because `AskBlockCard` → `AskOptionRow` → `MarkdownBody` → `useRenderedMarkdown` would be an import cycle. The hook finds each shell's slots with `askShellSlots` and writes the shell through `applyAskBlockShell`, which folds the source option list (`data-dispatch-ask-options="rows"`), only on a shell where it mounted a card, so a body with no provider keeps the options as a list (INFRA-612). `detached` drops the malformed card's "re-activates once it parses" line, since no server reads a body. The read-only parse (`remarkReadOnlyDirectives` in `@legion/proof-editor`) drops every attribute the block schema marks `server` from a typed block it keeps, so each reads at its default: no server wrote one in a body, so a body never shows an answer, a choice or a copy source that its author typed. The header and card rules in `styles.css` apply under `.dispatch-markdown` as under `.dispatch-doc`. The `inline` variant, `MarkdownPreview` and `useMarkdownHeadline` draw no header or card and stay one line of text.
 
 An open ask card lists every session the server routes the ask's answer and replies to, under `Reaches N` (`features/inbox/AskRecipients.tsx`), which sits below the answer form and is folded at rest behind the shared `DisclosureToggle`: routing is chrome a reader opens less than once per visit, and the count alone answers the common question, so it never sits between the question and its options (LEGION-67). Two groups make up that set. First the ask's followers — the session that opened it, every session that replied, and any session a human added — read from the same `GET /asks/{id}` thread fetch the card already makes; each has an `Unfollow` control that confirms in the shared `UnsubscribeDialog` before `DELETE /asks/{id}/followers/{session}`. Then, under `via issue subscription` (or `via document subscription` for an ask on a project document), every session whose persisted Envoy interests cover the owner's topic family and that is not already a follower — the same rows as the issue header's Subscribed agents panel, read through the same `["subscribers", <key or artifact id>]` query (`GET /issues/{key}/subscribers` or `GET /artifacts/{id}/subscribers`, human-only, so the card only asks once `/auth/whoami` says the principal is a user; each fetch is two Envoy listener round trips, so the card holds it fresh for 30 s rather than refetching on every mount and focus, and `nav.e2e.ts` exempts it from the Inbox no-per-issue-request guard) — when that fetch fails the card shows `Subscribers unavailable — Envoy listener unreachable.` with Retry under the heading rather than passing the follower count off as the whole set; each removable row has an `Unsubscribe` control that confirms and then `DELETE /issues/{key}/subscribers/{session}` (or the artifact route), the route that actually stops delivery, while a row subscribed only through a wider topic (`notifications.dispatch.>`) names that topic and has no control. Unfollowing a session that is also an issue subscriber moves it into the subscription group rather than off the card: the ask still reaches it, and its Unfollow confirmation says so (`still reach them through the issue subscription`) instead of promising delivery stops. Every row draws its session through `AgentName` (`features/refs/AgentName.tsx`): its name, its running state from the agent registry (not the subscribers endpoint's `live`, a second snapshot of the same listener list), and its live link; the confirmations name it through `useAgentText`, and the removed session is told. Both groups refresh over SSE, so a session that unfollows, re-follows, or is unsubscribed from the header appears or leaves without a reload.
 
@@ -901,7 +901,7 @@ prosemirror-tables patch, and the four for an empty last row fail without the pr
 
 A decision block is a card whose chrome is React and whose question text stays the editor's. `features/doc/ask-block.ts` mounts a ProseMirror `NodeView` for `ask` (`installTypedBlocks`, merged into the library's node views right after the editor is created, in both `ProofDocument` and `VersionView`, which also mounts `renderTypedBlock`'s node view for every other typed type, so the header it draws is never in the document's HTML, and a paste of a rendered block reads its `[data-proof-block-content]` hole rather than that header): it owns only the shell — the urgency accent and tint (`askUrgencyAccent`, `askBlockTint`, `askBlockPill` in `theme/classes.ts`), a `contenteditable="false"` header slot, the content hole, and a `contenteditable="false"` footer slot — and registers each mounted block as an `AskBlockHost` (slots + node) in React state; `update()` swaps the node and re-registers without remounting the content hole. `ignoreMutation` excludes the slots so ProseMirror never re-parses the card as an edit, and `stopEvent` keeps keystrokes in the answer controls away from the editor's keymaps. `features/doc/AskBlockCard.tsx` is the host: it portals into the two slots (the same `createPortal` pattern `MarkdownBody` uses for reference anchors) and renders nothing the card already has. The header names the block type — the urgency pill (`URGENCY_LABELS` from `features/inbox/ask-urgency.ts`) and "Decision" — and the footer is `<AskCard frame="block" variant="compact" thread="collapsed">` once the server has indexed the block into an ask row and the surface is live; this compact thread mode shows the two newest replies and keeps an answered ask's Reply composer behind its **Write a reply** control. `frame="block"` drops the card's own frame, urgency accent and notch, question, and block link, since the block shell draws the frame, the editor shows the question, and the block is the link's target (the card's metadata line still says who asked and when, with the `dispatch://` reference; `AskCompletionCard` takes the same `frame` and skips the question). Until the row exists, and on a read-only surface (closed issue, version view), the block reads its own attributes instead: the header adds who asked and when (from the row, if any), "Answered by … · when", and a Resolved / Closed pill, and the footer shows the options with the chosen ones ticked (`AskOptionList`) and the note — no composer, no Ask back. `ProofDocument` passes the card an `onAnswered` that invalidates `["artifact", id]`, since the server writes the outcome into the block. `@sjawhar/proof-editor`'s stylesheet is unlayered, so its element typography (`.milkdown h1-h3`, `p`, `ul`/`ol`, `li`, `code`, `pre`, `blockquote`, `a`, `hr`) reaches the slots and outranks the card's layered utilities — `space-y-*` is a `margin-block-end` that `.milkdown li { margin-bottom }` would beat. Inside the slots, `styles.css` rolls those declarations back with `revert-layer` (the cascade falls through to preflight, the card's utilities, and `prose`, as in the Inbox), so the card's own spacing and type are intact and it needs no `gap` workaround. The slots themselves are `not-prose` (`AskBlockView` sets it on both, so everything React renders into them — the open card, the answered or resolved record, and the thread beside it — is kept off the editor root's `prose`), and Typography cannot re-enter `prose` inside `not-prose`, so a `MarkdownBody` in the footer (a reply, an answer note) gets its `prose-sm` essentials — paragraph and list spacing, markers and indent, link, inline code, the fenced-code box, quote styling, and the surrounding text colour — from scoped rules in `styles.css` instead. Importing the library into a cascade layer below utilities would remove both workarounds but would also let the root's `prose` restyle every document; that doc-theme decision is open. The rows render the options, so the source `- Option: description` list is folded by default (`styles.css`, under `[data-dispatch-ask-options="rows"]`); it is the only place a human edits or adds options, so `askBlockEditingPlugin` (a view plugin `installTypedBlocks` adds) marks the block whose range holds `selection.$from` with `data-dispatch-ask-editing="true"` on every state update, and the list shows on that block alone — click into the question to reveal it, click elsewhere to fold it — and never where nothing can be edited (a read-only render) or once the decision is no longer open.
 
-The pure drawing those node views use lives in `features/doc/typed-block-drawing.ts`: `renderTypedBlock`, `askBlockFacts` (what an `ask` node says about itself), `askBlockShell` (the decision shell's frame and content classes, the attributes its frame stamps — urgency, state, and `data-dispatch-ask-malformed` only while malformed — and whether a mounted card folds the source option list, the one place each rule lives), `renderAskBlockShell` (the decision shell as a static spec, which `AskBlockView` and the read-only text engine both draw, so the two cannot drift; `AskBlockView` adds `data-dispatch-ask-block`, `data-block-id` and `data-dispatch-ask-options` over it, and re-applies the shell's classes and stamps on every update), and the `AskBlockHost` type `AskBlockCard` takes. It imports only types from `prosemirror-model` and small value modules (`theme/classes.ts`, `features/inbox/ask-urgency.ts`) — no editor library, no `picture-view`, no React — so the entry chunk's text engine can draw typed blocks without pulling the editor in. The editors never put the header in a document's HTML; the text engine does put it, and the decision shell, in a body's HTML, through the headless engine's `renderBlock`. A paste of a body still reads only the `[data-proof-block-content]` hole and the `data-proof-block-attr-*` copy attributes, which the schema's `toDOM` wrapper keeps on a host drawing.
+The pure drawing those node views use lives in `features/doc/typed-block-drawing.ts`: `renderTypedBlock`, `askBlockFacts` (what an `ask` node says about itself), `askBlockShell` (the decision shell's frame and content classes, the attributes its frame stamps — urgency, state, and `data-dispatch-ask-malformed` only while malformed — and whether a mounted card folds the source option list, the one place each rule lives), `renderAskBlockShell` (the decision shell as a static spec, which `AskBlockView` and the read-only text engine both draw, so the two cannot drift), `askShellSlots` and its `AskShellSlots` (a shell's own header, content hole and footer, never a nested decision's: the one slot lookup both use), `applyAskBlockShell` (writes the shell's classes, stamps and fold over a drawn shell where a card mounts: `AskBlockView` on every update, after it adds the editor-only `data-dispatch-ask-block` and `data-block-id`, and the text path once per paired shell), and the `AskBlockHost` type `AskBlockCard` takes. It imports only types from `prosemirror-model` and small value modules (`theme/classes.ts`, `features/inbox/ask-urgency.ts`) — no editor library, no `picture-view`, no React — so the entry chunk's text engine can draw typed blocks without pulling the editor in. The editors never put the header in a document's HTML; the text engine does put it, and the decision shell, in a body's HTML, through the headless engine's `renderBlock`. A paste of a body still reads only the `[data-proof-block-content]` hole and the `data-proof-block-attr-*` copy attributes, which the schema's `toDOM` wrapper keeps on a host drawing.
 
 `installTypedBlocks` also mounts `pictureView` (`features/doc/picture-view.ts`) for every `image` node, in both editors, because the browser cannot fetch `dispatch://`. A source naming an artifact at a version (`![shot.png](dispatch://KEY/artifact/shot-png@v1)`, the line `useDraftUpload` writes for a pasted picture) is a `<span data-dispatch-doc-picture="<reference>">` holding an `<img>` loaded lazily from the version's bytes route (`artifactVersionPath` in `api/client.ts`), with `pictureClassName` from `features/refs/DispatchPicture.tsx` and the caption `pictureReference` (`features/refs/routes.ts`, the one reading of an `image` node's `src` and `alt` it shares with `pictureSerializer`) gives it — the trimmed `alt`, or the artifact's slug when that is empty. A version the browser cannot draw (a markdown document, whose version route answers JSON; another file; a missing version — the `<img>`'s `error`, whose listener is attached before `src` is set so an error raised at once is caught), or a source that pins no version or names something other than an artifact, is a plain-DOM `<a href="<SPA path>" data-dispatch-href="<reference>">` whose text is the reference's short form (`shortForm` in `features/refs/routes.ts`, e.g. `CORE-1 notes-md`): in the live editor a click on it reaches the article's click handler and navigates in the app (`stopEvent` returns true inside the link — for every event but a `dragstart`, which is left to ProseMirror so a drag begun over the link's words moves the picture node instead of dropping the browser's own link HTML, while `copy` and `cut` stay stopped so a native copy of those words works — so the click is a click on a link rather than ProseMirror's node-selection gesture; events on the `<img>` are the editor's, so clicking a picture selects it); in the read-only version view the click is taken by proof-editor's `markdownLinkClickPlugin` (its `handleDOMEvents.click`, which `stopEvent` never gates), which opens the artifact's page in a new tab (`window.open` with `noopener,noreferrer`); a Ctrl/Cmd-click in the live editor goes the same way; a middle click uses the real `href`; and in the live editor hovering the link shows two cards — `RefPreviewHost`'s reference card, which triggers on `data-dispatch-href`, and the library's `Open link` card, which the plugin shows for any `a[href]` in an editable view outside `[data-mark-id]` — the one element in the editor that shows both, since a link mark has `href=""` and a web link no `data-dispatch-href`. A primary-button mousedown on the link first puts the editor's caret just after the picture node (`pictureNodeView`, in `picture-view.ts`, hands `pictureView` a `placeCaretAfter` that dispatches a collapsed `TextSelection` at `getPos() + node.nodeSize`): Firefox does not focus a link on mousedown, the editing host takes the focus instead, and ProseMirror then restores the editor's own selection to the DOM, wherever it last was — the document's start for a reader who has not clicked into the text — which scrolls a long document away from the link before the mouseup and the click land; with the caret beside the picture nothing scrolls, and the click reaches the handler with a collapsed selection (`e2e/picture-link-click.e2e.ts`, which runs in Firefox for this). The listener does not `preventDefault`, since Firefox would then start no drag from the link. Any other source — a picture on another website, a relative path, a `dispatch://` string `parseDispatchReference` refuses — is the schema's own `toDOM`, as before. The view has no `contentDOM` and no `update`, so a node whose attributes change is recreated and one whose attributes are unchanged keeps its DOM across a collaborator's edits, the picture not fetched again; it sets no `ignoreMutation`: prosemirror-view's default for a view without a `contentDOM` already ignores the swap from `<img>` to `<a>`, the one DOM change the view makes itself, and still reports the selection records the editor needs.
 
@@ -967,10 +967,11 @@ import each other under `web/src`, confirm `bun run lint` fails naming both, and
 ## End-to-end tests
 
 `bun run e2e` drives Playwright against the real Go Dispatch server and
-Postgres. The harness runs `e2e/run-server.sh` unless
-`PLAYWRIGHT_BASE_URL` selects an already deployed server. The harness defaults
-to `DISPATCH_E2E_PORT=8777`, which keeps its temporary server separate from
-the production listener on port 8766, but `DATABASE_URL` is required: the
+Postgres. It runs Playwright through `e2e/run.ts`, which starts the harness
+(`e2e/run-server.sh` and its fakes) unless `PLAYWRIGHT_BASE_URL` selects an
+already deployed server. Every harness server serves on a port the OS chooses
+unless its variable sets one (below), so the temporary server never meets the
+production listener on port 8766, but `DATABASE_URL` is required: the
 database must be isolated because `e2e/seed.ts` truncates it before every
 scenario and never falls back to `dispatch_c`. It runs the server in cookie
 identity, the production mode, and signs `alice` and `bob` in through the
@@ -993,15 +994,24 @@ assertion would still pass with the change reverted; if it would, the fixture sa
 clear-on-send check). Second, when something other than the assertion decides what it covers - fixture seeding,
 a login's casing - make that selector an assertion too, then lapse the property once and confirm the assertion
 fires, since a selector check that cannot fire only looks like a guard. The one exception is a Playwright
-project's title `grep`; its fallback is the one-time manual check beside the `webkit-iphone` project below.
+project's `grep`: `webkit-iphone`'s title `grep` falls back on the one-time manual check beside that project
+below, and `iphone`'s `@phone` tag `grep` on the `--list` check under "Phone acceptance".
 
 `run-server.sh` builds the server with the caller's `go`, in the caller's
 environment, and execs the binary with every server
 setting pinned. It execs the binary rather than `go run`: the go command ignores
 only SIGINT and SIGQUIT, so a SIGTERM to `go run` ends the go command and leaves
-its server listening. Playwright kills the whole process group and the
+its server listening. The harness stops each process group it started and the
 skill-scenarios rig the whole process tree, so neither noticed, but a caller
-that signals the one pid it started (`kill $!`) needs it to be the server. The binary is one per
+that signals the one pid it started (`kill $!`) needs it to be the server. With
+`DISPATCH_E2E_PORT` unset the script execs the server through
+`scripts/e2e/lib/held-port.py exec --fd-env DISPATCH_LISTEN_FD`, which holds a
+socket on `127.0.0.1:0` from the moment the kernel chooses its port, sets
+`DISPATCH_PORT` and `DISPATCH_SERVER_URL` from it and execs in place, so the pid
+is still the server's; the server serves on that socket and reports it on
+stderr as `msg="dispatch: listening" addr=127.0.0.1:<port>`, the line a caller
+reads the port from (`e2e/harness-start.ts` does). Set, the server binds that
+port, and an occupied one fails with `address already in use`. The binary is one per
 checkout, `packages/envoy/dispatch-e2e` (gitignored), built under
 `flock packages/envoy/.dispatch-e2e.lock` so two harnesses starting at once in
 one checkout serialise their builds; Go rewrites it only when the source
@@ -1012,11 +1022,12 @@ key, passes no cookie signing key (the server generates one for its process, as
 directory. A caller's environment or `~/.config/legion/envoy.json` /
 `~/.local/share/dispatch/{app.json,signing-key}` therefore cannot point the
 test server at a live Envoy, dashboard origin or GitHub App (every Legion pane
-exports `ENVOY_URL`). The harness ports stay inputs because the server script reads them too; on
-the TypeScript side `e2e/harness-ports.ts` is the one place they are resolved. The secrets broker
+exports `ENVOY_URL`). `FAKE_ENVOY_PORT` and `FAKE_GITHUB_PORT` are required inputs, the fakes'
+reported ports; on the TypeScript side `e2e/harness-ports.ts` is the one place the harness ports
+are resolved. The secrets broker
 the server relays credential requests to is one switch, `DISPATCH_E2E_AGENT_SECRETS_URL`, which
 `run-server.sh` and `e2e/harness-broker.ts` read alike (`${VAR-default}`, so empty and unset
-differ): unset, the default, is `e2e/fake-broker.ts` on `FAKE_BROKER_PORT` (default `9024`), which
+differ): unset, the default, is `e2e/fake-broker.ts` on `FAKE_BROKER_PORT` (then required), which
 verifies no caller, so the server presents the throwaway token in
 `e2e/fake-broker-account-token` and the credential-request feature is on; empty is no broker, the
 feature off as in a deployment that configures none (`DISPATCH_E2E_AGENT_SECRETS_URL= bun run
@@ -1025,7 +1036,7 @@ lists the ServiceAccount whose token `run-server.sh` hands the server by
 `DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, a path it makes absolute against the caller's
 directory before it changes into `packages/envoy`. The broker's docs rig
 (`docs/site/media/broker/rig.sh`) sets a URL, and keeps that token with
-`packages/envoy/cmd/dev-oidc-issuer`, the local issuer its broker trusts. Playwright starts the
+`packages/envoy/cmd/dev-oidc-issuer`, the local issuer its broker trusts. The harness starts the
 fake broker only for the default, and the skill-scenarios rig sets the switch empty.
 
 Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and above. Compact
@@ -1035,8 +1046,8 @@ post-update text selection; Yjs document transport and local editing remain acti
 `e2e/failed-room.e2e.ts` is opt-in and skipped without `DISPATCH_FAILED_ROOM_PROBE=1`: it holds
 the room's next durable append for 20 s with a `doc_updates` trigger and cancels that backend, so
 it costs about 40 s and does not belong in the suite CI runs. Run it as
-`DISPATCH_FAILED_ROOM_PROBE=1 bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/failed-room.e2e.ts`.
-That recipe loads the same config, so it refuses the harness ports while another run holds them.
+`DISPATCH_FAILED_ROOM_PROBE=1 bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/failed-room.e2e.ts`,
+which starts a harness of its own on ports the OS chooses.
 It is the end-to-end check for a failed document room: the writer inside the docs layer when the
 room fails is answered `503 DOC_SERVICE_UNAVAILABLE` rather than waiting for a recovery that
 cannot finish, the writer behind it is answered the same way or admitted once the room has
@@ -1047,11 +1058,12 @@ behind. Run it on a change and on its base whenever the docs layer's locking, re
 paths move; the two runs' `FAILED-ROOM` lines are the comparison.
 
 `e2e/fake-envoy.ts` is a stub Envoy listener the harness starts on
-`FAKE_ENVOY_PORT` (default `9021`) and the only Envoy a local harness server talks to:
-`run-server.sh` builds `ENVOY_URL` from that port alone. Playwright starts the same listener for a
-deployed run; `deploy/compose/dispatch.acceptance.compose.yml` requires `FAKE_ENVOY_PORT` and
-derives the target's Envoy URL from it. Before any row runs, `e2e/preflight.ts` (the config's
-`globalSetup`, which runs once the web servers are up) puts a session in this run's fake and
+`FAKE_ENVOY_PORT` (unset, a port the OS chooses, which it reports) and the only Envoy a local
+harness server talks to: `run-server.sh` builds `ENVOY_URL` from that port alone. The harness
+starts the same listener for a deployed run; `deploy/compose/dispatch.acceptance.compose.yml`
+requires `FAKE_ENVOY_PORT` and derives the target's Envoy URL from it, so a deployed run sets it.
+Before any row runs, `e2e/preflight.ts` (the config's `globalSetup`) puts a session in this run's
+fake and
 requires the target's `GET /api/v1/agents` to list it, then clears the fake: a target that reads
 another Envoy listener refuses the run naming the fake's port, rather than answering every row
 from sessions none of them seeded. Tests seed live sessions and their capabilities with
@@ -1158,49 +1170,61 @@ a Dispatch server from an earlier run still listening on `DISPATCH_E2E_PORT`, ma
 `resetDatabase` throw in `beforeEach`. Because it throws in the hook, **every** spec in the file
 reports failed, each carrying the `psql … DO $$` lock step and the holders it names in its message,
 which reads as a catastrophic regression in the change under test. Recognise that shape as the
-rig: stop whatever holds those tables (most often whatever holds the port) and run again. With
-reuse off a run cannot reach that shape through the port at all, and this paragraph is where the
-harness-port rule lives — `README.md` and the `docs/solutions` learning point here rather than
-restating it.
+rig: stop whatever holds those tables and run again. A run through `e2e/run.ts` cannot reach
+that shape through a port at all, since its servers serve on ports the OS chose for it alone, and
+this paragraph is where the harness-port rule lives — `README.md` and the `docs/solutions`
+learnings point here rather than restating it.
 
-`e2e/harness-ports.ts` resolves `DISPATCH_E2E_PORT` (default `8777`), `FAKE_ENVOY_PORT` (default
-`9021`), `FAKE_GITHUB_PORT` (default `9022`), `PLAIN_HTTP_PORT` (default `9023`) and
-`FAKE_BROKER_PORT` (default `9024`) once for every reader in `e2e/`, the Playwright config and the
-four Bun listeners included. An empty value means the default for all five alike, matching
-`run-server.sh`'s `${VAR:-default}` for the four ports it reads; anything that is not a port in
-canonical decimal is
-refused naming its variable (so `1e4`, `8777.0`, `0x2249`, `+8777`, `" 8777"` and a leading-zero
-`08777` are all refused, rather than binding one port while every URL built from the raw string
-points somewhere else, or writing one port two ways). Two variables naming one port are refused
-together, naming both: each port passes a per-port check on its own, and every consumer would
-otherwise fail in its own words — Playwright refusing the second `webServer` without naming a
-variable, the second Bun listener dying on `EADDRINUSE`. Because the check lives with the
-resolution, those listeners refuse it too, not only the Playwright config.
+`e2e/harness-ports.ts` resolves `DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`, `FAKE_GITHUB_PORT`,
+`PLAIN_HTTP_PORT` and `FAKE_BROKER_PORT` for every reader in `e2e/`, the Playwright config and the
+four Bun listeners included. `harnessPorts()` reads the environment when it is called, not when the
+module is imported, because the starters import it before the listeners have reported. Unset or
+empty is port `0`: the listener serves on a port the OS chooses and holds until it serves (the
+server on a socket `scripts/e2e/lib/held-port.py` hands it, each Bun listener by binding port 0)
+and prints it on its listening line. A set value is used as given: its listener binds exactly
+that port, and an occupied one fails with `address already in use`, never replaced by another.
+A set value that is not a port in canonical decimal is
+refused naming its variable (so `0`, `1e4`, `8777.0`, `0x2249`, `+8777`, `" 8777"` and a
+leading-zero `08777` are all refused, rather than binding one port while every URL built from the
+raw string points somewhere else, or writing one port two ways). Two set variables naming one port
+are refused together, naming both: each port passes a per-port check on its own, and every
+consumer would otherwise fail in its own words — the second Bun listener dying on `EADDRINUSE`.
+Because the check lives with the resolution, those listeners refuse it too, not only the
+Playwright config.
 
-`e2e/playwright.config.ts` probes every port it starts before any web server starts and fails the
-run with one message listing every taken port beside its own variable, before a single spec runs.
-One table, `e2e/harness-listeners.ts`, names each listener, its command, its port's variable and
-whether a deployed run starts it; the config's probe and `webServer` read the rows it starts: all
-five ports for a local run, and `FAKE_ENVOY_PORT` plus `PLAIN_HTTP_PORT` for a deployed run. The
-probe is `e2e/port-probe.ts`: `isPortUsed` is Playwright's own predicate, and `takenPorts` lists
-the taken ports of a set of rows, which the config and `e2e/local-instance.ts` both refuse on. The
-refusal names only the variables the run probes. Its remedies are
-to stop whatever listens there, or to move a local run to free ports **and its own
-`DATABASE_URL`** — moving only the ports starts this run's servers elsewhere and still truncates
-the database the leftover server holds, and `e2e/seed.ts`'s quiesce reaches only the server at the
-new port, so that server's live rooms stay open across the truncate. Reuse is
-opt-in through `DISPATCH_E2E_REUSE_SERVERS`, whose only accepted value is `1`: unset or empty
-starts this run's own servers, and any other value is refused at config load naming the variable
-and the value. `CI` takes no part in that decision, so a shell that exports it and one that does
-not behave alike; a lane that shares one hand-started harness across runs sets
-`DISPATCH_E2E_REUSE_SERVERS=1`. A deployed run passes `FAKE_ENVOY_PORT` to the acceptance Compose
-file, which derives the target's `ENVOY_URL` from that same value; the README's acceptance recipe
-wires the pair. A listing run starts no web server, so it skips the probe. The port validation above
-is not gated on that mode, so a malformed or duplicated port is refused in every invocation.
+`e2e/harness-start.ts` is the harness's one starter. It starts the rows of
+`e2e/harness-listeners.ts` a run needs, in the table's order — the fakes, then the server (its
+environment names the fakes' ports), then the plain-HTTP proxy (it forwards to the server's
+origin) — each as the leader of a process group of its own, reads each row's report line for its
+port, waits for the server's `/healthz`, and returns the ports by variable with a stop function.
+A row that exits before it reports fails the start with its last lines, naming the variable when
+its set port was taken. A deployed run (`PLAYWRIGHT_BASE_URL`) starts only the rows marked
+`deployed`, the fake Envoy and the plain-HTTP proxy. `e2e/run.ts`
+(`bun e2e/run.ts -- <command>`) starts it, exports the ports and
+`DISPATCH_E2E_REUSE_SERVERS=1`, runs the command, stops the harness when the command exits (a
+Ctrl-C reaches the command, a SIGTERM to the wrapper is passed on), and exits with the command's
+status; `bun run e2e`, `bun run e2e:deployed` and CI's browser step run Playwright through it, so
+the config, every worker that re-imports it and every helper that reads a port at import
+(`e2e/api.ts`'s `baseUrl`, `e2e/plain-http-origin.ts`'s `plainHttpOrigin`) see the real ports.
+
+`e2e/playwright.config.ts` starts no server. It refuses, before a single spec runs, a run whose
+targeted ports are not all set — all five for a local run, `FAKE_ENVOY_PORT` and
+`PLAIN_HTTP_PORT` for a deployed run — naming the unset variables and `e2e/run.ts`, and a run
+without `DISPATCH_E2E_REUSE_SERVERS=1`, whose only accepted value is `1` (any other is refused
+naming the variable and the value). Every port set by hand plus that flag runs against a harness
+a person started and left listening; pair it with that harness's own `DATABASE_URL`, since
+`e2e/seed.ts` truncates the database the server holds. `CI` takes no part in that decision. A
+deployed run passes `FAKE_ENVOY_PORT` to the acceptance Compose file, which derives the target's
+`ENVOY_URL` from that same value; the README's acceptance recipe wires the pair. A listing
+(`--list`, with no `--ui`) with every harness port unset is the one exception: it targets nothing,
+so the config lets it evaluate with no harness. The argv test is loose, and Playwright reads the
+`--list` of `--grep --list` as `--grep`'s value, a real run; with no port set that run fails at
+`e2e/preflight.ts`, and with any port set a listing meets the reuse refusal like any other run, so
+it asks for `DISPATCH_E2E_REUSE_SERVERS=1` or the ports unset.
 
 `bun run dispatch:local` (`e2e/local-instance.ts`) is that harness, left running and seeded: it
-starts every row of `e2e/harness-listeners.ts`, each as the leader of a process group of its own,
-waits for the server's `/healthz` and every other listener's port, empties the database with
+starts the harness through `e2e/harness-start.ts`, then imports the e2e modules that read a port
+(they read it once, at import) with the reported ports in its environment, empties the database with
 `resetDatabase`, seeds `e2e/workspace.ts`, and prints the signed-in URL; `README.md`'s "Local
 instance" section is its user's guide. Its database is `DATABASE_URL` or the `dispatch_local`
 database on `packages/envoy/scripts/dev-postgres.sh`'s container. Before it hands out the URL its
@@ -1211,8 +1235,9 @@ assertion, so the command has to start on a server without that fix for the spec
 against it. What it runs on lives in `e2e/local-instance-support.ts`, which runs nothing on
 import: `Supervisor`, which starts each process and stops them all (Ctrl-C, a SIGTERM, a failure
 at any step), signalling every process group, SIGKILLing whatever still runs after 10 s, aborting
-the signal its psql calls carry, and returning once every leader has exited; `databaseUrlRefusal`,
-its own `DATABASE_URL` check; and `shellQuote`, for the commands it prints.
+the signal its psql calls carry, and returning once every leader has exited, and which
+`e2e/harness-start.ts` starts the harness's processes on, their output piped to it;
+`databaseUrlRefusal`, its own `DATABASE_URL` check; and `shellQuote`, for the commands it prints.
 `e2e/__tests__/local-instance-support.test.ts` (`bun run test`) drives them with real processes
 and no server. That check reads the URL with `new URL`, as libpq would only in part; the order
 closes the gap, since the reset runs only after the server's `/healthz` answered, and the server
@@ -1308,11 +1333,73 @@ proxy.
 ## Phone acceptance
 
 The `iphone` Playwright project uses Chromium with the iPhone 13 viewport,
-touch input, and user agent. It verifies the responsive drawer, the margin
-and recipient-picker bottom sheets, touch-sized controls, and compact Inbox
-layout. It does not replace the manual phone check: run the server on a
-tailnet-reachable address, open it from a phone, open the review panel, and
-answer an open ask in Waiting on you.
+touch input, and user agent, and runs only the tests tagged `@phone`
+(`grep: phoneTagged` in `e2e/playwright.config.ts`). Those tests cover the
+navigation drawer, the margin's bottom sheet and the phone Thread dialog,
+touch gestures and touch-sized controls, the compact Inbox and top bar, and
+the live view's phone layout. It does not replace the manual phone check: run
+the server on a tailnet-reachable address, open it from a phone, open the
+review panel, and answer an open ask in Waiting on you.
+
+A phone width here is one under 768 px, where `PHONE_VIEWPORT_QUERY`
+(`(max-width: 767px)`, `web/src/features/shell/useDialog.ts`) matches; a desktop
+width is 768 px or wider, the compact layout below 1280 px included. The rules
+below apply only to a test that `iphone` can run at its own viewport. A test
+stays untagged, whatever its title says, when it:
+
+- skips every project but `chromium`
+  (`test.skip(project.name !== "chromium", …)`) or every project but
+  `webkit-iphone`;
+- sets a desktop width for every project before it checks anything and never
+  reaches a phone width, so `iphone` would only repeat the desktop run, and a
+  phone branch (`setSheet`, `openedThreadCard`) would find no phone layout; or
+- starts at the project's own width expecting a desktop one and then narrows
+  the window itself, so under `iphone` it would start from the wrong layout.
+
+Such a test passes `"chromium"` rather than the project name to a helper that
+branches on it. A test that skips every project but `iphone` is always tagged
+(R5), whatever widths it sets. Any other test takes the tag when, under
+`iphone`, it takes a phone-only path. That is, it:
+
+- **R1** chooses what to do by which project runs it, and `iphone` takes
+  another branch than `chromium`, directly, in a hook, or in a helper it calls:
+  `=== "iphone"`, `!== "iphone"`, a `"chromium"` test used as a layout switch
+  (an empty desktop-only block included), `PHONE_PROJECTS` or
+  `READING_PROJECTS` membership, a project-dependent value (`1280 : 390`,
+  `44 : 32`), `setSheet` and `openedThreadCard` (`e2e/editor.ts`), or a
+  file-local helper that takes the project or `isPhone`. The project name used
+  only in a file name, attachment name or seed namespace does not count.
+- **R2** branches on what the page shows where the phone layout decides it: the
+  Thread dialog or the margin card, a drawer menu button's visibility.
+- **R3** reads the window's size or checks the page against it
+  (`viewportSize()`, `innerWidth`/`innerHeight`, a `scrollWidth`/`clientWidth`
+  overflow check, `assertPageFits`), unless it first sets a fixed viewport for
+  every project.
+- **R4** uses touch: `tap()`, `page.touchscreen`, `e2e/touch.ts`, `hasTouch`,
+  `isMobile`.
+- **R5** runs only on the phone (it skips `chromium`), or is in a file named for
+  the phone (`phone*.e2e.ts`).
+- **R6** says in its title or its own comments that it covers the phone layout
+  (a phone, the drawer, the bottom sheet, 390 px).
+
+Once the exceptions above are ruled out, when unsure, tag it: an extra phone
+test costs CI minutes, and a missing one loses the phone coverage. Write the
+tag at the end of the title,
+`test("a reply opens the Thread dialog @phone", …)`, or at the end of a
+`test.describe` title when every test inside it qualifies. Playwright reads an
+`@word` in a title as a tag; the title form keeps the call at two arguments, so
+Biome does not re-indent the body as it does for a `{ tag }` details argument.
+A user-agent path (the Mac keymap that the iPhone user agent also takes) is not
+a phone-only path. An untagged test needs no
+`test.skip(project.name === "iphone", …)`, since `iphone` no longer runs it:
+drop the skip. A `!== "chromium"` skip stays: it marks a test that one project
+covers (it sets its own viewport, or does not depend on the layout), and it
+keeps that test out of the tag under the first exception above.
+
+Nothing fails when a phone test lacks the tag: it silently drops out of
+`iphone` and runs only on `chromium`. So after writing or renaming one, run
+`bunx playwright test --config e2e/playwright.config.ts --project=iphone --list`
+and check that it is listed.
 
 A retracted ask is withdrawn history: the Inbox and the open-ask badges drop it, and the margin folds it into the `Resolved (N)` toggle beside resolved comment threads. The Conversation lists it like every other conversation, under `All` and under `Closed`; the tab has no `Show retracted` or `Show activity` control of its own. Ask event payloads carry `options` as an array (the server never emits `null`), so the Activity tab and the margin's Pinned tab render `event.payload` as the `Ask` it is.
 

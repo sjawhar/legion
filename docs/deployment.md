@@ -319,6 +319,19 @@ provider_keys:
 - **`pi_config_files`** paths resolve against `legion.yaml`'s directory and may not hold `:`.
   The runtime's turn-scope overlay stays last, so its two keys outrank the operator's overlays. The
   boot plugin gate probes Oh My Pi under the same overlays and variables.
+- **`role_config_files`**, a top-level key beside the block, gives one role's panes overlays no
+  other role's get (`role_config_files: {implementer: [/etc/legion-operator/fallback.yml]}`, the
+  controller's pane under `controller: daemon` too): such a pane's `PI_CONFIG_FILES` is
+  `pi_config_files`, then the role's own in order, then the turn-scope overlay, still last. Each
+  path must be absolute; boot and `legion start --check-config` refuse one the host does not hold
+  as a file the daemon's user can read, naming the role and the path, and a pane of a role the key
+  leaves out is told what it was told without it. After the plugin gate passes, the boot gate runs
+  `omp config get retry.modelFallback --json` under each named role's list and on each of its files
+  alone, and refuses the boot when Oh My Pi exits non-zero (`boot gate: role_config_files.<role>:
+  the <role>'s Oh My Pi would not start: Oh My Pi refuses <file>: error: …`), rather than letting
+  every launch of that role fail. `docs/kubernetes.md` ("Operator configuration") has the rest of
+  the key's rules. Every pane runs as the daemon's Unix user, so each role can read every role's
+  overlay file; only loading is per role, so never put a secret in one.
 - **`take_over: kubernetes`** lets this daemon take over the claims a daemon running the project
   under `runtime: kubernetes` recorded on the same store ([Moving a project onto
   tmux](#moving-a-project-onto-tmux)). `kubernetes` is the only accepted value. Without the key, a
@@ -446,3 +459,24 @@ while panes can still read the keys, so the order is:
 
 Record the rotation on LEGION-74 as its spec asks (dates and key fingerprints only; never key
 material).
+
+## Serving on a socket the harness holds
+
+`legion start` binds legion.yaml's `bind` and `port` for its API. With `LEGION_LISTEN_FD=<n>` in
+its environment, it serves the API on descriptor `<n>` instead, a listening TCP socket it inherited
+from whatever started it, and binds nothing. A test harness opens that socket on port 0, so the
+kernel chooses the port, and holds it until the daemon serves on it; no other program can take the
+port in between. A shared-box deployment leaves the variable unset.
+
+- The file's `bind` and `port` must name the socket's address: `bind` an IP literal equal to the
+  socket's IP (`0.0.0.0` matches only a socket on every IPv4 interface, and a host name matches
+  nothing), `port` its port. The registry entry, the default `daemon_url` and `legion state` dial
+  them. A socket they do not name, or a descriptor that is not a listening TCP socket, refuses the
+  start before it takes the team or opens the store, naming `LEGION_LISTEN_FD` and the setting:
+  `legion start: legion.yaml: port=8081 does not match LEGION_LISTEN_FD=3, a socket listening on 127.0.0.1:8080`.
+- The daemon takes the socket over before it runs anything, the configuration's key commands
+  included, and serves on a close-on-exec copy, then unsets the variable: no process it starts, its
+  panes and tmux server among them, holds the socket or inherits the variable.
+- The boot line `legion daemon started` names the address the daemon serves on, as it does when it
+  binds.
+- `legion start --check-config` binds nothing and never reads the variable.

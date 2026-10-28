@@ -152,7 +152,7 @@ describe("app-logins.ts", () => {
       review: "example-review[bot]",
     });
     expect(seen.map(({ path, iss }) => `${path} ${iss}`)).toEqual(["/app 101", "/app 202"]);
-    for (const { iat, exp } of seen) expect(exp - iat).toBe(660);
+    for (const { iat, exp } of seen) expect(exp - iat).toBe(600);
   });
 
   test("a key GitHub does not take is named by its role and GitHub's status", async () => {
@@ -263,7 +263,7 @@ describe("app-logins.ts", () => {
     expect(() => appKeySources("project: ACME\n")).toThrow("the config has no github_apps");
   });
 
-  test("the JWT is the daemon's: RS256, issued a minute back, ten minutes of life", () => {
+  test("the JWT is the daemon's: RS256, issued a minute back, nine minutes of life", () => {
     const jwt = appJWT("101", apps["101"].key.privateKey, new Date("2026-10-16T06:00:00Z"));
     const [header, claims] = jwt
       .split(".")
@@ -271,7 +271,7 @@ describe("app-logins.ts", () => {
       .map((part) => JSON.parse(Buffer.from(part, "base64url").toString()));
     const at = Date.parse("2026-10-16T06:00:00Z") / 1000;
     expect(header).toEqual({ alg: "RS256", typ: "JWT" });
-    expect(claims).toEqual({ iss: "101", iat: at - 60, exp: at + 600 });
+    expect(claims).toEqual({ iss: "101", iat: at - 60, exp: at + 540 });
   });
 });
 

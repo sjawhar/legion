@@ -4,6 +4,7 @@ import type { MarkdownNode as ParsedMarkdownNode, NodeSchema } from '@milkdown/k
 
 import { withBlockIdSpec } from './editor/schema/block-ids.js';
 import { withDomAttributes } from './editor/schema/dom-attributes.js';
+import { markdownSource } from './typed-block-drawing.js';
 
 export type BlockAttributeKind = 'string' | 'bool' | 'enum' | 'string[]' | 'actor' | 'timestamp';
 
@@ -283,7 +284,7 @@ export function rejectUnsupportedDirectiveSyntax(tree: MarkdownNode, markdown: s
 export function remarkTypedBlocks(schema: BlockSchema) {
   validateBlockSchema(schema);
   return (tree: MarkdownNode, file: { toString(): string }) => {
-    rejectUnsupportedDirectiveSyntax(tree, file.toString());
+    rejectUnsupportedDirectiveSyntax(tree, markdownSource(file));
     for (const child of tree.children ?? []) visit(child, schema);
   };
 }

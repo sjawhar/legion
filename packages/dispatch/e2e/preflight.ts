@@ -2,7 +2,7 @@ import { resetFakeEnvoy, setLiveSessions } from "./agents";
 import { baseUrl, listAgents } from "./api";
 import { harnessPorts } from "./harness-ports";
 
-/** Playwright's global setup, which runs once the web servers are up and before any row
+/** Playwright's global setup, which runs before any row, once e2e/run.ts has started the harness
  *  (e2e/playwright.config.ts). Every fixture a row seeds goes to this run's fake Envoy, while the
  *  server under test reads whatever its own `ENVOY_URL` names: run-server.sh builds it from
  *  `FAKE_ENVOY_PORT`, and the acceptance Compose file from the `FAKE_ENVOY_PORT` its own `up` was
@@ -11,7 +11,7 @@ import { harnessPorts } from "./harness-ports";
 export default async function preflight(): Promise<void> {
   const sentinel = { session_id: `e2e-preflight-${process.pid}`, title: "e2e preflight" };
   const refusal = `The Dispatch e2e harness cannot start: ${baseUrl}`;
-  const { port, variable } = harnessPorts.fakeEnvoy;
+  const { port, variable } = harnessPorts().fakeEnvoy;
   const fake = `the fake Envoy this run started on 127.0.0.1:${port} (${variable})`;
   await setLiveSessions([sentinel]);
   try {

@@ -41,7 +41,7 @@ type Image struct {
 
 // commandTimeout bounds each command a check runs: a `--version` or a `--check` that has not
 // answered in a minute is hanging, not slow, and the probe's own budget is not to be spent on it.
-const commandTimeout = 60 * time.Second
+var commandTimeout = 60 * time.Second
 
 // maxDetail caps a command's quoted output in a State's detail, so a chatty command cannot push
 // the table past the log tail the daemon reads back.

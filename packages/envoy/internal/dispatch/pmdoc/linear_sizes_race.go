@@ -8,7 +8,6 @@ package pmdoc
 const (
 	parseFullTarget   = 128 << 10
 	renderFullTarget  = 64 << 10
-	runFullTarget     = 128 << 10
 	updateSeedTarget  = 128 << 10
 	updateShapeTarget = 16 << 10
 )
