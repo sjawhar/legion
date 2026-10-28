@@ -6,6 +6,9 @@
 #   stack.sh setup          build envoy-dispatch, envoy-listener and loadgen into $LOADTEST_ROOT/bin,
 #                           install nats-server (the version packages/envoy/go.mod pins) and Postgres,
 #                           initdb, write stack.json. Idempotent: a rerun rebuilds incrementally.
+#                           Writes bin/envoy-dispatch.json, the build's record (below). With
+#                           LOADTEST_DISPATCH_COMMIT=<rev> envoy-dispatch alone is built from that
+#                           commit instead (a rev that names no commit is refused before any build).
 #   stack.sh start          start Postgres, the proxy, NATS and the listener (one already running is
 #                           kept); refuses a port another process holds, naming it.
 #   stack.sh seed [--force] seed through Dispatch (18 to 27 min on 2 vCPU), drain the outbox, vacuum,
@@ -20,20 +23,43 @@
 #                           ("<commit> <true|false>"; run-step.sh records them in meta.json).
 #   stack.sh loadgen ARGS   run $LOADTEST_ROOT/bin/loadgen under the stack's environment, from the
 #                           root (run-step.sh and run-series.sh call loadgen this way).
+#   stack.sh replay-seed-patch-check BUNDLE_DIR
+#                           build Dispatch at the replay seed's commit with replay-seed-len16.patch
+#                           into bin/dispatch-seed and run the patch's tests there (TestLen16Seed),
+#                           with every *.md under BUNDLE_DIR as the corpus; exits with their status.
+#   stack.sh replay-seed --bundle DIR [--keys-file FILE] [--stock] [--resume] [--out DIR] [-- ARGS]
+#                           the LINUX replay's seed: build Dispatch at 35efd326 (production's commit on
+#                           2026-10-26, migration 0114) with replay-seed-len16.patch (--stock: without)
+#                           into bin/dispatch-seed[-stock]; on database dispatch_replay_build (dropped
+#                           and recreated, or kept with --resume) start it while Postgres, the proxy,
+#                           NATS and the listener run, run `loadgen replay-seed -bundle DIR -db
+#                           dispatch_replay_build [-keys-file FILE] ARGS`, wait for Dispatch to owe no
+#                           work and go idle, stop it, vacuum, pg_dump the database (the smallest of
+#                           gzip:9 and the zstd levels this pg_dump accepts), split it into 24 MiB
+#                           parts linux-replay-seed-0114.dump.partNN under DIR of --out (default
+#                           $LOADTEST_ROOT/replay-seed) and write seed.meta.json there.
+#
+# A Dispatch built from another commit (build_dispatch_at) is built in a `git archive` export of that
+# commit's packages/envoy under $LOADTEST_ROOT/dispatch-src/<commit>[-<patch sha256, 12 hex>], with
+# GOWORK=off GOTOOLCHAIN=local; a tree without cmd/dispatch/pprof.go gets zz_loadtest_pprof.go.txt as
+# cmd/dispatch/zz_loadtest_pprof.go, which serves pprof on LOADTEST_DISPATCH_PPROF_PORT. Every
+# Dispatch binary has a <binary>.json beside it: dispatch_commit, dispatch_tree, build_dirty, patch,
+# patch_sha256, dispatch_pprof_overlay, dispatch_binary_sha256, go_version, newest_migration.
 #
 # Environment: LOADTEST_ROOT (default ${TMPDIR:-/tmp}/dispatch-loadtest); LOADTEST_SRC (default: the
 # checkout holding this script); ports LOADTEST_PG_PORT (15432), LOADTEST_PROXY_PORT (15433),
 # LOADTEST_NATS_PORT (14222), LOADTEST_NATS_MONITOR_PORT (18222), LOADTEST_LISTENER_PORT (19120),
 # LOADTEST_DISPATCH_PORT (18777), LOADTEST_PPROF_PORT (16061), read by setup into stack.json;
-# LOADTEST_PROXY_RTT (1ms); LOADTEST_PG_DIRECT=1 starts Dispatch on Postgres without the proxy.
+# LOADTEST_PROXY_RTT (1ms); LOADTEST_PG_DIRECT=1 starts Dispatch on Postgres without the proxy;
+# LOADTEST_DISPATCH_COMMIT (setup, above); LOADTEST_GOMAXPROCS, Dispatch's GOMAXPROCS (default: nproc).
 #
 # Every stack process starts under `env -i` with an explicit environment, so this shell's
 # DISPATCH_URL, ENVOY_URL, ENVOY_NATS_URL, AWS_*, HOME and XDG_* never reach it, and every process is
 # stopped by the pid in its pidfile ($LOADTEST_ROOT/run/<name>.pid), never by name.
 #
-# setup, start, seed, reset and stop take the root's run lock (common.sh) for their run, and are
-# refused while another run holds it; run-step.sh's and run-series.sh's own calls pass. status,
-# build-info and loadgen take no lock.
+# setup, start, seed, reset, stop, replay-seed-patch-check and replay-seed take the root's run lock
+# (common.sh) for their run, and are refused while another run holds it; run-step.sh's and
+# run-series.sh's own calls pass. status, build-info and loadgen take no lock.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -51,6 +77,15 @@ STACK=$ROOT/stack.json
 SEED_META=$ROOT/seed.meta.json
 STACK_HOME=$ROOT/home
 PGSERVER_VERSION=0.1.4
+# The LINUX replay's seed: Dispatch at production's commit on 2026-10-26 (newest migration 0114,
+# no cmd/dispatch/pprof.go), with the allocation-free len16 patch unless --stock, on its own database.
+REPLAY_COMMIT=35efd326b66aea9ee2476396dabab7f7685fdbf3
+REPLAY_MIGRATION=114
+REPLAY_PATCH=$here/replay-seed-len16.patch
+REPLAY_DB=dispatch_replay_build
+PPROF_OVERLAY=$here/zz_loadtest_pprof.go.txt
+# The binaries a dispatch process may run: the stack's own and the replay seed's two builds.
+DISPATCH_BINARIES=("$BIN/envoy-dispatch" "$BIN/dispatch-seed" "$BIN/dispatch-seed-stock")
 # Processes in stop order, and in start order (dispatch is started by seed and reset).
 PROCESSES=(dispatch listener nats proxy postgres)
 START_ORDER=(postgres proxy nats listener dispatch)
@@ -183,19 +218,20 @@ write_stack_json() {
 
 pidfile() { printf '%s/%s.pid\n' "$RUN" "$1"; }
 
-# binary_of NAME: the executable a live process of that name must be running, so a pid the kernel
-# has reused for something else is never signalled.
+# binary_of NAME: the executables a live process of that name may be running, one a line, so a pid
+# the kernel has reused for something else is never signalled. A dispatch process runs the stack's
+# envoy-dispatch or one of the replay seed's builds.
 binary_of() {
   case $1 in
     postgres) printf '%s\n' "$PGBIN/postgres" ;;
     proxy) printf '%s\n' "$BIN/loadgen" ;;
     nats) printf '%s\n' "$BIN/nats-server" ;;
     listener) printf '%s\n' "$BIN/envoy-listener" ;;
-    dispatch) printf '%s\n' "$BIN/envoy-dispatch" ;;
+    dispatch) printf '%s\n' "${DISPATCH_BINARIES[@]}" ;;
   esac
 }
 
-# pid_of NAME: the pid in NAME's pidfile when that process is alive and runs NAME's binary.
+# pid_of NAME: the pid in NAME's pidfile when that process is alive and runs one of NAME's binaries.
 pid_of() {
   local f pid exe
   f=$(pidfile "$1")
@@ -205,7 +241,7 @@ pid_of() {
   [ -d "/proc/$pid" ] || return 1
   # A binary rebuilt while its process runs shows as "<path> (deleted)".
   exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || return 1
-  [ "${exe% (deleted)}" = "$(binary_of "$1")" ] || return 1
+  binary_of "$1" | grep -qxF -- "${exe% (deleted)}" || return 1
   printf '%s\n' "$pid"
 }
 
@@ -367,10 +403,21 @@ dispatch_healthy() {
   curl -fsS --max-time 5 "http://127.0.0.1:$(port dispatch)/healthz" | jq -e '.ok and .nats'
 }
 
-# start_dispatch LOG: Dispatch on database dispatch, through the latency proxy unless
-# LOADTEST_PG_DIRECT=1; waits up to 120 s for /healthz to report ok and NATS.
+# gomaxprocs: LOADTEST_GOMAXPROCS (default: nproc), refused unless a positive integer.
+gomaxprocs() {
+  local n=${LOADTEST_GOMAXPROCS:-$(nproc)}
+  [[ $n =~ ^[1-9][0-9]*$ ]] || die "LOADTEST_GOMAXPROCS='$n' is not a positive integer"
+  printf '%s\n' "$n"
+}
+
+# start_dispatch LOG [BINARY [DB]]: BINARY (default $BIN/envoy-dispatch) on database DB (default
+# dispatch), through the latency proxy unless LOADTEST_PG_DIRECT=1; waits up to 120 s for /healthz to
+# report ok and NATS.
 start_dispatch() {
-  local log=$1
+  local log=$1 binary=${2:-$BIN/envoy-dispatch} db=${3:-dispatch}
+  [ -x "$binary" ] || die "no Dispatch binary at $binary; run stack.sh setup first"
+  local procs
+  procs=$(gomaxprocs) || exit 1
   running dispatch && die "Dispatch is already running (pid $(pid_of dispatch)); stack.sh stop dispatch first"
   check_port dispatch dispatch
   check_port dispatch pprof
@@ -382,14 +429,22 @@ start_dispatch() {
   else
     running proxy || die "the latency proxy is not running; stack.sh start (or LOADTEST_PG_DIRECT=1)"
   fi
+  # A build with a pprof.go of its own reads DISPATCH_PPROF_PORT; one without it carries stack.sh's
+  # overlay (build_dispatch_at), which reads LOADTEST_DISPATCH_PPROF_PORT.
+  local pprof_var=DISPATCH_PPROF_PORT
+  if [ -f "$binary.json" ] && [ "$(jq -r .dispatch_pprof_overlay "$binary.json")" = true ]; then
+    pprof_var=LOADTEST_DISPATCH_PPROF_PORT
+  fi
   local webdist=$ROOT/webdist
   mkdir -p -- "$webdist" "$STACK_HOME"
   # scripts/e2e/dispatch-session-settings.sh's Dispatch, on the stack's ports and tokens. No
   # DISPATCH_SIGNING_KEY: Dispatch keeps its key under the stack's HOME (XDG_DATA_HOME), so it is the
-  # same across steps. No AWS_*: no Bedrock calls.
+  # same across steps. No AWS_*: no Bedrock calls. Of the settings below, the only one 35efd326 (the
+  # replay seed's build) lacks is DISPATCH_PPROF_PORT: it has no pprof.go, so the overlay's
+  # LOADTEST_DISPATCH_PPROF_PORT stands in for it.
   # shellcheck disable=SC2034
   local dispatch_env=("${base_env[@]}"
-    "DATABASE_URL=postgres://postgres@127.0.0.1:$pg_port/dispatch?sslmode=disable"
+    "DATABASE_URL=postgres://postgres@127.0.0.1:$pg_port/$db?sslmode=disable"
     "DISPATCH_AGENT_TOKEN=$(jq -r .dispatch_token "$STACK")"
     "DISPATCH_IDENTITY=header:X-Dispatch-User"
     "DISPATCH_IDENTITY_HEADER_TRUSTED=1"
@@ -397,31 +452,118 @@ start_dispatch() {
     "DISPATCH_PORT=$(port dispatch)"
     "DISPATCH_SERVER_URL=http://127.0.0.1:$(port dispatch)"
     "DISPATCH_WEB_DIST=$webdist"
-    "DISPATCH_PPROF_PORT=$(port pprof)"
+    "$pprof_var=$(port pprof)"
+    "GOMAXPROCS=$procs"
     "NATS_URLS=nats://127.0.0.1:$(port nats)"
     "ENVOY_URL=http://127.0.0.1:$(port listener)"
     "ENVOY_TOKEN=$(jq -r .listener_token "$STACK")")
-  spawn dispatch "$log" dispatch_env "$BIN/envoy-dispatch"
+  spawn dispatch "$log" dispatch_env "$binary"
   set_pid dispatch "$(pid_of dispatch)"
   stack_set '.pg_direct = $d' --argjson d "$direct"
   wait_for "Dispatch /healthz to report ok and NATS" 120 dispatch "$log" dispatch_healthy
-  note "dispatch pid $(pid_of dispatch) on 127.0.0.1:$(port dispatch), pprof $(port pprof), postgres via port $pg_port; log $log"
+  note "dispatch pid $(pid_of dispatch) ($binary, database $db, GOMAXPROCS $procs) on 127.0.0.1:$(port dispatch), pprof $(port pprof), postgres via port $pg_port; log $log"
+}
+
+# ---- builds ------------------------------------------------------------------------------------------
+
+sha256_of() { sha256sum -- "$1" | cut -d' ' -f1; }
+
+# resolve_commit REV: REV's full commit id in the checkout; refused, naming REV, when it names none.
+resolve_commit() {
+  git -C "$SRC" rev-parse --verify --quiet "$1^{commit}" ||
+    die "'$1' names no commit in $SRC"
+}
+
+# newest_migration ENVOY_DIR: the highest NNNN prefix of a migration file in that tree, an integer.
+newest_migration() {
+  local file
+  file=$(cd -- "$1/internal/dispatch/store/migrations" && printf '%s\n' [0-9]*.sql | sort -n | tail -n1)
+  printf '%s\n' "$((10#${file%%_*}))"
+}
+
+# write_build_json BINARY ENVOY_DIR COMMIT TREE DIRTY PATCH PATCH_SHA256 OVERLAY: BINARY.json, the
+# build's record (an empty TREE, PATCH or PATCH_SHA256 is null).
+write_build_json() {
+  local binary=$1 dir=$2
+  jq -n --arg commit "$3" --arg tree "$4" --argjson dirty "$5" --arg patch "$6" --arg patch_sha "$7" \
+    --argjson overlay "$8" --arg binary_sha "$(sha256_of "$binary")" \
+    --arg go "$(go version "$binary" | awk '{ print $NF }')" --argjson migration "$(newest_migration "$dir")" \
+    'def orNull: if . == "" then null else . end;
+     {dispatch_commit: $commit, dispatch_tree: ($tree | orNull), build_dirty: $dirty,
+      patch: ($patch | orNull), patch_sha256: ($patch_sha | orNull), dispatch_pprof_overlay: $overlay,
+      dispatch_binary_sha256: $binary_sha, go_version: $go, newest_migration: $migration}' >"$binary.json"
+}
+
+# build_dispatch_at REV OUT [PATCH]: build cmd/dispatch of commit REV (PATCH applied) into OUT, and
+# write OUT.json. The tree is a `git archive` export of REV's packages/envoy under
+# $ROOT/dispatch-src/<commit>[-<first 12 hex of PATCH's sha256>], reused once marked .complete; a
+# tree without cmd/dispatch/pprof.go gets the pprof overlay. Sets BUILT_TREE to its packages/envoy.
+build_dispatch_at() {
+  local rev=$1 out=$2 patch=${3:-} sha
+  sha=$(resolve_commit "$rev") || exit 1
+  local key=$sha patch_sha="" patch_name=""
+  if [ -n "$patch" ]; then
+    [ -f "$patch" ] || die "no patch at $patch"
+    patch_sha=$(sha256_of "$patch")
+    patch_name=$(basename -- "$patch")
+    key+=-${patch_sha:0:12}
+  fi
+  local srcroot=$ROOT/dispatch-src
+  local tree=$srcroot/$key
+  if [ ! -f "$tree/.complete" ]; then
+    note "exporting packages/envoy at $sha${patch:+ with $patch_name} into $tree"
+    rm -rf -- "$tree"
+    mkdir -p -- "$tree"
+    git -C "$SRC" archive "$sha" packages/envoy | tar -x -C "$tree"
+    if [ -n "$patch" ]; then
+      # The export is no repository: the ceiling keeps git apply from finding one above it.
+      (cd -- "$tree" && GIT_CEILING_DIRECTORIES=$srcroot git apply -p1 "$patch") ||
+        die "$patch does not apply to $sha"
+    fi
+    : >"$tree/.complete"
+  fi
+  BUILT_TREE=$tree/packages/envoy
+  local overlay=false
+  if [ ! -f "$BUILT_TREE/cmd/dispatch/pprof.go" ]; then
+    cp -f -- "$PPROF_OVERLAY" "$BUILT_TREE/cmd/dispatch/zz_loadtest_pprof.go"
+    overlay=true
+  fi
+  note "building $out from $sha${patch:+ + $patch_name} (pprof overlay: $overlay)"
+  (cd -- "$BUILT_TREE" && GOWORK=off GOTOOLCHAIN=local go build -o "$out" ./cmd/dispatch)
+  write_build_json "$out" "$BUILT_TREE" "$sha" "$(git -C "$SRC" rev-parse "$sha:packages/envoy")" false \
+    "$patch_name" "$patch_sha" "$overlay"
 }
 
 # ---- commands ----------------------------------------------------------------------------------------
 
 cmd_setup() {
+  local commit=""
+  if [ -n "${LOADTEST_DISPATCH_COMMIT:-}" ]; then
+    commit=$(resolve_commit "$LOADTEST_DISPATCH_COMMIT") || exit 1
+  fi
   command -v go >/dev/null || die "go is required"
   command -v uv >/dev/null || die "uv is required (Postgres comes from the pgserver wheel)"
   command -v jq >/dev/null || die "jq is required"
   [ -d "$ENVOY_SRC/cmd/dispatch" ] || die "LOADTEST_SRC=$SRC holds no packages/envoy/cmd/dispatch"
   mkdir -p -- "$BIN" "$RUN" "$LOGS" "$PGDIR/log" "$STACK_HOME" "$ROOT/tmp" "$ROOT/runs"
 
-  note "building envoy-dispatch, envoy-listener and loadgen from $ENVOY_SRC into $BIN"
-  (cd -- "$ENVOY_SRC" &&
-    go build -o "$BIN/envoy-dispatch" ./cmd/dispatch &&
-    go build -o "$BIN/envoy-listener" ./cmd/listener &&
-    go build -o "$BIN/loadgen" ./loadtest)
+  if [ -n "$commit" ]; then
+    build_dispatch_at "$commit" "$BIN/envoy-dispatch"
+    note "building envoy-listener and loadgen from $ENVOY_SRC into $BIN"
+    (cd -- "$ENVOY_SRC" &&
+      go build -o "$BIN/envoy-listener" ./cmd/listener &&
+      go build -o "$BIN/loadgen" ./loadtest)
+  else
+    note "building envoy-dispatch, envoy-listener and loadgen from $ENVOY_SRC into $BIN"
+    (cd -- "$ENVOY_SRC" &&
+      go build -o "$BIN/envoy-dispatch" ./cmd/dispatch &&
+      go build -o "$BIN/envoy-listener" ./cmd/listener &&
+      go build -o "$BIN/loadgen" ./loadtest)
+    local dirty tree=""
+    dirty=$(build_dirty)
+    [ "$dirty" = true ] || tree=$(git -C "$SRC" rev-parse HEAD:packages/envoy 2>/dev/null || true)
+    write_build_json "$BIN/envoy-dispatch" "$ENVOY_SRC" "$(build_commit)" "$tree" "$dirty" "" "" false
+  fi
 
   local nats_version
   nats_version=$(awk '$1 == "github.com/nats-io/nats-server/v2" { print $2; exit }' "$ENVOY_SRC/go.mod")
@@ -588,6 +730,261 @@ cmd_reset() {
   start_dispatch "$log"
 }
 
+# ---- the LINUX replay's seed -------------------------------------------------------------------------
+
+cmd_replay_seed_patch_check() {
+  [ $# -eq 1 ] || die "usage: stack.sh replay-seed-patch-check BUNDLE_DIR"
+  [ -d "$1" ] || die "no bundle directory at $1"
+  local bundle
+  bundle=$(cd -- "$1" && pwd -P)
+  command -v go >/dev/null || die "go is required"
+  mkdir -p -- "$BIN" "$LOGS"
+  build_dispatch_at "$REPLAY_COMMIT" "$BIN/dispatch-seed" "$REPLAY_PATCH"
+  local log=$LOGS/replay-seed-patch-check.log status=0
+  note "go test ./internal/dispatch/pmdoc -run TestLen16Seed in $BUILT_TREE, corpus $bundle; log $log"
+  (cd -- "$BUILT_TREE" && GOWORK=off GOTOOLCHAIN=local LOADTEST_LEN16_CORPUS=$bundle \
+    go test ./internal/dispatch/pmdoc -run 'TestLen16Seed' -count=1 -v) >"$log" 2>&1 || status=$?
+  grep -E 'len16 corpus:|^(--- |ok |FAIL|PASS)' -- "$log" || true
+  ((status == 0)) || die "the len16 patch's tests failed (exit $status); see $log"
+  note "the len16 patch's tests pass"
+}
+
+# has_table DB TABLE: TABLE exists in DB. Postgres resolves every table a statement names before it
+# runs, so the existence check is a query of its own.
+has_table() { [ "$(sql "$1" "select to_regclass('public.$2') is not null")" = t ]; }
+
+# owe WHAT COUNT: owed_work's tally.
+owe() {
+  OWED=$((OWED + $2))
+  (($2 == 0)) || OWED_WHAT+="${OWED_WHAT:+, }$2 $1"
+}
+
+# owed_work DB: sets OWED to the number of rows of work Dispatch still owes in DB and OWED_WHAT to
+# what they are, each table read only when it exists. At 0114 the settle timer is in memory, but every
+# durable document update writes a doc_settlements_pending row and settlement deletes it.
+owed_work() {
+  local db=$1 n
+  OWED=0
+  OWED_WHAT=""
+  if has_table "$db" events; then
+    owe "unpublished events" "$(sql "$db" 'select count(*) from events where published_at is null')"
+  fi
+  if has_table "$db" comment_deliveries; then
+    owe "pending comment deliveries" "$(sql "$db" "select count(*) from comment_deliveries where state = 'pending'")"
+  fi
+  if has_table "$db" message_deliveries; then
+    owe "pending message deliveries" "$(sql "$db" "select count(*) from message_deliveries where state = 'pending'")"
+  fi
+  if has_table "$db" doc_settlements_pending; then
+    owe "pending document settlements" "$(sql "$db" 'select count(*) from doc_settlements_pending')"
+  fi
+  if has_table "$db" document_block_versions; then
+    n=$(sql "$db" 'select count(*) from document_block_versions where version is null')
+    owe "unversioned document blocks" "$n"
+  fi
+  if has_table "$db" block_grammar_owed; then
+    owe "block-grammar entries owed" "$(sql "$db" 'select count(*) from block_grammar_owed')"
+  fi
+}
+
+# cpu_ticks PID: the process's utime + stime, in clock ticks.
+cpu_ticks() {
+  local stat fields
+  stat=$(cat -- "/proc/$1/stat") || return 1
+  read -ra fields <<<"${stat##*) }"
+  # After "pid (comm) ", utime and stime are the 12th and 13th fields.
+  printf '%s\n' "$((fields[11] + fields[12]))"
+}
+
+# wait_quiet DB LOG: wait until Dispatch owes no work in DB (within 1800 s), then until it uses less
+# than 0.05 cores over 30 s (within 900 s), then read the owed work again. Sets QUIET_SECONDS.
+wait_quiet() {
+  local db=$1 log=$2 started=$SECONDS deadline
+  note "waiting for Dispatch to owe no work in $db"
+  deadline=$((SECONDS + 1800))
+  while :; do
+    owed_work "$db"
+    ((OWED == 0)) && break
+    running dispatch || die "Dispatch exited while it still owed $OWED_WHAT; see $log"
+    ((SECONDS < deadline)) || die "Dispatch still owes $OWED_WHAT after 1800 s; see $log"
+    sleep 2
+  done
+  note "Dispatch owes no work; waiting for it to idle below 0.05 cores over 30 s"
+  local clk pid before after
+  clk=$(getconf CLK_TCK)
+  deadline=$((SECONDS + 900))
+  while :; do
+    pid=$(pid_of dispatch) || die "Dispatch exited before it went idle; see $log"
+    before=$(cpu_ticks "$pid")
+    sleep 30
+    after=$(cpu_ticks "$pid") || die "Dispatch exited before it went idle; see $log"
+    # Below 0.05 cores over 30 s: fewer than 1.5 s of CPU, 2 * ticks < 3 * CLK_TCK.
+    if ((2 * (after - before) < 3 * clk)); then
+      break
+    fi
+    ((SECONDS < deadline)) || die "Dispatch still uses $(((after - before) * 100 / clk / 30))% of a core after 900 s; see $log"
+    note "Dispatch used $(((after - before) * 100 / clk / 30))% of a core over 30 s; waiting"
+  done
+  owed_work "$db"
+  ((OWED == 0)) || die "Dispatch went idle yet owes $OWED_WHAT; see $log"
+  QUIET_SECONDS=$((SECONDS - started))
+  note "Dispatch is quiet after $QUIET_SECONDS s"
+}
+
+# pg_tool NAME: the Postgres client NAME of the stack's own Postgres (pgserver), else the system's.
+pg_tool() {
+  if [ -x "$PGBIN/$1" ]; then
+    printf '%s\n' "$PGBIN/$1"
+  elif [ -x "/usr/bin/$1" ]; then
+    printf '%s\n' "/usr/bin/$1"
+  else
+    die "no $1: neither $PGBIN/$1 nor /usr/bin/$1 exists"
+  fi
+}
+
+cmd_replay_seed() {
+  local usage="usage: stack.sh replay-seed --bundle DIR [--keys-file FILE] [--stock] [--resume] [--out DIR] [-- LOADGEN_ARGS]"
+  local bundle="" keys="" stock=false resume=false out=$ROOT/replay-seed extra=()
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --bundle | --keys-file | --out)
+        if [ $# -lt 2 ] || [ -z "$2" ]; then die "$1 needs a value; $usage"; fi
+        case $1 in
+          --bundle) bundle=$2 ;;
+          --keys-file) keys=$2 ;;
+          --out) out=$2 ;;
+        esac
+        shift 2
+        ;;
+      --stock) stock=true && shift ;;
+      --resume) resume=true && shift ;;
+      --)
+        extra=("${@:2}")
+        break
+        ;;
+      *) die "unknown argument '$1'; $usage" ;;
+    esac
+  done
+  [ -n "$bundle" ] || die "--bundle is required; $usage"
+  [ -d "$bundle" ] || die "no bundle directory at $bundle"
+  bundle=$(cd -- "$bundle" && pwd -P)
+  if [ -n "$keys" ]; then
+    [ -f "$keys" ] || die "no keys file at $keys"
+    keys=$(cd -- "$(dirname -- "$keys")" && pwd -P)/$(basename -- "$keys")
+  fi
+  mkdir -p -- "$out"
+  out=$(cd -- "$out" && pwd -P)
+  need_stack
+  local p
+  for p in postgres nats listener; do
+    running "$p" || die "$p is not running; stack.sh start first"
+  done
+  running dispatch && die "Dispatch is already running (pid $(pid_of dispatch)); stack.sh stop dispatch first"
+  [ -x "$BIN/loadgen" ] || die "no $BIN/loadgen; run stack.sh setup first"
+  gomaxprocs >/dev/null
+  if [ "$resume" = true ]; then
+    db_exists "$REPLAY_DB" || die "--resume: database $REPLAY_DB does not exist; run without --resume"
+  fi
+
+  local binary=$BIN/dispatch-seed patch=$REPLAY_PATCH
+  if [ "$stock" = true ]; then
+    binary=$BIN/dispatch-seed-stock
+    patch=""
+  fi
+  build_dispatch_at "$REPLAY_COMMIT" "$binary" "$patch"
+
+  if [ "$resume" = true ]; then
+    note "resuming on database $REPLAY_DB"
+  else
+    sql postgres "drop database if exists $REPLAY_DB" >/dev/null
+    sql postgres "create database $REPLAY_DB" >/dev/null
+  fi
+  local dispatch_log=$LOGS/dispatch-replay-seed.log started=$SECONDS
+  trap 'stop_one dispatch' EXIT
+  start_dispatch "$dispatch_log" "$binary" "$REPLAY_DB"
+
+  note "replaying the bundle's state into $REPLAY_DB; log $LOGS/replay-seed.log"
+  local args=(replay-seed -bundle "$bundle" -db "$REPLAY_DB")
+  [ -z "$keys" ] || args+=(-keys-file "$keys")
+  loadgen "${args[@]}" "${extra[@]}" 2>&1 | tee "$LOGS/replay-seed.log" >&2
+  local seed_seconds=$((SECONDS - started))
+
+  wait_quiet "$REPLAY_DB" "$dispatch_log"
+  stop_one dispatch
+  trap - EXIT
+
+  note "vacuum analyze"
+  sql "$REPLAY_DB" 'vacuum analyze' >/dev/null
+  local migration
+  migration=$(sql "$REPLAY_DB" 'select max(version) from schema_migrations')
+  [ "$migration" = "$REPLAY_MIGRATION" ] ||
+    die "database $REPLAY_DB is at migration '$migration', not $REPLAY_MIGRATION; refusing to dump it"
+
+  # pg_dump's custom format under each compression; pgserver's 16.2 is built without zstd and
+  # refuses those, which is logged and skipped. The smallest is kept.
+  local name dump_log=$LOGS/replay-seed-dump.log candidates=() spec file best="" best_bytes=0 best_spec="" i=0
+  name=linux-replay-seed-$(printf '%04d' "$REPLAY_MIGRATION")
+  local pg_dump compression='[]'
+  pg_dump=$(pg_tool pg_dump)
+  : >"$dump_log"
+  for spec in gzip:9 zstd:19 zstd:level=19,long; do
+    file=$ROOT/tmp/$name.dump.$i
+    i=$((i + 1))
+    note "pg_dump -Fc -Z $spec"
+    if env -i "${base_env[@]}" "$pg_dump" -h 127.0.0.1 -p "$(port postgres)" -U postgres -d "$REPLAY_DB" \
+      -Fc -Z "$spec" -f "$file" >>"$dump_log" 2>&1; then
+      local bytes
+      bytes=$(stat -c %s -- "$file")
+      compression=$(jq -c --arg s "$spec" --argjson b "$bytes" '. + [{compression: $s, bytes: $b}]' <<<"$compression")
+      candidates+=("$file")
+      if [ -z "$best" ] || ((bytes < best_bytes)); then
+        best=$file best_bytes=$bytes best_spec=$spec
+      fi
+    else
+      local why
+      why=$(tail -n 1 -- "$dump_log")
+      note "pg_dump -Z $spec refused, skipped: $why"
+      compression=$(jq -c --arg s "$spec" --arg r "$why" '. + [{compression: $s, refused: $r}]' <<<"$compression")
+      rm -f -- "$file"
+    fi
+  done
+  [ -n "$best" ] || die "pg_dump refused every compression; see $dump_log"
+
+  local dump_sha parts='[]' part
+  dump_sha=$(sha256_of "$best")
+  rm -f -- "$out/$name.dump.part"*
+  split -b 24M -d -a 2 -- "$best" "$out/$name.dump.part"
+  for part in "$out/$name.dump.part"*; do
+    parts=$(jq -c --arg f "$(basename -- "$part")" --argjson b "$(stat -c %s -- "$part")" \
+      --arg s "$(sha256_of "$part")" '. + [{file: $f, bytes: $b, sha256: $s}]' <<<"$parts")
+  done
+  rm -f -- "${candidates[@]}"
+
+  local counts
+  counts=$(sql "$REPLAY_DB" "select json_build_object(
+      'projects', (select count(*) from projects),
+      'issues', (select count(*) from issues),
+      'artifacts', (select count(*) from artifacts),
+      'artifact_versions', (select count(*) from artifact_versions),
+      'comments', (select count(*) from comments),
+      'asks', (select count(*) from asks),
+      'events', (select count(*) from events))")
+  jq -n --argjson migration "$migration" --slurpfile build "$binary.json" \
+    --arg pg "$("$PGBIN/postgres" --version)" --arg at "$(date -u +%FT%TZ)" \
+    --argjson seed_seconds "$seed_seconds" --argjson quiet "$QUIET_SECONDS" \
+    --arg chosen "$best_spec" --argjson candidates "$compression" \
+    --argjson bytes "$best_bytes" --arg sha "$dump_sha" --argjson parts "$parts" --argjson counts "$counts" \
+    --arg keys "$([ -z "$keys" ] || basename -- "$keys")" \
+    '$build[0] as $b |
+     {migration: $migration, dispatch_commit: $b.dispatch_commit, dispatch_tree: $b.dispatch_tree,
+      dispatch_binary_sha256: $b.dispatch_binary_sha256, patch: $b.patch, patch_sha256: $b.patch_sha256,
+      go_version: $b.go_version, postgres_version: $pg, created_at: $at, seed_seconds: $seed_seconds,
+      quiet_wait_seconds: $quiet, compression: {chosen: $chosen, candidates: $candidates},
+      dump: {bytes: $bytes, sha256: $sha}, parts: $parts, counts: $counts,
+      keys_file: (if $keys == "" then null else $keys end)}' >"$out/seed.meta.json"
+  note "replay seed done: $(jq '.parts | length' "$out/seed.meta.json") parts of $best_bytes bytes ($best_spec) in $out; $(jq -c .counts "$out/seed.meta.json")"
+}
+
 cmd_stop() {
   [ -f "$STACK" ] || return 0
   local names=("$@") p
@@ -626,7 +1023,7 @@ usage() {
 }
 
 case ${1:-} in
-  setup | start | seed | reset | stop) lock_root "$ROOT" stack.sh ;;
+  setup | start | seed | reset | stop | replay-seed-patch-check | replay-seed) lock_root "$ROOT" stack.sh ;;
 esac
 case ${1:-} in
   setup) cmd_setup ;;
@@ -634,6 +1031,8 @@ case ${1:-} in
   seed) cmd_seed "${@:2}" ;;
   reset) cmd_reset "${@:2}" ;;
   stop) cmd_stop "${@:2}" ;;
+  replay-seed-patch-check) cmd_replay_seed_patch_check "${@:2}" ;;
+  replay-seed) cmd_replay_seed "${@:2}" ;;
   status) cmd_status ;;
   build-info) cmd_build_info ;;
   loadgen) loadgen "${@:2}" ;;
