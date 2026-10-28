@@ -240,7 +240,7 @@ func (s *server) getIssueReferences(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var latestOnly bool
-	switch versions := r.URL.Query().Get("versions"); versions {
+	switch r.URL.Query().Get("versions") {
 	case "", "all":
 	case "latest":
 		latestOnly = true
@@ -333,33 +333,25 @@ func (s *server) loadArtifactsByRefKey(ctx context.Context, q queryer, refKeys [
 	if len(refKeys) == 0 {
 		return artifacts, nil
 	}
-	statement := `
-		select a.id::text, a.issue_key, coalesce(a.project_key, ''), a.session_id, a.ref_key, a.slug, a.name, a.kind, a.is_primary,
-		       a.created_by, a.created_at,
-		       ` + versionColumns + `
-		from artifacts a
-		join artifact_versions v on v.artifact_id = a.id
-		where a.ref_key = any($1)
-		order by a.ref_key, v.number
-	`
+	versions := `join artifact_versions v on v.artifact_id = a.id`
 	if latestOnly {
-		statement = `
-		select a.id::text, a.issue_key, coalesce(a.project_key, ''), a.session_id, a.ref_key, a.slug, a.name, a.kind, a.is_primary,
-		       a.created_by, a.created_at,
-		       ` + versionColumns + `
-		from artifacts a
-		join lateral (
+		versions = `join lateral (
 			select v.number, v.named, v.summary, v.authors, v.created_at, v.size, v.markdown, v.mime, v.sha256
 			from artifact_versions v
 			where v.artifact_id = a.id
 			order by v.number desc
 			limit 1
-		) v on true
-		where a.ref_key = any($1)
-		order by a.ref_key
-	`
+		) v on true`
 	}
-	rows, err := q.Query(ctx, statement, refKeys)
+	rows, err := q.Query(ctx, `
+		select a.id::text, a.issue_key, coalesce(a.project_key, ''), a.session_id, a.ref_key, a.slug, a.name, a.kind, a.is_primary,
+		       a.created_by, a.created_at,
+		       `+versionColumns+`
+		from artifacts a
+		`+versions+`
+		where a.ref_key = any($1)
+		order by a.ref_key, v.number
+	`, refKeys)
 	if err != nil {
 		return nil, err
 	}

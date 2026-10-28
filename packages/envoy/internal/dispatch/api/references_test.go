@@ -362,29 +362,6 @@ func TestIssueReferencesMembersCarryTheirDocumentsOwnCreatorAndVersionAuthors(t 
 			t.Fatalf("member %q carries approval %s; the references answer carries none", id, approval)
 		}
 
-		wantCreatorJSON, err := json.Marshal(oracle.CreatedBy)
-		if err != nil {
-			t.Fatalf("encode creator: %v", err)
-		}
-		gotCreatorJSON, err := json.Marshal(got["created_by"])
-		if err != nil {
-			t.Fatalf("encode member creator: %v", err)
-		}
-		if !bytes.Equal(gotCreatorJSON, wantCreatorJSON) {
-			t.Fatalf("member %q created_by = %s; want %s", id, gotCreatorJSON, wantCreatorJSON)
-		}
-		wantVersionsJSON, err := json.Marshal(oracle.Versions)
-		if err != nil {
-			t.Fatalf("encode versions: %v", err)
-		}
-		gotVersionsJSON, err := json.Marshal(got["versions"])
-		if err != nil {
-			t.Fatalf("encode member versions: %v", err)
-		}
-		if !bytes.Equal(gotVersionsJSON, wantVersionsJSON) {
-			t.Fatalf("member %q versions differ from loadArtifact's:\n got %.600s\nwant %.600s", id, gotVersionsJSON, wantVersionsJSON)
-		}
-
 		oracle.Approval = nil
 		oracleJSON, err := json.Marshal(oracle)
 		if err != nil {
