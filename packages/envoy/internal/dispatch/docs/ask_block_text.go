@@ -72,6 +72,13 @@ func (s *Service) SetAskBlockText(
 		if err != nil {
 			return err
 		}
+		// An edit keeping the options keeps every list the block holds, so a block breaking its
+		// content rule is refused before the edit is built; checked again on the written block.
+		if edit.Options == nil {
+			if err := refuseAskContentBreak(block.node); err != nil {
+				return err
+			}
+		}
 		want := AskBlockText{
 			Question: block.question,
 			Options:  block.options,
@@ -111,6 +118,13 @@ func (s *Service) SetAskBlockText(
 			if err != nil {
 				return err
 			}
+		}
+		written, err := askBlockOf(next, blockID)
+		if err != nil {
+			return err
+		}
+		if err := refuseAskContentBreak(written.node); err != nil {
+			return err
 		}
 		if err := verifyAskBlockRoundTrip(next, blockID, want, wroteBody); err != nil {
 			return err
@@ -471,4 +485,19 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 		})
 	}
 	return normalized
+}
+
+// refuseAskContentBreak refuses an edit leaving ask, an ask block, breaking its content rule
+// (pmdoc.AskContentError), which settlement marks `invalid` (readAskBlockStrictly). askBlockOf
+// reads such an ask leniently, joining every list into its options where the browser's card reads
+// only the last, so the row must not take that reading. An edit sending options rebuilds them as
+// one list, which repairs the ask.
+func refuseAskContentBreak(ask *pmdoc.Node) error {
+	if err := pmdoc.AskContentError(ask); err != nil {
+		return &ErrAskBlockUnrepresentable{
+			Field:  "block",
+			Reason: err.Error() + "; send options to rebuild the options as one list",
+		}
+	}
+	return nil
 }

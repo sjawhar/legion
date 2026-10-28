@@ -594,6 +594,130 @@ func TestSettlementMarksAnAskWithASecondBulletListInvalid(t *testing.T) {
 	})
 }
 
+// The ask-edit route reads a two-list ask leniently, joining its lists, so an edit leaving both
+// lists in place is refused: the row must not take options the browser's card does not show.
+// An edit sending options rebuilds them as one list, which repairs the ask.
+func TestSetAskBlockTextRefusesAnEditLeavingASecondBulletList(t *testing.T) {
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, "- Defer: Wait a week\n")))
+	settleCurrentGeneration(t, service, artifactID)
+	before := liveTree(t, service, artifactID)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+
+	for name, edit := range map[string]AskBlockEdit{
+		"urgency only":  {Urgency: new("high")},
+		"question only": {Question: new("Should we ship today?")},
+	} {
+		err := joinedWrite(service, func(ctx context.Context) error {
+			_, err := service.SetAskBlockText(ctx, artifactID, "ask-lists", edit, alice)
+			return err
+		})
+		var unrepresentable *ErrAskBlockUnrepresentable
+		if !errors.As(err, &unrepresentable) || !strings.Contains(err.Error(), "paragraph+ bullet_list?") || !strings.Contains(err.Error(), "send options to rebuild the options as one list") {
+			t.Fatalf("%s edit of a two-list ask: err = %v, want ErrAskBlockUnrepresentable naming the content rule", name, err)
+		}
+	}
+	if after := liveTree(t, service, artifactID); !after.EqualWithBlockIDs(before) {
+		t.Fatalf("refused edits changed the block")
+	}
+	assertShipAskRow(t, service, artifactID, "ask-lists")
+
+	sent := []model.AskOption{{Label: "Ship", Description: "Release it"}, {Label: "Defer", Description: "Wait a week"}}
+	var stored AskBlockText
+	err := joinedWrite(service, func(ctx context.Context) error {
+		var err error
+		stored, err = service.SetAskBlockText(ctx, artifactID, "ask-lists", AskBlockEdit{Options: &sent}, alice)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("edit sending options: %v", err)
+	}
+	if !slices.Equal(stored.Options, sent) {
+		t.Fatalf("stored options = %#v, want %#v", stored.Options, sent)
+	}
+	ask := firstAsk(liveTree(t, service, artifactID))
+	if lists := countChildren(ask, "bullet_list"); lists != 1 {
+		t.Fatalf("repaired ask holds %d bullet lists, want 1", lists)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", sent)
+}
+
+// A decided ask given a second list is marked invalid and keeps its decided row; once the second
+// list is gone, settlement clears invalid and the block carries its decided wording again.
+func TestSettlementMarksADecidedAskWithASecondBulletListInvalid(t *testing.T) {
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	answer := model.AskAnswer{User: "alice", Selected: []string{"Ship"}, At: time.Now().UTC()}
+	answerJSON, err := json.Marshal(answer)
+	if err != nil {
+		t.Fatalf("encode answer: %v", err)
+	}
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		update asks set state = 'answered', answer = $3 where block_artifact_id = $1 and block_id = $2
+	`, artifactID, "ask-lists", answerJSON); err != nil {
+		t.Fatalf("answer indexed ask: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAnsweredShipAsk := func(stage string) {
+		t.Helper()
+		var state string
+		var storedAnswer []byte
+		if err := service.store.Pool.QueryRow(context.Background(), `
+			select state, answer from asks where block_artifact_id = $1 and block_id = $2
+		`, artifactID, "ask-lists").Scan(&state, &storedAnswer); err != nil {
+			t.Fatalf("%s: load ask row: %v", stage, err)
+		}
+		var got model.AskAnswer
+		if err := json.Unmarshal(storedAnswer, &got); err != nil {
+			t.Fatalf("%s: decode answer: %v", stage, err)
+		}
+		if state != "answered" || got.User != "alice" || !slices.Equal(got.Selected, []string{"Ship"}) {
+			t.Fatalf("%s: ask row = state=%q answer=%#v, want answered by alice with Ship", stage, state, got)
+		}
+	}
+	assertAnsweredShipAsk("answered")
+
+	editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, "- Defer: Wait a week\n")))
+	settleCurrentGeneration(t, service, artifactID)
+	const reason = `ask block "ask-lists", asking "Should we ship?", holds a second bullet list where its content rule, paragraph+ bullet_list?, allows one or more paragraphs and then at most one bullet list, last`
+	if got := firstAsk(liveTree(t, service, artifactID)).Attrs["invalid"]; got != reason {
+		t.Fatalf("decided ask invalid = %#v, want %q", got, reason)
+	}
+	assertAnsweredShipAsk("second list")
+
+	// Merge the second list into the first, so the block's wording differs from the decided one.
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		ask := firstAsk(tree)
+		ask.Children[1].Children = append(ask.Children[1].Children, ask.Children[2].Children...)
+		ask.Children = ask.Children[:2]
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+	ask := firstAsk(liveTree(t, service, artifactID))
+	if got, exists := ask.Attrs["invalid"]; exists {
+		t.Fatalf("repaired decided ask invalid = %#v, want it cleared", got)
+	}
+	assertAnsweredShipAsk("repaired")
+	block, err := parseAskBlock(ask)
+	if err != nil {
+		t.Fatalf("parse repaired ask: %v", err)
+	}
+	want := []model.AskOption{{Label: "Ship", Description: "Release it"}, {Label: "Hold", Description: "Wait for review"}}
+	if block.question != "Should we ship?" || !slices.Equal(block.options, want) || ask.Attrs["state"] != "answered" {
+		t.Fatalf("repaired decided ask = state=%v question=%q options=%#v, want the decided wording", ask.Attrs["state"], block.question, block.options)
+	}
+}
+
+func countChildren(node *pmdoc.Node, nodeType string) int {
+	count := 0
+	for _, child := range node.Children {
+		if child.Type == nodeType {
+			count++
+		}
+	}
+	return count
+}
+
 // Concurrent browser edits can leave an ask holding a paragraph after its options, which the
 // browser keeps and takes no part of its question from. Settlement marks it invalid and leaves its
 // row open and as it was, until an edit moves the paragraph into the question.
