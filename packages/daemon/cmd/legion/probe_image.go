@@ -11,7 +11,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
@@ -86,7 +85,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	envoyPluginRoot := flags.String("envoy-plugin-root", "", "the Envoy plugin directory a pod loads as its other explicit extension, which the load probe loads the same way (required)")
 	podSafety := flags.Bool("pod-safety", false, "run the probes on a pod's baseline (internal/podsafety), as a pod's shim starts Oh My Pi")
 	providerEnvDir := flags.String("provider-env-dir", "", "a directory whose files NAME=contents the probes' Oh My Pi gets, as a worker's shim exports them")
-	probeDeadline := flags.String("probe-deadline", "", "the UTC RFC3339 deadline the daemon's probe pod reserves for this command")
+	probeBudget := flags.Duration("probe-budget", 0, "the duration the daemon's probe pod reserves for this command")
 	skipAgentModels := flags.Bool("skip-agent-models", false, "leave the prompt-named task agents' models unresolved (the image build's probe)")
 	skipBrowser := flags.Bool("skip-browser", false, "leave the browser row unchecked: the build of an image for a deployment that turns Oh My Pi's browser off (browser.enabled: false), which carries no Chromium")
 	roleReferences := flags.String("role-references", "", "the task agents and skills the daemon's own role prompts name, resolved in place of the role prompts this binary embeds")
@@ -109,14 +108,13 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		return 2
 	}
 
-	if *probeDeadline != "" {
-		deadline, err := time.Parse(time.RFC3339Nano, *probeDeadline)
-		if err != nil {
-			fmt.Fprintf(stderr, "legion probe-image: --probe-deadline must be an RFC3339 timestamp: %v\n", err)
-			return 1
-		}
+	if *probeBudget < 0 {
+		fmt.Fprintln(stderr, "legion probe-image: --probe-budget must not be negative")
+		return 1
+	}
+	if *probeBudget > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithDeadline(ctx, deadline)
+		ctx, cancel = context.WithTimeout(ctx, *probeBudget)
 		defer cancel()
 	}
 	if *roleNamespaces != "" {

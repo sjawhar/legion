@@ -178,10 +178,10 @@ func TestProbeImageRefusesWhenTheRoleNamespaceCheckFails(t *testing.T) {
 	}
 }
 
-func TestProbeImageRefusesAnInvalidProbeDeadline(t *testing.T) {
-	code, stdout, stderr := probeImage("--plugin-root", t.TempDir(), "--envoy-plugin-root", t.TempDir(), "--probe-deadline", "not-a-timestamp")
-	if code != 1 || stdout != "" || !strings.Contains(stderr, "--probe-deadline must be an RFC3339 timestamp") {
-		t.Fatalf("probe-image with an invalid deadline = %d, stdout %q, stderr %q; want exit 1 naming --probe-deadline", code, stdout, stderr)
+func TestProbeImageRefusesANegativeProbeBudget(t *testing.T) {
+	code, stdout, stderr := probeImage("--plugin-root", t.TempDir(), "--envoy-plugin-root", t.TempDir(), "--probe-budget", "-1s")
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "--probe-budget must not be negative") {
+		t.Fatalf("probe-image with a negative budget = %d, stdout %q, stderr %q; want exit 1 naming --probe-budget", code, stdout, stderr)
 	}
 }
 

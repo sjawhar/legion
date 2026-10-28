@@ -276,8 +276,13 @@ The image probe's own wait is derived from the same key: each attempt's budget i
 `slow_command_timeout_seconds` (300 s by default), or, when `worker_boot_timeout_seconds` plus a
 60 s margin is larger, that instead (`ProbeBudget`, `packages/daemon/internal/daemon/kubernetes.go`)
 — so the capacity stop below (under "The image is probed before it publishes") always has room,
-within one attempt, to see a probe pod's Unschedulable age pass the boot timeout. The boot log
-names the derived bound when it applies, and so does `legion start --check-config`.
+within one attempt, to see a probe pod's Unschedulable age pass the boot timeout. The probe pod
+passes `probe-image` a relative command budget 60 s below that attempt budget. Pod scheduling and
+image pull spend the daemon's attempt budget; the 60 s reserve leaves time for pod start, command
+exit and log collection. The TLS clients each have their own 20 s bound except Chromium's 90 s
+cold-start bound. A command stopped by the aggregate budget is unavailable with `probe deadline`,
+so the image probe fails closed naming its client and site. The boot log names a derived bound when
+it applies, and so does `legion start --check-config`.
 Oh My Pi's boot after it fits the registration deadline,
 `worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals` (360 s by default). The
 stage 4a harness's `image-probe` and `root-ready` checks (`scripts/e2e/README.md`) are where a

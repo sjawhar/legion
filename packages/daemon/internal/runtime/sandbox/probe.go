@@ -173,9 +173,10 @@ type ImageProbe struct {
 	// Sandbox's shutdownTime is the budget and one API call after it, so the log of a pod that
 	// finished at the budget is still there to read.
 	Budget time.Duration
-	// Deadline is the time the probe-image command must stop by. probeAttempt derives it from each
-	// attempt's Budget; a direct manifest test leaves it zero and sends no flag.
-	Deadline time.Time
+	// CommandBudget is the duration the probe-image command has before it must stop. probeAttempt
+	// derives it from each attempt's Budget; a direct manifest test leaves it zero and sends no flag.
+	CommandBudget  time.Duration
+	commandReserve time.Duration
 	// Retry waits out the attempts that say nothing about the image: bootprobe.Daemon at boot.
 	Retry bootprobe.Retry
 	// RoleReferences are the task agents and skills the daemon's own role prompts name, required:
@@ -193,8 +194,19 @@ type ImageProbe struct {
 	Resources corev1.ResourceRequirements
 }
 
-func probeCommandDeadline(now time.Time, budget time.Duration) time.Time {
-	return now.Add(budget - min(probeCommandReserve, budget/4))
+func probeCommandBudget(budget time.Duration) time.Duration {
+	return budget - probeCommandReserve
+}
+
+func (p ImageProbe) commandReserveDuration() time.Duration {
+	if p.commandReserve > 0 {
+		return p.commandReserve
+	}
+	return probeCommandReserve
+}
+
+func (p ImageProbe) commandBudget() time.Duration {
+	return p.Budget - p.commandReserveDuration()
 }
 
 // ProbeImage proves the runtime's image (Options.Image) on the cluster before any claim runs on
@@ -215,6 +227,9 @@ func probeCommandDeadline(now time.Time, budget time.Duration) time.Time {
 func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) (bootprobe.ImageReport, error) {
 	if p.Contract < 1 || p.Budget <= 0 || p.Retry.Initial <= 0 || p.Retry.Max < p.Retry.Initial {
 		return bootprobe.ImageReport{}, errors.New("image probe: a contract, a positive budget, and a positive retry wait are required")
+	}
+	if p.Budget <= p.commandReserveDuration() {
+		return bootprobe.ImageReport{}, fmt.Errorf("image probe: budget %s must exceed command reserve %s", p.Budget, p.commandReserveDuration())
 	}
 	if p.RoleReferences.Zero() {
 		return bootprobe.ImageReport{}, errors.New("image probe: ImageProbe.RoleReferences is required: the references of the role prompts a pod is handed")
@@ -320,12 +335,12 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 	}); err != nil {
 		return unlessStopped(ctx, err, "probe sandbox "+name)
 	}
-	// Built at each create, so the shutdown and command deadline are each from that moment,
+	// Built at each create, so the shutdown and command budget are each from that moment,
 	// whatever came before it.
 	manifest := func() (*unstructured.Unstructured, error) {
 		now := r.now()
 		commandProbe := p
-		commandProbe.Deadline = probeCommandDeadline(now, p.Budget)
+		commandProbe.CommandBudget = p.commandBudget()
 		return encodeProbe(r.probeManifest(name, commandProbe, now.Add(p.Budget+apiTimeout)))
 	}
 	uid, outcome, created := r.createProbe(ctx, name, digest, manifest, p.Budget)
@@ -1226,8 +1241,8 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	providers, providersMounts := r.providers()
 	command := []string{r.tools.Legion, "probe-image", "--daemon-api-version", strconv.Itoa(p.Contract), "--plugin-root", legionPlugin, "--envoy-plugin-root", envoyPlugin, "--pod-safety"}
-	if !p.Deadline.IsZero() {
-		command = append(command, "--probe-deadline", p.Deadline.UTC().Format(time.RFC3339Nano))
+	if p.CommandBudget > 0 {
+		command = append(command, "--probe-budget", p.CommandBudget.String())
 	}
 	// The probe reads the providers directory as a worker's shim does, and only where its pod mounts
 	// the providers Secret there, which it does when something needs it (mountsProviders: a provider

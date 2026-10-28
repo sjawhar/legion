@@ -246,7 +246,7 @@ const testRoleReferencesJSON = `{"LEGION_PROMPT_AGENTS":{"oracle":["roles/core/p
 // passing test nothing. A test whose attempt must run out sets unfinishedBudget.
 func probeOptions(t *testing.T) ImageProbe {
 	return ImageProbe{
-		Contract: 3, Budget: 10 * time.Second, RoleReferences: testRoleReferences,
+		Contract: 3, Budget: 10 * time.Second, RoleReferences: testRoleReferences, commandReserve: time.Millisecond,
 		Retry: bootprobe.Retry{Initial: time.Millisecond, Max: time.Millisecond, Attempts: 2},
 	}
 }
@@ -356,6 +356,7 @@ func TestProbeImagePassesTheRemainingAttemptBudgetToItsCommand(t *testing.T) {
 	g.succeeds(okLine(3) + "\n")
 	probe := probeOptions(t)
 	probe.Budget = 300 * time.Second
+	probe.commandReserve = 0
 
 	if _, err := g.r.ProbeImage(g.ctx, probe); err != nil {
 		t.Fatalf("ProbeImage = %v, want a pass", err)
@@ -370,12 +371,33 @@ func TestProbeImagePassesTheRemainingAttemptBudgetToItsCommand(t *testing.T) {
 		}
 	}
 	command := created.Spec.PodTemplate.Spec.Containers[0].Command
-	flag := slices.Index(command, "--probe-deadline")
+	flag := slices.Index(command, "--probe-budget")
 	if flag < 0 || flag+1 == len(command) {
-		t.Fatalf("probe command = %q, want --probe-deadline", command)
+		t.Fatalf("probe command = %q, want --probe-budget", command)
 	}
-	if got, want := command[flag+1], now.Add(240*time.Second).Format(time.RFC3339Nano); got != want {
-		t.Fatalf("probe deadline = %q, want the 300s attempt budget less the 60s reserve %q", got, want)
+	if got, want := command[flag+1], (240 * time.Second).String(); got != want {
+		t.Fatalf("probe budget = %q, want the 300s attempt budget less the 60s reserve %q", got, want)
+	}
+}
+
+func TestProbeCommandBudgetKeepsTheFullReserveBelowFourMinutes(t *testing.T) {
+	if got, want := probeCommandBudget(180*time.Second), 120*time.Second; got != want {
+		t.Fatalf("probeCommandBudget(180s) = %s, want 120s after the 60s reserve", got)
+	}
+}
+
+func TestProbeImageRefusesABudgetWithoutCommandTime(t *testing.T) {
+	g := newProbeRig(t, nil)
+	probe := probeOptions(t)
+	probe.Budget = probeCommandReserve
+	probe.commandReserve = 0
+
+	_, err := g.r.ProbeImage(g.ctx, probe)
+	if err == nil || !strings.Contains(err.Error(), "budget") || !strings.Contains(err.Error(), "command reserve") {
+		t.Fatalf("ProbeImage() = %v, want a refusal naming the budget and command reserve", err)
+	}
+	if got := g.creates.Load(); got != 0 {
+		t.Fatalf("created %d probe sandboxes, want a budget refusal before a pod", got)
 	}
 }
 
