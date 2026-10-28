@@ -69,9 +69,13 @@ const HTML_BLOCKS: readonly (readonly [RegExp, RegExp])[] = [
   [/^<![A-Za-z]/, />/],
   [/^<!\[CDATA\[/, /\]\]>/],
 ];
-/** HTML block kind 6, which like kinds 1 to 5 may interrupt a paragraph; a blank line ends it. */
+/**
+ * HTML block kind 6, which like kinds 1 to 5 may interrupt a paragraph; a blank line ends it. The
+ * tag names follow GitHub's cmark-gfm, which still has `source` (CommonMark 0.31 and micromark
+ * dropped it), and also CommonMark 0.31's `search`: reading a line as a block start leaves it alone.
+ */
 const HTML_BLOCK_TAG =
-  /^<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t]|\/?>|$)/i;
+  /^<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t]|\/?>|$)/i;
 /** HTML block kind 7: a complete open or closing tag alone on the line; a blank line ends it. */
 const HTML_TAG_LINE =
   /^<(?!\/?(?:script|pre|style|textarea)\b)(?:[A-Za-z][A-Za-z0-9-]*(?:[ \t]+[A-Za-z_:][\w.:-]*(?:[ \t]*=[ \t]*(?:[^ \t"'=<>`]+|'[^']*'|"[^"]*"))?)*[ \t]*\/?|\/[A-Za-z][A-Za-z0-9-]*[ \t]*)>[ \t]*$/i;
@@ -989,8 +993,27 @@ async function loadParser(): Promise<Parse | undefined> {
   return undefined;
 }
 
+/**
+ * A line that opens an HTML block for GitHub's cmark-gfm but not for micromark: a `source` tag,
+ * which CommonMark 0.31 dropped from the kind-6 names. micromark reads such a line as paragraph
+ * text, so the guard checks these lines itself.
+ */
+const GFM_ONLY_HTML_BLOCK_LINE = /^ {0,3}<\/?source(?:[ \t>]|\/>|$)/i;
+
 /** The first top-level block whose rendering differs between the two texts, or undefined. */
 function renderDifference(parse: Parse, before: string, after: string): string | undefined {
+  const gfmOnly = (text: string) =>
+    text
+      .split("\n")
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => GFM_ONLY_HTML_BLOCK_LINE.test(line));
+  const sourceBefore = gfmOnly(before);
+  const sourceAfter = gfmOnly(after);
+  const moved = sourceBefore.find(({ line }, n) => sourceAfter[n]?.line !== line);
+  if (moved !== undefined || sourceAfter.length !== sourceBefore.length) {
+    const at = moved === undefined ? "" : ` at line ${moved.index + 1}`;
+    return `a line that opens an HTML block on GitHub (\`<source\`)${at} would no longer start its line`;
+  }
   const blocksBefore = parse(before);
   const blocksAfter = parse(after);
   const exactBefore = exactBlocks(blocksBefore);

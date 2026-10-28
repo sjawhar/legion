@@ -449,3 +449,37 @@ test("the guard refuses a re-layout after a <pre> only micromark reads, in a blo
   expect(result.exitCode).toBe(2);
   expect(await readFile(path, "utf8")).toBe(text);
 });
+
+// GitHub's cmark-gfm still reads `source` as an HTML block tag (CommonMark 0.31 and micromark do
+// not), so a line that starts with `<source` interrupts the paragraph and stays as it is.
+for (const text of [
+  'Some words here\n<source "x"> *a* more words.\n',
+  'Intro words.\n<source "x"> <code "y">alpha\nbeta gamma</code> tail.\n',
+]) {
+  test(`--write leaves a line that starts with <source as it is: ${JSON.stringify(text)}`, async () => {
+    const result = await written(text);
+    expect(result.text).toBe(text);
+    expect(result.exitCode).toBe(0);
+  });
+}
+
+// VERBATIM_OPEN's names and letter case: each of the eight names, upper and mixed case, opens a
+// verbatim element; a lookalike name does not.
+for (const name of ["pre", "code", "tt", "kbd", "samp", "textarea", "script", "style"]) {
+  for (const spelled of [name.toUpperCase(), name.charAt(0).toUpperCase() + name.slice(1)]) {
+    test(`<${spelled}> opens a verbatim element`, async () => {
+      const text = `Use <${spelled}>one. Two\nthree</${spelled}> here.\n`;
+      const result = await written(text);
+      expect(result.text).toBe(text);
+      expect(result.exitCode).toBe(0);
+    });
+  }
+}
+
+for (const name of ["prefix", "codex"]) {
+  test(`<${name}> is no verbatim element, so --write re-lays out its paragraph`, async () => {
+    const result = await written(`Use <${name}>one. Two\nthree</${name}> here.\n`);
+    expect(result.text).toBe(`Use <${name}>one.\nTwo three</${name}> here.\n`);
+    expect(result.exitCode).toBe(0);
+  });
+}
