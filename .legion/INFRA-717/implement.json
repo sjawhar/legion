@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-717",
-  "completed": "2026-10-28T21:30:00Z",
+  "completed": "2026-10-28T22:40:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2476",
-  "codeHead": "75e39fdb4443e5c85a5dd079bb9def00c25e7ff2",
-  "round": 4,
-  "roundReason": "Tester's round-3 failure: after an interrupted first run, the block's LD_LIBRARY_PATH export made python3 load the half-extracted zonky liblzma and overwrite it (Bus error, then ImportError on every run), and SIGKILL inside initdb left a data/ without pg_control that the rerun trusted. The architect asked: drop the export; initdb into data.new then mv; extract into a fresh directory then mv; one sentence after the block: if a run fails, rm -rf \"$TMPDIR/pg\" and run it again; show SIGINT and SIGKILL during initdb each followed by a rerun that succeeds.",
+  "codeHead": "59377f8f148db07a88d650683a44aba9b2429762",
+  "round": 5,
+  "roundReason": "The implementer's own retro finding, moved back to implementing: the round-4 block decided liveness with pg_ctl status, which reads postmaster.pid; each role of an issue pod has its own PID and IPC namespace and all roles share $TMPDIR, so a sibling role's run started a second postmaster on the same data/ and broke the first role's server, and postmaster.pid then held a PID that in the first role is its own worker-shim. The architect asked: liveness by a connection to the socket, never pg_ctl status; do not start when the socket does not answer but postmaster.pid exists; tell the reader to stop the server from the shell that started it, or to remove $TMPDIR/pg if nothing answers; prove it with the unshare sibling run.",
   "proof": [
     {
       "criterion": "No workflow under .github/workflows names the 0.8.7-pg16 digest or an '(until production runs Postgres 18)' job, and actionlint is clean.",
@@ -55,6 +55,14 @@
       "observed": "A: run 1 exit 1, initdb 'child process was terminated by signal 2: Interrupt', 'removing data directory \"data.new\"', left server/; rerun exit 0, 'server started', 180006|'add':1,2 'set':3|'add', 1 postgres. B: run 1 exit 137, left data.new and server, no data; rerun exit 0, same psql line, 1 postgres. C: run 1 exit 130 (KeyboardInterrupt in tarfile), left server.new only; rerun exit 0, same psql line, 1 postgres. D: run 1 exit 137, left server.new; rerun exit 0, same psql line, 1 postgres. Two in a row: same postmaster PID 4176, 1 process, listen_addresses once; after a stop the run restarts the cluster (180006|'add':1,2); two concurrent first runs: one 'server started', the other only the path, both exit 0, 1 process. LD_LIBRARY_PATH unset throughout.",
       "headSha": "75e39fdb4443e5c85a5dd079bb9def00c25e7ff2",
       "negativeControl": "The round-3 block (da02c91a) with the same harness: SIGINT during initdb, then the rerun exits 1 with 'Bus error  python3 -c ... extractall(\"server\", filter=\"data\")' and no server; SIGKILL during initdb leaves data/ with no global/pg_control, then the rerun exits 1 with 'pg_ctl: error: could not open file \"data/global/pg_control\" for reading'."
+    },
+    {
+      "criterion": "The README's lexeme-database block decides liveness by the socket, never pg_ctl status; refuses to start when no server answers but postmaster.pid is left; a sibling role's run leaves one server, the first role's server still answers, the result is 'add', and the sibling's stop command signals no process of its own (architect, round 5).",
+      "surface": "The README's own bash block at the code head, extracted with awk and run in this pod; a sibling role simulated with unshare --user --map-current-user --pid --ipc --fork --mount-proc bash -c 'source <block>' (own PID and IPC namespace, as each role of an issue pod has).",
+      "command": "B=$TMPDIR/lexeme-block.sh (awk extraction); T=$TMPDIR/t717s; TMPDIR=$T bash -c \"source $B\" twice; then TMPDIR=$T unshare --user --map-current-user --pid --ipc --fork --mount-proc bash -c \"source $B; head -1 $T/pg/data/postmaster.pid; ps -e; cd $T/pg && server/bin/pg_ctl -D data status; server/bin/pg_ctl -D data stop\"; then pgrep -fa '$T/pg/server/bin/postgres -D' and psql -h $T/pg -U postgres -Atc \"select current_setting('server_version_num'), to_tsvector('english','added adding settings'), websearch_to_tsquery('english','added'), pg_postmaster_start_time()\"; then a clean stop and run, a SIGKILL of the postmaster and runs from role A and a sibling, rm -rf and run, two first runs at once (role A and a sibling), and the four interruption cases of $TMPDIR/interrupt-test.sh.",
+      "observed": "Role A run 1: server started, postmaster 5396, 180006|'add':1,2 'set':3|'add'. Run 2: only the socket path, exit 0. Sibling: only the socket path, exit 0, no new postmaster; it sees postmaster.pid 5396 while its own processes are PIDs 1-10; its pg_ctl status 'no server running' (exit 3); its pg_ctl stop 'could not send stop signal (PID: 5396): No such process' (exit 1). Afterwards 5396 is the only postmaster, same pg_postmaster_start_time, 180006|'add':1,2 'set':3|'add', no 'database system was interrupted' in pg.log. Clean stop then run: started, exit 0. Stale postmaster.pid after SIGKILL: role A and sibling each exit 1 with 'no server answers on .../pg, but data/postmaster.pid is left: stop the server from the shell that started it, or remove .../pg', no postmaster started; after rm -rf: new server, 180006|'add':1,2. Two first runs at once from role A and a sibling: one 'server started', the other only the path, both exit 0, one postmaster, 180006|'add':1,2. Interruption cases A-D: each rerun exit 0, one postmaster, 180006|'add':1,2 'set':3|'add'.",
+      "headSha": "59377f8f148db07a88d650683a44aba9b2429762",
+      "negativeControl": "The round-4 block (75e39fdb), same sibling run while role A's server ran: 'pg_ctl: another server might be running; trying to start server anyway', 'server started'; pg.log 'database system was interrupted ... automatic recovery in progress'; afterwards role A's postmaster ran but its socket refused connections, and postmaster.pid held PID 9, which in role A's namespace is the worker-shim."
     }
   ],
   "filesChanged": [
@@ -65,9 +73,10 @@
   ],
   "trickyParts": [
     "No paths-filter, trigger or pull-test-images entry existed only for the deleted jobs, so every filter entry stays; envoy-go, envoy-infra-go and envoy-smoke still use pull-test-images.",
-    "The PR's Envoy and Contracts runs at each code head listed only 'changes' when read; envoy-go's 180006|0.8.7 line is still not read. The reviewer approves only after envoy-go finishes success.",
+    "envoy-go at code head 75e39fdb printed 180006|0.8.7 (reviewer, job 123086097473) and was red only on internal/dispatch/deliveryaudit not compiling at base a409c128 (fixed on main by d743376f, #2473); envoy-go-race was red on a pmdoc timing ratio. This change touches no Go file; the PR body's 'Not proven / risk' records both.",
     "Round 3: the started postmaster inherits every open fd of the subshell, so pg_ctl start runs with 9>&-; without it the server holds the flock forever and every later run blocks.",
-    "Round 4: a background job of a non-interactive shell starts with SIGINT ignored, and python3 keeps it ignored (initdb resets its own handlers), so a SIGINT test of the extraction must start run 1 with SIGINT at its default action; the first attempt without that left extraction uninterrupted. postgres, initdb and pg_ctl find their libraries through RUNPATH $ORIGIN/../lib (tester's readelf), and every run above had LD_LIBRARY_PATH unset."
+    "Round 4: a background job of a non-interactive shell starts with SIGINT ignored, and python3 keeps it ignored (initdb resets its own handlers), so a SIGINT test of the extraction must start run 1 with SIGINT at its default action; the first attempt without that left extraction uninterrupted. postgres, initdb and pg_ctl find their libraries through RUNPATH $ORIGIN/../lib (tester's readelf), and every run above had LD_LIBRARY_PATH unset.",
+    "Round 5: each role of an issue pod has its own PID and IPC namespace (this role sees only its launcher, shim and omp; PID 9 is its worker-shim), so postmaster.pid and pg_ctl status/stop are only meaningful in the role that started the server; liveness is pg_isready on the socket. A stale postmaster.pid is refused, not started over: from another role it cannot be told from a live server's, and the tester's round-4 'stale postmaster.pid then rerun exits 0' case now exits 1 with the remove-or-stop message, as the architect asked."
   ],
   "deviations": [
     "The edits were made directly, not by a deep-worker subagent: the change is five deletions and four one-line text edits, each checked above.",
@@ -75,7 +84,8 @@
     "scripts/dispatch/README.md line 328 is now 110 characters wide; the rest of that sentence is unchanged, as task 5a says.",
     "Round 2 uses zonky's PostgreSQL 18.6.0 binaries, not packages/envoy/scripts/dev-postgres.sh as the architect suggested first: dev-postgres.sh needs Docker, which a worker pod lacks (no docker binary here), and gives a TCP container rather than the socket-only server under $TMPDIR/pg that the README's example invocation (line 266) names. The architect allowed 'another pinned Postgres 18 runner'. 18.6.0 is the version production runs; the binaries carry no pgvector, which the lexeme check does not use.",
     "Round 3 adds a flock beyond the architect's three conditions: the tester's criterion names the concurrent run, and $TMPDIR is shared by every role of the pod, so two first runs at the same time must not both extract and initdb.",
-    "Round 4 changes one existing README sentence besides the block: it said the block 'downloads and creates the cluster only when $TMPDIR/pg/data is absent'; now the download depends on server/ and the cluster on data/, so the sentence names each. No other claim was added."
+    "Round 4 changes one existing README sentence besides the block: it said the block 'downloads and creates the cluster only when $TMPDIR/pg/data is absent'; now the download depends on server/ and the cluster on data/, so the sentence names each. No other claim was added.",
+    "Round 5 changes the intro sentence to name the socket check and the refusal, and the stop sentence to say only the shell that started the server stops it; liveness uses pg_isready (in the image beside psql) for the socket connection the architect asked for."
   ],
   "openQuestions": []
 }
