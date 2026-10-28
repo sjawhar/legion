@@ -158,7 +158,8 @@ out
 .nuxt
 dist
 packages/*/dist/
-# The Claude Code plugin cache runs the plugin from its committed bundle.
+# The Claude Code plugin cache runs the plugin from main's committed bundle, which main's Rebuild
+# Claude Envoy plugin workflow writes; a pull request never commits it.
 !packages/claude-envoy/dist/
 
 # Gatsby files

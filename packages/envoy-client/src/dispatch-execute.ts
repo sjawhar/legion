@@ -62,6 +62,7 @@ import {
 } from "@legion/contracts";
 import { canonicalRepo } from "@legion/contracts/repo";
 import { z } from "zod";
+import { actorText } from "./actor-text";
 import { askAnswerText, textHead } from "./ask-answer";
 import { commandLine, commandName } from "./dispatch-command";
 import type { ActiveDispatchConfig } from "./dispatch-config";
@@ -153,6 +154,11 @@ export interface ExecuteDispatchToolInput {
   readonly tool: string;
   readonly args: ToolArguments;
   readonly cwd: string;
+  /**
+   * The bytes of an upload's `--path` file as the CLI already read them for AskGate's check, sent
+   * in place of a fresh read, so the upload sends exactly the bytes that check digested.
+   */
+  readonly uploadBytes?: Uint8Array;
   readonly host: DispatchHost;
   readonly sessionId?: string;
   readonly sessionTitle?: string;
@@ -2091,19 +2097,6 @@ function eventHead(event: Event): string | undefined {
   }
 }
 
-/** How an event, comment, message or ask author reads in the tools: `<kind> <id>`, plus
- *  ` (as <namespace>/<name>)` — the verified service token's subject through
- *  `serviceSubjectLabel`, which keeps the namespace because every namespace has a `default`
- *  service account — when a service token authenticated the write. A claim's holder is named by
- *  `claimText` instead, which follows the dashboard's session label. */
-function actorText(actor: Actor): string {
-  const service = actor.kind === "session" ? actor.service : undefined;
-  if (service === undefined) {
-    return `${actor.kind} ${actor.id}`;
-  }
-  return `${actor.kind} ${actor.id} (as ${serviceSubjectLabel(service)})`;
-}
-
 /** The `dispatch://` reference of the message, comment or ask an issue event carries, so a log
  *  line names what `dispatch read --ref` reads and a spec links: the log shows no other id. */
 function eventRef(event: Event): string | undefined {
@@ -3248,9 +3241,13 @@ export async function executeDispatchTool(
           throw new Error(`Dispatch claimed ${issueKey} but answered with no claim`);
         }
         const claimed = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}`;
+        // The claimant route (Dispatch's outbox) delivers a person's answers, comments and
+        // messages on the issue to this session; the notSubscribed suffix below is about every
+        // other event on the issue.
+        const reaches = `A person's answers, comments and messages on ${issueKey} now reach you directly.`;
         text = legionManaged
-          ? `${claimed}; ${LEGION_OWNS_STATUS} Release the claim when you stop.`
-          : `${claimed}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
+          ? `${claimed}; ${LEGION_OWNS_STATUS} Release the claim when you stop. ${reaches}`
+          : `${claimed}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop. ${reaches}`;
       }
       return {
         text: `${text}${await notSubscribed(issueTopic(issueKey), input.subscriptions)}`,
@@ -3947,7 +3944,14 @@ export async function executeDispatchTool(
         content === undefined
           ? {
               name,
-              file: Bun.file(resolvePath(input.cwd, stringArg(args, "path"))),
+              // The bytes AskGate's check read, when it read them, typed as Bun types the path.
+              file:
+                input.uploadBytes === undefined
+                  ? Bun.file(resolvePath(input.cwd, stringArg(args, "path")))
+                  : // The copy gives the bytes a plain buffer of their own, which a Blob takes.
+                    new Blob([new Uint8Array(input.uploadBytes)], {
+                      type: Bun.file(resolvePath(input.cwd, stringArg(args, "path"))).type,
+                    }),
               ...(summary === undefined ? {} : { summary }),
               actor,
             }

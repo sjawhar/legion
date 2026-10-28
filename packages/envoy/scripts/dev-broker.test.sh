@@ -59,7 +59,7 @@ trap cleanup EXIT
 cat >"${fake_bin_dir}/docker" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${DEV_BROKER_TEST_DOCKER_CALL_FILE:?}"
-pinned_id="sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a"
+pinned_id="sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11"
 case "$1 $2" in
   # dev-broker.sh no longer calls `ps`; this answer keeps the stale-image case red on a
   # dev-broker.sh that goes back to finding dispatch-pg with `docker ps` and reusing it unchecked.
@@ -70,8 +70,6 @@ case "$1 $2" in
       *"{{.Image}}"*) printf '%s\n' "${DEV_BROKER_TEST_PG_IMAGE_ID:-$pinned_id}" ;;
       *"{{.State.Running}}"*) printf 'true\n' ;;
       *"{{.Config.Image}}"*) printf 'postgres:16\n' ;;
-      *".Config.Env"*) printf 'PG_MAJOR=16\n' ;;
-      *".Mounts"*) printf 'volume|dispatch-pg-data|/var/lib/docker/volumes/dispatch-pg-data/_data\n' ;;
     esac
     ;;
   "image inspect") printf '%s\n' "$pinned_id" ;;
@@ -442,13 +440,15 @@ fi
 printf 'PASS: a run whose create database fails drops no database\n'
 
 # --- A dispatch-pg on another image than dev-postgres.sh's pinned one (an older script's
-# postgres:16, with no pgvector) is refused through dev-postgres.sh before this run creates a
-# database or starts a broker. ---
+# postgres:16) is refused through dev-postgres.sh before this run creates a database or starts a
+# broker, and the refusal prints the dump that moves its databases. ---
 DEV_BROKER_TEST_PG_IMAGE_ID="sha256:eb4759788a2182f08257135e61a34f2cfc3c2914079f3465d64ee62350f4d081" \
   run_instance 1 "$log1" "$docker_calls1" "$curl_calls1"
 wait_for_exit 1
 stale_status="$exited_status"
 if [[ "$stale_status" -eq 0 ]] || ! grep -qF "dev-postgres: dispatch-pg runs postgres:16" "$log1" \
+  || ! grep -qF "dev-postgres:   docker exec dispatch-pg pg_dumpall -U postgres --clean --if-exists > " "$log1" \
+  || grep -qF "no pgvector" "$log1" \
   || grep -q 'create database' "$docker_calls1" || grep -q 'starting broker' "$log1" \
   || grep -qE '^(start|run|stop|rm|rename) ' "$docker_calls1"; then
   cat "$log1" >&2

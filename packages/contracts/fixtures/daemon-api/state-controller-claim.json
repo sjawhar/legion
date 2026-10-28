@@ -162,6 +162,7 @@
     "capabilities": {
       "decided": {}
     },
-    "worker_backends": {}
+    "worker_backends": {},
+    "role_config_files": {}
   }
 }
