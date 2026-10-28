@@ -86,16 +86,25 @@ mode is marked sent right before its `claims/ready`, after which the daemon writ
 Without the mark, a terminal's idle card would start its turn ahead of the start command, and in
 RPC mode a card's wake would fire once the host is idle after its startup, which can be before the
 daemon's prompt arrives. While the mark names this session (the instance's own and the host's live
-one) and its start is unsent or was sent less than 30 s ago (`STARTUP_TURN_CAP_MS`), the startup
-phase holds whatever `ctx.mode` is: an idle card goes as a `followUp` with no turn, and an idle
-check sends no wake, keeps the phase and checks again at the mark's cap (every 30 s while the start
-is unsent, since no event tells pi-envoy of the send). Every startup card seen while the mark held
-is owed the one wake the check sends after the start turn's `agent_end`, whatever reply follows it
-in the branch. A mark past its cap (a start the host failed) or naming another session (a `task`
-subagent's, a session switched away from) changes nothing, and a session change drops the owed
-cards with the rest. A card that reaches the session before the Legion entry's `session_start` has
-set the unsent mark (inside the Envoy entry's own `session_start`, when Oh My Pi runs that first)
-finds no mark.
+one) and its start was sent less than 30 s ago (`STARTUP_TURN_CAP_MS`), or is unsent and pi-envoy
+first read that unsent mark less than 30 s ago, the startup phase holds whatever `ctx.mode` is: an
+idle card goes as a `followUp` with no turn, and an idle check sends no wake, keeps the phase and
+checks again at the sent mark's cap, or every second while the start is unsent
+(`STARTUP_TURN_POLL_MS`, since no event tells pi-envoy of the send, nor of a start claim refused
+before the send, which clears the mark), until that mark's cap. The unsent mark's cap is not
+renewed, so a start that never comes (a start claim that never answers, a session started with no
+`/legion-controller-start`) holds the cards back for 30 s once, and a refused start claim releases
+them at the next poll. Every startup card seen while the mark held is owed the one wake the check
+sends once the hold ends (after the start turn's `agent_end`, or at the release), unless a reply
+after the start turn read it: the start turn's own replies, its tool calls' included, ran the
+start procedure and do not count, but any assistant message after the first one after the card
+that ends a model turn (one that called no tool and did not error) does, whether a later run or
+the start turn's run going on for an aside it took at the model's stop wrote it; the branch's
+order decides, as for every other card. A sent mark past its cap (a start the host failed) or a
+mark naming another session (a `task` subagent's, a session switched away from) changes nothing,
+and a session change drops the owed cards with the rest. A card that reaches the session before
+the Legion entry's `session_start` has set the unsent mark (inside the Envoy entry's own
+`session_start`, when Oh My Pi runs that first) finds no mark.
 The limits: a card sent as a session turns busy, before the host has marked it busy, is a steer,
 can wait in that queue and is dropped by an Esc, and an Esc puts a person's queued Sends back in the
 input box merged and without their Dispatch ids, until the session runs an Oh My Pi release with

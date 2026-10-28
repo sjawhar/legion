@@ -8,6 +8,7 @@ import {
   type CardWakeContext,
   STARTUP_CARD_CAP_MS,
   STARTUP_TURN_CAP_MS,
+  STARTUP_TURN_POLL_MS,
   unreadCards,
 } from "./card-wake";
 
@@ -647,7 +648,7 @@ describe("while the start-turn mark names the session", () => {
   const twoCards =
     "2 Envoy messages above arrived with no turn to read them: read them and act on them.";
 
-  test("sends a terminal's idle card as a follow-up that starts no turn while the start is unsent, and wakes for none, checking again at the cap", async () => {
+  test("sends a terminal's idle card as a follow-up that starts no turn while the start is unsent, and wakes for none before the cap, reading the mark again at each poll", async () => {
     const host = harness({ mode: "tui" });
     host.markUnsent();
     host.setIdle(true);
@@ -660,14 +661,58 @@ describe("while the start-turn mark names the session", () => {
     host.message(card.message);
     await host.fire();
     expect(host.sent).toEqual([]);
-    // No event tells the wake the start was sent, so it reads the mark again at the cap.
-    expect(host.delays.at(-1)).toBe(STARTUP_TURN_CAP_MS);
-    host.advance(STARTUP_TURN_CAP_MS);
+    // No event tells the wake the start was sent, or that a refused claim cleared the mark, so it
+    // reads the mark again at each poll.
+    expect(host.delays.at(-1)).toBe(STARTUP_TURN_POLL_MS);
+    host.advance(STARTUP_TURN_POLL_MS);
     await host.fire();
     expect(host.sent).toEqual([]);
-    expect(host.delays.at(-1)).toBe(STARTUP_TURN_CAP_MS);
+    expect(host.delays.at(-1)).toBe(STARTUP_TURN_POLL_MS);
     // The phase holds: a second idle card is a startup card too.
     expect(host.card("terminal-startup-two").delivery).toMatchObject(followUp);
+  });
+
+  // A start claim that never answers, or a session given no start command, leaves the mark unsent
+  // for good: the cap from the wake's first read of it ends the hold, once.
+  test("wakes once at the unsent mark's cap from its first read, not before, and holds nothing after it", async () => {
+    const host = harness({ mode: "tui" });
+    host.markUnsent();
+    host.setIdle(true);
+    host.message(host.card("never-sent").message);
+    await host.fire();
+    for (let waited = STARTUP_TURN_POLL_MS; waited < STARTUP_TURN_CAP_MS; ) {
+      host.advance(STARTUP_TURN_POLL_MS);
+      waited += STARTUP_TURN_POLL_MS;
+      await host.fire();
+      expect(host.sent).toEqual([]);
+    }
+    expect(host.delays.every((delay) => delay <= STARTUP_TURN_POLL_MS)).toBe(true);
+
+    host.advance(STARTUP_TURN_POLL_MS);
+    await host.fire();
+    expect(host.sent).toEqual([wakeMessage(oneCard)]);
+    const armed = host.delays.length;
+    await host.fire();
+    expect(host.delays).toHaveLength(armed);
+
+    // The same unsent mark holds nothing now: an idle card is a steer that starts its own turn.
+    expect(host.card("after-the-cap").delivery).toMatchObject(steer);
+  });
+
+  // `/legion-controller-start`'s claim refused before the send clears the unsent mark.
+  test("wakes at the next poll, well before the cap, once a refused claim clears the unsent mark", async () => {
+    const host = harness({ mode: "tui" });
+    host.markUnsent();
+    host.setIdle(true);
+    host.message(host.card("refused-start").message);
+    await host.fire();
+    expect(host.sent).toEqual([]);
+
+    host.clearMark();
+    host.advance(STARTUP_TURN_POLL_MS);
+    await host.fire();
+    expect(host.sent).toEqual([wakeMessage(oneCard)]);
+    expect(host.delays).toEqual([0, STARTUP_TURN_POLL_MS]);
   });
 
   test("wakes once after the start turn's agent_end for every startup card, though the start turn's reply follows them", async () => {
@@ -687,6 +732,76 @@ describe("while the start-turn mark names the session", () => {
     expect(host.card("after-start-turn").delivery).toMatchObject(steer);
   });
 
+  test("still owes the wake to a startup card when only the start turn's replies follow it, its tool calls included", async () => {
+    const host = harness({ mode: "tui" });
+    host.markUnsent();
+    host.setIdle(true);
+    host.message(host.card("owed-tool-steps").message);
+    await host.fire();
+
+    host.markSent(host.clock());
+    host.setIdle(false);
+    host.run();
+    host.clearMark();
+    host.message({ role: "user", content: "start" });
+    host.message(host.reply({ stopReason: "toolUse" }));
+    host.message({ role: "toolResult", content: "ok" });
+    host.message(host.reply());
+    host.setIdle(true);
+    host.end();
+    await host.fire();
+    expect(host.sent).toEqual([wakeMessage(oneCard)]);
+  });
+
+  // A card that arrives while the start turn runs is an aside, which the host takes at the model's
+  // stop: the start turn's run goes on, and its next reply reads every card above it.
+  test("sends no wake for a startup card that a reply after the start turn's end read, in the start turn's run", async () => {
+    const host = harness({ mode: "tui" });
+    host.markUnsent();
+    host.setIdle(true);
+    host.message(host.card("owed-read-in-run").message);
+    await host.fire();
+
+    host.markSent(host.clock());
+    host.setIdle(false);
+    host.run();
+    host.clearMark();
+    host.message({ role: "user", content: "start" });
+    host.message(host.reply());
+    const during = host.card("during-start");
+    expect(during.delivery).toMatchObject(aside);
+    host.message(during.message);
+    host.message(host.reply());
+    host.setIdle(true);
+    host.end();
+    await host.fire();
+    expect(host.sent).toEqual([]);
+  });
+
+  // The operator's prompt starts a run before the check the start turn's `agent_end` armed runs:
+  // that check finds the host busy and leaves the startup card to the run's `agent_end`.
+  test("sends no wake for a startup card that a later run read", async () => {
+    const host = harness({ mode: "tui" });
+    host.markUnsent();
+    host.setIdle(true);
+    host.message(host.card("owed-read-later").message);
+    await host.fire();
+
+    host.markSent(host.clock());
+    host.startTurn();
+    host.setIdle(false);
+    host.run();
+    await host.fire();
+    expect(host.sent).toEqual([]);
+
+    host.message({ role: "user", content: "typed" });
+    host.message(host.reply());
+    host.setIdle(true);
+    host.end();
+    await host.fire();
+    expect(host.sent).toEqual([]);
+  });
+
   // The operator typed a turn before the start command ran: its `agent_start` clears the unsent
   // mark, and that run's `agent_end` sends the one wake.
   test("sends no wake until a run's agent_start clears the unsent mark, then wakes at that run's agent_end", async () => {
@@ -695,7 +810,7 @@ describe("while the start-turn mark names the session", () => {
     host.setIdle(true);
     host.message(host.card("unsent-then-run").message);
     await host.fire();
-    host.advance(STARTUP_TURN_CAP_MS);
+    host.advance(STARTUP_TURN_POLL_MS);
     await host.fire();
     expect(host.sent).toEqual([]);
 
@@ -996,5 +1111,25 @@ describe("unreadCards", () => {
     unreadCards([cardEntry("folded")], cards);
 
     expect([...cards]).toEqual(["folded"]);
+  });
+
+  test("counts an owed card read only by an assistant message after the first one after it that ends a model turn", () => {
+    const reply = (stopReason: string) => ({
+      type: "message",
+      message: { role: "assistant", stopReason },
+    });
+    const user = { type: "message", message: { role: "user" } };
+    const toolResult = { type: "message", message: { role: "toolResult" } };
+    const owed = new Set(["owed"]);
+    const count = (...after: unknown[]) =>
+      unreadCards([cardEntry("owed"), user, ...after], owed, owed);
+
+    expect(count(reply("stop"))).toBe(1);
+    expect(count(reply("toolUse"), toolResult, reply("stop"))).toBe(1);
+    expect(count(reply("error"), reply("stop"))).toBe(1);
+    expect(count(reply("stop"), cardEntry("later"), reply("stop"))).toBe(0);
+    expect(count(reply("stop"), user, reply("toolUse"))).toBe(0);
+    // The same branch reads a card that is not owed at the start turn's reply.
+    expect(unreadCards([cardEntry("owed"), user, reply("stop")], owed)).toBe(0);
   });
 });

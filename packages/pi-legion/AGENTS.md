@@ -376,9 +376,10 @@ The Envoy entry still opens the session's agent subject at its own `session_star
 start message not yet sent the operator's controller names the session at `session_start` in the
 interface's `startupTurn` with the start due and unsent (`{session, sentAt: undefined}`,
 `markStartupTurnPending`): while that mark names the session, a card that reaches it idle starts
-no turn and its wake waits for the start turn (pi-envoy's `src/card-wake.ts`). The start command's
-send overwrites it with the sent mark; a claim refused before the send clears it, and so does a
-claim that stops for a session change, for the replaced session.
+no turn and its wake waits for the start turn, for at most 30 s while the start is unsent
+(pi-envoy's `src/card-wake.ts`). The start command's send overwrites it with the sent mark; a
+claim refused before the send clears it, and so does a claim that stops for a session change, for
+the replaced session.
 Oh My Pi runs command-line words after its startup, once the TUI listens, and the extension command
 `legion-controller-start` (`extensions/legion.ts`, `startCommand`) answers the word:
 

@@ -52,8 +52,9 @@ export interface EnvoyPluginInterface {
    * is cleared once that session's first run starts or the session shuts down, and an unsent mark
    * once the start command's claim fails before the send or hands over to a new session. The Envoy
    * entry reads it (`packages/pi-envoy/src/card-wake.ts`): while it names the Envoy entry's own
-   * live session, unsent or sent less than 30 s ago, a card that arrived while that session started
-   * takes no turn, and its wake waits for the start turn.
+   * live session, sent less than 30 s ago, or unsent and first read by that entry less than 30 s
+   * ago, a card that arrived while that session started takes no turn, and its wake waits for the
+   * start turn.
    */
   startupTurn: { readonly session: string; readonly sentAt: number | undefined } | undefined;
 }
