@@ -99,7 +99,6 @@ import type { RetypeOutcome } from './record-mark-retype';
 
 export type { MarkAction, SelectionBarActionKind, PopoverActionKind } from './dispatch-marks';
 export type { RetypedMark, RetypeRefusal, RetypeOutcome } from './record-mark-retype';
-export type { MermaidDrawer, MermaidDrawing } from './mermaid-svg';
 export type {
   BlockAttributeKind,
   BlockAttributeSchema,

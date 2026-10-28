@@ -45,13 +45,14 @@ export function mermaidSvgElement(markup: string, document: Document): SVGSVGEle
 }
 
 /** A drawn source: the sanitized diagram (shared; a consumer inserts a clone, as `showMermaidSvg`
- *  does) or the full status text of a refusal. */
-export type MermaidDrawing = { svg: SVGSVGElement } | { error: string };
+ *  does), the full status text of a refusal, or `unavailable` when no renderer can draw the source
+ *  (the host's worker failed to start or load), so the block shows its source as code, with no
+ *  status line. */
+export type MermaidDrawing = { svg: SVGSVGElement } | { error: string } | { unavailable: true };
 
-/** Draws `source` for the editor: calls `draw` at most once — synchronously inside the call when
- *  the drawing is cached, later when the renderer answers, never after the returned cancel runs,
- *  and never at all when no renderer can run (the block keeps showing its source). Returns the
- *  cancel. */
+/** Draws `source` for the editor: calls `draw` at most once and never after the returned cancel
+ *  runs — synchronously inside the call when the drawing is cached or no renderer can run
+ *  (`unavailable`), later when the renderer answers or fails. Returns the cancel. */
 export type MermaidDrawer = (source: string, draw: (drawing: MermaidDrawing) => void) => () => void;
 
 /**

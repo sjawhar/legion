@@ -186,6 +186,8 @@ export function ProofDocument({
 }: ProofDocumentProps): ReactNode {
   const root = useRef<HTMLDivElement>(null);
   const editorRef = useRef<EditorHandle | undefined>(undefined);
+  // The dispose of the latest focus's re-run after the diagrams draw (`focusInEditor`).
+  const disposeRefocusRef = useRef<(() => void) | undefined>(undefined);
   const isClosedRef = useRef(isClosed);
   const schemaReadOnlyRef = useRef(false);
   const userRef = useRef(user);
@@ -319,6 +321,16 @@ export function ProofDocument({
       `${window.location.origin}${window.location.pathname}${blockFragment(blockId)}`
     );
   }, []);
+  // Every focus in the live editor - a block link, the margin's mark and block focus, a reader's
+  // click to a block - runs `focus` now and `refocus` once more after the page's mermaid diagrams
+  // have drawn (`refocusAfterDiagrams`), since a diagram that draws above the target pushes it
+  // down. One re-run waits at a time: a newer focus drops an older one's, and so does the editor
+  // unbinding.
+  const focusInEditor = useCallback((focus: () => void, refocus: () => void = focus) => {
+    disposeRefocusRef.current?.();
+    focus();
+    disposeRefocusRef.current = refocusAfterDiagrams(refocus);
+  }, []);
   // Google Docs' chord for the selection bar's Comment button, on the button's own path. It is
   // offered while this editor has focus, holds a selection and takes edits, which is when the bar
   // offers Comment; anywhere else - a comment composer, an ask card's field, a read-only or
@@ -422,24 +434,29 @@ export function ProofDocument({
     // link - for as long as it is this effect's editor. It returns what undoes it.
     const bindEditor = (handle: EditorHandle, connection: DocumentConnection) => {
       installTypedBlocks(handle.view, blockSchema, setAskBlockHosts);
+      // False once this editor unbinds, so a focus a frame late never reaches a destroyed editor
+      // or leaves a re-run behind for it.
+      let bound = true;
       const blockLink = window.location.hash;
-      // A diagram above the block that draws after this focus pushes the block down, so the focus
-      // runs again once the diagrams have drawn, while the hash still names this block.
-      let disposeRefocus = () => {};
       if (blockLink.startsWith("#b-")) {
         const linkedBlockId = decodeURIComponent(blockLink.slice(3));
-        handle.focusBlock(linkedBlockId);
-        disposeRefocus = refocusAfterDiagrams(() => {
-          if (window.location.hash === blockLink) handle.focusBlock(linkedBlockId);
-        });
+        // The re-run lands only while the hash still names this block.
+        focusInEditor(
+          () => handle.focusBlock(linkedBlockId),
+          () => {
+            if (window.location.hash === blockLink) handle.focusBlock(linkedBlockId);
+          }
+        );
       }
       setSearchHighlights(handle.view.dom, highlightTermRef.current);
       marginRef.current.registerDocument({
         artifactId: artifact.id,
         focusBlock: (blockId) => {
-          requestAnimationFrame(() => handle.focusBlock(blockId));
+          requestAnimationFrame(() => {
+            if (bound) focusInEditor(() => handle.focusBlock(blockId));
+          });
         },
-        focusMark: (markId) => handle.focusMark(markId),
+        focusMark: (markId) => focusInEditor(() => handle.focusMark(markId)),
         removeMark: (markId) => handle.removeMark(markId),
         retypeMark: (markId, kind) => handle.retypeMark(markId, selectionBarKindFor(kind)),
         setActiveBlocks: (blockIds) => handle.setActiveBlocks(blockIds),
@@ -479,7 +496,9 @@ export function ProofDocument({
       publishPlacements();
       fragment.observeDeep(publishPlacements);
       return () => {
-        disposeRefocus();
+        bound = false;
+        disposeRefocusRef.current?.();
+        disposeRefocusRef.current = undefined;
         cancelAnimationFrame(frame);
         cancelAnimationFrame(searchFrame);
         resizeObserver.disconnect();
@@ -639,7 +658,7 @@ export function ProofDocument({
       readmitRef.current = undefined;
       teardown();
     };
-  }, [artifact.id, blockSchema, createEditor, loadTransport, queryClient]);
+  }, [artifact.id, blockSchema, createEditor, focusInEditor, loadTransport, queryClient]);
 
   // A blocked admission is admitted again by the next successful read of the document's text: the
   // refetch a repair upload's or a rebuild's invalidation makes, or any other. Each successful read
@@ -739,7 +758,7 @@ export function ProofDocument({
                 return;
               }
               window.location.hash = blockFragment(blockID);
-              editorRef.current?.focusBlock(blockID);
+              focusInEditor(() => editorRef.current?.focusBlock(blockID));
             }}
             title={openDecision.question}
           >
@@ -837,7 +856,7 @@ export function ProofDocument({
                     key={block.id}
                     onClick={() => {
                       marginRef.current.filterToBlock(block.id);
-                      editorRef.current?.focusBlock(block.id);
+                      focusInEditor(() => editorRef.current?.focusBlock(block.id));
                     }}
                     style={{ top: `${blockPlacements.get(block.id)?.top ?? 0}px` }}
                     type="button"

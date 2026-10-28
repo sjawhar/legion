@@ -18,19 +18,28 @@ interface DrawRequest {
   /** When the view asked, by `performance.now()`. */
   readonly at: number;
   cancels: number;
-  /** Delivers an answer, whether or not the request was cancelled, as a drawer never does. */
+  /** Delivers an answer, unless the request was cancelled: a drawer never calls `draw` after its
+   *  cancel, which is what the view relies on to drop an answer to an earlier source. */
   readonly answer: (drawing: MermaidDrawing) => void;
 }
 
 /** A drawer that records each request and answers only when the case calls `answer`, or at once
- *  with `answerAtOnce`'s drawing when it returns one. */
+ *  with `answerAtOnce`'s drawing when it returns one; like the host's, it never draws a request
+ *  after its cancel. */
 function fakeDrawer(answerAtOnce?: (source: string) => MermaidDrawing | undefined): {
   drawMermaid: MermaidDrawer;
   requests: DrawRequest[];
 } {
   const requests: DrawRequest[] = [];
   const drawMermaid: MermaidDrawer = (source, draw) => {
-    const request: DrawRequest = { answer: draw, at: performance.now(), cancels: 0, source };
+    const request: DrawRequest = {
+      answer: (drawing) => {
+        if (request.cancels === 0) draw(drawing);
+      },
+      at: performance.now(),
+      cancels: 0,
+      source,
+    };
     requests.push(request);
     const drawing = answerAtOnce?.(source);
     if (drawing !== undefined) draw(drawing);
@@ -192,8 +201,6 @@ test("edits ask nothing until the pause after the last one, then ask once for th
 
       await Bun.sleep(50);
       expect(requests).toHaveLength(2);
-      requests[0]?.answer(diagram(document, "stale"));
-      expect(shownDiagram(block)).toBe("before");
       requests[1]?.answer(diagram(document, "after"));
       expect(shownDiagram(block)).toBe("after");
       expect(requests[1]?.cancels).toBe(0);
@@ -202,7 +209,7 @@ test("edits ask nothing until the pause after the last one, then ask once for th
   );
 });
 
-test("destroying the editor cancels the request and the redraw timer, and a late answer changes nothing", async () => {
+test("destroying the editor cancels the request and the redraw timer", async () => {
   const { drawMermaid, requests } = fakeDrawer();
   await withMarksEditor(
     ONE_DIAGRAM,
@@ -221,7 +228,6 @@ test("destroying the editor cancels the request and the redraw timer, and a late
 
       await Bun.sleep(EDIT_REDRAW_DELAY_MS + 50);
       expect(requests).toHaveLength(1);
-      expect(() => requests[0]?.answer(diagram(view.dom.ownerDocument, "late"))).not.toThrow();
       expect(block.preview?.shadowRoot ?? null).toBeNull();
       expect(block.preview?.hidden).toBe(true);
     },
@@ -297,6 +303,31 @@ test("a refusal shows its text in the status line and hides the preview", async 
       expect(block.preview?.hidden).toBe(true);
       expect(block.preview?.shadowRoot?.childNodes).toHaveLength(0);
       expect(block.pre.parentElement?.matches("details.proof-mermaid-source[open]")).toBe(true);
+    },
+    { drawMermaid }
+  );
+});
+
+test("an edit answered unavailable (no renderer can draw it) clears the earlier drawing and shows the source", async () => {
+  const { drawMermaid, requests } = fakeDrawer();
+  await withMarksEditor(
+    ONE_DIAGRAM,
+    async ({ view }) => {
+      const [block] = blocks(view);
+      if (!block) throw new Error("the document draws a code block");
+      requests[0]?.answer(diagram(view.dom.ownerDocument, "drawn"));
+      expect(shownDiagram(block)).toBe("drawn");
+
+      typeInto(view, 0, "\n  B --> C");
+      await until(() => requests.length > 1);
+      requests[1]?.answer({ unavailable: true });
+
+      expect(block.preview?.hidden).toBe(true);
+      expect(block.preview?.shadowRoot?.childNodes).toHaveLength(0);
+      expect(block.status?.hidden).toBe(true);
+      expect(block.status?.textContent).toBe("");
+      expectSourceShown(block);
+      expect(block.code.textContent).toBe(`${FIRST}\n  B --> C`);
     },
     { drawMermaid }
   );

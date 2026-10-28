@@ -3,8 +3,9 @@
  * `mermaidDiagramsPlugin` (INFRA-532). A plain code block is upstream's
  * `div.proof-code-block > pre.proof-code-block-pre > code`. A mermaid block is drawn by the host's
  * `MermaidDrawer` (Dispatch's Web Worker), never on the page's thread, and the drawing is mounted
- * in the preview's shadow root, so the diagram's styles stay inside it. This module imports
- * nothing from upstream, so beautiful-mermaid and ELK stay out of the editor's bundle.
+ * in the preview's shadow root, so the diagram's styles stay inside it; when no renderer can run,
+ * the block shows its source as code. This module imports nothing from upstream, so
+ * beautiful-mermaid and ELK stay out of the editor's bundle.
  */
 
 import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
@@ -31,7 +32,11 @@ const mermaidCodeBlockKey = new PluginKey("mermaid-code-block");
  * and never when a drawing arrives: an answer comes back at any time, often while the reader is
  * typing in the block, and moving the `pre` then would move the contentDOM under the caret. An
  * answer only fills or clears the preview's shadow root and the status line. Until the first
- * answer, and for good when there is no drawer or it never answers, the block shows its source.
+ * answer, and for good when there is no drawer or it never answers, the block shows its source;
+ * an `unavailable` answer (no renderer can draw the source) clears the preview and the status, so
+ * the block shows its source again rather than a drawing of an earlier source. The drawer never
+ * calls `draw` after its cancel, and each request cancels the one before it, so only the latest
+ * request's answer ever reaches the block.
  */
 class MermaidCodeBlockView implements NodeView {
   readonly dom: HTMLDivElement;
@@ -44,8 +49,6 @@ class MermaidCodeBlockView implements NodeView {
   private readonly pre: HTMLPreElement;
   private currentLanguage = "";
   private currentSource = "";
-  /** Counts the requests made, so an answer to any but the latest one is dropped. */
-  private requests = 0;
   private cancelRequest: (() => void) | undefined;
   private redrawTimer: number | undefined;
 
@@ -159,18 +162,14 @@ class MermaidCodeBlockView implements NodeView {
   }
 
   /** Cancels the earlier request and asks for the current source; the drawer may answer inside
-   *  the call (a cached drawing), which draws at once. */
+   *  the call (a cached drawing, or no renderer), which shows at once. */
   private requestDrawing(): void {
     this.cancelPendingRequest();
     if (this.drawMermaid === undefined) return;
-    const request = ++this.requests;
-    this.cancelRequest = this.drawMermaid(this.currentSource, (drawing) => {
-      if (request === this.requests) this.show(drawing);
-    });
+    this.cancelRequest = this.drawMermaid(this.currentSource, (drawing) => this.show(drawing));
   }
 
   private cancelPendingRequest(): void {
-    this.requests++;
     const cancel = this.cancelRequest;
     this.cancelRequest = undefined;
     cancel?.();
@@ -182,18 +181,24 @@ class MermaidCodeBlockView implements NodeView {
     this.cancelPendingRequest();
   }
 
-  /** Fills the preview's shadow root with a drawing, or clears it and shows a refusal's text. */
+  /** Fills the preview's shadow root with a drawing, or clears it and shows a refusal's text, or
+   *  clears both when no renderer can draw the source, leaving the source shown. */
   private show(drawing: MermaidDrawing): void {
     if ("svg" in drawing) {
       showMermaidSvg(this.preview, drawing.svg, EDITOR_SHEET);
       this.preview.hidden = false;
       this.status.hidden = true;
       this.status.textContent = "";
-    } else {
+    } else if ("error" in drawing) {
       this.preview.shadowRoot?.replaceChildren();
       this.preview.hidden = true;
       this.status.textContent = drawing.error;
       this.status.hidden = false;
+    } else {
+      this.preview.shadowRoot?.replaceChildren();
+      this.preview.hidden = true;
+      this.status.hidden = true;
+      this.status.textContent = "";
     }
   }
 }

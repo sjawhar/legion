@@ -4,9 +4,10 @@ import { mermaidDrawsSettled, mermaidDrawsWaiting } from "../refs/mermaid-diagra
 const READER_ACTIONS = ["pointerdown", "wheel", "touchstart", "keydown"] as const;
 
 /**
- * Runs `refocus` (a block link's `focusBlock`, a highlighted mark's `focusMark`) once more after
- * the page's mermaid diagrams have drawn, so the focus lands on its block whether or not a
- * diagram above it had drawn when it first ran. A document's diagrams draw in Dispatch's Mermaid
+ * Runs `refocus` (every focus in the live document, through `ProofDocument`'s `focusInEditor`,
+ * and a past version's highlighted mark in `VersionView`) once more after the page's mermaid
+ * diagrams have drawn, so the focus lands on its target whether or not a diagram above it had
+ * drawn when it first ran. A document's diagrams draw in Dispatch's Mermaid
  * worker (`features/refs/mermaid-diagrams.ts`), after the editor opened and scrolled to its
  * target, and each one that draws above the target pushes it down by the diagram's height. The
  * focus scrolls smoothly, and a script scroll during a smooth scroll cuts it short, so the focus

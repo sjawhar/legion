@@ -70,6 +70,11 @@ class FakeWorker {
     this.terminated = true;
   }
 
+  /** Fires `error`, as a worker whose module fails to load after it started does. */
+  fail(): void {
+    this.emit("error", new Event("error"));
+  }
+
   private emit(type: string, event: unknown): void {
     if (this.terminated) return;
     for (const listener of this.listeners[type] ?? []) listener(event);
@@ -621,27 +626,62 @@ describe("Mermaid diagrams", () => {
       expect(FakeWorker.sent).toEqual([shared]);
     });
 
-    test("with the renderer failed an uncached source never draws, nor waits to be sent once it recovers", async () => {
+    test("while the renderer is failed an uncached source draws unavailable inside the call and is not queued", async () => {
       FakeWorker.startFails = true;
       const logged = spyOn(console, "error").mockImplementation(() => {});
       try {
-        const drawn: string[] = [];
-        requestMermaidDrawing("sequenceDiagram\n  Alice->>Bob: Before", () => drawn.push("before"));
+        requestMermaidDrawing("sequenceDiagram\n  Alice->>Bob: Before", () => {});
         await waitFor(() => expect(logged).toHaveBeenCalledTimes(1));
-        requestMermaidDrawing("sequenceDiagram\n  Alice->>Bob: Failed", () => drawn.push("failed"));
-        await Bun.sleep(20);
-        expect(drawn).toEqual([]);
+        const failedDraws: MermaidDrawing[] = [];
+        requestMermaidDrawing("sequenceDiagram\n  Alice->>Bob: Failed", (drawing) =>
+          failedDraws.push(drawing)
+        );
+        // Checked before any await: a draw deferred to a later microtask or task fails here.
+        expect(failedDraws).toEqual([{ unavailable: true }]);
         expect(FakeWorker.created).toHaveLength(1);
 
-        // A source queued while failed would be sent first by the next worker and drawn.
+        // A source queued while failed would be sent first by the next worker.
         FakeWorker.startFails = false;
         window.dispatchEvent(new Event("online"));
         const after = "sequenceDiagram\n  Alice->>Bob: After";
-        requestMermaidDrawing(after, () => drawn.push("after"));
-        await waitFor(() => expect(drawn).toContain("after"));
+        const afterDraws: MermaidDrawing[] = [];
+        requestMermaidDrawing(after, (drawing) => afterDraws.push(drawing));
+        await waitFor(() => expect(afterDraws).toHaveLength(1));
         await mermaidDrawsSettled();
-        expect(drawn).toEqual(["after"]);
+        expect(afterDraws[0] !== undefined && "svg" in afterDraws[0]).toBe(true);
+        expect(failedDraws).toHaveLength(1);
         expect(FakeWorker.sent).toEqual([after]);
+        expect(FakeWorker.created).toHaveLength(2);
+      } finally {
+        logged.mockRestore();
+      }
+    });
+
+    test("every draw waiting on a worker that fails draws unavailable, once", async () => {
+      // The worker never answers, so one source stays in flight with two draws, the other queued.
+      FakeWorker.answer = () => undefined;
+      const logged = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const drawn: string[] = [];
+        const record = (label: string) => (drawing: MermaidDrawing) =>
+          drawn.push(`${label}: ${JSON.stringify(drawing)}`);
+        const inFlight = "sequenceDiagram\n  Alice->>Bob: In flight";
+        requestMermaidDrawing(inFlight, record("first"));
+        const cancelSecond = requestMermaidDrawing(inFlight, record("second"));
+        requestMermaidDrawing("sequenceDiagram\n  Carol->>Dave: Queued", record("queued"));
+        await waitFor(() => expect(FakeWorker.sent).toEqual([inFlight]));
+
+        FakeWorker.created[0]?.fail();
+        expect(drawn).toEqual([
+          'first: {"unavailable":true}',
+          'second: {"unavailable":true}',
+          'queued: {"unavailable":true}',
+        ]);
+        expect(logged).toHaveBeenCalledTimes(1);
+        // A draw already run has a cancel that does nothing, and nothing waits any more.
+        cancelSecond();
+        await mermaidDrawsSettled();
+        expect(drawn).toHaveLength(3);
       } finally {
         logged.mockRestore();
       }
@@ -697,11 +737,13 @@ describe("Mermaid diagrams", () => {
       FakeWorker.startFails = true;
       const logged = spyOn(console, "error").mockImplementation(() => {});
       try {
-        const drawn: string[] = [];
-        requestMermaidDrawing("sequenceDiagram\n  Alice->>Bob: Never", () => drawn.push("never"));
+        const drawn: MermaidDrawing[] = [];
+        requestMermaidDrawing("sequenceDiagram\n  Alice->>Bob: Never", (drawing) =>
+          drawn.push(drawing)
+        );
         expect(await settlesWithin(mermaidDrawsSettled(), 1000)).toBe(true);
         expect(logged).toHaveBeenCalledTimes(1);
-        expect(drawn).toEqual([]);
+        expect(drawn).toEqual([{ unavailable: true }]);
       } finally {
         logged.mockRestore();
       }
