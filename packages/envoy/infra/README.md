@@ -687,17 +687,36 @@ the consumers' updates between:
    updates the app Deployment; a preview that deletes a RandomPassword is not this step. Apply it:
    the app rolls onto both tokens, and `agentToken` is the new one.
 2. Apply every consumer, so each stores the new `agentToken`, and let each relaunch its agents
-   onto it. Agents still on the old token keep working meanwhile.
-3. Once every consumer has relaunched, clear `keepPreviousAgentToken` (or set it `false`) and
-   apply again. The preview deletes `<hostname>-agent-token-<N-1>` (`<hostname>-agent-token` after
-   the first rotation), replaces the Secret and updates the app Deployment; the app rolls onto the
-   new token alone.
+   onto it. Agents still on the old token keep working meanwhile, and Dispatch names each of
+   them: every app pod logs `dispatch: request authenticated with a previous shared agent token`,
+   at WARN, with the caller's `address`, `user_agent` and `path`, the first time a caller presents
+   the old token and again at most once every ten minutes per caller while it keeps doing so.
+   Read every app pod's log for it:
+
+   ```sh
+   kubectl -n <namespace> logs -l app=<hostname> -c envoy-dispatch --prefix --since=1h \
+     | grep 'previous shared agent token'
+   ```
+
+3. Once that line has stopped appearing in every app pod's log for well over ten minutes (an
+   hour, say, or longer than the slowest consumer takes to relaunch its agents), so that every
+   consumer has relaunched, clear `keepPreviousAgentToken` (or set it `false`) and apply again.
+   A caller still in the log is an agent this step would lock out. The preview deletes
+   `<hostname>-agent-token-<N-1>` (`<hostname>-agent-token` after the first rotation), replaces
+   the Secret and updates the app Deployment; the app rolls onto the new token alone.
 
 At one app replica each roll recreates the app's one pod, a brief outage, as any change to the
-Secret is; above one it rolls with no pod down. Never lower `agentTokenGeneration`: a generation
-the stack no longer holds is minted afresh, a value no agent has. Raising it with
+Secret is; above one it rolls with no pod down. Raising `agentTokenGeneration` with
 `keepPreviousAgentToken` unset is a hard cut, which refuses every agent on the old token from the
 moment the app rolls.
+
+To roll back step 1 before step 3, set `agentTokenGeneration` back to N-1 and unset
+`keepPreviousAgentToken`: generation N-1 is still in the stack's state, so it keeps its value,
+every agent on it keeps working, and the update deletes generation N, so agents that already
+moved to N are refused. After step 3 there is no rollback to the old token: generation N-1 has
+been deleted, so setting `keepPreviousAgentToken` again, or lowering `agentTokenGeneration` to
+N-1, mints a new value for it that no agent holds. For the same reason, never lower
+`agentTokenGeneration` except in that rollback.
 
 ### The front door
 
