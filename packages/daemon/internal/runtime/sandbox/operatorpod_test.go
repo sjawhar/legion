@@ -93,6 +93,7 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "a variable the runtime sets", pod: env("LEGION_TREE", "LEGSMOKE-1"), want: envSets("LEGION_TREE", byRuntime)},
 		{name: "the pod's PATH", pod: env("PATH", "/usr/bin"), want: envSets("PATH", byRuntime)},
 		{name: "the image's HOME", pod: env("HOME", "/tmp/elsewhere"), want: envSets("HOME", byImage)},
+		{name: "the AWS CLI CA bundle", pod: env("AWS_CA_BUNDLE", "/tmp/roots.pem"), want: envSets("AWS_CA_BUNDLE", byImage)},
 		{name: "the image's profile", pod: env("OMP_PROFILE", "other"), want: envSets("OMP_PROFILE", byImage)},
 		{name: "the Oh My Pi the probe proves", pod: env("LEGION_OMP_PATH", "/usr/bin/true"), want: envSets("LEGION_OMP_PATH", byImage)},
 		{name: "Oh My Pi's config root", pod: env("PI_CONFIG_DIR", ".elsewhere"), want: envSets("PI_CONFIG_DIR", bySessions)},

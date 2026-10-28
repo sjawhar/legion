@@ -480,7 +480,7 @@ describe("spec-writing", () => {
   test("cuts a source question over Dispatch's ask cap at a word, and posts the rest unchanged", async () => {
     const src = source();
     const asks = JSON.parse(readFileSync(path.join(src, "asks.json"), "utf8"));
-    const long = `${"Which way? ".repeat(70)}Recommendation: the second way, since it costs less.`;
+    const long = `${"Which way? ".repeat(Math.ceil(ASK_QUESTION_MAX / 11))}Recommendation: the second way, since it costs less.`;
     expect(long.length).toBeGreaterThan(ASK_QUESTION_MAX);
     asks[0].question = long;
     writeFileSync(path.join(src, "asks.json"), JSON.stringify(asks));
