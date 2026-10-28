@@ -12,7 +12,9 @@ reads its agent tier from local sops files and its human tier through the local 
 which asks for a YubiKey touch, and it never reads the agent-secrets broker. `agent-secrets` reads
 that broker, which is backed by a cloud Secret Manager. One key name can therefore hold different
 values in the two stores. `agent-secrets` names its store in output and every refusal; `secrets`
-names none today. This page is about `secrets`.
+names none today. This page is mostly about `secrets`; the keys of the `legion-implementer` (App ID
+5341240) and `legion-reviewer` (App ID 5341243) Apps are in the broker, and
+[their own section](#the-legion-implementer-and-legion-reviewer-apps) says how a daemon reads them.
 
 ## Current decision for the LEGION deployment
 
@@ -72,15 +74,41 @@ memory for its whole lifetime, so a grant ending never interrupts a running daem
 after it notices. A request nobody taps within 90 seconds fails with secretsd's timeout message and
 the daemon refuses to start, quoting it.
 
+## The `legion-implementer` and `legion-reviewer` Apps
+
+The `sjawhar` account owns both Apps. Their keys are in the secrets broker, not in secretsd:
+`LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier) and `GH_REVIEW_APP_PRIVATE_KEY_B64` (human tier:
+each read waits for a person's grant in Dispatch). `private_key_secret` reads secretsd only, so a
+daemon uses these Apps through `private_key_command`, as the live proofs do
+(`scripts/e2e/lib/github-apps.sh`, `app_key_command`):
+
+```yaml
+github_apps:
+  implement:
+    app_id: "5341240"
+    private_key_command: "agent-secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 --reason=legion-daemon-github-app-key -- sh -c 'printf %s \"$LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64\" | base64 -d'"
+  review:
+    app_id: "5341243"
+    private_key_command: "agent-secrets GH_REVIEW_APP_PRIVATE_KEY_B64 --reason=legion-daemon-github-app-key -- sh -c 'printf %s \"$GH_REVIEW_APP_PRIVATE_KEY_B64\" | base64 -d'"
+```
+
+The daemon passes the command's stderr through as it runs, so `agent-secrets`' line naming the
+pending request appears in the daemon's log while the review key waits for its grant.
+
+To rotate either key: in the App's GitHub settings, generate a new private key; store it with
+`base64 -w0 < key.pem | agent-secrets secret set <NAME>`; restart the daemon and confirm a fresh
+worker pane's `gh auth status` shows account `x-access-token`; only then revoke the old key in
+GitHub, for the reason step 7 below gives.
+
 ## The `private_key_secret` form
 
 ```yaml
 github_apps:
   implement:
-    app_id: "3202636"
+    app_id: "<implement App id>"
     private_key_secret: LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
   review:
-    app_id: "3202653"
+    app_id: "<review App id>"
     private_key_secret: GH_REVIEW_APP_PRIVATE_KEY_B64
 ```
 
@@ -291,6 +319,19 @@ provider_keys:
 - **`pi_config_files`** paths resolve against `legion.yaml`'s directory and may not hold `:`.
   The runtime's turn-scope overlay stays last, so its two keys outrank the operator's overlays. The
   boot plugin gate probes Oh My Pi under the same overlays and variables.
+- **`role_config_files`**, a top-level key beside the block, gives one role's panes overlays no
+  other role's get (`role_config_files: {implementer: [/etc/legion-operator/fallback.yml]}`, the
+  controller's pane under `controller: daemon` too): such a pane's `PI_CONFIG_FILES` is
+  `pi_config_files`, then the role's own in order, then the turn-scope overlay, still last. Each
+  path must be absolute; boot and `legion start --check-config` refuse one the host does not hold
+  as a file the daemon's user can read, naming the role and the path, and a pane of a role the key
+  leaves out is told what it was told without it. After the plugin gate passes, the boot gate runs
+  `omp config get retry.modelFallback --json` under each named role's list and on each of its files
+  alone, and refuses the boot when Oh My Pi exits non-zero (`boot gate: role_config_files.<role>:
+  the <role>'s Oh My Pi would not start: Oh My Pi refuses <file>: error: …`), rather than letting
+  every launch of that role fail. `docs/kubernetes.md` ("Operator configuration") has the rest of
+  the key's rules. Every pane runs as the daemon's Unix user, so each role can read every role's
+  overlay file; only loading is per role, so never put a secret in one.
 - **`take_over: kubernetes`** lets this daemon take over the claims a daemon running the project
   under `runtime: kubernetes` recorded on the same store ([Moving a project onto
   tmux](#moving-a-project-onto-tmux)). `kubernetes` is the only accepted value. Without the key, a
@@ -380,9 +421,11 @@ written by whichever daemon wrote last — so the order matters:
    found nowhere is refused again, and a tmux daemon pointed at a store a Kubernetes daemon still
    drives refuses to start rather than take its claims.
 
-## Rotating the App keys
+## Rotating App keys held in secretsd
 
-When a shared-box deployment rotates its keys under the human-tier boundary, rotation is pointless
+This runbook is for a shared-box deployment whose App keys are in secretsd under the human-tier
+boundary (the `legion-implementer` and `legion-reviewer` keys are in the broker; rotate those as
+[their section](#the-legion-implementer-and-legion-reviewer-apps) says). Rotation is pointless
 while panes can still read the keys, so the order is:
 
 1. Deploy the pane fix from LEGION-74 ("Every Legion pane inherits the daemon's GitHub App private
@@ -416,3 +459,24 @@ while panes can still read the keys, so the order is:
 
 Record the rotation on LEGION-74 as its spec asks (dates and key fingerprints only; never key
 material).
+
+## Serving on a socket the harness holds
+
+`legion start` binds legion.yaml's `bind` and `port` for its API. With `LEGION_LISTEN_FD=<n>` in
+its environment, it serves the API on descriptor `<n>` instead, a listening TCP socket it inherited
+from whatever started it, and binds nothing. A test harness opens that socket on port 0, so the
+kernel chooses the port, and holds it until the daemon serves on it; no other program can take the
+port in between. A shared-box deployment leaves the variable unset.
+
+- The file's `bind` and `port` must name the socket's address: `bind` an IP literal equal to the
+  socket's IP (`0.0.0.0` matches only a socket on every IPv4 interface, and a host name matches
+  nothing), `port` its port. The registry entry, the default `daemon_url` and `legion state` dial
+  them. A socket they do not name, or a descriptor that is not a listening TCP socket, refuses the
+  start before it takes the team or opens the store, naming `LEGION_LISTEN_FD` and the setting:
+  `legion start: legion.yaml: port=8081 does not match LEGION_LISTEN_FD=3, a socket listening on 127.0.0.1:8080`.
+- The daemon takes the socket over before it runs anything, the configuration's key commands
+  included, and serves on a close-on-exec copy, then unsets the variable: no process it starts, its
+  panes and tmux server among them, holds the socket or inherits the variable.
+- The boot line `legion daemon started` names the address the daemon serves on, as it does when it
+  binds.
+- `legion start --check-config` binds nothing and never reads the variable.

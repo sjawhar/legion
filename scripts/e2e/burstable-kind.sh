@@ -90,7 +90,7 @@ begin launch
 CGO_ENABLED=0 go -C "$root/packages/daemon" test -c -tags e2e -o "$work/burstable.test" ./internal/daemon
 kind_sandbox_internal_kubeconfig "$work/kubeconfig-internal"
 result=$work/result
-docker run --rm --name "$cluster-driver" --network kind --user "$(id -u):$(id -g)" \
+docker run --rm --name "$cluster-driver" --cpus 2 --memory 2g --network kind --user "$(id -u):$(id -g)" \
   -v "$work:$work" -e HOME=/tmp \
   -e LEGION_E2E_KUBECONFIG="$work/kubeconfig-internal" -e LEGION_E2E_KUBE_CONTEXT="$kind_context" \
   -e LEGION_E2E_IMAGE="$image" -e LEGION_E2E_WORK="$work" -e LEGION_E2E_RESULT="$result" \

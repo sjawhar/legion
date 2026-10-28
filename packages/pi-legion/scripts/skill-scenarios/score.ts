@@ -8,11 +8,11 @@
 //     newline, whether the result spilled to an artifact, and so whether the file arrived whole;
 //     then the plugin paths Oh My Pi's log says it loaded.
 //   score.ts runs <runs dir> [<scenario>]
-//     One row per run, then counts per scenario and label, and a legend saying what each count
-//     is. Each scenario's rule is on the function that scores it: askOnMessage,
-//     measureBeforeAsk, testerProof, brainstormSurface, and specRow for spec-writing and
-//     spec-rewrite. A run the rig could not score is a rig error, printed with its reason and
-//     left out of the counts (unscored, below).
+//     One row per run, then counts per scenario and label (for askgate, per case and label), and a
+//     legend saying what each count is. Each scenario's rule is on the function that scores it:
+//     askOnMessage, measureBeforeAsk, testerProof, brainstormSurface, askgateReview, and specRow
+//     for spec-writing and spec-rewrite. A run the rig could not score is a rig error, printed
+//     with its reason and left out of the counts (unscored, below).
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
@@ -128,7 +128,7 @@ function json<T>(file: string, schema: z.ZodType<T>): T {
 }
 
 /** Every tool call the session made, in order: its id, its tool, and its whole arguments as JSON
- * and their `path`. */
+ * and their `path` and `command`. */
 function toolCalls(entries: SessionEntry[]) {
   return entries.flatMap((entry) =>
     entry.message?.role !== "assistant"
@@ -137,17 +137,13 @@ function toolCalls(entries: SessionEntry[]) {
           .filter((part) => part.type === "toolCall")
           .map((part) => {
             const args = part.arguments;
-            const target =
-              typeof args === "object" &&
-              args !== null &&
-              "path" in args &&
-              typeof args.path === "string"
-                ? args.path
-                : "";
+            const fields: Record<string, unknown> =
+              typeof args === "object" && args !== null ? { ...args } : {};
             return {
               id: part.id ?? "",
               tool: part.name ?? "",
-              path: target,
+              path: typeof fields.path === "string" ? fields.path : "",
+              command: typeof fields.command === "string" ? fields.command : "",
               args: JSON.stringify(args ?? null),
             };
           })
@@ -371,6 +367,140 @@ function measureBeforeAsk(runDir: string, run: string, label: string): Row {
   return { ...row, notes: `readExport=${readExport} ${row.notes}` };
 }
 
+/** The `data` of the `advisor-gate` entry AskGate writes into the session for each call it
+ * reviews, as far as the score reads it. */
+const GateEntry = z.looseObject({
+  tool: z.string(),
+  toolCallId: z.string(),
+  decision: z.string(),
+  outcome: z.string(),
+  verdictMode: z.string(),
+  reason: z.string().nullish(),
+});
+type GateEntry = z.infer<typeof GateEntry>;
+/** How a refused call's error result starts when a model's revise in block mode stopped it. */
+const NOT_SENT = "AskGate did not send this call.";
+/** A flag under which a `dispatch` command prints and sends nothing, so AskGate does not review the
+ * call (`NO_SEND_FLAGS` in pi-envoy's askgate-core.ts). */
+const NO_SEND = /(?:^|\s)--(?:help|dry-run)(?=\s|$)/;
+
+/** Every `advisor-gate` entry of the transcript, in order. */
+function gateEntries(entries: SessionEntry[]): GateEntry[] {
+  return entries.flatMap((entry) =>
+    entry.type === "custom" && entry.customType === "advisor-gate"
+      ? [GateEntry.parse(entry.data)]
+      : []
+  );
+}
+
+/** The result a tool call got: its text and whether it was an error. */
+function resultOf(entries: SessionEntry[], id: string): { text: string; isError: boolean } {
+  const message = entries.find(
+    (entry) => entry.message?.role === "toolResult" && entry.message.toolCallId === id
+  )?.message;
+  return {
+    text: (message?.content ?? []).map((part) => part.text ?? "").join(""),
+    isError: message?.isError === true,
+  };
+}
+
+/** An askgate run's directory, askgate-<case>-<label>-<n>: the case comes before the label, so the
+ * three cases' batches of one label, each numbered from 1, never share a directory. */
+const ASKGATE_RUN = /^askgate-(facts|link|upload)-(.+)-\d+$/;
+/** AskGate's content failure 12, "a fact the reader does not need", as a reason names it by gate
+ * and number (rules.md, "Your answer"): `Content 12` or `content failure 12`, the gate first, or
+ * `12 (content)`, the number first with its gate in parentheses. */
+const FAILURE_12 = /\bcontent\s+(?:failures?\s+)?12\b|(?:^|[^\w.])12\s*\(\s*content\b/i;
+/** The gate entry outcomes that record a refusal no review stands behind (askgateReview). */
+const NOT_REVIEWS = ["unreadable", "unmarked"];
+
+/** askgate: AskGate (the pi-envoy plugin's review of each Dispatch write) on a seeded issue whose
+ * one comment is the person's. The run's label is its profile: `off` was built with
+ * `{"askgate":{"enabled":false}}` in its envoy.json, every other label leaves the gate on. The
+ * run's directory names its case, and `case.txt` names the prompt rig.sh gave, which must be the
+ * same case. The row's scenario is `askgate:<case>`, so the counts are per case. A gate entry with
+ * outcome `unreadable` is a refusal before any model call, of a command the gate cannot read (a
+ * pipe, a `;`, an unquoted here-document), and one with outcome `unmarked` is the `dispatch` CLI's
+ * refusal or warning for a gated write that carried no AskGate marker, so no rule counts either as
+ * a review. A pass:
+ *   - on, facts: the first bash call that runs `dispatch ask` and sends, with neither `--help` nor
+ *     `--dry-run` and no `unreadable` or `unmarked` gate entry, got an error result starting
+ *     NOT_SENT, and that call's own gate entry is a revise verdict in block mode whose reason
+ *     names failure 12 (FAILURE_12), the age (`nine years` or `age`) and the contributors (`214`
+ *     or `contributor`). The refusal's text is not read for them: it quotes the question whatever
+ *     the failure, so it names both facts on a refusal for another failure too;
+ *   - on, link: an ask is on the issue, a gate entry of a `dispatch_ask` call with outcome
+ *     `verdict` says allow, and none with outcome `verdict` says revise. A timeout, an error, a
+ *     skip, an override or no entry at all is no review of the ask, so it fails;
+ *   - on, upload: the first gate entry of a `dispatch artifact` call with outcome `verdict` says
+ *     revise in block mode, with a reason naming the person's comment or a link to it (`comment`
+ *     or `dispatch://`);
+ *   - off, facts: an ask is on the issue, and the transcript holds no gate entry.
+ * Any other pair is a rig error naming why. */
+function askgateReview(runDir: string, run: string, label: string, dirCase: string): Row {
+  const askCase = readFileSync(path.join(runDir, "case.txt"), "utf8").trim();
+  if (!["facts", "link", "upload"].includes(askCase))
+    throw new Error(`askgate case.txt names '${askCase}', not facts, link or upload`);
+  if (askCase !== dirCase)
+    throw new Error(`case.txt names '${askCase}', but the run's directory names ${dirCase}`);
+  const on = label !== "off";
+  if (!on && askCase !== "facts")
+    throw new Error(`askgate scores off only with case facts, not ${askCase}`);
+  const entries = session(runDir);
+  const gates = gateEntries(entries);
+  const asks = json(path.join(runDir, "asks.json"), IssueAsks).length;
+  const row = (pass: boolean, notes: string): Row => ({
+    run,
+    scenario: `askgate:${askCase}`,
+    label,
+    pass,
+    ref: false,
+    notes: `case=${askCase} ${notes} ${lines(path.join(runDir, "out.txt")).at(-1) ?? ""}`,
+  });
+  if (!on) return row(asks > 0 && gates.length === 0, `asks=${asks} gateEntries=${gates.length}`);
+  if (askCase === "facts") {
+    const call = toolCalls(entries).find(
+      (c) =>
+        c.tool === "bash" &&
+        /\bdispatch\s+ask\b/.test(c.command) &&
+        !NO_SEND.test(c.command) &&
+        !NOT_REVIEWS.includes(gates.find((g) => g.toolCallId === c.id)?.outcome ?? "")
+    );
+    if (call === undefined) return row(false, "askCall=none");
+    const result = resultOf(entries, call.id);
+    const refused = result.isError && result.text.startsWith(NOT_SENT);
+    const gate = gates.find((g) => g.toolCallId === call.id);
+    const verdict = gate?.decision === "revise" && gate.outcome === "verdict";
+    const reason = gate?.reason ?? "";
+    const failure12 = FAILURE_12.test(reason);
+    const age = /nine years|\bage\b/i.test(reason);
+    const contributors = /\b214\b|contributor/i.test(reason);
+    const mode = gate?.verdictMode ?? "none";
+    return row(
+      refused && verdict && failure12 && age && contributors && mode === "block",
+      `refused=${refused} failure12=${failure12} age=${age} contributors=${contributors} verdictMode=${mode} entry=${gate ? `${gate.decision}/${gate.outcome}` : "none"} reason=${JSON.stringify(reason)}`
+    );
+  }
+  if (askCase === "link") {
+    const reviews = gates.filter((g) => g.tool === "dispatch_ask");
+    const verdicts = reviews.filter((g) => g.outcome === "verdict");
+    const allowed = verdicts.filter((g) => g.decision === "allow").length;
+    const revised = verdicts.filter((g) => g.decision === "revise");
+    return row(
+      asks > 0 && allowed > 0 && revised.length === 0,
+      `asks=${asks} allowed=${allowed} revised=${revised.length} outcomes=${JSON.stringify(reviews.map((g) => g.outcome))} reasons=${JSON.stringify(revised.map((g) => g.reason ?? ""))}`
+    );
+  }
+  const reviewed = gates.find((g) => g.tool === "dispatch_artifact" && g.outcome === "verdict");
+  if (reviewed === undefined) return row(false, "reviewedUpload=none");
+  const reason = reviewed.reason ?? "";
+  const fix = /comment|dispatch:\/\//i.test(reason);
+  return row(
+    reviewed.decision === "revise" && reviewed.verdictMode === "block" && fix,
+    `decision=${reviewed.decision} verdictMode=${reviewed.verdictMode} fix=${fix} reason=${JSON.stringify(reason)}`
+  );
+}
+
 /** A commit this run can name: the PR's head, or one its tester pushed. A seven-or-more-digit
  * prefix counts. The implementer's code commit does not, since the fixture's own `E2E
  * (implementer)` line names it. */
@@ -513,6 +643,35 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
   ];
   return { run, scenario: "tester-proof", label, pass, ref, notes: notes.join(" ") };
 }
+
+/** rig.sh's own_dispatch record, <run>/dispatch.json: the run's own Dispatch, a database in the
+ * batch's Postgres container (its id) and the server on it. */
+const RunDispatch = z.object({
+  postgres: z.string().min(1),
+  database: z.string().min(1),
+  port: z.number(),
+  url: z.string(),
+});
+/** The run's own Dispatch as `postgres` and `database`, one tab between them, or undefined when the
+ * run records none (no dispatch.json). */
+function dispatchOf(runDir: string): string | undefined {
+  const file = path.join(runDir, "dispatch.json");
+  if (!existsSync(file)) return undefined;
+  const { postgres, database } = json(file, RunDispatch);
+  return `${postgres}\t${database}`;
+}
+
+/** The scenarios whose runs the rig scores with no dispatch.json: spec-writing and spec-rewrite.
+ * Before each run had a Dispatch of its own, rig.sh ran each batch of these as one run of one label
+ * (cmd_batch refused more from the first spec run on), so that run had its batch's Dispatch to
+ * itself. Today's rig.sh writes dispatch.json (own_dispatch) before it seeds the run's issue or
+ * starts its agent, so a run of today that has none also has no fixture.json and no `exit=` line,
+ * and is a rig error for that. An older batch of ask-on-message, measure-before-ask or tester-proof
+ * could hold several runs on its one Dispatch, so a run of another scenario with no dispatch.json
+ * stays a rig error. */
+const BATCH_DISPATCH: Record<string, true> = { "spec-writing": true, "spec-rewrite": true };
+const BATCH_DISPATCH_NOTE =
+  "no dispatch.json: an older rig's spec run, on its batch's Dispatch, alone in its batch";
 
 // spec-writing and spec-rewrite: how a fresh agent writes a design spec with a person. A run is a
 // design conversation between a fresh agent and a person stand-in on the run's own issue. Its
@@ -2136,6 +2295,11 @@ function median(values: number[]): number {
 }
 
 /** Why the rig cannot score a run, or undefined when it can:
+ *   - it did not have a Dispatch of its own: it records none (`dispatch` undefined: no
+ *     dispatch.json) and is no spec run (BATCH_DISPATCH), or another run names the same database
+ *     in the same Postgres container (`sharing`, each Dispatch's runs). A `dispatch search`
+ *     searches every project of its server, so runs that share one can read each other's issue
+ *     and asks, and one run's answer can be another's;
  *   - it never finished: out.txt has no `exit=` line;
  *   - its agent got no model turn: it left no transcript, or one with no assistant message, as when
  *     the profile's gateway key command ran past its budget. The key command's own record of each
@@ -2148,7 +2312,23 @@ function median(values: number[]): number {
  *     An agent reads the whole filesystem, and `legion` on its PATH resolves into the checkout
  *     rig.sh runs from.
  * A record missing or malformed is a rig error too, thrown by the scenario's function. */
-function unscored(runDir: string, label: string, labels: Map<string, string>): string | undefined {
+function unscored(
+  runDir: string,
+  scenario: string,
+  dispatch: string | undefined,
+  label: string,
+  labels: Map<string, string>,
+  sharing: Map<string, string[]>
+): string | undefined {
+  if (dispatch === undefined) {
+    if (!BATCH_DISPATCH[scenario]) return "it records no Dispatch of its own (no dispatch.json)";
+  } else {
+    const others = (sharing.get(dispatch) ?? []).filter((run) => run !== path.basename(runDir));
+    if (others.length > 0) {
+      const [postgres, database] = dispatch.split("\t");
+      return `it shares Dispatch database ${database} of Postgres ${postgres} with ${others.join(", ")}, so each could read the other's issue and asks`;
+    }
+  }
   if (!lines(path.join(runDir, "out.txt")).at(-1)?.startsWith("exit="))
     return "out.txt has no exit= line: the run never finished";
   const entries = session(runDir);
@@ -2188,30 +2368,59 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       return [];
     }
   });
+  // Every run's own Dispatch, keyed by its Postgres container and database, with the runs that
+  // name it. A run that records none is scored or not by unscored, below; a dispatch.json that does
+  // not parse is its own run's rig error, below.
+  const sharing = new Map<string, string[]>();
+  for (const run of existsSync(runsDir) ? readdirSync(runsDir) : []) {
+    let dispatch: string | undefined;
+    try {
+      dispatch = dispatchOf(path.join(runsDir, run));
+    } catch {
+      continue;
+    }
+    if (dispatch !== undefined) sharing.set(dispatch, [...(sharing.get(dispatch) ?? []), run]);
+  }
   // Every checkout a spec run's agent can reach, so that a check naming one is no spec-only check.
   const reach = checkouts(path.dirname(runsDir));
-  // Each scenario's scorer, keyed by the name its runs' directories start with.
-  const scorers: Record<string, (dir: string, run: string, label: string) => Row> = {
-    "ask-on-message": askOnMessage,
-    "measure-before-ask": measureBeforeAsk,
-    "tester-proof": (dir, run, label) => testerProof(dir, run, label, heads),
-    brainstorm: brainstormSurface,
-    "spec-writing": (dir, run, label) => specRow(dir, run, "spec-writing", label, reach),
-    "spec-rewrite": (dir, run, label) => specRow(dir, run, "spec-rewrite", label, reach),
-  };
+  // Each scenario's scorer, keyed by the name its runs' directories start with. An askgate run's
+  // case comes from its directory (ASKGATE_RUN).
+  const scorers: Record<string, (dir: string, run: string, label: string, askCase: string) => Row> =
+    {
+      "ask-on-message": askOnMessage,
+      "measure-before-ask": measureBeforeAsk,
+      "tester-proof": (dir, run, label) => testerProof(dir, run, label, heads),
+      brainstorm: brainstormSurface,
+      askgate: askgateReview,
+      "spec-writing": (dir, run, label) => specRow(dir, run, "spec-writing", label, reach),
+      "spec-rewrite": (dir, run, label) => specRow(dir, run, "spec-rewrite", label, reach),
+    };
   const name = new RegExp(`^(${Object.keys(scorers).join("|")})-(.+)-(\\d+)$`);
   for (const run of existsSync(runsDir) ? readdirSync(runsDir).sort() : []) {
     const match = name.exec(run);
     const score = scorers[match?.[1] ?? ""];
     if (!match || !score) continue;
-    const [, scenario = "", label = ""] = match;
+    const [, scenario = "", named = ""] = match;
     if (only && scenario !== only) continue;
     const dir = path.join(runsDir, run);
-    const key = `${scenario}\t${label}`;
+    // undefined for every other scenario, null for an askgate directory that names no case.
+    const askgate = scenario === "askgate" ? ASKGATE_RUN.exec(run) : undefined;
+    const [, askCase = "", label = named] = askgate ?? [];
+    const key = `${askgate ? `askgate:${askCase}` : scenario}\t${label}`;
     let reason: string | undefined;
     try {
-      reason = unscored(dir, label, labels);
-      if (reason === undefined) rows.push(score(dir, run, label));
+      if (askgate === null)
+        throw new Error(
+          "the directory names no case: an askgate run's directory is askgate-<case>-<label>-<n>"
+        );
+      const dispatch = dispatchOf(dir);
+      reason = unscored(dir, scenario, dispatch, label, labels, sharing);
+      if (reason === undefined) {
+        const row = score(dir, run, label, askCase);
+        rows.push(
+          dispatch === undefined ? { ...row, notes: `${row.notes}\n  ${BATCH_DISPATCH_NOTE}` } : row
+        );
+      }
     } catch (error) {
       reason = error instanceof Error ? error.message : String(error);
     }
@@ -2264,7 +2473,8 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       "           spec-writing and spec-rewrite: the eight scores of specRow pass (outline,",
       "           checked, refusals, plan, routed, chat, quoted, self); the judges' counts follow",
       "           them, and the source table gives each source and label's median fault count",
-      "pass+ref   passed, and the agent read the file the rule is in",
+      "           askgate: the rule for the run's label and case (askgateReview)",
+      "pass+ref   passed, and the agent read the file the rule is in (askgate: never counted)",
       "rig errors runs the rig could not score (unscored), left out of both counts",
       "ran=false  a tester-proof run the bun stand-in saw no greet.ts run in: read its transcript",
       "           before believing it, since the stand-in sees only a bun reached through PATH",

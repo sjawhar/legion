@@ -29,7 +29,9 @@ type AttemptRun struct {
 type ClassifiedPush struct {
 	SHA string `json:"sha"`
 	// Before is the head the push replaced, empty when the push did not say.
-	Before      string `json:"before,omitempty"`
+	Before string `json:"before,omitempty"`
+	// HandoffOnly is a push every one of whose changed paths is the issue's own handoff, under
+	// .legion/<issue>/ (classify.HandoffPath); a .legion/-only push names such a push throughout.
 	HandoffOnly bool   `json:"handoffOnly"`
 	Unknown     string `json:"unknown,omitempty"`
 	// ByReviewApp is whether the push was the review App's (its pusher is the review App's bot login).
@@ -40,8 +42,8 @@ type ClassifiedPush struct {
 	Forced bool `json:"forced,omitempty"`
 }
 
-// MayChangeCode is whether the push may have changed anything outside .legion/ in the head it
-// replaced.
+// MayChangeCode is whether the push may have changed anything outside the issue's own
+// .legion/<issue>/ in the head it replaced.
 func (p ClassifiedPush) MayChangeCode() bool {
 	return !p.HandoffOnly || p.Forced
 }
@@ -105,6 +107,26 @@ type Issue struct {
 	// event subjects carry, which NATS matches case-sensitively, so GitHub intake hears the issue's
 	// repository by it, read from the record at boot.
 	GitHubRepo string
+	// Ancestry is the keys of a root's Dispatch parent chain, from its parent upward to the top,
+	// stopping only at a repeated key or back at the root, as the newest Dispatch observation
+	// applied to the record was prepared with (intake's DispatchIssue.Ancestry), or as the
+	// preparation of an event of an issue on that chain read it again (intake's
+	// DispatchIssue.Reread): kept for a labelled todo root under a parent unrecorded or recorded as
+	// a root, such as a child of a live tree that tree's architect has not released. Such a root
+	// is held under that unreleased child (the ancestry hold) and waits for no slot while any live
+	// root is on its chain (Waiting), exactly while that root's release would reach it; it is not
+	// the hold on Dispatch blocked-by links (blockers.WaitsOn). Empty for every other record, for a
+	// root that ran as a tree of its own (workflow's RanAsRoot), which no release adopts, and
+	// cleared when adoption takes the record into a tree.
+	Ancestry []string
+	// HandedOverFrom is the key of the tree the issue left when it became a root of its own:
+	// re-admission (admit.Admission.readmit) writes it whenever it moves a member of another tree
+	// into a tree of its own, a child its finished tree handed over (carrying its run or not) or an
+	// orphan a person admitted, and never clears it, a root's re-admission of itself included. Such
+	// a root stays its own tree (workflow's RanAsRoot): no admission sweep or release of children
+	// adopts it, into the tree it left or any other, and no ancestry hold holds it. Empty for every
+	// other record.
+	HandedOverFrom string
 	// Awaiting is what a root in phase awaiting_person waits on, nil in every other phase: the two
 	// change together, as Hold and held do.
 	Awaiting *Awaiting
@@ -394,17 +416,23 @@ type PullRequest struct {
 	// and said which head it replaced, which carry an approval across, and the pushes whose heads
 	// have not arrived yet. A push that may change code is spent once its head arrives.
 	Pushes []ClassifiedPush
+	// Moves are the moves the record has made, newest last and at most the last 32: each head's
+	// arrival from the head before it, and each push on the chain of pushes it found between them. A
+	// push whose own move is among them is spent (classify.unspentPushes), whenever it arrives; a push
+	// for a move not made yet - one that returns the branch to a commit it held before, say - is not.
+	Moves []Move
 	// HeadCounted is the head the fix-attempt count last counted, a push onto a red verdict, kept
 	// across every head pushed on top of it until one is pushed onto a green verdict, or onto a
 	// settled head whose base branch requires no check and no workflow
 	// (classify.AdvancePullRequestHead); empty when no such attempt stands. The fix-attempt cap holds
 	// a red within that attempt (classify.FixAttemptCapHolds).
 	HeadCounted string
-	// HeadCountedBefore is the mark HeadCounted held before the count that set it. A count made
-	// before its head's push arrived is taken back when that push proves handoff-only or the review
-	// App's (classify.ApplyPush), which restores this mark, so the counted attempt does not depend on
-	// which of the push and the head's arrival GitHub delivers first.
-	HeadCountedBefore string
+	// Run is the head run: the pull request's judgement as it stood before the first head still
+	// waiting for a push of its move, and every head, settlement, required read, clearing of the
+	// head the required workflows were read at, and reopen applied since, replayed at each step and
+	// each push (classify.ApplyPush). Nil when no head waits for a push, and once a run is cut to
+	// its bound with none left waiting.
+	Run *HeadRun
 	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
 	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
 	PlannedRed bool
@@ -441,6 +469,76 @@ type PullRequest struct {
 	// looks for it in a build): empty until the merge, and for a pull request merged before the
 	// column existed, whose check's first compare fills it from GitHub.
 	MergeSHA string
+}
+
+// HeadRun is a pull request's head run (PullRequest.Run): Anchor, the judgement before the run's
+// first step; Pushes, every push recorded since the anchor's pushes; and Steps, in the order they
+// were applied. Replaying the steps from the anchor with every push gives the judgement the facts
+// would have given had every push arrived before every head (classify.ApplyPush).
+type HeadRun struct {
+	Anchor Judgement        `json:"anchor"`
+	Pushes []ClassifiedPush `json:"pushes"`
+	Steps  []RunStep        `json:"steps"`
+	// Decided is the head whose held red a lapsed hold let be decided as it stands (workflow's
+	// HoldLapsed), so the required-checks pass decides it once, not on every pass.
+	Decided string `json:"decided,omitempty"`
+}
+
+// Judgement is the part of a pull request a head run replays: its head, its fix-attempt count and
+// marks, its planned mark, its CI settlement, what its base branch requires, and the moves it has
+// made. BlockedAttempts is what was reported, and is not replayed.
+type Judgement struct {
+	HeadSHA       string             `json:"headSha"`
+	FixAttempts   int                `json:"fixAttempts"`
+	HeadCounted   string             `json:"headCounted,omitempty"`
+	PlannedRed    bool               `json:"plannedRed,omitempty"`
+	CheckedHead   string             `json:"checkedHead,omitempty"`
+	Failing       []string           `json:"failing"`
+	Cancelled     []string           `json:"cancelled"`
+	CheckRuns     []AttemptRun       `json:"checkRuns"`
+	Generation    int64              `json:"generation,omitempty"`
+	Snapshot      string             `json:"snapshot,omitempty"`
+	Required      []string           `json:"required"`
+	Workflows     []RequiredWorkflow `json:"workflows"`
+	WorkflowsHead string             `json:"workflowsHead,omitempty"`
+	Moves         []Move             `json:"moves,omitempty"`
+}
+
+// Move is a move from the head Before to the head SHA, which a push with the same two heads makes.
+type Move struct {
+	Before string `json:"before"`
+	SHA    string `json:"sha"`
+}
+
+// RunStep is one fact a head run replays: exactly one of a head's arrival (Head), a CI settlement
+// (Settlement), a read of what the base branch requires (Required), the clearing of the head the
+// required workflows' runs were read at (WorkflowsCleared), or a reopen, which starts the CI
+// settlement afresh (Reopened). At is when a head arrived, by the daemon's clock: a red at that
+// head is held for a bounded time from then (workflow's holdsRed).
+type RunStep struct {
+	Head             string        `json:"head,omitempty"`
+	At               time.Time     `json:"at,omitzero"`
+	Settlement       *Settlement   `json:"settlement,omitempty"`
+	Required         *RequiredRead `json:"required,omitempty"`
+	WorkflowsCleared bool          `json:"workflowsCleared,omitempty"`
+	Reopened         bool          `json:"reopened,omitempty"`
+}
+
+// Settlement is a CI settlement of Head as the listener reported it (classify.SettlementFor).
+type Settlement struct {
+	Head       string       `json:"head"`
+	CheckRuns  []AttemptRun `json:"checkRuns"`
+	Generation int64        `json:"generation"`
+	Snapshot   string       `json:"snapshot"`
+	Failing    []string     `json:"failing"`
+	Cancelled  []string     `json:"cancelled"`
+}
+
+// RequiredRead is a read of what the base branch requires (intake.RequiredChecks).
+type RequiredRead struct {
+	Names         []string           `json:"names"`
+	Workflows     []RequiredWorkflow `json:"workflows"`
+	WorkflowsHead string             `json:"workflowsHead,omitempty"`
 }
 
 // RequiredWorkflow is one workflow the base branch requires, named by its path, and the result of
@@ -730,6 +828,10 @@ type Store interface {
 	MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID string) (fresh bool, err error)
 	Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error)
 	Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error)
+	// QueuedRootsUnder is every labelled todo root whose Ancestry holds key, by key: the roots the
+	// waiting line may hold under a live root on a chain key is on (Waiting), whose Ancestry an
+	// event of key reads again.
+	QueuedRootsUnder(ctx context.Context, tx pgx.Tx, key string) ([]Issue, error)
 	// SlottedIssues is the record of each issue of project that holds an admission slot, in slot
 	// order, in one read: another project's slot in the shared table, and every issue holding no
 	// slot, are left out of the read rather than of the caller's loop.

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"os/exec"
 	"slices"
 	"strconv"
@@ -483,12 +484,12 @@ func (p *dispatchProcess) checkSettledAtShutdown(t *testing.T, database *store.S
 	}
 }
 
-// A process that lost its port to another server is not healthy because the port answers: the
-// other server answers /healthz in its place, as the other process of a pair did in the CI run
-// cmdtest.FreeTCPPort names. Nor is one that bound the port and has exited since, leaving the port
-// to another server. The wait takes the bind from the process's own output and refuses any
-// process that has exited, so it refuses both answers, and takes the same answer from a running
-// process whose output says it bound the port.
+// A process that has exited is not healthy because its port answers: it released the port when it
+// exited, and whatever bound the port next answers /healthz in its place. That holds whether it
+// exited before it served (its listen failed) or after it logged that it serves. The wait takes
+// serving from the process's own output and refuses any process that has exited, so it refuses
+// both answers, and takes the same answer from a running process whose output says it serves on
+// the port.
 func TestTheHealthWaitTakesNoAnswerOnThePortForAProcessThatLostIt(t *testing.T) {
 	holder := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	t.Cleanup(holder.Close)
@@ -505,24 +506,87 @@ func TestTheHealthWaitTakesNoAnswerOnThePortForAProcessThatLostIt(t *testing.T) 
 		return &dispatchProcess{Process: &cmdtest.Process{Output: logged, Exited: done}, port: port}
 	}
 
-	lost := process(`level=ERROR msg="dispatch: listen" `+address+` error="bind: address already in use"`, true)
+	lost := process(`level=ERROR msg="dispatch: listen" `+address+` error="DISPATCH_LISTEN_FD=3: serve on the inherited socket: bad file descriptor"`, true)
 	if err := lost.healthyWithin(5 * time.Second); err == nil || !strings.Contains(err.Error(), "exited before it became healthy") {
-		t.Errorf("a process that exited on its bind passed as healthy on a port another server holds: %v", err)
+		t.Errorf("a process that exited on its listen passed as healthy on a port another server holds: %v", err)
 	}
 	gone := process(listening+"\n"+`level=INFO msg="dispatch: shutting down"`, true)
 	if err := gone.healthyWithin(5 * time.Second); err == nil || !strings.Contains(err.Error(), "exited before it became healthy") {
-		t.Errorf("a process that logged its bind and then exited passed as healthy on a port another server holds: %v", err)
+		t.Errorf("a process that logged it serves and then exited passed as healthy on a port another server holds: %v", err)
 	}
 	bound := process(listening, false)
 	if err := bound.healthyWithin(5 * time.Second); err != nil {
-		t.Errorf("a running process that logged its bind, on a port that answers, was not healthy: %v", err)
+		t.Errorf("a running process that logged it serves, on a port that answers, was not healthy: %v", err)
+	}
+}
+
+// A harness that holds the port hands Dispatch the listening socket and sets neither
+// DISPATCH_LISTEN_HOST nor DISPATCH_PORT: Dispatch serves on the socket, at the address the kernel
+// chose for it, and says that address in its listening line. Without the socket it would bind
+// every interface on 8766.
+func TestDispatchServesOnTheListenSocketItInheritsWithNoAddressSet(t *testing.T) {
+	database := storetest.Open(t)
+	process := startDispatchProcessWith(t, database.Pool.Config().ConnString(), dispatchOptions{
+		Without: []string{"DISPATCH_LISTEN_HOST", "DISPATCH_PORT"},
+	})
+	if environment := strings.Join(process.Cmd.Env, "\n"); strings.Contains(environment, "DISPATCH_PORT=") || strings.Contains(environment, "DISPATCH_LISTEN_HOST=") {
+		t.Fatalf("Dispatch was started with DISPATCH_PORT or DISPATCH_LISTEN_HOST set:\n%s", environment)
+	}
+	// healthyWithin waits for this line and a 200 from /healthz on the held port.
+	process.waitHealthy(t)
+	if listening := `msg="dispatch: listening" addr=127.0.0.1:` + strconv.Itoa(process.port); !strings.Contains(process.Output.String(), listening) {
+		t.Errorf("Dispatch did not log %q:\n%s", listening, process.Output.String())
+	}
+}
+
+// A DISPATCH_LISTEN_FD that names something other than a listening socket refuses startup, naming
+// the variable, and Dispatch binds nothing in its place: no DISPATCH_PORT, which here names a port
+// the test holds, so a bind would log its failure. The refusal comes before Dispatch reads its
+// database, so the test needs none.
+func TestDispatchRefusesAListenFDThatIsNotASocketAndBindsNothing(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold the port DISPATCH_PORT names: %v", err)
+	}
+	t.Cleanup(func() { _ = occupied.Close() })
+	notASocket, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	cmd := exec.Command(cmdtest.Build(t, "envoy-dispatch"))
+	cmd.Dir = home
+	cmd.Env = []string{
+		"HOME=" + home,
+		"XDG_CONFIG_HOME=" + home,
+		"DATABASE_URL=postgres://nobody@127.0.0.1:1/never-read",
+		"DISPATCH_AGENT_TOKEN=shutdown-test-token",
+		"DISPATCH_IDENTITY=header:X-Dispatch-User",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED=1",
+		"DISPATCH_NATS_DISABLED=1",
+		"DISPATCH_LISTEN_HOST=127.0.0.1",
+		"DISPATCH_PORT=" + strconv.Itoa(occupied.Addr().(*net.TCPAddr).Port),
+		"DISPATCH_LISTEN_FD=3",
+	}
+	cmd.ExtraFiles = []*os.File{notASocket}
+	process := cmdtest.Start(t, "Dispatch", cmd)
+	process.WaitExit(t, "its start")
+	output := process.Output.String()
+	if code := cmd.ProcessState.ExitCode(); code != 1 {
+		t.Errorf("Dispatch exited %d, want 1:\n%s", code, output)
+	}
+	if !strings.Contains(output, `msg="dispatch: resolve boot config"`) || !strings.Contains(output, "DISPATCH_LISTEN_FD=3 is not a socket") {
+		t.Errorf("Dispatch did not refuse its boot naming DISPATCH_LISTEN_FD=3 and what is wrong with it:\n%s", output)
+	}
+	if strings.Contains(output, `msg="dispatch: listen`) {
+		t.Errorf("Dispatch bound or served an address in the descriptor's place:\n%s", output)
 	}
 }
 
 // dispatchTestLogin is the person the test calls the server as, through header identity.
 const dispatchTestLogin = "alice"
 
-// dispatchProcess is a Dispatch binary a test started, serving on port.
+// dispatchProcess is a Dispatch binary a test started, serving on the loopback port port.
 type dispatchProcess struct {
 	*cmdtest.Process
 	port int
@@ -544,12 +608,15 @@ type dispatchOptions struct {
 	// one here, and a name not here is added. It is how a test gives the process a GitHub App,
 	// a sign-in issuer or cookie identity without every other test growing those rows.
 	Env map[string]string
+	// Without names rows below the process does not get at all, as a deployment that leaves
+	// them unset.
+	Without []string
 }
 
-// startDispatchProcess builds Dispatch and starts it on a free loopback port against databaseURL,
-// with no NATS and nothing from the caller's environment or home, and kills it when the test ends if
-// it still runs. DISPATCH_TEST_HOOKS serves the agent conversation relay in-process, as the browser
-// harness does, since there is no NATS to relay it from.
+// startDispatchProcess builds Dispatch and starts it on a loopback port it holds against
+// databaseURL, with no NATS and nothing from the caller's environment or home, and kills it when the
+// test ends if it still runs. DISPATCH_TEST_HOOKS serves the agent conversation relay in-process,
+// as the browser harness does, since there is no NATS to relay it from.
 func startDispatchProcess(t *testing.T, databaseURL string) *dispatchProcess {
 	return startDispatchProcessWith(t, databaseURL, dispatchOptions{})
 }
@@ -558,14 +625,15 @@ func startDispatchProcessWithSettleDelay(t *testing.T, databaseURL string, settl
 	return startDispatchProcessWith(t, databaseURL, dispatchOptions{SettleDelay: settleDelay})
 }
 
-// startDispatchProcessWith starts Dispatch under options: a free loopback port, a home of its
-// own, and nothing from the caller's environment. The binary is built before the port is drawn, so
-// the port does not sit unbound through the build as well as through the process's boot.
+// startDispatchProcessWith starts Dispatch under options: a home of its own, nothing from the
+// caller's environment, and a loopback port the kernel chose and the test holds from that moment,
+// which the process inherits as DISPATCH_LISTEN_FD and serves on, so no other program can take the
+// port before it serves. DISPATCH_PORT names the same port, which Dispatch checks against the socket.
 func startDispatchProcessWith(t *testing.T, databaseURL string, options dispatchOptions) *dispatchProcess {
 	t.Helper()
 	home := t.TempDir()
 	cmd := exec.Command(cmdtest.Build(t, "envoy-dispatch"))
-	port := cmdtest.FreeTCPPort(t)
+	held := cmdtest.HoldPort(t)
 	cmd.Dir = home
 	environment := map[string]string{
 		"HOME":                             home,
@@ -576,7 +644,7 @@ func startDispatchProcessWith(t *testing.T, databaseURL string, options dispatch
 		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
 		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
 		"DISPATCH_LISTEN_HOST":             "127.0.0.1",
-		"DISPATCH_PORT":                    strconv.Itoa(port),
+		"DISPATCH_PORT":                    strconv.Itoa(held.Port),
 		"DISPATCH_WEB_DIST":                home,
 		"DISPATCH_TEST_HOOKS":              "1",
 	}
@@ -592,14 +660,18 @@ func startDispatchProcessWith(t *testing.T, databaseURL string, options dispatch
 		environment["DISPATCH_TEST_SETTLE_DELAY"] = options.SettleDelay.String()
 	}
 	maps.Copy(environment, options.Env)
-	cmd.Env = make([]string, 0, len(environment))
+	for _, name := range options.Without {
+		delete(environment, name)
+	}
+	cmd.Env = make([]string, 0, len(environment)+1)
 	for name, value := range environment {
 		cmd.Env = append(cmd.Env, name+"="+value)
 	}
+	held.Pass(cmd, "DISPATCH_LISTEN_FD")
 	// Sorted, so a failure's process listing and a test's own log read the same whichever run
 	// printed them: Go's map iteration order is not.
 	slices.Sort(cmd.Env)
-	return &dispatchProcess{Process: cmdtest.Start(t, "Dispatch", cmd), port: port}
+	return &dispatchProcess{Process: cmdtest.Start(t, "Dispatch", cmd), port: held.Port}
 }
 
 func (p *dispatchProcess) url(path string) string {
@@ -615,14 +687,13 @@ func (p *dispatchProcess) waitHealthy(t *testing.T) {
 	}
 }
 
-// healthyWithin waits up to within for the process to log that it bound its own port and for
+// healthyWithin waits up to within for the process to log that it serves on its own port and for
 // /healthz there to answer 200 while the process still runs, and says why it did not, with the
-// process's output. An answer on the port alone does not show the bind: a process that cannot bind
-// its port exits (main.go's listen), and whatever else holds the port answers in its place
-// (cmdtest.FreeTCPPort names the CI run where that happened). Nor does a logged bind and an answer
-// from a process that has exited since, which left the port to whatever took it next. The port is
-// bound after the SIGTERM handler is installed, so a server that answers is one a signal stops in
-// order.
+// process's output. The socket the process inherited is not readiness: the kernel queues
+// connections on it from before the process starts, and only the process's listening line says it
+// serves them. Nor is an answer once the process has exited, which released the port to whatever
+// took it next. The process serves after the SIGTERM handler is installed, so a server that
+// answers is one a signal stops in order.
 func (p *dispatchProcess) healthyWithin(within time.Duration) error {
 	listening := `msg="dispatch: listening" addr=127.0.0.1:` + strconv.Itoa(p.port)
 	exited := func() bool {

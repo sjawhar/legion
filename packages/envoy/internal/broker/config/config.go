@@ -27,6 +27,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 type Config struct {
@@ -175,7 +176,9 @@ type Config struct {
 	// BROKER_ENVOY_URL is set.
 	EnvoyToken string
 	// BROKER_LEASE_SECONDS: an enrollment's lease. A session renews it while it runs; one whose
-	// lease runs out is no longer enrolled and its calls are refused.
+	// lease runs out is no longer enrolled and its calls are refused. Time while no broker was
+	// serving is not counted against it: a lease that ran out then stays live until a broker serves
+	// again, which gives it that time back. More than four and a half times BROKER_SWEEP_SECONDS.
 	LeaseSeconds int
 	// BROKER_PROOF_SKEW_SECONDS: how far the issue time of a signed proof or request object may
 	// differ from the broker's clock.
@@ -190,7 +193,10 @@ type Config struct {
 	// from then; past it the machine logs in again, with a new key, a new code and a new approval.
 	LauncherCredentialSeconds int
 	// BROKER_SWEEP_SECONDS: how often the broker ends the enrollments whose lease lapsed and expires
-	// the pending requests and machine logins nobody decided in time.
+	// the pending requests and machine logins nobody decided in time. It is also how often a serving
+	// broker records that it serves: a gap of more than three sweeps between two such records is
+	// time no broker was serving, which the broker gives back to every lease still running when the
+	// gap began.
 	SweepSeconds int
 	// BROKER_DRAIN_SECONDS: how long the broker goes on serving after SIGTERM while answering
 	// GET /healthz with 503, so Kubernetes has stopped sending it new requests before it stops
@@ -212,6 +218,10 @@ type Config struct {
 	// otherwise a caller can forge the header and pick its own rate-limit bucket.
 	TrustedProxyHeader string
 }
+
+// NotServingSweeps is how many sweeps a gap between two serving records may last and still count
+// as a broker serving; a longer gap is time no broker was serving.
+const NotServingSweeps = 3
 
 // noUIToken is why BROKER_UI_TOKEN and its file are gone: the routes it authenticated take the
 // caller's own Kubernetes ServiceAccount token now.
@@ -519,10 +529,10 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	if parsed, err := url.Parse(cfg.PublicURL); err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Path != "" {
-		return Config{}, fmt.Errorf("BROKER_PUBLIC_URL must be an absolute URL with no path: %q", cfg.PublicURL)
+		return Config{}, fmt.Errorf("BROKER_PUBLIC_URL must be an absolute URL with no path: %q", redact.URL(cfg.PublicURL))
 	}
 	if parsed, err := url.Parse(cfg.MachineLoginURL); err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-		return Config{}, fmt.Errorf("BROKER_MACHINE_LOGIN_URL must be an absolute http(s) URL: %q", cfg.MachineLoginURL)
+		return Config{}, fmt.Errorf("BROKER_MACHINE_LOGIN_URL must be an absolute http(s) URL: %q", redact.URL(cfg.MachineLoginURL))
 	}
 	switch cfg.SecretsStore {
 	case secrets.StoreAWS:
@@ -634,6 +644,13 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("%s must be a whole number between %d and %d, got %q", i.name, i.min, i.max, raw)
 		}
 		*i.dst = n
+	}
+	// A live session renews with at least two thirds of its lease left, and a gap of up to
+	// NotServingSweeps sweeps reads as a broker still serving, so a lease that ran out inside such a
+	// gap would be ended rather than given back. That gap must fall short of two thirds of a lease.
+	if 2*cfg.LeaseSeconds <= 3*NotServingSweeps*cfg.SweepSeconds {
+		return Config{}, fmt.Errorf("BROKER_LEASE_SECONDS (%d) must be more than four and a half times BROKER_SWEEP_SECONDS (%d): a live session holds at least two thirds of its lease, and the gap the broker tolerates before giving back the time no broker was serving is three sweeps",
+			cfg.LeaseSeconds, cfg.SweepSeconds)
 	}
 	return cfg, nil
 }
