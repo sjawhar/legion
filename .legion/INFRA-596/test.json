@@ -2,68 +2,59 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-596",
-  "completed": "2026-10-28T13:28:00Z",
-  "testedHead": "06e2600c56416e5e9c670fb768b0f7fe4351f3a0",
-  "codeHead": "be2fe7170b18a951d19a364502fa4018914a0905",
+  "completed": "2026-10-28T14:11:00Z",
+  "testedHead": "691b44e4f5140b20866da53e8d9849d7271e2132",
+  "codeHead": "55be984b0902",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Full round after the behavioural forward merge (main's claimant route from #2225 kept, this pull request's own claimant path dropped). Drove delivery, the delivered-only mention rule, the failed recipient query, BET-15's reopen shape, the spec-edit notice, doc-read (head CLI and regenerated claude-envoy dist) on a local stack built from the head, with current main 08572e01 as the control; rebuilt version 4 of the October document and the pairs TSV byte for byte."
+    "how": "Drove the round's behavioural change (recipientFilter reads the comment's mentions, as main's claimant and follower routes do, through attempt.leftToMention; comment_create.go back to main's suppressed_authors) on a local stack, plus delivery, the failed query, the reported case's reopen shape, the spec-edit notice, doc-read and the report rebuild; current main 08572e01 as the control."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "A person's reply reaches every session in its thread and the thread document's authors, and a person's comment on an issue with no route and no session claim reaches the primary document's session authors, beside main's claimant route.",
-      "surface": "Local Dispatch stack: the Dispatch server built from the head on Postgres 17 + pgvector with every migration, nats-server 2.10.29 -js, a subscriber on notifications.>, a stub Envoy listener; driven over the HTTP API.",
-      "command": "$TMPDIR/infra596-tester/edge2.sh head (dispatch://INFRA-596/artifact/tester-rig-edge2-sh)",
-      "observed": "12/12 OK, no subject twice: E1 reply, its edit and a reply to a reply reach S-claim, S-other, S-writer; root edit S-claim, S-writer; E2 routed and claimed: conversation comment S-claim and S-route, reply S-claim and S-route; E3 person-claimed: S-spec; E4 ask thread S-asker, S-claim; E5 and E6 nobody; E9 mentioned claimant: S-other, S-writer on NATS and S-claim by its mention. Burst 30/30 to the claimant once.",
-      "headSha": "06e2600c56416e5e9c670fb768b0f7fe4351f3a0",
-      "negativeControl": "edge2.sh main (08572e01, carries #2225): E1-reply, E1-reply-edit, E1-reply-to-reply reach only S-claim; E3 reaches nobody; E9 reaches nobody on NATS; the claimant cases and the burst pass."
+      "criterion": "Thread and document recipients follow main's delivered-only mention rule, read from the comment's mentions: a session whose mention was delivered hears a new comment once, from the mention; one whose mention failed gets the outbox's copy; an edit is never left to the mention.",
+      "surface": "Local Dispatch stack: the Dispatch server built from the head on Postgres 17 + pgvector with every migration, nats-server 2.10.29 -js, a subscriber on notifications.>, a stub Envoy that reports S-gone not live.",
+      "command": "$TMPDIR/infra596-tester/mention.sh head (dispatch://INFRA-596/artifact/tester-rig-mention-sh v2)",
+      "observed": "M1 reply mentioning S-other (sent) and S-gone (failed, 'no live session S-gone'): NATS to S-claim, S-gone, S-writer. M2 failed mention of the claimant S-gone: S-gone gets the copy. M3 unclaimed issue, S-writer mentioned (sent) and S-gone (failed): NATS to S-gone only. M4 the person's edit of M1's reply: S-claim, S-gone, S-other, S-writer. No subject twice.",
+      "headSha": "691b44e4f5140b20866da53e8d9849d7271e2132",
+      "negativeControl": "mention.sh main (08572e01): M1 and M4 reach only S-claim, M3 nobody; M2 passes (main's claimant rule)."
     },
     {
-      "criterion": "Thread and primary-document recipients follow main's delivered-only mention rule: a session a mention reached hears it once, from the mention; one whose mention failed still gets the outbox's copy.",
-      "surface": "The same local stack; the stub Envoy reports S-gone not live, so its mention fails (comment_deliveries state failed, 'no live session S-gone').",
-      "command": "$TMPDIR/infra596-tester/mention.sh head (dispatch://INFRA-596/artifact/tester-rig-mention-sh)",
-      "observed": "M1 reply mentioning thread members S-other (live) and S-gone (dead): NATS to S-claim, S-gone, S-writer; S-other by its mention only. M2 failed mention of the claimant S-gone: the claimant gets the NATS copy. M3 unclaimed issue, mentions of spec authors S-writer (live) and S-gone (dead): NATS to S-gone only; S-writer by its mention.",
-      "headSha": "06e2600c56416e5e9c670fb768b0f7fe4351f3a0",
-      "negativeControl": "mention.sh main (08572e01): M1 reaches only S-claim, M3 reaches nobody; M2 passes (main's claimant rule)."
+      "criterion": "A person's reply reaches every session in its thread and the thread document's authors, and a comment on an issue with no route and no session claim reaches the primary document's session authors, beside main's claimant route.",
+      "surface": "The same local stack.",
+      "command": "$TMPDIR/infra596-tester/edge2.sh head (dispatch://INFRA-596/artifact/tester-rig-edge2-sh)",
+      "observed": "12/12 OK, no subject twice; the 30-issue burst sent 15 at a time reached each claimant once.",
+      "headSha": "691b44e4f5140b20866da53e8d9849d7271e2132",
+      "negativeControl": "Last round's edge2.sh main on the same main (08572e01): five cases fail (the reply, its edit and a reply to a reply reach only the claimant; the person-claimed issue's spec session and the mentioned-claimant thread get nobody)."
     },
     {
       "criterion": "A failed recipient query still publishes the comment's owner topic, route and claimant, backs off only the events that needed it, and a retry sends only the rest.",
-      "surface": "The same local stack, with one data fault injected by psql.",
+      "surface": "The same local stack, one data fault injected by psql.",
       "command": "$TMPDIR/infra596-tester/fail.sh head (dispatch://INFRA-596/artifact/tester-rig-fail-sh)",
-      "observed": "First attempt: FC [issue topic, S-claim], FR [issue topic, S-route], FU [issue topic], each unpublished with attempt_count 1 and a retry scheduled; HC published at once. After the repair FC and FR added S-other and S-writer, FU added S-writer; every subject received once.",
-      "headSha": "06e2600c56416e5e9c670fb768b0f7fe4351f3a0",
+      "observed": "First attempt: FC [issue topic, S-claim], FR [issue topic, S-route], FU [issue topic], each unpublished, attempt_count 1, retry scheduled; HC published at once. After the repair, the retries added only S-other and S-writer (FU: S-writer); every subject once.",
+      "headSha": "691b44e4f5140b20866da53e8d9849d7271e2132",
       "negativeControl": "HC, a healthy comment in the same batch, is untouched by the fault."
     },
     {
-      "criterion": "BET-15's sequence: the person's reopening reply reaches the claimant and the spec's writer.",
+      "criterion": "The reported case's sequence, and the corrected docs: a resolve or reopen reaches the route, the claimant and the thread root's author, none of the sessions this change adds.",
       "surface": "The same local stack.",
-      "command": "$TMPDIR/infra596-tester/reopen.sh head (dispatch://INFRA-596/artifact/tester-rig-reopen-sh): S-writer edits the spec, S-claim claims with no route, the person's anchored root, S-claim replies and resolves, the person replies",
-      "observed": "Event 9 (the person's reply) published to the issue topic, notifications.agent.S-claim and notifications.agent.S-writer; event 8 (the reopen) to the issue topic and S-claim (main's claimant rule); S-claim's own reply and resolve reach only the issue topic.",
-      "headSha": "06e2600c56416e5e9c670fb768b0f7fe4351f3a0",
-      "negativeControl": "BET-15 in production (trace-03207432, events 4314/4315): the reopen and the reply reached only the issue topics."
+      "command": "$TMPDIR/infra596-tester/reopen.sh head (dispatch://INFRA-596/artifact/tester-rig-reopen-sh)",
+      "observed": "The person's reopening reply (event 9) reached the issue topic, S-claim and S-writer; the reopen (event 8) the issue topic and S-claim only (the root author is the person, S-writer is not added), as the envoy changelog fragment and docs/site dispatch/envoy.md now say.",
+      "headSha": "691b44e4f5140b20866da53e8d9849d7271e2132",
+      "negativeControl": "The reported case in production: the reopen and the reply reached only the issue topics."
     },
     {
-      "criterion": "dispatch doc-read shows open comments with their text, from the head's CLI and the regenerated claude-envoy bundle.",
-      "surface": "The dispatch CLI bundled from the head and packages/claude-envoy/dist/dispatch.js at the head, against the same local Dispatch.",
-      "command": "$TMPDIR/infra596-tester/docread.sh head and docdist.sh head",
-      "observed": "Both: the open anchored ask with its reply, T1 with both replies, the reopened T8; absent: resolved T2, retracted T7, unanchored T6, conversation T4, the plan's T3; plan-md shows T3; the project document shows its root and reply.",
-      "headSha": "06e2600c56416e5e9c670fb768b0f7fe4351f3a0",
-      "negativeControl": "doc-read --artifact nosuch through both: exit 1 naming the issue's documents."
-    },
-    {
-      "criterion": "A committed query or command produces the October table; the document's counts add up.",
-      "surface": "report.ts at the head over the run files attached to INFRA-596 and the live findings; version 4 of dispatch://INFRA-514/artifact/human-comment-delivery-2026-10-md and the pairs TSV.",
-      "command": "bun scripts/dispatch/comment-delivery/report.ts --comments … --receipts … --counts … --trace … --trace … --findings <live findings> --pairs …; cmp against version 4 and the uploaded pairs",
-      "observed": "Exit 0; document sha256 83587ddf… equals version 4 (the live version) byte for byte; pairs bd067fb6… equal. Version 3 to 4: same line count, the no-target (14/14) and not-addressed:claimant (19/32) rows keep cause and counts, the rest is fix-column and findings prose.",
-      "headSha": "06e2600c56416e5e9c670fb768b0f7fe4351f3a0",
-      "negativeControl": "14 of 14 broken inputs exit 1 naming the line."
+      "criterion": "dispatch doc-read shows open comments with their text; a person's spec edit reaches the spec's agents; the October document rebuilds.",
+      "surface": "The same local stack, the head's CLI and packages/claude-envoy/dist/dispatch.js; report.ts on the INFRA-596 run files.",
+      "command": "docread.sh head, docdist.sh head, he.sh head; bun scripts/dispatch/comment-delivery/report.ts … against the live INFRA-514 document",
+      "observed": "doc-read through both: 10 thread entries, no resolved thread, the missing document refused. artifact.human_edited reached S-writer once. Report sha256 83587ddf… and pairs bd067fb6… cmp-equal to the live uploads.",
+      "headSha": "691b44e4f5140b20866da53e8d9849d7271e2132",
+      "negativeControl": "doc-read --artifact nosuch: exit 1 naming the issue's documents."
     }
   ],
   "observations": [
-    "CI at code head be2fe7170b18: build, changes, lint, test, typecheck queued when read; not waited on.",
-    "Wording, not behaviour: packages/envoy/.changes/unreleased/pr2366-thread-and-spec-recipients.yaml says 'A resolve or a reopen still reaches the thread root's author only'. Since #2225 a person's reopen also reaches the claimant (reopen.sh event 8), so in BET-15's shape the claimant gets two frames, the reopen and the reply; the sentence is true of the author routes this pull request changes, not of the event's whole fan-out. Passed to the reviewer and architect as a wording item.",
-    "Added lines outside .legion/ carry no INFRA-<n> or dispatch://; the PR body's tester lines carry none either."
+    "CI at code head 55be984b0902: build, changes, lint, test, typecheck and the daemon Postgres 16 suite queued when read; not waited on. The controller named two reds on main (packages/dispatch/e2e/recipients-claim.e2e.ts and envoy/infra/gcp TestDispatchConnectionsPerPodIsTheServers) as main's since #2233; if either shows on this head it is main's.",
+    "The PR body's tester line names no Dispatch key and no dispatch:// link."
   ]
 }
