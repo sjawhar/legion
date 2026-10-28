@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"regexp"
@@ -87,6 +88,13 @@ const (
 	bytesOfHeapAStructHeldForTest = 170
 	bytesOfHeapAStructForTest     = 620
 	splitsAStructCanCauseForTest  = 2
+
+	// pressureReserveBytesForTest mirrors pressureReserveBytes
+	// (internal/dispatch/docs/room_budget.go:209), how far past its limit the deletes admitted while
+	// the budget is full may take its charges. TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks
+	// fails unless the charges its shrinks leave are within it; a wrong mirror moves only that
+	// check, beside which it logs the server's own figures.
+	pressureReserveBytesForTest = 256 << 20
 )
 
 // One browser's update is bounded by bytes, over a real document socket of a real server
@@ -802,23 +810,31 @@ func TestTheHeaviestHandoffTheBoundsAllowIsNotClosedForSize(t *testing.T) {
 // The room budget refuses the browser its own arithmetic says it has no room for: documents of a
 // mebibyte of prose, each edited once, opened until one is refused with 4503 and DOC_BUSY, under the
 // Go limit a 4 GiB pod gives the server. A room is charged at both copies from its admission
-// (roomCopies, internal/dispatch/docs/room_budget.go:571), so the refusals begin within one room of
-// the budget divided by what one such room reserves - its stored version's elements at the price of
-// one, at both copies - computed here from the server's constants and held to the numbers the server
-// logs, both when the browsers come one after another and when fifty open at once.
+// (roomCopies, internal/dispatch/docs/room_budget.go:571), and an admission reserves the heaviest of
+// its stored version's elements, its stored history's structs and its rendered bytes at their
+// prices (copyHeap, storedRoomReservation), which for prose is its elements. So the refusals begin
+// within one room of the budget divided by that reservation, computed here from the server's
+// constants (mebibyteFleet) and held to the numbers the server logs, both when the browsers come
+// one after another and when fifty open at once.
 //
-// One after another, five of the browsers leave once they have edited. Each refusal while their
-// rooms are still charged starts a sweep that closes one of them to make room for the refused
-// browser (sweepRooms), and that browser's next attempt, as the editor's backoff makes it, is
-// admitted. Each close is read twice before that attempt: from the line the server logs for it, in
-// the budget's own figures, and from the room's absence, which a test-only read reports (roomLive).
-// Each refusal is read from its close frame and from its document's absence. A browser that stayed
-// keeps its room, the server's peak resident memory stays under the pod's, and once the rest have
-// left, a browser is admitted again.
+// One after another, five of the browsers leave once they have edited, the last of them just before
+// the next browser asks, and no browser is refused while a room whose browser went is still
+// charged: an admission the budget is short for waits for the sweep it starts (roomBudget.await),
+// which closes such a room once its settlement has committed (admissionFlushAllowance), and the
+// admission is then made into the room the close freed. Each close is read from the line the server
+// logs for it, in the budget's own figures, and from the room's absence, which a test-only read
+// reports (roomLive). The first refusal comes only once every one of those rooms is closed, read the
+// same two ways, with the rooms of the browsers that stayed within one of the arithmetic. Then a
+// browser that stayed leaves just before the next asks: that browser is admitted into the room the
+// leaving freed, closed for it, and the one after it is refused. A browser that stayed keeps its
+// room, the server's peak resident memory stays under the pod's, and once the rest have left, a
+// browser is admitted again.
 //
-// Fifty at once, the budget admits within one room of the same number and refuses the rest at
-// admission, and none of the admitted browsers' first edits is refused: each room's second copy was
-// charged before the edit made it.
+// Fifty at once, each browser hands back its whole state as soon as it has the room's, as the
+// editor does on every connect, and then edits: the budget admits within one room of the same
+// number and refuses the rest at admission, and no admitted browser's handoff or first edit is
+// refused, since a handoff of the state the room holds adds nothing to its charge (deletedRuns) and
+// each room's second copy was charged before the edit made it.
 func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 	const burst, gone = 50, 5
 	memory := newMemoryHarness(t)
@@ -862,17 +878,18 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 			return opened, nil
 		}
 		var left []string
-		var firstRefusalOpen int
+		var firstRefusal int
 		var final *gws.CloseError
-		// leftClosed is the closes the budget logged of rooms whose browsers went. A sweep with
-		// none of those left to close goes on to any other room nothing holds, such as one the
-		// server opened for its own work, heaviest first.
-		leftClosed := func() []budgetClose {
-			return slices.DeleteFunc(budgetCloses(t, server), func(made budgetClose) bool { return !slices.Contains(left, made.room) })
-		}
+		// leftClosed is the closes the budget logged of rooms whose browsers went (closesOf), and
+		// closedWithin the same once it holds want of them. A sweep with none of those left to close
+		// goes on to any other room nothing holds, such as one the server opened for its own work,
+		// heaviest first.
+		leftClosed := func() []budgetClose { return closesOf(t, server, left, 0) }
+		closedWithin := func(want int) []budgetClose { return closesOf(t, server, left, want) }
 		peak := server.peakResident(t, func() {
 			// Those who stay, then those who go, one room short of the budget's arithmetic: the
-			// rooms of those who went are the budget's to close once a browser needs their room.
+			// rooms of those who went are the budget's to close once a browser needs their room. The
+			// last of them leaves just before the next browser asks.
 			for len(stayed)+len(left) < rooms-1 {
 				opened, refused := admit(t)
 				if refused != nil {
@@ -885,67 +902,70 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 				left = append(left, opened.room)
 				opened.leave()
 			}
-			for _, room := range left {
-				memory.waitForSettled(t, room)
-			}
-			// Then more who stay. Each refusal while a room whose browser went is charged is
-			// answered by a close, and the refused browser's next attempt is admitted.
-			closed, justClosed := 0, false
+			// Then more who stay, until one is refused, which none is while a room whose browser
+			// went is still charged: each admission the budget is short for waits for the close of
+			// one of them.
 			for {
 				opened, refused := admit(t)
 				if opened != nil {
 					stayed = append(stayed, opened)
-					justClosed = false
 					continue
 				}
-				if justClosed {
-					t.Fatalf("a refused browser's next attempt was refused again (%v) after the budget closed a room for it", refused)
+				if closes := closedWithin(len(left)); len(closes) != len(left) {
+					t.Fatalf("a browser was refused (%v) with %d rooms held by browsers that stayed, while %d of the %d rooms whose browsers went were still charged", refused, len(stayed), len(left)-len(closes), len(left))
 				}
-				if firstRefusalOpen == 0 {
-					firstRefusalOpen = len(stayed) + len(left)
+				for _, room := range left {
+					requireRoomAbsent(t, server, room, "a room whose browser went, at the first refusal")
 				}
-				if closed == len(left) {
-					final = refused
-					return
-				}
-				// The refusal started a sweep. A room whose browser went may still have been
-				// settling when it looked, and closable only after, so the browser tries again, as
-				// the editor's backoff does, until a close of one is logged; no attempt may be
-				// admitted before one is.
-				deadline := time.Now().Add(45 * time.Second)
-				for len(leftClosed()) == closed {
-					if time.Now().After(deadline) {
-						t.Fatalf("no room whose browser went was closed in the 45 s after a refusal, with %d of the %d closed", closed, len(left))
-					}
-					time.Sleep(3 * time.Second)
-					if len(leftClosed()) > closed {
-						break
-					}
-					if again, _ := admit(t); again != nil {
-						t.Fatalf("a refused browser was admitted with no room closed for it, %d of the %d rooms whose browsers went closed", closed, len(left))
-					}
-				}
-				made := leftClosed()[closed]
-				closed++
-				t.Logf("refused with %d rooms held by browsers that stayed; the budget closed %s, %d -> %d of %d bytes charged, to make room for %d", len(stayed), made.room, made.chargedBefore, made.charged, made.limit, made.makingRoomFor)
-				if made.limit != roomBudgetBytesForTest || made.makingRoomFor != fleet.reserved ||
-					made.chargedBefore+made.makingRoomFor <= made.limit || made.charged+made.makingRoomFor > made.limit {
-					t.Errorf("the budget closed a room at %d -> %d of %d bytes to make room for %d, want a close that a reservation of %d needed and that made room for it", made.chargedBefore, made.charged, made.limit, made.makingRoomFor, fleet.reserved)
-				}
-				requireRoomAbsent(t, server, made.room, "a room the budget logged as closed")
-				justClosed = true
+				firstRefusal = len(stayed)
+				t.Logf("the first refusal came with %d rooms held by browsers that stayed, once the %d rooms whose browsers went were closed: %v", firstRefusal, len(left), refused)
+				break
 			}
+			// A browser that stayed leaves just before the next asks: that admission waits for the
+			// leaving browser's room to settle and be closed, and is admitted into it.
+			leaving := stayed[len(stayed)-1]
+			stayed = stayed[:len(stayed)-1]
+			left = append(left, leaving.room)
+			leaving.leave()
+			opened, refused := admit(t)
+			if refused != nil {
+				t.Fatalf("the browser asking just after another left was refused (%v), want it admitted once the room that browser left was closed", refused)
+			}
+			stayed = append(stayed, opened)
+			if closes := closedWithin(len(left)); len(closes) != len(left) || closes[len(closes)-1].room != leaving.room {
+				t.Fatalf("the browser asking just after another left was admitted, and the budget logged %d closes of the %d rooms whose browsers went, the last of them not the room just left", len(closes), len(left))
+			}
+			requireRoomAbsent(t, server, leaving.room, "the room a browser left just before the next asked")
+			// And the next is refused: no room whose browser went is left to close.
+			again, refused := admit(t)
+			if again != nil {
+				stayed = append(stayed, again)
+				t.Fatalf("a browser was admitted with %d rooms held by browsers that stayed and none whose browser went, want it refused", len(stayed)-1)
+			}
+			final = refused
 		})
-		t.Logf("the first refusal came with %d rooms open, %d of them left by their browsers; the budget closed those one refusal at a time and refused again with %d rooms held by browsers that stayed (%v); peak resident memory %d MiB", firstRefusalOpen, len(left), len(stayed), final, peak>>20)
-		if firstRefusalOpen < rooms-1 || firstRefusalOpen > rooms+1 {
-			t.Errorf("the first refusal came with %d rooms open, want within one of the budget's %d", firstRefusalOpen, rooms)
+		closes := leftClosed()
+		for _, made := range closes {
+			t.Logf("the budget closed %s, a room whose browser went, %d -> %d of %d bytes charged, to make room for %d", made.room, made.chargedBefore, made.charged, made.limit, made.makingRoomFor)
+			if made.limit != roomBudgetBytesForTest || made.makingRoomFor != fleet.reserved ||
+				made.chargedBefore+made.makingRoomFor <= made.limit || made.charged+made.makingRoomFor > made.limit {
+				t.Errorf("the budget closed a room at %d -> %d of %d bytes to make room for %d, want a close that a reservation of %d needed and that made room for it", made.chargedBefore, made.charged, made.limit, made.makingRoomFor, fleet.reserved)
+			}
 		}
-		if len(stayed) < rooms-1 || len(stayed) > rooms+1 {
-			t.Errorf("the last refusal came with %d rooms held by browsers that stayed, want within one of the budget's %d", len(stayed), rooms)
+		t.Logf("the first refusal came with %d rooms held by browsers that stayed, and the last, after one of them left and the next browser took its room, with %d (%v); peak resident memory %d MiB", firstRefusal, len(stayed), final, peak>>20)
+		for what, open := range map[string]int{"first": firstRefusal, "last": len(stayed)} {
+			if open < rooms-1 || open > rooms+1 {
+				t.Errorf("the %s refusal came with %d rooms held by browsers that stayed, want within one of the budget's %d", what, open, rooms)
+			}
 		}
 		refusals := requireBudgetRefusals(t, server, fleet.reserved)
-		if charged := refusals[len(refusals)-1].charged; charged >= int64(len(stayed)+1)*fleet.reserved {
-			t.Errorf("at the last refusal the budget charged %d bytes, %d rooms' worth for the %d browsers that stayed: a room whose browser had gone was still charged", charged, charged/fleet.reserved, len(stayed))
+		if len(refusals) != 2 {
+			t.Errorf("the server logged %d refusals of the budget, want the two this drive asked for", len(refusals))
+		}
+		for index, refusal := range refusals {
+			if refusal.charged >= int64(len(stayed)+1)*fleet.reserved {
+				t.Errorf("at refusal %d the budget charged %d bytes, %d rooms' worth for the %d browsers that stayed: a room whose browser had gone was still charged", index+1, refusal.charged, refusal.charged/fleet.reserved, len(stayed))
+			}
 		}
 		// The last refusal's sweep finds no room whose browser went, and closes no room a browser
 		// holds. What else it closes is a room nothing holds, which the server opened for work of
@@ -1001,10 +1021,12 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 		requirePodGoMemoryLimit(t, server)
 		edit := browserEdit(t, fleet.state, func(tree *pmdoc.Node) { paddingTexts(t, tree)[0].Text += " Edited in a burst." })
 		type outcome struct {
-			opened  *browser
-			applied bool
-			closed  *gws.CloseError
-			err     error
+			opened              *browser
+			handedBack, applied bool
+			closed              *gws.CloseError
+			err                 error
+			// answered is how long the socket's upgrade took to be answered, admitted or not.
+			answered time.Duration
 		}
 		outcomes := make([]outcome, burst)
 		t.Cleanup(func() {
@@ -1019,44 +1041,53 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 			for index := range outcomes {
 				group.Go(func() {
 					result := &outcomes[index]
+					asked := time.Now()
 					result.opened, result.err = server.tryOpenBrowser(fleet.copies[index])
+					result.answered = time.Since(asked)
 					if errors.As(result.err, &result.closed) {
 						result.err = nil
 						return
 					}
+					// Every copy holds the stored state, so the room's state is what this browser
+					// received and hands back whole.
 					if result.err == nil {
+						result.handedBack, result.closed, result.err = result.opened.send(result.opened.stateFrame(fleet.state))
+					}
+					if result.err == nil && result.handedBack {
 						result.applied, result.closed, result.err = result.opened.send(result.opened.updateFrame(edit))
 					}
 				})
 			}
 			group.Wait()
 		})
-		applied, atAdmission, atEdit := 0, 0, 0
+		applied, atAdmission, atHandoff, atEdit := 0, 0, 0, 0
 		for index, outcome := range outcomes {
 			switch {
 			case outcome.err != nil:
-				t.Errorf("browser %d: %v", index, outcome.err)
+				t.Errorf("browser %d, answered after %s: %v", index, outcome.answered.Round(time.Millisecond), outcome.err)
 			case outcome.applied:
 				applied++
 			case outcome.closed == nil:
-				t.Errorf("browser %d's edit was not applied and its socket stayed open, want it applied or refused with %d", index, contracts.DocumentBusyCloseCode)
-			default:
+				t.Errorf("browser %d's handoff or edit was not applied and its socket stayed open, want both applied or the browser refused with %d", index, contracts.DocumentBusyCloseCode)
+			case outcome.opened == nil:
 				requireClose(t, outcome.closed, contracts.DocumentBusyCloseCode, contracts.DocumentBusyCloseReason, fmt.Sprintf("browser %d", index))
-				if outcome.opened != nil {
-					atEdit++
-					continue
-				}
 				atAdmission++
 				requireRoomAbsent(t, server, fleet.copies[index], fmt.Sprintf("browser %d's document, refused at admission", index))
+			case !outcome.handedBack:
+				t.Errorf("browser %d's handoff of the state its room holds was refused with %v, want it applied", index, outcome.closed)
+				atHandoff++
+			default:
+				t.Errorf("browser %d's first edit was refused with %v, want it applied", index, outcome.closed)
+				atEdit++
 			}
 		}
-		t.Logf("%d browsers at once: %d edited their rooms, %d refused at admission, %d refused their edit; peak resident memory %d MiB", burst, applied, atAdmission, atEdit, peak>>20)
+		t.Logf("%d browsers at once: %d handed their state back and edited their rooms, %d refused at admission, %d refused their handoff, %d their edit; peak resident memory %d MiB", burst, applied, atAdmission, atHandoff, atEdit, peak>>20)
 		requireBudgetRefusals(t, server, fleet.reserved)
 		if applied < rooms-1 || applied > rooms+1 {
-			t.Errorf("%d rooms took their browser's edit, want within one of the budget's %d", applied, rooms)
+			t.Errorf("%d rooms took their browser's handoff and edit, want within one of the budget's %d", applied, rooms)
 		}
-		if atEdit != 0 {
-			t.Errorf("%d admitted browsers had their first edit refused, want none: a room's second copy is charged from its admission", atEdit)
+		if atHandoff+atEdit != 0 {
+			t.Errorf("%d admitted browsers had their handoff refused and %d their first edit, want none: a handoff adds nothing, and a room's second copy is charged from its admission", atHandoff, atEdit)
 		}
 		for index, outcome := range outcomes {
 			if outcome.applied {
@@ -1071,128 +1102,220 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 	})
 }
 
-// Rooms admitted small grow under browsers that stay, and the budget follows them up. Each room
-// holds two sockets that never leave: one only holds the room, so nothing can close it, and one
-// grows it in rounds of 2,048 one-letter headings (growthRounds), each four elements in five bytes
-// of rendering, the same update bytes sent to every room, a round no more often than a room's
-// elements are counted (roomCountIntervalForTest). The heap follows the elements and not the bytes
-// (bytesOfHeapAnElement), so the rooms pass the budget while each document and each update stay far
-// under the document bound, and what refuses them can only be the budget. With every room held
-// there is no unused room to close and no browser asking for a new document; what this proves is
-// that the charge follows the rooms up - no growth is refused until what the rooms hold, at the
-// server's price of an element and both copies, is past the budget - that once it is, every update
-// that would grow a room is refused with 4503 and DOC_BUSY while one that shrinks it still applies,
-// and that the server's peak resident memory stays under the pod's throughout. Each refusal is read
-// from its close frame and from the documents, which hold every round their rooms took, none they
-// were refused, and nowhere the text of the probe every room refused.
-func TestTheRoomBudgetFollowsRoomsThatGrowWhileTheirBrowsersStay(t *testing.T) {
-	const rooms, probeText = 56, " More."
+// Rooms admitted small grow under their browsers, and the budget follows them up, closing the rooms
+// whose browsers went before it refuses anything. Each room is a copy of one 5 KiB document of
+// prose (proseMarkdown), held by a socket that sends nothing, so a room whose growth is refused is
+// still held, and grown through a socket of its own in pastes of 64 KiB of the same prose
+// (pasteRounds), the same update bytes in every room, toward the document bound, as fast as the
+// client can: each paste is sent once the room has answered the last, room after room, never
+// waiting for a count. A grower the budget refuses reconnects into its room and sends its paste
+// again on the next pass, as the editor keeps a refused edit and sends it once room frees; the
+// growth ends once a pass after the counts have landed moves no room. Every fourth room's browsers
+// both leave once it renders more than 512 KiB.
+//
+// How many rooms grow is computed from the server's own figures: a room of a copy the drive does
+// not grow takes the same pastes on a server of its own, and what the budget charges it once its
+// count has landed is read at the paste after which every fourth browser leaves and at the last
+// (roomChargesAfter). The drive grows the fewest rooms whose held rooms at the last paste are
+// charged past the budget by a twentieth, so the budget must refuse, and fails unless that many
+// rooms are charged under nine tenths of it at the leaving paste, so those browsers reach it. Until
+// a count lands, each paste's content is charged at the densest price (bytesOfHeapAByteAtTheDensest,
+// internal/dispatch/docs/room_budget.go:135), 137 MB for one of 64 KiB, so a client that does not
+// wait for the counts is refused growth sooner than the rooms' counted charges alone would refuse
+// it, and again each time its pastes outrun the counter; each such refusal is transient, and the
+// grower's next attempt is taken once the counts have landed.
+//
+// What this proves is that the budget closes the rooms whose browsers went before it refuses any
+// growth: at the first refusal every fourth browser has gone and the budget has closed each of
+// their rooms, read from the line it logs for each close (budgetCloseLine) and from the room's
+// absence (roomLive), and at each refusal after it, every such room whose settlement has committed,
+// which makes it closable (unusedLocked, internal/dispatch/docs/roomstate.go:290-294), has been
+// closed the same way; that once the held rooms are past the budget the next browser is refused
+// with 4503 and DOC_BUSY at admission; that each held room's insert is then refused the same way
+// while a delete applies; and that the server's peak resident memory, read from /proc, stays under
+// the pod's throughout. The documents hold every paste their rooms took, none they were refused,
+// the delete, and nowhere the text of the probe every held room refused.
+func TestTheRoomBudgetFollowsGrowingRoomsAndClosesTheGoneOnesFirst(t *testing.T) {
+	const pasteBytes, leaveAt, probeText, pasted = 64 << 10, 512 << 10, " Probe.", "## Pasted section 0\n"
 	memory := newMemoryHarness(t)
 	memory.env = append(memory.env, "GOMEMLIMIT="+strconv.Itoa(podGoMemoryLimit))
-	copies, state := memory.smallDocuments(t, rooms)
-	charge := func(elements int) int64 { return roomCopiesForTest * int64(elements) * bytesOfHeapAnElementForTest }
-	rounds := growthRounds(t, state, func(size pmdoc.DocumentSize) bool {
-		return int64(rooms)*charge(size.Elements) <= roomBudgetBytesForTest*3/2
-	})
-	// The shrink deletes the first round's first half, which every room holds, from a copy of the
-	// document that holds that round alone, so its bytes apply wherever the rounds stopped.
+	// proseMarkdown writes whole sections of about 1,740 bytes, so three of them are the 5 KiB.
+	source, state := memory.storedDocument(t, proseMarkdown(t, 6<<10))
+	small := memory.storedShape(t, "the 5 KiB document", source)
+	if small.rendered < 5<<10-512 || small.rendered > 5<<10+512 {
+		t.Fatalf("the document to grow renders %d bytes, want about 5 KiB", small.rendered)
+	}
+	paste := strings.ReplaceAll(proseMarkdown(t, pasteBytes), "## Section ", "## Pasted section ")
+	rounds := pasteRounds(t, state, paste)
+	leave := slices.IndexFunc(rounds, func(round pasteRound) bool { return round.size.Bytes > leaveAt })
+	if leave < 0 {
+		t.Fatalf("no paste takes the document past %d bytes", leaveAt)
+	}
+	copies := memory.cloneDocuments(t, source, 2)
+	charges := memory.roomChargesAfter(t, copies[0], copies[1], rounds, leave, len(rounds)-1)
+	atLeave, final := charges[0], charges[1]
+	rooms := 4
+	for int64(rooms-rooms/4)*final <= roomBudgetBytesForTest*21/20 {
+		rooms++
+	}
+	last := rounds[len(rounds)-1]
+	t.Logf("%d pastes of %d bytes take the %d-byte document to %d bytes making %d elements, its room charged %d bytes once counted; every fourth browser leaves after paste %d, at %d bytes and %d charged; %d rooms grow, %d of them held",
+		len(rounds), len(paste), small.rendered, last.size.Bytes, last.size.Elements, final, leave+1, rounds[leave].size.Bytes, atLeave, rooms, rooms-rooms/4)
+	if charged := int64(rooms) * atLeave; charged >= roomBudgetBytesForTest*9/10 {
+		t.Fatalf("%d rooms are charged %d bytes when their every fourth browser leaves, past nine tenths of the %d-byte budget: those browsers might never reach the point they leave at", rooms, charged, roomBudgetBytesForTest)
+	}
+	copies = memory.cloneDocuments(t, source, rooms+1)
+	// The shrink deletes the first half of the first paste, which every held room holds, from a
+	// copy of the document that holds that paste alone, so its bytes apply wherever the pastes
+	// stopped.
 	shrinker := newBrowserDocument(t, state)
+	before := len(shrinker.tree(t).Children)
 	if err := crdt.ApplyUpdateV1(shrinker.doc, rounds[0].update, nil); err != nil {
 		t.Fatal(err)
 	}
 	shrink := shrinker.edit(t, func(tree *pmdoc.Node) {
-		tree.Children = append(tree.Children[:2], tree.Children[2+headingsARound/2:]...)
+		added := len(tree.Children) - before
+		tree.Children = append(tree.Children[:before], tree.Children[before+added/2:]...)
 	})
 	requireInsertsNothing(t, shrink)
-	probe := browserEdit(t, state, func(tree *pmdoc.Node) { tree.Children[1].Children[0].Text += probeText })
+	probe := browserEdit(t, state, func(tree *pmdoc.Node) { paddingTexts(t, tree)[0].Text += probeText })
 
 	server := memory.start(t)
 	requirePodGoMemoryLimit(t, server)
 	holders, growers := make([]*browser, rooms), make([]*browser, rooms)
 	t.Cleanup(func() {
-		for _, held := range append(holders, growers...) {
-			if held != nil {
-				held.leave()
+		for _, opened := range append(holders, growers...) {
+			if opened != nil {
+				opened.leave()
 			}
 		}
 	})
-	for index, room := range copies {
+	for index, room := range copies[:rooms] {
 		holders[index], growers[index] = server.openBrowser(t, room), server.openBrowser(t, room)
 	}
 	took := make([]int, rooms)
-	held := func() int64 {
-		total := int64(0)
-		for _, taken := range took {
-			total += charge(rounds[taken-1].size.Elements)
-		}
-		return total
-	}
-	type refusal struct {
-		round, room int
-		held        int64
-	}
+	gone := make([]bool, rooms)
+	var left []string
+	type refusal struct{ pass, room, took, left int }
 	var refusals []refusal
 	peak := server.peakResident(t, func() {
-		for number, round := range rounds {
-			started := time.Now()
-			for index := range copies {
-				if growers[index] == nil {
+		for pass, idle := 1, false; ; pass++ {
+			moved := false
+			for index := range copies[:rooms] {
+				if gone[index] || took[index] == len(rounds) {
 					continue
 				}
-				applied, closed, err := growers[index].send(growers[index].updateFrame(round.update))
+				if growers[index] == nil {
+					growers[index] = server.openBrowser(t, copies[index])
+				}
+				applied, closed, err := growers[index].send(growers[index].updateFrame(rounds[took[index]].update))
 				if err != nil {
-					t.Fatalf("round %d, room %d: %v", number+1, index, err)
+					t.Fatalf("pass %d, room %d: %v", pass, index, err)
 				}
 				if applied {
-					took[index] = number + 1
+					took[index]++
+					moved = true
+					if index%4 == 3 && rounds[took[index]-1].size.Bytes > leaveAt {
+						holders[index].leave()
+						growers[index].leave()
+						gone[index] = true
+						left = append(left, copies[index])
+					}
 					continue
 				}
-				if number == 0 {
-					t.Fatalf("room %d refused the first round, %v; want every room to take it", index, closed)
-				}
 				requireRefused(t, applied, closed, contracts.DocumentBusyCloseCode, contracts.DocumentBusyCloseReason)
-				refusals = append(refusals, refusal{round: number + 1, room: index, held: held()})
 				growers[index] = nil
-			}
-			taking := 0
-			for _, grower := range growers {
-				if grower != nil {
-					taking++
+				refusals = append(refusals, refusal{pass: pass, room: index, took: took[index], left: len(left)})
+				// At the first refusal every fourth browser has gone and its room is closed. At
+				// each, every room whose browsers went and whose settlement has committed is
+				// closable, and closed by the sweep that raised the refusal or by the one its
+				// settlement's end started (Service.unlockState).
+				closable := left
+				if len(refusals) > 1 {
+					closable = slices.DeleteFunc(slices.Clone(left), func(room string) bool { return !memory.settled(t, room) })
+				} else {
+					t.Logf("pass %d: the budget refused room %d's paste %d, its first refusal, with %d rooms whose browsers went; %d MiB resident", pass, index, took[index]+1, len(left), server.resident(t, "VmRSS")>>20)
+					if len(left) != rooms/4 {
+						t.Fatalf("the budget refused growth with %d of the %d rooms whose every fourth browser leaves left, want it to refuse none before they have", len(left), rooms/4)
+					}
+				}
+				if closes := closesOf(t, server, closable, len(closable)); len(closes) != len(closable) {
+					t.Fatalf("pass %d: the budget refused room %d's paste %d while %d of the %d rooms whose browsers went that it could close were still charged", pass, index, took[index]+1, len(closable)-len(closes), len(closable))
+				}
+				for _, room := range closable {
+					requireRoomAbsent(t, server, room, "a room whose browsers went, at a refusal")
 				}
 			}
-			t.Logf("round %d, %d elements a room: %d rooms grew, the rooms hold %d bytes at the server's price, %d MiB resident", number+1, round.size.Elements, taking, held(), server.resident(t, "VmRSS")>>20)
-			// Each room's count of this round lands within the measurer's interval
-			// (roomCountIntervalForTest), one room at a time, before the next round is sent.
-			time.Sleep(time.Until(started.Add(roomCountIntervalForTest + 2*time.Second)))
-			if taking == 0 {
+			taken := 0
+			for _, count := range took {
+				taken += count
+			}
+			t.Logf("pass %d: the rooms have taken %d pastes, %d refused so far; %d MiB resident", pass, taken, len(refusals), server.resident(t, "VmRSS")>>20)
+			if moved {
+				idle = false
+				continue
+			}
+			if idle {
 				break
 			}
+			// Each room's count of what it took lands within the measurer's interval
+			// (roomCountIntervalForTest) before the last pass.
+			idle = true
+			time.Sleep(roomCountIntervalForTest + 2*time.Second)
 		}
-		for index, room := range copies {
-			asking := server.openBrowser(t, room)
+		if len(refusals) == 0 {
+			t.Fatalf("every room took all %d pastes, want the budget to refuse growth once the held rooms pass it", len(rounds))
+		}
+		_, err := server.tryOpenBrowser(copies[rooms])
+		var closed *gws.CloseError
+		if !errors.As(err, &closed) {
+			t.Fatalf("the next browser, once the held rooms passed the budget: %v, want its socket closed", err)
+		}
+		requireClose(t, closed, contracts.DocumentBusyCloseCode, contracts.DocumentBusyCloseReason, "the next browser, once the held rooms passed the budget")
+		requireRoomAbsent(t, server, copies[rooms], "the next browser's document")
+		for index := range copies[:rooms] {
+			if gone[index] {
+				continue
+			}
+			asking := server.openBrowser(t, copies[index])
 			applied, closed, err := asking.send(asking.updateFrame(probe))
 			if err != nil {
 				t.Fatalf("room %d: %v", index, err)
 			}
 			requireRefused(t, applied, closed, contracts.DocumentBusyCloseCode, contracts.DocumentBusyCloseReason)
 		}
-		for index := range copies {
-			requireApplied(t, holders[index], shrink, fmt.Sprintf("room %d's shrink", index))
+		for index := range copies[:rooms] {
+			if !gone[index] {
+				requireApplied(t, holders[index], shrink, fmt.Sprintf("room %d's delete", index))
+			}
 		}
 	})
-	if len(refusals) == 0 {
-		t.Fatal("no growth was refused, want the budget to refuse it once the rooms pass it")
+	early := 0
+	for _, refused := range refusals {
+		if refused.left == 0 {
+			early++
+		}
 	}
-	t.Logf("%d growth updates refused, the first in round %d with the rooms holding %d bytes at the server's price; peak resident memory %d MiB", len(refusals), refusals[0].round, refusals[0].held, peak>>20)
-	// What a room is charged is at most what it holds at the server's price: its count of
-	// elements trails its rendering, and only the update bytes taken since stand beside it.
-	if slack := int64(rooms) * int64(len(rounds[0].update)); refusals[0].held+slack <= roomBudgetBytesForTest {
-		t.Errorf("growth was first refused with the rooms holding %d bytes, under the %d-byte budget: the budget charged more than the rooms hold", refusals[0].held, roomBudgetBytesForTest)
+	t.Logf("%d pastes refused, the first on pass %d to room %d after it took %d, %d of them before any browser left; the next browser and every held room's insert refused, every held room's delete applied; peak resident memory %d MiB",
+		len(refusals), refusals[0].pass, refusals[0].room, refusals[0].took, early, peak>>20)
+	requireBudgetRefusals(t, server, small.reserved)
+	closes := closesOf(t, server, left, 0)
+	for _, made := range closes {
+		t.Logf("the budget closed %s, a room whose browsers went, %d -> %d of %d bytes charged", made.room, made.chargedBefore, made.charged, made.limit)
+		if made.limit != roomBudgetBytesForTest || made.chargedBefore+made.makingRoomFor <= made.limit {
+			t.Errorf("the budget closed a room at %d of %d bytes charged, making room for %d, want a close the budget's limit needed", made.chargedBefore, made.limit, made.makingRoomFor)
+		}
 	}
-	for index, room := range copies {
+	if len(closes) != len(left) || len(left) != rooms/4 {
+		t.Errorf("the budget closed %d rooms whose browsers went, of the %d whose browsers left, want each of the %d rooms of every fourth browser once", len(closes), len(left), rooms/4)
+	}
+	for index, room := range copies[:rooms] {
+		if gone[index] {
+			continue
+		}
 		text := server.text(t, room)
-		if got, want := strings.Count(text, growthHeading), headingsARound*took[index]-headingsARound/2; got != want {
-			t.Errorf("room %d reads %d grown headings after %d rounds and its shrink, want %d: a refused round reached it, or a taken one did not", index, got, took[index], want)
+		if got := strings.Count(text, pasted); got != took[index]-1 {
+			t.Errorf("room %d reads %d pastes after taking %d and the delete of the first's first half, want %d: a refused paste reached it, or a taken one or the delete did not", index, got, took[index], took[index]-1)
 		}
 		if strings.Contains(text, probeText) {
 			t.Errorf("room %d reads the probe its room refused", index)
@@ -1209,8 +1332,14 @@ func TestTheRoomBudgetFollowsRoomsThatGrowWhileTheirBrowsersStay(t *testing.T) {
 // for it; an update that would grow a document already open is refused the same way, and the
 // document never gains it; so is one that adds elements and leaves the document no larger in bytes,
 // which a test of bytes would let through; and a hundred updates that shrink documents are applied
-// and stored. Meanwhile an API write to a document no room holds is taken, and the unrecorded-mark
-// sweep writes. The server's peak resident memory stays under the pod's throughout.
+// and stored, their deletes' charges keeping the budget within the pressure reserve past its limit
+// (pressureReserveBytes, internal/dispatch/docs/room_budget.go:209), as the line the server logs
+// for the next browser's refusal reads. Meanwhile an API write to a document no room holds is taken,
+// and the unrecorded-mark sweep writes, in a room a browser holds and in one no room held when the
+// budget filled: each such room the server's own work opened over the budget is closed once its
+// settlement has ended (closeIfOpenedOverBudget, :1507-1532), read from its absence (roomLive) and
+// from the line the server logs for the close. The server's peak resident memory stays under the
+// pod's throughout.
 //
 // The budget is filled the way the server reaches a full one. An admission never takes it past its
 // limit, since a room is charged at both copies from its reservation on (roomCopies), so browsers
@@ -1227,7 +1356,7 @@ func TestTheRoomBudgetFollowsRoomsThatGrowWhileTheirBrowsersStay(t *testing.T) {
 func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 	// proofComment is the mark a comment anchors with (docs.MarkComment,
 	// internal/dispatch/docs/marks.go:26).
-	const growers, markID, commentMark = 4, "memory-unrecorded-mark", "proofComment"
+	const growers, markID, unheldMarkID, commentMark = 4, "memory-unrecorded-mark", "memory-unrecorded-mark-unheld", "proofComment"
 	// A hundred shrinks are one browser's four cuts of fifty bytes each, sent to twenty-five
 	// documents in the order it made them: ygo's update observer encodes a transaction's structs
 	// beside the document's whole delete set (sjawhar/ygo v1.51.3-sami.7, crdt/doc.go:597-612), so
@@ -1244,6 +1373,25 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 	rounds := growthRounds(t, smallState, func(size pmdoc.DocumentSize) bool {
 		return size.Elements+4*headingsARound < pmdoc.MaxDocumentElements
 	})
+	// unheld is a document whose stored history holds an unrecorded comment mark and that no room of
+	// the drive's server holds: a server of its own takes the mark from a browser and stores it, then
+	// stops, well inside the minute after which the sweep removes an unrecorded mark
+	// (sweepUnrecordedMarks, internal/dispatch/docs/marks.go:783-838), which the drive's server counts
+	// from when its own settlement first finds the mark.
+	unheld := fleet.copies[len(fleet.copies)-1]
+	unheldMark := pmdoc.MarkRef{Type: commentMark, ID: unheldMarkID}
+	marking := memory.start(t)
+	setting := marking.openBrowser(t, unheld)
+	requireApplied(t, setting, browserEdit(t, fleet.state, func(tree *pmdoc.Node) {
+		text := paddingTexts(t, tree)[0]
+		text.Marks = append(text.Marks, pmdoc.Mark{Type: commentMark, Attrs: pmdoc.Attrs{"id": unheldMarkID, "by": "user:alice"}})
+	}), "an unrecorded comment mark")
+	setting.leave()
+	memory.waitForSettled(t, unheld)
+	marking.stop(t)
+	if !slices.Contains(pmdoc.ListMarks(newBrowserDocument(t, memory.storedState(t, unheld)).tree(t)), unheldMark) {
+		t.Fatalf("the document %s does not store the unrecorded mark its browser applied", unheld)
+	}
 	server := memory.start(t)
 	requirePodGoMemoryLimit(t, server)
 	var opened []*browser
@@ -1306,8 +1454,8 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 		next := 0
 		var refused *gws.CloseError
 		for {
-			if next >= len(fleet.copies)-2 {
-				t.Fatalf("all %d copies but the two kept for the end were admitted, want the budget to refuse one", next)
+			if next >= len(fleet.copies)-3 {
+				t.Fatalf("all %d copies but the three kept for the end were admitted, want the budget to refuse one", next)
 			}
 			admitted, err := server.tryOpenBrowser(fleet.copies[next])
 			if errors.As(err, &refused) {
@@ -1412,15 +1560,38 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 			memory.waitForStoredText(t, room.room, func(text string) bool { return len(text) == want })
 		}
 		t.Logf("%d shrinks applied to %d documents on the full server, and stored; %d MiB resident", len(shrinking)*shrunk, shrunk, server.resident(t, "VmRSS")>>20)
+		// The shrinks' deletes were admitted within the pressure reserve, and the refusal of the
+		// next browser names what the rooms are charged once they have been.
+		if _, err := server.tryOpenBrowser(fleet.copies[next]); !errors.As(err, &closed) {
+			t.Fatalf("the next browser after the shrinks: %v, want its socket closed", err)
+		}
+		requireClose(t, closed, contracts.DocumentBusyCloseCode, contracts.DocumentBusyCloseReason, "the next browser after the shrinks")
+		refusals := requireBudgetRefusals(t, server, fleet.reserved)
+		before, after := refusals[len(refusals)-2], refusals[len(refusals)-1]
+		t.Logf("the budget charged %d of %d bytes before the shrinks and %d after them: %d past its limit, against the %d-byte pressure reserve",
+			before.charged, before.limit, after.charged, after.charged-after.limit, pressureReserveBytesForTest)
+		if after.charged > after.limit+pressureReserveBytesForTest {
+			t.Errorf("after the shrinks the budget charged %d bytes, %d past its %d-byte limit, want within the %d-byte pressure reserve", after.charged, after.charged-after.limit, after.limit, pressureReserveBytesForTest)
+		}
 
+		// An API write to a document no room holds opens its room over the full budget, and the
+		// room is closed once the write's settlement has ended.
 		written := fleet.copies[next+1]
-		if server.roomLive(t, written) {
-			t.Fatalf("document %s is live before the API write, want one no room holds", written)
+		for _, room := range []string{written, unheld} {
+			if server.roomLive(t, room) {
+				t.Fatalf("document %s is live before the API write, want one no room holds", room)
+			}
 		}
 		if answer := server.edit(t, written, map[string]any{"op": "replace", "find": "Paragraph 3 holds", "with": "Paragraph 3 now holds"}); answer.status != http.StatusOK {
 			t.Errorf("an API write to a document no room holds, on the full server: %d %.300s, want 200", answer.status, answer.body)
 		} else if !strings.Contains(server.text(t, written), "Paragraph 3 now holds") {
 			t.Error("an API write on the full server answered 200, and the document does not read it")
+		}
+		requireClosedOnceSettled(t, memory, server, written, "the room an API write opened on the full server")
+		// So does one to the document whose stored mark no room has seen: its settlement finds the
+		// mark, which the sweep then removes a minute later, in a room the server opens for it.
+		if answer := server.edit(t, unheld, map[string]any{"op": "replace", "find": "Paragraph 5 holds", "with": "Paragraph 5 now holds"}); answer.status != http.StatusOK {
+			t.Errorf("an API write to the unheld document, on the full server: %d %.300s, want 200", answer.status, answer.body)
 		}
 
 		markRef := pmdoc.MarkRef{Type: commentMark, ID: markID}
@@ -1436,6 +1607,11 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 		})
 		requireBusyAndUnchanged(t, memory, server, held[len(held)-3].room, grow, "an update that grows a document once the mark sweep has written")
 		t.Log("the sweep removed the unrecorded mark, and the server still refuses growth")
+		memory.waitForStored(t, unheld, "the sweep's removal of the unrecorded mark no room held", func(state []byte) bool {
+			return !slices.Contains(pmdoc.ListMarks(newBrowserDocument(t, state).tree(t)), unheldMark)
+		})
+		requireClosedOnceSettled(t, memory, server, unheld, "the room the mark sweep wrote in on the full server")
+		t.Log("the sweep removed the unrecorded mark from the document no room held, and its room was closed once its settlement ended")
 	})
 	t.Logf("peak resident memory %d MiB", peak>>20)
 	if peak >= podMemory {
@@ -1491,31 +1667,7 @@ func TestARoomFedOnlyByAPIWritesIsChargedTheStructsTheyAdd(t *testing.T) {
 		// settlement after the room's settle delay.
 		time.Sleep(roomCountIntervalForTest + 2*time.Second)
 		memory.waitForSettled(t, fed.artifactID)
-		seen := len(budgetRefusalLine.FindAllStringSubmatch(server.output.String(), -1))
-		refused, err := server.tryOpenBrowser(probe.artifactID)
-		if err == nil {
-			refused.leave()
-			t.Fatalf("%s: a browser was admitted to the probe on a budget of one byte", when)
-		}
-		var closed *gws.CloseError
-		if !errors.As(err, &closed) {
-			t.Fatalf("%s: the probe's socket failed with %v, want the budget's close", when, err)
-		}
-		requireClose(t, closed, contracts.DocumentBusyCloseCode, contracts.DocumentBusyCloseReason, when+", the probe's socket")
-		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
-			if refusals := budgetRefusalLine.FindAllStringSubmatch(server.output.String(), -1); len(refusals) > seen {
-				last := refusals[len(refusals)-1]
-				charged, chargedErr := strconv.ParseInt(last[1], 10, 64)
-				limit, limitErr := strconv.ParseInt(last[2], 10, 64)
-				if chargedErr != nil || limitErr != nil || limit != 1 {
-					t.Fatalf("%s: the server refused the probe with %q, want what is charged against a budget of one byte", when, last[0])
-				}
-				return charged
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("%s: the server logged no refusal of the probe:\n%s", when, server.output.tail())
-			}
-		}
+		return server.chargedAgainstOneByte(t, probe.artifactID, when)
 	}
 	structs := func() int64 {
 		t.Helper()
@@ -1555,6 +1707,333 @@ func TestARoomFedOnlyByAPIWritesIsChargedTheStructsTheyAdd(t *testing.T) {
 			t.Fatalf("the room reads %q, want word %d replaced", text, word)
 		}
 	}
+}
+
+// gcFloodClient is the client of the first GC-struct update the A1 drives send, each later update
+// of a drive a client of its own above it, none of them a client any stored document holds.
+const gcFloodClient = 5_000_000
+
+// A client that is not the Proof editor is charged what it adds, over real document sockets of a
+// real server under the Go limit a 4 GiB pod gives it. It opens as many rooms on a small document as
+// the budget admits, each held by a socket that sends nothing, and through a second socket sends
+// each room updates of GC structs just under the byte bound until one is refused. A GC run renders
+// nothing, so no count of the room's rendering prices it; what charges it is the structure part
+// (roomCharge, internal/dispatch/docs/room_budget.go), each struct with the splits its integration
+// can cause at bytesOfHeapAStruct, at both copies. Each room takes them until its struct total
+// refuses one with 4413 and DOC_TOO_LARGE or the budget, filled by the structure part with nothing
+// it can close, refuses one with 4503 and DOC_BUSY; and the next room's browser is refused 4503 at
+// admission. The line the server logs for that refusal names what the open rooms are charged
+// (budgetRefusalLine), which must exceed what their admissions reserved by at least the structure
+// price of every struct the rooms took. The server's peak resident memory, read from /proc, stays
+// under the pod's.
+//
+// The struct total counts each struct of an update with its two splits against the decode cap,
+// and confirms a refusal by the exact count of the structs the room holds (countRoomStructs,
+// internal/dispatch/docs/peer_update.go:1400), so a room takes an update while what it holds and
+// three times the update's structs stay within the cap. Each update's GC runs are 128 clocks long,
+// which lib0 writes in two bytes, three with the struct's info byte: a frame just under the byte
+// bound then holds about as many structs as one update may add to a room holding the small
+// document, so each room takes one and its struct total refuses the second, while the structure
+// part of two such updates passes the budget.
+func TestABrowserThatIsNotTheEditorIsChargedWhatItAdds(t *testing.T) {
+	const rooms, framesARoom, runLength = 8, 3, 128
+	memory := newMemoryHarness(t)
+	memory.env = append(memory.env, "GOMEMLIMIT="+strconv.Itoa(podGoMemoryLimit))
+	copies, _ := memory.smallDocuments(t, rooms)
+	small := memory.storedShape(t, "the small document", copies[0])
+	// Each frame stays 4 KiB short of what the byte bound admits into a room rendering the small
+	// document (peer_update.go:379-383), so the bytes never refuse one, and holds no more structs
+	// than one update may add to the room as it loads.
+	split := 1 + splitsAStructCanCauseForTest
+	structs := min((pmdoc.MaxDocumentBytes-small.rendered-4<<10)/3, (maxUpdateItemsForTest-int(small.structs))/split)
+	frames := make([][]byte, framesARoom)
+	for index := range frames {
+		frames[index] = gcFrame(gcFloodClient+uint64(index), structs, runLength)
+		if size := len(frames[index]) + small.rendered; size >= pmdoc.MaxDocumentBytes || size < pmdoc.MaxDocumentBytes-8<<10 {
+			t.Fatalf("an update of %d GC structs is %d bytes beside a %d-byte rendering, want just under the %d-byte bound", structs, len(frames[index]), small.rendered, pmdoc.MaxDocumentBytes)
+		}
+	}
+	perStruct := int64(bytesOfHeapAStructForTest * split * roomCopiesForTest)
+	takes := 1 + (maxUpdateItemsForTest-int(small.structs)-split*structs)/structs
+	t.Logf("each update is %d bytes of %d GC structs, charged %d bytes in the structure part at %d a struct; a room's struct total takes %d of them, the %d-byte budget the structure of %d",
+		len(frames[0]), structs, int64(structs)*perStruct, perStruct, takes, roomBudgetBytesForTest, roomBudgetBytesForTest/(int64(structs)*perStruct))
+	if takes >= framesARoom {
+		t.Fatalf("a room's struct total takes %d updates, want fewer than the %d each room is sent", takes, framesARoom)
+	}
+
+	server := memory.start(t)
+	requirePodGoMemoryLimit(t, server)
+	var held []*browser
+	t.Cleanup(func() {
+		for _, opened := range held {
+			opened.leave()
+		}
+	})
+	type outcome struct {
+		taken  int
+		closed *gws.CloseError
+	}
+	var outcomes []outcome
+	var refused *gws.CloseError
+	peak := server.peakResident(t, func() {
+		for _, room := range copies {
+			holder, err := server.tryOpenBrowser(room)
+			if errors.As(err, &refused) {
+				requireClose(t, refused, contracts.DocumentBusyCloseCode, contracts.DocumentBusyCloseReason, "the browser of the room past the budget")
+				requireRoomAbsent(t, server, room, "the room past the budget")
+				return
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			sending := server.openBrowser(t, room)
+			held = append(held, holder, sending)
+			var result outcome
+			for number, frame := range frames {
+				applied, closed, err := sending.send(sending.updateFrame(frame))
+				if err != nil {
+					t.Fatalf("room %d, update %d: %v", len(outcomes), number+1, err)
+				}
+				if applied {
+					result.taken++
+					continue
+				}
+				if closed == nil {
+					t.Fatalf("room %d's update %d was not applied and its socket stayed open, want it applied or refused", len(outcomes), number+1)
+				}
+				result.closed = closed
+				break
+			}
+			outcomes = append(outcomes, result)
+			t.Logf("room %d took %d updates and then closed the socket with %v; %d MiB resident", len(outcomes)-1, result.taken, result.closed, server.resident(t, "VmRSS")>>20)
+		}
+	})
+	if refused == nil {
+		t.Fatalf("the budget admitted a browser to each of the %d rooms, want it to refuse one once the structure part filled it", rooms)
+	}
+	admitted := 0
+	for index, result := range outcomes {
+		admitted += result.taken
+		switch {
+		case result.closed == nil:
+			t.Errorf("room %d took every update it was sent, want its struct total or the budget to refuse one", index)
+		case result.closed.Code == contracts.DocumentTooLargeCloseCode && result.closed.Text == contracts.DocumentTooLargeCloseReason:
+			if result.taken != takes {
+				t.Errorf("room %d's struct total refused an update after it took %d, want after the %d it holds", index, result.taken, takes)
+			}
+		case result.closed.Code == contracts.DocumentBusyCloseCode && result.closed.Text == contracts.DocumentBusyCloseReason:
+			if result.taken > takes {
+				t.Errorf("room %d took %d updates before the budget refused one, past the %d its struct total holds", index, result.taken, takes)
+			}
+		default:
+			t.Errorf("room %d's update was refused with %v, want %d %s or %d %s", index, result.closed,
+				contracts.DocumentTooLargeCloseCode, contracts.DocumentTooLargeCloseReason, contracts.DocumentBusyCloseCode, contracts.DocumentBusyCloseReason)
+		}
+	}
+	refusals := requireBudgetRefusals(t, server, small.reserved)
+	last := refusals[len(refusals)-1]
+	reserved := int64(len(outcomes)) * small.reserved
+	added := int64(admitted*structs) * perStruct
+	t.Logf("%d rooms took %d updates, %d GC structs, before a browser was refused at %d of %d bytes charged: %d past what their admissions reserved (%d), against %d for the structs' structure; peak resident memory %d MiB",
+		len(outcomes), admitted, admitted*structs, last.charged, last.limit, last.charged-reserved, reserved, added, peak>>20)
+	if admitted == 0 {
+		t.Error("no room took an update, want each to take some before a refusal")
+	}
+	if grew := last.charged - reserved; grew < added {
+		t.Errorf("the rooms' charge grew by %d bytes for %d GC structs, want at least %d, %d a struct", grew, admitted*structs, added, perStruct)
+	}
+	if peak >= podMemory {
+		t.Errorf("the server's resident memory peaked at %d MiB, want under the pod's %d MiB", peak>>20, podMemory>>20)
+	}
+}
+
+// A browser cannot push a document past the decode cap, over a real document socket of a real
+// server. A room is brought near the cap by an update of GC structs its struct total admits, and two
+// updates that would take it past - one of GC structs, one of delete ranges, each sized from the
+// structs the room's encoded state holds, the count the room confirms a refusal by
+// (countRoomStructs, internal/dispatch/docs/peer_update.go:1400) - are each refused with 4413 and
+// DOC_TOO_LARGE, and the room is left as it was. Each GC struct counts itself and the two splits its
+// integration can cause against the cap; each delete range of a client the room does not hold
+// counts the two ends it can split and the parked range its tail leaves (peerWeighing.walkedDelete,
+// :625-644). The stored document then loads in a new room of a new server, holding what the room
+// held before the refusals, within the cap.
+func TestABrowserCannotPushADocumentPastTheDecodeCap(t *testing.T) {
+	const nearStructs = 340_000
+	memory := newMemoryHarness(t)
+	server := memory.start(t)
+	stored := server.upload(t, "json", memory.issue, "# Capped\n\nOne paragraph of ordinary prose.\n")
+	if stored.status != http.StatusCreated {
+		t.Fatalf("upload: status %d body %.300s, want 201", stored.status, stored.body)
+	}
+	memory.waitForSettlement(t, stored)
+	room := stored.artifactID
+	filling := server.openBrowser(t, room)
+	t.Cleanup(filling.leave)
+	requireApplied(t, filling, gcFrame(gcFloodClient, nearStructs, 1), fmt.Sprintf("an update of %d GC structs", nearStructs))
+	before := canonicalState(t, filling.state(t))
+	held, err := docs.StateStructsForTest(before)
+	if err != nil {
+		t.Fatalf("count the room's structs: %v", err)
+	}
+	over := int((maxUpdateItemsForTest-held)/(1+splitsAStructCanCauseForTest)) + 1
+	t.Logf("the room holds %d structs after an update of %d GC structs; an update of %d structs or delete ranges takes it past the %d-struct decode cap", held, nearStructs, over, maxUpdateItemsForTest)
+	for _, row := range []struct {
+		name   string
+		update []byte
+	}{
+		{"GC structs", gcFrame(gcFloodClient+1, over, 1)},
+		{"delete ranges", deleteRangesFrame(gcFloodClient+2, over)},
+	} {
+		refused := server.openBrowser(t, room)
+		t.Cleanup(refused.leave)
+		applied, closed, err := refused.send(refused.updateFrame(row.update))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("a %d-byte update of %d %s: applied %v, closed %v", len(row.update), over, row.name, applied, closed)
+		requireRefused(t, applied, closed, contracts.DocumentTooLargeCloseCode, contracts.DocumentTooLargeCloseReason)
+		if state := canonicalState(t, filling.state(t)); !bytes.Equal(state, before) {
+			t.Fatalf("the room holds a %d-byte state after the refused update of %s, want the %d-byte state it held", len(state), row.name, len(before))
+		}
+	}
+	memory.waitForSettled(t, room)
+	server.stop(t)
+	again := memory.start(t)
+	reopened := again.openBrowser(t, room)
+	t.Cleanup(reopened.leave)
+	state := canonicalState(t, reopened.state(t))
+	loaded, err := docs.StateStructsForTest(state)
+	if err != nil {
+		t.Fatalf("count the reloaded room's structs: %v", err)
+	}
+	t.Logf("a new server's room loads the stored document as a %d-byte state of %d structs", len(state), loaded)
+	if !bytes.Equal(state, before) || loaded > maxUpdateItemsForTest {
+		t.Fatalf("a new room loads a %d-byte state of %d structs, want the %d-byte state the room held before the refusals, within the %d-struct cap", len(state), loaded, len(before), maxUpdateItemsForTest)
+	}
+}
+
+// An update the walk refuses is not applied, over a real document socket of a real server: the
+// room answers it SyncStatus(0), keeps the browser connected, and its state vector and state are
+// what they were, for a frame of valid GC structs ending in one bad byte, which ygo's own apply
+// would integrate in part before it failed (sjawhar/ygo v1.51.3-sami.7, crdt/update.go:104-110),
+// for a subdocument and for a struct under a root the Proof editor never writes
+// (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:235-244). The stored document,
+// once settled, holds none of them.
+func TestAnUpdateTheWalkerRefusesIsNotApplied(t *testing.T) {
+	const client = gcFloodClient
+	memory := newMemoryHarness(t)
+	server := memory.start(t)
+	stored := server.upload(t, "json", memory.issue, "# Walked\n\nOne paragraph of ordinary prose.\n")
+	if stored.status != http.StatusCreated {
+		t.Fatalf("upload: status %d body %.300s, want 201", stored.status, stored.body)
+	}
+	memory.waitForSettlement(t, stored)
+	room := stored.artifactID
+	sending := server.openBrowser(t, room)
+	t.Cleanup(sending.leave)
+	before := sending.state(t)
+	vector := newBrowserDocument(t, before).doc.StateVector()
+	badByte := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarUint(1)
+		encoder.WriteVarUint(4)
+		encoder.WriteVarUint(client)
+		encoder.WriteVarUint(0)
+		for range 3 {
+			encoder.WriteUint8(0)
+			encoder.WriteVarUint(2)
+		}
+		encoder.WriteUint8(0xff)
+	})
+	if err := crdt.ApplyUpdateV1(newBrowserDocument(t, before).doc, badByte, nil); err == nil {
+		t.Fatal("ygo's own apply took the frame ending in a bad byte, want it refused")
+	}
+	halfApplied := newBrowserDocument(t, before).doc
+	_ = crdt.ApplyUpdateV1(halfApplied, badByte, nil)
+	if halfApplied.StateVector()[crdt.ClientID(client)] == 0 {
+		t.Fatal("ygo's own apply of the frame ending in a bad byte integrated none of its structs, want the valid ones before the bad byte integrated")
+	}
+	// rooted is one struct of client's at clock 0: content of reference tag directly under root, as
+	// the entry key of a map when key is not empty (info bit 0x20).
+	rooted := func(tag byte, root, key string, content func(encoder *encoding.Encoder)) []byte {
+		return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+			encoder.WriteVarUint(1)
+			encoder.WriteVarUint(1)
+			encoder.WriteVarUint(client)
+			encoder.WriteVarUint(0)
+			if key == "" {
+				encoder.WriteRaw([]byte{tag, 1})
+				encoder.WriteVarString(root)
+			} else {
+				encoder.WriteRaw([]byte{tag | 0x20, 1})
+				encoder.WriteVarString(root)
+				encoder.WriteVarString(key)
+			}
+			content(encoder)
+			encoder.WriteVarUint(0)
+		})
+	}
+	for _, row := range []struct {
+		name   string
+		update []byte
+	}{
+		{"three valid GC structs and then one bad byte", badByte},
+		// A subdocument (content reference 9) as an entry of the margin (marksMapName,
+		// internal/dispatch/docs/tree.go:20): its guid and its options.
+		{"a subdocument", rooted(9, "marks", "sub", func(encoder *encoding.Encoder) {
+			encoder.WriteVarString("guid")
+			encoder.WriteAny(map[string]any{"autoLoad": false})
+		})},
+		// A string (content reference 4) under a root named t.
+		{"a struct under an unknown root", rooted(4, "t", "", func(encoder *encoding.Encoder) { encoder.WriteVarString("hi") })},
+	} {
+		applied, closed, err := sending.send(sending.updateFrame(row.update))
+		t.Logf("%s, %d bytes: applied %v, closed %v, %v", row.name, len(row.update), applied, closed, err)
+		if err != nil || applied || closed != nil {
+			t.Fatalf("%s: applied %v, closed %v, %v; want SyncStatus(0) and the socket open", row.name, applied, closed, err)
+		}
+		if err := sending.ping(); err != nil {
+			t.Fatalf("%s: the socket no longer answers: %v", row.name, err)
+		}
+		after := sending.state(t)
+		if got := newBrowserDocument(t, after).doc.StateVector(); !maps.Equal(got, vector) || !bytes.Equal(after, before) {
+			t.Fatalf("%s: the room's state vector is %v and its state %d bytes, want %v and the %d bytes it held", row.name, got, len(after), vector, len(before))
+		}
+	}
+	memory.waitForSettled(t, room)
+	if storedState, want := canonicalState(t, memory.storedState(t, room)), canonicalState(t, before); !bytes.Equal(storedState, want) {
+		t.Fatalf("the stored document is a %d-byte state, want the room's %d-byte state from before the refused updates", len(storedState), len(want))
+	}
+}
+
+// gcFrame is one client's update of n GC runs of length clocks each, from clock 0, with an empty
+// delete set, written byte for byte as Yjs writes a GC struct: its info byte 0, then its length.
+func gcFrame(client uint64, n int, length uint64) []byte {
+	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarUint(1)
+		encoder.WriteVarUint(uint64(n))
+		encoder.WriteVarUint(client)
+		encoder.WriteVarUint(0)
+		for range n {
+			encoder.WriteUint8(0)
+			encoder.WriteVarUint(length)
+		}
+		encoder.WriteVarUint(0)
+	})
+}
+
+// deleteRangesFrame is an update of no structs whose delete set holds n ranges of one clock each of
+// client's, at the odd clocks from 1 up, so none starts at a client's first clock or touches the
+// next.
+func deleteRangesFrame(client uint64, n int) []byte {
+	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarUint(0)
+		encoder.WriteVarUint(1)
+		encoder.WriteVarUint(client)
+		encoder.WriteVarUint(uint64(n))
+		for index := range n {
+			encoder.WriteVarUint(uint64(2*index + 1))
+			encoder.WriteVarUint(1)
+		}
+	})
 }
 
 const (
@@ -2028,24 +2507,133 @@ func growthRounds(t *testing.T, state []byte, more func(pmdoc.DocumentSize) bool
 }
 
 // smallDocuments is count copies of one stored document of a heading and a sentence
-// (cloneDocuments), and its stored state, for a drive to grow from small.
+// (documentCopies), and its stored state, for a drive to grow from small.
 func (h *memoryHarness) smallDocuments(t *testing.T, count int) ([]string, []byte) {
 	t.Helper()
+	return h.documentCopies(t, "# Growth\n\nA small document its browser grows.\n", count)
+}
+
+// documentCopies is count copies of one stored document of markdown (storedDocument,
+// cloneDocuments), and its stored state.
+func (h *memoryHarness) documentCopies(t *testing.T, markdown string, count int) ([]string, []byte) {
+	t.Helper()
+	source, state := h.storedDocument(t, markdown)
+	return h.cloneDocuments(t, source, count), state
+}
+
+// storedDocument is a document of markdown uploaded and settled on a server of its own, which no
+// server holds open once it returns, and its stored state.
+func (h *memoryHarness) storedDocument(t *testing.T, markdown string) (string, []byte) {
+	t.Helper()
 	setup := h.start(t)
-	source := setup.upload(t, "json", h.issue, "# Growth\n\nA small document its browser grows.\n")
+	source := setup.upload(t, "json", h.issue, markdown)
 	if source.status != http.StatusCreated {
-		t.Fatalf("upload the small document: status %d body %.300s, want 201", source.status, source.body)
+		t.Fatalf("upload the document: status %d body %.300s, want 201", source.status, source.body)
 	}
 	h.waitForSettlement(t, source)
 	setup.stop(t)
-	return h.cloneDocuments(t, source.artifactID, count), h.storedState(t, source.artifactID)
+	return source.artifactID, h.storedState(t, source.artifactID)
+}
+
+// pasteRound is one paste a browser makes into a document, and the size of the rendering it leaves.
+type pasteRound struct {
+	update []byte
+	size   pmdoc.DocumentSize
+}
+
+// pasteRounds is the pastes of markdown one browser makes from state, each on the last, for as long
+// as the byte bound admits the next: the rendering before a paste and the paste's own bytes stay
+// under pmdoc.MaxDocumentBytes (peer_update.go:379-383). A paste sent to copies of state that took
+// the pastes before it applies to each alike.
+func pasteRounds(t *testing.T, state []byte, markdown string) []pasteRound {
+	t.Helper()
+	grower := newBrowserDocument(t, state)
+	var rounds []pasteRound
+	for {
+		before := grower.size(t)
+		added, err := pmdoc.Parse(markdown)
+		if err != nil {
+			t.Fatal(err)
+		}
+		update := grower.edit(t, func(tree *pmdoc.Node) {
+			tree.Children = append(tree.Children, added.Children...)
+			pmdoc.EnsureBlockIDs(tree)
+		})
+		if before.Bytes+len(update) >= pmdoc.MaxDocumentBytes {
+			break
+		}
+		rounds = append(rounds, pasteRound{update: update, size: grower.size(t)})
+	}
+	if len(rounds) == 0 {
+		t.Fatal("the byte bound admits no paste")
+	}
+	return rounds
+}
+
+// roomChargesAfter is what the room budget charges a room of room, a copy of the document rounds
+// grow, once its count has landed after each paste whose index after lists: a server of its own
+// takes the pastes from a browser that holds the room, and after each listed one reads the room's
+// charge on a budget of one byte (chargedAgainstOneByte), refusing a browser of probe, a document
+// no room holds, then puts the real budget back.
+func (h *memoryHarness) roomChargesAfter(t *testing.T, room, probe string, rounds []pasteRound, after ...int) []int64 {
+	t.Helper()
+	server := h.start(t)
+	defer server.stop(t)
+	growing := server.openBrowser(t, room)
+	defer growing.leave()
+	var charges []int64
+	for index, round := range rounds {
+		requireApplied(t, growing, round.update, fmt.Sprintf("paste %d into the room the charges are read from", index+1))
+		if !slices.Contains(after, index) {
+			continue
+		}
+		time.Sleep(roomCountIntervalForTest + 2*time.Second)
+		server.setRoomBudget(t, 1)
+		charges = append(charges, server.chargedAgainstOneByte(t, probe, fmt.Sprintf("after paste %d", index+1)))
+		server.setRoomBudget(t, 0)
+	}
+	return charges
+}
+
+// chargedAgainstOneByte is what the open rooms are charged, read the way the budget drives read the
+// budget's figures, from the line the server logs for a browser it refuses (budgetRefusalLine): on
+// a budget of one byte, which the caller has set, a browser opening probe, a document no room holds,
+// is refused with what the rooms are charged.
+func (p *memoryServer) chargedAgainstOneByte(t *testing.T, probe, when string) int64 {
+	t.Helper()
+	seen := len(budgetRefusalLine.FindAllStringSubmatch(p.output.String(), -1))
+	refused, err := p.tryOpenBrowser(probe)
+	if err == nil {
+		refused.leave()
+		t.Fatalf("%s: a browser was admitted to the probe on a budget of one byte", when)
+	}
+	var closed *gws.CloseError
+	if !errors.As(err, &closed) {
+		t.Fatalf("%s: the probe's socket failed with %v, want the budget's close", when, err)
+	}
+	requireClose(t, closed, contracts.DocumentBusyCloseCode, contracts.DocumentBusyCloseReason, when+", the probe's socket")
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if refusals := budgetRefusalLine.FindAllStringSubmatch(p.output.String(), -1); len(refusals) > seen {
+			last := refusals[len(refusals)-1]
+			charged, chargedErr := strconv.ParseInt(last[1], 10, 64)
+			limit, limitErr := strconv.ParseInt(last[2], 10, 64)
+			if chargedErr != nil || limitErr != nil || limit != 1 {
+				t.Fatalf("%s: the server refused the probe with %q, want what is charged against a budget of one byte", when, last[0])
+			}
+			return charged
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: the server logged no refusal of the probe:\n%s", when, p.output.tail())
+		}
+	}
 }
 
 // mebibyteFleet is copies of one stored document of a mebibyte of prose (cloneDocuments), its
 // stored state for browsers to edit, its stored version's count of elements, and what the room
-// budget reserves to admit a browser to one: that count at the server's price of an element, at
-// both copies (storedRoomReservation, roomCopiesForTest). copies is how many a drive needs, given
-// that reservation.
+// budget reserves to admit a browser to one, computed as the server computes it (storedShape): the
+// heaviest of its elements', its structs' and its rendered bytes' prices, at both copies
+// (storedRoomReservation, roomCopiesForTest), which for prose is its elements'. copies is how many
+// a drive needs, given that reservation.
 type mebibyteFleet struct {
 	copies   []string
 	state    []byte
@@ -2062,22 +2650,15 @@ func (h *memoryHarness) mebibyteFleet(t *testing.T, copies func(reserved int64) 
 	}
 	h.waitForSettlement(t, source)
 	setup.stop(t)
-	var stored string
-	if err := h.database.Pool.QueryRow(context.Background(),
-		`select markdown from artifact_versions where artifact_id = $1 order by number desc limit 1`, source.artifactID,
-	).Scan(&stored); err != nil {
-		t.Fatalf("read the stored version: %v", err)
+	shape := h.storedShape(t, "a mebibyte of prose", source.artifactID)
+	if byElements := roomCopiesForTest * int64(shape.elements) * bytesOfHeapAnElementForTest; shape.reserved != byElements {
+		t.Fatalf("a mebibyte of prose reserves %d bytes, want its elements' price, %d", shape.reserved, byElements)
 	}
-	size := pmdoc.MeasureDocument(stored)
-	if !size.Counted {
-		t.Fatalf("the stored version measures %+v, want it counted", size)
-	}
-	reserved := roomCopiesForTest * int64(size.Elements) * bytesOfHeapAnElementForTest
 	return mebibyteFleet{
-		copies:   h.cloneDocuments(t, source.artifactID, copies(reserved)),
+		copies:   h.cloneDocuments(t, source.artifactID, copies(shape.reserved)),
 		state:    h.storedState(t, source.artifactID),
-		elements: size.Elements,
-		reserved: reserved,
+		elements: shape.elements,
+		reserved: shape.reserved,
 	}
 }
 
@@ -2215,6 +2796,47 @@ func requireRoomAbsent(t *testing.T, server *memoryServer, artifactID, what stri
 	t.Helper()
 	if server.roomLive(t, artifactID) {
 		t.Fatalf("%s, %s, is live in the server, want no room for it", what, artifactID)
+	}
+}
+
+// settled reports whether a document has settled every write it has had, as waitForSettled waits
+// for, without waiting.
+func (h *memoryHarness) settled(t *testing.T, artifactID string) bool {
+	t.Helper()
+	var owed bool
+	if err := h.database.Pool.QueryRow(context.Background(),
+		`select exists(select 1 from doc_settlements_pending where artifact_id = $1)`, artifactID,
+	).Scan(&owed); err != nil {
+		t.Fatalf("read the document's pending settlement: %v", err)
+	}
+	return !owed
+}
+
+// serverOpenedCloseLine is the line the server logs as it closes a room its own work opened over the
+// budget, once nothing holds it (closeIfOpenedOverBudget, internal/dispatch/docs/room_budget.go:1507-1532).
+var serverOpenedCloseLine = regexp.MustCompile(`msg="dispatch: the room budget closed a document the server opened over it" room=(\S+) charged_before=\d+ charged=\d+ limit=\d+`)
+
+// requireClosedOnceSettled fails the test unless the room of artifactID, which the server's own work
+// opened over a full budget, is gone within thirty seconds of the document's settlement ending: not
+// live (roomLive), and logged as closed by the budget (serverOpenedCloseLine).
+func requireClosedOnceSettled(t *testing.T, memory *memoryHarness, server *memoryServer, artifactID, what string) {
+	t.Helper()
+	memory.waitForSettled(t, artifactID)
+	settled := time.Now()
+	for server.roomLive(t, artifactID) {
+		if time.Since(settled) > 30*time.Second {
+			t.Fatalf("%s, %s, was still live %s after its settlement ended, want it closed", what, artifactID, time.Since(settled).Round(time.Second))
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Logf("%s, %s, was gone %s after its settlement ended", what, artifactID, time.Since(settled).Round(100*time.Millisecond))
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		if slices.ContainsFunc(serverOpenedCloseLine.FindAllStringSubmatch(server.output.String(), -1), func(match []string) bool { return match[1] == artifactID }) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s, %s, is gone, and the server logged no close of it by the budget", what, artifactID)
+		}
 	}
 }
 
@@ -2411,7 +3033,7 @@ func requireBudgetRefusals(t *testing.T, server *memoryServer, reserved int64) [
 			t.Errorf("the server refused against a budget of %d bytes, want %d", refusal.limit, roomBudgetBytesForTest)
 		}
 		if refusal.needs != 0 && refusal.needs != reserved {
-			t.Errorf("the server reserved %d bytes for a document of %d bytes at %d bytes an element, want %d", refusal.needs, pmdoc.MaxDocumentBytes, bytesOfHeapAnElementForTest, reserved)
+			t.Errorf("the server reserved %d bytes for the refused document, want the %d the drive computed from its stored shape", refusal.needs, reserved)
 		}
 		refusals = append(refusals, refusal)
 	}
@@ -2449,6 +3071,20 @@ func budgetCloses(t *testing.T, server *memoryServer) []budgetClose {
 		closes = append(closes, closed)
 	}
 	return closes
+}
+
+// closesOf is the closes the server has logged of rooms (budgetCloses), once they number want or
+// ten seconds have passed. A sweep logs a close once its eviction returns, after the budget has
+// taken the room's charge back and any admission waiting on it has gone on, and the line reaches
+// the test through the pipe the server's output is copied through.
+func closesOf(t *testing.T, server *memoryServer, rooms []string, want int) []budgetClose {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		closes := slices.DeleteFunc(budgetCloses(t, server), func(made budgetClose) bool { return !slices.Contains(rooms, made.room) })
+		if len(closes) >= want || time.Now().After(deadline) {
+			return closes
+		}
+	}
 }
 
 // storedShape is a stored document a struct-dense drive copies (cloneDocuments), and what an
