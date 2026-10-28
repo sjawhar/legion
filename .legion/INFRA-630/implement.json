@@ -2,35 +2,36 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-630",
-  "completed": "2026-10-28T08:52:54Z",
+  "completed": "2026-10-28T09:51:25Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2423",
   "proof": [
     {
-      "criterion": "Round 3 finding 1: verify-build and every documented local command leave the tree clean; only the rebuild's build job writes its own checkout",
-      "surface": "packages/claude-envoy in a scratch git clone of the head with a contracts edit and a skills edit committed (Bun 1.4.4, the pin)",
-      "command": "bun run verify-build $TMPDIR/infra630-r3.tar; bun run test; bun run check-dist; bun scripts/build.ts --out $TMPDIR/r3-out; git status --porcelain after each",
-      "observed": "verify-build exit 0 ('holds a build main's rebuild accepts'), test 220 pass 0 fail, check-dist exit 1 naming the stale dist/ and legion/ files, --out exit 0; git status --porcelain empty after every one; the workflow's extract step then shows M dist/dispatch.js, dist/envoy-channel.js, dist/session-hook.js, legion/skills/legion-worker/SKILL.md",
-      "headSha": "79c191d13e4f67fe1acb9016463e96d27f6c5c1e",
-      "negativeControl": "bun run verify-build vb.tar -> '::error::verify-build.sh: .../packages/claude-envoy/vb.tar is inside the repository', status empty; executable skills/legion-worker/scripts/x.sh -> check-built '::error:: ... has the mode -rwxr-xr-x', status empty"
+      "criterion": "Round 4: one land_on_main after merging #2419, and the merged release and credential scripts pass",
+      "surface": ".github/scripts shell tests at the merged head",
+      "command": "grep -c '^land_on_main()' .github/scripts/release-push.sh; bash .github/scripts/release-push.test.sh; bash .github/scripts/changelog-fold.test.sh (changie v1.26.0); bash .github/scripts/check-release-credentials.sh; bash .github/scripts/check-release-credentials.test.sh",
+      "observed": "1; 515 passed; 12 passed; 10 credentialed and 10 build jobs across 5 workflows, exit 0; 260 passed",
+      "headSha": "4360b7a2192cc897aff1ec5d1346d4cfb7e10109",
+      "negativeControl": "the credential suite's refusals (deploy key in a build job, push-main in the rebuild workflow, push-built in a release workflow) stay green; extract-built refuses an executable tar member and leaves both directories untouched (release-push.test.sh)"
     },
     {
-      "criterion": "4 (before the merge): the rebuild's build and push jobs on a real build land one github-actions[bot] commit touching only dist/ and legion/, check-dist passes there; main moved means nothing pushed and a fresh run",
-      "surface": "the rebuild workflow's steps (verify-build, extract, release-push.sh push-built) against a local bare origin through the deploy-key URL rewrite",
-      "command": "bash $TMPDIR/infra630/pushbuilt-proof.sh",
-      "observed": "push-built exit 0, pushed=true, no gh call; one commit, parent 6a570fdb (base), author/committer github-actions[bot], subject 'chore(claude-envoy): rebuild dist/ and legion/ from 6a570fdb0a43' plus GitHub's skip keyword, only dist/dispatch.js, dist/envoy-channel.js, dist/session-hook.js; check-dist at that commit 'dist/ and legion/ match a fresh build'",
-      "headSha": "79c191d13e4f67fe1acb9016463e96d27f6c5c1e",
-      "negativeControl": "origin main moved before the push job: exit 0, origin main unchanged at the moved commit, no pushed=true, stub gh logged 'workflow run claude-envoy-rebuild.yaml --repo example/repo --ref main'"
+      "criterion": "Round 4 findings 6-7: verify-build applies a shipped skill's .gitignore and fails on a failed listing",
+      "surface": "bun run verify-build in packages/claude-envoy of a scratch clone of the head",
+      "command": "bun run verify-build $TMPDIR/r4.tar with skills/legion-worker/.gitignore naming notes.md plus notes.md committed; and with a stub git first on PATH failing ls-files",
+      "observed": "exit 1, '::error::verify-build.sh: packages/claude-envoy/legion/skills/legion-worker/notes.md is a generated file git ignores ...'; stub: exit 1, no tar written; on the workspace tree verify-build exit 0 and jj status clean",
+      "headSha": "4360b7a2192cc897aff1ec5d1346d4cfb7e10109",
+      "negativeControl": "the same tree without the skill .gitignore passes verify-build (exit 0)"
     },
     {
-      "criterion": "3. Release-credential check and script tests pass",
-      "surface": ".github/scripts shell checks",
-      "command": "bash .github/scripts/check-release-credentials.sh; bash .github/scripts/check-release-credentials.test.sh; bash .github/scripts/release-push.test.sh; shellcheck verify-build.sh",
-      "observed": "9 credentialed / 9 build jobs across 4 workflows, exit 0; both test scripts PASS; shellcheck clean",
-      "headSha": "79c191d13e4f67fe1acb9016463e96d27f6c5c1e",
-      "negativeControl": "the credential test suite's refusal cases (deploy key in the rebuild's build job, push-main in the rebuild workflow) stay green"
+      "criterion": "4 (before the merge): the rebuild's build and push jobs land one github-actions[bot] commit touching only dist/ and legion/, check-dist passes there; main moved means nothing pushed and a fresh run",
+      "surface": "the rebuild workflow's steps (verify-build, release-push.sh extract-built, push-built) against a local bare origin through the deploy-key URL rewrite",
+      "command": "bash $TMPDIR/infra630/pushbuilt-proof.sh; release-push.sh extract-built in its build clone",
+      "observed": "verify-build leaves status empty; extract-built: M dist/dispatch.js, dist/envoy-channel.js, dist/session-hook.js; push-built exit 0, one commit, parent 548d1221, github-actions[bot], subject 'chore(claude-envoy): rebuild dist/ and legion/ from 548d122164d1' plus GitHub's skip keyword, only those three files; check-dist at that commit passes",
+      "headSha": "4360b7a2192cc897aff1ec5d1346d4cfb7e10109",
+      "negativeControl": "origin main moved before the push job: exit 0, origin main unchanged, stub gh logged 'workflow run claude-envoy-rebuild.yaml --repo example/repo --ref main'"
     }
   ],
   "filesChanged": [
+    ".github/scripts/changelog-fold.test.sh",
     ".github/scripts/check-body-embed-limit.sh",
     ".github/scripts/check-private-names.sh",
     ".github/scripts/check-release-credentials.sh",
@@ -53,6 +54,7 @@
     "docs/solutions/legion/the-claude-code-plugin-mirror-is-generated-from-the-skills-and-its-build-rewrites-dist-too-INFRA-227.md",
     "docs/solutions/legion/unchanged-diff-fingerprint-one-fileset-verified-by-a-pair.md",
     "docs/solutions/skill-patterns/a-skill-over-the-byte-guard-sheds-a-whole-on-demand-section-to-a-reference-verbatim-and-proves-the-move-with-cmp-INFRA-376.md",
+    "packages/claude-envoy/.changes/unreleased/INFRA-630-built-plugin-rebuilt-on-main.yaml",
     "packages/claude-envoy/AGENTS.md",
     "packages/claude-envoy/CHANGELOG.md",
     "packages/claude-envoy/README.md",
@@ -92,7 +94,7 @@
     "bin/dispatch's missing-bundle message updated the same way."
   ],
   "openQuestions": [
-    "None."
+    "envoy-and-contracts.yaml's claude_plugin path filter does not list .github/scripts/release-push.sh, which the claude-envoy job now runs (check-built, extract-built); the required test job and the rebuild workflow's pull_request run both cover a release-push.sh change. Left as is under the round's narrow scope."
   ],
   "searchReasons": [
     ".github/scripts/check-body-embed-limit.sh: a comment naming main's packages/claude-envoy/dist/*.js as a copy of the body limit, kept fresh by main's Rebuild Claude Envoy plugin workflow (updated here).",
@@ -172,7 +174,7 @@
     "scripts/e2e/dispatch-user-turns.sh: `bun run build:web` of the Dispatch web app.",
     "scripts/pi-plugin-prepack.sh: pi-envoy's/pi-legion's `bun run build --metafile`, other packages."
   ],
-  "round": 4,
+  "round": 5,
   "round1": [
     "Finding 1: deleted the scheduled run's age-based red step and its header sentences; schedule hourly -> daily (23 5 * * *) (783ad752).",
     "Finding 2: '## Contract change census' added to the PR body: searches, every hit with its disposition, rollout = immediate refusal and what it closes.",
@@ -192,5 +194,14 @@
     "Finding 1 (79c191d1): verify-build builds twice with --out into a scratch dir, reports 'two builds of this tree differ', runs the private-name check on the scratch build at its repository path in a scratch git repo, refuses ignored generated files with git check-ignore, refuses a tar inside the repository, writes no checkout file; the rebuild build job extracts the checked tar before git status; the claude-envoy job extracts it for its pack. build.ts --in-place removed (no caller left; it was the only mode that wrote the tracked files).",
     "Finding 2 (79c191d1): docs/deployment.md points LEGION_CLAUDE_PLUGIN_DIR at an --out build during the lag.",
     "Round-3 fast-follow not applied: the architect narrowed this round to the two findings (Envoy 08:38Z); land_on_main unchanged."
+  ],
+  "round4": [
+    "Merge of main (#2419, 184897ac) as f428381d: conflicts in release-push.sh, its test, check-release-credentials.sh, its test, AGENTS.md resolved; one land_on_main (main's copy) whose header names push-fold and push-built; PUSH_COMMANDS per workflow incl. changelog-fold.yaml -> push-fold.",
+    "land_on_main: pushed=true output and its assertions dropped (nothing read it; changelog-fold.test.sh assertion too); its own hex base check dropped (push-fold and push-built check the base themselves, and the parent check refuses any other base).",
+    "release-push.sh extract-built <tar> (check_built, then replace the two directories) used by push-built, the rebuild's build job and the claude-envoy job.",
+    "verify-build.sh: ignore check is git ls-files -o -i --exclude-standard in the scratch repo with the root .gitignore copied in; comments corrected (check-private-names reads given paths with find and grep).",
+    "Workflow comments point to verify-build.sh; check-private-names.sh names three jobs; README/AGENTS/rebuild comment name both extracting jobs.",
+    "Changelog entry moved to packages/claude-envoy/.changes/unreleased/INFRA-630-built-plugin-rebuilt-on-main.yaml per main's new convention.",
+    "PR body Change and Not proven / risk corrected."
   ]
 }
