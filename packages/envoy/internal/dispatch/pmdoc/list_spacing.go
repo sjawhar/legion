@@ -239,7 +239,7 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 		// typed block once around the list that count is quotedListSpread's; where quotes and typed
 		// blocks alternate around it more than once, a blank line in its quote at or after it, outside
 		// the code it holds, is refused.
-		if quoteTypedAlternations(list) > 1 && len(lines.blankLinesOutsideCode(list, nextBlock(list), quoteBlankLine)) > 0 {
+		if quoteTypedAlternations(list) > 1 && len(lines.blanksOutsideCode(list, lines.blankLines(list, nextBlock(list), quoteBlankLine))) > 0 {
 			return nestedQuotedListBlank
 		}
 		// The browser editor spaces a list in a typed block inside its quote by one blank line.
@@ -495,10 +495,18 @@ func fenceEnding(typed *typedDirective) (*typedDirective, bool) {
 // line before the next item. Blank lines between the list and what the nearer of the two goes on
 // with space the last item, one before a quote or a list, and two before anything else when the
 // quote stands inside the definition; with the definition inside the quote, two before anything
-// else space the list. Blank lines after a last item that ends in a list are that list's.
+// else space the list. Blank lines after a last item that ends in a list are that list's, and
+// those after one ending in a typed block that ends in a fenced code block no fence closed are
+// that code's (keepsBlankLinesAfter).
 func footnotedQuoteListSpread(list *ast.List, quote, definition ast.Node, lines sourceLines) (spread, lastSpread bool, reason string) {
-	if endsWithList(list.LastChild()) {
+	last := list.LastChild()
+	if endsWithList(last) {
 		return false, false, ""
+	}
+	if keepsBlankLinesAfter(last) {
+		if typed, ok := ancestor[*typedDirective](lastFencedCode(last)); ok && isAncestor(last, typed) {
+			return false, false, ""
+		}
 	}
 	quoteInside := isAncestor(definition, quote)
 	within := definition
@@ -652,14 +660,23 @@ func keepsBlankLinesAfter(node ast.Node) bool {
 	return true
 }
 
-// endsInOpenFence reports whether node ends in a fenced code block no fence closed.
+// endsInOpenFence reports whether node ends in a fenced code block no fence closed, and that runs
+// to node's end: a typed block between them, node included, that its own fence closes ends the code
+// there, so the lines after it are not the code's.
 func endsInOpenFence(node ast.Node) bool {
 	code := lastFencedCode(node)
 	if code == nil {
 		return false
 	}
-	_, closed := code.Attribute(fenceClosedAttr)
-	return !closed
+	if _, closed := code.Attribute(fenceClosedAttr); closed {
+		return false
+	}
+	for container := code.Parent(); container != node.Parent(); container = container.Parent() {
+		if typed, ok := container.(*typedDirective); ok && typed.Closed {
+			return false
+		}
+	}
+	return true
 }
 
 // lastFencedCode is the fenced code block node ends in, through the last block of each container

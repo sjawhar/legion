@@ -4335,6 +4335,477 @@
     "rendered_by_milkdown": "A callout in a footnote definition, holding an unclosed fence that ends in a blank line, before a paragraph the definition does not hold.\n\nText[^d].\n\n[^d]: x\n\n    :::callout{#df1 kind=\"note\" title=\"T\"}\n    ```\n    code\n    ```\n    :::\n\nafter\n"
   },
   {
+    "name": "definition-items-spaced-around-callouts-holding-an-unclosed-fence",
+    "markdown": "Callouts in list items in footnote definitions, each holding a fence no fence closes, and the blank lines that space or do not space their items.\n\nText[^a][^b][^c][^d].\n\n[^a]: lead\n\n    - x\n      :::callout{#ds1 kind=\"note\" title=\"T\"}\n      ~~~\n      code\n      :::\n\n    - y\n\n[^b]: lead\n\n    - x\n      :::callout{#ds2 kind=\"note\" title=\"T\"}\n      ```\n      code\n\n    - y\n\n> [^c]: lead\n>\n>     - x\n>       :::callout{#ds3 kind=\"note\" title=\"T\"}\n>       ~~~\n>       code\n>       :::\n>\n>     - y\n\n> [^d]: lead\n>\n>     - x\n>       :::callout{#ds4 kind=\"note\" title=\"T\"}\n>       ~~~\n>       code\n>\n>       :::\n>\n>\n>     after\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Callouts in list items in footnote definitions, each holding a fence no fence closes, and the blank lines that space or do not space their items."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Text"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "a"
+              }
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "b"
+              }
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "c"
+              }
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "d"
+              }
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "a",
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000004"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "lead"
+                }
+              ]
+            },
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000005"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": true,
+                    "checked": null,
+                    "blockId": "b-000006"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000007"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "x"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "callout",
+                      "attrs": {
+                        "kind": "note",
+                        "title": "T",
+                        "blockId": "ds1"
+                      },
+                      "content": [
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null,
+                            "blockId": "b-000008"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "code"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000009"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000010"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "y"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "b",
+            "blockId": "b-000011"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000012"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "lead"
+                }
+              ]
+            },
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000013"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000014"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000015"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "x"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "callout",
+                      "attrs": {
+                        "kind": "note",
+                        "title": "T",
+                        "blockId": "ds2"
+                      },
+                      "content": [
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null,
+                            "blockId": "b-000016"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "code\n"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000017"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000018"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "y"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000019"
+          },
+          "content": [
+            {
+              "type": "footnote_definition",
+              "attrs": {
+                "label": "c",
+                "blockId": "b-000020"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000021"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "lead"
+                    }
+                  ]
+                },
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false,
+                    "blockId": "b-000022"
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": true,
+                        "checked": null,
+                        "blockId": "b-000023"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000024"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "x"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "callout",
+                          "attrs": {
+                            "kind": "note",
+                            "title": "T",
+                            "blockId": "ds3"
+                          },
+                          "content": [
+                            {
+                              "type": "code_block",
+                              "attrs": {
+                                "language": null,
+                                "blockId": "b-000025"
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "code"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": false,
+                        "checked": null,
+                        "blockId": "b-000026"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000027"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "y"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000028"
+          },
+          "content": [
+            {
+              "type": "footnote_definition",
+              "attrs": {
+                "label": "d",
+                "blockId": "b-000029"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000030"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "lead"
+                    }
+                  ]
+                },
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": true,
+                    "blockId": "b-000031"
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": false,
+                        "checked": null,
+                        "blockId": "b-000032"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000033"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "x"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "callout",
+                          "attrs": {
+                            "kind": "note",
+                            "title": "T",
+                            "blockId": "ds4"
+                          },
+                          "content": [
+                            {
+                              "type": "code_block",
+                              "attrs": {
+                                "language": null,
+                                "blockId": "b-000034"
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "code\n"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000035"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "after"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AaEBAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBkQFDYWxsb3V0cyBpbiBsaXN0IGl0ZW1zIGluIGZvb3Rub3RlIGRlZmluaXRpb25zLCBlYWNoIGhvbGRpbmcgYSBmZW5jZSBubyBmZW5jZSBjbG9zZXMsIGFuZCB0aGUgYmxhbmsgbGluZXMgdGhhdCBzcGFjZSBvciBkbyBub3Qgc3BhY2UgdGhlaXIgaXRlbXMuKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCXBhcmFncmFwaAcAAZQBBgQAAZUBBFRleHSHAZUBAxJmb290bm90ZV9yZWZlcmVuY2UoAAGaAQVsYWJlbAF3AWGHAZoBAxJmb290bm90ZV9yZWZlcmVuY2UoAAGcAQVsYWJlbAF3AWKHAZwBAxJmb290bm90ZV9yZWZlcmVuY2UoAAGeAQVsYWJlbAF3AWOHAZ4BAxJmb290bm90ZV9yZWZlcmVuY2UoAAGgAQVsYWJlbAF3AWSHAaABBgQAAaIBAS4oAAGUAQdibG9ja0lkAXcIYi0wMDAwMDKHAZQBAxNmb290bm90ZV9kZWZpbml0aW9uBwABpQEDCXBhcmFncmFwaAcAAaYBBgQAAacBBGxlYWQoAAGmAQdibG9ja0lkAXcIYi0wMDAwMDSHAaYBAwtidWxsZXRfbGlzdAcAAa0BAwlsaXN0X2l0ZW0HAAGuAQMJcGFyYWdyYXBoBwABrwEGBAABsAEBeCgAAa8BB2Jsb2NrSWQBdwhiLTAwMDAwN4cBrwEDB2NhbGxvdXQHAAGzAQMKY29kZV9ibG9jawcAAbQBBgQAAbUBBGNvZGUoAAG0AQdibG9ja0lkAXcIYi0wMDAwMDgoAAGzAQRraW5kAXcEbm90ZSgAAbMBBXRpdGxlAXcBVCgAAbMBB2Jsb2NrSWQBdwNkczEoAAGuAQVsYWJlbAF3A+KAoigAAa4BCGxpc3RUeXBlAXcGYnVsbGV0KAABrgEGc3ByZWFkAXgoAAGuAQdibG9ja0lkAXcIYi0wMDAwMDaHAa4BAwlsaXN0X2l0ZW0HAAHCAQMJcGFyYWdyYXBoBwABwwEGBAABxAEBeSgAAcMBB2Jsb2NrSWQBdwhiLTAwMDAxMCgAAcIBBWxhYmVsAXcD4oCiKAABwgEIbGlzdFR5cGUBdwZidWxsZXQoAAHCAQZzcHJlYWQBeSgAAcIBB2Jsb2NrSWQBdwhiLTAwMDAwOSgAAa0BBnNwcmVhZAF5KAABrQEHYmxvY2tJZAF3CGItMDAwMDA1KAABpQEFbGFiZWwBdwFhKAABpQEHYmxvY2tJZAF3CGItMDAwMDAzhwGlAQMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAc8BAwlwYXJhZ3JhcGgHAAHQAQYEAAHRAQRsZWFkKAAB0AEHYmxvY2tJZAF3CGItMDAwMDEyhwHQAQMLYnVsbGV0X2xpc3QHAAHXAQMJbGlzdF9pdGVtBwAB2AEDCXBhcmFncmFwaAcAAdkBBgQAAdoBAXgoAAHZAQdibG9ja0lkAXcIYi0wMDAwMTWHAdkBAwdjYWxsb3V0BwAB3QEDCmNvZGVfYmxvY2sHAAHeAQYEAAHfAQVjb2RlCigAAd4BB2Jsb2NrSWQBdwhiLTAwMDAxNigAAd0BBGtpbmQBdwRub3RlKAAB3QEFdGl0bGUBdwFUKAAB3QEHYmxvY2tJZAF3A2RzMigAAdgBBWxhYmVsAXcD4oCiKAAB2AEIbGlzdFR5cGUBdwZidWxsZXQoAAHYAQZzcHJlYWQBeSgAAdgBB2Jsb2NrSWQBdwhiLTAwMDAxNIcB2AEDCWxpc3RfaXRlbQcAAe0BAwlwYXJhZ3JhcGgHAAHuAQYEAAHvAQF5KAAB7gEHYmxvY2tJZAF3CGItMDAwMDE4KAAB7QEFbGFiZWwBdwPigKIoAAHtAQhsaXN0VHlwZQF3BmJ1bGxldCgAAe0BBnNwcmVhZAF5KAAB7QEHYmxvY2tJZAF3CGItMDAwMDE3KAAB1wEGc3ByZWFkAXkoAAHXAQdibG9ja0lkAXcIYi0wMDAwMTMoAAHPAQVsYWJlbAF3AWIoAAHPAQdibG9ja0lkAXcIYi0wMDAwMTGHAc8BAwpibG9ja3F1b3RlBwAB+gEDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAH7AQMJcGFyYWdyYXBoBwAB/AEGBAAB/QEEbGVhZCgAAfwBB2Jsb2NrSWQBdwhiLTAwMDAyMYcB/AEDC2J1bGxldF9saXN0BwABgwIDCWxpc3RfaXRlbQcAAYQCAwlwYXJhZ3JhcGgHAAGFAgYEAAGGAgF4KAABhQIHYmxvY2tJZAF3CGItMDAwMDI0hwGFAgMHY2FsbG91dAcAAYkCAwpjb2RlX2Jsb2NrBwABigIGBAABiwIEY29kZSgAAYoCB2Jsb2NrSWQBdwhiLTAwMDAyNSgAAYkCBGtpbmQBdwRub3RlKAABiQIFdGl0bGUBdwFUKAABiQIHYmxvY2tJZAF3A2RzMygAAYQCBWxhYmVsAXcD4oCiKAABhAIIbGlzdFR5cGUBdwZidWxsZXQoAAGEAgZzcHJlYWQBeCgAAYQCB2Jsb2NrSWQBdwhiLTAwMDAyM4cBhAIDCWxpc3RfaXRlbQcAAZgCAwlwYXJhZ3JhcGgHAAGZAgYEAAGaAgF5KAABmQIHYmxvY2tJZAF3CGItMDAwMDI3KAABmAIFbGFiZWwBdwPigKIoAAGYAghsaXN0VHlwZQF3BmJ1bGxldCgAAZgCBnNwcmVhZAF5KAABmAIHYmxvY2tJZAF3CGItMDAwMDI2KAABgwIGc3ByZWFkAXkoAAGDAgdibG9ja0lkAXcIYi0wMDAwMjIoAAH7AQVsYWJlbAF3AWMoAAH7AQdibG9ja0lkAXcIYi0wMDAwMjAoAAH6AQdibG9ja0lkAXcIYi0wMDAwMTmHAfoBAwpibG9ja3F1b3RlBwABpgIDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAGnAgMJcGFyYWdyYXBoBwABqAIGBAABqQIEbGVhZCgAAagCB2Jsb2NrSWQBdwhiLTAwMDAzMIcBqAIDC2J1bGxldF9saXN0BwABrwIDCWxpc3RfaXRlbQcAAbACAwlwYXJhZ3JhcGgHAAGxAgYEAAGyAgF4KAABsQIHYmxvY2tJZAF3CGItMDAwMDMzhwGxAgMHY2FsbG91dAcAAbUCAwpjb2RlX2Jsb2NrBwABtgIGBAABtwIFY29kZQooAAG2AgdibG9ja0lkAXcIYi0wMDAwMzQoAAG1AgRraW5kAXcEbm90ZSgAAbUCBXRpdGxlAXcBVCgAAbUCB2Jsb2NrSWQBdwNkczQoAAGwAgVsYWJlbAF3A+KAoigAAbACCGxpc3RUeXBlAXcGYnVsbGV0KAABsAIGc3ByZWFkAXkoAAGwAgdibG9ja0lkAXcIYi0wMDAwMzIoAAGvAgZzcHJlYWQBeCgAAa8CB2Jsb2NrSWQBdwhiLTAwMDAzMYcBrwIDCXBhcmFncmFwaAcAAccCBgQAAcgCBWFmdGVyKAABxwIHYmxvY2tJZAF3CGItMDAwMDM1KAABpwIFbGFiZWwBdwFkKAABpwIHYmxvY2tJZAF3CGItMDAwMDI5KAABpgIHYmxvY2tJZAF3CGItMDAwMDI4AA==",
+    "rendered_by_milkdown": "Callouts in list items in footnote definitions, each holding a fence no fence closes, and the blank lines that space or do not space their items.\n\nText[^a][^b][^c][^d].\n\n[^a]: lead\n\n    * x\n\n      :::callout{#ds1 kind=\"note\" title=\"T\"}\n      ```\n      code\n      ```\n      :::\n    * y\n\n[^b]: lead\n\n    * x\n      :::callout{#ds2 kind=\"note\" title=\"T\"}\n      ```\n      code\n\n      ```\n      :::\n    * y\n\n> [^c]: lead\n>\n>     * x\n>\n>       :::callout{#ds3 kind=\"note\" title=\"T\"}\n>       ```\n>       code\n>       ```\n>       :::\n>     * y\n\n> [^d]: lead\n>\n>     * x\n>       :::callout{#ds4 kind=\"note\" title=\"T\"}\n>       ```\n>       code\n>\n>       ```\n>       :::\n>\n>     after\n"
+  },
+  {
     "name": "directive-like-text",
     "markdown": "Production deploys **held** since 16:25Z, retried at 04:20Z.\n\nRatio a:b and see :note[value] here, spec lines :176-177.\n\n- retry at 04:20Z\n\nA quote marker opening a line keeps it text:\n\n> spec lines\n>     :::: and more\n\n> - see\n>       ::leaf here\n",
     "pm_json": {
@@ -16916,6 +17387,463 @@
     },
     "yjs_update_v1_b64": "AWABAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEqSXRlbXMgdGhhdCBvcGVuIHdpdGggYSBmb290bm90ZSBkZWZpbml0aW9uhwEBAxJmb290bm90ZV9yZWZlcmVuY2UoAAEsBWxhYmVsAXcBYYcBLAMSZm9vdG5vdGVfcmVmZXJlbmNlKAABLgVsYWJlbAF3AWKHAS4DEmZvb3Rub3RlX3JlZmVyZW5jZSgAATAFbGFiZWwBdwFjhwEwBgQAATIgIHdob3NlIGZpcnN0IGxpbmUgaG9sZHMgbm90aGluZy4oAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAAMJcGFyYWdyYXBoBwABVAYEAAFVBU5leHQuKAABVAdibG9ja0lkAXcIYi0wMDAwMDKHAVQDC2J1bGxldF9saXN0BwABXAMJbGlzdF9pdGVtBwABXQMJcGFyYWdyYXBoKAABXgdibG9ja0lkAXcIYi0wMDAwMDWHAV4DE2Zvb3Rub3RlX2RlZmluaXRpb24HAAFgAwlwYXJhZ3JhcGgHAAFhBgQAAWIBYSgAAWEHYmxvY2tJZAF3CGItMDAwMDA3KAABYAVsYWJlbAF3AWEoAAFgB2Jsb2NrSWQBdwhiLTAwMDAwNigAAV0FbGFiZWwBdwPigKIoAAFdCGxpc3RUeXBlAXcGYnVsbGV0KAABXQZzcHJlYWQBeCgAAV0HYmxvY2tJZAF3CGItMDAwMDA0KAABXAZzcHJlYWQBeSgAAVwHYmxvY2tJZAF3CGItMDAwMDAzhwFcAwlwYXJhZ3JhcGgHAAFtBgQAAW4FTmV4dC4oAAFtB2Jsb2NrSWQBdwhiLTAwMDAwOIcBbQMLYnVsbGV0X2xpc3QHAAF1AwlsaXN0X2l0ZW0HAAF2AwlwYXJhZ3JhcGgHAAF3BgQAAXgBeCgAAXcHYmxvY2tJZAF3CGItMDAwMDExhwF3AwtidWxsZXRfbGlzdAcAAXsDCWxpc3RfaXRlbQcAAXwDCXBhcmFncmFwaCgAAX0HYmxvY2tJZAF3CGItMDAwMDE0hwF9AxNmb290bm90ZV9kZWZpbml0aW9uBwABfwMJcGFyYWdyYXBoBwABgAEGBAABgQEBYigAAYABB2Jsb2NrSWQBdwhiLTAwMDAxNigAAX8FbGFiZWwBdwFiKAABfwdibG9ja0lkAXcIYi0wMDAwMTUoAAF8BWxhYmVsAXcD4oCiKAABfAhsaXN0VHlwZQF3BmJ1bGxldCgAAXwGc3ByZWFkAXgoAAF8B2Jsb2NrSWQBdwhiLTAwMDAxMygAAXsGc3ByZWFkAXkoAAF7B2Jsb2NrSWQBdwhiLTAwMDAxMigAAXYFbGFiZWwBdwPigKIoAAF2CGxpc3RUeXBlAXcGYnVsbGV0KAABdgZzcHJlYWQBeSgAAXYHYmxvY2tJZAF3CGItMDAwMDEwKAABdQZzcHJlYWQBeSgAAXUHYmxvY2tJZAF3CGItMDAwMDA5hwF1AwlwYXJhZ3JhcGgHAAGSAQYEAAGTAQVOZXh0LigAAZIBB2Jsb2NrSWQBdwhiLTAwMDAxN4cBkgEDC2J1bGxldF9saXN0BwABmgEDCWxpc3RfaXRlbQcAAZsBAwlwYXJhZ3JhcGgoAAGcAQdibG9ja0lkAXcIYi0wMDAwMjCHAZwBAxNmb290bm90ZV9kZWZpbml0aW9uBwABngEDCXBhcmFncmFwaAcAAZ8BBgQAAaABAWMoAAGfAQdibG9ja0lkAXcIYi0wMDAwMjIoAAGeAQVsYWJlbAF3AWMoAAGeAQdibG9ja0lkAXcIYi0wMDAwMjEoAAGbAQVsYWJlbAF3A+KAoigAAZsBCGxpc3RUeXBlAXcGYnVsbGV0KAABmwEGc3ByZWFkAXgoAAGbAQdibG9ja0lkAXcIYi0wMDAwMTmHAZsBAwlsaXN0X2l0ZW0HAAGpAQMJcGFyYWdyYXBoBwABqgEGBAABqwEBZCgAAaoBB2Jsb2NrSWQBdwhiLTAwMDAyNCgAAakBBWxhYmVsAXcD4oCiKAABqQEIbGlzdFR5cGUBdwZidWxsZXQoAAGpAQZzcHJlYWQBeSgAAakBB2Jsb2NrSWQBdwhiLTAwMDAyMygAAZoBBnNwcmVhZAF5KAABmgEHYmxvY2tJZAF3CGItMDAwMDE4AA==",
     "rendered_by_milkdown": "Items that open with a footnote definition[^a][^b][^c] whose first line holds nothing.\n\nNext.\n\n*\n\n  [^a]: a\n\nNext.\n\n* x\n  *\n\n    [^b]: b\n\nNext.\n\n*\n\n  [^c]: c\n* d\n"
+  },
+  {
+    "name": "items-spaced-around-callouts-holding-an-unclosed-fence",
+    "markdown": "Callouts in list items, each holding a fence no fence closes, and the blank lines that space or do not space their lists and items.\n\n- x\n  :::callout{#us1 kind=\"note\" title=\"T\"}\n  ~~~\n  code\n\n- y\n\n***\n\n- x\n  :::callout{#us2 kind=\"note\" title=\"T\"}\n  ```\n  code\n\n  :::\n\n- y\n\n***\n\n1. x\n   :::callout{#us3 kind=\"note\" title=\"T\"}\n   ~~~\n   code\n   :::\n\n1. y\n\n***\n\n- x\n  :::callout{#us4 kind=\"note\" title=\"T\"}\n  ~~~\n  code\n  :::\n\n  more\n\n***\n\n- a\n  - x\n    :::callout{#us5 kind=\"note\" title=\"T\"}\n    ~~~\n    code\n\n    :::\n\n  after\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Callouts in list items, each holding a fence no fence closes, and the blank lines that space or do not space their lists and items."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000003"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000004"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "x"
+                    }
+                  ]
+                },
+                {
+                  "type": "callout",
+                  "attrs": {
+                    "kind": "note",
+                    "title": "T",
+                    "blockId": "us1"
+                  },
+                  "content": [
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null,
+                        "blockId": "b-000005"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "code\n"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000006"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000007"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "y"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "hr",
+          "attrs": {
+            "blockId": "b-000008"
+          }
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": true,
+            "blockId": "b-000009"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000010"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000011"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "x"
+                    }
+                  ]
+                },
+                {
+                  "type": "callout",
+                  "attrs": {
+                    "kind": "note",
+                    "title": "T",
+                    "blockId": "us2"
+                  },
+                  "content": [
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null,
+                        "blockId": "b-000012"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "code\n"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000013"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000014"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "y"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "hr",
+          "attrs": {
+            "blockId": "b-000015"
+          }
+        },
+        {
+          "type": "ordered_list",
+          "attrs": {
+            "order": 1,
+            "spread": true,
+            "blockId": "b-000016"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000017"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000018"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "x"
+                    }
+                  ]
+                },
+                {
+                  "type": "callout",
+                  "attrs": {
+                    "kind": "note",
+                    "title": "T",
+                    "blockId": "us3"
+                  },
+                  "content": [
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null,
+                        "blockId": "b-000019"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "code"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000020"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000021"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "y"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "hr",
+          "attrs": {
+            "blockId": "b-000022"
+          }
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000023"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": true,
+                "checked": null,
+                "blockId": "b-000024"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000025"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "x"
+                    }
+                  ]
+                },
+                {
+                  "type": "callout",
+                  "attrs": {
+                    "kind": "note",
+                    "title": "T",
+                    "blockId": "us4"
+                  },
+                  "content": [
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null,
+                        "blockId": "b-000026"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "code"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000027"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "more"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "hr",
+          "attrs": {
+            "blockId": "b-000028"
+          }
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000029"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": true,
+                "checked": null,
+                "blockId": "b-000030"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000031"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a"
+                    }
+                  ]
+                },
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false,
+                    "blockId": "b-000032"
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": false,
+                        "checked": null,
+                        "blockId": "b-000033"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000034"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "x"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "callout",
+                          "attrs": {
+                            "kind": "note",
+                            "title": "T",
+                            "blockId": "us5"
+                          },
+                          "content": [
+                            {
+                              "type": "code_block",
+                              "attrs": {
+                                "language": null,
+                                "blockId": "b-000035"
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "code\n"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000036"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "after"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AaABAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBgwFDYWxsb3V0cyBpbiBsaXN0IGl0ZW1zLCBlYWNoIGhvbGRpbmcgYSBmZW5jZSBubyBmZW5jZSBjbG9zZXMsIGFuZCB0aGUgYmxhbmsgbGluZXMgdGhhdCBzcGFjZSBvciBkbyBub3Qgc3BhY2UgdGhlaXIgbGlzdHMgYW5kIGl0ZW1zLigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwtidWxsZXRfbGlzdAcAAYYBAwlsaXN0X2l0ZW0HAAGHAQMJcGFyYWdyYXBoBwABiAEGBAABiQEBeCgAAYgBB2Jsb2NrSWQBdwhiLTAwMDAwNIcBiAEDB2NhbGxvdXQHAAGMAQMKY29kZV9ibG9jawcAAY0BBgQAAY4BBWNvZGUKKAABjQEHYmxvY2tJZAF3CGItMDAwMDA1KAABjAEEa2luZAF3BG5vdGUoAAGMAQV0aXRsZQF3AVQoAAGMAQdibG9ja0lkAXcDdXMxKAABhwEFbGFiZWwBdwPigKIoAAGHAQhsaXN0VHlwZQF3BmJ1bGxldCgAAYcBBnNwcmVhZAF5KAABhwEHYmxvY2tJZAF3CGItMDAwMDAzhwGHAQMJbGlzdF9pdGVtBwABnAEDCXBhcmFncmFwaAcAAZ0BBgQAAZ4BAXkoAAGdAQdibG9ja0lkAXcIYi0wMDAwMDcoAAGcAQVsYWJlbAF3A+KAoigAAZwBCGxpc3RUeXBlAXcGYnVsbGV0KAABnAEGc3ByZWFkAXkoAAGcAQdibG9ja0lkAXcIYi0wMDAwMDYoAAGGAQZzcHJlYWQBeSgAAYYBB2Jsb2NrSWQBdwhiLTAwMDAwMocBhgEDAmhyKAABpwEHYmxvY2tJZAF3CGItMDAwMDA4hwGnAQMLYnVsbGV0X2xpc3QHAAGpAQMJbGlzdF9pdGVtBwABqgEDCXBhcmFncmFwaAcAAasBBgQAAawBAXgoAAGrAQdibG9ja0lkAXcIYi0wMDAwMTGHAasBAwdjYWxsb3V0BwABrwEDCmNvZGVfYmxvY2sHAAGwAQYEAAGxAQVjb2RlCigAAbABB2Jsb2NrSWQBdwhiLTAwMDAxMigAAa8BBGtpbmQBdwRub3RlKAABrwEFdGl0bGUBdwFUKAABrwEHYmxvY2tJZAF3A3VzMigAAaoBBWxhYmVsAXcD4oCiKAABqgEIbGlzdFR5cGUBdwZidWxsZXQoAAGqAQZzcHJlYWQBeSgAAaoBB2Jsb2NrSWQBdwhiLTAwMDAxMIcBqgEDCWxpc3RfaXRlbQcAAb8BAwlwYXJhZ3JhcGgHAAHAAQYEAAHBAQF5KAABwAEHYmxvY2tJZAF3CGItMDAwMDE0KAABvwEFbGFiZWwBdwPigKIoAAG/AQhsaXN0VHlwZQF3BmJ1bGxldCgAAb8BBnNwcmVhZAF5KAABvwEHYmxvY2tJZAF3CGItMDAwMDEzKAABqQEGc3ByZWFkAXgoAAGpAQdibG9ja0lkAXcIYi0wMDAwMDmHAakBAwJocigAAcoBB2Jsb2NrSWQBdwhiLTAwMDAxNYcBygEDDG9yZGVyZWRfbGlzdAcAAcwBAwlsaXN0X2l0ZW0HAAHNAQMJcGFyYWdyYXBoBwABzgEGBAABzwEBeCgAAc4BB2Jsb2NrSWQBdwhiLTAwMDAxOIcBzgEDB2NhbGxvdXQHAAHSAQMKY29kZV9ibG9jawcAAdMBBgQAAdQBBGNvZGUoAAHTAQdibG9ja0lkAXcIYi0wMDAwMTkoAAHSAQRraW5kAXcEbm90ZSgAAdIBBXRpdGxlAXcBVCgAAdIBB2Jsb2NrSWQBdwN1czMoAAHNAQVsYWJlbAF3A+KAoigAAc0BCGxpc3RUeXBlAXcGYnVsbGV0KAABzQEGc3ByZWFkAXkoAAHNAQdibG9ja0lkAXcIYi0wMDAwMTeHAc0BAwlsaXN0X2l0ZW0HAAHhAQMJcGFyYWdyYXBoBwAB4gEGBAAB4wEBeSgAAeIBB2Jsb2NrSWQBdwhiLTAwMDAyMSgAAeEBBWxhYmVsAXcD4oCiKAAB4QEIbGlzdFR5cGUBdwZidWxsZXQoAAHhAQZzcHJlYWQBeSgAAeEBB2Jsb2NrSWQBdwhiLTAwMDAyMCgAAcwBBW9yZGVyAX0BKAABzAEGc3ByZWFkAXgoAAHMAQdibG9ja0lkAXcIYi0wMDAwMTaHAcwBAwJocigAAe0BB2Jsb2NrSWQBdwhiLTAwMDAyMocB7QEDC2J1bGxldF9saXN0BwAB7wEDCWxpc3RfaXRlbQcAAfABAwlwYXJhZ3JhcGgHAAHxAQYEAAHyAQF4KAAB8QEHYmxvY2tJZAF3CGItMDAwMDI1hwHxAQMHY2FsbG91dAcAAfUBAwpjb2RlX2Jsb2NrBwAB9gEGBAAB9wEEY29kZSgAAfYBB2Jsb2NrSWQBdwhiLTAwMDAyNigAAfUBBGtpbmQBdwRub3RlKAAB9QEFdGl0bGUBdwFUKAAB9QEHYmxvY2tJZAF3A3VzNIcB9QEDCXBhcmFncmFwaAcAAYACBgQAAYECBG1vcmUoAAGAAgdibG9ja0lkAXcIYi0wMDAwMjcoAAHwAQVsYWJlbAF3A+KAoigAAfABCGxpc3RUeXBlAXcGYnVsbGV0KAAB8AEGc3ByZWFkAXgoAAHwAQdibG9ja0lkAXcIYi0wMDAwMjQoAAHvAQZzcHJlYWQBeSgAAe8BB2Jsb2NrSWQBdwhiLTAwMDAyM4cB7wEDAmhyKAABjQIHYmxvY2tJZAF3CGItMDAwMDI4hwGNAgMLYnVsbGV0X2xpc3QHAAGPAgMJbGlzdF9pdGVtBwABkAIDCXBhcmFncmFwaAcAAZECBgQAAZICAWEoAAGRAgdibG9ja0lkAXcIYi0wMDAwMzGHAZECAwtidWxsZXRfbGlzdAcAAZUCAwlsaXN0X2l0ZW0HAAGWAgMJcGFyYWdyYXBoBwABlwIGBAABmAIBeCgAAZcCB2Jsb2NrSWQBdwhiLTAwMDAzNIcBlwIDB2NhbGxvdXQHAAGbAgMKY29kZV9ibG9jawcAAZwCBgQAAZ0CBWNvZGUKKAABnAIHYmxvY2tJZAF3CGItMDAwMDM1KAABmwIEa2luZAF3BG5vdGUoAAGbAgV0aXRsZQF3AVQoAAGbAgdibG9ja0lkAXcDdXM1KAABlgIFbGFiZWwBdwPigKIoAAGWAghsaXN0VHlwZQF3BmJ1bGxldCgAAZYCBnNwcmVhZAF5KAABlgIHYmxvY2tJZAF3CGItMDAwMDMzKAABlQIGc3ByZWFkAXkoAAGVAgdibG9ja0lkAXcIYi0wMDAwMzKHAZUCAwlwYXJhZ3JhcGgHAAGtAgYEAAGuAgVhZnRlcigAAa0CB2Jsb2NrSWQBdwhiLTAwMDAzNigAAZACBWxhYmVsAXcD4oCiKAABkAIIbGlzdFR5cGUBdwZidWxsZXQoAAGQAgZzcHJlYWQBeCgAAZACB2Jsb2NrSWQBdwhiLTAwMDAzMCgAAY8CBnNwcmVhZAF5KAABjwIHYmxvY2tJZAF3CGItMDAwMDI5AA==",
+    "rendered_by_milkdown": "Callouts in list items, each holding a fence no fence closes, and the blank lines that space or do not space their lists and items.\n\n* x\n  :::callout{#us1 kind=\"note\" title=\"T\"}\n  ```\n  code\n\n  ```\n  :::\n* y\n\n***\n\n* x\n  :::callout{#us2 kind=\"note\" title=\"T\"}\n  ```\n  code\n\n  ```\n  :::\n\n* y\n\n***\n\n1. x\n   :::callout{#us3 kind=\"note\" title=\"T\"}\n   ```\n   code\n   ```\n   :::\n\n2. y\n\n***\n\n* x\n\n  :::callout{#us4 kind=\"note\" title=\"T\"}\n  ```\n  code\n  ```\n  :::\n\n  more\n\n***\n\n* a\n\n  * x\n    :::callout{#us5 kind=\"note\" title=\"T\"}\n    ```\n    code\n\n    ```\n    :::\n\n  after\n"
   },
   {
     "name": "link-delimiters",
@@ -29706,6 +30634,383 @@
     },
     "yjs_update_v1_b64": "AdsBAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBd0FuIGl0ZW0gb2YgYSBxdW90ZWQgbGlzdCBob2xkaW5nIGEgY2FsbG91dCBpdHMgb3duIGZlbmNlIGNsb3Nlcywgd2l0aCBibGFuayBsaW5lcyBhZnRlciB0aGUgZmVuY2UgYmVmb3JlIHRoZSBuZXh0IGl0ZW0uKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCXBhcmFncmFwaAcAAXoGBAABewVOZXh0LigAAXoHYmxvY2tJZAF3CGItMDAwMDAyhwF6AwpibG9ja3F1b3RlBwABggEDC2J1bGxldF9saXN0BwABgwEDCWxpc3RfaXRlbQcAAYQBAwlwYXJhZ3JhcGgoAAGFAQdibG9ja0lkAXcIYi0wMDAwMDaHAYUBAwdjYWxsb3V0BwABhwEDC2J1bGxldF9saXN0BwABiAEDCWxpc3RfaXRlbQcAAYkBAwlwYXJhZ3JhcGgoAAGKAQdibG9ja0lkAXcIYi0wMDAwMDkoAAGJAQVsYWJlbAF3A+KAoigAAYkBCGxpc3RUeXBlAXcGYnVsbGV0KAABiQEGc3ByZWFkAXkoAAGJAQdibG9ja0lkAXcIYi0wMDAwMDgoAAGIAQZzcHJlYWQBeSgAAYgBB2Jsb2NrSWQBdwhiLTAwMDAwNygAAYcBBGtpbmQBdwRub3RlKAABhwEFdGl0bGUBdwAoAAGHAQdibG9ja0lkAXcCYzEoAAGEAQVsYWJlbAF3A+KAoigAAYQBCGxpc3RUeXBlAXcGYnVsbGV0KAABhAEGc3ByZWFkAXkoAAGEAQdibG9ja0lkAXcIYi0wMDAwMDWHAYQBAwlsaXN0X2l0ZW0HAAGZAQMJcGFyYWdyYXBoKAABmgEHYmxvY2tJZAF3CGItMDAwMDExKAABmQEFbGFiZWwBdwPigKIoAAGZAQhsaXN0VHlwZQF3BmJ1bGxldCgAAZkBBnNwcmVhZAF5KAABmQEHYmxvY2tJZAF3CGItMDAwMDEwKAABgwEGc3ByZWFkAXgoAAGDAQdibG9ja0lkAXcIYi0wMDAwMDQoAAGCAQdibG9ja0lkAXcIYi0wMDAwMDOHAYIBAwlwYXJhZ3JhcGgHAAGjAQYEAAGkAQVOZXh0LigAAaMBB2Jsb2NrSWQBdwhiLTAwMDAxMocBowEDCmJsb2NrcXVvdGUHAAGrAQMLYnVsbGV0X2xpc3QHAAGsAQMJbGlzdF9pdGVtBwABrQEDCXBhcmFncmFwaCgAAa4BB2Jsb2NrSWQBdwhiLTAwMDAxNocBrgEDB2NhbGxvdXQHAAGwAQMLYnVsbGV0X2xpc3QHAAGxAQMJbGlzdF9pdGVtBwABsgEDCXBhcmFncmFwaAcAAbMBBgQAAbQBAWEoAAGzAQdibG9ja0lkAXcIYi0wMDAwMTkoAAGyAQVsYWJlbAF3A+KAoigAAbIBCGxpc3RUeXBlAXcGYnVsbGV0KAABsgEGc3ByZWFkAXkoAAGyAQdibG9ja0lkAXcIYi0wMDAwMTgoAAGxAQZzcHJlYWQBeSgAAbEBB2Jsb2NrSWQBdwhiLTAwMDAxNygAAbABBGtpbmQBdwRub3RlKAABsAEFdGl0bGUBdwAoAAGwAQdibG9ja0lkAXcCYzIoAAGtAQVsYWJlbAF3A+KAoigAAa0BCGxpc3RUeXBlAXcGYnVsbGV0KAABrQEGc3ByZWFkAXkoAAGtAQdibG9ja0lkAXcIYi0wMDAwMTWHAa0BAwlsaXN0X2l0ZW0HAAHEAQMJcGFyYWdyYXBoBwABxQEGBAABxgEBYigAAcUBB2Jsb2NrSWQBdwhiLTAwMDAyMSgAAcQBBWxhYmVsAXcD4oCiKAABxAEIbGlzdFR5cGUBdwZidWxsZXQoAAHEAQZzcHJlYWQBeSgAAcQBB2Jsb2NrSWQBdwhiLTAwMDAyMCgAAawBBnNwcmVhZAF4KAABrAEHYmxvY2tJZAF3CGItMDAwMDE0KAABqwEHYmxvY2tJZAF3CGItMDAwMDEzhwGrAQMJcGFyYWdyYXBoBwAB0AEGBAAB0QEFTmV4dC4oAAHQAQdibG9ja0lkAXcIYi0wMDAwMjKHAdABAwpibG9ja3F1b3RlBwAB2AEDDG9yZGVyZWRfbGlzdAcAAdkBAwlsaXN0X2l0ZW0HAAHaAQMJcGFyYWdyYXBoKAAB2wEHYmxvY2tJZAF3CGItMDAwMDI2hwHbAQMHY2FsbG91dAcAAd0BAwxvcmRlcmVkX2xpc3QHAAHeAQMJbGlzdF9pdGVtBwAB3wEDCXBhcmFncmFwaAcAAeABBgQAAeEBAXgoAAHgAQdibG9ja0lkAXcIYi0wMDAwMjkoAAHfAQVsYWJlbAF3A+KAoigAAd8BCGxpc3RUeXBlAXcGYnVsbGV0KAAB3wEGc3ByZWFkAXkoAAHfAQdibG9ja0lkAXcIYi0wMDAwMjgoAAHeAQVvcmRlcgF9ASgAAd4BBnNwcmVhZAF5KAAB3gEHYmxvY2tJZAF3CGItMDAwMDI3KAAB3QEEa2luZAF3BG5vdGUoAAHdAQV0aXRsZQF3ACgAAd0BB2Jsb2NrSWQBdwJjMygAAdoBBWxhYmVsAXcD4oCiKAAB2gEIbGlzdFR5cGUBdwZidWxsZXQoAAHaAQZzcHJlYWQBeSgAAdoBB2Jsb2NrSWQBdwhiLTAwMDAyNYcB2gEDCWxpc3RfaXRlbQcAAfIBAwlwYXJhZ3JhcGgHAAHzAQYEAAH0AQF5KAAB8wEHYmxvY2tJZAF3CGItMDAwMDMxKAAB8gEFbGFiZWwBdwPigKIoAAHyAQhsaXN0VHlwZQF3BmJ1bGxldCgAAfIBBnNwcmVhZAF5KAAB8gEHYmxvY2tJZAF3CGItMDAwMDMwKAAB2QEFb3JkZXIBfQEoAAHZAQZzcHJlYWQBeCgAAdkBB2Jsb2NrSWQBdwhiLTAwMDAyNCgAAdgBB2Jsb2NrSWQBdwhiLTAwMDAyM4cB2AEDCXBhcmFncmFwaAcAAf8BBgQAAYACBU5leHQuKAAB/wEHYmxvY2tJZAF3CGItMDAwMDMyhwH/AQMKYmxvY2txdW90ZQcAAYcCAwtidWxsZXRfbGlzdAcAAYgCAwlsaXN0X2l0ZW0HAAGJAgMJcGFyYWdyYXBoKAABigIHYmxvY2tJZAF3CGItMDAwMDM2hwGKAgMHY2FsbG91dAcAAYwCAwtidWxsZXRfbGlzdAcAAY0CAwlsaXN0X2l0ZW0HAAGOAgMJcGFyYWdyYXBoBwABjwIGBAABkAIBYSgAAY8CB2Jsb2NrSWQBdwhiLTAwMDAzOSgAAY4CBWxhYmVsAXcD4oCiKAABjgIIbGlzdFR5cGUBdwZidWxsZXQoAAGOAgZzcHJlYWQBeSgAAY4CB2Jsb2NrSWQBdwhiLTAwMDAzOIcBjgIDCWxpc3RfaXRlbQcAAZcCAwlwYXJhZ3JhcGgHAAGYAgYEAAGZAgFiKAABmAIHYmxvY2tJZAF3CGItMDAwMDQxKAABlwIFbGFiZWwBdwPigKIoAAGXAghsaXN0VHlwZQF3BmJ1bGxldCgAAZcCBnNwcmVhZAF5KAABlwIHYmxvY2tJZAF3CGItMDAwMDQwKAABjQIGc3ByZWFkAXkoAAGNAgdibG9ja0lkAXcIYi0wMDAwMzcoAAGMAgRraW5kAXcEbm90ZSgAAYwCBXRpdGxlAXcAKAABjAIHYmxvY2tJZAF3AmM0KAABiQIFbGFiZWwBdwPigKIoAAGJAghsaXN0VHlwZQF3BmJ1bGxldCgAAYkCBnNwcmVhZAF5KAABiQIHYmxvY2tJZAF3CGItMDAwMDM1hwGJAgMJbGlzdF9pdGVtBwABqQIDCXBhcmFncmFwaAcAAaoCBgQAAasCAWMoAAGqAgdibG9ja0lkAXcIYi0wMDAwNDMoAAGpAgVsYWJlbAF3A+KAoigAAakCCGxpc3RUeXBlAXcGYnVsbGV0KAABqQIGc3ByZWFkAXkoAAGpAgdibG9ja0lkAXcIYi0wMDAwNDIoAAGIAgZzcHJlYWQBeCgAAYgCB2Jsb2NrSWQBdwhiLTAwMDAzNCgAAYcCB2Jsb2NrSWQBdwhiLTAwMDAzM4cBhwIDCXBhcmFncmFwaAcAAbUCBgQAAbYCBU5leHQuKAABtQIHYmxvY2tJZAF3CGItMDAwMDQ0hwG1AgMKYmxvY2txdW90ZQcAAb0CAwpibG9ja3F1b3RlBwABvgIDC2J1bGxldF9saXN0BwABvwIDCWxpc3RfaXRlbQcAAcACAwlwYXJhZ3JhcGgoAAHBAgdibG9ja0lkAXcIYi0wMDAwNDmHAcECAwdjYWxsb3V0BwABwwIDDG9yZGVyZWRfbGlzdAcAAcQCAwlsaXN0X2l0ZW0HAAHFAgMJcGFyYWdyYXBoBwABxgIGBAABxwIBYSgAAcYCB2Jsb2NrSWQBdwhiLTAwMDA1MigAAcUCBWxhYmVsAXcD4oCiKAABxQIIbGlzdFR5cGUBdwZidWxsZXQoAAHFAgZzcHJlYWQBeSgAAcUCB2Jsb2NrSWQBdwhiLTAwMDA1MSgAAcQCBW9yZGVyAX0BKAABxAIGc3ByZWFkAXkoAAHEAgdibG9ja0lkAXcIYi0wMDAwNTAoAAHDAgRraW5kAXcEbm90ZSgAAcMCBXRpdGxlAXcAKAABwwIHYmxvY2tJZAF3AmM1KAABwAIFbGFiZWwBdwPigKIoAAHAAghsaXN0VHlwZQF3BmJ1bGxldCgAAcACBnNwcmVhZAF5KAABwAIHYmxvY2tJZAF3CGItMDAwMDQ4hwHAAgMJbGlzdF9pdGVtBwAB2AIDCXBhcmFncmFwaAcAAdkCBgQAAdoCAXgoAAHZAgdibG9ja0lkAXcIYi0wMDAwNTQoAAHYAgVsYWJlbAF3A+KAoigAAdgCCGxpc3RUeXBlAXcGYnVsbGV0KAAB2AIGc3ByZWFkAXkoAAHYAgdibG9ja0lkAXcIYi0wMDAwNTMoAAG/AgZzcHJlYWQBeCgAAb8CB2Jsb2NrSWQBdwhiLTAwMDA0NygAAb4CB2Jsb2NrSWQBdwhiLTAwMDA0NigAAb0CB2Jsb2NrSWQBdwhiLTAwMDA0NQA=",
     "rendered_by_milkdown": "An item of a quoted list holding a callout its own fence closes, with blank lines after the fence before the next item.\n\nNext.\n\n> *\n>   :::callout{#c1 kind=\"note\" title}\n>   *\n>   :::\n>\n> *\n\nNext.\n\n> *\n>   :::callout{#c2 kind=\"note\" title}\n>   * a\n>   :::\n>\n> * b\n\nNext.\n\n> 1.\n>    :::callout{#c3 kind=\"note\" title}\n>    1. x\n>    :::\n>\n> 2. y\n\nNext.\n\n> *\n>   :::callout{#c4 kind=\"note\" title}\n>   * a\n>   * b\n>   :::\n>\n> * c\n\nNext.\n\n> > *\n> >   :::callout{#c5 kind=\"note\" title}\n> >   1. a\n> >   :::\n> >\n> > * x\n"
+  },
+  {
+    "name": "quoted-items-spaced-around-callouts-holding-an-unclosed-fence",
+    "markdown": "Callouts in quoted list items, each holding a fence no fence closes, and the blank lines that space or do not space their lists and items.\n\n> - x\n>   :::callout{#qs1 kind=\"note\" title=\"T\"}\n>   ~~~\n>   code\n>\n> - y\n\n***\n\n> - x\n>   :::callout{#qs2 kind=\"note\" title=\"T\"}\n>   ~~~\n>   code\n>\n>   :::\n>\n> > q\n\n***\n\n> - x\n>   :::callout{#qs3 kind=\"note\" title=\"T\"}\n>   ```\n>   code\n>   :::\n>\n> - y\n\n***\n\n> - x\n>   :::callout{#qs4 kind=\"note\" title=\"T\"}\n>   ~~~\n>   code\n>\n>   :::\n>\n>\n> after\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Callouts in quoted list items, each holding a fence no fence closes, and the blank lines that space or do not space their lists and items."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000003"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000004"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000005"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "x"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "callout",
+                      "attrs": {
+                        "kind": "note",
+                        "title": "T",
+                        "blockId": "qs1"
+                      },
+                      "content": [
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null,
+                            "blockId": "b-000006"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "code\n"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000007"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000008"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "y"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "hr",
+          "attrs": {
+            "blockId": "b-000009"
+          }
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000010"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": true,
+                "blockId": "b-000011"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000012"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000013"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "x"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "callout",
+                      "attrs": {
+                        "kind": "note",
+                        "title": "T",
+                        "blockId": "qs2"
+                      },
+                      "content": [
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null,
+                            "blockId": "b-000014"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "code\n"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "blockquote",
+              "attrs": {
+                "blockId": "b-000015"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000016"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "q"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "hr",
+          "attrs": {
+            "blockId": "b-000017"
+          }
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000018"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": true,
+                "blockId": "b-000019"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000020"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000021"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "x"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "callout",
+                      "attrs": {
+                        "kind": "note",
+                        "title": "T",
+                        "blockId": "qs3"
+                      },
+                      "content": [
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null,
+                            "blockId": "b-000022"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "code"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000023"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000024"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "y"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "hr",
+          "attrs": {
+            "blockId": "b-000025"
+          }
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000026"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": true,
+                "blockId": "b-000027"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000028"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000029"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "x"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "callout",
+                      "attrs": {
+                        "kind": "note",
+                        "title": "T",
+                        "blockId": "qs4"
+                      },
+                      "content": [
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null,
+                            "blockId": "b-000030"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "code\n"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000031"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "after"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AX4BAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQGKAUNhbGxvdXRzIGluIHF1b3RlZCBsaXN0IGl0ZW1zLCBlYWNoIGhvbGRpbmcgYSBmZW5jZSBubyBmZW5jZSBjbG9zZXMsIGFuZCB0aGUgYmxhbmsgbGluZXMgdGhhdCBzcGFjZSBvciBkbyBub3Qgc3BhY2UgdGhlaXIgbGlzdHMgYW5kIGl0ZW1zLigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwpibG9ja3F1b3RlBwABjQEDC2J1bGxldF9saXN0BwABjgEDCWxpc3RfaXRlbQcAAY8BAwlwYXJhZ3JhcGgHAAGQAQYEAAGRAQF4KAABkAEHYmxvY2tJZAF3CGItMDAwMDA1hwGQAQMHY2FsbG91dAcAAZQBAwpjb2RlX2Jsb2NrBwABlQEGBAABlgEFY29kZQooAAGVAQdibG9ja0lkAXcIYi0wMDAwMDYoAAGUAQRraW5kAXcEbm90ZSgAAZQBBXRpdGxlAXcBVCgAAZQBB2Jsb2NrSWQBdwNxczEoAAGPAQVsYWJlbAF3A+KAoigAAY8BCGxpc3RUeXBlAXcGYnVsbGV0KAABjwEGc3ByZWFkAXkoAAGPAQdibG9ja0lkAXcIYi0wMDAwMDSHAY8BAwlsaXN0X2l0ZW0HAAGkAQMJcGFyYWdyYXBoBwABpQEGBAABpgEBeSgAAaUBB2Jsb2NrSWQBdwhiLTAwMDAwOCgAAaQBBWxhYmVsAXcD4oCiKAABpAEIbGlzdFR5cGUBdwZidWxsZXQoAAGkAQZzcHJlYWQBeSgAAaQBB2Jsb2NrSWQBdwhiLTAwMDAwNygAAY4BBnNwcmVhZAF5KAABjgEHYmxvY2tJZAF3CGItMDAwMDAzKAABjQEHYmxvY2tJZAF3CGItMDAwMDAyhwGNAQMCaHIoAAGwAQdibG9ja0lkAXcIYi0wMDAwMDmHAbABAwpibG9ja3F1b3RlBwABsgEDC2J1bGxldF9saXN0BwABswEDCWxpc3RfaXRlbQcAAbQBAwlwYXJhZ3JhcGgHAAG1AQYEAAG2AQF4KAABtQEHYmxvY2tJZAF3CGItMDAwMDEzhwG1AQMHY2FsbG91dAcAAbkBAwpjb2RlX2Jsb2NrBwABugEGBAABuwEFY29kZQooAAG6AQdibG9ja0lkAXcIYi0wMDAwMTQoAAG5AQRraW5kAXcEbm90ZSgAAbkBBXRpdGxlAXcBVCgAAbkBB2Jsb2NrSWQBdwNxczIoAAG0AQVsYWJlbAF3A+KAoigAAbQBCGxpc3RUeXBlAXcGYnVsbGV0KAABtAEGc3ByZWFkAXkoAAG0AQdibG9ja0lkAXcIYi0wMDAwMTIoAAGzAQZzcHJlYWQBeCgAAbMBB2Jsb2NrSWQBdwhiLTAwMDAxMYcBswEDCmJsb2NrcXVvdGUHAAHLAQMJcGFyYWdyYXBoBwABzAEGBAABzQEBcSgAAcwBB2Jsb2NrSWQBdwhiLTAwMDAxNigAAcsBB2Jsb2NrSWQBdwhiLTAwMDAxNSgAAbIBB2Jsb2NrSWQBdwhiLTAwMDAxMIcBsgEDAmhyKAAB0gEHYmxvY2tJZAF3CGItMDAwMDE3hwHSAQMKYmxvY2txdW90ZQcAAdQBAwtidWxsZXRfbGlzdAcAAdUBAwlsaXN0X2l0ZW0HAAHWAQMJcGFyYWdyYXBoBwAB1wEGBAAB2AEBeCgAAdcBB2Jsb2NrSWQBdwhiLTAwMDAyMYcB1wEDB2NhbGxvdXQHAAHbAQMKY29kZV9ibG9jawcAAdwBBgQAAd0BBGNvZGUoAAHcAQdibG9ja0lkAXcIYi0wMDAwMjIoAAHbAQRraW5kAXcEbm90ZSgAAdsBBXRpdGxlAXcBVCgAAdsBB2Jsb2NrSWQBdwNxczMoAAHWAQVsYWJlbAF3A+KAoigAAdYBCGxpc3RUeXBlAXcGYnVsbGV0KAAB1gEGc3ByZWFkAXkoAAHWAQdibG9ja0lkAXcIYi0wMDAwMjCHAdYBAwlsaXN0X2l0ZW0HAAHqAQMJcGFyYWdyYXBoBwAB6wEGBAAB7AEBeSgAAesBB2Jsb2NrSWQBdwhiLTAwMDAyNCgAAeoBBWxhYmVsAXcD4oCiKAAB6gEIbGlzdFR5cGUBdwZidWxsZXQoAAHqAQZzcHJlYWQBeSgAAeoBB2Jsb2NrSWQBdwhiLTAwMDAyMygAAdUBBnNwcmVhZAF4KAAB1QEHYmxvY2tJZAF3CGItMDAwMDE5KAAB1AEHYmxvY2tJZAF3CGItMDAwMDE4hwHUAQMCaHIoAAH2AQdibG9ja0lkAXcIYi0wMDAwMjWHAfYBAwpibG9ja3F1b3RlBwAB+AEDC2J1bGxldF9saXN0BwAB+QEDCWxpc3RfaXRlbQcAAfoBAwlwYXJhZ3JhcGgHAAH7AQYEAAH8AQF4KAAB+wEHYmxvY2tJZAF3CGItMDAwMDI5hwH7AQMHY2FsbG91dAcAAf8BAwpjb2RlX2Jsb2NrBwABgAIGBAABgQIFY29kZQooAAGAAgdibG9ja0lkAXcIYi0wMDAwMzAoAAH/AQRraW5kAXcEbm90ZSgAAf8BBXRpdGxlAXcBVCgAAf8BB2Jsb2NrSWQBdwNxczQoAAH6AQVsYWJlbAF3A+KAoigAAfoBCGxpc3RUeXBlAXcGYnVsbGV0KAAB+gEGc3ByZWFkAXkoAAH6AQdibG9ja0lkAXcIYi0wMDAwMjgoAAH5AQZzcHJlYWQBeCgAAfkBB2Jsb2NrSWQBdwhiLTAwMDAyN4cB+QEDCXBhcmFncmFwaAcAAZECBgQAAZICBWFmdGVyKAABkQIHYmxvY2tJZAF3CGItMDAwMDMxKAAB+AEHYmxvY2tJZAF3CGItMDAwMDI2AA==",
+    "rendered_by_milkdown": "Callouts in quoted list items, each holding a fence no fence closes, and the blank lines that space or do not space their lists and items.\n\n> * x\n>   :::callout{#qs1 kind=\"note\" title=\"T\"}\n>   ```\n>   code\n>\n>   ```\n>   :::\n> * y\n\n***\n\n> * x\n>   :::callout{#qs2 kind=\"note\" title=\"T\"}\n>   ```\n>   code\n>\n>   ```\n>   :::\n>\n> > q\n\n***\n\n> * x\n>   :::callout{#qs3 kind=\"note\" title=\"T\"}\n>   ```\n>   code\n>   ```\n>   :::\n>\n> * y\n\n***\n\n> * x\n>   :::callout{#qs4 kind=\"note\" title=\"T\"}\n>   ```\n>   code\n>\n>   ```\n>   :::\n>\n> after\n"
   },
   {
     "name": "quoted-typed-block-list-ends",
