@@ -779,6 +779,43 @@ func TestSettlementMarksAnAskWithAParagraphAfterItsOptionsInvalid(t *testing.T) 
 	})
 }
 
+// The ask-edit route never moves a paragraph after an ask's options into its question, nor
+// deletes it: the caller reads the row, which holds only the question above the options, so it
+// cannot know the paragraph is there. Every edit of such an ask is refused, naming the paragraph,
+// and writes nothing; a document edit moves or deletes it.
+func TestSetAskBlockTextRefusesAnEditOfAnAskWithAParagraphAfterItsOptions(t *testing.T) {
+	options := []model.AskOption{{Label: "Ship", Description: "Release it"}, {Label: "Hold", Description: "Wait for review"}}
+
+	for name, edit := range map[string]AskBlockEdit{
+		"options only":         {Options: &options},
+		"options and question": {Question: new("Should we ship today?"), Options: &options},
+		"question only":        {Question: new("Should we ship today?")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			service, artifactID := seedIndexedShipAsk(t, "ask-paragraph")
+			editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, "Stray words after the list\n")))
+			settleCurrentGeneration(t, service, artifactID)
+			before := liveTree(t, service, artifactID)
+			err := joinedWrite(service, func(ctx context.Context) error {
+				_, err := service.SetAskBlockText(ctx, artifactID, "ask-paragraph", edit, model.Actor{Kind: "user", ID: "alice"})
+				return err
+			})
+			var unrepresentable *ErrAskBlockUnrepresentable
+			if !errors.As(err, &unrepresentable) || unrepresentable.Field != "block" || !strings.Contains(err.Error(), `"Stray words after the list"`) || !strings.Contains(err.Error(), "dispatch doc-edit") {
+				t.Fatalf("err = %v, want ErrAskBlockUnrepresentable on block quoting the paragraph after the options", err)
+			}
+			after := liveTree(t, service, artifactID)
+			if !after.EqualWithBlockIDs(before) {
+				t.Fatalf("refused edit changed the block")
+			}
+			if last := firstAsk(after).Children[2]; last.Type != "paragraph" || pmdoc.TextContent(last) != "Stray words after the list" {
+				t.Fatalf("block's last child = %s %q, want the paragraph after the options", last.Type, pmdoc.TextContent(last))
+			}
+			assertShipAskRow(t, service, artifactID, "ask-paragraph")
+		})
+	}
+}
+
 // seedIndexedShipAsk is a document holding one ask, "Should we ship?" with the options Ship and
 // Hold, which settlement has indexed as an open ask row. Its settlements run only when the test
 // runs them.

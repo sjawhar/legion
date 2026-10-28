@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/reearth/ygo/crdt"
@@ -72,12 +73,10 @@ func (s *Service) SetAskBlockText(
 		if err != nil {
 			return err
 		}
-		// An edit keeping the options keeps every list the block holds, so a block breaking its
-		// content rule is refused before the edit is built; checked again on the written block.
-		if edit.Options == nil {
-			if err := refuseAskContentBreak(block.node); err != nil {
-				return err
-			}
+		// The content rule is decided once, before the edit is built: askBlockChildren then
+		// yields the question's paragraphs and at most one list, which keeps the rule.
+		if err := refuseAskContentEdit(block.node, edit); err != nil {
+			return err
 		}
 		want := AskBlockText{
 			Question: block.question,
@@ -119,13 +118,6 @@ func (s *Service) SetAskBlockText(
 				return err
 			}
 		}
-		written, err := askBlockOf(next, blockID)
-		if err != nil {
-			return err
-		}
-		if err := refuseAskContentBreak(written.node); err != nil {
-			return err
-		}
 		if err := verifyAskBlockRoundTrip(next, blockID, want, wroteBody); err != nil {
 			return err
 		}
@@ -158,17 +150,27 @@ func (s *Service) SetAskBlockText(
 }
 
 // askBlockBodyChanges reports whether edit still names a part of the body to rewrite, after the
-// parts it names but does not change have been dropped. Options sent to a block that breaks its
-// content rule always count as a change: the joined reading of a two-list ask can equal them, yet
-// rebuilding them as one list is the repair the refusal tells the caller to send.
+// parts it names but does not change have been dropped (withoutUnchanged).
 func askBlockBodyChanges(current askBlock, edit AskBlockEdit) bool {
-	if edit.Question != nil && normalizeAskQuestion(*edit.Question) != current.question {
-		return true
+	edit = withoutUnchanged(current, edit)
+	return edit.Question != nil || edit.Options != nil
+}
+
+// withoutUnchanged is edit without the question or options it names but does not change. An
+// idempotent retry sends the whole ask back, and rebuilding nodes that already say the same thing
+// would mint fresh inner block ids and orphan the anchors inside them for no change at all.
+// Options sent to a block that breaks its content rule always count as a change: the joined
+// reading of a two-list ask can equal them, yet rebuilding them as one list is the repair the
+// refusal tells the caller to send (refuseAskContentEdit).
+func withoutUnchanged(current askBlock, edit AskBlockEdit) AskBlockEdit {
+	if edit.Question != nil && normalizeAskQuestion(*edit.Question) == current.question {
+		edit.Question = nil
 	}
-	if edit.Options != nil && pmdoc.AskContentError(current.node) != nil {
-		return true
+	if edit.Options != nil && pmdoc.AskContentError(current.node) == nil &&
+		reflect.DeepEqual(normalizeAskOptions(*edit.Options), current.options) {
+		edit.Options = nil
 	}
-	return edit.Options != nil && !reflect.DeepEqual(normalizeAskOptions(*edit.Options), current.options)
+	return edit
 }
 
 // askBlockChildren is the block's children after edit: the parts it names rebuilt, the parts it
@@ -187,18 +189,7 @@ func askBlockChildren(current askBlock, edit AskBlockEdit, budget *pmdoc.WriteBu
 		paragraphs = append(paragraphs, child)
 	}
 
-	// A field the caller named but did not change is not rewritten. An idempotent retry sends
-	// the whole ask back, and rebuilding nodes that already say the same thing would mint fresh
-	// inner block ids and orphan the anchors inside them for no change at all. Options sent to a
-	// block that breaks its content rule are kept even when they equal its joined reading: the
-	// loop above keeps only the last list, so only rebuilding them yields one list holding all.
-	if edit.Question != nil && normalizeAskQuestion(*edit.Question) == current.question {
-		edit.Question = nil
-	}
-	if edit.Options != nil && pmdoc.AskContentError(current.node) == nil &&
-		reflect.DeepEqual(normalizeAskOptions(*edit.Options), current.options) {
-		edit.Options = nil
-	}
+	edit = withoutUnchanged(current, edit)
 
 	if edit.Question != nil {
 		question := normalizeAskQuestion(*edit.Question)
@@ -495,17 +486,66 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 	return normalized
 }
 
-// refuseAskContentBreak refuses an edit leaving ask, an ask block, breaking its content rule
+// refuseAskContentEdit refuses edit of ask, an ask block breaking its content rule
 // (pmdoc.AskContentError), which settlement marks `invalid` (readAskBlockStrictly). askBlockOf
-// reads such an ask leniently, joining every list into its options where the browser's card reads
-// only the last, so the row must not take that reading. An edit sending options rebuilds them as
-// one list, which repairs the ask.
-func refuseAskContentBreak(ask *pmdoc.Node) error {
-	if err := pmdoc.AskContentError(ask); err != nil {
+// reads such an ask leniently, joining every paragraph into its question and every list into its
+// options, where the browser's card reads its question from the first child and its options from
+// the last, so the row must not take that reading.
+//
+// An ask holding a block after its first list is refused whatever the edit sends: rebuilding the
+// body would move that block's text into the question or delete it, and the caller, reading the
+// row, cannot know it is there. A document edit moves or deletes it. An ask holding only
+// paragraphs and then two or more lists is refused unless the edit sends options, which rebuilds
+// them as one list and so repairs the ask.
+func refuseAskContentEdit(ask *pmdoc.Node, edit AskBlockEdit) error {
+	broken := pmdoc.AskContentError(ask)
+	if broken == nil {
+		return nil
+	}
+	if after, found := textAfterOptions(ask); found {
 		return &ErrAskBlockUnrepresentable{
-			Field:  "block",
-			Reason: err.Error() + "; send options to rebuild the options as one list",
+			Field: "block",
+			Reason: broken.Error() + "; the ask-edit route will not move " + after +
+				" into the question nor delete it: move it above the options or delete it with a document edit (dispatch doc-edit), then edit the ask",
 		}
 	}
-	return nil
+	if edit.Options != nil {
+		return nil
+	}
+	return &ErrAskBlockUnrepresentable{
+		Field:  "block",
+		Reason: broken.Error() + "; send options to rebuild the options as one list",
+	}
+}
+
+// textAfterOptions names the blocks ask holds after its first bullet list that are not lists -
+// their text quoted, cut short where it runs on - and reports whether it holds any.
+func textAfterOptions(ask *pmdoc.Node) (string, bool) {
+	first := slices.IndexFunc(ask.Children, func(child *pmdoc.Node) bool { return child.Type == "bullet_list" })
+	if first < 0 {
+		return "", false
+	}
+	parts := []string{}
+	found := false
+	for _, child := range ask.Children[first+1:] {
+		if child.Type == "bullet_list" {
+			continue
+		}
+		found = true
+		if text := strings.Join(strings.Fields(pmdoc.TextContent(child)), " "); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	if !found {
+		return "", false
+	}
+	if len(parts) == 0 {
+		return "the empty paragraph after the options", true
+	}
+	const quoted = 80
+	text := []rune(strings.Join(parts, " "))
+	if len(text) > quoted {
+		return fmt.Sprintf("%q", strings.TrimRight(string(text[:quoted]), " ")+"…"), true
+	}
+	return fmt.Sprintf("%q", string(text)), true
 }
