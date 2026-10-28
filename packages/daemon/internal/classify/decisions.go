@@ -420,9 +420,10 @@ func (read arrivalRead) chained(previous, head string) bool {
 // whether they lead one by one from from to before - each move from the head the one before it
 // reached - in the order GitHub's clock puts them: every move of required, and those of optional
 // that lead there. Optional are the moves in the second the window starts or ends in, which can be
-// the window's before them or after them: GitHub's clock is to the second. Moves of one second are
-// taken in the one order of them that so leads, when exactly one path does; none, or more than one,
-// leaves the path unled (as does trying more than maxTiedOrders). Named moves of unknown clock are
+// the window's before them or after them: GitHub's clock is to the second. Of the paths that lead,
+// the one taking the fewest optional moves is the path, its moves of one second in the one order
+// of them that so leads; none, or more than one such path, leaves the path unled (as does trying
+// more than maxTiedOrders). Named moves of unknown clock are
 // taken as the shortest chain of the newest of each two heads. A move missing from the middle, the
 // start or the end of the path leaves it unled, so the arrival waits for it; a loop the branch made
 // inside the path, a head left and returned to, whose synchronizes are still to come, is not seen
@@ -450,16 +451,23 @@ func gapPath(required, optional []record.Named, from, before string) ([]record.N
 		sorted = append(sorted, candidate{n, i >= len(required)})
 	}
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].named.At.Before(sorted[j].named.At) })
-	var paths [][]record.Named
-	tries := 0
-	var walk func(start int, at string, acc []record.Named)
-	walk = func(start int, at string, acc []record.Named) {
-		if len(paths) > 1 || tries > maxTiedOrders {
+	// Of the paths that lead, the one that takes the fewest optional moves: a move of the window's
+	// own second it need not take is the neighbour window's, as it is when it is a second apart.
+	var best []record.Named
+	bestOptional, ties, tries := -1, 0, 0
+	var walk func(start int, at string, acc []record.Named, optional int)
+	walk = func(start int, at string, acc []record.Named, optional int) {
+		if tries > maxTiedOrders || (bestOptional >= 0 && optional > bestOptional) {
 			return
 		}
 		if start == len(sorted) {
-			if at == before {
-				paths = append(paths, acc)
+			if at != before {
+				return
+			}
+			if bestOptional < 0 || optional < bestOptional {
+				best, bestOptional, ties = acc, optional, 1
+			} else {
+				ties++
 			}
 			return
 		}
@@ -467,28 +475,32 @@ func gapPath(required, optional []record.Named, from, before string) ([]record.N
 		for end < len(sorted) && sorted[end].named.At.Equal(sorted[start].named.At) {
 			end++
 		}
-		var order func(left []candidate, at string, acc []record.Named)
-		order = func(left []candidate, at string, acc []record.Named) {
+		var order func(left []candidate, at string, acc []record.Named, optional int)
+		order = func(left []candidate, at string, acc []record.Named, optional int) {
 			if tries++; tries > maxTiedOrders {
 				return
 			}
 			if onlyOptional(left) {
-				walk(end, at, acc)
+				walk(end, at, acc, optional)
 			}
 			for k, c := range left {
 				if c.named.Before == at {
 					rest := append(append(make([]candidate, 0, len(left)-1), left[:k]...), left[k+1:]...)
-					order(rest, c.named.SHA, append(clone(acc), c.named))
+					took := optional
+					if c.optional {
+						took++
+					}
+					order(rest, c.named.SHA, append(clone(acc), c.named), took)
 				}
 			}
 		}
-		order(sorted[start:end], at, acc)
+		order(sorted[start:end], at, acc, optional)
 	}
-	walk(0, from, nil)
-	if len(paths) != 1 || tries > maxTiedOrders {
+	walk(0, from, nil, 0)
+	if bestOptional < 0 || ties != 1 || tries > maxTiedOrders {
 		return nil, false
 	}
-	return paths[0], true
+	return best, true
 }
 
 // candidate is a move gapPath may put on a path: one the path must take, or an optional one.

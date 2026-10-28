@@ -200,6 +200,21 @@ func TestTiedMovesInTwoOrdersLeaveThePathUnled(t *testing.T) {
 	}
 }
 
+// Of the paths a window's moves lead by, the one taking the fewest moves of the second the window
+// starts or ends in is the path: an arrival from the recorded head, c2>c3, in the second of two
+// later skipped moves c3>c2 and c2>c3 - the next arrivals' - takes the empty path, not the loop
+// c2>c3>c2 they also make.
+func TestAPathTakesTheFewestMovesOfItsWindowsSeconds(t *testing.T) {
+	at := time.Date(2026, 10, 1, 0, 0, 2, 0, time.UTC)
+	optional := []record.Named{{Before: "c3", SHA: "c2", Sender: "bob", At: at}, {Before: "c2", SHA: "c3", Sender: "bob", At: at}}
+	if path, ok := gapPath(nil, optional, "c2", "c2"); !ok || len(path) != 0 {
+		t.Errorf("gapPath %v, %v; want the empty path", path, ok)
+	}
+	if path, ok := gapPath(optional[:1], optional[1:], "c3", "c2"); !ok || len(path) != 1 {
+		t.Errorf("gapPath %v, %v; want c3>c2 alone, the required move", path, ok)
+	}
+}
+
 // A second copy of the synchronize that reached the recorded head - GitHub can send two for one
 // push - is no move, whatever its clock: h0>h1 applied, then a copy of h0>h1 a second later,
 // counts no fix attempt and opens no head run.
