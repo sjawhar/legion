@@ -1,0 +1,13 @@
+kind: Added
+body: |-
+  `envoy-infra`'s `ListenerPermissions`, and through it `HostPermissions` and
+  `DispatchPermissions`, grant the session consumers' calls on any consumer of
+  `ENVOY_NOTIFICATIONS` (`$JS.API.CONSUMER.CREATE`, with and without a filter subject, `INFO`,
+  `DELETE` and `MSG.NEXT` on `ENVOY_NOTIFICATIONS.*`, and `$JS.ACK.ENVOY_NOTIFICATIONS.*.>`) and
+  subscribe on `notifications.role.> envoy-roles`, beside the machine's own role-lane group.
+  `SessionPermissions` does not change. The rendered users change, so moving a hub with a
+  `listener`, a `machineId` user or a `dispatchMachineId` user to this release replaces its VM
+  once, with NATS down until the new VM starts. A hub carries the grant only after that
+  replacement or a live reload of its configuration; until then the listener answers every
+  registration `core` with `no_grant` and subscribes its role lane in its machine's group
+  (INFRA-594).

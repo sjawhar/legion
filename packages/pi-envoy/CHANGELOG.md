@@ -1,28 +1,15 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
-- Consumer delivery. While a session's agent subject is open, the plugin subscribes its relay
-  subject, `notifications.envoy.deliver.<session id>`, before it registers, and every registration
-  asks the listener for the session's durable consumer, with an epoch per NATS connection and the
-  resume point it persisted. Answered `consumer`, the session takes its agent subject and every
-  followed topic the stream stores from the listener's relay, in stream order: each frame is
-  answered `received` as it decodes, `progress` every 20 s while Oh My Pi holds its card or turn
-  unwritten, and `done` once Oh My Pi wrote it (the message's `message_end`), or at once for a
-  frame skipped, suppressed, already shown, or rejected (after the rejection reply is posted). A
-  frame the host dropped unwritten (a switch away, an interrupt that withdrew a person's turn) is
-  answered `nak` and comes again. The core copies of those subjects then show nothing and only
-  answer a role lane's receipt, and the replay engine makes no `/v1/replay` call. So a message
-  published while the session was killed, restarting or disconnected, a role message to a role it
-  holds included, is shown once when it is back, for up to 72 hours. A nats.js reconnect begins a
-  new epoch and registers at once, so the listener restarts the relay at the consumer's ack floor;
-  the resume point and each topic's follow time are kept in the session file
-  (`envoy-consumer-state`), so a resumed session's missing consumer starts where it stopped. A BTW
-  that arrives late (delivered before, or stored before the connection's epoch began) is one inert
-  card and starts no side turn. Answered `core`, or by a listener of an earlier release, delivery
-  works as before (INFRA-594).
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by …` with the
+  options chosen and `Answer text: …`, `Closed with no answer: …`, `Closed after an answer: …` with
+  `Last answer by …`, or `Open: no answer yet.`; against a Dispatch older than this release, which
+  reports no state, `Answer state not reported by this Dispatch; open the link to read the ask.`
+  Its description says an ask hit says whether it is answered (INFRA-569).
+
 - AskGate's marker checks at the `dispatch` CLI (no matching marker, a file changed after the
   review, a file missing when the gate ran) warn by default: the write posts with its warning and
   an entry the report counts. They refuse only when the session chose block (`OMP_ASKGATE=block`,
@@ -348,9 +335,17 @@
 
 ### Changed
 
-- A BTW's side turn and every Dispatch reply run off the frame that started them, so the frames
-  after it wait for neither the model call nor the reply, on the core path and the consumer path
-  alike (INFRA-594).
+- `dispatch-writing-specs`, "Old specs": text kept in a rewrite follows the text rules, and each
+  retelling, quotation or unlinked attribution in the old spec is restated as design or cut; a
+  requirement's linked `From:` source stays. Rewrites kept passages such as "You asked if …" word
+  for word, because the agent carried them over rather than wrote them. To stay under the
+  2,000-word guard, lines another loaded text already says are cut or merged: "Write about the
+  design, never the person" joins "State the current design, never how people reached it" as
+  "Write about the current design, never the person or how people reached it"; the list of
+  reference forms after "Link each source where the person wrote it" (`dispatch`, "References",
+  lists them); "A person's decision is their answered ask block" (`dispatch`: "Decisions are
+  asks"); and "approved spec's" in "The plan" (`dispatch-first`'s table says when to plan).
+
 - `dispatch-writing-specs` adds two rules for the text. A spec cites code by file and symbol, never
   a line number, since a line number is stale at the next edit. A sentence that cites a gate
   passing (a test, review, check or proof) also says, in that sentence, what the pass does not

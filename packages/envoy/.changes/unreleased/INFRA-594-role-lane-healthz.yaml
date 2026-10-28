@@ -1,0 +1,5 @@
+kind: Added
+body: |-
+  `/healthz` answers `503 {"status":"unhealthy","error":"role lane subscription inactive"}` when
+  the role lane's own connection is not connected or holds no valid subscription, since no role
+  message is forwarded then (INFRA-594).

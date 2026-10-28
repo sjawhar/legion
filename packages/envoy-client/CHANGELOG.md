@@ -1,20 +1,16 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Changed
 
-- `envoy_subscribe` and `envoy_publish` describe stored delivery: a stored topic (agent, dispatch,
-  github, slack, legion, ghostwispr, whatsapp, and a role message, which reaches its holder as a
-  stored copy on the holder's agent topic) reaches each subscribed session once, also one that was
-  away or restarted, when its listener supports consumer delivery; team and other ad-hoc topics
-  are live only (INFRA-594).
 - The `dispatch` CLI reads an AskGate store with no recorded mode as warn, not block, and refuses
   a gated write without a matching marker only when a live owner's store records `block`.
 - `dispatch ask` and `dispatch edit-ask` take a question of up to 2,000 characters, from 800, and
   their `--help` asks for the concrete case first and the choice in its terms
   (`@legion/contracts`' question contract). On `dispatch ask`, which alone takes `--ref` and
   `--image`, the appended `Ref:` line and picture lines count toward the limit.
+
 - **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
   one per repository, and prints each source's answer in turn: `Synced P architecture from
   repo@branch: commit C (time).`, or `Sync failed for P (repo@branch): error` followed by `The
@@ -53,26 +49,6 @@
 
 ### Added
 
-- `@legion/envoy-client/consumer-delivery`: the relay protocol of consumer delivery, which both
-  plugins share. `createConsumerDelivery` takes each frame the owning listener relays on
-  `notifications.envoy.deliver.<session id>` (`DELIVER_SUBJECT_PREFIX`, `decodeRelayFrame` for its
-  `Envoy-*` headers), answers `received` before any host work, hands the frames to the host one at
-  a time in stream order (a frame stops holding up the next once the host returns, releases it or
-  settles it), sends `progress` every 20 s while a frame is held unwritten, and answers `done`
-  once the host wrote it, or `nak` when the session cannot take it. A frame the replay ledger
-  already holds, one on a subject no followed topic matches, and one stored before its topic was
-  followed (2 s of clock allowance) are answered `done` unshown. A frame whose delivery threw is
-  answered `nak`, and from its third delivery on `done` with the host's failure notice. A frame
-  delivered before, or stored before the current NATS connection's epoch began, is marked `late`,
-  so a host never starts a side turn for it. The resume point (the lowest sequence held unwritten
-  minus one, else the highest written) and each topic's follow time are a snapshot the host
-  persists, and a registration answer that reports a gap or names another stream tells the
-  session once. `transport` gains the registration's `delivery` field (`DeliveryRequest`, with
-  `epoch` and `resume`) and the answer's (`DeliveryAnswer`, `deliveryAnswerOf`, which reads a
-  missing or unreadable field as `core`). `@legion/envoy-client/stream-topics`' `streamStores`
-  says whether the stream stores a topic, as the listener's `bus.StreamCaptures` does. The replay
-  engine's `setConsumerMode(true)` stops its `POST /v1/replay` calls while the listener relays the
-  session's consumer (INFRA-594).
 - `askgate-marker` holds AskGate's enforcement at the `dispatch` CLI, shared by the CLI and
   pi-envoy's gate: `gatedWrite(tool, args)`, the one list of gated writes (`ask`, `message`,
   `edit-ask`, `comment`, `doc-edit`, `request-approval`, an `issue` with a spec, an `artifact`
@@ -208,6 +184,15 @@
   session's start notice (`sessionSettings`' `notice`, which pi-envoy shows at `session_start`)
   names that value beside the deadline in force. The field reports that one raise: the 25 ms
   interval floor and the timer's ceiling are applied in silence and are not reported by it.
+
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by <user> at
+  <time> · options chosen: <labels>` and `Answer text: <text>` (each `none` when empty);
+  `Closed with no answer: <resolved|retracted> by <actor> at <time>: <reason>`; `Closed after an
+  answer: …` followed by `Last answer by …` and its `Answer text:`; or `Open: no answer yet.`. A
+  later line of a multi-line answer is indented four spaces, so it stays under its hit. A Dispatch
+  older than this release reports no state, and its ask hits read `Answer state not reported by
+  this Dispatch; open the link to read the ask.` rather than passing for open ones. `actorText`
+  moves to `actor-text.ts`, shared by the event log and the search answer (INFRA-569).
 
 - `askgateSetting(file)` reads AskGate's switch, the top-level `askgate` section of the session's
   envoy.json: `{"askgate":{"enabled":false}}` turns AskGate off. A section that does not parse

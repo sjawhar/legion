@@ -12,9 +12,11 @@
 #   pi   Oh My Pi in `--mode rpc --no-extensions -e <the checkout's packed pi-envoy>`
 #   cc   Claude Code under `legion claude-bridge -- claude -p --input-format stream-json
 #        --output-format stream-json --verbose --replay-user-messages …`, Claude Code from
-#        `bunx --package @anthropic-ai/claude-code@<version> claude`, with the checkout's
-#        claude-envoy as packages/daemon/internal/runtime/tmux/claude.go configures it (an MCP
-#        config naming dist/envoy-channel.js, both plugin directories, LEGION_CLAUDE_INBOX).
+#        `bunx --package @anthropic-ai/claude-code@<version> claude`, with claude-envoy built from
+#        the checkout (`packages/claude-envoy/scripts/build.ts --out` into the run's directory: a
+#        pull request's tree carries no fresh dist/) as
+#        packages/daemon/internal/runtime/tmux/claude.go configures it (an MCP config naming
+#        dist/envoy-channel.js, both plugin directories, LEGION_CLAUDE_INBOX).
 #
 # Each session reaches NATS only through a socat proxy of its own, which the script can cut. Every
 # server takes its port as lib/held-port.py gives it, never a port picked free a moment earlier:
@@ -59,9 +61,11 @@
 #   bash scripts/e2e/envoy-session-delivery.sh [--disruptions a,b,c,d,e,f]
 #       [--build-from <rev> [--expect-lost <agent,issue,role>]]
 #
-# --build-from <rev> builds the listener, pi-envoy, claude-envoy (its committed dist/) and the
-# `legion` bridge from <rev> instead, extracted with `git archive <rev> | tar -x` into the run's
-# directory; natsd and Dispatch stay this checkout's. The bridge's argv carries
+# --build-from <rev> builds the listener, pi-envoy, claude-envoy and the `legion` bridge from <rev>
+# instead, extracted with `git archive <rev> | tar -x` into the run's directory; natsd and Dispatch
+# stay this checkout's. claude-envoy is that tree's `scripts/build.ts --out` build when its
+# build.ts takes `--out`, else (a revision from before pull requests stopped committing dist/) its
+# committed dist/ and legion/. The bridge's argv carries
 # --replay-user-messages only when <rev>'s claude.go does. --expect-lost names the kinds that rev
 # is expected to lose under disruption a: the run then exits 0 only when every event of those kinds
 # in window a counted 0 in both sessions (the negative control), and the rest of the table is
@@ -363,7 +367,16 @@ mkdir -p "$work/pi-envoy"
 tar xzf "$tarball" -C "$work/pi-envoy" --strip-components=1
 pi_plugin="$work/pi-envoy/dist/envoy.js"
 [ -r "$pi_plugin" ] || fail "the packed pi-envoy holds no dist/envoy.js"
-claude_plugin="$tree/packages/claude-envoy"
+# claude-envoy built from the tree (`scripts/build.ts --out`), since a pull request's tree carries
+# no fresh dist/ or legion/; a revision whose build.ts takes no --out predates that and committed
+# both, so its own package directory is the plugin.
+if grep -q -- '--out <dir>' "$tree/packages/claude-envoy/scripts/build.ts"; then
+  claude_plugin="$work/claude-envoy"
+  (cd "$tree" && bun packages/claude-envoy/scripts/build.ts --out "$claude_plugin") >"$work/logs/build-claude-envoy.log" 2>&1 ||
+    fail "claude-envoy did not build from $tree; see $work/logs/build-claude-envoy.log"
+else
+  claude_plugin="$tree/packages/claude-envoy"
+fi
 [ -r "$claude_plugin/dist/envoy-channel.js" ] || fail "$claude_plugin has no dist/envoy-channel.js"
 replay_flag=()
 if grep -q -- '--replay-user-messages' "$tree/packages/daemon/internal/runtime/tmux/claude.go"; then

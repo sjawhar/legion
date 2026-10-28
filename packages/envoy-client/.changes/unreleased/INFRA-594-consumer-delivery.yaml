@@ -1,0 +1,22 @@
+kind: Added
+body: |-
+  `@legion/envoy-client/consumer-delivery`: the relay protocol of consumer delivery, which both
+  plugins share. `createConsumerDelivery` takes each frame the owning listener relays on
+  `notifications.envoy.deliver.<session id>` (`DELIVER_SUBJECT_PREFIX`, `decodeRelayFrame` for its
+  `Envoy-*` headers), answers `received` before any host work, hands the frames to the host one at
+  a time in stream order (a frame stops holding up the next once the host returns, releases it or
+  settles it), sends `progress` every 20 s while a frame is held unwritten, and answers `done`
+  once the host wrote it, or `nak` when the session cannot take it. A frame the replay ledger
+  already holds, one on a subject no followed topic matches, and one stored before its topic was
+  followed (2 s of clock allowance) are answered `done` unshown. A frame whose delivery threw is
+  answered `nak`, and from its third delivery on `done` with the host's failure notice. A frame
+  delivered before, or stored before the current NATS connection's epoch began, is marked `late`,
+  so a host never starts a side turn for it. The resume point (the lowest sequence held unwritten
+  minus one, else the highest written) and each topic's follow time are a snapshot the host
+  persists, and a registration answer that reports a gap or names another stream tells the
+  session once. `transport` gains the registration's `delivery` field (`DeliveryRequest`, with
+  `epoch` and `resume`) and the answer's (`DeliveryAnswer`, `deliveryAnswerOf`, which reads a
+  missing or unreadable field as `core`). `@legion/envoy-client/stream-topics`' `streamStores`
+  says whether the stream stores a topic, as the listener's `bus.StreamCaptures` does. The replay
+  engine's `setConsumerMode(true)` stops its `POST /v1/replay` calls while the listener relays the
+  session's consumer (INFRA-594).

@@ -101,10 +101,10 @@ omp plugin install @sjawhar/pi-envoy
 ```
 
 A session that had the pre-split package installed (the one package that carried both entries
-until 7.x) uninstalls it and installs this one once; the Unreleased entry of `CHANGELOG.md` gives
-the two commands. A Legion deployment installs `@sjawhar/pi-legion` as well
-(`packages/pi-legion/README.md`); the daemon's boot gate refuses a pane that still loads the
-pre-split package beside the new ones.
+until 7.x) uninstalls it and installs this one once; the `CHANGELOG.md` entry that renames the
+package `@sjawhar/pi-envoy` gives the two commands. A Legion deployment installs
+`@sjawhar/pi-legion` as well (`packages/pi-legion/README.md`); the daemon's boot gate refuses a
+pane that still loads the pre-split package beside the new ones.
 
 The tarball is self-contained: it ships `dist/envoy.js` — bundling every dependency except the OMP
 host packages (`@legion/pi-shared`, `@legion/contracts` and `@legion/envoy-client` are inlined) —
@@ -127,8 +127,8 @@ for `omp.extensions` (only `omp.skills` ships as committed, since `dist/skills` 
 a repo checkout after the prepack and the published tarball), while the committed manifest keeps
 the TypeScript entry for repo checkouts. In `.github/workflows/release.yaml`, the `pi_envoy_build`
 job rewrites the manifest before `bun pm pack` and uploads the tarball (its tree is discarded,
-nothing is restored); the `pi_envoy_publish` job publishes that tarball and commits the version bump
-to the committed manifest, touching `.version` alone.
+nothing is restored); the `publish` job publishes that tarball and commits the version bump to the
+committed manifest, touching `.version` alone.
 Packing with the committed source manifest is refused by the prepack, because such a tarball would
 point OMP at an extension file it does not contain.
 
