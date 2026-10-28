@@ -748,9 +748,11 @@ func isBareEmailLink(node *Node, marks []Mark) bool {
 		href, _ := mark.Attrs["href"].(string)
 		title, _ := mark.Attrs["title"].(string)
 		value := node.Text
-		var local emailRun
-		return title == "" && value != "" && href == emailHref(value) && local.read(value, 0, len(value)) == len(value) &&
-			strings.IndexByte("-_0123456789", value[len(value)-1]) < 0
+		if title != "" || href != emailHref(value) {
+			return false
+		}
+		found := findEmails(nil, value, 0, len(value))
+		return len(found) == 1 && found[0].start == 0 && found[0].end == len(value)
 	}
 	return false
 }

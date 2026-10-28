@@ -1919,39 +1919,54 @@ accepting a list beside one) therefore stores the two lists it made, and a `repl
 names a list item's marker names the one it is written with (`BlockMarker.Other`).
 
 A bare web address or email is read as the browser editor's engine, remark-gfm, reads it, by both of
-its readers (`linkify.go`, INFRA-531). Its tokenizer reads the markdown as written, before emphasis,
+its readers (INFRA-531). Its tokenizer (`linkify.go`) reads the markdown as written, before emphasis,
 code or links form: `linkifyGuard`, asked at every ASCII punctuation character, whitespace and head
 after every other inline parser declines, reads from there to the next character goldmark asks at
 (`readLiteralAddress`), and `underscoreEmail` reads an email at `_` before emphasis. Asking at a
 character no other parser triggers on ends goldmark's text there, so the guard gives the split text
 back (`linkifyBlock.settle`), and a markdown holding no address is counted and weighed as without
-it. Its transform reads, at block close, each run of text nodes between other nodes, decoded, its
-URL pattern first and its email pattern over what that leaves (`linkTextAddresses`); the two end
-an address differently (`x;https://x.test/a_ b` leaves the `_` out, `see http\://x.test/a_ b`
-keeps it), each as the engine does. So an address is a link after any punctuation, a letter
-outside ASCII, `]`, `|`, `!`, a character reference or an escape, a URL after a digit too, and at
-a line or table cell opening with punctuation, as in a comment and the browser editor. An email
-links to its `mailto:` URL (`emailHref`), as in the engine.
+it. Its transform (`autolink_transform.go`) reads, at block close, each run of text nodes between
+other nodes, decoded, its URL pattern first and its email pattern over what that leaves
+(`linkTextAddresses`); one decoder gives each text's decoded text and the source offset each of its
+characters was written at (`decodeMarkdownTextOffsets`), where an address's edges split the text.
+The two readers end an address differently (`x;https://x.test/a_ b` leaves the `_` out, `see
+http\://x.test/a_ b` keeps it), each as the engine does. So an address is a link after any
+punctuation, a letter outside ASCII, `]`, `|`, `!`, a character reference or an escape, a URL after
+a digit too, and at a line or table cell opening with punctuation, as in a comment and the browser
+editor. An email links to its `mailto:` URL (`emailHref`), as in the engine.
 
 The renderer writes a run of inline text so that it reads back as written. A bare URL is written as
 its bytes where the readers read it back whole (`isBareAutolink`, `isBareWWWLink`); where the run
 then reads back otherwise, because what follows runs on into it, it is written again as `<url>`, a
-www link as `[www…](http://www…)` (`runSpelling.angleURLs`). Plain text is written as it is: a
+www link as `[www…](http://www…)` (`runSpelling.angleURLs`). An email link is written as an
+explicit link, and as its address only where its run reads back in no other spelling
+(`runSpelling.bareEmails`), an address being text the transform's email matcher links whole
+(`isBareEmailLink` asks `findEmails`). Plain text is written as it is: a
 scheme's colon or an `@` is escaped only as a respelling, where the run would otherwise read back
 holding an address only the tokenizer reads, such as `http://localhost` or an email after a letter
 outside ASCII (`schemeColons`, `ats`, alone or with `angleURLs`). Plain text the transform reads
 (`see https://x.test`) has no plain spelling, since the transform reads the decoded text, so it is
-written as it is and reads back as a link, as the engine reads it. Marks are
+written as it is and reads back as a link, as the engine reads it. A text `<` the escape rules
+leave as it is, judged within its own text (`angleConstruct`), is escaped where what the run writes
+after it, out to a `>` in a later node, closes it into an autolink (`writeInlineRun`,
+`autolinkAt`): `&lt;javascript:void(a@b.cc)>`, whose email the readers link, would otherwise be
+written `<javascript:void([a@b.cc](mailto:a@b.cc))>` and read back as one autolink to a
+`javascript:` address. Marks are
 written in one order - link, strong, emphasis - so where a text still carries a mark the text
 before it opened, and the order puts that mark after the text's other marks, the mark is closed and
 opened again; where that puts two runs of one delimiter character side by side (bold inside italic:
 `*`, `**` and `*`), the parser reads one run. Such a run is kept where it reads back, as the parser
 then splits it as written, and one that does not is written again in the plain respellings, as main
-writes it again. Only where none of those reads back is it written with the marks still open kept
+writes it again. Only where none of those reads back, and a text is under more than one mark
+(`nestsMarks`), is it written with the marks still open kept
 open, then the marks the next text still carries, and the text's others opened inside them
 (`keepingOpen`), kept only where that reads back with nothing fused, so `_**a** b_` is written
 `***a** b*`; a run that fuses nothing is written as before, so italic closed around a link keeps
-its bytes.
+its bytes. A spelling that writes a delimiter run's neighbouring letter as a reference (`flanking`)
+is made only where such a letter stands beside one (`letterBesideDelimiter`). The respellings are
+listed in one order (`runSpellings`, over the run's `runNeeds`), and many write the same bytes, so
+each distinct writing is read back once (`inlineWithEscapes`, by the digest of its bytes), and the
+spelling kept is the one trying every spelling in that order would keep.
 
 A container that holds nothing is read as the browser editor's parser reads it, holding one empty
 paragraph (`emptyParagraphFirst`): an empty list item (`-`), quote (`>`), typed block or footnote
@@ -2049,8 +2064,8 @@ and the parser puts each definition back where it was written and removes the li
 document is read (`definitionsInPlace`). Goldmark's footnote transformer, which would order the
 definitions by first reference, drop the rest and append backlinks, is not used.
 
-Inline text, a link's and an image's title, an image's address and a footnote label are decoded in
-one pass from the left, as CommonMark and the browser editor's parser decode them
+Inline text, a link's and an image's title, a link's and an image's address and a footnote label
+are decoded in one pass from the left, as CommonMark and the browser editor's parser decode them
 (`decodeMarkdownText`): a backslash before ASCII punctuation is that character, so `\&amp;` is
 the text `&amp;`, and a character reference is decoded only where it is one to that parser
 (`characterReferenceAt`). Goldmark's `util.UnescapePunctuations` and Go's `html.UnescapeString`
@@ -2061,11 +2076,15 @@ numeric one of more than seven decimal or six hexadecimal digits, a legacy name 
 U+FFFD. Named references come from Go's HTML table, but for `&nLt;` and `&nGt;`, which it lacks.
 A line feed in text, a decoded `&#10;` among them, is a space, as that parser's import reads every
 line feed in a text node; an image's alt text keeps it. A typed block's attribute values keep
-HTML's attribute rules, as the parser reads them. The title writer (`titleSuffix`) and the image
-address writer (`escapeImageSource`) put a backslash before an `&` that would open a reference,
-and the image address writer doubles a backslash before punctuation in and out of a table, so each
-reads back; an `&` that opens none, as in `&foo;` or `AT&T`, is written as it is. A text link's
-address is still read as written (dispatch://INFRA-425).
+HTML's attribute rules, as the parser reads them. The title writer (`titleSuffix`) puts a
+backslash before an `&` that would open a reference. One writer writes a link's and an image's
+address (`escapeDestination`): an `&` that would open a reference as `&amp;` in a link's
+(`escapeLinkDestination`), so a stored `x?a=1&amp;amp;b=2` keeps its bytes, and as `\&` in an
+image's (`escapeImageSource`); a backslash before punctuation or ending the address doubled, in
+and out of a table; and an ASCII control character, which a decoded `&#9;`, `&#10;` or `&#12;`
+leaves there and which ends a destination or is none to the engine's parser, as its numeric
+reference (`asciiControl`). So each reads back; an `&` that opens none, as in `&foo;` or `AT&T`,
+is written as it is.
 
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node
