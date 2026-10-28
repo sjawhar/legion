@@ -3,7 +3,8 @@
 - The replay does not send browser document edits or settlements.
 - The replay does not reproduce the time that a CLI process takes to start between its requests.
 - The seed's historical versions hold the 22:55 text with a marker line. Each synthetic version changes as many bytes as the real version that it replaces.
-- The seed places an anchor whose logged quote is gone on a substitute sentence in the same block. INFRA-639's seed check records the count of these anchors.
+- The seed's anchor count, document sizes and history bytes are faithful. The placement of an anchor in its document is approximate when the seed puts the anchor on the nearest surviving block. The cost of the anchor refresh on each write scales with the anchor count and the document size, which are faithful. The cost of quote matching can depend on the placement of the anchors.
+- Some small synthetic versions in the seed change the logged number of bytes in the opposite direction: they add bytes where the real version removed bytes, or remove bytes where it added bytes. INFRA-639's seed check counts these versions in `sign_flipped`.
 - When the client's text does not hold the logged quote of an anchored comment, the replay sends a substitute quote. `summary.json` counts these in `replay.substitutes.quote`.
 - For a cut diff, and for a version with no diff, the replay sends substitute content of the logged size change. `summary.json` counts these in `replay.substitutes.edit`.
 - When version 1 of a created issue's spec was unreadable, the replay sends synthetic text of the logged size. `spec_sizes` counts these specs.

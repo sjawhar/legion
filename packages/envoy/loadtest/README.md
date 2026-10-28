@@ -1491,7 +1491,11 @@ loadgen run -allow-foreign -source replay -events 0 -requests 0 -replay-inputs /
 The reads, their mix, the upload share and the roster are INFRA-639's defaults. After it: the
 step's after-work (the copy back, the crash check, `cgroup-merge`, `tables`), then
 `loadgen codepaths -heap-start heap-start.pprof -heap-end heap-end.pprof -outage-cores 11.1,13.8
--outage-memory 13.8 -residual-notes cluster/replay-residual.md -window-offset <from>`.
+-outage-memory 13.8 -residual-notes <run>/replay-residual.md -window-offset <from>`, where
+`<run>/replay-residual.md` is `cluster/replay-residual.md` followed by two lines from the
+manifest's seed check: the anchors by placement rule, with the share placed on the nearest
+surviving block, and the versions whose size change has its sign flipped (`not recorded` for a
+count the check does not give).
 
 **`cgroup-merge` fills the replay block** of `summary.json`, whose CPU fields a foreign run leaves
 null (`cpu_source` `none`), from the `dispatch` role's samples: `cpu_source` `cgroup`;

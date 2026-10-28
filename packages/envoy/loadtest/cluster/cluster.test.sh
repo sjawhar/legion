@@ -23,9 +23,10 @@
 # step's reset looks up the nats-box pod once; loadgen and seed.json go into the runner only when
 # it does not hold them, and a step's directory is removed from the runner once copied back;
 # replay-prepare downloads and verifies the parts, streams the dump into the Postgres pod,
-# restores it and renames it to dispatch_replay, writing replay-prepared.json; a replay's loadgen
-# run holds -source replay -replay-rate 1 -replay-from 0 -replay-to 39m (5m under all --profile
-# quick), runs codepaths beside the outage, and is left out of curves; collect runs loadgen tables
+# restores it and renames it to dispatch_replay, writing replay-prepared.json and keeping the
+# manifest as replay-manifest.json; a replay's loadgen run holds -source replay -replay-rate 1
+# -replay-from 0 -replay-to 39m (5m under all --profile quick), runs codepaths beside the outage
+# with the run's replay-residual.md, and is left out of curves; collect runs loadgen tables
 # and curves over the steps in the order they ran (meta.json start, not the directory names'
 # order), loadgen codepaths in each step directory, and packs and uploads curves/ and TABLES.md as
 # phase results; all with a null-seed manifest prints one line per skipped replay phase and goes
@@ -39,7 +40,9 @@
 # before and after reads writes step-failed.json with kind restart; (g) the sampler writes an
 # error line with no number when its exec fails, and a numeric line when it reads; (h) when go and
 # the network reach helm, render-nats.sh re-renders nats.yaml equal to the committed file (else it
-# says it skipped that).
+# says it skipped that); (i) the run's residual notes are replay-residual.md's lines, then the seed
+# check's anchors by placement rule (with the share on the nearest surviving block) and its
+# sign-flipped versions, a count the check lacks written as "not recorded".
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -623,8 +626,15 @@ jq -e --arg c "$commit_ok" '.dispatch_commit == $c' "$run_dir/steps/r16/envoy-di
 { grep -q -- "cp $run_dir/steps/r16/last-reset.json runner:/work/root/replay/last-reset.json" "$fake/kubectl.log" &&
   grep -q -- "cp $run_dir/steps/r16/envoy-dispatch.json runner:/work/root/bin/envoy-dispatch.json" "$fake/kubectl.log"; } ||
   fail "replay r16 did not put last-reset.json and envoy-dispatch.json under the runner's LOADTEST_ROOT"
-grep -qx -- "codepaths -step $run_dir/steps/r16 -out $run_dir/steps/r16 -heap-start $run_dir/steps/r16/heap-start.pprof -heap-end $run_dir/steps/r16/heap-end.pprof -outage-cores 11.1,13.8 -outage-memory 13.8 -residual-notes $here/replay-residual.md -window-offset 0" \
+cmp -s "$seeded" "$run_dir/replay-manifest.json" || fail "replay-prepare did not keep the manifest as replay-manifest.json"
+grep -qx -- "codepaths -step $run_dir/steps/r16 -out $run_dir/steps/r16 -heap-start $run_dir/steps/r16/heap-start.pprof -heap-end $run_dir/steps/r16/heap-end.pprof -outage-cores 11.1,13.8 -outage-memory 13.8 -residual-notes $run_dir/replay-residual.md -window-offset 0" \
   "$fake/loadgen.log" || fail "replay r16 did not run loadgen codepaths beside the outage: $(grep '^codepaths ' "$fake/loadgen.log")"
+# The fixture's seed check holds neither anchor_rules nor sign_flipped.
+{
+  cat "$here/replay-residual.md"
+  printf '%s\n' '- Anchors by placement rule (seed check): not recorded on the logged quote, not recorded on a sentence in the logged block, not recorded on the nearest surviving block, of not recorded (share placed approximately not recorded).' \
+    "- Seed versions with the size change's sign flipped (seed check): not recorded."
+} | cmp -s - "$run_dir/replay-residual.md" || fail "the run's replay-residual.md is not the residual notes and the seed check's lines: $(cat "$run_dir/replay-residual.md")"
 grep -qx r16 "$run_dir/phases/replay" || fail "replay r16 is not in the phase replay"
 [ "$(grep -c -- "^-n $ns cp $run_dir/loadgen runner:/work/loadgen " "$fake/kubectl.log")" = 1 ] ||
   fail "loadgen was copied into the runner again although the runner held it since up"
@@ -897,6 +907,7 @@ pass "a restart between the before and after container reads writes step-failed.
   # shellcheck source=packages/envoy/loadtest/cluster/cluster.sh
   source "$cluster"
   NS=$ns
+  # shellcheck disable=SC2030 # this root stays in (g)'s subshell; (i) sources cluster.sh in its own
   LOADTEST_CLUSTER_ROOT=$tmp/root-sampler
   CLUSTER_ROOT=$LOADTEST_CLUSTER_ROOT
   set_run lt-20261028t120000-abcd
@@ -932,3 +943,35 @@ if PATH=$real_path command -v go >/dev/null &&
 else
   printf 'SKIP: go or the network does not reach helm and the chart, so manifests/nats.yaml was not compared with a fresh render\n'
 fi
+
+# ---- (i) the replay residual's seed-check lines -------------------------------------------------
+
+(
+  # shellcheck source=packages/envoy/loadtest/cluster/cluster.sh
+  source "$cluster"
+  dir=$tmp/residual
+  mkdir -p "$dir"
+  printf -- '- First note.\n- Second note.\n' >"$dir/notes.md"
+  write_manifest "$dir/full.json" '{"passed": true, "version_size_mismatches": 0, "anchors_outside_logged_block": 0, "sign_flipped": 21,
+    "anchor_rules": {"logged_quote": 4110, "in_logged_block": 960, "nearest_surviving_block": 7002}}'
+  printf '%s\n' '- First note.' '- Second note.' \
+    '- Anchors by placement rule (seed check): 4110 on the logged quote, 960 on a sentence in the logged block, 7002 on the nearest surviving block, of 12072 (58.0% placed approximately).' \
+    "- Seed versions with the size change's sign flipped (seed check): 21." >"$dir/want"
+  replay_residual_notes "$dir/notes.md" "$dir/full.json" >"$dir/got" || fail "replay_residual_notes failed on a full seed check"
+  diff -u "$dir/want" "$dir/got" >&2 || fail "replay_residual_notes of a full seed check is not the notes and the two exact lines"
+
+  write_manifest "$dir/no-sign.json" '{"passed": true, "version_size_mismatches": 0, "anchors_outside_logged_block": 0,
+    "anchor_rules": {"logged_quote": 2, "in_logged_block": 0, "nearest_surviving_block": 1}}'
+  printf '%s\n' '- First note.' '- Second note.' \
+    '- Anchors by placement rule (seed check): 2 on the logged quote, 0 on a sentence in the logged block, 1 on the nearest surviving block, of 3 (33.3% placed approximately).' \
+    "- Seed versions with the size change's sign flipped (seed check): not recorded." >"$dir/want"
+  replay_residual_notes "$dir/notes.md" "$dir/no-sign.json" >"$dir/got" || fail "replay_residual_notes failed on a seed check without sign_flipped"
+  diff -u "$dir/want" "$dir/got" >&2 || fail "replay_residual_notes does not write a missing sign_flipped as not recorded"
+
+  printf '%s\n' '- First note.' '- Second note.' \
+    '- Anchors by placement rule (seed check): not recorded on the logged quote, not recorded on a sentence in the logged block, not recorded on the nearest surviving block, of not recorded (share placed approximately not recorded).' \
+    "- Seed versions with the size change's sign flipped (seed check): not recorded." >"$dir/want"
+  replay_residual_notes "$dir/notes.md" "$dir/absent.json" >"$dir/got" || fail "replay_residual_notes failed with no manifest"
+  diff -u "$dir/want" "$dir/got" >&2 || fail "replay_residual_notes with no manifest does not write every count as not recorded"
+)
+pass "the replay residual is the notes, then the seed check's anchors by placement rule and sign-flipped versions, a missing count as not recorded"

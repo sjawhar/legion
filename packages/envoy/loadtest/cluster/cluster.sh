@@ -40,12 +40,14 @@
 #       (its schema_version), the block-index backfill and the quiet check (Dispatch below 0.05
 #       cores over 30 s in the sampler's cgroup reads); stops both, runs vacuum analyze and
 #       loadgen replay-checksum, and renames the database to dispatch_replay. Writes
-#       <run>/replay-prepared.json. A template of the same seed dump is reused.
+#       <run>/replay-prepared.json, and keeps the manifest as <run>/replay-manifest.json. A
+#       template of the same seed dump is reused.
 #   cluster.sh replay --namespace NS NAME [--from 0] [--to 39m]
 #       The reset from dispatch_replay (refused without it), the bundle into the runner, then
 #       loadgen run -allow-foreign -source replay at rate 1 over the sub-window, then the step's
 #       after-work and loadgen codepaths beside the outage (11.1-13.8 cores, 13.8 GiB, the
-#       residual from replay-residual.md).
+#       residual <run>/replay-residual.md: replay-residual.md's lines, then the seed check's anchors
+#       by placement rule and sign-flipped versions from <run>/replay-manifest.json).
 #   cluster.sh collect --namespace NS [--upload-issue KEY]
 #       Every step in the order the steps ran (meta.json start): the cross-step TABLES.md,
 #       loadgen curves into <run>/curves over every step but the phase replay's, loadgen codepaths
@@ -1294,6 +1296,7 @@ replay_prepare_run() {
   local manifest=$1 from_dir=$2 rdir=$RUN_DIR/replay rec=$RUN_DIR/replay-prepared.json
   local dump_sha t0 total0=$EPOCHREALTIME
   dump_sha=$(jq -er .seed.dump_sha256 "$manifest")
+  cp -- "$manifest" "$RUN_DIR/replay-manifest.json"
   if [ -f "$rec" ] && [ "$(jq -r .seed_dump_sha256 "$rec")" = "$dump_sha" ] && db_exists "$REPLAY_TEMPLATE"; then
     note "replay-prepare: the template $REPLAY_TEMPLATE of seed dump $dump_sha exists ($rec); reused"
     return 0
@@ -1385,12 +1388,37 @@ replay_prepare_run() {
   note "replay-prepare done: template $REPLAY_TEMPLATE; $(jq -c '{migration_before, migration_after, schema_version, checksum, seconds}' "$rec")"
 }
 
+# replay_residual_notes NOTES MANIFEST: the residual notes file NOTES, then two list lines from the
+# seed check (seed.check) of the replay manifest MANIFEST: the anchors by placement rule, with the
+# share on the nearest surviving block (placed approximately), and the versions whose size change
+# has its sign flipped. A count that the check does not hold, or a MANIFEST that is not there,
+# reads "not recorded", never 0.
+replay_residual_notes() {
+  cat -- "$1" || return 1
+  { if [ -f "$2" ]; then cat -- "$2"; else echo null; fi; } | jq -r '
+    def count: if type == "number" then tostring else "not recorded" end;
+    (try .seed.check catch null) as $c
+    | (if ($c | type) == "object" then $c else {} end) as $c
+    | (if ($c.anchor_rules | type) == "object" then $c.anchor_rules else {} end) as $r
+    | [$r.logged_quote, $r.in_logged_block, $r.nearest_surviving_block] as $n
+    | (if all($n[]; type == "number") then
+        ($n | add) as $sum
+        | if $sum == 0 then "0 (none placed approximately)"
+          else (($n[2] * 1000 / $sum) | round) as $t | "\($sum) (\($t / 10 | floor).\($t % 10)% placed approximately)" end
+      else "not recorded (share placed approximately not recorded)" end) as $of
+    | "- Anchors by placement rule (seed check): \($n[0] | count) on the logged quote, \($n[1] | count) on a sentence in the logged block, \($n[2] | count) on the nearest surviving block, of \($of).",
+      "- Seed versions with the size change'"'"'s sign flipped (seed check): \($c.sign_flipped | count)."'
+}
+
 # replay_codepaths DIR OFFSET: loadgen codepaths of the replay step DIR beside the outage: its
-# heap profiles, the outage's cores and memory, the residual notes and the window's offset from
-# 22:55.
+# heap profiles, the outage's cores and memory, the run's residual notes (replay_residual_notes of
+# replay-residual.md and the prepared manifest, into <run>/replay-residual.md) and the window's
+# offset from 22:55.
 replay_codepaths() {
+  local notes=$RUN_DIR/replay-residual.md
+  replay_residual_notes "$here/replay-residual.md" "$RUN_DIR/replay-manifest.json" >"$notes" || return 1
   loadgen_local codepaths -step "$1" -out "$1" -heap-start "$1/heap-start.pprof" -heap-end "$1/heap-end.pprof" \
-    -outage-cores "$OUTAGE_CORES" -outage-memory "$OUTAGE_MEMORY_GIB" -residual-notes "$here/replay-residual.md" -window-offset "$2"
+    -outage-cores "$OUTAGE_CORES" -outage-memory "$OUTAGE_MEMORY_GIB" -residual-notes "$notes" -window-offset "$2"
 }
 
 # run_replay NAME FROM TO PHASE: one replay step (see the header), into steps/NAME.
