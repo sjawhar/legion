@@ -1,5 +1,5 @@
 // Package processes is the registry of live envoy-dispatch server processes (INFRA-555, migration
-// 0130): one server_processes row per process that serves requests, written once the process has
+// 0135): one server_processes row per process that serves requests, written once the process has
 // bound its port and before it serves anything, kept alive by a heartbeat, and deleted once its
 // HTTP drain has ended. Which rows are live is measured on the database's clock, never a process's
 // own, since two hosts' clocks differ by whatever theirs do.
@@ -9,25 +9,25 @@
 // one process is presented to another on the next request, and a key one of them does not hold
 // signs that person out. A process with no DISPATCH_SIGNING_KEY signs with a key it minted in its
 // own data dir, which no other process holds, so it is refused beside any live peer, and so is a
-// pod rolled with a changed secret beside pods that hold only the old one.
+// pod rolled with a changed secret beside pods that hold only the old one. A refusal stands only
+// beside a process that stays live: Register waits up to LiveWindow and one HeartbeatInterval for
+// the refusing process to stop heartbeating, so a process restarted after a kill, whose dead row
+// still counts as live for up to LiveWindow, starts once that row lapses.
 //
-// Each row also records what INFRA-558's decisions over the fleet read (migration 0133): the
+// Each row also records what INFRA-558's decisions over the fleet read (migration 0138): the
 // document schema numbers the process reads and creates, which the document socket's admission
 // takes (docs.Service.authorize), its embedder's identity, and whether it stores files in a bucket.
 package processes
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"slices"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -79,11 +79,11 @@ const pruneLease = "server-processes"
 var ErrKeySetMismatch = errors.New("this process's signing key set does not match a live server process's")
 
 // Instance is what a process registers: the build it serves, the keys it signs and verifies with,
-// and what INFRA-558's fleet decisions read (migration 0133).
+// and what INFRA-558's fleet decisions read (migration 0138).
 type Instance struct {
 	// Commit is the legion commit the binary was stamped with, "" for an unstamped build.
 	Commit string
-	// DashboardBuild names the dashboard the process serves (DashboardBuild), "" for none.
+	// DashboardBuild names the dashboard the process serves (routes.DashboardBuild), "" for none.
 	DashboardBuild string
 	// SigningKeys is the fingerprint of each key of the process's DISPATCH_SIGNING_KEY set
 	// (auth.SigningKeys.Fingerprints), the current key first. It holds at least that one.
@@ -121,7 +121,7 @@ type Process struct {
 }
 
 // PredatesFleetColumns reports whether p is a process of a build before INFRA-558, whose row holds
-// the defaults of the columns migration 0133 added: no build that registers them reads schema
+// the defaults of the columns migration 0138 added: no build that registers them reads schema
 // version 0. A decision over the fleet leaves such a process out of the numbers it takes from the
 // live rows, as it leaves out a build that does not register at all.
 func (p Process) PredatesFleetColumns() bool { return p.SchemaVersion == 0 }
@@ -186,7 +186,19 @@ type Registration struct {
 // the other's, so a cookie either one mints verifies on the other. "K1 K0" beside "K0 K1" shares;
 // a process that minted a key of its own beside any other does not.
 //
-// The read and the insert are one transaction under registryLock, so two processes booting at once
+// A refusal stands only beside a process that stays live. A process killed without deregistering
+// (SIGKILL, out of memory, its node lost) leaves a row that counts as live for up to LiveWindow
+// after its last heartbeat, and a process started in that window with another key set - a dev
+// sign-in server restarted after a kill, since its key is minted per process, or a pod replaced
+// with a changed secret - would be refused by a process that no longer runs. So Register waits
+// (waitForAdmission): a refusal is logged at WARN, naming the refusing process, and the admission
+// is tried again every HeartbeatInterval until it is admitted, once the refusing rows have
+// lapsed, or until LiveWindow and one HeartbeatInterval have passed since the first refusal, which
+// a live process outlasts by heartbeating every HeartbeatInterval: then Register returns that last
+// refusal. The caller serves nothing meanwhile, since it serves only once Register returns, and
+// ctx ending ends the wait with ctx's error.
+//
+// Each admission is one transaction under registryLock (admit), so two processes booting at once
 // are serialised: the second reads the first's row and is refused if the two do not share. A row
 // whose heartbeat is older than LiveWindow is a process gone, and refuses nothing; should that
 // process resume, its heartbeat checks its keys against this one before it counts as live again
@@ -211,8 +223,8 @@ func Register(ctx context.Context, pool *store.Pool, instance Instance) (*Regist
 	if err != nil {
 		return nil, fmt.Errorf("open the server process registry's pool: %w", err)
 	}
-	id, err := insertUnlessRefused(ctx, own, instance)
-	if err != nil {
+	id := uuid.NewString()
+	if err := waitForAdmission(ctx, own, id, instance); err != nil {
 		own.Close()
 		return nil, err
 	}
@@ -222,41 +234,87 @@ func Register(ctx context.Context, pool *store.Pool, instance Instance) (*Regist
 	return registration, nil
 }
 
-// insertUnlessRefused is Register's transaction: the lock, the read of the live rows, the check
-// against each, and the insert.
-func insertUnlessRefused(ctx context.Context, pool *pgxpool.Pool, instance Instance) (string, error) {
+// waitForAdmission is Register's wait: tryRegister every HeartbeatInterval until it admits the
+// process, or until LiveWindow and one HeartbeatInterval have passed since its first refusal, when
+// that last refusal is returned. A refusal naming another process than the one before is logged
+// again, so the log names every process the wait was on.
+func waitForAdmission(ctx context.Context, pool *pgxpool.Pool, id string, instance Instance) error {
+	var giveUp time.Time
+	logged := ""
+	for {
+		refusal, err := tryRegister(ctx, pool, id, instance)
+		if err != nil {
+			return fmt.Errorf("register this server process: %w", err)
+		}
+		if refusal == nil {
+			return nil
+		}
+		if giveUp.IsZero() {
+			giveUp = time.Now().Add(LiveWindow + HeartbeatInterval)
+		}
+		if !time.Now().Before(giveUp) {
+			return refusal
+		}
+		if refusal.Error() != logged {
+			logged = refusal.Error()
+			slog.Warn("dispatch: a live server process refuses this one's signing keys; waiting for its heartbeat to lapse, as a process killed without deregistering lets it, before this one refuses to start",
+				"instance", id, "refusal", refusal, "gives_up_in", time.Until(giveUp).Round(time.Millisecond))
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("register this server process: %w", ctx.Err())
+		case <-time.After(HeartbeatInterval):
+		}
+	}
+}
+
+// tryRegister is one admission of Register, in its own transaction under registryLock: admit's
+// refusal, nil once the row is written, and an error when no decision was reached.
+func tryRegister(ctx context.Context, pool *pgxpool.Pool, id string, instance Instance) (refusal error, err error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return "", fmt.Errorf("register this server process: %w", err)
+		return nil, err
 	}
 	// A no-op once the transaction has committed.
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock($1)`, registryLock); err != nil {
-		return "", fmt.Errorf("register this server process: %w", err)
+		return nil, err
 	}
+	if refusal, err := admit(ctx, tx, id, instance); refusal != nil || err != nil {
+		return refusal, err
+	}
+	return nil, tx.Commit(ctx)
+}
+
+// admit is the registry's admission check, made in tx under registryLock, which its caller holds:
+// against every live process but id itself, it returns the refusal of the first whose key set does
+// not share instance's (keySetsShared) and writes nothing; when each shares, it writes id's row as
+// instance, or, where the row is there already (a lapsed heartbeat, Registration.renew), stamps its
+// heartbeat. The second result is a failure to reach a decision. The caller commits.
+func admit(ctx context.Context, tx pgx.Tx, id string, instance Instance) (refusal error, err error) {
 	live, err := Live(ctx, tx)
 	if err != nil {
-		return "", fmt.Errorf("register this server process: %w", err)
+		return nil, err
 	}
 	for _, peer := range live {
+		if peer.ID == id {
+			// A lapsed row Live still counts by the transaction's now() (Registration.renew).
+			continue
+		}
 		if err := keySetsShared(peer, instance.SigningKeys); err != nil {
-			return "", err
+			return err, nil
 		}
 	}
-	var id string
-	if err := tx.QueryRow(ctx, `
+	if _, err := tx.Exec(ctx, `
 		insert into server_processes (instance, commit, dashboard_build, signing_keys,
 			schema_version, schema_creatable, embedder_identity, file_store)
-		values (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7)
-		returning instance::text`,
-		instance.Commit, instance.DashboardBuild, instance.SigningKeys,
-		instance.SchemaVersion, instance.SchemaCreatable, instance.EmbedderIdentity, instance.FileStore).Scan(&id); err != nil {
-		return "", fmt.Errorf("register this server process: %w", err)
+		values ($1, $2, $3, $4, $5, $6, $7, $8)
+		on conflict (instance) do update set heartbeat_at = now()`,
+		id, instance.Commit, instance.DashboardBuild, instance.SigningKeys,
+		instance.SchemaVersion, instance.SchemaCreatable, instance.EmbedderIdentity, instance.FileStore); err != nil {
+		return nil, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return "", fmt.Errorf("register this server process: %w", err)
-	}
-	return id, nil
+	return nil, nil
 }
 
 // rotationAdvice is what every refusal tells the operator to do.
@@ -337,9 +395,9 @@ func (r *Registration) beat(ctx context.Context) error {
 // registered since has checked its keys against this one. A row that had dropped out of Live -
 // the process frozen, or cut from the database, for longer than LiveWindow - or that is gone,
 // pruned after PruneAge, is a process that any registrant meanwhile counted as gone, so renew
-// makes Register's check again before it writes the row: against every live process, it rejoins
-// (logged at WARN) when each shares this process's key set, and otherwise records nothing and
-// returns the refusal, the first result. The second is a failure to reach a decision.
+// makes Register's check again (admit) before it writes the row: against every live process, it
+// rejoins (logged at WARN) when each shares this process's key set, and otherwise records nothing
+// and returns the refusal, the first result. The second is a failure to reach a decision.
 //
 // Whether the row is live is measured with clock_timestamp() read after the lock is held, not the
 // transaction's now(). A registrant measures liveness with its own transaction's now(), which is
@@ -370,27 +428,12 @@ func (r *Registration) renew(ctx context.Context) (refusal error, err error) {
 		}
 		return nil, tx.Commit(ctx)
 	}
-	peers, err := Live(ctx, tx)
+	refusal, err = admit(ctx, tx, r.ID, r.instance)
 	if err != nil {
 		return nil, err
 	}
-	for _, peer := range peers {
-		if peer.ID == r.ID {
-			// Live by the transaction's now(), lapsed by the clock read under the lock.
-			continue
-		}
-		if err := keySetsShared(peer, r.instance.SigningKeys); err != nil {
-			return fmt.Errorf("this server process's heartbeat lapsed, and it cannot count as live again: %w", err), nil
-		}
-	}
-	if _, err := tx.Exec(ctx, `
-		insert into server_processes (instance, commit, dashboard_build, signing_keys,
-			schema_version, schema_creatable, embedder_identity, file_store)
-		values ($1, $2, $3, $4, $5, $6, $7, $8)
-		on conflict (instance) do update set heartbeat_at = now()`,
-		r.ID, r.instance.Commit, r.instance.DashboardBuild, r.instance.SigningKeys,
-		r.instance.SchemaVersion, r.instance.SchemaCreatable, r.instance.EmbedderIdentity, r.instance.FileStore); err != nil {
-		return nil, err
+	if refusal != nil {
+		return fmt.Errorf("this server process's heartbeat lapsed, and it cannot count as live again: %w", refusal), nil
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
@@ -451,21 +494,4 @@ func prune(ctx context.Context, pool *store.Pool) (int64, error) {
 		return 0, err
 	}
 	return tag.RowsAffected(), nil
-}
-
-// DashboardBuild names the dashboard build served from webDistDir: lowercase hex of the first 16
-// bytes of the SHA-256 of its index.html, the page every dashboard route answers. They are the
-// bytes routes.servePage hashes for that page's ETag, and the same hash, so two processes report
-// one build exactly when they answer one page. It is "" when there is no dashboard to serve: no
-// directory, no index.html, or one this process cannot read.
-func DashboardBuild(webDistDir string) string {
-	if webDistDir == "" {
-		return ""
-	}
-	page, err := os.ReadFile(filepath.Join(webDistDir, "index.html"))
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(page)
-	return hex.EncodeToString(sum[:16])
 }

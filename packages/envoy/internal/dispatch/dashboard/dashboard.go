@@ -4,7 +4,7 @@
 // tab holding one build's page asks for that build's content-hashed chunks, and whichever process
 // answers must have them. Every process publishes its build at boot, before it listens (Publish),
 // prunes the builds no process needs (Prune), and answers a local miss from the database (Store,
-// the router's routes.AssetStore). The tables are migration 0131's.
+// the router's routes.AssetStore). The tables are migration 0136's.
 package dashboard
 
 import (
@@ -24,9 +24,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // KeepNewest is how many of the most recently started builds Prune keeps beside the live ones: a
@@ -47,8 +47,8 @@ var (
 	entryPath    = regexp.MustCompile(`^/assets/index-[^/]+\.js$`)
 )
 
-// BuildID returns the build id of the web dist at distDir — processes.DashboardBuild's name for
-// it, the one each process records in the registry of live server processes — and the entry chunk
+// BuildID returns the build id of the web dist at distDir — routes.DashboardBuild's name for it,
+// the one each process records in the registry of live server processes — and the entry chunk
 // its page names (`/assets/index-*.js`, the path a tab compares to tell builds apart, read as
 // DeploymentResilience.tsx reads it), or an empty entry when the page names none. It returns
 // ErrNoBuild when there is no index.html.
@@ -60,7 +60,7 @@ func BuildID(distDir string) (build, entry string, err error) {
 	if err != nil {
 		return "", "", fmt.Errorf("read the dashboard's index.html: %w", err)
 	}
-	if build = processes.DashboardBuild(distDir); build == "" {
+	if build = routes.DashboardBuild(distDir); build == "" {
 		return "", "", errors.New("read the dashboard's index.html: it could not be read a second time")
 	}
 	for _, match := range scriptSource.FindAllSubmatch(page, -1) {
@@ -309,8 +309,14 @@ func NewStore(pool *store.Pool) *Store {
 }
 
 // GetAsset returns the bytes stored under key, or routes.ErrAssetNotFound when no build published
-// that path.
+// that path. The key is a Postgres text parameter, which cannot hold a NUL byte or invalid UTF-8:
+// Postgres refuses such a key (SQLSTATE 22021) rather than finding no row, and that refusal would
+// be a store failure for a name no build can hold, since every stored path is a text value. Such a
+// key is answered as missing without asking.
 func (s *Store) GetAsset(ctx context.Context, key string) ([]byte, error) {
+	if !text.Storable(key) {
+		return nil, routes.ErrAssetNotFound
+	}
 	var content []byte
 	err := s.pool.QueryRow(ctx, `select content from dashboard_assets where path = $1`, key).Scan(&content)
 	if errors.Is(err, pgx.ErrNoRows) {

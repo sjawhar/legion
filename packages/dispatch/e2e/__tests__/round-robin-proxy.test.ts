@@ -432,10 +432,16 @@ describe("DISPATCH_E2E_PROCESSES", () => {
         '#!/usr/bin/env bash\necho "given binary in $PWD with DISPATCH_TEST_HOOKS=$DISPATCH_TEST_HOOKS DISPATCH_WEB_DIST=$DISPATCH_WEB_DIST"\n',
         { mode: 0o755 }
       );
+      // run-server.sh reads the fakes' ports, and a given binary binds a port of its own: it may
+      // not serve on a held socket.
       const environment = {
         DATABASE_URL: "postgres://postgres@127.0.0.1:1/never-opened",
+        DISPATCH_E2E_PORT: "8777",
         DISPATCH_E2E_SERVER_BINARY: binary,
         DISPATCH_E2E_SERVER_WEB_DIST: "/given/web",
+        FAKE_BROKER_PORT: "9024",
+        FAKE_ENVOY_PORT: "9021",
+        FAKE_GITHUB_PORT: "9022",
       };
       const ran = Bun.spawn(["bash", runServer], {
         env: { PATH: process.env.PATH ?? "", ...environment },
@@ -456,16 +462,29 @@ describe("DISPATCH_E2E_PROCESSES", () => {
       expect(missing.stderr).toContain(
         `DISPATCH_E2E_SERVER_BINARY names ${join(directory, "absent")}, which is not an executable file`
       );
+
+      const { DISPATCH_E2E_PORT: _, ...portless } = environment;
+      const held = await run(["bash", runServer], portless);
+      expect(held.code).not.toBe(0);
+      expect(held.stderr).toContain(
+        "DISPATCH_E2E_SERVER_BINARY needs DISPATCH_E2E_PORT: a given build may not serve on a held socket"
+      );
     } finally {
       rmSync(directory, { force: true, recursive: true });
     }
   });
 
   test("A's and B's ports join the collision check in two-process mode only", async () => {
-    const clash = { DISPATCH_E2E_PORT_A: "9021" };
-    const twoProcesses = await importPorts({ ...clash, DISPATCH_E2E_PROCESSES: "2" });
+    // The ports resolve, and a collision is refused, when `harnessPorts` is called, not on import.
+    const resolve = [
+      "bun",
+      "-e",
+      `(await import(${JSON.stringify(harnessPortsModule)})).harnessPorts()`,
+    ];
+    const clash = { DISPATCH_E2E_PORT_A: "9021", FAKE_ENVOY_PORT: "9021" };
+    const twoProcesses = await run(resolve, { ...clash, DISPATCH_E2E_PROCESSES: "2" });
     expect(twoProcesses.code).not.toBe(0);
     expect(twoProcesses.stderr).toContain("DISPATCH_E2E_PORT_A and FAKE_ENVOY_PORT name port 9021");
-    expect((await importPorts(clash)).code).toBe(0);
+    expect((await run(resolve, clash)).code).toBe(0);
   });
 });

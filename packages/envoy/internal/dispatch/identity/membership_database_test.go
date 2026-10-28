@@ -82,7 +82,7 @@ func TestMembershipAgesAConfirmationByTheDatabasesClock(t *testing.T) {
 		t.Fatalf("Confirm of a confirmation the database dates %s old: err=%v refreshes=%d, want nil and none", MembershipMaxAge-time.Minute, err, refreshes.Load())
 	}
 	confirmedAgo(MembershipMaxAge + time.Minute)
-	if err := membership.Confirm(ctx, memberEmail); !errors.Is(err, oidc.ErrIssuerUnavailable) || refreshes.Load() != 1 {
-		t.Fatalf("Confirm of a confirmation the database dates %s old: err=%v refreshes=%d, want the refresh's oidc.ErrIssuerUnavailable after one refresh", MembershipMaxAge+time.Minute, err, refreshes.Load())
+	if err := membership.Confirm(ctx, memberEmail); !errors.Is(err, ErrSignInUnavailable) || refreshes.Load() != 1 {
+		t.Fatalf("Confirm of a confirmation the database dates %s old: err=%v refreshes=%d, want ErrSignInUnavailable after one refresh", MembershipMaxAge+time.Minute, err, refreshes.Load())
 	}
 }

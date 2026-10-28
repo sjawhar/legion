@@ -1,114 +1,45 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
-- Two Dispatch builds, the one that serves and the one a release rolls in beside it, now serve one
-  Postgres and one NATS together, in both directions, and no release stops every server process.
-  `cmd/dispatch/README.md` ("Two builds at once") gives the rule each release keeps while the build
-  before it serves, for request bodies, routes, query values and opaque tokens, socket frames,
-  response members, stored documents, NATS settings and subjects, settings and SQL; the exception
-  for stop-the-world migrations is gone. `0113` and `0117` stay deployed as they were, and a
-  deployment still on a release before `0117` crosses it once with Dispatch stopped, before it
-  runs more than one replica. Stream and consumer generations and the delivery holds protect from
-  the release after this one: the build before it compares settings without generations, binds
-  its durable with no hold and refuses request members it does not declare, so this release
-  changes no request member, document element, stream or consumer setting, or loop interval
-  (INFRA-558).
-- The two-build test, `go test -tags twobuild ./cmd/dispatch` (`cmd/dispatch/twobuild_test.go`),
-  runs a previous build and this tree on one Postgres and one NATS: each build's `dispatch` command
-  against the other's server, each build's corpus documents read, edited, approved and opened on the
-  other's document socket, and outbox events, GitHub messages and the stream and consumer settings
-  across a stop and restart of each build. `scripts/build-dispatch-build.sh --commit <sha|tag>
-  --out <dir>` (or `--previous-release`, the newest `legion-envoy-v*` tag in the history of the
-  branch's merge base with `origin/main`) builds that previous build from `git archive` of its
-  commit, and refuses a commit whose migrations stop below `0117`. The CI job `dispatch-two-builds`
-  runs it against the previous release, or against the commit a manual run names (INFRA-558).
-  The job then runs the browser half, `packages/dispatch/e2e/cross-build.multiprocess.e2e.ts`, in
-  the browser suite's two-process mode with Dispatch B run from the previous build
-  (`DISPATCH_E2E_BINARY_B` and `DISPATCH_E2E_WEB_DIST_B`): each build's page against the other
-  build's server signs in, opens an issue list and an issue, comments, answers an ask, edits the
-  issue's document and sees the edit from a page of the other build, and opens the Delivery page,
-  whose socket subscribes. The round-robin proxy's `dispatch-e2e-page` and `dispatch-e2e-api`
-  cookies split one browser context that way. Under `DISPATCH_TEST_HOOKS=1`,
-  `POST /api/v1/artifacts/{id}/_test/newer-content` appends an element no build knows, so the same
-  spec opens a document holding newer content (INFRA-558).
-- `409 DOC_NEWER_CONTENT`: a stored document tree holding an element this Dispatch build does not
-  know (a node, mark or typed block its manifest does not name, an undeclared attribute or an
-  unlisted enum value), which a newer build wrote during a release. `/text`, `/blocks`,
-  `POST /edits` and `POST /versions` answer it with one message that names the element and says to
-  try again in one minute; the document socket closes with `4425`, which the provider reconnects
-  on. Nothing repairs such a document: a replacement from markdown, an upload over it and a rebuild
-  are refused and change nothing, settlement writes no version of it, and the dashboard shows "This
-  document holds content this version of Dispatch cannot show yet. It reloads in a minute." with no
-  upload or rebuild, and admits the document again on its own (INFRA-558).
-- A page's document socket is writable by the numbers of every live server process, not by an
-  exact match of its schema version with the answering process's. Each process records, in four
-  new `server_processes` columns (migration `0133_server_processes_schema`, constant defaults,
-  nothing rewritten), the schema version it reads and the highest `since` it creates, its
-  embedder's identity and whether it stores files in a bucket. A page presenting `schema_version`
-  V and `schema_creatable` R is writable on an open issue when R is at most every live process's
-  version and V is at least every live process's creatable version and the highest `since` the
-  document holds; a page without `schema_creatable` counts V as R, and a process before this
-  release is left out. The Hocuspocus token's answer is the decision its socket was admitted
-  with, and a token no waiting socket presented is read-only. Every 15 s each process closes with
-  `1012` each writable document socket the fleet no longer admits, and the provider reconnects
-  (INFRA-558).
-- `GET /api/v1/dashboard/builds` says which dashboard builds Dispatch serves, to any
-  authenticated caller: `{serving, live}`, `serving` the entry chunk (`/assets/index-*.js`) of the
-  build the answering process serves (`""` when it serves none) and `live` the distinct entry
-  chunks of the builds every live server process serves, sorted. The dashboard's update notice
-  reads it (Changed, below).
-- `DISPATCH_DEV_SIGNIN_SHARED_KEY`, only beside `DISPATCH_DEV_SIGNIN=1` (boot refuses it
-  otherwise), gives every dev-sign-in process set to one value one session-cookie key, so a person
-  signed in on one of them is signed in on the others. The key is HMAC-SHA256 of the value under
-  the fixed label `dispatch dev sign-in`, never the value itself, so a production
-  `DISPATCH_SIGNING_KEY` placed there signs no cookie a production server accepts. Unset, each
-  dev-sign-in process still generates a key of its own. The Dispatch browser suite's two-process
-  mode relies on it: `DISPATCH_E2E_PROCESSES=2` (`bun run e2e:multiprocess` in
-  `packages/dispatch`) runs two servers on one database, serving two builds of the dashboard,
-  behind a round-robin proxy, and runs the `*.multiprocess.e2e.ts` specs in Chromium; CI runs it
-  as the `dispatch-browser-multiprocess` job.
-- `DISPATCH_SIGNING_KEY` takes one key or several separated by whitespace, parsed as
-  `DISPATCH_AGENT_TOKEN` is (startup refuses an empty or repeated entry, naming its position and
-  never its value; a value of nothing but whitespace counts as unset). The first key signs every
-  new session cookie and the sign-in's state cookie and seals every refresh token Dispatch stores;
-  every key verifies a cookie and opens a seal. The seal's `v1:` format is unchanged byte for byte.
-  So the key rotates without signing anyone out, in three steps each rolled to every server
-  process: add the new key second, move it first, then remove the old key no sooner than 30 days
-  later, the cookie's lifetime; a refresh token sealed under the old key is sealed again under the
-  new one at its person's next hourly confirmation (INFRA-555).
-- A registry of live Dispatch server processes (migration `0130`, tables `server_processes` and
-  `server_build_announcements`, both new). A process registers once its port is bound and before
-  it serves, stamps its row every 5 s on a one-connection pool of its own, counts as live while
-  that stamp is within 15 s of the database's `now()`, and deletes its row once its HTTP drain has
-  ended; rows a process left behind are pruned 10 minutes after their last stamp, under the lease
-  `server-processes`. Operator subcommands never register. A process whose signing key set a live
-  process does not share both ways (its current key among the other's keys, and the other's
-  current key among its own) logs `dispatch: register this server process` at ERROR, naming the
-  other process and the rotation steps, and exits 1 before it serves: a process that minted a key
-  in its data dir refuses beside any live process, and so does a pod rolled with a changed secret
-  beside pods that hold only the old key, which stalls the roll while the old pods serve. A
-  process whose heartbeat lapsed (frozen, cut from the database) or whose row was pruned checks
-  its keys again before it counts as live once more, and beside a live process whose keys it does
-  not share logs `dispatch: this server process no longer shares its signing keys with a live
-  server process` at ERROR, stops serving after its HTTP drain, and exits 1. The registry's pool
-  is one more Postgres connection per process, and its prune one more lease connection, eleven
-  (INFRA-555).
-- Dispatch's `/healthz` reports `fleet_commit`, the commit of the latest announcement that every
-  live server process serves one build (`null` when there is none, or before this process's
-  announcer has first read it; up to one five-second pass behind), and `signin` and
-  `service_tokens`, whether the sign-in issuer's and the service-account token issuer's discovery
-  documents have been read (`null` where that issuer is not configured). None of the three
-  decides the status (INFRA-555).
-- `dev-oidc-issuer --code-flow <client id>=<client secret file>` serves the authorization code flow
-  for that one client, so a browser signs in to a local Dispatch with no Google: each
-  authorization signs in the next person queued at the loopback-only `POST <issuer
-  URL>/_dev/sign-in-as` (a JSON object of ID token claims), or `--sign-in-as <email>`'s person when
-  none is queued, a member of `--sign-in-group <group>`'s group when that is given. Dispatch takes
-  `DISPATCH_SIGNIN_DOMAIN` only under Google's issuer, so a local Dispatch signs in through this
-  issuer with `DISPATCH_SIGNIN_GROUP` (INFRA-555).
+- `envoy-dispatch` serves `GET /livez`, answering 204 with no I/O, for liveness and startup probes
+  that must not wait on or fail with Postgres, NATS or the file store; `/healthz` is unchanged.
+- The listener answers `POST /v1/replay` with the messages `ENVOY_NOTIFICATIONS` stored for a
+  session after a cursor per subject, so a session that receives on its own NATS subscriptions
+  (pi-envoy, claude-envoy) reads back what it missed while they were down. It serves only the
+  session's own `notifications.agent.<session_id>`, exactly, and the topics registered as its
+  interests that lie inside a shared stream subject (`notifications.dispatch.>`,
+  `notifications.github.>`, `notifications.slack.>`, `notifications.ghostwispr.>`,
+  `notifications.whatsapp.>`), whose publishers never carry one session's private payload. Every
+  other subject is `refused: "not_followed"` even when the interest store holds it: another
+  session's agent subject or a wildcard over them, every exception lane (the session's own
+  included), the Legion controller's `notifications.legion.>` notices, and a wildcard wider than
+  one shared subject such as `notifications.>`. Every subject of the stream is classified shared
+  or private beside the stream's subject list, and a test fails on a new one left unclassified. An
+  answered subject the deployed stream does not retain is `refused: "not_retained"`; a subject
+  without a cursor gets the stream's last sequence to start one. The answer's `stream` names the
+  stream's `id`, the `envoy_stream_id` metadata the listener and Dispatch's server set once (on the
+  stream they create, or on a deployed one without it, whose other metadata every start keeps; a
+  deployed stream that needs no other change gets the id alone, its replicas and every other
+  setting kept as deployed), which a backup and restore, a reconcile and a leader election keep,
+  while a restore changes `created`, and after a clustered restore the servers can report
+  different `created` times, so a later leader election can change it too. One answer holds at
+  most 32 subjects, 500 messages (100 by default), 2 MiB and 5 s of reading, and says `more` for
+  a subject it cut short. NATS refusing the read is `503 {"code":"REPLAY_UNAVAILABLE"}` naming
+  NATS's error; a listener without the route answers 404, which a session reads as "does not
+  replay". A `session_id` that is not one literal NATS token (`.`, `*`, `>`, whitespace or a
+  control character) is a 400, so a wildcard cannot make `notifications.agent.>` its own subject
+  and read every session's inbox (INFRA-439).
+- `envoy-infra`'s `ListenerPermissions`, and through it `HostPermissions` and
+  `DispatchPermissions`, grant `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, the stored-message
+  read `/v1/replay` makes; it reads one message at a time and can create, change or delete
+  nothing, and `SessionPermissions` does not get it. The rendered users change, so moving a hub
+  with a `listener`, a `machineId` user or a `dispatchMachineId` user to this release replaces its
+  VM once, with NATS down until the new VM starts; a hub with none of them keeps its VM. A
+  listener whose NATS user lacks the read answers `/v1/replay` with `REPLAY_UNAVAILABLE`
+  (INFRA-439).
 - A person's browser edit of a document reaches the agent sessions that wrote it. Once the
   document has been quiet for 30 seconds after a person's last settled version, Dispatch appends
   one `artifact.human_edited` event: the person who edited last is its actor, and its payload
@@ -178,6 +109,24 @@
   whatever the length of its target's key; only bare text it links is held to the index's
   bounds. A search hit for an ask links its typed block (`#b-<id>`) only while that block is a
   graph node, and otherwise `?ask=<id>`, so `dispatch read` of the hit reads the ask.
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line. They are on every node
+  `GET /api/v1/references` and `GET /api/v1/block-links` answer, whatever its kind, always
+  present: who made the node and when, who last changed its own text or fields and when (its
+  maker while nothing has changed it since; a claim, an answer or a resolution is no change), the
+  node it belongs to (`{kind, id, ref?}`) and the version of that parent it belongs to. A fact
+  Dispatch never recorded is `[]` for an actor list and `null` otherwise: a session has none, and
+  a block's maker is known only when the block is in its document's first version or Dispatch
+  indexed the version before the one that first held it. Migrations `0130` and `0131` add
+  `comments.written_version` and `asks.written_version`, the version current when a comment or
+  an ask was written on a document without an anchor (an approval request's, the version it names
+  when it opens), which a `before insert` trigger records for every build's insert, and `0133` and
+  `0134` fill them on the rows stored before, from the latest version created at or before each
+  item or, for an approval request, from its `ask.opened` event, holding `comments` and then
+  `asks` `EXCLUSIVE` while they write, which every write of that table waits behind. Migration
+  `0132` creates `component_facts`, which each import keeps from this release on: a component's
+  `made_at` and `changed_at`, judged by a digest of its own fields. A component stored before it
+  has no `made_at`, and no `changed_at` until an import changes it.
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update
@@ -204,6 +153,43 @@
   unchanged, and with neither set the component renders what it always did. The component
   refuses, naming the input, an `appPriorityClassName` that is empty, not a DNS subdomain or in
   the reserved `system-` prefix, and an `appPdbMinAvailable` below 1 or above `replicas`.
+- `envoy-infra:gcp:Dispatch` takes `proxyCpu` and `proxyMemory`, the Kubernetes quantities that
+  size the app pod's `cloud-sql-proxy` sidecar as both its request and its limit, so a deployment
+  sizes the proxy every database call of the pod passes through. They default to 1 CPU and `2Gi`
+  (see Changed), and the component judges them with `appCpu` and `appMemory` against Autopilot's
+  bounds for the pod's sum, refusing them as it refuses those, each refusal naming the inputs; a
+  size that is not above 0 is now refused too.
+- `envoy-infra:gcp:Dispatch` takes `frontDoorPdbMinAvailable` and `listenerPdbMinAvailable`, which
+  register a PodDisruptionBudget named for the front door (`<hostname>-tailnet`) or the listener
+  (`<hostname>-listener`), over that Deployment's pods alone, as `appPdbMinAvailable` does for the
+  app, each refused below 1 or above its Deployment's replica count. A pod template whose
+  Deployment has a budget no longer carries the cluster autoscaler's `safe-to-evict: "false"`
+  annotation, since the budget bounds the autoscaler's evictions too; a template with no budget
+  keeps it. A budget made by hand under one of those names must be deleted before the update that
+  sets its input, since the component's provider does not adopt it.
+- `envoy-infra:gcp:Dispatch` takes `frontDoorReplicas`, the front door's pod count, 2 by default,
+  and `listenerReplicas`, the listener's, 1 by default, each refused below 1. The front door runs
+  two by default, since with one pod every node drain, upgrade or scale-down that moves it takes
+  Dispatch off the tailnet until its replacement is ready. Raise `listenerReplicas` above 1 only on
+  an envoy image whose listener holds a delivery lease, where a standby pod is ready and serves
+  `/v1` while only the lease holder delivers.
+- `envoy-infra:gcp:Dispatch` takes `databaseAvailabilityType`, the Cloud SQL instance's
+  availability type: `ZONAL`, the default and the instance's value until now, or `REGIONAL`, a
+  standby in a second zone that Cloud SQL fails over to; anything else is refused by name.
+  Switching changes the instance in place, since the bridged Terraform provider declares
+  `settings.availability_type` without ForceNew: Cloud SQL restarts the instance once, and the
+  change cannot be stopped once started. `REGIONAL` roughly doubles the instance's cost.
+- `envoy-infra:gcp:Dispatch`'s front door runs `frontDoorReplicas` pods that host one Tailscale
+  Service, `svc:<hostname>`, each pod its own tailnet node, registered under the pod's name with its
+  state on an `emptyDir`, so `https://<hostname>.<tailnetDnsName>` and the SOCKS5 proxy the app and
+  the listener reach NATS through answer while any one pod serves. A pod advertises the Service
+  only through its advertiser, is ready only while it hosts the Service, and on stopping drains the
+  Service, waits 20 s and logs its node out inside a 60 s grace period. The Service's certificate
+  is kept in the Secret `<hostname>-tailnet-tls`, which a new pod seeds its cache from and the pods
+  publish a later certificate to, and a pod with no certificate more than 31 days from its end takes
+  one of 3 claims per 7 days recorded on that Secret before it may order one, under Let's Encrypt's
+  5 per name per week. `cert-publish` runs on `frontDoorToolsImage`; see the Breaking entry under
+  Changed for the move.
 - Dispatch writes one access-log line per served request, so the callers behind a load spike can
   be named: `dispatch: request` at INFO when the request ends, with the method, the route's own
   pattern, the escaped request path, the caller (a person's email, a bearer's session, a personal
@@ -233,6 +219,26 @@
   exits 2 on a narrowing the broker would refuse `INVALID_NARROWING` before it sends any request,
   and runs its command only once the broker names the narrowing it applied, so deploy the broker
   before any caller passes `--github-owner`.
+- `envoy-dispatch` serves on an inherited listening TCP socket that `DISPATCH_LISTEN_FD` names by
+  its descriptor number, and binds nothing: a test harness opens the socket on port 0 and holds the
+  port the kernel chose until Dispatch serves on it, so no other program can take it in between.
+  `DISPATCH_LISTEN_HOST` and `DISPATCH_PORT`, when set and not empty, must name the socket's
+  address, and `DISPATCH_SERVER_URL` is not derived from it. A descriptor that is not a listening
+  TCP socket, or a setting that names another address, refuses startup naming the variable, with
+  nothing bound in its place, and `DISPATCH_DEV_SIGNIN=1` refuses a socket that is not on a
+  loopback address. The `dispatch: listening` line names the address the server is bound to, in
+  both modes: a server on every interface logs `addr=[::]:8766` where it logged `addr=:8766`.
+- `envoy-listener` serves on an inherited listening TCP socket that `ENVOY_LISTEN_FD` names by its
+  descriptor number, and binds nothing, for a process a test harness starts (not a container:
+  Docker cannot pass a host descriptor in). `ENVOY_LISTEN_HOST` and `PORT`, when set, must name the
+  socket's address, and `PORT=0` names none; a descriptor that is not a listening TCP socket, or a
+  setting that names another address, refuses startup naming the variable, with nothing bound in
+  its place. The API auth rule judges the socket's own address, so a socket on every interface
+  needs `ENVOY_API_TOKEN`, the OIDC pair or `ENVOY_API_ALLOW_UNAUTHENTICATED=1` as
+  `ENVOY_LISTEN_HOST=0.0.0.0` does, though an unset `ENVOY_LISTEN_HOST` means loopback. The
+  `envoy-listener listening` line's `addr` is the address the listener is bound to, in both modes:
+  `PORT=0` logs the port the kernel chose where it logged port 0, and a listener on every interface
+  logs `[::]:9020` where it logged `0.0.0.0:9020`.
 - Dispatch can serve the Go profiler: `DISPATCH_PPROF_PORT` set to a port serves
   `net/http/pprof` on `127.0.0.1:<port>` alone, on a mux of its own, so a CPU profile of a busy
   server is one `kubectl port-forward` and `go tool pprof` away. Unset or empty, nothing listens;
@@ -266,18 +272,23 @@
   in total and per kind the searchable items with a current vector, lacking one or failed, and the
   oldest lacking item's wait (INFRA-393).
 - `agent-secrets` names the store it answered from, so no answer of its own is read as another
-  secrets CLI's about the same name: the broker `AGENT_SECRETS_URL` names, by host, and that
-  broker's store, read once from its public `GET /v1/settings` (`AWS Secrets Manager account <id>
-  in <region>`, or `GCP Secret Manager project <number>`), with the broker named alone where the
-  settings cannot be read. The injection form writes one line to standard error before it execs -
-  `agent-secrets: NAME, NAME from the broker at <host> (<store>)`, the names it injected and
-  nothing of their values; `request`, `status` and `self` print a `source:` line; `secret show`
-  prints a `store:` line and every row of `secret list` carries `store` in `--json` and a line
-  on standard error naming the store the table is from; `machine list` and `grant list` name
-  their broker the same way; and every refusal names where this CLI looked, from a denied request
-  to `UNKNOWN_SECRET` and a grant that released no value. `--json` output is unchanged for
-  `request`, `status`, `self`, `whoami`, `machine list` and `grant list`, which still print the
-  broker's own body verbatim and make no settings call; `secret list --json` and
+  secrets CLI's about the same name: the broker `AGENT_SECRETS_URL` names, and the kind of that
+  broker's store, read once from its public `GET /v1/settings` (`AWS Secrets Manager`, `GCP Secret
+  Manager`, or the store the broker names when this release does not know it), as `the broker
+  AGENT_SECRETS_URL names (<store kind>)`, with no `(<store kind>)` where the settings cannot be
+  read. The injection form writes one line to standard error before it execs -
+  `agent-secrets: NAME, NAME from the broker AGENT_SECRETS_URL names (<store kind>)`, the names it
+  injected and nothing of their values; `request`, `status` and `self` print a `source:` line;
+  `machine list` and `grant list` name their broker the same way; and every refusal names where
+  this CLI looked, from a denied or pending request to `UNKNOWN_SECRET` and a grant that released
+  no value. None of these lines names the broker's host or the store's account, region or
+  project, since an agent's output is quoted wherever it goes, a public pull request among them.
+  The secret forms, which a person runs under their own cloud sign-in, name the store's account or
+  project (`AWS Secrets Manager account <id> in <region>`, `GCP Secret Manager project <number>`):
+  `secret show` prints a `store:` line and every row of `secret list` carries `store` in `--json`
+  and a line on standard error naming the store the table is from. `--json` output is unchanged
+  for `request`, `status`, `self`, `whoami`, `machine list` and `grant list`, which still print
+  the broker's own body verbatim and make no settings call; `secret list --json` and
   `secret show --json` gain a `store` field. No line names a secret's version: the broker
   releases a grant's values as names and values alone, and a session holds no sign-in of its own
   to the store to read one with (`agent-secrets secret show`, which reads the store directly
@@ -291,6 +302,44 @@
   that inherited a stale address reads a stale address. Such a message carries no `asked the
   broker …` trailer: the broker refused nothing. A local helper refusal or dead helper socket names
   that socket instead, since no broker was asked.
+- No output of `agent-secrets`, `agent-secrets-helper` or `agent-secrets-devrelay` prints a
+  credential the broker's URL carries. Every message that names the URL names it through
+  `internal/redact`'s allow-list: the URL prints as written only when it is provably a plain
+  http(s) URL - printable ASCII with no `@`, `%`, `?`, `#`, backslash or whitespace, an http or
+  https scheme, a DNS name, IPv4 or bracketed IPv6 host with an optional numeric port, and a path
+  of letters, digits and `._~/-` alone - and as `(not printed: the value carries a credential or is
+  not a plain http(s) URL)` otherwise. No part of a value that fails the check prints, so no
+  separator, escape (single or double) or control byte in it can show a credential or forge a
+  line. For such a URL, the transport's own error prints as its class alone (`name resolution
+  failed`, `connection refused`, `timed out`, `TLS failed`, `the broker answered HTTP <n>`,
+  `not a valid URL`, `the request failed`), since its text can quote the URL; it still unwraps
+  to the original, so every classification reads as before, and a clean URL's errors print as
+  before. This covers a broker that could not be reached, the secret forms' refusal of a
+  plain-http broker, the helper's `listening` log line, and every error the helper's broker
+  calls make (a machine login, an enrollment, a renewal, a refresh or a revoke, which
+  `agent-secrets machine login`, `register --wait` and the helper's log print), the helper's
+  `sign-launcher` refusal of a URL that is not its broker's (which `machine` and `grant` list and
+  revoke print), `agent-secrets-helper install`'s refusal of a URL a unit line would need
+  escaped, Dispatch's two boot errors about `DISPATCH_AGENT_SECRETS_URL`, and the broker's own
+  refusals of `BROKER_PUBLIC_URL` and `BROKER_MACHINE_LOGIN_URL`. With a clean base, an error
+  prints as net/http wrote it only when the URL it names is that base followed by a plain `/v1/`
+  path and the error it wraps is a transport failure (a dial, name resolution, refused, timeout,
+  TLS, net/http's `http: server gave HTTP response to HTTPS client`, EOF, a reset or a broken
+  pipe), an HTTP status answer, or text the allow-list passes: a redirect's target (another host
+  or path, a query, or a malformed `Location` whose text quotes it) prints the class alone.
+  `agent-secrets` refuses an id that would not name one path segment as written - `"req%zz" is
+  not a request id`, with no `asked the broker` ending since nothing was sent - before any call,
+  since the proof signs the path as built and the broker checks it against the path it decoded;
+  before, such an id was blamed on the broker's address. An http server answering an https
+  `AGENT_SECRETS_URL` now reads as `the broker at … answered but the exchange failed`, as the
+  troubleshooting guide says: net/http reports it as its fixed `http.ErrSchemeMismatch`, which
+  the classification did not look for.
+  `agent-secrets-devrelay --broker` no longer takes `AGENT_SECRETS_URL` as its flag default,
+  which its usage text printed whole; it reads the variable after parsing. `agent-secrets-helper
+  install` writes its unit `0600`, not `0644`, since the unit's `Environment=` line holds the
+  URL, and narrows a unit an older install left `0644`. Before, net/http masked a password alone
+  and printed the user name and query, and the message about an unreachable broker printed the
+  whole URL, twice since the entry above.
 - The `ask.opened` or `ask.answered` Dispatch's settlement appends when an edit restores a decision
   block it retracted carries `restored: true`: the ask returns to the state it had, and the event
   records no new answer, so a reader that takes an `ask.answered` for a person's answer can tell
@@ -967,170 +1016,114 @@
 - The secrets broker logs at boot how it signs in to its database, `database sign-in
   method=rds-iam` or `method=password`, before it reaches for AWS or the database, so an operator
   tells a token sign-in from a password one in the log rather than the task's environment.
+- `GET /api/v1/search` gives every `ask` hit `ask`, where the ask stands when the search ran:
+  `open`, `answered` with its latest answer (who gave it, when, the options it chose and its
+  text), or `resolved` with its resolution and, when anyone answered it, the last answer it had,
+  which for an ask that document settlement retracted while it was answered is read from its
+  `ask.answered` events, since its row keeps none. One query reads every ask hit of a page, the
+  events are read only when the page holds a resolved ask, and a page with no ask hit reads
+  nothing more. The search palette shows it under each ask hit's excerpt: a badge (`Open`,
+  `Answered`, `Closed, no answer` or `Closed after an answer`), who closed the ask and when, and
+  its latest answer, with who gave it, when, the options chosen and its text cut to three lines
+  (INFRA-569).
 
 ### Changed
 
-- Dispatch processes configured with different embedders no longer drop each other's vectors in
-  turn. One embedder identity is active at a time, the one row of the new table `embedder_active`
-  (migration `0134_embedder_active`, census `0`): it stays active while a live server process
-  registers it as its `embedder_identity`; when none does, the identity of the earliest-started
-  live process that registers one becomes active, and with no row yet, the first process to look
-  records its own. Only a process whose identity is active drops other identities' vectors,
-  re-admits rows dead under another identity, embeds queue rows and reserves tokens; the coverage
-  pass of any other process logs `identityStepsSkipped=true` and `activeIdentity`, and its meaning
-  search answers with text matches only. An embedder change is therefore a release like any other:
-  the old identity embeds until its last process leaves, and then the new one drops and re-embeds.
-  A build before this one registers no identity and drops every identity but its own, so change
-  the embedder no sooner than the release after this one.
-- While a live server process has no file bucket (`file_store` false in `server_processes`, or a
-  build before this one, which registers none), an upload to a process with a bucket keeps its
-  bytes in `artifact_versions.content` as well as in the bucket, so the bucketless process serves
-  it, and `envoy-dispatch backfill-files` refuses with exit 1, naming each such process by its
-  instance id, its build and its start; `--verify-only` and `--restore` still run. Turning the
-  store off still takes `backfill-files --restore` before the release that unsets
-  `DISPATCH_FILE_STORE_BUCKET`.
-- A Dispatch route ignores a request-body member it does not declare, where it answered `400`
-  before, and logs the ignored names at debug with the route; the JSON upload does too, and still
-  refuses `primary` by name. The delivery socket ignores a frame member it does not declare, and
-  still answers an unknown frame type or view kind `INVALID_FRAME`, on which the dashboard now
-  closes the socket and reconnects with its backoff. The dashboard sends a request a Dispatch
-  process answered `404 NOT_FOUND` "no route for …" again after 1, 2 and 4 seconds (each jittered
-  by a quarter), since no handler ran and a release may be rolling out, then says that the action
-  is not offered yet. A known `/api` path asked with a method it does not serve answers that same
-  JSON 404 (INFRA-558).
-- The document schema manifest (`pmdoc/schema/blocks.json`, `GET /api/v1/schema/blocks`) names the
-  schema's nodes and marks beside its typed blocks, and every element may carry `since` (the schema
-  version from which a build reads it) and `creatable_since` (from which a build creates it), both
-  1 when absent; every element today is 1, and the version stays 2. A write that would add an
-  element this build reads but may not create yet is refused, naming it, unless the document holds
-  it already. The dashboard uses the manifest it was built with instead of fetching it, presents it
-  to the document socket as `schema_version` and `schema_creatable`, and never keeps or replays the
-  editor's removal of an element its schema cannot build (INFRA-558).
-- `409 DOCUMENT_UNLOADABLE`, `DOCUMENT_LIVE` and `DOCUMENT_LOADS` no longer tell the reader to
-  rebuild or replace a document: each message names what a rebuild discards (every edit after the
-  latest saved version) and what a replacement from markdown discards (the current content), and
-  says that a person decides (INFRA-558).
-- `GET /api/v1/references?kind=` answers a kind this build does not emit with no edges of it and
-  lists it in the top-level `unknown_kinds`, where it answered `400 INVALID_KIND`. A rewrite of a
-  body keeps its reference edges to node kinds this build does not know, which a newer build
-  wrote (INFRA-558).
-- A version is no longer written for a document whose content did not change since its latest
-  version only because another build renders it differently, at a snapshot as at settlement. An
-  approved version holding an element this build does not know is left to a build that reads it:
-  settlement writes no version and the approval stays to be carried there. The reference-excerpt
-  reconciliation passes over a document holding such an element for ten minutes or until its next
-  version, leaving its mentions owed, and marks stale excerpts at every tick that follows its
-  five-minute wait rather than only in the hour after its process started (INFRA-558).
-- `ENVOY_NOTIFICATIONS` carries the generation of its settings in its metadata
-  (`dispatch.stream-generation`). An owning client (the listener, Dispatch's server) leaves a
-  stream stamped with a higher generation exactly as it is, so an older build never reverts a
-  newer one's `MaxAge`, `Duplicates` or subjects. It ensures the stream on its connect (on its
-  first connection, for one that connects in the background) and again after every reconnect, so a
-  stream lost while it runs is created again. Dispatch's server keeps the stream's deployed replica
-  count on every update, where it set one; the listener still sets `ENVOY_NATS_REPLICAS`. Every
-  client decides a topic's transport from the deployed stream's subjects, read at each ensure, or
-  at connect (at the first connection, in the background) and every 60 s by a client that owns no
-  stream, so a topic under a subject only a newer build adds is published through JetStream, with
-  its message id, by an older build too (INFRA-558).
-- Each Dispatch delivery durable (`delivery-events`, `delivery-jobs`) delivers to one process at a
-  time: the holder of its hold, a row of `duty_holds` (migration `0132`) with a 15-second lease on
-  the database's clock, renewed every 5 s, which the holder reports lost 2 s before it lapses. The
-  other processes stand by, logging so at INFO, and try for the hold every 2 s. A take-over deletes
-  the durable and creates it again at its ack floor on a fresh deliver subject, which redelivers a
-  dead holder's unacknowledged messages at once and fences that holder off. A stopping process
-  finishes the message in its handler, hands back the messages behind it and releases the hold, so
-  another process takes over and is redelivered them within seconds rather than after the ack wait.
-  A durable carries its config's generation (`dispatch.consumer-generation`), and a take-over that
-  finds a higher one keeps the deployed config; standbys no longer reconcile the durable's settings
-  on every poll. A durable bound by a build before holds is left to it until it lets go. The lease
-  pool grows by four connections for the holds, to 15 (INFRA-558).
-- A periodic maintenance loop records its passes per lease and period (`duty_passes` row
-  `<lease>/<period_ns>`), so two builds with different intervals for one loop each run it once per
-  their own period, and still share the previous build's row when their period is its own
-  (INFRA-558).
-- Every Dispatch server process now stores its dashboard build's assets in Postgres at boot,
-  before it listens (migration `0131_dashboard_assets`: `dashboard_builds`, `dashboard_assets` and
-  `dashboard_build_assets`), and answers a file under `/assets/` that its own image lacks from
-  there, through a cache of at most 64 MiB its requests share, with one database read per file
-  however many requests ask for it at once. While a rolling update or a rollback runs two builds
-  behind one load balancer, a page of either build is served its chunks by whichever process
-  answers, so a tab no longer gets a failed chunk or a blank page from the process that did not
-  build it. A restart on a build already stored writes no bytes, and each boot then prunes every
-  build no live server process serves that is not among the 20 started most recently. A publish
-  that fails, a build holding a file over 8 MiB among them, refuses the boot, so a rolling update
-  keeps the processes it would have replaced; `bun run check:asset-sizes` in `packages/dispatch`,
-  run in CI after the build, refuses such a build first. A release before `0131` neither reads
-  nor writes the new tables, so it serves beside this one unchanged, its pages' chunks from its
-  own image alone as before, and rolling back past `0131` is an image rollback.
-- **Breaking:** `DISPATCH_ASSET_STORE_BUCKET` and its S3 reader of earlier builds' assets are
-  removed: a Dispatch that still sets the variable refuses to start, naming it and saying that
-  every server process now keeps its build's dashboard assets in Dispatch's database. Unset it
-  before deploying this release.
-- A dashboard tab now recovers from a failed script, module preload or stylesheet of its build,
-  the main stylesheet included, by reloading while fewer than 3 of its recovery reloads fall in
-  the last 5 minutes, where it reloaded once per tab: a tab open across many deployments recovers
-  from each, and a page whose assets fail on every load still stops after three reloads. The
-  inline script in `index.html` and the lazy-chunk recovery keep the reloads' times on one
-  sessionStorage key, `dispatch.chunk-reloads`, and share the budget; the once-only
-  `dispatch.reloaded-for-chunk` key is neither read nor written.
-- The dashboard's "A new version is available" notice now asks `GET /api/v1/dashboard/builds`
-  once, on focus at most once a minute, where it compared `/healthz` and a fresh `/`, and offers
-  itself only when `live` names exactly one build and it is not the tab's own: while a rolling
-  update or a rollback still runs two builds, no tab is told to reload. A `404` from a process
-  older than the route, a `401`, a `5xx` or a network failure offers nothing.
-- After a dropped connection, the dashboard's first reconnect of the workspace event stream, an
-  agent's live stream, the Delivery and Pipeline socket and a document's socket waits a random
-  time under 2 s, so the tabs one restart or roll dropped reconnect, and refresh their reads,
-  spread over two seconds rather than in one burst. Later attempts back off exponentially with
-  equal jitter, half of `min(1 s × 2^n, 30 s)` plus a random share of the other half, where the
-  streams waited that whole delay and the Delivery socket ±25 % of it. Dispatch's restart close
-  (1012) no longer reopens the Delivery socket at once but waits that first spread, and a
-  document's socket that had opened reconnects after the spread too; its first connect is still
-  immediate, and `online` or a tab turning visible still reconnects the event stream at once.
-- **Breaking (a hand-written signing key holding whitespace):** a `DISPATCH_SIGNING_KEY` with a
-  space, tab or line break inside it is now several keys, the first of which signs, so the first
-  start of this release signs everyone out once and leaves the refresh tokens sealed under the old
-  value unopenable, where the release before read it as one key. A generated key (the
-  `envoy-infra:gcp:Dispatch` component's 64-character alphanumeric value, or the data dir's
-  base64url file, which is read whole) is unchanged. This release is never the release of a first
-  rotation: an earlier build reads `"K1 K0"` as one key, so no build older than this one is rolled
-  back to while the setting holds two values (INFRA-555).
-- **Breaking (`server.started` consumers):** Dispatch publishes `server.started` once each time the
-  commit every live server process serves changes, not once per process start: a rolling update
-  announces once its last process of the earlier build has gone, a restart of every process on the
-  announced commit announces nothing, and a rollback announces the earlier commit again. Whichever
-  process finds the fleet agreeing records the announcement in `server_build_announcements`, under
-  an advisory lock, and any process whose bus is connected publishes it, so one whose NATS is down
-  leaves it to another. Subject and payload
-  are unchanged; `started_at` is the database's time of the announcement, and the event id, source
-  event id and dedupe key are `dispatch-server-started-<commit>-<seq>`, `seq` the announcement's
-  own, where they ended in the start's Unix time. Builds before this one do not register: the
-  first release that carries it announces as soon as its own processes agree, and a process of an
-  earlier release started meanwhile still publishes its own start, so that release is deployed with
-  no earlier process serving beside it (INFRA-555).
-- Dispatch's `/healthz` is `200` while the database answers whatever NATS does: `ok` says this
-  process can serve requests, and `nats` still reports the connection (`null` when disabled)
-  without deciding the status. Every NATS client of the server pings every second and declares
-  the connection lost at two pings outstanding, so `nats` reads `false` within two to three
-  seconds of a silent cut, where it took minutes. The probe is a readiness probe and never a
-  liveness probe: it fails while the database is unreachable, so a liveness probe on it would
-  restart every server process during a database failover (INFRA-555).
-- Dispatch starts and serves while NATS is unreachable or refuses its credential. Each of its NATS
-  clients connects in the background and retries forever, a refused credential logged at ERROR at
-  most once a minute; only a configuration error (an unusable seed or SOCKS5 setting, a server
-  that is not this machine's) still refuses the boot. The stream is reconciled on the first
-  connection, the outbox publishes what was written meanwhile, the webhook redelivery sweep opens
-  its KV bucket on its first pass with NATS connected, and the agent conversation route answers
-  `503 STREAM_UNAVAILABLE` until the relay connects (INFRA-555).
-- Dispatch starts without its sign-in issuer or service-account token issuer. Each discovery
-  document is read in the background from boot (retrying after one second, doubling to thirty,
-  each attempt bounded at ten seconds and at least five seconds after a failed one, a failure
-  logged at ERROR at most once a minute) or by the first request that needs it. Until then
-  `/auth/start` and the callback answer `503 SIGNIN_UNAVAILABLE`, a JWT-shaped bearer
-  `503 OIDC_ISSUER_UNAVAILABLE` rather than `401`, and agent tokens are served; a plain-text
-  refresh token the boot cannot revoke yet stays for the next boot (INFRA-555).
-- `/auth/start` no longer answers `429` "too many pending sign-in attempts": no process holds a
-  sign-in in flight, so there is nothing to cap (INFRA-555).
+- **Breaking:** `envoy-infra:gcp:Dispatch` takes two new required inputs: `tailnetService`, the
+  Tailscale Service the front door hosts, which must resolve to `svc:<hostname>` (pass the `Name`
+  output of the consumer's `tailscale.Service`, so the Serve ConfigMap and the front door wait for
+  the Service), and `frontDoorToolsImage`, the digest-pinned image `cert-publish` runs on, which
+  must carry `/bin/sh`, `curl`, `openssl` 3, `base64`, GNU `date`, `sed`, `grep` and `tr` (the
+  envoy image does). The front door's shape changed: its pods run as a ServiceAccount of their own,
+  `<hostname>-tailnet`, whose Role `<hostname>-tailnet-tls` may only get and patch the certificate
+  Secret, with the token mounted into `cert-publish` alone; the Role `<hostname>-tailscale-state`
+  is gone; and a Tailscale Service holds the name `<hostname>` rather than a node. Moving takes
+  steps before the update ("Moving from a single front-door node" in
+  `packages/envoy/infra/README.md`): give every client of Dispatch access to `svc:<hostname>` on
+  443 in the tailnet policy (a grant with that destination, or a tag on the Service their grants
+  already name), since grants on the front door's tags do not cover the Service's address, with
+  an auto-approval of the Service for the front door's tags; delete the tailnet machine that holds
+  `<hostname>`; declare `svc:<hostname>` with its port `tcp:443`; optionally seed
+  `<hostname>-tailnet-tls`; delete a hand-made budget named `<hostname>`; and back up, then
+  delete, the runtime Secret `<hostname>-tailscale-state`. The move is an outage while the old
+  node is gone and the new pods come up. New refusals, each naming its input before anything
+  registers: a resolved `tailnetService` other than `svc:<hostname>` (never echoing it), an
+  unpinned `frontDoorToolsImage`, a `databaseAvailabilityType` other than `ZONAL` or `REGIONAL`,
+  an `appCpu`, `appMemory`, `proxyCpu` or `proxyMemory` not above 0 or outside Autopilot's bounds
+  for the pod's sum, a `frontDoorReplicas` or `listenerReplicas` below 1, and a
+  `frontDoorPdbMinAvailable` or `listenerPdbMinAvailable` outside 1 to its Deployment's replica
+  count. The defaults changed size too: `databaseTier` is `db-custom-4-15360`
+  (was `db-custom-1-3840`) and the `cloud-sql-proxy` sidecar 1 CPU and `2Gi` (was `200m` and
+  `256Mi`), so a deployment that relied on either default changes size on its next update; set
+  `databaseTier` to the tier the instance runs to keep it. `appPriorityClassName` is renamed
+  `priorityClassName` and names the class of every pod of the three Deployments (the app, the
+  front door and the listener), read once, with all three Deployments waiting on the read and the
+  same refusals; a program that sets `appPriorityClassName` sets `priorityClassName` instead.
+- `envoy-infra:gcp:Dispatch` defaults `databaseTier` to `db-custom-4-15360` (4 vCPU, 15 GB), from
+  `db-custom-1-3840` (100 connections). During a roll, every app pod that holds connections (the
+  replicas, the surge pod and pods still terminating, for up to their grace period) times the
+  server's `store.ConnectionsPerProcess` must fit in the instance's `max_connections` less
+  PostgreSQL's 3 superuser-reserved slots, so a consumer sets `databaseTier` for its replica
+  count. It defaults the `cloud-sql-proxy` sidecar to 1 CPU and `2Gi`, the proxy's own sidecar
+  example's size for one pod's pools, through whose TLS every database call passes; with the
+  app's defaults the pod requests 2 CPU and `6Gi`.
+- `envoy-infra:gcp:Dispatch` takes each Deployment's update strategy from its own replica count:
+  `Recreate` at one pod, since a roll would run two builds side by side, and `RollingUpdate` with
+  `maxUnavailable: 0` and `maxSurge: 1` above one, so a new pod is ready before an old one goes
+  down. The front door and the listener were always recreated; the front door, at its default of
+  two pods, now rolls.
+- `envoy-infra:gcp:Dispatch` spreads each Deployment's pods: required pod anti-affinity on
+  `kubernetes.io/hostname`, so a node holds at most one, and a `topology.kubernetes.io/zone` spread
+  with `maxSkew: 1`, `DoNotSchedule` and `minDomains: 2`, without which Autopilot, which creates
+  nodes on demand, could place two pods in one zone.
+- `envoy-infra:gcp:Dispatch` gives every serving container a startup and a liveness probe that
+  fails only when the process does not answer: `envoy-dispatch` and `envoy-listener` run curl
+  without `-f` against their `/livez`, which reads nothing (`envoy-dispatch` answers it 204, the
+  listener 404 from its router), so neither a dependency outage nor a slow Postgres or NATS
+  restarts a pod, and `envoy-dispatch`'s startup allows 30 minutes for its migrations;
+  `cloud-sql-proxy` runs with `--health-check` and is probed on `/startup` and `/liveness` on port
+  9801; and the front door's `tailscale` container's liveness asks its LocalAPI. The listener's
+  readiness probe allows 6 s, and the listener waits 5 s before it stops, inside a 35 s grace
+  period.
+- `envoy-infra:gcp:Dispatch` rolls the pods that read one of its own Secrets when that Secret
+  changes: each pod template carries `checksum/<secret>`, the resourceVersion of
+  `<hostname>-dispatch` and `<hostname>-listener` on the app, `<hostname>-listener` on the
+  listener and `<hostname>-tailnet-auth-key` on the front door, so a rotated value no longer needs
+  a `kubectl rollout restart`. The NATS seed, the GitHub App key and the Azure key, which the
+  component does not own, still do.
+- Dispatch closes a client connection after its next response once the connection is 60 s old
+  (`Connection: close`), except a request carrying `Upgrade`, a websocket handshake. kube-proxy
+  and the front door spread load per connection, so while callers reuse keep-alive connections a
+  process that has just rolled in gets little traffic; the client's new connection is spread across
+  every ready process.
+- Dispatch accepts an ask question of up to 2,000 UTF-16 units, from 800, on `POST .../asks` and
+  `PATCH /api/v1/asks/{id}`, read from the generated `contracts.AskQuestionMax`; an approval
+  request's `summary` gets what its question leaves of the same limit.
+
+- `POST /v1/interests/subscribe` no longer stores a topic reaching a private stream subject other
+  than the session's own agent subject (`bus.ReachesPrivateStreamSubject`): another session's
+  `notifications.agent.<id>`, a failed-delivery lane
+  `notifications.envoy.exceptions.notifications.agent.<id>` (the session's own included), a
+  Legion daemon notice under `notifications.legion.>` (the controller lane
+  `notifications.legion.<project>.controller`), or a wildcard overlapping one
+  (`notifications.agent.*`, `notifications.agent.>`, `notifications.envoy.>`,
+  `notifications.>`, `notifications.*.<x>`), since the stored topics drive the listener's fan-out
+  to serve-port sessions and such a topic would hand one session another's inbox, a failed
+  delivery's payload or the controller's notices (`/v1/replay` refuses such a subject on its own).
+  The rest of the registration is stored and the answer stays 200, its `warnings` naming each
+  topic left out (`<topic> was not registered: …`), so a released pi-envoy, which registers a fork
+  parent's agent subject with the rest of what it follows, keeps registering. A row an earlier
+  build stored with such a topic is cleaned at the session's next registration: the registry drops
+  every such topic from the merged row, not only from the incoming topics, as do a role claim and
+  an unsubscribe that rewrite the row, so the fan-out stops reaching the session after its next
+  heartbeat. pi-envoy and claude-envoy no longer register or replay a topic reaching a private
+  stream subject other than their own agent subject (`reachesPrivateStreamSubject` in
+  `@legion/envoy-client/replay`, mirroring `bus.ReachesPrivateStreamSubject`) (INFRA-439).
+- A dead session's subscriptions now stay 5 minutes longer: the interest reaper deletes one only
+  15 minutes after its row's last write, where it was 10, because it now adds
+  `store.InterestRefreshAge` to its grace window. For that time the subscribers page and the
+  `envoy_active_interests` gauge still list them, and a message matching one logs a failed
+  delivery to that session; a paused session that comes back within it still has them.
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
@@ -1149,8 +1142,8 @@
   since no server of any release reads it. Each vector now records its embedder's identity
   (`us.cohere.embed-v4:0` on Bedrock, the value every stored vector already carries, and
   `azure:<endpoint host>/<deployment>` on Azure), and search compares a query only with vectors of
-  its own identity: the coverage pass drops vectors another identity made (only on a process whose
-  identity is the active one, Changed above), and a new model on Azure goes under a new deployment
+  its own identity: run one embedder configuration on every process of a deployment, since each
+  process's pass drops the others' vectors, and put a new model on Azure under a new deployment
   name. A text with nothing to embed (empty or only white space) is settled with no vector rather
   than retried until it dies, and a row that died that way is settled by the pass (INFRA-393).
 - **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
@@ -1929,25 +1922,40 @@
 
 ### Fixed
 
-- A sign-in started on one Dispatch server process completes on another. The sign-in in flight
-  (state, nonce, the page it returns to, its expiry ten minutes on) rides the browser's
-  `dispatch_oauth_state` cookie as `s1.<payload>.<signature>`, signed under a key derived from
-  the current signing key for that purpose alone and verified under every key, where it was kept
-  in the memory of the process that started it, so a callback reaching another process answered
-  `400` "invalid or expired state". The processes need one `DISPATCH_SERVER_URL`, since the
-  callback URL is built from it. A sign-in started on the release before this one and completed
-  on this one fails once, and the person starts again (INFRA-555).
-- An outage of the sign-in issuer no longer signs people out. Only a refresh the issuer refuses
-  (`400` or `401` with the OAuth error `invalid_grant`), or one whose ID token no longer passes
-  the sign-in rule, ends a person's sessions; any other failure (no answer, a timeout, a `5xx` or
-  `429`, another OAuth error, an answer without an ID token that verifies, an issuer not yet
-  discovered) refuses the request `503 SIGNIN_UNAVAILABLE` and keeps the sign-in, so the first
-  request after the issuer answers refreshes and is served. Before, any failed refresh ended every
-  session of the person as their hour lapsed (INFRA-555).
-- Dispatch's time-gated writes use the database's clock rather than the serving process's: a
-  sign-in's confirmation (`people.confirmed_at`, and the hour it is measured against), a delivery
-  pull request's `last_event_at`, `deployed_event_at`, and the cutoff of the delivery changes
-  prune, so server processes whose clocks differ agree on them (INFRA-555).
+- An ask hit's search excerpt, in `GET /api/v1/search` and in the write-time suggestions, is cut
+  from the text its search vector indexes - the question, the options' labels and descriptions,
+  the answer's text and the options it chose - where it was cut from the question, the options'
+  raw JSON and the answer's text, so the excerpt could show JSON keys and braces (INFRA-569).
+- An ask answer that chose no option reads `"selected": []` from `GET /api/v1/asks/{id}`, the ask
+  lists and `GET /api/v1/me/answers`, and an `ask.answered` event's `answer` and `previous_answer`
+  read it from `GET /api/v1/issues/{key}/events`, `GET /api/v1/artifacts/{id}/events` and the
+  `GET /api/v1/events` stream, where each read `null`, including the rows and `ask.answered`
+  events already stored with `null`; a new answer stores `[]` (INFRA-569).
+
+- A document now strikes tilde runs as a comment does. A run of `~` pairs only with a run of its
+  own length, so `Plain ~a~~ text.` and `Plain ~~a~ text.` keep their tildes where a document
+  written through the API struck `a`; a run directly after an escaped tilde may open or close, so
+  `Plain ~\~~ end.` strikes the tilde where a document showed `~~~`; and `~` runs pair apart from
+  `*` and `_` runs, in the browser editor's order, so `x* ~~a*b~~c*` is emphasis `b~~c` in both.
+  Reading a paragraph of mixed `~` and `*` runs is now linear in its length: a mebibyte of
+  `~~a ` then `a* ` took over a minute. So is a paragraph whose `*` runs the rule of three keeps
+  apart: 437 KiB of `**a ` then `a*a` took 100 seconds and now takes under one. A rendering stored
+  correctly keeps its bytes, an image's alt text included: the writer takes first a spelling that
+  reads back under the browser editor's rules and under both sets of rules Dispatch stored
+  markdown under, so the spelling it wrote before stays wherever the browser reads it back as
+  written. One the browser misread, such as text `~~~x~~` stored as `\~~~x~~`, which the browser
+  strikes, is written anew (`&#126;&#126;&#126;x&#126;&#126;`) when its document is next
+  rendered, and no stored document is rewritten. An image inside an image's label now adds its own
+  alt text to the outer alt text, as the browser editor reads it. A `*` or `_` run beside a tilde
+  now opens or closes toward it as the browser editor reads it, so `*~~**b~~*` is emphasis around
+  struck `**b`, and `Plain b*~* text.` is emphasis `~` (INFRA-534).
+
+- A bare email address, or one written `<a@b.test>`, in Markdown written to a document through the
+  API is now stored and shown as a link to its `mailto:` URL, `[a@b.test](mailto:a@b.test)`, as a
+  comment and the browser editor show it (INFRA-530). Dispatch linked it to the bare address, which
+  the editor's link opener resolved as a page path under the document's own URL. A document that
+  already holds `[a@b.test](a@b.test)` keeps that link's bare target until it is edited.
+
 - A broker outage no longer ends the sessions whose leases ran out during it (INFRA-487). A session
   renews its lease through a broker, so while every broker process was down, or none could reach
   the database, no lease could be renewed, and the first sweep after the outage ended every
@@ -1995,6 +2003,16 @@
   first events of an issue reached the Legion daemon after later ones, which it drops as stale.
   The shared database pool every request reads through holds 64 connections, from 16: under heavy
   agent load the API held all sixteen and every other caller waited behind them.
+
+- Dispatch's server now reads a `|` after an even run of backslashes in a table row as the end of a
+  cell, as the browser editor reads it: `| a \\| b |` is the two cells `a \` and `b` on both, where
+  the server read one cell `a \| b`, so a document no longer showed one table in the live editor
+  and the command line and another in the past-version view. A `|` after an odd run (`\|`) is
+  still the cell's text. Code in a cell cannot hold a `|` right after an odd run of backslashes,
+  since no markdown of a cell writes it: an API replace, delete by quote or accepted suggestion
+  that adds such code is refused, naming the table, the cell and the header above it, also beside
+  such code a browser edit left, and a browser edit that holds one is stored with that `|` written
+  as text after the code (INFRA-172).
 
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.

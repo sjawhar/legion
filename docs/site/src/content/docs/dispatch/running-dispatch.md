@@ -174,7 +174,9 @@ revokes no refresh token at the issuer: whoever holds a database backup and the 
 use the tokens sealed under it until they expire, so after a key leaks, sign people out at the
 issuer too.
 
-Spaces and line breaks separate the keys, so a key itself holds neither.
+Separate the keys with one space or one line feed. Every whitespace character separates two keys,
+so a key itself holds none, and two in a row, a CR LF among them, enclose an empty key, which
+Dispatch refuses to start with.
 
 ## Running it on your machine
 
@@ -291,8 +293,9 @@ balancer's or Kubernetes' readiness probe at it.
   have been reached, or `null` when that issuer is not set. Neither decides `ok` or the status.
 - `commit` is the source commit this server's image was built from, or `null` in a build that was
   not stamped.
-- `fleet_commit` is the commit every running server was last found serving, the one Dispatch
-  announced on NATS, or `null` before any was found. It can trail by a few seconds.
+- `fleet_commit` is the commit every running server was last found serving, the latest announced
+  build, or `null` before any was found. It is read from the database, so it is reported while NATS
+  is down too. It can trail by a few seconds.
 - `schema_version` is the newest database migration applied.
 
 A check that needs NATS, the bucket or sign-in asserts `nats: true`, `files: true` or `signin: true`
@@ -310,11 +313,15 @@ one. Three things have to be true first; Dispatch checks the first for you.
   servers that are running in the database, with a fingerprint of each key that reveals nothing of
   it, and a server whose keys a running server does not share refuses to start: it logs why,
   naming the other server and the steps of [changing the session key](#changing-the-session-key),
-  and exits before it serves anything. A rolling update to a changed key stalls the same way on the
-  first new server while the old ones keep serving. A server that stopped reporting in for longer
-  than 15 seconds (frozen, or cut off from the database) is not counted meanwhile, so it checks its
-  keys again before it counts once more: beside a running server whose keys it does not share, it
-  logs why, finishes the requests it is answering, and exits 1.
+  and exits before it serves anything. Before it exits it waits up to 15 seconds and one more
+  report (5 seconds) for the other server to stop reporting in, so a server started right after
+  another was killed, which never removed itself from the database, starts once the killed
+  server's record lapses; a server that is running keeps reporting in and keeps it refused. A
+  rolling update to a changed key stalls the same way on the first new server while the old ones
+  keep serving. A server that stopped reporting in for longer than 15 seconds (frozen, or cut off
+  from the database) is not counted meanwhile, so it checks its keys again before it counts once
+  more: beside a running server whose keys it does not share, it logs why, finishes the requests
+  it is answering, and exits 1.
 - **Give every server the same embedder settings.** Each stored vector records the embedder that
   made it, and each server drops the vectors another embedder made and embeds that text again, so
   two servers set up differently keep replacing each other's work. A rollout that changes the
@@ -330,12 +337,12 @@ one. Three things have to be true first; Dispatch checks the first for you.
   rather than rolling it (Kubernetes `strategy: Recreate`), until a single-publisher lock lands.
 
 A second server also costs connections, and Postgres counts them per server. Each server opens up
-to 64 connections for requests, up to 11 for the periodic work it runs once across the servers, up
+to 64 connections for requests, up to 16 for the work it runs once across the servers, up
 to 4 for loading documents, one for the health check, and one for the events outbox, and it holds
 four more open for as long as it runs: one each for the three things that wait on Postgres
 notifications, which are delivery, the live event stream, and closing a document session another
 server has written to, and one for its entry in the list of running servers, which it renews every
-five seconds. That is 85 connections for one server at its ceiling, and twice that for two, past a
+five seconds. That is 90 connections for one server at its ceiling, and twice that for two, past a
 default Postgres's limit of 100. Check the database's connection
 limit before you start the second server: a limit sized for one server, with whatever else uses
 that database counted in, is the thing that runs out.

@@ -2,32 +2,28 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-559",
-  "completed": "2026-10-27T11:16:45Z",
-  "decision": "changes_requested",
-  "reviewedHead": "f169f43e22f4d376455bc4b31501d2c1c151db88",
-  "codeHead": "dc41305784ba39e735bffecc618323e7a5b6f740",
+  "completed": "2026-10-28T08:37:59Z",
+  "round": 3,
+  "decision": "approved",
+  "codeHead": "fc31630412fe4e1365d1a2298ec073d0b2802b80",
   "critical": 0,
-  "important": 2,
+  "important": 0,
   "minor": 1,
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/store/migrations/0129_server_processes.up.sql",
-      "description": "GitHub reports PR #2323 CONFLICTING (mergeStateStatus DIRTY) against main 2e8c68cd98ce: `git merge-tree` shows content conflicts in packages/envoy/CHANGELOG.md and packages/envoy/internal/dispatch/store/pool.go, and main's #2137 adds migration 0129_document_edit_notices, the number this branch gives 0129_server_processes (0130_dashboard_assets follows). GitHub runs no checks on a conflicting head, so the required checks cannot settle. Forward-merge main, renumber both migrations (in step with INFRA-555's #2390), resolve pool.go's lease-pool size against main's."
-    },
-    {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/shell/DeploymentResilience.tsx",
-      "description": "deploymentChanged (line 86) compares live[0], always an entry path /assets/index-*.js, with runningIndexAsset(), which falls back to __DISPATCH_BUILD__ (line 66) when the page has no /assets/index-*.js script (Vite dev server). Under `bun run dev` with a backend on :8766 that serves any built web/dist, the route answers one live entry and the tab shows 'A new version is available' on every focus; a reload brings it back. Before this change the old code read `/` from the dev server, found no index asset and offered nothing. Fix: offer nothing when the page names no entry chunk, plus a unit test of that case."
-    },
-    {
       "severity": "minor",
       "file": "packages/envoy/internal/dispatch/routes/router.go",
-      "description": "Hardening, no exploit path: readRetainedAsset's flight runs on context.WithoutCancel (line 595) while the 8 MiB reservation is released when the handler returns, so a client that disconnects at once leaves a store lookup running outside the memory cap's concurrency bound. Lookups are sub-millisecond primary-key reads; not a gate."
+      "description": "Cleanup only, on the Fast-follow line. The 'can Postgres store this text' guard is in two places: in dashboard.Store.GetAsset (dashboard.go:317, the right owner) and in the router (router.go:524). The router comment's reason 'answer a store failure' is no longer true now that the store guards itself. Both guards behave correctly, and the router copy only keeps such a path out of the memory reservation."
     }
   ],
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. CI head dc41305784ba (compare to f169f43e: 2 files, handoffsOnly true): typecheck success, lint and test in_progress, pr-title queued. Not green; the conflict blocks the head regardless.",
-  "thermonuclear": "Pair run once at f169f43e (code dc41305784ba): deep review CHANGES (the dev-notice finding, Minor detached-read hardening, everything else clean incl. DISPATCH_DEV_SIGNIN_SHARED_KEY refused without dev sign-in at cmd/dispatch/main.go:688, path cleaned and parameterized, publish/prune advisory locks); code quality CHANGES on cleanup only (reload budget in two copies as the plan accepted, LiveDashboardBuilds in package api and BuildID re-reading index.html because INFRA-555's processes package is frozen on #2390, assetCache flight in router, duplicate size check, dead top-level testIgnore) - none changes behaviour; not requested.",
-  "threads": "0 threads on the pull request.",
-  "e2eLines": "E2E (implementer) and E2E (tester) both present in the PR body."
+  "verifiedFixes": [
+    "Round-2 finding (invalid UTF-8 asset path reached the store and answered 502 + ERROR): fixed in fc31630412fe. The targeted Go tests pass on real Postgres 17 (dashboard, routes). The tester's negative control on the round-2 server gave 502 and 5 ERROR lines; the head gives 404 and 0 ERROR lines.",
+    "Round-2 stale workflow comment: fixed in 355331f0bd64."
+  ],
+  "ci": "Required set: lint, typecheck, test, pr-title. CI head fc31630412fe, and the compare to 252cf6f2 holds only .legion/ (2 files). lint, typecheck and pr-title passed. test first failed in the daemon's TestFetchKeepsAFeedAfterGitGC/killed_during_repack, a flake that dispatch://INFRA-523 tracks (code this PR does not touch; 5 of 5 passed in the pod). It passed on the single rerun (completed 2026-10-27T20:21:24Z).",
+  "thermonuclear": "Pair run once at 252cf6f2 (code fc31630412fe). The deep review approves: Go's and Postgres's views of valid UTF-8 agree, Publish cannot store a key the guard hides, and the slog swap in the subtests is race-free. The code quality review raised the duplicate guard and a repeated log-capture copy in assets_test.go; both are cleanup with no behaviour change.",
+  "threads": "Three threads, all mine; the implementer resolved all three. Round 1's thread was already answered. In this round I answer PRRT_kwDORFy7ds6wxsJM and PRRT_kwDORFy7ds6wxsJQ as fixed and accept them.",
+  "notes": [
+    "At this reading GitHub reports PR #2323 CONFLICTING again with main b295a3fbcb42. The conflicts are in CHANGELOG.md files (claude-envoy, contracts, envoy, pi-legion), packages/envoy/AGENTS.md and cmd/dispatch/main_test.go. There is no migration collision: main ends at 0134. The PR also merges only after #2390, so the implementer's forward merge comes back for the fingerprint check."
+  ]
 }

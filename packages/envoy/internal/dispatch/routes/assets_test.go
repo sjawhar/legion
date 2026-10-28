@@ -44,7 +44,8 @@ func (s *fakeAssetStore) GetAsset(_ context.Context, key string) ([]byte, error)
 // wins, pages and other paths never consult it, and a router with no store answers every asset
 // miss with a plain 404. Only a hit carries the immutable header. A path no file can have (a NUL
 // byte, a name too long, a file where a directory must be) is a miss like any other, except that
-// a NUL byte is never asked of the store, whose Postgres key cannot carry one.
+// a NUL byte or invalid UTF-8 is never asked of the store, whose Postgres key cannot carry either.
+// Nothing but a store failure logs an ERROR.
 func TestStaticHandlerRetainedAssets(t *testing.T) {
 	const retained = "console.log('previous build')"
 	for _, tc := range []struct {
@@ -87,6 +88,19 @@ func TestStaticHandlerRetainedAssets(t *testing.T) {
 		{
 			name: "NUL in an asset name, no store", path: "/assets/foo%00.js",
 			status: http.StatusNotFound,
+		},
+		{
+			// The store answers as Postgres refuses a key that is not UTF-8: asking it would be a
+			// 502 and an ERROR for a name no build can hold.
+			name: "invalid UTF-8 in an asset name", path: "/assets/%ff.js",
+			store:  &fakeAssetStore{err: errors.New(`read dashboard asset "assets/\xff.js": ERROR: invalid byte sequence for encoding "UTF8": 0xff (SQLSTATE 22021)`)},
+			status: http.StatusNotFound,
+		},
+		{
+			name: "non-ASCII asset name", path: "/assets/caf%C3%A9.js",
+			store:  &fakeAssetStore{assets: map[string]string{"assets/café.js": retained}},
+			status: http.StatusOK, body: retained, cacheControl: assetCacheControl,
+			contentType: "text/javascript; charset=utf-8", keys: []string{"assets/café.js"},
 		},
 		{
 			name: "asset name too long", path: "/assets/" + strings.Repeat("a", 300) + ".js", store: &fakeAssetStore{},
@@ -134,6 +148,11 @@ func TestStaticHandlerRetainedAssets(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+
 			webDist := t.TempDir()
 			if err := os.MkdirAll(filepath.Join(webDist, "assets"), 0o700); err != nil {
 				t.Fatal(err)
@@ -191,6 +210,16 @@ func TestStaticHandlerRetainedAssets(t *testing.T) {
 			}
 			if !slices.Equal(keys, tc.keys) {
 				t.Errorf("store asked for %q, want %q", keys, tc.keys)
+			}
+			if tc.status != http.StatusBadGateway {
+				for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+					var record struct {
+						Level string `json:"level"`
+					}
+					if json.Unmarshal([]byte(line), &record) == nil && record.Level == "ERROR" {
+						t.Errorf("ERROR record for a %d: %s", tc.status, line)
+					}
+				}
 			}
 		})
 	}

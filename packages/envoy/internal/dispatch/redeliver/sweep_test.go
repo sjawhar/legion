@@ -117,7 +117,7 @@ func newHarness(t *testing.T) *harness {
 func (h *harness) sweeper() *redeliver.Sweeper {
 	return &redeliver.Sweeper{
 		GitHub: h.client,
-		State:  h.state,
+		Open:   func() (bus.KeyValue, error) { return h.state, nil },
 		Logger: slog.New(slog.NewTextHandler(h.logs, nil)),
 		Now:    h.clock.Now,
 	}
@@ -491,7 +491,7 @@ func TestASweepPausedBeforeItsRequestSendsNothingUnderANewLimit(t *testing.T) {
 
 	paused := &pausedClaim{KeyValue: h.state, entered: make(chan struct{}), release: make(chan struct{})}
 	second := h.sweeper()
-	second.State = bus.KeyValue{KeyValue: paused}
+	second.Open = func() (bus.KeyValue, error) { return bus.KeyValue{KeyValue: paused}, nil }
 	reports := make(chan redeliver.Report, 1)
 	go func() {
 		report, err := second.Sweep(context.Background(), redeliver.Options{})
@@ -720,14 +720,13 @@ func TestTheSweepSummaryCountsEveryOutcome(t *testing.T) {
 	}
 }
 
-// A sweeper built with Open and no State, as envoy-dispatch builds it for both the running loop
-// and the redeliver-webhooks command, opens its state when it sweeps, and only once: the command
-// calls Sweep directly, with no loop ahead of it to open the bucket.
+// A sweeper opens its state when it sweeps, as envoy-dispatch builds it for both the running loop
+// and the redeliver-webhooks command, and only once: the command calls Sweep directly, with no
+// loop ahead of it to open the bucket.
 func TestASweepOpensTheStateItWasBuiltWithout(t *testing.T) {
 	h := newHarness(t)
 	failed := h.fail("guid-a", http.StatusServiceUnavailable, time.Minute)
 	sweeper := h.sweeper()
-	sweeper.State = bus.KeyValue{}
 	opens := 0
 	sweeper.Open = func() (bus.KeyValue, error) {
 		opens++
@@ -757,7 +756,6 @@ func TestASweepWhoseStateWillNotOpenFails(t *testing.T) {
 	h := newHarness(t)
 	h.fail("guid-a", http.StatusServiceUnavailable, time.Minute)
 	sweeper := h.sweeper()
-	sweeper.State = bus.KeyValue{}
 	refused := errors.New("NATS is not connected")
 	sweeper.Open = func() (bus.KeyValue, error) { return bus.KeyValue{}, refused }
 

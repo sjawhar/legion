@@ -394,6 +394,9 @@ test("an error frame rejects the query with an ApiError carrying the code", asyn
 // each reconnect may reach another process, and the new socket subscribes again.
 test("an INVALID_FRAME for a subscription the page holds opens a new socket", async () => {
   jest.useFakeTimers();
+  // Each reconnect waits a draw of its delay (`reconnectDelayMs`); pinned at 0.625, the first
+  // waits 1,250 ms of the 2 s spread and the second 1,625 ms of its 1 to 2 s.
+  const random = spyOn(Math, "random").mockReturnValue(0.625);
   const { observer, unsubscribe } = observe();
   try {
     const { socket, sub } = await opened();
@@ -411,7 +414,9 @@ test("an INVALID_FRAME for a subscription the page holds opens a new socket", as
     // The page keeps the data it holds while it reconnects.
     expect(queryClient.getQueryData<DeliveryTimelineResponse>(key)).toEqual(body);
     expect(sockets.sockets).toHaveLength(1);
-    jest.advanceTimersByTime(1_251);
+    jest.advanceTimersByTime(1_249);
+    expect(sockets.sockets).toHaveLength(1);
+    jest.advanceTimersByTime(1);
     expect(sockets.sockets).toHaveLength(2);
 
     const again = sockets.latest();
@@ -420,9 +425,9 @@ test("an INVALID_FRAME for a subscription the page holds opens a new socket", as
     // A second refusal waits twice as long: the refusal did not reset the backoff.
     again.receive({ type: "error", sub, code: "INVALID_FRAME", message: "type must be subscribe" });
     expect(again.closedWith).toBe(4000);
-    jest.advanceTimersByTime(1_499);
+    jest.advanceTimersByTime(1_624);
     expect(sockets.sockets).toHaveLength(2);
-    jest.advanceTimersByTime(1_002);
+    jest.advanceTimersByTime(1);
     expect(sockets.sockets).toHaveLength(3);
 
     // The process the third socket reaches serves the subscription.
@@ -433,6 +438,7 @@ test("an INVALID_FRAME for a subscription the page holds opens a new socket", as
     expect(live.state().state).toBe("open");
     expect(observer.getCurrentResult().data).toEqual(body);
   } finally {
+    random.mockRestore();
     unsubscribe();
   }
 });

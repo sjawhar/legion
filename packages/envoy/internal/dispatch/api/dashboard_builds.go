@@ -20,7 +20,7 @@ type dashboardBuilds struct {
 	Live    []string `json:"live"`
 }
 
-// LiveDashboardBuilds is the distinct dashboard builds (processes.DashboardBuild's ids) the live
+// LiveDashboardBuilds is the distinct dashboard builds (routes.DashboardBuild's ids) the live
 // server processes serve (processes.Live), in the order Live first names each, and never nil, so a
 // query given it binds an empty array rather than SQL null. A process that serves no dashboard
 // adds nothing. It lives here rather than in package dashboard, which imports this package through
@@ -41,7 +41,7 @@ func LiveDashboardBuilds(ctx context.Context, db processes.Querier) ([]string, e
 
 // getDashboardBuilds answers which dashboard builds are being served. Live is the registry of live
 // server processes (processes.Live, heartbeats on the database's clock) joined to the builds those
-// processes published at boot (dashboard_builds, migration 0131) on the build id: a process whose
+// processes published at boot (dashboard_builds, migration 0136) on the build id: a process whose
 // build has no row, or a row whose page names no entry chunk, adds nothing.
 func (s *server) getDashboardBuilds(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {

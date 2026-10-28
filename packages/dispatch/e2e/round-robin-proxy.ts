@@ -72,9 +72,21 @@ interface RoundRobinSocket extends RelaySocket {
   record?: ProxiedSocket;
 }
 
+// DISPATCH_E2E_PORT, or with it unset port 0, so the OS chooses; the line at the end reports the
+// port bound, which e2e/harness-start.ts reads. A's and B's ports are set by then: the harness
+// holds them before it starts this proxy (`heldAhead` in e2e/harness-listeners.ts).
+const ports = harnessPorts();
+for (const upstream of [ports.dispatchA, ports.dispatchB]) {
+  if (upstream.port === 0) {
+    throw new Error(
+      `The round-robin proxy cannot start: ${upstream.variable} is unset, so it has no process ` +
+        "to forward to. e2e/harness-start.ts sets it before it starts this proxy."
+    );
+  }
+}
 const upstreams: Record<DispatchProcess, { readonly name: string; readonly origin: string }> = {
-  a: { name: "Dispatch A", origin: `http://127.0.0.1:${harnessPorts.dispatchA.port}` },
-  b: { name: "Dispatch B", origin: `http://127.0.0.1:${harnessPorts.dispatchB.port}` },
+  a: { name: "Dispatch A", origin: `http://127.0.0.1:${ports.dispatchA.port}` },
+  b: { name: "Dispatch B", origin: `http://127.0.0.1:${ports.dispatchB.port}` },
 };
 
 let requests: ProxiedRequest[] = [];
@@ -192,7 +204,7 @@ const listener = Bun.serve<RoundRobinSocket>({
   // An event stream is silent between the server's 15 s heartbeats, and Bun's default 10 s idle
   // timeout would cut it before the first one.
   idleTimeout: 0,
-  port: harnessPorts.dispatch.port,
+  port: ports.dispatch.port,
   async fetch(request, server) {
     const { pathname } = new URL(request.url);
     if (pathname.includes("/_proxy/")) return answerOwn(request, pathname);

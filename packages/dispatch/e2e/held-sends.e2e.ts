@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { agentRow, openAgents, plannerSession, seedAgents } from "./agents";
 import { createComment, createIssue, createProject } from "./api";
+import { conversationThreadScope } from "./editor";
 import { resetDatabase } from "./seed";
 import { answeredPost, navigateInApp, refusePosts } from "./sends";
 import { asUser } from "./users";
@@ -100,11 +101,7 @@ test("an Agents row send refused while the reader is on the Inbox is there on th
 // comment (`redirectedReplyTarget` in `held-sends.ts`, read by both `beginReply`s).
 test("a docked Reply on a different comment redirects onto the one whose refusal it holds", async ({
   browser,
-}, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "a phone's comment Reply opens its own thread, covered by the thread-composer redirect row"
-  );
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Two comments, one docked composer" });
   const a = await createComment(issue.key, { body: "Comment A" });
@@ -144,7 +141,7 @@ test("a docked Reply on a different comment redirects onto the one whose refusal
 // Past the send's deadline Collapse thread, and on a phone the thread's Back, let the reader leave
 // a thread whose own reply is still out. The reply's composer goes with the thread it is in; the
 // send does not, and the thread opened again has its draft and refusal.
-test("a thread's own reply refused after the reader left it past the deadline is there when the thread opens again", async ({
+test("a thread's own reply refused after the reader left it past the deadline is there when the thread opens again @phone", async ({
   browser,
 }, testInfo) => {
   const phone = testInfo.project.name === "iphone";
@@ -157,7 +154,7 @@ test("a thread's own reply refused after the reader left it past the deadline is
     await page.clock.install();
     await page.goto(`/issues/${issue.key}/conversation`);
     const turn = page.locator(`[data-turn="comment:${earlier.id}"]`);
-    const thread = phone ? page.getByRole("dialog", { name: "Thread" }) : turn;
+    const thread = conversationThreadScope(page, testInfo.project.name, turn);
     const openThread = async () => {
       await turn.getByRole("button", { name: "Expand thread" }).click();
       await expect(

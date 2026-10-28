@@ -1,24 +1,18 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
-- `DOCUMENT_NEWER_CONTENT_CLOSE_CODE` (`4425`) and `DOCUMENT_NEWER_CONTENT_CLOSE_REASON`
-  (`"DOC_NEWER_CONTENT"`), with which the document websocket closes a room whose tree holds an
-  element this Dispatch build cannot read, which a newer build wrote during a release; the
-  Hocuspocus provider reconnects on the code. `bun run gen:go` writes them into Go as
-  `contracts.DocumentNewerContentCloseCode` and `contracts.DocumentNewerContentCloseReason`.
-  `AnchorPosition.anchor_block_error` gains `"DOC_NEWER_CONTENT"`, and the Dispatch tools'
-  description of it says to try again in one minute (INFRA-558).
-- `BlockElementVersions` (`since`, `creatable_since`) on every element of the document schema
-  manifest: `BlockTypeSchema` and `BlockAttributeSchema` extend it, `BlockAttributeSchema` gains
-  `choice_versions` by choice, and the manifest gains `nodes` and `marks`, each a
-  `BlockSchemaElement` (`name` and the two numbers). A server older than INFRA-558 names no nodes or
-  marks (INFRA-558).
-- `GraphReferences.unknown_kinds`: the `?kind=` values the answering Dispatch build does not emit
-  (during a release, a newer build's kinds), which it answers with no edges; absent when there are
-  none (INFRA-558).
+- `SearchResult.ask` (`SearchAsk`), where an ask hit stands when the search ran:
+  `{state: "open"}`, `{state: "answered", answer}` with its latest answer, or
+  `{state: "resolved", resolution, answer?}`, whose `answer` is the last one the ask had before it
+  was closed and is absent when nobody answered it. It is present on every `ask` hit from a
+  Dispatch of this release and absent on every other kind and on any hit from an older Dispatch.
+  The `dispatch_search` description says an ask hit says whether it is answered: an answered one
+  shows the latest answer, who gave it, when, the options chosen and its text, and a closed one
+  says it was closed with no answer or shows the last answer it had (INFRA-569).
+
 - The event `artifact.human_edited` and its payload, `ArtifactHumanEditedEventPayload` and
   `ArtifactHumanEditedEventPayloadSchema`: `artifact_id`, `name`, `from_version`, `to_version`,
   `editors`, `diff` and `diff_truncated`. Dispatch sends it once a document has been quiet for 30
@@ -45,6 +39,12 @@
   past them is its document, and one whose document or item is past them names nothing.
   `parseBlockFragment`'s `pin` is N's decimal digits as a string, so no pin past 2^53 is rounded.
   `DISPATCH_TEXT_REFERENCES` gains the block, pin and bound rows both readers of text are held to.
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line. `GraphNode` gains them,
+  optional because a server older than them omits them (`changed_at` was a block's alone and may
+  now be `null`), and `GraphNodeParent` (`kind`, `id`, `ref?`) is `parent`'s type: `id` is the
+  parent node's own id and `ref` is absent when the parent has no reference. An actor list the
+  server never recorded is `[]`, any other fact `null`.
 - Daemon API contract 40: `LEGION_WORKFLOW_PHASES` gains `awaiting_person`, after `admitted`, a
   root that gave its admission slot up while its architect waits on a person's answer, and the
   state issue view gains `waitingOn`, present only in that phase: `kind: "ask"` with the question's
@@ -216,15 +216,14 @@
 
 ### Changed
 
-- `DISPATCH_SERVER_STARTED_SUBJECT` and `DispatchServerStartedPayloadSchema` mean the build every
-  live Dispatch server process serves, announced once each time that build changes, rather than one
-  process's start: a rolling update is announced once its last process of the earlier build has
-  gone, a restart on the announced build is not announced, and a rollback is announced again.
-  `started_at` is the database's time of the announcement, and the event id is
-  `dispatch-server-started-<commit>-<seq>`. The subject and the payload's two fields are unchanged,
-  so the schema still parses every envelope; a shared fixture
-  (`packages/daemon/internal/intake/testdata/dispatch/server-started.json`) holds the Dispatch
-  writer, the daemon's intake and this schema to one envelope (INFRA-555).
+- `ASK_QUESTION_MAX` is 2,000, from 800, and `scripts/gen-go.ts` emits it as
+  `contracts.AskQuestionMax`, which the Dispatch server enforces in place of its own literal. The
+  question contract `dispatch ask` and `dispatch edit-ask` print in `--help` now asks for the
+  concrete case first: which machines, files, sessions or people, and the numbers, then the choice
+  in those terms, saying what happens to whom under each option, never "How should we proceed?"
+  or "Which option?", with every fact the decision needs and nothing else. It no longer forbids
+  naming the choices in the question. Both commands' example is a concrete question.
+
 - `dispatch_issue`'s `spec` and `dispatch_doc_edit` point at `skill://dispatch-writing-specs` in
   place of the dispatch skill's "Writing a spec". Five descriptions take a rule the
   dispatch skill's references held, so `dispatch <command> --help` prints it: `dispatch_resolve_ask`

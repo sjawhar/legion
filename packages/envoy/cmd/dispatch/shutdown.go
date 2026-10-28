@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
-	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -52,38 +51,20 @@ const silentProbes = 3
 // probes it runs every pass.
 const drainPollInterval = 250 * time.Millisecond
 
-// deregisterTimeout bounds the delete that takes this process out of the registry of live server
-// processes at shutdown. It is one delete by primary key, so five seconds is a slow round trip
-// rather than a slow statement; a deregistration that does not land leaves a row whose heartbeat
-// has stopped, which drops out of the live window (processes.LiveWindow) on its own.
-const deregisterTimeout = 5 * time.Second
-
-// deregisterAfterDrain is the deregistration shutdown runs once HTTP has drained: registration's
-// row deleted within deregisterTimeout, a failure logged.
-func deregisterAfterDrain(registration *processes.Registration) func() {
-	return func() {
-		ctx, cancel := context.WithTimeout(context.Background(), deregisterTimeout)
-		defer cancel()
-		if err := registration.Deregister(ctx); err != nil {
-			slog.Warn("dispatch: deregister this server process", "instance", registration.ID, "error", err)
-			return
-		}
-		slog.Info("dispatch: deregistered this server process", "instance", registration.ID)
-	}
-}
-
 // serveUntilStopped serves on listener until ctx ends, then stops Dispatch (shutdown), deregistering
-// it once HTTP has drained. Two things end serving before the signal does, each logged at ERROR and
-// returned once shutdown has run, so main exits 1 and a supervisor never reads either as a clean
-// stop: serving failed, or the registry refused to count this process as live again beside a live
-// process whose signing keys it does not share (lost, processes.Registration.Lost). Either cancels
-// ctx, so the stop is the one a signal makes: the listener closes at once, the requests in flight
-// are answered, and the registry's row is deleted.
+// it once HTTP has drained. It logs the address listener is bound to, whether main bound it or
+// inherited it (DISPATCH_LISTEN_FD), so the line names the port a kernel chose. Two things end
+// serving before the signal does, each logged at ERROR and returned once shutdown has run, so main
+// exits 1 and a supervisor never reads either as a clean stop: serving failed, or the registry
+// refused to count this process as live again beside a live process whose signing keys it does not
+// share (lost, processes.Registration.Lost). Either cancels ctx, so the stop is the one a signal
+// makes: the listener closes at once, the requests in flight are answered, and the registry's row
+// is deleted.
 func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *http.Server, listener net.Listener,
-	addr string, documentService *docs.Service, pool *store.Pool, waitDelivery, deregister func(), lost <-chan error) error {
+	documentService *docs.Service, pool *store.Pool, waitDelivery, deregister func(), lost <-chan error) error {
 	serveErr := make(chan error, 1)
 	go func() {
-		slog.Info("dispatch: listening", "addr", addr)
+		slog.Info("dispatch: listening", "addr", listener.Addr().String())
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("dispatch: serve", "error", err)
 			serveErr <- err

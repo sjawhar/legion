@@ -33,6 +33,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 // signInEnvironment is a cookie-identity boot environment with all four sign-in settings.
@@ -367,6 +368,53 @@ func TestResolveBootConfigRejectsAgentSecretsURLWithPathOrBadScheme(t *testing.T
 	}
 }
 
+// Both DISPATCH_AGENT_SECRETS_URL refusals - a shape refusal (a path, or a value that does not
+// parse) and the dev sign-in's refusal of a remote broker - name a clean URL as it is and any
+// other value as redact.NotPrinted: user info, a query, escapes, a control byte.
+func TestResolveBootConfigRefusesAgentSecretsURLWithoutNamingItsCredential(t *testing.T) {
+	shape := func(brokerURL string) settingValues {
+		return envGetter(map[string]string{
+			"DATABASE_URL":                              "postgres://dispatch",
+			"DISPATCH_AGENT_TOKEN":                      "agent-token",
+			"DISPATCH_IDENTITY":                         "header:X-Dispatch-User",
+			"DISPATCH_IDENTITY_HEADER_TRUSTED":          "1",
+			"DISPATCH_AGENT_SECRETS_URL":                brokerURL,
+			"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": "/var/run/secrets/broker/token",
+		})
+	}
+	remote := func(brokerURL string) settingValues {
+		return devSignInEnvironment(map[string]string{
+			"DISPATCH_AGENT_SECRETS_URL":                brokerURL,
+			"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": "/var/run/secrets/broker/token",
+		})
+	}
+	for name, row := range map[string]struct {
+		env  settingValues
+		want string
+	}{
+		"a clean path":                     {shape("https://broker.example.com/v1"), `DISPATCH_AGENT_SECRETS_URL="https://broker.example.com/v1"`},
+		"a clean remote broker":            {remote("https://broker.example.com"), `DISPATCH_AGENT_SECRETS_URL="https://broker.example.com"`},
+		"a path":                           {shape("https://tokuser9f3:hunter2pw@broker.example.com/v1?token=qtok77"), `DISPATCH_AGENT_SECRETS_URL="` + redact.NotPrinted + `"`},
+		"a remote broker":                  {remote("https://tokuser9f3:hunter2pw@broker.example.com?token=qtok77"), `DISPATCH_AGENT_SECRETS_URL="` + redact.NotPrinted + `"`},
+		"an '@' in a query value":          {shape("https://broker.example.com/?password=hunter@2pwSECRET"), `DISPATCH_AGENT_SECRETS_URL="` + redact.NotPrinted + `"`},
+		"a remote broker, '@' in a query":  {remote("https://broker.example.com?a=1&token=qtok@77SECRET&b=2"), `DISPATCH_AGENT_SECRETS_URL="` + redact.NotPrinted + `"`},
+		"a literal '@' and an escaped one": {shape("https://ada@corp.example:hunter2pw%40127.0.0.1:1"), `DISPATCH_AGENT_SECRETS_URL="` + redact.NotPrinted + `"`},
+		"a double-escaped '@'":             {shape("https://tokuser9f3:hunter2pw%2540broker.example.com"), `DISPATCH_AGENT_SECRETS_URL="` + redact.NotPrinted + `"`},
+		"a newline forging a line":         {shape("https://broker.example.com\nFORGED"), `DISPATCH_AGENT_SECRETS_URL="` + redact.NotPrinted + `"`},
+	} {
+		_, err := resolveBootConfig(row.env)
+		if err == nil || !strings.Contains(err.Error(), row.want) {
+			t.Errorf("%s: err = %v, want a refusal naming %s", name, err, row.want)
+			continue
+		}
+		for _, secret := range []string{"tokuser9f3", "hunter2pw", "qtok", "2pwSECRET", "77SECRET", "ada@corp", "2540", "FORGED"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("%s: refusal %q names %q", name, err, secret)
+			}
+		}
+	}
+}
+
 // A broker URL with no token file must refuse to boot rather than construct a client that
 // authenticates with an empty bearer.
 func TestResolveBootConfigRequiresTheAccountTokenFileWhenAgentSecretsURLSet(t *testing.T) {
@@ -459,6 +507,27 @@ func TestDispatchHandlerReportsDisconnectedNATS(t *testing.T) {
 	}
 	if nats, ok := health["nats"].(bool); !ok || nats {
 		t.Fatalf("healthz nats = %#v, want false", health["nats"])
+	}
+}
+
+// untouchedFiles is a file store any call on which panics: its methods are the nil interface's.
+type untouchedFiles struct{ files.Store }
+
+// /livez answers 204 with no body and asks no dependency anything: with no database, no NATS
+// client and a file store any call on which panics, it still answers, and the router behind it is
+// never reached. It is what the liveness and startup probes ask, which must not wait on or fail
+// with a dependency.
+func TestDispatchHandlerLivezAnswersWithoutDependencies(t *testing.T) {
+	router := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("the router served %s %s", r.Method, r.URL.Path)
+	})
+	response := httptest.NewRecorder()
+	dispatchHandler(router, nil, nil, untouchedFiles{}, "", nil, issuers{}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/livez", nil))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("GET /livez status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+	if response.Body.Len() != 0 {
+		t.Fatalf("GET /livez body = %q, want none", response.Body.String())
 	}
 }
 
@@ -1116,6 +1185,41 @@ func TestResolveBootConfigDevSignInChecksTheAddressItBinds(t *testing.T) {
 	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_SIGNIN": "", "DISPATCH_PORT": "70000"})); err == nil || !strings.Contains(err.Error(), "DISPATCH_PORT") {
 		t.Errorf("DISPATCH_PORT=70000: err = %v, want a refusal naming DISPATCH_PORT", err)
 	}
+}
+
+// With DISPATCH_LISTEN_FD the fence checks the inherited socket's own address, which is what
+// serves: a socket on every interface is refused, naming the variable, though DISPATCH_LISTEN_HOST
+// names that socket's address correctly, and a loopback one is accepted.
+func TestResolveBootConfigDevSignInChecksTheListenSocket(t *testing.T) {
+	wildcard, address := listeningFD(t, "tcp4", "0.0.0.0:0")
+	_, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_LISTEN_FD": wildcard, "DISPATCH_LISTEN_HOST": "0.0.0.0"}))
+	if err == nil || !strings.Contains(err.Error(), "DISPATCH_DEV_SIGNIN=1 is for a loopback server only") ||
+		!strings.Contains(err.Error(), "DISPATCH_LISTEN_FD="+wildcard) || !strings.Contains(err.Error(), address.String()) {
+		t.Errorf("dev sign-in on a socket on %s: err = %v, want the fence's refusal naming DISPATCH_LISTEN_FD and the address", address, err)
+	}
+	loopback, address := listeningFD(t, "tcp4", "127.0.0.1:0")
+	boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_LISTEN_FD": loopback}))
+	if err != nil || !boot.DevSignIn || boot.ListenAddr != address.String() {
+		t.Errorf("dev sign-in on a socket on %s: ListenAddr = %q, DevSignIn %t, %v; want accepted", address, boot.ListenAddr, boot.DevSignIn, err)
+	}
+}
+
+// listeningFD listens on address and returns the number of a descriptor of the listening socket's
+// own, as DISPATCH_LISTEN_FD names an inherited one, with the socket's address. Both close when the
+// test ends; resolveBootConfig only inspects the descriptor.
+func listeningFD(t *testing.T, network, address string) (string, *net.TCPAddr) {
+	t.Helper()
+	listener, err := net.Listen(network, address)
+	if err != nil {
+		t.Fatalf("listen on %s: %v", address, err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	file, err := listener.(*net.TCPListener).File()
+	if err != nil {
+		t.Fatalf("take the listening socket's descriptor: %v", err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	return strconv.Itoa(int(file.Fd())), listener.Addr().(*net.TCPAddr)
 }
 
 func TestResolveBootConfigDevSignInRequiresALoopbackDatabase(t *testing.T) {

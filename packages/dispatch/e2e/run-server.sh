@@ -14,50 +14,99 @@ unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE
 # DATABASE_URL is the one required caller input. The harness has no fake
 # Postgres and e2e/seed.ts truncates the named database before every scenario,
 # so silently selecting a shared default would make the destructive write
-# target ambiguous. The four ports are shared harness inputs because the
-# Playwright config and its helpers resolve them too.
-: "${DATABASE_URL:?DATABASE_URL must name an isolated Dispatch e2e database}"
-database_url="$DATABASE_URL"
-e2e_port="${DISPATCH_E2E_PORT:-8777}"
-fake_envoy_port="${FAKE_ENVOY_PORT:-9021}"
-fake_github_port="${FAKE_GITHUB_PORT:-9022}"
-fake_broker_port="${FAKE_BROKER_PORT:-9024}"
-
-# This process's own inputs, read before the sweep below. In one-server mode the server listens on
-# DISPATCH_E2E_PORT and serves web/dist, and its dashboard origin is its own. In two-process mode
-# (DISPATCH_E2E_PROCESSES=2, e2e/harness-processes.ts) the harness runs this script twice, giving
-# each run its own DISPATCH_E2E_SERVER_PORT (DISPATCH_E2E_PORT_A or _B), B a web dist of its own
-# in DISPATCH_E2E_SERVER_WEB_DIST (a path from packages/envoy, where the server runs), and both one
-# DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY; DISPATCH_E2E_PORT is then the round-robin proxy in front of
-# them (e2e/round-robin-proxy.ts), whose origin both serve as their dashboard origin. The shared
-# key is required there: with a key apiece, a person signed in on one process is signed out by the
-# first request the other answers.
+# target ambiguous. FAKE_ENVOY_PORT and FAKE_GITHUB_PORT (and FAKE_BROKER_PORT
+# for the default broker switch below) name the fakes the caller started, whose
+# ports e2e/harness-start.ts reads from their reports.
 #
-# DISPATCH_E2E_SERVER_BINARY, when set, is the envoy-dispatch this run starts in place of the one
-# it builds from this tree, also a path from packages/envoy: the harness sets it for B from
-# DISPATCH_E2E_BINARY_B, a previous release's build (packages/envoy/scripts/build-dispatch-build.sh),
-# so a browser drives two builds at once. That build gets the same environment: a release ignores
-# a setting it does not know and refuses only the ones it removed, none of which is set here. It
-# knows no DISPATCH_DEV_SIGNIN_SHARED_KEY, so it signs cookies with a key of its own, and a
-# browser context signed in on it sends its requests to it alone.
-server_port="${DISPATCH_E2E_SERVER_PORT:-$e2e_port}"
-web_dist="${DISPATCH_E2E_SERVER_WEB_DIST:-../dispatch/web/dist}"
-server_binary="${DISPATCH_E2E_SERVER_BINARY:-}"
-shared_key_env=()
-if [ -n "${DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY:-}" ]; then
-  shared_key_env=(DISPATCH_DEV_SIGNIN_SHARED_KEY="$DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY")
-fi
+# One server (DISPATCH_E2E_PROCESSES unset or 1): DISPATCH_E2E_PORT unset (or
+# empty), the server serves on a port the kernel chooses, held from that moment
+# until the server serves on it: scripts/e2e/lib/held-port.py opens a listening
+# socket on 127.0.0.1:0 and the server inherits it (DISPATCH_LISTEN_FD). The
+# server's own line reports it,
+#   ... msg="dispatch: listening" addr=127.0.0.1:<port>
+# on stderr, the line a caller waits for and reads the port from. Set, the
+# server binds exactly that port, and an occupied one fails with "address
+# already in use". DISPATCH_E2E_LISTEN_FROM instead names the unix socket of a
+# `held-port.py keep` process, for a caller that needs the port before the
+# server starts: the server serves on that keeper's port. The server's
+# dashboard origin is its own, http://127.0.0.1:<port>.
+#
+# Two processes (DISPATCH_E2E_PROCESSES=2, e2e/harness-processes.ts): the
+# harness runs this script twice, Dispatch A and B, behind the round-robin proxy
+# (e2e/round-robin-proxy.ts) on DISPATCH_E2E_PORT, whose origin both serve as
+# their dashboard origin. Each run's own port is DISPATCH_E2E_SERVER_PORT when
+# its DISPATCH_E2E_PORT_A or _B is set, and otherwise the port of the keeper
+# DISPATCH_E2E_LISTEN_FROM names, which e2e/harness-start.ts holds before it
+# starts the proxy, so the proxy can name it. B gets a web dist of its own in
+# DISPATCH_E2E_SERVER_WEB_DIST (a path from packages/envoy, where the server
+# runs), and both one DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY, required here: with a
+# key apiece, a person signed in on one process is signed out by the first
+# request the other answers.
 case "${DISPATCH_E2E_PROCESSES:-1}" in
-  1) dashboard_origin="http://127.0.0.1:$server_port" ;;
+  1)
+    own_port_variable=DISPATCH_E2E_PORT
+    own_port="${DISPATCH_E2E_PORT:-}"
+    dashboard_origin=""
+    ;;
   2)
     : "${DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY:?DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY must give both processes of DISPATCH_E2E_PROCESSES=2 one cookie key}"
-    dashboard_origin="http://127.0.0.1:$e2e_port"
+    : "${DISPATCH_E2E_PORT:?DISPATCH_E2E_PORT must name the round-robin proxy (e2e/round-robin-proxy.ts) both processes of DISPATCH_E2E_PROCESSES=2 serve behind}"
+    own_port_variable=DISPATCH_E2E_SERVER_PORT
+    own_port="${DISPATCH_E2E_SERVER_PORT:-}"
+    dashboard_origin="http://127.0.0.1:$DISPATCH_E2E_PORT"
     ;;
   *)
     echo "DISPATCH_E2E_PROCESSES must be 1, 2 or unset, not '$DISPATCH_E2E_PROCESSES'" >&2
     exit 1
     ;;
 esac
+: "${DATABASE_URL:?DATABASE_URL must name an isolated Dispatch e2e database}"
+: "${FAKE_ENVOY_PORT:?FAKE_ENVOY_PORT must name the fake Envoy (e2e/fake-envoy.ts) this server reads}"
+: "${FAKE_GITHUB_PORT:?FAKE_GITHUB_PORT must name the fake GitHub (e2e/fake-github.ts) this server reads}"
+database_url="$DATABASE_URL"
+fake_envoy_port="$FAKE_ENVOY_PORT"
+fake_github_port="$FAKE_GITHUB_PORT"
+held_port="$(cd "$(dirname "$0")/../../.." && pwd)/scripts/e2e/lib/held-port.py"
+if [ -n "$own_port" ] && [ -n "${DISPATCH_E2E_LISTEN_FROM:-}" ]; then
+  echo "run-server.sh: set $own_port_variable or DISPATCH_E2E_LISTEN_FROM, not both" >&2
+  exit 2
+fi
+if [ -n "$own_port" ]; then
+  listen=()
+  port_env=(DISPATCH_PORT="$own_port" DISPATCH_SERVER_URL="${dashboard_origin:-http://127.0.0.1:$own_port}")
+else
+  listen=(python3 "$held_port" exec)
+  if [ -n "${DISPATCH_E2E_LISTEN_FROM:-}" ]; then
+    listen+=(--from "$DISPATCH_E2E_LISTEN_FROM")
+  fi
+  # held-port.py writes the port it holds in for {port}.
+  own_origin='http://127.0.0.1:{port}'
+  listen+=(--fd-env DISPATCH_LISTEN_FD
+    --env 'DISPATCH_PORT={port}' --env "DISPATCH_SERVER_URL=${dashboard_origin:-$own_origin}" --)
+  port_env=()
+fi
+
+# This process's own web dist and cookie key, read before the sweep below: web/dist and a key of
+# its own unless two-process mode gave it others (above).
+web_dist="${DISPATCH_E2E_SERVER_WEB_DIST:-../dispatch/web/dist}"
+shared_key_env=()
+if [ -n "${DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY:-}" ]; then
+  shared_key_env=(DISPATCH_DEV_SIGNIN_SHARED_KEY="$DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY")
+fi
+
+# DISPATCH_E2E_SERVER_BINARY, when set, is the envoy-dispatch this run starts in place of the one
+# it builds from this tree, also a path from packages/envoy: the harness sets it for B from
+# DISPATCH_E2E_BINARY_B, a previous release's build (packages/envoy/scripts/build-dispatch-build.sh),
+# so a browser drives two builds at once. That build gets the same environment: a release ignores
+# a setting it does not know and refuses only the ones it removed, none of which is set here. It
+# knows no DISPATCH_DEV_SIGNIN_SHARED_KEY, so it signs cookies with a key of its own, and a
+# browser context signed in on it sends its requests to it alone. It may not adopt a held socket
+# (DISPATCH_LISTEN_FD), so it needs a port of its own to bind ($own_port_variable).
+server_binary="${DISPATCH_E2E_SERVER_BINARY:-}"
+if [ -n "$server_binary" ] && [ -z "$own_port" ]; then
+  echo "run-server.sh: DISPATCH_E2E_SERVER_BINARY needs $own_port_variable: a given build may not serve on a held socket" >&2
+  exit 2
+fi
 
 # The secrets broker the server relays credential requests to, read before
 # the sweep below drops every DISPATCH_* variable. DISPATCH_E2E_AGENT_SECRETS_URL
@@ -72,9 +121,10 @@ esac
 # each call, so no argv carries the token and a rewrite reaches it.
 broker_env=()
 if [ -z "${DISPATCH_E2E_AGENT_SECRETS_URL+set}" ]; then
+  : "${FAKE_BROKER_PORT:?FAKE_BROKER_PORT must name the fake secrets broker (e2e/fake-broker.ts) this server reads}"
   broker_env=(
     DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE="$(cd "$(dirname "$0")" && pwd)/fake-broker-account-token"
-    DISPATCH_AGENT_SECRETS_URL="http://127.0.0.1:$fake_broker_port"
+    DISPATCH_AGENT_SECRETS_URL="http://127.0.0.1:$FAKE_BROKER_PORT"
   )
 elif [ -n "$DISPATCH_E2E_AGENT_SECRETS_URL" ]; then
   : "${DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE:?DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE must accompany DISPATCH_E2E_AGENT_SECRETS_URL}"
@@ -122,11 +172,12 @@ done
 # alone, or in two-process mode derives from the shared key above, so no
 # signing key is passed and nothing reaches the caller's persistent data dir;
 # DISPATCH_INSECURE_COOKIE=1 keeps the cookie usable over plain HTTP in every
-# engine. DISPATCH_SERVER_URL is the dashboard origin above: it is the origin
-# the CSRF guard compares writes against, the only Host the router serves under
-# the flag, and the Playwright config's baseURL. The flag also refuses a
-# DATABASE_URL whose host is not loopback or a unix socket, and any
-# DISPATCH_SIGNIN_* setting.
+# engine. DISPATCH_SERVER_URL is the dashboard origin above,
+# http://127.0.0.1:<port> of the port the server serves on, or in two-process
+# mode the round-robin proxy's: it is the origin the CSRF guard compares writes
+# against, the only Host the router serves under the flag, and the Playwright
+# config's baseURL. The flag also refuses a DATABASE_URL whose host is not
+# loopback or a unix socket, and any DISPATCH_SIGNIN_* setting.
 app_pem="$(openssl genrsa 2048 2>/dev/null)"
 
 cd "$(dirname "$0")/../../envoy"
@@ -137,7 +188,9 @@ cd "$(dirname "$0")/../../envoy"
 # signals the one pid it started (`kill $!`) needs that pid to be the server. One binary per
 # checkout, built under a lock so two harnesses, or two-process mode's two servers, starting at
 # once serialise: Go rewrites it only when the source changed, and a running server keeps the
-# inode it started from. A given binary (DISPATCH_E2E_SERVER_BINARY) is run as it is.
+# inode it started from. The port is chosen only after the build, and held-port.py execs `env`,
+# which execs the server, so the pid a caller started is still the server's. A given binary
+# (DISPATCH_E2E_SERVER_BINARY) is run as it is.
 if [ -n "$server_binary" ]; then
   if [ ! -f "$server_binary" ] || [ ! -x "$server_binary" ]; then
     echo "run-server.sh: DISPATCH_E2E_SERVER_BINARY names $server_binary, which is not an executable file" >&2
@@ -147,7 +200,7 @@ else
   flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch
   server_binary=./dispatch-e2e
 fi
-exec env \
+exec "${listen[@]}" env \
   "${broker_env[@]}" \
   "${file_store_env[@]}" \
   "${shared_key_env[@]}" \
@@ -161,8 +214,7 @@ exec env \
   DISPATCH_INSECURE_COOKIE=1 \
   DISPATCH_LISTEN_HOST=127.0.0.1 \
   DISPATCH_NATS_DISABLED=1 \
-  DISPATCH_PORT="$server_port" \
-  DISPATCH_SERVER_URL="$dashboard_origin" \
+  "${port_env[@]}" \
   DISPATCH_TEST_HOOKS=1 \
   DISPATCH_WEB_DIST="$web_dist" \
   ENVOY_URL="http://127.0.0.1:$fake_envoy_port" \

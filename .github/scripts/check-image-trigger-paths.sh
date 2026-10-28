@@ -26,7 +26,24 @@
 #     check does too. Two event terms are admitted beside those, `github.event.action !=
 #     'closed'` and `!github.event.pull_request.draft`, the draft term only while every
 #     pull request trigger that runs its holder lists `ready_for_review`; the comment above
-#     NEUTRAL says why.
+#     NEUTRAL says why. One more such term is a CALL MODE, in a job's `if:`: `inputs.<name> ==
+#     ''`, exactly the empty literal, on a <name> the workflow's own `on.workflow_call.inputs`
+#     declares `type: string` with no `default` or `default: ""`. It holds on every run whose
+#     starter leaves the input out: a call that omits it gets its default, "", and on the
+#     workflow's own `pull_request` or `workflow_dispatch` run it is null, which GitHub
+#     compares equal to '' (both coerce to 0), so the build runs. worker-image.yaml's build
+#     job runs only on `inputs.attest_digest == ''` (beside the two event terms), so
+#     release.yaml's attest-only call, which sets attest_digest, skips it. The caller picks
+#     that value, not the change, and every caller's triggers and gates are traced below as
+#     triggers of this workflow anyway. Every other comparison is refused, since each is false
+#     on some run that leaves the input out and so skips the build there: `== ''` on a
+#     non-empty default (or a boolean or number input, whose default is never ''), `!=` the
+#     declared default, `!= '0'` (null coerces to 0), `== '<non-empty>'` and `!= ''`. The one
+#     gap: this check does not read a caller's `with:`, so a caller passing a path-derived
+#     value (a paths-filter output, say) into such an input would narrow by path unseen. No
+#     caller does that today, and review holds it. Everywhere else an `inputs.` term is
+#     refused: in a step's `if:`, in a workflow without `workflow_call` or whose
+#     `workflow_call` does not declare that input as such a string, and in any shape but `== ''`.
 #   * A build in a `run:` step is DETECTED, and EVERY detection is refused - there is no
 #     pattern that can excuse one. The detector judges ONE COMMAND at a time and is drawn
 #     broad: a container-CLI word followed later on the command by `build`, `bake` or `b`, the
@@ -101,13 +118,14 @@ PATH_EVENTS = ("push", "pull_request", "pull_request_target", "merge_group")
 NEEDS_OUTPUT = re.compile(r"needs\.([\w-]+)\.outputs\.([\w-]+)")
 STEP_OUTPUT = re.compile(r"steps\.([\w-]+)\.outputs\.([\w-]+)")
 EQUALS_TRUE = re.compile(r"needs\.([\w-]+)\.outputs\.([\w-]+)\s*==\s*'true'")
-# The only `if:` terms that do not narrow which CHANGES reach a job, so the only ones that can
-# sit beside the filters clause without being refused. GitHub's comparisons are
-# case-insensitive (Expressions → Operators), so these are too: `needs.X.result == 'Success'`
-# must read exactly like `== 'success'`, or a capital letter walks a narrowing gate past the
-# allowlist. `!github.event.pull_request.draft` and `github.event.action != 'closed'` narrow by
-# event, not by change. Both are true wherever a deployment's pinnable image is built: push,
-# merge_group, workflow_call from a push and workflow_dispatch carry no pull_request and no
+# The only `if:` terms that do not narrow which CHANGES reach a job anywhere, so, with CALL_MODE
+# below, the only ones that can sit beside the filters clause without being refused. GitHub's
+# comparisons are case-insensitive (Expressions → Operators), so these are too:
+# `needs.X.result == 'Success'` must read exactly like `== 'success'`, or a capital letter walks
+# a narrowing gate past the allowlist. `!github.event.pull_request.draft` and
+# `github.event.action != 'closed'` narrow by event, not by change. Both are true wherever a
+# deployment's pinnable image is built: push, merge_group, workflow_call from a push and
+# workflow_dispatch carry no pull_request and no
 # closed action. On a pull request, `!= 'closed'` skips only a closed pull request, which merges
 # nothing more. The draft term skips a draft's head, which is safe only if the trigger builds
 # that head when the draft is marked ready: otherwise a draft marked ready with no new push
@@ -127,6 +145,37 @@ DRAFT = re.compile(r"!\s*github\.event\.pull_request\.draft", re.I)
 # The activity types a `pull_request` or `pull_request_target` trigger without `types` runs on.
 DEFAULT_PULL_REQUEST_TYPES = ("opened", "synchronize", "reopened")
 RESULT_TERM = re.compile(r"needs\.([\w-]+)\.result\s*(==|!=)\s*'([A-Za-z_]+)'", re.I)
+# A CALL MODE (the GATES paragraph above): `inputs.<name> == ''`, exactly the empty literal, so
+# `== ''''` (GitHub's escaped quote, the one-quote string) is not one. Neutral only for the input
+# names gate_outputs is handed, the ones call_inputs returns for the job's own workflow.
+CALL_MODE = re.compile(r"inputs\.([\w-]+)\s*==\s*''", re.I)
+INPUTS_TERM = re.compile(r"(?<![\w.])inputs\.", re.I)
+
+
+def call_inputs(document: dict) -> frozenset[str]:
+    """The input names a job-level CALL_MODE term may test, lowercased since GitHub reads names
+    case-insensitively: those the workflow's own `on.workflow_call.inputs` declares `type:
+    string` with no `default` or `default: ""`. Only such an input is "" on a call that omits
+    it and null, which GitHub compares equal to '', on the workflow's own triggers."""
+    call = events(document).get("workflow_call")
+    declared = call.get("inputs") if isinstance(call, dict) else None
+    if not isinstance(declared, dict):
+        return frozenset()
+    return frozenset(
+        str(name).lower()
+        for name, spec in declared.items()
+        if isinstance(spec, dict) and spec.get("type") == "string" and spec.get("default", "") == ""
+    )
+
+
+def neutral(term: str, modes: frozenset[str]) -> bool:
+    """True for an `if:` term that cannot narrow which CHANGES reach a job: a NEUTRAL term, or
+    a CALL_MODE comparison on one of `modes`."""
+    term = unwrap(term).strip()
+    if NEUTRAL.fullmatch(term):
+        return True
+    mode = CALL_MODE.fullmatch(term)
+    return bool(mode) and mode.group(1).lower() in modes
 
 
 def admits_skipped(term: str) -> bool:
@@ -515,6 +564,8 @@ def classify_run_step(step: dict) -> list[tuple[str, bool]]:
 NON_BUILDING_ACTIONS = {
     "actions/attest-build-provenance",
     "actions/cache",
+    "actions/cache/restore",
+    "actions/cache/save",
     "actions/checkout",
     "actions/configure-pages",
     "actions/deploy-pages",
@@ -667,7 +718,7 @@ def unwrap(expression: str) -> str:
     return expression
 
 
-def gate_outputs(condition: str) -> list[tuple[str, str]]:
+def gate_outputs(condition: str, modes: frozenset[str]) -> list[tuple[str, str]]:
     """(job, output) for each paths-filter output an `if:` is gated on.
 
     An allowlist, because unknown must mean refused and never ungated: a condition this check
@@ -676,10 +727,12 @@ def gate_outputs(condition: str) -> list[tuple[str, str]]:
     job does not have. Each top-level `&&` conjunct is therefore either THE filters clause
     (`needs.<job>.outputs.<name> == 'true'` tests joined by `||`, at most one such conjunct;
     other `||` terms there only widen, so they are allowed), or made entirely of terms that do
-    not narrow by path — `always()`, `success()`, `!cancelled()`, `needs.<job>.result` — or of
-    the two event terms `!github.event.pull_request.draft` and `github.event.action !=
-    'closed'`, or it is refused, quoting the term. gating_filters admits the draft term only
-    under triggers that list `ready_for_review`; the comment above NEUTRAL says why."""
+    not narrow by path — `always()`, `success()`, `!cancelled()`, `needs.<job>.result`, the two
+    event terms `!github.event.pull_request.draft` and `github.event.action != 'closed'`, and a
+    CALL_MODE comparison on one of `modes` — or it is refused, quoting the term.
+    gating_filters admits the draft term only under triggers that list `ready_for_review`; the
+    comment above NEUTRAL says why. `modes` is empty unless the `if:` is a job's, in a workflow
+    whose `workflow_call` declares inputs call_inputs returns."""
     if not condition.strip():
         return []
     conjuncts = [unwrap(part) for part in split_top(unwrap(condition), "&&")]
@@ -687,15 +740,23 @@ def gate_outputs(condition: str) -> list[tuple[str, str]]:
     for part in conjuncts:
         if part in clauses:
             continue
-        if all(NEUTRAL.fullmatch(unwrap(term).strip()) for term in split_top(part, "||")):
+        if all(neutral(term, modes) for term in split_top(part, "||")):
             continue
+        if INPUTS_TERM.search(part):
+            hint = (
+                "; an `inputs.<name> == ''` comparison is admitted only in a job's if:, on a "
+                "`type: string` input the workflow's `on.workflow_call.inputs` declares with no "
+                'default or `default: ""`'
+            )
+        else:
+            hint = ""
         raise Unreadable(
             f"is narrowed by `{' '.join(part.split())}`, which this check cannot evaluate "
             f"against a path filter; express which CHANGES reach the job as a "
             f"dorny/paths-filter output tested `== 'true'`, and leave anything else "
             f"(`always()`, `success()`, `!cancelled()`, a `needs.<job>.result` comparison that "
             f"still admits `skipped`, `!github.event.pull_request.draft`, "
-            f"`github.event.action != 'closed'`) beside it"
+            f"`github.event.action != 'closed'`) beside it{hint}"
         )
     if not clauses:
         return []
@@ -719,16 +780,18 @@ def gate_outputs(condition: str) -> list[tuple[str, str]]:
     return outputs
 
 
-def gating_filters(workflow: Path, describe: str, holder: dict) -> list[tuple[str, Filter]]:
+def gating_filters(
+    workflow: Path, describe: str, holder: dict, modes: frozenset[str] = frozenset()
+) -> list[tuple[str, Filter]]:
     """The dorny/paths-filter filters an `if:` is gated on. The holder is a job that builds an
     image, a job that calls a workflow which does, a job either of those needs, or the build
-    step itself, in `workflow`. A gate this check cannot evaluate is reported, never ignored,
-    since ignoring it would treat a gated build as one that runs on every change. So is a draft
-    term under a trigger that does not build the head once the draft is marked ready (the
-    comment above NEUTRAL)."""
+    step itself, in `workflow`; `modes` are the CALL_MODE inputs its `if:` may test, none for a
+    step. A gate this check cannot evaluate is reported, never ignored, since ignoring it would
+    treat a gated build as one that runs on every change. So is a draft term under a trigger
+    that does not build the head once the draft is marked ready (the comment above NEUTRAL)."""
     condition = str(holder.get("if", ""))
     try:
-        outputs = gate_outputs(condition)
+        outputs = gate_outputs(condition, modes)
     except Unreadable as error:
         problems.append(f"::error::{describe} builds or calls an image, and its if: {error}")
         return []
@@ -837,6 +900,7 @@ def inherited_gates(workflow: Path, job_name: str) -> list[tuple[str, list[tuple
     re-imposes X's gate by hand, so X still decides whether this job runs."""
     document = documents[workflow]
     gates, seen, queue = [], set(), [job_name]
+    modes = call_inputs(document)
     while queue:
         name = queue.pop()
         if name in seen:
@@ -844,7 +908,7 @@ def inherited_gates(workflow: Path, job_name: str) -> list[tuple[str, list[tuple
         seen.add(name)
         job = (document.get("jobs") or {}).get(name) or {}
         condition = str(job.get("if", ""))
-        found = gating_filters(workflow, f"jobs.{name}", job)
+        found = gating_filters(workflow, f"jobs.{name}", job, modes)
         if found:
             gates.append((f"jobs.{name}.if", found))
         demanded = required_results(condition)

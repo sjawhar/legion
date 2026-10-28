@@ -46,6 +46,8 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/redact"
+	"github.com/sjawhar/envoy/listenfd"
 )
 
 const (
@@ -104,9 +106,13 @@ type bootConfig struct {
 	// FileStoreBucket is DISPATCH_FILE_STORE_BUCKET: the bucket uploaded files are stored in.
 	// Empty keeps them in Postgres.
 	FileStoreBucket string
-	// ListenAddr is the address the server binds, from DISPATCH_LISTEN_HOST and DISPATCH_PORT
-	// (listenAddress). The dev sign-in fence checks this value, so what it checks is what binds.
+	// ListenAddr is the address the server serves on: the inherited socket's own address with
+	// DISPATCH_LISTEN_FD, else the one main binds, from DISPATCH_LISTEN_HOST and DISPATCH_PORT
+	// (listenAddress). The dev sign-in fence checks this value, so what it checks is what serves.
 	ListenAddr string
+	// ListenSocket is the listening socket DISPATCH_LISTEN_FD names, inspected but not yet
+	// adopted: main serves on it in place of binding ListenAddr. Nil when the variable is unset.
+	ListenSocket *listenfd.Socket
 	// PprofAddr is where the profiling listener binds, 127.0.0.1 and DISPATCH_PPROF_PORT
 	// (pprofAddress); empty, nothing listens.
 	PprofAddr string
@@ -202,7 +208,7 @@ func main() {
 		// No WithReplicas: Dispatch keeps the stream's deployed replica count on every update and
 		// creates it with one replica, so a Dispatch process never changes the count the listener
 		// (ENVOY_NATS_REPLICAS) or an operator set.
-		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, serverBus(bus.WithEnvironment(env.lookup), bus.WithName("dispatch"))...)
+		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, serverClient(bus.WithEnvironment(env.lookup), bus.WithName("dispatch"))...)
 		if err != nil {
 			slog.Error("dispatch: connect NATS", "error", err)
 			os.Exit(1)
@@ -252,12 +258,13 @@ func main() {
 		slog.Error("dispatch: resolve web dist dir", "error", err)
 		os.Exit(1)
 	}
-	// The build's assets are in the database before the process listens, so a page of this build
-	// that another process serves, during a rolling update or a rollback, finds its chunks here,
-	// and this process answers another build's from there (dashboard.Store below). A process that
-	// cannot publish exits before it is ready, and a rolling update keeps the processes it would
-	// have replaced. The build is what the process registers below as the build it serves, and its
-	// entry chunk what GET /api/v1/dashboard/builds answers as this process's.
+	// The build's assets are in the database before the process serves, before it binds its port
+	// or adopts the socket DISPATCH_LISTEN_FD names, so a page of this build that another process
+	// serves, during a rolling update or a rollback, finds its chunks here, and this process
+	// answers another build's from there (dashboard.Store below). A process that cannot publish
+	// exits before it is ready, and a rolling update keeps the processes it would have replaced.
+	// The build is what the process registers below as the build it serves, and its entry chunk
+	// what GET /api/v1/dashboard/builds answers as this process's.
 	dashboardBuild, err := publishDashboard(store.WithTransactionTracking(ctx), database.Pool, webDistDir, dashboardPublishTimeout)
 	if err != nil {
 		slog.Error("dispatch: publish dashboard assets", "error", err)
@@ -307,6 +314,11 @@ func main() {
 		EditNoticeQuiet: boot.EditNoticeQuiet,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
+	// The asks a close or a reopen by a release older than the withdrawal left: at boot, then on an
+	// interval below. It appends events and takes no copy lock, so it runs after
+	// restoreDecidedWordings, which takes the copy lock (see below).
+	issueAskRepairDeps := api.Deps{Store: database, Docs: documentService, Events: broker}
+	repairIssueAsks(ctx, issueAskRepairDeps, issueAskRepairBootTimeout)
 	// The seed appends events, so it runs after restoreDecidedWordings, which takes the copy lock:
 	// TestCopyLockComesBeforeEveryPendingRowAndEvent reads main as one transaction.
 	if err := api.SeedRepoProjects(store.WithTransactionTracking(ctx), database, broker, boot.RepoProjects); err != nil {
@@ -386,7 +398,8 @@ func main() {
 	//     the durable head, so it has to run wherever a room is resident), and the document
 	//     sockets' schema re-check (it closes this process's own sockets).
 	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
-	//     retirePlainRefreshTokens, restoreDecidedWordings and SeedRepoProjects above.
+	//     retirePlainRefreshTokens, restoreDecidedWordings, repairIssueAsks and SeedRepoProjects
+	//     above.
 	leases, err := database.Pool.Leases()
 	if err != nil {
 		slog.Error("dispatch: open the lease pool for the maintenance loops", "error", err)
@@ -458,6 +471,9 @@ func main() {
 	// rebuild-refs marks - and each comment, ask and issue message citing a block (`#b-`) that such
 	// a build indexed without the block grammar.
 	go documentService.RunBlockIndexReconciliation(ctx, leases)
+	// The asks a process older than the withdrawal leaves on an issue it closes or
+	// reopens during a roll are withdrawn or restored every interval after the boot's own pass.
+	go api.RunIssueAskRepair(ctx, issueAskRepairDeps, leases)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {
@@ -492,7 +508,7 @@ func main() {
 		// it go back to NATS, and the intake's hold is released, so another process takes its
 		// durable over at once. stop waits for both Runs, then closes their clients.
 		connectIntake := func(name string) (*bus.Client, error) {
-			return bus.Connect(envoyConfig.Envoy.NatsURLs, serverBus(bus.WithEnvironment(env.lookup), bus.WithName(name))...)
+			return bus.Connect(envoyConfig.Envoy.NatsURLs, serverClient(bus.WithEnvironment(env.lookup), bus.WithName(name))...)
 		}
 		stop, err := delivery.StartIntakes(ctx, connectIntake, database.Pool, appCtx.GitHub(), broker)
 		if err != nil {
@@ -506,9 +522,9 @@ func main() {
 
 	// LEGION-781, INFRA-555: the announcer publishes server.started once each time every live
 	// server process comes to serve one build (startup.Announcer), and /healthz reports the latest
-	// announcement's commit as fleet_commit. It runs once this process is registered, below. A
-	// process without NATS announces into the database and leaves the publish to a process whose
-	// bus answers.
+	// announcement's commit as fleet_commit. It runs once this process is registered, below
+	// (joinRegistry, registry.go). A process without NATS announces into the database and leaves
+	// the publish to a process whose bus answers.
 	var announcements startup.Publisher
 	if natsClient != nil {
 		announcements = natsClient
@@ -521,39 +537,21 @@ func main() {
 		stopIntakes()
 	}
 	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
-	server := &http.Server{
-		Handler:           handler,
-		ReadHeaderTimeout: readHeaderTimeout,
-		IdleTimeout:       idleTimeout,
-		// WriteTimeout remains zero because the event stream is long-lived.
+	server := newHTTPServer(handler, time.Now)
+	// The server serves on the socket it inherited (DISPATCH_LISTEN_FD) or binds its address, and
+	// does either before serving, so a socket it cannot serve on or an address it cannot take ends
+	// the process with 1: a supervisor must not read a port clash as a clean stop.
+	var listener net.Listener
+	if boot.ListenSocket != nil {
+		listener, err = listenfd.Adopt(*boot.ListenSocket)
+	} else {
+		listener, err = net.Listen("tcp", boot.ListenAddr)
 	}
-	// Bound before serving, so an address that cannot be taken ends the process with 1: a
-	// supervisor must not read a port clash as a clean stop.
-	listener, err := net.Listen("tcp", boot.ListenAddr)
 	if err != nil {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 		os.Exit(1)
 	}
-	// INFRA-555: the process enters the registry of live server processes once its port is bound
-	// and before it serves its first request, after one probe that the database answers. The
-	// registration refuses a key set a live peer does not share (processes.Register): a cookie this
-	// process minted would not verify there, or the reverse, and the people it signed in would be
-	// signed out on the next request the load balancer sends to the other. That refusal ends the
-	// process with 1 here, before anything is served, so a roll stalls on the new pod while the old
-	// ones keep serving. The registration's heartbeat runs until shutdown deregisters it, after the
-	// HTTP drain (shutdown), so a draining process counts as live until its last request is
-	// answered. A heartbeat that lapsed (the process frozen, or cut from the database) or whose
-	// row was pruned checks the keys again before the process counts as live once more; beside a
-	// live process whose keys it does not share it refuses (registration.Lost), and serving stops
-	// as at a signal and ends the process with 1 once drained (serveUntilStopped). The prune loop
-	// deletes what processes that died without deregistering left behind, once overall under its
-	// lease. The announcer starts only now, so its first pass counts this process among the live
-	// ones and never announces a build the fleet is rolling away from.
-	if _, err := database.Pool.Healthy(ctx); err != nil {
-		slog.Error("dispatch: probe the database", "error", err)
-		os.Exit(1)
-	}
-	// INFRA-558: the row also carries the document schema numbers this build reads and creates,
+	// INFRA-558: the registry row carries the document schema numbers this build reads and creates,
 	// which every process's document socket admission reads; the identity of its embedder, "" with
 	// none, the same string the embedding queue compares stored vectors with, from which every
 	// process's queue takes the one identity that embeds and drops (embedqueue, active.go); and
@@ -563,7 +561,7 @@ func main() {
 	if embedder != nil {
 		embedderIdentity = embedder.Identity()
 	}
-	registration, err := processes.Register(ctx, database.Pool, processes.Instance{
+	registration, err := joinRegistry(ctx, database, processes.Instance{
 		Commit:           buildCommit,
 		DashboardBuild:   dashboardBuild.Build,
 		SigningKeys:      signingKey.Fingerprints(),
@@ -571,16 +569,21 @@ func main() {
 		SchemaCreatable:  pmdoc.SchemaCreatable(),
 		EmbedderIdentity: embedderIdentity,
 		FileStore:        fileStore != nil,
-	})
+	}, leases, announcer)
 	if err != nil {
+		// A deploy that stops this process while the registration waits for a refusing peer's
+		// heartbeat to lapse (processes.Register's wait, up to a live window and a heartbeat) stops
+		// a process that has served nothing: a clean stop, not a failed start.
+		if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+			slog.Info("dispatch: stopped while waiting for admission to the registry of live server processes")
+			return
+		}
 		slog.Error("dispatch: register this server process", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("dispatch: registered this server process", "instance", registration.ID)
-	go processes.RunPrune(ctx, database.Pool, leases)
-	go announcer.Run(ctx)
-	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDeliveryAndIntakes,
+	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, waitDeliveryAndIntakes,
 		deregisterAfterDrain(registration), registration.Lost()); err != nil {
+		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
 	}
 }
@@ -715,11 +718,10 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 			return bootConfig{}, fmt.Errorf("DISPATCH_SIGNING_KEY %w", err)
 		}
 	}
-	listenAddr, err := listenAddress(env)
+	boot.ListenAddr, boot.ListenSocket, err = resolveListen(env)
 	if err != nil {
 		return bootConfig{}, err
 	}
-	boot.ListenAddr = listenAddr
 	pprofAddr, err := pprofAddress(env)
 	if err != nil {
 		return bootConfig{}, err
@@ -803,7 +805,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 	if agentSecretsURL != "" {
 		parsed, err := url.Parse(agentSecretsURL)
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.Path != "" {
-			return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_SECRETS_URL=%q (expected an absolute http(s) URL with no path)", agentSecretsURL)
+			return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_SECRETS_URL=%q (expected an absolute http(s) URL with no path)", redact.URL(agentSecretsURL))
 		}
 		boot.AgentSecretsURL = agentSecretsURL
 		boot.AgentSecretsTokenFile = strings.TrimSpace(env.get("DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE"))
@@ -840,6 +842,9 @@ func devSignInFence(boot bootConfig, env settingValues) error {
 		return errors.New("DISPATCH_DEV_SIGNIN=1 signs people in without the sign-in issuer, so DISPATCH_SIGNIN_* must be unset: a loopback server holds no sign-in client secret")
 	}
 	if !routes.LoopbackHostPort(boot.ListenAddr) {
+		if boot.ListenSocket != nil {
+			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback server only: %s, must be on 127.0.0.1 or [::1]", boot.ListenSocket)
+		}
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback server only: DISPATCH_LISTEN_HOST=%q (listen address %q) must be 127.0.0.1 or [::1]", env.get("DISPATCH_LISTEN_HOST"), boot.ListenAddr)
 	}
 	if err := loopbackDatabase(boot.DatabaseURL); err != nil {
@@ -853,7 +858,7 @@ func devSignInFence(boot bootConfig, env settingValues) error {
 	}
 	if boot.AgentSecretsURL != "" {
 		if !routes.LoopbackURL(boot.AgentSecretsURL) {
-			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 decides credential requests on this machine's secrets broker only: DISPATCH_AGENT_SECRETS_URL=%q must name 127.0.0.1, [::1] or localhost", boot.AgentSecretsURL)
+			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 decides credential requests on this machine's secrets broker only: DISPATCH_AGENT_SECRETS_URL=%q must name 127.0.0.1, [::1] or localhost", redact.URL(boot.AgentSecretsURL))
 		}
 	}
 	if !routes.LoopbackURL(boot.EnvoyURL) {
@@ -948,7 +953,9 @@ func explainMigrateError(err error) error {
 // DISPATCH_SIGNING_KEY's keys when that is set (a deployment's, from its secrets manager),
 // otherwise the data dir's signing-key file, created on first start (a local run's). Outside dev
 // sign-in the keys must stay the same across deploys, or every dsession cookie is invalidated
-// whenever a container rolls; a rotation adds the new key second first.
+// whenever a container rolls; a rotation adds the new key second first. An empty signing-key file
+// is refused by name: the empty set signs nothing, and the people store would refuse it only by
+// panicking.
 func sessionSigningKey(boot bootConfig, dataDir string) (auth.SigningKeys, error) {
 	if boot.DevSignIn {
 		if boot.DevSignInSharedKey != "" {
@@ -963,7 +970,15 @@ func sessionSigningKey(boot bootConfig, dataDir string) (auth.SigningKeys, error
 	if !boot.SigningKey.Empty() {
 		return boot.SigningKey, nil
 	}
-	return auth.LoadOrCreateSigningKey(filepath.Join(dataDir, "signing-key"))
+	path := filepath.Join(dataDir, "signing-key")
+	keys, err := auth.LoadOrCreateSigningKey(path)
+	if err != nil {
+		return auth.SigningKeys{}, err
+	}
+	if keys.Empty() {
+		return auth.SigningKeys{}, fmt.Errorf("the session signing key file %s is empty: put its key back, delete it to have a new key written (which signs out everyone signed in under the old one), or set DISPATCH_SIGNING_KEY", path)
+	}
+	return keys, nil
 }
 
 // devSignInSharedSigningKeyLabel separates the cookie key dev sign-in derives from every key a
@@ -997,7 +1012,7 @@ const dashboardPublishTimeout = 60 * time.Second
 // publishDashboard stores the dashboard build at webDistDir in the database
 // (dashboard.Publish, stamped with buildCommit) and then prunes the builds no process needs any
 // more (dashboard.Prune), both within timeout, and returns what it published: the build's id
-// (processes.DashboardBuild's) and entry chunk among it. A dist with no index.html (the Go test
+// (routes.DashboardBuild's) and entry chunk among it. A dist with no index.html (the Go test
 // rigs serve an empty directory) publishes nothing, logs that it did not, and returns the zero
 // Published, whose empty build and entry say this process serves no dashboard. A failed publish
 // is the error returned, and refuses the boot; a failed prune is logged and the start goes on,
@@ -1052,6 +1067,28 @@ func restoreDecidedWordings(ctx context.Context, documents *docs.Service, timeou
 				return nil, err
 			}
 			return []any{"restored", restored, "copies", copies}, nil
+		})
+}
+
+// issueAskRepairBootTimeout bounds the boot's repair of the asks of closed and reopened issues.
+// Each issue commits on its own, so a repair cut short keeps what it repaired, and the interval
+// pass (api.RunIssueAskRepair) repairs what it left.
+const issueAskRepairBootTimeout = 30 * time.Second
+
+// repairIssueAsks is the boot's repair of the asks a close or a reopen by a release older than
+// the withdrawal left (api.RepairIssueAsks), bounded by timeout: open asks on closed issues are
+// withdrawn, and withdrawn asks on open issues are restored. It sweeps only the closed issues'
+// documents marked owing a settlement within the last api.IssueAskRepairInterval, so a boot does
+// not read every closed issue's documents before it serves; the interval pass's first run sweeps
+// them all. Each issue it repairs has its own line; this logs the counts. A repair that fails or
+// runs out of time is logged and the start goes on, since api.RunIssueAskRepair repairs the rest
+// every api.IssueAskRepairInterval.
+func repairIssueAsks(ctx context.Context, deps api.Deps, timeout time.Duration) {
+	bootTask(ctx, timeout, "dispatch: repair the asks of closed and reopened issues", "dispatch: repaired the asks of closed and reopened issues",
+		func(ctx context.Context) ([]any, error) {
+			markedSince := time.Now().Add(-api.IssueAskRepairInterval)
+			repair, err := api.RepairIssueAsks(ctx, deps, &markedSince)
+			return repair.LogArgs(), err
 		})
 }
 
@@ -1144,21 +1181,32 @@ func openFileStore(ctx context.Context, boot bootConfig) (files.Store, error) {
 	return bucketStore, nil
 }
 
-// serverBus is the options every NATS client of the server connects with, after extra: it connects
-// in the background (bus.WithConnectInBackground), so a bus that is down at boot or refuses the
-// credential leaves the process serving and connects it once the bus answers, and it declares a
-// connection whose packets stop coming back lost within seconds (bus.WithSilentCutDetection), so
-// /healthz reports a cut bus within seconds of the cut.
-func serverBus(extra ...bus.ConnectOption) []bus.ConnectOption {
-	return append(extra, bus.WithConnectInBackground(), bus.WithSilentCutDetection())
+// serverBus is the options every NATS connection of the server is made with: it connects in the
+// background (bus.WithConnectInBackground), so a bus that is down at boot or refuses the credential
+// leaves the process serving and connects it once the bus answers, and it declares a connection
+// whose packets stop coming back lost within seconds (bus.WithSilentCutDetection), so /healthz
+// reports a cut bus within seconds of the cut.
+func serverBus() []bus.DialOption {
+	return []bus.DialOption{bus.WithConnectInBackground(), bus.WithSilentCutDetection()}
 }
 
-// dispatchHandler mounts the one /healthz the process serves above every dashboard and API
-// route, so the probe is answered whatever the router is doing. Go's ServeMux prefers the
-// longer pattern, so "GET /healthz" wins over the router's "/".
+// serverClient is the options a NATS client of the server connects with: extra, then serverBus's.
+func serverClient(extra ...bus.ConnectOption) []bus.ConnectOption {
+	for _, option := range serverBus() {
+		extra = append(extra, option)
+	}
+	return extra
+}
+
+// dispatchHandler mounts the one /healthz the process serves, and /livez, above every dashboard
+// and API route, so each probe is answered whatever the router is doing. Go's ServeMux prefers
+// the longer pattern, so "GET /healthz" and "GET /livez" win over the router's "/". /livez
+// answers 204 and touches nothing: it says only that the process answers, for a liveness or
+// startup probe, which must not wait on or fail with Postgres, NATS or the file store.
 func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit, announcer, issuers))
+	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.Handle("/", handler)
 	return mux
 }
@@ -1293,6 +1341,33 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 			SchemaVersion *int    `json:"schema_version"`
 		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, SignIn: signInOK, ServiceTokens: serviceTokensOK, Commit: reportedCommit, FleetCommit: announcer.FleetCommit(), SchemaVersion: schemaVersion})
 	}
+}
+
+// resolveListen says where the server serves. With DISPATCH_LISTEN_FD it is the inherited socket
+// that names, at the socket's own address, and DISPATCH_LISTEN_HOST and DISPATCH_PORT, each only
+// when set, must name that address: no default stands in for one that is unset. An empty value
+// reads as unset: without the socket an empty one is its default, and the listener reads an empty
+// ENVOY_LISTEN_HOST or PORT as unset too. Without DISPATCH_LISTEN_FD, it is the address
+// listenAddress builds, for main to bind. It only inspects the socket; main adopts it, so nothing a
+// caller of resolveBootConfig gets owns a descriptor.
+func resolveListen(env settingValues) (string, *listenfd.Socket, error) {
+	descriptor, set := env.lookup("DISPATCH_LISTEN_FD")
+	if !set {
+		address, err := listenAddress(env)
+		return address, nil, err
+	}
+	socket, err := listenfd.Inspect("DISPATCH_LISTEN_FD", descriptor)
+	if err != nil {
+		return "", nil, err
+	}
+	setting := func(name string) listenfd.Setting {
+		value := strings.TrimSpace(env.get(name))
+		return listenfd.Setting{Name: name, Value: value, Set: value != ""}
+	}
+	if err := socket.CheckAgainst(setting("DISPATCH_LISTEN_HOST"), setting("DISPATCH_PORT")); err != nil {
+		return "", nil, err
+	}
+	return socket.Addr().String(), &socket, nil
 }
 
 // listenAddress builds the listen address from DISPATCH_LISTEN_HOST and DISPATCH_PORT

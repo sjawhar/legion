@@ -19,8 +19,22 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
-// ConnectOption configures the bus client.
-type ConnectOption func(*connectOpts)
+// ConnectOption configures a client: Connect and ConnectOwningStream take every one. Dial takes
+// only the DialOptions among them.
+type ConnectOption interface{ apply(*connectOpts) }
+
+// DialOption is a ConnectOption Dial honours too: WithConnectInBackground, WithSilentCutDetection
+// and WithReconnectErrClock. Dial's name and environment are its parameters, so WithName and
+// WithEnvironment are not DialOptions, and neither are the options of a client's JetStream
+// (WithReplicas, WithPublishAcknowledgementClock).
+type DialOption func(*connectOpts)
+
+func (o DialOption) apply(opts *connectOpts) { o(opts) }
+
+// clientOption is a ConnectOption only Connect and ConnectOwningStream honour.
+type clientOption func(*connectOpts)
+
+func (o clientOption) apply(opts *connectOpts) { o(opts) }
 
 type connectOpts struct {
 	name string
@@ -46,10 +60,10 @@ func (o connectOpts) connectionSettings(credential nats.Option) nats.Option {
 }
 
 // parseConnectOptions applies options over the defaults every connect starts from.
-func parseConnectOptions(options []ConnectOption) connectOpts {
+func parseConnectOptions[O ConnectOption](options []O) connectOpts {
 	opts := connectOpts{name: "envoy", publishAcknowledgementClock: wallClock{}, environment: os.LookupEnv, streamSubjectsRefresh: streamSubjectsRefresh}
 	for _, o := range options {
-		o(&opts)
+		o.apply(&opts)
 	}
 	return opts
 }
@@ -67,13 +81,13 @@ func (wallClock) WithTimeout(parent context.Context, timeout time.Duration) (con
 
 // WithPublishAcknowledgementClock overrides the clock that bounds JetStream publish acknowledgements.
 func WithPublishAcknowledgementClock(clock AcknowledgementClock) ConnectOption {
-	return func(o *connectOpts) { o.publishAcknowledgementClock = clock }
+	return clientOption(func(o *connectOpts) { o.publishAcknowledgementClock = clock })
 }
 
 // WithReconnectErrClock overrides the clock that throttles the warning a failed reconnect attempt
 // logs (reconnectErrThrottle), so a test can see a minute pass without waiting one. nil, the
 // default, is time.Now.
-func WithReconnectErrClock(now func() time.Time) ConnectOption {
+func WithReconnectErrClock(now func() time.Time) DialOption {
 	return func(o *connectOpts) { o.reconnectErrClock = now }
 }
 
@@ -83,29 +97,31 @@ func WithReconnectErrClock(now func() time.Time) ConnectOption {
 // and keeps the deployed count on every update, so it never changes the replicas an operator or
 // another process set: Dispatch's server names none.
 func WithReplicas(n int) ConnectOption {
-	return func(o *connectOpts) { o.replicas = cmp.Or(n, 1) }
+	return clientOption(func(o *connectOpts) { o.replicas = cmp.Or(n, 1) })
 }
 
 // withStreamSubjectsRefresh replaces streamSubjectsRefresh for one client, so a test can see the
 // client read the deployed subjects again without waiting a minute.
 func withStreamSubjectsRefresh(every time.Duration) ConnectOption {
-	return func(o *connectOpts) { o.streamSubjectsRefresh = every }
+	return clientOption(func(o *connectOpts) { o.streamSubjectsRefresh = every })
 }
 
 // WithEnvironment names where a connect reads ENVOY_ALLOW_REMOTE_NATS (AllowRemoteEnvVar),
 // ENVOY_NATS_SOCKS5_PROXY (SOCKS5ProxyEnvVar), NATS_NKEY_SEED_FILE and NATS_NKEY_SEED, in place of
 // the process environment (os.LookupEnv): envoy-dispatch hands it the lookup over its settings
-// table, which lists all four. Dial takes the same lookup as its environment parameter.
+// table, which lists all four. Dial takes the same lookup as its environment parameter, and not
+// this option.
 func WithEnvironment(lookup func(string) (string, bool)) ConnectOption {
-	return func(o *connectOpts) { o.environment = lookup }
+	return clientOption(func(o *connectOpts) { o.environment = lookup })
 }
 
 // WithName names the client, in place of "envoy": the name the NATS server's connection listings
 // (its /connz endpoint, `nats server report connections`) show for the connection the client dials
 // first and for each one it dials to replace a closed one, and the name field of the client's
-// lifecycle log lines (`envoy nats disconnected`, `envoy nats recovery attempt` and the rest).
+// lifecycle log lines (`envoy nats disconnected`, `envoy nats recovery attempt` and the rest). Dial
+// takes its name as a parameter, and not this option.
 func WithName(name string) ConnectOption {
-	return func(o *connectOpts) { o.name = name }
+	return clientOption(func(o *connectOpts) { o.name = name })
 }
 
 // WithConnectInBackground has the constructor (Connect, ConnectOwningStream, Dial) return without
@@ -127,7 +143,7 @@ func WithName(name string) ConnectOption {
 //
 // envoy-dispatch's server takes it for each of its clients, so a bus that is down when it boots
 // leaves it serving everything that does not need the bus, and connected once the bus answers.
-func WithConnectInBackground() ConnectOption {
+func WithConnectInBackground() DialOption {
 	return func(o *connectOpts) { o.background = true }
 }
 
@@ -137,7 +153,7 @@ func WithConnectInBackground() ConnectOption {
 // once; one whose packets are dropped (a partition, a node that vanished) closes nothing, and only
 // the client's own pings notice. envoy-dispatch's server takes it for each of its clients, so its
 // /healthz reports a cut bus within seconds of the cut.
-func WithSilentCutDetection() ConnectOption {
+func WithSilentCutDetection() DialOption {
 	return func(o *connectOpts) { o.silentCutDetection = true }
 }
 
@@ -265,14 +281,13 @@ type Client struct {
 // reading ENVOY_ALLOW_REMOTE_NATS from environment too, which answers as os.LookupEnv does
 // (WithEnvironment).
 //
-// Of the options it takes WithConnectInBackground, which returns the connection before it has
+// It takes the DialOptions: WithConnectInBackground, which returns the connection before it has
 // connected (a core subscription made on it before then is sent once it connects),
-// WithSilentCutDetection and WithReconnectErrClock; its name and its environment are its
-// parameters, so WithName and WithEnvironment change nothing here.
+// WithSilentCutDetection and WithReconnectErrClock.
 //
 // For JetStream-backed publishing or a durable consumer, use Connect; to reconcile the stream
 // this codebase owns, ConnectOwningStream.
-func Dial(name string, urls []string, environment func(string) (string, bool), options ...ConnectOption) (*nats.Conn, error) {
+func Dial(name string, urls []string, environment func(string) (string, bool), options ...DialOption) (*nats.Conn, error) {
 	opts := parseConnectOptions(options)
 	if err := refuseRemoteNATS(urls, environment); err != nil {
 		return nil, err
@@ -286,16 +301,13 @@ func Dial(name string, urls []string, environment func(string) (string, bool), o
 		return nil, err
 	}
 	settings := opts.connectionSettings(credential)
-	if !opts.background {
-		return connect(name, urls, settings, dialer, nil, nil, nil, nil)
+	dial := func(first nats.Option) (*nats.Conn, error) {
+		return connect(name, urls, allOf(settings, first), dialer, nil, nil, nil, opts.reconnectErrClock)
 	}
-	refusals := newReconnectErrThrottle(opts.reconnectErrClock)
-	nc, err := connect(name, urls, allOf(settings, connectInBackground(name, urls, refusals, nil)), dialer, nil, nil, nil, nil)
-	if err != nil {
-		return nil, err
+	if opts.background {
+		return connectFirstInBackground(name, urls, opts.reconnectErrClock, dial, nil, nil)
 	}
-	go reportRefusalsUntilConnected(nc, name, urls, refusals)
-	return nc, nil
+	return dial(nil)
 }
 
 // Connect opens a client that publishes and subscribes without touching the shared
@@ -361,11 +373,10 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		stream.Replicas = opts.replicas
 		c.streamConfig = &stream
 	}
-	first := c.connectionSettings
-	var refusals *reconnectErrThrottle
+	dial := func(first nats.Option) (*nats.Conn, error) {
+		return connect(c.name, urls, allOf(c.connectionSettings, first), dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
+	}
 	if opts.background {
-		refusals = newReconnectErrThrottle(opts.reconnectErrClock)
-		first = allOf(c.connectionSettings, connectInBackground(c.name, urls, refusals, c.onConnect))
 		c.awaitingConnection = true
 		// The first connection is a connection event, so the hooks this registers before the
 		// caller can add one of its own do what the constructor of a client that waits does at
@@ -375,45 +386,52 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		} else {
 			c.AddReconnectHook(c.readDeployedSubjectsUntilRead)
 		}
-		// nats.go can run onConnect as soon as the connect below returns, and onConnect counts
-		// the connection only once it is c.Conn, so the connection is installed under the lock
-		// onConnect takes.
-		c.mu.Lock()
-		defer c.mu.Unlock()
+		// onConnect counts the first connection only once it is c.Conn, which install makes it.
+		install := func(nc *nats.Conn) error { return c.install(nc, false) }
+		if _, err := connectFirstInBackground(c.name, urls, c.reconnectErrClock, dial, c.onConnect, install); err != nil {
+			return nil, err
+		}
+		go c.followDeployedSubjects(opts.streamSubjectsRefresh)
+		return c, nil
 	}
-	nc, err := connect(c.name, urls, first, dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
+	nc, err := dial(nil)
 	if err != nil {
 		return nil, err
 	}
-	js, err := nc.JetStream(nats.MaxWait(10*time.Second), nats.PublishAsyncTimeout(publishAcknowledgementTimeout))
-	if err != nil {
+	if err := c.install(nc, ownsStream); err != nil {
 		nc.Close()
 		return nil, err
 	}
 	readable := true
-	switch {
-	case opts.background:
-		// The first connection's hook, registered above, ensures the stream or reads its subjects.
-	case ownsStream:
-		if err := c.ensureStream(js); err != nil {
-			nc.Close()
-			return nil, err
-		}
+	if ownsStream {
 		// Registered before the caller can add a hook of its own, so after a connection event the
 		// stream is ensured before the hooks that rewatch state kept on it.
 		c.AddReconnectHook(c.ensureStreamOn)
-	default:
+	} else {
 		readable = c.readDeployedSubjects(nc, firstStreamSubjectsRead)
 	}
-	c.Conn = nc
-	c.js = js
 	if readable {
 		go c.followDeployedSubjects(opts.streamSubjectsRefresh)
 	}
-	if opts.background {
-		go reportRefusalsUntilConnected(nc, c.name, urls, refusals)
-	}
 	return c, nil
+}
+
+// install makes nc the client's connection, with the JetStream context taken from it, once it has
+// ensured the client's stream on nc (ensureStream) when ensure is true.
+func (c *Client) install(nc *nats.Conn, ensure bool) error {
+	js, err := nc.JetStream(nats.MaxWait(10*time.Second), nats.PublishAsyncTimeout(publishAcknowledgementTimeout))
+	if err != nil {
+		return err
+	}
+	if ensure {
+		if err := c.ensureStream(js); err != nil {
+			return err
+		}
+	}
+	c.mu.Lock()
+	c.Conn, c.js = nc, js
+	c.mu.Unlock()
+	return nil
 }
 
 // streamSubjectsRefresh is how often a client reads the deployed stream's subjects again: a newer

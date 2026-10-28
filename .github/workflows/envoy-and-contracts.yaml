@@ -23,6 +23,9 @@ on:
       # prepack test packs through pack-plugin.sh, pi-legion's skills guard sweeps the root guides
       # and docs below, and every Bun job installs Bun through setup-bun from .bun-version.
       - "scripts/e2e/lib/pack-plugin.sh"
+      # The dispatch job's e2e/run-server.sh serves the browser tests' server on the socket this
+      # holds.
+      - "scripts/e2e/lib/held-port.py"
       - "AGENTS.md"
       - "README.md"
       - "docs/kubernetes.md"
@@ -80,6 +83,7 @@ on:
       - "packages/pi-shared/**"
       - "scripts/pi-plugin-prepack.sh"
       - "scripts/e2e/lib/pack-plugin.sh"
+      - "scripts/e2e/lib/held-port.py"
       - "AGENTS.md"
       - "README.md"
       - "docs/kubernetes.md"
@@ -430,6 +434,7 @@ jobs:
               - 'skills/**'
             # envoy-go's gate alone; every other Go job has a filter of its own.
             envoy:
+              - '.github/workflows/envoy-and-contracts.yaml'
               - 'packages/envoy/**'
               - 'packages/proof-editor/**'
               - 'packages/contracts/**'
@@ -560,7 +565,8 @@ jobs:
               - 'scripts/pi-plugin-prepack.sh'
               - '.github/workflows/release.yaml'
             # The Envoy plugin: its own sources, the workspace packages its bundle inlines, and the
-            # Oh My Pi pin its real-binary test runs (extensions/dispatch-first-omp.test.ts),
+            # Oh My Pi pin its real-binary tests run (extensions/dispatch-first-omp.test.ts and
+            # extensions/askgate/askgate-omp.test.ts),
             # installed through the mise install-jj leaves. Every skill and every daemon prompt:
             # src/skills-guard.test.ts stages its five skills through the prepack script and resolves
             # their skill:// links across all of skills/, and its native-tool-name rule scans every
@@ -642,10 +648,13 @@ jobs:
               # job's S3 step reads.
               - 'packages/envoy/internal/bus/**'
               - 'packages/envoy/internal/contracts/**'
+              - 'packages/envoy/internal/githubappjwt/**'
+              - 'packages/envoy/internal/id/**'
               - 'packages/envoy/internal/oidc/**'
               - 'packages/envoy/internal/pgmigrate/**'
               - 'packages/envoy/internal/pglisten/**'
               - 'packages/envoy/internal/routing/**'
+              - 'packages/envoy/listenfd/**'
               - 'packages/envoy/internal/tests3/seaweedfs.go'
               # e2e/__tests__/local-instance-support.test.ts holds shellQuote to this table, which
               # dev-postgres.test.sh (envoy-go) reads too.
@@ -667,6 +676,8 @@ jobs:
               - *bun_toolchain
               # The SPA build writes dist/THIRD_PARTY_NOTICES.txt.
               - 'scripts/third-party-notices.ts'
+              # e2e/run-server.sh serves the browser tests' server on the socket this holds.
+              - 'scripts/e2e/lib/held-port.py'
 
   contracts:
     needs: changes
@@ -786,9 +797,10 @@ jobs:
       # Only for the mise it leaves at ~/.local/bin/mise, which install-omp installs the pin through:
       # nothing in this package drives jj.
       - uses: ./.github/actions/install-jj
-      # extensions/dispatch-first-omp.test.ts runs the pinned Oh My Pi against stand-ins
-      # (packages/pi-shared/test/omp-harness.ts) and refuses on GitHub Actions without one. The pin
-      # is read from .omp-pin, the repository's one copy of it (.github/actions/install-omp).
+      # extensions/dispatch-first-omp.test.ts and extensions/askgate/askgate-omp.test.ts run the
+      # pinned Oh My Pi against stand-ins (packages/pi-shared/test/omp-harness.ts) and refuse on
+      # GitHub Actions without one. The pin is read from .omp-pin, the repository's one copy of it
+      # (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
       - run: bun install --frozen-lockfile
       - name: Build contracts for pi-envoy
@@ -850,9 +862,24 @@ jobs:
       # Docker, pulling its pinned ubuntu image from mirror.gcr.io.
       # scripts/skill-scenarios/daemon-pane.test.ts runs daemon-pane.go with `go run` inside packages/daemon.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: setup_go
         with:
           go-version-file: packages/daemon/go.mod
-          cache-dependency-path: packages/daemon/go.sum
+          cache: false
+      # The Go module and build caches are restored on every run and saved at the end of the job
+      # only by a run on main: an entry a pull request writes is readable by no other pull request,
+      # and those entries pushed main's own out. setup-go's own cache has no restore-only input, so
+      # it is off. Only a run off main falls back, when go.sum changed, to main's newest entry for
+      # this Go by prefix; a run on main restores by the exact key only, so the entry it saves holds
+      # no modules an older go.sum needed.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: go_cache
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-daemon-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-${{ hashFiles('packages/daemon/go.sum') }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-daemon-{0}-{1}-', runner.os, steps.setup_go.outputs.go-version) || '' }}
       - run: bun install --frozen-lockfile
       - name: Build contracts for pi-legion
         run: bun run build
@@ -893,6 +920,13 @@ jobs:
         with:
           name: pi-legion-pr
           path: out/pr-artifacts/*.tgz
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.go_cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.go_cache.outputs.cache-primary-key }}
 
   dispatch:
     needs: changes
@@ -994,11 +1028,13 @@ jobs:
         working-directory: packages/dispatch
       - name: Browser-test dispatch dashboard
         # `bun run e2e` builds the SPA itself, which would rebuild it a second time in this job.
-        # Calling Playwright directly reuses the "Build dispatch dashboard" step's dist above and
+        # Calling the wrapper directly reuses the "Build dispatch dashboard" step's dist above and
         # drops this job to one Vite build. Safe because that build and this one are now the same
         # binary: `packages/dispatch` no longer has an E2E-only build flag (removed with its sole,
-        # unconsumed consumer, the `window.__dispatchDocument` inspection probe).
-        run: bunx playwright test --config e2e/playwright.config.ts
+        # unconsumed consumer, the `window.__dispatchDocument` inspection probe). e2e/run.ts starts
+        # the harness on ports the OS chooses and runs Playwright with them; the config starts no
+        # server.
+        run: bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts
         working-directory: packages/dispatch
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
@@ -1043,8 +1079,9 @@ jobs:
         run: bun run build
         working-directory: packages/contracts
       - name: Build the Dispatch server
-        # run-server.sh builds it too, inside Playwright's 60 s wait for each server; built here,
-        # both servers find it current and start in seconds.
+        # run-server.sh builds it too, inside the harness's boot wait for each server
+        # (e2e/harness-start.ts, bounded by the listener's bootMs); built here, both servers find it
+        # current and start in seconds.
         run: go build -o ./dispatch-e2e ./cmd/dispatch
         working-directory: packages/envoy
       - name: Install Playwright Chromium
@@ -1151,8 +1188,13 @@ jobs:
             packages/envoy/internal/testnats/nats.go Image
             packages/envoy/internal/testnats/nats.go HubImage
             packages/envoy/internal/tests3/seaweedfs.go Image
+      # The API package owns the largest set of Postgres-backed tests. Running it with the other
+      # package binaries makes all of their per-test database cleanup queue on the service's one
+      # checkpointer, so run it before the rest of the module.
       - name: Unit test envoy Go package
-        run: go list ./... | grep -v /integration | xargs go test
+        run: |
+          go test ./internal/dispatch/api
+          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
@@ -1222,9 +1264,19 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: setup_go
         with:
           go-version-file: packages/envoy/infra/go.mod
-          cache-dependency-path: packages/envoy/infra/go.sum
+          cache: false
+      # Restored on every run, saved at the end of the job only on main (the pi-legion job says why).
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: go_cache
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-infra-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-${{ hashFiles('packages/envoy/infra/go.sum') }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-infra-{0}-{1}-', runner.os, steps.setup_go.outputs.go-version) || '' }}
       - name: Pull the NATS and Postgres test container images
         uses: ./.github/actions/pull-test-images
         with:
@@ -1250,6 +1302,13 @@ jobs:
       - name: Live tests of envoy-infra against nats-server (natslive)
         run: go test -tags natslive ./core/ ./seed/
         working-directory: packages/envoy/infra
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.go_cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.go_cache.outputs.cache-primary-key }}
 
   # The document service and the API that drives it, pmdoc (LEGION-571: its own flakes under
   # -race and load, not a race in production code, cost three review rounds because nothing ran
@@ -1471,7 +1530,9 @@ jobs:
         run: bun run build
         working-directory: packages/contracts
       - name: Build the Dispatch server
-        # Dispatch A's; run-server.sh builds it too, inside Playwright's 60 s wait for each server.
+        # Dispatch A's; run-server.sh builds it too, inside the harness's boot wait for each server
+        # (e2e/harness-start.ts, bounded by the listener's bootMs); built here, A finds it current
+        # and starts in seconds.
         run: go build -o ./dispatch-e2e ./cmd/dispatch
         working-directory: packages/envoy
       - name: Install Playwright Chromium
@@ -1482,12 +1543,16 @@ jobs:
           bunx playwright install --with-deps chromium
         working-directory: packages/dispatch
       - name: Browser-test each build's page against the other build's server
+        # B is the previous build, which cannot serve on a socket the harness holds for it, so it
+        # binds DISPATCH_E2E_PORT_B, a port free when this step picks it.
         env:
           DATABASE_URL: postgres://postgres:ci@localhost:5432/dispatch_cross_build?sslmode=disable
           DISPATCH_PREVIOUS_BUILD: ${{ runner.temp }}/dispatch-previous
         run: |
           psql "postgres://postgres:ci@localhost:5432/postgres" -c 'create database dispatch_cross_build'
+          port_b=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
           DISPATCH_E2E_BINARY_B="$DISPATCH_PREVIOUS_BUILD/envoy-dispatch" \
+            DISPATCH_E2E_PORT_B="$port_b" \
             DISPATCH_E2E_WEB_DIST_B="$DISPATCH_PREVIOUS_BUILD/web" \
             bun run e2e:multiprocess -- cross-build.multiprocess
         working-directory: packages/dispatch
@@ -1559,9 +1624,11 @@ jobs:
       # The runner VM is discarded after the job, so testcontainers' Ryuk reaper has nothing to
       # clean up, and its image would be one more registry pull a test could fail on.
       TESTCONTAINERS_RYUK_DISABLED: "true"
-      # The listener image the smoke test and envoy-infra's live tests run, built by its own step
-      # below.
+      # The listener image the smoke test runs, built by its own step below.
       ENVOY_SMOKE_IMAGE: legion-envoy-smoke:${{ github.sha }}
+      # The image envoy-infra's live tests run, built on top of ENVOY_SMOKE_IMAGE by its own step
+      # below.
+      ENVOY_SMOKE_HELD_PORT_IMAGE: legion-envoy-smoke-heldport:${{ github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1618,6 +1685,26 @@ jobs:
           load: true
           provenance: false
           tags: ${{ env.ENVOY_SMOKE_IMAGE }}
+      # The image envoy-infra's live tests run (pulumitest.HeldPortImage): the smoke image above with
+      # packages/envoy/infra/host/heldportwrapper as its envoy-listener, which takes the listening
+      # socket the test holds for the container's port over an abstract unix socket and executes the
+      # real listener on it, so the port stays held from the test's bind until the listener serves.
+      # Its Dockerfile builds the wrapper from the tree, on the Go image the smoke image's build
+      # pulled, so this build reads only files this workflow's triggers cover. The smoke test keeps
+      # running the smoke image itself.
+      - name: Build the held-port listener image the envoy-infra live tests run
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          # As the smoke image's build above.
+          BUILDX_METADATA_PROVENANCE: disabled
+          DOCKER_BUILD_SUMMARY: "false"
+        with:
+          context: .
+          file: packages/envoy/infra/host/heldportwrapper/Dockerfile
+          build-args: BASE=${{ env.ENVOY_SMOKE_IMAGE }}
+          load: true
+          provenance: false
+          tags: ${{ env.ENVOY_SMOKE_HELD_PORT_IMAGE }}
       # The image's notices (packages/envoy/docker/Dockerfile): the build fails when a license cannot
       # be determined, and the listing shows the image ships both files.
       - name: List the image's third-party notices
@@ -1633,7 +1720,7 @@ jobs:
         working-directory: packages/envoy
       # The envoy-infra plugin's live tests (packages/envoy/infra/host/live_test.go) apply Pulumi
       # YAML programs with the pinned Pulumi CLI (.github/actions/install-pulumi) against this
-      # runner's Docker, on the listener image built above and on the docker provider the plugin's
+      # runner's Docker, on the held-port image built above and on the docker provider the plugin's
       # first consumer pins. Each download is checked against its SHA-256 before it is unpacked or
       # installed.
       - name: Install the Pulumi CLI
@@ -1677,14 +1764,24 @@ jobs:
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: setup_go
         with:
           go-version-file: packages/envoy/go.mod
-          cache-dependency-path: packages/envoy/go.sum
+          cache: false
+      # Restored on every run, saved at the end of the job only on main (the pi-legion job says why).
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: go_cache
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-${{ hashFiles('packages/envoy/go.sum') }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-{1}-', runner.os, steps.setup_go.outputs.go-version) || '' }}
       # scripts/e2e-local.test.sh drives the driver's refusals, which the acceptance run below
-      # never reaches: an unknown option, --help, and a NATS already holding the port, where the
-      # driver must refuse rather than run the acceptance against a server it did not start. It
-      # needs the bun and go this job already has, and it runs first because it is seconds
-      # (INFRA-250).
+      # never reaches: an unknown option, --help, and an E2E_NATS_PORT, E2E_PORT or E2E_SESSION_PORT
+      # another process already holds, which the driver uses as given and fails on rather than
+      # replacing it or running against a server it did not start. It needs the bun and go this job
+      # already has, and it runs first because it is seconds (INFRA-250).
       - name: Refusal test for e2e-local.sh
         run: bash scripts/e2e-local.test.sh
         working-directory: packages/envoy
@@ -1696,3 +1793,10 @@ jobs:
         with:
           name: envoy-e2e-local-evidence-${{ github.run_attempt }}
           path: packages/envoy/out/e2e
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.go_cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.go_cache.outputs.cache-primary-key }}

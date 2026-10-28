@@ -34,11 +34,12 @@ the kernel kill pod processes below their own limits, and the kubelet does not s
 | `dispatch-user-turns.sh` | a person's direct Send or Aside from Dispatch's conversation page reaches a real Oh My Pi session — the pinned build with this checkout's Envoy plugin in an isolated profile — as that person's own user turn, the body alone, carrying its Dispatch id as the host's tag, while a BTW stays a side question; the composer completes the session's slash commands, and a skill, a prompt template, a file command, an extension command, `/session`, `/compact`, `/new` and an unknown `/foo` each run from the page as they would at the session's terminal; a frame a session forged claiming a person wrote it, a broadcast, an issue message, a Legion role notice and a session's re-send of the person's BTW through the retry route each arrive as a card; a Send the session got as a card stays one when a frame is forged for it inside the accept's minute, while the person's retry of it is their turn; the page shows each message once; after the session restarts, a replay of the Send's own envelope and a frame forged naming a Send made while it was down, over a minute old, each inject nothing, and neither does a frame a bare bus client forges for a failed Send inside its minute; and Dispatch records only the Send, the Aside and the carded Send's retry as accepted. Devbox only |
 | `dispatch-session-settings.sh` | Dispatch's live view shows a real Oh My Pi session's current model and thinking level and switches them (INFRA-195), run in an issue pod: Oh My Pi in `--mode rpc` with this checkout's Envoy plugin, a real listener, `nats-server`, Postgres and Dispatch, and one held-open Chromium page. Each value the header shows matches the session's own RPC answers, its `/effort` output and its session file: before any turn; within 20 s of a change at the terminal, by a message or by a fallback; after a pick from either picker, including `auto` kept across a model pick, the level a model pick leaves (compared with a twin session), a pick during a turn, a refusal, and a pick to a stopped session that ends in the no-answer line and is refused `ACCEPT_STALE` once it resumes. A forged switch, an Envoy message and an agent's bearer change nothing. Another session, a resumed session and a new session each keep their own values. A session on the released pi-envoy shows the restart notice. A switch is stored under the person who sent it |
 | `claude-backend-tmux.sh` | `worker_backends` on tmux: an implementer the daemon runs on Claude Code (`legion claude-bridge -- claude -p`) registers its Claude Code transcript as its session, takes its phase, completes it through the `legion` MCP tool's `handoff_complete` with a pushed `.legion/<issue>/` handoff commit, and, its pane killed, relaunches with `claude --resume` into the same session id, its earlier turns unchanged on disk and in its context. Devbox only |
-| `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
+| `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair refuses either boot, an issuer that does not answer refuses the listener's boot, Dispatch starts and serves against such an issuer (`/healthz` `service_tokens` false, a JWT-shaped bearer `503 OIDC_ISSUER_UNAVAILABLE` until it discovers it in the background), and a refused token leaves its failure class in the log and nowhere else |
 | `burstable-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` giving the issue pod `issue: {memory: 32Gi, memory_request: 8Gi}` is admitted, scheduled and recorded `Burstable`, its `roles` container carrying exactly that request and limit, while one from a file with no `resources` block stays `Guaranteed`; `legion start --check-config` names the Burstable issue pod and refuses a request past its limit or that is no quantity, naming the key |
 | `controller-sweep-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, the project controller Legion's own loader, `sandboxOptions` and boot's Sandbox runtime factory launch from a `controller: daemon` `legion.yaml` over a real Postgres store keeps its Sandbox and volume through five orphan sweeps at grace 0 told claims read before its launch, because the store holds its claim unretired, and loses both to the first sweep once the claim is retired; the same launch and sweep on a driver whose sweep reads no claim (the sweep before the fix) deletes the launched controller's Sandbox |
 | `share-volumes-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` whose `runtime.kubernetes.pod` mounts an existing NFS share twice — through a PersistentVolumeClaim (read-only by default) and as an `nfs` export with `read_only: false` — reads the server's seed file through the claim, is refused a write there, and writes a file through the export that the server then holds; `legion start --check-config` refuses a volume naming two sources, and `legion probe-boot` mounts both shares and refuses a missing claim, a missing export and a server that never answers, each naming the volume and its share, and an image digest the registry does not have, naming the image |
 | `merged-root-waits.sh` | the daemon keeps a tree's order at the close, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own: a `sign_off` of a root with a child in the workflow lands, the child untouched; the root's merge, as GitHub's own envelope, leaves it in `awaiting_merge` with its pull request `merged`, no Dispatch `done`, no suspension, its slot kept and its architect told once by a `pr-merged` notice naming the child; a restart there leaves the wait and tells nobody again; the child's implementer completes its phase in that wait, where a lingering tree refuses it 409 `TREE_LINGERING`; a pull request GitHub reports opened from the waiting root's branch leaves the merged one the root waits on recorded; and the child's own merge closes it and the root behind it, with the tree suspended, the slot freed and the root's production check open on the root's merged pull request |
+| `dispatch-claimant-delivery.sh` | Dispatch's outbox delivers a person's answer, comment or untargeted message on an issue a session has claimed to that session's own `notifications.agent.<session>`, driven over HTTP through the real `envoy-dispatch` against a loopback PostgreSQL the caller names and a NATS of the run's own: a person's answer to an ask another session opened reaches the asker and the claimant, a person's reply in a person's thread on the issue's spec and a person's untargeted message reach the claimant, while a message targeted at another session, another session's comment and a person's comment on an unclaimed issue reach no claimant. A person's comment mentioning a session skips that session's own copy only when the mention's send landed: a delivered mention of the claimant leaves its topic out, a failed one reaches it, and a failed mention of an ask's follower still reaches the follower. Run against a base binary (`DISPATCH_BIN`), it is the change's negative control |
 | `child-adoption.sh` | a labelled root still queued in admission, which a person then makes a child of a live tree, joins that tree and runs there, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own: Dispatch's re-parent event takes it out of `admission.waiting` and into the tree, planning with no slot and no architect of its own; `release_children` adopts one the daemon saw no re-parent of before it answers, from todo, from backlog (writing todo, whose event runs it) and from the state INFRA-214 reached (backlog, label off, todo), and the old linger's close stops none of it; a todo root under an unreleased child of the live tree is recorded but waits in no line, even with a slot free and a root of its own parked between it and the tree, until its release, and its own todo child waits with it, is refused 409 `CHILD_IN_OTHER_TREE` naming it and the held root when released alone, and joins the tree with it; such a root takes the free slot once a person moves an ancestor out from under the tree, unrecorded or recorded; a root that ran as a tree of its own is never held so, and takes the free slot; and a child recorded in another live tree is refused 409 `CHILD_IN_OTHER_TREE` naming it and that tree, with nothing changed or written |
 | `no-required-checks.sh` | a pull request whose base branch requires no check and no workflow has no CI verdict, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own, with GitHub's settlements, push and synchronize as its own envelopes and what each base requires read by the daemon's own required-checks pass from a GitHub stand-in the driver switches: a failed check on a base that requires nothing leaves no `checksVerdict` key on `GET /legion/v1/state`, the issue in `testing` and no `checks-red`; the same failure once that base requires the check is `red`, sends the work to `implementing` and tells one `checks-red` naming it; a passing required check is `green`; and at an exhausted fix-attempt count a code push onto the held head once its base requires nothing leaves the counted attempt, `fixAttempts` unchanged, so the new head's red once the base requires the check again sends the work back with a `checks-red` rather than being held |
 | `TestRealGitHubCredentialSurface` | the real `api.NewServer`'s App leases, rendered as the gh files a pane's `GH_CONFIG_DIR` holds, make the real `gh` identify as the implementer and reviewer bots, an empty `GH_CONFIG_DIR` authenticates nobody, and `git` clones the smoke repository through `gh auth git-credential` from the implement App's files alone. Devbox only |
@@ -95,7 +96,7 @@ it acts, which needs `bun` on `PATH` (and `jq` for its log line).
 bash scripts/e2e/stage1-skeleton.sh     # → "stage 1 e2e: PASS", exit 0
 ```
 
-Needs `go`, `docker`, `jq`, `curl`, `ss` and `tmux`. It builds the binary from the checkout
+Needs `go`, `docker`, `jq`, `curl`, `python3` and `tmux`. It builds the binary from the checkout
 (`packages/daemon/cmd/legion`), so it proves the tree you are standing in. When the first tmux on
 `PATH` is a script or mise itself, as on a devbox, the run's `PATH`, and so the daemon's, starts with
 the real binary that `mise which tmux` names in `packages/daemon`, the daemon's working directory
@@ -138,25 +139,33 @@ two sessions — neither collide nor report each other as a leftover:
   box's `~/.local/state/legion/legions.json`.
 - a per-run project key (`E2E<pid><epoch>`) — boots are counted per project, so a fresh key is
   what makes `boots == 1` true on a store that has served other runs.
-- a free daemon port picked per run by [`lib/free-port.sh`](#libfree-portsh), below the kernel's
-  ephemeral range, and on the devbox path the container `legion-e2e-pg-<pid>`.
+- a daemon port the kernel chose, held for the whole run by a keeper ([`lib/rig.sh`](#librigsh)'s
+  `keep_port`, [`lib/held-port.py`](#libheld-portpy)): `legion.yaml` names it, and each start
+  serves on a copy of the keeper's socket (`LEGION_LISTEN_FD`, `start_kept`), so the restart serves
+  the same port and nothing else can take it in between; and on the devbox path the container
+  `legion-e2e-pg-<pid>`.
+
+After each healthy start the run checks that the socket the daemon serves on is held by the
+daemon's and the keeper's processes alone (`held_only_by`: the socket's inode from the `LISTEN` row
+of `/proc/net/tcp`, its holders from `/proc/*/fd`): a copy that leaked into the daemon's tmux
+server, a pane or a `legion` CLI call would keep the port listening after the daemon stops.
 
 After any exit — pass, failure, or an interrupt — the `EXIT` trap removes the container and
-signals the daemon; `docker ps -a --filter name=legion-e2e-pg` comes back empty and no daemon is
-left holding the run's port.
+signals the daemon and the keeper; `docker ps -a --filter name=legion-e2e-pg` comes back empty and
+nothing is left holding the run's port. A failed run prints the daemon's log (`<work>/logs/daemon.log`).
 
 ### How it fails
 
-Every step is fatal and names its reason: no port to pick ([`lib/free-port.sh`](#libfree-portsh):
-`ss` missing or failing, or no room below the ephemeral range), the refusal that does not name its
-host, a first tmux that is a script or mise itself while `mise which tmux` names no tmux
-(`real_bin_path` refuses), a daemon that exits before it answers `/healthz` (the run stops at once
-and names the daemon's exit status),
-a `/healthz` that never answers, a state document that is not boot 1 with cap 4 and no
-issues, a registry without exactly one entry for this run, a `firstBootAt` that moved across the
-restart, a daemon that ignored a stop (SIGKILLed on the way out, so nothing holds the port) or
-exited non-zero on one. `stop_daemon` reads and judges the exit status, because `daemon.Run`
-returns 0 on a cancelled context — a non-zero status there is a defect, not a stop.
+Every step is fatal and names its reason: a keeper that never held a port, the refusal that does
+not name its host, a first tmux that is a script or mise itself while `mise which tmux` names no
+tmux (`real_bin_path` refuses), a daemon that exits before it answers `/healthz` (the run stops at
+once and names the daemon's exit status), a `/healthz` that never answers (each poll times out
+after 2 s: the kept port queues a request no daemon accepts), a socket held by any process but the
+daemon and its keeper, a state document that is not boot 1 with cap 4 and no issues, a registry
+without exactly one entry for this run, a `firstBootAt` that moved across the restart, a daemon
+that ignored a stop (SIGKILLed on the way out) or exited non-zero on one. `stop_daemon` reads and
+judges the exit status, because `daemon.Run` returns 0 on a cancelled context — a non-zero status
+there is a defect, not a stop.
 
 Two notes on what the script had to learn about its own surface:
 
@@ -189,7 +198,7 @@ LEGION_E2E_MODEL_ROUTE=box-login bash scripts/e2e/stage2-tmux-supervision.sh    
 ```
 
 **Devbox only.** It runs a real Oh My Pi that calls a real model, so it needs `go`, `docker`,
-`jq`, `curl`, `ss`, `tmux`, `socat`, `bun`, `mise` (with the pinned OMP build it installs if
+`jq`, `curl`, `python3`, `tmux`, `socat`, `bun`, `mise` (with the pinned OMP build it installs if
 missing), the `secrets` CLI holding `GEMINI_API_KEY_TESTS` (agent tier: no YubiKey touch), and
 `LEGION_E2E_MODEL_ROUTE` (required, `gateway`, `key-file` or `box-login`), which picks how the
 agents reach Anthropic, independently of which devbox this runs on:
@@ -238,7 +247,8 @@ What it stands up, all of it the run's own:
 - **NATS and the Envoy listener** on the host: a `nats:2.10 -js` container
   (`legion-e2e2-nats-<pid>`), and `packages/envoy`'s `cmd/listener` built into the work directory
   and started with a fresh API bearer, which reaches every pane as the 0600 file `envoy_token_file`
-  names.
+  names, on a socket [`lib/held-port.py`](#libheld-portpy) opened on a port the kernel chose
+  (`ENVOY_LISTEN_FD`).
 - **The plugins**: this checkout's `@sjawhar/pi-envoy` and `@sjawhar/pi-legion`, each packed as
   the release packs it, installed into the OMP profile `legion-e2e2-<pid>-<epoch>` by
   `lib/install-plugin-profile.sh` (`--package pi-envoy`, then `--package pi-legion`), under the
@@ -275,8 +285,9 @@ What it stands up, all of it the run's own:
   environment.
 - **The daemon**: `legion.yaml` with a fresh project key per run (`S2E<pid><epoch>` — a retired
   claim is never spawned again, so a reused key would fail on a store that served an earlier run),
-  a free port from [`lib/free-port.sh`](#libfree-portsh) (its second daemon and the listener get
-  two more, each excluding the ones already picked),
+  a port the kernel chose, held for the whole run by a [`lib/held-port.py`](#libheld-portpy)
+  keeper, which each start serves on (`LEGION_LISTEN_FD`; the restart keeps it), as the second
+  daemon's is by a keeper of its own,
   `probe_interval_seconds: 5`, and the operator token file `legion claims` presents.
   `XDG_STATE_HOME` and `TMUX_TMPDIR` point into the work directory, so the legions registry and
   the private tmux servers are the run's.
@@ -348,7 +359,7 @@ and sees one disposable pull request merged into `sjawhar/legion-smoke` by the d
 submission on its accepted READY: the repository allows no auto-merge, so the daemon merges it once
 GitHub reports it mergeable, and the proof only reads it (`await_ready_merge`), never merging it by
 hand.
-The run needs `go`, `docker`, `jq`, `curl`, `ss`, `tmux`, `bun`, `mise`, `gh`, `shellcheck`, the
+The run needs `go`, `docker`, `jq`, `curl`, `python3`, `tmux`, `bun`, `mise`, `gh`, `shellcheck`, the
 `secrets` CLI, the `agent-secrets` client reaching the secrets broker that holds the two role App
 keys (the default pair unless the App inputs name another deployment's), and
 `LEGION_E2E_MODEL_ROUTE` (required, `gateway`, `key-file` or `box-login`), which picks how
@@ -438,12 +449,14 @@ run's first write.
 The script stands up a scratch Postgres, NATS, Envoy listener, native Dispatch server, and a
 subscribe-only production-Envoy GitHub bridge in one temporary directory. It installs this
 checkout's two plugins in an isolated OMP profile and runs the Go daemon with a separate state
-directory, private tmux server, ports from [`lib/free-port.sh`](#libfree-portsh), a root-only
-Dispatch project, `admission_cap: 2`, `review_round_cap: 3`, `production_check_hours: 0.25` (the
-production check's bound, 14 days by default, brought inside the run: 15 minutes, after the first
-look's report, since a look open at the bound defers it by the look's own two-hour bound; the
-linger keeps its default 72 h, the tree's close being Stage 4b's proof), and the root design gate
-armed. Its
+directory, private tmux server, ports the kernel chose and [`lib/held-port.py`](#libheld-portpy)
+holds until each service serves on its own (the daemon's and Dispatch's by a keeper for the whole
+run, since both restart on the port every pane names, so every poll of either carries a timeout), a
+root-only Dispatch project, `admission_cap: 2`, `review_round_cap: 3`,
+`production_check_hours: 0.25` (the production check's bound, 14 days by default, brought inside
+the run: 15 minutes, after the first look's report, since a look open at the bound defers it by
+the look's own two-hour bound; the linger keeps its default 72 h, the tree's close being Stage
+4b's proof), and the root design gate armed. Its
 host-side helpers are [`lib/rig.sh`](#librigsh), and the workflow's vocabulary (Dispatch, the
 daemon's state, the agents, the proof human, the handoff checks) is
 [`lib/workflow.sh`](#libworkflowsh); the script defines only its runtime's reads, its scratch
@@ -1938,7 +1951,7 @@ also drops the database and removes the work directory.
 bash scripts/e2e/verifiers-staging-token.sh     # → "verifiers e2e: PASS", exit 0
 ```
 
-Needs `go`, `docker`, `kubectl`, `jq`, `curl`, `ss` and `base64`, and credentials for the `staging`
+Needs `go`, `docker`, `kubectl`, `jq`, `curl`, `python3` and `base64`, and credentials for the `staging`
 kube context — it mints two real tokens with `kubectl -n legion create token default --audience
 {dispatch,envoy} --duration 10m` (the TokenRequest API) and reads the issuer from the cluster's own
 `/.well-known/openid-configuration`. That is why it is a devbox gate and not a CI job: GitHub's
@@ -1957,8 +1970,9 @@ What the run touches, and nothing else:
   box's `~/.local/share/dispatch`. Recreated from empty each run.
 - the containers `verifiers-e2e-pg` (`postgres:16`) and `verifiers-e2e-nats` (`nats:2.10 -js`), both
   on ephemeral loopback ports.
-- two ports from [`lib/free-port.sh`](#libfree-portsh), one for `dispatch` and one for the
-  listener, the second excluding the first.
+- two ports the kernel chose, one for `dispatch` and one for the listener, each held by
+  [`lib/held-port.py`](#libheld-portpy) from that choice until its binary serves on it
+  (`DISPATCH_LISTEN_FD`, `ENVOY_LISTEN_FD`). The boot refusals exit before any bind and get none.
 
 After any exit — pass, failure, or an interrupt — the `EXIT` trap signals both binaries and removes
 both containers; `docker ps -a --filter name=verifiers-e2e` comes back empty.
@@ -1976,8 +1990,11 @@ and `exp`. The last step asserts that neither binary's log contains `eyJ`.
 Every step is fatal and names its reason: a cluster that will not mint, a discovery document with
 no `https` issuer, a token whose `iss`, `aud` or `sub` is not the one asked for, a container that
 never becomes ready, a binary that exits during boot (reported at once from its dead pid, with its
-log, rather than after the whole wait), a boot log that does not name the issuer, any of the eight
-calls answering the wrong status, a body that is not the actor the verifier should have produced, a
+log, rather than after the whole wait), a Dispatch booted against an issuer that does not answer
+that exits, never answers `/healthz`, reports `service_tokens` as anything but `false`, or does not
+stop with status 0 within 30 s of its SIGTERM, a boot log that does not name the issuer, any of the
+nine calls answering the wrong status, a body that is not the actor the verifier should have
+produced (or, for the bearer sent before the issuer is discovered, not `OIDC_ISSUER_UNAVAILABLE`), a
 refusal whose class is missing from the log — or present in the 401 body, which would tell an
 unauthenticated caller which credential the listener is configured for.
 
@@ -2284,6 +2301,80 @@ outbox lanes are the real ones. `MERGED_ROOT_WAITS_EVIDENCE_DIR` (default a fres
 `TMPDIR`, kept and printed) keeps the transcript, the `nats-server`'s log and the daemon's own,
 which the driver writes through `LEGION_E2E_DAEMON_LOG`.
 
+## dispatch-claimant-delivery.sh
+
+```sh
+DATABASE_URL=postgres://<user>@127.0.0.1:<port>/<database>?sslmode=disable \
+  [DISPATCH_BIN=<envoy-dispatch>] bash scripts/e2e/dispatch-claimant-delivery.sh     # → "dispatch claimant delivery e2e: PASS in <n>s", exit 0
+```
+
+Runs on any Linux host with `go`, `bun`, `curl`, `psql` and `openssl` — no Docker. It proves
+`publishClaimantRoute` (`packages/envoy/internal/dispatch/outbox/publisher.go`) on the wire: the
+real `envoy-dispatch` publishes each event, and the run reads which `notifications.agent.*` topics
+carried its envelope, `dispatch-<event id>`.
+
+| input | default | meaning |
+| :--- | :--- | :--- |
+| `DATABASE_URL` | required | a scratch PostgreSQL database with `pgvector` available, on `127.0.0.1`, `localhost` or `::1` (any other host, or a host given as a parameter, is refused). The run drops and recreates its `public` schema before the server migrates it, and leaves what it wrote there for inspection |
+| `DISPATCH_BIN` | unset | a prebuilt `envoy-dispatch` to run; unset, the script builds `./cmd/dispatch` from this checkout's `packages/envoy` |
+| `CLAIMANT_E2E_DISPATCH_PORT` | `19051` | the server's port; refused when something already answers on it |
+| `CLAIMANT_E2E_ENVOY_PORT` | `19053` | the fake Envoy listener's port; refused the same way |
+
+The script drops every inherited `DISPATCH_*`, `ENVOY_*` and `NATS_*` variable (and `PGHOSTADDR`)
+before it starts anything, so a Legion pane's real listener, Dispatch and NATS credentials reach
+none of it. It starts a NATS of its own (`internal/testnats/cmd/natsd`, JetStream on, on a port the
+kernel picks), the harness's fake Envoy listener (`packages/dispatch/e2e/fake-envoy.ts`, where the
+three sessions are registered live and P and C advertise `steer`, a mention's default mode), and
+the server with NATS on, dev sign-in, an insecure cookie and an agent token minted for the run, in
+an environment holding nothing else. The driver, `dispatch-claimant-delivery.ts`, subscribes to
+`notifications.>` on that NATS, acts as the sessions P, C and Q with the agent token (each write
+naming its session as `actor`) and as one person through `GET /auth/_dev/signin`, finds each
+event's id in the issue's event log, waits up to 10 s for its envelope on the issue's own topic and
+2 s more for its other destinations, and prints the agent topics that carried it. The mention cases
+listen 15 s rather than 2 s: while a mention's send is pending the outbox holds back the mentioned
+session's copy and re-checks the event on its 5 s tick. Issue `CLM-1` is the person's, with a spec
+and no route, claimed by P.
+
+| case | driven | passes when the event's envelope reached |
+| :--- | :--- | :--- |
+| `case3-ask-answer` | C opens an ask on `CLM-1`; the person answers it | exactly `agent.C` and `agent.P`. It also prints `claimant`, `route` and `route_holder` of `GET /api/v1/asks/{id}` and of the ask's Inbox row's thread (`absent` on a server that predates them) |
+| `case2-thread-reply` | the person comments on a passage of `CLM-1`'s spec, then replies in that thread, mentioning nobody | `agent.P`, among any others |
+| `untargeted-message` | the person posts a message on `CLM-1` with no target | exactly `agent.P` |
+| `targeted-message` | the person sends a message on `CLM-1` targeted at `session:Q` | no `agent.P` |
+| `agent-comment` | C comments on `CLM-1` | no `agent.P` |
+| `unclaimed-issue` | the person comments on `CLM-2`, which nobody claims and which has no route | no agent topic at all |
+| `mention-delivered-claimant` | the person comments on `CLM-1` mentioning `session:P`; the fake listener takes the send. It prints the payload's mentions (`session:P→P`), the sends the listener took and the comment's delivery rows from `GET /api/v1/comments/{id}` | no `agent.P` within 15 s (the mention is P's one copy), and the delivery row `sent` |
+| `mention-failed-claimant` | the same, with the fake listener answering every send to P 404 while its registry read still finds P, so the mention resolves to P and its send fails | `agent.P` within 15 s, and the delivery row `failed` |
+| `mention-failed-follower` | C opens an ask on `CLM-3`, which nobody claims, so C only follows it; the person replies in the ask mentioning `session:C`, and the fake listener answers every send to C 404. It prints the ask's `claimant`, `route` and `route_holder` | `agent.C` within 15 s, and the delivery row `failed` |
+
+Each mention case fails when the comment.created payload's mention does not carry the mentioned
+session's `session_id`: the cases are about a mention that resolved, whatever its send did.
+
+Every case runs and prints `== <case>`, what it read, and `ok <case>` or `FAIL <case>: <why>`; a
+summary follows, and any FAIL exits 1. The work directory, under `TMPDIR`, holds the binaries and
+the logs of natsd, the fake listener and the server: removed when the run passes, kept (without the
+binaries) and printed when it fails. Every process the run started is stopped on any exit.
+
+**Negative control.** Built from the pull request's base commit, `81a3b5ef7b47`, which has no
+claimant route, the same run must fail the three cases the claimant route adds and
+`mention-failed-claimant`, and pass the rest. `mention-failed-follower` passes there by design:
+the base always sent the follower its copy, mentioned or not, and the case proves that behaviour is
+kept. A binary built from the pull request's earlier head `15e414ed9b6b`, which skipped a
+mentioned session's copy as soon as the mention resolved, fails both `mention-failed-claimant` and
+`mention-failed-follower`. Neither serves `route_holder`, printed `absent` there:
+
+```sh
+mkdir -p "$TMPDIR/base-src"
+git --git-dir=<the checkout's git directory> archive <base commit> packages/envoy | tar -x -C "$TMPDIR/base-src"
+go -C "$TMPDIR/base-src/packages/envoy" build -o "$TMPDIR/envoy-dispatch-base" ./cmd/dispatch
+DATABASE_URL=… DISPATCH_BIN="$TMPDIR/envoy-dispatch-base" bash scripts/e2e/dispatch-claimant-delivery.sh
+# → FAIL case3-ask-answer (agent.C alone), FAIL case2-thread-reply, FAIL untargeted-message and
+#   FAIL mention-failed-claimant (no agent topic), ok for the other five, exit 1
+# Built the same way from 15e414ed9b6b:
+# → FAIL mention-failed-claimant and FAIL mention-failed-follower (no agent topic), ok for the
+#   other seven, exit 1
+```
+
 ## child-adoption.sh
 
 ```sh
@@ -2417,36 +2508,83 @@ real ones. `NO_REQUIRED_CHECKS_EVIDENCE_DIR` (default a fresh directory under `T
 printed) keeps the transcript, the `nats-server`'s log and the daemon's own, which the driver
 writes through `LEGION_E2E_DAEMON_LOG`.
 
-## lib/free-port.sh
+## lib/held-port.py
 
-Prints one TCP port that nothing listens on, for a stage proof to hand a binary that binds it
-later. Stage 1, Stage 2, Stage 3 (through [`lib/rig.sh`](#librigsh)'s `pick_port`) and
-`verifiers-staging-token.sh` take their ports from it.
+Starts a server on a TCP port the kernel chose, and holds that port from the choice until the
+server serves on it, so nothing else can take it in between. Python 3.9 or later, standard library
+only. It replaces picking a port that was free a moment earlier and passing its number: such a port
+can be taken before the server binds it, and the bind then fails with `address already in use`. The
+server must adopt an inherited listening socket: `ENVOY_LISTEN_FD` (envoy-listener),
+`DISPATCH_LISTEN_FD` (envoy-dispatch) or `LEGION_LISTEN_FD` (`legion start`).
 
 ```sh
-port=$(bash scripts/e2e/lib/free-port.sh)                  # → 20000 ≤ port < first ephemeral port
-second=$(bash scripts/e2e/lib/free-port.sh "$port")        # never $port
-third=$(bash scripts/e2e/lib/free-port.sh "$port" "$second")
+# One server: the helper listens on 127.0.0.1:0 and becomes the server.
+python3 scripts/e2e/lib/held-port.py exec --port-file "$work/dispatch.port" \
+  --fd-env DISPATCH_LISTEN_FD \
+  --env DISPATCH_PORT={port} --env DISPATCH_SERVER_URL=http://127.0.0.1:{port} \
+  -- "$work/envoy-dispatch" &
+server_pid=$!                       # the server's own PID: the helper executes it in place
+
+# A port that outlives restarts: a keeper holds it, and each start receives a copy.
+python3 scripts/e2e/lib/held-port.py keep --port-file "$work/listener.port" --socket "$work/listener.sock" &
+keeper_pid=$!                       # wait for listener.port before the first start
+python3 scripts/e2e/lib/held-port.py exec --from "$work/listener.sock" \
+  --fd-env ENVOY_LISTEN_FD --env PORT={port} -- "$work/envoy-listener" &
 ```
 
-The port comes from 20000 up to, not including, the first port of
-`/proc/sys/net/ipv4/ip_local_port_range` (32768 on a default kernel). The kernel autobinds every
-outbound socket from that range, so between the pick and the bind, any connection the run opens
-(go build's module fetches, a Postgres dial, a curl) could take a port inside it. The bind would
-then fail with `address already in use`. The kernel never autobinds a port below the range.
-`ss -ltnH` rules out a port something already listens on. Each argument is a port the caller has
-already picked and not yet bound, and the helper never returns one of them, so several picks in
-one run stay distinct.
+`exec [--host H | --from SOCKPATH] [--port-file F] --fd-env NAME [--env K=V]... -- CMD [ARG]...`
+opens a listening socket on `H:0` (default `127.0.0.1`; an IPv6 address such as `::1` works) or,
+with `--from`, receives one from the keeper at `SOCKPATH`. It puts the socket on descriptor 3,
+inheritable, and keeps no other copy. It replaces `{port}` in each `--env` value and in CMD and
+its arguments, sets each `K=V` and `NAME=3`, writes the port and a newline to F (a temporary file in
+F's directory, then a rename, so a reader never sees half a number) and executes CMD in its own
+process: `$!` is the server's PID. A failure before CMD runs exits 1 and names what failed on
+stderr; a CMD that cannot be executed exits 127 (not found) or 126, after F was written. Either way
+the socket closes with the process and the port is free again.
 
-### How it fails
+`keep [--host H] --port-file F --socket SOCKPATH` holds one listening socket for its whole life and
+serves the unix socket `SOCKPATH`, answering each connection with a copy of the held socket
+(SCM_RIGHTS). It writes F only once `SOCKPATH` listens, so a reader of F can start an
+`exec --from` at once. Every server started from it serves the same port, and a restart cannot
+lose the port to another process. It runs until killed: SIGTERM or SIGINT exits 0 and removes
+`SOCKPATH`; the caller's cleanup kills it.
 
-It exits non-zero, printing the reason on stderr and nothing on stdout, when:
+Between two servers, a kept port still listens. The kernel accepts a connection into the socket's
+queue and nothing answers it until the next server starts and accepts it. A check that the server
+is down therefore sees a hang, not a refusal: poll with a timeout (`curl --max-time 2`) and take the
+timeout for down.
 
-- `ss` is missing or fails (`ss: command not found`, or `ss`'s own error). An unanswered busy
-  check is never read as a free port.
-- the ephemeral range starts at 21000 or below (`the ephemeral range starts at <n>, leaving no
-  room above 20000`).
-- 50 draws find no free port (`no free port found below <n>`).
+`held-port.test.ts` runs the real envoy-listener of this checkout through both commands: it serves
+on the port the port file names in the helper's own PID, a competing bind is refused before the
+server runs, the listener holds the socket only on its own close-on-exec copy, a command that
+cannot run frees its port, and a keeper keeps its port, unanswered, between two listeners. It
+builds the listener with `go`, so CI runs it after `setup-go`.
+
+Every stage proof and rig takes its servers' ports this way, apart from the ports Stage 4a and
+Stage 4b pin inside the range the devbox security group admits. [`lib/rig.sh`](#librigsh)'s
+`start_held`, `keep_port` and `start_kept` wrap it for the scripts that source the rig (Stage 1,
+Stage 3, the 4b.13b acceptance, `claude-backend-tmux.sh`, `controller-start-tmux.sh`,
+`dispatch-user-turns.sh`, the docs rigs and the skill-scenarios rig); Stage 2 and
+`verifiers-staging-token.sh` call it directly. A daemon always serves on a keeper's socket, since its
+`legion.yaml` must name the port before it starts. A process that binds port 0 itself and reports
+what it got — `nats-server -p -1`, a Bun fake, `kubectl port-forward :<port>` — needs no helper; the
+rig reads its report with `report_port`. A port a person sets explicitly is used as given, and an
+occupied one fails with `address already in use`.
+
+## lib/port-file.sh
+
+The wait for the port file [`lib/held-port.py`](#libheld-portpy) writes, which `lib/rig.sh`'s
+`start_held` and `keep_port` and `packages/envoy/scripts/search-smoke.sh` and `searchbench.sh`
+share. Sourced, never run; it needs nothing of its caller's.
+
+```sh
+. "$root/scripts/e2e/lib/port-file.sh"
+read_port_file "$work/dispatch.port" "$server_pid" port || waited=$?
+```
+
+`read_port_file FILE PID VAR` polls FILE every tenth of a second while PID lives and assigns VAR
+the port it names. It prints nothing, so each caller words its own failure: it returns 0 once VAR
+is set, 1 when PID exits before FILE is written, and 2 after `port_file_seconds` (30).
 
 ## lib/built-from.sh
 
@@ -3036,15 +3174,19 @@ The caller sets `root` (the checkout), `work` (the run's scratch directory: ever
 working directory or command line names it is the run's), `evidence` (each service started by
 `start_process` logs to `$evidence/logs/<name>.log`) and `timeout_hook` (empty, or a function a
 timed-out wait runs before it fails), and defines `note` and `fail`, which exits. Stage 1 calls
-only `real_bin_path`, so it sets `root` and `work` and defines `fail` alone.
+`real_bin_path`, `keep_port`, `start_kept` and `held_only_by`.
 
 | function | does |
 | :--- | :--- |
 | `until_true SECONDS WHAT CMD…` | runs CMD every half second until it succeeds. After SECONDS of wall time, each poll's own run included, it runs `timeout_hook` and fails naming WHAT. It says what it waits for on entry and every 60 s. A poll that never returns would hold the wait, so callers bound their remote calls. A guard that writes `$evidence/pane-endpoint-violation.txt` makes the next wait abort, naming the violation |
-| `pick_port VAR` | assigns VAR a port from [`lib/free-port.sh`](#libfree-portsh) that no earlier pick of the run returned. It assigns in place: a command substitution would run it in a subshell and lose the run's set of picks |
 | `start_process NAME CMD…` | starts CMD in the background, appending to NAME's log, and sets `NAME_pid` |
-| `log_size NAME` | the size of NAME's log, the offset `await_start` reads a start's own lines from |
-| `await_start NAME PID OFFSET SECONDS WHAT CMD…` | waits, bounded, for CMD to succeed while PID lives. It returns 2 when the service exited on `address already in use` after OFFSET, the one race a pick before the bind cannot close, so the caller picks again; any other exit fails naming the log |
+| `start_held NAME PORT_VAR FD_ENV [--env K=V]… -- CMD…` | starts CMD as the service NAME through [`lib/held-port.py`](#libheld-portpy) `exec`: a socket listening on a port the kernel chose, held from that choice until CMD serves on it, handed over as descriptor 3 with `FD_ENV=3`; `{port}` in an `--env` value or in CMD is its port. It waits, bounded, for the helper's port file and sets PORT_VAR before CMD runs; `NAME_pid` is CMD's own pid. A CMD that clears its environment (`env -i`) names `FD_ENV=3` itself |
+| `keep_port NAME PORT_VAR` | starts the keeper NAME (`held-port.py keep`, its socket `$work/NAME.sock`), which holds one socket on a port the kernel chose for the whole run, and sets PORT_VAR once it hands out copies. The caller's cleanup stops it (`NAME_pid`). A configuration can name the port before its service starts, and a restart cannot lose it. Between two servers the port listens unanswered, so every poll of it carries a timeout |
+| `start_kept NAME KEEPER FD_ENV [--env K=V]… -- CMD…` | starts CMD as `start_held` does, on a copy of the socket the keeper KEEPER holds (`exec --from`) |
+| `report_port LOG PATTERN` | prints the port a process that bound port 0 itself reported: the digits right after the first match of the extended regex PATTERN in LOG (`'Listening for client connections on [^ ]*:'` for `nats-server -p -1`). It fails while no line matches, so it is also the poll that waits for one |
+| `listening_holders PORT` | prints the pid of every process holding the one socket listening on PORT: its inode from the `LISTEN` row of `/proc/net/tcp` and `/proc/net/tcp6`, its holders from `/proc/*/fd`. It fails when no socket, or more than one, listens on PORT |
+| `held_only_by PORT PID…` | succeeds when the holders of the socket listening on PORT are exactly the PIDs given; otherwise it prints each holder's pid and command line and fails. Stage 1 runs it after each daemon start with the daemon and its keeper |
+| `await_start NAME PID SECONDS WHAT CMD…` | waits, bounded, for CMD to succeed while PID lives, and fails naming NAME's log the moment PID exits |
 | `stop_pid PID` | TERM, then KILL after 10 s; best effort, so a failed cleanup never hides the check that failed. An empty PID does nothing; a PID that cannot name one process of the run (0 however spelled, so any value with a leading zero, 1, a negative or non-numeric value, the calling shell or its process group's leader) is refused with a printed line, since `kill 0` signals the caller's whole process group |
 | `stop_tree PID` | stops a background loop with every process under it: it freezes the loop, stops each child the same way, then kills the loop, so the `kubectl`, `jq` or `sleep` the loop was waiting on goes with it. It signals a pid only while its parent is the calling shell, so a pid the watcher left and another process reused is never hit, and refuses the same pids `stop_pid` does: `kill -STOP 0` would freeze the whole driver and a later `kill -KILL 0` end it. Stage 3's and Stage 4b's watchers are stopped with it |
 | `run_processes` | prints every pid whose working directory or command line names `$work` |

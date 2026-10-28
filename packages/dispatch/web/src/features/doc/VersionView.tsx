@@ -141,6 +141,7 @@ export function VersionView({
               key={host.key}
               owner={owner}
               readOnly
+              rowResolution={false}
             />
           );
         })}

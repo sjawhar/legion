@@ -148,11 +148,12 @@ func (b *twoBuilds) options(env map[string]string) dispatchOptions {
 }
 
 // startPrevious starts a process of the previous build, its own web app served, and returns once it
-// answers /healthz.
+// answers /healthz. The previous build may predate DISPATCH_LISTEN_FD, so it binds its port itself.
 func (b *twoBuilds) startPrevious(t *testing.T, env map[string]string) *dispatchProcess {
 	t.Helper()
 	options := b.options(env)
 	options.Binary, options.WebDist = b.build.path("envoy-dispatch"), b.build.path("web")
+	options.BindsItsPort = true
 	b.a = startDispatchProcessWith(t, b.databaseURL(t), options)
 	b.a.waitHealthy(t)
 	return b.a

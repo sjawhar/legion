@@ -154,7 +154,15 @@ func NewPool(pool *pgxpool.Pool) *Pool {
 // the DSN another repository's URL builder writes. It is 64, from 16, since 2026-10-27: a
 // request takes a connection per statement one after another (an issue read is about eleven),
 // so under ~240 agent requests a minute the API held all sixteen and every other request waited
-// seconds for one; the database (16 vCPU) has hundreds of connections spare.
+// seconds for one. The database bounds it from above. Dispatch's database is the gcp:Dispatch
+// component's Cloud SQL Postgres instance, whose default max_connections follows its tier's
+// memory (https://cloud.google.com/sql/docs/postgres/flags, max_connections), and every server
+// pod opens up to ConnectionsPerProcess. During a roll, every pod that holds connections (the
+// replicas, the surge pod and pods still terminating, for up to their grace period) times that
+// sum must fit in max_connections less PostgreSQL's 3 superuser-reserved slots, so raising a pool
+// or the pod count is checked against it: read SHOW max_connections on the instance before
+// raising either. A new pool, or a new permanent Listener caller, goes into
+// ConnectionsPerProcess with it.
 const sharedPoolSize = 64
 
 // roomsPoolSize bounds the connections document loads use. Loading takes no lock and always
@@ -260,29 +268,30 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // one at the same moment, and it is a caller and not a lease or a hold that needs one.
 //
 // Exclusive takes its connection before it learns whether the lease is held, so a pass that skips
-// because the other process holds the lease holds a connection for that round trip too. Eleven
+// because the other process holds the lease holds a connection for that round trip too. Twelve
 // names are leased - the document compaction, the suggestion-outcome sweep, the reference-excerpt
 // reconciliation, the block-index reconciliation, the GitHub webhook redelivery sweep, the
-// architecture import, the delivery reconcile, the edit-notice sweep, one per delivery durable
-// for the intake's take-over (delivery.consumerLease, a name each for delivery-events and
-// delivery-jobs) and the server process registry's prune (processes.RunPrune) - by eleven
-// callers, since each intake takes its own durable's name from its own goroutine, so eleven
-// callers can be inside Exclusive at once.
+// architecture import, the delivery reconcile, the edit-notice sweep, the repair of closed and
+// reopened issues' asks (api.RunIssueAskRepair), one per delivery durable for the intake's
+// take-over (delivery.consumerLease, a name each for delivery-events and delivery-jobs) and the
+// server process registry's prune (processes.RunPrune) - by twelve callers, since each intake
+// takes its own durable's name from its own goroutine, so twelve callers can be inside Exclusive
+// at once.
 //
 // Each of the two intakes also holds its durable's hold, whose every statement is one statement
 // on a connection of this pool for that statement alone. Two can be in flight per intake at once:
 // the hold's renewal goroutine (duty.Hold's renew, every 5 s, each bounded by the renew interval),
 // and the intake's own goroutine (duty.HoldToken, duty.TryHold, SetToken, Release, one at a time),
 // whose SetToken runs inside the take-over and so needs a connection beside the one its lease is
-// held on. That is four more callers, fifteen in all.
+// held on. That is four more callers, sixteen in all.
 //
-// Fifteen connections are exactly those fifteen: the headroom is zero. A renewal that waited for
+// Sixteen connections are exactly those sixteen: the headroom is zero. A renewal that waited for
 // a connection behind a compaction pass, which holds its lease for minutes, would see its hold
 // reported lost at the loss deadline and the durable's delivery stop, so the next caller added
 // here - a leased loop, or another hold - takes a connection of its own in this count. They
 // cannot come from the shared pool: a lease is held for the whole pass, and the shared pool's
 // sharedPoolSize connections are what every request reads through.
-const leasePoolSize = 15
+const leasePoolSize = 16
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
 // only one process runs each pass (duty.Exclusive). The lease is a session-level advisory lock, so
@@ -299,6 +308,20 @@ func (p *Pool) Leases() (*pgxpool.Pool, error) {
 // is one goroutine that runs one statement at a time and closes each cursor before its next
 // statement, so one connection is every connection it can use.
 const outboxPoolSize = 1
+
+// registryPoolSize bounds the pool the registry of live server processes stamps this process's row
+// through: processes.Register opens it from this pool's configuration with MaxConns 1, outside the
+// pools above, so it is counted here rather than by a method of Pool.
+const registryPoolSize = 1
+
+// permanentListeners is how many connections the listener pool dials and hands off for the life
+// of the process: the delivery hub, the event stream relay and the stale-room evictor (Listener).
+const permanentListeners = 3
+
+// ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres:
+// every pool's size, the registry's own pool (processes.Register) among them, and one connection
+// per permanent listener, which the listener pool dials and hands off rather than holds.
+const ConnectionsPerProcess = sharedPoolSize + roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + registryPoolSize + permanentListeners
 
 // Outbox is the pool the events outbox claims, reads and records events through, and reads the
 // followers and authors a publish routes to. Under load the API's requests queue for the shared

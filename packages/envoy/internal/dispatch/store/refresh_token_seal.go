@@ -3,8 +3,6 @@ package store
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hkdf"
-	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -44,11 +42,7 @@ func newRefreshTokenSeal(keys auth.SigningKeys) refreshTokenSeal {
 		panic("dispatch: the refresh-token seal needs a signing key")
 	}
 	var seal refreshTokenSeal
-	for _, signingKey := range keys.Keys() {
-		key, err := hkdf.Key(sha256.New, []byte(signingKey), nil, refreshTokenKeyInfo, 32)
-		if err != nil {
-			panic(fmt.Sprintf("dispatch: derive the refresh-token key from the signing key: %v", err))
-		}
+	for _, key := range keys.Derive(refreshTokenKeyInfo) {
 		block, err := aes.NewCipher(key)
 		if err != nil {
 			panic(fmt.Sprintf("dispatch: refresh-token cipher: %v", err))

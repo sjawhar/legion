@@ -32,16 +32,6 @@ func rawJetStream(t *testing.T, url string) nats.JetStreamContext {
 	return js
 }
 
-// deployedStream reads the stream's configuration as the server holds it.
-func deployedStream(t *testing.T, js nats.JetStreamContext) nats.StreamConfig {
-	t.Helper()
-	info, err := js.StreamInfo(Stream)
-	if err != nil {
-		t.Fatalf("read the stream: %v", err)
-	}
-	return info.Config
-}
-
 // A stream whose settings a newer build stamped keeps every one of them when a client of this
 // build starts, whether it names a replica count (the listener) or not (Dispatch): the older build
 // does not revert what the newer one set.
@@ -74,7 +64,7 @@ func TestAnOwningClientLeavesAStreamANewerGenerationStampedUntouched(t *testing.
 				t.Fatalf("connect: %v", err)
 			}
 			t.Cleanup(client.Close)
-			got := deployedStream(t, js)
+			got := deployedStream(t, js).Config
 			if got.MaxAge != newer.MaxAge || got.Duplicates != newer.Duplicates ||
 				!slices.Equal(got.Subjects, newer.Subjects) || got.Replicas != newer.Replicas {
 				t.Fatalf("stream MaxAge=%s Duplicates=%s Subjects=%v Replicas=%d, want the newer build's MaxAge=%s Duplicates=%s Subjects=%v Replicas=%d",
@@ -102,7 +92,7 @@ func TestAnOwningClientStampsItsGenerationOnAnUnstampedStream(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(client.Close)
-	if got := deployedStream(t, js).Metadata[generationKey]; got != "1" {
+	if got := deployedStream(t, js).Config.Metadata[generationKey]; got != "1" {
 		t.Fatalf("stream generation = %q, want 1", got)
 	}
 }
@@ -137,7 +127,7 @@ func TestAnOwningClientKeepsTheDeployedReplicasUnlessItNamesSome(t *testing.T) {
 				t.Fatalf("connect: %v", err)
 			}
 			t.Cleanup(client.Close)
-			got := deployedStream(t, js)
+			got := deployedStream(t, js).Config
 			if !slices.Contains(got.Subjects, "notifications.legion.>") {
 				t.Fatalf("stream subjects = %v; the start did not update the stream", got.Subjects)
 			}

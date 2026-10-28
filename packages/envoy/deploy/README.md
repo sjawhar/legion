@@ -90,13 +90,13 @@ Two releases of Dispatch never serve the database together in this compose deplo
 `docker compose up -d --no-deps dispatch` stops and removes the old container before it starts the
 new one, which boots and migrates. That order is this deployer's own, not a rule every deployment
 keeps: a deployment that rolls Dispatch instead, running two processes against one database while
-it rolls, is supported under the preconditions the server's own guidance names — one
-`DISPATCH_SIGNING_KEY` every process is given, which the server checks itself (a process whose
-keys a live process does not share refuses to start), and every migration written to leave the
-release before it able to read and write the schema (`../cmd/dispatch/README.md`, "Running more
-than one process" and "Database migrations"). What no deployment does is start an image older than its
-database's schema: migrations `0113` and `0117` are each deployed with no earlier release running,
-and none is started over either again.
+it rolls, is supported under the preconditions the server's own guidance names — the same keys
+in every process (`DISPATCH_SIGNING_KEY`, or one shared data directory), which the server checks
+itself (a process whose keys a live process does not share refuses to start), and every
+migration written to leave the release before it able to read and write the schema
+(`../cmd/dispatch/README.md`, "Running more than one process" and "Database migrations"). What
+no deployment does is start an image older than its database's schema: migrations `0113` and
+`0117` are each deployed with no earlier release running, and none is started over either again.
 
 Run it continuously in its supervised host service, or use one pass for a
 smoke check:
@@ -105,10 +105,16 @@ smoke check:
 cd packages/envoy/deploy
 scripts/autodeploy.sh --once
 ```
-After health succeeds, the deployer reads `DISPATCH_SERVER_URL` from
-`compose/.env` and checks that `/auth/start` emits exactly
-`$DISPATCH_SERVER_URL/auth/callback`. It persists the new `ENVOY_IMAGE_TAG`
-only after both checks. A pull that fails changes nothing; the previous image
+The health check waits, up to 90 seconds, for `/healthz` to answer `200` with
+NATS connected: `"nats": false` fails it, and `"nats": null` (NATS turned off)
+passes. Dispatch serves while NATS is down or refuses its credential, so a
+`200` alone would keep an image whose NATS connection fails; such an image is
+rolled back instead, as it was when Dispatch exited at boot without NATS. A
+NATS outage fails the check for the previous image too, so its rollback then
+reports that it did not become healthy. After health succeeds, the deployer
+reads `DISPATCH_SERVER_URL` from `compose/.env` and checks that `/auth/start`
+emits exactly `$DISPATCH_SERVER_URL/auth/callback`. It persists the new
+`ENVOY_IMAGE_TAG` only after both checks. A pull that fails changes nothing; the previous image
 keeps serving. A deploy that fails after the new image started restores the
 previous tag and restarts only `dispatch`, unless the failed image moved the
 database's schema. Before each deploy the deployer reads the schema version and
@@ -171,7 +177,8 @@ to its clients as `PGPASSWORD` alone. `compose/dispatch.env.example`'s URL is in
 | `ENVOY_NATS_SOCKS5_PROXY` | no | A SOCKS5 proxy, as `host:port`, every NATS connection goes through (reconnects included), each server's host name handed to it unresolved. A value that is not `host:port`, or that holds an nkey seed, refuses startup naming the variable, without printing the value; a set proxy also needs `ENVOY_ALLOW_REMOTE_NATS=1`. Unset dials NATS directly. |
 | `ENVOY_LISTENER_PORT` | no | Defaults to `9020`. |
 | `ENVOY_LISTEN_HOST` | no | Defaults to `127.0.0.1`. |
-| `ENVOY_API_TOKEN` | conditional | Required when `ENVOY_LISTEN_HOST` is not loopback and no OIDC pair is set; matching bearer token for Listener API requests. Empty no longer opens `/v1` while a verifier is configured. |
+| `ENVOY_LISTEN_FD` | no | An inherited listening TCP socket, by descriptor number, the listener serves on instead of binding, for a process a test harness starts: the harness opens the socket on port 0 and holds the port the kernel chose until the listener serves on it. Not for a container, since Docker cannot pass a host descriptor into one. `ENVOY_LISTEN_HOST` and the listener's `PORT` (which the compose files set from `ENVOY_LISTENER_PORT`), when set, must name the socket's address (`PORT=0` never does); a descriptor that is not a listening TCP socket, or a setting that names another address, refuses startup naming the variable, with nothing bound in its place. The API auth rule below judges the socket's own address. |
+| `ENVOY_API_TOKEN` | conditional | Required when the listen address (`ENVOY_LISTEN_HOST`, or the `ENVOY_LISTEN_FD` socket's) is not loopback and no OIDC pair is set; matching bearer token for Listener API requests. Empty no longer opens `/v1` while a verifier is configured. |
 | `ENVOY_OIDC_ISSUER` | conditional | OIDC issuer whose projected service-account tokens authenticate to `/v1` beside `ENVOY_API_TOKEN`. Set with `ENVOY_OIDC_AUDIENCE` or not at all; half the pair refuses to boot naming the missing one, as does an issuer that does not answer discovery. |
 | `ENVOY_OIDC_AUDIENCE` | conditional | Audience those tokens must carry (`envoy`). Set with `ENVOY_OIDC_ISSUER` or not at all. |
 | `ENVOY_ALLOWED_HOSTS` | conditional | Comma-separated host names or addresses (no port) an unauthenticated listener serves `/v1` to beside loopback; required for each name clients reach it by when neither `ENVOY_API_TOKEN` nor the OIDC pair is set and they do not dial loopback. Any other `Host` gets a JSON 421. Unused when a bearer is required. |
@@ -183,6 +190,11 @@ to its clients as `PGPASSWORD` alone. `compose/dispatch.env.example`'s URL is in
 | `ENVOY_GITHUB_MENTION_TRIGGER` | no | Defaults to `@legion`. |
 | `ENVOY_SLACK_SIGNING_SECRET` | conditional | Required when Slack webhooks are enabled. |
 | `ENVOY_GHOSTWISPR_SIGNING_SECRET` | optional | Empty skips Ghost Wispr signature verification. |
+
+Once it serves, the listener logs one JSON line `"msg":"envoy-listener listening"` whose `addr` is
+the address it is bound to, in either mode: the port the kernel chose for `PORT=0` or for an
+inherited socket, and `[::]:<port>` for a listener on every interface (`ENVOY_LISTEN_HOST=0.0.0.0`).
+A harness reads its port there, with `jq -r 'select(.msg == "envoy-listener listening") | .addr'`.
 
 A process is given a NATS nkey seed only after its NATS server has nkey users (the server's stage 1,
 which keeps a `no_auth_user` fallback): a server with no users sends no nonce, and the Go client
@@ -211,7 +223,7 @@ The Dispatch service reads its public browser origin and NATS URLs from
 | `DATABASE_URL` | yes | The external Dispatch Postgres URL (production: the Aurora `dispatch` database), as `postgres://<user>:<password>@<host>:<port>/<database>?sslmode=require`, with the password percent-encoded. The auto-deployer accepts only that form, with `connect_timeout` and `application_name` the other query keys it allows, and refuses any other (Auto-deployer, above). The compose runs no Postgres of its own. |
 | `DISPATCH_SERVER_URL` | yes | Public browser origin and sign-in callback origin. It must be the URL humans type into their browser; Dispatch's client at the sign-in issuer (the sign-in pool's app client, or the Google web client) must list `<DISPATCH_SERVER_URL>/auth/callback`. |
 | `NATS_URLS` | yes | Comma-separated NATS URLs for Dispatch. |
-| `ENVOY_ALLOW_REMOTE_NATS` | yes, for a shared NATS | Set to `1` to reach a NATS that is not this host's own. The server owns the `ENVOY_NOTIFICATIONS` stream, so every start reconciles it; without this the start refuses a non-loopback NATS, naming the URL. `compose/dispatch.compose.yml` sets it. |
+| `ENVOY_ALLOW_REMOTE_NATS` | yes, for a shared NATS | Set to `1` to reach a NATS that is not this host's own. The server owns the `ENVOY_NOTIFICATIONS` stream, so it reconciles it on its first connection; without this the start refuses a non-loopback NATS, naming the URL. `compose/dispatch.compose.yml` sets it. |
 | `NATS_NKEY_SEED_FILE` | no | A file holding the NATS nkey user seed this process connects as (trimmed); wins over `NATS_NKEY_SEED`. A set but empty, missing, unreadable, blank or non-user-seed value refuses startup naming the variable and path. Neither set connects without a credential. |
 | `NATS_NKEY_SEED` | no | The NATS nkey user seed itself, when `NATS_NKEY_SEED_FILE` is unset. |
 | `ENVOY_NATS_SOCKS5_PROXY` | no | A SOCKS5 proxy, as `host:port`, every NATS connection Dispatch makes goes through (reconnects included), each server's host name handed to it unresolved. A value that is not `host:port`, or that holds an nkey seed, refuses startup naming the variable, without printing the value; a set proxy also needs `ENVOY_ALLOW_REMOTE_NATS=1`. Unset dials NATS directly. |
@@ -226,7 +238,7 @@ The Dispatch service reads its public browser origin and NATS URLs from
 | `DISPATCH_NATS_DISABLED` | no | Set to `1` to run database and SSE paths without NATS. |
 | `ENVOY_URL` | no | Envoy listener base URL for live agent titles; defaults to `http://127.0.0.1:9020` (set it when `ENVOY_LISTENER_PORT` changes). |
 | `ENVOY_TOKEN` | conditional | Matching Listener API bearer token when `ENVOY_API_TOKEN` protects the listener. |
-| `DISPATCH_OIDC_ISSUER` | conditional | OIDC issuer whose projected service-account tokens authenticate as agents beside `DISPATCH_AGENT_TOKEN`. Set with `DISPATCH_OIDC_AUDIENCE` or not at all; half the pair refuses to boot naming the missing one, as does an issuer that does not answer discovery. |
+| `DISPATCH_OIDC_ISSUER` | conditional | OIDC issuer whose projected service-account tokens authenticate as agents beside `DISPATCH_AGENT_TOKEN`. Set with `DISPATCH_OIDC_AUDIENCE` or not at all; half the pair refuses to boot naming the missing one. An issuer that does not answer discovery refuses no boot: Dispatch starts and serves, discovers the issuer in the background, and until then answers a JWT-shaped bearer `503 OIDC_ISSUER_UNAVAILABLE` (`/healthz` reports `service_tokens` false) while every other credential is served. |
 | `DISPATCH_OIDC_AUDIENCE` | conditional | Audience those tokens must carry (`dispatch`). Set with `DISPATCH_OIDC_ISSUER` or not at all. |
 | `DISPATCH_URL` | no | Host-adapter override for the Dispatch base URL; use with `DISPATCH_TOKEN`. |
 | `DISPATCH_TOKEN` | host adapters | Bearer token paired with `DISPATCH_URL`. |

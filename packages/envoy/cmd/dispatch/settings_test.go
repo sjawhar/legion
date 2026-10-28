@@ -768,6 +768,50 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_PORT": "0"}, "DISPATCH_PORT")
 		},
+		"DISPATCH_LISTEN_FD": func(t *testing.T) {
+			descriptor, address := listeningFD(t, "tcp4", "127.0.0.1:0")
+			port := strconv.Itoa(address.Port)
+			// Unset, the server binds the address the other two settings build.
+			if boot := resolveWith(t, nil); boot.ListenSocket != nil {
+				t.Errorf("unset: ListenSocket = %v, want none", boot.ListenSocket)
+			}
+			// Set, the server serves on the socket at its own address, with neither other setting
+			// set, with both naming that address, or with both empty, which is unset: an empty
+			// DISPATCH_LISTEN_HOST does not ask for every interface of a socket on one address.
+			for _, overrides := range []map[string]string{
+				{"DISPATCH_LISTEN_FD": descriptor},
+				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": "127.0.0.1", "DISPATCH_PORT": port},
+				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": " [127.0.0.1] ", "DISPATCH_PORT": " " + port + " "},
+				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": "", "DISPATCH_PORT": ""},
+				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": " ", "DISPATCH_PORT": " "},
+			} {
+				boot := resolveWith(t, overrides)
+				if boot.ListenSocket == nil || boot.ListenAddr != address.String() || boot.ListenSocket.Addr().String() != address.String() {
+					t.Errorf("%v: ListenAddr = %q, ListenSocket = %v; want the socket on %s", overrides, boot.ListenAddr, boot.ListenSocket, address)
+				}
+			}
+			// A setting that names another address than the socket's is refused, naming the
+			// setting and the socket; so is port 0, which never names a socket's port.
+			otherPort := strconv.Itoa(address.Port%65535 + 1)
+			for name, value := range map[string]string{
+				"DISPATCH_PORT":        otherPort,
+				"DISPATCH_LISTEN_HOST": "127.0.0.2",
+			} {
+				_, err := resolveBootConfig(bootEnvironment(map[string]string{"DISPATCH_LISTEN_FD": descriptor, name: value}))
+				if err == nil || !strings.Contains(err.Error(), name+"="+value) || !strings.Contains(err.Error(), "DISPATCH_LISTEN_FD="+descriptor) {
+					t.Errorf("%s=%s with the socket on %s: err = %v, want a refusal naming both", name, value, address, err)
+				}
+			}
+			refusedWith(t, map[string]string{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_PORT": "0"}, "DISPATCH_PORT=0")
+			// A descriptor that is not a listening socket is refused, and nothing is bound in its
+			// place.
+			notASocket, err := os.Open(os.DevNull)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer notASocket.Close()
+			refusedWith(t, map[string]string{"DISPATCH_LISTEN_FD": strconv.Itoa(int(notASocket.Fd()))}, "DISPATCH_LISTEN_FD")
+		},
 		"DISPATCH_PPROF_PORT": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_PPROF_PORT": "6060"}); boot.PprofAddr != "127.0.0.1:6060" {
 				t.Errorf("PprofAddr = %q, want 127.0.0.1:6060", boot.PprofAddr)
@@ -1142,6 +1186,31 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					t.Errorf("the people store main builds read %#v, %v; want the token sealed under the earlier key", membership, err)
 				}
 			})
+			// Unset, with an empty signing-key file in the data dir, the boot exits 1 naming the
+			// file, before the people store would panic on the empty key set.
+			t.Run("an empty signing-key file", func(t *testing.T) {
+				database := storetest.Open(t)
+				home := t.TempDir()
+				keyFile := filepath.Join(home, ".local", "share", "dispatch", "signing-key")
+				if err := os.MkdirAll(filepath.Dir(keyFile), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(keyFile, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				process := startDispatchProcessWith(t, database.Pool.Config().ConnString(), dispatchOptions{Env: map[string]string{"HOME": home}})
+				process.WaitExit(t, "its start with an empty signing-key file")
+				output := process.Output.String()
+				if code := process.Cmd.ProcessState.ExitCode(); code != 1 {
+					t.Errorf("the boot with an empty signing-key file exited %d, want 1:\n%s", code, output)
+				}
+				if !strings.Contains(output, `msg="dispatch: load signing key"`) || !strings.Contains(output, keyFile) || !strings.Contains(output, "is empty") {
+					t.Errorf("the boot with an empty signing-key file did not refuse it by name (%s):\n%s", keyFile, output)
+				}
+				if strings.Contains(output, "panic") {
+					t.Errorf("the boot with an empty signing-key file panicked:\n%s", output)
+				}
+			})
 			// The key the router's sign-in seals the pool's refresh token under (main hands it to the
 			// people store): the row holds the sealed form, and past the hour the membership check
 			// opens it and renews the sign-in with the pool. A people store under another key, which
@@ -1416,8 +1485,8 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					t.Fatalf("dev sign-in with DISPATCH_DEV_SIGNIN_SHARED_KEY=%q: %v", shared, err)
 				}
 				keys, err := sessionSigningKey(boot, t.TempDir())
-				if err != nil || len(keys.Keys()) != 1 {
-					t.Fatalf("DISPATCH_DEV_SIGNIN_SHARED_KEY=%q: %d keys, %v; want one", shared, len(keys.Keys()), err)
+				if err != nil || len(keys.Fingerprints()) != 1 {
+					t.Fatalf("DISPATCH_DEV_SIGNIN_SHARED_KEY=%q: %d keys, %v; want one", shared, len(keys.Fingerprints()), err)
 				}
 				return keys
 			}
@@ -1437,7 +1506,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			// The value is never the key itself: a production DISPATCH_SIGNING_KEY pasted here mints
 			// nothing its own server accepts, and that server's cookies sign no one in here.
 			production := auth.SingleSigningKey("harness-secret")
-			if a.Keys()[0] == "harness-secret" {
+			if slices.Equal(a.Fingerprints(), production.Fingerprints()) {
 				t.Error("dev sign-in signs with DISPATCH_DEV_SIGNIN_SHARED_KEY's own value")
 			}
 			if _, ok := auth.VerifySession(cookieOf(t, "alice@example.com", a), production); ok {
@@ -1447,10 +1516,10 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Error("a dev-sign-in process accepted a cookie signed with the shared value itself")
 			}
 			// Another harness's value is another key, and with none each process keeps its own.
-			if slices.Equal(devKey(t, "another-harness").Keys(), a.Keys()) {
+			if slices.Equal(devKey(t, "another-harness").Fingerprints(), a.Fingerprints()) {
 				t.Error("two shared values derived one key")
 			}
-			if slices.Equal(devKey(t, "").Keys(), devKey(t, "").Keys()) {
+			if slices.Equal(devKey(t, "").Fingerprints(), devKey(t, "").Fingerprints()) {
 				t.Error("two dev-sign-in processes with no shared value signed with one key")
 			}
 		},

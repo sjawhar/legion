@@ -27,8 +27,11 @@ import (
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
-// testSigningKey is the one-key set the package's session cookies are signed with.
-var testSigningKey = auth.SingleSigningKey("signing-key")
+// testSigningKeyValue is the one key of testSigningKey, the set the package's session cookies are
+// signed with.
+const testSigningKeyValue = "signing-key"
+
+var testSigningKey = auth.SingleSigningKey(testSigningKeyValue)
 
 // sharedAgentTokens is a DISPATCH_AGENT_TOKEN setting parsed as the server parses it at boot.
 func sharedAgentTokens(t *testing.T, setting string) *auth.SharedAgentTokens {
@@ -1028,7 +1031,7 @@ func TestOAuthCallbackRefusesAValueSignedForAnotherPurpose(t *testing.T) {
 				t.Fatalf("encode state payload: %v", err)
 			}
 			payload := oauthStateFormat + "." + base64.RawURLEncoding.EncodeToString(body)
-			mac := hmac.New(sha256.New, []byte(testSigningKey.Keys()[0]))
+			mac := hmac.New(sha256.New, []byte(testSigningKeyValue))
 			mac.Write([]byte(payload))
 			return payload + "." + hex.EncodeToString(mac.Sum(nil))
 		}},
@@ -1398,6 +1401,43 @@ func TestStaticHandlerRevalidatesPagesByContent(t *testing.T) {
 				t.Fatalf("%s: status %d body %q, want 200 and this server's page", name, response.Code, response.Body.String())
 			}
 		})
+	}
+}
+
+// The dashboard build is the page's ETag value: the first 16 bytes of the SHA-256 of index.html,
+// in lowercase hex, exactly what the page is served under; "" when there is no dashboard to serve.
+func TestDashboardBuildNamesTheIndexPage(t *testing.T) {
+	dist := t.TempDir()
+	page := []byte("<!doctype html><script src=/assets/index-abc.js></script>")
+	if err := os.WriteFile(filepath.Join(dist, "index.html"), page, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(page)
+	if got, want := DashboardBuild(dist), hex.EncodeToString(sum[:16]); got != want {
+		t.Errorf("DashboardBuild = %q, want %q", got, want)
+	}
+	handler, context := newTestRouter(t)
+	context.WebDistDir = dist
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if got, want := response.Header().Get("ETag"), `"`+DashboardBuild(dist)+`"`; got != want {
+		t.Errorf("the page's ETag = %q, want the dashboard build %q", got, want)
+	}
+	for name, dir := range map[string]string{
+		"no setting":    "",
+		"no directory":  filepath.Join(dist, "missing"),
+		"no index.html": t.TempDir(),
+		"index.html a dir": func() string {
+			d := t.TempDir()
+			if err := os.Mkdir(filepath.Join(d, "index.html"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return d
+		}(),
+	} {
+		if got := DashboardBuild(dir); got != "" {
+			t.Errorf("DashboardBuild with %s = %q, want \"\"", name, got)
+		}
 	}
 }
 

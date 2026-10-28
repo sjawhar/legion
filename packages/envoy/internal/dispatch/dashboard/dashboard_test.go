@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -126,7 +125,7 @@ func TestPublishStoresEveryFileOfTheBuild(t *testing.T) {
 	}
 	// The registry of live server processes records this id for the process serving the dist, and
 	// the builds route joins the two on it.
-	if registered := processes.DashboardBuild(dist); build != registered || registered == "" {
+	if registered := routes.DashboardBuild(dist); build != registered || registered == "" {
 		t.Errorf("build id %q, want the registry's %q", build, registered)
 	}
 	assets := NewStore(pool)
@@ -148,6 +147,15 @@ func TestPublishStoresEveryFileOfTheBuild(t *testing.T) {
 	if n := count(t, pool, `select count(*) from dashboard_build_assets where build = $1`, build); n != 4 {
 		t.Errorf("the build links %d assets, want 4", n)
 	}
+}
+
+// A key no text value can hold — invalid UTF-8, as a request for /assets/%ff.js decodes to, or a
+// NUL byte — is an asset no build published, never a store failure: Postgres refuses such a
+// parameter (SQLSTATE 22021), and the router answers a store failure with a 502 and an ERROR.
+func TestGetAssetOfAKeyNoTextCanHoldIsNotFound(t *testing.T) {
+	assets := NewStore(storetest.Open(t).Pool)
+	requireNoAsset(t, assets, "assets/\xff.js")
+	requireNoAsset(t, assets, "assets/foo\x00.js")
 }
 
 // A process restarted on a build already stored writes no asset: it neither reads nor sends a file
