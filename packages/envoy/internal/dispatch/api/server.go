@@ -115,6 +115,11 @@ type Deps struct {
 	// contracts.LiveSocketMaxAge), so the sockets a deploy opened together do not all end
 	// together; a test returns a fixed age.
 	LiveSocketAge func() time.Duration
+	// ListenerRosterUncached is for end-to-end test processes only: every read of the listener's
+	// session list (route_status on an issue read, GET /api/v1/agents) asks the listener rather
+	// than sharing the process's five-second copy, so a test that changes the listener's sessions
+	// sees the change at its next read. A deployment leaves it false.
+	ListenerRosterUncached bool
 }
 
 // defaultStreamHeartbeat is StreamHeartbeat when DepsInput leaves it zero.
@@ -159,6 +164,9 @@ type DepsInput struct {
 	// (Deps.StreamHeartbeat). Zero keeps fifteen seconds; a test proving a connection closes
 	// sets a short one.
 	StreamHeartbeat time.Duration
+	// ListenerRosterUncached is for end-to-end test processes only; see
+	// Deps.ListenerRosterUncached.
+	ListenerRosterUncached bool
 }
 
 // NewDeps parses boot configuration once and returns API dependencies.
@@ -200,24 +208,25 @@ func NewDeps(input DepsInput) (Deps, error) {
 		heartbeat = defaultStreamHeartbeat
 	}
 	return Deps{
-		Store:            input.Store,
-		Identity:         input.Identity,
-		AgentTokens:      input.AgentTokens,
-		DefaultProject:   defaultProject,
-		ServerURL:        strings.TrimSuffix(input.ServerURL, "/"),
-		Docs:             input.Docs,
-		Embedder:         input.Embedder,
-		Envoy:            envoyClient,
-		Events:           input.Events,
-		GitHub:           github,
-		Architecture:     architecture.NewImporter(input.Store, github, input.Events),
-		OIDC:             input.OIDC,
-		AgentStream:      input.AgentStream,
-		AgentSecrets:     agentSecretsClient,
-		Files:            input.Files,
-		Lifetime:         input.Lifetime,
-		TestHooksEnabled: input.TestHooksEnabled,
-		StreamHeartbeat:  heartbeat,
+		Store:                  input.Store,
+		Identity:               input.Identity,
+		AgentTokens:            input.AgentTokens,
+		DefaultProject:         defaultProject,
+		ServerURL:              strings.TrimSuffix(input.ServerURL, "/"),
+		Docs:                   input.Docs,
+		Embedder:               input.Embedder,
+		Envoy:                  envoyClient,
+		Events:                 input.Events,
+		GitHub:                 github,
+		Architecture:           architecture.NewImporter(input.Store, github, input.Events),
+		OIDC:                   input.OIDC,
+		AgentStream:            input.AgentStream,
+		AgentSecrets:           agentSecretsClient,
+		Files:                  input.Files,
+		Lifetime:               input.Lifetime,
+		TestHooksEnabled:       input.TestHooksEnabled,
+		StreamHeartbeat:        heartbeat,
+		ListenerRosterUncached: input.ListenerRosterUncached,
 	}, nil
 }
 
@@ -261,7 +270,8 @@ type server struct {
 	// test's choice rather than a race against five seconds of wall clock (INFRA-249).
 	broadcastResolveBudget time.Duration
 	// rosters is the process's copy of the listener's live-session list that issue reads judge
-	// routes against (issue_route_status.go). Only register gives it non-zero TTLs.
+	// routes against and the agents list lists (issue_route_status.go). Only register gives it
+	// non-zero TTLs.
 	rosters rosterCache
 	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); nil on a server
 	// with no Lifetime (register), which mounts no GET /ws/live.

@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1480,6 +1481,42 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					fmt.Sprintf("DISPATCH_TEST_EDIT_NOTICE_QUIET=%q (expected a positive Go duration)", invalid))
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_EDIT_NOTICE_QUIET": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
+		"DISPATCH_TEST_ROSTER_UNCACHED": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_ROSTER_UNCACHED": "1"}); !boot.ListenerRosterUncached {
+				t.Error("DISPATCH_TEST_ROSTER_UNCACHED=1: ListenerRosterUncached false")
+			}
+			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_ROSTER_UNCACHED": "true"}); boot.ListenerRosterUncached {
+				t.Error("DISPATCH_TEST_ROSTER_UNCACHED=true: ListenerRosterUncached true, want only 1 to set it")
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_ROSTER_UNCACHED": "1"}, "DISPATCH_TEST_HOOKS=1 required")
+			// Its reader: two agents lists within the copy's five seconds ask the listener twice
+			// with the copy off, once with it on.
+			t.Run("router", func(t *testing.T) {
+				for value, want := range map[string]int32{"1": 2, "": 1} {
+					var calls atomic.Int32
+					listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						calls.Add(1)
+						_, _ = w.Write([]byte("[]"))
+					}))
+					t.Cleanup(listener.Close)
+					router := routerFor(t, resolveWith(t, map[string]string{
+						"DISPATCH_TEST_HOOKS":           "1",
+						"DISPATCH_TEST_ROSTER_UNCACHED": value,
+						"ENVOY_URL":                     listener.URL,
+					}), routes.AppContextOptions{})
+					for range 2 {
+						response := httptest.NewRecorder()
+						router.ServeHTTP(response, signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil), "alice"))
+						if response.Code != http.StatusOK {
+							t.Fatalf("DISPATCH_TEST_ROSTER_UNCACHED=%q: GET /api/v1/agents: %d %s", value, response.Code, response.Body.String())
+						}
+					}
+					if got := calls.Load(); got != want {
+						t.Errorf("DISPATCH_TEST_ROSTER_UNCACHED=%q: two GET /api/v1/agents called the listener %d times, want %d", value, got, want)
+					}
+				}
+			})
 		},
 	}
 	for _, row := range settings {
