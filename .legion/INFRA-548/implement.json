@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-548",
-  "completed": "2026-10-28T12:44:29Z",
+  "completed": "2026-10-28T14:02:55Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2331",
-  "round": "Conflict return, not a defect: #2331 was CONFLICTING with main (2d872499). This round merges main forward and changes nothing else.",
+  "round": "Conflict return, not a defect: #2331 was CONFLICTING with main (139c61b3) in .dispatch/architecture/envoy-listener.md only. This round merges main forward, keeps both sides of that file and changes nothing else; the stall suites were not re-run (the code proofs stand at 5384eb84, whose code this merge does not touch), and the tester re-runs the bare gates.",
   "proof": [
     {
       "criterion": "A client behind a TCP proxy that stops forwarding without closing either side reconnects within 60 s (shared code path), also when it wrote data the frozen path never acknowledged, and a redial nats.js gives up on leaves no socket open",
@@ -42,8 +42,8 @@
       "criterion": "The PR updates .dispatch/architecture/pi-envoy.md, envoy-client.md and claude-envoy-bridge.md on connection checks and registration",
       "surface": "the architecture documents",
       "command": "grep -n 'plugin_version' .dispatch/architecture/{pi-envoy,envoy-client,claude-envoy-bridge,envoy-listener}.md; grep -n '10 s\\|10 seconds' .dispatch/architecture/{pi-envoy,envoy-client,claude-envoy-bridge}.md",
-      "observed": "one line per file in each grep (line 7 of each)",
-      "headSha": "5384eb840c2db06d936a99005b3739f641e498d5",
+      "observed": "one line per file in each grep at dfd2ff0a (line 7 of each), envoy-listener.md's line being main's rewritten sentence followed by this issue's plugin/plugin_version sentence",
+      "headSha": "dfd2ff0ae6243f4ac27bdfc208e1cdae07096b0c",
       "negativeControl": "the same greps on main@origin print nothing for those files"
     }
   ],
@@ -66,7 +66,8 @@
     "Merge of main b295a3fb (carrying #2228's squash 85713740) into the branch at ccdc02ea, resolved as main plus this issue's own change: the change was computed against the #2228 tip it built on (a92387a8 merged with main 32b6dd9f) and reapplied onto main, so every #2228 file takes main's version. Conflicts resolved by hand: envoy-listener.md, envoy-and-contracts.yaml (main's Go cache step kept before the envoy-session-stall job), packages/envoy/AGENTS.md and docs/architecture.md (this issue's plugin fields applied to main's rows), envoy-client package.json build list, four CHANGELOGs (both sides kept), claude-envoy dist (rebuilt under main's pinned Bun 1.4.4). The files the PR changes against main are exactly this issue's 61 files plus .legion/INFRA-548.",
     "The reviewer's round-3 Fast-follow tidy-up (stall-proxy closedAt note and dead frozen guards, one exported RECOVERY_BOUND_MS, naming handleAuthError in the README) was not taken: the INFRA-14 architect narrowed this round to the two findings. It is on the PR body's Fast-follow line.",
     "Merge d26157e2 of main aeeee6c0: conflicts in envoy-plugin CHANGELOG.md (taken as main's, with every changelog entry of this PR moved to fragments) and two architecture records (main's new sentence kept, this issue's appended). Fingerprint before (815c711a) 86ee20ea...; it changes because the CHANGELOG lines become fragment files.",
-    "Merge 5384eb84 of main 2d872499: the one conflict was .github/workflows/release.yaml, which main's #2358 restructured (no changes job and paths-filter any more; each package's version arguments in a workflow env, PI_ENVOY_VERSION_ARGS). Resolved as main's file with this issue's change applied to its new place: --patch-path patches/ and patches/ added to PI_ENVOY_VERSION_ARGS, and its comment naming patches/ as a shipped build input; the old pi_envoy filter entry has no counterpart, since main's push trigger already lists patches/**. Fingerprint d4c90c02... -> 9e0d4632..., changed because that release.yaml hunk moved."
+    "Merge 5384eb84 of main 2d872499: the one conflict was .github/workflows/release.yaml, which main's #2358 restructured (no changes job and paths-filter any more; each package's version arguments in a workflow env, PI_ENVOY_VERSION_ARGS). Resolved as main's file with this issue's change applied to its new place: --patch-path patches/ and patches/ added to PI_ENVOY_VERSION_ARGS, and its comment naming patches/ as a shipped build input; the old pi_envoy filter entry has no counterpart, since main's push trigger already lists patches/**. Fingerprint d4c90c02... -> 9e0d4632..., changed because that release.yaml hunk moved.",
+    "Merge dfd2ff0a of main 139c61b3: the one conflict, .dispatch/architecture/envoy-listener.md, resolved as main's rewritten first line (it now describes the CI store's summary loop) with this issue's sentence about plugin and plugin_version appended after its last sentence, as before. bun install unchanged, check-dist and check-private-names pass. Fingerprint 9e0d4632... -> b83926c3..., changed only because the base line of that doc hunk is main's rewritten text."
   ],
   "openQuestions": [
     "Merge gate met: #2228 merged as 85713740, and main carrying it is merged into this branch.",
