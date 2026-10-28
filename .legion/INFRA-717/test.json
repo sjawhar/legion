@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-717",
+  "completed": "2026-10-28T19:52:00Z",
+  "testedHead": "839a67cb5ae5a704eb1cce2abbd8729a0cacab05",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran its commands at code head 839a67cb: grep -rnE '7b822b0a|until production runs Postgres 18|postgres-16' .github/workflows (no output, exit 1); pinned actionlint v1.7.12 with shellcheck 0.10.0 on the two edited workflows (exit 0, no output); the same actionlint -oneline over the whole directory at the head and over main a409c128's .github/workflows (exported into a git-initialised $TMPDIR copy) gave 9 findings each, diff empty, none in the two edited files."
+  },
+  "failures": [
+    {
+      "criterion": "scripts/dispatch/README.md (architect's task 5a, in this diff): the Lexeme database paragraph must not tell a reader something false about the server the lexeme check needs.",
+      "evidence": "Line 328 now says 'Any Postgres 18 works, as production and CI run 18', and line 336, unchanged, gives the throwaway server to use: uvx --python 3.12 --from pgserver==0.1.4 ... get_server(...). That server is PostgreSQL 16.2: s.psql('show server_version_num') printed 160002. Postgres 16.2 and 18.6 stem English differently, so on that server the check computes lexemes production does not: psql -Atc \"select current_setting('server_version_num'), to_tsvector('english','added adding settings'), websearch_to_tsquery('english','added')\" printed 160002|'ad':1,2 'set':3|'ad' on pgserver 16.2 and 180006|'add':1,2 'set':3|'add' on Postgres 18.6 (zonky embedded-postgres-binaries-linux-amd64 18.6.0 from Maven Central, the version production runs). Over 18,957 distinct words of docs/ and skills/ markdown, ts_lexize('english_stem', w) differs for 3 (added, adding, ettings). The line was true before this change (the pgserver server and production were both 16); the diff made it contradict the command beneath it. No red test: a test that reads README prose is a source-text test, which this repository's rules forbid; the command above is the reproduction. Fix is the implementer's choice, for example a throwaway command that starts Postgres 18 (the zonky 18.6.0 jar works in this pod, with psql from the image) in place of pgserver 0.1.4."
+    }
+  ],
+  "failed": 1,
+  "proof": [
+    {
+      "criterion": "No workflow under .github/workflows names the 0.8.7-pg16 digest or an '(until production runs Postgres 18)' job, and actionlint is clean.",
+      "surface": "The job graph GitHub Actions builds from the workflows (the PR's Tests run at the code head against main's Tests run at the base), and the workflow files at the head.",
+      "command": "gh run view 40748621006 -R sjawhar/legion --json status,jobs --jq '.status, (.jobs[] | [.name, .status] | @tsv)'; the same for main's Tests run 40741954129 at base a409c128; python/pyyaml read of both edited workflows (every needs names an existing job; every needs.changes.outputs.X used is declared and every declared one used); pinned actionlint v1.7.12 on the two files and over the directory against main.",
+      "observed": "PR Tests run 40748621006 (queued, jobs created): typecheck, lint, test only. Main's Tests run 40741954129: typecheck, 'Daemon Go suite on production's Postgres 16 (until production runs Postgres 18)', lint, test. envoy-and-contracts.yaml: 17 jobs, no dangling needs, no unused or undeclared changes output; envoy-go is the only job gated on the envoy filter, and envoy-go, envoy-infra-go and envoy-smoke are the only users of pull-test-images, so the three rewritten comments are true. actionlint: exit 0 on the two files; 9 findings at head and at main, identical. Legion Envoy and Contracts run 40748620346 lists only 'changes' (queued), so its job list is not yet read.",
+      "headSha": "839a67cb5ae5a704eb1cce2abbd8729a0cacab05",
+      "negativeControl": "A $TMPDIR copy of the head's envoy-and-contracts.yaml with the first four lines of main's dispatch-go-postgres-16 job appended (a half-done deletion): actionlint exits 1, '\"runs-on\" section is missing in job \"dispatch-go-postgres-16\"' and '\"steps\" section is missing'."
+    },
+    {
+      "criterion": "The required checks (lint, typecheck, test, pr-title) pass on the pull request, and envoy-go still reports 180006|0.8.7.",
+      "surface": "The PR's checks on GitHub at the code head, and main's ruleset.",
+      "command": "gh api repos/sjawhar/legion/rules/branches/main --jq '.[] | select(.type==\"required_status_checks\") | .parameters.required_status_checks[].context'; gh api repos/sjawhar/legion/commits/839a67cb5ae5a704eb1cce2abbd8729a0cacab05/check-runs",
+      "observed": "Required contexts: lint, typecheck, test, pr-title; none of the removed jobs is required, so the deletion cannot leave a required check that never reports. At the code head at 19:50Z: lint, typecheck, test, changes queued; pr-title queued (an earlier pr-title cancelled). envoy-go not yet created: its 180006|0.8.7 line is not yet read. The reviewer approves only once envoy-go at the code head finished success with that line.",
+      "headSha": "839a67cb5ae5a704eb1cce2abbd8729a0cacab05",
+      "negativeControl": "Main's Tests run 40741954129 lists the Postgres 16 job, so the same job-list read shows the job when it exists."
+    },
+    {
+      "criterion": "No added line or path names the deployment's Dispatch keys or dispatch:// links; no fragment; new commit subjects carry no key.",
+      "surface": "The PR's diff, files and commits on GitHub (PR #2476).",
+      "command": "jj diff --git --from a409c128 --to legion/INFRA-717@origin .github .dispatch scripts | grep -E '^\\+' | grep -vE '^\\+\\+\\+ ' | grep -oE '[A-Z][A-Z0-9]+-[0-9]+|dispatch://'; gh pr view 2476 -R sjawhar/legion --json title,commits,files",
+      "observed": "One match, 'SQL-18' inside 'PostgreSQL-18' on main's existing text, not a key. Title and commit subjects: no key (grep exit 1). Files: the 4 changed files plus .legion/INFRA-717/, none under /.changes/.",
+      "headSha": "839a67cb5ae5a704eb1cce2abbd8729a0cacab05",
+      "negativeControl": "printf '+# see dispatch://X-1\\n' | grep -nE '[A-Z][A-Z0-9]+-[0-9]+|dispatch://' printed the line."
+    }
+  ]
+}
