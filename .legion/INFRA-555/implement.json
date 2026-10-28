@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-555",
+  "completed": "2026-10-28T12:26:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2390",
+  "codeHead": "3e09540a3c7b29d4c8c21b2c5c29326dada61e95",
+  "proof": [
+    {
+      "criterion": "Review round 2: the announcer's publish is bounded by its context and no publish outlives its pass; a stop during the admission wait is a clean stop",
+      "surface": "the real envoy-dispatch binary (NATS down then up; a refused process sent SIGTERM during its admission wait) and the startup package on Postgres",
+      "command": "/legion/scratch/tmp/infra555/proof/nats-down.sh <binary at the head> head; go test ./cmd/dispatch -run TestAProcessStoppedWhileWaitingForAdmissionExitsCleanly; go test ./internal/dispatch/startup -run TestAPublishThatOutlivesItsBoundIsAbandoned",
+      "observed": "NATS down: /healthz 200 nats:false, API read 200; NATS up: nats:true in 1.5 s and announcement seq 1 for the head published once; the refused process stopped during its wait logged 'dispatch: stopped while waiting for admission to the registry of live server processes' and exited 0; a hanging publish is abandoned at its bound and published on the next pass",
+      "headSha": "62a8f2d1d58951bf39ab67a9a879669f423c53d3",
+      "negativeControl": "before the fix (76483b14) the stopped process exited 1 with 'register this server process: context canceled' (the new test's failure line)"
+    },
+    {
+      "criterion": "Review round 1: a dev sign-in server restarted after a kill starts (no refusal by a dead process's row)",
+      "surface": "the real envoy-dispatch binary with DISPATCH_DEV_SIGNIN=1 on one Postgres database, SIGKILLed and started again at once",
+      "command": "/legion/scratch/tmp/infra555/proof/devsignin-restart.sh <envoy-dispatch built at the head> head (output at https://github.com/sjawhar/legion/pull/2390#issuecomment-6445048418); go test ./cmd/dispatch -run TestADevSignInServerRestartedAfterAKillStarts",
+      "observed": "the second server logged 'a live server process refuses this one's signing keys; waiting for its heartbeat to lapse ...', then 'registered this server process' and answered /healthz 200 16 s after its start (re-run at 76483b14 after the forward merge of main 452e4647: same results; https://github.com/sjawhar/legion/pull/2390#issuecomment-6446130068)",
+      "headSha": "62a8f2d1d58951bf39ab67a9a879669f423c53d3",
+      "negativeControl": "the same script against e1754f3c (before the wait): the second server exited 1 with 'dispatch: register this server process ... signing key set does not match a live server process'"
+    },
+    {
+      "criterion": "Review round 1: the staging token proof drives Dispatch serving against an issuer that does not answer",
+      "surface": "scripts/e2e/verifiers-staging-token.sh's own helpers, dispatch_env and absent-issuer step (held port via lib/held-port.py), extracted and run against the real binary, local Postgres and nats-server",
+      "command": "bash /legion/scratch/tmp/infra555-w4/harness.sh <envoy-dispatch built at the head> (throwaway harness that sources the script's sections; the full script needs a staging cluster)",
+      "observed": "/healthz 200 with service_tokens false; GET /api/v1/whoami with a JWT-shaped bearer 503 {\"code\":\"OIDC_ISSUER_UNAVAILABLE\",...}; SIGTERM exit 0; log repeats no token; harness PASS",
+      "headSha": "961c6f1df2f7a28f9c5f3c6dfe6024fffce7006a",
+      "negativeControl": "the same harness against a build of 819dc283: 'dispatch exited during boot against an issuer that does not answer'"
+    },
+    {
+      "criterion": "Spec item 2 (tester's failure): a process whose signing key set the fleet does not share must not serve in a multi-process deployment, including one that resumes after its heartbeat lapsed beside a peer registered meanwhile",
+      "surface": "two real envoy-dispatch processes on one Postgres 17: A on DISPATCH_SIGNING_KEY=KX frozen with SIGSTOP past the registry's 15 s live window, B on KY started meanwhile",
+      "command": "/legion/scratch/tmp/infra555/proof/freeze-resume.sh <envoy-dispatch built at the head> head (script and output at https://github.com/sjawhar/legion/pull/2390#issuecomment-6441270765); go test -tags multiprocess -count=1 -timeout 25m ./cmd/dispatch (the tester's TestAProcessThatResumesBesideAPeerWhoseKeySetItDoesNotShareDoesNotServeBesideIt, unmodified); go test ./internal/dispatch/processes/",
+      "observed": "B started and served 200 while A was frozen; within 5 s of SIGCONT A logged 'dispatch: this server process no longer shares its signing keys with a live server process ... heartbeat lapsed, and it cannot count as live again ...', deregistered and exited; 5-25 s after the resume A /healthz 000, B 200, only B's row live; the tester's test PASS (25-28 s) and the processes package tests (lapsed refused/rejoined, pruned row rewritten or refused, live row checks no peer) ok",
+      "headSha": "961c6f1df2f7a28f9c5f3c6dfe6024fffce7006a",
+      "negativeControl": "the same script against 2f16634c (the tester's head, before the fix): A resumed and kept serving, A and B both /healthz 200 with both rows live 25 s after the resume; the tester's test failed there with 'still serves beside it 20s after it resumed'"
+    },
+    {
+      "criterion": "A process started while NATS is unreachable becomes healthy (/healthz 200, \"nats\": false) and serves an API read; once NATS is reachable it reports \"nats\": true and publishes",
+      "surface": "the real envoy-dispatch binary, stamped with the head commit, on a local Postgres 17 with every migration and internal/testnats/cmd/natsd",
+      "command": "/legion/scratch/tmp/infra555/proof/nats-down.sh <envoy-dispatch built at the head> head (script and output posted at https://github.com/sjawhar/legion/pull/2390#issuecomment-6438579128); also go test ./cmd/dispatch -run 'TestAProcessStartedWhileNATSIsDownServesAndConnectsLater|TestAProcessReportsASilentNATSCutWithinSeconds'",
+      "observed": "with nothing listening on NATS_URLS: GET /healthz 200 {\"ok\":true,\"db\":true,\"nats\":false,...,\"commit\":\"0b7f2af5...\",\"schema_version\":129} and GET /api/v1/projects 200; after natsd started on that port: /healthz \"nats\":true within 1.5 s, server_build_announcements row seq 1 for the head with published_at set, log 'dispatch: every live server process serves one build; announced it' (re-run at e1754f3c: same results, schema_version 130) (re-run at 76483b14 after the forward merge of main 452e4647: same results; https://github.com/sjawhar/legion/pull/2390#issuecomment-6446130068)",
+      "headSha": "62a8f2d1d58951bf39ab67a9a879669f423c53d3",
+      "negativeControl": "the same script against envoy-dispatch built at 819dc283 (the commit before the change): the process exited 1 at boot with 'dispatch: connect NATS ... no servers available for connection' and never answered /healthz"
+    },
+    {
+      "criterion": "A sign-in started on process A completes on process B; during a key rotation a person stays signed in on a process holding both keys",
+      "surface": "two real envoy-dispatch processes on one Postgres, A with DISPATCH_SIGNING_KEY=\"K1 K0\" and B with \"K0 K1\", one DISPATCH_SERVER_URL, signing in through cmd/dev-oidc-issuer --code-flow --sign-in-as --sign-in-group (group mode)",
+      "command": "/legion/scratch/tmp/infra555/proof/cross-signin.sh <envoy-dispatch built at the head> head \"K1 K0\" \"K0 K1\" (output in the same PR comment); also go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/dispatch (TestASignInStartedOnOneProcessCompletesOnTheOther, TestAKeyRotationKeepsPeopleSignedInAcrossTwoProcesses)",
+      "observed": "GET A/auth/start 302 to the issuer with a dispatch_oauth_state cookie; the issuer's redirect sent to B: GET B/auth/callback 302 to /issues with a dsession cookie; GET /auth/whoami 200 {\"kind\":\"user\",\"login\":\"alice@d.example\"} on both A and B; the multiprocess suite passed (ok 378.9s) (re-run at e1754f3c: same results, schema_version 130) (re-run at 76483b14 after the forward merge of main 452e4647: same results; https://github.com/sjawhar/legion/pull/2390#issuecomment-6446130068)",
+      "headSha": "76483b143ad894e973ec8e537d9d4deab604fe0a",
+      "negativeControl": "the same script against 819dc283 with one shared key \"K0\": B answered the callback 400 {\"error\":\"invalid or expired state — start over at /auth/start\"}, no dsession cookie, whoami 401 on both"
+    },
+    {
+      "criterion": "A process started with no key, or with a key set a live peer does not share, refuses to start in a multi-process deployment",
+      "surface": "a third real envoy-dispatch process started beside the A/B pair of the previous proof",
+      "command": "cross-signin.sh (its last step starts a process with DISPATCH_SIGNING_KEY=\"K9\"); go test -tags multiprocess ./cmd/dispatch -run TestAProcessWhoseKeySetALivePeerDoesNotShareRefusesToStart (another key, and no key minting one in its data dir)",
+      "observed": "the \"K9\" process logged msg=\"dispatch: register this server process\" error=\"this process's signing key set does not match a live server process's: live server process <id> (commit 0b7f2af5...)...\" and exited 1; GET its /healthz got no answer (000) (re-run at e1754f3c: same results, schema_version 130) (re-run at 76483b14 after the forward merge of main 452e4647: same results; https://github.com/sjawhar/legion/pull/2390#issuecomment-6446130068)",
+      "headSha": "76483b143ad894e973ec8e537d9d4deab604fe0a",
+      "negativeControl": "the same step against 819dc283: the \"K9\" process started and answered /healthz 200 beside the pair"
+    },
+    {
+      "criterion": "A test of the started-event contract on both sides",
+      "surface": "the real envoy-dispatch binaries (two processes, stamped builds) and the daemon's intake/workflow/client on the shared fixture packages/daemon/internal/intake/testdata/dispatch/server-started.json",
+      "command": "go test -tags multiprocess ./cmd/dispatch -run TestTwoProcessesAnnounceTheirBuildOnce; go test ./internal/dispatch/startup/...; cd packages/daemon && go test ./internal/dispatch/... ./internal/intake/... ./internal/workflow/... (Postgres and natsd with monitor); bun test packages/contracts/src/dispatch-api.test.ts",
+      "observed": "two processes stamped C1 published one envelope; restarting B published none; B on C2 beside A on C1 published none; A replaced by C2 published one for C2; /healthz fleet_commit followed; daemon decodes the fixture to ServerStarted, BuildCommit reads fleet_commit (commit for an older body); all passed",
+      "headSha": "961c6f1df2f7a28f9c5f3c6dfe6024fffce7006a",
+      "negativeControl": "read in the code at 819dc283 (not run): cmd/dispatch/main.go called startup.PublishStarted in every process before it listened, so a restart of B publishes a second envelope; TestTwoProcessesAnnounceTheirBuildOnce asserts that the restart publishes none"
+    },
+    {
+      "criterion": "A process started while the discovery document is unreachable serves agent-token requests and completes a sign-in once discovery succeeds",
+      "surface": "the real envoy-dispatch binary against two oidctest issuers whose discovery answers 503",
+      "command": "go test -count=1 ./cmd/dispatch -run TestAProcessStartedWhileTheSignInIssuerIsDownServesAgentTokensAndSignsInLater",
+      "observed": "/healthz 200 signin:false service_tokens:false; shared agent token 200; pod JWT 503 OIDC_ISSUER_UNAVAILABLE; /auth/start 503; after discovery recovers both true, the JWT 200, a full sign-in completes; with the token endpoint at 503 the same cookie gets 503 SIGNIN_UNAVAILABLE, then 200 after recovery",
+      "headSha": "961c6f1df2f7a28f9c5f3c6dfe6024fffce7006a",
+      "negativeControl": "at 819dc283 the boot discovers both issuers synchronously and exits 1 when discovery fails (the settings test for DISPATCH_SIGNIN_ISSUER expected a refused boot; it now expects 503)"
+    }
+  ],
+  "filesChanged": [
+    "99 files, +7328/-1560 against main (round 2 adds: packages/envoy/internal/dispatch/processes/{processes.go,processes_test.go}, packages/envoy/cmd/dispatch/{main.go,shutdown.go,edit_notice_restart_test.go}, docs and CHANGELOG lines for the heartbeat re-check; forward merge of main c892b97d)",
+    "98 files, +6909/-1554 against main (see the pull request); main areas: packages/envoy/internal/dispatch/{auth,routes,store,identity,processes (new),startup,redeliver,delivery,api}, packages/envoy/internal/{bus,oidc,oidctest,cmdtest}, packages/envoy/cmd/{dispatch,dev-oidc-issuer}, migration 0129_server_processes, packages/daemon/internal/{dispatch,intake,workflow,daemon,prompts}, packages/contracts/src/dispatch-api.ts, docs (cmd/dispatch README/AGENTS, packages/envoy/AGENTS.md, docs/site, root AGENTS.md, skills/legion-worker merge-gate + claude-envoy copy), CHANGELOGs (envoy, contracts, claude-envoy, pi-legion)"
+  ],
+  "trickyParts": [
+    "The registry heartbeat runs on a one-connection pool of its own: on the shared pool it broke cmd/dispatch's silent-database shutdown check (waitUntilIdle reads a handed-back connection as a database still answering).",
+    "/healthz fleet_commit is the announcer's cached read of the latest announcement (no statement per probe): null before the announcer's first pass, up to one 5 s pass behind the table.",
+    "The bus option WithConnectInBackground uses nats.go RetryOnFailedConnect so only nats.go dials before the first connection; the owning client reconciles the stream as its first reconnect hook. WithSilentCutDetection pings every 1 s with 2 outstanding.",
+    "Refresh classification: only 400/401 invalid_grant (and the rule checks) end a sign-in; every other refresh failure returns ErrIssuerUnavailable, answered 503 SIGNIN_UNAVAILABLE with the sign-in kept.",
+    "Envoy-dispatch accepts DISPATCH_SIGNIN_DOMAIN only with Google's issuer, so local and test sign-ins run in group mode; dev-oidc-issuer --sign-in-group makes the default person carry the Cognito pool claims.",
+    "A registry heartbeat that lapsed checks keys again; a live one only stamps. Both take the registry advisory lock, so the decision is ordered against Register."
+  ],
+  "deviations": [
+    "Plan task 12 (browser spec signin.multiprocess.e2e.ts) moved by the INFRA-63 architect's decision (2026-10-27 07:43Z): it lands in whichever of INFRA-555 and INFRA-559 (#2323) merges second, since it needs INFRA-559's two-process browser harness, which is not on main. That spec must run Dispatch in group mode through dev-oidc-issuer --sign-in-group.",
+    "Plan design 3 said the heartbeat rides the shared pool; it uses its own one-connection pool (reason under trickyParts). The architect accepted this.",
+    "Migration renumbered 0121 -> 0129 -> 0130 at the forward merges of main (main holds up to 0129_document_edit_notices); INFRA-559 takes 0131. leasePoolSize is main's 10 plus one for the registry's prune loop: 11.",
+    "fleet_commit is cached by the announcer rather than read per probe (see trickyParts).",
+    "The simplify pass found and fixed a bug the change introduced: the redeliver-webhooks operator command panicked on a sweeper built with a lazily opened state; Sweep now opens it (regression tests TestASweepOpensTheStateItWasBuiltWithout, TestASweepWhoseStateWillNotOpenFails).",
+    "Round 2: the heartbeat is now one transaction under the registry lock; a lapsed or pruned row re-checks the key sets of the live peers (clock_timestamp after the lock, so a registrant that counted it stale makes it see itself lapsed) and either rejoins or reports the refusal through Registration.Lost(), on which cmd/dispatch drains and exits 1. Main's TestEditNoticeRestart (restart within 15 s on one database) now gives both processes one DISPATCH_SIGNING_KEY, since a minted key is refused beside the killed process's still-live row.",
+    "Round 3 (review round 1): Register refuses only beside a peer that stays live: it waits up to one live window plus a heartbeat for refusing rows to lapse (fixes a restart after a kill, dev sign-in included). Review's code-quality findings applied (admit, joinRegistry, Derive, ErrSignInUnavailable, Sweeper Open-only, routes.DashboardBuild, bus background helper and DialOption). Census findings fixed: memory harness shares one key (the dispatch-memory job would have failed), auto-deployer keeps an image only with nats not false (option A, the boot-exit behaviour it had before), stale infra/oidc/daemon comments and docs. Two census hits left by architect decision to INFRA-560: infra/gcp/dispatch_kube.go:390-394 and dispatch_test.go:851-853. Main merged forward at ae36683e (#2229 held listeners); the staging step was then moved onto a held port.",
+    "Round 3, second forward merge (main 452e4647 took 0130-0134): migration renumbered to 0135_server_processes; INFRA-559 takes 0136.",
+    "Round 4 (review round 2, narrowed by the INFRA-63 architect): census migration number 0135 and agent-infra counts at 9b212cbf; publishWithin replaced by PublishReportingDuplicateWithin; stop during admission wait exits 0; migration comment; registry.go; wait_for_dispatch_healthz; the two infra/gcp NATS comments rewritten. The skill-separation item was withdrawn by the architect at 16:34Z (relayed in error): the skill-only PR #2415 was opened and closed, and the Dispatch ask dispatch://INFRA-555/ask/fea72562-46fa-40a3-8150-181920099621 (already answered Yes) got a reply saying it no longer applies.",
+    "Round 5 (conflict return only): forward merge of main 184897ac at 6e3df71e. Migration 0135 and leasePoolSize 11 unchanged (main ends at 0134 with leasePoolSize 10); #2368 not on main, so no ConnectionsPerProcess input changed. Main's #2419 moved changelogs to changie fragments, so this change's 17 CHANGELOG entries moved word for word to packages/{envoy,contracts,claude-envoy,pi-legion}/.changes/unreleased/INFRA-555-*.yaml and each CHANGELOG.md is main's. main_test.go imports and an envoy/AGENTS.md paragraph merged from both sides. Fingerprints ad9fe91b -> e034b9f9 posted at https://github.com/sjawhar/legion/pull/2390#issuecomment-6465680703. Checked after the merge: go build/vet (incl. -tags multiprocess), go test ./cmd/dispatch ./internal/dispatch/processes ./internal/dispatch/startup and the store census/migration tests ok.",
+    "Round 6 (narrowed to two items): the 17 changelog fragments renamed to pr2390-<Kind>-<time>.yaml with Issue pr2390 and no Dispatch key in their text (15e7b7f5, commit subject without a key); forward merge of main aeeee6c0 carrying #2368 (75c172e2): migration 0135 and leasePoolSize 11 unchanged; store.ConnectionsPerProcess gains registryPoolSize = 1 so infra/gcp dispatchConnectionsPerPod = 85 and TestDispatchConnectionsPerPodIsTheServers holds; main's /livez and newHTTPServer kept beside this change's /healthz and registry; infra docs/comments merged to say the app's readiness reads Postgres and the listener's NATS. Fingerprints 4a784c12 -> a6be691f posted. Checked: go build/vet (incl. multiprocess), go test ./cmd/dispatch, store census/migration, infra/gcp (all but two data-disk tests that need mkfs.ext4).",
+    "Round 7 (conflict return after retro): forward merge of main 2d872499 at 3e09540a. Migration 0135 stands. Main's #2233 added a leased loop and raised its leasePoolSize to 11, so this change's is 12. store.ConnectionsPerProcess is 86, so dispatchConnectionsPerPod is 86. The README leased-loop count (ten), the docs connection count (86) and the registry fragment (twelve) are updated. Fingerprints a6be691f -> 19f9412e posted. Checked: go build/vet (incl. multiprocess, memory), infra/gcp TestDispatchConnectionsPerPodIsTheServers, processes, duty and store census/migration tests. This handoff is written again because retro removed .legion/; the next retro removes it."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "Local-sandbox-only test failures, unrelated to this change and failing the same way without it: cmd/agent-secrets, cmd/agent-secrets-helper and internal/broker/helper (gVisor process ancestry/peer credentials), internal/cmdtest TestFreeTCPPortsLieOutsideTheKernelsOwnPortRange (kernel port range 16000-65535), internal/dispatch/api TestIssueRanksStayOrdered... (test database collation C), and timing tests in pmdoc/api (gVisor clock granularity under load). CI runs them on its own runners.",
+    "Sandbox-only at round 3: the memory test cannot read /proc/<pid>/clear_refs (gVisor) and autodeploy_test.sh stops at its en_US.UTF-8 locale check; W5 verified the harness fix with two harness servers at once and the autodeploy cases with the locale check removed. TestEventStreamRelayRecoversWhenTheEventLogIsReset and TestAHealthyRoomUnderWritesIsNeverRefused failed once under the full parallel run and pass alone."
+  ],
+  "round": 7
+}
