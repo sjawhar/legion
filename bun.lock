@@ -229,7 +229,9 @@
         "@milkdown/theme-nord": "^7.5.0",
         "@milkdown/transformer": "^7.5.0",
         "mdast-util-directive": "^3.1.0",
-        "micromark-extension-directive": "^4.0.0",
+        "micromark-factory-space": "^2.0.1",
+        "micromark-factory-whitespace": "^2.0.1",
+        "micromark-util-character": "^2.1.1",
         "micromark-util-types": "^2.0.2",
         "proof-sdk-upstream": "github:sjawhar/proof-sdk#dc6a852b2ab45463dc9d3d17762235450c8ff0d6",
         "remark-frontmatter": "^5.0.0",
@@ -254,6 +256,7 @@
     "@milkdown/plugin-clipboard@7.22.1": "patches/@milkdown%2Fplugin-clipboard@7.22.1.patch",
     "@milkdown/preset-gfm@7.22.1": "patches/@milkdown%2Fpreset-gfm@7.22.1.patch",
     "prosemirror-tables@1.8.5": "patches/prosemirror-tables@1.8.5.patch",
+    "nats@2.29.3": "patches/nats@2.29.3.patch",
   },
   "packages": {
     "@ampproject/remapping": ["@ampproject/remapping@2.3.0", "", { "dependencies": { "@jridgewell/gen-mapping": "^0.3.5", "@jridgewell/trace-mapping": "^0.3.24" } }, "sha512-30iZtAPgz+LTIYoeivqYo853f02jBYSd5uGnGpkFV0M3xOt9aN73erkgYAmZU43x4VfqcnLxW9Kpg3R5LC4YYw=="],

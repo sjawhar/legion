@@ -155,6 +155,15 @@ type Service struct {
 	// afterSettleRead runs after settleRoom has read the document and before it stamps block ids
 	// into the room. Nil outside tests; tests use it to edit the room in that window.
 	afterSettleRead func(room string)
+	// afterSettleTreeRead runs as soon as settleRoom has read the tree it settles
+	// (readSettlementTree), before anything renders or changes that tree. Nil outside tests; tests
+	// use it to record the tree as read.
+	afterSettleTreeRead func(room string, read *pmdoc.Node)
+	// beforeSettleVersionRender runs once a settlement has decided whether its version takes the
+	// rendering it made of read, the tree it read (reused), or renders the tree it versions again,
+	// and before either. Nil outside tests; tests use it to require read unchanged since
+	// afterSettleTreeRead whenever its rendering is reused.
+	beforeSettleVersionRender func(room string, read *pmdoc.Node, reused bool)
 	// afterSettleReconcile runs after settleRoom has reconciled the document's ask blocks with
 	// their rows and before it writes their repairs into the room. Nil outside tests; tests use it
 	// to edit the room in that window.
@@ -270,6 +279,9 @@ type Service struct {
 	// observer keeps (weak.Pointer[renderedReplica]), which the document's reads walk (readLive),
 	// keyed by a weak pointer to that document (keepReplica).
 	replicas sync.Map
+	// renderPaths counts how the renderings the rooms' update observers and the document writes
+	// need were had (renderPathCounts); every replica counts on it (keepReplica).
+	renderPaths renderPathCounts
 	// instances lists, for each resident room document, what that instance records about the
 	// durable history behind it (*roomInstance): the updates whose writes can have recorded a
 	// pending author, and the durable version the instance stands at, keyed by a weak pointer to
@@ -1520,6 +1532,9 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		}
 		return stoppedShort(err)
 	}
+	if s.afterSettleTreeRead != nil {
+		s.afterSettleTreeRead(room, read)
+	}
 
 	// What the document renders before its closure runs. The closure's own update is classified
 	// against it (closureChangedMarkdown), as a transactional live write classifies its own
@@ -1689,7 +1704,11 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// (changedTree). versioned is another tree once a stamp replaced the read or a write read the
 	// document again. So the version takes the rendering of the read when it is that tree, unchanged.
 	markdown, offsets, err := beforeMarkdown, beforeOffsets, beforeRenderErr
-	if versioned != read || reconciliation.changedTree() {
+	reused := versioned == read && !reconciliation.changedTree()
+	if s.beforeSettleVersionRender != nil {
+		s.beforeSettleVersionRender(room, read, reused)
+	}
+	if !reused {
 		markdown, offsets, err = renderTreeWithOffsets(versioned)
 	}
 	if err != nil {

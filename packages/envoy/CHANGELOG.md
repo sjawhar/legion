@@ -1938,7 +1938,7 @@
   lease, with or without NATS, first ticks within 30 seconds of start and compacts what the
   queues missed. The sweep reads only the documents a table of documents with rows to fold names
   (`doc_compaction_owed`), written by each append in its own statement and cleared by compaction;
-  migration 0136 adds it and backfills it. Compaction reads and folds on a two-connection pool of
+  migration 0137 adds it and backfills it. Compaction reads and folds on a two-connection pool of
   its own (`dispatch-compaction`), so one server's stated connection ceiling rises by 2, to 88; it
   holds no document lock while it folds, writes under the lock only when the rows it folded are
   unchanged, and leaves rows younger than 2 minutes as written. The LEGION-496 guarantee, that

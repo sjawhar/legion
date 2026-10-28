@@ -152,7 +152,8 @@ route's query string without `from` and `to`), or `{"kind": "pipeline"}` with an
 A client that reconnects subscribes again with `"resume": {"seq", "revs"}`, the last change it
 applied and the revisions it holds, and is sent a delta of what changed since; a resume from
 before the day of changes Dispatch keeps is answered with a snapshot. Dispatch closes every
-socket with code 1012 when it restarts, and a client reconnects at once.
+socket with code 1012 when it restarts, and the page reconnects after a random wait of under two
+seconds, so the pages one restart closed do not all reach the next server at the same moment.
 
 `packages/dispatch/e2e/delivery-live-probe.ts` is the way to watch the route from a checkout:
 

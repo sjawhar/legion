@@ -159,7 +159,7 @@ func TestAFailedRoomsEvictionCompactionWaitsForTheLockAndFoldsOnlyOldRows(t *tes
 // drops the fold: the rows stay as the prune left them, and the next compaction folds those.
 func TestACompactionDropsItsFoldWhenAPruneRunsInsideIt(t *testing.T) {
 	database, versioned, artifactID := newHeldCompactionDocument(t)
-	var left []storedRow
+	var left []updateRow
 	var reading string
 	duringCompactionFold(versioned, artifactID, func() {
 		if err := versioned.PruneAfter(context.Background(), artifactID, 2, nil); err != nil {
@@ -186,7 +186,7 @@ func TestACompactionDropsItsFoldWhenAPruneRunsInsideIt(t *testing.T) {
 // rows the prune left.
 func TestACompactionFinishesAStrandedPruneAndFoldsOnTheNextAttempt(t *testing.T) {
 	database, versioned, artifactID := newHeldCompactionDocument(t)
-	var stored []storedRow
+	var stored []updateRow
 	var reading string
 	duringCompactionFold(versioned, artifactID, func() {
 		if _, err := database.Pool.Exec(context.Background(), `
@@ -222,7 +222,7 @@ func TestACompactionFinishesAStrandedPruneAndFoldsOnTheNextAttempt(t *testing.T)
 // as the rebuild wrote it.
 func TestACompactionDropsItsFoldWhenARebuildRunsInsideIt(t *testing.T) {
 	database, versioned, artifactID := newHeldCompactionDocument(t)
-	var left []storedRow
+	var left []updateRow
 	duringCompactionFold(versioned, artifactID, func() {
 		ctx := context.Background()
 		tx, err := database.Pool.Begin(ctx)
@@ -269,7 +269,7 @@ func TestACompactionDropsItsFoldWhenADeleteRunsInsideIt(t *testing.T) {
 func TestACompactionDropsItsFoldWhenAnotherProcessCompactsInsideIt(t *testing.T) {
 	database, versioned, artifactID := newHeldCompactionDocument(t)
 	reading := storedReading(t, versioned, artifactID)
-	var left []storedRow
+	var left []updateRow
 	duringCompactionFold(versioned, artifactID, func() {
 		other := NewPgVersioned(database)
 		if result := compactUnderTail(t, other, artifactID); result.outcome != compactCompacted {
@@ -291,7 +291,7 @@ func TestACompactionDropsItsFoldWhenAnotherProcessCompactsInsideIt(t *testing.T)
 func TestACompactionDropsItsFoldWhenAnOlderBuildCompactsInsideIt(t *testing.T) {
 	database, versioned, artifactID := newHeldCompactionDocument(t)
 	reading := storedReading(t, versioned, artifactID)
-	var left []storedRow
+	var left []updateRow
 	duringCompactionFold(versioned, artifactID, func() {
 		if deleted, err := NewPgVersioned(database).Compact(context.Background(), artifactID, 1); err != nil || deleted != 4 {
 			t.Fatalf("the older build's compaction deleted %d rows (%v), want 4", deleted, err)
@@ -324,7 +324,7 @@ func TestACompactionReadsTheCursorASettlementMovedInsideIt(t *testing.T) {
 	}
 	ageUpdatesThrough(t, service.store, artifactID, everyVersion, time.Hour)
 	persist := service.persistence.(*PgVersioned)
-	var settled []storedRow
+	var settled []updateRow
 	var cursor int64
 	duringCompactionFold(persist, artifactID, func() {
 		settleCurrentGeneration(t, service, artifactID)
@@ -429,7 +429,7 @@ func TestABrowserAppendLandsWhileACompactionIsInsideItsFold(t *testing.T) {
 	rows := storedRows(t, service.store, artifactID)
 	foldPoint := rows[len(rows)-1].version
 	persist := service.persistence.(*PgVersioned)
-	var written []storedRow
+	var written []updateRow
 	var cursor int64
 	duringCompactionFold(persist, artifactID, func() {
 		editLiveTree(t, service, artifactID, appendBlocks(t, "Third.\n"))
@@ -464,7 +464,7 @@ func TestAJoinedWriteCommitsWhileACompactionIsInsideItsFold(t *testing.T) {
 	rows := storedRows(t, service.store, artifactID)
 	foldPoint := rows[len(rows)-1].version
 	persist := service.persistence.(*PgVersioned)
-	var written []storedRow
+	var written []updateRow
 	var cursor int64
 	duringCompactionFold(persist, artifactID, func() {
 		done := make(chan error, 1)
@@ -594,15 +594,15 @@ func compactAged(t *testing.T, versioned *PgVersioned, database *store.Store, ar
 	return compactUnderTail(t, versioned, artifactID)
 }
 
-// storedRow is one doc_updates row as stored: its bytes and the transaction that wrote it.
-type storedRow struct {
+// updateRow is one doc_updates row as stored: its bytes and the transaction that wrote it.
+type updateRow struct {
 	version        int64
 	xmin           string
 	update         []byte
 	contentChanged bool
 }
 
-func storedRows(t *testing.T, database *store.Store, artifactID string) []storedRow {
+func storedRows(t *testing.T, database *store.Store, artifactID string) []updateRow {
 	t.Helper()
 	rows, err := database.Pool.Query(context.Background(), `
 		select version, xmin::text, update, content_changed from doc_updates where artifact_id = $1 order by version
@@ -611,9 +611,9 @@ func storedRows(t *testing.T, database *store.Store, artifactID string) []stored
 		t.Fatalf("read document rows: %v", err)
 	}
 	defer rows.Close()
-	var stored []storedRow
+	var stored []updateRow
 	for rows.Next() {
-		var row storedRow
+		var row updateRow
 		if err := rows.Scan(&row.version, &row.xmin, &row.update, &row.contentChanged); err != nil {
 			t.Fatalf("scan document row: %v", err)
 		}
@@ -627,7 +627,7 @@ func storedRows(t *testing.T, database *store.Store, artifactID string) []stored
 
 // requireRowsAsStored fails unless the document's rows are want, byte for byte and each under the
 // transaction that wrote it.
-func requireRowsAsStored(t *testing.T, database *store.Store, artifactID string, want []storedRow) {
+func requireRowsAsStored(t *testing.T, database *store.Store, artifactID string, want []updateRow) {
 	t.Helper()
 	got := storedRows(t, database, artifactID)
 	if len(got) != len(want) {
@@ -643,10 +643,10 @@ func requireRowsAsStored(t *testing.T, database *store.Store, artifactID string,
 // requireCompactedFrom fails unless the document's rows are before compacted at foldPoint: no row
 // below it, the fold point's row claiming content when a row it folded past cursor did, and every
 // newer row as it was, byte for byte and under the transaction that wrote it. It returns the rows.
-func requireCompactedFrom(t *testing.T, database *store.Store, artifactID string, before []storedRow, foldPoint, cursor int64) []storedRow {
+func requireCompactedFrom(t *testing.T, database *store.Store, artifactID string, before []updateRow, foldPoint, cursor int64) []updateRow {
 	t.Helper()
 	contentChanged := false
-	var newer []storedRow
+	var newer []updateRow
 	for _, row := range before {
 		if row.version <= foldPoint {
 			contentChanged = contentChanged || (row.version > cursor && row.contentChanged)
@@ -669,11 +669,11 @@ func requireCompactedFrom(t *testing.T, database *store.Store, artifactID string
 	return got
 }
 
-func sameRow(a, b storedRow) bool {
+func sameRow(a, b updateRow) bool {
 	return a.version == b.version && a.xmin == b.xmin && a.contentChanged == b.contentChanged && bytes.Equal(a.update, b.update)
 }
 
-func rowVersions(rows []storedRow) []int64 {
+func rowVersions(rows []updateRow) []int64 {
 	versions := make([]int64, 0, len(rows))
 	for _, row := range rows {
 		versions = append(versions, row.version)
