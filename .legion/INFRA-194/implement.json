@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-194",
+  "completed": "2026-10-28T08:47:00Z",
+  "proof": [
+    {
+      "criterion": "Deployed build: production carries INFRA-393's merge f45fd5095930372b4150e9289aefe35484883531",
+      "surface": "production Dispatch GET /healthz (the script's build line) and the GitHub compare API",
+      "command": "bun scripts/dispatch/meaning-search-check.ts … (build line); gh api repos/sjawhar/legion/compare/f45fd5095930372b4150e9289aefe35484883531...9b92ac14351a926361c982edb7953e0325fab0de --jq .status",
+      "observed": "2026-10-28T08:40:03Z: 'build commit=9b92ac14351a926361c982edb7953e0325fab0de schema=120 ok=true'. The compare printed ahead (ahead_by 46, behind_by 0). PR #2200 comment 6464518192.",
+      "headSha": "bc359229482030f13b09432a6349237fdb05adda",
+      "negativeControl": "Before run, 2026-10-25T16:50:19Z: build 35efd326b66aea9ee2476396dabab7f7685fdbf3, schema 114, predates INFRA-393's merge; the coverage route answered not-found there."
+    },
+    {
+      "criterion": "A1: a search answer is not degraded to keyword-only ranking",
+      "surface": "production Dispatch: GET /api/v1/search through the script, and the dispatch CLI",
+      "command": "bun scripts/dispatch/meaning-search-check.ts --a1-query 'meaning search' …; dispatch search --query 'meaning search'",
+      "observed": "2026-10-28T08:40:03Z: 'A1 degraded=no results=20 pass'. At 08:40:19Z the literal CLI search exited 0 and printed no 'Searched by keyword only' line (grep count 0).",
+      "headSha": "bc359229482030f13b09432a6349237fdb05adda",
+      "negativeControl": "Before run, 2026-10-25T16:50:19Z: 'A1 degraded=yes results=20 fail', and the CLI printed the keyword-only line once."
+    },
+    {
+      "criterion": "A2: a query that shares no word with an issue finds that issue's own row in the top five",
+      "surface": "production Dispatch GET /api/v1/search?q=<query>&limit=5, with lexemes from a throwaway Postgres 16.2 (pgserver 0.1.4, unix socket under $TMPDIR)",
+      "command": "bun scripts/dispatch/meaning-search-check.ts --pair 'INFRA-43=<pre-registered query>' --pair 'INFRA-30=<pre-registered query>' --pair 'INFRA-32=<pre-registered query>' --lexeme-database \"$TMPDIR/infra194/pg/.s.PGSQL.5432\" … (queries as in scripts/dispatch/README.md)",
+      "observed": "2026-10-28T08:40:03Z: 'A2 INFRA-43 shared=0 position=1 pass', 'A2 INFRA-30 shared=0 position=none fail', 'A2 INFRA-32 shared=0 position=none fail', 'A2 pass (pairs passed 1 of 3)'.",
+      "headSha": "bc359229482030f13b09432a6349237fdb05adda",
+      "negativeControl": "Before run, 2026-10-25T16:50:19Z: all three pairs 'shared=0 position=none fail'. At 2026-10-28T08:40:26Z, the INFRA-43 query plus one word of its title gave 'A2 INFRA-43 shared=1 position=1 fail', exit 1."
+    },
+    {
+      "criterion": "A3: every item has a current vector from the configured model, none lacking and none failed",
+      "surface": "production Dispatch GET /api/v1/search/coverage (INFRA-393)",
+      "command": "bun scripts/dispatch/meaning-search-check.ts --coverage --expect-model \"$(cat $TMPDIR/infra194/expect-model)\" --coverage-wait 600. The identity is azure:<endpoint host>/embed-v-4-0, built from agent-infra a133f425's dispatch/Pulumi.prod.yaml and passed only at run time.",
+      "observed": "2026-10-28T08:40:03Z: 'A3 identity=match place=azure items=42938 current=42938 lacking=0 oldest_lacking_s=none failed=0 reads=1 pass'. Every kind (issue 2598, document 6266, comment 29487, ask 1967, message 2620) had lacking=0 and failed=0. The full run exited 0 ('result pass exit=0').",
+      "headSha": "bc359229482030f13b09432a6349237fdb05adda",
+      "negativeControl": "At 2026-10-28T08:40:26Z, --expect-model 'azure:wrong.example/embed-v-4-0' gave 'A3 identity=mismatch place=azure … fail', exit 1. Before run: 'A3 unavailable: not-found reads=1', exit 2."
+    },
+    {
+      "criterion": "Output hygiene: no private host, name, URL, token or identity in the script's output",
+      "surface": "the captured stdout and stderr of the production runs",
+      "command": ".github/scripts/check-private-names.sh \"$TMPDIR/infra194/after1.out\" \"$TMPDIR/infra194/neg.out\"",
+      "observed": "Exit 0 on both files. The posted PR comment and the PR body also passed the same scan before they were posted.",
+      "headSha": "bc359229482030f13b09432a6349237fdb05adda",
+      "negativeControl": "Earlier runs (2026-10-25): a wrong token gave only 'A1 unavailable: auth', exit 2; no --lexeme-database gave only 'unavailable: lexeme-database', exit 2. No URL or body was printed."
+    }
+  ],
+  "filesChanged": [
+    "scripts/dispatch/meaning-search-check.ts",
+    "scripts/dispatch/__tests__/meaning-search-check.test.ts",
+    "scripts/dispatch/README.md"
+  ],
+  "trickyParts": [
+    "The after run came before INFRA-394's issue closed: its deploy was applied outside Legion (theorem-labs/agent-infra#453, merged 2026-10-28T05:02:51Z), and the architect gave the go on that basis (Envoy 772e97a1). The build check is the /healthz commit compared with INFRA-393's merge f45fd509, which printed ahead.",
+    "A2 passed on one pair of three (INFRA-43 at position 1). INFRA-30 and INFRA-32 both had position=none. They are recorded as observed, and no query was changed (plan.md section 4).",
+    "A3 passed on the first read: 42938 items, all current, so the backfill was already complete and there was no wait.",
+    "The recreated workspace had no node_modules. bun install --frozen-lockfile came before the run, and nothing in the lockfile changed."
+  ],
+  "deviations": [
+    "plan.md section 6 step 6 waits for INFRA-394 to close. The architect moved the after run to the time production first carried INFRA-393 (Envoy 772e97a1), because the deploy had landed outside Legion."
+  ],
+  "openQuestions": []
+}
