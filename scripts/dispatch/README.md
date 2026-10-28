@@ -325,7 +325,7 @@ carries the private host while an issue title can carry a private name.
 ### Lexeme database
 
 `--lexeme-database` takes a Postgres URL (`postgres://` or `postgresql://`) or the path of a
-server's `.s.PGSQL.5432` socket. Any Postgres 16 works, as production runs 16: the check uses only
+server's `.s.PGSQL.5432` socket. Any Postgres 18 works, as production and CI run 18: the check uses only
 the built-in `english` configuration, in one statement per pair with every value bound, and
 reads or writes no table. The statement mirrors the issue row's vector
 (`migrations/0088_issues_title_lexemes.up.sql`, with `search_text` from
