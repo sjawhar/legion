@@ -2,49 +2,63 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-591",
-  "completed": "2026-10-28T10:02:40Z",
-  "headTested": "cd3fe5cac7f3025509c82ca312e327785f304f36 (code 79cf9b708611; cd3fe5ca adds only .legion/)",
+  "completed": "2026-10-28T10:55:00Z",
+  "headTested": "cba0c91fded71c790a8544ed85ea3d99e1ac2a11 (code b923561bb2fa, forward merge onto main 4e55b2e0; cba0c91f adds only .legion/)",
+  "rebaseCheck": "The fingerprint over '~(.legion | docs/solutions)' changed: 79cf9b70 e04cb4de... -> b923561b 06301544.... The merge changed the workflow step and moved the changelog entry into a fragment, so this was a full round. The same fingerprint over packages/envoy/**/*.go alone is equal at both heads (7e93361d...): the Go diff did not change.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently. envoy-dispatch was built from the workspace at 79cf9b70 and from main c210f10d (the head's fork point), each on a Postgres 16.2 and a NATS of the tester's own, since the scratch volume and its harness were lost when the workspaces were recreated. Seed: 2 projects and 120 issues created through the API. (1) Out-of-order steps: on head, the stream held 124 back while 123 was open, then sent 123 and 124; on base it sent 124 at once and never 123. (2) Newly started process while a transaction in database postgres holds an id: on head, a stream with Last-Event-ID opened in 14 ms, and the event written during the hold arrived 26 ms after the holder committed. (3) Lock check: on head the POST answered 201 in 30 ms; on base, no answer in 8 s. The load runs were not repeated this round. I last confirmed their direction with a 1x pair at 26a15dcf (test round 2); they need a pair again at the merged head."
+    "how": "Drove the same surface independently at b923561b, with main 4e55b2e0 built the same way as the negative control, on a Postgres 16.2 and a NATS of the tester's own: the out-of-order steps, the newly-started-process steps and the lock check. Then a 1x and a 2x load pair on INFRA-589's committed harness (#2369 at bdc451d3), seeded with 4e55b2e0. They agree in direction with the implementer's: the commit-order lock is gone, writes are faster, and live frames are slower. One difference: the implementer's table was measured against main c210f10d, where the base collapsed at 1x. On 4e55b2e0 the base commits everything at 1x and collapses at 2x."
   },
-  "failures": [
-    {
-      "criterion": "The head that merges is the head tested, and CI is green on it.",
-      "evidence": "gh api repos/sjawhar/legion/pulls/2392 -> mergeable false, mergeable_state dirty, head cd3fe5ca. gh api .../commits/<sha>/check-runs -> 0 runs for 4d00a61f2e15, 79cf9b708611 and cd3fe5cac7f3. GitHub starts no pull_request workflow while the pull request conflicts, so no CI has run on the code head. In particular, nothing has checked the envoy-go fix in 4d00a61f, the package -timeout 20m. At 312e84c6, the last head CI ran on, envoy-go is red: https://github.com/sjawhar/legion/actions/runs/40538700828/job/122337837309. git merge-tree --write-tree cd3fe5ca 4e55b2e0 (main@origin) conflicts in .github/workflows/envoy-and-contracts.yaml. Main's 'Unit test envoy Go package' step now runs `go test ./internal/dispatch/api` on its own line, before the rest of the module, so the -timeout has to go on that line. A second item for the same merge: main's #2419 (184897acc118) makes changelog entries fragment files. Main's AGENTS.md says to add packages/<pkg>/.changes/unreleased/<ISSUE KEY>-<slug>.yaml and never edit a CHANGELOG.md. This PR's packages/envoy/CHANGELOG.md edit auto-merges into the file's 'Before changelog fragments' section, so it must become a fragment instead. Fix: forward-merge main into legion/INFRA-591, resolve the workflow step, move the changelog entry into a fragment, push, and let CI run at the merged head."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
       "criterion": "The global serialization is gone: a write holds no lock shared with writes to other issues.",
-      "surface": "Local Dispatch built from the head's code, through the REST API, on Postgres 16.2",
-      "command": "adv.py lock (psql holds pg_advisory_xact_lock(0x4449535041544348), and a psql write on TSA-51 stays open with its owner row locked; then POST /api/v1/issues/TSA-52/comments)",
-      "observed": "201 in 30 ms.",
-      "headSha": "79cf9b7086111d8a1db2befbf3d1be6bd1825f15",
-      "negativeControl": "Main c210f10d, same steps: no answer within 8 s."
+      "surface": "Local Dispatch built from the head's code, through the REST API; INFRA-589's harness with its 1 s ungranted-lock sampler",
+      "command": "adv.py lock (psql holds pg_advisory_xact_lock(0x4449535041544348), and a psql write on TSA-51 stays open with its owner row locked; then POST /api/v1/issues/TSA-52/comments); run-step.sh tester4-after-1x --events 4 --sessions 400 --requests 60; run-step.sh tester4-after-2x --events 8 --sessions 467 --requests 120",
+      "observed": "201 in 46 ms. Commit-order lock held in 0% of samples at 1x and at 2x. At 2x the waits were transactionid row_wait on an issue's own row (74% of samples), the NOTIFY commit lock (5%, kept by decision D1) and tuple locks on issues (2%).",
+      "headSha": "b923561bb2fa97d00cbbf2c5165f4473ba677acb",
+      "negativeControl": "Main 4e55b2e0: no answer within 8 s. The commit-order lock was held in 65% of samples at 1x (24 waiters at most) and in 100% at 2x (49 waiting at the median)."
     },
     {
       "criterion": "A reader resuming from a cursor never misses an event that commits later with a lower id; a test commits two writes out of id order and a resuming reader gets both in a defined order.",
       "surface": "GET /api/v1/events (SSE) cold and with Last-Event-ID, on one and two envoy-dispatch processes; newly started processes while a transaction holds an id",
-      "command": "adv.py ooo commit; adv.py ooo rollback; adv.py concurrent; STREAM_PORT=17778 adv.py concurrent; adv.py fresh resume|cold; adv.py heartbeat; adv.py shutdown <pid>; adv.py churn 30; adv.py stall; adv.py lastid",
-      "observed": "Lower id 123 was open while the higher 124 committed. The stream sent nothing, then 123 and 124 after the commit, and a resume sent the same. On rollback the stream sent only 124, 37 ms after. Concurrency: 80 POSTs and 16 slow writes, 4 of them rolled back. Each of 3 streams got exactly the 92 committed ids in order, as did a mid-run resume, on one process and with the streams on a second process. Newly started process with a foreign id held: a resuming stream opened in 14 ms, heartbeat twice in 35 s, and got the held-back event 26 ms after the commit. SIGTERM exited in 0.05 s and ended the stream. Four staggered 2 s id holders overlapped for 30 s: every frame arrived 1.8 to 2.1 s after its write, so the horizon kept advancing. A foreign 8 s hold delayed the frame until 186 ms after the commit. Bad Last-Event-ID values are refused 400, and a resume from 0 equals the database.",
-      "headSha": "79cf9b7086111d8a1db2befbf3d1be6bd1825f15",
-      "negativeControl": "Main c210f10d: the open stream sent 124 at once and never 123. In the concurrency run each stream missed 10 committed ids ([131, 132, 137, 138, 148, 153, 159, 172, 177, 185]), and the resume missed 7."
+      "command": "adv.py ooo commit; adv.py ooo rollback; adv.py concurrent; STREAM_PORT=17778 adv.py concurrent; adv.py fresh resume|cold; adv.py shutdown <pid>; adv.py churn 20; adv.py stall; adv.py lastid",
+      "observed": "Lower id 123 was open while 124 committed. The stream sent nothing, then 123 and 124 after the commit, and a resume sent the same. On rollback the stream sent only 124, 44 ms after. Concurrency: each of 3 streams got exactly the 92 committed ids in order, as did a mid-run resume, on one process and across two. Newly started process with a foreign id held: a resuming stream opened in 14 ms and got the held-back event 28 ms after the commit; SIGTERM exited in 0.05 s. Overlapping 2 s holders: frames 1.5 to 2.1 s after their writes. Foreign 8 s hold: the frame arrived 247 ms after the commit. Bad Last-Event-ID values are refused 400, and a resume from 0 equals the database. The load runs showed 0 SSE order violations at 1x and 2x.",
+      "headSha": "b923561bb2fa97d00cbbf2c5165f4473ba677acb",
+      "negativeControl": "Main 4e55b2e0: the open stream sent 124 at once and never 123. Each concurrency stream missed 10 committed ids ([131, 132, 137, 138, 148, 159, 160, 175, 184, 198]), and the resume missed 5."
     },
     {
       "criterion": "Every consumer of the event stream keeps the order it relies on; the plan lists each and the test covers each.",
       "surface": "SSE and relay (above), GET /api/v1/references?since=, the outbox's per-issue NATS subject",
       "command": "adv.py refs_quiet and adv.py refs_open, each on a newly started process; adv.py nats",
-      "observed": "References: the first since read on a quiet, newly started process, right after a mention committed, listed it in 50 ms, which fixes the reviewer's finding on Safe. With a foreign id held, the read answered in 1,009 ms without the newer mention and listed it once the holder ended. With a lower id open, it withheld the higher mention, then listed it after the commit. NATS: 30 concurrent comments on TSB-51 reached its subject in seq order, 2 to 31, equal to the database. The delivery hub has no reachable surface on this stack (it needs delivery settings proven against the GitHub App), so it rests on its Go tests, which CI has not run at this head.",
-      "headSha": "79cf9b7086111d8a1db2befbf3d1be6bd1825f15",
-      "negativeControl": "Main c210f10d: the since read listed mention 126 while the lower id 125 was open."
+      "observed": "References: the first since read on a quiet process listed the just-committed mention in 48 ms. With a lower id open, each read took about 1 s and withheld the higher mention; it was listed after the commit. NATS: 30 concurrent comments on TSB-51 reached its subject in seq order, 2 to 31, equal to the database. The delivery hub has no reachable surface on this stack (it needs delivery settings proven against the GitHub App), so it rests on its Go tests in CI's envoy-go lane, which was queued at b923561b when I read it.",
+      "headSha": "b923561bb2fa97d00cbbf2c5165f4473ba677acb",
+      "negativeControl": "Main 4e55b2e0: the since read listed mention 126 while the lower id 125 was open."
+    },
+    {
+      "criterion": "Before and after on the committed load reproduction at tonight's step and twice it: lock hold samples, committed vs offered, write latency p50/p99, delivery latency from the write's arrival.",
+      "surface": "INFRA-589's committed harness (#2369 at bdc451d3), seeded with main 4e55b2e0 (1,000 issues, migration 134), one 2-vCPU pod with nothing else running",
+      "command": "LOADTEST_SRC=<before|after> run-step.sh tester4-{before,after}-1x --events 4 --sessions 400 --requests 60; the same for -2x with --events 8 --sessions 467 --requests 120 (TABLES-*.md in dispatch://INFRA-591/artifact/infra591-tester-evidence-tar-gz v3)",
+      "observed": "1x, before -> after: lock held 65% -> 0%; committed 3.99 -> 3.99 of 3.99; comment p50/p99 703/1,606 ms -> 229/1,050 ms; NATS delivery from arrival p50 1,148 -> 638 ms; SSE frame after write response p50 16 -> 324 ms; 2xx 100% -> 100%. 2x: lock held 100% (49 waiting) -> 0%; committed 4.26 -> 5.67 of 7.98; comment p50 25.5 s -> 13.4 s; NATS delivery p50 26.4 s -> 16.2 s; SSE frame after write response p50 9.6 s -> 73.8 s; 2xx 19% -> 43%. 0 SSE order violations in all four runs.",
+      "headSha": "b923561bb2fa97d00cbbf2c5165f4473ba677acb",
+      "negativeControl": "The base reproduces the knee at 2x: lock held 100% with 49 writers waiting, and 4.26 of 7.98 events/s committed."
+    },
+    {
+      "criterion": ".dispatch/architecture/dispatch-events.md says what is now true.",
+      "surface": "The architecture doc at the head",
+      "command": "grep -n -i 'advisory lock|horizon|primary' .dispatch/architecture/dispatch-events.md",
+      "observed": "No advisory-lock ordering sentence remains. The doc names the horizon rule, the writer invariants, the instance-wide cost and the primary-only constraint. This text is unchanged since round 3, and the round's Go diff is identical.",
+      "headSha": "b923561bb2fa97d00cbbf2c5165f4473ba677acb",
+      "negativeControl": "Main before this change: 'orders commits with a global advisory lock'."
     }
   ],
-  "risks": [
-    "On a newly started process, the first stream with no Last-Event-ID still gets no headers until every transaction holding an id on the Postgres instance ends. It got no headers for 4 s and more in the test, then opened 33 ms after the commit. Main opens in 18 ms. This is the implementer's recorded deviation (the browser refreshes on the headers, so opening first would lose events). The reviewer judges it."
+  "ci": "Read on GitHub at b923561b at about 10:52Z, recorded here only. build, changes and typecheck are green. test is running. lint, dispatch, dispatch-memory, dispatch-multiprocess, envoy-go, envoy-go-race, envoy-infra-go, envoy-smoke, envoy-e2e-local and broker-multiprocess are queued. GitHub reports the pull request mergeable, with its state blocked.",
+  "notes": [
+    "The PR body's 'Load reproduction' table is against main c210f10d, where the base collapsed at 1x. On main 4e55b2e0 the base commits everything at 1x and collapses at 2x (my pair above). The E2E (tester) line says so; whether the table is restated is the implementer's and reviewer's call.",
+    "The changelog fragment is named packages/envoy/.changes/unreleased/pr2392-Changed-20261028-101132.yaml with custom Issue: pr2392. Main's AGENTS.md asks for <ISSUE KEY>-<slug>.yaml, and the branch name only when there is no Dispatch issue, so this should be INFRA-591-... with Issue: INFRA-591. The .changie.yaml changeFormat does not print Issue, so the folded CHANGELOG text is the same either way. Naming only."
   ],
-  "notRun": [
-    "The load pair, because the harness was lost with the scratch volume and the head does not merge. It runs in the next round, at the merged head."
+  "risks": [
+    "On a newly started process, the first stream with no Last-Event-ID gets no headers until every transaction holding an id on the Postgres instance ends. In the test: no headers for the whole 4 s hold, then open 23 ms after the commit; main opens in 24 ms. This is the implementer's recorded deviation; a resuming stream opens at once."
   ]
 }
