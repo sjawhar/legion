@@ -92,7 +92,7 @@ test("the ask card lists the issue's claimant and route, and drops the claimant 
     await dialog.getByRole("button", { name: "Cancel" }).click();
     await expect(dialog).toHaveCount(0);
 
-    // The claimant gives the issue up over the agent API; the open card drops it over SSE.
+    // The claimant gives the issue up over the agent API; the open card drops it over the live socket's event feed.
     await releaseClaim(issue.key, { actor: claimant, as: "agent" });
     await expect(recipients).toContainText("Reaches 2");
     await expect(recipients.locator(`[title='${claimant.id}']`)).toHaveCount(0);
@@ -155,7 +155,7 @@ test("a follower that holds the claim is listed once, and unfollowing it says th
     await expect(recipients.getByRole("list", { name: "Followers" })).toHaveCount(0);
     await expect(recipients).toContainText("Reaches 1");
 
-    // A role route set on the issue joins the card over SSE, naming the session holding the role.
+    // A role route set on the issue joins the card over the event feed, naming the role's holder.
     await patchIssue(issue.key, { route: "role:reviewer" });
     await expect(recipients).toContainText("Reaches 2");
     const roleRow = viaIssue

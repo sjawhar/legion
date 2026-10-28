@@ -173,7 +173,8 @@ used for sign-in. It must equal the URL humans type into the browser, with
 adapters can override their configured Dispatch base URL with `DISPATCH_URL`.
 `DISPATCH_TEST_HOOKS=1` mounts test-only routes — unset in every real deployment. `POST
 /api/v1/live/_test/disconnect` closes every open `/ws/live` socket with 1012, as a server restart
-does, so e2e can exercise the page's resume and refresh-after-gap path. `POST
+does, so e2e can exercise the page's resume, which Dispatch replays in full (`replay_complete`
+on its `events_start`). `POST
 /api/v1/live/_test/rotate` closes every live socket with 4001 (`max age`), so e2e can exercise its
 quiet resubscribe without waiting 30 minutes. `POST /api/v1/artifacts/_test/quiesce` closes every
 live document, flushing each through the store, and waits for the settlements in flight, leaving

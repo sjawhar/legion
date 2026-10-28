@@ -13,11 +13,12 @@ import {
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
-// INFRA-492: how many reads one open tab sends while other sessions write. Every helper this file
-// uses exists at the commit before the change (16e4bb0f758e) and no `/api/v1/events/_test/*` hook
-// is touched, so the identical file runs at both commits: the budget and sidebar tests fail there
-// on their counts and pass at the change. The writer is an autonomous session acting through the
-// bearer API, as in `live.e2e.ts`; only alice's browser is real.
+// INFRA-492: how many reads one open tab sends while other sessions write. As #2324 wrote it, the
+// file ran unchanged at the commit before the change (16e4bb0f758e) and at the change, where the
+// budget and sidebar tests failed and passed on their counts. This copy is ported to the live
+// socket (`/ws/live`), which that commit did not serve, so it runs only from the live socket on.
+// The writer is an autonomous session acting through the bearer API, as in `live.e2e.ts`; only
+// alice's browser is real.
 const bob = { actor: { id: "bob", kind: "session" as const }, as: "agent" as const };
 
 test.beforeEach(async () => {

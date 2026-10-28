@@ -1832,8 +1832,8 @@ open asks; for any other status move, `[]`. `user_state.updated` carries `change
 `pinned`, `last_read_seq` and `dismissed` the write moved, or `["snoozed"]` for a snooze or an
 un-snooze of one Inbox row (`PUT` or `DELETE /api/v1/me/asks/{id}/snooze`, which append it only
 when the row moved). A snooze's payload is exactly `{login, changed: ["snoozed"]}`: every signed-in
-caller's event stream replays it, so it names neither the ask nor the writer's issue state, and
-the writer's other tabs and devices refetch their whole Inbox. `references_changed` names the
+caller's event feed on the live socket replays it, so it names neither the ask nor the writer's
+issue state, and the writer's other tabs and devices refetch their whole Inbox. `references_changed` names the
 targets whose inbound edges the write moved that a reader refreshes by name: an issue (`{kind:
 "issue", id}`), an ask (`{kind: "ask", id, issue_key?, artifact_id?}`, with the issue or document
 whose ask list holds its row) and a document or file (`{kind: "artifact", id, ref}`: its uuid, the
