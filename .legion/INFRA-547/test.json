@@ -2,53 +2,26 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-547",
-  "completed": "2026-10-28T09:28:00Z",
-  "round": 8,
-  "headTested": "7b4109af8b3e9bd11d0d47dff413f590a93183db",
-  "codeHead": "f18ca5a7db3ef4a6223d0d59aa757ae303ae3392",
-  "scope": "Since round 7 (a16d4af7), there are two code commits. 1e1f7db5 answers review round 3: notify maps a 403 to ErrPublishDenied only when its error opens with the listener's publishDeniedPrefix, and listener comments and docs are corrected. f18ca5a7 merges main, which now carries sjawhar/legion#2228 (merged 2026-10-27 19:10Z as 85713740) in place of the branch's old #2228 tip 3ea454d3: replay.go, api.go, the envoy, envoy-client and pi-envoy docs and changelogs, and skills/envoy. .legion/INFRA-439/ is gone from the branch. The workspace was recreated before this round; it held my pushed round-7 handoff (5994ac01) as expected. Full round, because the merge changes the replay route the soak's captured-topic case uses.",
+  "completed": "2026-10-28T10:08:00Z",
+  "round": 9,
+  "headTested": "882e16e635ca37834bec63c574147341b919dc9d",
+  "codeHead": "6220ef2bac729b9c9adc85b71a26c3342e40f7f9",
+  "scope": "One commit since round 8 (f18ca5a7), 6220ef2b. It answers review round 4's four minor findings with comment edits in outbox.go, notify.go, api.go and request_record.go, plus a pi-envoy CHANGELOG entry. Comment-only, checked: jj diff -r 6220ef2b --git over **/*.go and **/*.ts, with comment and blank lines removed, prints nothing. The daemon and listener therefore behave exactly as at f18ca5a7, which round 8 verified in full on real binaries: the soak with the lane off and on and 0 messages lost; role 200/504/404/403; 403 publish_denied finishing a notice while a proxy's JSON 403 is retried; the 503 retried by both clients; ad-hoc 504 not_confirmed. This round re-runs the bare gates only.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its command at f18ca5a7: cd packages/envoy && go test -tags serverchange -count=1 -timeout 20m -v -run TestServerChange ./cmd/listener -> --- PASS: TestServerChange (147.79s). Lane off: 9 disruptions, role 273/273, ad-hoc 273/273, captured 198 live + 75 only by #2228's merged replay, errored 0. Lane on: 8 disruptions, role 249/249, ad-hoc 249/249, captured 183 live + 66 only by replay, errored 0."
+    "how": "Its proof's code is f18ca5a7's, which I verified in round 8 by re-running its soak command (--- PASS 147.79s) and driving the same surface independently. At 6220ef2b: go build ./... and go vet pass in packages/envoy and packages/daemon; go test -run TestHTTPPublisher ./internal/notify -> ok; go test -run TestPublishRoute ./cmd/listener -> ok (29.7 s)."
   },
   "failed": 0,
   "failures": [],
-  "ci": "At 09:26Z on code head f18ca5a7 every check is queued (build x2, changes, lint, test, typecheck, pr-title x2; two pr-title runs cancelled). None has settled. GitHub reports MERGEABLE.",
-  "notes": [
-    "notify's publishDeniedPrefix copies the listener's constant (packages/envoy/cmd/listener/api.go:232) across two Go modules. If the listener's wording ever changes, the daemon reads the denial as a plain failure and retries it. That loses no notice, so it is the safe direction to drift."
-  ],
+  "ci": "At 10:06Z on 6220ef2b every check is queued (build x2, changes, lint, test, typecheck, pr-title x2), none settled. On f18ca5a7: lint, typecheck, build x2, changes, envoy-infra-go, claude-envoy and pi-legion succeeded; test, envoy-go, envoy-go-race, envoy-e2e-local, listener-server-change and the other package jobs were cancelled when the next push superseded them. GitHub reports MERGEABLE.",
   "proof": [
     {
-      "criterion": "A role message through the sending listener is received by the holder or its sender's call errs, on the head that carries main and the merged #2228",
-      "surface": "two real envoy-listener binaries built at f18ca5a7 (host-a with ENVOY_SUBSCRIBE_ALL_TOPICS=1, host-b without) on a nats-server 2.10.29 whose 'listener' user is denied publish to notifications.agent.ses_denied8. Session stand-ins on their own connections. Driven with curl and envoy-client's publish (bun)",
-      "command": "POST http://127.0.0.1:18692/v1/messages/publish {topic: notifications.role.t8-live|t8-silent|t8-none|t8-denied}, a btw payload, and the hub frozen with SIGSTOP on its exact PID",
-      "observed": "confirming holder -> 200 in 31 ms; a repeat -> 200 with no second forward; silent holder -> 504 receipt_timeout, attempts 2, in 4.028 s. A denied forward -> 403 'envoy: the message bus denied the publish under this listener's own permissions: …' in 29 ms. Hub frozen -> 503 with Retry-After: 1 in 3.51 s; envoy-client retried once and threw EnvoyApiError 503 after 7.27 s",
-      "headSha": "f18ca5a7db3ef4a6223d0d59aa757ae303ae3392",
-      "negativeControl": "unclaimed -> 404 {reason unclaimed}; btw to a holder without it -> 403 {reason capability}"
-    },
-    {
-      "criterion": "The same holds for an ad-hoc topic",
-      "surface": "same rig",
-      "command": "POST /v1/messages/publish {topic: notifications.team.t8} through lane-on host-a, with one confirming and one silent subscriber; then {topic: notifications.team.nobody}",
-      "observed": "504 {reason not_confirmed, delivered [ses_holder8], undelivered [{ses_silent8, receipt_timeout}]} in 4.029 s; no recipient -> 200 in 30 ms",
-      "headSha": "f18ca5a7db3ef4a6223d0d59aa757ae303ae3392",
-      "negativeControl": "the round-1 red test TestPublishRouteAnswersAnAdHocTopicInsideItsWindowWhileTheServerIsDown is still in the suite"
-    },
-    {
-      "criterion": "(review round 3) only the listener's own publish denial finishes a notice row; any other JSON 403 is retried, and the daemon still retries a 503",
-      "surface": "the daemon's real outbox runner and notify.HTTPPublisher (a throwaway test in internal/daemon, deleted after the run), against the real host-b listener and against an httptest proxy answering 403 {\"error\":\"forbidden\"}. Embedded Postgres 16.4",
-      "command": "ZZ_LISTENER_URL=http://127.0.0.1:18692 LEGION_TEST_PG_DSN=<embedded Postgres> go test -count=1 -v -run TestZZOutboxAgainstRealListener ./internal/daemon (one notice per case to architect role legion-legion-legion-1-architect)",
-      "observed": "Real listener, denied holder: rows left 0, one WARN 'outbox notice finished undelivered: the listener's NATS grant denied the forward to its architect'. Proxy JSON 403 the listener does not write: rows left 1, 'outbox row failed … listener returned 403 Forbidden: {\"error\":\"forbidden\"}', so it is retried. Real listener after ses_holder8 claims the role: rows left 0, delivered. Also passing: TestANoticeTheListenerIsDeniedToForwardFinishesUndelivered (my round-6 test, unchanged), TestANoticeTheHolderRefusesFinishesUndelivered, TestANoticeTheListenerCouldNotForwardAtAllIsRetriedWithoutACap, the MergeQueue tests and TestHTTPPublisher*",
-      "headSha": "f18ca5a7db3ef4a6223d0d59aa757ae303ae3392",
-      "negativeControl": "the proxy's own JSON 403 is itself the refused input here: the row stays and is retried. [INFERENCE, not re-run] At a16d4af7 the same body finished the row, since that head's notify_test pinned {\"error\":\"forbidden\"} as ErrPublishDenied"
-    },
-    {
-      "criterion": "Messages sent every 250 ms for at least 60 s arrive or err while the holder's server is lame-ducked and force-killed (role, ad-hoc, captured), with the live topics lane off and on",
-      "surface": "the real envoy-listener binary, two processes over a three-server in-process nats-server cluster (TestServerChange), against #2228's merged replay route",
-      "command": "cd packages/envoy && go test -tags serverchange -count=1 -timeout 20m -v -run TestServerChange ./cmd/listener",
-      "observed": "--- PASS (147.79s). Lane off: role 273/273, ad-hoc 273/273, captured 198 live + 75 by replay. Lane on: role 249/249, ad-hoc 249/249, captured 183 live + 66 by replay. errored 0",
-      "headSha": "f18ca5a7db3ef4a6223d0d59aa757ae303ae3392",
-      "negativeControl": "the same test on base 3ea454d3 (round 1, independent run) -> --- FAIL assertion 1: 10 role and 67 ad-hoc messages answered 200 and never received"
+      "criterion": "The comment-only commit changes no behavior of the publish route or the daemon's notice handling",
+      "surface": "the diff of 6220ef2b, and the listener and daemon built at the head",
+      "command": "jj diff -r 6220ef2b --git -- 'glob:**/*.go' 'glob:**/*.ts' | grep -E '^[-+]' | grep -vE '^(\\+\\+\\+|---)' | grep -vE '^[-+]\\s*(//|\\*|/\\*)' | grep -vE '^[-+]\\s*$'; then go build/vet in both modules, go test -run TestHTTPPublisher ./internal/notify, go test -run TestPublishRoute ./cmd/listener",
+      "observed": "the grep prints nothing (exit 1). Both modules build and vet clean, and both test runs report ok",
+      "headSha": "6220ef2bac729b9c9adc85b71a26c3342e40f7f9",
+      "negativeControl": "the same grep over 1e1f7db5, a behavior change, prints its code lines: `+const publishDeniedPrefix = …`, the changed `case response.StatusCode == http.StatusForbidden && strings.HasPrefix(answer.Error, publishDeniedPrefix):`, and the changed notify_test row"
     }
   ]
 }
