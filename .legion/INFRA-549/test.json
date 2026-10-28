@@ -2,61 +2,52 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-549",
-  "completed": "2026-10-28T14:04:07Z",
-  "round": 5,
-  "headSha": "f5176373f7ff720a5bf7817d3f0d58111aef66e0",
-  "codeHeadSha": "253b920c5f57c4e78a5b768b0f627d79df9ee7ea",
+  "completed": "2026-10-28T14:51:26Z",
+  "round": 6,
+  "headSha": "d6bf2a1e073d3a366fbb9af9e41eadc33b263763",
+  "codeHeadSha": "16234e5e20b8981bbd9250aa9a1097f386633500",
   "evidence": [
-    "https://github.com/sjawhar/legion/pull/2371#issuecomment-6471097545",
-    "https://github.com/sjawhar/legion/pull/2371#issuecomment-6438746050",
-    "https://github.com/sjawhar/legion/pull/2371#issuecomment-6437726062",
-    "https://github.com/sjawhar/legion/pull/2371#issuecomment-6436632084",
-    "https://github.com/sjawhar/legion/pull/2371#issuecomment-6436052083"
+    "https://github.com/sjawhar/legion/pull/2371#issuecomment-6472259776",
+    "https://github.com/sjawhar/legion/pull/2371#issuecomment-6471097545"
   ],
-  "rebaseCheck": "Fingerprint (skill://legion-worker/references/conflicts-and-rewrites.md) at my round-4 head c6a616fb: f4aefcc804759aa87c582b4742997c64a3cf434d3827e4f4846d25a6dc4a4070 (fork 5fbe7ca5); at f5176373: 2ad25775e35fda34d9de0a7d90270a37ab2a15a8ae371b4eacb36d58a2c6b386 (fork 91d30dea). Changed: new gcp/clusteredhub_autopilot.go (podPriorityClass and autopilotPodSize moved out of the base's rewritten dispatch.go), tailnet_service.go and dispatch.go out of the diff (now the base's, from #2368), the live test's port picking, .changelog entries in place of the CHANGELOG. So this is a full test round.",
-  "ci": "Read on GitHub at 253b920c when this was written: build, changes, lint, pr-title, test, typecheck queued. Read as queued, not as a pass. f5176373 is a handoff-only push. The PR is MERGEABLE/CLEAN and approved.",
+  "ci": "Read on GitHub at 16234e5e when this was written: build, changes, lint, test, typecheck queued (superseded pr-title runs cancelled). Read as queued, not as a pass. The PR is MERGEABLE/CLEAN.",
+  "scope": "c85984cd (the live test draws distinct ports and draws new ones on a refused start) and 16234e5e (the hub's pods held to Autopilot's 250m floor for a pod without pod anti-affinity) answer the round-4 review. Everything else is unchanged since round 5's full round.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command at 253b920c: cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/ -> ok 30.385s (leader kill at 210/1000 acks with a new leader in 6.62 s, users reloaded with cid 20 and 0 reconnects, (f) lower store reload refused, admitted after a restart). The surfaces the merge touched were driven independently (proofs below)."
+    "how": "Re-ran the implementer's command at 16234e5e: cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/ -> ok 30.775s (leader kill at 211/1000 acks with a new leader in 6.6 s, users reloaded with cid 20 and 0 reconnects, (f) passes). Both findings were also driven independently: a port held on a different server and port kind than the implementer's, and the floor boundaries through the real Pulumi engine."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Users are applied by reload alone; a change of the no-credential session user or the store limit rolls the pods after the ConfigMap; the StatefulSet is protected.",
-      "surface": "The plugin built at 253b920c run by the Pulumi CLI v3.268.0 on the README's YAML program against a real kube-apiserver v1.33.0 + etcd + kube-controller-manager v1.33.0 (StatefulSet and Deployment controllers; no scheduler or kubelet)",
-      "command": "pulumi up; pulumi preview --json after: one user added; sessionUser.nkey changed; streamMaxBytes 40000000000 with diskSizeGb 53 and natsMemory 5Gi held; the current values; diskSizeGb 60. Then pulumi up of the session-user change and kubectl get cm/sts/pods -o json",
-      "observed": "In state the StatefulSet depends on envoy-nats-config and is protected; pod annotations max-file-store 47Gi and no-auth-user; 53Gi claim, 5Gi limit, GOMEMLIMIT 4096MiB. User add -> only data[\"auth.conf\"]. Session change -> auth.conf plus the no-auth-user annotation. Store lower -> nats.conf, the max-file-store annotation and the listener's ENVOY_STREAM_MAX_BYTES. Current values -> no change. Applied session change: the ConfigMap updated first (0.04 s, new no_auth_user), then the StatefulSet. The controller went to revision envoy-nats-c7f7d8dcd and replaced envoy-nats-2 (uid c2f76c02 -> be423ee7, annotation UBIFC2TL).",
-      "headSha": "253b920c5f57c4e78a5b768b0f627d79df9ee7ea",
-      "negativeControl": "diskSizeGb 60 -> preview fails: the StatefulSet 'is currently marked for protection'."
+      "criterion": "Review round 4 (thread PRRT_kwDORFy7ds6xKae8): the live test's hub servers get distinct ports, and a start that finds a port taken retries on new ones, so the natslive lane does not go red at random.",
+      "surface": "The natslive live test's three nats-server v2.15.1 processes, with another program holding one of their drawn ports, and three concurrent runs on one host",
+      "command": "go test -count=1 -tags natslive -overlay <throwaway: net.Listen on serverPorts[5], envoy-nats-1's route port, right after the nine-port draw, held for the test> -run 'TestClusteredNatsHubCluster$' -v ./gcp/; and three concurrent runs of the compiled test binary (-test.run 'TestClusteredNatsHubCluster$')",
+      "observed": "Head: ok 36.003s. With 127.0.0.1:39080 held, envoy-nats-1 started on --cluster nats://127.0.0.1:40140; envoy-nats-0 still routes to 39080 and envoy-nats-2 to 40140, and the cluster formed in 117 ms with each server routing to the other two. Concurrent: all three PASS (44.5 s, 48.0 s, 44.5 s).",
+      "headSha": "16234e5e20b8981bbd9250aa9a1097f386633500",
+      "negativeControl": "The same thief over the 253b920c live test -> FAIL: 11 '[FTL] Error listening on router port: 50870 ... bind: address already in use', one per attempt, all on the same port."
     },
     {
-      "criterion": "Every refusal names its input before anything registers, including the Autopilot sizing and priority-class rules now in gcp/clusteredhub_autopilot.go, and no seed is echoed.",
-      "surface": "pulumi preview of the README's program against the same API server, one input broken per run",
-      "command": "python3 ../mutate.py <case> && pulumi preview --non-interactive (20 cases)",
-      "observed": "Each exits 1 naming its input: natsCpu 100m (at least 400m), natsCpu 40 (at most 29900m), natsCpu 8 with 5Gi (1-6.5 GiB per CPU), tailnet.listener.cpu 100m (at least 200m), priorityClassName system-node-critical (system- prefix), a missing PriorityClass, tailnetAuthKey without tailnet, a tag-pinned image, natsReplicas 4, tailnet.replicas 1, natsMemory 4Gi (floor 4.31 GiB), maxFileStoreGb 46 (needs 46.1), seeds in storageClassName/users[0].machineId/tailnetAuthKey ('holds an nkey seed (not echoed)'), a 45-byte name, duplicate clientNamespaces, a durable collision. The seed appears in no output.",
-      "headSha": "253b920c5f57c4e78a5b768b0f627d79df9ee7ea",
-      "negativeControl": "Boundary inputs are accepted: natsReplicas 1, and natsCpu 4 with natsMemory 5Gi (1.27 GiB per CPU) -> preview exit 0."
-    },
-    {
-      "criterion": "The tailnet session listener takes the replica count and byte limit, and the hub's grants include INFRA-546's bucket update grant, which the listener's 30 s keeper now uses.",
-      "surface": "envoy-listener built at 253b920c with the tailnet Deployment's exact environment (only NATS_URLS and the seed path changed) on three nats-server v2.15.1 that use the engine-rendered nats.conf and auth.conf",
-      "command": "run.sh servers; run.sh listener 1; run.sh listener 3; nats req '$JS.API.STREAM.UPDATE.KV_envoy_interests' <config with num_replicas 1>; curl localhost:1822{0,1,2}/jsz?streams=true&config=true; curl -H 'Host: <h>' http://127.0.0.1:9020/v1/sessions",
-      "observed": "ENVOY_NOTIFICATIONS at R3/max_bytes 44023414784 and KV_envoy_interests/sessions/roles at R3 on all three servers after the R1 start and the R3 restart, with no permission violation. /v1/sessions 200 for envoy-hub.example-tailnet.ts.net:9020, 421 for evil.example.com. KV_envoy_interests lowered to R1 while the listener ran -> back at R3 within 20 s.",
-      "headSha": "253b920c5f57c4e78a5b768b0f627d79df9ee7ea",
-      "negativeControl": "With $JS.API.STREAM.UPDATE.KV_envoy_interests removed from the listener user (servers reloaded) and the bucket lowered to R1 by the host user -> the keeper got 'Publish Violation - Subject \"$JS.API.STREAM.UPDATE.KV_envoy_int...\"' and the bucket stayed R1 for the 54 s watched."
+      "criterion": "Review round 4 (thread PRRT_kwDORFy7ds6xKafG): the hub's pods are held to GKE Autopilot's floor for their own shape (250m CPU and 512Mi, no pod anti-affinity or safe-to-evict), not gcp:Dispatch's 500m.",
+      "surface": "The plugin built at 16234e5e run by the Pulumi CLI v3.268.0 on the README's program against a real kube-apiserver v1.33.0",
+      "command": "pulumi preview --json, hub without streamMaxBytes, with natsCpu 150m + natsMemory 512Mi; natsCpu 149m; natsCpu 150m with the default memory; natsMemory 300Mi; natsCpu 300m + natsMemory 1Gi; tailnet.listener.cpu 1m (256Mi) and 150m",
+      "observed": "150m/512Mi (a 250m / 704Mi pod) accepted; 300m/1Gi accepted; listener 1m and 150m accepted (the tailnet pod is already 300m / 576Mi). The rendered StatefulSet and tailnet Deployment have affinity null and no safe-to-evict annotation, so GKE's general-purpose row (250m / 512 MiB without bursting, read 2026-10-28) applies; gcp:Dispatch's pods carry PodAntiAffinity (dispatch_kube.go:123).",
+      "headSha": "16234e5e20b8981bbd9250aa9a1097f386633500",
+      "negativeControl": "natsCpu 149m -> refused naming natsCpu ('must be at least 150m ... less than 250m, below which Autopilot raises a pod with neither pod anti-affinity nor the safe-to-evict annotation'); natsMemory 300Mi -> 'at least 320Mi ... less than 512Mi'; natsCpu 150m with 2Gi -> the 1-6.5 GiB per CPU rule."
     },
     {
       "criterion": "The rendered NATS configuration is run by three local nats-server processes: they form a cluster, a stream created at three copies survives one server's kill with a leader and no lost publish, and a user added and removed through the rendered auth file reloads with no restart and no client reconnect.",
       "surface": "Three local nats-server v2.15.1 processes with the real nats-server-config-reloader v0.24.0 and prometheus-nats-exporter v0.20.2, on the helm v3.20.2 render of the component's values",
       "command": "cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/",
-      "observed": "ok 30.385s. SIGKILL of R3 leader envoy-nats-1 after 210 of 1000 acks; envoy-nats-2 led 6.62 s later; every acknowledged message stored exactly once. Users reloaded with cid 20 and 0 reconnects, and the PIDs did not change.",
-      "headSha": "253b920c5f57c4e78a5b768b0f627d79df9ee7ea",
+      "observed": "ok 30.775s. SIGKILL of R3 leader envoy-nats-2 after 211 of 1000 acks; envoy-nats-1 led 6.616 s later; every acknowledged message stored exactly once. Users reloaded with cid 20 and 0 reconnects and 0 disconnects.",
+      "headSha": "16234e5e20b8981bbd9250aa9a1097f386633500",
       "negativeControl": "(e) and (f) of the same run: a no_auth_user change and a lower max_file_store are each refused by reload, and only a restart applies them."
     }
   ],
   "observations": [
-    "The workspace was recreated before this round, so every tool was installed again under $TMPDIR. One early command ran in the workspace root because its cd failed, and left a go.work.sum change and a throwaway nkey seed file in the working copy. Neither was committed or pushed; the commit holding them was abandoned, and jj status is clean.",
-    "Not reachable on this surface, unchanged: claim expansion (no storage provisioner), a real tailscaled and the Linux PID-1 signal drop, the README PromQL, and GKE-only behaviour (GMP, Dataplane V2, Autopilot scheduling) belong to INFRA-551's live proof."
+    "Not driven: Autopilot's own admission. The only namespace this pod can create Jobs in (builds) requires the custom build ComputeClass, whose minimums differ, so it cannot show the general-purpose floor.",
+    "For the reviewer, not a failure: GKE says a cluster without bursting rounds a pod's CPU up to the next 0.25 vCPU, and the ratio check uses the CPU as written. So, for example, natsCpu 450m with natsMemory 400Mi (550m / 592Mi, 1.05 GiB per CPU) is accepted but would be rounded to 750m there, and Autopilot would then raise its memory. A cluster with bursting rounds nothing. The rule came with the helper from gcp:Dispatch, and this round did not add it.",
+    "My go builds touched packages/envoy/infra/go.work.sum in the working copy; I restored it before committing.",
+    "Unchanged and not reachable here: claim expansion, a real tailscaled and the Linux PID-1 signal drop, the README PromQL, and GKE-only behaviour (GMP, Dataplane V2, Autopilot scheduling) belong to INFRA-551's live proof."
   ]
 }
