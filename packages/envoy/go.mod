@@ -145,10 +145,10 @@ require (
 // document logs each committed transaction's update in commit order under its own lock
 // (UpdateLog), so the room's update observer measures each update against the room the commit
 // before it left; parked delete ranges are capped as parked items are and retried only once they
-// can apply, and a room's stored state loads with the pending cap lifted; and a remote update's
-// deferred items integrate in dependency order, so a document many writers forked from decodes in
-// time linear in its items rather than one pass over every deferred item per dependency (INFRA-593;
-// its upstream pull request is still to be opened). The fork's opt-in hooks and bounds
+// can apply; and a remote update's deferred items integrate in dependency order, so a document many
+// writers forked from decodes in time linear in its items rather than one pass over every deferred
+// item per dependency (INFRA-593; upstream fixed the same since v1.51.12, reearth/ygo #296 and
+// #312, which the fork's base predates). The fork's opt-in hooks and bounds
 // (Server.OnPeerUpdate, WithMaxIntegrateScan, WithIntegrateScanBudget) are off unless set, and
 // Dispatch sets none. A merged update's skip parking the items after it (reearth/ygo#257) is
 // upstream since v1.51.0.

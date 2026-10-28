@@ -19,15 +19,13 @@ import (
 )
 
 // stateThrough returns the state the room's stored updates through version, which updates replays,
-// make, as one V1 update, and whether the fold's read-back decoded that state as a room decodes it
-// (readBack), which a room's load (servicePersistenceAdapter.LoadDoc) does not decode again. It
-// applies the updates one at a time, oldest first, to one document that collects garbage, and
-// encodes that document, so a deleted item keeps its id and length but none of its content, and
-// what it holds at once is that document and the one update being applied, however much the
-// stored updates inserted and later deleted. Nothing reads deleted content back from the store:
-// every document built from it - a room ygo's server loads, a read, a fork, a validation - is a
-// crdt.New, which collects an item's content in the transaction that deletes it, the transaction
-// that applies a load included.
+// make, as one V1 update. It applies the updates one at a time, oldest first, to one document that
+// collects garbage, and encodes that document, so a deleted item keeps its id and length but none
+// of its content, and what it holds at once is that document and the one update being applied,
+// however much the stored updates inserted and later deleted. Nothing reads deleted content back
+// from the store: every document built from it - a room ygo's server loads, a read, a fork, a
+// validation - is a crdt.New, which collects an item's content in the transaction that deletes it,
+// the transaction that applies a load included.
 //
 // A document parks an update whose dependencies have not arrived, and a delete of an item it does
 // not hold. ygo's encoding of the document carries both (upstream since v1.51.0), and when the
@@ -49,18 +47,17 @@ import (
 //
 // A log of one update is returned as stored: a compaction leaves the rows it folds as one update
 // holding their state, and a document's first update deletes nothing an earlier one inserted.
-func stateThrough(room string, version persistence.Version, updates updateSource) (state []byte, readBack bool, err error) {
-	state, decoded, misread, err := fold(updates)
+func stateThrough(room string, version persistence.Version, updates updateSource) ([]byte, error) {
+	state, _, misread, err := fold(updates)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	if misread == nil {
-		return state, decoded != nil, nil
+		return state, nil
 	}
 	slog.Warn(misreadWarning+"; serving them merged",
 		"room", room, "version", int64(version), "error", misread)
-	state, err = mergedThrough(updates)
-	return state, false, err
+	return mergedThrough(updates)
 }
 
 // documentThrough is the document stateThrough's state decodes into, decoded once: the document

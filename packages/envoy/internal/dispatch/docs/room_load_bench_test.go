@@ -7,8 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/reearth/ygo/crdt"
-
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -24,12 +22,12 @@ const roomLoadYoung = 15
 
 var roomLoadActor = model.Actor{Kind: "user", ID: "alice"}
 
-// BenchmarkRoomLoad measures what ygo runs when it loads a document's room: the persistence
-// adapter's LoadDoc and the decode of its update into a fresh document. Each document is a ~98 KB
-// spec of 400 paragraphs whose every version rewrites 5% of them through the upload write path,
-// with 25 anchored comments once it has 30 versions or more. Its history is compacted to one row
-// (compacted), or to one row followed by 15 young versions left as rows of their own
-// (compacted+15young).
+// BenchmarkRoomLoad measures what a document's room load runs: the persistence adapter's LoadDoc
+// and the room's load hook's decode of the state it read into a fresh document
+// (bootstrapLoadedState). Each document is a ~98 KB spec of 400 paragraphs whose every version
+// rewrites 5% of them through the upload write path, with 25 anchored comments once it has 30
+// versions or more. Its history is compacted to one row (compacted), or to one row followed by 15
+// young versions left as rows of their own (compacted+15young).
 func BenchmarkRoomLoad(b *testing.B) {
 	for _, versions := range []int{1, 30, 60, 120, 240} {
 		for _, young := range []int{0, roomLoadYoung} {
@@ -140,19 +138,20 @@ func (fixture *roomLoadFixture) run(b *testing.B) {
 	if rows := storedUpdateCount(b, fixture.service.store, fixture.artifactID); rows != fixture.rows {
 		b.Fatalf("document holds %d rows, want %d", rows, fixture.rows)
 	}
-	adapter := &servicePersistenceAdapter{store: fixture.service.persistence, service: fixture.service}
+	service := fixture.service
+	adapter := &servicePersistenceAdapter{store: service.persistence, service: service}
 	b.ReportAllocs()
 	b.ResetTimer()
 	var stateBytes int
 	for range b.N {
-		update, err := adapter.LoadDoc(fixture.artifactID)
-		if err != nil {
+		if _, err := adapter.LoadDoc(fixture.artifactID); err != nil {
 			b.Fatal(err)
 		}
-		if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
+		state := service.takeLoadedState(fixture.artifactID)
+		if err := service.bootstrapLoadedState(fixture.artifactID, newDocumentCopy(), state); err != nil {
 			b.Fatal(err)
 		}
-		stateBytes = len(update)
+		stateBytes = len(state)
 	}
 	b.StopTimer()
 	b.ReportMetric(float64(fixture.rows), "rows/op")

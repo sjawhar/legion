@@ -4,12 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/reearth/ygo/crdt"
-	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -116,63 +115,48 @@ func TestALoadReadsOneStateWhetherItFoldsTheLogInMemoryOrStreamed(t *testing.T) 
 	}
 }
 
-// copyingLoadStore answers a room's load with a copy of the state the store below it loaded.
-type copyingLoadStore struct {
-	VersionedStore
-}
-
-func (s copyingLoadStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
-	result, err := s.VersionedStore.Load(ctx, room)
-	result.Update = bytes.Clone(result.Update)
-	return result, err
-}
-
-// A room's load decodes a folded log's state no further before the room does: the fold applied the
-// rows and read the state back into the document a room decodes it into, so the load does not
-// check it again (validateUpdate). It checks a single row, which the store returns as stored, and
-// a state a store wrapping PgVersioned answers with in place of the one the fold read back. A log
-// the fold cannot apply, served merged, is checked too, and that check fails the room, as ygo's
-// own load of the room meets it.
-func TestARoomLoadChecksOnlyAStateTheFoldDidNotReadBack(t *testing.T) {
+// roomLoadService is a service on a database of its own whose room loads record each stored state
+// their load hook decodes (bootstrapLoadedState), by room.
+func roomLoadService(t *testing.T) (*Service, *PgVersioned, *roomDecodes) {
+	t.Helper()
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
 	service := New(Deps{Store: database, Persistence: versioned, Events: events.NewBroker(), Settle: time.Hour})
+	decodes := &roomDecodes{states: make(map[string][][]byte)}
+	service.bootstrapping = decodes.decoded
 	t.Cleanup(func() {
 		stop, cancel := context.WithTimeout(context.Background(), recoveryBound)
 		defer cancel()
 		_ = service.Shutdown(stop)
 	})
-	failed := make(chan string, 4)
-	service.beforeFailedEviction = func(room string) { failed <- room }
-	requireFailed := func(t *testing.T, artifactID string) {
-		t.Helper()
-		select {
-		case room := <-failed:
-			if room != artifactID {
-				t.Fatalf("failed room %s, want %s", room, artifactID)
-			}
-		case <-time.After(recoveryBound):
-			t.Fatal("the room that cannot load never failed")
-		}
-	}
-	var checks atomic.Int32
-	loadRoom := func(t *testing.T, store VersionedStore, rows [][]byte) ([]byte, string, int32, error) {
-		t.Helper()
-		artifactID := createDocument(t, database, "history")
-		appendUpdates(t, versioned, artifactID, rows...)
-		adapter := &servicePersistenceAdapter{store: store, service: service, validating: func(string) { checks.Add(1) }}
-		checks.Store(0)
-		served, err := adapter.LoadDoc(artifactID)
-		return served, artifactID, checks.Load(), err
-	}
-	text := func(t *testing.T, state []byte) string {
-		t.Helper()
-		doc := crdt.New()
-		if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
-			t.Fatalf("decode the served state: %v", err)
-		}
-		return doc.GetText("t").ToString()
-	}
+	return service, versioned, decodes
+}
+
+// roomDecodes is every stored state a room's load hook decoded, by room, in order.
+type roomDecodes struct {
+	mu     sync.Mutex
+	states map[string][][]byte
+}
+
+func (d *roomDecodes) decoded(room string, state []byte) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.states[room] = append(d.states[room], state)
+}
+
+func (d *roomDecodes) of(room string) [][]byte {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([][]byte(nil), d.states[room]...)
+}
+
+// A room's load decodes the state its store read once, in the room's own load hook: ygo is handed
+// no bytes to decode. A single stored row is that decode alone, of the row as stored; a folded log
+// is decoded by the fold's read-back too, and then once in the room. Either room reads the text
+// its history wrote.
+func TestARoomLoadDecodesItsStoredStateOnceInTheRoom(t *testing.T) {
+	service, versioned, decodes := roomLoadService(t)
+	ctx := context.Background()
 	writer := crdt.New(crdt.WithClientID(7))
 	written := writer.GetText("t")
 	var folded [][]byte
@@ -187,28 +171,175 @@ func TestARoomLoadChecksOnlyAStateTheFoldDidNotReadBack(t *testing.T) {
 		folded = append(folded, crdt.EncodeStateAsUpdateV1(writer, before))
 	}
 
-	served, _, checked, err := loadRoom(t, versioned, folded)
-	if err != nil || checked != 0 || text(t, served) != "base kept" {
-		t.Fatalf("room load of a folded log: %q, %d checks (%v), want %q and no check", text(t, served), checked, err, "base kept")
-	}
-	served, _, checked, err = loadRoom(t, versioned, folded[:1])
-	if err != nil || checked != 1 || !bytes.Equal(served, folded[0]) {
-		t.Fatalf("room load of one row: %d bytes, %d checks (%v), want the row as stored and one check", len(served), checked, err)
-	}
-	served, _, checked, err = loadRoom(t, copyingLoadStore{VersionedStore: versioned}, folded)
-	if err != nil || checked != 1 || text(t, served) != "base kept" {
-		t.Fatalf("room load of a wrapping store's copy: %q, %d checks (%v), want %q and one check", text(t, served), checked, err, "base kept")
-	}
-	_, artifactID, checked, err := loadRoom(t, versioned, unfoldableHistory())
-	if err == nil || checked != 1 {
-		t.Fatalf("room load of a log the fold cannot apply: %d checks (%v), want one check that fails", checked, err)
-	}
-	requireFailed(t, artifactID)
+	for _, test := range []struct {
+		name string
+		rows [][]byte
+		text string
+	}{
+		{"one stored row", folded[:1], "base"},
+		{"a folded log", folded, "base kept"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			artifactID := createDocument(t, service.store, "history")
+			appendUpdates(t, versioned, artifactID, test.rows...)
+			stored, err := versioned.Load(ctx, artifactID)
+			if err != nil {
+				t.Fatalf("load the stored state: %v", err)
+			}
+			if len(test.rows) == 1 && !bytes.Equal(stored.Update, test.rows[0]) {
+				t.Fatalf("the store loaded %d bytes of one row, want the %d-byte row as stored", len(stored.Update), len(test.rows[0]))
+			}
+			// What ygo itself decodes: nothing.
+			adapter := &servicePersistenceAdapter{store: versioned, service: service}
+			if handed, err := adapter.LoadDoc(artifactID); err != nil || len(handed) != 0 {
+				t.Fatalf("LoadDoc handed ygo %d bytes (%v), want none", len(handed), err)
+			}
+			if kept := service.takeLoadedState(artifactID); !bytes.Equal(kept, stored.Update) {
+				t.Fatalf("LoadDoc kept %d bytes for the room's load hook, want the %d-byte stored state", len(kept), len(stored.Update))
+			}
 
-	artifactID = createDocument(t, database, "unfoldable")
-	appendUpdates(t, versioned, artifactID, unfoldableHistory()...)
-	if err := service.warmLiveDocument(context.Background(), artifactID); err == nil {
-		t.Fatal("a room of a log the fold cannot apply loaded")
+			if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+				t.Fatalf("load the room: %v", err)
+			}
+			live := service.srv.GetDoc(artifactID)
+			if live == nil {
+				t.Fatal("the room loaded no document")
+			}
+			if got := live.GetText("t").ToString(); got != test.text {
+				t.Fatalf("the room reads %q, want %q", got, test.text)
+			}
+			if states := decodes.of(artifactID); len(states) != 1 || !bytes.Equal(states[0], stored.Update) {
+				t.Fatalf("the room's load decoded %d states, want the stored state decoded once", len(states))
+			}
+		})
 	}
-	requireFailed(t, artifactID)
+}
+
+// A history that does not decode in the room fails the room as the check before the room's
+// decode (validateUpdate) failed it: the caller gets the error that check gives for the same bytes,
+// the room's failure holds it, its failed-room eviction runs, no room is published, and the next
+// access loads the history afresh and fails the same way. A single stored row that parks more
+// than the server's pending cap does not load, nor does a log the fold cannot apply, served
+// merged.
+func TestARoomWhoseHistoryDoesNotDecodeFailsFromTheRoomsOwnDecode(t *testing.T) {
+	service, versioned, decodes := roomLoadService(t)
+	ctx := context.Background()
+	evicting := make(chan string, 1)
+	release := make(chan struct{}, 1)
+	finished := make(chan struct{})
+	service.beforeFailedEviction = func(room string) {
+		evicting <- room
+		select {
+		case <-release:
+		case <-finished:
+		}
+	}
+	t.Cleanup(func() { close(finished) })
+	unfoldable := unfoldableHistory()
+	merged, err := crdt.MergeUpdatesV1(unfoldable...)
+	if err != nil {
+		t.Fatalf("merge the unfoldable log: %v", err)
+	}
+
+	for _, test := range []struct {
+		name  string
+		store func(t *testing.T, artifactID string)
+	}{
+		{"one stored row", func(t *testing.T, artifactID string) {
+			// A row no append takes (appendUpdate decodes it under the same cap), stored as it is.
+			if _, err := service.store.Pool.Exec(ctx, `
+				insert into doc_updates (artifact_id, version, update, content_changed) values ($1, 1, $2, true)
+			`, artifactID, merged); err != nil {
+				t.Fatalf("store the row: %v", err)
+			}
+		}},
+		{"a log served merged", func(t *testing.T, artifactID string) {
+			appendUpdates(t, versioned, artifactID, unfoldable...)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			artifactID := createDocument(t, service.store, "unloadable")
+			test.store(t, artifactID)
+			stored, err := versioned.Load(ctx, artifactID)
+			if err != nil {
+				t.Fatalf("load the stored state: %v", err)
+			}
+			if !bytes.Equal(stored.Update, merged) {
+				t.Fatalf("the store loaded %d bytes, want the %d-byte merge", len(stored.Update), len(merged))
+			}
+			want := validateUpdate(stored.Update)
+			if want == nil {
+				t.Fatal("the stored state decodes, so nothing here is tested")
+			}
+
+			for access := 1; access <= 2; access++ {
+				err := service.warmLiveDocument(ctx, artifactID)
+				if !wrapsDecodeError(err, want) {
+					t.Fatalf("access %d: the room's load = %v, want the decode's error %q", access, err, want)
+				}
+				select {
+				case room := <-evicting:
+					if room != artifactID {
+						t.Fatalf("access %d: failed room %s, want %s", access, room, artifactID)
+					}
+				case <-time.After(recoveryBound):
+					t.Fatalf("access %d: the room that cannot load never failed", access)
+				}
+				// The eviction waits here, so the failure is the one this access recorded.
+				state := service.lockExistingState(artifactID)
+				if state == nil {
+					t.Fatalf("access %d: the failed room has no record", access)
+				}
+				cause := state.failed
+				service.unlockState(artifactID, state)
+				if cause == nil || cause.Error() != want.Error() || errors.Is(cause, crdt.ErrInvalidUpdate) != errors.Is(want, crdt.ErrInvalidUpdate) {
+					t.Fatalf("access %d: the room failed for %v, want the decode's error %q", access, cause, want)
+				}
+				if !errors.Is(err, cause) {
+					t.Fatalf("access %d: the caller got %v, not the failure the room recorded", access, err)
+				}
+				if failure := service.roomFailure(artifactID); !errors.Is(failure, ErrServiceUnavailable) || !errors.Is(failure, cause) {
+					t.Fatalf("access %d: the room's failure = %v, want ErrServiceUnavailable for the decode's error", access, failure)
+				}
+				if service.srv.GetDoc(artifactID) != nil {
+					t.Fatalf("access %d: a room that did not load is served", access)
+				}
+				release <- struct{}{}
+				recovered, cancel := context.WithTimeout(ctx, recoveryBound)
+				err = service.awaitRoomRecovery(recovered, artifactID)
+				cancel()
+				if err != nil {
+					t.Fatalf("access %d: the failed room's eviction: %v", access, err)
+				}
+				if service.srv.GetDoc(artifactID) != nil {
+					t.Fatalf("access %d: a room that did not load is served after its eviction", access)
+				}
+				if states := decodes.of(artifactID); len(states) != access || !bytes.Equal(states[access-1], stored.Update) {
+					t.Fatalf("access %d: the room's loads decoded %d states, want the stored state once per access", access, len(states))
+				}
+			}
+		})
+	}
+}
+
+// wrapsDecodeError reports whether err carries want, a decode's error, as the same error: one in
+// its chain that says what want says and is the sentinel want is.
+func wrapsDecodeError(err, want error) bool {
+	if err == nil {
+		return false
+	}
+	if err.Error() == want.Error() {
+		return errors.Is(err, crdt.ErrInvalidUpdate) == errors.Is(want, crdt.ErrInvalidUpdate)
+	}
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() error }:
+		return wrapsDecodeError(wrapped.Unwrap(), want)
+	case interface{ Unwrap() []error }:
+		for _, each := range wrapped.Unwrap() {
+			if wrapsDecodeError(each, want) {
+				return true
+			}
+		}
+	}
+	return false
 }

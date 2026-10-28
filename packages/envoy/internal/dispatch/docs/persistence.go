@@ -87,9 +87,8 @@ func NewPgVersioned(database *store.Store) *PgVersioned {
 // reads in one repeatable-read transaction on the rooms pool: the head and the count and bytes of
 // the rows at or below it, then those rows, which it folds once the transaction has committed
 // when they total at most foldBufferBytes, so a fold holds no connection a room load waits for,
-// and folds inside the transaction while it streams them when they total more (foldRead). A
-// state the fold read back as a room decodes it is recorded on the record a room's load marked
-// ctx with (withLoadReadBack), so that load does not decode it again.
+// and folds inside the transaction while it streams them when they total more (foldRead). A room's
+// load decodes the state it returns once more, in the room's load hook (onLoadDocument).
 func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
 	if err := ctx.Err(); err != nil {
 		return persistence.LoadResult{}, err
@@ -112,15 +111,11 @@ func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadRe
 		return persistence.LoadResult{}, tx.Commit(ctx)
 	}
 	var update []byte
-	var readBack bool
 	if err := p.foldRead(ctx, tx, room, head, stored.rows, stored.bytes, "document load", func(updates updateSource) (err error) {
-		update, readBack, err = stateThrough(room, head, updates)
+		update, err = stateThrough(room, head, updates)
 		return err
 	}); err != nil {
 		return persistence.LoadResult{}, err
-	}
-	if readBack {
-		noteLoadReadBack(ctx, update)
 	}
 	if stored.rows > 1 {
 		p.noted(room, int64(head), stored.oldest)
@@ -426,7 +421,7 @@ func (p *PgVersioned) MaterializeAt(ctx context.Context, room string, version pe
 	if version > head {
 		version = head
 	}
-	update, _, err := stateThrough(room, version, storedUpdates(ctx, tx, room, version))
+	update, err := stateThrough(room, version, storedUpdates(ctx, tx, room, version))
 	if err != nil {
 		return nil, err
 	}

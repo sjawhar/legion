@@ -314,13 +314,15 @@ reads back as them`): the load serves the stored updates merged whole, which for
 cannot apply is what `loadDocument` decodes and refuses as `ErrDocumentUnloadable`, offering the
 rebuild, and compaction leaves them as stored without building that merge; the process's later
 compactions of the same rows skip them until they change.
-A room's load (`servicePersistenceAdapter.LoadDoc`) decodes what its store returns once before the
-room does: a single stored row, which `Load` returns as stored, is decoded by `validateUpdate` and
-then by the room; a folded log is decoded by the fold, which applies its rows, and by the fold's
-read-back, which decodes the state into the document a room decodes it into, then by the room,
-and `LoadDoc` does not decode that state again (`withLoadReadBack`). A log served merged is
-decoded by `validateUpdate` as a single row is, which is what fails the room for a history that
-cannot load.
+A room's load decodes the stored state once: `servicePersistenceAdapter.LoadDoc` hands ygo no bytes
+and puts the state it read (or the socket's preload) on the load's record (`roomLoad`), and the
+room's own load hook (`onLoadDocument`, through `bootstrapLoadedState`) decodes it into the room's
+document under the server's pending cap, `maxUpdateItems`, before anything reads or observes it.
+A single stored row, which `Load` returns as stored, is decoded there alone; a folded log is also
+decoded by the fold, which applies its rows, and by the fold's read-back. A history that does not
+decode there, a log served merged among them, fails the room (`failRoom`) with that decode's
+error, which ygo returns to the caller: the room is not published, and its next access loads it
+afresh.
 Compaction (`compactRoom`) folds a document's rows at or below its fold point into that row, which
 then holds their state, and deletes the rows below it. The fold point is the newest row at or
 below the head older than two minutes on the database's clock (`compactTail`), so a row younger

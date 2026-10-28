@@ -60,81 +60,37 @@ func isOwnerVerified(ctx context.Context) bool {
 type servicePersistenceAdapter struct {
 	store   VersionedStore
 	service *Service
-	// validating runs as LoadDoc decodes a state its store loaded to check that a room can load
-	// it (validateUpdate). Nil outside tests; tests use it to count the room loads that decode the
-	// state before the room does.
-	validating func(room string)
 }
 
-// LoadDoc is the durable state a room loads. It records the load before it reads, and the head it
-// read after: the room's load (onLoadDocument) takes the record next on the same goroutine (ygo's
-// loadRoom) to start the instance's roomHold and its cursor, and a version this process appends
-// between the two reaches that instance through the record (roomLoad) rather than no instance at
-// all. The read itself takes no advisory lock - a durable writer holds that one across its whole
-// transaction, and a load that waited for it would wedge a write that forks the room it loads -
-// so the record, not the lock, is what keeps a room from being born behind the head.
+// LoadDoc reads the durable state a room loads and hands ygo none of it: the state goes on the
+// load's record (roomLoad.keepState), and the room's own load hook (onLoadDocument) decodes it
+// into the room's document, once, under the server's pending cap, and fails the room for a
+// history that does not decode. ygo, given no bytes, decodes nothing itself. A preload
+// (takePreload), which the socket's admission check decoded, goes on the record as a read would.
 //
-// A state that cannot load fails the room here (failRoom), before the room decodes it, so the
-// state is checked once before the room's own decode. A single stored row, which the store returns
-// as stored, is decoded here (validateUpdate), then by the room. A folded log is decoded by the
-// fold, which applies its rows, and by the fold's read-back, which decodes the state into the
-// document a room decodes it into, with the server's pending queue (readsBackOtherwise), then by
-// the room: Load records the read-back on the context this marks (withLoadReadBack), and this
-// does not decode that state again. A log that does not fold, which the store serves merged, and a
-// state a wrapping store answered with itself are decoded here as a single row is, which is what
-// fails the room for a history that cannot load. A preload (takePreload) was decoded by the
-// socket's admission check and is served as it is.
+// It records the load before it reads, and the head it read after: the room's load
+// (onLoadDocument) takes the record next on the same goroutine (ygo's loadRoom) to start the
+// instance's roomHold and its cursor, and a version this process appends between the two reaches
+// that instance through the record (roomLoad) rather than no instance at all. The read itself
+// takes no advisory lock - a durable writer holds that one across its whole transaction, and a
+// load that waited for it would wedge a write that forks the room it loads - so the record, not
+// the lock, is what keeps a room from being born behind the head. A read that fails fails the
+// room (failRoom).
 func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 	load := a.service.beginRoomLoad(room)
 	if loaded, ok := a.service.takePreload(room); ok {
 		load.readHead(loaded.Version)
-		return loaded.Update, nil
+		load.keepState(loaded.Update)
+		return nil, nil
 	}
-	readBack := &loadReadBack{}
-	result, err := a.store.Load(withLoadReadBack(context.Background(), readBack), room)
-	if err == nil && !readBack.holds(result.Update) {
-		if a.validating != nil {
-			a.validating(room)
-		}
-		err = validateUpdate(result.Update)
-	}
+	result, err := a.store.Load(context.Background(), room)
 	if err != nil {
 		a.service.failRoom(room, err)
 		return nil, err
 	}
 	load.readHead(result.Version)
-	return result.Update, nil
-}
-
-// loadReadBackContextKey marks a room load's context with the record its store fills in
-// (withLoadReadBack).
-type loadReadBackContextKey struct{}
-
-// loadReadBack is the state a room's load (PgVersioned.Load) folded and read back into the
-// document a room decodes it into (stateThrough), nil while the load returned no such state: an
-// empty log, a single row as stored, or a log that does not fold, merged.
-type loadReadBack struct {
-	state []byte
-}
-
-// withLoadReadBack marks ctx with record, which a PgVersioned.Load under ctx fills in. A store that
-// wraps PgVersioned and loads through it passes ctx on, so the record names the state the store
-// below it read back; a wrapper that answers on its own leaves the record as it was.
-func withLoadReadBack(ctx context.Context, record *loadReadBack) context.Context {
-	return context.WithValue(ctx, loadReadBackContextKey{}, record)
-}
-
-// noteLoadReadBack records state on the record withLoadReadBack marked ctx with, if any.
-func noteLoadReadBack(ctx context.Context, state []byte) {
-	if record, ok := ctx.Value(loadReadBackContextKey{}).(*loadReadBack); ok {
-		record.state = state
-	}
-}
-
-// holds reports whether update is the very state the load read back, the same bytes rather than a
-// copy or another state a wrapping store handed on in its place.
-func (r *loadReadBack) holds(update []byte) bool {
-	return len(update) > 0 && len(update) == len(r.state) && &update[0] == &r.state[0]
+	load.keepState(result.Update)
+	return nil, nil
 }
 
 func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) error {
@@ -194,15 +150,30 @@ func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) er
 }
 
 // validateUpdate decodes a stored history, or an update about to replace one, as the room will
-// decode it: into a document with the server's pending queue (newDocumentCopy), so a history a room
-// served is never judged one that cannot load. A room's load runs it on a state its store did not
-// already read back that way (LoadDoc); a rebuild runs it on its seed and on the history it
-// replaces.
+// decode it: into a document with the server's pending queue (newDocumentCopy), the cap a room's
+// load hook decodes its stored state under (bootstrapLoadedState), so a history a room served is
+// never judged one that cannot load. A rebuild runs it on its seed and on the history it replaces;
+// a room's load does not, as its own decode is the check.
 func validateUpdate(update []byte) error {
 	if len(update) == 0 {
 		return nil
 	}
 	return crdt.ApplyUpdateV1(newDocumentCopy(), update, nil)
+}
+
+// bootstrapLoadedState decodes state, what room's load read (takeLoadedState), into doc, the
+// room's document. It is the one decode of the stored state a room's load makes: ygo is handed no
+// bytes (servicePersistenceAdapter.LoadDoc), so it decodes under the pending cap ygo set on doc
+// before its load hook ran, the server's MaxPendingItems, maxUpdateItems. An empty state - an
+// empty history - decodes nothing.
+func (s *Service) bootstrapLoadedState(room string, doc *crdt.Doc, state []byte) error {
+	if len(state) == 0 {
+		return nil
+	}
+	if s.bootstrapping != nil {
+		s.bootstrapping(room, state)
+	}
+	return crdt.ApplyUpdateV1(doc, state, nil)
 }
 
 // preloadedDocument is the durable state a document socket's admission check decoded, kept for the
@@ -442,7 +413,17 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 	return nil
 }
 
+// onLoadDocument is the room's load hook, which ygo runs once it has made room's document and set
+// its pending cap, and before it hands the document to anyone. It decodes the state the room's
+// load read (servicePersistenceAdapter.LoadDoc) into doc - the one decode of that state on the
+// room's load, under the server's pending cap (bootstrapLoadedState) - and a state that does not
+// decode fails the room (failRoom) with the decode's error, which it returns to ygo, so the room
+// is not published and its next access loads it afresh. Then it records what the room starts
+// from: its issue's state, the settlement it owes, its ask blocks, its replica and its instance,
+// and the update observer that classifies and credits every update the room commits.
 func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc) error {
+	// The state is taken off the load's record first, so a load refused below leaves none held.
+	stored := s.takeLoadedState(room)
 	// A load never waits for its own room's recovery. That recovery's eviction waits in ygo's
 	// CloseRoom for the ready barrier this load holds (sjawhar/ygo v1.51.3-sami.1,
 	// provider/websocket/inject.go:517-525) and closes the channel awaitRoomRecovery waits on
@@ -469,6 +450,12 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	}
 	open, err := s.issueOpen(ctx, rooms, room)
 	if err != nil {
+		return err
+	}
+	// Decoded before anything reads or observes the document. ygo set its pending cap to
+	// maxUpdateItems before this hook, so this refuses what validateUpdate refuses.
+	if err := s.bootstrapLoadedState(room, doc, stored); err != nil {
+		s.failRoom(room, err)
 		return err
 	}
 	// The load takes no advisory lock, which a durable writer can hold for as long as its

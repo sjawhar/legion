@@ -74,9 +74,8 @@ type Deps struct {
 // API transaction use AppendUpdateTx, classifying the update the way the room's update observer
 // classifies a live one. RebuildTx replaces an unreadable history inside the rebuild's
 // transaction, through the same persistence boundary as its preflight load. Load, ygo's, is a
-// room's load; a store that wraps another and loads through it passes the context on, which
-// carries the record of the state the load read back (withLoadReadBack). Head is the version
-// Load would fold up to now, which says whether a state loaded earlier is still the stored one.
+// room's load. Head is the version Load would fold up to now, which says whether a state loaded
+// earlier is still the stored one.
 // DocumentStamp names the stored state a read of the document meets now, and LoadDocument is that
 // state decoded once with the stamp it was read under, which a read of a document no room holds
 // caches its rendering by (coldRead). compactRoom is the compaction every path Dispatch compacts a
@@ -217,6 +216,10 @@ type Service struct {
 	// closes the room (evictFailed). Nil outside tests; tests use it to close and reload the room
 	// another way first.
 	beforeFailedEviction func(room string)
+	// bootstrapping runs as a room's load hook decodes state, the stored state its load read, into
+	// the room's document (bootstrapLoadedState). Nil outside tests; tests use it to count the
+	// decodes a room's load makes and to see which state each decodes.
+	bootstrapping func(room string, state []byte)
 	// inServiceTransaction runs first in every transaction a service mutation makes through
 	// Server.Apply (serviceTransact). Nil outside tests; tests use it to change the live document
 	// between the mutation's read of it and its write, where a peer's update can land: Apply runs

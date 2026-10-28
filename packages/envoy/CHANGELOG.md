@@ -1813,25 +1813,26 @@
   after start and only with NATS configured; and a compaction folded while it held the
   document's lock, so a browser's append waited for the whole fold. A load now reads the compacted
   row and the rows since, buffers them up to 32 MiB and folds them after its transaction ends
-  (past that it folds them as it streams them), and a room's load no longer decodes a folded
-  state again before the room does. Compaction runs on any process from the log's length and
-  age: a per-process queue, fed by every append and every load, compacts a document once 16 rows
-  after its first are older than 2 minutes or one is older than 15 minutes, and an hourly sweep
-  under the `document-compaction` lease, with or without NATS, first ticks within 30 seconds of
-  start and compacts what the queues missed. It reads and folds on a two-connection pool of its
-  own (`dispatch-compaction`), so one server's stated connection ceiling rises by 2, to 85; it
-  holds no document lock while it folds, writes under the lock only when the rows it folded are
-  unchanged, and leaves rows younger than 2 minutes as written. The LEGION-496 guarantee, that
-  `doc_updates` and any backup of it hold no text a write deleted, now holds within about 75
-  minutes of the write (the 2-minute tail, the 15-minute age rule, the hourly sweep) rather than
-  as a room closes, as the server shuts down and daily. ygo's `CompactEvery` setting and the
-  outbox's daily compaction are removed. The room's own decode of a document many writers
-  touched is faster too: the ygo fork pin moves from `v1.51.3-sami.4` to `v1.51.3-sami.7`, whose
-  decoder integrates an update's deferred items in dependency order instead of re-scanning every
-  deferred item once per dependency, so the state of a 400-paragraph spec after 240 versions
-  decodes in about 143 ms rather than 433 ms. The tag also caps parked delete ranges as parked
-  items are, retries them only once they can apply, and loads a room's stored state with the
-  pending cap lifted; its opt-in hooks and scan bounds are off, and Dispatch sets none.
+  (past that it folds them as it streams them), and a room's load decodes the stored state once,
+  in the room's own load hook under the server's pending cap (a folded log is also decoded by the
+  fold's read-back), and a history that does not load fails the room from that decode.
+  Compaction runs on any process from the log's length and age: a per-process queue, fed by every
+  append and every load, compacts a document once 16 rows after its first are older than 2
+  minutes or one is older than 15 minutes, and an hourly sweep under the `document-compaction`
+  lease, with or without NATS, first ticks within 30 seconds of start and compacts what the
+  queues missed. It reads and folds on a two-connection pool of its own (`dispatch-compaction`),
+  so one server's stated connection ceiling rises by 2, to 85; it holds no document lock while it
+  folds, writes under the lock only when the rows it folded are unchanged, and leaves rows
+  younger than 2 minutes as written. The LEGION-496 guarantee, that `doc_updates` and any backup
+  of it hold no text a write deleted, now holds within about 75 minutes of the write (the
+  2-minute tail, the 15-minute age rule, the hourly sweep) rather than as a room closes, as the
+  server shuts down and daily. ygo's `CompactEvery` setting and the outbox's daily compaction are
+  removed. The room's own decode of a document many writers touched is faster too: the ygo fork
+  pin moves from `v1.51.3-sami.4` to `v1.51.3-sami.7`, whose decoder integrates an update's
+  deferred items in dependency order instead of re-scanning every deferred item once per
+  dependency, so the state of a 400-paragraph spec after 240 versions decodes in about 143 ms
+  rather than 433 ms. The tag also caps parked delete ranges as parked items are and retries them
+  only once they can apply; its opt-in hooks and scan bounds are off, and Dispatch sets none.
 
 - A document now strikes tilde runs as a comment does. A run of `~` pairs only with a run of its
   own length, so `Plain ~a~~ text.` and `Plain ~~a~ text.` keep their tildes where a document
