@@ -166,7 +166,7 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 	// Last, over everything this pass stored and what intake stored since the previous one: the
 	// issue.deployed of every pull request whose shipping run is now known. Its failure is the
 	// pass's, so last_error names it, and the rows it did not reach wait for the next pass.
-	if written, err := RecordDeployedEvents(ctx, r.pool, settings, r.events, now); err != nil {
+	if written, err := RecordDeployedEvents(ctx, r.pool, settings, r.events); err != nil {
 		record("record issue.deployed events", err)
 	} else if written > 0 {
 		slog.Info("dispatch delivery: recorded issue.deployed", "events", written, "by", "reconcile")
@@ -181,7 +181,7 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 	}
 	// The change log keeps a day (ChangeRetention): a page away longer reads its window once. A
 	// failed prune leaves the rows for the next pass and fails nothing else.
-	if _, err := PruneChanges(ctx, r.pool, time.Now()); err != nil {
+	if _, err := PruneChanges(ctx, r.pool); err != nil {
 		slog.Error("dispatch: delivery prune changes failed", "error", err)
 	}
 }

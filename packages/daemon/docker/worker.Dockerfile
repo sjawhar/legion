@@ -1,8 +1,9 @@
 # syntax=mirror.gcr.io/docker/dockerfile:1.7
 # Legion worker image: every Legion agent process under `runtime: kubernetes` runs from this image.
 # Build context: the repo root. Built by .github/workflows/worker-image.yaml on the GitHub-hosted runner
-# (called from release.yaml after `legion`, on every head of a pull request against main that touches a file
-# it builds from, or dispatched post-merge). Never build it on a workstation — no `docker build`,
+# (called from release.yaml beside its publish job, build only, then attested by a second call after
+# publish; on every head of a pull request against main that touches a file it builds from; or
+# dispatched post-merge). Never build it on a workstation — no `docker build`,
 # `docker buildx`, or `docker compose build` (Sami, 2026-09-12); the CI runner is not a workstation.
 #
 # Contents: pinned Bun; the Go `legion` (packages/daemon) compiled from this checkout at go.work's
@@ -17,11 +18,11 @@
 # explicit loads twice; the pod lane's probe refuses an image whose pi-envoy does), and
 # @bopstack/pi-codegraph (from npm, pinned), the one plugin linked into the isolated OMP profile
 # `legion`, where discovery loads it — backed by the CodeGraph CLI (@colbymchenry/codegraph, pinned) at
-# /opt/codegraph/bin; @sjawhar/claude-envoy from this checkout's packages/claude-envoy at
+# /opt/codegraph/bin; @sjawhar/claude-envoy built from this checkout's packages/claude-envoy at
 # /opt/legion/claude-envoy, the plugin root a phase worker on the `claude` backend loads (its
 # dist/envoy-channel.js is that worker's one MCP server, its legion/ the generated Legion plugin
-# Claude Code loads beside it), shipped as the committed build the plugin stage holds to a fresh
-# one; the pin of Claude Code and nothing else of it — packages/daemon/docker/claude-code's
+# Claude Code loads beside it), which the plugin stage builds from source; the pin of Claude Code
+# and nothing else of it — packages/daemon/docker/claude-code's
 # package.json and package-lock.json, which pin @anthropic-ai/claude-code exactly with the npm
 # integrity of every tarball, at /opt/legion/claude-code. The image carries no Claude Code: its
 # license reserves every right and grants no redistribution, and this image is public, so a pod
@@ -195,30 +196,22 @@ RUN jq '.omp.extensions = ["dist/legion.js"]' package.json > tmp.json \
     && mkdir -p /out/pi-legion \
     && tar xzf ./*.tgz -C /out/pi-legion --strip-components=1
 
-# claude-envoy ships as its committed build rather than a pack: no workflow releases it, its
-# skills/ are relative symlinks into the repository's skills/ that its package.json `files` does
-# not list, and a Claude Code marketplace install takes the git tree itself. `check-dist` is the
-# gate on that tree — it rebuilds dist/ and regenerates legion/ into a scratch directory and
-# refuses a committed copy that differs, and refuses any Bun but the one .bun-version pins, which
-# this stage's base image is (ARG BUN_VERSION; .github/scripts/check-bun-version.sh holds the two
-# equal) — so a pull request that edits the plugin's source without rebuilding fails here rather
-# than publishing an image whose channel server is the old bundle. The tree goes to
-# /out/claude-envoy with its skills symlinks resolved (tar -h), since the image carries no
-# repository root for them to point into, and without the node_modules the workspace install left
-# in it (the .dockerignore keeps the checkout's own out of the context). The tar is written to a
-# file rather than piped into the second one: a pipeline's exit status is its last command's, so a
-# failed pack would unpack nothing and still succeed. The copy drops group and other write, which a
-# checkout's umask may have left, since the runtime stage's final step refuses a plugin file anyone
-# but root can write.
+# claude-envoy ships as a build of this checkout's source rather than a pack: no workflow releases
+# it, its skills/ are relative symlinks into the repository's skills/ that its package.json `files`
+# does not list, and a Claude Code marketplace install takes the git tree itself. That tree's dist/
+# and legion/ are no input here: a pull request never commits them, and main's Rebuild Claude Envoy
+# plugin workflow commits them only after each merge, so they lag the source they were built from.
+# `scripts/build.ts --out` writes /out/claude-envoy from the source instead: the plugin's own files
+# with its skills symlinks resolved, since the image carries no repository root for them to point
+# into, and a fresh dist/ and legion/. It refuses any Bun but the one .bun-version pins, which this
+# stage's base image is (ARG BUN_VERSION; .github/scripts/check-bun-version.sh holds the two equal).
+# The copy drops group and other write, which a checkout's umask may have left, since the runtime
+# stage's final step refuses a plugin file anyone but root can write.
 COPY .bun-version /repo/.bun-version
 COPY packages/claude-envoy /repo/packages/claude-envoy
 WORKDIR /repo/packages/claude-envoy
 RUN set -eu; \
-    bun run check-dist; \
-    mkdir -p /out/claude-envoy; \
-    tar -ch --exclude=./node_modules -f /tmp/claude-envoy.tar .; \
-    tar -xf /tmp/claude-envoy.tar -C /out/claude-envoy; \
-    rm /tmp/claude-envoy.tar; \
+    bun scripts/build.ts --out /out/claude-envoy; \
     chmod -R go-w /out/claude-envoy; \
     test -f /out/claude-envoy/dist/envoy-channel.js; \
     test -f /out/claude-envoy/legion/.claude-plugin/plugin.json
@@ -641,9 +634,9 @@ COPY --from=tools /opt/tools/gh /usr/local/bin/gh
 COPY --from=plugin /out/pi-envoy /opt/legion/pi-envoy
 COPY --from=plugin /out/pi-legion /opt/legion/pi-legion
 # claude-envoy, the plugin root a phase worker on the `claude` backend loads: its package root
-# beside the two Oh My Pi roots (names.go's claudePluginDir), holding the committed build the
-# plugin stage held to a fresh one — `dist/envoy-channel.js`, the worker's one MCP server, and
-# `legion/`, the generated Legion plugin Claude Code loads as a second --plugin-dir (claudelaunch).
+# beside the two Oh My Pi roots (names.go's claudePluginDir), holding the build of this checkout
+# the plugin stage made — `dist/envoy-channel.js`, the worker's one MCP server, and `legion/`, the
+# generated Legion plugin Claude Code loads as a second --plugin-dir (claudelaunch).
 # Every Claude role of an issue pod loads this one copy, so it is root's too.
 COPY --from=plugin /out/claude-envoy /opt/legion/claude-envoy
 # CodeGraph CLI (@colbymchenry/codegraph): the self-contained per-platform bundle alone (bundled

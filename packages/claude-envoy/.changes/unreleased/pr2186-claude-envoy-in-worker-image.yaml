@@ -1,8 +1,9 @@
 kind: Added
 body: |-
-  The Legion worker image carries this package's committed build at `/opt/legion/claude-envoy`, so
-  a phase worker a deployment puts on Claude Code now runs under `runtime: kubernetes` as well as
-  tmux: in its issue pod's one `roles` container, in the role's own namespaces, its command is
+  The Legion worker image carries a build of this package from the image's own commit at
+  `/opt/legion/claude-envoy`, so a phase worker a deployment puts on Claude Code now runs under
+  `runtime: kubernetes` as well as tmux: in its issue pod's one `roles` container, in the role's
+  own namespaces, its command is
   `legion claude-bridge -- claude -p …`, its one MCP server is that root's
   `dist/envoy-channel.js` and its plugins are that root and its generated `legion/`. The copy is
   root's and writable by no one else, as the image's two Oh My Pi plugins are, since every role of

@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test"
+import { afterAll, afterEach, expect, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -141,8 +141,9 @@ function serveStandin(answer: (url: URL, body: Record<string, unknown>) => Respo
 // GitHub Actions because CI's pi-envoy job installs the Oh My Pi pin, nothing in CI installs the
 // Claude Code binary, so there is no host where a skip here would hide the only run of the check.
 //
-// What runs is real: the package's own generated `legion/` plugin tree (the artefact that ships),
-// the package's built `dist/envoy-channel.js` as the pane's `legion` MCP server, and the real
+// What runs is real: a fresh `scripts/build.ts --out` build of this tree, whose generated `legion/`
+// plugin tree and built `dist/envoy-channel.js` (the pane's `legion` MCP server) are what main's
+// rebuild ships from these sources, and the real
 // binary. The stand-ins are the ones a pod has no business reaching — the Anthropic API
 // (ANTHROPIC_BASE_URL), the Legion daemon, the Envoy listener and NATS.
 //
@@ -164,9 +165,37 @@ const SESSION = "6f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f"
 const ISSUE = "LEGION-208"
 const CLAIM_TOKEN = `legion-legion-${ISSUE.toLowerCase()}-implementer`
 
-/** The package root, whose `legion/` is the generated plugin tree and whose `dist/` holds the
- * built MCP server: both are what ships, and a hand-written copy of either would prove nothing. */
+/** The package root, whose `scripts/build.ts` builds the plugin a worker loads. */
 const PACKAGE = resolve(import.meta.dir, "..")
+
+/** The scratch directory of the plugin build, removed after the last case. */
+let pluginScratch: string | undefined
+let pluginBuild: Promise<string> | undefined
+
+/** The plugin a worker loads, built once by the first case that runs: a fresh `--out` build of
+ * this tree, whose `legion/` is the generated plugin tree and whose `dist/` holds the built MCP
+ * server. A pull request's tree carries main's last build of these, never its own, and a
+ * hand-written copy of either would prove nothing. */
+function builtPlugin(): Promise<string> {
+  pluginBuild ??= (async () => {
+    pluginScratch = await mkdtemp(join(tmpdir(), "claude-envoy-phase-hook-plugin-"))
+    const out = join(pluginScratch, "plugin")
+    const script = join(PACKAGE, "scripts", "build.ts")
+    const build = Bun.spawn([process.execPath, script, "--out", out], {
+      cwd: tmpdir(),
+      stdout: "ignore",
+      stderr: "pipe",
+    })
+    const [exitCode, stderr] = await Promise.all([build.exited, new Response(build.stderr).text()])
+    if (exitCode !== 0) throw new Error(`scripts/build.ts --out exited ${exitCode}: ${stderr}`)
+    return out
+  })()
+  return pluginBuild
+}
+
+afterAll(async () => {
+  if (pluginScratch !== undefined) await rm(pluginScratch, { recursive: true, force: true })
+})
 
 /** The reminders stay far away: nothing in these cases waits for a timer, and the architect is
  * never told. The `Stop` continuation is immediate, so only the delays a case must not reach are
@@ -256,7 +285,7 @@ interface WorkerRun {
 /**
  * Runs one Legion phase worker on the real Claude Code binary until its last prompt's run ends:
  * Legion's own agent command (`claudelaunch.Argv`, less the `legion claude-bridge` wrapper, which
- * is transport and launches this same command), the package's built `dist/envoy-channel.js` as the
+ * is transport and launches this same command), the fresh build's `dist/envoy-channel.js` as the
  * one `--mcp-config` server under the name every generated hook entry names, and both plugin
  * directories a worker loads.
  *
@@ -271,6 +300,7 @@ async function runWorker(options: {
   readonly prompts: readonly string[]
   readonly replies: readonly (readonly Block[])[]
 }): Promise<WorkerRun> {
+  const plugin = await builtPlugin()
   const root = await mkdtemp(join(tmpdir(), "claude-envoy-phase-hook-"))
   cleanup.push(() => rm(root, { recursive: true, force: true }))
   const configDir = join(root, "claude")
@@ -351,7 +381,7 @@ async function runWorker(options: {
           command: "/bin/sh",
           args: [
             "-c",
-            `exec '${process.execPath}' '${join(PACKAGE, "dist", "envoy-channel.js")}' 2>>'${paneLogFile}'`,
+            `exec '${process.execPath}' '${join(plugin, "dist", "envoy-channel.js")}' 2>>'${paneLogFile}'`,
           ],
           env: { CLAUDE_PLUGIN_DATA: join(configDir, "envoy-plugin-data") },
         },
@@ -374,9 +404,9 @@ async function runWorker(options: {
       "--mcp-config",
       mcpConfig,
       "--plugin-dir",
-      PACKAGE,
+      plugin,
       "--plugin-dir",
-      join(PACKAGE, "legion"),
+      join(plugin, "legion"),
       "--session-id",
       SESSION,
       // Not Legion's: the log this file reads its hook observations out of.
@@ -523,7 +553,7 @@ test.skipIf(claude === undefined)(
 
     // 1. Claude Code armed the generated plugin's hook entries, from the tree that ships.
     expect(run.debug).toContain(
-      `Read hooks.json for plugin legion (enabled=true): ${join(PACKAGE, "legion", "hooks", "hooks.json")}`,
+      `Read hooks.json for plugin legion (enabled=true): ${join(await builtPlugin(), "legion", "hooks", "hooks.json")}`,
     )
     expect(run.hooks.map(({ event }) => event)).toEqual([
       "UserPromptSubmit",

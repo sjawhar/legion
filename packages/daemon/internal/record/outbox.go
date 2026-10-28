@@ -466,9 +466,10 @@ type ReadyMerge struct {
 func (ReadyMerge) OutboxKind() OutboxKind { return OutboxKindReadyMerge }
 
 // CheckCompare wakes a production check from a build or from a deploy run, whichever of Build and
-// Deploy it carries (exactly one). Build is the commit a daemon boot or a Dispatch start reported
-// itself built from: the executor runs a GitHub compare of the check's merge commit with it, as the
-// implement App, and starts the look Look when the build contains the merge. Deploy is a completed
+// Deploy it carries (exactly one). Build is the commit a daemon boot reported itself built from,
+// or Dispatch announced every server process serves (server.started): the executor runs a GitHub
+// compare of the check's merge commit with it, as the implement App, and starts the look Look when
+// the build contains the merge. Deploy is a completed
 // run attempt of a deploy workflow the project names (`projects.<KEY>.deploys`): the executor reads
 // the run and its jobs from GitHub, and wakes the check once for each job whose named step succeeded
 // after the pull request merged. Cause names what asked for it (`daemon boot`, `dispatch start`,

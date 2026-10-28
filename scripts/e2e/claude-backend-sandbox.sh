@@ -225,7 +225,7 @@ nats_container="legion-e2eccs-nats-$$"
 # tests against, as Stage 4a's and Stage 4b's), and the providers Secret key its URL reaches every
 # pod under (runtime.kubernetes.session_dsn_secret).
 session_db_container="legion-e2eccs-db-$$"
-session_db_image=pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+session_db_image=mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
 session_dsn_key=SESSION_DSN
 daemon_log=$evidence/logs/daemon.log
 # The daemon's container under bridge (daemon_run_args): its name, whose prefix and trailing pid
@@ -1272,9 +1272,9 @@ built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" "$work
   fail "lib/built-from.sh could not say what the run built"
 while IFS= read -r line; do note "$line"; done <<<"$built"
 # Postgres is the daemon's and Dispatch's alone, so it stays on loopback: no pod reads it.
-docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \
+docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql \
   -e POSTGRES_USER=legion -e POSTGRES_PASSWORD="$(cat "$work/postgres-password")" -e POSTGRES_DB=dispatch \
-  -p "127.0.0.1::5432" pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a >/dev/null
+  -p "127.0.0.1::5432" mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 >/dev/null
 port_pg=$(docker port "$pg_container" 5432/tcp | sed -n '1s/.*://p')
 [ -n "$port_pg" ] || fail "docker assigned Postgres no host port"
 until_true 60 "Postgres to accept TCP connections" docker exec "$pg_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d dispatch

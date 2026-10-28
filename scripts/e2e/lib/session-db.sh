@@ -35,7 +35,7 @@ session_db_start() {
     printf 'POSTGRES_USER=legion\nPOSTGRES_DB=sessions\nPOSTGRES_PASSWORD=%s\n' "$password" >"$work/session-db.env"
     printf 'postgres://legion:%s@%s:%s/sessions?sslmode=disable\n' "$password" "$host" "$port_session_db" >"$work/session-dsn"
   )
-  docker run -d --name "$session_db_container" "$@" --mount type=tmpfs,destination=/var/lib/postgresql/data \
+  docker run -d --name "$session_db_container" "$@" --mount type=tmpfs,destination=/var/lib/postgresql \
     --env-file "$work/session-db.env" -p "$bind:$port_session_db:5432" "$session_db_image" >/dev/null ||
     fail "docker could not start the scratch session database $session_db_container on $bind:$port_session_db"
   until_true 60 "the session database to accept TCP connections" docker exec "$session_db_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d sessions

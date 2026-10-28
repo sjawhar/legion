@@ -252,10 +252,15 @@ makes the same refusals:
 - `LEGION_CLAUDE_PATH`, the `claude` executable, else the first `claude` on `PATH`;
 - `LEGION_BUN_PATH`, the `bun` the MCP server runs on, else the first `bun` on `PATH`;
 - `LEGION_CLAUDE_PLUGIN_DIR`, the absolute path of a built `packages/claude-envoy`: it must hold
-  `dist/envoy-channel.js` and the generated Legion plugin's `legion/.claude-plugin/plugin.json`
-  (`bun run build` in that package writes both). No workflow releases this package, so build it
-  from a checkout of a commit on `main`, never of a branch (`AGENTS.md`, "Deploys come only from
-  main").
+  `dist/envoy-channel.js` and the generated Legion plugin's `legion/.claude-plugin/plugin.json`.
+  A checkout of a commit on `main`, never of a branch, already holds both (`AGENTS.md`, "Deploys
+  come only from main"): main's Rebuild Claude Envoy plugin workflow commits them after each merge.
+  `bun run check-dist` in that package confirms them. A checkout taken after a merge and before its
+  rebuild commit (one run of that workflow, its runner queues included) holds the previous build:
+  build the plugin from it with `bun scripts/build.ts --out <dir>` in that package, into a
+  directory outside the checkout, and point `LEGION_CLAUDE_PLUGIN_DIR` at `<dir>` until the rebuild
+  commit lands. That leaves the checkout's tracked files as they are, so its next `git pull`
+  fast-forwards.
 
 A missing one refuses the boot, naming every gap in one line. The three are tmux's alone: a pod
 resolves nothing. Its bun and its claude-envoy root are the worker image's, at fixed paths

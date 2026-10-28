@@ -121,7 +121,7 @@ repo=sjawhar/legion-smoke
 second_owner_repo=${LEGION_E2E_REPO_SECOND_OWNER:-}
 previous_image=${LEGION_E2E_PREVIOUS_IMAGE:-}
 # The scratch session database's image: the pinned Postgres the repository's CI tests against.
-session_db_image=pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+session_db_image=mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
 session_db_port=${LEGION_E2E_SESSION_DB_PORT:-}
 operator=${LEGION_E2E_OPERATOR_CONTEXT:-production}
 runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-production}
@@ -386,7 +386,7 @@ session_db_password=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
 )
 unset session_db_password
 session_db_started=1
-docker run -d --name "$session_db" --cpus 2 --memory 4g --mount type=tmpfs,destination=/var/lib/postgresql/data \
+docker run -d --name "$session_db" --cpus 2 --memory 4g --mount type=tmpfs,destination=/var/lib/postgresql \
   --env-file "$work/session-db.env" -p "$bind_host:$session_db_port:5432" "$session_db_image" >/dev/null ||
   fail "docker could not start the scratch session database $session_db on $bind_host:$session_db_port"
 ready=
