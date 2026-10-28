@@ -2,27 +2,30 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-493",
-  "completed": "2026-10-28T22:10:00Z",
-  "headTested": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
+  "completed": "2026-10-28T22:20:00Z",
+  "headTested": "ac10118d1eccb0207171017ecf3b708c1f900429",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its W11 command (`cd packages/daemon && go test -count=1 ./internal/intake/ -run TestADeliveryNATSRefusedIsRedeliveredByTheSweepAndApplied -v`, real listener and real `dispatch redeliver-webhooks` binaries): listener 503, one redelivery request, github.8a4f2c10-… applied once, acme/widgets#7 open on ACME-7. Drove its `legion start` proof surface independently on a rig of my own (branch binary built at 55eb11c8, embedded Postgres 16.4, nats-server 2.10.22, project TPROOF): deleted consumer resumed by_start_time after the last applied message, webhook App missing line for installed:false and 404, consumer lag and STALLED lines, all as its proof says."
+    "how": "The fix 7aa6d160 changes only drain_test.go (processedGitHubEvents reads without `order by` and sorts in Go). Re-ran `cd packages/daemon && LEGION_TEST_DRAIN_MEASURE=1 go test -count=1 ./internal/intake/ -run BacklogOfOtherPullRequests -v` at ac10118d on the embedded Postgres 16.4 with template1 under ICU en-US-u-ka-shifted (the collation that failed it at 55eb11c8): PASS, drained 17.341 s; under C: PASS, 17.452 s."
   },
-  "failures": [
-    {
-      "criterion": "Required CI green at the head (the `test` job of pr-and-main.yaml and the Daemon Go suite on Postgres 16); acceptance 3.3's drain test",
-      "evidence": "TestABacklogOfOtherPullRequestsDrainsAndAppliesEveryLegionEvent (packages/daemon/internal/intake/drain_test.go:229-231) compares `processedGitHubEvents`, read with `select source || ':' || event_id from processed_events order by 1` (drain_test.go:386), against a list sorted with Go's byte order (slices.Sort, drain_test.go:228). The SQL order follows the database's collation, so on any database whose collation ignores punctuation the two orders differ (`legion-33-checks` sorts before `legion-3-checks`) and the test fails although the set is exactly right. Red at 55eb11c8 in the required `test` job (https://github.com/sjawhar/legion/actions/runs/40762777994/job/123078824809, drain_test.go:230 `processed events = [... legion-28-checks legion-33-checks legion-38-checks legion-3-checks ...], want exactly the 50 Legion events [... legion-28-checks legion-3-checks legion-33-checks ...]`) and in `Daemon Go suite on production's Postgres 16` (job 123078824276, same line). Reproduced in the pod: with template1 recreated `locale_provider icu icu_locale 'en-US-u-ka-shifted'` on an embedded Postgres 16.4, `cd packages/daemon && LEGION_TEST_PG_DSN=<that server> LEGION_TEST_NATS_URL=<idle nats-server 2.10.22> go test -count=1 ./internal/intake/ -run BacklogOfOtherPullRequests -v` fails at drain_test.go:230 with the same ordering; on the same server with template1 under the C collation it passes (drained 16.902 s, 17.170 s, 17.382 s with LEGION_TEST_DRAIN_MEASURE=1). The existing test is the red test: make the comparison independent of the collation (sort `got` in Go, or `order by 1 collate \"C\"`). No product code is wrong here; the head cannot merge while the required `test` job is red."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "mainRedsNotThisChange": [
     "packages/dispatch/e2e/recipients-claim.e2e.ts 'a route change that closes the issue…' (fixed by #2324)",
     "packages/envoy/infra/gcp TestDispatchConnectionsPerPodIsTheServers 84 vs 83 (fixed by #2464)",
     "packages/dispatch/e2e/mermaid.e2e.ts:194 'a diagram too large to draw in time…' (INFRA-138)",
     "packages/envoy/internal/dispatch/pmdoc does not compile since #2448 (docstest.NestedValue moved; #2481 fixes it)"
   ],
-  "ciAtHead": "Read on GitHub at 55eb11c8 at 22:05Z: lint, typecheck, build, changes, pr-title green; test and Daemon Go suite on Postgres 16 red (the failure above, the only failing Go test in each); the package lanes (envoy-go, contracts, pi-legion, dispatch and the rest) were still queued.",
+  "ciAtHead": "Read on GitHub at ac10118d at 22:16Z: pr-title (one run) cancelled and re-queued; lint, typecheck, build, changes, test and the Daemon Go suite on Postgres 16 queued (read as running, not waited on). 7aa6d160 has no runs of its own: the push's head is ac10118d.",
   "proof": [
+    {
+      "criterion": "Round-1 failure: the drain test passes whatever the database's collation, and still holds every Legion event applied (3.3)",
+      "surface": "the daemon's real consumer and handlers in the drain test, embedded Postgres 16.4, idle nats-server 2.10.22",
+      "command": "recreate template1 with locale_provider icu icu_locale 'en-US-u-ka-shifted'; cd packages/daemon && LEGION_TEST_DRAIN_MEASURE=1 go test -count=1 ./internal/intake/ -run BacklogOfOtherPullRequests -v; then template1 under C and the same command",
+      "observed": "shifted: PASS, drained in 17.341s; C: PASS, drained in 17.452s (bound 60 s)",
+      "headSha": "ac10118d1eccb0207171017ecf3b708c1f900429",
+      "negativeControl": "the same command under the shifted collation at 55eb11c8 failed at drain_test.go:230 with legion-33-checks ordered before legion-3-checks (round 1)"
+    },
     {
       "criterion": "Architect's requirement: the daemon drops a GitHub fact it already applied by the envelope's dedupe_key, so the same delivery published twice with different event_ids and no Nats-Msg-Id is applied once",
       "surface": "the branch's real `legion start` binary (55eb11c8) on embedded Postgres 16.4 and nats-server 2.10.22, envelopes published straight to ENVOY_NOTIFICATIONS with no MsgId and a fresh event_id each",
@@ -91,5 +94,12 @@
   "notes": [
     "scripts/e2e/merged-root-waits.sh cannot run in this pod: the boot's relaunch provisions acme/widgets with `jj git clone https://github.com/acme/widgets`, which the pod's credential helper refuses; the throwaway drivers pre-created the shared clone and workspace instead.",
     "Acceptance 3.4 (three read_state readings an hour apart) is the production check's, after the merge (architect 21:33Z)."
-  ]
+  ],
+  "round": 2,
+  "previousRound": {
+    "head": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
+    "verdict": "fail",
+    "failure": "TestABacklogOfOtherPullRequestsDrainsAndAppliesEveryLegionEvent (packages/daemon/internal/intake/drain_test.go:229-231) compares `processedGitHubEvents`, read with `select source || ':' || event_id from processed_events order by 1` (drain_test.go:386), against a list sorted with Go's byte order (slices.Sort, drain_test.go:228). The SQL order follows the database's collation, so on any database who…"
+  },
+  "roundTwoScope": "`jj diff --from 19626ddd --to ac10118d` touches only .legion/INFRA-493/implement.json and packages/daemon/internal/intake/drain_test.go, so no product code changed since round 1: the round-1 real-surface proofs (run at 55eb11c8) hold for ac10118d, whose product files are byte-identical."
 }
