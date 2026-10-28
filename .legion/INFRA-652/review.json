@@ -2,49 +2,45 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-652",
-  "completed": "2026-10-28T08:51:29Z",
-  "decision": "changes_requested",
-  "reviewedCodeHead": "76dbf9108bb35f9c619728744d48486c6d4aa195",
+  "completed": "2026-10-28T10:13:47Z",
+  "round": 2,
+  "decision": "approved",
+  "reviewedCodeHead": "e66f2b32fc3579f7a8e426bbce0059b04425f2b4",
   "critical": 0,
-  "important": 2,
-  "minor": 2,
+  "important": 0,
+  "minor": 3,
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/agents.go:94",
-      "description": "Shutdown drain answers the agents list 503 from a healthy listener. The shared roster fetch runs on s.lifetime() (issue_route_status.go:141), which main.go:182/338 sets to the SIGTERM context, while shutdown.go:68-93 keeps serving requests in flight through http.Server.Shutdown. After SIGTERM, an agents list whose copy has expired gets an unanswered roster with 'context canceled' and answers 503 ENVOY_UNAVAILABLE (cached for the 5 s silence), where base, reading on the request's context, answered 200. Reproduced with a throwaway test: cancelled Lifetime + healthy listener -> answered=false, writeEnvoyError -> 503; Envoy.Sessions on the request context -> 1 session. Not among the failure paths the architect accepted. Fix in this PR, with a permanent test (cancelled Lifetime, healthy listener -> GET /api/v1/agents 200)."
-    },
-    {
-      "severity": "important",
-      "file": "PR body",
-      "description": "The PR adds a boot refusal at a process boundary (DISPATCH_TEST_ROSTER_UNCACHED without DISPATCH_TEST_HOOKS=1, cmd/dispatch/main.go:662-665) and carries no '## Contract change census'. Add one: the search for DISPATCH_TEST_ROSTER_UNCACHED, each hit with its disposition (run-server.sh:151 and the acceptance compose:47, both beside DISPATCH_TEST_HOOKS=1), and the rollout line (immediate refusal, naming what it closes: a test-only bypass of the roster copy reaching a deployment)."
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/agents.go:83",
+      "description": "Doc comments omit the shutdown-drain path: listAgents' 'answers 503 for as long as that copy is a silence' (agents.go:83-84) and readRouteRoster's 'listAgents ... answers 503 with the roster's err' (issue_route_status.go:115-117); routeRoster.err says 'the listener client's own error' while the ctx.Done branch (issue_route_status.go:149) wraps the request's own end. Wording only; on the fast-follow."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/issue_route_status.go:70",
-      "description": "routeRosterSilenceTTL comment still says every read in the window reads unknown and a failed fetch serves unknown; an agents list now answers the cached 503 there."
+      "file": "packages/envoy/internal/dispatch/api/agents_test.go:289",
+      "description": "The recovery half of TestAgentsAnswer503ThroughTheSilenceWindowAndListOnceTheListenerRecovers repeats issue_route_status_cache_test.go's silence-window recovery test and costs a 2.2 s sleep. Duplication only; on the fast-follow."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/agents.go:82",
-      "description": "'at most routeRosterTTL (5 s) old plus the fetch that answered it' disagrees with fetchRouteRoster, which counts the TTL from the moment the read was sent (issue_route_status.go:153-160), and with every other doc in the diff ('at most 5 s')."
+      "file": "packages/envoy/internal/dispatch/api/agents_test.go:417",
+      "description": "The drain test cancels the lifetime before the first read; a read already waiting on a fetch when SIGTERM lands takes the same branch and answers 200 (deep review's throwaway heldRosterMux test under -race; tester's binary drain case B: 5x 200). Not a defect: the behaviour is proven and the permanent test fails without the fix."
     }
   ],
   "declined": [
     {
-      "source": "thermonuclear-code-quality, important 1",
-      "finding": "Fold DISPATCH_TEST_ROSTER_UNCACHED into DISPATCH_TEST_HOOKS.",
-      "reason": "Not a defect: the plan chose an explicit setting (plan task 4, plan review approved), the boot refusal keeps it test-only, and a hooks harness with the copy on stays a valid mode."
-    },
-    {
-      "source": "thermonuclear-code-quality, minor 4",
-      "finding": "routeRoster.err nil while unanswered (listener unconfigured).",
-      "reason": "Not a defect: listAgents answers the unconfigured case at agents.go:89-92 before reading the roster, and the routeRoster comment documents the nil case."
+      "source": "thermonuclear-code-quality round 2, important 1",
+      "finding": "Move the shutdown fix into the cache (context.WithoutCancel on the shared fetch) instead of the listAgents fallback.",
+      "reason": "Not a defect: a design preference. The fallback is the narrowest change, keeps TestAShutdownEndsAFetchInFlight's rule, leaves issue reads' drain behaviour as at base, and the deep review and tester show it correct in every drain case (healthy, cached failure, cancelled request, hung listener bounded at 2 s)."
     }
   ],
-  "fastFollow": "Drop the agents tests that repeat existing coverage: agents_test.go:264-285 (TTL expiry, as issue_route_status_cache_test.go:122-141) and agents_test.go:439-461 (uncached flag, as settings_test.go's router subtest).",
-  "ci": "Required set lint, typecheck, test, pr-title (rulesets; no branch protection). CI head 76dbf9108bb3 (newest pull_request run): lint, typecheck, test success; pr-title success (run 40558843935; two earlier runs cancelled). Compare 76dbf9108bb3...0ba52b8c296: handoffsOnly true, 2 files.",
-  "e2eLines": "E2E (implementer) and E2E (tester) both present in the PR body.",
-  "threads": "0 review threads on GitHub at the time of review.",
-  "thermonuclear": "Both run at 76dbf9108bb3: deep review 0 critical / 0 important / 2 minor; code quality 0 critical / 1 important (declined) / 3 minor."
+  "roundOneThreads": [
+    "PRRT_kwDORFy7ds6xC3TC: fixed in e66f2b32fc35, verified, accepted (reply r4399311684)",
+    "PRRT_kwDORFy7ds6xC3TG: fixed in e66f2b32fc35, verified, accepted (reply r4399311945)",
+    "PRRT_kwDORFy7ds6xC3TI: fixed in e66f2b32fc35, verified, accepted (reply r4399312227)"
+  ],
+  "census": "Re-ran grep -rn DISPATCH_TEST_ROSTER_UNCACHED at the head: hits outside the change's own code/tests/settings/CHANGELOG are run-server.sh:151 and the acceptance compose:47, both beside DISPATCH_TEST_HOOKS=1, as the body lists; the deployment repository code search returns []. Rollout: immediate refusal naming what it closes.",
+  "fastFollow": "Bring the listAgents, readRouteRoster and routeRoster.err doc comments up to the drain path and the ctx.Done error, and drop the recovery half (and its 2.2 s sleep) of TestAgentsAnswer503ThroughTheSilenceWindowAndListOnceTheListenerRecovers, which issue_route_status_cache_test.go already covers.",
+  "ci": "Required set lint, typecheck, test, pr-title (rulesets). CI head e66f2b32fc35 (newest pull_request run): lint, typecheck, test success; pr-title success (run 40665197931). Compare e66f2b32fc35...b31215ed2346: handoffsOnly true, 2 files.",
+  "e2eLines": "E2E (implementer) and E2E (tester) both present and name head e66f2b32fc35 (tester at bfb101233874, code e66f2b32).",
+  "thermonuclear": "Both run at e66f2b32fc35: deep review approve, 0 critical / 0 important / 2 minor; code quality 0 critical / 1 important (declined) / 2 minor."
 }
