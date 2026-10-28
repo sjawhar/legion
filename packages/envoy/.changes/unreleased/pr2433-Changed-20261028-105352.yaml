@@ -6,13 +6,15 @@ body: |-
     ask. The options sent must include, with the same label and description, every option the
     decision's lists hold that its ask does not, which the reason quotes in full; the rebuilt list
     keeps each option's plain text, so such an option that holds more below its text (a nested list,
-    a second paragraph) is refused whatever the edit sends, quoting that content, and a document
-    edit moves or deletes it first. A decision whose lists hold two options with one label is
+    a second paragraph) is refused whatever the edit sends: the reason quotes in full, by block id,
+    the list to delete with a document edit (`dispatch doc-edit`), which leaves one list, before the
+    ask edit sends every option. A decision whose lists hold two options with one label is
     refused whatever the edit sends, quoting both: remove one with a document edit, then edit the
     ask sending every option, the removed one renamed. Before, an edit of only its urgency or `multiple` wrote its options, joined across both
     lists, to the ask. A decision holding a paragraph after its options is refused whatever the
     edit sends, `options` included, and the reason quotes that text: the route never moves it into
-    the question nor deletes it, so a document edit moves or deletes it first.
+    the question nor deletes it, so a document edit moves it out of the decision or deletes it
+    first.
 time: 2026-10-28T10:53:52.572551815Z
 custom:
     Issue: pr2433
