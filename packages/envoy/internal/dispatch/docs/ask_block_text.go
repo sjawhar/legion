@@ -158,9 +158,14 @@ func (s *Service) SetAskBlockText(
 }
 
 // askBlockBodyChanges reports whether edit still names a part of the body to rewrite, after the
-// parts it names but does not change have been dropped.
+// parts it names but does not change have been dropped. Options sent to a block that breaks its
+// content rule always count as a change: the joined reading of a two-list ask can equal them, yet
+// rebuilding them as one list is the repair the refusal tells the caller to send.
 func askBlockBodyChanges(current askBlock, edit AskBlockEdit) bool {
 	if edit.Question != nil && normalizeAskQuestion(*edit.Question) != current.question {
+		return true
+	}
+	if edit.Options != nil && pmdoc.AskContentError(current.node) != nil {
 		return true
 	}
 	return edit.Options != nil && !reflect.DeepEqual(normalizeAskOptions(*edit.Options), current.options)
@@ -184,11 +189,14 @@ func askBlockChildren(current askBlock, edit AskBlockEdit, budget *pmdoc.WriteBu
 
 	// A field the caller named but did not change is not rewritten. An idempotent retry sends
 	// the whole ask back, and rebuilding nodes that already say the same thing would mint fresh
-	// inner block ids and orphan the anchors inside them for no change at all.
+	// inner block ids and orphan the anchors inside them for no change at all. Options sent to a
+	// block that breaks its content rule are kept even when they equal its joined reading: the
+	// loop above keeps only the last list, so only rebuilding them yields one list holding all.
 	if edit.Question != nil && normalizeAskQuestion(*edit.Question) == current.question {
 		edit.Question = nil
 	}
-	if edit.Options != nil && reflect.DeepEqual(normalizeAskOptions(*edit.Options), current.options) {
+	if edit.Options != nil && pmdoc.AskContentError(current.node) == nil &&
+		reflect.DeepEqual(normalizeAskOptions(*edit.Options), current.options) {
 		edit.Options = nil
 	}
 
