@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-652",
+  "completed": "2026-10-28T12:51:03Z",
+  "round": 4,
+  "scope": "Narrowed by the INFRA-512 architect: only the docs/solutions rename delta.",
+  "decision": "approved",
+  "reviewedCodeHead": "143ec5b5f6cc8645135dd7cf496fc5c91aec0c58",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "delta": "GitHub compare e06753bd7299...162c483d82a3 (my last approval to the head): ahead, 7 files, only docs/solutions/ (three added learnings) and .legion/INFRA-652/. Within 733870d5...143ec5b5: three renames from -INFRA-652.md to -pr2429.md, each dropping its related_issues block, and one prose 'the INFRA-56 rule' reworded to 'that document's rule'. The only issue keys left in the three files are the two 'Extends' paths, which name docs/solutions/testing/...-INFRA-56.md and ...-INFRA-228.md, both present on main@origin.",
+  "thermonuclear": "None: docs-only delta.",
+  "ci": "Required set lint, typecheck, test, pr-title. CI head 143ec5b5f6cc (newest pull_request run): all four completed success. Compare 143ec5b5f6cc...162c483d82a3: handoffsOnly true, 2 files.",
+  "threads": "0 unresolved.",
+  "e2eLines": "E2E (implementer) and E2E (tester) present.",
+  "fastFollow": "none"
+}
