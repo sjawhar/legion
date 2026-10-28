@@ -853,6 +853,7 @@ const TEXT_PARENTS: Record<string, true> = {
 
 interface ParsedNode {
   type: string;
+  value?: string;
   children?: ParsedNode[];
   position?: { start: { line: number } };
 }
@@ -861,19 +862,34 @@ interface ParsedNode {
  * A parsed node as it renders: positions dropped, the looseness of lists dropped, and whitespace
  * folded in values that run as text (text and an image's alt text). Inline code, code blocks, HTML,
  * inline or not, and link titles keep their values exactly, so a change inside a code span always
- * refuses.
+ * refuses. So do the values inside an element VERBATIM_OPEN opens among the children of a text
+ * parent, up to its close tag among the same children (`verbatim`), so a change inside an inline
+ * `<pre>` or `<code>` element always refuses too.
  */
-function renderedForm(node: ParsedNode, inText: boolean): unknown {
+function renderedForm(node: ParsedNode, inText: boolean, verbatim = false): unknown {
   const form: Record<string, unknown> = {};
   const childrenInText = inText || TEXT_PARENTS[node.type] === true;
   for (const [key, value] of Object.entries(node)) {
     if (key === "position") continue;
     if (key === "spread" && (node.type === "list" || node.type === "listItem")) continue;
     if (key === "children") {
-      form.children = node.children?.map((child) => renderedForm(child, childrenInText));
+      let close: RegExp | undefined;
+      form.children = node.children?.map((child) => {
+        if (verbatim || !childrenInText || child.type !== "html" || child.value === undefined) {
+          return renderedForm(child, childrenInText, verbatim || close !== undefined);
+        }
+        if (close === undefined) {
+          const element = VERBATIM_OPEN.exec(child.value)?.[1];
+          if (element !== undefined) close = new RegExp(`^</${element}\\s*>$`, "i");
+        } else if (close.test(child.value)) {
+          close = undefined;
+        }
+        return renderedForm(child, childrenInText);
+      });
     } else if (
       ((key === "value" && node.type === "text") || key === "alt") &&
       inText &&
+      !verbatim &&
       typeof value === "string"
     ) {
       form[key] = value.replace(WHITESPACE_RUN, " ");
@@ -970,7 +986,7 @@ function secondRelayoutDifference(text: string): string | undefined {
   const changed = again.split("\n");
   let line = 0;
   while (lines[line] === changed[line]) line++;
-  return `a second re-layout would change it again (first difference at line ${line + 1})`;
+  return `a second re-layout would change it again (first difference at line ${line + 1} of the re-laid-out text)`;
 }
 
 function screenRows(lines: readonly string[]): number {

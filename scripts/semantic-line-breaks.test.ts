@@ -293,8 +293,45 @@ test("--write refuses, writing nothing, a re-layout that a second re-layout woul
   const path = await markdownFile(text);
   const result = Bun.spawnSync(["bun", SCRIPT, "--write", path], { cwd: REPO_ROOT });
   expect(result.stderr.toString()).toBe(
-    `${path}: refusing to write: a second re-layout would change it again (first difference at line 1)\n`
+    `${path}: refusing to write: a second re-layout would change it again (first difference at line 1 of the re-laid-out text)\n`
   );
   expect(result.exitCode).toBe(2);
   expect(await readFile(path, "utf8")).toBe(text);
+});
+
+/** `--write` on `text`, which it must refuse: the refusal on stderr, the exit code, the file after. */
+async function refused(text: string) {
+  const path = await markdownFile(text);
+  const result = Bun.spawnSync(["bun", SCRIPT, "--write", path], { cwd: REPO_ROOT });
+  return {
+    path,
+    stderr: result.stderr.toString(),
+    exitCode: result.exitCode,
+    text: await readFile(path, "utf8"),
+  };
+}
+
+test("--write refuses a join inside a <pre> element on a blockquote's lazy line", async () => {
+  const text = "> Quote <pre>\nline one\nline two</pre>\n";
+  const result = await refused(text);
+  expect(result.stderr).toContain(`${result.path}: refusing to write: the block at line 1`);
+  expect(result.exitCode).toBe(2);
+  expect(result.text).toBe(text);
+});
+
+test("--write refuses a join inside a <pre> element in a footnote definition's text", async () => {
+  const text = "[^1]: Run <pre>\nline one\nline two</pre>\n\nText[^1].\n";
+  const result = await refused(text);
+  expect(result.stderr).toContain(`${result.path}: refusing to write: the block at line 1`);
+  expect(result.exitCode).toBe(2);
+  expect(result.text).toBe(text);
+});
+
+test("--write refuses a join inside a <code> element past an escaped close tag", async () => {
+  // `\</code>` is text, so the element runs to the second `</code>`, over the line break.
+  const text = "Use <code>a \\</code> b\nc</code> here.\n";
+  const result = await refused(text);
+  expect(result.stderr).toContain(`${result.path}: refusing to write: the block at line 1`);
+  expect(result.exitCode).toBe(2);
+  expect(result.text).toBe(text);
 });
