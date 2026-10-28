@@ -69,7 +69,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("a comment holding a mermaid block draws a diagram, its source behind Mermaid source", async ({
+test("a comment holding a mermaid block draws a diagram, its source behind Mermaid source @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -88,7 +88,7 @@ test("a comment holding a mermaid block draws a diagram, its source behind Merma
   }
 });
 
-test("an ask's question holding a mermaid block draws a diagram on the Inbox card", async ({
+test("an ask's question holding a mermaid block draws a diagram on the Inbox card @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -111,7 +111,7 @@ test("an ask's question holding a mermaid block draws a diagram on the Inbox car
   }
 });
 
-test("an issue message holding a mermaid block draws a diagram in the Conversation", async ({
+test("an issue message holding a mermaid block draws a diagram in the Conversation @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -134,7 +134,7 @@ test("an issue message holding a mermaid block draws a diagram in the Conversati
   }
 });
 
-test("a reply to a comment holding a mermaid block draws a diagram under its comment", async ({
+test("a reply to a comment holding a mermaid block draws a diagram under its comment @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -160,7 +160,7 @@ test("a reply to a comment holding a mermaid block draws a diagram under its com
   }
 });
 
-test("a mermaid source the renderer refuses shows the reason and its source, and no diagram", async ({
+test("a mermaid source the renderer refuses shows the reason and its source, and no diagram @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -191,7 +191,7 @@ test("a mermaid source the renderer refuses shows the reason and its source, and
 // ELK's layout time grows faster than the diagram: a flowchart of 800 nodes with 2 edges each
 // takes over a minute. Drawn on the page's own thread it held every reader of the comment there;
 // in the worker the page keeps answering and the time limit refuses it.
-test("a diagram too large to draw in time shows the reason, and the page keeps responding", async ({
+test("a diagram too large to draw in time shows the reason, and the page keeps responding @phone", async ({
   browser,
 }, testInfo) => {
   const nodes = 800;
@@ -239,7 +239,7 @@ test("a diagram too large to draw in time shows the reason, and the page keeps r
   }
 });
 
-test("a mermaid label holding markup draws as text, never as an element", async ({
+test("a mermaid label holding markup draws as text, never as an element @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -264,7 +264,7 @@ test("a mermaid label holding markup draws as text, never as an element", async 
   }
 });
 
-test("a code block in another language stays code", async ({ browser }, testInfo) => {
+test("a code block in another language stays code @phone", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "TypeScript block" });
   const comment = await createComment(issue.key, {
