@@ -229,6 +229,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/model/*'
               - 'packages/envoy/internal/dispatch/outbox/*'
               - 'packages/envoy/internal/dispatch/pmdoc/**'
+              - 'packages/envoy/internal/dispatch/processes/*'
               - 'packages/envoy/internal/dispatch/rank/*'
               - 'packages/envoy/internal/dispatch/redeliver/*'
               - 'packages/envoy/internal/dispatch/refs/*'
@@ -756,13 +757,14 @@ jobs:
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
             # `go test -tags memory ./cmd/dispatch`. memory_profile_test.go reads four guides only
             # when DISPATCH_EDIT_PROFILE_OUT is set (its line 126), which CI never sets, so they are
-            # not here.
+            # not here. cmd/dispatch/nats_unreachable_test.go, which carries no tag, starts the
+            # in-process NATS (its line 47).
             dispatch_memory:
               - '.github/workflows/ci.yaml'
               - *go_workspace
               - *dispatch_command_tests
-            # `go test -tags multiprocess ./cmd/dispatch`, the same closure as dispatch_memory, with
-            # the in-process NATS.
+              - 'packages/envoy/internal/testnats/*'
+            # `go test -tags multiprocess ./cmd/dispatch`, the same closure as dispatch_memory.
             dispatch_multiprocess:
               - '.github/workflows/ci.yaml'
               - *go_workspace

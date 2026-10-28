@@ -1235,9 +1235,11 @@ func requireWaitsForTheFrontDoor(t *testing.T, m *pulumitest.Mocks, deployment, 
 		dials+" dials the proxy at its Service, not at the pod")
 }
 
-// envoy-dispatch exits 1 when it cannot reach NATS through the proxy, and its /healthz answers 503
-// until it connects, so an app pod started before the front door and its Service exist never goes
-// ready and the rollout waits it out.
+// envoy-dispatch serves without NATS: its /healthz readiness reads only Postgres, reporting nats
+// false, and its bus clients connect in the background once the front door's proxy answers. So an
+// app pod started before the front door and its Service would still go ready, serving without
+// the bus until the proxy answers; the app waits for the front door only so that it starts
+// connected.
 func TestDispatchAppWaitsForTheFrontDoor(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -1600,7 +1602,7 @@ func podProbes(t *testing.T, m *pulumitest.Mocks, deployment string) map[string]
 }
 
 // A liveness probe restarts a container, so it fails only when the process does not answer at
-// all: Dispatch's and the listener's /healthz answer 503 while Postgres or NATS is down, and run
+// all: Dispatch's /healthz answers 503 while Postgres is down and the listener's while NATS is, and run
 // those checks on every call, so a liveness or startup probe failing on that, or waiting on it,
 // would turn a dependency outage or a slow hub into a restart of every pod. So no liveness or
 // startup command passes curl -f (any short-option cluster holding f, or --fail), none is an

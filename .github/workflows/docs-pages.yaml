@@ -135,6 +135,7 @@ on:
       - 'packages/envoy/internal/dispatch/model/*'
       - 'packages/envoy/internal/dispatch/outbox/*'
       - 'packages/envoy/internal/dispatch/pmdoc/**'
+      - 'packages/envoy/internal/dispatch/processes/*'
       - 'packages/envoy/internal/dispatch/rank/*'
       - 'packages/envoy/internal/dispatch/redeliver/*'
       - 'packages/envoy/internal/dispatch/refs/*'
