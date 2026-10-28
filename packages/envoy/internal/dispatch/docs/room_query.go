@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -41,7 +42,7 @@ import (
 // merge of the member's unstored updates, the one whose append is under way included, since an
 // update stays listed until its append has returned (StoreUpdateContext). One over
 // roomShareLimit answers "too_large" and no updates. An answer whose notification would pass
-// roomQueryPayloadLimit is split into parts numbered from 0, actors and then the base64 of the
+// roomSyncPayloadLimit is split into parts numbered from 0, actors and then the base64 of the
 // updates spread across them in order, the last part flagged "last"; the asker puts them back
 // together before it reads the answer.
 //
@@ -62,17 +63,11 @@ const (
 const (
 	// roomQueryWait is the longest an asker waits for the other members' answers.
 	roomQueryWait = 500 * time.Millisecond
-	// roomQueryPayloadLimit bounds one answer notification's payload, under Postgres's 8000-byte
-	// NOTIFY limit with room for the sender's framing.
-	roomQueryPayloadLimit = 7_900
 	// roomShareLimit bounds the updates one member shares (bytes of the merged Yjs update, before
 	// base64): more is answered too_large, and the asker judges without them. It is about twelve
 	// notifications, and a room holding that much its store does not is a room whose appends are
 	// failing, not one a write is racing a person's keystrokes on.
 	roomShareLimit = 64 << 10
-	// roomAnswerSendTimeout bounds one answer's sends, so a sender that cannot reach Postgres does
-	// not hold the member's lane or its flush goroutine for longer.
-	roomAnswerSendTimeout = 2 * time.Second
 	// roomFlushPoll is how often a member's flush looks again whether the updates it waits for
 	// have left its room's unstored updates.
 	roomFlushPoll = 2 * time.Millisecond
@@ -149,8 +144,7 @@ const roomQueryMembersStatement = `
 	           where locktype = 'advisory' and pid = pg_backend_pid() and granted and objsubid = 1
 	             and classid = ((hashtext($1)::bigint >> 32) & 4294967295)::oid
 	             and objid = (hashtext($1)::bigint & 4294967295)::oid)
-	from pg_stat_activity
-	where datname = current_database() and application_name like '` + ListenerApplicationPrefix + `%'`
+	` + roomSyncMembership
 
 // readRoomQueryMembers is the members, by process id, through q, and whether q's connection holds
 // room's advisory lock, which it reads only when checkLock is set.
@@ -159,11 +153,7 @@ func readRoomQueryMembers(ctx context.Context, q Queryer, room string, checkLock
 	if err := q.QueryRow(ctx, roomQueryMembersStatement, room, checkLock).Scan(&names, &locked); err != nil {
 		return nil, false, fmt.Errorf("read the room-sync members: %w", err)
 	}
-	members = make([]string, 0, len(names))
-	for _, name := range names {
-		members = append(members, strings.TrimPrefix(name, ListenerApplicationPrefix))
-	}
-	return members, locked, nil
+	return roomSyncMemberIDs(names), locked, nil
 }
 
 // ask sends a kind query about room to every other member, read through q, and returns the whole
@@ -232,10 +222,7 @@ func (r *roomQueries) ask(ctx context.Context, q Queryer, room, kind string) (an
 	}
 	r.mu.Lock()
 	answers = pending.answers
-	missing := make([]string, 0, len(pending.waiting))
-	for member := range pending.waiting {
-		missing = append(missing, member)
-	}
+	missing := slices.Collect(maps.Keys(pending.waiting))
 	r.mu.Unlock()
 	if len(missing) > 0 {
 		slices.Sort(missing)
@@ -374,7 +361,7 @@ func (r *roomQueries) send(ctx context.Context, query roomQuery, answer roomAnsw
 		slog.Error("dispatch: encode a document room answer", "room", query.Room, "error", err)
 		return
 	}
-	sending, cancel := context.WithTimeout(ctx, roomAnswerSendTimeout)
+	sending, cancel := context.WithTimeout(ctx, roomSyncSendTimeout)
 	defer cancel()
 	for _, payload := range payloads {
 		if err := r.service.roomSyncSender.Notify(sending, documentAnswerChannel, payload); err != nil {
@@ -387,7 +374,7 @@ func (r *roomQueries) send(ctx context.Context, query roomQuery, answer roomAnsw
 }
 
 // roomAnswerPayloads packs answer with actors and updates (base64) into the fewest notification
-// payloads each within roomQueryPayloadLimit: the actors first, whole, then the updates cut across
+// payloads each within roomSyncPayloadLimit: the actors first, whole, then the updates cut across
 // as many parts as they fill, each part numbered and the last flagged. An actor whose entry alone
 // does not fit is dropped with a WARN.
 func roomAnswerPayloads(answer roomAnswerPart, actors []model.Actor, updates string) ([]string, error) {
@@ -413,7 +400,7 @@ func roomAnswerPayloads(answer roomAnswerPart, actors []model.Actor, updates str
 		if err != nil {
 			return nil, err
 		}
-		if fits <= roomQueryPayloadLimit {
+		if fits <= roomSyncPayloadLimit {
 			continue
 		}
 		part.Actors = part.Actors[:len(part.Actors)-1]
@@ -424,7 +411,7 @@ func roomAnswerPayloads(answer roomAnswerPart, actors []model.Actor, updates str
 			part.Actors = []model.Actor{actor}
 			if fits, err = size(); err != nil {
 				return nil, err
-			} else if fits <= roomQueryPayloadLimit {
+			} else if fits <= roomSyncPayloadLimit {
 				continue
 			}
 			part.Actors = nil
@@ -438,7 +425,7 @@ func roomAnswerPayloads(answer roomAnswerPart, actors []model.Actor, updates str
 		if err != nil {
 			return nil, err
 		}
-		room := roomQueryPayloadLimit - used - updatesFraming
+		room := roomSyncPayloadLimit - used - updatesFraming
 		if room <= 0 {
 			if err := next(); err != nil {
 				return nil, err

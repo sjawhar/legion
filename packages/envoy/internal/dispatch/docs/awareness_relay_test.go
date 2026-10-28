@@ -287,7 +287,7 @@ func TestAnAwarenessStateTooLargeToRelayIsDroppedAndCounted(t *testing.T) {
 	alice := pair.openReader(t, pair.serverA, "alice")
 	bob := pair.openReader(t, pair.serverB, "bob")
 
-	oversized := map[string]any{"user": map[string]any{"name": strings.Repeat("a", awarenessPayloadLimit)}}
+	oversized := map[string]any{"user": map[string]any{"name": strings.Repeat("a", roomSyncPayloadLimit)}}
 	setAwareness(t, alice, aliceClient, oversized)
 	waitFor(t, roomWait(t), "task A's relay to count the oversized state", func() bool {
 		return pair.taskA.awarenessRelay.oversized.Load() == 1
@@ -327,7 +327,7 @@ func TestAnAwarenessBatchIsSplitAcrossNotificationsWithinTheLimit(t *testing.T) 
 		}
 		batch[client] = entries[0].raw
 	}
-	huge, err := decodeAwarenessEntries(awarenessEntryUpdate(99, 1, `{"name":"`+strings.Repeat("y", awarenessPayloadLimit)+`"}`))
+	huge, err := decodeAwarenessEntries(awarenessEntryUpdate(99, 1, `{"name":"`+strings.Repeat("y", roomSyncPayloadLimit)+`"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,8 +339,8 @@ func TestAnAwarenessBatchIsSplitAcrossNotificationsWithinTheLimit(t *testing.T) 
 	}
 	var sent []uint64
 	for _, payload := range payloads {
-		if len(payload) > awarenessPayloadLimit {
-			t.Errorf("a notification of %d bytes passes the %d-byte limit", len(payload), awarenessPayloadLimit)
+		if len(payload) > roomSyncPayloadLimit {
+			t.Errorf("a notification of %d bytes passes the %d-byte limit", len(payload), roomSyncPayloadLimit)
 		}
 		var message awarenessMessage
 		if err := json.Unmarshal([]byte(payload), &message); err != nil {

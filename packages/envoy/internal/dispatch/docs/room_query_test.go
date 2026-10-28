@@ -161,7 +161,7 @@ func TestAShareReturnsTheOtherProcessesInFlightAppend(t *testing.T) {
 	if len(answers) != 1 || !answers[0].holds || answers[0].tooLarge {
 		t.Fatalf("task A's share answers = %+v, want task B's one, holding the room", answers)
 	}
-	if len(answers[0].updates) <= roomQueryPayloadLimit {
+	if len(answers[0].updates) <= roomSyncPayloadLimit {
 		t.Fatalf("task B shared %d bytes, which fit one notification; the test wants an answer in parts", len(answers[0].updates))
 	}
 	if !reflect.DeepEqual(answers[0].actors, []model.Actor{bob}) {
@@ -438,8 +438,8 @@ func TestARoomAnswerTooLargeForOneNotificationIsSplitIntoParts(t *testing.T) {
 	parts := &roomAnswerParts{parts: make(map[int]roomAnswerPart), last: -1}
 	// Parts may arrive in any order.
 	for _, payload := range slices.Backward(payloads) {
-		if len(payload) > roomQueryPayloadLimit {
-			t.Fatalf("a part of %d bytes passes the %d-byte limit", len(payload), roomQueryPayloadLimit)
+		if len(payload) > roomSyncPayloadLimit {
+			t.Fatalf("a part of %d bytes passes the %d-byte limit", len(payload), roomSyncPayloadLimit)
 		}
 		var part roomAnswerPart
 		if err := json.Unmarshal([]byte(payload), &part); err != nil {

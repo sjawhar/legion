@@ -300,7 +300,8 @@ func (s *Service) tookResidentVersion(room string, version persistence.Version) 
 // goes with the document, as the listing does: until then took still reaches this instance
 // through it, which is what ygo's loading window needs it for.
 //
-// It also schedules one catch-up of the instance (scheduleCatchUp): a load reads the store with
+// It also schedules one catch-up of the instance (roomCatchUps.schedule), which waits for ygo to
+// publish it once this load hook returns (roomCatchUps.takeLoading): a load reads the store with
 // no lock, so another process's append can commit between that read and the moment this room is
 // resident, and its notification can be decided while the room is still loading, when there is no
 // room to catch up. Without this the room would be born behind with nothing left to come for it.
@@ -315,7 +316,7 @@ func (s *Service) keepInstance(room string, live *crdt.Doc) *roomInstance {
 	instance := load.start()
 	listResident(&s.instances, live, instance)
 	runtime.AddCleanup(live, func(load *roomLoad) { s.roomLoads.CompareAndDelete(room, load) }, load)
-	s.scheduleCatchUp(room, live)
+	s.catchUps.schedule(room, live)
 	return instance
 }
 
@@ -323,6 +324,15 @@ func (s *Service) keepInstance(room string, live *crdt.Doc) *roomInstance {
 func (s *Service) instanceOf(live *crdt.Doc) *roomInstance {
 	if listed, ok := s.instances.Load(weak.Make(live)); ok {
 		return listed.(*roomInstance)
+	}
+	return nil
+}
+
+// replicaOf is the replica live's update observer keeps (keepReplica), nil for a document that
+// lists none - no transaction since it loaded - or whose replica has gone.
+func (s *Service) replicaOf(live *crdt.Doc) *renderedReplica {
+	if listed, ok := s.replicas.Load(weak.Make(live)); ok {
+		return listed.(weak.Pointer[renderedReplica]).Value()
 	}
 	return nil
 }

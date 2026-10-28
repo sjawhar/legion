@@ -83,12 +83,16 @@ const (
 	roomSyncSenderApplicationPrefix = "dispatch-sender "
 )
 
+// roomSyncMembership is the from and where of every read of the members: each connection to this
+// database that holds a process's shared LISTEN connection. Every Dispatch process connects as one
+// database role, so each sees the others' application_name.
+const roomSyncMembership = `from pg_stat_activity
+	where datname = current_database() and application_name like '` + ListenerApplicationPrefix + `%'`
+
 // roomSyncMembersStatement reads every process that holds its shared LISTEN connection to this
-// database. Every Dispatch process connects as one database role, so each sees the others'
-// application_name.
+// database (roomSyncMembership).
 const roomSyncMembersStatement = `
-	select application_name from pg_stat_activity
-	where datname = current_database() and application_name like '` + ListenerApplicationPrefix + `%'
+	select application_name ` + roomSyncMembership + `
 	order by application_name`
 
 // roomSyncMembers returns the ids (Service.ProcessID) of the processes whose shared listener
@@ -105,11 +109,17 @@ func roomSyncMembers(ctx context.Context, q Queryer) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read the room-sync members: %w", err)
 	}
+	return roomSyncMemberIDs(names), nil
+}
+
+// roomSyncMemberIDs is the process ids (Service.ProcessID) the members' application names, as
+// roomSyncMembership reads them, carry.
+func roomSyncMemberIDs(names []string) []string {
 	members := make([]string, 0, len(names))
 	for _, name := range names {
 		members = append(members, strings.TrimPrefix(name, ListenerApplicationPrefix))
 	}
-	return members, nil
+	return members
 }
 
 // roomSyncHandler is one lane's room-sync channels and what runs their notifications. Every func
@@ -343,6 +353,17 @@ func (l *roomSyncLane) run(ctx context.Context) {
 
 // errRoomSyncSenderClosed is a Notify after the document service shut down.
 var errRoomSyncSenderClosed = errors.New("the room-sync sender is closed")
+
+const (
+	// roomSyncPayloadLimit bounds one notification's payload sent through the sender (an
+	// awareness batch, a room query's answer), under Postgres's 8000-byte NOTIFY limit with room
+	// for the sender's framing.
+	roomSyncPayloadLimit = 7_900
+	// roomSyncSendTimeout bounds one batch's or one answer's sends, so a sender that cannot reach
+	// Postgres holds neither the goroutine sending them, nor the lane answering, nor Shutdown for
+	// longer.
+	roomSyncSendTimeout = 2 * time.Second
+)
 
 // roomSyncSender is the process's NOTIFY connection: a dedicated connection of its own, opened at
 // the first send and opened again after one fails. Sends go one at a time, in the order they take
@@ -613,7 +634,7 @@ func (s *Service) catchUpRoom(ctx context.Context, q Queryer, room string, live 
 	if err != nil {
 		return 0, err
 	}
-	if historyReplaced(through, high, low != 0 && low <= through) {
+	if storedHistoryReplaced(through, low, high) {
 		return catchUpReplaced, nil
 	}
 	versions := make([]int64, 0, len(rows))
@@ -718,14 +739,13 @@ func (s *Service) historyReplacedUnderLock(ctx context.Context, room string, liv
 	`, room).Scan(&low, &high); err != nil {
 		return false, fmt.Errorf("read the document's stored bounds: %w", err)
 	}
-	return historyReplaced(through, high, low != 0 && low <= through), nil
+	return storedHistoryReplaced(through, low, high), nil
 }
 
-// scheduleCatchUp queues one catch-up of live, room's instance that is still loading
-// (keepInstance): ygo publishes it once its load hook returns, and the catch-up waits for that
-// (roomCatchUps.takeLoading).
-func (s *Service) scheduleCatchUp(room string, live *crdt.Doc) {
-	s.catchUps.schedule(room, live)
+// storedHistoryReplaced is historyReplaced for a room held through through, against the stored
+// history's bounds: low, its lowest version, and high, its head, each 0 for an empty history.
+func storedHistoryReplaced(through, low, high int64) bool {
+	return historyReplaced(through, high, low != 0 && low <= through)
 }
 
 // catchUpRetryInterval is the first wait before a room whose catch-up reached no verdict - a read

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -35,7 +36,7 @@ import (
 //
 // The first carries awareness states: a count, then each client's id, clock and state JSON (null
 // for a client that left), as y-protocols encodes them. A batch whose notification would pass
-// awarenessPayloadLimit is split across several, whole clients to each; one client whose state
+// roomSyncPayloadLimit is split across several, whole clients to each; one client whose state
 // alone passes it is dropped, logged at WARN and counted (awarenessRelay.oversized), and the other
 // processes keep that client's last state until it expires (awarenessExpiry).
 //
@@ -51,9 +52,6 @@ const (
 	// a client moving its cursor at typing speed costs one notification per window, not one per
 	// keystroke, each notification being a commit Postgres serialises with every other.
 	awarenessCoalesceWindow = 50 * time.Millisecond
-	// awarenessPayloadLimit bounds one notification's payload, under Postgres's 8000-byte NOTIFY
-	// limit with room for the sender's framing.
-	awarenessPayloadLimit = 7_900
 	// awarenessExpiry is how long a room keeps an awareness client it hears nothing from
 	// (Server.AwarenessExpiry). A browser re-announces itself every 15 s, so a live client never
 	// expires, and one relayed from a process that died without saying so goes after this. An
@@ -62,9 +60,6 @@ const (
 	// on its home process too; the y-protocols client then sees its own state removed and
 	// announces itself again, which is how it comes back everywhere.
 	awarenessExpiry = 30 * time.Second
-	// awarenessSendTimeout bounds one batch's sends, so a sender that cannot reach Postgres holds
-	// neither the batch's goroutine nor Shutdown for longer.
-	awarenessSendTimeout = 2 * time.Second
 )
 
 // awarenessMessage is one documentAwarenessChannel notification (see the wire format above).
@@ -210,10 +205,7 @@ func (r *awarenessRelay) Close() error {
 		return nil
 	}
 	r.closed = true
-	rooms := make([]string, 0, len(r.pending))
-	for room := range r.pending {
-		rooms = append(rooms, room)
-	}
+	rooms := slices.Collect(maps.Keys(r.pending))
 	r.mu.Unlock()
 	for _, room := range rooms {
 		r.flush(room)
@@ -282,7 +274,7 @@ func (r *awarenessRelay) flush(room string) {
 		return
 	}
 	payloads := r.awarenessNotifications(room, batch)
-	ctx, cancel := context.WithTimeout(context.Background(), awarenessSendTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), roomSyncSendTimeout)
 	defer cancel()
 	for _, payload := range payloads {
 		if err := r.service.roomSyncSender.Notify(ctx, documentAwarenessChannel, payload); err != nil {
@@ -293,7 +285,7 @@ func (r *awarenessRelay) flush(room string) {
 }
 
 // awarenessNotifications packs batch, room's client entries, into the fewest notification payloads
-// each within awarenessPayloadLimit, whole clients to each, in client order. A client whose entry
+// each within roomSyncPayloadLimit, whole clients to each, in client order. A client whose entry
 // alone does not fit is dropped and counted.
 func (r *awarenessRelay) awarenessNotifications(room string, batch map[uint64][]byte) []string {
 	framing, err := json.Marshal(awarenessMessage{Sender: r.service.processID, Room: room, Data: "-"})
@@ -303,15 +295,11 @@ func (r *awarenessRelay) awarenessNotifications(room string, batch map[uint64][]
 	}
 	// budget is what the base64 of one update may take: the payload less its framing, whose
 	// placeholder stands for that base64. Base64's alphabet needs no JSON escape.
-	budget := awarenessPayloadLimit - (len(framing) - 1)
+	budget := roomSyncPayloadLimit - (len(framing) - 1)
 	fits := func(entries, size int) bool {
 		return base64.StdEncoding.EncodedLen(varUintLen(uint64(entries))+size) <= budget
 	}
-	clients := make([]uint64, 0, len(batch))
-	for client := range batch {
-		clients = append(clients, client)
-	}
-	slices.Sort(clients)
+	clients := slices.Sorted(maps.Keys(batch))
 	var (
 		payloads []string
 		group    [][]byte
@@ -335,7 +323,7 @@ func (r *awarenessRelay) awarenessNotifications(room string, batch map[uint64][]
 		if !fits(1, len(entry)) {
 			dropped := r.oversized.Add(1)
 			slog.Warn("dispatch: drop an awareness state too large to relay to the other processes",
-				"room", room, "client", client, "bytes", len(entry), "limit", awarenessPayloadLimit, "dropped_total", dropped)
+				"room", room, "client", client, "bytes", len(entry), "limit", roomSyncPayloadLimit, "dropped_total", dropped)
 			continue
 		}
 		if !fits(len(group)+1, size+len(entry)) {
@@ -364,7 +352,7 @@ func (r *awarenessRelay) query(room string) {
 	r.sends.Add(1)
 	go func() {
 		defer r.sends.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), awarenessSendTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), roomSyncSendTimeout)
 		defer cancel()
 		if err := r.service.roomSyncSender.Notify(ctx, documentAwarenessChannel, string(payload)); err != nil {
 			slog.Warn("dispatch: ask the other processes for a document room's awareness", "room", room, "error", err)
@@ -376,10 +364,7 @@ func (r *awarenessRelay) query(room string) {
 // with that state's clock.
 func (r *awarenessRelay) localClients(room string, aw *awareness.Awareness) map[uint64]uint64 {
 	r.mu.Lock()
-	listed := make([]uint64, 0, len(r.local[room]))
-	for client := range r.local[room] {
-		listed = append(listed, client)
-	}
+	listed := slices.Collect(maps.Keys(r.local[room]))
 	r.mu.Unlock()
 	if len(listed) == 0 {
 		return nil
@@ -403,11 +388,7 @@ func (r *awarenessRelay) localRemoval(room string, aw *awareness.Awareness) []by
 	if len(clients) == 0 {
 		return nil
 	}
-	ids := make([]uint64, 0, len(clients))
-	for client := range clients {
-		ids = append(ids, client)
-	}
-	slices.Sort(ids)
+	ids := slices.Sorted(maps.Keys(clients))
 	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
 		encoder.WriteVarUint(uint64(len(ids)))
 		for _, client := range ids {
@@ -466,10 +447,7 @@ func (r *awarenessRelay) answer(room string) {
 	if len(clients) == 0 {
 		return
 	}
-	ids := make([]uint64, 0, len(clients))
-	for client := range clients {
-		ids = append(ids, client)
-	}
+	ids := slices.Collect(maps.Keys(clients))
 	r.enqueue(room, aw.EncodeUpdate(ids))
 }
 
@@ -490,13 +468,7 @@ func (s *Service) hasLocalConnection(room string) bool {
 // what loads it, and that load's query (RoomActivated) is answered while the load can still be
 // finishing.
 func (s *Service) holdsRoomForReaders(room string) bool {
-	if !s.hasLocalConnection(room) {
-		return false
-	}
-	if _, resident := s.srv.GetAwareness(room); resident {
-		return true
-	}
-	return slices.Contains(s.srv.Rooms(), room)
+	return s.hasLocalConnection(room) && s.roomHeld(room)
 }
 
 // removeLocalAwareness removes the awareness states of room's local clients before this process

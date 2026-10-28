@@ -2,6 +2,7 @@ package pglisten
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"time"
 
@@ -110,10 +111,8 @@ func (h *Hub) OnDisconnected(callback func()) {
 // register adds channel to the channels the hub LISTENs on, once; h.mu is held.
 func (h *Hub) register(method, channel string) {
 	h.refuseStarted(method)
-	for _, registered := range h.channels {
-		if registered == channel {
-			return
-		}
+	if slices.Contains(h.channels, channel) {
+		return
 	}
 	h.channels = append(h.channels, channel)
 }

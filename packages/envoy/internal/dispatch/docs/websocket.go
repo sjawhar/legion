@@ -13,7 +13,6 @@ import (
 	"path"
 	"strings"
 	"time"
-	"weak"
 
 	"github.com/google/uuid"
 	gws "github.com/gorilla/websocket"
@@ -724,12 +723,8 @@ func (s *Service) observeRoomLog(room string, instance *roomInstance, replica *r
 // instance has nothing to drain.
 func (s *Service) observeRoomUpdates(room string, live *crdt.Doc) {
 	instance := s.instanceOf(live)
-	listed, ok := s.replicas.Load(weak.Make(live))
-	if instance == nil || !ok {
-		return
-	}
-	replica := listed.(weak.Pointer[renderedReplica]).Value()
-	if replica == nil {
+	replica := s.replicaOf(live)
+	if instance == nil || replica == nil {
 		return
 	}
 	s.settleAfterObserving(room, s.observeRoomLog(room, instance, replica, nil))
