@@ -50,8 +50,8 @@ type runConfig struct {
 	// boxBusyBefore is the box's busy fraction read before Dispatch started (run-step.sh reads it
 	// with `loadgen box-busy` before its reset); negative means collectMeta reads it itself.
 	boxBusyBefore float64
-	// args are the run's arguments as meta.json records them: the token values redacted
-	// (redactArgs).
+	// args are the run's flags as meta.json records them: the normalized flag list, the token
+	// values redacted and the URL passwords removed (recordedArgs).
 	args []string
 }
 
@@ -146,42 +146,28 @@ func runLoad(args []string) error {
 		sessions: *sessions, events: *events, requests: *requests,
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
 		human: *human, sse: *sse, rngSeed: *rngSeed, natsConns: *natsConns,
-		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: redactArgs(fs, args),
+		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: recordedArgs(fs),
 	}, sf)
 }
 
-// redacted replaces a token in the arguments that meta.json records.
+// redacted replaces a token, or a value whose password cannot be found, in what a step records.
 const redacted = "<redacted>"
 
-// redactArgs is args with the value of each tokenFlags flag replaced by redacted. It reads args as
-// fs.Parse does: "-name" or "--name", the value after "=" or, for a flag that is not boolean, in
-// the next argument, up to "--" or the first argument that is not a flag.
-func redactArgs(fs *flag.FlagSet, args []string) []string {
-	out := slices.Clone(args)
-	for i := 0; i < len(out); i++ {
-		a := out[i]
-		if len(a) < 2 || a[0] != '-' || a == "--" {
-			break
+// recordedArgs is every flag given to fs, once parsed, as "-name=value" in fs's (lexical) order:
+// the value of each tokenFlags flag replaced by redacted, and each urlFlags flag's URL without its
+// password (redactURL). runLoad takes no positional argument, so these are all of its arguments.
+func recordedArgs(fs *flag.FlagSet) []string {
+	var out []string
+	fs.Visit(func(f *flag.Flag) {
+		name, value := "-"+f.Name, f.Value.String()
+		switch {
+		case slices.Contains(tokenFlags, name):
+			value = redacted
+		case slices.Contains(urlFlags, name):
+			value = redactURL(value)
 		}
-		name, _, inline := strings.Cut(strings.TrimPrefix(a[1:], "-"), "=")
-		secret := slices.Contains(tokenFlags, name)
-		if inline {
-			if secret {
-				out[i] = a[:strings.IndexByte(a, '=')+1] + redacted
-			}
-			continue
-		}
-		f := fs.Lookup(name)
-		if f == nil {
-			continue
-		}
-		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
-			continue
-		}
-		if i++; i < len(out) && secret {
-			out[i] = redacted
-		}
-	}
+		out = append(out, name+"="+value)
+	})
 	return out
 }
 
@@ -659,7 +645,7 @@ func stepFailure(sum summary) error {
 		why = append(why, err.Error())
 	}
 	if sum.Events.commitsUnread() {
-		why = append(why, fmt.Sprintf("the run's commit rows were not read (summary.json events.commits_error: %s); the step's committed, receipt and delivery columns do not measure the load",
+		why = append(why, fmt.Sprintf("the run's commit rows were not read (summary.json events.commits_error: %s); this row's committed, receipt and delivery columns do not measure the load",
 			sum.Events.CommitsError))
 	}
 	if len(why) == 0 {

@@ -88,7 +88,7 @@ func TestTablesRenderTheSamplersAndTheirFailedReads(t *testing.T) {
 
 	for _, c := range []struct{ title, failed, cur string }{
 		{"Delivery from sending, and SSE frames", "| failed | - | - | - | 0 | 0 |", "| new | 120 / 900 | 40 / 300 | 5 / 60 | 1,200 | 2 |"},
-		{"Commit-order lock", "| failed (1 failed reads) | - | - | - | - | - |", "| new | - | - | - | - | - |"},
+		{"Commit-order lock", "| failed (1 failed read) | - | - | - | - | - |", "| new | - | - | - | - | - |"},
 		{"Ungranted locks", "| failed (160 failed reads) | - | - | - |", `| new | 97% | advisory commit_order_lock ExclusiveLock 96%, 12 / 40 | select a \| b → (none) (800) |`},
 		{"Transaction ids", "| failed | - |", "| new | 412.3 |"},
 	} {
@@ -177,11 +177,15 @@ func TestTablesResourcesShowFailedSamplerReadsAsMissing(t *testing.T) {
 	checkRowWidths(t, md)
 }
 
-// TestTablesMarkEveryCellThatDependsOnUnreadCommitRows: beyond the Events and kinds cells of
-// TestTablesDoNotShowUnreadCommitsAsZero, a step whose commit rows were not read shows "-" and the
-// mark in the delivery-from-sent, SSE-from-write-response and CPU-per-operation cells, a note under
-// each marked table names events.commits_error, and a step whose rows were read is not marked.
-func TestTablesMarkEveryCellThatDependsOnUnreadCommitRows(t *testing.T) {
+// TestTablesDoNotShowUnreadCommitsAsZero: a step whose loadtest.event_commits could not be read
+// (events.commits_error: a foreign run's database without the commit trigger, or an unreachable
+// -pg) knows nothing about its commits, receipts or delivery: Committed is 0 because nothing was
+// read, not because nothing committed. Its tables must not present that 0 as a measurement: the
+// committed rate, the issue-topic receipts and each kind's committed count are not 0; each table
+// with cells that depend on the commit rows marks the row, shows "-" in those cells and names
+// events.commits_error in a note; the other cells keep their values; and neither a step whose
+// commit rows were read nor a table that no commit row feeds carries the mark.
+func TestTablesDoNotShowUnreadCommitsAsZero(t *testing.T) {
 	perOp := 0.0123
 	read := stepData{name: "read", sum: summary{
 		Config:    summaryConfig{Step: "read", EventsPerS: 1},
@@ -189,17 +193,44 @@ func TestTablesMarkEveryCellThatDependsOnUnreadCommitRows(t *testing.T) {
 		Resources: &resourcesSummary{DispatchCPUSPerOp: &perOp},
 		SSE:       sseSummary{Frames: 40, FrameMsFromWriteResponse: stat{N: 30, P50: 5, P99: 60}},
 	}}
-	// What an older summary.json of an unread step can hold: values beside commits_error.
-	unread := stepData{name: "unread", sum: summary{
-		Config: summaryConfig{Step: "unread", EventsPerS: 1},
-		Events: eventsSummary{Offered: 31, OfferedPerS: 1.03, DeliveryMsFromSent: stat{N: 2, P50: 1, P99: 2},
-			CommitsError: "read loadtest.event_commits: failed to connect"},
-		Resources: &resourcesSummary{DispatchCPUSPerOp: &perOp},
-		SSE:       sseSummary{Frames: 40, FrameMsFromCreatedAt: stat{N: 40, P50: 30, P99: 80}, FrameMsFromWriteResponse: stat{N: 1, P50: 5, P99: 5}},
+	// What run.go writes for a step whose commit rows were not read: no delivery latency, no CPU
+	// per operation, and its SSE frames from created_at, which need no commit row.
+	unread := stepData{name: "foreign-notrigger", sum: summary{
+		Config: summaryConfig{Step: "foreign-notrigger", EventsPerS: 1, Sessions: 10},
+		Events: eventsSummary{
+			Offered:     31,
+			OfferedPerS: 1.03,
+			ByKind: map[string]kindSummary{
+				kindComment:  {Offered: 1, WriteMs: stat{N: 1, P50: 118, P99: 118}},
+				kindAnchored: {Offered: 8, WriteMs: stat{N: 8, P50: 670, P99: 720}},
+			},
+			CommitsError: `read loadtest.event_commits (is commit-trigger.sql installed?): ERROR: relation "loadtest.event_commits" does not exist (SQLSTATE 42P01)`,
+		},
+		Resources: &resourcesSummary{},
+		SSE:       sseSummary{Frames: 40, FrameMsFromCreatedAt: stat{N: 40, P50: 30, P99: 80}},
 	}}
 	md := renderTables([]stepData{read, unread})
 
-	const mark = "unread " + commitsUnreadMark
+	cells := rowCells(section(md, "Events, delivery and requests"), "foreign-notrigger")
+	if cells == nil {
+		t.Fatalf("no Events row for the step:\n%s", md)
+	}
+	if len(cells) < 8 {
+		t.Fatalf("Events row has %d cells:\n%s", len(cells), md)
+	}
+	if rate := cells[3]; strings.HasSuffix(rate, "/ 0.00") {
+		t.Errorf("the committed rate of a step whose commit rows were not read reads %q, a measured zero:\n%s", rate, md)
+	}
+	if receipts := cells[7]; receipts == "0 / 0" {
+		t.Errorf("the issue-topic receipts of a step whose commit rows were not read read %q, a measured zero:\n%s", receipts, md)
+	}
+	for line := range strings.SplitSeq(section(md, "Write latency by kind"), "\n") {
+		if strings.HasPrefix(line, "| foreign-notrigger") && strings.Contains(line, "(0 / ") {
+			t.Errorf("a kind's committed count of a step whose commit rows were not read reads 0:\n%s", line)
+		}
+	}
+
+	const mark = "foreign-notrigger " + commitsUnreadMark
 	for _, c := range []struct {
 		title string
 		cols  []int // the cells that depend on the commit rows
@@ -210,7 +241,7 @@ func TestTablesMarkEveryCellThatDependsOnUnreadCommitRows(t *testing.T) {
 		{"Delivery from sending, and SSE frames", []int{1, 3}},
 	} {
 		text := section(md, c.title)
-		cells := rowCells(text, "unread")
+		cells := rowCells(text, "foreign-notrigger")
 		if cells == nil || cells[0] != mark {
 			t.Errorf("section %q: the unread step's row is not marked %q:\n%s", c.title, commitsUnreadMark, text)
 			continue
@@ -228,10 +259,10 @@ func TestTablesMarkEveryCellThatDependsOnUnreadCommitRows(t *testing.T) {
 		}
 	}
 	// The cells that do not depend on the commit rows keep their values.
-	if cells := rowCells(section(md, "Delivery from sending, and SSE frames"), "unread"); cells[2] != "30 / 80" || cells[4] != "40" {
+	if cells := rowCells(section(md, "Delivery from sending, and SSE frames"), "foreign-notrigger"); cells[2] != "30 / 80" || cells[4] != "40" {
 		t.Errorf("the unread step's SSE frames and their latency from created_at: %q", cells)
 	}
-	if cells := rowCells(section(md, "Events, delivery and requests"), "unread"); cells[3] != "1.00 / 1.03 / -" {
+	if cells := rowCells(section(md, "Events, delivery and requests"), "foreign-notrigger"); cells[3] != "1.00 / 1.03 / -" {
 		t.Errorf("the unread step's events/s: %q, want the target and offered rates and - committed", cells[3])
 	}
 	// The tables that no commit row feeds carry no mark.
@@ -244,21 +275,21 @@ func TestTablesMarkEveryCellThatDependsOnUnreadCommitRows(t *testing.T) {
 }
 
 // TestTablesMarkAFailedTransactionIDRead: a step whose transaction-id probe failed shows "-" with
-// the failed-reads mark, and the note names resources.xid_read_error; a step with no resources
-// shows "-" unmarked, as every cell of its Resources row.
+// the mark "(1 failed read)", and the note names resources.xid_read_error; a step with no
+// resources shows "-" unmarked, as every cell of its Resources row.
 func TestTablesMarkAFailedTransactionIDRead(t *testing.T) {
 	md := renderTables([]stepData{
 		{name: "xid-failed", sum: summary{Config: summaryConfig{Step: "xid-failed"}, Resources: &resourcesSummary{XIDReadError: "xid probe: failed to connect"}}},
 		{name: "no-window", sum: summary{Config: summaryConfig{Step: "no-window"}}},
 	})
 	text := section(md, "Transaction ids")
-	if cells := rowCells(text, "xid-failed"); cells == nil || cells[0] != "xid-failed (1 failed reads)" || cells[1] != "-" {
+	if cells := rowCells(text, "xid-failed"); cells == nil || cells[0] != "xid-failed (1 failed read)" || cells[1] != "-" {
 		t.Errorf("the failed transaction-id read is not '-' with the mark: %q\n%s", cells, text)
 	}
 	if cells := rowCells(text, "no-window"); cells == nil || cells[0] != "no-window" || cells[1] != "-" {
 		t.Errorf("the step with no resources: %q\n%s", cells, text)
 	}
-	if note := noteLine(text, "(<n> failed reads)"); !strings.Contains(note, "`resources.xid_read_error`") {
+	if note := noteLine(text, "(1 failed read)"); !strings.Contains(note, "`resources.xid_read_error`") {
 		t.Errorf("no note of the failed-reads mark names summary.json `resources.xid_read_error`:\n%s", text)
 	}
 	checkRowWidths(t, md)
