@@ -30,7 +30,7 @@ body: |-
     more: a LISTEN on new events and on the hold's release, the process's own commits, a NATS
     reconnect and a timer to the earliest due retry wake it. Each process uses one more Postgres
     connection (the outbox's pool is two, so its hold's renewal never waits behind a batch) and holds
-    one more LISTEN connection: 85 connections per process at its ceiling, from 83
+    one more LISTEN connection: 86 connections per process at its ceiling, from 84
     (`store.ConnectionsPerProcess`). Migrations `0135_duty_holds` (a new table) and
     `0136_outbox_claim` (three partial indexes on `events`, `events.publish_error`, and the drop of
     `events_unpublished` and `events_unpublished_ready`) apply at boot. `0136` builds its indexes

@@ -339,11 +339,12 @@ jobs:
               - 'packages/contracts/fixtures/decision-blocks/**'
             # `go test -tags memory ./cmd/dispatch`; memory_profile_test.go:147-148 reads four
             # guides only when DISPATCH_EDIT_PROFILE_OUT is set, which CI never sets, so none is
-            # named.
+            # named. internal/testnats: the untagged cmd/dispatch/main_test.go imports it (#2395).
             dispatch_memory:
               - '.github/workflows/envoy-and-contracts.yaml'
               - *go_workspace
               - *dispatch_command_tests
+              - 'packages/envoy/internal/testnats/*'
             # `go test -tags multiprocess ./cmd/dispatch`, as dispatch_memory plus the in-process
             # NATS its rows start.
             dispatch_multiprocess:
