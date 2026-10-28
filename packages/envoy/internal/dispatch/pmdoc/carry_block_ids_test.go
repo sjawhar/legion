@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 )
 
 // An upload writes the whole document's markdown over the live one, and that markdown names no
@@ -19,7 +20,7 @@ import (
 // block), a typed block's id is the one its markdown names, and a repeat live carries is kept for
 // its first holder alone.
 func TestAnUploadKeepsTheIDsOfTheBlocksItLeavesUnchanged(t *testing.T) {
-	spec := tableHeavySpec(rand.New(rand.NewPCG(715, 1)), "LOAD-1", 25_000)
+	spec, _, _ := docstest.LoadSpec(rand.New(rand.NewPCG(715, 1)), "LOAD-1", 25_000)
 
 	oneToken := func(t *testing.T, old, replacement string, wantTypes []string) {
 		t.Helper()
@@ -125,7 +126,9 @@ func TestAnUploadKeepsTheIDsOfTheBlocksItLeavesUnchanged(t *testing.T) {
 		if id, _ := storedBlockID(after.Children[1]); id == held {
 			t.Fatalf("the unchanged paragraph kept id %q, which the callout names", held)
 		}
-		requireNoIDTwice(t, after)
+		if err := RepeatedBlockID(nil, after, after); err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	t.Run("two swapped paragraphs", func(t *testing.T) {
@@ -147,13 +150,13 @@ func TestAnUploadKeepsTheIDsOfTheBlocksItLeavesUnchanged(t *testing.T) {
 		liveIDs := blockIDsOf(live)
 		for _, index := range []int{1, 2} {
 			if id, _ := storedBlockID(after.Children[index]); slices.Contains(liveIDs, id) {
-				t.Errorf("swapped paragraph %d (%q) has live id %q, want a fresh one", index, textOf(after.Children[index]), id)
+				t.Errorf("swapped paragraph %d (%q) has live id %q, want a fresh one", index, TextContent(after.Children[index]), id)
 			}
 		}
 		for _, index := range []int{0, 3} {
 			got, _ := storedBlockID(after.Children[index])
 			if want, _ := storedBlockID(live.Children[index]); got != want {
-				t.Errorf("unchanged paragraph %d (%q) has id %q, want live's %q", index, textOf(after.Children[index]), got, want)
+				t.Errorf("unchanged paragraph %d (%q) has id %q, want live's %q", index, TextContent(after.Children[index]), got, want)
 			}
 		}
 	})
@@ -185,7 +188,9 @@ func TestAnUploadKeepsTheIDsOfTheBlocksItLeavesUnchanged(t *testing.T) {
 		if want, _ := storedBlockID(live.Children[2]); third != want {
 			t.Errorf("the unchanged third paragraph has id %q, want live's %q", third, want)
 		}
-		requireNoIDTwice(t, after)
+		if err := RepeatedBlockID(nil, after, after); err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	t.Run("a paragraph retyped as a heading", func(t *testing.T) {
@@ -201,51 +206,13 @@ func TestAnUploadKeepsTheIDsOfTheBlocksItLeavesUnchanged(t *testing.T) {
 		retyped := strings.Replace(markdown, "Retyped text", "## Retyped text", 1)
 		after, diff := uploadOver(t, doc, frag, live, retyped)
 		t.Logf("diff update %d bytes", diff)
-		if after.Children[1].Type != "heading" || textOf(after.Children[1]) != "Retyped text" {
-			t.Fatalf("block 1 after the upload is a %s holding %q, want the heading", after.Children[1].Type, textOf(after.Children[1]))
+		if after.Children[1].Type != "heading" || TextContent(after.Children[1]) != "Retyped text" {
+			t.Fatalf("block 1 after the upload is a %s holding %q, want the heading", after.Children[1].Type, TextContent(after.Children[1]))
 		}
 		if id, _ := storedBlockID(after.Children[1]); slices.Contains(blockIDsOf(live), id) {
 			t.Fatalf("the retyped heading has live id %q, want a fresh one", id)
 		}
 	})
-}
-
-// tableHeavySpec is the load harness's spec (INFRA-589 loadtest/seed.go:270): a title, the
-// "Revision token r0" paragraph, then sections of two prose paragraphs and a six-column table of
-// four rows until it holds target bytes. Every row's Requirement cell reads "Requirement
-// <key>-R<n> holds".
-func tableHeavySpec(r *rand.Rand, key string, target int) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "# Spec for %s\n\nRevision token r0\n\n", key)
-	row, section := 0, 0
-	for b.Len() < target {
-		section++
-		fmt.Fprintf(&b, "## Section %d\n\n%s.\n\n%s.\n\n", section, specSentence(r, 40), specSentence(r, 30))
-		b.WriteString("| Id | Requirement | Owner | Status | Evidence | Notes |\n|---|---|---|---|---|---|\n")
-		for range 4 {
-			row++
-			fmt.Fprintf(&b, "| R%d | Requirement %s-R%d holds | team-%d | open | %s | %s |\n", row, key, row, r.IntN(9), specSentence(r, 6), specSentence(r, 5))
-		}
-		b.WriteString("\n")
-	}
-	return b.String()
-}
-
-var specWords = strings.Fields(`the outbox publishes each committed event to its issue topic and every session that
-watches the issue receives it within a second while the listener keeps interests in a key value bucket
-dispatch reads issues documents comments and asks from postgres through a shared pool of connections
-a reviewer anchors a comment to a line of the specification and the author answers with a new version
-latency throughput memory goroutines profile scaling knee saturation connection queue lock contention`)
-
-func specSentence(r *rand.Rand, words int) string {
-	var b strings.Builder
-	for i := range words {
-		if i > 0 {
-			b.WriteByte(' ')
-		}
-		b.WriteString(specWords[r.IntN(len(specWords))])
-	}
-	return b.String()
 }
 
 // writeLiveDocument writes tree into a fresh document's fragment and returns the document, the
@@ -254,9 +221,7 @@ func writeLiveDocument(t *testing.T, tree *Node) (*crdt.Doc, *crdt.YXmlFragment,
 	t.Helper()
 	doc := crdt.New()
 	frag := doc.GetXmlFragment("prosemirror")
-	if err := doc.TransactE(func(txn *crdt.Transaction) error { return Update(txn, frag, tree) }); err != nil {
-		t.Fatal(err)
-	}
+	writeUpdate(t, doc, frag, tree)
 	live, err := Read(frag)
 	if err != nil {
 		t.Fatal(err)
@@ -273,13 +238,8 @@ func uploadOver(t *testing.T, doc *crdt.Doc, frag *crdt.YXmlFragment, live *Node
 	if err != nil {
 		t.Fatalf("ParseForWrite: %v", err)
 	}
-	before, err := crdt.DecodeStateVectorV1(crdt.EncodeStateVectorV1(doc))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := doc.TransactE(func(txn *crdt.Transaction) error { return Update(txn, frag, next) }); err != nil {
-		t.Fatal(err)
-	}
+	before := doc.StateVector()
+	writeUpdate(t, doc, frag, next)
 	after, err := Read(frag)
 	if err != nil {
 		t.Fatal(err)
@@ -350,28 +310,4 @@ func blockIDsOf(tree *Node) []string {
 		return true
 	})
 	return ids
-}
-
-// requireNoIDTwice fails the test when one id names two of tree's blocks.
-func requireNoIDTwice(t *testing.T, tree *Node) {
-	t.Helper()
-	seen := map[string]bool{}
-	for _, id := range blockIDsOf(tree) {
-		if seen[id] {
-			t.Fatalf("id %q names two blocks", id)
-		}
-		seen[id] = true
-	}
-}
-
-// textOf is the text of every text node under node, joined.
-func textOf(node *Node) string {
-	var b strings.Builder
-	Walk(node, func(child *Node) bool {
-		if child.Type == "text" {
-			b.WriteString(child.Text)
-		}
-		return true
-	})
-	return b.String()
 }

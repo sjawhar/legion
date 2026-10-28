@@ -405,27 +405,24 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		if len(reanchors) > 0 {
 			scratch := newDocumentCopy()
 			scratchFragment := scratch.GetXmlFragment(fragmentName)
-			var anchorErr error
-			scratch.Transact(func(txn *crdt.Transaction) {
-				if anchorErr = pmdoc.Update(txn, scratchFragment, target); anchorErr != nil {
-					return
+			if err := scratch.TransactE(func(txn *crdt.Transaction) error {
+				if err := pmdoc.Update(txn, scratchFragment, target); err != nil {
+					return err
 				}
 				for _, reanchor := range reanchors {
-					if _, anchorErr = markQuoteInTxn(txn, scratchFragment, target, reanchor.mark.anchor.Quote, nil, &reanchor.range_.From, MarkSpec{
+					if _, err := markQuoteInTxn(txn, scratchFragment, target, reanchor.mark.anchor.Quote, nil, &reanchor.range_.From, MarkSpec{
 						Kind:  MarkKind(reanchor.mark.markType),
 						ID:    reanchor.mark.anchor.MarkID,
 						Attrs: reanchor.attrs,
-					}); errors.Is(anchorErr, pmdoc.ErrTargetNotFound) {
-						anchorErr = nil
-						continue
-					} else if anchorErr != nil {
-						return
+					}); err != nil && !errors.Is(err, pmdoc.ErrTargetNotFound) {
+						return err
 					}
 				}
-				write, anchorErr = pmdoc.ReadInTransaction(txn, scratchFragment)
-			})
-			if anchorErr != nil {
-				return anchorErr
+				var err error
+				write, err = pmdoc.ReadInTransaction(txn, scratchFragment)
+				return err
+			}); err != nil {
+				return err
 			}
 		}
 		var updateErr error

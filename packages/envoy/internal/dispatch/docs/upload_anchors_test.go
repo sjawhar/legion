@@ -1,7 +1,6 @@
 package docs
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -64,44 +63,13 @@ func placeUploadAnchors(t *testing.T, service *Service, artifactID string, ancho
 	return placed
 }
 
-// comparableTree is node as two trees are compared here: by JSON value, so an attribute the room
-// holds as one Go type and the parser writes as another still compares equal, with no empty
-// attribute or mark set and no null attribute (the room does not hold one the parser writes, such
-// as a table cell's colwidth), and with no block id unless keepBlockIDs.
-func comparableTree(t *testing.T, node *pmdoc.Node, keepBlockIDs bool) string {
-	t.Helper()
-	var visit func(*pmdoc.Node) map[string]any
-	visit = func(node *pmdoc.Node) map[string]any {
-		out := map[string]any{"type": node.Type}
-		attrs := map[string]any{}
-		for key, value := range node.Attrs {
-			if value != nil && (keepBlockIDs || key != pmdoc.BlockIDAttr) {
-				attrs[key] = value
-			}
-		}
-		if len(attrs) > 0 {
-			out["attrs"] = attrs
-		}
-		if node.Text != "" {
-			out["text"] = node.Text
-		}
-		if len(node.Marks) > 0 {
-			out["marks"] = node.Marks
-		}
-		if len(node.Children) > 0 {
-			children := make([]any, 0, len(node.Children))
-			for _, child := range node.Children {
-				children = append(children, visit(child))
-			}
-			out["children"] = children
-		}
-		return out
-	}
-	encoded, err := json.Marshal(visit(node))
+// treeMarkdown is tree rendered for a failure message, or why it does not render.
+func treeMarkdown(tree *pmdoc.Node) string {
+	markdown, err := pmdoc.Render(tree)
 	if err != nil {
-		t.Fatalf("encode tree: %v", err)
+		return fmt.Sprintf("(does not render: %v)", err)
 	}
-	return string(encoded)
+	return markdown
 }
 
 func sameAttrs(t *testing.T, got, want pmdoc.Attrs) bool {
@@ -189,8 +157,8 @@ func TestAnUploadLeavesTheAnchorsOnTheTextItKeeps(t *testing.T) {
 				t.Fatalf("upload: %v", err)
 			}
 			after := liveTree(t, service, artifactID)
-			if got, want := comparableTree(t, pmdoc.StripAnchorMarks(after), false), comparableTree(t, pmdoc.StripAnchorMarks(target), false); got != want {
-				t.Fatalf("the room after the upload, its anchors stripped =\n%s\nwant the upload's tree\n%s", got, want)
+			if got, want := pmdoc.StripAnchorMarks(after), pmdoc.StripAnchorMarks(target); !got.Equal(want) {
+				t.Fatalf("the room after the upload, its anchors stripped =\n%s\nwant the upload's tree\n%s", treeMarkdown(got), treeMarkdown(want))
 			}
 			orphaned := map[string]bool{}
 			for _, quote := range test.orphaned {
@@ -247,8 +215,8 @@ func TestAnUploadMovingAnAskQuoteIntoACodeBlockIsRefused(t *testing.T) {
 	if !errors.Is(err, ErrDocSchema) || !strings.Contains(err.Error(), `mark "dispatchAsk" is not allowed in code_block`) {
 		t.Fatalf("upload moving the ask's quote into a code block = %v, want the ask mark refused there", err)
 	}
-	if got, want := comparableTree(t, liveTree(t, service, artifactID), true), comparableTree(t, before, true); got != want {
-		t.Fatalf("the room after the refused upload =\n%s\nwant the tree it held\n%s", got, want)
+	if got := liveTree(t, service, artifactID); !got.EqualWithBlockIDs(before) {
+		t.Fatalf("the room after the refused upload =\n%s\nwant the tree it held\n%s", treeMarkdown(got), treeMarkdown(before))
 	}
 }
 
@@ -256,14 +224,7 @@ func TestAnUploadMovingAnAskQuoteIntoACodeBlockIsRefused(t *testing.T) {
 // its rows and their bytes, each update kept as the room applied it until a fold.
 func durableHistory(t *testing.T, service *Service, artifactID string) (rows, bytes int) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
-		t.Fatalf("wait for live updates to reach persistence: %v", err)
-	}
-	if err := service.waitForDurableAppends(ctx, artifactID); err != nil {
-		t.Fatalf("wait for live updates to become durable: %v", err)
-	}
+	waitForLandedAppends(t, service, artifactID)
 	return storedUpdateCount(t, service.store, artifactID), storedUpdateBytes(t, service.store, artifactID)
 }
 

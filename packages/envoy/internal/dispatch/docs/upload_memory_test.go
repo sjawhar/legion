@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -53,7 +54,7 @@ func TestUploadsOverOpenAnchorsKeepMemoryWithinTheBound(t *testing.T) {
 	unanchored := measureRoom(t, agent)
 	quotes := agent.anchorQuotes(anchors)
 	for index, quote := range quotes {
-		agent.anchoredComment(quote, fmt.Sprintf("Anchored comment %d: %s", index, specSentence(agent.r, 20)))
+		agent.anchoredComment(quote, fmt.Sprintf("Anchored comment %d: %s", index, docstest.SpecSentence(agent.r, 20)))
 	}
 	opened := measureRoom(t, agent)
 	for range anchored {
@@ -76,7 +77,7 @@ func TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound(t *testing.T) {
 	const writes = 400
 	agent, start := newLoadAgent(t)
 	for seed := range 4 {
-		agent.roots = append(agent.roots, agent.anchoredComment(agent.randomQuote(), fmt.Sprintf("Seed comment %d: %s", seed, specSentence(agent.r, 25))))
+		agent.roots = append(agent.roots, agent.anchoredComment(agent.randomQuote(), fmt.Sprintf("Seed comment %d: %s", seed, docstest.SpecSentence(agent.r, 25))))
 	}
 	base := measureRoom(t, agent)
 	mix := []struct {
@@ -98,7 +99,7 @@ func TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound(t *testing.T) {
 		case "comment":
 			// A plain comment writes no document.
 		case "anchored":
-			agent.anchoredComment(agent.randomQuote(), "lt line comment: "+specSentence(agent.r, 20))
+			agent.anchoredComment(agent.randomQuote(), "lt line comment: "+docstest.SpecSentence(agent.r, 20))
 		case "reply":
 			if agent.r.Float64() >= 0.77 {
 				pick = "reply to a plain root" // which writes no document
@@ -146,7 +147,7 @@ func newLoadAgent(t *testing.T) (*loadAgent, time.Time) {
 	service, artifactID := newTestService(t)
 	service.srv.RoomIdleTimeout = time.Hour
 	r := rand.New(rand.NewPCG(715, 1))
-	spec, quotes, paragraphs := loadSpec(r, "LOAD-1", 25_000)
+	spec, quotes, paragraphs := docstest.LoadSpec(r, "LOAD-1", 25_000)
 	seedServiceText(t, service, artifactID, spec)
 	t.Logf("spec bytes=%d requirement quotes=%d prose paragraphs=%d", len(spec), len(quotes), len(paragraphs))
 	return &loadAgent{
@@ -230,7 +231,7 @@ func (a *loadAgent) anchoredComment(quote, body string) *loadThread {
 // replies included.
 func (a *loadAgent) reply(root *loadThread) {
 	a.t.Helper()
-	root.replies = append(root.replies, MarkReply{By: ActorRef(a.actor), Text: "lt reply: " + specSentence(a.r, 20), At: time.Now().UTC().Format(time.RFC3339Nano)})
+	root.replies = append(root.replies, MarkReply{By: ActorRef(a.actor), Text: "lt reply: " + docstest.SpecSentence(a.r, 20), At: time.Now().UTC().Format(time.RFC3339Nano)})
 	if err := joinedProjectMark(a.service, a.artifactID, root.id, MarkRecord{
 		Kind: "comment", By: ActorRef(a.actor), CreatedAt: root.at, Text: root.body, Replies: root.replies,
 	}, a.actor); err != nil {
@@ -281,15 +282,7 @@ func measureRoom(t *testing.T, agent *loadAgent) roomMemory {
 	service, artifactID := agent.service, agent.artifactID
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	drain := func() {
-		if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
-			t.Fatalf("wait for the room's updates to reach persistence: %v", err)
-		}
-		if err := service.waitForDurableAppends(ctx, artifactID); err != nil {
-			t.Fatalf("wait for the room's updates to become durable: %v", err)
-		}
-	}
-	drain()
+	waitForLandedAppends(t, service, artifactID)
 	// The settlement runs service.settle (20ms) after the last write; give it time to start
 	// before waiting for it to clear what it owes.
 	time.Sleep(500 * time.Millisecond)
@@ -297,7 +290,7 @@ func measureRoom(t *testing.T, agent *loadAgent) roomMemory {
 		owed, err := settlementPending(ctx, service.store.Pool, artifactID)
 		return err == nil && !owed
 	})
-	drain()
+	waitForLandedAppends(t, service, artifactID)
 	if service.srv.GetDoc(artifactID) == nil {
 		t.Fatal("the room is not resident")
 	}
@@ -346,47 +339,4 @@ func requireWithinRoomBound(t *testing.T, base, end roomMemory, writes int, tota
 
 func perWrite(bytes int64, writes int) float64 {
 	return float64(bytes) / float64(writes)
-}
-
-// loadSpec is the load harness's spec (INFRA-589 loadtest/seed.go:270): a title, the "Revision
-// token r0" paragraph, then sections of two prose paragraphs and a six-column table of four rows
-// until it holds target bytes. It returns the spec, each row's "Requirement <key>-R<n> holds"
-// cell, and the prose paragraphs, each without its closing period.
-func loadSpec(r *rand.Rand, key string, target int) (string, []string, []string) {
-	var b strings.Builder
-	var quotes, paragraphs []string
-	fmt.Fprintf(&b, "# Spec for %s\n\nRevision token r0\n\n", key)
-	row, section := 0, 0
-	for b.Len() < target {
-		section++
-		p1, p2 := specSentence(r, 40), specSentence(r, 30)
-		paragraphs = append(paragraphs, p1, p2)
-		fmt.Fprintf(&b, "## Section %d\n\n%s.\n\n%s.\n\n", section, p1, p2)
-		b.WriteString("| Id | Requirement | Owner | Status | Evidence | Notes |\n|---|---|---|---|---|---|\n")
-		for range 4 {
-			row++
-			quote := fmt.Sprintf("Requirement %s-R%d holds", key, row)
-			quotes = append(quotes, quote)
-			fmt.Fprintf(&b, "| R%d | %s | team-%d | open | %s | %s |\n", row, quote, r.IntN(9), specSentence(r, 6), specSentence(r, 5))
-		}
-		b.WriteString("\n")
-	}
-	return b.String(), quotes, paragraphs
-}
-
-var specWords = strings.Fields(`the outbox publishes each committed event to its issue topic and every session that
-watches the issue receives it within a second while the listener keeps interests in a key value bucket
-dispatch reads issues documents comments and asks from postgres through a shared pool of connections
-a reviewer anchors a comment to a line of the specification and the author answers with a new version
-latency throughput memory goroutines profile scaling knee saturation connection queue lock contention`)
-
-func specSentence(r *rand.Rand, words int) string {
-	var b strings.Builder
-	for i := range words {
-		if i > 0 {
-			b.WriteByte(' ')
-		}
-		b.WriteString(specWords[r.IntN(len(specWords))])
-	}
-	return b.String()
 }
