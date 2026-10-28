@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-558",
+  "completed": "2026-10-28T18:49:30Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "I re-ran both of the implementer's proof commands on the same real surfaces. At this head, the previous release is legion-envoy-v19.0.0 (aeeee6c029f6), because the merge of main at 53f39ba0 brought it into the history. So I built that release with build-dispatch-build.sh --previous-release, which is the release CI's dispatch-two-builds job resolves now. The implementer's runs used v18.4.0. Go harness: 3 of 3 PASS. Cross-build browser spec: 2 passed and 1 skipped as designed with B=v19, and 3 passed with both processes on this tree."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Acceptance 1 / item 6: the two-build test exists, runs in CI, and passes for the current build against the previous release (CLI, documents, messages and subscription settings both ways).",
+      "surface": "Two real envoy-dispatch processes, legion-envoy-v19.0.0 (built from git archive by build-dispatch-build.sh) and this head, on one Postgres 17 + pgvector and one nats-server, with each build's dispatch CLI run against the other build's server",
+      "command": "bash packages/envoy/scripts/build-dispatch-build.sh --previous-release --out $TMPDIR/t558/prev-v19 && cd packages/envoy && DISPATCH_PREVIOUS_BUILD=$TMPDIR/t558/prev-v19 DISPATCH_TEST_DATABASE_URL=<local postgres> go test -tags twobuild -count=1 -timeout 30m -v -run TestTwoBuilds ./cmd/dispatch",
+      "observed": "TestTwoBuildsAnswerEachOthersCLI PASS (14.3s). TestTwoBuildsReadAndEditEachOthersDocuments PASS (45.8s): the corpus, approval carry v1->v2 each way, and 54 refs rows that survive each way. TestTwoBuildsPassMessagesBothWays PASS (118.0s). ok github.com/sjawhar/envoy/cmd/dispatch 178.350s. Evidence: https://github.com/sjawhar/legion/pull/2461#issuecomment-6477673061",
+      "headSha": "54169896609ce3557746ba268bbe9ae78edec272",
+      "negativeControl": "G3, in a copy of the tree at this head. (a) The callout kind gets 'tip' with since 3, creatable_since 3, and a corpus file uses it: TestTwoBuildsReadAndEditEachOthersDocuments FAILs. v19 answers 409 DOC_SCHEMA '... must be one of note, warning, got \"tip\"', and the bad build admits v2 pages readonly. (b) The current CLI sends due_date, and DisallowUnknownFields is put back: TestTwoBuildsAnswerEachOthersCLI FAILs with 'invalid JSON body: json: unknown field \"due_date\"'."
+    },
+    {
+      "criterion": "Spec rule binds from the next release on (departure 3): a correctly staged next release rolls beside this head on documents and request members.",
+      "surface": "The same Go harness, with this head built as the previous build (build-dispatch-build.sh --commit HEAD) and a copy of the tree changed as a next release would change it as the current side",
+      "command": "bash packages/envoy/scripts/build-dispatch-build.sh --commit HEAD --out $TMPDIR/t558/prev-head; in the copy: DISPATCH_PREVIOUS_BUILD=$TMPDIR/t558/prev-head go test -tags twobuild -count=1 -v -run 'TestTwoBuildsReadAndEditEachOthersDocuments|TestTwoBuildsAnswerEachOthersCLI' ./cmd/dispatch",
+      "observed": "Staged element (callout kind 'tip', since 3, creatable_since 4, manifest version 3): documents PASS both directions (66.4s), with each page admitted read-write by the other build. Next-release CLI that sends due_date on issue create: CLI PASS both directions. This head accepts the new member.",
+      "headSha": "54169896609ce3557746ba268bbe9ae78edec272",
+      "negativeControl": "The same element made creatable at once (creatable_since 3), against this head as the previous build: FAIL. This head's /text answers 409 DOC_NEWER_CONTENT 'this Dispatch process's build cannot read an element of this document ... Try again in one minute ... (typed block \"callout\" attribute \"kind\": ... got \"tip\")', and it does not tell the agent to replace the document."
+    },
+    {
+      "criterion": "Item 6 browser half: each build's page works against the other build's server, and a document holding newer content shows that state with no replace drop zone.",
+      "surface": "Dispatch web app in real Chromium (Playwright) through the two-process proxy, with page and API pinned to different processes; process B is legion-envoy-v19.0.0, or this tree",
+      "command": "cd packages/dispatch && DATABASE_URL=<fresh db> DISPATCH_E2E_BINARY_B=$TMPDIR/t558/prev-v19/envoy-dispatch DISPATCH_E2E_WEB_DIST_B=$TMPDIR/t558/prev-v19/web DISPATCH_E2E_PORT_B=<free port> bun run e2e:multiprocess -- cross-build.multiprocess; and DATABASE_URL=<fresh db> bun run e2e:multiprocess -- cross-build.multiprocess",
+      "observed": "With B=v19.0.0: 2 passed (21.8s), the newer-content row skipped as designed. With both on this tree: 3 passed (27.3s), the newer-content row included.",
+      "headSha": "54169896609ce3557746ba268bbe9ae78edec272",
+      "negativeControl": "On the manual stack, the newer-content hook route on v19 answers 404 'no route for POST .../_test/newer-content'. On this head it is mounted only under DISPATCH_TEST_HOOKS=1."
+    },
+    {
+      "criterion": "Item 3: a stopped or dead intake holder's messages reach the standby at once, not after AckWait, and a cut-off holder is fenced; stream settings do not flip, and the stream is ensured on reconnect.",
+      "surface": "Two real envoy-dispatch processes of this head on one Postgres and one NATS (throwaway probe on the twobuild helpers, never committed), plus a manual stack of this head and v19.0.0 on a real nats-server binary",
+      "command": "Probe: SIGKILL, then SIGSTOP/SIGCONT, of the delivery-events holder with 30 merged-PR messages published. Manual: stamp ENVOY_NOTIFICATIONS with dispatch.stream-generation 2 and MaxAge 96h, then restart each build. Delete the stream, then restart nats-server.",
+      "observed": "SIGKILL: the standby bound at 14.4s and handled all 30 at 22s, with 0 repeats. SIGSTOP: the standby handled all 30 at 21.9s, and none of the 20 messages published after SIGCONT reached the restored holder (it logged 'the NATS consumer no longer delivers to this intake'). The one in-flight message (#2006) was handled again by the restored holder, which is the at-least-once allowance for one in-flight message. This head on a gen-2 stream logged 'stream settings belong to a newer build' and left MaxAge at 96h. It recreated the deleted stream (generation 1) on reconnect.",
+      "headSha": "54169896609ce3557746ba268bbe9ae78edec272",
+      "negativeControl": "v19.0.0 alone on the same stack: its boot rewrote the gen-2 stream's MaxAge from 96h to 72h, and after the stream was deleted and NATS restarted, it left the stream missing ('nats: stream not found')."
+    },
+    {
+      "criterion": "Item 1: a request body or socket frame member from the other build is accepted; a route the other build lacks is retried and then answered with the release message.",
+      "surface": "Manual stack: this head (:18781) and v19.0.0 (:18782) on one database and one NATS, with curl, a Bun websocket client, and the current dispatch CLI through a proxy that sends GET /api/v1/issues/<key> to a path the real server has no route for",
+      "command": "curl POST /api/v1/issues with due_date and a nested unknown member; /ws/delivery subscribe with extra members; dispatch read --issue MAN18781-1 through the proxy (MISS=2 and MISS=all)",
+      "observed": "Current answers 201, and a frame with extra members gets the same answer as a plain frame. The CLI retry: when only the first 2 attempts get no route, attempts are at 6.29s, 7.49s and 9.90s, then exit 0. When every attempt gets no route, there are 4 attempts (jittered 1/2/4s), then exit 1 with 'The Dispatch process that answered does not offer this action yet, because a new release of Dispatch is in progress. Try again in one minute.'",
+      "headSha": "54169896609ce3557746ba268bbe9ae78edec272",
+      "negativeControl": "On current: a truncated body gives 400 INVALID_JSON 'unexpected EOF'; two JSON values give 400 'request body must contain one JSON value'; title 5 gives 400 'cannot unmarshal'; text/plain gives 415; no caller gives 401; an unknown frame type or view.kind gives INVALID_FRAME. v19 answers 400 'unknown field \"due_date\"' and INVALID_FRAME 'unknown field \"future\"'."
+    }
+  ],
+  "notes": [
+    "CI at code head 9605d1c0 at test time: lint, typecheck, test and build are success. Legion Envoy and Contracts lanes (dispatch-two-builds, dispatch-multiprocess, envoy-go, envoy-go-race and others) are queued on GitHub. I did not wait for them.",
+    "Failing-before spot check: the test-only commit 630f8899 (C1-C4) does not compile its bus tests, because they use symbols the fix adds. So 'failing before' there is a build failure, not the assertion messages the evidence log quotes. I showed the C1 and C3 before/after behaviour on the real surface instead (v19 compared with this head, above).",
+    "Environment: at 18:17Z I stopped the shared local test Postgres at 127.0.0.1:5433 ($TMPDIR/pg) by mistake: I removed its postmaster.pid, and it was running in another role's PID namespace. I restarted it on the same data directory and port at 18:18Z, and it is running."
+  ]
+}
