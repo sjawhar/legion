@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -373,15 +375,90 @@ const heapTxtFixture = `heap profile: 3: 400 [3: 9405000] @ heap/524288
 `
 
 func TestCodepathsParsesMemStats(t *testing.T) {
-	ms, err := parseMemStats(heapTxtFixture)
+	ms, err := parseMemStats([]byte(heapTxtFixture))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := (memStats{HeapSys: 838860800, HeapInuse: 629145600, StackSys: 16777216, Sys: 1048576000}); ms != want {
 		t.Errorf("%+v, want %+v", ms, want)
 	}
-	if _, err := parseMemStats("heap profile: 1: 2\n"); err == nil {
-		t.Error("a heap.txt with no runtime.MemStats was taken")
+	if _, err := parseMemStats([]byte("heap profile: 1: 2\n")); !errors.Is(err, errNoMemStats) {
+		t.Errorf("a heap.txt with no runtime.MemStats gave %v, want errNoMemStats", err)
+	}
+}
+
+// TestCodepathsCommandTakesACutHeapTxt: a heap.txt cut before its runtime.MemStats block, as a
+// fetch that ran out of time leaves it, still gives CODEPATHS.md: the CPU tables, and the Go heap
+// rows by entry point with heap-end's inuse_space shares, while every figure from runtime.MemStats
+// shows `-` with a note naming why. A runtime.MemStats block that lacks a figure still fails.
+func TestCodepathsCommandTakesACutHeapTxt(t *testing.T) {
+	step, out := filepath.Join(t.TempDir(), "r16"), t.TempDir()
+	if err := os.MkdirAll(step, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := cpuFixture()
+	cpWriteProfile(t, filepath.Join(step, "cpu.pprof"), p)
+	start, end := heapFixtures()
+	cpWriteProfile(t, filepath.Join(step, "heap-start.pprof"), start)
+	cpWriteProfile(t, filepath.Join(step, "heap-end.pprof"), end)
+	cut, _, _ := strings.Cut(heapTxtFixture, "# runtime.MemStats")
+	if err := os.WriteFile(filepath.Join(step, "heap.txt"), []byte(cut+"1: 100 [1: 1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cg, err := json.Marshal(outageCgroup())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(step, "cgroup.json"), cg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCodepaths([]string{"-step", step, "-out", out}); err != nil {
+		t.Fatalf("a cut heap.txt failed the command: %v", err)
+	}
+	var rep codepathsReport
+	b, err := os.ReadFile(filepath.Join(out, "codepaths.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.CPU == nil || rep.CPU.Samples != 52 || len(rep.Subsystems) == 0 {
+		t.Fatalf("cpu %+v, %d subsystems; want the CPU tables", rep.CPU, len(rep.Subsystems))
+	}
+	if m := rep.Memory; m.HeapInuse != nil || m.HeapSys != nil || m.StackSys != nil || m.Sys != nil || m.WorkingSetBytes == nil {
+		t.Errorf("memory %+v: want no runtime.MemStats figure, and the working set", m)
+	}
+	rows := map[string]cpMemoryRow{}
+	for _, r := range rep.Memory.Rows {
+		rows[r.Row] = r
+		if r.Bytes != nil {
+			t.Errorf("row %q has %v bytes with no runtime.MemStats, want null", r.Row, *r.Bytes)
+		}
+	}
+	if fold, ok := rows["Go heap in use: "+entryFold]; !ok || fold.InuseShare == nil || *fold.InuseShare != 0.75 || fold.WindowAllocBytes == nil {
+		t.Errorf("fold row %+v (present %v): want heap-end's inuse_space share 0.75 and the window's allocation", fold, ok)
+	}
+	md := readText(t, filepath.Join(out, "CODEPATHS.md"))
+	for _, want := range []string{
+		"| HTTP getIssueReferences | 7 | 13.46% | 0.07 | 1.62 |",
+		"| Go heap in use: " + entryFold + " | - | - | - | 75.00% | 7.812 |",
+		"| heap idle (HeapSys - HeapInuse) | - | - | - | - | - |",
+		"| stacks (StackSys) | - | - | - | - | - |",
+		"| other runtime memory (Sys - HeapSys - StackSys) | - | - | - | - | - |",
+		"| non-Go memory (working set - Sys) | - | - | - | - | - |",
+		fmt.Sprintf("heap.txt: no `# runtime.MemStats` block in its %d bytes (the block ends the profile, so a fetch cut short has none), so every row from runtime.MemStats shows `-`.", len(cut)+len("1: 100 [1: 1")),
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("CODEPATHS.md has no %q:\n%s", want, md)
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(step, "heap.txt"), []byte(cut+"# runtime.MemStats\n# Sys = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCodepaths([]string{"-step", step, "-out", out}); err == nil {
+		t.Error("a runtime.MemStats block with no HeapSys was taken")
 	}
 }
 

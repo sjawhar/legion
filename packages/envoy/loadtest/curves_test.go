@@ -390,6 +390,7 @@ func TestCurvesWriteTheHoursTrend(t *testing.T) {
 		at := curveWinStart.Add(time.Duration(s) * 5 * time.Second)
 		smp := sample{At: at, InWindow: true}
 		if s%3 == 0 {
+			smp.HeapAt, smp.HeapInWindow = at, true
 			smp.HeapInuse = float64(300<<20) + at.Sub(curveWinStart).Hours()*float64(200<<20)
 		}
 		ss = append(ss, smp)

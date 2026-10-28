@@ -647,7 +647,9 @@ func (p *probes) waitSampler() { <-p.smpDone }
 
 // profile fetches Dispatch's profiles. The CPU profile covers the whole window; the goroutine
 // dump and the heap profile are taken once it has finished, outside it, and under -source replay
-// after the replay's window-end reads (heap-end.pprof, then Dispatch's /proc read).
+// after the replay's window-end reads (heap-end.pprof, then Dispatch's /proc read). heap.txt has
+// 10 minutes: with a heap of tens of GiB it is over 500 MB, and 60 s cut it before its
+// runtime.MemStats block.
 func (st *step) profile(ctx context.Context) {
 	if !sleepUntil(ctx, st.winStart) {
 		return
@@ -664,7 +666,7 @@ func (st *step) profile(ctx context.Context) {
 	}
 	fetchTo(pprof+"/debug/pprof/goroutine?debug=2", filepath.Join(out, "goroutines.txt"), 120*time.Second, st.lg)
 	fetchTo(pprof+"/debug/pprof/heap", filepath.Join(out, "heap.pprof"), 60*time.Second, st.lg)
-	fetchTo(pprof+"/debug/pprof/heap?debug=1", filepath.Join(out, "heap.txt"), 60*time.Second, st.lg)
+	fetchTo(pprof+"/debug/pprof/heap?debug=1", filepath.Join(out, "heap.txt"), 10*time.Minute, st.lg)
 }
 
 // buildSummary joins what the phases recorded into summary.json, and writes samples.json. It

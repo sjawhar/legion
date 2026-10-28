@@ -173,8 +173,9 @@ func hourSeries(s *curveStep) []trendSeries {
 	return []trendSeries{cores, wset, heap}
 }
 
-// hourHeap is the hour step's 1-minute means of Go heap in use, MiB, over the in-window samples of
-// samples.json whose heap read succeeded; why says why there are none.
+// hourHeap is the hour step's 1-minute means of Go heap in use, MiB, over the heap reads of
+// samples.json that worked and ended in the window, each in the minute it ended (sample.HeapAt);
+// why says why there are none.
 func hourHeap(s *curveStep) ([]trendPoint, string) {
 	if s.meta == nil || s.meta.WindowStart.IsZero() {
 		return nil, "no window_start in meta.json"
@@ -190,11 +191,11 @@ func hourHeap(s *curveStep) ([]trendPoint, string) {
 	var sum [trendTo]float64
 	var n [trendTo]int
 	for _, x := range ss {
-		if !x.InWindow || x.HeapInuse <= 0 || slices.Contains(x.FailedReads, readHeap) {
+		if !x.HeapInWindow || x.HeapInuse <= 0 || slices.Contains(x.FailedReads, readHeap) {
 			continue
 		}
-		m := int(x.At.Sub(s.meta.WindowStart) / time.Minute)
-		if x.At.Before(s.meta.WindowStart) || m < trendFrom || m >= trendTo {
+		m := int(x.HeapAt.Sub(s.meta.WindowStart) / time.Minute)
+		if x.HeapAt.Before(s.meta.WindowStart) || m < trendFrom || m >= trendTo {
 			continue
 		}
 		sum[m] += x.HeapInuse

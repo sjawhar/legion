@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -74,15 +76,20 @@ func TestSamplerChecksNothingWithoutPIDs(t *testing.T) {
 }
 
 // fakeSample is an in-window sample at second at, with pgTotal connections ("idle|" state),
-// goroutines and heap in MiB (0: not read), and the reads named in failed marked as failed.
+// goroutines and heap in MiB (0: not read), and the reads named in failed marked as failed. A heap
+// read, one that worked or failed, ended at the sample's time.
 func fakeSample(at, pgTotal, goroutines int, heapMiB float64, failed ...string) sample {
 	t0 := time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC)
-	return sample{
+	s := sample{
 		At: t0.Add(time.Duration(at) * time.Second), InWindow: true,
 		CPUTicks: map[string]float64{"dispatch": float64(at) * 50}, RSSKiB: map[string]float64{"dispatch": 1024},
 		PGConns: map[string]int{"idle|": pgTotal}, PGTotal: pgTotal, Goroutines: goroutines, PoolWait: goroutines / 10,
 		HeapInuse: heapMiB * 1048576, FailedReads: failed,
 	}
+	if heapMiB > 0 || slices.Contains(failed, readHeap) {
+		s.HeapAt, s.HeapInWindow = s.At, true
+	}
+	return s
 }
 
 func TestSummarizeResourcesLeavesFailedReadsOutOfTheStats(t *testing.T) {
@@ -120,6 +127,25 @@ func TestSummarizeResourcesLeavesFailedReadsOutOfTheStats(t *testing.T) {
 	}
 }
 
+// TestSummarizeResourcesTakesHeapReadsByWhenTheyEnded: a heap read enters the window by when it
+// ended, not by the sample that carries it: a read that ended before the window, carried by the
+// window's first sample, is left out; one that ended in the window, carried by the first sample
+// past it, counts.
+func TestSummarizeResourcesTakesHeapReadsByWhenTheyEnded(t *testing.T) {
+	early := fakeSample(0, 1, 1, 0)
+	early.HeapInuse, early.HeapAt, early.HeapInWindow = 50*1048576, early.At.Add(-time.Second), false
+	late := fakeSample(15, 1, 1, 0)
+	late.InWindow = false
+	late.HeapInuse, late.HeapAt, late.HeapInWindow = 70*1048576, late.At.Add(-2*time.Second), true
+	failedLate := fakeSample(20, 1, 1, 0, readHeap)
+	failedLate.InWindow = false
+	res := summarizeResources([]sample{early, fakeSample(5, 1, 1, 0), fakeSample(10, 1, 1, 0), late, failedLate}, 0, 10)
+	if res.HeapInuseMiB.N != 1 || res.HeapInuseMiB.Max != 70 || res.PprofReadErrors != 1 {
+		t.Fatalf("heap %+v, pprof_read_errors %d; want the one read that worked and ended in the window (70 MiB), and the failed one counted",
+			res.HeapInuseMiB, res.PprofReadErrors)
+	}
+}
+
 func TestGoroutineCountsFailsWithoutAProfile(t *testing.T) {
 	const profile = "goroutine profile: total 7\n" +
 		"3 @ 0x1 0x2\n#\t0x1\tgithub.com/jackc/puddle/v2.(*Pool[...]).Acquire+0x1\tpool.go:1\n\n" +
@@ -141,7 +167,7 @@ func TestGoroutineCountsFailsWithoutAProfile(t *testing.T) {
 		if _, _, err := goroutineCounts(base); err == nil {
 			t.Errorf("goroutineCounts(%s) read no profile and no error", base)
 		}
-		if _, _, _, err := heapStats(base); err == nil {
+		if _, _, _, err := heapStats(context.Background(), base); err == nil {
 			t.Errorf("heapStats(%s) read no profile and no error", base)
 		}
 	}
@@ -189,19 +215,31 @@ func TestSummarizeResourcesTakesNATSRatesFromTheReadsThatWorked(t *testing.T) {
 
 // TestSamplerMarksNoReadThatFailedOnceTheStepEnded: a read that fails while the step runs is
 // marked in its sample and logged; a sample taken once ctx has ended is not kept at all, and its
-// failed reads are neither counted nor logged, as poll does.
+// failed reads are neither counted nor logged, as poll does. The heap read runs on its own, so its
+// failure lands in the first or the second sample.
 func TestSamplerMarksNoReadThatFailedOnceTheStepEnded(t *testing.T) {
 	down := endpoints{pprof: "http://127.0.0.1:1", natsMon: "http://127.0.0.1:1", pg: unreachablePG, pids: map[string]int{}}
 	now := time.Now()
 
 	var logged bytes.Buffer
 	running := newSampler(down)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
 	defer cancel()
 	running.loop(ctx, now, now.Add(time.Minute), log.New(&logged, "", 0))
 	ss := running.all()
-	if want := []string{readPostgres, readGoroutines, readHeap, readNATS}; len(ss) == 0 || !slices.Equal(ss[0].FailedReads, want) {
-		t.Fatalf("samples %+v: want the first to mark %v", ss, want)
+	if len(ss) != 2 {
+		t.Fatalf("%d samples in 7 s, want 2", len(ss))
+	}
+	heaps := 0
+	for _, s := range ss {
+		others := slices.DeleteFunc(slices.Clone(s.FailedReads), func(r string) bool { return r == readHeap })
+		heaps += len(s.FailedReads) - len(others)
+		if !slices.Equal(others, []string{readPostgres, readGoroutines, readNATS}) {
+			t.Errorf("sample at %s marks %v, want postgres, goroutines and nats", s.At, s.FailedReads)
+		}
+	}
+	if heaps != 1 {
+		t.Errorf("samples mark %v and %v, want the one heap read marked once", ss[0].FailedReads, ss[1].FailedReads)
 	}
 	for _, name := range []string{"sampler: postgres", "sampler: pprof", "sampler: nats"} {
 		if !strings.Contains(logged.String(), name) {
@@ -216,6 +254,74 @@ func TestSamplerMarksNoReadThatFailedOnceTheStepEnded(t *testing.T) {
 	ended.loop(endedCtx, now, now.Add(time.Minute), log.New(&logged, "", 0))
 	if ss := ended.all(); len(ss) != 0 || logged.Len() != 0 {
 		t.Fatalf("reads that failed once ctx had ended: samples %+v, log %q; want no sample and no log line", ss, logged.String())
+	}
+}
+
+// TestSamplerHeapReadDelaysNoSample: Dispatch's heap endpoint answers 7 s after it is asked, past
+// the 5 s sample interval, and the goroutine reads keep their 5 s cadence meanwhile. The heap read
+// lands in the first sample after it ended, with its own end time, and no second heap read starts
+// before the next 15 s slot.
+func TestSamplerHeapReadDelaysNoSample(t *testing.T) {
+	const heapDelay = 7 * time.Second
+	var mu sync.Mutex
+	var heapAsked []time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/debug/pprof/goroutine":
+			fmt.Fprint(w, "goroutine profile: total 7\n")
+		case "/debug/pprof/heap":
+			mu.Lock()
+			heapAsked = append(heapAsked, time.Now())
+			mu.Unlock()
+			select {
+			case <-time.After(heapDelay):
+				fmt.Fprint(w, "heap profile: 1: 2 [3: 4] @ heap/1048576\n\n# runtime.MemStats\n# HeapAlloc = 2097152\n# HeapSys = 8388608\n# HeapInuse = 4194304\n")
+			case <-r.Context().Done():
+			}
+		case "/varz":
+			fmt.Fprint(w, `{"in_msgs": 1}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	start := time.Now()
+	s := newSampler(endpoints{pprof: srv.URL, natsMon: srv.URL, pg: unreachablePG, pids: map[string]int{}})
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	s.loop(ctx, start, start.Add(time.Minute), log.New(io.Discard, "", 0))
+
+	ss := s.all()
+	if len(ss) != 3 {
+		t.Fatalf("%d samples in 12 s, want 3: one each 5 s while the heap read is in flight", len(ss))
+	}
+	for i, x := range ss {
+		if late := x.At.Sub(start) - time.Duration(i)*5*time.Second; late < 0 || late > time.Second {
+			t.Errorf("sample %d at %s past the start, want %d s: the heap read in flight delayed it", i, x.At.Sub(start), i*5)
+		}
+		if x.Goroutines != 7 || slices.Contains(x.FailedReads, readGoroutines) || slices.Contains(x.FailedReads, readHeap) {
+			t.Errorf("sample %d: goroutines %d, failed reads %v; want 7 goroutines, no failed goroutine or heap read", i, x.Goroutines, x.FailedReads)
+		}
+	}
+	for i, x := range ss[:2] {
+		if !x.HeapAt.IsZero() || x.HeapInuse != 0 {
+			t.Errorf("sample %d carries a heap read (ended %s, %v bytes) before the read could end", i, x.HeapAt, x.HeapInuse)
+		}
+	}
+	got := ss[2]
+	if got.HeapInuse != 4194304 || got.HeapAlloc != 2097152 || got.HeapSys != 8388608 || !got.HeapInWindow {
+		t.Errorf("sample 2 heap in use %v, alloc %v, sys %v, in window %v; want the read's 4 MiB, 2 MiB, 8 MiB, in the window",
+			got.HeapInuse, got.HeapAlloc, got.HeapSys, got.HeapInWindow)
+	}
+	if ended := got.HeapAt.Sub(start); ended < heapDelay || got.HeapAt.After(got.At.Add(time.Second)) || !got.HeapAt.After(ss[1].At) {
+		t.Errorf("sample 2 (at %s) carries a heap read that ended %s past the start, want its own end, after %s and after sample 1",
+			got.At.Sub(start), ended, heapDelay)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(heapAsked) != 1 {
+		t.Errorf("heap asked at %v, want once: the next 15 s slot is past the 12 s run", heapAsked)
 	}
 }
 

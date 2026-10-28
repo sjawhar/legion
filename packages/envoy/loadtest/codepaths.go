@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	_ "embed"
 	"encoding/csv"
@@ -595,13 +596,18 @@ type memStats struct {
 	HeapSys, HeapInuse, StackSys, Sys float64
 }
 
+// errNoMemStats is parseMemStats' error for a heap.txt with no `# runtime.MemStats` block: the
+// block ends /debug/pprof/heap?debug=1, so a fetch cut before its end has none.
+var errNoMemStats = errors.New("no `# runtime.MemStats` block")
+
 // parseMemStats reads the `# runtime.MemStats` block of /debug/pprof/heap?debug=1: `# Key = value`
 // lines, and `# Stack = <inuse> / <sys>`.
-func parseMemStats(text string) (memStats, error) {
-	_, block, ok := strings.Cut(text, "# runtime.MemStats\n")
+func parseMemStats(text []byte) (memStats, error) {
+	_, blockBytes, ok := bytes.Cut(text, []byte("# runtime.MemStats\n"))
 	if !ok {
-		return memStats{}, errors.New("no `# runtime.MemStats` block")
+		return memStats{}, errNoMemStats
 	}
+	block := string(blockBytes)
 	got := map[string]float64{}
 	for line := range strings.SplitSeq(block, "\n") {
 		key, value, ok := strings.Cut(strings.TrimPrefix(line, "# "), " = ")
@@ -1024,11 +1030,15 @@ func runCodepaths(args []string) error {
 		if err != nil {
 			return err
 		}
-		ms, err := parseMemStats(string(b))
-		if err != nil {
+		ms, err := parseMemStats(b)
+		switch {
+		case errors.Is(err, errNoMemStats):
+			mi.msWhy = fmt.Sprintf("%s in its %d bytes (the block ends the profile, so a fetch cut short has none)", err, len(b))
+		case err != nil:
 			return fmt.Errorf("%s: %w", txtIn.path, err)
+		default:
+			mi.ms = &ms
 		}
-		mi.ms = &ms
 	}
 	mi.ws, mi.wsSource = workingSetAtEnd(cf)
 	if cgIn.path == "" {
