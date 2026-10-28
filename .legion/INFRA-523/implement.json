@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-523",
-  "completed": "2026-10-28T18:39:35Z",
+  "completed": "2026-10-28T20:18:42Z",
   "proof": [
     {
       "criterion": "A1: the catalog lists every job attempt in the window that failed with a later attempt of that job",
@@ -187,6 +187,14 @@
       "observed": "red test ok 3/3 (20.9 s); duty, redeliver, outbox, processes, docs paced-loop tests ok; lone-runner and two-runner race ok x3; suggestion and owner-row lock tests ok; multiprocess leased-loop tests ok (91.8 s)",
       "headSha": "0a38d434e74e7024957fd1e9023dc0252236f886",
       "negativeControl": "RunLeased arming time.After(interval) after each pass, by -overlay: the red test fails 'pass 2 served the period at 18:35:30.000 and the pass after it the period at 18:35:32.000, 2s later: 1 period(s) between them got no pass' (twice)"
+    },
+    {
+      "criterion": "Round 5 (review 5689079928's Fast-follow): the leased-loop comments state the ticker's overrun behaviour and the red test's comment no longer says the loops return their interval; no code change",
+      "surface": "the pull request's diff at a95753b1 and the envoy module's build",
+      "command": "jj -R . diff -r a95753b1 --git | grep '^[+-]' | grep -v '^[+-]\\s*//' | grep -v '^+++\\|^---'; go build ./... && go vet ./internal/dispatch/duty/ ./internal/dispatch/api/ ./internal/dispatch/outbox/ ./internal/dispatch/processes/ ./internal/dispatch/redeliver/ && gofmt -l internal",
+      "observed": "no changed line outside a // comment; build, vet and gofmt clean; 'overruns dropped' and 'return their interval' no longer appear in packages/envoy",
+      "headSha": "a95753b12e6adcb0030477c759e70a1131a811f2",
+      "negativeControl": "grep -rn 'overruns dropped\\|return their interval' packages/envoy --include=*.go found the seven stale sentences at 0a38d434 and finds none at a95753b1"
     }
   ],
   "filesChanged": [
@@ -220,7 +228,8 @@
     "Review finding 2 (deep-links.e2e.ts) is not changed, on the architect's decision for this round: the layout shift is dispatch://INFRA-662's.",
     "Review round 2: the reviewer's fast-follow items (one duty helper, one lock-wait helper, waitOutABucketBoundary's unused parameter, machine_logins_test through logtest, the tmux credential mint/write helper, Deps.Lifetime as a Register parameter) are done in this pull request rather than left as a fast-follow; the redelivery, suggestion-outcome, compaction, issue-ask repair and prune loops now wait their interval after each pass ends instead of ticking on a fixed ticker (changelog fragment says so).",
     "Main merged forward at ec4448fb (fingerprint comment on the pull request); packages/claude-envoy/dist and legion are dropped per #2423. Per the architect, the two reds main's #2233 brought (recipients-claim.e2e.ts route row, TestDispatchConnectionsPerPodIsTheServers) are not fixed here; main is merged again once their fixes land.",
-    "Round 4: the tester's red test run_leased_period_test.go changes in the two lines RunLeased's new pass signature forces (the architect asked for func(context.Context)): its closure no longer declares a time.Duration return and no longer returns interval; its assertions, timings and comment are unchanged."
+    "Round 4: the tester's red test run_leased_period_test.go changes in the two lines RunLeased's new pass signature forces (the architect asked for func(context.Context)): its closure no longer declares a time.Duration return and no longer returns interval; its assertions, timings and comment are unchanged.",
+    "Round 5: the tester's red test file run_leased_period_test.go has its doc comment corrected (lines 14-15, 21-23), as the architect asked for this round; its code is unchanged."
   ],
   "openQuestions": []
 }
