@@ -18,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import yaml
@@ -263,17 +263,24 @@ def apply_rules(session: Session, rules: dict, source: str, seen: set) -> list:
 def module_reads(session: Session, files: list, run_: Run) -> tuple:
     """What a claimed command this check does not reduce counts as reading: every Go file of its
     module (the nearest directory at or above the Run's workdir holding a go.mod, any nested
-    module's subtree aside), that module's go.mod and go.sum, and its workspace's module files.
-    Returns (the module's directory, those paths)."""
+    module's subtree aside; above every module, each module of the go.work that governs it), those
+    modules' go.mod and go.sum, and its workspace's module files. Returns (the modules'
+    directories, those paths)."""
     root = (REPO / run_.workdir).resolve()
     while root != REPO and not (root / "go.mod").is_file():
         root = root.parent
-    prefix = "" if root == REPO else f"{rel(str(root))}/"
-    nested = [f.removesuffix("go.mod") for f in files
-              if os.path.basename(f) == "go.mod" and f.startswith(prefix) and f != f"{prefix}go.mod"]
-    paths = [f for f in files if f.endswith(".go") and f.startswith(prefix) and not f.startswith(tuple(nested))]
-    paths += [f"{prefix}go.mod", f"{prefix}go.sum"] + [read.glob for read in session.module_files(run_)]
-    return prefix.rstrip("/") or ".", paths
+    work = session.module_files(run_)
+    if (root / "go.mod").is_file():
+        prefixes = ["" if root == REPO else f"{rel(str(root))}/"]
+    else:
+        prefixes = sorted({read.glob.removesuffix("go.mod") for read in work if read.glob.endswith("go.mod")})
+    paths = [read.glob for read in work]
+    for prefix in prefixes:
+        nested = [f.removesuffix("go.mod") for f in files
+                  if os.path.basename(f) == "go.mod" and f.startswith(prefix) and f != f"{prefix}go.mod"]
+        paths += [f for f in files if f.endswith(".go") and f.startswith(prefix) and not f.startswith(tuple(nested))]
+        paths += [f"{prefix}go.mod", f"{prefix}go.sum"]
+    return " ".join(p.rstrip("/") or "." for p in prefixes) or "(none)", paths
 
 
 # ---------------------------------------------------------------- files and filters
@@ -421,6 +428,29 @@ def env_reason(document: dict, job: dict, steps: list) -> str:
     return ""
 
 
+# A run: step that changes every later step's environment, which a go command reads beyond its line.
+ENV_WRITE = re.compile(r"\$\{?GITHUB_(?:ENV|PATH)\b|\bgo\s+env\s+-w\b")
+
+
+def job_reason(job: dict) -> str:
+    """The first step of the job whose run: writes $GITHUB_ENV or $GITHUB_PATH or runs `go env -w`,
+    which reach every later go command of the job without showing on its line, or ''."""
+    for step in job.get("steps") or []:
+        written = ENV_WRITE.search(str(step.get("run", "")))
+        if written:
+            return f'step "{step_label(step)}" runs `{written.group(0)}`, which every later step inherits'
+    return ""
+
+
+def step_workdir(document: dict, job: dict, step: dict) -> str:
+    """The directory a run: step runs in: its own working-directory, else the job's or the
+    workflow's defaults.run.working-directory, else the repository root."""
+    def default(holder: dict):
+        return ((holder.get("defaults") or {}).get("run") or {}).get("working-directory")
+    given = step.get("working-directory") or default(job) or default(document) or "."
+    return str(given).strip().removeprefix("./").rstrip("/") or "."
+
+
 def tag_set(tags: str) -> frozenset:
     return frozenset(t for t in tags.split(",") if t)
 
@@ -495,9 +525,17 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
                     problems.append(f"::error file={WORKFLOW}::{where}, which no Run in ci_job_reads.py lists; add it "
                                     f"to the job's gate so its closure is checked")
                     continue
-                reason = env_reason(document, job, [step]) or ("it is part of a backslash continuation" if joined else "")
+                reason = (env_reason(document, job, [step]) or job_reason(job)
+                          or ("it is part of a backslash continuation" if joined else ""))
                 named, tags, mode, reason = reduce_line(line) if not reason else (None, None, None, reason)
+                workdir = step_workdir(document, job, step)
                 for r in pinned:
+                    if workdir != (r.workdir.removeprefix("./").rstrip("/") or "."):
+                        # A cd in its script may move it to the Run's directory or not, so it falls to
+                        # the modules of both.
+                        why_not = reason or f"its step runs in {workdir}, the Run in {r.workdir}"
+                        unreduced[owner[id(r)]] += [(r, where, why_not), (replace(r, workdir=workdir), where, why_not)]
+                        continue
                     if reason:
                         unreduced[owner[id(r)]].append((r, where, reason))
                         continue
@@ -539,7 +577,8 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
             job = jobs.get(g.job) or {}
             lines = (REPO / r.source).read_text().splitlines()
             held = [i for i, line in enumerate(lines) if r.text in line]
-            reason = env_reason(document, job, job.get("steps") or []) or ("" if held else "its text spans lines")
+            reason = (env_reason(document, job, job.get("steps") or []) or job_reason(job)
+                      or ("" if held else "its text spans lines"))
             for i in held:
                 if not reason and lines[i].strip() != r.text:
                     reason = f"its line is `{lines[i].strip()}`, not the text alone"

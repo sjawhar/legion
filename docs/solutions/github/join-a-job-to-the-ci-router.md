@@ -153,11 +153,15 @@ fails the pull request that adds it.
   It reduces a claimed command only in its simple form: one uncontinued line of
   `go test|vet|build`, relative package paths and only `-v`, `-race`, `-count=N`, `-timeout D`,
   `-buildvcs=false` and one `-tags T`, with no `GO*` or `CGO_*` variable in the workflow's, job's
-  or step's `env:`, whose packages, tags and mode must then be exactly the `Run`'s; a script's
+  or step's `env:`, no step of the job writing `$GITHUB_ENV` or `$GITHUB_PATH` or running
+  `go env -w`, and the step's working directory (its own, else a `defaults.run` one, else the
+  root) the `Run`'s; its packages, tags and mode must then be exactly the `Run`'s, and a script's
   line must be exactly the pinned text. Any other claimed command (`GOFLAGS=...`, another flag,
   a pipe, a quote, a continuation) counts as reading every Go file of its module and the module
-  files, and fails naming the command unless its filter selects them all: the check fails wide
-  rather than parse further. It fails too when a pinned text is gone, and when a job or step is
+  files, and fails naming the command unless its filter selects them all; a step in another
+  directory falls to the modules of both. Pass a value to a later step as a step output set in
+  that step's `env:`, not through `$GITHUB_ENV`. The check fails wide rather than parse further.
+  It fails too when a pinned text is gone, and when a job or step is
   gated on a filter neither `GATES` nor `EXCLUDED` lists. A job with no go commands still gets a
   gate with its reads.
 - `RULES`: per source file, what a test does outside its package: a go command it starts, or a

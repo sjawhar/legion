@@ -50,15 +50,20 @@
 # A claimed go command is reduced only in its simple form, never parsed further: one physical
 # line, not continued with a backslash, of `go test|vet|build`, then relative package paths and
 # only -v, -race, -count=N, -timeout D, -buildvcs=false and one -tags T, with no GO* or CGO_*
-# variable in the workflow's, job's or step's env. A script_run is held exact instead: the
+# variable in the workflow's, job's or step's env, no step of the job writing $GITHUB_ENV or
+# $GITHUB_PATH or running `go env -w` (each reaches every later go command unseen), and the
+# step's working directory (its own, else the job's or workflow's defaults.run, else the root)
+# the Run's. A script_run is held exact instead: the
 # script's line holding its text must be that text alone and uncontinued, under such an env (the
-# job's and every one of its steps'); the script's variables are the Run author's to read, and
-# anything appended to that line falls to everything. Any other claimed command - an assignment
-# such as GOFLAGS, another flag, a pipe, a quote, a substitution - counts as reading every Go
-# file of its module (the nearest go.mod at or above its directory, nested modules aside), with
-# the module's go.mod and go.sum and its workspace's module files, and fails naming the command
-# unless its filter selects all of them. It fails wide, never narrow: a new evasion is answered
-# by falling to everything, not by more parsing.
+# job's and every one of its steps') and such a job; the script's variables are the Run author's
+# to read, and anything appended to that line falls to everything. Any other claimed command - an
+# assignment such as GOFLAGS, another flag, a pipe, a quote, a substitution - counts as reading
+# every Go file of its module (the nearest go.mod at or above its directory, nested modules
+# aside; above every module, each module of the go.work there), with the module's go.mod and
+# go.sum and its workspace's module files, and fails naming the command unless its filter
+# selects all of them. A line whose step runs in another directory than the Run's falls to the
+# modules of both, since a cd in the script may move it to either. It fails wide, never narrow: a
+# new evasion is answered by falling to everything, not by more parsing.
 #
 # The go commands run with GOPROXY=off over an empty module cache: nothing is downloaded, no
 # go.work.sum is rewritten, and a cold runner gives the answer a warm machine does. Third-party
