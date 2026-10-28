@@ -2,39 +2,29 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-631",
-  "completed": "2026-10-28T16:36:45Z",
-  "round": 11,
-  "headReviewed": "the handoff commit this file is pushed in (code head 0c77df5c, merge of main 8b4a862b)",
-  "decision": "changes_requested",
+  "completed": "2026-10-28T17:31:02Z",
+  "round": 12,
+  "headReviewed": "the handoff commit this file is pushed in (code head e6f60222, merge of main e82b013b)",
+  "decision": "approved",
   "critical": 0,
-  "important": 3,
+  "important": 0,
   "minor": 0,
-  "roundTenFindings": "fixed: a BOM then '<source src=x> …' and a list is left unchanged; BOM files with a paragraph, an ATX heading or front matter are re-laid out with the BOM kept, stable on a second run; main 8b4a862b merged and restructure.ts --strict on its files is byte-identical to the head guides",
+  "approvalRule": "The architect's decision of 2026-10-28 16:38Z replaces the wait for queued CI: approve when the code review finds no correctness defect, the local biome, tsc and test runs pass at the code head, no required check is red at the code head (queued is fine), and the pull request is not CONFLICTING. Main's ruleset still requires lint, typecheck, test and pr-title at the head before it merges.",
+  "roundElevenFindings": "fixed: two leading byte order marks refuse with exit 2, file unchanged (fc24d837); U+FF01 as the first character gets no mark added; each new test fails under its mutation (U+FEFF out of ODD_WHITESPACE; hasByteOrderMark reduced to its first byte); main e82b013b merged and restructure.ts --strict on its files is byte-identical to the head guides",
   "verified": [
-    "checker exit 0 on both guides; bun test of the two test files: 88 pass, 0 fail",
-    "GitHub reports the pull request CONFLICTING with main e82b013b (#2324, merged 16:28Z), which changed AGENTS.md (+6/-6) and README.md (+41/-1); git merge-tree conflicts in both; restructure.ts --strict on e82b013b's files exits 0",
-    "required checks at CI head 0c77df5c queued at 16:30Z"
+    "bunx biome check on scripts/semantic-line-breaks.ts and its two test files: exit 0",
+    "bunx tsc --noEmit --strict --target esnext --module esnext --moduleResolution bundler --types bun --skipLibCheck on the same three files: exit 0 (no tsconfig covers them, and CI's typecheck does not reach them)",
+    "bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts: 90 pass, 0 fail",
+    "checker exit 0 on both guides",
+    "every reproduction of review rounds 1-11 (37 inputs) refuses or stays unchanged as intended, and a second --write changes nothing",
+    "required checks (lint, typecheck, test, pr-title) at CI head e6f60222 all queued at 17:16Z, none red; compare e6f60222...67c0c11c is .legion/ only",
+    "GitHub reports the pull request MERGEABLE",
+    "23 review threads, all mine, all resolved by the implementer with the fixing commit; each answered by me in round 12"
   ],
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md",
-      "description": "The head conflicts with main e82b013b in both guides. Merge main and regenerate the guides with restructure.ts --strict on main's files."
-    },
-    {
-      "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts:1150",
-      "description": "The decoder drops one BOM; micromark drops another, GitHub does not. '\\xef\\xbb\\xbf\\xef\\xbb\\xbf| a | b |\\n|---|---|\\n| 1 | 2 |\\n2. item' is written with exit 0 (a blank line before '2. item'); GitHub renders one paragraph before and a paragraph plus <ol start=\"2\"> after. Round 10 refused it. Fix by construction: add U+FEFF to ODD_WHITESPACE, so --write refuses any file whose decoded text still holds one; add the input as a test."
-    },
-    {
-      "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts:1123",
-      "description": "No test needs bytes 2 and 3 of hasByteOrderMark: weakening it to bytes[0] === 0xef passes all tests, and would add a BOM to any file starting with a character in U+F000-U+FFFF. Add a test such as '！Some words. More words.' whose output must not start with U+FEFF."
-    }
-  ],
-  "fastFollow": "Two doc comments in a row above LENIENT_UTF8 (semantic-line-breaks.ts:1113-1117); the usage comment's refusal list; the cleanups named in rounds 3, 5 and 7.",
+  "keyFindings": [],
+  "fastFollow": "The usage comment's refusal list; ODD_WHITESPACE now names characters, not only whitespace; the cleanups named in rounds 3, 5 and 7.",
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at e53bf974 (1 High: two BOMs). Line numbers, a file of only a BOM, a BOM before invalid UTF-8 and the restructure.ts path checked and fine",
-    "codeQuality": "Verdict: APPROVE at e53bf974 (the byte check is untested; doubled doc comment)"
+    "deepReview": "Verdict: APPROVE at 67c0c11c (sweep of all 1,260 tracked markdown files with the head and the d62ccbbd script: 0 files changed outcome; no tracked file holds EF BB BF)",
+    "codeQuality": "Verdict: APPROVE at 67c0c11c"
   }
 }
