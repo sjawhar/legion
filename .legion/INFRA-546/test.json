@@ -2,51 +2,51 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-546",
-  "completed": "2026-10-28T13:37:16Z",
-  "round": 8,
-  "headSha": "91d30dea0656e98500d425c8bc54f16d3ae533e5",
-  "codeHeadSha": "07b2cc7c310dcd07c9bb03d7175d672a7082ef6d",
+  "completed": "2026-10-28T16:21:00Z",
+  "round": 9,
+  "headSha": "57e888dc871cea5f5f04a261973ee8b51091e04b",
+  "codeHeadSha": "eaca35818b582a0fe044ef4146b5f46debef2bfd",
   "fingerprint": {
-    "oldHead": "81cf8c12ad439ac091aa7a35fd9d3850e24bb729",
-    "newHead": "91d30dea0656e98500d425c8bc54f16d3ae533e5",
-    "base": "main (fork_point(main@origin | head))",
-    "result": "9eb94a30216d2528 -> a47a794122daacbf: changed, only in the .dispatch/architecture/envoy-listener.md summary line main (#2367) also rewrote; this PR's sentence is kept",
-    "decision": "real-surface checks re-run on the merged tree (main's listener code moved), not bare gates"
+    "oldHead": "91d30dea0656e98500d425c8bc54f16d3ae533e5",
+    "newHead": "57e888dc871cea5f5f04a261973ee8b51091e04b",
+    "result": "a47a794122daacbf -> 82c154a62e86b1b7: changed (bus.newClient rewired onto main's background-connecting clients, #2390)",
+    "decision": "full test round"
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `bash /legion/scratch/tmp/p546b/proof.sh /legion/workspaces/sjawhar/legion/infra-546` at 91d30dea: P1-P5 and every standalone refusal reproduced."
+    "how": "Re-ran `bash /legion/scratch/tmp/p546b/proof.sh /legion/workspaces/sjawhar/legion/infra-546` at 57e888dc: P1-P5 and every standalone refusal reproduced (P3 through Dispatch's background connect)."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "On the tree merged with main, a full ENVOY_NOTIFICATIONS refuses new messages: send and publish answer a retryable 503 naming the full stream (outcome stream_full), the GitHub webhook answers 503, and nothing stored is dropped",
-      "surface": "Real envoy-listener (ENVOY_STREAM_MAX_BYTES=20000, ENVOY_WEBHOOKS=github) on a standalone nats-server v2.15.1, driven with curl",
-      "command": "bash /legion/scratch/tmp/t546/tS.sh (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6470476902)",
-      "observed": "publish and send: 503, Retry-After: 1, 'envoy: the message bus refused the message because its stream is full: stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded', records outcome stream_full; webhook 503; stream unchanged at 15 msgs, first_seq 1; after the operator's raise the same send -> 200.",
-      "headSha": "91d30dea0656e98500d425c8bc54f16d3ae533e5",
-      "negativeControl": "NATS server stopped under the running listener: a send -> 503 'envoy: the message bus did not answer: bus: waiting for NATS to reconnect: context deadline exceeded', recorded bus_unavailable"
+      "criterion": "On the tree merged with main (Dispatch background-connecting), Dispatch with ENVOY_NATS_REPLICAS=3 and a byte limit creates the stream at three copies with the limit, DiscardNew and an id once NATS is reachable, and its keeper puts back what an operator lowered",
+      "surface": "Real envoy-dispatch (Postgres 17, App key) started with the three-server nats-server v2.15.1 cluster down, then the cluster started; natscli stream edits",
+      "command": "bash /legion/scratch/tmp/t546/tD2.sh (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6474417238)",
+      "observed": "dispatch: listening with NATS down; 8 s after the cluster started: replicas 3, max_bytes 2000000, discard new, an id. An operator set R1, max_bytes -1, discard old: 35 s later back to 3 / 2000000 / new, keeper 'restored=\"replicas 1 -> 3, max_bytes -1 -> 2000000, discard DiscardOld -> DiscardNew\"'.",
+      "headSha": "57e888dc871cea5f5f04a261973ee8b51091e04b",
+      "negativeControl": "Dispatch with ENVOY_NATS_REPLICAS=3 on a standalone v2.15.1 -> 'envoy nats reconnect hook failed ... reconcile the ENVOY_NOTIFICATIONS stream: ENVOY_NATS_REPLICAS=3: nats: replicas > 1 not supported in non-clustered mode' (serves on, as the changelog fragments say); redeliver-webhooks ENVOY_NATS_REPLICAS=6 -> 'invalid ENVOY_NATS_REPLICAS \"6\": want a whole number of copies from 1 to 5'"
     },
     {
-      "criterion": "On the merged tree, a GitHub delivery and Dispatch outbox events a full clustered nats-server 2.10 stream refused are stored once there is room, with no step-down",
-      "surface": "Real envoy-listener and envoy-dispatch (Postgres 17) on three nats-server v2.10.29 processes; the listener also on three v2.15.1 processes",
-      "command": "bash /legion/scratch/tmp/t546/tX.sh <nats-server v2.10.29 | v2.15.1>; bash /legion/scratch/tmp/t546/tZ.sh (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6470476902)",
-      "observed": "v2.10.29: d1 503 while full ('... does not hold, and its publish without its id failed: ... is full'), redelivery after the raise -> 200 and stored 15 -> 16 with no step-down, fresh d2 twice stored once; v2.15.1 the same. Dispatch: project.created and issue.created retried while full, stored once each after the raise.",
-      "headSha": "91d30dea0656e98500d425c8bc54f16d3ae533e5",
-      "negativeControl": "GitHub webhook with a bad signature -> 401 'invalid signature'"
+      "criterion": "On the merged tree, a full stream refuses new messages: send and publish answer 503 stream_full, the webhook 503; refused GitHub deliveries and Dispatch outbox events on a v2.10.29 cluster are stored once there is room with no step-down",
+      "surface": "Real envoy-listener on a standalone v2.15.1 and on three v2.10.29 processes; real envoy-dispatch on the v2.10.29 cluster",
+      "command": "bash /legion/scratch/tmp/t546/tS.sh; tX.sh bin210/nats-server; tZ.sh (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6474417238)",
+      "observed": "send/publish 503, Retry-After: 1, 'envoy: the message bus refused the message because its stream is full: ...', outcome stream_full; webhook 503; send 200 after the raise. v2.10.29: d1 503 while full, 200 and stored 15 -> 16 after the raise, d2 stored once; outbox project.created and issue.created stored once each after the raise.",
+      "headSha": "57e888dc871cea5f5f04a261973ee8b51091e04b",
+      "negativeControl": "NATS server stopped under the running listener -> send 503 'envoy: the message bus did not answer: ...', outcome bus_unavailable; webhook with a bad signature -> 401"
     },
     {
-      "criterion": "On the merged tree, copies, limit, DiscardNew and envoy_stream_id hold across listener and Dispatch starts and the mixed-settings race; an operator's raise of the limit stands",
+      "criterion": "On the merged tree, copies, limit, DiscardNew and envoy_stream_id hold across starts and the mixed-settings race (listener or Dispatch as the program with the settings); the redelivery bucket is raised to the replica count",
       "surface": "Real envoy-listener and envoy-dispatch on three nats-server v2.15.1 processes and a standalone v2.15.1",
-      "command": "bash /legion/scratch/tmp/p546b/proof.sh <workspace>; bash /legion/scratch/tmp/t546/race.sh <workspace> 4 40 (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6470476902)",
-      "observed": "proof.sh: P1 replicas 3, max_bytes 44023414784, discard new, one id; P2 unchanged; P5 50 GiB raise stood, lowering restored; P3 dispatch listening, subjects 5 -> 8, same id; P4 10 acknowledged, 20 refused. race.sh: 8/8 PASS, 8 keeper restores.",
-      "headSha": "91d30dea0656e98500d425c8bc54f16d3ae533e5",
-      "negativeControl": "Standalone v2.15.1: ENVOY_NATS_REPLICAS=3 -> exit 1 'ENVOY_NATS_REPLICAS=3: nats: replicas > 1 not supported in non-clustered mode'; ENVOY_STREAM_MAX_BYTES=44023414784 -> exit 1 'insufficient storage resources available'"
+      "command": "bash /legion/scratch/tmp/t546/race.sh <workspace> 4 40; bash /legion/scratch/tmp/p546b/proof.sh <workspace>; bash /legion/scratch/tmp/t546/tG.sh (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6474417238)",
+      "observed": "race.sh 12/12 PASS (listener||listener, dispatch(unset)||listener(R3), dispatch(R3)||listener(unset)); 7 listener-keeper restores. proof.sh P1-P5 reproduced. redeliver-webhooks raised an R1 KV_envoy_webhook_redelivery to 3, history 1 and key kept; setting 1 left 3.",
+      "headSha": "57e888dc871cea5f5f04a261973ee8b51091e04b",
+      "negativeControl": "Standalone v2.15.1 listener with ENVOY_NATS_REPLICAS=3 -> exit 1 'ENVOY_NATS_REPLICAS=3: nats: replicas > 1 not supported in non-clustered mode'"
     }
   ],
   "observations": [
-    "Harness: one v2.10.29 webhook run first read a stale lX.log and sent its requests during the listener's starting gate; tX.sh now deletes the log before each start, and the recorded run is the corrected one.",
-    "CI at 07b2cc7c (the merge), read 2026-10-28T13:36Z: lint, typecheck, test, build and changes queued. Not waited for."
+    "Main's background connect (#2390) changes how a refused setting shows in Dispatch: it no longer exits; it serves on, retries the reconcile and logs 'envoy nats reconnect hook failed' naming ENVOY_NATS_REPLICAS=3, while /healthz answers 200 with \"nats\":true. The PR's changelog fragments describe the log; /healthz not reflecting a failing stream reconcile is #2390's behaviour for any reconcile failure, not this PR's.",
+    "The redelivery bucket now opens lazily (main's change), so a Dispatch boot with an App key did not create it within the test window; redeliver-webhooks covers its raise.",
+    "CI at eaca3581, read 2026-10-28T16:19Z: every lane queued. Not waited for."
   ]
 }
