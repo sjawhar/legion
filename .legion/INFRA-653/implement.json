@@ -2,43 +2,43 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-653",
-  "completed": "2026-10-28T14:21:00Z",
+  "completed": "2026-10-28T17:56:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2427",
-  "round": "Answers test.json's failure: the PR conflicted with main (#2360 replaced the two inline readers with three). Forward merge 0413af1e takes main's reader files whole (part C out, A and B kept); 7edefc89 redesigns C on main's three readers; every proof was taken again at base aeeee6c0.",
-  "baseSha": "aeeee6c029f6766d3e4b7900dd1c7ef4e6edcc3f",
-  "headSha": "7edefc8982b849034440d792699efd33eb239313",
-  "fingerprint": "b8898f1f -> 7edefc89: d1f759aa... -> 4b7e79f9... (changed); comment https://github.com/sjawhar/legion/pull/2427#issuecomment-6468240380",
+  "round": "Answers test.json's second failure: main moved to #2361 and the PR conflicted in render.go's import block only. Forward merge f6b53858 with main c44c1469 (keep slices, drop regexp); fingerprint unchanged (4b7e79f9...), comment https://github.com/sjawhar/legion/pull/2427#issuecomment-6473348407. #2361 adds no rules-dependent pmdoc code. Every proof was taken again at base c44c1469, as the plan's merge rule asks when the branch takes in a moved main.",
+  "baseSha": "c44c1469e42d020f23eea89578e44445722f0879",
+  "headSha": "f6b53858836912f62cc4afda0813a90be6e19ce2",
+  "fingerprint": "453a6636 -> f6b53858: 4b7e79f9... -> 4b7e79f9... (unchanged); earlier b8898f1f -> 7edefc89 changed (d1f759aa... -> 4b7e79f9...)",
   "proof": [
     {
       "criterion": "Rendered markdown and offsets byte-identical on every LINUX spec",
-      "surface": "pmdoc renderer and misread checks over every LINUX issue's current spec (1203 specs, `dispatch issues --project LINUX --all` then `dispatch doc-read --issue <KEY>` on 2026-10-28, linux.jsonl sha256 193f170b3c8ff51a64f9e4202c8c5c08e44ecd450f80711bde769a4a3ee280e5, not committed), base build against head build",
-      "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base aeeee6c029f6766d3e4b7900dd1c7ef4e6edcc3f --head 7edefc8982b849034440d792699efd33eb239313 --corpus $TMPDIR/infra653-v2/linux.jsonl --out $TMPDIR/infra653-v2/diff; then a throwaway pmdoc test (not committed) run in `git archive` trees of base and head writing, per spec, RenderWithBlockOffsets markdown/offsets/error, NewMisread both ways and RefuseMisreadDocument for the parsed tree and an anchor-bearing variant (addWrittenBranches); cmp equiv-base.bin equiv-head.bin",
-      "observed": "differential.sh exit 0, every gate 0 over 1288 documents; diff/base.jsonl and diff/head.jsonl cmp identical (sha256 380366df...). Throwaway output 165,048,914 bytes each side, cmp identical (sha256 3478093c185d0298772c87ed190c59f31d2ae09100f2843ef449e498b92af89c); 1203 parsed by Parse; no panic.",
-      "headSha": "7edefc8982b849034440d792699efd33eb239313",
+      "surface": "pmdoc renderer and misread checks over every LINUX issue's current spec (1204 specs, `dispatch issues --project LINUX --all` then `dispatch doc-read --issue <KEY>` on 2026-10-28, linux.jsonl sha256 2dc0c7206e6a33e713e8f392417d2c1151e4dff4b1871018e37c1ad17dc821ce, not committed), base build against head build",
+      "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base c44c1469e42d020f23eea89578e44445722f0879 --head f6b53858836912f62cc4afda0813a90be6e19ce2 --corpus $TMPDIR/infra653-v3/linux.jsonl --out $TMPDIR/infra653-v3/diff; then a throwaway pmdoc test (not committed) in `git archive` trees of base and head writing, per spec, RenderWithBlockOffsets markdown/offsets/error, NewMisread both ways and RefuseMisreadDocument for the parsed tree and an anchor-bearing variant (addWrittenBranches); cmp equiv-base.bin equiv-head.bin",
+      "observed": "differential.sh exit 0, every gate 0 over 1289 documents; diff/base.jsonl and diff/head.jsonl cmp identical (sha256 f5d0b1b9...). Throwaway output 165,150,902 bytes each side, cmp identical (sha256 3650ee141497af5b35202cb323e444fa86ee74f68a10c2e6a239514bba7e7707); 1204 parsed by Parse; no panic.",
+      "headSha": "f6b53858836912f62cc4afda0813a90be6e19ce2",
       "negativeControl": "Divergence flag forced false -> TestRenderReadsBackUnderEveryReaderASkipCouldMiss fails (a*_* renders a*_* instead of &#97;*_*); stored read skipped although `~` is present -> same test fails (a*~* renders a*~* instead of &#97;*~*); asWritten replacing U+0000 before merging -> TestAsWrittenIsTheOldPipelineOnEveryBranch/nul_and_replacement fails."
     },
     {
       "criterion": "Merge rule of the shared context on LINUX's replay for writes",
-      "surface": "Dispatch built from base aeeee6c0 and head 7edefc89 under the INFRA-512 architect's LINUX write replay (tools sha256 95a9cec2..., inputs sha256 4299570e..., s4: F=0.3, one read per write, seed 27030, GOMAXPROCS=2, Postgres 17.11 + pgvector 0.8.7, fresh database and process per run)",
-      "command": "run-replay.sh bin/dispatch-<commit> v2-<side>-<n>, interleaved base-1 head-1 base-2 head-2 base-3 head-3; window_cpu_s = Dispatch utime+stime over the 480 s window; go tool pprof -top -nodecount=1000000 -nodefraction=0 -edgefraction=0 -focus='pmdoc\\.(render|asWritten)$' runs/v2-<side>-[123]/cpu.pprof",
-      "observed": "base 474.28 / 483.63 / 472.15 CPU-s, head 440.89 / 424.61 / 433.90: every head run below every base run (spread 11.48; median -8.51%). S_base 13.73% (180.07s of 1311.19s), S_head 7.96% (94.03s of 1181.60s); G = 0.498 x 13.73 = 6.84 points = 32.4 CPU-s. 293 write events each run, no 5xx.",
-      "headSha": "7edefc8982b849034440d792699efd33eb239313",
+      "surface": "Dispatch built from base c44c1469 and head f6b53858 under the INFRA-512 architect's LINUX write replay (tools sha256 95a9cec2..., inputs sha256 4299570e..., s4: F=0.3, one read per write, seed 27030, GOMAXPROCS=2, Postgres 17.11 + pgvector 0.8.7, fresh database and process per run)",
+      "command": "run-replay.sh bin/dispatch-<commit> v3-<side>-<n>, interleaved base-1 head-1 base-2 head-2 base-3 head-3; window_cpu_s = Dispatch utime+stime over the 480 s window; go tool pprof -top -nodecount=1000000 -nodefraction=0 -edgefraction=0 -focus='pmdoc\\.(render|asWritten)$' runs/v3-<side>-[123]/cpu.pprof",
+      "observed": "base 465.08 / 472.77 / 461.58 CPU-s, head 434.66 / 420.55 / 455.87: every head run below every base run (spread 11.19; median -6.54%). S_base 12.73% (162.84s of 1279.51s), S_head 7.39% (88.66s of 1198.99s); G = 0.486 x 12.73 = 6.19 points = 28.8 CPU-s. 293 write events each run, no 5xx in the window.",
+      "headSha": "f6b53858836912f62cc4afda0813a90be6e19ce2",
       "negativeControl": "The plan's share command with -nodecount=1 reports the single shown node's flat time rather than the focused total; the full-node form was used and matches pmdoc.render's -top -cum share."
     },
     {
       "criterion": "Merge rule of the shared context on INFRA-589's route mix for reads",
-      "surface": "Dispatch built from base aeeee6c0 and head 7edefc89 under packages/envoy/loadtest at legion/INFRA-639 688cab741c70 (LOADTEST_DISPATCH_COMMIT), default route mix routes-2026-10-26-1719Z.txt, seed made by the base build at migration 0134",
-      "command": "LOADTEST_DISPATCH_COMMIT=<commit> packages/envoy/loadtest/run-step.sh v2-<side>-<n> --events 4 --sessions 400 --requests 60, interleaved; CPU-s = resources.cpu_cores_mean.dispatch x resources.window_s; pprof shares with and without -show_from='docs\\.\\(\\*Service\\)\\.foldDocument'",
-      "observed": "base 155.84 / 153.27 / 155.80 CPU-s, head 139.37 / 144.05 / 141.62: every head step below every base step (spread 2.57; median -9.1%). Fold render base 0.38% (1.73s of 457.38s), head 0.21% (0.87s of 417.52s); all render base 9.06%, head 4.74%. 719 events committed and 10,752 requests all 2xx per step; binary sha256 checked per step.",
-      "headSha": "7edefc8982b849034440d792699efd33eb239313",
+      "surface": "Dispatch built from base c44c1469 and head f6b53858 under packages/envoy/loadtest at legion/INFRA-639 688cab741c70 (LOADTEST_DISPATCH_COMMIT), default route mix routes-2026-10-26-1719Z.txt, seed made by the base build at migration 0135",
+      "command": "LOADTEST_DISPATCH_COMMIT=<commit> packages/envoy/loadtest/run-step.sh v3-<side>-<n> --events 4 --sessions 400 --requests 60, interleaved; CPU-s = resources.cpu_cores_mean.dispatch x resources.window_s; pprof shares with and without -show_from='docs\\.\\(\\*Service\\)\\.foldDocument'",
+      "observed": "base 157.14 / 157.29 / 152.13 CPU-s, head 148.01 / 144.91 / 140.77: every head step below every base step (spread 5.16; median -7.8%). Fold render base 0.35% (1.60s of 457.95s), head 0.22% (0.92s of 425.58s); all render base 8.05%, head 4.42%. 719 events committed and 10,752 requests all 2xx per step; binary sha256 checked per step.",
+      "headSha": "f6b53858836912f62cc4afda0813a90be6e19ce2",
       "negativeControl": "The load test's seed check compares the seed with its own checkout's migrations (0129) and refused both builds against the 0134 seed; it was satisfied by setting seed.meta.json to 129 for the steps (the database and both builds are at 0134, so no step ran a backfill) and restored afterwards."
     },
     {
       "criterion": "Behaviour: no memory the server keeps resident",
       "surface": "heap.pprof at the end of each measured window (replay and load test)",
       "command": "go tool pprof -top -sample_index=inuse_space -focus=pmdoc <run>/heap.pprof per run; -top -cum -focus=<site> for each head-only site",
-      "observed": "No function the change adds or edits holds in-use memory at head that base did not hold (slices.Clone[[]pmdoc.Mark] is visibleMarks' slice, make at base; readsBackUnder 0.5 MB once is runReadsBack's allocation renamed). Other head-only sites are single samples in untouched code. Total in-use replay base 958/977/934 MB, head 953/999/932 MB; load test base 1186/1219/1044 MB, head 1176/1140/1168 MB. Replay pmdoc-focused figure is dominated by len16/utf16.Encode under refreshAnchors -> FindMark -> nodeSize (write in flight at the snapshot; base 39-162 MB, head 156-267 MB), untouched code.",
-      "headSha": "7edefc8982b849034440d792699efd33eb239313",
+      "observed": "Total in-use not higher at head: replay base 968/1055/1103 MB, head 1026/1004/1009 MB; load test base 1179/1098/1083 MB, head 1113/1070/1015 MB; pmdoc in-use medians level (replay 397 vs 399 MB, load test 188 vs 158 MB). Nothing is kept between renders (no package-level state but a parser context key). Head-only sites in changed functions are the working set of a render or read-back in flight at the snapshot, in place of base's matching sites: slices.Clone[[]pmdoc.Mark] (visibleMarks' slice, make at base), readsBackUnder (runReadsBack renamed; 1 MB flat once), childrenAsWritten and writtenTree (0.5 MB once each), where every base run shows StripAnchorMarks and writtenLineBreaks. Other head-only sites are single samples in untouched code.",
+      "headSha": "f6b53858836912f62cc4afda0813a90be6e19ce2",
       "negativeControl": "TestAsWrittenSharesWhatItWritesAsItIs asserts 0 allocations for a document written as it is; it fails if asWritten copies an unchanged tree."
     }
   ],
@@ -63,7 +63,7 @@
     "Benchmark ran -benchtime 10x x 5 interleaved rounds (not 20x): 20x would take about 2 hours on the pod.",
     "Share command uses -nodecount=1000000 -nodefraction=0 -edgefraction=0: the plan's -nodecount=1 form reports one node's flat time.",
     "Write leg on the architect's replay (architect's decision 2026-10-27 15:32Z) with a stand-in for the 762-session roster the tarballs lack, and a fresh database and process per run.",
-    "Four CPU-timing linearity tests (TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText, TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds, TestBareURLShapesParseAndRenderLinearly, TestUpdateIsLinearInTheBlockCount) fail on this pod at the merge commit 0413af1e (no C) and at head alike: the pod's process CPU clock moves in 10 ms steps, so the small input measures 0 s. They pass in CI at 7edefc89 (envoy-go green)."
+    "Four CPU-timing linearity tests (TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText, TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds, TestBareURLShapesParseAndRenderLinearly, TestUpdateIsLinearInTheBlockCount) fail on this pod with or without this change (the pod's process CPU clock moves in 10 ms steps); they passed in CI at 7edefc89. The rest of pmdoc and docs pass locally at f6b53858."
   ],
   "openQuestions": [],
   "discoveredComplexity": []
