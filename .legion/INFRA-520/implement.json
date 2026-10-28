@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-520",
-  "completed": "2026-10-28T19:15:46Z",
+  "completed": "2026-10-28T21:03:36Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2316",
   "proof": [
+    {
+      "criterion": "Review at 48b844e1: the pull request merges with main, and main's changes to the deleted envoy-and-contracts.yaml are carried into ci.yaml so the filter check passes",
+      "surface": "GitHub mergeability and the local checks on the merged tree (main c24ea568)",
+      "command": "gh pr view 2316 -R sjawhar/legion --json mergeable,mergeStateStatus; .github/scripts/check-ci-filters.sh; actionlint ci.yaml; check-image-trigger-paths.sh",
+      "observed": "MERGEABLE/BLOCKED at bb1a700a. check-ci-filters.sh exit 0, 26 gates 0 uncovered, including envoy-session-stall (1173 files, #2331) and dispatch-browser-multiprocess (1915 files, #2323), each with its own filter, ci-ok needs and SELECTED_BY, and a gate; #2323's dashboard path is in dispatch_server and docs-pages.yaml's paths; #2369's loadtest tests are in envoy-go and loadtest/** in worker_image. actionlint 0; image-trigger, action-pins, private-names, bun-version, release-credentials checks 0; check-ci-filters tests 131/0, ci-ok 42/0. release.yaml's merged change is release-version arguments only, no cache rule. Fingerprint comment 6480624528.",
+      "headSha": "bb1a700af2f39ca5c3aa46e60ddb5e3d198b695e",
+      "negativeControl": "Before the two new jobs' filters held the dev OIDC issuer's closure, the check named packages/envoy/internal/oidc/oidctest/issuer.go uncovered (1 uncovered), a file main's own list for that job lacked; and before docs-pages.yaml gained dispatch/dashboard/*, the check failed naming that missing path."
+    },
     {
       "criterion": "Review at cad74205: a step script is read as bash reads it, only allowlisted env names keep a go line reduced, and the check states what it does not read",
       "surface": "check-ci-filters.sh and its test suite on the branch tree (main 53f39ba0 merged in)",
