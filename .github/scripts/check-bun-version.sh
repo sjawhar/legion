@@ -28,9 +28,10 @@
 #   6. an `env:` naming an `INPUT_*` variable at workflow, job, `container:` or step level — an
 #      action reads its inputs from `INPUT_*`, either way,
 #   7. a job `container:` or `services:` image on `oven/bun` whose tag is not the pinned one,
-#   8. that wrapper missing, or not holding exactly one setup-bun step whose inputs are
-#      `bun-version-file: .bun-version` and at most `no-cache`, which selects no Bun version —
-#      it is checked for what it is, not only for what other files are not,
+#   8. that wrapper missing, or not holding exactly one setup-bun step — that step holds
+#      `bun-version-file: .bun-version` and may also pass `no-cache` (which only turns setup-bun's
+#      cache off and cannot change the version), and any other input fails; it is checked for what
+#      it is, not only for what other files are not,
 #   9. a `FROM oven/bun` (case-insensitive) whose tag does not come from `${BUN_VERSION}`, an
 #      `ARG BUN_VERSION` default that disagrees with the pin, or a Dockerfile `RUN` (backslash
 #      continuations joined) that installs Bun,
@@ -336,8 +337,8 @@ for workflow in workflows:
             )
 
 # The wrapper is judged for what it is, not only for what other files are not: a wrapper that is
-# deleted, repointed at a fork, duplicated, or given an input beyond `no-cache` would otherwise
-# leave every other rule satisfied while CI installed something else.
+# deleted, repointed at a fork, duplicated, or given any input other than `no-cache` would
+# otherwise leave every other rule satisfied while CI installed something else.
 if not SETUP_ACTION.is_file():
     problems.append(
         f"::error file={SETUP_ACTION}::{SETUP_ACTION} is missing: it is the one place Bun is "

@@ -17,19 +17,22 @@ name: CI
 #
 # Caches: no pull-request or merge-queue run writes an Actions cache entry. setup-go caches nothing
 # here (`cache: false` on every step). The jobs that cache Go restore one of five families with
-# actions/cache/restore, by its prefix when the exact key misses: go-daemon (typecheck, test,
-# pi-legion), go-docs (docs), go-envoy (envoy-e2e-local), go-envoy-infra (envoy-infra-go) and
-# go-notices (lint's notices step). Each family keeps one entry, keyed on the Go version its job's
-# setup-go installed, so it is refreshed only when Go is bumped. A go.sum change downloads only the
-# changed modules, and Go's build cache is content-addressed, so a stale entry costs a run only what
-# changed; a key on the go.sum files left a whole entry, up to a gigabyte, per change for seven
-# days. Each saves its family with actions/cache/save as its last step, and only on a push to main
-# whose job succeeded and whose restore missed the exact key. setup-bun reads and writes its cache
-# only on main (.github/actions/setup-bun).
+# actions/cache/restore: go-daemon (typecheck, test, pi-legion), go-docs (docs), go-envoy
+# (envoy-e2e-local), go-envoy-infra (envoy-infra-go) and go-notices (lint's notices step). Each
+# family keeps one entry, keyed on the Go version its job's setup-go installed, so it is refreshed
+# only when Go is bumped. A go.sum change downloads only the changed modules, and Go's build cache
+# is content-addressed, so a stale entry costs a run only what changed; a key on the go.sum files
+# left a whole entry, up to a gigabyte, per change for seven days. Only a run off main falls back,
+# when the exact key misses, to the family's newest entry by its prefix; a run on main restores by
+# the exact key only, so the entry it saves after a Go bump holds nothing the older Go built. Each
+# saves its family with actions/cache/save as its last step, and only on a push to main whose job
+# succeeded and whose restore missed the exact key. setup-bun reads and writes its cache only on
+# main (.github/actions/setup-bun).
 
 # No `paths:`: every change starts this workflow, and `changes` selects what runs. No `branches:`
 # on pull_request: a pull request on any base is tested. No `edited`: a title or body edit starts
-# no run (pr-title.yaml checks those). `ready_for_review` starts the run a draft skipped.
+# no run (pr-title.yaml checks those). `ready_for_review` starts the run a draft skipped. No
+# `closed`: tests-closed.yaml cancels a closed pull request's run (the concurrency comment below).
 # merge_group runs the router on the merge queue's commit of each queued group: `changes` selects
 # by what the queued change touches against the queue base (the group's base_sha..head_sha), and
 # ci-ok reports there, so the required checks pass on the merged tree before anything lands.
@@ -41,12 +44,17 @@ on:
   merge_group:
     types: [checks_requested]
 
-# A newer push to a pull request cancels its older run. A push to main is a group of its own per
+# A newer push to a pull request cancels its older run, waiting or running. On pull_request the key
+# is the pull request's number: tests-closed.yaml joins this same group when the pull request
+# closes, cancelling what still waits or runs, and a merged pull request's closed event carries
+# github.ref = the base branch, so the number is the only key that names the pull request on every
+# event. A reopen within about a minute of the close can race tests-closed.yaml's run:
+# tests-closed.yaml says what happens and what to do. A push to main is a group of its own per
 # commit and is never cancelled: `changes` selects by that push's own diff, and no later push's
 # diff contains the jobs a dropped merge's run would have selected. A merge group is likewise a
 # group of its own per commit (its head) and is never cancelled: the queue waits for its ci-ok.
 concurrency:
-  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: ci-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Read-only: the token clones, downloads pinned tools, and, in `changes`, reads the pull request's
@@ -176,15 +184,18 @@ jobs:
               - 'packages/envoy/internal/bus/*'
               - 'packages/envoy/internal/contracts/*'
               - 'packages/envoy/internal/githubappjwt/*'
+              - 'packages/envoy/internal/id/*'
               - 'packages/envoy/internal/oidc/**'
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/testnats/*'
+              - 'packages/envoy/listenfd/*'
               - 'packages/envoy/testnatsimages/*'
             # The Dispatch server, `go list -deps ./cmd/dispatch` in packages/envoy (its embedded
             # migrations and pmdoc schema included): what the daemon's outbox test builds
             # (internal/dispatch/outbox_scratch_dispatch_test.go:187), the browser tests' and the
-            # docs screenshots' run-server.sh builds (packages/dispatch/e2e/run-server.sh:103), and
+            # docs screenshots' run-server.sh builds (packages/dispatch/e2e/run-server.sh:135), and
             # envoy-infra's permissions live test builds (infra/core/permissions_live_test.go:298).
+            # packages/envoy/listenfd serves on the socket a test or harness holds (#2229).
             dispatch_server: &dispatch_server
               - 'packages/envoy/cmd/dispatch/*'
               - 'packages/envoy/internal/bus/*'
@@ -225,11 +236,13 @@ jobs:
               - 'packages/envoy/internal/oidc/*'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
+              - 'packages/envoy/internal/redact/*'
               - 'packages/envoy/internal/routing/*'
+              - 'packages/envoy/listenfd/*'
             # The daemon's `legion` command, `go list -deps ./cmd/legion` in packages/daemon (its
-            # embedded probes, turnscope.yml and role prompts included): what
-            # docs/site/scripts/build-binaries.sh:17 builds and lint's notices step loads for each
-            # target .github/go-release-targets.json lists.
+            # embedded probes, turnscope.yml and role prompts included, and the envoy package it
+            # serves its held listener through): what docs/site/scripts/build-binaries.sh:17 builds
+            # and lint's notices step loads for each target .github/go-release-targets.json lists.
             legion_command: &legion_command
               - 'packages/daemon/cmd/legion/*'
               - 'packages/daemon/internal/admit/*'
@@ -287,6 +300,7 @@ jobs:
               - 'packages/daemon/internal/wait/*'
               - 'packages/daemon/internal/workflow/*'
               - 'packages/daemon/internal/workspace/*'
+              - 'packages/envoy/listenfd/*'
             # The listener's packages, `go list -deps ./cmd/listener` in packages/envoy.
             listener_command: &listener_command
               - 'packages/envoy/cmd/listener/*'
@@ -305,9 +319,10 @@ jobs:
               - 'packages/envoy/internal/store/*'
               - 'packages/envoy/internal/verify/*'
               - 'packages/envoy/internal/webhook/*'
+              - 'packages/envoy/listenfd/*'
             # What `go test ./cmd/dispatch` reads under both its memory and its multiprocess tag:
             # the packages it compiles, with the whole of cmd/dispatch and internal/dispatch, whose
-            # .go files cmd/dispatch/settings_test.go:136 walks, and the pod spec
+            # .go files cmd/dispatch/settings_test.go:137 walks, and the pod spec
             # cmd/dispatch/pod_grace_period_test.go:17 reads.
             dispatch_command_tests: &dispatch_command_tests
               - 'packages/envoy/cmd/dispatch/**'
@@ -320,8 +335,10 @@ jobs:
               - 'packages/envoy/internal/oidc/**'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
+              - 'packages/envoy/internal/redact/*'
               - 'packages/envoy/internal/routing/*'
               - 'packages/envoy/internal/testsocks5/*'
+              - 'packages/envoy/listenfd/*'
               - 'packages/envoy/infra/gcp/testdata/dispatch-pod.golden'
             # Oh My Pi, which .github/actions/install-omp installs at the version .omp-pin names,
             # through the mise .github/actions/install-jj leaves.
@@ -348,6 +365,8 @@ jobs:
               - 'packages/daemon/**'
               - *daemon_envoy_deps
               - *dispatch_server
+              # scripts/e2e/lib/held-port.test.ts:45 builds the real envoy-listener.
+              - *listener_command
               - 'packages/envoy/internal/contracts/**'
               # Each .github/scripts/*.test.sh runs its checker, through test-lib.sh (and
               # workflow_paths.py, check-pr-text.sh, release-bump.sh, ci_filter_coverage.py where a
@@ -358,7 +377,8 @@ jobs:
               - 'scripts/sessions-import-pods.sh'
               - 'scripts/sessions-import-pods.test.sh'
               # `bun test scripts/e2e/lib` scans scripts/e2e/*.sh (lib/script-functions.test.ts:101-104),
-              # and the Stage 1 proof sources lib/rig.sh, free-port.sh and built-from.sh.
+              # and the Stage 1 proof sources lib/rig.sh (with port-file.sh and held-port.py) and runs
+              # built-from.sh.
               - 'scripts/e2e/**'
               - 'scripts/dispatch/**'
               - 'scripts/github-apps/**'
@@ -396,7 +416,8 @@ jobs:
               - 'docs/site/**'
               # docs/site/scripts/build-binaries.sh:17-20 builds the daemon's ./cmd/legion and
               # envoy's ./cmd/{dispatch,broker,agent-secrets,agent-secrets-helper,broker-refgen};
-              # the screenshots' harness starts the Dispatch server (docs/site/media/harness.ts:190).
+              # the screenshots' harness starts the Dispatch server (packages/dispatch/e2e/harness-start.ts,
+              # which docs/site/media/harness.ts:21,97 imports).
               # broker-refgen also parses broker/api, broker/config, broker/helper, cmd/broker and
               # cmd/agent-secrets at run time (generators/broker-reference.sh:13-14).
               - *legion_command
@@ -427,8 +448,10 @@ jobs:
               - 'packages/envoy/internal/buildversion/*'
               # The screenshots build packages/dispatch's web app, which aliases contracts' and the
               # proof editor's sources (web/vite.config.ts:63-81), and boot its e2e harness
-              # (docs/site/media/harness.ts:20-24,189-247).
+              # (docs/site/media/harness.ts:21,97), whose e2e/run-server.sh serves the Dispatch
+              # server on the socket scripts/e2e/lib/held-port.py holds (run-server.sh:37).
               - 'packages/dispatch/**'
+              - 'scripts/e2e/lib/held-port.py'
               - 'packages/proof-editor/src/**'
               - 'packages/contracts/src/**'
               # generators/dispatch-tools.ts:12 imports envoy-client's dispatch-command.ts;
@@ -501,9 +524,10 @@ jobs:
               - 'packages/daemon/internal/prompts/**'
               - '.github/workflows/release.yaml'
             # The Envoy plugin: its sources, the workspace packages its bundle inlines, the Oh My
-            # Pi its real-binary test runs (extensions/dispatch-first-omp.test.ts), installed
-            # through the mise install-jj leaves, and the skills and daemon prompts its skills guard
-            # reads (src/skills-guard.test.ts:29-33).
+            # Pi its real-binary tests run (extensions/dispatch-first-omp.test.ts and
+            # extensions/askgate/askgate-omp.test.ts), installed through the mise install-jj
+            # leaves, and the skills and daemon prompts its skills guard reads
+            # (src/skills-guard.test.ts:29-33).
             pi_envoy:
               - '.github/workflows/ci.yaml'
               - *bun_install
@@ -582,9 +606,11 @@ jobs:
               # e2e/cli-body-cap.e2e.ts:27 runs envoy-client's dispatch CLI.
               - 'packages/envoy-client/src/**'
               - 'packages/envoy-client/bin/dispatch.ts'
-              # The Dispatch server the browser tests start (e2e/run-server.sh:103).
+              # The Dispatch server the browser tests start (e2e/run-server.sh:135), on the socket
+              # scripts/e2e/lib/held-port.py holds (run-server.sh:37).
               - *go_workspace
               - *dispatch_server
+              - 'scripts/e2e/lib/held-port.py'
               # The S3 step reads the file store image from its declaration, and
               # e2e/__tests__/local-instance-support.test.ts:153-154 holds shellQuote to this table.
               - 'packages/envoy/internal/tests3/seaweedfs.go'
@@ -690,11 +716,13 @@ jobs:
               - *go_workspace
               - *dispatch_command_tests
               - 'packages/envoy/internal/testnats/*'
-            # `go test -tags multiprocess ./cmd/broker`.
+            # `go test -tags multiprocess ./cmd/broker`, and the agent-secrets binary
+            # cmd/broker/outage_test.go:317-318 builds.
             broker_multiprocess:
               - '.github/workflows/ci.yaml'
               - *go_workspace
               - 'packages/envoy/cmd/broker/*'
+              - 'packages/envoy/cmd/agent-secrets/*'
               # cmd/broker/main_test.go:220 (sslrootcert).
               - 'packages/envoy/docker/rds-global-bundle.pem'
               - 'packages/envoy/internal/broker/api/*'
@@ -716,15 +744,19 @@ jobs:
               - 'packages/envoy/internal/broker/secrets/*'
               - 'packages/envoy/internal/broker/store/**'
               - 'packages/envoy/internal/broker/wake/*'
+              - 'packages/envoy/internal/buildversion/*'
               - 'packages/envoy/internal/cmdtest/*'
               - 'packages/envoy/internal/dispatch/githubapp/githubapptest/*'
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/oidc/**'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
+              - 'packages/envoy/internal/redact/*'
             # Every file packages/envoy/docker/Dockerfile builds from, so envoy-smoke runs whenever
-            # the image it smokes changes, and what the job's tests compile: TestSmoke in the root
-            # workspace, and envoy-infra's host live tests and plugin in the infra one.
+            # the image it smokes changes, every file the held-port image built on top of it reads
+            # (packages/envoy/infra/host/heldportwrapper/Dockerfile and its .dockerignore), and what
+            # the job's tests compile: TestSmoke in the root workspace, and envoy-infra's host live
+            # tests and plugin in the infra one.
             # .github/scripts/check-image-trigger-paths.sh fails the build when this list misses a
             # file the image build reads; it reads this filter only as a flat list, so it names no
             # anchor. check-ci-filters.sh holds it to the rest: the job's go commands and its other
@@ -756,6 +788,7 @@ jobs:
               - 'packages/envoy/go.sum'
               - 'packages/envoy/cmd/**'
               - 'packages/envoy/internal/**'
+              - 'packages/envoy/listenfd/**'
               - 'packages/envoy/docker/rds-global-bundle.pem'
               # TestSmoke compiles in the root workspace.
               - 'go.work'
@@ -843,6 +876,7 @@ jobs:
               - 'packages/envoy/docker/**'
               - 'packages/envoy/docs/**'
               - 'packages/envoy/internal/**'
+              - 'packages/envoy/listenfd/**'
               - 'packages/envoy/scripts/**'
               - 'packages/envoy/testnatsimages/**'
               - '.omp-pin'
@@ -899,6 +933,7 @@ jobs:
               - 'packages/envoy/internal/broker/secrets/*'
               - 'packages/envoy/internal/buildversion/*'
               - 'packages/envoy/internal/githubappjwt/*'
+              - 'packages/envoy/internal/redact/*'
             # check-ci-filters.sh, which holds every filter above to what its job reads: every file
             # whose change can move a Go closure (Go code anywhere, the modules' embedded files and
             # testdata, every module and workspace file, the target lists the go commands expand
@@ -974,10 +1009,11 @@ jobs:
 
       # A pull request's title, body and commit messages reach main's squash commit, the
       # generated release notes and GitHub's pages, and its comments and reviews are public on its
-      # page, so this required job checks them at every push. pr-title.yaml checks them again when
-      # the pull request is opened, reopened or edited, a review is submitted or edited, or the
-      # merge queue runs its group. A push to main or a merge-queue run of this workflow carries no
-      # pull request.
+      # page, so this job checks them at every push to a pull request that is not a draft and when
+      # a draft is marked ready. pr-title.yaml checks them at every push too, draft or not, and
+      # when the pull request is opened, reopened or edited, a review is submitted or edited, or
+      # the merge queue runs its group. A push to main or a merge-queue run of this workflow carries
+      # no pull request.
       - name: Check the pull request's title, body, branch name, commits, comments and reviews name nothing private
         if: github.event_name == 'pull_request'
         env:
@@ -1031,7 +1067,7 @@ jobs:
             ~/.cache/go-build
             ~/.cache/legion
           key: go-notices-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
-          restore-keys: go-notices-${{ runner.os }}-
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-notices-{0}-', runner.os) || '' }}
 
       # Every Go archive a release ships carries THIRD_PARTY_NOTICES, written at build time with
       # the build's own GOOS, GOARCH and CGO_ENABLED (release.yaml's legion_build job and
@@ -1118,7 +1154,7 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: go-daemon-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
-          restore-keys: go-daemon-${{ runner.os }}-
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-daemon-{0}-', runner.os) || '' }}
 
       # With the e2e tag, vet also compiles the live proofs behind it (the Stage 4a harness,
       # sandbox/live*_test.go), which run on the devbox against a real cluster.
@@ -1222,9 +1258,6 @@ jobs:
       - name: Test the session import pods script (a stand-in kubectl)
         run: bash scripts/sessions-import-pods.test.sh
 
-      - name: Test the live proofs' libraries (the GitHub ingress bridge, the proof human's check, the model gateway key command, the design-gate verdict)
-        run: bun test scripts/e2e/lib
-
       - name: Lint the Dispatch census script
         run: bunx biome check --error-on-warnings scripts/dispatch
 
@@ -1256,7 +1289,11 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: go-daemon-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
-          restore-keys: go-daemon-${{ runner.os }}-
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-daemon-{0}-', runner.os) || '' }}
+
+      # After setup-go: held-port.test.ts builds the real envoy-listener and hands it a held socket.
+      - name: Test the live proofs' libraries (the GitHub ingress bridge, the proof human's check, the model gateway key command, the design-gate verdict, the held-port helper)
+        run: bun test scripts/e2e/lib
 
       # After setup-go: its fixtures run go list over a scratch module.
       - name: Test the CI filter check
@@ -1376,7 +1413,7 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: go-docs-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
-          restore-keys: go-docs-${{ runner.os }}-
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-docs-{0}-', runner.os) || '' }}
       - run: bun install --frozen-lockfile
       - name: Lint the docs site
         run: bun run lint
@@ -1576,9 +1613,10 @@ jobs:
       # Only for the mise it leaves at ~/.local/bin/mise, which install-omp installs the pin through:
       # nothing in this package drives jj.
       - uses: ./.github/actions/install-jj
-      # extensions/dispatch-first-omp.test.ts runs the pinned Oh My Pi against stand-ins
-      # (packages/pi-shared/test/omp-harness.ts) and refuses on GitHub Actions without one. The pin
-      # is read from .omp-pin, the repository's one copy of it (.github/actions/install-omp).
+      # extensions/dispatch-first-omp.test.ts and extensions/askgate/askgate-omp.test.ts run the
+      # pinned Oh My Pi against stand-ins (packages/pi-shared/test/omp-harness.ts) and refuse on
+      # GitHub Actions without one. The pin is read from .omp-pin, the repository's one copy of it
+      # (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
       - run: bun install --frozen-lockfile
       - name: Build contracts for pi-envoy
@@ -1652,7 +1690,7 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: go-daemon-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
-          restore-keys: go-daemon-${{ runner.os }}-
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-daemon-{0}-', runner.os) || '' }}
       - run: bun install --frozen-lockfile
       - name: Build contracts for pi-legion
         run: bun run build
@@ -1797,11 +1835,13 @@ jobs:
         working-directory: packages/dispatch
       - name: Browser-test dispatch dashboard
         # `bun run e2e` builds the SPA itself, which would rebuild it a second time in this job.
-        # Calling Playwright directly reuses the "Build dispatch dashboard" step's dist above and
+        # Calling the wrapper directly reuses the "Build dispatch dashboard" step's dist above and
         # drops this job to one Vite build. Safe because that build and this one are now the same
         # binary: `packages/dispatch` no longer has an E2E-only build flag (removed with its sole,
-        # unconsumed consumer, the `window.__dispatchDocument` inspection probe).
-        run: bunx playwright test --config e2e/playwright.config.ts
+        # unconsumed consumer, the `window.__dispatchDocument` inspection probe). e2e/run.ts starts
+        # the harness on ports the OS chooses and runs Playwright with them; the config starts no
+        # server.
+        run: bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts
         working-directory: packages/dispatch
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
@@ -1896,8 +1936,13 @@ jobs:
             packages/envoy/internal/testnats/nats.go Image
             packages/envoy/internal/testnats/nats.go HubImage
             packages/envoy/internal/tests3/seaweedfs.go Image
+      # The API package owns the largest set of Postgres-backed tests. Running it with the other
+      # package binaries makes all of their per-test database cleanup queue on the service's one
+      # checkpointer, so run it before the rest of the module.
       - name: Unit test envoy Go package
-        run: go list ./... | grep -v /integration | xargs go test
+        run: |
+          go test ./internal/dispatch/api
+          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
@@ -1978,7 +2023,7 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: go-envoy-infra-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
-          restore-keys: go-envoy-infra-${{ runner.os }}-
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-infra-{0}-', runner.os) || '' }}
       - name: Pull the NATS and Postgres test container images
         uses: ./.github/actions/pull-test-images
         with:
@@ -2207,9 +2252,11 @@ jobs:
       # The runner VM is discarded after the job, so testcontainers' Ryuk reaper has nothing to
       # clean up, and its image would be one more registry pull a test could fail on.
       TESTCONTAINERS_RYUK_DISABLED: "true"
-      # The listener image the smoke test and envoy-infra's live tests run, built by its own step
-      # below.
+      # The listener image the smoke test runs, built by its own step below.
       ENVOY_SMOKE_IMAGE: legion-envoy-smoke:${{ github.sha }}
+      # The image envoy-infra's live tests run, built on top of ENVOY_SMOKE_IMAGE by its own step
+      # below.
+      ENVOY_SMOKE_HELD_PORT_IMAGE: legion-envoy-smoke-heldport:${{ github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2267,6 +2314,26 @@ jobs:
           load: true
           provenance: false
           tags: ${{ env.ENVOY_SMOKE_IMAGE }}
+      # The image envoy-infra's live tests run (pulumitest.HeldPortImage): the smoke image above with
+      # packages/envoy/infra/host/heldportwrapper as its envoy-listener, which takes the listening
+      # socket the test holds for the container's port over an abstract unix socket and executes the
+      # real listener on it, so the port stays held from the test's bind until the listener serves.
+      # Its Dockerfile builds the wrapper from the tree, on the Go image the smoke image's build
+      # pulled, so this build reads only files the envoy_smoke filter names. The smoke test keeps
+      # running the smoke image itself.
+      - name: Build the held-port listener image the envoy-infra live tests run
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          # As the smoke image's build above.
+          BUILDX_METADATA_PROVENANCE: disabled
+          DOCKER_BUILD_SUMMARY: "false"
+        with:
+          context: .
+          file: packages/envoy/infra/host/heldportwrapper/Dockerfile
+          build-args: BASE=${{ env.ENVOY_SMOKE_IMAGE }}
+          load: true
+          provenance: false
+          tags: ${{ env.ENVOY_SMOKE_HELD_PORT_IMAGE }}
       # The image's notices (packages/envoy/docker/Dockerfile): the build fails when a license cannot
       # be determined, and the listing shows the image ships both files.
       - name: List the image's third-party notices
@@ -2282,7 +2349,7 @@ jobs:
         working-directory: packages/envoy
       # The envoy-infra plugin's live tests (packages/envoy/infra/host/live_test.go) apply Pulumi
       # YAML programs with the pinned Pulumi CLI (.github/actions/install-pulumi) against this
-      # runner's Docker, on the listener image built above and on the docker provider the plugin's
+      # runner's Docker, on the held-port image built above and on the docker provider the plugin's
       # first consumer pins. Each download is checked against its SHA-256 before it is unpacked or
       # installed.
       - name: Install the Pulumi CLI
@@ -2338,12 +2405,12 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
-          restore-keys: go-envoy-${{ runner.os }}-
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
       # scripts/e2e-local.test.sh drives the driver's refusals, which the acceptance run below
-      # never reaches: an unknown option, --help, and a NATS already holding the port, where the
-      # driver must refuse rather than run the acceptance against a server it did not start. It
-      # needs the bun and go this job already has, and it runs first because it is seconds
-      # (INFRA-250).
+      # never reaches: an unknown option, --help, and an E2E_NATS_PORT, E2E_PORT or E2E_SESSION_PORT
+      # another process already holds, which the driver uses as given and fails on rather than
+      # replacing it or running against a server it did not start. It needs the bun and go this job
+      # already has, and it runs first because it is seconds (INFRA-250).
       - name: Refusal test for e2e-local.sh
         run: bash scripts/e2e-local.test.sh
         working-directory: packages/envoy

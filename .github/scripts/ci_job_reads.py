@@ -189,14 +189,16 @@ RULES = {
     f"{ENVOY}/cmd/broker-refgen/auth_test.go": [
         Read(f"{ENVOY}/{d}/*", "cmd/broker-refgen/auth_test.go:14 readAPI(repo root) parses it") for d in BROKER_REFGEN_DIRS],
     f"{ENVOY}/cmd/broker/main_test.go": reads((f"{ENVOY}/docker/rds-global-bundle.pem", "cmd/broker/main_test.go:220 sslrootcert=../../docker/rds-global-bundle.pem")),
+    f"{ENVOY}/cmd/broker/outage_test.go": [
+        run(ENVOY, ["./cmd/agent-secrets"], "cmd/broker/outage_test.go:317-318 go build . in ../agent-secrets", mode="build")],
     f"{ENVOY}/cmd/broker/multiprocess_test.go": reads((f"{ENVOY}/internal/broker/store/migrations/*", "cmd/broker/multiprocess_test.go:289")),
     f"{ENVOY}/cmd/dispatch/main_test.go": reads((f"{ENVOY}/internal/dispatch/store/migrations/*", "cmd/dispatch/main_test.go:545")),
     # cmd/dispatch/memory_profile_test.go:147-148 reads four guides only when
     # DISPATCH_EDIT_PROFILE_OUT is set (line 126), which CI never sets: not a CI read.
     f"{ENVOY}/cmd/dispatch/pod_grace_period_test.go": reads((f"{INFRA}/gcp/testdata/dispatch-pod.golden", "cmd/dispatch/pod_grace_period_test.go:17")),
     f"{ENVOY}/cmd/dispatch/settings_test.go": reads(
-        (f"{ENVOY}/cmd/dispatch/**", "cmd/dispatch/settings_test.go:136 environmentReads walks .go files"),
-        (f"{ENVOY}/internal/dispatch/**", "cmd/dispatch/settings_test.go:136 environmentReads walks .go files")),
+        (f"{ENVOY}/cmd/dispatch/**", "cmd/dispatch/settings_test.go:137 environmentReads walks .go files"),
+        (f"{ENVOY}/internal/dispatch/**", "cmd/dispatch/settings_test.go:137 environmentReads walks .go files")),
     f"{ENVOY}/cmd/listener/api_test.go": reads((f"{FIX}/dispatch-targeted-delivery.json", "cmd/listener/api_test.go:191,436,480")),
     f"{ENVOY}/internal/broker/config/config_test.go": reads((f"{ENVOY}/docker/rds-global-bundle.pem", "internal/broker/config/config_test.go:513")),
     f"{ENVOY}/internal/contracts/dedupe_test.go": reads((f"{FIX}/dedupe-keys.json", "internal/contracts/dedupe_test.go:14")),
@@ -238,7 +240,9 @@ RULES = {
         run(ENVOY, ["./cmd/dispatch", "./cmd/listener"], "infra/core/permissions_live_test.go:298-299 go build . in ../../cmd/<dispatch|listener> (root go.work)", mode="build")],
     f"{INFRA}/core/allowed_hosts_agreement_test.go": [run(f"{INFRA}/core", ["."], "infra/core/allowed_hosts_agreement_test.go:95 go list -deps .", mode="build")],
     f"{INFRA}/gcp/imports_test.go": [run(f"{INFRA}/gcp", ["."], "infra/gcp/imports_test.go:15 go list -deps .", mode="build")],
-    f"{INFRA}/host/live_test.go": [run(INFRA, ["./cmd/pulumi-resource-envoy-infra"], "infra/host/live_test.go pulumitest.Plugin -> internal/pulumitest/pulumitest.go:163 go build", mode="build")],
+    f"{INFRA}/host/heldportwrapper/main_test.go": [
+        run(ENVOY, ["./cmd/listener"], "infra/host/heldportwrapper/main_test.go:113-114 go build . in ../../../cmd/listener (root go.work)", mode="build")],
+    f"{INFRA}/host/live_test.go": [run(INFRA, ["./cmd/pulumi-resource-envoy-infra"], "infra/host/live_test.go pulumitest.Plugin -> internal/pulumitest/pulumitest.go:168 go build", mode="build")],
 }
 
 
@@ -293,6 +297,8 @@ GATES = [
                  DAEMON, ["./internal/daemon/", "./internal/record/", "./internal/sessionproxy/", "./internal/launcher/"]),
         script_run("scripts/e2e/stage1-skeleton.sh", 'go build -o "$work/legion" ./cmd/legion', at("test", "Stage 1 live proof"),
                    DAEMON, ["./cmd/legion"], mode="build"),
+        script_run("scripts/e2e/lib/held-port.test.ts", '["go", "build", "-o", listener, "./cmd/listener"]',
+                   at("test", "bun test scripts/e2e/lib"), ENVOY, ["./cmd/listener"], mode="build"),
     ], reads=reads(
         (".github/scripts/*", f"{at('test', 'Test release scripts')} and the steps after it: each .github/scripts/*.test.sh sources "
                               "test-lib.sh and runs its checker (with workflow_paths.py, check-pr-text.sh, ci_filter_coverage.py, "
@@ -302,7 +308,8 @@ GATES = [
         ("scripts/sessions-import-pods.test.sh", at("test", "Test the session import pods script (a stand-in kubectl)")),
         ("scripts/sessions-import-pods.sh", "scripts/sessions-import-pods.test.sh:11"),
         ("scripts/e2e/**", f"{at('test', 'bun test scripts/e2e/lib')} (lib/script-functions.test.ts:101-104 scans scripts/e2e/*.sh and lib/*); "
-                           f"{at('test', 'Stage 1 live proof')}: stage1-skeleton.sh sources lib/rig.sh, free-port.sh, built-from.sh"),
+                           f"{at('test', 'Stage 1 live proof')}: stage1-skeleton.sh sources lib/rig.sh (with port-file.sh, held-port.py) "
+                           "and runs built-from.sh"),
         (CONTRACTS_SRC, "scripts/e2e/lib/envoy-bridge.ts:9-10, session-settings-services.ts:6; scripts/dispatch/ask-census.ts:9 (tsc -p scripts/dispatch)"),
         (ENVOY_CLIENT_SRC, "scripts/e2e/lib/nats-stream.ts:16-18, operator-dispatch.ts:16-21, envoy-bridge.ts:11; scripts/dispatch/ask-census.ts:10-15"),
         ("scripts/dispatch/**", f"{at('test', 'Lint the Dispatch census script')}, typecheck and test"),
@@ -335,11 +342,12 @@ GATES = [
         script_run(BUILD_BINARIES, 'go -C "$root/$envoy_module" build -o "$bin/" ./cmd/agent-secrets ./cmd/agent-secrets-helper ./cmd/broker-refgen',
                    f"docs/site/scripts/generate.ts:116, run by {at('docs', 'Build the docs site')}", ENVOY,
                    ["./cmd/agent-secrets", "./cmd/agent-secrets-helper", "./cmd/broker-refgen"], mode="build"),
-        script_run(RUN_SERVER, DISPATCH_SERVER_BUILD, f"started by docs/site/media/harness.ts:190, run by {at('docs', 'Take the screenshots')}",
+        script_run(RUN_SERVER, DISPATCH_SERVER_BUILD, f"started by packages/dispatch/e2e/harness-listeners.ts:74 (harness-start.ts, which "
+                   f"docs/site/media/harness.ts:21,97 imports), run by {at('docs', 'Take the screenshots')}",
                    ENVOY, ["./cmd/dispatch"], mode="build"),
     ], reads=reads(
         ("docs/site/**", f"{at('docs', 'Lint the docs site')}, typecheck, screenshots (docs/site/media/shots.ts) and build (generate.ts + astro build) in docs/site"),
-        ("packages/dispatch/**", f"{at('docs', 'Build the Dispatch dashboard the screenshots show')}; docs/site/media/harness.ts:20-24,189-190,202-247 boots packages/dispatch/e2e"),
+        ("packages/dispatch/**", f"{at('docs', 'Build the Dispatch dashboard the screenshots show')}; docs/site/media/harness.ts:21,97 boots packages/dispatch/e2e/harness-start.ts"),
         ("packages/proof-editor/src/**", "packages/dispatch/web/vite.config.ts:73-81 aliases (build:web)"),
         (CONTRACTS_SRC, "packages/dispatch/web/vite.config.ts:63-72; docs/site/generators/dispatch-tools.ts:7"),
         (ENVOY_CLIENT_SRC, "docs/site/generators/dispatch-tools.ts:12 imports ../../../packages/envoy-client/src/dispatch-command.ts"),
@@ -350,7 +358,8 @@ GATES = [
         (f"{ENVOY}/internal/dispatch/api/routes_table.go", "docs/site/generators/dispatch-api.ts:80 sources, checked by generators/lib/markdown.ts:46-49"),
         (f"{ENVOY}/cmd/dispatch/settings.go", "docs/site/generators/dispatch-config.ts:63 sources, checked by generators/lib/markdown.ts:46-49"),
         (BUILD_BINARIES, f"docs/site/scripts/generate.ts:116 runs it ({at('docs', 'Build the docs site')})"),
-        (RUN_SERVER, f"docs/site/media/harness.ts:190 runs it ({at('docs', 'Take the screenshots')})"),
+        (RUN_SERVER, f"packages/dispatch/e2e/harness-listeners.ts:74 runs it ({at('docs', 'Take the screenshots')})"),
+        ("scripts/e2e/lib/held-port.py", "packages/dispatch/e2e/run-server.sh:37 holds the server's port through it"),
         # broker-refgen (docs/site/generators/broker-reference.sh:14) parses these at run time.
         (f"{ENVOY}/internal/broker/api/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/routes.go:15,173)"),
         (f"{ENVOY}/internal/broker/config/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/config.go:11,36)"),
@@ -447,8 +456,8 @@ GATES = [
       + biome(at("pi-legion", "Lint pi-legion")) + bun_job("pi-legion") + CI_SELF),
 
     gate("dispatch", "dispatch", runs=[
-        script_run(RUN_SERVER, DISPATCH_SERVER_BUILD, f"the Playwright web server of {at('dispatch', 'Browser-test dispatch dashboard')}",
-                   ENVOY, ["./cmd/dispatch"], mode="build"),
+        script_run(RUN_SERVER, DISPATCH_SERVER_BUILD, f"started by packages/dispatch/e2e/harness-listeners.ts:74, which e2e/run.ts starts in "
+                   f"{at('dispatch', 'Browser-test dispatch dashboard')}", ENVOY, ["./cmd/dispatch"], mode="build"),
     ], reads=reads(
         ("packages/dispatch/**", f"{at('dispatch', 'Lint dispatch dashboard')}, typecheck, test, build, check:classes and Playwright in packages/dispatch"),
         ("packages/proof-editor/**", f"{at('dispatch', 'Lint proof editor')}, typecheck and test; packages/dispatch/web/vite.config.ts:73-87"),
@@ -460,6 +469,7 @@ GATES = [
         (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/dispatch/web/src/__tests__/setup.ts:7, features/refs/markdown-engine.test.ts:3, e2e/engine-tables.ts:9-10"),
         (f"{ENVOY}/scripts/fixtures/shell-quote.json", "packages/dispatch/e2e/__tests__/local-instance-support.test.ts:153-154"),
         (f"{ENVOY}/internal/tests3/seaweedfs.go", f"{at('dispatch', 'Start an S3-compatible server for uploaded files')} reads const Image"),
+        ("scripts/e2e/lib/held-port.py", "packages/dispatch/e2e/run-server.sh:37 holds the server's port through it"),
         ("scripts/third-party-notices.ts", "packages/dispatch/web/vite.config.ts:11 (build:web writes dist/THIRD_PARTY_NOTICES.txt)"),
     ) + setup_go("dispatch", f"{ENVOY}/go.mod") + biome(at("dispatch", "Lint dispatch dashboard")) + bun_job("dispatch") + CI_SELF),
 
@@ -479,8 +489,12 @@ GATES = [
     ) + biome(at("claude-envoy", "Lint Claude Envoy plugin")) + bun_job("claude-envoy") + CI_SELF),
 
     gate("envoy_go", "envoy-go", runs=[
-        # ./...: the unit step tests all of it but internal/integration, which the integration step tests.
-        step_run("envoy-go", "Unit test envoy Go package", "go list ./... | grep -v /integration | xargs go test", ENVOY, ["./..."]),
+        # The API package first, on its own (582cb2a2: its Postgres-backed tests' cleanup queues
+        # on the service's one checkpointer beside the other package binaries), then ./... but it
+        # and internal/integration, which the integration step tests.
+        step_run("envoy-go", "Unit test envoy Go package", "go test ./internal/dispatch/api", ENVOY, ["./internal/dispatch/api"]),
+        step_run("envoy-go", "Unit test envoy Go package", "go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test",
+                 ENVOY, ["./..."]),
         step_run("envoy-go", "Integration test envoy (a real NATS server, in the test process)",
                  "go test ./internal/integration/ -timeout 300s -count=1", ENVOY, ["./internal/integration/"]),
         step_run("envoy-go", "Test the container-backed NATS matrix (natslive)", "go test -tags natslive ./internal/testnats/", ENVOY,

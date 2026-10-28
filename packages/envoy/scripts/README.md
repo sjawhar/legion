@@ -108,9 +108,12 @@ The run writes its reusable evidence to `packages/envoy/out/e2e/`:
   status and `time_total`
 - `bus-down-client-error.json` — the `EnvoyApiError` the real client raised for it
 
-Use `E2E_NATS_PORT`, `E2E_PORT`, or `E2E_SESSION_PORT` to avoid local port
-collisions. The NATS server is a process of this checkout's own build, stopped
-on exit with the listener and the two fake clients. Unlike
+The OS chooses the NATS, listener and fake-session ports, and each URL is built
+from the port its own process reports. `E2E_NATS_PORT`, `E2E_PORT` or
+`E2E_SESSION_PORT` sets a port explicitly: it is used as given, and one already
+in use fails the run with `address already in use`. The NATS server is a
+process of this checkout's own build, stopped on exit with the listener and the
+two fake clients. Unlike
 `probe-webhook-e2e.sh`, it has no deployment URL or secret prerequisite: it
 validates local branch behavior only. CI runs it as the `envoy-e2e-local` job of
 `.github/workflows/ci.yaml` on every change its `envoy_e2e_local` filter matches.
@@ -191,9 +194,10 @@ so during a rolling deploy the replacement answers `/healthz` 200 `starting`
 and `/v1` 503 `service starting` for most of a minute and the run exits 1. A
 listener that opens `/v1` once its caches are warm passes.
 
-`listener-deploy-probe.test.sh` proves the verdict over two fake tasks, Python
-`http.server`s on `127.0.0.1` and `127.0.0.2` behind a fake `getent`; CI runs it
-in the `envoy-go` job of `.github/workflows/ci.yaml`.
+`listener-deploy-probe.test.sh` proves the verdict over two fake tasks, one
+Python process per case serving `127.0.0.1` and `127.0.0.2` on one port the
+kernel chose, behind a fake `getent`; CI runs it in the `envoy-go` job of
+`.github/workflows/ci.yaml`.
 
 ## Measuring search on a copy of the corpus
 

@@ -69,19 +69,21 @@ jobs:
     # A pull request's runs share one group per PR number. A new head's run cancels the build of the
     # head it replaced, whether that build is waiting for the group, waiting for a runner or running.
     # The call comes from ci.yaml on pull_request, whose own concurrency group (one per pull request
-    # ref, cancel-in-progress on pull_request) already cancels an older head's whole run, this call
-    # included; this group also cancels a build that a re-run of an older head's run starts. Only a
-    # head that starts a run of its own can do this. A push carrying `skip-checks: true` (a
-    # `.legion/`-only handoff) starts no run, so it never cancels the code head's build. Another pull
-    # request's build is in another group. Other events key on github.sha, not github.ref, so a
-    # pending run of one main commit never drops another commit's. They never cancel: in a call from
-    # release.yaml, `github.event_name` is the caller's (`push` or `workflow_dispatch`, never
-    # `pull_request`), so no main commit is left without an image to pin.
+    # number, cancel-in-progress on pull_request) already cancels an older head's whole run, this
+    # call included, and which tests-closed.yaml joins when the pull request closes, cancelling a
+    # build still waiting or running then; this group also cancels a build that a re-run of an older
+    # head's run starts. Only a head that starts a run of its own can do this. A push carrying
+    # `skip-checks: true` (a `.legion/`-only handoff) starts no run, so it never cancels the code
+    # head's build. Another pull request's build is in another group. Other events key on
+    # github.sha, not github.ref, so a pending run of one main commit never drops another commit's.
+    # They never cancel: in a call from release.yaml, `github.event_name` is the caller's (`push` or
+    # `workflow_dispatch`, never `pull_request`), so no main commit is left without an image to pin.
     # On a pull request, the run that reaches the group last wins, and GitHub does not guarantee
     # arrival order: two pushes seconds apart, or a re-run of an older head's run, can cancel the
     # newest head's build, and ci.yaml's ci-ok then fails for that run. `gh run rerun` of the newest
     # head's run restores it, so re-run an older head's run only after the newest head's build has
-    # completed.
+    # completed. The job has no draft or closed `if:`: its only pull_request run is ci.yaml's call,
+    # which never runs on a draft (ci.yaml's `changes` skips it) and has no `closed` trigger.
     concurrency:
       group: worker-image-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -171,10 +173,14 @@ jobs:
           # layer into the attested release build (no cache shared between trusted and untrusted
           # builds, BuildKit advisory GHSA-f2v9-hprr-32q3). A newer head can cancel a pull request's
           # build mid-export, and on 2026-10-27 the Actions cache held 10.80 GB of
-          # pull-request-scope buildkit entries. ignore-error=true: the cache only saves time, so a
-          # failed export never fails the build that pushed the image a release pins.
+          # pull-request-scope buildkit entries. mode=min exports only the final image's layers, not
+          # every intermediate stage's: on 2026-10-28 main alone held 10.44 GB, 5.97 GB of it
+          # buildkit blobs, mostly this build's mode=max export, over the repository's limit, so main
+          # evicted its own entries (the Envoy listener measured 136.8 MB a run with mode=min
+          # against 1.6 GB with mode=max). ignore-error=true: the cache only saves time, so a failed
+          # export never fails the build that pushed the image a release pins.
           cache-from: type=gha,scope=worker-image
-          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=worker-image,ignore-error=true' || '' }}
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=worker-image,ignore-error=true' || '' }}
           tags: ${{ steps.meta.outputs.tags }}
           # org.opencontainers.image.source is the Dockerfile's LABEL (the in-repo convention).
           labels: |

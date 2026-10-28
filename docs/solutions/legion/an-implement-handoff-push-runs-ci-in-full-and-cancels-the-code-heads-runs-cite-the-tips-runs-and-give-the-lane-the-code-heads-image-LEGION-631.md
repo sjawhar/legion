@@ -22,8 +22,9 @@ related_issues:
   handoff commit pushed without the trailer, carries no trailer and runs CI at its head, which is a
   handoff commit (as sjawhar/legion#1944's plan commit 3b5c8f78 did on 2026-10-14: 33 check runs
   at a `plan.json`-only commit). Such a push runs every workflow in full, and `pr-and-main.yaml`'s
-  concurrency group (`tests-<ref>`, `cancel-in-progress` on `pull_request`) cancels the code head's
-  `Tests`, `Docs` and `Legion Envoy and Contracts` runs still in flight. The green runs for that
+  concurrency group (`tests-<ref>`, since 2026-10-27 `tests-<pull request number>`;
+  `cancel-in-progress` on `pull_request`) cancels the code head's `Tests`, `Docs` and
+  `Legion Envoy and Contracts` runs still in flight. The green runs for that
   code are the handoff head's; they stand for the code head only because the handoff commit's
   diff over it is `.legion/` alone — say so in the `CI` line, naming both heads and the cancelled
   run ids, so a reader does not take "cancelled at the code head" for a red.
@@ -49,17 +50,17 @@ related_issues:
   and the tip's digest beside them in case its scripts hold the image's revision against the
   branch tip.
 
-  **Superseded 2026-10-27 (INFRA-520, the CI router):** a pull request's image build is now the
-  `worker-image` job of `.github/workflows/ci.yaml`, which calls `worker-image.yaml`, and that file
-  has a per-PR group with `cancel-in-progress` on `pull_request`; ci.yaml's own group (`ci-<ref>`,
-  `cancel-in-progress` on `pull_request`) also cancels the older head's whole run. A handoff push
-  without the trailer cancels the code head's image build if that build has not finished, so there
-  may be only the tip's digest (the same build inputs except for the image's two OCI labels,
-  `revision` and `version`, and the revision linked into its `legion version`, all of which name
-  the tip). Give the coordinator the tip's digest and say that it stands for the code head. Anyone
-  who needs the code head's own digest pushes the handoff only after the code head's image run has
-  completed. A `.legion/`-only push that carries `skip-checks: true` starts no run and cancels
-  nothing.
+  **Superseded 2026-10-27 (INFRA-520, the CI router, and dispatch://INFRA-600):** a pull request's
+  image build is now the `worker-image` job of `.github/workflows/ci.yaml`, which calls
+  `worker-image.yaml`, and that file has a per-PR group with `cancel-in-progress` on
+  `pull_request`; ci.yaml's own group (`ci-<PR number>`, `cancel-in-progress` on `pull_request`)
+  also cancels the older head's whole run, waiting or running. A handoff push without the trailer
+  cancels the code head's image build if that build has not finished, so there may be only the
+  tip's digest (the same build inputs except for the image's two OCI labels, `revision` and
+  `version`, and the revision linked into its `legion version`, all of which name the tip). Give
+  the coordinator the tip's digest and say that it stands for the code head. Anyone who needs the
+  code head's own digest pushes the handoff only after the code head's image run has completed. A
+  `.legion/`-only push that carries `skip-checks: true` starts no run and cancels nothing.
 
 ## Evidence
 

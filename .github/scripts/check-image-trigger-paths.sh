@@ -67,10 +67,13 @@
 # `github.event_name != '<event>'` conjunct excludes that one, so coverage is owed only on the
 # triggers whose event is still admitted - for a calling job, the CALLER's triggers, since a
 # called workflow sees its caller's event. Any other use of github.event_name is refused.
-# `!github.event.pull_request.draft`, as a conjunct or the whole `if:`, skips only a draft's run;
-# it is path-neutral when the workflow's `pull_request` trigger lists `types` including
-# `ready_for_review` (and so does any `pull_request_target` trigger), because the ready run that
-# follows selects by the same diff. Without that it is refused, naming the type to add.
+# `!github.event.pull_request.draft`, anywhere in the `if:`, skips only a draft's run; it is
+# path-neutral while every `pull_request` and `pull_request_target` trigger that runs its holder -
+# its own workflow's and each `workflow_call` caller's - lists `ready_for_review` in its `types`
+# (no `types` means GitHub's default, which leaves it out), because the ready run that follows
+# selects by the same diff. Otherwise it is refused, naming the trigger and the type to add.
+# `github.event.action != 'closed'` skips only a closed pull request's run, which merges nothing
+# more, so it is path-neutral too. The comment above NEUTRAL says why both are.
 #
 # A directory source is covered when every file under it that the context keeps (the
 # `.dockerignore` drops the rest) matches, so a new file outside a partial filter fails here on
@@ -130,16 +133,30 @@ EQUALS_TRUE = re.compile(r"needs\.([\w-]+)\.outputs\.([\w-]+)\s*==\s*'true'")
 # sit beside the filters clause without being refused. GitHub's comparisons are
 # case-insensitive (Expressions → Operators), so these are too: `needs.X.result == 'Success'`
 # must read exactly like `== 'success'`, or a capital letter walks a narrowing gate past the
-# allowlist.
+# allowlist. `!github.event.pull_request.draft` and `github.event.action != 'closed'` narrow by
+# event, not by change. Both are true wherever a deployment's pinnable image is built: push,
+# merge_group, workflow_call from a push and workflow_dispatch carry no pull_request and no
+# closed action. On a pull request, `!= 'closed'` skips only a closed pull request, which merges
+# nothing more. The draft term skips a draft's head, which is safe only if the trigger builds
+# that head when the draft is marked ready: otherwise a draft marked ready with no new push
+# merges with no image built at its head. So gating_filters admits the draft term only while
+# every `pull_request` and `pull_request_target` trigger that runs its holder (its own
+# workflow's, and each `workflow_call` caller's: unready_triggers) lists `ready_for_review` in
+# its `types`. A trigger with no `types` gets GitHub's default, opened, synchronize and
+# reopened, so it is refused too. Their opposites (`github.event.pull_request.draft`,
+# `== true`, `github.event.action == 'closed'`) skip every build a deployment pins, so they
+# stay refused.
 NEUTRAL = re.compile(
-    r"always\(\)|success\(\)|!\s*cancelled\(\)|needs\.[\w-]+\.result(\s*[=!]=\s*'[A-Za-z_]+')?",
+    r"always\(\)|success\(\)|!\s*cancelled\(\)|needs\.[\w-]+\.result(\s*[=!]=\s*'[A-Za-z_]+')?"
+    r"|!\s*github\.event\.pull_request\.draft|github\.event\.action\s*!=\s*'closed'",
     re.I,
 )
+DRAFT = re.compile(r"!\s*github\.event\.pull_request\.draft", re.I)
+# The activity types a `pull_request` or `pull_request_target` trigger without `types` runs on.
+DEFAULT_PULL_REQUEST_TYPES = ("opened", "synchronize", "reopened")
 RESULT_TERM = re.compile(r"needs\.([\w-]+)\.result\s*(==|!=)\s*'([A-Za-z_]+)'", re.I)
 # An event term: which trigger events reach a job. GitHub compares the value case-insensitively.
 EVENT_TERM = re.compile(r"github\.event_name\s*(==|!=)\s*'([\w-]+)'", re.I)
-# Skips a draft pull request's run, which the ready_for_review run then replaces.
-DRAFT_TERM = re.compile(r"!\s*github\.event\.pull_request\.draft", re.I)
 
 
 def admits_skipped(term: str) -> bool:
@@ -683,24 +700,7 @@ def unwrap(expression: str) -> str:
     return expression
 
 
-def lacks_ready_for_review(document: dict) -> list[str]:
-    """The workflow's pull request triggers on which a draft's skipped run is not followed by a
-    ready_for_review run: `pull_request` unless its `types` list ready_for_review (GitHub's
-    default types leave it out), and `pull_request_target` likewise when the workflow has one."""
-    triggers = events(document)
-    lacking = []
-    for name in ("pull_request", "pull_request_target"):
-        if name == "pull_request_target" and name not in triggers:
-            continue
-        spec = triggers.get(name)
-        types = spec.get("types") if isinstance(spec, dict) else None
-        types = [types] if isinstance(types, str) else types if isinstance(types, list) else []
-        if "ready_for_review" not in [str(kind) for kind in types]:
-            lacking.append(name)
-    return lacking
-
-
-def gate_outputs(condition: str, document: dict) -> tuple[list[tuple[str, str]], set[str]]:
+def gate_outputs(condition: str) -> tuple[list[tuple[str, str]], set[str]]:
     """(job, output) for each paths-filter output an `if:` is gated on, and the trigger events
     it admits.
 
@@ -710,12 +710,12 @@ def gate_outputs(condition: str, document: dict) -> tuple[list[tuple[str, str]],
     not have. Each top-level `&&` conjunct is therefore THE filters clause
     (`needs.<job>.outputs.<name> == 'true'` tests joined by `||`, at most one such conjunct;
     other `||` terms there only widen, so they are allowed); or made entirely of terms that do
-    not narrow by path — `always()`, `success()`, `!cancelled()`, `needs.<job>.result`; or an
-    event term — `github.event_name == '<event>'` tests joined by `||`, which admits only those
-    events, or one `github.event_name != '<event>'`, which excludes that event; or
-    `!github.event.pull_request.draft`, neutral when the workflow's pull request triggers list
-    `ready_for_review` (lacks_ready_for_review) and refused, naming that type, when they do not;
-    or it is refused, quoting the term."""
+    not narrow by path — `always()`, `success()`, `!cancelled()`, `needs.<job>.result`, and the
+    two event terms `!github.event.pull_request.draft` and `github.event.action != 'closed'`; or
+    an event term — `github.event_name == '<event>'` tests joined by `||`, which admits only
+    those events, or one `github.event_name != '<event>'`, which excludes that event; or it is
+    refused, quoting the term. gating_filters admits the draft term only under triggers that
+    list `ready_for_review`; the comment above NEUTRAL says why."""
     admitted = set(PATH_EVENTS)
     if not condition.strip():
         return [], admitted
@@ -734,24 +734,14 @@ def gate_outputs(condition: str, document: dict) -> tuple[list[tuple[str, str]],
         if len(terms) == 1 and named[0] and named[0].group(1) == "!=":
             admitted.discard(named[0].group(2).lower())
             continue
-        if len(terms) == 1 and DRAFT_TERM.fullmatch(terms[0]):
-            lacking = lacks_ready_for_review(document)
-            if not lacking:
-                continue
-            raise Unreadable(
-                f"is narrowed by `{terms[0]}`, which skips a draft pull request's run; that is "
-                f"path-neutral only when a ready_for_review run follows and selects by the same "
-                f"diff, and {' and '.join('on.' + name for name in lacking)} does not list "
-                f"ready_for_review among its types: add ready_for_review to the "
-                f"{' and '.join(lacking)} types"
-            )
         raise Unreadable(
             f"is narrowed by `{' '.join(part.split())}`, which this check cannot evaluate "
             f"against a path filter; express which CHANGES reach the job as a "
             f"dorny/paths-filter output tested `== 'true'`, and leave anything else "
             f"(`always()`, `success()`, `!cancelled()`, a `needs.<job>.result` comparison that "
             f"still admits `skipped`, `github.event_name == '<event>'` tests joined by ||, one "
-            f"`github.event_name != '<event>'`, `!github.event.pull_request.draft`) beside it"
+            f"`github.event_name != '<event>'`, `!github.event.pull_request.draft`, "
+            f"`github.event.action != 'closed'`) beside it"
         )
     if not clauses:
         return [], admitted
@@ -775,17 +765,30 @@ def gate_outputs(condition: str, document: dict) -> tuple[list[tuple[str, str]],
     return outputs, admitted
 
 
-def gating_filters(document: dict, describe: str, holder: dict) -> tuple[list[tuple[str, PathsFilter]], set[str]]:
+def gating_filters(workflow: Path, describe: str, holder: dict) -> tuple[list[tuple[str, PathsFilter]], set[str]]:
     """The dorny/paths-filter filters an `if:` is gated on, and the trigger events it admits.
     The holder is a job that builds an image, a job that calls a workflow which does, a job
-    either of those needs, or the build step itself. A gate this check cannot evaluate is
-    reported, never ignored, since ignoring it would treat a gated build as one that runs on
-    every change."""
+    either of those needs, or the build step itself, in `workflow`. A gate this check cannot
+    evaluate is reported, never ignored, since ignoring it would treat a gated build as one that
+    runs on every change. So is a draft term under a trigger that does not build the head once
+    the draft is marked ready (the comment above NEUTRAL)."""
+    document = documents[workflow]
+    condition = str(holder.get("if", ""))
     try:
-        outputs, admitted = gate_outputs(str(holder.get("if", "")), document)
+        outputs, admitted = gate_outputs(condition)
     except Unreadable as error:
         problems.append(f"::error::{describe} builds or calls an image, and its if: {error}")
         return [], set(PATH_EVENTS)
+    if DRAFT.search(condition):
+        for trigger, event in unready_triggers(workflow):
+            problems.append(
+                f"::error file={trigger}::{workflow}: {describe} builds or calls an image and "
+                f"its if: skips a draft with `!github.event.pull_request.draft`, but {trigger} "
+                f"on.{event}, which runs it, does not list ready_for_review in its types (no "
+                f"types means GitHub's default: {', '.join(DEFAULT_PULL_REQUEST_TYPES)}), so a "
+                f"draft marked ready with no new push builds no image at its head; add "
+                f"ready_for_review to the {event} types of {trigger}, or drop the draft term"
+            )
     jobs = document.get("jobs") or {}
     found = []
     for needed, output in outputs:
@@ -889,6 +892,33 @@ documents = {
 documents = {path: doc for path, doc in documents.items() if isinstance(doc, dict)}
 
 
+def calling_jobs(workflow: Path):
+    """(caller, its document, job id) for each job that calls `workflow` through
+    `workflow_call`; none when `workflow` has no such trigger."""
+    if "workflow_call" not in events(documents[workflow]):
+        return
+    for caller, caller_document in documents.items():
+        for job_name, job in (caller_document.get("jobs") or {}).items():
+            if isinstance(job, dict) and job.get("uses") == f"./{workflow}":
+                yield caller, caller_document, job_name
+
+
+def unready_triggers(workflow: Path) -> list[tuple[Path, str]]:
+    """(workflow, event) for each `pull_request` or `pull_request_target` trigger that runs a
+    holder in `workflow`, its own or a `workflow_call` caller's, whose `types` leave out
+    `ready_for_review`. No `types` means GitHub's default, which leaves it out too."""
+    found = []
+    for path in dict.fromkeys([workflow] + [caller for caller, _, _ in calling_jobs(workflow)]):
+        for event, spec in events(documents[path]).items():
+            if event not in ("pull_request", "pull_request_target"):
+                continue
+            types = spec.get("types") if isinstance(spec, dict) else None
+            types = [types] if isinstance(types, str) else types or DEFAULT_PULL_REQUEST_TYPES
+            if "ready_for_review" not in [str(kind) for kind in types]:
+                found.append((path, event))
+    return found
+
+
 def deciding_jobs(document: dict, job_name: str) -> list[str]:
     """`job_name` and every job whose `if:` decides whether it runs: each job it transitively
     `needs:`, since GitHub skips a job whose needed job was skipped.
@@ -914,13 +944,14 @@ def deciding_jobs(document: dict, job_name: str) -> list[str]:
     return order
 
 
-def inherited_gates(document: dict, job_name: str) -> list[tuple[str, list[tuple[str, PathsFilter]], set[str]]]:
+def inherited_gates(workflow: Path, job_name: str) -> list[tuple[str, list[tuple[str, PathsFilter]], set[str]]]:
     """(label, filters, admitted events) for every gate that decides whether `job_name` runs:
-    the `if:` of each of its deciding_jobs."""
+    the `if:` of each of its deciding_jobs, in `workflow`."""
+    document = documents[workflow]
     gates = []
     for name in deciding_jobs(document, job_name):
         job = (document.get("jobs") or {}).get(name) or {}
-        found, admitted = gating_filters(document, f"jobs.{name}", job)
+        found, admitted = gating_filters(workflow, f"jobs.{name}", job)
         gates.append((f"jobs.{name}.if", found, admitted))
     return gates
 
@@ -961,24 +992,19 @@ def triggers_for(workflow: Path) -> list[tuple[str, str, list, Path, tuple]]:
         (f"{workflow} {label}", event, [f], workflow, ())
         for event, label, f in event_filters(workflow, document)
     ]
-    if "workflow_call" not in events(document):
-        return found
-    for caller, caller_document in documents.items():
-        for job_name, job in (caller_document.get("jobs") or {}).items():
-            if not isinstance(job, dict) or job.get("uses") != f"./{workflow}":
-                continue
-            # The calling job is gated by its own `if:` and by every job it transitively needs,
-            # exactly as a building job is.
-            gates = inherited_gates(caller_document, job_name)
-            base = [
-                (f"{caller} {label}", event, [caller_filter], caller, ())
-                for event, label, caller_filter in event_filters(caller, caller_document)
-            ]
-            filtered = any(gate_filters for _, gate_filters, _ in gates)
-            found += [
-                (label if filtered else f"{label} (jobs.{job_name})", *rest)
-                for label, *rest in apply_gates(base, gates, caller)
-            ]
+    for caller, caller_document, job_name in calling_jobs(workflow):
+        # The calling job is gated by its own `if:` and by every job it transitively needs,
+        # exactly as a building job is.
+        gates = inherited_gates(caller, job_name)
+        base = [
+            (f"{caller} {label}", event, [caller_filter], caller, ())
+            for event, label, caller_filter in event_filters(caller, caller_document)
+        ]
+        filtered = any(gate_filters for _, gate_filters, _ in gates)
+        found += [
+            (label if filtered else f"{label} (jobs.{job_name})", *rest)
+            for label, *rest in apply_gates(base, gates, caller)
+        ]
     return found
 
 
@@ -1231,12 +1257,11 @@ for workflow, job_name, step, context, dockerfile in builds:
     # the trigger let through, and the image is then not built for that change either. The
     # gates are the build step's own `if:`, its job's, and every job that job transitively
     # needs. A gate's event terms drop the triggers whose event it does not admit.
-    document = documents[workflow]
-    gates = inherited_gates(document, job_name)
+    gates = inherited_gates(workflow, job_name)
     if str(step.get("if", "")):
         where = step.get("name") or "an unnamed step"
         describe = f"jobs.{job_name} step '{where}'"
-        found, admitted = gating_filters(document, describe, step)
+        found, admitted = gating_filters(workflow, describe, step)
         gates.append((f"{describe} if", found, admitted))
     triggers = apply_gates(triggers_for(workflow), gates, workflow)
     read = {path for _, files in inputs for path in files}
