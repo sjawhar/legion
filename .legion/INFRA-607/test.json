@@ -2,41 +2,41 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-607",
-  "completed": "2026-10-28T21:33:57Z",
-  "testedHead": "65783c21925043a36d25f9c15129b451211921a2",
-  "codeHead": "14be510457eaef081b073580305df9f43a355f62",
-  "round": 6,
-  "scope": "The review round's two fixes (823f782f: shutdown waits for the intakes before the pool closes, and a stop drains the subscription handle the bus holds after a reconnect), the cleanup (67c3d0f2: migration headers, removed pglisten/WokenLoop surface, intake_delivery.go) and the forward merge of main c24ea568 (migrations renumbered to 0137-0143). I built my own binary of 14be5104 and ran it on a database migrated from main's schema 134 straight to 143, as a deploy from main would.",
+  "completed": "2026-10-28T22:36:28Z",
+  "testedHead": "c0d4ab95e31a8775db978032707026fc91d6b07c",
+  "codeHead": "a56be7397f910bc0ec90d4b16fa1d73a9131bc77",
+  "round": 7,
+  "scope": "Review round 2's fixes (a56be739) change only the shutdown and intake stop paths: main.go/shutdown.go (stopIntakesOnExit), delivery intake.go, intake_delivery.go, jobs.go and intakes.go (the stop budget runs from the signal and bounds the bind), and bus nats.go/recovery.go (DrainSubscription gives up the registration). This round drives those paths on my own build of a56be739, including NATS frozen with SIGSTOP. Round 6's idle result stands: no loop code changed.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Shutdown (review M1): one bound process and a fake GitHub holding a merged PR's fetch for 3 s. SIGTERM at 21:33:40.31. GitHub answered at 42.303; delivery_pull_requests row 701 was written (merged, not partial) and last_event_at was set to 42.348; the consumer showed delivered 2 = ack floor 2 with 0 pending; the process exited 2.17 s after SIGTERM. The implementer saw 3.06 s. Its negative control is that 4f9bd6e8 acknowledged with no row. The regression tests pass: TestShutdownWaitsForAnIntakeHandlerBeforeClosingThePool, TestAStopAfterTheConnectionWasReplacedDrainsTheRestoredSubscription, TestDrainSubscription*, TestAHandOverKeepsAPullRequestsMessagesInOrder and TestAStoppingIntakeDoesNotWaitOutAGitHubCallThatDoesNotAnswer. I did not re-drive the connection-replacement case (review M2) on the real binary, because the pod move cut the time short: the implementer's check3/check3b through a TCP proxy's -ERR and the regression tests above are the evidence for it."
+    "how": "On my build of a56be739, with config B and a fake GitHub (FAKE_PULL_MERGED=1): with GitHub holding a fetch 50 s and SIGTERM 2 s in, the process exited 15.10 s after the signal (implementer: 15.05 s), and the fetch was given up 15.0 s after the signal. The regression tests pass: ./cmd/dispatch -run 'Shutdown|Panic|StopIntakes' (including the startup-panic test), ./internal/dispatch/delivery -run 'Stop|HandOver|Budget|Bind', and ./internal/bus -run 'Drain|Release'."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Each loop the plan made event-driven, edit notices included, does nothing while nothing changes, after the cleanup removed parts of the listener and woken-loop API",
-      "surface": "Two real head processes (14be5104) on one database migrated from main's schema 134 to 143 at their boot, in config B (fake Azure embedder, fake GitHub App), counted from the Postgres statement log",
-      "command": "python3 /legion/scratch/tmp/t607r3/count2.py <log> <offset 21:23:00> <offset 21:33:01> t6 (dispatch://INFRA-607/artifact/idle-statements-round-6-txt)",
-      "observed": "4,018 statements, or 3.35/s per process (round 5: 3.32). CPU was 0.0033 and 0.0036 cores. There were no statements from the embedding scan, coverage, task progress, excerpts, suggestion outcomes, edit notices or the settings poll. What remains is the server-process heartbeat, the outbox 5 s retry, block-index, the standby durable reconcile, settlement, redelivery, the reconcile and import, and their pings, as the PR body names. Before the window, the woken embedding queue drained the seed's whole 10,000-row backlog through the fake in 3 minutes, from boot (21:17:05) to 21:20:11.",
-      "headSha": "14be510457eaef081b073580305df9f43a355f62",
-      "negativeControl": "Round 4's fork point d47dbf05 under the same harness: embedding scan 241, edit notices 484, suggestion rules 30 and settings reads 42 in 10 minutes."
+      "criterion": "Shutdown stays inside the stop grace when the bus does not answer, with a handler in flight and with a standby",
+      "surface": "Two real head processes (a56be739) on one database and NATS: one bound to both durables, one standing by. NATS was frozen with SIGSTOP so every JetStream call waits for its timeout.",
+      "command": "publish-pr.sh 901 (GitHub holds the fetch 3 s); kill -STOP <nats-server>; kill -TERM <both>; then a second pair with NATS frozen 2.5 s before SIGTERM to the standby, then to the bound process",
+      "observed": "First pair: the bound process exited 3.18 s after SIGTERM, once GitHub answered. Row 901 was written, and the log shows the 'deregistered this server process' line with no error. The standby exited 0.37 s after SIGTERM. Second pair: the standby exited 0.17 s and the bound process 0.40 s after SIGTERM. server_processes was empty afterwards, so every process deregistered before its pool closed.",
+      "headSha": "a56be7397f910bc0ec90d4b16fa1d73a9131bc77",
+      "negativeControl": "The review traced 14be5104's budget starting only after a bind's JetStream calls returned (up to nats.MaxWait 10 s each), so a stop could push deregister and pool.Close past the 30 s stop grace. TestABindThatReturnsAfterTheSignalStopsByTheBudgetFromTheSignal fails on that code with 'Run returned 5.002s after its ctx ended' (implementer's run)."
     },
     {
-      "criterion": "Shutdown waits for a running intake handler before the database pool closes, so its message is written and acknowledged",
-      "surface": "The head binary bound to the delivery durable, a merged-PR envelope published through the Envoy listener's /v1/messages/publish, fake GitHub (FAKE_PULL_MERGED=1) holding pulls/701 for 3 s, SIGTERM 1 s after publishing",
-      "command": "publish-pr.sh 701; kill -TERM <pid>; psql delivery_pull_requests and delivery_settings; NATS /jsz?consumers=true",
-      "observed": "The fetch was held 21:33:39.301-42.303. Commits were fetched at 42.305 and 42.306. Row loadorg/loadrepo#701 was written, merged, not partial. last_event_at = 21:33:42.348. The consumer showed delivered 2, ack_floor 2, num_ack_pending 0. Exit was 2.17 s after SIGTERM (at 21:33:40.31).",
-      "headSha": "14be510457eaef081b073580305df9f43a355f62",
-      "negativeControl": "The implementer's run of 4f9bd6e8 under the same conditions deregistered 0.6 s after the signal, logged 'closed pool' and acknowledged the message with no row and a null last_event_at (stop-path-proof-md); TestShutdownWaitsForAnIntakeHandlerBeforeClosingThePool fails on that order."
+      "criterion": "A handler cut off by the stop budget is given up 15 s after the signal and its message handed back",
+      "surface": "The head binary bound to the delivery durable, fake GitHub holding pulls/902 for 50 s",
+      "command": "publish-pr.sh 902; kill -TERM <pid> 2 s after the fake logged the hold; NATS /jsz?consumers=true",
+      "observed": "SIGTERM at 22:35:56.458. The fake logged 'caller gone' at 22:36:11.474, 15.0 s later. The process exited 15.10 s after the signal. The consumer then showed push_bound absent and the message unacknowledged (delivered 2, ack_floor 1, 1 pending), ready for the next holder.",
+      "headSha": "a56be7397f910bc0ec90d4b16fa1d73a9131bc77",
+      "negativeControl": "With GitHub answering, the process exits within about 3 s of the signal with the message acknowledged (first proof above; round 6: 2.17 s)."
     }
   ],
-  "ci": "At 21:16Z, at 14be5104: every check queued (changes, lint, typecheck, build x2, test, the Daemon Go suite, pr-title). GitHub reports the PR MERGEABLE (BLOCKED on checks).",
+  "ci": "At 22:36Z at a56be739: changes, lint, typecheck, build x2, test and the Daemon Go suite are queued; pr-title runs were cancelled by later pushes, and the newest is queued. GitHub reports the PR MERGEABLE.",
   "mainReds": [
-    "Unchanged from round 4: recipients-claim.e2e.ts:310, TestDispatchConnectionsPerPodIsTheServers and mermaid.e2e.ts:194 are main's."
+    "Unchanged: recipients-claim.e2e.ts:310, TestDispatchConnectionsPerPodIsTheServers and mermaid.e2e.ts:194 are main's. The pmdoc compile failure from #2448 is main's if a later merge picks it up; this head's base (c24ea568) predates it."
   ],
   "notes": [
-    "The migrations were renumbered to 0137-0143 (main added 0136_dashboard_assets). The schema_migrations table keys by version alone. A database that ran an earlier build of this branch (old 0136 = embeddings_notify) would skip main's 0136 and mis-number the rest. No deployment ran this branch, so this is a note only for test databases such as the round-4/5 seeds dispatch_seed_b4 and b5; I used a fresh copy of dispatch_seed_idx (schema 134).",
-    "I cut the round short at 21:34Z for the INFRA daemon's pod move (controller, 21:28Z). Scratch under /legion/scratch/tmp does not survive the move; the idle counts are attached as dispatch://INFRA-607/artifact/idle-statements-round-6-txt."
+    "I did not inject a real startup panic into the binary. The startup-panic fix is proven by its regression test, and main.go:568 now defers stopIntakesOnExit(cancel, waitIntakes), which cancels the context before waiting.",
+    "Frozen NATS: the ack of message 901 could not reach the server, so the next holder will handle it again. The upserts are idempotent and nothing about this changed in this PR."
   ]
 }
