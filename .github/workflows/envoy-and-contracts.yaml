@@ -1117,7 +1117,7 @@ jobs:
       - name: One-run-at-a-time test for loadtest/run-step.sh and run-series.sh (fakes go and uv; no stack)
         run: bash loadtest/run-step.test.sh
         working-directory: packages/envoy
-      - name: Lock test for loadtest/common.sh (a series step keeps the lock after its parent dies; no stack)
+      - name: Lock test for loadtest/common.sh (inherited lock, refusals, holders in another PID namespace; no stack)
         run: bash loadtest/common.test.sh
         working-directory: packages/envoy
       # The test runs its URL cases under en_US.UTF-8, where bash's [[ =~ ]] ranges reach past ASCII,

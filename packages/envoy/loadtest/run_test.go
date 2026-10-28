@@ -60,48 +60,61 @@ func TestOpenLoopSchedule(t *testing.T) {
 	}
 }
 
-// TestAForeignRunsMetaHoldsNoToken: under -allow-foreign the tokens are flags, and meta.json
-// records the run's arguments; it holds neither token, whichever spelling gave it.
-func TestAForeignRunsMetaHoldsNoToken(t *testing.T) {
+// TestAForeignRunsMetaHoldsNoTokenOrPassword: under -allow-foreign the tokens and the URLs are
+// flags, and meta.json records them as the normalized flag list: each token as <redacted>, each URL
+// without its password (its user stays). Neither meta.json nor the log holds a token or a password.
+func TestAForeignRunsMetaHoldsNoTokenOrPassword(t *testing.T) {
 	t.Setenv("LOADTEST_ROOT", t.TempDir())
-	const agent, listener = "agent-token-7f3a", "listener-token-9c1e"
-	for _, args := range [][]string{
-		{"-allow-foreign", "-token", agent, "-listener-token", listener, "-name", "-token", "-pg", "postgres://postgres@127.0.0.1:1/dispatch?sslmode=disable"},
-		{"-allow-foreign", "-token=" + agent, "-listener-token=" + listener, "-pg", "postgres://postgres@127.0.0.1:1/dispatch?sslmode=disable"},
-		{"--allow-foreign", "--token", agent, "--listener-token", listener, "-pg", "postgres://postgres@127.0.0.1:1/dispatch?sslmode=disable"},
-		{"--allow-foreign=true", "--token=" + agent, "--listener-token=" + listener, "-pg=postgres://postgres@127.0.0.1:1/dispatch?sslmode=disable"},
+	const agent, listener, password = "agent-token-7f3a", "listener-token-9c1e", "url-password-51d2"
+	pg := "postgres://postgres@127.0.0.1:1/dispatch?sslmode=disable"
+	for _, c := range []struct {
+		args, want []string
+	}{
+		{
+			args: []string{"-allow-foreign", "-token", agent, "--listener-token=" + listener, "-name", "-token", "-pg", pg},
+			want: []string{"-allow-foreign=true", "-listener-token=" + redacted, "-name=-token", "-pg=" + pg, "-token=" + redacted},
+		},
+		{
+			args: []string{
+				"-allow-foreign", "-token", agent, "-listener-token", listener,
+				"-url", "http://agent:" + password + "@127.0.0.1:1", "-listener", "http://agent:" + password + "@127.0.0.1:2",
+				"-nats", "nats://loadgen:" + password + "@127.0.0.1:3", "-nats-mon", "http://monitor:" + password + "@127.0.0.1:4",
+				"-pprof", "http://pprof:" + password + "@127.0.0.1:5",
+				"-pg", "postgres://postgres:" + password + "@127.0.0.1:1/dispatch?sslmode=disable&password=" + password,
+			},
+			want: []string{
+				"-allow-foreign=true", "-listener=http://agent@127.0.0.1:2", "-listener-token=" + redacted,
+				"-nats=nats://loadgen@127.0.0.1:3", "-nats-mon=http://monitor@127.0.0.1:4", "-pg=" + pg,
+				"-pprof=http://pprof@127.0.0.1:5", "-token=" + redacted, "-url=http://agent@127.0.0.1:1",
+			},
+		},
 	} {
 		fs := flag.NewFlagSet("run", flag.ContinueOnError)
 		var ef endpointFlags
 		ef.register(fs)
 		name := fs.String("name", "", "")
-		if err := fs.Parse(args); err != nil {
+		if err := fs.Parse(c.args); err != nil {
 			t.Fatal(err)
 		}
 		if ef.token != agent || ef.listenerToken != listener || !ef.allowForeign {
-			t.Fatalf("%q parsed to token %q, listener token %q: the test does not pass the tokens", args, ef.token, ef.listenerToken)
+			t.Fatalf("%q parsed to token %q, listener token %q: the test does not pass the tokens", c.args, ef.token, ef.listenerToken)
 		}
 		var logged bytes.Buffer
 		cfg := runConfig{
-			name: *name, allowForeign: true, boxBusyBefore: 0, args: redactArgs(fs, args),
+			name: *name, allowForeign: true, boxBusyBefore: 0, args: recordedArgs(fs),
 			ep: endpoints{pg: ef.pg, token: ef.token, listenerToken: ef.listenerToken, pids: map[string]int{}},
 		}
 		meta, err := json.Marshal(collectMeta(context.Background(), cfg, log.New(&logged, "", 0)))
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, token := range []string{agent, listener} {
-			if strings.Contains(string(meta), token) || strings.Contains(logged.String(), token) {
-				t.Fatalf("%q: meta.json or the log holds a token:\n%s\n%s", args, meta, logged.String())
+		for _, secret := range []string{agent, listener, password} {
+			if strings.Contains(string(meta), secret) || strings.Contains(logged.String(), secret) {
+				t.Fatalf("%q: meta.json or the log holds a token or a password:\n%s\n%s", c.args, meta, logged.String())
 			}
 		}
-		if len(cfg.args) != len(args) {
-			t.Fatalf("%q recorded as %q: arguments lost", args, cfg.args)
-		}
-		for i, a := range cfg.args {
-			if a != args[i] && !strings.HasSuffix(a, redacted) {
-				t.Fatalf("%q recorded as %q: an argument that is not a token changed", args, cfg.args)
-			}
+		if !slices.Equal(cfg.args, c.want) {
+			t.Fatalf("%q recorded as %q, want %q", c.args, cfg.args, c.want)
 		}
 	}
 }

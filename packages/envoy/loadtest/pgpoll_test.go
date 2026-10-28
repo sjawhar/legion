@@ -12,6 +12,11 @@ import (
 	"time"
 )
 
+// unreachablePG is a Postgres URL that refuses every connect: each reader of the run's database is
+// tested against it to show that it reports the failure instead of an empty result that reads as
+// measured.
+const unreachablePG = "postgres://postgres@127.0.0.1:1/dispatch?sslmode=disable"
+
 // TestReadErrorsLogsTheFirstAndATotalPastThem: every failure counts; run.log gets one line for each
 // of the first pollErrorsLogged, then one line naming the probe and the total, only when more
 // failed.

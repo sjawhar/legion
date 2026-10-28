@@ -2,31 +2,36 @@
 # common.sh: what run-step.sh, run-series.sh and stack.sh share (README.md). They source it. Not
 # executable.
 #
-# die MESSAGE prints MESSAGE, prefixed with the script's name, and exits 1. usage prints the
-# script's header comment, from its second line to its `set -euo` line, and exits 2.
+# die MESSAGE prints MESSAGE, prefixed with the script's name, and exits 1. note MESSAGE prints
+# MESSAGE with the same prefix and goes on. usage prints the script's header comment, from its
+# second line to its `set -euo` line, and exits 2.
 #
 # resolve_paths sets SRC to LOADTEST_SRC (default: the checkout holding this file) and ROOT to
 # LOADTEST_ROOT (default ${TMPDIR:-/tmp}/dispatch-loadtest, created), both as physical paths, and
 # exports them as LOADTEST_SRC and LOADTEST_ROOT.
 #
 # lock_root ROOT: one run at a time per root (README.md, "One run at a time"). It takes an
-# exclusive, non-blocking flock on ROOT/.run.lock on file descriptor 9. The lock lasts until every
-# process that holds that descriptor has exited: the holder and the children that inherit it. Once
-# locked, the holder empties the lock file, then writes its pid, its PID namespace, command, start
-# time and a random token into it with one printf, and exports the token as LOADTEST_LOCK_TOKEN.
+# exclusive, non-blocking flock on ROOT/.run.lock and keeps it on file descriptor 9. The lock lasts
+# until every process that holds that descriptor has exited: the holder and the children that
+# inherit it. Once locked, the holder empties the lock file, then writes its pid, its PID namespace,
+# command, start time and a random token into it with one printf, and exports the token as
+# LOADTEST_LOCK_TOKEN.
 #
 # A holder's own child (run-series.sh's run-step.sh, a run's stack.sh) goes on without locking when
 # its LOADTEST_LOCK_TOKEN equals the file's token and its descriptor 9 is the inherited locked one:
 # it keeps that descriptor and sets LOCK_INHERITED=true. So a series step, and the loadgen run that
-# it starts, keep the root when run-series.sh is killed. Any other caller tries the lock for up to
-# 3 s, and is admitted when the holder ends in that time; else it is refused with exit 1 before it
+# it starts, keep the root when run-series.sh is killed. Any other caller that sees a live holder is
+# refused at once; while it sees none, it tries the lock for up to 3 s, and is admitted when the
+# lock is freed in that time. It tries on descriptor 8 and moves the lock to 9 only once it has it,
+# so a waiting caller never holds descriptor 9 on the file. A refused caller exits 1 before it
 # touches the stack, naming the root and the holder: the record's pid, once the file holds a
 # complete record whose pid runs in this PID namespace; or else the processes here that still hold
 # descriptor 9 on the file (the children of a holder that has exited); or else, when this PID
 # namespace shows neither (a holder in another PID namespace, such as another Legion role in this
-# pod on a shared root), the record as that run's own, and that the lock file must stay. The
-# record's pid is trusted only when the record's PID namespace is this one. stack.sh closes
-# descriptor 9 in every stack process that it starts, so no stack process keeps the lock.
+# pod on a shared root), the pid, start time and command that the lock file records for that run,
+# and that the lock file must stay. The record's pid is trusted only when the record's PID
+# namespace is this one. stack.sh closes descriptor 9 in every stack process that it starts, so no
+# stack process keeps the lock.
 #
 # prepare_stack runs stack.sh setup (an incremental build of SRC), start and seed, each of which
 # does nothing when its work is already done, and the migration check: a build whose highest
@@ -38,6 +43,8 @@ die() {
   printf '%s: %s\n' "${0##*/}" "$*" >&2
   exit 1
 }
+
+note() { printf '%s: %s\n' "${0##*/}" "$*" >&2; }
 
 usage() {
   sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2
@@ -66,12 +73,24 @@ lock_pid_alive() {
   [[ ${stat##*) } != Z* ]]
 }
 
+# lock_record_ns RECORD: where RECORD was written: "here" (this PID namespace), "elsewhere" (another
+# one) or "unknown" (the record names no PID namespace).
+lock_record_ns() {
+  local ns
+  ns=$(lock_field pidns "$1")
+  if [ -z "$ns" ]; then
+    echo unknown
+  elif [ "$ns" = "$(lock_pidns)" ]; then
+    echo here
+  else
+    echo elsewhere
+  fi
+}
+
 # lock_record_runs RECORD: RECORD was written in this PID namespace and its pid runs. A pid of
 # another PID namespace names an unrelated process here, or none.
 lock_record_runs() {
-  local ns
-  ns=$(lock_field pidns "$1")
-  [ -n "$ns" ] && [ "$ns" = "$(lock_pidns)" ] && lock_pid_alive "$(lock_field pid "$1")"
+  [ "$(lock_record_ns "$1")" = here ] && lock_pid_alive "$(lock_field pid "$1")"
 }
 
 # lock_holders FILE: "pid N (command)" of each process whose descriptor 9 is open on FILE, joined
@@ -114,39 +133,55 @@ lock_root() {
     LOCK_INHERITED=true
     return 0
   fi
-  # Try the lock for up to 3 s. While it fails, read the holder's record, which the holder writes
-  # just after it locks, and stop at a complete record whose pid runs in this PID namespace. A
-  # complete record whose pid does not is a holder whose children still hold the lock (stop when
-  # lock_holders names them), one that has just ended (the next try takes the lock), or one in
-  # another PID namespace, which this one never sees.
-  local record="" holders="" i
+  exec 9>&-
+  # Try the lock for up to 3 s, on descriptor 8: lock_holders lists the processes with descriptor 9
+  # on the file, and a waiting caller is none of them. While it fails, read the holder's record,
+  # which the holder writes just after it locks, and stop at a complete record whose pid runs in this
+  # PID namespace. A complete record whose pid does not is a holder whose children still hold the
+  # lock (stop when lock_holders names them), one that has just ended (the next try takes the lock),
+  # or one in another PID namespace, which this one never sees.
+  local record="" holders="" runs=false i
   for ((i = 0; i < 30; i++)); do
     ((i == 0)) || sleep 0.1
-    exec 9<>"$file"
-    if flock -n 9; then
+    exec 8<>"$file"
+    if flock -n 8; then
+      # The duplicate shares the locked open file description, so descriptor 9 keeps the lock.
+      exec 9<&8 8<&-
       lock_take "$file"
       return 0
     fi
-    exec 9>&-
+    exec 8<&-
     record=$(cat -- "$file" 2>/dev/null || true)
     if [[ $(lock_field token "$record") =~ ^[0-9a-f]{32}$ ]]; then
-      lock_record_runs "$record" && break
+      if lock_record_runs "$record"; then
+        runs=true
+        break
+      fi
       holders=$(lock_holders "$file")
       [ -n "$holders" ] && break
     fi
   done
-  local me=${0##*/} pid run
+  local me=${0##*/} pid ns run
   pid=$(lock_field pid "$record")
-  run="pid $pid, started $(lock_field started "$record"): $(lock_field command "$record")"
-  [ -n "$holders" ] || holders=$(lock_holders "$file")
-  if lock_record_runs "$record"; then
+  ns=$(lock_record_ns "$record")
+  # A pid of another PID namespace is not written as "pid N": here, pid N is an unrelated process.
+  if [ "$ns" = elsewhere ]; then
+    run="pid=$pid in PID namespace $(lock_field pidns "$record")"
+  else
+    run="pid $pid"
+  fi
+  run+=", started $(lock_field started "$record"): $(lock_field command "$record")"
+  $runs || [ -n "$holders" ] || holders=$(lock_holders "$file")
+  if $runs; then
     printf '%s: LOADTEST_ROOT %s is in use by another run (%s)\n' "$me" "$root" "$run" >&2
   elif [ -n "$holders" ]; then
     local taker="left no record in the lock file"
-    if [ -n "$pid" ] && [ "$(lock_field pidns "$record")" = "$(lock_pidns)" ]; then
-      taker="($run) has exited"
-    elif [ -n "$pid" ]; then
-      taker="($run) wrote its record in another PID namespace"
+    if [ -n "$pid" ]; then
+      case $ns in
+        here) taker="($run) has exited" ;;
+        elsewhere) taker="($run) wrote its record in another PID namespace" ;;
+        *) taker="($run) wrote no PID namespace in its record, so its pid is not trusted" ;;
+      esac
     fi
     printf '%s: LOADTEST_ROOT %s is in use by another run: %s holds its lock; the run that took it %s\n' \
       "$me" "$root" "$holders" "$taker" >&2
@@ -154,7 +189,13 @@ lock_root() {
     # The lock is held, yet this PID namespace shows no holder: neither the record's pid nor a
     # process with descriptor 9 on the file.
     local named="the lock file holds no record of that run"
-    [ -z "$pid" ] || named="the lock file names that run as $run, in its own PID namespace"
+    if [ -n "$pid" ]; then
+      case $ns in
+        here) named="the lock file names that run as $run, which has exited" ;;
+        elsewhere) named="the lock file names that run as $run, written in another PID namespace" ;;
+        *) named="the lock file names that run as $run, in a record without its PID namespace" ;;
+      esac
+    fi
     printf '%s: LOADTEST_ROOT %s is locked by a process that is not visible in this PID namespace, such as a run in another PID namespace (another Legion role in this pod on a shared LOADTEST_ROOT); %s. Do not remove %s: that run still holds it, and a run that locked a new lock file would reset the stack under it\n' \
       "$me" "$root" "$named" "$file" >&2
   fi
@@ -177,8 +218,7 @@ prepare_stack() {
     die "this build's highest migration is $build_level ($migrations/$build_file), older than the seed's $seed_level (seed made by $(jq -r .build_commit "$ROOT/seed.meta.json")); reseed with this build (stack.sh seed --force) or run a newer one"
   fi
   if ((build_level > seed_level)); then
-    printf '%s: note: the seed is at migration %s and this build at %s. Dispatch migrates each step'"'"'s copy forward at start, and any backfill those migrations start runs inside the step; reseed with this build (stack.sh seed --force) to measure it alone\n' \
-      "${0##*/}" "$seed_level" "$build_level" >&2
+    note "the seed is at migration $seed_level and this build at $build_level. Dispatch migrates each step's copy forward at start, and any backfill those migrations start runs inside the step; reseed with this build (stack.sh seed --force) to measure it alone"
   fi
   BUILD=$("$stack" build-info)
 }

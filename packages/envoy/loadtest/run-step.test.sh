@@ -8,8 +8,8 @@
 #
 # On a live stack a second run-step.sh on the root of a running step stops that step's Dispatch
 # and listener in its reset, and the first step then finishes with exit 0 and a row of connection
-# failures (INFRA-589 test round 1: step conc-a, 0.01 of 1 events/s committed, 1.6% of requests
-# 2xx, no CPU or heap profile). So the second run must be refused before it touches the stack:
+# failures: few of its writes commit, few of its requests get 2xx, and it has no CPU or heap
+# profile. So the second run must be refused before it touches the stack:
 # before `stack.sh setup`, whose first build is the fake `go` call this test watches for.
 #
 # Asserts that: (a) a second run-step.sh is refused while a run-step.sh holds the root; (b) a

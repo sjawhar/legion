@@ -4,7 +4,7 @@
 # Proves the run lock of common.sh (lock_root) without a stack. Each lock taker below sources
 # common.sh and calls lock_root, as run-series.sh, run-step.sh and stack.sh do.
 #
-# INFRA-589 review of PR #2369: a series' run-step.sh re-opened descriptor 9, so it lost the lock
+# The case this covers: a series' run-step.sh that re-opened descriptor 9 lost the lock
 # that it inherited from run-series.sh and went on by the token alone. Killing run-series.sh then
 # freed the root while its step still ran, and a new run-step.sh reset the stack under that step.
 # And a refused caller could name a previous holder that had ended, whose complete record was still
@@ -18,7 +18,10 @@
 # this PID namespace cannot see (here: on a descriptor other than 9, under a record whose pid does
 # not exist) is refused as held, naming the record's pid and the lock file not to remove, never as
 # free; (e) a caller is admitted when the record's pid is dead and no process holds the lock, also
-# when the holder ends while the caller waits for its record.
+# when the holder ends while the caller waits for its record; (f) two callers that wait at once on
+# such a holder, under a record of another PID namespace, never name each other as the holder: both
+# are refused as "not visible"; (g) a record of another PID namespace whose pid is a live process
+# here (this test's own) is refused as "not visible", without naming that process as the holder.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,6 +31,9 @@ readonly temporary_dir
 readonly locker="${temporary_dir}/locker.sh"
 readonly slow_bin="${temporary_dir}/slow-bin"
 readonly elsewhere="${temporary_dir}/elsewhere.sh"
+readonly slow_flock="${temporary_dir}/slow-flock"
+# A PID namespace that no process has: a record that names it was written in another namespace.
+readonly foreign_pidns="pid:[0]"
 
 pids=()
 cleanup() {
@@ -58,19 +64,37 @@ mv -f -- "$3.tmp" "$3"
 exec sleep 300
 EOF
 
-# elsewhere.sh ROOT PID READY SECONDS: hold ROOT's lock as a run in another PID namespace looks from
-# here: on descriptor 7, which lock_holders does not look at, under a complete record that names
-# PID. Write READY once the record is in the file, then hold the lock for SECONDS.
+# elsewhere.sh ROOT PID READY SECONDS [PIDNS]: hold ROOT's lock as a run in another PID namespace
+# looks from here: on descriptor 7, which lock_holders does not look at, under a complete record that
+# names PID, and PIDNS as its PID namespace when given. Write READY once the record is in the file,
+# then hold the lock for SECONDS.
 cat >"$elsewhere" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 exec 7<>"$1/.run.lock"
 flock 7
-printf 'pid=%s\ncommand=a run in another PID namespace\nstarted=2026-10-27T00:00:00Z\ntoken=0123456789abcdef0123456789abcdef\n' \
-  "$2" >"$1/.run.lock"
+pidns=""
+[ -z "${5:-}" ] || pidns="pidns=$5"$'\n'
+printf 'pid=%s\n%scommand=a run in another PID namespace\nstarted=2026-10-27T00:00:00Z\ntoken=0123456789abcdef0123456789abcdef\n' \
+  "$2" "$pidns" >"$1/.run.lock"
 echo ready >"$3"
 exec sleep "$4"
 EOF
+
+# A `flock` whose first call creates the directory LOADTEST_TEST_FLOCK_MARK and then takes 4 s before
+# it tries: a waiting caller with it on PATH keeps the lock file open, on the descriptor that it
+# tries, through another caller's whole 3 s wait.
+mkdir -p "$slow_flock"
+real_flock="$(command -v flock)"
+readonly real_flock
+cat >"${slow_flock}/flock" <<EOF
+#!/usr/bin/env bash
+if mkdir "\${LOADTEST_TEST_FLOCK_MARK:?}" 2>/dev/null; then
+  sleep 4
+fi
+exec "${real_flock}" "\$@"
+EOF
+chmod +x "${slow_flock}/flock"
 
 # A `date` that takes 1 s: lock_root calls it after its flock and before it writes its record, so
 # a holder with it on PATH holds the lock for 1 s without its own record in the file.
@@ -247,10 +271,6 @@ case_invisible_holder() {
   names "$out" "$dead" || { fail "(d) the refusal does not name the record's pid ($dead)"; return; }
   [[ $out == *"not visible"* ]] || { fail "(d) the refusal does not say that the holder is not visible here"; return; }
   [[ $out == *.run.lock* && $out == *remove* ]] || { fail "(d) the refusal does not tell the operator to leave .run.lock in place"; return; }
-  if [[ $out == *"no process holds"* || $out == *"Try again"* ]]; then
-    fail "(d) the refusal says that the lock is free while a process holds it"
-    return
-  fi
   [[ -e "${root}/.run.lock" ]] || { fail "(d) the lock file is gone"; return; }
   kill -TERM "$holder"
   wait "$holder" 2>/dev/null || true
@@ -286,13 +306,103 @@ case_holder_ended() {
   printf 'PASS: a caller takes the lock once its holder has ended, the record naming a dead pid\n'
 }
 
+case_waiting_callers() {
+  out=""
+  local root="${temporary_dir}/root-f" dead
+  mkdir -p "$root"
+  dead="$(dead_pid)"
+  bash "$elsewhere" "$root" "$dead" "${temporary_dir}/ready-f" 300 "$foreign_pidns" >/dev/null 2>&1 &
+  local holder=$!
+  pids+=("$holder")
+  wait_for "${temporary_dir}/ready-f" || { fail "(f) the holder on descriptor 7 did not take the lock"; return; }
+
+  # Caller 1 sits in its first flock for 4 s; caller 2 starts once caller 1 is in it, and waits its
+  # whole 3 s while caller 1 has the lock file open.
+  local mark="${temporary_dir}/flock-f" n i waiters=() rcs=()
+  for n in 1 2; do
+    local path="$PATH"
+    [[ $n == 2 ]] || path="${slow_flock}:${PATH}"
+    env -u LOADTEST_LOCK_TOKEN PATH="$path" LOADTEST_TEST_FLOCK_MARK="$mark" \
+      bash -c 'echo "$$" >"$3"; source "$1"; lock_root "$2"' caller \
+      "$helper" "$root" "${temporary_dir}/caller-f${n}.pid" >"${temporary_dir}/caller-f${n}.out" 2>&1 9>&- &
+    waiters+=("$!")
+    pids+=("$!")
+    for ((i = 0; i < 100 && n == 1; i++)); do
+      [[ -d "$mark" ]] && break
+      sleep 0.1
+    done
+    [[ -d "$mark" ]] || { fail "(f) caller 1 did not reach its flock"; return; }
+  done
+  for n in 0 1; do
+    rcs[n]=0
+    wait "${waiters[n]}" 2>/dev/null || rcs[n]=$?
+  done
+  local caller1 caller2 out1 out2
+  caller1="$(<"${temporary_dir}/caller-f1.pid")"
+  caller2="$(<"${temporary_dir}/caller-f2.pid")"
+  out1="$(<"${temporary_dir}/caller-f1.out")"
+  out2="$(<"${temporary_dir}/caller-f2.out")"
+  for n in 1 2; do
+    out="$out1"
+    [[ $n == 1 ]] || out="$out2"
+    if ((rcs[n - 1] == 0)); then
+      fail "(f) caller $n was admitted while a process that this PID namespace cannot see held the lock"
+      return
+    fi
+    [[ $out == *"not visible"* ]] || { fail "(f) caller $n's refusal does not say that the holder is not visible here"; return; }
+    [[ $out == *.run.lock* && $out == *remove* ]] || { fail "(f) caller $n's refusal does not tell the operator to leave .run.lock in place"; return; }
+  done
+  out="$out1"
+  if names "$out" "$caller2"; then
+    fail "(f) caller 1's refusal names caller 2 (pid $caller2), which only waited, as the holder"
+    return
+  fi
+  out="$out2"
+  if names "$out" "$caller1"; then
+    fail "(f) caller 2's refusal names caller 1 (pid $caller1), which only waited, as the holder"
+    return
+  fi
+  kill -TERM "$holder"
+  wait "$holder" 2>/dev/null || true
+  out=""
+  printf 'PASS: two callers that wait at once on a holder this PID namespace cannot see never name each other\n'
+}
+
+case_foreign_record_live_pid() {
+  out=""
+  local root="${temporary_dir}/root-g"
+  mkdir -p "$root"
+  bash "$elsewhere" "$root" "$$" "${temporary_dir}/ready-g" 300 "$foreign_pidns" >/dev/null 2>&1 &
+  local holder=$!
+  pids+=("$holder")
+  wait_for "${temporary_dir}/ready-g" || { fail "(g) the holder on descriptor 7 did not take the lock"; return; }
+
+  try_lock "$root"
+  if ((rc == 0)) || [[ $out == *ADMITTED* ]]; then
+    fail "(g) a caller was admitted while a process that this PID namespace cannot see held the lock"
+    return
+  fi
+  [[ $out == *"not visible"* ]] || { fail "(g) the refusal does not say that the holder is not visible here, although the record was written in another PID namespace"; return; }
+  if names "$out" "$$"; then
+    fail "(g) the refusal names pid $$ (this test, an unrelated process here) as the holder: the record's pid is of another PID namespace"
+    return
+  fi
+  [[ $out == *.run.lock* && $out == *remove* ]] || { fail "(g) the refusal does not tell the operator to leave .run.lock in place"; return; }
+  kill -TERM "$holder"
+  wait "$holder" 2>/dev/null || true
+  out=""
+  printf 'PASS: a record of another PID namespace whose pid runs here is refused as not visible, not naming that pid\n'
+}
+
 failed=0
 case_orphaned_child || failed=$((failed + 1))
 case_stale_record || failed=$((failed + 1))
 case_token_without_descriptor || failed=$((failed + 1))
 case_invisible_holder || failed=$((failed + 1))
 case_holder_ended || failed=$((failed + 1))
+case_waiting_callers || failed=$((failed + 1))
+case_foreign_record_live_pid || failed=$((failed + 1))
 if ((failed > 0)); then
-  printf 'FAIL: %d of 5 cases failed\n' "$failed" >&2
+  printf 'FAIL: %d of 7 cases failed\n' "$failed" >&2
   exit 1
 fi

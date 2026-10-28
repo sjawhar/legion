@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -100,5 +104,31 @@ func TestGuardAllowForeignRefusesAMissingFlag(t *testing.T) {
 	var missing *missingForeignFlagError
 	if !errors.As(err, &missing) || missing.Flag != "-listener" {
 		t.Fatalf("refusal %v, want -listener named", err)
+	}
+}
+
+// TestGuardPrintsNoURLPassword: a foreign URL that does not parse is refused naming its flag
+// alone, and a failed guard check names the endpoint without its password.
+func TestGuardPrintsNoURLPassword(t *testing.T) {
+	const password = "url-password-51d2"
+	flags := foreignFlags()
+	flags.pg = "host=db.example user=postgres password=" + password
+	if _, err := resolveEndpoints(flags, testStack()); err == nil || !strings.Contains(err.Error(), "-pg") || strings.Contains(err.Error(), password) {
+		t.Fatalf("a -pg that is not a URL: refusal %v, want one naming -pg without its password", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	withPassword := strings.Replace(srv.URL, "://", "://loadgen:"+password+"@", 1)
+	for _, e := range []endpoints{
+		{natsMon: withPassword, natsServerName: "loadtest-abc"},
+		{dispatch: withPassword},
+	} {
+		err := checkStack(context.Background(), e)
+		if err == nil || strings.Contains(err.Error(), password) || !strings.Contains(err.Error(), "loadgen@") {
+			t.Errorf("guard check against %+v: error %v, want one naming the endpoint's user without its password", e, err)
+		}
 	}
 }
