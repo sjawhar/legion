@@ -2,7 +2,8 @@
 
 Part of `skill://legion-worker`. Read it the moment your phase needs a tool the worker image may
 not carry — a database client, a linter, a one-off CLI — before you install, download, or vendor
-anything. Every path it cites is in sjawhar/legion.
+anything; before you measure Oh My Pi's binary; and when a test fails in your pod. Every path it
+cites is in sjawhar/legion.
 
 ## The five clients the image already carries
 
@@ -413,3 +414,31 @@ on "The test: where it lands, and what it leaves resolving", which the convenien
 The operator's side of this — why the image carries those five clients rather than anything else,
 the five priced options with their measurements, and what the clients cost the image — is in
 `docs/kubernetes.md`, the subsection "The tools a role's own work needs".
+
+## Before you measure Oh My Pi's binary
+
+Read Oh My Pi's source first, from the fork (`sjawhar/oh-my-pi`) at the tag `.omp-pin` names, not
+from upstream's version tag: the fork's release carries code upstream's does not. `.omp-pin` reads
+`github:sjawhar/oh-my-pi@<version>`, and the git tag adds a `v` in front of that text, so find it
+rather than type it:
+
+```text
+$ git ls-remote --tags https://github.com/sjawhar/oh-my-pi.git 'v<version>'
+```
+
+Search that source by the name of a construct or a setting, never by its value: one value is
+spelled in many places, and the code that sets it may spell it in none. If the module the binary
+names is absent at that tag, the binary is the ground truth: measure it, and say the source did not
+carry it.
+
+## The tests your pod cannot run
+
+Your pod runs under gVisor, which does not give a test every interface the Linux kernel does, so
+some tests fail in a pod whatever your change. In `packages/envoy` those are the tests of
+`cmd/agent-secrets`, `cmd/agent-secrets-helper` and `internal/broker/helper`: the helper identifies
+its peer with `SO_PEERPIDFD`, which gVisor answers `protocol not available` (`PEER_UNIDENTIFIED` in
+the test output), and the terminal-prompt tests of `cmd/agent-secrets` also need terminal
+job-control ioctls (`inappropriate ioctl for device`) and the `SigCgt` line of `/proc/<pid>/status`.
+Their proof is CI's run at the head, never a pod run: cite that run, and do not read their failures
+in a pod as your branch's. A timing test can fail in a pod too: gVisor's coarse clock can measure
+the small input at 0 s, and a linearity test then reports `+Inf times`.

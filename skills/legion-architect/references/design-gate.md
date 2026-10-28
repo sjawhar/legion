@@ -16,6 +16,10 @@ what the human decides, each as a [decision block](skill://dispatch/SKILL.md#ask
 Never post a second "spec" artifact beside it: `dispatch artifact` with the primary document's name
 replaces the human's document.
 
+On your first pass over the spec, cut each requirement whose only source is an earlier Dispatch
+issue: that issue's decisions were made for that issue. Keep a requirement when the human's own
+words in this issue support it.
+
 ## Which gate runs
 
 The approval step runs only when the `Design gate policy` sentence of your `Legion addressing` line
