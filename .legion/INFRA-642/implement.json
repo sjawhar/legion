@@ -2,11 +2,35 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-642",
-  "completed": "2026-10-28T12:05:00Z",
+  "completed": "2026-10-28T14:09:03Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2448",
   "proof": [
     {
-      "criterion": "A3: behaviour kept on the real route (create an anchored comment, reply, resolve, reopen, edit) between base and head",
+      "criterion": "A3 on the merged head: behaviour kept on the real route (create an anchored comment, reply, resolve, reopen, edit) between main and head",
+      "surface": "Local Dispatch server (packages/envoy/cmd/dispatch, GOMAXPROCS=2) on Postgres 17.11 + pgvector 0.8.7 with the INFRA-512 replay seed, driven over HTTP as the CLI and a signed-in person send",
+      "command": "$TMPDIR/a3/a3.sh for base 08572e01 (main) once and head 9bac6d86 twice; diff <(jq -S . r-base1/record.json) <(jq -S . r-head*/record.json); LINUX-36, 398,934-byte spec, 12 open anchored comments",
+      "observed": "r-base1 vs r-head2: 0 lines. r-head1 differed (1,262 lines) only in the order of the 5 comment.anchor_refreshed events of the first step's MarkQuote (same events as a set, every non-event part identical), and r-head1 vs r-head2 shows the same reordering: run-to-run row order of refreshAnchors' unordered read, as in round 1.",
+      "headSha": "9bac6d86f930e99354784b014d19089574beb113",
+      "negativeControl": "Round 1's broken build (warm margin writes skip the anchor refresh) differed from base by 1,978 lines (stale quotes kept, 6 of 12 anchor_refreshed events missing)."
+    },
+    {
+      "criterion": "Replay smoke on the merged head (architect's send-back)",
+      "surface": "Same local Dispatch driven by the INFRA-512 replay (tools/load.py), seed restored before each run",
+      "command": "/legion/scratch/tmp/a1/run.sh <binary> smoke-{base,head} -> load.py 0.3 1 27 8, GOMAXPROCS=2; base 08572e01, head 9bac6d86",
+      "observed": "base 439.71 CPU-s (0.914 cores), head 424.33 CPU-s (0.882 cores), 293 write events each, 0 pending actions; head inside round 1's head range (417-428), base inside round 1's base range (432-444).",
+      "headSha": "9bac6d86f930e99354784b014d19089574beb113",
+      "negativeControl": "The base binary (change absent) on the same inputs used 15.4 CPU-s more."
+    },
+    {
+      "criterion": "A2 on the merged head: behaviour kept exactly (equivalence test against the old whole-document write), after the test refactor",
+      "surface": "docs package against Postgres: two services on two databases seeded with the same bytes",
+      "command": "go test ./internal/dispatch/docs/ -run TestAMarginWriteMatchesTheWholeDocumentWrite -count=1; again with DISPATCH_TEST_SPEC_CORPUS=/legion/scratch/tmp/linux-specs; go test ./internal/dispatch/api/ -run 'Schema|OutsideSchema'",
+      "observed": "generated documents ok 151.0s; with the five LINUX specs ok 553.1s; api schema tests ok over docs.OutsideSchemaCorruptionsForTest.",
+      "headSha": "9bac6d86f930e99354784b014d19089574beb113",
+      "negativeControl": "applyMargin recording content_changed=true -> 12 'content_changed differs' failures; a corruption flow expecting ErrDocumentTooLarge -> checkFlow's errors.Is fails on both sides."
+    },
+    {
+      "criterion": "Round 1: A3: behaviour kept on the real route (create an anchored comment, reply, resolve, reopen, edit) between base and head",
       "surface": "Local Dispatch server (packages/envoy/cmd/dispatch, GOMAXPROCS=2) on Postgres 17.11 + pgvector 0.8.7 with the INFRA-512 replay seed run/seeded.dump, driven over HTTP as the CLI and a signed-in person send",
       "command": "$TMPDIR/a3/a3.sh <binary> <outdir> for base 460facf5 (twice) and head 1834eeb8 (twice), then diff <(jq -S . base/record.json) <(jq -S . head/record.json); LINUX-36, 398,934-byte spec, 12 open anchored comments, 5 anchors staled by SQL and one re-staled before each step",
       "observed": "base1-vs-base2 0 lines, base1-vs-head2 0 lines, base2-vs-head2 0 lines (responses, 12 comment.anchor_refreshed events with actors and order, /text markdown and document token, /blocks tokens, comment list, comments.anchor rows). head1 differed from the others only in the order of the 5 anchor_refreshed events of the first step's MarkQuote (an unchanged applyLive write; refreshAnchors reads rows with no order by), equal as a set, and head1-vs-head2 shows the same 1,262-line reordering, so it is run-to-run row order. Before the merge with main: head 082b7ea7 vs base 59f6647d also 0 lines.",
@@ -14,7 +38,7 @@
       "negativeControl": "Head built with recordLiveOperation skipping writeVersionTx for warm margin writes (dispatch-broken) -> 1,978 diff lines against base: stale quotes kept and 6 of 12 comment.anchor_refreshed events missing."
     },
     {
-      "criterion": "A1: merge rule on LINUX's replay (every head run uses less CPU than every base run)",
+      "criterion": "Round 1: A1: merge rule on LINUX's replay (every head run uses less CPU than every base run)",
       "surface": "Same local Dispatch, driven by the INFRA-512 architect's replay of LINUX's 22:55-23:34Z write log (tools/load.py, replay-inputs.tar.gz sha256 4299570e... OK), seed restored before every run",
       "command": "/legion/scratch/tmp/a1/run.sh <binary> <run> -> tools/drive.sh <run> 0.3 1 27 8 2 (load.py F=0.3, rho=1, minutes 27-35, 2 SSE, GOMAXPROCS=2, whole-run CPU profile), interleaved base 460facf5 / head 1834eeb8, three each",
       "observed": "base CPU-s 443.89, 432.10, 440.02; head 428.37, 417.13, 423.69 over 480.9 s each; max head 428.37 < min base 432.10. Spread 11.79 CPU-s, mean gain 15.6 CPU-s = 0.032 cores (3.6%). pprof -focus ProjectMark 12.31/11.87/12.10% -> 10.34/10.21/10.42%; updateChangesMarkdown 2.61/2.66/2.66% -> 2.63/2.34/2.54%.",
@@ -22,7 +46,7 @@
       "negativeControl": "Base binary (the change absent) is the control: all three base runs used more CPU than every head run; base-vs-base spread 11.79 CPU-s."
     },
     {
-      "criterion": "A2: behaviour kept exactly, on real-size documents (equivalence test against the old whole-document write)",
+      "criterion": "Round 1: A2: behaviour kept exactly, on real-size documents (equivalence test against the old whole-document write)",
       "surface": "docs package against Postgres: two services on two databases seeded with the same bytes, the route's docs.Service calls in joined transactions",
       "command": "go test ./internal/dispatch/docs/ -run TestAMarginWriteMatchesTheWholeDocumentWrite -count=1 -v; again with DISPATCH_TEST_SPEC_CORPUS=/legion/scratch/tmp/linux-specs (LINUX-129, -344, -345, -364, -43)",
       "observed": "generated 399,822- and 614,637-byte specs: ok 139.6s; with the five LINUX specs (149-597 KB, 48 anchors each): ok 528.5s, 596 subtests passed. Comparisons cover the error, each appended update's class and effect, anchor rows, events, the write's kept rendering and credits, /text, /blocks, and the room's class and kept rendering.",
@@ -40,7 +64,11 @@
     "packages/envoy/internal/dispatch/docs/margin_equivalence_test.go",
     "packages/envoy/internal/dispatch/api/schema_repair_test.go",
     "packages/envoy/AGENTS.md",
-    "packages/envoy/.changes/unreleased/pr2448-Changed-20261028-101000.yaml"
+    "packages/envoy/.changes/unreleased/pr2448-Changed-20261028-101000.yaml",
+    "packages/envoy/internal/dispatch/docs/testhooks.go",
+    "packages/envoy/internal/dispatch/docs/margin_equivalence_fixtures_test.go",
+    "packages/envoy/internal/dispatch/docs/margin_equivalence_flows_test.go",
+    "packages/envoy/internal/dispatch/docs/margin_equivalence_compare_test.go"
   ],
   "trickyParts": [
     "applyMargin reuses liveWrite.tree only after its own forkLive: buildFork/releaseFork/abandon drop the rendering whenever the fork moves.",
@@ -50,7 +78,15 @@
   "deviations": [
     "Measured gain 0.032 cores at F=0.3 against the plan's expected ~0.084; the rule's first condition (every head < every base) holds. The observer share did not move: in the replay rooms are mostly evicted between writes (roomIdleTimeout one minute, CLI-only load), so margin writes fork cold and are not tagged [INFERENCE]; INFRA-643's in-room check covers a cold write's publish.",
     "A planned stale_room_test case 'room replaced by one lacking a delete the fork holds' was not built: the state is unreachable on current code (CloseRoom flushes before evicting while the write's advisory lock holds pending appends; a failed room refuses loads until it compacts under the same lock; a failure before the append is refused at recordLiveOperation's failure check). The cold-fork case is built and fails a tag that ignores the room instance.",
-    "Main moved to changie fragments; the changelog entry is packages/envoy/.changes/unreleased/pr2448-Changed-20261028-101000.yaml (Issue pr2448, no Dispatch key, per the controller's ruling), merged forward at 1834eeb8 after GitHub reported the PR conflicting."
+    "Main moved to changie fragments; the changelog entry is packages/envoy/.changes/unreleased/pr2448-Changed-20261028-101000.yaml (Issue pr2448, no Dispatch key, per the controller's ruling), merged forward at 1834eeb8 after GitHub reported the PR conflicting.",
+    "testhooks.go carries an error-returning copy of docstest.NestedLinkUpdate's byte surgery: testhooks.go is linked into the server and must not import docstest (which imports testing), and docstest cannot import docs (cycle with docs' and pmdoc's tests)."
   ],
-  "openQuestions": []
+  "openQuestions": [],
+  "round2": {
+    "reason": "Architect's send-back at adb43b3e: merge main forward (PR conflicting) and land the reviewer's three test cleanups here. No other change.",
+    "commits": [
+      "19ff416291b91b53fff94692dc8332d0e9a474d0 merge: resolve conflict against main (conflict only in docs/mutation.go applyLive; main's forkHeld no-op drop moved into the shared liveOperation.change, isLifecycleWrite credit check kept in applyLive)",
+      "9bac6d86f930e99354784b014d19089574beb113 test(dispatch): share the outside-schema corruptions through docs test hooks and split the margin equivalence test"
+    ]
+  }
 }
