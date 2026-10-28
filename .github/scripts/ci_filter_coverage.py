@@ -346,6 +346,26 @@ def go_lines(text: str) -> list:
             if not line.strip().startswith("#") and GO_COMMAND.search(line)]
 
 
+# A package argument on a go line: a relative pattern (`.`, `./x`, `../x`, `./x/...`). This repository's
+# go commands name their packages only that way, and no flag value they pass starts with `.`.
+PACKAGE_ARG = re.compile(r"^\.{1,2}(?:/\S*)?$")
+
+
+def line_packages(line: str) -> set:
+    """The packages the go commands on one line name: every relative pattern after a go subcommand,
+    shell punctuation stripped. A Run claims a line only when these are exactly its packages, so a
+    package appended to a claimed command is never left out of the closure the check computes."""
+    found = set()
+    for match in GO_COMMAND.finditer(line):
+        rest = line[match.end():]
+        rest = re.split(r"\||&&|;|\)\s*$", rest)[0]
+        for token in rest.split():
+            token = token.strip("\"')")
+            if PACKAGE_ARG.match(token):
+                found.add(token)
+    return found
+
+
 # ---------------------------------------------------------------- the check
 def check_table(document: dict, data, filters: dict, files: set, problems: list) -> None:
     """The table must say what ci.yaml says: every gate a real filter on a real job, every go
@@ -404,10 +424,26 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
                 continue
             mine = [r for (j, ref), rs in claims.items() if j == job_id and step_matches(step, ref) for r in rs]
             for line in go_lines(str(step["run"])):
-                if not any(squash(r.text) in squash(line) for r in mine):
+                pinned = [r for r in mine if squash(r.text) in squash(line)]
+                if not pinned:
                     problems.append(f"::error file={WORKFLOW}::job {job_id} step \"{step_label(step)}\" runs `{line}`, "
                                     f"which no Run in ci_job_reads.py lists; add it to the job's gate so its closure "
                                     f"is checked")
+                    continue
+                # The pin finds the line; the packages decide the closure, so they must be exactly the
+                # Run's: a package appended to a claimed command would otherwise go unchecked.
+                named = line_packages(line)
+                for r in pinned:
+                    if named != set(r.pkgs):
+                        extra = sorted(named - set(r.pkgs))
+                        missing = sorted(set(r.pkgs) - named)
+                        detail = "; ".join(part for part in (
+                            f"it also names {' '.join(extra)}" if extra else "",
+                            f"it no longer names {' '.join(missing)}" if missing else "") if part)
+                        problems.append(f"::error file={WORKFLOW}::job {job_id} step \"{step_label(step)}\" runs "
+                                        f"`{line}`, whose packages are not the Run's ({' '.join(r.pkgs)}): {detail}; "
+                                        f"make the Run in ci_job_reads.py name exactly the packages the line names, "
+                                        f"so their closure is checked against the job's filter")
     for (job_id, ref), rs in claims.items():
         steps = [s for s in (jobs.get(job_id) or {}).get("steps") or [] if step_matches(s, ref)]
         text = squash(" ".join(str(s.get("run", "")) for s in steps))

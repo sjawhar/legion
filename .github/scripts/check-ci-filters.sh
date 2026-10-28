@@ -28,7 +28,8 @@
 #   2. a gate whose filter the changes job lacks, or whose job's (or step's) if: does not test it,
 #   3. a job or step gated on a filter the table neither lists in GATES nor EXCLUDES,
 #   4. a run: line of a ci.yaml job that starts a go command (test, vet, build, run, list,
-#      install, generate) no Run of a gate on that job claims,
+#      install, generate) no Run of a gate on that job claims, or whose packages (its relative
+#      package arguments) are not exactly the claiming Run's, since only the Run's are listed,
 #   5. a Run whose pinned text its step or script no longer holds, a RULES source file that is
 #      gone, or a why citing a step the job no longer has,
 #   6. a go command that fails or a first-party package go list cannot load, since its closure
