@@ -15306,6 +15306,717 @@
     "rendered_by_milkdown": "Indented code whose blank lines hold tabs, measured from the column each tab stands at.\n\nNext.\n\n```\na\n\nb\n```\n\nNext.\n\n```\na\n  \nb\n```\n\nNext.\n\n* x\n\n  ```\n  a\n\n  b\n  ```\n\nNext.\n\n* x\n\n  ```\n  a\n\n  b\n  ```\n\nNext.\n\n* x\n\n  ```\n  a\n   \n  b\n  ```\n\nNext.\n\n* x\n\n  ```\n  a\n    \n  b\n  ```\n\nNext.\n\n1. x\n\n   ```\n   a\n\n   b\n   ```\n\nNext.\n\n> * x\n>\n>   ```\n>   a\n>\n>   b\n>   ```\n"
   },
   {
+    "name": "indented-code-trailing-whitespace-lines",
+    "markdown": "Indented code keeps the whitespace-only lines after it that hold four columns or more past where its container's content starts, and any shorter blank lines between them; a list item measures from its content, a footnote definition from its own start.\n\nTop level, before a paragraph:\n\n          x\n        \n       \nAfter.\n\nTop level, one line of exactly four columns, then a blank line:\n\n    code\n    \n\nAfter.\n\nTwo lines of exactly four columns:\n\n    code\n    \n    \nAfter.\n\nA tab past the code's columns:\n\n    code\n\t\t\nAfter.\n\n>           x\n>        \n>       \n> In the quote.\n\n- a\n\n          x\n        \n       \n  In the item.\n\nNext.\n\n1. a\n\n           x\n         \n\n   In the item.\n\nNext.\n\n- a\n  - b\n\n            x\n              \n\nNext.\n\n- a\n\n  >     x\n  >       \n\nNext.\n\n:::callout{kind=\"note\" title=\"T\"}\n    code\n      \n:::\n\nFootnote[^q].\n\n[^q]: a\n\n          x\n        \n       \n    y\n\nCode right after a list or a quote keeps none, as main reads it:\n\n100. a\n\n    x\n          \nAfter.\n\n> # h\n    x\n      \nEnd.\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Indented code keeps the whitespace-only lines after it that hold four columns or more past where its container's content starts, and any shorter blank lines between them; a list item measures from its content, a footnote definition from its own start."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Top level, before a paragraph:"
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": null,
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "      x\n    \n   "
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Top level, one line of exactly four columns, then a blank line:"
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": null,
+            "blockId": "b-000006"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "code"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000008"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Two lines of exactly four columns:"
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": null,
+            "blockId": "b-000009"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "code\n"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000010"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000011"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A tab past the code's columns:"
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": null,
+            "blockId": "b-000012"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "code\n\t"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000013"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000014"
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null,
+                "blockId": "b-000015"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "      x\n   \n  "
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000016"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "In the quote."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000017"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": true,
+                "checked": null,
+                "blockId": "b-000018"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000019"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a"
+                    }
+                  ]
+                },
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000020"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "    x\n  \n "
+                    }
+                  ]
+                },
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000021"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "In the item."
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000022"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "ordered_list",
+          "attrs": {
+            "order": 1,
+            "spread": false,
+            "blockId": "b-000023"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": true,
+                "checked": null,
+                "blockId": "b-000024"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000025"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a"
+                    }
+                  ]
+                },
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000026"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "    x\n  "
+                    }
+                  ]
+                },
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000027"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "In the item."
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000028"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000029"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000030"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000031"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a"
+                    }
+                  ]
+                },
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false,
+                    "blockId": "b-000032"
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": true,
+                        "checked": null,
+                        "blockId": "b-000033"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000034"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "b"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null,
+                            "blockId": "b-000035"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "    x\n      "
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000036"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000037"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": true,
+                "checked": null,
+                "blockId": "b-000038"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000039"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a"
+                    }
+                  ]
+                },
+                {
+                  "type": "blockquote",
+                  "attrs": {
+                    "blockId": "b-000040"
+                  },
+                  "content": [
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null,
+                        "blockId": "b-000041"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "x\n  "
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000042"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "kind": "note",
+            "title": "T",
+            "blockId": "b-000043"
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null,
+                "blockId": "b-000044"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "code\n  "
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000045"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Footnote"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "q"
+              }
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "q",
+            "blockId": "b-000046"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000047"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "a"
+                }
+              ]
+            },
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null,
+                "blockId": "b-000048"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "  x\n    \n   "
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000049"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "y"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000050"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Code right after a list or a quote keeps none, as main reads it:"
+            }
+          ]
+        },
+        {
+          "type": "ordered_list",
+          "attrs": {
+            "order": 100,
+            "spread": false,
+            "blockId": "b-000051"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000052"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000053"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": null,
+            "blockId": "b-000054"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "x"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000055"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000056"
+          },
+          "content": [
+            {
+              "type": "heading",
+              "attrs": {
+                "id": "",
+                "level": 1,
+                "blockId": "b-000057"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "h"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": null,
+            "blockId": "b-000058"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "x"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000059"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "End."
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "Ae0BAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEB+wFJbmRlbnRlZCBjb2RlIGtlZXBzIHRoZSB3aGl0ZXNwYWNlLW9ubHkgbGluZXMgYWZ0ZXIgaXQgdGhhdCBob2xkIGZvdXIgY29sdW1ucyBvciBtb3JlIHBhc3Qgd2hlcmUgaXRzIGNvbnRhaW5lcidzIGNvbnRlbnQgc3RhcnRzLCBhbmQgYW55IHNob3J0ZXIgYmxhbmsgbGluZXMgYmV0d2VlbiB0aGVtOyBhIGxpc3QgaXRlbSBtZWFzdXJlcyBmcm9tIGl0cyBjb250ZW50LCBhIGZvb3Rub3RlIGRlZmluaXRpb24gZnJvbSBpdHMgb3duIHN0YXJ0LigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwlwYXJhZ3JhcGgHAAH+AQYEAAH/AR5Ub3AgbGV2ZWwsIGJlZm9yZSBhIHBhcmFncmFwaDooAAH+AQdibG9ja0lkAXcIYi0wMDAwMDKHAf4BAwpjb2RlX2Jsb2NrBwABnwIGBAABoAIQICAgICAgeAogICAgCiAgICgAAZ8CB2Jsb2NrSWQBdwhiLTAwMDAwM4cBnwIDCXBhcmFncmFwaAcAAbICBgQAAbMCBkFmdGVyLigAAbICB2Jsb2NrSWQBdwhiLTAwMDAwNIcBsgIDCXBhcmFncmFwaAcAAbsCBgQAAbwCP1RvcCBsZXZlbCwgb25lIGxpbmUgb2YgZXhhY3RseSBmb3VyIGNvbHVtbnMsIHRoZW4gYSBibGFuayBsaW5lOigAAbsCB2Jsb2NrSWQBdwhiLTAwMDAwNYcBuwIDCmNvZGVfYmxvY2sHAAH9AgYEAAH+AgRjb2RlKAAB/QIHYmxvY2tJZAF3CGItMDAwMDA2hwH9AgMJcGFyYWdyYXBoBwABhAMGBAABhQMGQWZ0ZXIuKAABhAMHYmxvY2tJZAF3CGItMDAwMDA3hwGEAwMJcGFyYWdyYXBoBwABjQMGBAABjgMiVHdvIGxpbmVzIG9mIGV4YWN0bHkgZm91ciBjb2x1bW5zOigAAY0DB2Jsb2NrSWQBdwhiLTAwMDAwOIcBjQMDCmNvZGVfYmxvY2sHAAGyAwYEAAGzAwVjb2RlCigAAbIDB2Jsb2NrSWQBdwhiLTAwMDAwOYcBsgMDCXBhcmFn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MzmHAakFAwpibG9ja3F1b3RlBwABrQUDCmNvZGVfYmxvY2sHAAGuBQYEAAGvBQR4CiAgKAABrgUHYmxvY2tJZAF3CGItMDAwMDQxKAABrQUHYmxvY2tJZAF3CGItMDAwMDQwKAABqAUFbGFiZWwBdwPigKIoAAGoBQhsaXN0VHlwZQF3BmJ1bGxldCgAAagFBnNwcmVhZAF4KAABqAUHYmxvY2tJZAF3CGItMDAwMDM4KAABpwUGc3ByZWFkAXkoAAGnBQdibG9ja0lkAXcIYi0wMDAwMzeHAacFAwlwYXJhZ3JhcGgHAAG8BQYEAAG9BQVOZXh0LigAAbwFB2Jsb2NrSWQBdwhiLTAwMDA0MocBvAUDB2NhbGxvdXQHAAHEBQMKY29kZV9ibG9jawcAAcUFBgQAAcYFB2NvZGUKICAoAAHFBQdibG9ja0lkAXcIYi0wMDAwNDQoAAHEBQRraW5kAXcEbm90ZSgAAcQFBXRpdGxlAXcBVCgAAcQFB2Jsb2NrSWQBdwhiLTAwMDA0M4cBxAUDCXBhcmFncmFwaAcAAdIFBgQAAdMFCEZvb3Rub3RlhwHTBQMSZm9vdG5vdGVfcmVmZXJlbmNlKAAB3AUFbGFiZWwBdwFxhwHcBQYEAAHeBQEuKAAB0gUHYmxvY2tJZAF3CGItMDAwMDQ1hwHSBQMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAeEFAwlwYXJhZ3JhcGgHAAHiBQYEAAHjBQFhKAAB4gUHYmxvY2tJZAF3CGItMDAwMDQ3hwHiBQMKY29kZV9ibG9jawcAAeYFBgQAAecFDCAgeAogICAgCiAgICgAAeYFB2Jsb2NrSWQBdwhiLTAwMDA0OIcB5gUDCXBhcmFncmFwaAcAAfUFBgQAAfYFAXkoAAH1BQdibG9ja0lkAXcIYi0wMDAwNDkoAAHhBQVsYWJlbAF3AXEoAAHhBQdibG9ja0lkAXcIYi0wMDAwNDaHAeEFAwlwYXJhZ3JhcGgHAAH7BQYEAAH8BUBDb2RlIHJpZ2h0IGFmdGVyIGEgbGlzdCBvciBhIHF1b3RlIGtlZXBzIG5vbmUsIGFzIG1haW4gcmVhZHMgaXQ6KAAB+wUHYmxvY2tJZAF3CGItMDAwMDUwhwH7BQMMb3JkZXJlZF9saXN0BwABvgYDCWxpc3RfaXRlbQcAAb8GAwlwYXJhZ3JhcGgHAAHABgYEAAHBBgFhKAABwAYHYmxvY2tJZAF3CGItMDAwMDUzKAABvwYFbGFiZWwBdwPigKIoAAG/BghsaXN0VHlwZQF3BmJ1bGxldCgAAb8GBnNwcmVhZAF5KAABvwYHYmxvY2tJZAF3CGItMDAwMDUyKAABvgYFb3JkZXIBfaQBKAABvgYGc3ByZWFkAXkoAAG+BgdibG9ja0lkAXcIYi0wMDAwNTGHAb4GAwpjb2RlX2Jsb2NrBwABywYGBAABzAYBeCgAAcsGB2Jsb2NrSWQBdwhiLTAwMDA1NIcBywYDCXBhcmFncmFwaAcAAc8GBgQAAdAGBkFmdGVyLigAAc8GB2Jsb2NrSWQBdwhiLTAwMDA1NYcBzwYDCmJsb2NrcXVvdGUHAAHYBgMHaGVhZGluZwcAAdkGBgQAAdoGAWgoAAHZBgJpZAF3ACgAAdkGBWxldmVsAX0BKAAB2QYHYmxvY2tJZAF3CGItMDAwMDU3KAAB2AYHYmxvY2tJZAF3CGItMDAwMDU2hwHYBgMKY29kZV9ibG9jawcAAeAGBgQAAeEGAXgoAAHgBgdibG9ja0lkAXcIYi0wMDAwNTiHAeAGAwlwYXJhZ3JhcGgHAAHkBgYEAAHlBgRFbmQuKAAB5AYHYmxvY2tJZAF3CGItMDAwMDU5AA==",
+    "rendered_by_milkdown": "Indented code keeps the whitespace-only lines after it that hold four columns or more past where its container's content starts, and any shorter blank lines between them; a list item measures from its content, a footnote definition from its own start.\n\nTop level, before a paragraph:\n\n```\n      x\n    \n   \n```\n\nAfter.\n\nTop level, one line of exactly four columns, then a blank line:\n\n```\ncode\n```\n\nAfter.\n\nTwo lines of exactly four columns:\n\n```\ncode\n\n```\n\nAfter.\n\nA tab past the code's columns:\n\n```\ncode\n\t\n```\n\nAfter.\n\n> ```\n>       x\n>    \n>   \n> ```\n>\n> In the quote.\n\n* a\n\n  ```\n      x\n    \n   \n  ```\n\n  In the item.\n\nNext.\n\n1. a\n\n   ```\n       x\n     \n   ```\n\n   In the item.\n\nNext.\n\n* a\n  * b\n\n    ```\n        x\n          \n    ```\n\nNext.\n\n* a\n\n  > ```\n  > x\n  >   \n  > ```\n\nNext.\n\n:::callout{#b-000043 kind=\"note\" title=\"T\"}\n```\ncode\n  \n```\n:::\n\nFootnote[^q].\n\n[^q]: a\n\n    ```\n      x\n        \n       \n    ```\n\n    y\n\nCode right after a list or a quote keeps none, as main reads it:\n\n100. a\n\n```\nx\n```\n\nAfter.\n\n> # h\n\n```\nx\n```\n\nEnd.\n"
+  },
+  {
     "name": "inline-code-backticks",
     "markdown": "Internal ``a ` b`` and edge `` `edge` ``.\n",
     "pm_json": {
@@ -22004,6 +22715,607 @@
     },
     "yjs_update_v1_b64": "AfYBAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBPUxpc3RzIG9wZW5pbmcgaW4gYSBjb250YWluZXIgb24gdGhlIGxpbmUgYWZ0ZXIgaW5kZW50ZWQgY29kZS4oAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAAMJcGFyYWdyYXBoBwABQAYEAAFBBU5leHQuKAABQAdibG9ja0lkAXcIYi0wMDAwMDKHAUADCmNvZGVfYmxvY2sHAAFIBgQAAUkEY29kZSgAAUgHYmxvY2tJZAF3CGItMDAwMDAzhwFIAwpibG9ja3F1b3RlBwABTwMJcGFyYWdyYXBoBwABUAYEAAFRAjEuKAABUAdibG9ja0lkAXcIYi0wMDAwMDUoAAFPB2Jsb2NrSWQBdwhiLTAwMDAwNIcBTwMJcGFyYWdyYXBoBwABVgYEAAFXBU5leHQuKAABVgdibG9ja0lkAXcIYi0wMDAwMDaHAVYDCmNvZGVfYmxvY2sHAAFeBgQAAV8EY29kZSgAAV4HYmxvY2tJZAF3CGItMDAwMDA3hwFeAwpibG9ja3F1b3RlBwABZQMJcGFyYWdyYXBoBwABZgYEAAFnBDIuIGEoAAFmB2Jsb2NrSWQBdwhiLTAwMDAwOSgAAWUHYmxvY2tJZAF3CGItMDAwMDA4hwFlAwlwYXJhZ3JhcGgHAAFuBgQAAW8FTmV4dC4oAAFuB2Jsb2NrSWQBdwhiLTAwMDAxMIcBbgMKY29kZV9ibG9jawcAAXYGBAABdwRjb2RlKAABdgdibG9ja0lkAXcIYi0wMDAwMTGHAXYDCmJsb2NrcXVvdGUHAAF9AwlwYXJhZ3JhcGgHAAF+BgQAAX8EMi4gYSgAAX4HYmxvY2tJZAF3CGItMDAwMDEzKAABfQdibG9ja0lkAXcIYi0wMDAwMTKHAX0DCXBhcmFncmFwaAcAAYYBBgQAAYcBBU5leHQuKAABhgEHYmxvY2tJZAF3CGItMDAwMDE0hwGGAQMKY29kZV9ibG9jawcAAY4BBgQAAY8BBGNvZGUoAAGOAQdibG9ja0lkAXcIYi0wMDAwMTWHAY4BAwtidWxsZXRfbGlzdAcAAZUBAwlsaXN0X2l0ZW0HAAGWAQMJcGFyYWdyYXBoBwABlwEGBAABmAEEMi4gYSgAAZcBB2Jsb2NrSWQBdwhiLTAwMDAxOCgAAZYBBWxhYmVsAXcD4oCiKAABlgEIbGlzdFR5cGUBdwZidWxsZXQoAAGWAQZzcHJlYWQBeSgAAZYBB2Jsb2NrSWQBdwhiLTAwMDAxNygAAZUBBnNwcmVhZAF5KAABlQEHYmxvY2tJZAF3CGItMDAwMDE2hwGVAQMJcGFyYWdyYXBoBwABpAEGBAABpQEFTmV4dC4oAAGkAQdibG9ja0lkAXcIYi0wMDAwMTmHAaQBAwpibG9ja3F1b3RlBwABrAEDCXBhcmFncmFwaAcAAa0BBgQAAa4BAXgoAAGtAQdibG9ja0lkAXcIYi0wMDAwMjGHAa0BAwpjb2RlX2Jsb2NrBwABsQEGBAABsgEEY29kZSgAAbEBB2Jsb2NrSWQBdwhiLTAwMDAyMocBsQEDCmJsb2NrcXVvdGUHAAG4AQMJcGFyYWdyYXBoBwABuQEGBAABugEEMi4gYSgAAbkBB2Jsb2NrSWQBdwhiLTAwMDAyNCgAAbgBB2Jsb2NrSWQBdwhiLTAwMDAyMygAAawBB2Jsb2NrSWQBdwhiLTAwMDAyMIcBrAEDCXBhcmFncmFwaAcAAcIBBgQAAcMBBU5leHQuKAABwgEHYmxvY2tJZAF3CGItMDAwMDI1hwHCAQMKY29kZV9ibG9jawcAAcoBBgQAAcsBCXwgMSB8IDIgfCgAAcoBB2Jsb2NrSWQBdwhiLTAwMDAyNocBygEDCmJsb2NrcXVvdGUHAAHWAQMJcGFyYWdyYXBoBwAB1wEGBAAB2AECMS4oAAHXAQdibG9ja0lkAXcIYi0wMDAwMjgoAAHWAQdibG9ja0lkAXcIYi0wMDAwMjeHAdYBAwlwYXJhZ3JhcGgHAAHdAQYEAAHeAQVOZXh0LigAAd0BB2Jsb2NrSWQBdwhiLTAwMDAyOYcB3QEDCmJsb2NrcXVvdGUHAAHlAQMKYmxvY2txdW90ZQcAAeYBAwpjb2RlX2Jsb2NrBwAB5wEGBAAB6AEFICBgYGAoAAHnAQdibG9ja0lkAXcIYi0wMDAwMzKHAecBAwtidWxsZXRfbGlzdAcAAe8BAwlsaXN0X2l0ZW0HAAHwAQMJcGFyYWdyYXBoBwAB8QEGBAAB8gEFMi4gMS4oAAHxAQdibG9ja0lkAXcIYi0wMDAwMzUoAAHwAQVsYWJlbAF3A+KAoigAAfABCGxpc3RUeXBlAXcGYnVsbGV0KAAB8AEGc3ByZWFkAXkoAAHwAQdibG9ja0lkAXcIYi0wMDAwMzQoAAHvAQZzcHJlYWQBeSgAAe8BB2Jsb2NrSWQBdwhiLTAwMDAzMygAAeYBB2Jsb2NrSWQBdwhiLTAwMDAzMSgAAeUBB2Jsb2NrSWQBdwhiLTAwMDAzMIcB5QEDCXBhcmFncmFwaAcAAYECBgQAAYICBU5leHQuKAABgQIHYmxvY2tJZAF3CGItMDAwMDM2hwGBAgMKYmxvY2txdW90ZQcAAYkCAwpjb2RlX2Jsb2NrBwABigIGBAABiwIYICAgICA+ICAgICBpbmRlbnRlZCBjb2RlKAABigIHYmxvY2tJZAF3CGItMDAwMDM4hwGKAgMKYmxvY2txdW90ZQcAAaUCAwlwYXJhZ3JhcGgHAAGmAgYEAAGnAgEtKAABpgIHYmxvY2tJZAF3CGItMDAwMDQwKAABpQIHYmxvY2tJZAF3CGItMDAwMDM5KAABiQIHYmxvY2tJZAF3CGItMDAwMDM3hwGJAgMJcGFyYWdyYXBoBwABrAIGBAABrQIFTmV4dC4oAAGsAgdibG9ja0lkAXcIYi0wMDAwNDGHAawCAwpjb2RlX2Jsb2NrBwABtAIGBAABtQIBeCgAAbQCB2Jsb2NrSWQBdwhiLTAwMDA0MocBtAIDCmJsb2NrcXVvdGUHAAG4AgMMb3JkZXJlZF9saXN0BwABuQIDCWxpc3RfaXRlbQcAAboCAwlwYXJhZ3JhcGgHAAG7AgYEAAG8AgFhKAABuwIHYmxvY2tJZAF3CGItMDAwMDQ2KAABugIFbGFiZWwBdwPigKIoAAG6AghsaXN0VHlwZQF3BmJ1bGxldCgAAboCBnNwcmVhZAF5KAABugIHYmxvY2tJZAF3CGItMDAwMDQ1KAABuQIFb3JkZXIBfQIoAAG5AgZzcHJlYWQBeSgAAbkCB2Jsb2NrSWQBdwhiLTAwMDA0NCgAAbgCB2Jsb2NrSWQBdwhiLTAwMDA0M4cBuAIDCXBhcmFncmFwaAcAAccCBgQAAcgCBU5leHQuKAABxwIHYmxvY2tJZAF3CGItMDAwMDQ3hwHHAgMMb3JkZXJlZF9saXN0BwABzwIDCWxpc3RfaXRlbQcAAdACAwlwYXJhZ3JhcGgoAAHRAgdibG9ja0lkAXcIYi0wMDAwNTAoAAHQAgVsYWJlbAF3A+KAoigAAdACCGxpc3RUeXBlAXcGYnVsbGV0KAAB0AIGc3ByZWFkAXkoAAHQAgdibG9ja0lkAXcIYi0wMDAwNDkoAAHPAgVvcmRlcgF9ASgAAc8CBnNwcmVhZAF5KAABzwIHYmxvY2tJZAF3CGItMDAwMDQ4hwHPAgMKY29kZV9ibG9jawcAAdoCBgQAAdsCBGNvZGUoAAHaAgdibG9ja0lkAXcIYi0wMDAwNTGHAdoCAwpibG9ja3F1b3RlBwAB4QIDDG9yZGVyZWRfbGlzdAcAAeICAwlsaXN0X2l0ZW0HAAHjAgMJcGFyYWdyYXBoBwAB5AIGBAAB5QIBYSgAAeQCB2Jsb2NrSWQBdwhiLTAwMDA1NSgAAeMCBWxhYmVsAXcD4oCiKAAB4wIIbGlzdFR5cGUBdwZidWxsZXQoAAHjAgZzcHJlYWQBeSgAAeMCB2Jsb2NrSWQBdwhiLTAwMDA1NCgAAeICBW9yZGVyAX0CKAAB4gIGc3ByZWFkAXkoAAHiAgdibG9ja0lkAXcIYi0wMDAwNTMoAAHhAgdibG9ja0lkAXcIYi0wMDAwNTKHAeECAwlwYXJhZ3JhcGgHAAHwAgYEAAHxAgVOZXh0LigAAfACB2Jsb2NrSWQBdwhiLTAwMDA1NocB8AIDCmNvZGVfYmxvY2sHAAH4AgYEAAH5AgRjb2RlKAAB+AIHYmxvY2tJZAF3CGItMDAwMDU3hwH4AgMHY2FsbG91dAcAAf8CAwxvcmRlcmVkX2xpc3QHAAGAAwMJbGlzdF9pdGVtBwABgQMDCXBhcmFncmFwaAcAAYIDBgQAAYMDAWEoAAGCAwdibG9ja0lkAXcIYi0wMDAwNjAoAAGBAwVsYWJlbAF3A+KAoigAAYEDCGxpc3RUeXBlAXcGYnVsbGV0KAABgQMGc3ByZWFkAXkoAAGBAwdibG9ja0lkAXcIYi0wMDAwNTkoAAGAAwVvcmRlcgF9AigAAYADBnNwcmVhZAF5KAABgAMHYmxvY2tJZAF3CGItMDAwMDU4KAAB/wIEa2luZAF3BG5vdGUoAAH/AgV0aXRsZQF3ACgAAf8CB2Jsb2NrSWQBdwJjMocB/wIDCXBhcmFncmFwaAcAAZADBgQAAZEDBU5leHQuKAABkAMHYmxvY2tJZAF3CGItMDAwMDYxhwGQAwMKYmxvY2txdW90ZQcAAZgDAwpjb2RlX2Jsb2NrBwABmQMGBAABmgMEY29kZSgAAZkDB2Jsb2NrSWQBdwhiLTAwMDA2M4cBmQMDB2NhbGxvdXQHAAGgAwMLYnVsbGV0X2xpc3QHAAGhAwMJbGlzdF9pdGVtBwABogMDCXBhcmFncmFwaCgAAaMDB2Jsb2NrSWQBdwhiLTAwMDA2NigAAaIDBWxhYmVsAXcD4oCiKAABogMIbGlzdFR5cGUBdwZidWxsZXQoAAGiAwZzcHJlYWQBeSgAAaIDB2Jsb2NrSWQBdwhiLTAwMDA2NSgAAaEDBnNwcmVhZAF5KAABoQMHYmxvY2tJZAF3CGItMDAwMDY0KAABoAMEa2luZAF3BG5vdGUoAAGgAwV0aXRsZQF3ACgAAaADB2Jsb2NrSWQBdwJjMygAAZgDB2Jsb2NrSWQBdwhiLTAwMDA2MgA=",
     "rendered_by_milkdown": "Lists opening in a container on the line after indented code.\n\nNext.\n\n```\ncode\n```\n\n> 1\\.\n\nNext.\n\n```\ncode\n```\n\n> 2\\. a\n\nNext.\n\n```\ncode\n```\n\n> 2\\. a\n\nNext.\n\n```\ncode\n```\n\n* 2\\. a\n\nNext.\n\n> x\n>\n> ```\n> code\n> ```\n>\n> > 2\\. a\n\nNext.\n\n```\n| 1 | 2 |\n```\n\n> 1\\.\n\nNext.\n\n> > ````\n> >   ```\n> > ````\n> >\n> > * 2\\. 1.\n\nNext.\n\n> ```\n>      >     indented code\n> ```\n>\n> > \\-\n\nNext.\n\n```\nx\n```\n\n> 2. a\n\nNext.\n\n1.\n\n```\ncode\n```\n\n> 2. a\n\nNext.\n\n```\ncode\n```\n\n:::callout{#c2 kind=\"note\" title}\n2. a\n:::\n\nNext.\n\n> ```\n> code\n> ```\n>\n> :::callout{#c3 kind=\"note\" title}\n> *\n> :::\n"
+  },
+  {
+    "name": "lists-spaced-by-indented-code-whitespace-lines",
+    "markdown": "A whitespace-only line indented code keeps is the code's, not a blank line, so it spaces no list or item.\n\n> -\n>       code\n>       \n>       note\n>       \n>   \n\nAfter.\n\n- a\n\n          x\n        \n- b\n\nNext.\n\n1. a\n\n          x\n          \n2. b\n\nNext.\n\n> - a\n>\n>       code\n>       \n> - b\n\nNext.\n\n> -       x\n>         \n>   b\n\nNext.\n\n-\n      code\n      more\n        \n\t\n    \n          \n      \n- b\n\nNext.\n\n- a\n  - b\n\n        code\n        \n  - c\n\nEnd.\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A whitespace-only line indented code keeps is the code's, not a blank line, so it spaces no list or item."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000003"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000004"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000005"
+                      }
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null,
+                        "blockId": "b-000006"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "code\n\nnote"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000008"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": true,
+                "checked": null,
+                "blockId": "b-000009"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000010"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a"
+                    }
+                  ]
+                },
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000011"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "    x\n  "
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000012"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000013"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "b"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000014"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "ordered_list",
+          "attrs": {
+            "order": 1,
+            "spread": false,
+            "blockId": "b-000015"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": true,
+                "checked": null,
+                "blockId": "b-000016"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000017"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a"
+                    }
+                  ]
+                },
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000018"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "   x\n   "
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000019"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000020"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "b"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000021"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000022"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000023"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": true,
+                    "checked": null,
+                    "blockId": "b-000024"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000025"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null,
+                        "blockId": "b-000026"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "code"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000027"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000028"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "b"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000029"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000030"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000031"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000032"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000033"
+                      }
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null,
+                        "blockId": "b-000034"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "  x\n  "
+                        }
+                      ]
+                    },
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000035"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "b"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000036"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000037"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000038"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000039"
+                  }
+                },
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000040"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "code\nmore\n  \n\n\n    "
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000041"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000042"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "b"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000043"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000044"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000045"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000046"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a"
+                    }
+                  ]
+                },
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false,
+                    "blockId": "b-000047"
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": true,
+                        "checked": null,
+                        "blockId": "b-000048"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000049"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "b"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null,
+                            "blockId": "b-000050"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "code"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": false,
+                        "checked": null,
+                        "blockId": "b-000051"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000052"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "c"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000053"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "End."
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "Ac4BAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBaUEgd2hpdGVzcGFjZS1vbmx5IGxpbmUgaW5kZW50ZWQgY29kZSBrZWVwcyBpcyB0aGUgY29kZSdzLCBub3QgYSBibGFuayBsaW5lLCBzbyBpdCBzcGFjZXMgbm8gbGlzdCBvciBpdGVtLigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwpibG9ja3F1b3RlBwABbAMLYnVsbGV0X2xpc3QHAAFtAwlsaXN0X2l0ZW0HAAFuAwlwYXJhZ3JhcGgoAAFvB2Jsb2NrSWQBdwhiLTAwMDAwNYcBbwMKY29kZV9ibG9jawcAAXEGBAABcgpjb2RlCgpub3RlKAABcQdibG9ja0lkAXcIYi0wMDAwMDYoAAFuBWxhYmVsAXcD4oCiKAABbghsaXN0VHlwZQF3BmJ1bGxldCgAAW4Gc3ByZWFkAXkoAAFuB2Jsb2NrSWQBdwhiLTAwMDAwNCgAAW0Gc3ByZWFkAXkoAAFtB2Jsb2NrSWQBdwhiLTAwMDAwMygAAWwHYmxvY2tJZAF3CGItMDAwMDAyhwFsAwlwYXJhZ3JhcGgHAAGFAQYEAAGGAQZBZnRlci4oAAGFAQdibG9ja0lkAXcIYi0wMDAwMDeHAYUBAwtidWxsZXRfbGlzdAcAAY4BAwlsaXN0X2l0ZW0HAAGPAQMJcGFyYWdyYXBoBwABkAEGBAABkQEBYSgAAZABB2Jsb2NrSWQBdwhiLTAwMDAxMIcBkAEDCmNvZGVfYmxvY2sHAAGUAQYEAAGVAQggICAgeAogICgAAZQBB2Jsb2NrSWQBdwhiLTAwMDAxMSgAAY8BBWxhYmVsAXcD4oCiKAABjwEIbGlzdFR5cGUBdwZidWxsZXQoAAGPAQZzcHJlYWQBeCgAAY8BB2Jsb2NrSWQBdwhiLTAwMDAwOYcBjwEDCWxpc3RfaXRlbQcAAaMBAwlwYXJhZ3JhcGgHAAGkAQYEAAGlAQFiKAABpAEHYmxvY2tJZAF3CGItMDAwMDEzKAABowEFbGFiZWwBdwPigKIoAAGjAQhsaXN0VHlwZQF3BmJ1bGxldCgAAaMBBnNwcmVhZAF5KAABowEHYmxvY2tJZAF3CGItMDAwMDEyKAABjgEGc3ByZWFkAXkoAAGOAQdibG9ja0lkAXcIYi0wMDAwMDiHAY4BAwlwYXJhZ3JhcGgHAAGuAQYEAAGvAQVOZXh0LigAAa4BB2Jsb2NrSWQBdwhiLTAwMDAxNIcBrgEDDG9yZGVyZWRfbGlzdAcAAbYBAwlsaXN0X2l0ZW0HAAG3AQMJcGFyYWdyYXBoBwABuAEGBAABuQEBYSgAAbgBB2Jsb2NrSWQBdwhiLTAwMDAxN4cBuAEDCmNvZGVfYmxvY2sHAAG8AQYEAAG9AQggICB4CiAgICgAAbwBB2Jsb2NrSWQBdwhiLTAwMDAxOCgAAbcBBWxhYmVsAXcD4oCiKAABtwEIbGlzdFR5cGUBdwZidWxsZXQoAAG3AQZzcHJlYWQBeCgAAbcBB2Jsb2NrSWQBdwhiLTAwMDAxNocBtwEDCWxpc3RfaXRlbQcAAcsBAwlwYXJhZ3JhcGgHAAHMAQYEAAHNAQFiKAABzAEHYmxvY2tJZAF3CGItMDAwMDIwKAABywEFbGFiZWwBdwPigKIoAAHLAQhsaXN0VHlwZQF3BmJ1bGxldCgAAcsBBnNwcmVhZAF5KAABywEHYmxvY2tJZAF3CGItMDAwMDE5KAABtgEFb3JkZXIBfQEoAAG2AQZzcHJlYWQBeSgAAbYBB2Jsb2NrSWQBdwhiLTAwMDAxNYcBtgEDCXBhcmFncmFwaAcAAdcBBgQAAdgBBU5leHQuKAAB1wEHYmxvY2tJZAF3CGItMDAwMDIxhwHXAQMKYmxvY2txdW90ZQcAAd8BAwtidWxsZXRfbGlzdAcAAeABAwlsaXN0X2l0ZW0HAAHhAQMJcGFyYWdyYXBoBwAB4gEGBAAB4wEBYSgAAeIBB2Jsb2NrSWQBdwhiLTAwMDAyNYcB4gEDCmNvZGVfYmxvY2sHAAHmAQYEAAHnAQRjb2RlKAAB5gEHYmxvY2tJZAF3CGItMDAwMDI2KAAB4QEFbGFiZWwBdwPigKIoAAHhAQhsaXN0VHlwZQF3BmJ1bGxldCgAAeEBBnNwcmVhZAF4KAAB4QEHYmxvY2tJZAF3CGItMDAwMDI0hwHhAQMJbGlzdF9pdGVtBwAB8QEDCXBhcmFncmFwaAcAAfIBBgQAAfMBAWIoAAHyAQdibG9ja0lkAXcIYi0wMDAwMjgoAAHxAQVsYWJlbAF3A+KAoigAAfEBCGxpc3RUeXBlAXcGYnVsbGV0KAAB8QEGc3ByZWFkAXkoAAHxAQdibG9ja0lkAXcIYi0wMDAwMjcoAAHgAQZzcHJlYWQBeSgAAeABB2Jsb2NrSWQBdwhiLTAwMDAyMygAAd8BB2Jsb2NrSWQBdwhiLTAwMDAyMocB3wEDCXBhcmFncmFwaAcAAf0BBgQAAf4BBU5leHQuKAAB/QEHYmxvY2tJZAF3CGItMDAwMDI5hwH9AQMKYmxvY2txdW90ZQcAAYUCAwtidWxsZXRfbGlzdAcAAYYCAwlsaXN0X2l0ZW0HAAGHAgMJcGFyYWdyYXBoKAABiAIHYmxvY2tJZAF3CGItMDAwMDMzhwGIAgMKY29kZV9ibG9jawcAAYoCBgQAAYsCBiAgeAogICgAAYoCB2Jsb2NrSWQBdwhiLTAwMDAzNIcBigIDCXBhcmFncmFwaAcAAZMCBgQAAZQCAWIoAAGTAgdibG9ja0lkAXcIYi0wMDAwMzUoAAGHAgVsYWJlbAF3A+KAoigAAYcCCGxpc3RUeXBlAXcGYnVsbGV0KAABhwIGc3ByZWFkAXkoAAGHAgdibG9ja0lkAXcIYi0wMDAwMzIoAAGGAgZzcHJlYWQBeSgAAYYCB2Jsb2NrSWQBdwhiLTAwMDAzMSgAAYUCB2Jsb2NrSWQBdwhiLTAwMDAzMIcBhQIDCXBhcmFncmFwaAcAAZ4CBgQAAZ8CBU5leHQuKAABngIHYmxvY2tJZAF3CGItMDAwMDM2hwGeAgMLYnVsbGV0X2xpc3QHAAGmAgMJbGlzdF9pdGVtBwABpwIDCXBhcmFncmFwaCgAAagCB2Jsb2NrSWQBdwhiLTAwMDAzOYcBqAIDCmNvZGVfYmxvY2sHAAGqAgYEAAGrAhNjb2RlCm1vcmUKICAKCgogICAgKAABqgIHYmxvY2tJZAF3CGItMDAwMDQwKAABpwIFbGFiZWwBdwPigKIoAAGnAghsaXN0VHlwZQF3BmJ1bGxldCgAAacCBnNwcmVhZAF5KAABpwIHYmxvY2tJZAF3CGItMDAwMDM4hwGnAgMJbGlzdF9pdGVtBwABxAIDCXBhcmFncmFwaAcAAcUCBgQAAcYCAWIoAAHFAgdibG9ja0lkAXcIYi0wMDAwNDIoAAHEAgVsYWJlbAF3A+KAoigAAcQCCGxpc3RUeXBlAXcGYnVsbGV0KAABxAIGc3ByZWFkAXkoAAHEAgdibG9ja0lkAXcIYi0wMDAwNDEoAAGmAgZzcHJlYWQBeSgAAaYCB2Jsb2NrSWQBdwhiLTAwMDAzN4cBpgIDCXBhcmFncmFwaAcAAc8CBgQAAdACBU5leHQuKAABzwIHYmxvY2tJZAF3CGItMDAwMDQzhwHPAgMLYnVsbGV0X2xpc3QHAAHXAgMJbGlzdF9pdGVtBwAB2AIDCXBhcmFncmFwaAcAAdkCBgQAAdoCAWEoAAHZAgdibG9ja0lkAXcIYi0wMDAwNDaHAdkCAwtidWxsZXRfbGlzdAcAAd0CAwlsaXN0X2l0ZW0HAAHeAgMJcGFyYWdyYXBoBwAB3wIGBAAB4AIBYigAAd8CB2Jsb2NrSWQBdwhiLTAwMDA0OYcB3wIDCmNvZGVfYmxvY2sHAAHjAgYEAAHkAgRjb2RlKAAB4wIHYmxvY2tJZAF3CGItMDAwMDUwKAAB3gIFbGFiZWwBdwPigKIoAAHeAghsaXN0VHlwZQF3BmJ1bGxldCgAAd4CBnNwcmVhZAF4KAAB3gIHYmxvY2tJZAF3CGItMDAwMDQ4hwHeAgMJbGlzdF9pdGVtBwAB7gIDCXBhcmFncmFwaAcAAe8CBgQAAfACAWMoAAHvAgdibG9ja0lkAXcIYi0wMDAwNTIoAAHuAgVsYWJlbAF3A+KAoigAAe4CCGxpc3RUeXBlAXcGYnVsbGV0KAAB7gIGc3ByZWFkAXkoAAHuAgdibG9ja0lkAXcIYi0wMDAwNTEoAAHdAgZzcHJlYWQBeSgAAd0CB2Jsb2NrSWQBdwhiLTAwMDA0NygAAdgCBWxhYmVsAXcD4oCiKAAB2AIIbGlzdFR5cGUBdwZidWxsZXQoAAHYAgZzcHJlYWQBeSgAAdgCB2Jsb2NrSWQBdwhiLTAwMDA0NSgAAdcCBnNwcmVhZAF5KAAB1wIHYmxvY2tJZAF3CGItMDAwMDQ0hwHXAgMJcGFyYWdyYXBoBwAB/wIGBAABgAMERW5kLigAAf8CB2Jsb2NrSWQBdwhiLTAwMDA1MwA=",
+    "rendered_by_milkdown": "A whitespace-only line indented code keeps is the code's, not a blank line, so it spaces no list or item.\n\n> *\n>   ```\n>   code\n>\n>   note\n>   ```\n\nAfter.\n\n* a\n\n  ```\n      x\n    \n  ```\n* b\n\nNext.\n\n1. a\n\n   ```\n      x\n      \n   ```\n2. b\n\nNext.\n\n> * a\n>\n>   ```\n>   code\n>   ```\n> * b\n\nNext.\n\n> *\n>   ```\n>     x\n>     \n>   ```\n>   b\n\nNext.\n\n*\n  ```\n  code\n  more\n    \n\n\n      \n  ```\n* b\n\nNext.\n\n* a\n  * b\n\n    ```\n    code\n    ```\n  * c\n\nEnd.\n"
   },
   {
     "name": "lists",
