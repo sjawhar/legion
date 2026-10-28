@@ -219,7 +219,9 @@ jobs:
             # (infra/core/dispatch_permissions_live_test.go:51, through
             # infra/core/permissions_live_test.go:298-299). packages/envoy/listenfd: added by
             # #2229 (cmd/dispatch, cmd/listener, internal/config and infra/host/heldportwrapper
-            # import it).
+            # import it). internal/roles and, through it, internal/store, internal/session and
+            # internal/kvwatch: added by INFRA-590 (the outbox's role forward resolves the holder
+            # with roles.ResolveHolder); internal/redact: cmd/dispatch/main.go imports it.
             dispatch_server: &dispatch_server
               - 'packages/envoy/cmd/dispatch/*'
               - 'packages/envoy/internal/bus/*'
@@ -257,13 +259,19 @@ jobs:
               - 'packages/envoy/internal/dispatch/text/*'
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/id/*'
+              - 'packages/envoy/internal/kvwatch/*'
               - 'packages/envoy/internal/oidc/*'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
+              - 'packages/envoy/internal/redact/*'
+              - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
+              - 'packages/envoy/internal/session/*'
+              - 'packages/envoy/internal/store/*'
               - 'packages/envoy/listenfd/*'
             # The listener's packages, `go list -deps ./cmd/listener` in packages/envoy
-            # (packages/envoy/listenfd: added by #2229).
+            # (packages/envoy/listenfd: added by #2229; internal/roles: added by INFRA-590, the
+            # role lane's holder resolution).
             listener_command: &listener_command
               - 'packages/envoy/cmd/listener/*'
               - 'packages/envoy/internal/bus/*'
@@ -276,6 +284,7 @@ jobs:
               - 'packages/envoy/internal/logging/*'
               - 'packages/envoy/internal/metrics/*'
               - 'packages/envoy/internal/oidc/*'
+              - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
               - 'packages/envoy/internal/session/*'
               - 'packages/envoy/internal/store/*'
