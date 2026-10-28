@@ -381,9 +381,12 @@ func githubWaiting(t *testing.T, consumers *intake.Consumers) uint64 {
 	return 0
 }
 
+// processedGitHubEvents is every processed event's id, sorted in Go's byte order as the test's
+// expected list is: an SQL `order by` follows the database's collation, which can order
+// punctuation differently (`legion-33-checks` before `legion-3-checks`).
 func processedGitHubEvents(t *testing.T, pool *pgxpool.Pool) []string {
 	t.Helper()
-	rows, err := pool.Query(context.Background(), `select source || ':' || event_id from processed_events order by 1`)
+	rows, err := pool.Query(context.Background(), `select source || ':' || event_id from processed_events`)
 	if err != nil {
 		t.Fatalf("read the processed events: %v", err)
 	}
@@ -398,6 +401,7 @@ func processedGitHubEvents(t *testing.T, pool *pgxpool.Pool) []string {
 		}
 		ids[i] = eventID
 	}
+	slices.Sort(ids)
 	return ids
 }
 
