@@ -14484,7 +14484,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_claim",
     example: { issue: "DSP-1" },
-    description: "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " + "and release it when you stop. Pass the issue alone to claim it, or --release to give it up. " + "Your claim records your own session and shows on every read of the issue: the dashboard header, the " + "issue list and board, dispatch read, and dispatch issues. Claiming is refused with 409 ISSUE_CLAIMED " + "when another session holds the issue and is still running; the refusal names that session, so talk to " + "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " + "person, not a session: there is nothing running to message, so ask them on the issue rather than " + "taking it. 409 CLAIM_CONTENDED means the issue changed " + "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " + "the issue and decide again. A claim whose session is no longer running may be " + "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " + "issue's status \u2014 claiming moves nothing, and the result names who moves the status: you, with " + "dispatch issue-update, or Legion's daemon on an issue it runs, where a status written by anyone " + "else is undone. A claim is released by its holder or any human, and by " + "any agent once the holder's session is no longer running. " + ISSUE_REFERENCE,
+    description: "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " + "and release it when you stop. Pass the issue alone to claim it, or --release to give it up. " + "Your claim records your own session and shows on every read of the issue: the dashboard header, the " + "issue list and board, dispatch read, and dispatch issues. While you hold it, a person's answers, " + "comments and messages on the issue reach your session directly (a new comment that mentions you " + "arrives once, as the mention, when the mention reached you; when the mention's send fails, the " + "comment still reaches you directly; a mention whose receipt timed out can arrive twice, and the " + "second copy is the same comment); an agent's events and every other change on the issue still " + "need a subscription to it, except in an ask you follow: anyone else's answer, hand-back, " + "resolution or edit of it (other than a quiet edit), and every reply there (new, edited, resolved " + "or reopened), reach you " + "as its follower. Claiming is refused with 409 ISSUE_CLAIMED " + "when another session holds the issue and is still running; the refusal names that session, so talk to " + "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " + "person, not a session: there is nothing running to message, so ask them on the issue rather than " + "taking it. 409 CLAIM_CONTENDED means the issue changed " + "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " + "the issue and decide again. A claim whose session is no longer running may be " + "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " + "issue's status \u2014 claiming moves nothing, and the result names who moves the status: you, with " + "dispatch issue-update, or Legion's daemon on an issue it runs, where a status written by anyone " + "else is undone. A claim is released by its holder or any human, and by " + "any agent once the holder's session is no longer running. " + ISSUE_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
       release: z.boolean().describe("Give up your claim instead of taking it; the issue's status does not change.").optional()
@@ -14752,7 +14752,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_search",
     example: { query: "astrolabe" },
-    description: "Search every issue, document, comment, ask, and message for a keyword or phrase and get deep links. " + "Use it before creating an issue or a design document, and to find where a word was written. " + 'Websearch syntax: "quoted phrase", -excluded, OR. ' + "Each kind of content is ranked on its own and the lists are merged, so the top holds the best " + "issue, document, ask, comment and message; an issue key searched alone lists that issue first. " + `The answer names how many results match; offset pages through them, and each kind lists at most its best ${SEARCH_KIND_DEPTH}, ` + "so narrow the query or name a project to reach the rest. Paging is exact only while the " + "corpus holds still: content added, changed, or removed between two offsets can shift rows " + "across a page boundary, so one hit can come back twice and another never.",
+    description: "Search every issue, document, comment, ask, and message for a keyword or phrase and get deep links. " + "Use it before creating an issue or a design document, and to find where a word was written. " + 'Websearch syntax: "quoted phrase", -excluded, OR. ' + "Each kind of content is ranked on its own and the lists are merged, so the top holds the best " + "issue, document, ask, comment and message; an issue key searched alone lists that issue first. " + "An ask hit says whether it is answered: an answered one shows the latest answer, who gave it, " + "when, the options chosen and its text; a closed one says it was closed with no answer, or " + "shows the last answer it had. " + `The answer names how many results match; offset pages through them, and each kind lists at most its best ${SEARCH_KIND_DEPTH}, ` + "so narrow the query or name a project to reach the rest. Paging is exact only while the " + "corpus holds still: content added, changed, or removed between two offsets can shift rows " + "across a page boundary, so one hit can come back twice and another never.",
     arguments: (z) => ({
       query: z.string({
         min: 2,
@@ -15431,6 +15431,15 @@ function commandsHelp() {
 
 // ../envoy-client/src/dispatch-execute.ts
 import { resolve as resolvePath2 } from "path";
+
+// ../envoy-client/src/actor-text.ts
+function actorText(actor) {
+  const service = actor.kind === "session" ? actor.service : undefined;
+  if (service === undefined) {
+    return `${actor.kind} ${actor.id}`;
+  }
+  return `${actor.kind} ${actor.id} (as ${serviceSubjectLabel(service)})`;
+}
 
 // ../envoy-client/src/ask-answer.ts
 var HEAD_LENGTH = 120;
@@ -16760,7 +16769,7 @@ ${HUMAN_EDIT_DIFF_CUT_NOTE}` : ""}`;
 function pageSummaryText(offset, count, total) {
   return `showing ${offset + 1}-${offset + count} of ${total}`;
 }
-function searchResultLine(result, baseUrl) {
+function searchHitLine(result, baseUrl) {
   const href = new URL(result.href, baseUrl).toString();
   const { owner } = result;
   if (owner.kind === "document") {
@@ -16770,6 +16779,42 @@ function searchResultLine(result, baseUrl) {
   const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
   const label = `${owner.key} [${owner.status}] ${owner.title} - ${result.kind}${artifactName}`;
   return `${label}: ${snippetText(result.snippet)} -> ${href}`;
+}
+function indentedText(text) {
+  return text.split(/\r?\n/u).join(`
+    `);
+}
+function answerLines(lead, answer) {
+  const selected = answer.selected.length === 0 ? "none" : answer.selected.join(", ");
+  const text = answer.text === null || answer.text === "" ? "none" : indentedText(answer.text);
+  return [
+    `  ${lead} by ${answer.user} at ${answer.at} \xB7 options chosen: ${selected}`,
+    `  Answer text: ${text}`
+  ];
+}
+function resolutionText(resolution) {
+  return `${resolution.kind} by ${actorText(resolution.actor)} at ${resolution.at}: ${indentedText(resolution.reason)}`;
+}
+function askStateLines(ask) {
+  if (ask === undefined) {
+    return ["  Answer state not reported by this Dispatch; open the link to read the ask."];
+  }
+  switch (ask.state) {
+    case "open":
+      return ["  Open: no answer yet."];
+    case "answered":
+      return answerLines("Answered", ask.answer);
+    case "resolved":
+      return ask.answer === undefined ? [`  Closed with no answer: ${resolutionText(ask.resolution)}`] : [
+        `  Closed after an answer: ${resolutionText(ask.resolution)}`,
+        ...answerLines("Last answer", ask.answer)
+      ];
+  }
+}
+function searchResultLine(result, baseUrl) {
+  const line = searchHitLine(result, baseUrl);
+  return result.kind === "ask" ? [line, ...askStateLines(result.ask)].join(`
+`) : line;
 }
 function searchAnswer(search, query, offset, configUrl) {
   const results = search.results;
@@ -17963,13 +18008,6 @@ function eventHead(event) {
       return;
   }
 }
-function actorText(actor) {
-  const service = actor.kind === "session" ? actor.service : undefined;
-  if (service === undefined) {
-    return `${actor.kind} ${actor.id}`;
-  }
-  return `${actor.kind} ${actor.id} (as ${serviceSubjectLabel(service)})`;
-}
 function eventRef(event) {
   const payload = event.payload;
   const id = typeof payload === "object" && payload !== null && "id" in payload ? payload.id : undefined;
@@ -18663,7 +18701,8 @@ async function executeDispatchTool(input) {
           throw new Error(`Dispatch claimed ${issueKey} but answered with no claim`);
         }
         const claimed = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}`;
-        text = legionManaged ? `${claimed}; ${LEGION_OWNS_STATUS} Release the claim when you stop.` : `${claimed}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
+        const reaches = `A person's answers, comments and messages on ${issueKey} now reach you directly.`;
+        text = legionManaged ? `${claimed}; ${LEGION_OWNS_STATUS} Release the claim when you stop. ${reaches}` : `${claimed}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop. ${reaches}`;
       }
       return {
         text: `${text}${await notSubscribed(issueTopic(issueKey), input.subscriptions)}`,
