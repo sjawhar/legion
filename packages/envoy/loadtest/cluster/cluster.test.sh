@@ -2,10 +2,11 @@
 # packages/envoy/loadtest/cluster/cluster.test.sh
 #
 # Proves cluster.sh's behaviour without a cluster and without a network: fakes `kubectl`, `gh`,
-# `curl`, `go`, `uv`, `dispatch` and `hostname` on PATH. The fake kubectl records every call and
-# answers from files the test writes (the run's pods, the lock ConfigMap, cpu.max), the fake curl
-# answers registry manifest reads with a digest (or 404 for the refs the test lists), and the fake
-# gh serves the production repository's two files and a commit's first parent.
+# `curl`, `go`, `uv`, `dispatch`, `hostname` and `sleep` on PATH. The fake kubectl records every
+# call and answers from files the test writes (the run's pods, the lock ConfigMap, cpu.max, the
+# errors an apply fails with), the fake curl answers registry manifest reads with a digest (or 404
+# for the refs the test lists), the fake gh serves the production repository's two files and a
+# commit's first parent, and the fake sleep returns at once from apply_manifest's 3 s wait.
 #
 # Asserts that: (a) every subcommand refuses a missing --namespace; (b) up refuses a commit that is
 # not 40 hex, a commit with no image (naming its newest first-parent ancestor with one) and a
@@ -18,18 +19,21 @@
 # order they ran (meta.json start, not the directory names' order), loadgen codepaths in each step
 # directory, and packs and uploads curves/ and TABLES.md as phase results; all --profile quick runs
 # no refinement and says so, and all --profile full, given a refine.txt with one factor and then
-# an empty one, runs exactly one refinement step <factor>x; (d) every manifest renders with no
-# placeholder left and every image by digest, and a value of the wrong shape is refused; (e) a
-# container restart between the before and after reads writes step-failed.json with kind restart;
-# (f) the sampler writes an error line with no number when its exec fails, and a numeric line when
-# it reads; (g) when go and the network reach helm, render-nats.sh re-renders nats.yaml equal to
-# the committed file (else it says it skipped that).
+# an empty one, runs exactly one refinement step <factor>x; (d) up retries an apply the
+# namespace's ResourceQuota race refuses ("the object has been modified") 3 s later and goes on,
+# stops at once on any other apply error, naming the manifest and showing the error, and stops
+# after five races in a row; (e) every manifest renders with no placeholder left and every image
+# by digest, and a value of the wrong shape is refused; (f) a container restart between the
+# before and after reads writes step-failed.json with kind restart; (g) the sampler writes an
+# error line with no number when its exec fails, and a numeric line when it reads; (h) when go
+# and the network reach helm, render-nats.sh re-renders nats.yaml equal to the committed file
+# (else it says it skipped that).
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 readonly cluster=$here/cluster.sh
 readonly real_path=$PATH
-# Not readonly: cluster.sh's functions, which (d) to (f) source, declare a local tmp.
+# Not readonly: cluster.sh's functions, which (e) to (g) source, declare a local tmp.
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/cluster-test.XXXXXX")
 readonly fake=$tmp/fake bin=$tmp/bin
 readonly ns=loadtest-test
@@ -101,7 +105,15 @@ case $verb in
     fi
     ;;
   apply)
-    cat >>"$FAKE_DIR/applied.yaml"
+    # FAKE_APPLY_FAIL=NAME: an apply of manifests/NAME (its first line is `# NAME: ...`) fails with
+    # the first line left in FAKE_DIR/apply-errors, which it uses up.
+    input=$(cat)
+    if [ -n "${FAKE_APPLY_FAIL:-}" ] && [[ $input == "# $FAKE_APPLY_FAIL:"* ]] && [ -s "$FAKE_DIR/apply-errors" ]; then
+      head -n1 "$FAKE_DIR/apply-errors" >&2
+      sed -i 1d "$FAKE_DIR/apply-errors"
+      exit 1
+    fi
+    printf '%s\n' "$input" >>"$FAKE_DIR/applied.yaml"
     printf -- '---\n' >>"$FAKE_DIR/applied.yaml"
     ;;
   delete)
@@ -269,13 +281,24 @@ cat >"$bin/hostname" <<'EOF'
 #!/usr/bin/env bash
 echo test-worker-0
 EOF
+
+# The fake sleep: apply_manifest's 3 s wait between tries is recorded and returns at once; every
+# other sleep (the daemons' loops, their start waits) is the real one.
+cat >"$bin/sleep" <<EOF
+#!/usr/bin/env bash
+if [ "\$*" = 3 ]; then
+  printf '%s\n' "\$*" >>"\$FAKE_DIR/sleep.log"
+  exit 0
+fi
+exec $(PATH=$real_path command -v sleep) "\$@"
+EOF
 chmod +x "$bin"/*
 
 export FAKE_DIR=$fake FAKE_NS=$ns
 export LOADTEST_CLUSTER_ROOT=$tmp/root
 export POD_UID=00000000-1111-2222-3333-444444444444 LEGION_ISSUE=TEST-1
 export PATH="$bin:$PATH"
-unset FAKE_EXEC_FAIL FAKE_SAMPLE FAKE_PROD_MAJOR FAKE_LOADGEN_FAIL
+unset FAKE_EXEC_FAIL FAKE_SAMPLE FAKE_PROD_MAJOR FAKE_LOADGEN_FAIL FAKE_APPLY_FAIL
 
 readonly commit_ok=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 readonly commit_none=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -306,7 +329,8 @@ write_pods() {
 }
 
 reset_fake() {
-  rm -f -- "$fake/lock.json" "$fake/applied.yaml" "$fake/kubectl.log" "$fake/seeded" "$fake/runner-starts" "$fake/dispatch.log" "$fake/loadgen.log" "$fake"/refine.[0-9]*
+  rm -f -- "$fake/lock.json" "$fake/applied.yaml" "$fake/kubectl.log" "$fake/seeded" "$fake/runner-starts" "$fake/dispatch.log" "$fake/loadgen.log" "$fake"/refine.[0-9]* \
+    "$fake/sleep.log" "$fake/apply-errors"
   write_pods
   echo '1600000 100000' >"$fake/cpu.max"
 }
@@ -551,7 +575,60 @@ if [ -s "$fake/kubectl-no-ns.log" ]; then
 fi
 pass "every kubectl call ($(wc -l <"$fake/kubectl.log") of them, the heartbeat's and sampler's included) carries -n $ns"
 
-# ---- (d) templates ---------------------------------------------------------------------------------
+# ---- (d) apply_manifest's retry of the quota race ---------------------------------------------------
+
+readonly race='Error from server (Conflict): Operation cannot be fulfilled on resourcequotas "loadtest": the object has been modified; please apply your changes to the latest version and try again'
+readonly forbidden='Error from server (Forbidden): error when creating "STDIN": statefulsets.apps "postgres" is forbidden: exceeded quota: loadtest, requested: requests.cpu=16, used: requests.cpu=60, limited: requests.cpu=64'
+
+# applies: the number of kubectl apply calls so far.
+applies() { grep -c "^-n $ns apply " "$fake/kubectl.log" || true; }
+
+reset_fake
+printf '%s\n' "$race" >"$fake/apply-errors"
+FAKE_APPLY_FAIL=nats.yaml run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
+((RC == 0)) || fail "up with one quota race on nats.yaml exited $RC"
+grep -qF 'kubectl apply of manifests/nats.yaml: the quota was updated under it (try 1 of 5); retrying in 3 s' "$tmp/out" ||
+  fail "up's log does not name the retry of nats.yaml"
+[ "$(cat "$fake/sleep.log" 2>/dev/null)" = 3 ] || fail "up did not wait 3 s exactly once before the retry: $(cat "$fake/sleep.log" 2>/dev/null)"
+[ "$(applies)" = 6 ] || fail "up made $(applies) applies, not the five manifests' and one retry"
+[ "$(grep -c '^# nats.yaml:' "$fake/applied.yaml")" = 1 ] || fail "nats.yaml was not applied once after the race"
+grep -q '^# dispatch.yaml:' "$fake/applied.yaml" || fail "up did not go on to the manifests after nats.yaml"
+grep -q 'the copy is up' "$tmp/out" || fail "up did not finish after the retry"
+run_cluster down --namespace "$ns"
+((RC == 0)) || fail "down after the retried up exited $RC"
+pass "up retries an apply refused by the quota race 3 s later, says so, and goes on"
+
+reset_fake
+printf '%s\n' "$forbidden" "$forbidden" >"$fake/apply-errors"
+FAKE_APPLY_FAIL=postgres.yaml run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
+((RC == 1)) || fail "up with a quota refusal of postgres.yaml exited $RC, not 1"
+grep -qF 'kubectl apply of manifests/postgres.yaml failed' "$tmp/out" || fail "up's failure does not name manifests/postgres.yaml"
+grep -qF "$forbidden" "$tmp/out" || fail "up's failure does not show kubectl's error"
+! grep -q 'retrying' "$tmp/out" || fail "up retried an apply error that is not the quota race"
+[ ! -s "$fake/sleep.log" ] || fail "up waited before failing on an apply error that is not the quota race"
+[ "$(applies)" = 2 ] || fail "up made $(applies) applies, not secrets.yaml.tmpl's and postgres.yaml's one"
+! grep -q '^# nats.yaml:' "$fake/applied.yaml" || fail "up went on to nats.yaml after postgres.yaml failed"
+run_cluster down --namespace "$ns"
+((RC == 0)) || fail "down after the failed up exited $RC"
+pass "up stops at once on an apply error other than the quota race, naming the manifest and showing the error"
+
+reset_fake
+printf '%s\n' "$race" "$race" "$race" "$race" "$race" "$race" >"$fake/apply-errors"
+FAKE_APPLY_FAIL=nats.yaml run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
+((RC == 1)) || fail "up with six quota races on nats.yaml exited $RC, not 1"
+grep -qF '(try 4 of 5); retrying in 3 s' "$tmp/out" || fail "up did not retry the fourth race"
+! grep -qF '(try 5 of 5)' "$tmp/out" || fail "up retried after the fifth try"
+grep -qF 'kubectl apply of manifests/nats.yaml failed' "$tmp/out" || fail "up's failure after five races does not name manifests/nats.yaml"
+grep -qF "$race" "$tmp/out" || fail "up's failure after five races does not show kubectl's error"
+[ "$(wc -l <"$fake/sleep.log")" = 4 ] || fail "up waited $(wc -l <"$fake/sleep.log") times, not 4, between five tries"
+[ "$(applies)" = 7 ] || fail "up made $(applies) applies, not two manifests' and four retries"
+[ "$(wc -l <"$fake/apply-errors")" = 1 ] || fail "up did not stop at the fifth try"
+! grep -q '^# listener.yaml:' "$fake/applied.yaml" || fail "up went on to listener.yaml after five races on nats.yaml"
+run_cluster down --namespace "$ns"
+((RC == 0)) || fail "down after the failed up exited $RC"
+pass "up stops after five quota races in a row on one manifest"
+
+# ---- (e) templates ---------------------------------------------------------------------------------
 
 (
   # shellcheck source=packages/envoy/loadtest/cluster/cluster.sh
@@ -583,7 +660,7 @@ pass "every kubectl call ($(wc -l <"$fake/kubectl.log") of them, the heartbeat's
 )
 pass "every manifest renders with no placeholder left and every image by digest; a tag or a missing value is refused"
 
-# ---- (e) a restart between the two reads ------------------------------------------------------------
+# ---- (f) a restart between the two reads ------------------------------------------------------------
 
 (
   # shellcheck source=packages/envoy/loadtest/cluster/cluster.sh
@@ -606,7 +683,7 @@ pass "every manifest renders with no placeholder left and every image by digest;
 )
 pass "a restart between the before and after container reads writes step-failed.json kind restart"
 
-# ---- (f) the sampler --------------------------------------------------------------------------------
+# ---- (g) the sampler --------------------------------------------------------------------------------
 
 (
   # shellcheck source=packages/envoy/loadtest/cluster/cluster.sh
@@ -633,11 +710,11 @@ pass "a restart between the before and after container reads writes step-failed.
 )
 pass "the sampler writes an error line with no number when its exec fails, and a numeric line when it reads"
 
-# ---- (g) nats.yaml against a fresh render ------------------------------------------------------------
+# ---- (h) nats.yaml against a fresh render ------------------------------------------------------------
 
 if PATH=$real_path command -v go >/dev/null &&
   PATH=$real_path curl -fsS --max-time 20 -o /dev/null https://nats-io.github.io/k8s/helm/charts/index.yaml 2>/dev/null; then
-  # shellcheck disable=SC2031 # (d) to (f) source cluster.sh in subshells; its here and tmp stay there
+  # shellcheck disable=SC2031 # (e) to (g) source cluster.sh in subshells; its here and tmp stay there
   PATH=$real_path bash "$here/render-nats.sh" --pin-from "$here/manifests/nats.yaml" --out "$tmp/nats.yaml" 2>"$tmp/out" ||
     fail "render-nats.sh failed"
   # shellcheck disable=SC2031 # as above
