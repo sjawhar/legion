@@ -2,31 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-642",
-  "completed": "2026-10-28T15:54:03Z",
-  "round": 2,
+  "completed": "2026-10-28T18:30:33Z",
+  "round": 3,
   "decision": "changes_requested",
-  "reviewedCodeHead": "9bac6d86f930e99354784b014d19089574beb113",
-  "ci": "Required set (lint, typecheck, test, pr-title) all success at CI head 9bac6d86; compare to a090c832 handoffsOnly true. Non-required reds: dispatch (mermaid.e2e.ts:194 and recipients-claim route-close, main's per the architect), envoy-infra-go (TestDispatchConnectionsPerPodIsTheServers, main's), envoy-go-race (api TestEventStreamRelayRecoversWhenTheEventLogIsReset: 'the relay ended a subscription opened after the reset'; this PR does not touch the event stream relay; not on the architect's list of main's reds).",
-  "threads": "0 review threads.",
-  "mergeResolution": "applyLive matches main: the forkHeld snapshot is read before OnUpdate/watchMargin, the drop happens only when mutate returned no error, and abandon keeps the fork when updates are dropped; the lifecycle credit guard is kept. applyMargin cannot drop a real margin write: ygo v1.51.3-sami.4 YMap.Set always appends a new item, so the state vector advances.",
+  "reviewedCodeHead": "f5035f9e07af4aeb6c225ca9af4d824053ac1fc6",
+  "roundTwoFindings": "All three fixed at f5035f9e: main's no-change check is back in applyLive only (it matches main 08572e01 line for line); docs/crafted holds NestedLinkUpdate, FirstText and NestedValue once, with no production caller; the ledger.go, persistence.go and livewrite.go comments name recordLiveOperation.",
+  "ci": "Required set (lint, typecheck, test, pr-title) success at CI head f5035f9e; compare to 7825d253 handoffsOnly true. But the run's merge ref bae11d23 fails to build the docs tests: 'margin_equivalence_compare_test.go:343:30: undefined: blockTokens' (Dispatch Go suite on Postgres 16, envoy-go-race), because main's #2451 replaced blockTokens with encodedTokens. GitHub reports the PR dirty (conflicting) against main a409c128.",
   "critical": 0,
   "important": 1,
-  "minor": 2,
+  "minor": 1,
   "keyFindings": [
     {
       "severity": "important",
+      "file": "packages/envoy/internal/dispatch/docs/margin_equivalence_compare_test.go",
+      "description": "The PR conflicts with main, and its docs tests do not build against main (line 343 calls blockTokens, which #2451 removed; use encodedTokens). Merge main. #2453 rewrote the same record step and observer loop, so the merge must: append renderings beside updates/versions/marginRooms in recordLiveOperation and clear them together in finishLiveWrite; keep applyLive in main's form, with the forkRead/forkMarkdown handling and the no-change snapshot, change and drop in main's order; give applyMargin a warm-fork rendering of {read, write.markdown} with no ask blocks, and zero for a cold fork; place the marginOnly skip after consumed(update), keep the r.markdown == nil render, hand classify nil asks, and count the skip in renderPathCounts; set marginOnly inside Apply beside inRoom; update render_reuse_test expectations (E2 beforeFromWrite) and AGENTS.md's 'two cases'."
+    },
+    {
+      "severity": "minor",
       "file": "packages/envoy/internal/dispatch/docs/mutation.go",
-      "description": "Line 122: the merge moved main's no-change check (StateVector + DeleteSetFromDoc before mutate, forkHeld after) into the shared liveOperation.change, so every margin write now does two whole-store walks (buildDeleteSet over every item, then an IDSet copy) for a check that can never fire for it. This is avoidable CPU on the path this PR exists to make cheap. Move the snapshot and the drop back into applyLive around its op.change call, as main has them, and restore change's doc comment."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/testhooks.go",
-      "description": "Lines 144-147 and 158-216 copy docstest.NestedValue, NestedLinkUpdate and FirstText into a file linked into the server binary; round 1's duplication was moved, not removed. Put the error-returning helpers in one leaf package that does not import testing, used by testhooks.go, with docstest.NestedLinkUpdate as a wrapper that fails the test."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/ledger.go",
-      "description": "Stale pointers to applyLive for steps that now run in recordLiveOperation for both write paths: ledger.go:442-443, persistence.go:835-837, livewrite.go:48."
+      "description": "Lines 348-349: applyMargin's doc promises websocket.ErrNoChanges for a write that changed nothing; a marks-map Set always adds an item, and all five ProjectMark callers treat every error as a failure. State the real rule there (the reason is now written in applyLive at 239-240)."
     }
   ]
 }
