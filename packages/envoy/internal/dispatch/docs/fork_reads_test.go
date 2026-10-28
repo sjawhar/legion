@@ -527,11 +527,12 @@ func runForkSteps(t *testing.T, service *Service, artifactID string, checks *ren
 	}
 }
 
-// Every rendering a write hands on - to a read joined to its transaction (docTree), to a version
-// (capture), and at each fork read and its publish - is a fresh read and render of its fork, in
-// each transaction the API runs: an anchored comment, a suggestion, an edit and its version, an
-// accept, and a transaction a browser's commit moves the fork under, after which no rendering is
-// reused. Each version records the document its transaction committed.
+// Every rendering a write hands on - to a margin write (applyMargin), to a read joined to its
+// transaction (docTree), to a version (capture), and at each fork read and its publish - is a
+// fresh read and render of its fork, in each transaction the API runs: an anchored comment, a
+// suggestion, an edit and its version, an accept, and a transaction a browser's commit moves the
+// fork under, after which no rendering is reused. Each version records the document its
+// transaction committed.
 func TestForkReadsEveryReuseOfAWritesRenderingDescribesItsFork(t *testing.T) {
 	service, artifactID := newForkReadsRoom(t)
 	checks := checkRenderings(service)
@@ -588,12 +589,14 @@ func TestForkReadsEveryReuseOfAWritesRenderingDescribesItsFork(t *testing.T) {
 		}
 		return step
 	}
+	// projectMark is ProjectMark after a write in the same transaction, whose rendering its margin
+	// write takes in place of reading the fork (applyMargin).
 	projectMark := func(id string, record MarkRecord) forkStep {
 		return forkStep{
 			name:  "ProjectMark",
 			run:   func(ctx context.Context) error { return service.ProjectMark(ctx, artifactID, id, record, reuseAlice) },
-			reads: forkReads{read: 2},
-			sites: map[string]int{"fork": 1},
+			reads: forkReads{renderingReused: 1},
+			sites: map[string]int{"fork": 1, "margin": 1},
 		}
 	}
 	comment := MarkRecord{Kind: "comment", By: "user:alice", CreatedAt: "2026-10-28T00:00:00Z", Text: "note", Replies: []MarkReply{}}

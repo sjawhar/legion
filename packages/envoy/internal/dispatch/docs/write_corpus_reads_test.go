@@ -11,10 +11,10 @@ import (
 
 // On every spec of the write corpus (runWriteCorpus), warm and cold, each anchored MarkQuote reads
 // its fork twice and shares its read-back with the tree after its write, and each read joined to
-// the write - every SnapshotVersion after a write, and the suggestion's SuggestionKind - takes the
-// write's rendering in place of reading the fork, and every rendering the write hands on is a
-// fresh read and render of its fork (checkRendering). The test skips unless DISPATCH_TOKEN_CORPUS
-// names the directory.
+// the write - every SnapshotVersion after a write, and the suggestion's SuggestionKind - and each
+// ProjectMark's margin write take the write's rendering in place of reading the fork, and every
+// rendering the write hands on is a fresh read and render of its fork (checkRendering). The test
+// skips unless DISPATCH_TOKEN_CORPUS names the directory.
 func TestWriteCorpusReadsOnce(t *testing.T) {
 	dir := os.Getenv("DISPATCH_TOKEN_CORPUS")
 	if dir == "" {
@@ -29,9 +29,11 @@ func TestWriteCorpusReadsOnce(t *testing.T) {
 	want := map[string]forkReads{
 		"comment/MarkQuote":          markQuote,
 		"comment/SnapshotVersion":    reused,
+		"comment/ProjectMark":        reused,
 		"suggestion/MarkQuote":       markQuote,
 		"suggestion/SnapshotVersion": reused,
 		"suggestion/SuggestionKind":  reused,
+		"suggestion/ProjectMark":     reused,
 		"edit/SnapshotVersion":       reused,
 	}
 	for _, name := range names {
