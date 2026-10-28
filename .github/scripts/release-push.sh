@@ -161,11 +161,9 @@
 #            these when it can reach GitHub.
 # check-built: check <tar>, a build of the Claude Envoy plugin, for what
 #            push-built and extract-built accept, holding no credential and
-#            writing nothing. The rebuild's build job runs it, and so do
-#            pr-and-main.yaml's required test job and envoy-and-contracts.yaml's
-#            claude-envoy job, all through
-#            packages/claude-envoy/scripts/verify-build.sh, so a pull request
-#            fails for whatever main's push job would refuse. <tar>
+#            writing nothing. packages/claude-envoy/scripts/verify-build.sh
+#            runs it (that script's header names the jobs that run it), so a
+#            pull request fails for whatever main's push job would refuse. <tar>
 #            holds the package's dist/ and legion/ (`tar -cf <tar> -C
 #            packages/claude-envoy dist legion`) and is checked from its listing:
 #            every member a regular file or a directory (no symlink, no hard

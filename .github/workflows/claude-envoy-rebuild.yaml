@@ -10,9 +10,9 @@ name: Rebuild Claude Envoy plugin
 # The repository's release-credential rule (AGENTS.md, Conventions) binds it, since it pushes with
 # the deploy key, and check-release-credentials.sh pins its shape. `build` runs the dependencies'
 # code (install, the bundler, the notices) and holds no write scope and no secret: it runs
-# packages/claude-envoy/scripts/verify-build.sh, which the pull request's required test job runs
-# too, puts the tar that script packs into this job's own checkout with release-push.sh
-# extract-built to see whether it changes main's files, hands that tar over, and ends in the
+# packages/claude-envoy/scripts/verify-build.sh (its header names every job that runs it), puts
+# the tar that script packs into this job's own checkout with release-push.sh extract-built to see
+# whether it changes main's files, hands that tar over, and ends in the
 # no-credential tripwire. `push` holds the deploy key and actions: write, runs no dependency code
 # and restores no cache: release-push.sh push-built checks the tar, member by member, before
 # anything acts on it, commits it over the commit it was built from and lands that one commit.
