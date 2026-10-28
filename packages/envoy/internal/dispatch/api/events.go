@@ -129,15 +129,29 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	// request's end, the server's shutdown and its heartbeat, on which it resolves the caller
 	// again. A subscription that fails ends the stream and sends the client to its reconnect.
 	//
-	// The stream opens (its headers and ": open") before the subscription only for a connection
-	// that resumes from an id of the log as it stands: its start point is the since it brought,
-	// which needs nothing from the subscription, so it opens at once and heartbeats while the
-	// relay starts. A cold connection, or one whose since the clamp below replaces, starts at
-	// published instead, and the browser refreshes every query when a reconnect opens
-	// (web/src/api/sse.ts): opened before published is fixed, that refresh could read before an
-	// event that then lands at or below published, sent neither by the refresh nor by the stream.
-	// So such a connection opens once its subscription has arrived, which is at once whenever the
-	// relay is already running.
+	// Whether the stream opens (its headers and ": open") before the subscription is decided once,
+	// before the handler subscribes (opensEarly). It does only for a connection that resumes from
+	// an id of the log as it stands: its start point is the since it brought, which needs nothing
+	// from the subscription, so it opens at once and heartbeats while the relay starts. A cold
+	// connection, or one whose since the clamp below replaces, starts at published instead, and the
+	// browser refreshes every query when a reconnect opens (web/src/api/sse.ts): opened before
+	// published is fixed, that refresh could read before an event that then lands at or below
+	// published, sent neither by the refresh nor by the stream. So such a connection opens once
+	// its subscription has arrived, which is at once whenever the relay is already running.
+	//
+	// Until then such a connection sends no bytes. The browser aborts an attempt that receives
+	// nothing for 45 s (WATCHDOG_MS, web/src/api/sse.ts:80-86, armed at :757-760) and reconnects
+	// after a backoff that grows to 30 s (reconnectDelayMs, web/src/api/live.ts:39-45), cold again
+	// when it was cold, since its lastEventId stays 0 until an event arrives (sse.ts:872), and
+	// with the same since when it was clamped. Each abort ends its request's context, and with it
+	// the relay start when that request was the one running it (eventStreamRelay.start), so the
+	// next connection starts a new Await, which again waits for every transaction open when it
+	// began. So on a newly started process, while a transaction anywhere on the instance stays
+	// open for more than about 45 s, every first page load cycles through "Reconnecting…" until
+	// that transaction ends. No event is lost: the connection that finally subscribes starts at
+	// published. An operator who sees such a reconnect storm at boot finds its cause in the
+	// horizon's stall warning (events.Horizon), which names the oldest transaction holding the
+	// horizon back.
 	//
 	// The event log can be reset under a reader (`truncate events restart identity`, the browser
 	// suite's e2e/seed.ts): the ids restart at 1 and the relay, which notices, ends every open
@@ -147,17 +161,22 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	// new log for ever, on a connection that stays open and heartbeats: a reader silent for good,
 	// with nothing logged and nothing failed. A since above the newest id can only be an id of a
 	// log this one replaced, so it starts at published too. The newest id is read once here, to
-	// choose when the stream opens, and again once the subscription has arrived, which is the
-	// read the clamp goes by: a reset while the subscription waited (the refill's open writes
-	// hold back the relay's new cursor) leaves a since this first read did not see as stale.
-	startsAtPublished := !sinceProvided
+	// decide opensEarly, and for a connection that opened early again once the subscription has
+	// arrived: a reset while the subscription waited (the refill's open writes hold back the
+	// relay's new cursor) leaves a since this first read did not see as stale. That connection
+	// cannot start at published then, because the browser ran its refresh when the headers
+	// arrived, and an event at or below published that committed after that refresh would reach
+	// it neither way. So it ends instead, and the browser reconnects with a since above the new
+	// log's newest id, which the new connection's first read sends down the path that opens once
+	// the subscription has arrived.
+	opensEarly := false
 	if sinceProvided {
 		head, err := s.eventLogHead(r.Context())
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		startsAtPublished = since > head
+		opensEarly = since <= head
 	}
 	// The subscription's reads run beside this handler's heartbeat, which resolves the caller on
 	// the shared pool too, so they take a hold mark of their own (store.ForConcurrentRead). Its
@@ -168,57 +187,22 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	opened := false
-	openStream := func() bool {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.WriteHeader(http.StatusOK)
-		opened = true
-		// One comment line with the headers, so the stream opens in every browser now. Firefox
-		// (the browser suite's, e2e/keyboard-session-pickers.e2e.ts) resolved its fetch of this
-		// stream only once a body byte arrived, and a connection with no backlog and no new event
-		// sends none until the first heartbeat: until then the page held its "Reconnecting…"
-		// state and skipped the refresh a reconnect owes every query, so what committed while it
-		// was away stayed unshown.
-		if _, err := fmt.Fprint(w, ": open\n\n"); err != nil {
-			return false
-		}
-		flusher.Flush()
-		return true
-	}
-	if !startsAtPublished && !openStream() {
+	if opensEarly && openEventStream(w, flusher) != nil {
 		return
 	}
 	subscribing, stopSubscribing := context.WithCancel(reads)
 	defer stopSubscribing()
+	// ready delivers the subscription once and is then set to nil, which no select receives
+	// from; subscription is nil, and so never ready, until then. A nil ready therefore also says
+	// the stream has opened, whether early or once the subscription arrived.
 	ready := s.awaitEventSubscription(subscribing)
+	var subscription <-chan model.Event
+	var floor int64
 
 	heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
 	defer heartbeat.Stop()
 	shutdown := s.lifetime().Done()
-	// beat answers one heartbeat: the caller is resolved again on every one, so a stream outlives
-	// its session (a logout, a membership the sign-in issuer no longer confirms) by one beat at
-	// most, and a connection that has not opened yet is refused rather than opened later. false
-	// ends the stream.
-	beat := func() bool {
-		if _, _, err := s.optionalActor(heartbeatRequest(r)); err != nil {
-			if !opened {
-				s.writeHandlerError(w, err)
-			}
-			return false
-		}
-		if !opened {
-			return true
-		}
-		if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
-			return false
-		}
-		flusher.Flush()
-		return true
-	}
-	var subscribed eventSubscription
-	for waiting := true; waiting; {
+	for {
 		select {
 		case <-r.Context().Done():
 			return
@@ -227,84 +211,54 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			// http.Server.Shutdown would wait its whole budget for it. Ending it sends the client
 			// to its reconnect, which resumes from the last id it saw on whichever server is up.
 			return
-		case subscribed = <-ready:
-			waiting = false
-		case <-heartbeat.C:
-			if !beat() {
+		case subscribed := <-ready:
+			ready = nil
+			if subscribed.err != nil {
+				if !opensEarly {
+					s.writeHandlerError(w, subscribed.err)
+				}
 				return
 			}
-		}
-	}
-	if subscribed.err != nil {
-		if !opened {
-			s.writeHandlerError(w, subscribed.err)
-		}
-		return
-	}
-	defer subscribed.cancel()
-	subscription, published := subscribed.events, subscribed.published
-	// A cold client asked for no backlog and starts at published, the handover this connection
-	// holds. A resuming one is clamped against the log's newest id as it stands now, after its
-	// subscription began, which costs it one more round trip.
-	if !startsAtPublished {
-		head, err := s.eventLogHead(r.Context())
-		if err != nil {
-			return
-		}
-		startsAtPublished = since > head
-	}
-	if startsAtPublished {
-		since = published
-	}
-	if !opened && !openStream() {
-		return
-	}
-	// Catch-up replays (since, published] from the log. Every event in it is final, since
-	// published is at or below the safe horizon, so a page read now holds the rows any later read
-	// would, and moving cursor to a page's last row skips nothing. It pages through the whole
-	// range on the one subscription, never ending the stream partway: whatever the relay publishes
-	// meanwhile waits in the subscription (or overflows it, which ends the stream and sends the
-	// client to its reconnect, Stream.Publish). A since at or above published needs no catch-up.
-	cursor := since
-	for cursor < published {
-		replay, err := s.readEventsAfterID(r.Context(), cursor, published)
-		if err != nil {
-			return
-		}
-		for _, event := range replay {
-			if err := writeSSEEvent(w, event); err != nil {
+			// Deferred inside the loop, but ready delivers only once, so it is deferred once.
+			defer subscribed.cancel()
+			published := subscribed.published
+			if opensEarly {
+				// Clamped against the log's newest id as it stands now, after the subscription
+				// began, which costs a resuming connection one more round trip. A since above it
+				// is a reset this connection's early open already let the browser refresh before,
+				// so the stream ends rather than start at published.
+				head, err := s.eventLogHead(r.Context())
+				if err != nil || since > head {
+					return
+				}
+			} else {
+				// A cold client asked for no backlog, and a clamped one's since is of a log this
+				// one replaced: both start at published, the handover this connection holds.
+				since = published
+				if openEventStream(w, flusher) != nil {
+					return
+				}
+			}
+			if s.replayEvents(r.Context(), w, flusher, since, published) != nil {
 				return
 			}
-			cursor = event.ID
-		}
-		flusher.Flush()
-		if len(replay) < maxSSEReplay {
-			break
-		}
-	}
-	// The live loop sends only events above both since and published. The relay publishes into
-	// this subscription only events above published, each once and in strictly increasing id
-	// order, so catch-up's (since, published] and the live loop's ids above max(since, published)
-	// are together every event after since, each sent exactly once and in id order. A since above
-	// published belongs to a client that has already seen events this process's relay has not yet
-	// published (read from the other process, or before a reconnect): the relay's ids at or below
-	// it are events that client has, and the comparison drops them.
-	//
-	// That argument covers a log whose ids only ever grow. A reset reuses them, and the clamp
-	// above is what extends the comparison across one: a since above the newest id is replaced by
-	// published, so an id the new log hands out is not dropped as one the old log already showed
-	// this reader. What the clamp cannot do is tell this reader apart from the events of the log
-	// it was reading; the relay ends the subscription at a reset instead, and the reader comes
-	// back on a new connection, which clamps its since against the log as it then stands.
-	floor := max(since, published)
-
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case <-shutdown:
-			// As above: a shutdown ends the stream and sends the client to its reconnect.
-			return
+			// The live feed sends only events above both since and published. The relay
+			// publishes into this subscription only events above published, each once and in
+			// strictly increasing id order, so catch-up's (since, published] and the feed's ids
+			// above max(since, published) are together every event after since, each sent
+			// exactly once and in id order. A since above published belongs to a client that has
+			// already seen events this process's relay has not yet published (read from the
+			// other process, or before a reconnect): the relay's ids at or below it are events
+			// that client has, and the comparison drops them.
+			//
+			// That argument covers a log whose ids only ever grow. A reset reuses them, and the
+			// clamp above is what extends the comparison across one: a since above the newest id
+			// is replaced by published, or ends a stream that opened early, so an id the new log
+			// hands out is not dropped as one the old log already showed this reader. What the
+			// clamp cannot do is tell this reader apart from the events of the log it was
+			// reading; the relay ends the subscription at a reset instead, and the reader comes
+			// back on a new connection, which clamps its since against the log as it then stands.
+			subscription, floor = subscribed.events, max(since, published)
 		case event, open := <-subscription:
 			if !open {
 				return
@@ -317,11 +271,71 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			flusher.Flush()
 		case <-heartbeat.C:
-			if !beat() {
+			// The caller is resolved again on every beat, so a stream outlives its session (a
+			// logout, a membership the sign-in issuer no longer confirms) by one beat at most,
+			// and a connection that has not opened yet is refused rather than opened later.
+			opened := opensEarly || ready == nil
+			if _, _, err := s.optionalActor(heartbeatRequest(r)); err != nil {
+				if !opened {
+					s.writeHandlerError(w, err)
+				}
 				return
 			}
+			if !opened {
+				continue
+			}
+			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		}
 	}
+}
+
+// openEventStream writes the event stream's headers and one comment line with them, so the stream
+// opens in every browser now. Firefox (the browser suite's, e2e/keyboard-session-pickers.e2e.ts)
+// resolved its fetch of this stream only once a body byte arrived, and a connection with no
+// backlog and no new event sends none until the first heartbeat: until then the page held its
+// "Reconnecting…" state and skipped the refresh a reconnect owes every query, so what committed
+// while it was away stayed unshown. An error is a client already gone.
+func openEventStream(w http.ResponseWriter, flusher http.Flusher) error {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	if _, err := fmt.Fprint(w, ": open\n\n"); err != nil {
+		return err
+	}
+	flusher.Flush()
+	return nil
+}
+
+// replayEvents is a stream's catch-up: it writes (since, published] from the log. Every event in
+// it is final, since published is at or below the safe horizon, so a page read now holds the rows
+// any later read would, and moving the cursor to a page's last row skips nothing. It pages
+// through the whole range on the caller's one subscription, never ending the stream partway:
+// whatever the relay publishes meanwhile waits in the subscription (or overflows it, which ends
+// the stream and sends the client to its reconnect, Stream.Publish). A since at or above
+// published needs no catch-up. An error ends the stream.
+func (s *server) replayEvents(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, since, published int64) error {
+	cursor := since
+	for cursor < published {
+		replay, err := s.readEventsAfterID(ctx, cursor, published)
+		if err != nil {
+			return err
+		}
+		for _, event := range replay {
+			if err := writeSSEEvent(w, event); err != nil {
+				return err
+			}
+			cursor = event.ID
+		}
+		flusher.Flush()
+		if len(replay) < maxSSEReplay {
+			break
+		}
+	}
+	return nil
 }
 
 // eventSubscription is what subscribe answered, delivered by awaitEventSubscription: the live

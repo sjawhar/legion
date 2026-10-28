@@ -2816,6 +2816,63 @@ func TestSSEStreamOpensAndHeartbeatsWhileTheHorizonIsHeld(t *testing.T) {
 	awaitSSELine(t, second, committed, sseFrameWait, "the event committed during the hold, on the second connection")
 }
 
+// TestSSEStreamOpenedEarlyEndsWhenTheLogIsResetWhileItSubscribes: a connection resuming from an id
+// of the log as it stands opens before its subscription, and the browser runs the refresh it owes
+// every query when it does. Here the relay's first start is held back by a transaction open
+// elsewhere on the instance, and meanwhile the log is reset and refilled below that since, so the
+// handler's second read, once the subscription arrives, finds the since above the new log's head.
+// Started at published then, the stream would stay open, but an event at or below published that
+// committed after the browser's refresh would be sent neither by that refresh nor by the stream.
+// So the stream ends, and the browser's reconnect, whose since is above the new head, opens only
+// once its subscription has arrived. The assertion is that end: a handler that went on from
+// published never ends, and sends the refill's events above published, if any, then heartbeats
+// for as long as the client stays.
+func TestSSEStreamOpenedEarlyEndsWhenTheLogIsResetWhileItSubscribes(t *testing.T) {
+	const heartbeat = 100 * time.Millisecond
+	handler, database, _ := newTestServer(t, testServerOptions{streamHeartbeat: heartbeat})
+	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+		"title": "Renamed before the reset",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("rename issue before the reset: status=%d body=%s", response.Code, response.Body.String())
+	}
+	since := eventHead(t, database)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	release := holdClusterTransactionID(t, 3*time.Second)
+	request := sseRequest(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, since), func(*http.Request) {})
+	lines := sseLines(t, openSSEResponse(t, request, time.Second).Body)
+	awaitSSELine(t, lines, ": open", time.Second, "the open comment of a connection resuming at the head while the horizon is held")
+	if _, err := database.Pool.Exec(t.Context(), `truncate events restart identity cascade`); err != nil {
+		t.Fatalf("reset the event log: %v", err)
+	}
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+		"title": "Renamed after the reset",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("rename issue after the reset: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if live := eventHead(t, database); live >= since {
+		t.Fatalf("event %d committed after the reset is not below the since %d: the reset reused no id, so this test proves nothing", live, since)
+	}
+	release()
+
+	deadline := time.After(sseFrameWait)
+	for {
+		select {
+		case line, open := <-lines:
+			if !open {
+				return
+			}
+			if strings.HasPrefix(line, "id: ") {
+				t.Fatalf("the stream sent %q after the log was reset beneath it, want it ended", line)
+			}
+		case <-deadline:
+			t.Fatalf("the stream was still open %s after the horizon was released, though the log was reset below its since while it subscribed", sseFrameWait)
+		}
+	}
+}
+
 // TestShutdownEndsAStreamWaitingOnTheHorizon: http.Server.Shutdown waits for every handler, and an
 // event stream never ends on its own, so a stream ends when the server's lifetime does. A stream
 // whose subscription is still waiting for the first horizon, held back by a transaction open

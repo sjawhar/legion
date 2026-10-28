@@ -336,34 +336,6 @@ func (s *server) waitBackground() {
 	s.eventRelay.wait()
 }
 
-// horizon is the server's one events.Horizon (eventHorizon), built by the first reader that asks
-// for it and observing through the store's horizon pool (store.Pool.Horizon), so an observation
-// never queues behind the requests holding the shared pool. Every global-id reader of the event
-// log on this server reads through it: one per process is what lets concurrent readers share an
-// observation, each of which consumes a transaction id, rather than each reader observing on its
-// own.
-//
-// The horizon pool opens only on a store that is still open. A closed store's Horizon observes
-// through the shared pool, which is closed too, so every observation fails with its error: that
-// fallback says nothing worth logging. Any other failure to open the pool also falls back to the
-// shared pool, so the process still serves its live readers, but now their observations queue
-// behind the API's requests, which is what the horizon pool exists to prevent, and horizonOnce
-// keeps that choice for the process's lifetime; so it is logged, once, with its cause.
-func (s *server) horizon() *events.Horizon {
-	s.horizonOnce.Do(func() {
-		var db events.HorizonDB = s.deps.Store.Pool
-		switch pool, err := s.deps.Store.Pool.Horizon(); {
-		case err == nil:
-			db = pool
-		case !errors.Is(err, store.ErrPoolClosed):
-			slog.Error("dispatch: could not open the event horizon's pool; the event log's live readers observe through the shared request pool, behind the API's requests, until the process restarts",
-				"error", err)
-		}
-		s.eventHorizon = events.NewHorizon(db)
-	})
-	return s.eventHorizon
-}
-
 // register is Register, answering the server it mounted, whose delivery hub and event stream
 // relay a test waits out before its database closes. It is also called with a zero Deps, as
 // TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound does, so it must stay cheap and
