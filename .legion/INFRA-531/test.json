@@ -2,47 +2,56 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-531",
-  "completed": "2026-10-27T09:05:00Z",
-  "headTested": "36591fd3778c0fdd378cfae3efc8b805252181d2",
+  "completed": "2026-10-28T17:40:00Z",
+  "round": 2,
+  "headTested": "590c2850321625f3d815028f67c015eb190448da",
+  "codeHead": "a60f8177b08ecd48ab0facff422d369d9c935366",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its browser proof (bash $TMPDIR/infra531-e2e/run-e2e.sh e2e/address-links.e2e.ts at 36591fd3, whose code equals e0b8a9e7): 2 passed (50.9s). Re-ran its negative control by restoring packages/envoy/internal/dispatch/pmdoc to 3f6d78916cd8 in the working copy and rebuilding the server: test 1 failed on the first document link assertion (link 'http://lower.test' not found), test 2 failed at createIssue with 400 INVALID_MARKDOWN; restored afterwards. Re-ran its Go engine-comparison, weight and linear tests (all PASS, engine ran) and drove the A6 surface independently with an adversarial corpus of 8,307 documents (regressions 0, head panics 0)."
+    "how": "Re-ran its browser proof (bash $TMPDIR/infra531-e2e/run-e2e.sh --build-web e2e/address-links.e2e.ts): 3 passed (16.6s). Re-ran a negative control with packages/envoy/internal/dispatch/pmdoc restored to main 690c0136 and the server rebuilt: 3 failed (Document editor link 'http://lower.test' not found; 400 INVALID_MARKDOWN for 'see www.www1.test b' and 'x&a@ref.test c'). Re-ran its engine-comparison tests (TestURLReadingsAgreeWithTheEngine, TestALinkReadFromABareAddressAfterPunctuationIsWrittenBack, TestEmailReadingsAgreeWithTheEngine, TestTildeRunsReadAsTheEngineReadsThem, TestParseMatchesMilkdownForFixtures: PASS, engine ran) and drove A6 independently against main 690c0136."
   },
-  "failed": 4,
-  "failures": [
+  "failed": 0,
+  "failures": [],
+  "risks": [
     {
-      "criterion": "A5/A7 and the merge gate: CI runs at the head and is green",
-      "evidence": "Pull request #2373 conflicts with main (gh api repos/sjawhar/legion/pulls/2373 → mergeable_state dirty; git merge-tree of main@origin b08a56bce0c8 and 36591fd3 → CONFLICT (content) in packages/envoy/CHANGELOG.md). GitHub ran no workflow on any head: gh api repos/sjawhar/legion/commits/<sha>/check-runs → total_count 0 for 36591fd3, e0b8a9e7, 40be0916, fe278ecc, 62dee6e2. Needs main brought in on that real conflict."
-    },
-    {
-      "criterion": "A2: Go reads like the engine at every position of the class (a document link equals the comment's)",
-      "evidence": "unescapeMarkdownText (parse.go:1017, html.UnescapeString) decodes legacy character-reference names without their ';' (&copy, &amp, &not, &lt); the engine keeps them as text, and the new transform searches Go's decoded text. Real surface at head (throwaway Playwright probe on the e2e harness): spec 'see http\\://x.test/?a=1&copy=2 b' via POST /api/v1/issues is stored as 'see http://x.test/?a=1©=2 b'; the conversation link href is http://x.test/?a=1&copy=2, the Document editor link href is http://x.test/?a=1©=2. 'x;www.x.test/?a=1&amp=2 b' is stored as 'x;www.x.test/?a=1&=2 b'. Plain text shares the cause ('a=1&copy=2 here' stored as 'a=1©=2 here', at main too). Red test: rows 'see http\\://x.test/?a=1&copy=2 b' and 'x;www.x.test/?a=1&amp=2 b' in TestURLReadingsAgreeWithTheEngine (commit f5885ab7); cd packages/envoy && go test -count=1 -run TestURLReadingsAgreeWithTheEngine ./internal/dispatch/pmdoc/ → FAIL on both rows."
-    },
-    {
-      "criterion": "A1 (whole class): a document written through the API shows the address as a link, as the comment does",
-      "evidence": "Go reads some new links it cannot write, so the API refuses the document. At head POST /api/v1/issues with spec 'x;https://x.test/(a)> b' → 400 INVALID_MARKDOWN (written as 'x;[https://x.test/(a)>](<https://x.test/(a)>>) b': an angle destination holding an unescaped '>'); at 3f6d78916cd8 (main's Go) the same write was stored. '\\(http://x.test/a>b\\_' is written '([http://x.test/a>b\\\\](http://x.test/a>b\\)_', whose '\\)' escapes the destination's parenthesis. gen/differential.sh --base 7f7edb8de3e3 --head 36591fd3 over the adversarial corpus: 25 documents base stored and head refuses, each a link whose destination holds '>' or ends in '\\', or a respelling that reads as an address ('# \\_www.1.2.3.4__;b', 'a \\[WWW.a-b.test/a?\\_'); report at $TMPDIR/infra531-test/diff-fuzz/report.jsonl. Red test: TestALinkReadFromABareAddressAfterPunctuationIsWrittenBack (commit f5885ab7); cd packages/envoy && go test -count=1 -run TestALinkReadFromABareAddressAfterPunctuationIsWrittenBack ./internal/dispatch/pmdoc/ → FAIL on both rows."
-    },
-    {
-      "criterion": "A1 (plan): INFRA-530's email rows read the same in Go and the engine, and the email shapes are in the corpus document and the browser test",
-      "evidence": "Plan task T5 is not done: #2307 (INFRA-530) is OPEN (gh pr view 2307 → state OPEN, mergedAt null); the PR body's Chain line says so. TestEmailShapesReadAsTheEngineReadsThemAndSurviveARender compares with mailto: taken off both sides; address-links.e2e.ts holds no email row."
+      "finding": "A link whose destination holds a character reference or a backslash escape keeps main's undecoded href in a live tree that main's server wrote. The first write by this build re-escapes that href, so the stored markdown, the version view and a comment then open another address (version 2 stored '[amp](https://x.test/?a=1&amp;amp;b=2)'; main's comment of the same markdown linked 'https://x.test/?a=1&b=2').",
+      "evidence": "Real surface: a throwaway Playwright probe wrote the spec through main's server (pmdoc at 690c0136), then edited it through the head's server against the same database. The head's v2 and v3 held '&amp;amp;', '&amp;copy;', '\\\\&amp;amp;' and 'a\\\\\\\\' in the four links. Census of every stored version in production (13 projects, 6,474 documents, 31,576 distinct versions): 0 versions hold such a link outside code, and 0 versions have a link the head reads differently from main's tree. A docs-package regression test (TestAnEditKeepsTheLinkALiveTreeFromTheBuildBeforeHeld, saved at $TMPDIR/infra531-test/main-era-tree-red-test.patch) fails at the head. It was not committed, because a pass needs a migration of live trees and that migration would touch no stored document today.",
+      "decisionFor": "architect: accept with the census re-run after the deploy, or order a live-tree migration"
     }
   ],
+  "ciAtCodeHead": "a60f8177: green lint, typecheck, test, build, Dispatch Go suite; envoy-go-race running when read. dispatch red on recipients-claim.e2e.ts:310 (main's, INFRA-492/#2324) and mermaid.e2e.ts:194 on four browsers (INFRA-713); envoy-go red on cmd/listener TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering (role claim view not complete, the flake INFRA-523 tracks). This pull request touches none of these files.",
   "proof": [
     {
-      "criterion": "A1/A2/A3 for the web-address rows: each is a link with the engine's href in the conversation and in the live Document editor, and the stored spec holds no '\\:'",
+      "criterion": "A1/A2/A3: every web-address and email row is the engine's link in the conversation and in the live Document editor, and the stored spec holds no '\\:'",
       "surface": "Dispatch's browser suite: real Go server built from the workspace, production SPA bundle, Postgres 17 + pgvector, Chromium",
-      "command": "bash $TMPDIR/infra531-e2e/run-e2e.sh e2e/address-links.e2e.ts --reporter=line (cd packages/dispatch && DATABASE_URL=… bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/address-links.e2e.ts)",
-      "observed": "2 passed (50.9s). Evidence: https://github.com/sjawhar/legion/pull/2373#issuecomment-6437174384",
-      "headSha": "36591fd3778c0fdd378cfae3efc8b805252181d2",
-      "negativeControl": "pmdoc restored to 3f6d78916cd8 and the server rebuilt: test 1 fails at getByRole('link', { name: 'http://lower.test', exact: true }) in the Document editor (not found); test 2 fails at createIssue with 400 INVALID_MARKDOWN"
+      "command": "bash $TMPDIR/infra531-e2e/run-e2e.sh --build-web e2e/address-links.e2e.ts --reporter=line",
+      "observed": "3 passed (16.6s). Evidence: https://github.com/sjawhar/legion/pull/2373#issuecomment-6475951692",
+      "headSha": "590c2850321625f3d815028f67c015eb190448da",
+      "negativeControl": "pmdoc restored to main 690c0136, server rebuilt: 3 failed (Document editor link 'http://lower.test' not found; createIssue 400 INVALID_MARKDOWN twice)"
     },
     {
-      "criterion": "A6: no regression across a corpus",
-      "surface": "gen/differential.sh, Go at base and head each read back by Go and by the browser engine",
-      "command": "bun fuzz-corpus.ts $TMPDIR/infra531-test/fuzz/fuzz.jsonl 8000 && bash gen/differential.sh --base 7f7edb8de3e3 --head 36591fd3778c --corpus $TMPDIR/infra531-test/fuzz --out $TMPDIR/infra531-test/diff-fuzz",
-      "observed": "8,307 documents: regressions 0, head panics 0, engine-tree regressions 1 (a refusal, failure 3); Go's tree equals the engine's (mailto: off) in 8,046 at head vs 3,971 at base and in no document where base agreed and head does not; 261 still differ: 152 legacy entity names (failure 2), 55 tildes (strikethrough, INFRA-534's area), the rest documents one reader cannot read",
-      "headSha": "36591fd3778c0fdd378cfae3efc8b805252181d2",
-      "negativeControl": "The same corpus at base: Go's tree differs from the engine's in 4,336 documents"
+      "criterion": "The architect's check: a link and a bare address holding &amp;, &copy;, \\&amp; or a backslash before the address's end read alike in the editor, the stored markdown, doc-read and a comment, and stored link bytes stay unchanged on a second write",
+      "surface": "Dispatch's browser suite harness: POST /api/v1/issues, createComment, the live Document editor, GET /artifacts/{id}/text (doc-read), GET /artifacts/{id}/versions/{n}, POST /artifacts/{id}/edits twice",
+      "command": "throwaway e2e/zz-tester-cross.e2e.ts (deleted) run with PROBE_PHASE=write then PROBE_PHASE=edit, both at the head",
+      "observed": "Every link's href is the same in the editor and the conversation (e.g. amp → https://x.test/?a=1&b=2, slash → https://x.test/a\\, bare https://esc.test/?a=1\\&amp;b=2 kept); doc-read text equals stored v1; v2 and v3 after two edits elsewhere keep every link byte of v1",
+      "headSha": "590c2850321625f3d815028f67c015eb190448da",
+      "negativeControl": "The same spec written through main's server (pmdoc 690c0136): editor href 'https://x.test/?a=1&amp;b=2' against comment href 'https://x.test/?a=1&b=2' for the same link, and 'x;https\\://semi.test/…' stored with the escape and no link"
+    },
+    {
+      "criterion": "A6: no regression across the URL corpus against main 690c0136",
+      "surface": "gen/differential.sh, Go at main and at the head, each read back by Go and by the browser engine",
+      "command": "bun fuzz-corpus.ts $TMPDIR/infra531-test/fuzz/fuzz.jsonl 8000 && bun gen/url-corpus.ts $TMPDIR/infra531-test/urls/urls.jsonl && bash gen/differential.sh --base 690c0136 --head 590c2850 --corpus $TMPDIR/infra531-test/fuzz --corpus $TMPDIR/infra531-test/urls --out $TMPDIR/infra531-test/diff",
+      "observed": "18,086 documents: regressions 0, engine-tree regressions 0, head panics 0; head stores 17,857 correctly against base 9,416. Misreads 10 are all documents the engine cannot read. Lost fixed points 101 are all the dropped 'http\\:' escape on a URL whose domain neither reader links, read the same in both. Churn 1,921 and engine-tree churn 4,974 are each stored correctly at the head.",
+      "headSha": "590c2850321625f3d815028f67c015eb190448da",
+      "negativeControl": "Base main 690c0136 stores 8,441 of the same documents incorrectly that the head stores correctly ('fixed')"
+    },
+    {
+      "criterion": "Census: stored versions whose link bytes or link reading change",
+      "surface": "Production Dispatch's stored versions through GET /api/v1/artifacts/{id}/versions/{n}, read by Go at main 690c0136 and at the head",
+      "command": "bun $TMPDIR/infra531-test/crawl.ts census/versions.jsonl, then census.sh (main's tree per version, then the head's write of it and its reading of the stored bytes)",
+      "observed": "13 projects, 6,474 documents, 31,576 distinct versions. Links whose href the head reads differently from main's tree: 0. First head write changes a link: 1 (INFRA-253 plan v1, a plain-text address the plan accepts). More links read: 2,167 versions (25 latest, 0 approved), all plain-text addresses. Byte changes: 1,733, every one with an escaped scheme or www or a new link reading.",
+      "headSha": "590c2850321625f3d815028f67c015eb190448da",
+      "negativeControl": "The same census over the 55 probe shapes flags 14 link changes on a first write of main's tree (e.g. '[a](https://x.test/?a=1&amp;b=2)' → 'https://x.test/?a=1&amp;b=2'), so the classifier finds the class"
     }
   ]
 }
