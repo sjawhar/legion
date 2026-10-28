@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Tests for `check-release-credentials.sh`: a job of the three release workflows or of
-# changelog-fold.yaml that holds a credential runs no dependency code, uses only allow-listed
-# actions, restores no cache and holds the deploy key only in the env of a step that pushes; a job
-# that runs dependency code holds no credential and ends in the no-credential tripwire; every
-# checkout persists no credential; release_publish stays in its concurrency group; and a job
-# condition downstream of a skippable job calls `always()` and tests the result of every job whose
-# outputs it reads. The check is a tripwire over named patterns (the commands, actions and paths
-# its lists hold), not a proof that no other code runs, and these cases exercise those patterns, on
-# each side of each line.
+# Tests for `check-release-credentials.sh`: a job of the five workflows it reads (the three release
+# workflows, changelog-fold.yaml and claude-envoy-rebuild.yaml) that holds a credential runs no
+# dependency code, uses only allow-listed actions, restores no cache and holds the deploy key only
+# in the env of a step that runs one of its workflow's push commands (a release's push-tag or
+# push-main, the fold's push-fold, the rebuild's push-built); a job that runs dependency code holds
+# no credential and ends in the no-credential tripwire; every checkout persists no credential;
+# release_publish stays in its concurrency group; and a job condition downstream of a skippable job
+# calls `always()` and tests the result of every job whose outputs it reads. The check is a tripwire
+# over named patterns (the commands, actions and paths its lists hold), not a proof that no other
+# code runs, and these cases exercise those patterns, on each side of each line.
 #
 # Each case builds a miniature repository under a temporary directory, with the real script
-# symlinked into it and the four workflows written green, and mutates one file.
+# symlinked into it and the five workflows written green, and mutates one file.
 #
 # Run from anywhere: .github/scripts/check-release-credentials.test.sh
 # CI runs it in ci.yaml's test job.
@@ -25,7 +26,7 @@ trap 'rm -rf "$work"' EXIT
 # shellcheck source=.github/scripts/test-lib.sh
 source "$script_dir/test-lib.sh"
 
-# fixture <name>: a tree with the script linked in and the four green workflows written. Echoes its
+# fixture <name>: a tree with the script linked in and the five green workflows written. Echoes its
 # root.
 fixture() {
   local root="$work/$1"
@@ -78,8 +79,9 @@ RELEASE=.github/workflows/release.yaml
 LISTENER=.github/workflows/release-envoy-listener.yaml
 INFRA=.github/workflows/release-envoy-infra.yaml
 FOLD=.github/workflows/changelog-fold.yaml
+REBUILD=.github/workflows/claude-envoy-rebuild.yaml
 
-# write_green <workflows dir>: the four workflows in a shape every rule passes, not a copy of the
+# write_green <workflows dir>: the five workflows in a shape every rule passes, not a copy of the
 # real files. release.yaml: a build job (install, setup-bun, a `go build` behind `&&`, upload,
 # tripwire) with an `if:` of its own, two credentialed publish jobs (setup-node, `npm publish` of
 # the handed tarball, the tag push, a GitHub release and the bump push) whose `if:` calls `always()`
@@ -92,7 +94,10 @@ FOLD=.github/workflows/changelog-fold.yaml
 # create`. Infra: a build job (install-pulumi, `pulumi package get-schema`, tripwire) and a publish
 # job. The fold: a build job (install-changie, fold-plan, fold-notes, upload, tripwire) with no
 # `if:`, and fold_publish (`actions: write`, the deploy key in the env of its push-fold step) whose
-# `if:` reads the build's outputs without `always()`.
+# `if:` reads the build's outputs without `always()`. The rebuild: a build job (setup-bun, `bun run
+# verify-build`, `release-push.sh extract-built`, upload, tripwire) with an `if:` of its own, and a
+# push job (`actions: write`, the deploy key in the env of its `push-built` step) whose `if:` calls
+# `always()` and tests build's result.
 write_green() {
   local dir=$1
   cat > "$dir/release.yaml" <<'YAML'
@@ -416,6 +421,82 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/release-push.sh push-fold "$BASE" "$RUNNER_TEMP/changelog-notes" $CHANGELOG_PACKAGES
 YAML
+  cat > "$dir/claude-envoy-rebuild.yaml" <<'YAML'
+name: Rebuild Claude Envoy plugin
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/claude-envoy-rebuild.yaml"
+      - ".github/scripts/release-push.sh"
+      - "packages/claude-envoy/scripts/verify-build.sh"
+permissions: {}
+concurrency:
+  group: claude-envoy-rebuild-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      base: ${{ steps.state.outputs.base }}
+      changed: ${{ steps.state.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.sha || 'main' }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-bun
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Build, check and pack the plugin
+        run: bun run verify-build "$RUNNER_TEMP/claude-envoy-built.tar"
+        working-directory: packages/claude-envoy
+      - name: Put the checked build into the checkout
+        run: .github/scripts/release-push.sh extract-built "$RUNNER_TEMP/claude-envoy-built.tar"
+      - name: Record the base and whether the build changed the tracked files
+        id: state
+        run: |
+          echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: steps.state.outputs.changed == 'true'
+        with:
+          name: claude-envoy-built
+          path: ${{ runner.temp }}/claude-envoy-built.tar
+      - name: Check this job holds no credential (tripwire)
+        run: .github/scripts/release-push.sh no-credential
+  push:
+    needs: build
+    if: always() && needs.build.result == 'success' && needs.build.outputs.changed == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
+    cache-mode: none
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.build.outputs.base }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          name: claude-envoy-built
+          path: ${{ runner.temp }}/built
+      - name: Land the build on main
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE: ${{ needs.build.outputs.base }}
+        run: .github/scripts/release-push.sh push-built "$BASE" "$RUNNER_TEMP/built/claude-envoy-built.tar"
+YAML
 }
 
 # add_publish_step <root> <step yaml lines>: a step before pi_envoy_publish's "Publish to npm".
@@ -430,12 +511,12 @@ add_push_tag_step() {
   add_publish_step "$1" "      - name: $2"$'\n        env:\n          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n          TAG: ${{ steps.handed.outputs.tag }}\n        run: |\n'"$3"$'          .github/scripts/release-push.sh push-tag "$TAG"\n'
 }
 
-echo "case: the four workflows in a shape every rule passes"
+echo "case: the five workflows in a shape every rule passes"
 root=$(fixture green)
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 check "says what it covered" \
-  "$(contains "$out" 'check-release-credentials: 5 credentialed job(s) and 4 build job(s) across 4 release and changelog-fold workflows keep credentials out of jobs that run dependency code')"
+  "$(contains "$out" 'check-release-credentials: 6 credentialed job(s) and 5 build job(s) across 5 workflows keep credentials out of jobs that run dependency code')"
 green_fold=$(cat "$root/$FOLD")
 check "the fold's publish job holds the deploy key in the env of its push-fold step" \
   "$(contains "$green_fold" '^          DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}$')"
@@ -444,6 +525,11 @@ check "the fold's publish job's if: calls no always(), its build having no if:" 
   "$(contains "$green_fold" "^    if: github.ref == 'refs/heads/main' && needs.fold_build.outputs.fold == 'true'$")"
 green_release=$(cat "$root/$RELEASE")
 green_listener=$(cat "$root/$LISTENER")
+green_rebuild=$(cat "$root/$REBUILD")
+# shellcheck disable=SC2016 # the literal ${{ … }} the workflow carries, never expanded
+check "the rebuild's push job holds the deploy key in the env of its push-built step" \
+  "$(is "$(contains "$green_rebuild" '^          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}$')|$(contains "$green_rebuild" '^        run: .github/scripts/release-push.sh push-built ')" 'true|true')"
+check "the rebuild's push job holds actions: write" "$(contains "$green_rebuild" '^      actions: write$')"
 check "a credentialed job runs release-push.sh handed" "$(contains "$green_release" 'release-push.sh handed pi-envoy-v')"
 check "a credentialed job runs npm publish" "$(contains "$green_release" 'run: npm publish')"
 check "a credentialed job runs docker buildx imagetools create" "$(contains "$green_listener" 'run: docker buildx imagetools create')"
@@ -455,6 +541,73 @@ check "a publish job's if: calls always() and tests the result of the build whos
 check "the green fixture needs a job it does not define, pi_legion_build (a dangling needs name is ignored on purpose)" \
   "$(contains "$green_release" '^    needs: \[pi_legion_build, ')"
 check "no job pi_legion_build" "$(is "$(contains "$green_release" '^  pi_legion_build:$')" false)"
+
+echo "case: the deploy key in the rebuild workflow's build job env"
+root=$(fixture rebuild-build-key)
+mutate "$root/$REBUILD" $'    outputs:\n' $'    env:\n      DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n    outputs:\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the build job and the key at its line" \
+  "$(contains "$out" "^::error::$REBUILD:$(line_of "$root/$REBUILD" '^      DEPLOY_KEY:'): job 'build' runs dependency code (.*), but its text names secrets.DEPLOY_KEY; a build job holds no secret but GITHUB_TOKEN")"
+check "names the build job as holding a credential while it runs bun" \
+  "$(contains "$out" "^::error::$REBUILD:.*: job 'build' holds a credential, but step 'Install dependencies' runs 'bun'")"
+
+echo "case: the rebuild workflow's push job runs bun"
+root=$(fixture rebuild-push-bun)
+mutate "$root/$REBUILD" $'      - name: Land the build on main\n' $'      - name: Install\n        run: bun install --frozen-lockfile\n      - name: Land the build on main\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the push job, the step and the command at the step's line" \
+  "$(contains "$out" "^::error::$REBUILD:$(line_of "$root/$REBUILD" '^      - name: Install$'): job 'push' holds a credential, but step 'Install' runs 'bun'; dependency code runs only in a job that holds none")"
+
+echo "case: the deploy key in the env of the rebuild's download step, which runs no push"
+root=$(fixture rebuild-download-step-key)
+mutate "$root/$REBUILD" $'      - uses: actions/download-artifact@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          name: claude-envoy-built\n' $'      - uses: actions/download-artifact@3d3c42e5aac5ba805825da76410c181273ba90b1\n        env:\n          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n        with:\n          name: claude-envoy-built\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the step at its line and the one command the rebuild allows" \
+  "$(contains "$out" "^::error::$REBUILD:$(line_of "$root/$REBUILD" '^          DEPLOY_KEY:'): job 'push' names secrets.DEPLOY_KEY at step 'actions/download-artifact@$SHA' env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-built, which claude-envoy-rebuild.yaml allows$")"
+check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
+
+echo "case: the deploy key in the rebuild's push step, which runs push-main, a release's push"
+root=$(fixture rebuild-push-main)
+# shellcheck disable=SC2016 # the literal run lines the workflow carries, never expanded
+mutate "$root/$REBUILD" 'run: .github/scripts/release-push.sh push-built "$BASE" "$RUNNER_TEMP/built/claude-envoy-built.tar"' 'run: .github/scripts/release-push.sh push-main packages/claude-envoy "$BASE"'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the push job, the step and the one command the rebuild allows" \
+  "$(contains "$out" "^::error::$REBUILD:$(line_of "$root/$REBUILD" '^          DEPLOY_KEY:'): job 'push' names secrets.DEPLOY_KEY at step 'Land the build on main' env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-built, which claude-envoy-rebuild.yaml allows$")"
+check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
+
+echo "case: the deploy key in a release's push step, which runs push-built, the rebuild's push"
+root=$(fixture release-push-built)
+mutate "$root/$RELEASE" $'        run: .github/scripts/release-push.sh push-tag "$TAG"\n' $'        run: .github/scripts/release-push.sh push-built "$TAG" built.tar\n' 1
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the publish job, the step and the two commands a release allows" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^          DEPLOY_KEY:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at step 'Push tag' env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag or release-push.sh push-main, which release.yaml allows$")"
+check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
+
+for other in push-built push-main; do
+  echo "case: the deploy key in the fold's push step, which runs $other, another workflow's push"
+  root=$(fixture "fold-$other")
+  # shellcheck disable=SC2016 # the literal run lines the workflow carries, never expanded
+  mutate "$root/$FOLD" 'run: .github/scripts/release-push.sh push-fold "$BASE"' "run: .github/scripts/release-push.sh $other \"\$BASE\""
+  run_check "$root"
+  check "exits 1" "$(is "$status" 1)"
+  check "names the publish job, the step and the one command the fold allows" \
+    "$(contains "$out" "^::error::$FOLD:$(line_of "$root/$FOLD" '^          DEPLOY_KEY:'): job 'fold_publish' names secrets.DEPLOY_KEY at step 'Fold and push' env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-fold, which changelog-fold.yaml allows$")"
+  check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
+done
+
+echo "case: the deploy key in a release's push step, which runs push-fold, the fold's push"
+root=$(fixture release-push-fold)
+mutate "$root/$RELEASE" $'        run: .github/scripts/release-push.sh push-tag "$TAG"\n' $'        run: .github/scripts/release-push.sh push-fold "$TAG" notes\n' 1
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the publish job, the step and the two commands a release allows" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^          DEPLOY_KEY:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at step 'Push tag' env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag or release-push.sh push-main, which release.yaml allows$")"
+check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
 
 echo "case: a credentialed job runs bun install"
 root=$(fixture bun-install)
@@ -600,7 +753,7 @@ mutate "$root/$RELEASE" $'          persist-credentials: false\n' $'          pe
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the site at its line" \
-  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" 'ssh-key:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at step 'actions/checkout@$SHA' with.ssh-key; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag, push-main or push-fold$")"
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" 'ssh-key:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at step 'actions/checkout@$SHA' with.ssh-key; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag or release-push.sh push-main, which release.yaml allows$")"
 
 echo "case: the deploy key in a job-level env"
 root=$(fixture job-env-key)
@@ -945,7 +1098,7 @@ check "exits 1" "$(is "$status" 1)"
 check "names the workflow's env for the build job at its line" \
   "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^  DEPLOY_KEY:'): job 'pi_envoy_build' runs dependency code (.*), but its text names secrets.DEPLOY_KEY; a build job holds no secret but GITHUB_TOKEN")"
 check "names the workflow's env for a credentialed job at its line" \
-  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^  DEPLOY_KEY:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at the workflow's env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag, push-main or push-fold$")"
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^  DEPLOY_KEY:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at the workflow's env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag or release-push.sh push-main, which release.yaml allows$")"
 check "names the workflow's env for the other credentialed job too" \
   "$(contains "$out" "job 'pi_legion_publish' names secrets.DEPLOY_KEY at the workflow's env.DEPLOY_KEY;")"
 check "the plain job, credentialed through the workflow's env, must set cache-mode: none" \
@@ -1207,8 +1360,8 @@ root=$(fixture fold-build-fold-notes)
 mutate "$root/$FOLD" $'      - uses: ./.github/actions/install-changie\n' ''
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
-check "fold-notes alone makes the fold's build job a build job: still 4 of them" \
-  "$(contains "$out" 'check-release-credentials: 5 credentialed job(s) and 4 build job(s) across ')"
+check "fold-notes alone makes the fold's build job a build job: still 5 of them" \
+  "$(contains "$out" 'check-release-credentials: 6 credentialed job(s) and 5 build job(s) across ')"
 
 echo "case: release-push.sh push-fold through ./ in the fold's publish job"
 root=$(fixture fold-publish-push-fold)

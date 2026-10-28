@@ -396,6 +396,33 @@ jobs:
               - *go_workspace
               - 'packages/daemon/**'
               - *daemon_envoy_deps
+            # The claude-envoy job, and the test job's verify-build step, which runs the same
+            # command (packages/claude-envoy/scripts/verify-build.sh).
+            claude_envoy: &claude_envoy
+              - '.github/workflows/ci.yaml'
+              # .bun-version is also read by scripts/build.ts:23: the build depends on the Bun it
+              # pins.
+              - *bun_install
+              - *biome
+              - 'packages/claude-envoy/**'
+              # verify-build.sh checks the build with check-private-names.sh and release-push.sh
+              # check-built, and the job puts it in place with release-push.sh extract-built.
+              - '.github/scripts/check-private-names.sh'
+              - '.github/scripts/release-push.sh'
+              - 'packages/contracts/src/**'
+              # tests/daemon-api-version.test.ts:15 and its neighbours.
+              - 'packages/contracts/fixtures/daemon-api/**'
+              - 'packages/envoy-client/src/**'
+              - 'packages/envoy-client/bin/dispatch.ts'
+              - 'packages/pi-shared/src/**'
+              # scripts/build.ts:115-128 generates legion/ from pi-legion's agents and the skills
+              # the prepack script stages for it, and :16 writes dist/THIRD_PARTY_NOTICES.
+              - 'packages/pi-legion/agents/**'
+              - 'scripts/pi-plugin-prepack.sh'
+              - 'skills/**'
+              - 'scripts/third-party-notices.ts'
+              # tests/envoy-channel-server.test.ts:7 holds the marketplace entry to no version.
+              - '.claude-plugin/marketplace.json'
             # The daemon's tests (`go test ./...`, the -race subset, and the daemon
             # scripts/e2e/stage1-skeleton.sh builds) and every file the job's other steps read.
             test:
@@ -403,6 +430,8 @@ jobs:
               - *bun_install
               - *biome
               - *daemon_go_tests
+              # Its verify-build step builds and checks the Claude Code plugin as main's rebuild does.
+              - *claude_envoy
               # scripts/e2e/lib/held-port.test.ts:45 builds the real envoy-listener.
               - *listener_command
               # Each .github/scripts/*.test.sh runs its checker, through test-lib.sh (and
@@ -651,27 +680,6 @@ jobs:
               - 'packages/envoy/scripts/fixtures/shell-quote.json'
               # The SPA build writes dist/THIRD_PARTY_NOTICES.txt (web/vite.config.ts:11).
               - 'scripts/third-party-notices.ts'
-            claude_envoy:
-              - '.github/workflows/ci.yaml'
-              # .bun-version is also read by scripts/build.ts:23: the committed bundle depends on
-              # the Bun it pins.
-              - *bun_install
-              - *biome
-              - 'packages/claude-envoy/**'
-              - 'packages/contracts/src/**'
-              # tests/daemon-api-version.test.ts:15 and its neighbours.
-              - 'packages/contracts/fixtures/daemon-api/**'
-              - 'packages/envoy-client/src/**'
-              - 'packages/envoy-client/bin/dispatch.ts'
-              - 'packages/pi-shared/src/**'
-              # scripts/build.ts:115-128 generates legion/ from pi-legion's agents and the skills
-              # the prepack script stages for it, and :16 writes dist/THIRD_PARTY_NOTICES.
-              - 'packages/pi-legion/agents/**'
-              - 'scripts/pi-plugin-prepack.sh'
-              - 'skills/**'
-              - 'scripts/third-party-notices.ts'
-              # tests/envoy-channel-server.test.ts:7 holds the marketplace entry to no version.
-              - '.claude-plugin/marketplace.json'
             envoy_go:
               - '.github/workflows/ci.yaml'
               - *bun_install
@@ -1287,6 +1295,14 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      # The very command main's Rebuild Claude Envoy plugin workflow runs in its build job, so a pull
+      # request whose source main's push job would refuse fails this required check instead of
+      # merging and then failing every rebuild on main (the claude-envoy job is not required until
+      # ci-ok is). What it builds and checks: packages/claude-envoy/scripts/verify-build.sh.
+      - name: Build, check and pack the Claude Code plugin as main's rebuild does
+        run: bun run verify-build "$RUNNER_TEMP/claude-envoy-built.tar"
+        working-directory: packages/claude-envoy
 
       - name: Test release scripts
         run: .github/scripts/release-push.test.sh
@@ -2014,9 +2030,15 @@ jobs:
       - name: Typecheck Claude Envoy plugin
         run: bun run typecheck
         working-directory: packages/claude-envoy
-      - name: Check the committed bundle is fresh
-        run: bun run check-dist
+      # A pull request never commits dist/ or legion/ (main's Rebuild Claude Envoy plugin workflow
+      # does), so this builds and checks them from the head's source as that workflow's build job
+      # does: packages/claude-envoy/scripts/verify-build.sh.
+      - name: Build, check and pack the plugin as main's rebuild does
+        run: bun run verify-build "$RUNNER_TEMP/claude-envoy-built.tar"
         working-directory: packages/claude-envoy
+      # The pack step packs the package's own dist/ and legion/ (release-push.sh extract-built).
+      - name: Put the checked build into CI's checkout for the pack
+        run: .github/scripts/release-push.sh extract-built "$RUNNER_TEMP/claude-envoy-built.tar"
       - name: Test Claude Envoy plugin
         run: bun run test
         working-directory: packages/claude-envoy

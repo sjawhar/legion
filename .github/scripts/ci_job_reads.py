@@ -119,8 +119,28 @@ def setup_go(job, gomod):
 
 
 CI_SELF = reads((".github/workflows/ci.yaml", "a job reads its own definition"))
+
 CONTRACTS_SRC = "packages/contracts/src/**"
 ENVOY_CLIENT_SRC = "packages/envoy-client/src/**"
+
+# What packages/claude-envoy/scripts/verify-build.sh and the claude-envoy job's other steps read:
+# the claude-envoy gate, and the test job's verify-build step.
+CLAUDE_ENVOY_BUILD = reads(
+        ("packages/claude-envoy/**", f"{at('claude-envoy', 'Lint Claude Envoy plugin')}, typecheck, verify-build, test and pack in packages/claude-envoy"),
+        (CONTRACTS_SRC, "packages/claude-envoy/tsconfig.json paths @legion/contracts; bundles import it"),
+        (ENVOY_CLIENT_SRC, "packages/claude-envoy/src/envoy-channel-server.ts:14-45, hooks/session-hook.ts:41-48 import @legion/envoy-client/*"),
+        ("packages/envoy-client/bin/dispatch.ts", "packages/claude-envoy/scripts/build.ts:34 BUNDLE_ENTRYPOINTS dispatch (verify-build, tests/dist-fresh.test.ts:292)"),
+        ("packages/pi-shared/src/**", "packages/claude-envoy/src/envoy-channel-server.ts:46-47, legion-claim.ts:7-9, legion-tool.ts:3-11 import @legion/pi-shared/*"),
+        (f"{FIX}/daemon-api/**", "packages/claude-envoy/tests/daemon-api-version.test.ts:15, legion-claim.test.ts:25, legion-pane-mcp.test.ts:17, legion-tool.test.ts:12"),
+        ("scripts/third-party-notices.ts", "packages/claude-envoy/scripts/build.ts:16"),
+        ("scripts/pi-plugin-prepack.sh", "packages/claude-envoy/scripts/build.ts:115-120 --stage-skills @sjawhar/pi-legion"),
+        ("packages/pi-legion/agents/**", "packages/claude-envoy/scripts/build.ts:125-128"),
+        ("skills/**", "packages/claude-envoy/scripts/build.ts:115-120 (staged pi-legion partition); packages/claude-envoy/skills/* symlinks into ../../../skills"),
+        (".bun-version", "packages/claude-envoy/scripts/build.ts:23 reads the Bun pin"),
+        (".claude-plugin/marketplace.json", "packages/claude-envoy/tests/envoy-channel-server.test.ts:7"),
+        (".github/scripts/check-private-names.sh", "packages/claude-envoy/scripts/verify-build.sh checks the build with it"),
+        (".github/scripts/release-push.sh", "packages/claude-envoy/scripts/verify-build.sh runs its check-built; the job runs its extract-built"),
+)
 
 
 # ---------------------------------------------------------------- RULES
@@ -308,7 +328,7 @@ GATES = [
                    DAEMON, ["./cmd/legion"], mode="build"),
         script_run("scripts/e2e/lib/held-port.test.ts", 'const build = Bun.spawnSync(["go", "build", "-o", listener, "./cmd/listener"], {',
                    at("test", "bun test scripts/e2e/lib"), ENVOY, ["./cmd/listener"], mode="build"),
-    ], reads=reads(
+    ], reads=CLAUDE_ENVOY_BUILD + reads(
         (".github/scripts/*", f"{at('test', 'Test release scripts')} and the steps after it: each .github/scripts/*.test.sh sources "
                               "test-lib.sh and runs its checker (with workflow_paths.py, check-pr-text.sh, ci_filter_coverage.py, "
                               "ci_job_reads.py or release-bump.sh where a checker reads them)"),
@@ -497,20 +517,7 @@ GATES = [
         ("scripts/third-party-notices.ts", "packages/dispatch/web/vite.config.ts:11 (build:web writes dist/THIRD_PARTY_NOTICES.txt)"),
     ) + setup_go("dispatch", f"{ENVOY}/go.mod") + biome(at("dispatch", "Lint dispatch dashboard")) + bun_job("dispatch") + CI_SELF),
 
-    gate("claude_envoy", "claude-envoy", reads=reads(
-        ("packages/claude-envoy/**", f"{at('claude-envoy', 'Lint Claude Envoy plugin')}, typecheck, check-dist, test and pack in packages/claude-envoy"),
-        (CONTRACTS_SRC, "packages/claude-envoy/tsconfig.json paths @legion/contracts; bundles import it"),
-        (ENVOY_CLIENT_SRC, "packages/claude-envoy/src/envoy-channel-server.ts:14-45, hooks/session-hook.ts:41-48 import @legion/envoy-client/*"),
-        ("packages/envoy-client/bin/dispatch.ts", "packages/claude-envoy/scripts/build.ts:34 BUNDLE_ENTRYPOINTS dispatch (check-dist, tests/dist-fresh.test.ts:292)"),
-        ("packages/pi-shared/src/**", "packages/claude-envoy/src/envoy-channel-server.ts:46-47, legion-claim.ts:7-9, legion-tool.ts:3-11 import @legion/pi-shared/*"),
-        (f"{FIX}/daemon-api/**", "packages/claude-envoy/tests/daemon-api-version.test.ts:15, legion-claim.test.ts:25, legion-pane-mcp.test.ts:17, legion-tool.test.ts:12"),
-        ("scripts/third-party-notices.ts", "packages/claude-envoy/scripts/build.ts:16"),
-        ("scripts/pi-plugin-prepack.sh", "packages/claude-envoy/scripts/build.ts:115-120 --stage-skills @sjawhar/pi-legion"),
-        ("packages/pi-legion/agents/**", "packages/claude-envoy/scripts/build.ts:125-128"),
-        ("skills/**", "packages/claude-envoy/scripts/build.ts:115-120 (staged pi-legion partition); packages/claude-envoy/skills/* symlinks into ../../../skills"),
-        (".bun-version", "packages/claude-envoy/scripts/build.ts:23 reads the Bun pin"),
-        (".claude-plugin/marketplace.json", "packages/claude-envoy/tests/envoy-channel-server.test.ts:7"),
-    ) + biome(at("claude-envoy", "Lint Claude Envoy plugin")) + bun_job("claude-envoy") + CI_SELF),
+    gate("claude_envoy", "claude-envoy", reads=CLAUDE_ENVOY_BUILD + biome(at("claude-envoy", "Lint Claude Envoy plugin")) + bun_job("claude-envoy") + CI_SELF),
 
     gate("envoy_go", "envoy-go", runs=[
         # The API package first, on its own (582cb2a2: its Postgres-backed tests' cleanup queues

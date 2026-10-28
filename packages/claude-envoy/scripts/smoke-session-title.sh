@@ -3,11 +3,12 @@
 # what this plugin registers with a real Envoy listener, that a rename replaces it, and that a
 # session nobody named keeps the folder-and-short-id fallback (dispatch://INFRA-92).
 #
-# It runs the committed bundle, not the TypeScript: a real nats-server, a real Envoy listener
-# built from this tree, `dist/session-hook.js` for each payload and `dist/envoy-channel.js` as
-# the session, read back through the listener's own `GET /v1/sessions`. Its negative control is
-# the same first case against the base revision's `dist/envoy-channel.js`, which registers the
-# folder name and not the chosen one.
+# It runs the bundles, not the TypeScript: a real nats-server, a real Envoy listener built from
+# this tree, and a copy of the plugin built from this tree into the scratch directory
+# (`scripts/build.ts --out`), whose `dist/session-hook.js` runs for each payload and
+# `dist/envoy-channel.js` as the session, read back through the listener's own
+# `GET /v1/sessions`. Its negative control is the same first case against the base revision's
+# committed `dist/envoy-channel.js`, which registers the folder name and not the chosen one.
 #
 # WHAT IS SIMULATED. Claude Code is not installed in a Legion issue pod and cannot be, so the two
 # hook payloads are JSON this script writes, shaped as Claude Code's hooks reference documents
@@ -71,6 +72,11 @@ cleanup() {
   return 0
 }
 trap cleanup EXIT INT TERM
+
+# The plugin under test, built from this tree: a pull request's tree carries no fresh `dist/`.
+readonly plugin_dir="${workdir}/claude-envoy"
+bun "${package_dir}/scripts/build.ts" --out "$plugin_dir" >"${workdir}/build.log" 2>&1 ||
+  fail "the plugin did not build: $(cat "${workdir}/build.log")"
 
 # Both servers bind port 0, so the kernel chooses each port and nothing can take it before the
 # server serves on it, and each reports the port it got: nats-server (`-p -1`) on its `Listening for
@@ -176,9 +182,9 @@ await_title() {
 # prompt on it, so it carries none of the SessionStart bundle's weight.
 run_hook() {
   local mode="$1" payload="$2"
-  local -a command=("${package_dir}/dist/session-hook.js" "$mode")
+  local -a command=("${plugin_dir}/dist/session-hook.js" "$mode")
   if [[ "$mode" == session-title ]]; then
-    command=("${package_dir}/dist/session-title-hook.js")
+    command=("${plugin_dir}/dist/session-title-hook.js")
   fi
   printf '%s' "$payload" | env -i PATH="$PATH" HOME="$workdir" \
     CLAUDE_CONFIG_DIR="$config_dir" CLAUDE_PLUGIN_DATA="$plugin_data" \
@@ -194,7 +200,7 @@ readonly fallback="probe-project ${short_id}"
 printf '\ncase 1: a SessionStart payload carrying the name a person gave the session\n'
 run_hook open-asks "$(jq -nc --arg id "$session_id" --arg dir "$project_dir" --arg title "$chosen_name" \
   '{session_id: $id, cwd: $dir, hook_event_name: "SessionStart", source: "startup", session_title: $title}')"
-run_channel_server "${package_dir}/dist/envoy-channel.js" "$session_id"
+run_channel_server "${plugin_dir}/dist/envoy-channel.js" "$session_id"
 await_title "$session_id" "$chosen_name" || fail "the chosen name did not reach the listener"
 printf 'the listener holds %q for %s\n' "$chosen_name" "$session_id"
 
