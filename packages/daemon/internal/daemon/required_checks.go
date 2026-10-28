@@ -152,7 +152,10 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 			}
 			continue
 		}
-		if pr.RequiredReadUnchanged(checks.Names, checks.Workflows, checks.WorkflowsHead) {
+		// A read that says what is recorded changes nothing, unless the red it judges was held
+		// while its head waited for a push and the hold has lapsed: the read is then what decides
+		// that red (workflow's HoldLapsed), so a push webhook lost for good holds it no longer.
+		if pr.RequiredReadUnchanged(checks.Names, checks.Workflows, checks.WorkflowsHead) && !w.engine.HoldLapsed(pr) {
 			continue
 		}
 		eventID := fmt.Sprintf("required-checks:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, pr.Repo, pr.Number, time.Now().UnixNano())
