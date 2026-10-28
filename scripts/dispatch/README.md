@@ -331,17 +331,25 @@ reads or writes no table. The statement mirrors the issue row's vector
 (`migrations/0088_issues_title_lexemes.up.sql`, with `search_text` from
 `migrations/0056_search_text.up.sql`) and search's own `websearch_to_tsquery('english', q)`. A
 throwaway PostgreSQL 18.6, the version production runs, that listens only on a unix socket in
-`$TMPDIR/pg`, from zonky's pinned Linux x86-64 binaries on Maven Central:
+`$TMPDIR/pg`, from zonky's pinned Linux x86-64 binaries on Maven Central. The block is safe to run
+again, also from a second shell at the same time: it holds a lock while it works, downloads and
+creates the cluster only when `$TMPDIR/pg/data` is absent, starts the cluster only when it is not
+running, and prints the socket path:
 
 ```bash
-pg="$TMPDIR/pg" v=18.6.0 && mkdir -p "$pg" && cd "$pg"
-curl -fsSL -o pg.jar "https://repo1.maven.org/maven2/io/zonky/test/postgres/embedded-postgres-binaries-linux-amd64/$v/embedded-postgres-binaries-linux-amd64-$v.jar"
-python3 -c 'import zipfile; zipfile.ZipFile("pg.jar").extract("postgres-linux-x86_64.txz")'
-python3 -c 'import lzma, tarfile; tarfile.open(fileobj=lzma.open("postgres-linux-x86_64.txz")).extractall("server", filter="data")'
-export LD_LIBRARY_PATH="$pg/server/lib"
-server/bin/initdb -D data -U postgres --auth=trust -E UTF8
-printf "listen_addresses = ''\nunix_socket_directories = '%s'\n" "$pg" >> data/postgresql.conf
-server/bin/pg_ctl -D data -l pg.log start
+pg="$TMPDIR/pg" v=18.6.0 && mkdir -p "$pg" && (
+  flock 9 && cd "$pg" && export LD_LIBRARY_PATH="$pg/server/lib" || exit 1
+  if [ ! -d data ]; then
+    curl -fsSL -o pg.jar "https://repo1.maven.org/maven2/io/zonky/test/postgres/embedded-postgres-binaries-linux-amd64/$v/embedded-postgres-binaries-linux-amd64-$v.jar" &&
+      python3 -c 'import zipfile; zipfile.ZipFile("pg.jar").extract("postgres-linux-x86_64.txz")' &&
+      python3 -c 'import lzma, tarfile; tarfile.open(fileobj=lzma.open("postgres-linux-x86_64.txz")).extractall("server", filter="data")' &&
+      server/bin/initdb -D data -U postgres --auth=trust -E UTF8 -c listen_addresses= -c "unix_socket_directories=$pg" ||
+      exit 1
+  fi
+  # 9>&-: the server must not inherit the lock, or every later run waits on it.
+  server/bin/pg_ctl -D data status >/dev/null || server/bin/pg_ctl -D data -l pg.log start 9>&- || exit 1
+  echo "$pg/.s.PGSQL.5432"
+) 9>"$pg/setup.lock"
 ```
 
 Pass it as `--lexeme-database "$TMPDIR/pg/.s.PGSQL.5432"`; the check connects as `postgres` to the
