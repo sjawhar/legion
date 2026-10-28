@@ -134,6 +134,25 @@ func TestImageTLSClientsCoverTheWorkerInventory(t *testing.T) {
 	}
 }
 
+// Chromium resolves only the probed site, so its certificate verifier's AIA fetches fail at once
+// instead of waiting on the CA's repository host.
+func TestImageChromiumResolvesOnlyTheProbedSite(t *testing.T) {
+	var chromium tlsChromiumClient
+	for _, client := range imageTLSClients("omp", nil, "") {
+		if client.name() == "chromium" {
+			chromium = client.(tlsChromiumClient)
+		}
+	}
+	for _, site := range tlsSites {
+		program, args, _ := chromium.command(site)
+		host := strings.TrimSuffix(strings.TrimPrefix(site.url, "https://"), "/")
+		want := []string{"--headless", "--no-sandbox", "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE " + host, "--dump-dom", site.url}
+		if program != "chromium" || !slices.Equal(args, want) {
+			t.Errorf("chromium command for %s = %s %q, want chromium %q", site.name, program, args, want)
+		}
+	}
+}
+
 func TestTLSPositiveControlsRequireTheExpectedChain(t *testing.T) {
 	for _, testCase := range []struct {
 		name, want         string
