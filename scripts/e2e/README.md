@@ -844,7 +844,7 @@ carries; an Oh My Pi pane calls its own profile's `baseUrl`, which outranks it),
 it writes anything, and refuses a key the endpoint's `GET /v1/models` does not accept (the key goes
 by a 0600 header file, never an argv). With `LEGION_E2E_MODEL_BASE_URL` named it holds that
 endpoint to more ([`lib/model-endpoint.sh`](#libmodel-endpointsh)): `GET /v1/models` with no key
-must not answer 200, or the endpoint checks no key; the alias its `GET /v1/key/info` names for
+must not answer 200, or the endpoint checks no key; the alias its `GET /key/info` names for
 the key is noted (or that it names none); and the agents' key file, when it is another file, is
 held to the same. The run copies the pane's key once into its work
 directory, 0600, and writes the implementer's claim directory (`<state>/claude/<claim token>`, which
@@ -1047,7 +1047,7 @@ and only with `LEGION_E2E_MODEL_BASE_URL`, which it defaults to) is the same end
 reaches it, for a gateway the pods reach at a cluster address the devbox cannot resolve: the key's
 preflight reads it. With a base URL named the preflight holds the endpoint to more
 ([`lib/model-endpoint.sh`](#libmodel-endpointsh)): `GET /v1/models` with no key must not answer
-200, or the endpoint checks no key, and the alias its `GET /v1/key/info` names for the key is noted
+200, or the endpoint checks no key, and the alias its `GET /key/info` names for the key is noted
 (or that it names none). `LEGION_E2E_MODEL_ROUTE` (required, `gateway` or
 `key-file`) is the route the pod's *Oh My Pi* roles take, the operator route's own as Stage 4a takes
 it: under `gateway`, `{pod,models}.yml` with `LEGION_E2E_MODEL_GATEWAY_URL` and
@@ -3306,9 +3306,9 @@ password, and stays a plain YAML scalar), ending in neither a colon nor a slash.
 to the key in `KEY`, the run's 0600 copy of the key file `WHAT` names: `GET /v1/models` with the
 key must answer 200, or the run fails naming the endpoint and the code. With `BASE` named it also
 asks `GET /v1/models` with no key, which must not answer 200 (an endpoint that serves a caller
-with no key proves nothing about the key; the code a refusal gave is noted), and `GET
-/v1/key/info` with the key, whose `key_alias` (a LiteLLM proxy's non-secret name for the key) is
-noted as `the model key is <alias>`, or that the endpoint names no alias, never failing on it.
+with no key proves nothing about the key; the code a refusal gave is noted), and `GET /key/info`
+with the key (a LiteLLM proxy serves key management at its root, not under `/v1`), whose
+`key_alias` (the proxy's non-secret name for the key, at the top level or under `info`) is noted as `the model key is <alias>`, or that the endpoint names no alias, never failing on it.
 Every call sends `anthropic-version: 2023-06-01`; the key reaches curl in `HEADER`, a 0600 header
 file removed before it returns (the callers' cleanup removes it too, after a `fail`), never an
 argv, and neither the key nor a response body is printed.

@@ -37,7 +37,7 @@ model_get() {
 # empty) to the key in KEY, the run's 0600 copy of the key file WHAT names, before anything is
 # created: GET /v1/models with the key must answer 200. With BASE named, two more. GET /v1/models
 # with no key must answer something else, or the endpoint checks no key and its 200 proves nothing
-# about this one. GET /v1/key/info with the key, which a LiteLLM proxy answers with the key's
+# about this one. GET /key/info with the key, which a LiteLLM proxy answers with the key's
 # `key_alias`, notes that non-secret name, or that the endpoint names no alias, and never refuses.
 # The key reaches curl in HEADER, a 0600 header file removed before this returns (a refusal is the
 # caller's fail, an exit, so the caller's cleanup removes HEADER too); neither the key nor a
@@ -65,14 +65,14 @@ model_key_preflight() {
       ;;
     esac
     # The body may echo the key back, so it is 0600 and read for key_alias alone.
-    code=$(umask 077 && model_get "$endpoint/v1/key/info" "$header" "$header.key-info")
+    code=$(umask 077 && model_get "$endpoint/key/info" "$header" "$header.key-info")
     alias=
-    [ "$code" != 200 ] || alias=$(jq -r '.key_alias | strings' "$header.key-info" 2>/dev/null) || alias=
+    [ "$code" != 200 ] || alias=$(jq -r '(.key_alias // .info.key_alias) | strings' "$header.key-info" 2>/dev/null) || alias=
     rm -f "$header.key-info"
     if [[ $alias =~ ^[[:graph:]][[:print:]]*$ ]]; then
-      note "the model key is $alias: the endpoint's name for the key in $what (GET /v1/key/info)"
+      note "the model key is $alias: the endpoint's name for the key in $what (GET /key/info)"
     else
-      note "the model endpoint $endpoint names no key alias for the key in $what: GET /v1/key/info answered $code"
+      note "the model endpoint $endpoint names no key alias for the key in $what: GET /key/info answered $code"
     fi
   fi
   rm -f "$header"

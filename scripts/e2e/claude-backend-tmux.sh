@@ -30,7 +30,7 @@
 # The Claude Code pane's key file holds the key the Claude Code implementer reaches its model with,
 # and the endpoint's own `GET /v1/models` must accept it before any pane starts. With
 # LEGION_E2E_MODEL_BASE_URL named, the preflight (lib/model-endpoint.sh) also holds the endpoint to
-# refusing that call with no key, notes the alias its `GET /v1/key/info` names for the key, and
+# refusing that call with no key, notes the alias its `GET /key/info` names for the key, and
 # holds the agents' key file to the same when it is another file. The run copies the pane's key
 # once into its work directory (0600), and the implementer's claim directory names a key command
 # that prints that copy (Claude Code's apiKeyHelper), so the key reaches no pane's environment, no

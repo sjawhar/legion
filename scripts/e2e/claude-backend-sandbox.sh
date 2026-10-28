@@ -110,7 +110,7 @@
 #   with it) is the same endpoint as the devbox reaches it, for a gateway the pods reach at a
 #   cluster address the devbox cannot resolve. The key's preflight below (lib/model-endpoint.sh)
 #   reads it before anything is created: its `GET /v1/models` must accept the key, and with a base
-#   URL named must refuse a call with no key, and the alias its `GET /v1/key/info` names for the
+#   URL named must refuse a call with no key, and the alias its `GET /key/info` names for the
 #   key is noted.
 # - LEGION_E2E_MODEL_ROUTE (required, `gateway` or `key-file`) is the route the pod's *Oh My Pi*
 #   roles take, the architect and the planner, which is the operator route's own
