@@ -169,6 +169,15 @@ type Service struct {
 	// read and rendered beforehand unmoved, and before it stamps block ids into the room. Nil
 	// outside tests; tests use it to edit the room in that window.
 	afterSettleRead func(room string)
+	// afterSettleTreeRead runs as soon as a settlement pass has copied the tree it settles
+	// (liveTree), before anything renders or changes that tree. Nil outside tests; tests use it to
+	// record the tree as read.
+	afterSettleTreeRead func(room string, read *pmdoc.Node)
+	// beforeSettleVersion runs once a settlement pass has reached its version, which takes the
+	// rendering the pass made of read, the tree it copied, before its transaction, and before the
+	// pass compares that rendering with the latest version. Nil outside tests; tests use it to
+	// require read unchanged since afterSettleTreeRead.
+	beforeSettleVersion func(room string, read *pmdoc.Node)
 	// afterSettleReconcile runs after settleRoom has reconciled the document's ask blocks with
 	// their rows and before it writes their repairs into the room. Nil outside tests; tests use it
 	// to edit the room in that window.
@@ -1603,6 +1612,9 @@ func (s *Service) settlePass(parent context.Context, room string, state *roomSta
 		}
 		return settleDone, stoppedShort(err)
 	}
+	if s.afterSettleTreeRead != nil {
+		s.afterSettleTreeRead(room, read)
+	}
 	if s.beforeSettleRender != nil {
 		s.beforeSettleRender(room)
 	}
@@ -2014,6 +2026,13 @@ func (s *Service) settlePass(parent context.Context, room string, state *roomSta
 		return settleMoved, settleOutcome{}
 	}
 	s.unlockState(room, state)
+
+	// The version takes the rendering this pass made of read before its transaction. Only a
+	// recorded repair changes read in place (settlementReconciliation.repair, repairAsk), and a pass
+	// that reconciled any repairs has ended above, so read is the tree that rendering was made of.
+	if s.beforeSettleVersion != nil {
+		s.beforeSettleVersion(room, read)
+	}
 
 	// Settlement writes a version only when the document now reads differently from the latest
 	// one. Indexing an ask block writes an `asks` row and an `ask.opened` event over words the

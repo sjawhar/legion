@@ -59,6 +59,7 @@ func TestSettlementVersionsARepairTheRoomAlreadyHolds(t *testing.T) {
 			return tree
 		})
 	}
+	invariant := requireReadUnchangedAtVersion(t, service)
 	settleCurrentGeneration(t, service, artifactID)
 	if release == nil {
 		t.Fatal("settlement never reached the window between its reconciliation and its repair")
@@ -66,6 +67,9 @@ func TestSettlementVersionsARepairTheRoomAlreadyHolds(t *testing.T) {
 	release()
 	service.afterSettleReconcile = nil
 	requireNoSuppressedSlots(t, service, artifactID, "after the repair")
+	// The pass that reconciled the repair planned it and ended there; the pass after it read the
+	// room holding the peer's attributes, repaired nothing, and versioned its rendering of that read.
+	invariant.requireVersions(t, artifactID, 1)
 
 	if versions := latestVersionNumber(t, service, artifactID); versions != versionsBefore+1 {
 		t.Fatalf("latest version = %d, want %d: the settlement wrote no version of the edited document", versions, versionsBefore+1)
@@ -118,6 +122,7 @@ func TestSettlementVersionsTheTreeOfAStampThatMintedNothing(t *testing.T) {
 			return tree
 		})
 	}
+	invariant := requireReadUnchangedAtVersion(t, service)
 	settleCurrentGeneration(t, service, artifactID)
 	if release == nil {
 		t.Fatal("settlement never reached the window between its read and its stamp")
@@ -125,6 +130,9 @@ func TestSettlementVersionsTheTreeOfAStampThatMintedNothing(t *testing.T) {
 	release()
 	service.afterSettleRead = nil
 	requireNoSuppressedSlots(t, service, artifactID, "after the stamp")
+	// The pass whose stamp minted nothing ended there; the pass after it read the room holding the
+	// other writer's ids and versioned its rendering of that read.
+	invariant.requireVersions(t, artifactID, 1)
 
 	if versions := latestVersionNumber(t, service, artifactID); versions != versionsBefore+1 {
 		t.Fatalf("latest version = %d, want %d: the settlement wrote no version of the appended blocks", versions, versionsBefore+1)
