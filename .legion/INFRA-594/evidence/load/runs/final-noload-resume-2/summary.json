@@ -1,0 +1,622 @@
+{
+  "config": {
+    "step": "step-10x",
+    "events_per_s": 40,
+    "sessions": 1000,
+    "requests_per_s": 0,
+    "sse": 1,
+    "event_mix": {
+      "name": "production-2026-10-26",
+      "weights": {
+        "anchored": 33,
+        "comment": 3,
+        "edit": 22,
+        "reply": 35,
+        "upload": 7
+      }
+    },
+    "route_mix": "routes-2026-10-26-1719Z.txt (embedded)",
+    "human": 0.1,
+    "warmup_s": 30,
+    "duration_s": 300,
+    "grace_s": 20,
+    "rng_seed": 1,
+    "nats_conns": 50,
+    "session_delivery": "consumer",
+    "marker_nonce": "927310781"
+  },
+  "events": {
+    "offered": 11907,
+    "offered_per_s": 39.69,
+    "committed": 212,
+    "committed_per_s": 0.7066666666666667,
+    "by_kind": {
+      "anchored": {
+        "primary_type": "comment.created",
+        "offered": 3848,
+        "committed": 0,
+        "write_ms": {
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "delivery_ms_from_arrival": {
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "delivery_ms_from_commit": {
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        }
+      },
+      "comment": {
+        "primary_type": "comment.created",
+        "offered": 383,
+        "committed": 0,
+        "write_ms": {
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "delivery_ms_from_arrival": {
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "delivery_ms_from_commit": {
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        }
+      },
+      "edit": {
+        "primary_type": "artifact.version",
+        "offered": 2636,
+        "committed": 149,
+        "write_ms": {
+          "n": 142,
+          "p50": 23081.981529,
+          "p90": 28821.566996,
+          "p99": 29700.254339,
+          "max": 29864.881755
+        },
+        "delivery_ms_from_arrival": {
+          "n": 745,
+          "p50": 23271.372789,
+          "p90": 29198.173225,
+          "p99": 30609.473906,
+          "max": 31358.717879
+        },
+        "delivery_ms_from_commit": {
+          "n": 745,
+          "p50": 81.074932,
+          "p90": 286.996048,
+          "p99": 1100.902403,
+          "max": 1800.187176
+        }
+      },
+      "reply": {
+        "primary_type": "comment.created",
+        "offered": 4246,
+        "committed": 0,
+        "write_ms": {
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "delivery_ms_from_arrival": {
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "delivery_ms_from_commit": {
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        }
+      },
+      "upload": {
+        "primary_type": "artifact.version",
+        "offered": 794,
+        "committed": 63,
+        "write_ms": {
+          "n": 63,
+          "p50": 16185.149855,
+          "p90": 20373.374326,
+          "p99": 24177.597568,
+          "max": 24413.97558
+        },
+        "delivery_ms_from_arrival": {
+          "n": 315,
+          "p50": 16205.43119,
+          "p90": 20891.264933,
+          "p99": 24429.742199,
+          "max": 24431.475839
+        },
+        "delivery_ms_from_commit": {
+          "n": 315,
+          "p50": 131.48317,
+          "p90": 327.096783,
+          "p99": 862.504272,
+          "max": 864.382032
+        }
+      }
+    },
+    "delivery_ms_from_sent": {
+      "n": 1060,
+      "p50": 18592.272336,
+      "p90": 28862.505262,
+      "p99": 30357.489588,
+      "max": 31365.132878
+    },
+    "delivery_ms_from_arrival": {
+      "n": 1060,
+      "p50": 18590.932006,
+      "p90": 28850.398043,
+      "p99": 30357.453858,
+      "max": 31358.717879
+    },
+    "delivery_ms_from_commit": {
+      "n": 1060,
+      "p50": 95.200007,
+      "p90": 305.881026,
+      "p99": 864.308163,
+      "max": 1800.187176
+    },
+    "delivery_ms_from_publish": {
+      "n": 1060,
+      "p50": 6.606119,
+      "p90": 14.811559,
+      "p99": 86.008271,
+      "max": 143.458464
+    },
+    "issue_topic_receipts": 1060,
+    "expected_issue_topic_receipts": 1060,
+    "missing": 0,
+    "agent_topic_receipts": 12,
+    "other_events": 0,
+    "other_receipts": 0,
+    "commit_times_missing": 0,
+    "clock_anomalies": 0,
+    "write_errors": {
+      "non_2xx": 0,
+      "transport": 11702
+    },
+    "conn_wait_ms": {
+      "n": 11907,
+      "p50": 24.655098,
+      "p90": 78.286943,
+      "p99": 216.526541,
+      "max": 775.698989
+    }
+  },
+  "requests": {
+    "target_per_s": 0,
+    "sent": 0,
+    "sent_per_s": 0,
+    "below_target": false,
+    "ok_2xx": 0,
+    "dropped_inflight_cap": 0,
+    "latency_ms": {
+      "n": 0,
+      "p50": 0,
+      "p90": 0,
+      "p99": 0,
+      "max": 0
+    },
+    "conn_wait_ms": {
+      "n": 0,
+      "p50": 0,
+      "p90": 0,
+      "p99": 0,
+      "max": 0
+    },
+    "routes": {}
+  },
+  "resources": {
+    "window_s": 300.003026747,
+    "cpu_cores_mean": {
+      "dispatch": 0.186264787412045,
+      "loadgen": 0.07209927257914339,
+      "nats": 0.03739962266934762,
+      "postgres": 0.7748921819913762,
+      "proxy": 0.06359935833610984
+    },
+    "cpu_cores_peak_5s": {
+      "dispatch": 1.0219583924869289,
+      "loadgen": 0.12470274113540203,
+      "nats": 0.18631919766876726,
+      "postgres": 0.9759799674255807,
+      "proxy": 0.12400569630086414
+    },
+    "rss_mib_max": {
+      "dispatch": 2245.4140625,
+      "listener": 69.0390625,
+      "loadgen": 215.72265625,
+      "nats": 189.5703125,
+      "postgres": 5533.40625,
+      "proxy": 116.9296875
+    },
+    "sys_busy_frac": 0.6011030024326035,
+    "goroutines": {
+      "n": 61,
+      "p50": 3376,
+      "p90": 3474,
+      "p99": 3496,
+      "max": 3537
+    },
+    "pool_acquire_goroutines": {
+      "n": 61,
+      "p50": 1428,
+      "p90": 1562,
+      "p99": 1579,
+      "max": 1584
+    },
+    "pg_conns_total": {
+      "n": 61,
+      "p50": 67,
+      "p90": 75,
+      "p99": 79,
+      "max": 79
+    },
+    "pg_conns_by_state": {
+      "active|": {
+        "n": 61,
+        "p50": 3,
+        "p90": 13,
+        "p99": 19,
+        "max": 23
+      },
+      "active|IO": {
+        "n": 2,
+        "p50": 1,
+        "p90": 1,
+        "p99": 1,
+        "max": 1
+      },
+      "active|LWLock": {
+        "n": 33,
+        "p50": 5,
+        "p90": 16,
+        "p99": 24,
+        "max": 25
+      },
+      "active|Lock": {
+        "n": 40,
+        "p50": 2,
+        "p90": 6,
+        "p99": 60,
+        "max": 61
+      },
+      "idle in transaction (aborted)|": {
+        "n": 2,
+        "p50": 1,
+        "p90": 1,
+        "p99": 1,
+        "max": 1
+      },
+      "idle in transaction (aborted)|Client": {
+        "n": 6,
+        "p50": 1,
+        "p90": 1,
+        "p99": 1,
+        "max": 1
+      },
+      "idle in transaction|": {
+        "n": 21,
+        "p50": 2,
+        "p90": 7,
+        "p99": 8,
+        "max": 11
+      },
+      "idle in transaction|Client": {
+        "n": 61,
+        "p50": 36,
+        "p90": 48,
+        "p99": 53,
+        "max": 54
+      },
+      "idle in transaction|IPC": {
+        "n": 1,
+        "p50": 2,
+        "p90": 2,
+        "p99": 2,
+        "max": 2
+      },
+      "idle in transaction|LWLock": {
+        "n": 10,
+        "p50": 1,
+        "p90": 3,
+        "p99": 3,
+        "max": 6
+      },
+      "idle|": {
+        "n": 11,
+        "p50": 1,
+        "p90": 2,
+        "p99": 2,
+        "max": 4
+      },
+      "idle|Client": {
+        "n": 61,
+        "p50": 16,
+        "p90": 21,
+        "p99": 27,
+        "max": 36
+      },
+      "|": {
+        "n": 4,
+        "p50": 1,
+        "p90": 1,
+        "p99": 1,
+        "max": 3
+      }
+    },
+    "heap_inuse_mib": {
+      "n": 21,
+      "p50": 1397.4453125,
+      "p90": 1663.2734375,
+      "p99": 1689.9453125,
+      "max": 1776.359375
+    },
+    "nats_out_msgs_per_s": 273.0972446791132,
+    "nats_in_msgs_per_s": 170.57827900901916,
+    "nats_slow_consumers": 0,
+    "js_consumers_max": 1004,
+    "js_consumers_last": 1004,
+    "js_api_per_s": 19.079807500832956,
+    "pull_requests_per_s": 29.883031838743438,
+    "session_pull_requests_per_s": 29.883031838743438,
+    "trends": {
+      "dispatch": {
+        "cores_first_third": 0.24846740913688334,
+        "cores_last_third": 0.16114053440198794,
+        "rss_mib_first_third": 2118.562890625,
+        "rss_mib_last_third": 1954.68046875,
+        "rss_slope_mib_per_min": -45.037700130553674,
+        "samples_in_each_third": 20
+      },
+      "loadgen": {
+        "cores_first_third": 0.07294360310234417,
+        "cores_last_third": 0.07351378628273698,
+        "rss_mib_first_third": 178.723046875,
+        "rss_mib_last_third": 214.43515625,
+        "rss_slope_mib_per_min": 10.867567179494992,
+        "samples_in_each_third": 20
+      },
+      "nats": {
+        "cores_first_third": 0.05249017505075696,
+        "cores_last_third": 0.025803549626462124,
+        "rss_mib_first_third": 149.7859375,
+        "rss_mib_last_third": 187.0640625,
+        "rss_slope_mib_per_min": 10.971594060925456,
+        "samples_in_each_third": 20
+      },
+      "postgres": {
+        "cores_first_third": 0.6825809841093464,
+        "cores_last_third": 0.822869931557341,
+        "rss_mib_first_third": 3506.8439453125,
+        "rss_mib_last_third": 3320.5306640625,
+        "rss_slope_mib_per_min": -77.42456416354776,
+        "samples_in_each_third": 20
+      },
+      "proxy": {
+        "cores_first_third": 0.0567686982656298,
+        "cores_last_third": 0.06635198475375974,
+        "rss_mib_first_third": 106.426953125,
+        "rss_mib_last_third": 109.90625,
+        "rss_slope_mib_per_min": 0.7592782891405719,
+        "samples_in_each_third": 20
+      }
+    },
+    "dispatch_cpu_s_per_op": 0.26358224633779953,
+    "xids_per_s": 25.026680363268298,
+    "pg_read_errors": 0,
+    "pprof_read_errors": 0
+  },
+  "commit_order_lock": {
+    "samples": 4605,
+    "errors": 0,
+    "held_fraction": 0.5706840390879478,
+    "waiters": {
+      "n": 4605,
+      "p50": 0,
+      "p90": 3,
+      "p99": 6,
+      "max": 8
+    },
+    "hold_ms": {
+      "n": 297,
+      "p50": 475.533792,
+      "p90": 963.067602,
+      "p99": 1290.639317,
+      "max": 1391.190109
+    },
+    "holds_observed": 297,
+    "holder_doing": [
+      {
+        "holder_doing": "idle in transaction (Client:ClientRead)",
+        "share_of_held_samples": 0.852359208523592
+      },
+      {
+        "holder_doing": "active:  insert into events (issue_key, artifact_id, project_key, seq, type, actor, payload, notif",
+        "share_of_held_samples": 0.08637747336377473
+      },
+      {
+        "holder_doing": "active: select pg_advisory_xact_lock($1)",
+        "share_of_held_samples": 0.017123287671232876
+      },
+      {
+        "holder_doing": "idle in transaction (LWLock:LockManager)",
+        "share_of_held_samples": 0.017123287671232876
+      },
+      {
+        "holder_doing": "idle in transaction",
+        "share_of_held_samples": 0.01445966514459665
+      },
+      {
+        "holder_doing": "active:  update issues set last_seq = $2, updated_at = greatest(updated_at, $3) where key = $1",
+        "share_of_held_samples": 0.0060882800608828
+      },
+      {
+        "holder_doing": "active:  with last_human as materialized ( select coalesce(max(id), 0) as last_id from events wher",
+        "share_of_held_samples": 0.003424657534246575
+      },
+      {
+        "holder_doing": "active:  with recursive chain as ( select i.parent_key, i.labels, 0 as depth from issues i where i",
+        "share_of_held_samples": 0.0015220700152207
+      },
+      {
+        "holder_doing": "active:  update refs set source_seq = $3 where from_kind = $1 and from_id = $2 and source_seq is n",
+        "share_of_held_samples": 0.00076103500761035
+      },
+      {
+        "holder_doing": "active:  select id::text, question from asks where issue_key = $1 and state = 'open' and author-\u003e\u003e",
+        "share_of_held_samples": 0.000380517503805175
+      },
+      {
+        "holder_doing": "idle in transaction (LWLock:XactSLRU)",
+        "share_of_held_samples": 0.000380517503805175
+      }
+    ]
+  },
+  "ungranted_locks": {
+    "samples": 281,
+    "errors": 0,
+    "share_of_samples_with_any_ungranted": 0.6583629893238434,
+    "groups": [
+      {
+        "locktype": "transactionid",
+        "target": "row_wait",
+        "mode": "ShareLock",
+        "top_pairs": [
+          {
+            "waiter_query": " select status, closed_at is null from issues where key = $1 for no key update",
+            "blocker_query": " insert into comments (id, issue_key, artifact_id, author, body, anchor, reply_t",
+            "count": 38
+          },
+          {
+            "waiter_query": " select status, closed_at is null from issues where key = $1 for no key update",
+            "blocker_query": " select coalesce(i.closed_at is null, true) from artifacts a left join issues i ",
+            "count": 35
+          },
+          {
+            "waiter_query": " select status, closed_at is null from issues where key = $1 for no key update",
+            "blocker_query": " with recursive replies as ( select c.id, c.issue_key, c.artifact_id, c.author, ",
+            "count": 23
+          }
+        ],
+        "waiters_p50": 1,
+        "waiters_max": 7,
+        "share_of_samples_with_waiter": 0.5373665480427047
+      },
+      {
+        "locktype": "advisory",
+        "target": "commit_order_lock",
+        "mode": "ExclusiveLock",
+        "top_pairs": [
+          {
+            "waiter_query": "select pg_advisory_xact_lock($1)",
+            "blocker_query": "select pg_advisory_xact_lock($1)",
+            "count": 68
+          },
+          {
+            "waiter_query": "select pg_advisory_xact_lock($1)",
+            "blocker_query": " insert into events (issue_key, artifact_id, project_key, seq, type, actor, payl",
+            "count": 56
+          },
+          {
+            "waiter_query": "select pg_advisory_xact_lock($1)",
+            "blocker_query": " update refs set source_seq = $3 where from_kind = $1 and from_id = $2 and sourc",
+            "count": 27
+          }
+        ],
+        "waiters_p50": 0,
+        "waiters_max": 7,
+        "share_of_samples_with_waiter": 0.3309608540925267
+      },
+      {
+        "locktype": "tuple",
+        "target": "issues",
+        "mode": "ExclusiveLock",
+        "top_pairs": [
+          {
+            "waiter_query": " select status, closed_at is null from issues where key = $1 for no key update",
+            "blocker_query": " select status, closed_at is null from issues where key = $1 for no key update",
+            "count": 5
+          }
+        ],
+        "waiters_p50": 0,
+        "waiters_max": 1,
+        "share_of_samples_with_waiter": 0.017793594306049824
+      }
+    ]
+  },
+  "sessions": {
+    "registered": 1000,
+    "register_errors": 0,
+    "heartbeat_errors": 375,
+    "nats_subscriptions": 7000,
+    "nats_connections": 50,
+    "delivery": {
+      "consumer_sessions": 1000,
+      "core_sessions": 0,
+      "unanswered": 0,
+      "mode_changes": 0,
+      "frames": 6556,
+      "duplicates": 0,
+      "redelivered": 0,
+      "gaps": 0,
+      "undecodable": 0,
+      "reply_errors": 0,
+      "core_copies": 6557,
+      "lane_receipts": 4027
+    }
+  },
+  "sse": {
+    "sse_frames": 20,
+    "sse_order_violations": 0,
+    "sse_frame_ms_from_created_at": {
+      "n": 20,
+      "p50": 131923.273413,
+      "p90": 272727.248391,
+      "p99": 272939.614542,
+      "max": 273232.009451
+    },
+    "sse_frame_ms_from_write_response": {
+      "n": 0,
+      "p50": 0,
+      "p90": 0,
+      "p99": 0,
+      "max": 0
+    }
+  },
+  "sse_bytes": 197915,
+  "stack_exits": [
+    {
+      "name": "listener",
+      "pid": 25305,
+      "first_seen_gone": "2026-10-28T19:56:17.996022522Z"
+    }
+  ]
+}

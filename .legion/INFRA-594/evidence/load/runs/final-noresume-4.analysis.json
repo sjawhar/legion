@@ -1,0 +1,16 @@
+{
+  "listener_down_s": 56.901954329,
+  "restart_to_first_answer_ms": 4074.960499,
+  "sessions_with_backlog": 1000,
+  "backlog_frames": 3000,
+  "backlog_frames_per_session_median": 3.0,
+  "backlog_ms_after_restart_p50": 8021.839689,
+  "backlog_ms_after_restart_p99": 9510.290879,
+  "backlog_ms_after_restart_max (every session has its backlog)": 9875.94738,
+  "backlog_ms_after_first_answer_max": 5800.986881,
+  "backlogpub_published": 3000,
+  "backlogpub_publish_errors": 0,
+  "backlogpub_envelopes_received_once": 3000,
+  "backlogpub_envelopes_missing": 0,
+  "duplicate_frames_in_run": 174
+}

@@ -1,0 +1,62 @@
+{
+  "step": "step-10x",
+  "args": [
+    "-name",
+    "step-10x",
+    "-out",
+    "/legion/scratch/tmp/infra594/load/runs/final-resume-4",
+    "-build-commit",
+    "unknown",
+    "-build-dirty=false",
+    "-box-busy-before",
+    "0.0310",
+    "-events",
+    "40",
+    "-sessions",
+    "1000",
+    "-requests",
+    "600",
+    "-duration",
+    "300s"
+  ],
+  "start": "2026-10-28T19:12:56.812975442Z",
+  "window_start": "2026-10-28T19:13:26.812975442Z",
+  "window_end": "2026-10-28T19:18:26.812975442Z",
+  "end": "2026-10-28T19:20:16.845574982Z",
+  "nproc": 2,
+  "cpu_model": "unknown",
+  "kernel": "4.19.0-gvisor",
+  "box_busy_before": 0.031,
+  "box_busy_before_window_s": 5,
+  "gomaxprocs": "unset",
+  "postgres_version": "PostgreSQL 16.2 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 10.2.1 20210130 (Red Hat 10.2.1-11), 64-bit",
+  "build_commit": "unknown",
+  "build_dirty": false,
+  "seed_meta": {
+    "migration": 134,
+    "build_commit": "unknown",
+    "build_dirty": false,
+    "created_at": "2026-10-28T10:13:38Z",
+    "seed_seconds": 761,
+    "postgres_version": "postgres (PostgreSQL) 16.2",
+    "counts": {
+      "projects": 4,
+      "issues": 1000,
+      "comments": 8000,
+      "artifacts": 1000,
+      "artifact_versions": 1000,
+      "events": 10004
+    }
+  },
+  "stack": "/legion/scratch/tmp/infra594/load/root-after/stack.json",
+  "pg_direct": false,
+  "allow_foreign": false,
+  "pids": {
+    "dispatch": 16865,
+    "listener": 16805,
+    "nats": 16755,
+    "postgres": 22270,
+    "proxy": 22329
+  },
+  "marker_nonce": "999300945"
+}
