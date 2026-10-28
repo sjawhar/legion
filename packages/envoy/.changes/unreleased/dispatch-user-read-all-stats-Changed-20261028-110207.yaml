@@ -1,0 +1,5 @@
+kind: Changed
+body: '`envoy-infra:gcp:Dispatch` gives its database user `dispatch` the database roles `cloudsqlsuperuser` and `pg_read_all_stats`, so `envoy-dispatch census`, which runs as that user, reads the state and transaction age of a lock holder of another role instead of refusing it. The first apply updates the user in place; the provider replaces the user''s whole set of roles with the list, which is why `cloudsqlsuperuser` is named too.'
+time: 2026-10-28T11:02:07.651255709Z
+custom:
+    Issue: dispatch-user-read-all-stats

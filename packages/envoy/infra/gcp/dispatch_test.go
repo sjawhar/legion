@@ -1666,6 +1666,17 @@ func TestDispatchProtectsItsInstanceServerSide(t *testing.T) {
 	}
 }
 
+// Dispatch's database user holds pg_read_all_stats, so the pre-deploy census, which runs as that
+// user, reads the age of a lock holder of another role instead of refusing it; and it names
+// cloudsqlsuperuser too, since the provider replaces the user's whole set of roles with the list.
+func TestDispatchDatabaseUserReadsEverySessionsActivity(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	inputs := m.One(t, "gcp:sql/user:User").Inputs.Mappable()
+	require.Equal(t, "dispatch", inputs["name"])
+	require.Equal(t, []any{"cloudsqlsuperuser", "pg_read_all_stats"}, inputs["databaseRoles"])
+}
+
 // Dispatch itself trims one trailing slash off DISPATCH_AGENT_SECRETS_URL, so the component
 // renders the value as Dispatch reads it.
 func TestDispatchTrimsTheAgentSecretsUrlsTrailingSlash(t *testing.T) {
