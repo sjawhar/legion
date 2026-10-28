@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-492",
-  "completed": "2026-10-27T16:37:01Z",
+  "completed": "2026-10-28T08:51:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2324",
-  "round": "review round: the reviewer's review at 614e0003 (3 threads plus the PR body census and claims), scope set by the architect; one conflict merge of main ae36683e",
+  "round": "review round 5: the reviewer's one finding (claude-envoy's committed bundle stale against the new contracts fields), scope set by the architect; one conflict merge of main b295a3fb",
   "proof": [
+    {
+      "criterion": "Reviewer thread PRRT_kwDORFy7ds6xCnlf: claude-envoy's committed dist/ matches a fresh build after this PR's contracts schema fields, so its check-dist job passes",
+      "surface": "claude-envoy's own build check (the check-dist step CI runs), with the Bun that .bun-version pins",
+      "command": "cd packages/claude-envoy && $TMPDIR/bun-1.4.4/bun-linux-x64/bun scripts/build.ts --check; .../bun scripts/build.ts; .../bun scripts/build.ts --check; .../bun test",
+      "observed": "After the rebuild: 'dist/ and legion/ match a fresh build' (exit 0). The dist diff is only changed, ancestors and thread_logins as optional zod fields. claude-envoy tests: 216 pass, 0 fail. Contracts: 297 pass; dispatch tsc clean, with 410 pass in its api, sse and refs tests; biome check . clean; Go build and vet clean.",
+      "headSha": "5d84d0775ae98ac707b0b0a0245b79a4c1641bf0",
+      "negativeControl": "Before the rebuild, on the same merged tree: 'generated files are stale (dist/dispatch.js, dist/envoy-channel.js, dist/session-hook.js)' (exit 1), as CI job 122310200662 reported at 27152a78. Under Bun 1.3.14 the build refuses: 'refusing to build under Bun 1.3.14: .bun-version pins 1.4.4'."
+    },
     {
       "criterion": "Reviewer thread PRRT_kwDORFy7ds6wtE7Z: a blocker added or removed updates the blocker's open Referenced by count",
       "surface": "Dispatch's Go api package on a real Postgres 17 (the event a tab receives) and the web rule table",
@@ -76,7 +84,8 @@
     "Conflict return: merged main 1b859ea3 as 5873436a; the only conflict was MarkdownBody.test.tsx's import list (both sides kept). Record: the PR comment after https://github.com/sjawhar/legion/pull/2324#issuecomment-6442151664.",
     "Review round: PR body gained the Contract change census and corrected two claims (optimistic mutations still cancel on purpose; focus still refetches stale reads, only the reconnect's whole-cache refresh is gone); structural cleanup stays on Fast-follow as the architect ruled.",
     "Merged main ae36683e as 9e4bb204 (conflicts: one packages/dispatch/AGENTS.md paragraph and packages/envoy/CHANGELOG.md, both sides kept). Main's e2e harness now starts through e2e/run.ts.",
-    "Merged main 452e46479082 as 27152a78 (#2389): AGENTS.md bullet conflict and a test-helper name collision (branch's createChildIssue renamed createTitledChild). Observed, not a defect: the room-under-writes test's write count runs about 15% lower than main (median 37 vs 44 in 5 runs), still well above its floor of 20."
+    "Merged main 452e46479082 as 27152a78 (#2389): AGENTS.md bullet conflict and a test-helper name collision (branch's createChildIssue renamed createTitledChild). Observed, not a defect: the room-under-writes test's write count runs about 15% lower than main (median 37 vs 44 in 5 runs), still well above its floor of 20.",
+    "Merged main b295a3fb as ee6e83db (only conflicts: two additive spots in packages/envoy/CHANGELOG.md, both kept; fingerprint 48597817 unchanged). The pod has Bun 1.3.14; the pinned 1.4.4 (non-baseline bun-linux-x64, as setup-bun installs on an AVX2 runner) was downloaded under $TMPDIR for the build and the checks."
   ],
   "openQuestions": [
     "Memory with kubectl top (dispatch://INFRA-492/comment/8d3d6ac7-d9a7-4187-a9bb-348c88cac96e) is not in the approved acceptance and not done; the architect decides (comment 32 says not added).",
