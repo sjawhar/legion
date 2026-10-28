@@ -125,11 +125,14 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 // once either way, and the required-checks pass's compare carries the approval when only the
 // issue's handoffs changed (daemon's readApprovalCarry). A synchronize that moves nothing - a
 // redelivery, or one carrying no head - changes nothing the verdict or the round reads, and applies
-// and re-asks nothing. In implementing a head that arrives once the implementer has completed is
-// the pull request its completion waited for.
+// and re-asks nothing. A synchronize of a pull request recorded merged changes nothing either:
+// GitHub synchronizes only an open pull request, so one observed after the merge is older than it,
+// a late redelivery the merge's missing clock cannot fence, as a close or a reopen of a merged pull
+// request is (closed, pullRequestOpened). In implementing a head that arrives once the implementer
+// has completed is the pull request its completion waited for.
 func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact intake.PullRequestSynchronized) (intake.Result, error) {
 	pr, err := e.pullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
-	if err != nil || pr == nil || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
+	if err != nil || pr == nil || pr.State == record.PullRequestMerged || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
 		return intake.Result{}, err
 	}
 	prior := *pr
