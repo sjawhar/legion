@@ -335,10 +335,10 @@ export interface Issue {
 export type IssueRouteStatus = (typeof ISSUE_ROUTE_STATUSES)[number];
 
 /**
- * Every issue read (the detail, the list, the pinned list) resolves this from the server's copy
- * of the listener's session list, at most 5 s old. It is stored in no table and is never on an
- * event payload, which is why it is not a field of `Issue`. Both are null when the issue has no
- * route.
+ * Every issue read (the detail, the list, the pinned list) and every ask read (`AskReach`, for
+ * the ask's issue's route) resolves this from the server's copy of the listener's session list,
+ * at most 5 s old. It is stored in no table and is never on an event payload, which is why it is
+ * not a field of `Issue`. Both are null when there is no route.
  */
 export interface IssueRouteReach {
   readonly route_status: IssueRouteStatus | null;
@@ -824,9 +824,30 @@ export interface Ask extends AnchorPosition {
 export const ASK_TURNS = ["human", "agent"] as const;
 export type AskTurn = (typeof ASK_TURNS)[number];
 
+/** Whom besides the followers a person's answer and replies on an ask reach, as every ask read
+ *  carries it: the single-ask read (`AskRead`) and each list row's thread (`AskThread`).
+ *
+ *  The inherited `route_status` and `route_holder` are the issue reads' `IssueRouteReach` for
+ *  `route`, resolved per read from one listener read and stored nowhere: `route_holder` is the
+ *  live session `route` reaches right now (the routed session while the Envoy listener lists it,
+ *  or the session holding the role), so a reader can count each session once (the claimant may be
+ *  the same session). `route_status` tells a route nobody holds (`no_holder`) from one Dispatch
+ *  cannot judge because the listener is unconfigured or did not answer (`unknown`); both leave
+ *  `route_holder` null. Both are null when there is no route, and on a project document's ask. */
+export interface AskReach extends IssueRouteReach {
+  /** The session holding the claim on the ask's issue: a person's answer and replies on the ask
+   *  reach it (Dispatch's claimant route) as well as the route and the followers. Null while
+   *  nobody or a person holds the claim, and on a project document's ask, which has no issue. */
+  readonly claimant: string | null;
+  /** The ask's issue's route (`session:<id>` or `role:<name>`): a person's answer and replies on
+   *  the ask reach that session or role holder as well as the claimant and the followers. Null
+   *  when the issue has no route, and on a project document's ask. */
+  readonly route: string | null;
+}
+
 /** An ask's thread as a list row carries it: everything a card needs before its first targeted
  *  thread refresh. */
-export interface AskThread {
+export interface AskThread extends AskReach {
   readonly replies: Comment[];
   /** Every rewording of the question, oldest first; empty when never edited. */
   readonly edits: AskEdit[];
@@ -2545,7 +2566,7 @@ export interface CommentRead {
   readonly replies: Comment[];
 }
 
-export interface AskRead {
+export interface AskRead extends AskReach {
   readonly ask: Ask;
   readonly replies: Comment[];
   /** Every rewording of the question, oldest first; empty when never edited. */

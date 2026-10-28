@@ -1156,6 +1156,21 @@ type Mention struct {
 	SessionID *string `json:"session_id"`
 }
 
+// DeliveryClaimLapse is the lease on a pending delivery attempt (a comment_deliveries or
+// message_deliveries row): a sender's claim older than this was left by a sender that never came
+// back. Two readers depend on the one window and must agree. The API's claimLapsed
+// (internal/dispatch/api) lets another sender resume or settle an attempt whose claim is older,
+// and the outbox's mentionDeliveryQuery (internal/dispatch/outbox) stops holding a mentioned
+// session's own-topic copy back for a pending mention attempt whose claim - or creation, when no
+// sender claimed it - is older, so the outbox never waits on an attempt a sender may no longer
+// finish. Both judge it in Postgres against Postgres's own timestamps, through
+// DeliveryClaimLapseInterval.
+const DeliveryClaimLapse = time.Minute
+
+// DeliveryClaimLapseInterval is DeliveryClaimLapse as a Postgres interval literal in whole
+// seconds, for SQL that compares a delivery's claimed_at or created_at against now().
+var DeliveryClaimLapseInterval = fmt.Sprintf("interval '%d seconds'", int64(DeliveryClaimLapse/time.Second))
+
 // CommentDelivery records one attempt to deliver a mention to its resolved session.
 type CommentDelivery struct {
 	CommentID  string  `json:"comment_id"`
@@ -1307,11 +1322,16 @@ type CommentEventPayload struct {
 	// ask or is a root comment.
 	ThreadRootID string `json:"thread_root_id,omitempty"`
 	// SuppressRoute and SuppressedAuthors are resolved before the comment event commits,
-	// so the outbox can deduplicate without consulting the live session registry.
-	// SuppressedAuthors names the sessions the author routes skip because a mention delivers the
-	// comment to them: on a reply, its thread's root author when mentioned; on a new comment not
-	// in an ask's thread, every session a mention resolved to, since the outbox reads the
-	// document's authors only when it publishes.
+	// so the outbox can deduplicate without consulting the live session registry. They name
+	// candidates only: the sessions the comment's mentions resolved to when it was written. The
+	// mention's send runs after the commit and can fail, so the outbox skips a candidate's copy only
+	// once comment_deliveries shows its mention was sent to it, holds the copy back while that send
+	// is still pending, and publishes it when the send failed or was abandoned.
+	// SuppressedRoute is the route that resolved to SuppressedRouteSessionID, the candidate whose
+	// mention suppresses the route. SuppressedAuthors names the candidates the author routes skip:
+	// on a reply, its thread's root author when mentioned; on a new comment not in an ask's thread,
+	// every session a mention resolved to, since the outbox reads the document's authors only when
+	// it publishes.
 	SuppressRoute            bool     `json:"suppress_route"`
 	SuppressedRoute          string   `json:"suppressed_route,omitempty"`
 	SuppressedRouteSessionID *string  `json:"suppressed_route_session_id,omitempty"`
