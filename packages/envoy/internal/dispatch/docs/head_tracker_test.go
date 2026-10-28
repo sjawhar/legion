@@ -543,6 +543,75 @@ func TestAServiceWithNothingTheTrackerProtectsSendsNoPing(t *testing.T) {
 	}
 }
 
+// Four processes on one database, each holding a cached cold read with its evictor running, send
+// about one ping a second between them, not one each: every ping reaches every listener and draws
+// each one's quiet window afresh, and the jitter keeps the processes that heard it from pinging
+// together. On a real deployment of four processes each pinged once a second, 240 pings a minute,
+// where the claim was one ping a second for the whole deployment. Every tracker still trusts
+// itself at the end, so the fewer pings still keep each connection proving it delivers.
+func TestFourServicesHoldingSomethingSendAboutOnePingASecondBetweenThem(t *testing.T) {
+	const (
+		processes = 4
+		window    = 12 * time.Second
+		perSecond = 1.5
+	)
+	ctx := context.Background()
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	services := make([]*Service, processes)
+	for i := range services {
+		processStore := database
+		if i > 0 {
+			processStore = storetest.SecondProcess(t, database)
+		}
+		services[i] = newReadCacheService(t, processStore, NewPgVersioned(processStore))
+	}
+	seedServiceText(t, services[0], artifactID, "Seeded.\n")
+	listen, err := pgx.ConnectConfig(ctx, database.Pool.Config().ConnConfig.Copy())
+	if err != nil {
+		t.Fatalf("connect the ping listener: %v", err)
+	}
+	t.Cleanup(func() { _ = listen.Close(context.Background()) })
+	if _, err := listen.Exec(ctx, "listen "+documentPingChannel); err != nil {
+		t.Fatalf("listen on %s: %v", documentPingChannel, err)
+	}
+	for i, service := range services {
+		runProbedEvictor(t, service, nil)
+		if text, err := service.Text(ctx, artifactID); err != nil || text != "Seeded.\n" {
+			t.Fatalf("service %d: cold read = %q (%v), want the seeded text", i, text, err)
+		}
+		if cacheEntry(t, service, artifactID) == nil {
+			t.Fatalf("service %d cached no cold read, so it holds nothing the ping protects and nothing here is tested", i)
+		}
+	}
+
+	deadline := time.Now().Add(window)
+	senders := map[string]int{}
+	pings := 0
+	for {
+		waitCtx, cancel := context.WithDeadline(ctx, deadline)
+		notification, err := listen.WaitForNotification(waitCtx)
+		cancel()
+		if err != nil {
+			break
+		}
+		pings++
+		senders[notification.Payload]++
+	}
+	t.Logf("%d services each holding a cached cold read sent %d pings on %s in %s (%.2f a second), from %d of them", processes, pings, documentPingChannel, window, float64(pings)/window.Seconds(), len(senders))
+	if limit := int(perSecond * window.Seconds()); pings > limit {
+		t.Errorf("%d services sent %d pings in %s, want at most %d (%.1f a second for the whole deployment): every process that heard a ping pinged again together", processes, pings, window, limit, perSecond)
+	}
+	if pings == 0 {
+		t.Errorf("%d services each holding a cached cold read sent no ping in %s, want about one a second: nothing keeps their trackers trusting an idle connection", processes, window)
+	}
+	for i, service := range services {
+		if figures := service.RoomFigures(); !figures.HeadTracker.Trusted || figures.ReadCache.Entries == 0 {
+			t.Errorf("service %d at the end of the window: head tracker %+v, read cache %+v, want trusted and still holding its cached read", i, figures.HeadTracker, figures.ReadCache)
+		}
+	}
+}
+
 // silencingProxy forwards each TCP connection it accepts to target until silence, after which the
 // connections it already holds forward nothing and neither end of them is closed: each looks open
 // to both ends and stays silent, a half-open connection. A connection accepted after silence

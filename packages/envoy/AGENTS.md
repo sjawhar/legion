@@ -526,11 +526,17 @@ tracker hears every content-changing write through `dispatch_doc_head` and `disp
 nothing while its LISTEN is down, or while that connection has delivered nothing for 3 s
 (`headTrustWindow`): a half-open connection, up but silent, is otherwise noticed only by
 pglisten's idle ping after about 35 s. The evictor keeps a healthy idle connection delivering by
-listening on `dispatch_doc_ping` and, whenever its tracker has heard nothing for a second, sending
-`pg_notify('dispatch_doc_ping', <process id>)` through a shared-pool connection bounded at a
-second (a saturated pool skips the ping, and trust lapses to store reads); every process's ping
-reaches every listener, so a deployment sends about one a second at idle and none while
-notifications flow. A read on one process therefore lags a commit on another by at most the
+listening on `dispatch_doc_ping` and, while its process holds something that trust serves (a
+resident room, a cached cold read, a preload or a tracker entry) and its connection has delivered
+nothing for its quiet window, sending `pg_notify('dispatch_doc_ping', <process id>)` through a
+shared-pool connection bounded at a second (a saturated pool skips the ping, and trust lapses to
+store reads). The quiet window is a second plus a jitter under a second (`math/rand/v2`), drawn
+afresh after every delivery and every ping, so processes that heard the same ping do not ping
+together and the first holder to fire resets the rest; the longest gap between pings is under 2 s
+plus a delivery, inside `headTrustWindow`. A process holding none of those sends no ping and still
+counts what it hears as delivery, so a deployment sends about one ping a second while some process
+holds a room, a cached read, a preload or a tracker entry and no document write is announced, and
+none otherwise. A read on one process therefore lags a commit on another by at most the
 notification's delivery, and by at most 3 s plus that delivery on a half-open LISTEN connection.
 Its entry carries the canonical
 markdown, document token, block ranges/tokens and block paths, is immutable after construction,
