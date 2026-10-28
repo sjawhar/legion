@@ -1,8 +1,14 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
+
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by …` with the
+  options chosen and `Answer text: …`, `Closed with no answer: …`, `Closed after an answer: …` with
+  `Last answer by …`, or `Open: no answer yet.`; against a Dispatch older than this release, which
+  reports no state, `Answer state not reported by this Dispatch; open the link to read the ask.`
+  (INFRA-569).
 
 - The packaged skills gain `asd-ste100`, which OpenCode finds on the skills path the config hook
   adds: the ASD-STE100 rules (Simplified Technical English) for text a reader must not misread.
