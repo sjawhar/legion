@@ -1,19 +1,30 @@
 /**
  * Draws each fenced `mermaid` code block of a rendered Markdown body (`MarkdownBody`'s block
- * form; a one-line preview and the inline variant write no `<pre>`) as the diagram the document
- * editor draws: `renderMermaidMarkup` from `@legion/proof-editor/mermaid-render` (upstream's
- * validation and renderer), run in a Web Worker, its markup turned into an element by
+ * form; a one-line preview and the inline variant write no `<pre>`), and each mermaid block of a
+ * document, with one renderer: `renderMermaidMarkup` from `@legion/proof-editor/mermaid-render`
+ * (upstream's validation and renderer), run in a Web Worker, its markup turned into an element by
  * `mermaidSvgElement` from `@legion/proof-editor/mermaid` (a stricter sanitizer and the editor's
- * accessible name). The block becomes a `figure` holding the diagram, then (only for a source the
- * renderer refuses) a status line naming the reason, then the original code block inside a
+ * accessible name). A body's block becomes a `figure` holding the diagram, then (only for a source
+ * the renderer refuses) a status line naming the reason, then the original code block inside a
  * `Mermaid source` disclosure, closed once the diagram drew and open on a refusal so the source is
  * readable at once.
  *
- * The SVG goes in an open shadow root of the preview element, so the diagram's own `<style>`
- * styles that diagram alone rather than every SVG and `<text>` on the page, and its marker ids
- * (`url(#arrowhead…)`) resolve inside that root: two diagrams on a page, or one body shown in two
- * places at once, never point at each other's markers. The accessibility tree and Playwright's
- * locators reach into an open root; the disclosure stays in the light DOM.
+ * A document's blocks draw here too, through the editor's drawer: `features/doc/editor.ts` gives
+ * `createProofEditor` `requestMermaidDrawing` as its `drawMermaid`, so the live editor, a
+ * read-only document and a past version share this queue, its time limit and its cache with every
+ * body on the page. The editor's code-block view asks once when a block opens and again 300 ms
+ * after the last edit of its source, and keeps its last drawing until the answer replaces it.
+ * `requestMermaidDrawing` draws a source at most once: inside the call when it is cached, later
+ * when the worker answers, never after its cancel runs, and never when no worker can run (an
+ * uncached source asked for while the worker is failed, which keeps showing its source).
+ * `mermaidDrawsSettled` resolves once no source is waiting, so a block link or a highlighted mark
+ * can be focused again after the diagrams above it have drawn and moved it.
+ *
+ * Both mount the SVG with `showMermaidSvg` in an open shadow root of the preview element, so the
+ * diagram's own `<style>` styles that diagram alone rather than every SVG and `<text>` on the
+ * page, and its marker ids (`url(#arrowhead…)`) resolve inside that root: two diagrams on a page,
+ * or one body shown in two places at once, never point at each other's markers. The accessibility
+ * tree and Playwright's locators reach into an open root; the disclosure stays in the light DOM.
  *
  * A mermaid block whose fence the parser still reads as open is still being written (an unclosed
  * fence runs to the end of the document), so it stays code: the live view re-parses a turn on
@@ -24,22 +35,23 @@
  * block (`endsInOpenMermaidFence`).
  *
  * The renderer (beautiful-mermaid and ELK) runs in one shared worker (`mermaid-render.worker.ts`),
- * created only once a body holds a mermaid block not drawn before: ELK's layout time grows faster
- * than the diagram (a flowchart of 400 nodes takes seconds), and any comment, ask or message
- * reaches readers who did not choose it, so no source may hold the page's main thread. The worker
- * draws one source at a time, in the order bodies asked; a source it has not answered
- * `RENDER_TIME_LIMIT_MS` after it started on it is refused (`Unable to render Mermaid diagram: it
- * did not finish within 5 seconds`), and the worker is terminated, which stops that layout, and a
- * fresh one takes the sources still waiting. A source no body waits for any more (every body that
- * asked for it re-painted or unmounted) is dropped and never sent; if the worker is drawing it,
- * the worker is terminated the same way, nothing is cached for it (a reader who comes back asks
- * again), and a fresh one takes the sources still waiting, so a reader who leaves a page of slow
- * diagrams does not wait for them on the next. That check runs on a microtask after the cancel:
- * React runs a layout effect's cleanup and the next run of it in one commit, so a body re-painted
- * with the same block (the live view, every frame while text after a finished diagram streams)
- * asks again first, and its source keeps its place and the draw in flight. A worker that fails to
- * start or load leaves every block as code, logs once, and none is started again until the
- * window's next `online` event.
+ * created only once a body or a document holds a mermaid block not drawn before: ELK's layout time
+ * grows faster than the diagram (a flowchart of 400 nodes takes seconds), any comment, ask or
+ * message reaches readers who did not choose it, and a document is where diagrams get edited, so
+ * no source may hold the page's main thread. The worker draws one source at a time, in the order
+ * they were asked for; a source it has not answered `RENDER_TIME_LIMIT_MS` after it started on it
+ * is refused (`Unable to render Mermaid diagram: it did not finish within 5 seconds`), and the
+ * worker is terminated, which stops that layout, and a fresh one takes the sources still waiting.
+ * A source no one waits for any more (every body that asked for it re-painted or unmounted, every
+ * editor block that asked for it was edited or removed) is dropped and never sent; if the worker
+ * is drawing it, the worker is terminated the same way, nothing is cached for it (a reader who
+ * comes back asks again), and a fresh one takes the sources still waiting, so a reader who leaves
+ * a page of slow diagrams does not wait for them on the next. That check runs on a microtask after
+ * the cancel: React runs a layout effect's cleanup and the next run of it in one commit, so a body
+ * re-painted with the same block (the live view, every frame while text after a finished diagram
+ * streams) asks again first, and its source keeps its place and the draw in flight. A worker that
+ * fails to start or load leaves every block as code, logs once, and none is started again until
+ * the window's next `online` event.
  *
  * Drawn results are cached by source (the sanitized SVG, cloned per use, or the refusal), the
  * newest 32. A cached source draws in the layout effect that painted its body, so a body re-painted
@@ -47,16 +59,18 @@
  * code and is replaced when the worker answers, unless the body re-painted or unmounted first, so
  * a diagram's first draw moves the content below it once.
  */
-import { mermaidSvgElement } from "@legion/proof-editor/mermaid";
+import {
+  type MermaidDrawing,
+  mermaidSvgElement,
+  showMermaidSvg,
+} from "@legion/proof-editor/mermaid";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 
 import { dangerText } from "../../theme/classes";
 import type { MermaidReply, MermaidRequest } from "./mermaid-render.worker";
 
-/** A drawn source: its sanitized SVG, or the status line a refusal shows. */
-type Drawing = { svg: SVGSVGElement } | { error: string };
-/** Draws one block once its source's answer arrives. */
-type LateDraw = (drawn: Drawing) => void;
+/** Draws one body block, or one editor block, once its source's answer arrives. */
+type LateDraw = (drawn: MermaidDrawing) => void;
 /** Parses a source with the engine and soft-break policy that parsed the body; `undefined` for a
  *  source the engine refuses. */
 type Reparse = (source: string) => ProseMirrorNode | undefined;
@@ -86,11 +100,13 @@ const CONTAINER_LEAD = /^(?:[ \t]*(?:>|(?:[-+*]|\d{1,9}[.)])(?=[ \t]|$)))*[ \t]*
 /** The one rule the diagram needs beside its own sheet: its natural width, up to the body's. */
 const PREVIEW_STYLE = "svg{max-width:100%;height:auto;display:block}";
 
-const drawings = new Map<string, Drawing>();
+const drawings = new Map<string, MermaidDrawing>();
 /** Each source asked for and not answered yet, oldest first, with the draws its answer feeds in
- *  paint order. The first is the one the worker is drawing or starts on next. A source whose
- *  draws were all cancelled stays, with none, until the cancel's microtask drops it. */
+ *  the order they asked. The first is the one the worker is drawing or starts on next. A source
+ *  whose draws were all cancelled stays, with none, until the cancel's microtask drops it. */
 const requests = new Map<string, LateDraw[]>();
+/** Resolves each pending `mermaidDrawsSettled` promise; run once `requests` is empty. */
+const settledWaiters: (() => void)[] = [];
 let renderer: Renderer | undefined;
 /** A worker failed to start or load; none is started until the window's next `online` event. */
 let failed = false;
@@ -160,7 +176,7 @@ function endsInOpenMermaidFence(
   );
 }
 
-function refusal(reason: string | null): Drawing {
+function refusal(reason: string | null): MermaidDrawing {
   return {
     error:
       reason === null
@@ -169,8 +185,19 @@ function refusal(reason: string | null): Drawing {
   };
 }
 
+/** Resolves every `mermaidDrawsSettled` promise on the microtask after no source is waiting, so
+ *  each draw that settled the last one has run first; a source asked for before that microtask
+ *  keeps them waiting. Run after every change that can empty `requests`. */
+function noteSettled(): void {
+  if (requests.size > 0 || settledWaiters.length === 0) return;
+  queueMicrotask(() => {
+    if (requests.size > 0) return;
+    for (const resolve of settledWaiters.splice(0)) resolve();
+  });
+}
+
 /** Caches `drawn` for `source` and runs the draws that waited on it. */
-function settle(source: string, drawn: Drawing): void {
+function settle(source: string, drawn: MermaidDrawing): void {
   if (drawings.size >= CACHE_LIMIT) {
     const oldest = drawings.keys().next();
     if (oldest.done !== true) drawings.delete(oldest.value);
@@ -179,6 +206,7 @@ function settle(source: string, drawn: Drawing): void {
   const draws = requests.get(source) ?? [];
   requests.delete(source);
   for (const draw of draws) draw(drawn);
+  noteSettled();
 }
 
 /** Terminates the worker, which stops a layout it is running, and forgets it and the request it
@@ -196,6 +224,7 @@ function fail(error: unknown): void {
   failed = true;
   stopRenderer();
   requests.clear();
+  noteSettled();
   window.addEventListener("online", recover, { once: true });
   console.error("Showing Mermaid source as code, the diagram renderer is unavailable", error);
 }
@@ -212,7 +241,7 @@ function answer(from: Renderer, reply: MermaidReply): void {
   if (current?.id !== reply.id) return;
   window.clearTimeout(current.timer);
   from.current = undefined;
-  let drawn: Drawing;
+  let drawn: MermaidDrawing;
   if ("markup" in reply) {
     try {
       drawn = { svg: mermaidSvgElement(reply.markup, document) };
@@ -281,11 +310,12 @@ function dropAbandoned(): void {
     requests.delete(source);
     if (renderer?.current?.source === source) stopRenderer();
   }
+  noteSettled();
   sendNext();
 }
 
 /** Replaces `pre` with its drawn figure, moving `pre` itself into the source disclosure. */
-function drawBlock(pre: HTMLPreElement, drawn: Drawing): void {
+function drawBlock(pre: HTMLPreElement, drawn: MermaidDrawing): void {
   const document = pre.ownerDocument;
   const figure = document.createElement("figure");
   figure.className = "dispatch-mermaid";
@@ -296,9 +326,7 @@ function drawBlock(pre: HTMLPreElement, drawn: Drawing): void {
   if ("svg" in drawn) {
     const preview = document.createElement("div");
     preview.className = "dispatch-mermaid-preview";
-    const style = document.createElement("style");
-    style.textContent = PREVIEW_STYLE;
-    preview.attachShadow({ mode: "open" }).append(style, document.importNode(drawn.svg, true));
+    showMermaidSvg(preview, drawn.svg, PREVIEW_STYLE);
     figure.append(preview);
   } else {
     const status = document.createElement("p");
@@ -314,14 +342,50 @@ function drawBlock(pre: HTMLPreElement, drawn: Drawing): void {
 }
 
 /**
+ * The editor's `MermaidDrawer` (`@legion/proof-editor/mermaid`), and the one way any block here
+ * asks for a drawing. A cached source calls `draw` now, inside the call. An uncached one joins
+ * the queue and `draw` runs when the worker answers, unless the worker is failed, when it never
+ * runs and the block keeps showing its source. Returns the cancel: it takes `draw` off the
+ * source's list, so a cancelled draw never runs and holds none of its caller's DOM while the
+ * worker draws, then queues `dropAbandoned` on a microtask, after any re-paint in the same commit
+ * has asked again. A source drawn or refused already, or never queued, has a cancel that does
+ * nothing.
+ */
+export function requestMermaidDrawing(source: string, draw: LateDraw): () => void {
+  // A code block keeps its source's line ends, and the renderer splits lines at LF alone, so a
+  // source written with lone CRs reaches it as LF; CRLF too, so one diagram is one cache entry
+  // whoever asks for it.
+  const normalised = source.replace(/\r\n?/g, "\n");
+  const drawn = drawings.get(normalised);
+  if (drawn !== undefined) {
+    draw(drawn);
+    return noop;
+  }
+  if (failed) return noop;
+  const draws = requests.get(normalised);
+  if (draws === undefined) requests.set(normalised, [draw]);
+  else draws.push(draw);
+  sendNext();
+  let cancelled = false;
+  return () => {
+    if (cancelled) return;
+    cancelled = true;
+    const waiting = requests.get(normalised);
+    const at = waiting?.indexOf(draw) ?? -1;
+    if (at >= 0) waiting?.splice(at, 1);
+    if (dropQueued) return;
+    dropQueued = true;
+    queueMicrotask(dropAbandoned);
+  };
+}
+
+/**
  * Draws every mermaid code block `element` holds (painted from `parsed`, the parse of
- * `markdown`) but one whose fence is still open. `reparse` parses with the engine and soft-break
- * policy that produced `parsed`; the open-fence check runs it once, only when the body ends in a
- * mermaid block. A block whose source is cached draws now; every other one when the worker
- * answers, in the order the bodies were painted. Returns the cancel for those late draws: it takes
- * this call's own draws off each source's list, so a cancelled draw never runs and holds none of
- * the body's DOM while the worker draws, then queues `dropAbandoned` on a microtask, after any
- * re-paint in the same commit has asked again.
+ * `markdown`) but one whose fence is still open, each through `requestMermaidDrawing`. `reparse`
+ * parses with the engine and soft-break policy that produced `parsed`; the open-fence check runs
+ * it once, only when the body ends in a mermaid block. A block whose source is cached draws now;
+ * every other one when the worker answers, in the order the bodies were painted. Returns the
+ * cancel for those late draws, which runs each block's own cancel.
  */
 export function drawMermaidDiagrams(
   element: HTMLElement,
@@ -329,39 +393,29 @@ export function drawMermaidDiagrams(
   markdown: string,
   reparse: Reparse
 ): () => void {
-  // A code block keeps its source's line ends, and the renderer splits lines at LF alone, so a
-  // source written with lone CRs reaches it as LF; CRLF too, so one diagram is one cache entry.
-  const blocks = Array.from(element.querySelectorAll<HTMLPreElement>("pre[data-language]"))
-    .filter((pre) => isMermaidLanguage(pre.getAttribute("data-language")))
-    .map((pre): [HTMLPreElement, string] => [pre, (pre.textContent ?? "").replace(/\r\n?/g, "\n")]);
+  const blocks = Array.from(element.querySelectorAll<HTMLPreElement>("pre[data-language]")).filter(
+    (pre) => isMermaidLanguage(pre.getAttribute("data-language"))
+  );
   if (blocks.length > 0 && endsInOpenMermaidFence(parsed, markdown, reparse)) blocks.pop();
-  const late: [HTMLPreElement, string][] = [];
-  for (const [pre, source] of blocks) {
-    const drawn = drawings.get(source);
-    if (drawn === undefined) late.push([pre, source]);
-    else drawBlock(pre, drawn);
-  }
-  if (late.length === 0 || failed) return noop;
-  const waiting: [string, LateDraw][] = [];
-  for (const [pre, source] of late) {
-    const draw: LateDraw = (drawn) => drawBlock(pre, drawn);
-    waiting.push([source, draw]);
-    const draws = requests.get(source);
-    if (draws === undefined) requests.set(source, [draw]);
-    else draws.push(draw);
-  }
-  sendNext();
+  const cancels = blocks.map((pre) =>
+    requestMermaidDrawing(pre.textContent ?? "", (drawn) => drawBlock(pre, drawn))
+  );
   return () => {
-    for (const [source, draw] of waiting) {
-      const draws = requests.get(source);
-      const at = draws?.indexOf(draw) ?? -1;
-      if (at >= 0) draws?.splice(at, 1);
-    }
-    waiting.length = 0;
-    if (dropQueued) return;
-    dropQueued = true;
-    queueMicrotask(dropAbandoned);
+    for (const cancel of cancels) cancel();
   };
+}
+
+/**
+ * Resolves on the microtask after no source is waiting for the worker: every block that asked
+ * has drawn, been refused or been cancelled, or a failure or a reset cleared the queue. With
+ * none waiting it resolves at once. A block link or a highlighted mark is focused again then,
+ * after the diagrams above it have drawn and moved it (`features/doc/refocus-after-diagrams.ts`).
+ */
+export function mermaidDrawsSettled(): Promise<void> {
+  if (requests.size === 0) return Promise.resolve();
+  const { promise, resolve } = Promise.withResolvers<void>();
+  settledWaiters.push(resolve);
+  return promise;
 }
 
 /**
@@ -375,5 +429,6 @@ export function resetMermaidDiagrams(limitMs = RENDER_TIME_LIMIT_MS): void {
   window.removeEventListener("online", recover);
   drawings.clear();
   requests.clear();
+  noteSettled();
   timeLimitMs = limitMs;
 }

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import type { MermaidDrawing } from "@legion/proof-editor/mermaid";
 import * as mermaidRenderer from "@legion/proof-editor/mermaid-render";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, waitFor, within } from "@testing-library/react";
@@ -6,7 +7,11 @@ import type { ReactNode } from "react";
 
 import { MarkdownBody } from "./MarkdownBody";
 import { warmMarkdownRenderer } from "./markdown-engine";
-import { resetMermaidDiagrams } from "./mermaid-diagrams";
+import {
+  mermaidDrawsSettled,
+  requestMermaidDrawing,
+  resetMermaidDiagrams,
+} from "./mermaid-diagrams";
 import {
   answerMermaidRequest,
   type MermaidReply,
@@ -582,5 +587,124 @@ describe("Mermaid diagrams", () => {
       logged.mockRestore();
       view.unmount();
     }
+  });
+
+  // The editor's drawer: the same queue, cache and failure latch as a body's blocks, asked for
+  // one source at a time.
+  describe("requestMermaidDrawing", () => {
+    test("a cached source draws inside the call, and is not sent again", async () => {
+      const source = "sequenceDiagram\n  Alice->>Bob: Cached";
+      const first: MermaidDrawing[] = [];
+      requestMermaidDrawing(source, (drawing) => first.push(drawing));
+      await waitFor(() => expect(first).toHaveLength(1));
+      const again: MermaidDrawing[] = [];
+      requestMermaidDrawing(source, (drawing) => again.push(drawing));
+      // Checked before any await: a cached draw deferred to a later microtask or task fails here.
+      expect(again).toHaveLength(1);
+      expect(again[0]).toBe(first[0]);
+      expect(FakeWorker.sent).toEqual([source]);
+    });
+
+    test("a cancel before the answer means its draw never runs, and a source no one else waits for is never sent", async () => {
+      const shared = "sequenceDiagram\n  Alice->>Bob: Shared";
+      const alone = "sequenceDiagram\n  Erin->>Finn: Alone";
+      const drawn: string[] = [];
+      const cancelShared = requestMermaidDrawing(shared, () => drawn.push("shared, cancelled"));
+      requestMermaidDrawing(shared, () => drawn.push("shared, kept"));
+      const cancelAlone = requestMermaidDrawing(alone, () => drawn.push("alone, cancelled"));
+      cancelShared();
+      cancelAlone();
+      await waitFor(() => expect(drawn).toContain("shared, kept"));
+      // A source still queued would be answered before the queue settles, so its draw would run.
+      await mermaidDrawsSettled();
+      expect(drawn).toEqual(["shared, kept"]);
+      expect(FakeWorker.sent).toEqual([shared]);
+    });
+
+    test("with the renderer failed an uncached source never draws, nor waits to be sent once it recovers", async () => {
+      FakeWorker.startFails = true;
+      const logged = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const drawn: string[] = [];
+        requestMermaidDrawing("sequenceDiagram\n  Alice->>Bob: Before", () => drawn.push("before"));
+        await waitFor(() => expect(logged).toHaveBeenCalledTimes(1));
+        requestMermaidDrawing("sequenceDiagram\n  Alice->>Bob: Failed", () => drawn.push("failed"));
+        await Bun.sleep(20);
+        expect(drawn).toEqual([]);
+        expect(FakeWorker.created).toHaveLength(1);
+
+        // A source queued while failed would be sent first by the next worker and drawn.
+        FakeWorker.startFails = false;
+        window.dispatchEvent(new Event("online"));
+        const after = "sequenceDiagram\n  Alice->>Bob: After";
+        requestMermaidDrawing(after, () => drawn.push("after"));
+        await waitFor(() => expect(drawn).toContain("after"));
+        await mermaidDrawsSettled();
+        expect(drawn).toEqual(["after"]);
+        expect(FakeWorker.sent).toEqual([after]);
+      } finally {
+        logged.mockRestore();
+      }
+    });
+
+    test("a source written with CRLF, lone CR or LF line ends is one request and one cache entry", async () => {
+      const drawn: MermaidDrawing[] = [];
+      requestMermaidDrawing("sequenceDiagram\r\n  Alice->>Bob: Ends", (drawing) =>
+        drawn.push(drawing)
+      );
+      requestMermaidDrawing("sequenceDiagram\n  Alice->>Bob: Ends", (drawing) =>
+        drawn.push(drawing)
+      );
+      await waitFor(() => expect(drawn).toHaveLength(2));
+      expect(drawn[1]).toBe(drawn[0]);
+      expect(FakeWorker.sent).toEqual(["sequenceDiagram\n  Alice->>Bob: Ends"]);
+      requestMermaidDrawing("sequenceDiagram\r  Alice->>Bob: Ends", (drawing) =>
+        drawn.push(drawing)
+      );
+      expect(drawn).toHaveLength(3);
+      expect(drawn[2]).toBe(drawn[0]);
+    });
+  });
+
+  describe("mermaidDrawsSettled", () => {
+    /** Whether `promise` settles within `ms`, so a promise that never resolves fails the case on
+     *  its assertion rather than on the test's timeout. */
+    const settlesWithin = (promise: Promise<void>, ms: number): Promise<boolean> =>
+      Promise.race([promise.then(() => true), Bun.sleep(ms).then(() => false)]);
+
+    test("resolves at once when no source is waiting", async () => {
+      let settled = false;
+      void mermaidDrawsSettled().then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(true);
+      expect(FakeWorker.created).toHaveLength(0);
+    });
+
+    test("resolves only after the last waiting source is answered, not after the first", async () => {
+      const events: string[] = [];
+      requestMermaidDrawing("sequenceDiagram\n  Alice->>Bob: First", () => events.push("first"));
+      requestMermaidDrawing("sequenceDiagram\n  Carol->>Dave: Second", () => events.push("second"));
+      const settled = mermaidDrawsSettled().then(() => {
+        events.push("settled");
+      });
+      expect(await settlesWithin(settled, 2000)).toBe(true);
+      expect(events).toEqual(["first", "second", "settled"]);
+    });
+
+    test("resolves once a failed renderer clears the queue", async () => {
+      FakeWorker.startFails = true;
+      const logged = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const drawn: string[] = [];
+        requestMermaidDrawing("sequenceDiagram\n  Alice->>Bob: Never", () => drawn.push("never"));
+        expect(await settlesWithin(mermaidDrawsSettled(), 1000)).toBe(true);
+        expect(logged).toHaveBeenCalledTimes(1);
+        expect(drawn).toEqual([]);
+      } finally {
+        logged.mockRestore();
+      }
+    });
   });
 });

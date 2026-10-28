@@ -12,6 +12,7 @@ import { colorForLogin } from "./connection";
 import { createDoc, type EditorHandle } from "./editor";
 import type { Highlight } from "./highlight";
 import { embedHighlight } from "./highlight";
+import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 import { DocumentRuntime } from "./runtime";
 import type { AskBlockHost } from "./typed-block-drawing";
 
@@ -66,6 +67,7 @@ export function VersionView({
     let ydoc: Doc | undefined;
     let handle: EditorHandle | undefined;
     let mounted = true;
+    let disposeRefocus = () => {};
     setRenderError(undefined);
     const mount = async () => {
       const doc = await createDoc();
@@ -92,7 +94,11 @@ export function VersionView({
       editor.setMarkdown(embedded ?? markdown);
       setHighlightMissing(highlight !== undefined && embedded === undefined);
       if (embedded !== undefined && highlight !== undefined) {
-        editor.focusMark(highlight.id);
+        const focusHighlight = () => editor.focusMark(highlight.id);
+        focusHighlight();
+        // A diagram above the quote that draws after this focus pushes it down, so the focus
+        // runs again once the diagrams have drawn; the cleanup drops it once unmounted.
+        disposeRefocus = refocusAfterDiagrams(focusHighlight, () => mounted);
       }
     };
     mount().catch((error: unknown) => {
@@ -107,6 +113,7 @@ export function VersionView({
 
     return () => {
       mounted = false;
+      disposeRefocus();
       handle?.destroy();
       ydoc?.destroy();
     };

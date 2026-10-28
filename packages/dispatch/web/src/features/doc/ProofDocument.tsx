@@ -62,6 +62,7 @@ import {
 } from "./marks";
 import { NameVersionDialog } from "./NameVersionDialog";
 import type { PendingState } from "./pending-sync";
+import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 import { FRAGMENT_NAME } from "./roots";
 import { DocumentRuntime } from "./runtime";
 import { loadBlockSchema } from "./schema";
@@ -422,8 +423,17 @@ export function ProofDocument({
     const bindEditor = (handle: EditorHandle, connection: DocumentConnection) => {
       installTypedBlocks(handle.view, blockSchema, setAskBlockHosts);
       const blockLink = window.location.hash;
+      // A diagram above the block that draws after this focus pushes the block down, so the focus
+      // runs again once the diagrams have drawn, while the hash still names this block. The
+      // returned dispose drops it when this editor unbinds.
+      let disposeRefocus = () => {};
       if (blockLink.startsWith("#b-")) {
-        handle.focusBlock(decodeURIComponent(blockLink.slice(3)));
+        const focusLinkedBlock = () => handle.focusBlock(decodeURIComponent(blockLink.slice(3)));
+        focusLinkedBlock();
+        disposeRefocus = refocusAfterDiagrams(
+          focusLinkedBlock,
+          () => window.location.hash === blockLink
+        );
       }
       setSearchHighlights(handle.view.dom, highlightTermRef.current);
       marginRef.current.registerDocument({
@@ -471,6 +481,7 @@ export function ProofDocument({
       publishPlacements();
       fragment.observeDeep(publishPlacements);
       return () => {
+        disposeRefocus();
         cancelAnimationFrame(frame);
         cancelAnimationFrame(searchFrame);
         resizeObserver.disconnect();
