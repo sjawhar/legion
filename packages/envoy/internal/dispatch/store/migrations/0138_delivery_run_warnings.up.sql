@@ -1,5 +1,5 @@
 -- 0138_delivery_run_warnings.up.sql
--- INFRA-562: the configuration warnings the Delivery page's reads log once across every Dispatch
+-- The configuration warnings the Delivery page's reads log once across every Dispatch
 -- process. A read judges every deploy run (api/delivery.go, productionApplies) and warns about a
 -- successful run holding none of delivery_settings.production_job_names, and about a run whose
 -- production job lists no step named production_apply_step_name: either run never counts as a

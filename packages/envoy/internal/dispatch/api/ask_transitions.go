@@ -94,6 +94,10 @@ func answerTransition(actor model.Actor, selected []string, text *string, option
 					return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "answer requires a selected option or free-text answer")
 				}
 			}
+			// An answer that chose no option stores an empty list, never null.
+			if selected == nil {
+				selected = []string{}
+			}
 			// The transaction's now(), read under the ask's row lock (transitionAskTx), so it is
 			// the created_at of this answer's ask.answered event too. Each process's host keeps
 			// its own clock, and this `at` is compared with times the database stamped: the carry

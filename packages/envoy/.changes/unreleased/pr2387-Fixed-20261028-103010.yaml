@@ -1,0 +1,10 @@
+kind: Fixed
+body: |-
+    Migrations `0135` to `0138` are additive (a nullable column, two indexes and three new tables),
+    so the release before them keeps serving beside this one through a rolling update, and rolling
+    back past them is an image rollback alone. While both releases serve, only this release's
+    processes share the route list, the GitHub rate limits and the warnings, and resume stranded
+    deliveries.
+time: 2026-10-28T10:30:10.000000000Z
+custom:
+    Issue: pr2387

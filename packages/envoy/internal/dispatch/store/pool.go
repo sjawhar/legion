@@ -154,7 +154,15 @@ func NewPool(pool *pgxpool.Pool) *Pool {
 // the DSN another repository's URL builder writes. It is 64, from 16, since 2026-10-27: a
 // request takes a connection per statement one after another (an issue read is about eleven),
 // so under ~240 agent requests a minute the API held all sixteen and every other request waited
-// seconds for one; the database (16 vCPU) has hundreds of connections spare.
+// seconds for one. The database bounds it from above. Dispatch's database is the gcp:Dispatch
+// component's Cloud SQL Postgres instance, whose default max_connections follows its tier's
+// memory (https://cloud.google.com/sql/docs/postgres/flags, max_connections), and every server
+// pod opens up to ConnectionsPerProcess. During a roll, every pod that holds connections (the
+// replicas, the surge pod and pods still terminating, for up to their grace period) times that
+// sum must fit in max_connections less PostgreSQL's 3 superuser-reserved slots, so raising a pool
+// or the pod count is checked against it: read SHOW max_connections on the instance before
+// raising either. A new pool, or a new permanent Listener caller, goes into
+// ConnectionsPerProcess with it.
 const sharedPoolSize = 64
 
 // roomsPoolSize bounds the connections document loads use. Loading takes no lock and always
@@ -290,6 +298,15 @@ func (p *Pool) Leases() (*pgxpool.Pool, error) {
 // is one goroutine that runs one statement at a time and closes each cursor before its next
 // statement, so one connection is every connection it can use.
 const outboxPoolSize = 1
+
+// permanentListeners is how many connections the listener pool dials and hands off for the life
+// of the process: the delivery hub, the event stream relay and the stale-room evictor (Listener).
+const permanentListeners = 3
+
+// ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres:
+// every pool's size, and one connection per permanent listener, which the listener pool dials and
+// hands off rather than holds.
+const ConnectionsPerProcess = sharedPoolSize + roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + permanentListeners
 
 // Outbox is the pool the events outbox claims, reads and records events through, and reads the
 // followers and authors a publish routes to. Under load the API's requests queue for the shared

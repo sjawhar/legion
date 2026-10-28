@@ -1,3 +1,4 @@
+import { ASK_QUESTION_MAX } from "@legion/contracts/dispatch-tools";
 import { expect, type Page, test } from "@playwright/test";
 import type { Artifact } from "../web/src/api/types";
 
@@ -399,21 +400,23 @@ test("an answer started before a hand-back that rewords nothing is saved, and th
   }
 });
 
-test("an approval ask's Inbox card shows a question carrying a long summary whole", async ({
+test("an approval ask's Inbox card shows a question carrying a long summary whole @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "GATE", name: "Gate" });
   const issue = await createIssue({ project: "GATE", spec: "The plan.", title: "Design gate" });
-  // Nearly as long as the ask cap leaves a summary: 762 units, budgeted against the longest version
-  // a request can reach ("Approve spec.md (version 9999999999)? "), cut at a word so the text still
-  // reads as a sentence.
+  // Nearly as long as the ask cap leaves a summary, budgeted as the server budgets it
+  // (`approvalQuestion` in `internal/dispatch/api/reviews.go`): the cap less the question at the
+  // longest version a request can reach, less the space before the summary. Cut at a word, so the
+  // text still reads as a sentence.
+  const room = ASK_QUESTION_MAX - "Approve spec.md (version 9999999999)?".length - 1;
   const opening =
     "Retries a failed push at most three times, one minute apart, and then stops and names the push that failed. ";
   const ending = "Nothing else in the retry path changes.";
-  const filler = opening.repeat(8).slice(0, 762 - ending.length);
+  const filler = opening.repeat(Math.ceil(room / opening.length)).slice(0, room - ending.length);
   const summary = filler.slice(0, filler.lastIndexOf(" ") + 1) + ending;
-  expect(summary.length).toBeGreaterThan(740);
-  expect(summary.length).toBeLessThanOrEqual(762);
+  expect(summary.length).toBeGreaterThan(room - 15);
+  expect(summary.length).toBeLessThanOrEqual(room);
   const requested = await requestApproval(issue.primary_artifact_id, { summary }, session);
   expect(requested.ask.question).toBe(`Approve spec.md (version 1)? ${summary}`);
 
@@ -573,7 +576,7 @@ test("rejecting a suggestion on part of an identifier in an approved spec leaves
   }
 });
 
-test("an approval request for an unassigned issue's non-primary document remains actionable while the primary is draft", async ({
+test("an approval request for an unassigned issue's non-primary document remains actionable while the primary is draft @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "GATE", name: "Gate" });
@@ -712,7 +715,7 @@ test("an approval ask's Inbox row, drawer link and bare ask route land on the sp
   }
 });
 
-test("an open approval ask's document link reaches the issue's Conversation, and a project document's own approval link reaches its document, while the margin omits the link on both", async ({
+test("an open approval ask's document link reaches the issue's Conversation, and a project document's own approval link reaches its document, while the margin omits the link on both @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "GATE", name: "Gate" });

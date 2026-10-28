@@ -1,5 +1,5 @@
 -- 0136_route_roster.up.sql
--- INFRA-562: the listener's last answer to GET /v1/sessions, which every issue read judges its
+-- The listener's last answer to GET /v1/sessions, which every issue read judges its
 -- route_status against (api/issue_route_status.go). Each process used to keep its own copy, so two
 -- processes asked the listener moments apart and could read one route live on one and no_holder on
 -- the other, and a filtered page cut on one held other issues than the next page cut on the other.

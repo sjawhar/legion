@@ -82,7 +82,7 @@ missing proof goes back as step 1 says. The Dispatch message (step 7) is for a f
    Dispatch's message limit, and ends with your attribution footer:
 
    ```bash
-   dispatch message --issue "$LEGION_ISSUE" --body-file - <<'EOF'
+   dispatch message --issue '<KEY>' --body-file - <<'EOF'
    ## Retro Complete
 
    **Learnings documented in:** docs/solutions/<path>.md, or none: <why no point qualified>.
