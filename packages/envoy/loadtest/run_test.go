@@ -71,6 +71,7 @@ func TestAForeignRunsMetaHoldsNoTokenOrPassword(t *testing.T) {
 	pg := "postgres://127.0.0.1:1/dispatch?sslmode=disable"
 	for _, c := range []struct {
 		args, want []string
+		secrets    []string // fragments of a case's own credentials, found in no output
 	}{
 		{
 			args: []string{"-allow-foreign", "-token", agent, "--listener-token=" + listener, "-name", "-token", "-pg", pg},
@@ -107,6 +108,23 @@ func TestAForeignRunsMetaHoldsNoTokenOrPassword(t *testing.T) {
 				"-pg=postgres://127.0.0.1:1,127.0.0.1:2/dispatch?sslmode=disable", "-token=" + redacted,
 			},
 		},
+		{
+			// A -pg password or password parameter with a comma, which pgx reads whole: the
+			// value is one URL, not a list, and no fragment of the password is recorded.
+			args:    []string{"-allow-foreign", "-token", agent, "-listener-token", listener, "-pg", "postgres://u:123,abc@h/db"},
+			want:    []string{"-allow-foreign=true", "-listener-token=" + redacted, "-pg=postgres://h/db", "-token=" + redacted},
+			secrets: []string{"123", "abc"},
+		},
+		{
+			args:    []string{"-allow-foreign", "-token", agent, "-listener-token", listener, "-pg", "postgres://h/db?password=Abc,def123"},
+			want:    []string{"-allow-foreign=true", "-listener-token=" + redacted, "-pg=postgres://h/db", "-token=" + redacted},
+			secrets: []string{"Abc", "def123"},
+		},
+		{
+			args:    []string{"-allow-foreign", "-token", agent, "-listener-token", listener, "-pg", "postgres://u:a:1,b@h/db"},
+			want:    []string{"-allow-foreign=true", "-listener-token=" + redacted, "-pg=postgres://h/db", "-token=" + redacted},
+			secrets: []string{"a:1", "1,b"},
+		},
 	} {
 		fs := flag.NewFlagSet("run", flag.ContinueOnError)
 		var ef endpointFlags
@@ -127,7 +145,7 @@ func TestAForeignRunsMetaHoldsNoTokenOrPassword(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, secret := range []string{agent, listener, password, natsToken} {
+		for _, secret := range append([]string{agent, listener, password, natsToken}, c.secrets...) {
 			if strings.Contains(string(meta), secret) || strings.Contains(logged.String(), secret) {
 				t.Fatalf("%q: meta.json or the log holds a token or a password:\n%s\n%s", c.args, meta, logged.String())
 			}
