@@ -20638,11 +20638,11 @@ async function refreshedAnswers(session, cwd, dispatchUrl, startedAt, by) {
   for (;; ) {
     const outcome = refreshOutcome(file, startedAt);
     if (outcome !== undefined) {
-      const other = outcome.dispatch_url;
-      if (other === null || dispatchUrl === undefined || other === dispatchUrl) {
+      if (outcome.dispatch_url === dispatchUrl)
         return { text: outcome.text ?? undefined };
-      }
-      return { reason: `the refresher read ${other}, not the Dispatch envoy.json names now` };
+      return {
+        reason: `the refresher read ${outcome.dispatch_url ?? "no Dispatch"}, not the Dispatch envoy.json names now`
+      };
     }
     const left = remainingUntil(by);
     if (left === 0) {
@@ -20659,10 +20659,12 @@ async function answersMessage(session, cwd, startedAt, by) {
   let dispatchUrl;
   if (!dispatch.enabled && dispatch.error !== null) {
     dispatchUrl = sessionDispatchUrl(file, process.env, { cwd });
-    const refreshed = await refreshedAnswers(session, cwd, dispatchUrl, startedAt, by);
-    if ("text" in refreshed)
-      return refreshed.text;
-    dispatch = offWithError(refreshed.reason);
+    if (dispatchUrl !== undefined) {
+      const refreshed = await refreshedAnswers(session, cwd, dispatchUrl, startedAt, by);
+      if ("text" in refreshed)
+        return refreshed.text;
+      dispatch = offWithError(refreshed.reason);
+    }
   }
   const read = await readSessionAnswers({
     session,
@@ -20701,7 +20703,9 @@ async function answers(text) {
   }
   const timingFile = process.env[ANSWERS_TIMING_FILE];
   if (timingFile !== undefined) {
-    writeFileSync2(timingFile, JSON.stringify({ began, printed, ended: performance.now() }));
+    try {
+      writeFileSync2(timingFile, JSON.stringify({ began, printed, ended: performance.now() }));
+    } catch {}
   }
   process.exit(0);
 }

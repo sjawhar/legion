@@ -493,7 +493,10 @@ test("adds nothing when the list is empty or Dispatch is not configured", async 
     sessionStart("startup", home),
   )
   expect(off).toMatchObject({ exitCode: 0, stdout: "", stderr: "" })
-  expect(dispatch.requests).toHaveLength(1)
+  // The empty list came from the one read; a read that missed the wait may end with the hook's
+  // process before it reaches Dispatch. Dispatch off sends nothing.
+  expect(dispatch.requests.length).toBe(empty.stdout === "" ? 1 : dispatch.requests.length)
+  expect(dispatch.requests.length).toBeLessThanOrEqual(1)
 }, 20_000)
 
 test("a `!` token command runs outside the hook: a quick one gives the bearer, a slow one cannot hold the hook", async () => {
@@ -780,6 +783,101 @@ test("a token command that fails gives the hook its error, not a Dispatch envoy.
   await eventually(() => noRefresher(home, state), "the refreshers' end")
   expect(dispatch.requests).toEqual([])
   expect(await readdir(tmp)).toEqual([])
+}, 20_000)
+
+/** Writes, as a refresher would, what it read for `dispatchUrl` (null: no Dispatch), finished a
+ *  minute from now so a hook started now takes it as its own refresher's. */
+async function refresherOutcome(state: string, dispatchUrl: string | null, text: string) {
+  const directory = join(state, "sessions", SESSION)
+  await mkdir(directory, { recursive: true })
+  await writeFile(
+    join(directory, "answers-refresh.json"),
+    JSON.stringify({ finished_at: Date.now() + 60_000, dispatch_url: dispatchUrl, text }),
+  )
+}
+
+test("with envoy.json unreadable, a list read from another Dispatch never stands in: the failure line names why", async () => {
+  const other = standinDispatch()
+  const items = [answer("ask-o", "Read from a Dispatch envoy.json no longer names.", 1)]
+  other.route = { kind: "list", items }
+  const { home, state, config, tmp } = await scratch()
+  const env = { HOME: home, DISPATCH_STATE_DIR: state, CLAUDE_CONFIG_DIR: config, TMPDIR: tmp }
+  const envoyJson = join(config, "envoy.json")
+
+  // A list read from `other`, in answers.json and as a refresher's fresh outcome.
+  await writeFile(
+    envoyJson,
+    JSON.stringify({ dispatch: { serverUrl: other.base, token: "!printf other-token" } }),
+  )
+  const since = Date.now()
+  await runHook(env, sessionStart("startup", home))
+  await refresherFinished(state, since)
+  const cache = JSON.parse(await readFile(join(state, "sessions", SESSION, "answers.json"), "utf8"))
+  expect(cache.dispatch_url).toBe(other.base)
+  await refresherOutcome(
+    state,
+    other.base,
+    renderSessionAnswers(items, { now: Date.now(), total: 1 }) as string,
+  )
+
+  // envoy.json caught mid-edit: no URL can be read from it.
+  await writeFile(envoyJson, '{ "dispatch": ')
+  const run = await runHook(env, sessionStart("resume", home))
+  const context = contextOf(run, "SessionStart")
+  const [opening, closing] = sessionAnswersFailureLine("\u0000").split("\u0000") as [string, string]
+  expect(context.startsWith(opening) && context.endsWith(closing)).toBe(true)
+  expect(context).toContain(envoyJson)
+  expect(context).not.toContain("Read from a Dispatch envoy.json no longer names.")
+  expect(context).not.toContain("As read at")
+  expectWithinDeadline(run)
+  // No refresher started for a configuration that names no Dispatch.
+  expect(other.requests).toHaveLength(1)
+}, 20_000)
+
+test("a list read for the Dispatch envoy.json names stands in even when a refresher read none", async () => {
+  const dispatch = standinDispatch()
+  const items = [answer("ask-s", "Read for the Dispatch envoy.json names.", 1)]
+  dispatch.route = { kind: "list", items }
+  const { home, state, config, tmp } = await scratch()
+  const env = { HOME: home, DISPATCH_STATE_DIR: state, CLAUDE_CONFIG_DIR: config, TMPDIR: tmp }
+  const envoyJson = join(config, "envoy.json")
+
+  await writeFile(
+    envoyJson,
+    JSON.stringify({ dispatch: { serverUrl: dispatch.base, token: "!printf same-token" } }),
+  )
+  const firstSince = Date.now()
+  await runHook(env, sessionStart("startup", home))
+  await refresherFinished(state, firstSince)
+  expect(dispatch.requests).toEqual([`Bearer same-token /api/v1/agents/${SESSION}/answers`])
+
+  // A refresher that ran while envoy.json was broken recorded no Dispatch and an error line.
+  await refresherOutcome(state, null, sessionAnswersFailureLine("envoy.json: invalid JSON"))
+  // envoy.json names the same Dispatch again, behind a command that waits on the test's gate.
+  const gate = join(home, "gate")
+  await writeFile(
+    envoyJson,
+    JSON.stringify({
+      dispatch: {
+        serverUrl: dispatch.base,
+        token: `!while [ ! -e '${gate}' ]; do sleep 0.02; done; printf same-token`,
+      },
+    }),
+  )
+  const since = Date.now()
+  cleanup.push(async () => {
+    await writeFile(gate, "")
+    await refresherFinished(state, since)
+  })
+  const run = await runHook(env, sessionStart("resume", home))
+  const context = contextOf(run, "SessionStart")
+
+  // The list read for this Dispatch stands in, naming why this read gave none; never the stale
+  // error line of a refresher that read no Dispatch.
+  expect(allowedOutcome(context, items, /not the Dispatch envoy\.json names now$/)).toBe("cached")
+  expect(context).toContain("the refresher read no Dispatch, not the Dispatch envoy.json names now")
+  expect(context).not.toContain("invalid JSON")
+  expectWithinDeadline(run)
 }, 20_000)
 
 test("hooks started together run a slow token command once", async () => {

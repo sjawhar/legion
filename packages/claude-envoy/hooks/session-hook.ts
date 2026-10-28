@@ -303,14 +303,14 @@ type Refreshed = { readonly text: string | undefined } | { readonly reason: stri
 
 /** Starts the session's refresher unless one is running, and waits until `by` for what it reads.
  *  `startedAt` is when this process started (epoch ms): an outcome from before then is not this
- *  hook's. An outcome whose targeted Dispatch URL and `dispatchUrl`, the one envoy.json names to
- *  this hook, are both known and differ is a refresher started while envoy.json named another: the
- *  hook carries none of it, and a hook after the refresher this one started carries the list of
- *  the Dispatch named now. Any other outcome, a failed token command's error included, is carried. */
+ *  hook's. The hook carries an outcome only when the Dispatch URL its refresher targeted is
+ *  `dispatchUrl`, the one envoy.json names to this hook, a failed token command's error included;
+ *  any other is a refresher started while envoy.json named another, and the hook carries none of
+ *  it: a hook after the refresher this one started carries the list of the Dispatch named now. */
 async function refreshedAnswers(
   session: string,
   cwd: string,
-  dispatchUrl: string | undefined,
+  dispatchUrl: string,
   startedAt: number,
   by: number,
 ): Promise<Refreshed> {
@@ -334,11 +334,10 @@ async function refreshedAnswers(
   for (;;) {
     const outcome = refreshOutcome(file, startedAt)
     if (outcome !== undefined) {
-      const other = outcome.dispatch_url
-      if (other === null || dispatchUrl === undefined || other === dispatchUrl) {
-        return { text: outcome.text ?? undefined }
+      if (outcome.dispatch_url === dispatchUrl) return { text: outcome.text ?? undefined }
+      return {
+        reason: `the refresher read ${outcome.dispatch_url ?? "no Dispatch"}, not the Dispatch envoy.json names now`,
       }
-      return { reason: `the refresher read ${other}, not the Dispatch envoy.json names now` }
     }
     const left = remainingUntil(by)
     if (left === 0) {
@@ -364,11 +363,15 @@ async function answersMessage(
   let { dispatch } = sessionDispatchSettings(file, process.env, { cwd, commands: "kept" })
   let dispatchUrl: string | undefined
   if (!dispatch.enabled && dispatch.error !== null) {
-    // Resolved before the wait, which absorbs its cost: the configured URL alone, no command run.
+    // The configured URL alone, no command run. With none (envoy.json unreadable, Dispatch off or
+    // no URL), no token command can name one either: the hook starts no refresher and carries the
+    // failure line naming why, never a list read for some URL.
     dispatchUrl = sessionDispatchUrl(file, process.env, { cwd })
-    const refreshed = await refreshedAnswers(session, cwd, dispatchUrl, startedAt, by)
-    if ("text" in refreshed) return refreshed.text
-    dispatch = offWithError(refreshed.reason)
+    if (dispatchUrl !== undefined) {
+      const refreshed = await refreshedAnswers(session, cwd, dispatchUrl, startedAt, by)
+      if ("text" in refreshed) return refreshed.text
+      dispatch = offWithError(refreshed.reason)
+    }
   }
   const read = await readSessionAnswers({
     session,
@@ -418,7 +421,11 @@ async function answers(text: string): Promise<never> {
   }
   const timingFile = process.env[ANSWERS_TIMING_FILE]
   if (timingFile !== undefined) {
-    writeFileSync(timingFile, JSON.stringify({ began, printed, ended: performance.now() }))
+    try {
+      writeFileSync(timingFile, JSON.stringify({ began, printed, ended: performance.now() }))
+    } catch {
+      // The tests' seam only: a path it cannot write never changes what the hook printed or its exit.
+    }
   }
   // Exits rather than returns: a read still running would hold the process open.
   process.exit(0)
