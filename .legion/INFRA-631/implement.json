@@ -2,31 +2,31 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-631",
-  "completed": "2026-10-28T15:00:00Z",
+  "completed": "2026-10-28T15:50:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2422",
   "proof": [
     {
       "criterion": "1. Outside fenced code blocks no line holds more than one sentence, list items are separated by blank lines, and no list item or table row is longer than one screen; a check shows it.",
       "surface": "scripts/semantic-line-breaks.ts on the two guides as a contributor runs it, and its unit tests as CI runs them",
       "command": "cd -- \"$LEGION_WORKSPACE\" && bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md; bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts",
-      "observed": "checker exit 0 on both guides; 36 pass, 0 fail (the tester's red tests unmodified, the six new tests for review round 2, the guides test)",
-      "headSha": "c2a0819653c4c67c1235e2c531b01e014ff72c4a",
-      "negativeControl": "the six new tests against the previous script (74b63566's): 29 pass, 6 fail, each new test failing"
+      "observed": "checker exit 0 on both guides; 39 pass, 0 fail (the tester's red tests unmodified, the three new tests for inline verbatim elements, the guides test)",
+      "headSha": "9a1d7614d478ed4b859e85fb56dc263254b962de",
+      "negativeControl": "the three new tests against the previous script (c2a08196's) each fail (34 pass, 4 fail, the fourth my own message test's new wording)"
     },
     {
       "criterion": "Tool contract: --write changes only whitespace and never how a file renders (the architect's structural guarantee, 2026-10-28 09:03Z).",
       "surface": "scripts/semantic-line-breaks.ts --write on copies of every tracked .md file of the repository",
       "command": "git ls-files '*.md' | grep -v '^.legion/' (1,191 files) copied under $TMPDIR/infra631/c9/files; xargs bun scripts/semantic-line-breaks.ts --write, twice; whitespace-folded comparison; refusals tallied by guard",
-      "observed": "pass 1: 1,118 rewritten, 0 whitespace-folded different; refusals: render guard 4 (the pmdoc test-corpus edge cases), whitespace guard 0, idempotence guard 0; pass 2 changes no file; one file differs from the previous script (docs/solutions/legion/provisioning-touches-the-issue-bookmark-only-when-it-creates-the-workspace.md:58: '<when origin has the branch, …' is no tag under CommonMark, so its lines are now joined, render-equal)",
-      "headSha": "c2a0819653c4c67c1235e2c531b01e014ff72c4a",
-      "negativeControl": "'See [a](b `c d) e \\nf` g.' (a join inside a code span the link-destination mask misreads): --write exit 2, the render guard now comparing inline code exactly, file unchanged; 'Intro text\\n[see. Next [a]: b' : --write exit 2 'a second re-layout would change it again', file unchanged"
+      "observed": "sweep of 1,191 tracked .md files at 6b85cb5f, --write twice: 1,118 rewritten, 0 whitespace-folded different; refusals: render guard 4 (pmdoc test-corpus edge cases), idempotence guard 0; the second pass changes no file; every file's output identical to the previous script's",
+      "headSha": "9a1d7614d478ed4b859e85fb56dc263254b962de",
+      "negativeControl": "the reviewer's five inline <pre>/<code> inputs (blockquote lazy line, footnote text, <code> in a blockquote, escaped close, sentence cut inside <pre>) were written with exit 0 by the previous script; now each --write exits 2 (render guard) and leaves the file unchanged"
     },
     {
       "criterion": "2. Nothing is lost: every difference is a move the plan names, a pointer to the new place, or a listed format word or statement edit.",
       "surface": "git history of the branch, compared as folded words and as CommonMark+GFM renderings (micromark 4.0.2 + micromark-extension-gfm 3.0.0), and restructure.ts as the reviewer re-runs it",
-      "command": "bun .legion/INFRA-631/restructure.ts --strict <main 0a921021 AGENTS.md> <out> <README.md> <out>, cmp with the head guides",
-      "observed": "byte-identical (the guides did not change this round)",
-      "headSha": "c2a0819653c4c67c1235e2c531b01e014ff72c4a",
+      "command": "bun .legion/INFRA-631/restructure.ts --strict <main 2d872499 AGENTS.md> <out> <README.md> <out>, cmp with the head guides (merge head 9a1d7614)",
+      "observed": "byte-identical",
+      "headSha": "9a1d7614d478ed4b859e85fb56dc263254b962de",
       "negativeControl": "semantic-line-breaks.ts --write on a copy whose relayout replaced one word refused with exit 2 and the file unchanged; restructure.ts --strict on main's AGENTS.md with 'Shutdown stops HTTP first' reworded: exit 1, nothing written"
     },
     {
@@ -34,15 +34,15 @@
       "surface": "git merge-tree --write-tree on branches made from the head's files with the committed patches (refreshed against this head)",
       "command": "the tester's case through PR-body recipe steps 4-8: base.md = main aeeee6c0's README, ours.md = it plus '\\n- a\\n  - -\\n'; bun .legion/INFRA-631/restructure.ts --lenient --line-breaks scripts/semantic-line-breaks.ts base.md base.new ours.md ours.new; hand edit of the named block; semantic-line-breaks.ts --write ours.new; git merge-file -p ours.new base.new <head README> > F; semantic-line-breaks.ts F",
       "observed": "restructure exit 2 with base.new (= --strict on base.md alone) and ours.new (= --structural-only on ours.md) written; the warning names ours.new line 1955, which is the refused block '- a' / '  - -'; after '  - -' → '  - \\-', --write exit 0; merge-file 0 conflicts; checker on F exit 0",
-      "headSha": "c2a0819653c4c67c1235e2c531b01e014ff72c4a",
+      "headSha": "9a1d7614d478ed4b859e85fb56dc263254b962de",
       "negativeControl": "--strict on the same pair: exit 2, nothing written, the message names ours.md and says its line numbers count the --structural-only text"
     },
     {
       "criterion": "4. Every citation of a moved section still resolves; and the PR body's porting recipe works as written on open pull requests.",
       "surface": "the repository's checks that read packages/envoy/AGENTS.md, Dispatch's document element measure, and the porting recipe driven on open PRs #2387, #2414, #2404 against this head",
       "command": ".github/scripts/check-body-embed-limit.sh; bash .github/scripts/check-body-embed-limit.test.sh; .github/scripts/check-private-names.sh; go test -overlay … -run TestMeasureGuides ./internal/dispatch/pmdoc/; the PR body's porting recipe (steps 1-7, S = the checkout's checker) on open PRs #2391 and #2245 (README) and #2404 (AGENTS)",
-      "observed": "embed limit pass; 49 passed; private names exit 0; AGENTS 25,246 elements / 574,553 bytes, README 10,133 / 171,237",
-      "headSha": "c2a0819653c4c67c1235e2c531b01e014ff72c4a",
+      "observed": "embed limit pass; 49 passed; private names exit 0; AGENTS 25,436 elements / 581,273 bytes, README 10,268 / 175,039",
+      "headSha": "9a1d7614d478ed4b859e85fb56dc263254b962de",
       "negativeControl": "restructure.ts --strict on PR #2391's README: exit 1 naming each migration above 0134, nothing written"
     }
   ],
@@ -86,8 +86,9 @@
     "Round 6 (review 5681541125; architect's decision 2026-10-28 11:00Z, narrow): an inline tag is one unit through its '>' including quoted attribute values; a multi-line setext heading stays byte for byte and R1 does not read it (ATX headings are still checked line by line); front matter has one definition (micromark's: '---' plus spaces or tabs, opener and closer; '...' no longer closes) used by the rewrite and the guard; the guard compares inline HTML exactly. scanBlocks is not replaced by mdast positions (architect).",
     "Round 7 (architect's decision 2026-10-28 11:15Z): restructure.ts --lenient writes a refused file's structural text and exits 2 after writing every output; the rewrite reads a leading '---' block closed by '...' as front matter, the guard only a '---'-closed one (micromark's rule); recipe steps 4 and 8 rewritten.",
     "Round 8 (architect's decision 2026-10-28 11:32Z): a line holding a tag alone is a boundary on both sides (nothing joins onto it), so --write is idempotent on it; main 0a921021 merged forward with split anchors split-issue-events-claimant and split-issue-events-mention.",
-    "Round 9 (review round 2; architect's decision 2026-10-28 11:58Z): the guard compares inline code exactly; inline HTML is recognised only per CommonMark's raw-HTML rules, left to right with code spans; an idempotence guard refuses a file a second re-layout would change; RULE_LIKE_LINE stands alone; the frontMatterEnd comment corrected. Link-destination masking that a code span starts inside is left to the render guard, which refuses it."
+    "Round 9 (review round 2; architect's decision 2026-10-28 11:58Z): the guard compares inline code exactly; inline HTML is recognised only per CommonMark's raw-HTML rules, left to right with code spans; an idempotence guard refuses a file a second re-layout would change; RULE_LIKE_LINE stands alone; the frontMatterEnd comment corrected. Link-destination masking that a code span starts inside is left to the render guard, which refuses it.",
+    "Round 10 (review round 3; architect's decision 2026-10-28 12:37Z): the render guard keeps the text inside inline pre/textarea/script/style/code/tt/kbd/samp elements exact, tracking open and close html children within one text parent; the idempotence refusal says its line counts the re-laid-out text (the reviewer's minor finding, a message wording); main 2d872499 merged forward."
   ],
   "openQuestions": [],
-  "round": 9
+  "round": 10
 }
