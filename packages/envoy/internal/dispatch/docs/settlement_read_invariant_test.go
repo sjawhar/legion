@@ -10,7 +10,8 @@ import (
 )
 
 // readInvariant counts, per room, the settlements whose version reused the rendering of the tree
-// they read and those that rendered their version again (requireReadUnchangedWhenReused).
+// they read and those that rendered their version again (requireReadUnchangedWhenReused), and
+// requireCounts checks those counts.
 // Settlements run on timer goroutines as well as the test's, so mu guards every field.
 type readInvariant struct {
 	mu       sync.Mutex
@@ -30,7 +31,7 @@ type readSnapshot struct {
 // takes that rendering only when nothing changed the tree in place, so a settlement that changes
 // it without recording the change (changedTree) would version a document the tree no longer
 // holds. A tree Node.JSON cannot encode counts as changed. The returned readInvariant counts the
-// settlements that reused the rendering and those that rendered again.
+// settlements that reused the rendering and those that rendered again, for requireCounts.
 func requireReadUnchangedWhenReused(t *testing.T, service *Service) *readInvariant {
 	t.Helper()
 	invariant := &readInvariant{
@@ -73,18 +74,16 @@ func requireReadUnchangedWhenReused(t *testing.T, service *Service) *readInvaria
 	return invariant
 }
 
-// reuses is the number of room's settlements whose version reused the rendering of their read.
-func (i *readInvariant) reuses(room string) int {
+// requireCounts fails the test unless exactly reuses of room's settlements reused the rendering of
+// their read and exactly renders of them rendered their version again.
+func (i *readInvariant) requireCounts(t *testing.T, room string, reuses, renders int) {
+	t.Helper()
 	i.mu.Lock()
-	defer i.mu.Unlock()
-	return i.reused[room]
-}
-
-// renders is the number of room's settlements that rendered their version again.
-func (i *readInvariant) renders(room string) int {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	return i.rendered[room]
+	gotReuses, gotRenders := i.reused[room], i.rendered[room]
+	i.mu.Unlock()
+	if gotReuses != reuses || gotRenders != renders {
+		t.Fatalf("the settlement reused the rendering of its read %d times and rendered again %d times, want %d reuses and %d renders", gotReuses, gotRenders, reuses, renders)
+	}
 }
 
 // A settlement that writes nothing into the room versions the rendering it made of the tree it
@@ -120,7 +119,5 @@ func TestSettlementReusesTheRenderOnlyOfAnUntouchedRead(t *testing.T) {
 	if versions := latestVersionNumber(t, service, artifactID); versions != versionsBefore+1 {
 		t.Fatalf("latest version = %d, want %d: the settlement wrote no version of the edited document", versions, versionsBefore+1)
 	}
-	if reuses, renders := invariant.reuses(artifactID), invariant.renders(artifactID); reuses != 1 || renders != 0 {
-		t.Fatalf("the settlement reused the rendering of its read %d times and rendered again %d times, want one reuse and no render", reuses, renders)
-	}
+	invariant.requireCounts(t, artifactID, 1, 0)
 }
