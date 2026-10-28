@@ -22,7 +22,7 @@ import (
 const dispatchType = "envoy-infra:gcp:Dispatch"
 
 const (
-	defaultDispatchDatabaseVersion = "POSTGRES_16"
+	defaultDispatchDatabaseVersion = "POSTGRES_18"
 	// defaultDispatchDatabaseTier is the Cloud SQL tier when databaseTier is unset: 4 vCPU and
 	// 15 GB. During a roll, every app pod that holds connections (the replicas, the surge pod and
 	// pods still terminating, for up to their grace period) times dispatchConnectionsPerPod must

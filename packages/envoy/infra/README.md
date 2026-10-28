@@ -137,7 +137,7 @@ the listener may dial the proxy, and the app alone may dial the listener.
 | VPC, subnetwork, router and Cloud NAT | Private Autopilot nodes can pull images and reach the tailnet control plane without public node addresses. |
 | Private services access range and connection | Cloud SQL receives a private IP on the component's VPC. |
 | Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. |
-| Cloud SQL instance, database, user and generated password | PostgreSQL 16, private IP only, automated backups and point-in-time recovery. |
+| Cloud SQL instance, database, user and generated password | PostgreSQL 18 by default (`databaseVersion`), private IP only, automated backups and point-in-time recovery. |
 | Kubernetes namespace (not with `existingNamespace`), ServiceAccount `<hostname>`, Secrets, ConfigMap and SecretProviderClass | The app's and the listener's account, which Workload Identity lets mount the NATS seed; the generated application secrets (`<hostname>-dispatch`), the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the front door's auth key (`<hostname>-tailnet-auth-key`, one key `TS_AUTHKEY`), the Serve configuration (ConfigMap `<hostname>-serve`, rendered from the resolved `tailnetService`), and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key). |
 | ServiceAccount `<hostname>-tailnet`, Role and RoleBinding `<hostname>-tailnet-tls` | The front door's pods run as an account of their own, which the Role lets `get` and `patch` the one Secret `<hostname>-tailnet-tls` and nothing else (no `create`, since the component creates it, and no `update`, since the pods send merge patches), so neither the app nor the listener, nor the account `serviceAccountSubject` names, can write the certificate. The pod does not automount the account's token: only `cert-publish`, which calls the API server, mounts it, so the tailnet-facing `tailscale` and `advertiser` containers hold no credential for the Secret. |
 | Secret `<hostname>-tailnet-tls` | The Tailscale Service's certificate, its key and the ACME account key (keys `tls.crt`, `tls.key` and `acme-account.key.pem`), which the front door's pods publish and seed from ([The front door](#the-front-door)). The component declares it with no data and ignores its contents, so a later preview never plans to undo what the pods wrote, and no pod template carries its checksum, so a renewed certificate rolls no pod. |
@@ -151,7 +151,7 @@ The required plain inputs are `region`, `hostname`, `tailnetDnsName`, `tags`, th
 digest-pinned images, `signInClientId`, and `signInDomain`. `tailnetAuthKey`, `tailnetService`,
 `natsUrl`, `natsSeedSecret`, and `signInClientSecret` are Pulumi inputs and may come from another
 resource or stack. `tailnetAuthKey` and `signInClientSecret` are secrets. `databaseVersion`
-defaults to `POSTGRES_16`, `databaseTier` to `db-custom-4-15360`, `namespace` to `dispatch`, and
+defaults to `POSTGRES_18`, `databaseTier` to `db-custom-4-15360`, `namespace` to `dispatch`, and
 `deletionProtection` to `true`; it sets both Pulumi's own guard and the Cloud SQL instance's
 `deletionProtectionEnabled`, which refuses a delete from the API or the console too, and the
 `dispatch` database's `deletionPolicy` `PREVENT` (otherwise `DELETE`), which keeps an instance
@@ -165,6 +165,18 @@ front door's certificate Secret included: first remove the Namespace from the st
 for a cluster that already exists: on a first apply the component creates the cluster, so no other
 program can have made the namespace yet. `allowedNamespaces`, empty by default, each a DNS label,
 names the in-cluster namespaces the NetworkPolicy admits on port 8766.
+
+`databaseVersion` defaults to `POSTGRES_18`; envoy-infra v2.9.1 and every release before this
+change defaulted to `POSTGRES_16`. A stack that leaves `databaseVersion` unset is upgraded in place
+from its current major version to PostgreSQL 18 at its first `pulumi up` after its `envoy-infra`
+pin moves to a release that carries this default: the first `envoy-infra-v*` tag cut from a `main`
+commit that contains sjawhar/legion#2364. That is a Cloud SQL major-version upgrade: Cloud SQL
+makes the instance unavailable while it performs the upgrade, so Dispatch is down for that time,
+and the upgrade cannot be reversed in place. Cloud SQL makes a pre-upgrade backup immediately
+before it starts, and the way back to the earlier version is restoring that backup to a new
+instance running it ([Upgrade the database major version
+in-place](https://cloud.google.com/sql/docs/postgres/upgrade-major-db-version-inplace)). To keep
+PostgreSQL 16, set `databaseVersion: POSTGRES_16` before moving the pin.
 
 `tailnetService`, required, is the Tailscale Service the front door's pods host, as Tailscale's
 API names it. It must resolve to `svc:<hostname>`, the name the certificate and the URL carry, and
