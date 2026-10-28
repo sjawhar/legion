@@ -2,64 +2,33 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-631",
-  "completed": "2026-10-28T10:50:00Z",
-  "round": 5,
-  "headTested": "d7e9799c459e03d6f7d5675fd6da875b97c7c7f0",
+  "completed": "2026-10-28T11:25:00Z",
+  "round": 6,
+  "headTested": "34ae3fe4b4c7c7f22261cf48b4d3b2fdcb5d0d72",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at d7e9799c (code head 7a05e75c, a merge of main aeeee6c0): checker exit 0 on both guides; `restructure.ts --strict` on aeeee6c0's two files byte-identical to head; `replay/run.sh` 11/11 PASS; `bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts` 23 pass, my round 1-4 tests unchanged; --write over every tracked .md file of the repository (below)."
+    "how": "Re-ran at 34ae3fe4 (code head 52b2223e): checker exit 0 on both guides; `restructure.ts --strict` on main aeeee6c0's files byte-identical to head (guides unchanged since d7e9799c); `replay/run.sh` 11/11 PASS; `bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts` 28 pass, my tests unchanged; the three review findings reproduced fixed (below); --write over all 1,188 tracked .md files as in round 5."
   },
-  "roundFourFailure": "fixed: `Type <code>a\\nb</code> now.` is left as it is (the round-4 checker 1fe06cd7 writes `<code>a b</code>`); `<tt>`, `<samp>`, `<kbd>` and `<code class=…>` content likewise.",
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "reviewFindings": {
+    "quoted attribute holding >": "fixed: `See <abbr title=\"a>b. Second one\">x</abbr> here. Next.` is cut only after 'here.'; `title=\"x>y\\nz\"` is not joined; single-quoted and unquoted attributes and a prose `<b and c = \"d. E\" then f>` (a valid CommonMark open tag) render the same under cmark-gfm",
+    "multi-line setext heading": "fixed: `Setup. Then run\\nthe tool\\n===` is left byte for byte and not R1-checked; the body after it is still re-laid out; `---` underlines likewise",
+    "two front matter definitions": "fixed: an opener `--- ` with trailing spaces is front matter to both check and --write (YAML untouched, body re-laid out); an unclosed `---` is a rule, as GitHub reads it",
+    "recipe step 4 refusal and step 7 headings": "NOT fixed as written (failure below)"
+  },
+  "failures": [
     {
-      "criterion": "1. Outside fenced code blocks no line holds more than one sentence, list items are separated by blank lines, and no list item or table row is longer than one screen; a check shows it.",
-      "surface": "scripts/semantic-line-breaks.ts on the two guides as a contributor runs it, plus an independent paragraph-level scanner",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md; echo $?  (and a Python scanner over both guides: fences removed, code spans, inline HTML and link destinations masked per paragraph, boundary '[.!?][closers]* +[A-Za-z0-9`[(\"*_<|#>]' not after an abbreviation)",
-      "observed": "exit 0, no output; the independent scanner finds 0 two-sentence lines in either guide; --write on copies of both guides changes nothing; R3 max 50 rows (AGENTS), 35 (README)",
-      "headSha": "d7e9799c459e03d6f7d5675fd6da875b97c7c7f0",
-      "negativeControl": "the same command on main aeeee6c0's old-layout files exits 1: AGENTS 1599 R1 / 101 R2 / 8 R3, README 553 R1 / 23 R2 / 1 R3"
-    },
-    {
-      "criterion": "2. Nothing is lost: every difference is a move the plan names, a pointer to the new place, or a listed format word or statement edit.",
-      "surface": "restructure.ts as the reviewer re-runs it, and whitespace-folded comparison with the round-2 head whose word diff was classified hunk by hunk",
-      "command": "bun .legion/INFRA-631/restructure.ts --strict <aeeee6c0 AGENTS.md> <out> <aeeee6c0 README.md> <out>; cmp with head; the same on b295a3fb's files, then cmp <(tr -s '[:space:]' ' ' < out) <(git show 64eec901:<file> | tr -s '[:space:]' ' ')",
-      "observed": "regeneration from aeeee6c0 byte-identical to head; regeneration from b295a3fb folded-equal to round-2 head 64eec901 for both files, whose every word-diff hunk (AGENTS 117, README 345) was classified into the named kinds with 0 left over and whose 10 converted tables match cell for cell; so rounds 3-5 changed only whitespace in the guides",
-      "headSha": "d7e9799c459e03d6f7d5675fd6da875b97c7c7f0",
-      "negativeControl": "the folded comparison reports a difference for a one-word change (round 2); restructure.ts --strict on a copy of main's AGENTS.md with the anchor 'Shutdown stops HTTP first' reworded exits 1 and writes nothing (round 2, implementer's control re-run)"
-    },
-    {
-      "criterion": "3. Replay: real conflicting pairs ported to the new layout merge clean wherever the two edits changed different, non-adjacent sentences or added items at different places; two new items added at different places of one list merge clean.",
-      "surface": "git merge-tree --write-tree on branches made from the new-layout files with the committed patches, plus five more real merges hand-ported in round 1",
-      "command": "TMPDIR=$TMPDIR/infra631-test5/own/rp bash .legion/INFRA-631/replay/run.sh",
-      "observed": "exit 0, 11/11 PASS: 5e45356e68aa, 4671996e14fd, 56d31191f8f1, 949ebe03bd4e clean; 5aee84d6930e, 125a3bfb0484 (same or adjacent) conflict as classified; append(a) README Routes and append(b) AGENTS Where to look clean. Round 1's own ports: 6112adc201ea, e26a66480011, 26a15dcf333e clean, fd21523a17a3 and d4383e383e0a conflict on one shared line each",
-      "headSha": "d7e9799c459e03d6f7d5675fd6da875b97c7c7f0",
-      "negativeControl": "append(c), two items inserted at one point of Routes, conflicts; controls 728b5e297fb5 and 4440fc7b57a2 (same sentence) conflict; every clean pair conflicts on the old layout (git merge-tree exit 1)"
-    },
-    {
-      "criterion": "4. Every citation of a moved section still resolves, and the porting recipe in the PR body works for open pull requests.",
-      "surface": "the recipe driven literally on open pull requests (rounds 2-3), and the head's position words and cited phrases",
-      "command": "recipe steps 1-8 from a fresh clone with `bun install` on #2387, #2391, #2177, #2245, #2404, #2402, swept over 73 open-PR file runs (round 3, restructure.ts pinned at cd3dce97, unchanged since); round-4 re-read of step 6 in the live PR body",
-      "observed": "step 4 exit 0 on 73/73; 66 merge with no conflict and the rest with no more conflicts than the old layout; no line lost; the migration warnings name exactly the notes a branch adds; '(the shutdown bullet below)' and every other position word resolves at head",
-      "headSha": "d7e9799c459e03d6f7d5675fd6da875b97c7c7f0",
-      "negativeControl": "--write with no node_modules prints 'run `bun install` in the repository root', exit 2, file unchanged"
-    },
-    {
-      "criterion": "Tool contract: --write changes only whitespace, never front matter and never how GitHub renders a file (the architect's guarantee).",
-      "surface": "scripts/semantic-line-breaks.ts --write on copies of every tracked .md file of the repository, compared with cmark-gfm (GitHub's renderer) and PyYAML",
-      "command": "git ls-files '*.md' | grep -v '^.legion/' (1,188 files) copied to $TMPDIR/infra631-test5/work; xargs bun <checkout>/scripts/semantic-line-breaks.ts --write; fm.py (front matter block byte-compare + PyYAML 6.0.2); cm.py (cmarkgfm 2024.11.20 unsafe+footnotes, whitespace kept exactly inside pre/code/textarea/kbd/samp/tt, tight/loose list wrappers ignored)",
-      "observed": "1,115 written, 4 refused (pmdoc corpus hazards, each naming its block), 0 of 824 front matter blocks changed (the same 6 unparseable before and after); cmark-gfm rendering equal for all 1,115 but docs/kubernetes.md, whose only difference is the </p> a loose list adds before the <dir> HTML block main already has there; 34 crafted inputs (front matter variants, block-opening HTML of kinds 1-7 after a sentence end, inline tags, verbatim elements, autolinks, task boxes) left as they are or rendered the same",
-      "headSha": "d7e9799c459e03d6f7d5675fd6da875b97c7c7f0",
-      "negativeControl": "`Type <code>a\\nb</code> now.`: the round-4 checker (1fe06cd7) writes `<code>a b</code>`, exit 0; the head's leaves it as it is"
+      "criterion": "Spec: 'say in the pull request body how an open pull request moves its edit onto the new layout' (the reviewer's minor finding on step 4, which this round's step 4 text answers).",
+      "evidence": "Step 4 now says: 'If it stops with `semantic-line-breaks.ts --write exited 2` for `ours.md`, the refusal names the file and a block (`the block at line N would render differently`): write the step-4 command's other outputs, put the line breaks of that block into `ours.new` by hand … and continue at step 5.' Driven: base.md = main aeeee6c0's README, ours.md = the same plus `\\n- a\\n  - -\\n`; `bun .legion/INFRA-631/restructure.ts --lenient --line-breaks scripts/semantic-line-breaks.ts base.md base.new ours.md ours.new` exits 2 and writes NEITHER base.new NOR ours.new (`ls *.new` -> none). The refusal names `/legion/scratch/tmp/infra-631-restructure-SPC16u/1-readme.md … the block at line 1955`, a temporary file that is already deleted when the command returns, while ours.md has 1,580 lines; so there is no ours.new to edit, line N points into no file the porter has, and 'write the step-4 command's other outputs' names no command. Also step 7 says for R1 in a heading the branch did not write 'otherwise leave it', while step 8 says 'Run step 7 again until it exits 0', which then never happens. Repro dir: $TMPDIR/infra631-test5/rs/. No open PR hit the refusal in the round-3 sweep (73 runs), so this is the rare path, but the instruction cannot be followed. Fix shape: on a refusal under --lenient, restructure.ts writes the other pair and writes ours.new as the structural, not-yet-re-laid-out text (or keeps the intermediate and names its path), with N a line of that file; and step 8 excepts heading findings step 7 says to leave."
     }
   ],
+  "failed": 1,
   "verified": [
-    "CI at d7e9799c read at 10:39Z: lint, test, typecheck, build x2, changes queued; nothing settled.",
-    "PR mergeable at d7e9799c; main@origin is aeeee6c0, the merge's main parent."
+    "Full sweep at 34ae3fe4: --write on all 1,188 tracked .md files writes 1,115 and refuses the same 4 pmdoc corpus files; 0 of 824 front matter blocks change (6 unparseable before and after); cmark-gfm rendering equal for all but docs/kubernetes.md, whose only difference is the </p> a loose list adds before the <dir> HTML block main already has; a second --write changes nothing (diff -rq: 0).",
+    "Round 4-5 probes (34 inputs) still left as they are or rendered the same; round-6 probes (abbr/attr/single-quote/unquoted/prose-tag, setext = and -, front matter with trailing spaces, unclosed) the same.",
+    "CI: no check run or workflow run exists yet for 34ae3fe4 at 11:12Z; at d7e9799c the runs were cancelled when the next push landed (build, changes, typecheck success)."
   ],
   "notes": [
-    "By design, not failures: check mode passes a line whose second sentence starts with an HTML block opener (`Done. <!-- c --> more`, `Done. <div>x</div> more`) or a task box, since --write may not cut there; with front matter opened by `---` plus trailing spaces, check mode reports R1 inside it and --write refuses (exit 2) rather than skipping it.",
-    "Not counted, as before: README Identity list split halves read as identity modes (disclosed deviation)."
+    "Per the architect's round-6 decision, front matter now follows micromark: `---` … `...` is not front matter, so --write joins its YAML lines (`title: Foo description: Bar.\\nBaz ...`). Jekyll accepts `...` as a closer; no tracked .md file uses it (0 of 824).",
+    "Not counted, as before: README Identity list split halves (disclosed deviation)."
   ]
 }
