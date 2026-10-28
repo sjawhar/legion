@@ -372,7 +372,8 @@ A browser's room load takes no lock the write holds, so a room that loads while 
 Every mutate starts from the tree `applyLive` already read (`startTree`, `editTree`) rather than reading its own;
 `applyLive` lets that tree go before the one check that decodes a second copy of the state (`refuseUndecodable`);
 and a write drops its fork and rendering once it commits, before its publish loads the room (`releaseFork`), since a pooled connection's context can keep the write reachable long after it answered (LEGION-504).
-The `nodeToken` hash streams the token's encoding (`pmdoc.WriteTokenJSON`) rather than holding it whole.
+A token's encoding (`pmdoc.AppendTokenJSON`) is held once per call, in one buffer for the document and all its blocks, and dropped when the call returns;
+LEGION-504's concern was more copies per token and their retention, and neither holds.
 The handler ends the transaction with `ledger.Commit`, which records each settlement credit with the document content and takes each version's authors back out of that record, commits, credits the writes' actor to their rooms, releases the authors a version the transaction wrote named, then applies and broadcasts the updates, and last publishes the events its document operations appended, ahead of the handler's own;
 it defers `ledger.Discard`, so a transaction that does not commit leaves the room, every connected browser, every version and the durable document as they were.
 
