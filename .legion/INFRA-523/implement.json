@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-523",
-  "completed": "2026-10-28T20:26:44Z",
+  "completed": "2026-10-28T20:43:41Z",
   "proof": [
     {
       "criterion": "A1: the catalog lists every job attempt in the window that failed with a later attempt of that job",
@@ -203,6 +203,14 @@
       "observed": "envoy and daemon build and vet clean; deliveryaudit ok, routes ok; claude-envoy 223 pass 0 fail; GitHub reports MERGEABLE; fingerprint comment issuecomment-6479894470",
       "headSha": "fa7c2a72bb1d3e5a5dea6add1881e4e816adb4f6",
       "negativeControl": "before the one-line deliveryaudit_test.go change, go vet ./... failed: 'unknown field Lifetime in struct literal of type api.DepsInput' (main's new test against this branch's Register parameter)"
+    },
+    {
+      "criterion": "Round 7 (tester's finding after the af1ff09c merge): every test that captures the default logger restores the log package's output and flags - main's four new captures through logtest.SetDefault, the daemon's state-route test inline",
+      "surface": "packages/envoy and packages/daemon go test in the issue pod",
+      "command": "go test -count=1 -run 'Log' ./internal/dispatch/dashboard/ ./internal/dispatch/routes/ ./internal/dispatch/docs/; go test -count=1 ./internal/dispatch/dashboard/ ./internal/dispatch/routes/; (daemon) go test -count=1 ./internal/api/",
+      "observed": "the tester's red tests TestCaptureLogsGivesTheLogPackageItsOutputBack, TestAssetTestsGiveTheLogPackageItsOutputBack and TestRenderReuseGivesTheLogPackageItsOutputBack pass unmodified; dashboard, routes, docs (122.6 s) and daemon internal/api ok; no plain slog.SetDefault capture left in either module outside logtest and the daemon's restoring one",
+      "headSha": "1d3a1d3df480afb3b275adf9f291e262dec7b907",
+      "negativeControl": "at fa7c2a72 (the four plain captures) the tester's three red tests fail (.legion/INFRA-523/test.json, round 9)"
     }
   ],
   "filesChanged": [
