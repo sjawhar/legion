@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-631",
+  "completed": "2026-10-28T10:57:15Z",
+  "round": 1,
+  "headReviewed": "the handoff commit this file is pushed in (code head 7a05e75c, merge of main aeeee6c0)",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 1,
+  "verified": [
+    "restructure.ts --strict on main aeeee6c0's two files: exit 0, byte-identical to the head guides",
+    "bun scripts/semantic-line-breaks.ts on both guides: exit 0; bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts: 23 pass, 0 fail",
+    "required checks (rulesets): lint, typecheck, test, pr-title; CI head d7e9799c, compare to 6d73808a handoffs only; every required check still queued at 10:56Z (runners), not read green",
+    "0 review threads on the pull request"
+  ],
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "scripts/semantic-line-breaks.ts:515",
+      "description": "htmlEnd ends a tag at the first '>' and ignores quoted attribute values, so --write cuts and joins inside an inline tag (`<abbr title=\"a>b. Second…\">` is cut after 'b.'; `title=\"x>y\\nz\"` is joined to 'x>y z'), exit 0; the render guard folds whitespace in inline html values (:796), so it lets the write through. Reproduced. Fix: skip quoted attribute values in htmlEnd; compare inline html values exactly in renderedForm; add a unit test."
+    },
+    {
+      "severity": "important",
+      "file": "scripts/semantic-line-breaks.ts:262",
+      "description": "A multi-line setext heading is re-laid out as a paragraph (`Setup. Then run\\nthe tool\\n===` becomes `Setup.\\nThen run the tool`, exit 0); check mode reports R1 on it; the guard folds heading text. Where the soft break falls in a heading changes its GitHub anchor slug [INFERENCE from GitHub's slug rule that drops non-word characters]. Fix: leave a paragraph that ends at a setext underline as it is, in check and --write."
+    },
+    {
+      "severity": "important",
+      "file": "scripts/semantic-line-breaks.ts:314",
+      "description": "Two front matter definitions disagree: scanBlocks accepts only an exact '---' opener and closes on '---' or '...'; CLOSED_FRONT_MATTER (:88) allows trailing whitespace and closes only on '---'. A file opening '--- ' gets R1 findings inside its YAML and --write refuses the whole file (exit 2, 'a yaml became a yaml'), leaving its body's R1 unfixable by the recipe. Fix: one definition."
+    },
+    {
+      "severity": "minor",
+      "file": "PR body, 'Moving an open pull request onto the new layout'",
+      "description": "Step 4 has no instruction for restructure.ts --lenient stopping because the checker's --write exits 2 on ours.md (restructure.ts:1084-1090), and step 7 none for an R1 finding in a heading, which --write never fixes. The E2E lines carry no link to their runs (pr-body.md: each E2E line carries a link)."
+    }
+  ],
+  "notRequested": [
+    "Code-quality pass: the hand-written block scanner (scanBlocks and its regexes, about 310 lines) duplicates micromark, which --write already loads; replacing it with mdast positions is a redesign that makes check mode need bun install, against the architect's round-4 'narrow' decision, so it is the architect's call, not a finding of this round.",
+    "R1 heuristics: no sentence start at '(' or a single '*'/'_', and no 'a.m.'/'p.m.'/'Inc.'/'St.' abbreviations. Minor: check mode is advisory (not in CI), sentence detection is heuristic by design (round 2 narrowed lowercase starts to avoid false splits), and the tester's independent scanner, which does start sentences at '(', finds no two-sentence line in either guide."
+  ],
+  "thermonuclear": {
+    "deepReview": "Verdict: CHANGES at 6d73808a (1 Medium: the htmlEnd finding; 4 Minor)",
+    "codeQuality": "Verdict: CHANGES at 6d73808a (two block parsers; two front matter definitions)"
+  }
+}
