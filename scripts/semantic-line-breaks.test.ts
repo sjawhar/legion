@@ -84,3 +84,52 @@ test("--write leaves the inside of a <pre> block as it is, blank lines included"
   const result = await written(text);
   expect(result.text).toBe(text);
 });
+
+test("--write leaves a fenced block as it is when a fence line inside it is indented four spaces", async () => {
+  const text = "```yaml\na: 1\n    ```\nb: x. Next one\nc: y\n```\n";
+  const result = await written(text);
+  expect(result.text).toBe(text);
+});
+
+test("--write leaves a code block indented with a tab as it is", async () => {
+  const text = "Para.\n\n\tcode line one\n\tcode. Two\n";
+  const result = await written(text);
+  expect(result.text).toBe(text);
+});
+
+test("R2 finds a list item that opens with a fence and has no blank line before it", async () => {
+  const path = await markdownFile("Steps:\n- ```sh\n  make\n  ```\n");
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toContain(`${path}:2: R2:`);
+  expect(exitCode).toBe(1);
+});
+
+test("an ordered marker other than 1 does not interrupt a paragraph, so R2 does not apply", async () => {
+  const path = await markdownFile("The release line is\n01. That is the build number.\n");
+  const { stdout } = run([path]);
+  expect(stdout).not.toContain("R2");
+});
+
+test("--write keeps a footnote definition that interrupts a paragraph on its own line", async () => {
+  const result = await written("Text[^n] here,\nmore text\n[^n]: The note.\n");
+  expect(result.text.split("\n")).toContain("[^n]: The note.");
+});
+
+test("--write keeps the content of an empty list item's next line inside that item", async () => {
+  const text = "Next.\n\n-\n  1.\n";
+  const result = await written(text);
+  expect(result.text).toBe(text);
+});
+
+test("--write leaves an HTML block opened by a custom element named script-something as it is", async () => {
+  const text = "Intro.\n\n<script-runner>\nfoo. Bar\nbaz\n";
+  const result = await written(text);
+  expect(result.text).toBe(text);
+});
+
+test("R1 does not end a sentence at the abbreviation incl.", async () => {
+  const path = await markdownFile("Every phase worker (incl. sub-architect) resumes.\n");
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toBe("");
+  expect(exitCode).toBe(0);
+});
