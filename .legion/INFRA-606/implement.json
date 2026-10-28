@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-28T10:40:00Z",
+  "completed": "2026-10-28T13:40:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -92,6 +92,22 @@
       "observed": "new clean exit 0 (5 events), new rig exit 1 (artifact.created with no issue flagged); old: prints 'production Dispatch has no GET /api/v1/events/log ...; reading its event stream since 99 instead', clean exit 0, rig exit 1 with the same event flagged.",
       "headSha": "12aada04cc8c3eeeb75f1a61091140bfc398f3b9",
       "negativeControl": "broken (500): 'production Dispatch could not be read for the audit', exit 1."
+    },
+    {
+      "criterion": "Mention delivery is not lost: a session both mentioned and reached by the route or an author route gets one copy with a silent listener and one with a live one (tester round 3 failure 1; architect's ruling to build on main's #2225 leftToMention).",
+      "surface": "POST /api/v1/issues/{key}/comments through the API handler with a fake listener that answers no lookup of s1 (or a live one), then the real outbox publishing comment.created to NATS destinations recorded in published_destinations",
+      "command": "go test ./internal/dispatch/api/ -run 'TestASilentListenerStillLeavesTheSessionOneCopyOfTheComment|TestALiveListenerLeavesTheMentionedSessionTheMentionsCopyAlone|TestAnUnanswered' -count=2; go test ./internal/dispatch/outbox/ -run 'TestAnUnansweredSessionMentionHoldsTheCopiesOfTheSessionItNames|TestARouteSuppressedByAnUnansweredMentionsTargetFollowsThatMention' -count=1",
+      "observed": "Silent listener, route = session:s1 and reply in s1's thread: the mention attempt fails and comment.created's published_destinations include notifications.agent.s1 (one copy). Live listener: the mention is sent and s1's topic is not among the destinations. Outbox: an unanswered session:<id> mention and an equal-string route each defer while pending, skip once sent, publish once failed.",
+      "headSha": "da4434188526ffef16a314e92c0de33a46fbe855",
+      "negativeControl": "At 12aada04 (previous head) the tester's TestASilentListenerStillLeavesTheSessionOneCopyOfTheComment failed: no event of the comment reached s1 (tester round 3, routecopy.sh / authorcopy.sh: 0 copies stored)."
+    },
+    {
+      "criterion": "The stranded-mention pass costs little when nothing is stranded: one indexed statement that reads no row (architect, 2026-10-28T10:19Z).",
+      "surface": "A database migrated by envoy-dispatch built at the head (schema_migrations max 135), comment_deliveries filled with 200,000 settled rows",
+      "command": "EXPLAIN (ANALYZE, BUFFERS) of strandedCommentMentions' statement (idx-explain.sql); raw output dispatch://INFRA-606/artifact/infra606-round4-index-explain-txt",
+      "observed": "With 20 pending attempts younger than the lease and with none pending: Index Scan using comment_deliveries_pending, actual rows=0, Buffers: shared hit=1.",
+      "headSha": "da4434188526ffef16a314e92c0de33a46fbe855",
+      "negativeControl": "The same statement with the index dropped has no index condition on state (the planner scanned the empty comments table instead); the tester's EXPLAIN at 12aada04 showed Seq Scan on comment_deliveries."
     }
   ],
   "filesChanged": [
@@ -100,8 +116,13 @@
     ".dispatch/architecture/dispatch-events.md",
     "packages/dispatch/AGENTS.md",
     "packages/dispatch/e2e/api.ts",
+    "packages/envoy/.changes/unreleased/pr2406-Added-20261028-113257.yaml",
+    "packages/envoy/.changes/unreleased/pr2406-Added-20261028-113259.yaml",
+    "packages/envoy/.changes/unreleased/pr2406-Changed-20261028-113301.yaml",
+    "packages/envoy/.changes/unreleased/pr2406-Changed-20261028-113303.yaml",
+    "packages/envoy/.changes/unreleased/pr2406-Changed-20261028-113305.yaml",
+    "packages/envoy/.changes/unreleased/pr2406-Changed-20261028-113307.yaml",
     "packages/envoy/AGENTS.md",
-    "packages/envoy/CHANGELOG.md",
     "packages/envoy/cmd/dispatch/AGENTS.md",
     "packages/envoy/cmd/dispatch/README.md",
     "packages/envoy/cmd/dispatch/shutdown_mentions_test.go",
@@ -114,6 +135,7 @@
     "packages/envoy/internal/dispatch/api/comment_delivery.go",
     "packages/envoy/internal/dispatch/api/comment_delivery_claim_test.go",
     "packages/envoy/internal/dispatch/api/comment_delivery_duplicate_test.go",
+    "packages/envoy/internal/dispatch/api/comment_delivery_fallback_copy_test.go",
     "packages/envoy/internal/dispatch/api/comment_delivery_receipt_test.go",
     "packages/envoy/internal/dispatch/api/comment_delivery_resolution_test.go",
     "packages/envoy/internal/dispatch/api/comment_delivery_sender_test.go",
@@ -146,6 +168,9 @@
     "packages/envoy/internal/dispatch/events/stream_test.go",
     "packages/envoy/internal/dispatch/model/model.go",
     "packages/envoy/internal/dispatch/outbox/publisher.go",
+    "packages/envoy/internal/dispatch/outbox/publisher_mentions_test.go",
+    "packages/envoy/internal/dispatch/store/migrations/0135_comment_deliveries_pending.census.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0135_comment_deliveries_pending.up.sql",
     "packages/envoy/internal/dispatch/store/pool.go",
     "scripts/e2e/README.md",
     "scripts/e2e/lib/operator-dispatch.sh",
@@ -171,7 +196,9 @@
     "New read route GET /api/v1/events/log (not in the plan): the only way the Stage 3 audit can read events that belong to no issue once the stream's replay is bounded.",
     "Mention recovery is one periodic stranded pass per process (start + every 30 s) over attempts at least a claim lease old, replacing the start pass, the lapse timer and the drain-triggered pass; the lease-age rule keeps a pass from taking a live process's queue out of order, at the cost of up to a lease of extra latency for a stopped process's leftovers.",
     "The Stage 3 audit falls back to the event-stream replay when production answers the log route 404 (warn-first), per the architect's ruling on review finding 3.",
-    "Reviewer's fast-follow done in this round (architect's ruling): hub generations own their views and conns (nine currency guards gone), deliveryHub.feed removed, the relay and the log route share readEventsAfterID, signal(q.wake), mention process tests moved to shutdown_mentions_test.go."
+    "Reviewer's fast-follow done in this round (architect's ruling): hub generations own their views and conns (nine currency guards gone), deliveryHub.feed removed, the relay and the log route share readEventsAfterID, signal(q.wake), mention process tests moved to shutdown_mentions_test.go.",
+    "Two forward merges of main (both on GitHub-reported conflicts), each fingerprinted on the PR. The second takes main's outbox/publisher.go whole (#2225) and drops this branch's claim-token edit and payload reopen in favour of extending main's leftToMention.",
+    "A send that waits in its lane longer than model.DeliveryClaimLapse unclaimed is counted abandoned by main's outbox query, which then publishes the copy; the mention may also land (documented)."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -180,7 +207,6 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 3,
-  "answersTest": "e51834f2a28ef3a6a8e160e7a3ae19ac1eb613de",
-  "answersReview": "536f7f68068042a30ebe7f2719df0f98e1f75ab7"
+  "round": 4,
+  "answersTest": "c03e536014d0fc380bcb23ce0db7e7f75076cbb2"
 }
