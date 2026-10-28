@@ -7,8 +7,8 @@
 
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
-import { TextSelection } from "@milkdown/kit/prose/state";
+import { Fragment, type Node as ProseMirrorNode, Slice } from "@milkdown/kit/prose/model";
+import { TextSelection, type Transaction } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import * as Y from "yjs";
 import { BLOCK_ID_ATTR } from "../src/lib-headless.js";
@@ -471,6 +471,86 @@ test("input without a keypress over a selection across blocks of a two-list ask 
       );
       expect(beforeInput(view, "deleteContentBackward", null).defaultPrevented).toBe(true);
       expect(blocks(requireAsk(view.state.doc))).toEqual([["paragraph", "Whichion B"]]);
+    },
+    { blockSchema }
+  );
+});
+
+/**
+ * Selects from after `Which` in the question to after `Opt` in the first list's first option of a
+ * two-list ask, and returns a replace shaped like the one ProseMirror reads back from the DOM after
+ * the browser edits that selection itself (`document.execCommand`, no `beforeinput`): it runs from
+ * the selection's start to the end of the ask's content and leaves `Whichxion A` and the first
+ * list's last option, so the second list, which the selection never touched, is dropped.
+ */
+function readBackReplace(view: EditorView): Transaction {
+  const { doc, schema } = view.state;
+  const from = textblockStart(doc, "Which one?") + "Which".length;
+  const to = textblockStart(doc, "Option A") + "Opt".length;
+  view.dispatch(view.state.tr.setSelection(TextSelection.create(doc, from, to)));
+  let askEnd = -1;
+  doc.descendants((node, pos) => {
+    if (node.type.name === "ask") askEnd = pos + node.nodeSize - 1;
+    return askEnd === -1;
+  });
+  const firstList = requireAsk(doc).child(1);
+  const slice = new Slice(
+    Fragment.from([
+      schema.nodes.paragraph.create(null, schema.text("xion A")),
+      firstList.copy(Fragment.from(firstList.lastChild)),
+    ]),
+    1,
+    0
+  );
+  return view.state.tr.replace(from, askEnd, slice);
+}
+
+test("a replace read back from the DOM that drops a list the selection never touched in a two-list ask is refused", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ view, ydoc }) => {
+      peerAppendsList(ydoc, true);
+      const tr = readBackReplace(view);
+      // The replace itself would apply: the ask's relaxed check accepts what it leaves.
+      expect(blocks(requireAsk(tr.doc))).toEqual([
+        ["paragraph", "Whichxion A"],
+        ["bullet_list", "After"],
+      ]);
+      const before = view.state;
+      let updates = 0;
+      ydoc.on("update", () => updates++);
+      expect(() => view.dispatch(tr)).not.toThrow();
+      expect(view.state.doc).toBe(before.doc);
+      expect(updates).toBe(0);
+      expectTwoListAsk(view, ydoc);
+    },
+    { blockSchema }
+  );
+});
+
+test("a whole-document replace and a Backspace joining the lists of a two-list ask still apply", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ handle, press, view, ydoc }) => {
+      peerAppendsList(ydoc, true);
+      // The selection the read-back row makes, so only the edits' own shape decides.
+      readBackReplace(view);
+      handle.setMarkdown("Intro\n\n:::ask{#a1}\nWhich one?\n\n- Option A\n:::\n");
+      expect(blocks(requireAsk(view.state.doc))).toEqual([
+        ["paragraph", "Which one?"],
+        ["bullet_list", "Option A"],
+      ]);
+      expect(ydoc.getXmlFragment("prosemirror").toString()).not.toContain("Option B");
+
+      peerAppendsList(ydoc, true);
+      const secondList = textblockStart(view.state.doc, "Option B");
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, secondList)));
+      press("Backspace");
+      expect(blocks(requireAsk(view.state.doc))).toEqual([
+        ["paragraph", "Which one?"],
+        ["bullet_list", "Option AOption B"],
+      ]);
+      expect(yAskChildren(ydoc)).toEqual(["paragraph", "bullet_list"]);
     },
     { blockSchema }
   );

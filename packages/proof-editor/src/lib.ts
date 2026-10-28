@@ -58,7 +58,7 @@ import { frontmatterSchema } from 'proof-sdk-upstream/src/editor/schema/frontmat
 import { libraryRemarkFrontmatterPlugin } from './lib-remark-frontmatter-plugin';
 import { libraryRemarkDirectivePlugin } from './lib-remark-directive-plugin';
 import { liveTypedBlocksRemarkPlugin } from './read-only-directives';
-import { brokenAskInputGuards, relaxAskContentCheck } from './ask-content';
+import { brokenAskInputGuards, keepUnselectedAskBlocks, relaxAskContentCheck } from './ask-content';
 import { remarkProofMarksPlugin } from 'proof-sdk-upstream/src/editor/schema/remark-proof-marks-plugin';
 import { proofMarkHandler } from 'proof-sdk-upstream/src/formats/remark-proof-marks';
 
@@ -354,6 +354,7 @@ export async function createProofEditor(
     .use(recordMarkHistoryPlugin)
     .use(editorHighlightsPlugin)
     .use(placeholderPlugin)
+    .use(keepUnselectedAskBlocks) // no read-back edit drops an unselected block of an off-rule ask (./ask-content.ts)
     .config((ctx) => {
       ctx.update(remarkStringifyOptionsCtx, (prev) => ({
         ...prev,

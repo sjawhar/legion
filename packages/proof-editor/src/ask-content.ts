@@ -1,7 +1,9 @@
+import { $prose } from "@milkdown/kit/utils";
 import type { Fragment, ResolvedPos, Schema } from "@milkdown/prose/model";
-import { TextSelection, type Transaction } from "@milkdown/prose/state";
+import { type EditorState, Plugin, TextSelection, type Transaction } from "@milkdown/prose/state";
 import { dropPoint } from "@milkdown/prose/transform";
 import type { EditorProps, EditorView } from "@milkdown/prose/view";
+import { ySyncPluginKey } from "y-prosemirror";
 
 /**
  * Makes `schema`'s `ask` node (when it has one) accept, as a node's content, what the document
@@ -193,3 +195,73 @@ export const brokenAskInputGuards: EditorProps = {
     },
   },
 };
+
+/**
+ * Whether `tr` drops, from the ask at `askPos` in `state.doc` that its content rule refuses, a
+ * child block that lies wholly outside the selection: every step of `tr` replaces a range inside
+ * the ask's content, the block's opening is deleted, and its text is not in the ask `tr` leaves.
+ */
+function dropsUnselectedAskBlock(tr: Transaction, state: EditorState, askPos: number): boolean {
+  const ask = state.doc.nodeAt(askPos);
+  if (ask === null || ask.type.contentMatch.matchFragment(ask.content)?.validEnd) return false;
+  let contentFrom = askPos + 1;
+  let contentTo = askPos + ask.nodeSize - 1;
+  for (const step of tr.steps) {
+    const map = step.getMap();
+    let inside = true;
+    map.forEach((oldStart, oldEnd) => {
+      if (oldStart < contentFrom || oldEnd > contentTo) inside = false;
+    });
+    if (!inside) return false;
+    contentFrom = map.map(contentFrom, -1);
+    contentTo = map.map(contentTo, 1);
+  }
+  const kept = tr.doc.nodeAt(tr.mapping.map(askPos));
+  if (kept === null || kept.type !== ask.type) return false;
+  const keptText = kept.textBetween(0, kept.content.size, "\n");
+  const { from, to } = state.selection;
+  let dropped = false;
+  ask.forEach((block, offset) => {
+    const start = askPos + 1 + offset;
+    const end = start + block.nodeSize;
+    if (dropped || (end > from && start < to)) return;
+    if (!tr.mapping.mapResult(start, 1).deletedAfter) return;
+    dropped = !keptText.includes(block.textBetween(0, block.content.size, "\n"));
+  });
+  return dropped;
+}
+
+/**
+ * Refuses a local edit that drops a block of an ask its content rule refuses (see
+ * `relaxAskContentCheck`) which the selection does not touch.
+ *
+ * An edit the browser makes itself, with no `beforeinput` for `brokenAskInputGuards` to prevent
+ * (`document.execCommand`, which grammar and writing extensions use to replace selected text),
+ * is read back from the DOM by ProseMirror, which parses the changed blocks through the ask's
+ * content rule: over a selection from the question into the first of two option lists, the
+ * read-back replace drops the second list too, which was never selected. Such a transaction is
+ * refused, so the state keeps every block; ProseMirror marked the DOM it read as dirty, and since
+ * the state's document does not change, the DOM observer's flush redraws those nodes from the
+ * kept state (`view.updateState(view.state)` when `docView.dirty`), writing nothing to Yjs.
+ *
+ * Only transactions every step of which replaces a range inside one such ask's content are read:
+ * edits elsewhere, whole-document replacements and the shared document's own changes
+ * (y-prosemirror's sync, undo and redo among them) are not. An edit that keeps an unselected
+ * block's text (typing, Backspace joining the lists, a block id set on a node) applies.
+ */
+export const keepUnselectedAskBlocks = $prose(
+  () =>
+    new Plugin({
+      filterTransaction(tr, state) {
+        if (!tr.docChanged || tr.getMeta(ySyncPluginKey)?.isChangeOrigin) return true;
+        let refused = false;
+        state.doc.descendants((node, pos) => {
+          if (refused) return false;
+          if (node.type.name !== "ask") return true;
+          refused = dropsUnselectedAskBlock(tr, state, pos);
+          return false;
+        });
+        return !refused;
+      },
+    })
+);
