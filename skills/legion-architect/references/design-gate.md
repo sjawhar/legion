@@ -16,6 +16,13 @@ what the human decides, each as a [decision block](skill://dispatch/SKILL.md#ask
 Never post a second "spec" artifact beside it: `dispatch artifact` with the primary document's name
 replaces the human's document.
 
+On your first pass over the spec, cut each requirement carried over from an earlier issue's spec or
+decisions that no source of this issue states: those were decided for that issue. This issue's
+sources are the words a person wrote in it, and its `Filed for` line with what that line cites: the
+answer, Slack message or direct message of a `Filed for <person> at their request:` line, or the
+evidence of a controller's `Filed for Legion from <role> on <issue>:` line
+([The `Filed for` line](skill://legion-controller/references/finding-asks.md#the-filed-for-line)).
+
 ## Which gate runs
 
 The approval step runs only when the `Design gate policy` sentence of your `Legion addressing` line
@@ -51,12 +58,13 @@ When the gate is armed, run this exact sequence before the tree's work starts:
    them to answer: give such a point its own decision block first, or take it out of the spec.
 
    ```bash
-   dispatch request-approval --issue <root issue> --summary '<what the human is approving> Reviews: <gap result>, <claim result>.'
+   dispatch request-approval --issue <root issue> --summary '<what the human is approving> Reviews: <gap result>, <claim result>; <what they do not show>.'
    ```
 
    `--summary` says in one to three sentences what the human is approving and nothing else (no
-   commentary and no open question), then one sentence with both reviews' results, for example
-   `Reviews: no open gap, 14 of 14 claims verified.` The primary document is the default; the
+   commentary and no open question), then one sentence with both reviews' results and what they do
+   not show, for example `Reviews: no open gap, 14 of 14 claims verified; neither shows that the
+   design works once built.` The primary document is the default; the
    command prints `Approval requested for spec.md (document id <UUID>) at version <N> (ask <id>)`.
 5. Register that document version with the daemon:
 
