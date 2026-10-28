@@ -1,0 +1,10 @@
+--- a/docs/kubernetes.md
++++ b/docs/kubernetes.md
+@@ -449,6 +449,7 @@
+   dig -v &&
+   ssh-keygen -t ed25519 -N "" -f /tmp/k &&
+   chromium --version &&
++  agent-browser --version &&
+   uv python install 3.13 &&
+   uv run --python 3.13 python -c "print(1)"'
+ ```

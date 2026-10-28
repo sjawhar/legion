@@ -1,0 +1,11 @@
+--- a/docs/kubernetes.md
++++ b/docs/kubernetes.md
+@@ -2244,7 +2244,7 @@
+    works on, and every later write of a locked file fails on it — when the retry runs before the
+    daemon replaces the pod, which it does within seconds of reading the failure (see
+    `workspace-fetch` above). No process can hold one when the
+-   retry runs, since the pod's `roles` container has not started and no other pod mounts the disk.
++   retry runs, since no role container of the pod has started and no other pod mounts the disk.
+    Another worktree entry of the clone keeps its locks; a lock it cannot remove,
+    and a clone whose `.git` or `.git/worktrees` is a symlink (git never makes either one, and it
+    would take the removal outside the clone), fail the container naming the path. jj's own locks

@@ -1,0 +1,11 @@
+--- a/docs/kubernetes.md
++++ b/docs/kubernetes.md
+@@ -270,6 +270,8 @@
+ 
+ - `ce-simplify-code`
+ 
++- the tester's `ce-dogfood`
++
+ The Envoy plugin ships these skills in its `dist/skills`:
+ 
+ - `asd-ste100`

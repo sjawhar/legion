@@ -1,0 +1,11 @@
+--- a/docs/kubernetes.md
++++ b/docs/kubernetes.md
+@@ -306,6 +306,8 @@
+ 
+ - `jq`
+ 
++- `replay-demo-b` (an invented tool beside `jq`)
++
+ - `ssh-keygen`
+ 
+ - `flock`

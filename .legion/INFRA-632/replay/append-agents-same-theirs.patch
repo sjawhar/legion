@@ -1,0 +1,13 @@
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -91,6 +91,10 @@
+ 
+   Check daemon status
+ 
++- `legion replay-demo-d <team>`
++
++  Replay demo D, an invented command beside `legion status <team>`
++
+ - `legion status <issue> <status>`
+ 
+   The operator's: set an issue's Dispatch lifecycle status (`todo|backlog|icebox`) from an operator shell;

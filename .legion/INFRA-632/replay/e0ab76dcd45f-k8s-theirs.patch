@@ -1,0 +1,13 @@
+--- a/docs/kubernetes.md
++++ b/docs/kubernetes.md
+@@ -2241,9 +2241,7 @@
+    it, and logs each with its path and age (`RemoveStaleGitLocks`,
+    `internal/workspace/stalelock.go`): the kubelet retries a failed init container on the pod it
+    failed in, so a first attempt killed mid-fetch leaves its locks on the same disk the retry
+-   works on, and every later write of a locked file fails on it — when the retry runs before the
+-   daemon replaces the pod, which it does within seconds of reading the failure (see
+-   `workspace-fetch` above). No process can hold one when the
++   works on, and every later write of a locked file fails on it. No process can hold one when the
+    retry runs, since the pod's `roles` container has not started and no other pod mounts the disk.
+    Another worktree entry of the clone keeps its locks; a lock it cannot remove,
+    and a clone whose `.git` or `.git/worktrees` is a symlink (git never makes either one, and it

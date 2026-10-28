@@ -1,0 +1,10 @@
+--- a/docs/kubernetes.md
++++ b/docs/kubernetes.md
+@@ -437,7 +437,6 @@
+   aws --version &&
+   kubectl version --client &&
+   go version &&
+-  gcc --version &&
+   gopls version &&
+   python3 --version &&
+   jq --version &&

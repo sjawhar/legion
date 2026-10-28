@@ -1,0 +1,13 @@
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -113,6 +113,10 @@
+ 
+   List registered Legion daemons
+ 
++- `legion replay-demo-b`
++
++  Replay demo B, an invented command beside `legion legions`
++
+ - `legion state`
+ 
+   An operator and coordinator command: read daemon state;

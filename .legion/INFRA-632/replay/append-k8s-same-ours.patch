@@ -1,0 +1,11 @@
+--- a/docs/kubernetes.md
++++ b/docs/kubernetes.md
+@@ -290,6 +290,8 @@
+ 
+ - `gcc`
+ 
++- `replay-demo-c` (an invented tool beside `gcc`)
++
+ - `curl`
+ 
+ - `wget`

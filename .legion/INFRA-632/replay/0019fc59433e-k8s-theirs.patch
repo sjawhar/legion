@@ -1,0 +1,11 @@
+--- a/docs/kubernetes.md
++++ b/docs/kubernetes.md
+@@ -272,8 +272,6 @@
+ 
+ The Envoy plugin ships these skills in its `dist/skills`:
+ 
+-- `asd-ste100`
+-
+ - `dispatch`
+ 
+ - `dispatch-first`
