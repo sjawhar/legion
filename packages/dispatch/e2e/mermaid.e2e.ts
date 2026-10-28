@@ -56,6 +56,8 @@ declare global {
     __mermaidSent?: string[];
     /** How many workers the page constructed. */
     __mermaidWorkers?: number;
+    /** The page's scroll offset at every frame since it loaded (`recordScrollEachFrame`). */
+    __scrollEachFrame?: number[];
     /** Delivers what a held worker posted, and lets later posts through. */
     __releaseMermaid?: () => void;
   }
@@ -269,6 +271,20 @@ async function holdMermaidWorkers(page: Page): Promise<void> {
  *  that re-run brings the target back into view. */
 async function withoutScrollAnchoring(page: Page): Promise<void> {
   await page.addStyleTag({ content: "* { overflow-anchor: none !important; }" });
+}
+
+/** Records the page's scroll offset (`window.__scrollEachFrame`) at every animation frame from
+ *  the moment it loads, so a row can see a jump back to the top that no single read would. */
+async function recordScrollEachFrame(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const offsets: number[] = [];
+    window.__scrollEachFrame = offsets;
+    const sample = () => {
+      offsets.push(Math.round(window.scrollY));
+      requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  });
 }
 
 /** The document's scroll offset once it has stopped moving: unchanged over 10 frames in a row, so
@@ -1075,12 +1091,22 @@ test("a past version's comment link lands on its quote in a document with no dia
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    await recordScrollEachFrame(page);
     await page.goto(
       `/issues/${issue.key}/artifact/spec?v=1&comment=${encodeURIComponent(comment.id)}`
     );
     const versionView = page.getByRole("region", { name: "Document version 1" });
     const highlight = versionView.locator(`[data-id="${comment.id}"]`);
     await expect(highlight).toHaveText("quoted words");
+    await expect(highlight).toBeInViewport();
+    // A page that rebuilt the version's editor collapsed to the viewport's height between builds,
+    // throwing the reader back to the top after the scroll to the quote began. Waiting is the
+    // only way to show a jump that does not come.
+    await page.waitForTimeout(1_500);
+    const offsets = (await page.evaluate(() => window.__scrollEachFrame)) ?? [];
+    const started = offsets.findIndex((offset) => offset > 0);
+    expect(started).toBeGreaterThanOrEqual(0);
+    expect(offsets.slice(started).filter((offset) => offset === 0)).toEqual([]);
     await expect(highlight).toBeInViewport();
   } finally {
     await alice.close();
