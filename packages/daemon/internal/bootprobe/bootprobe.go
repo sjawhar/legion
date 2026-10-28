@@ -291,3 +291,57 @@ func NATSUser(output string) string {
 	}
 	return match[1]
 }
+
+// RoleConfigFilesFlag is the `legion probe-image` flag the daemon's probe Sandbox passes once per
+// role `role_config_files` names, its value RoleConfigFilesValue: the probe reads that role's
+// PI_CONFIG_FILES as the role's Oh My Pi will start with it, the probe pod's own overlays then the
+// role's, and refuses with a RoleOverlaysRefusedLine when one is missing or Oh My Pi refuses them.
+// Passed only for a role that names overlays, so a deployment that names none probes with the
+// command it always had.
+const RoleConfigFilesFlag = "--role-config-files"
+
+// RoleConfigFilesValue is one RoleConfigFilesFlag's value: `<role>=<file>:<file>…`, the role's
+// overlays in the order its PI_CONFIG_FILES names them.
+func RoleConfigFilesValue(role string, files []string) string {
+	return role + "=" + strings.Join(files, ":")
+}
+
+// ParseRoleConfigFiles reads a RoleConfigFilesValue back into the role and its overlays, refusing
+// a value with no role, no file, or an empty entry.
+func ParseRoleConfigFiles(value string) (string, []string, error) {
+	role, joined, ok := strings.Cut(value, "=")
+	if !ok || role == "" || joined == "" {
+		return "", nil, fmt.Errorf("%s %q is not <role>=<file>[:<file>…]", RoleConfigFilesFlag, value)
+	}
+	files := strings.Split(joined, ":")
+	for _, file := range files {
+		if file == "" {
+			return "", nil, fmt.Errorf("%s %q names an empty file", RoleConfigFilesFlag, value)
+		}
+	}
+	return role, files, nil
+}
+
+// roleOverlaysRefusedPrefix begins the line `legion probe-image` prints, and exits 1 after, when a
+// role's PI_CONFIG_FILES (RoleConfigFilesFlag) names an overlay the probe pod cannot read or Oh My
+// Pi refuses the role's overlays.
+const roleOverlaysRefusedPrefix = "probe-image: role-overlays-refused role="
+
+// RoleOverlaysRefusedLine is that line for role, why naming the overlay or Oh My Pi's answer, its
+// line breaks turned to spaces so the line carries the whole of it.
+func RoleOverlaysRefusedLine(role, why string) string {
+	return roleOverlaysRefusedPrefix + role + ": " + strings.Join(strings.Fields(why), " ")
+}
+
+// roleOverlaysRefused is a RoleOverlaysRefusedLine.
+var roleOverlaysRefused = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(roleOverlaysRefusedPrefix) + `(\S+): (.*)$`)
+
+// RoleOverlaysRefused is the role and the reason of the first RoleOverlaysRefusedLine in output,
+// and false when output holds none.
+func RoleOverlaysRefused(output string) (role, why string, ok bool) {
+	match := roleOverlaysRefused.FindStringSubmatch(output)
+	if match == nil {
+		return "", "", false
+	}
+	return match[1], match[2], true
+}

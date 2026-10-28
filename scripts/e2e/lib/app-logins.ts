@@ -79,11 +79,12 @@ export function appKeySources(
 const base64url = (data: string | Buffer): string => Buffer.from(data).toString("base64url");
 
 /** The RS256 App JWT the daemon mints (internal/appauth, GenerateJWT): issued a minute back for
- * clock skew, ten minutes of life, the App id as its issuer. */
+ * clock skew, nine minutes of life (GitHub refuses an exp more than ten minutes ahead of its clock,
+ * so ten fails on a host whose clock runs ahead of GitHub's), the App id as its issuer. */
 export function appJWT(appId: string, privateKeyPEM: string, now: Date): string {
   const seconds = Math.floor(now.getTime() / 1000);
   const input = `${base64url(JSON.stringify({ alg: "RS256", typ: "JWT" }))}.${base64url(
-    JSON.stringify({ iss: appId, iat: seconds - 60, exp: seconds + 600 })
+    JSON.stringify({ iss: appId, iat: seconds - 60, exp: seconds + 540 })
   )}`;
   const signature = createSign("RSA-SHA256").update(input).sign(privateKeyPEM);
   return `${input}.${base64url(signature)}`;
