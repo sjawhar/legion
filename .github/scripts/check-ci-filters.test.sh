@@ -471,4 +471,21 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the file that closure reads outside the filter, or the go env write" "$(contains "$out" 'other\|go env')"
 
+echo "case: a claimed command that cds into another module of the workspace before it runs"
+root=$(fixture cd-other-module)
+mkdir -p "$root/mod2/cmd/app" "$root/mod2/lib"
+printf 'module example.com/m2\n\ngo 1.21\n' > "$root/mod2/go.mod"
+printf 'package main\n\nfunc main() {}\n' > "$root/mod2/cmd/app/main.go"
+printf 'package lib\n' > "$root/mod2/lib/lib.go"
+printf 'go 1.21\n\nuse (\n\t./mod\n\t./mod2\n)\n' > "$root/go.work"
+replace "$root/.github/workflows/ci.yaml" "              - 'mod/go.mod'" $'              - \'mod/go.mod\'\n              - \'mod2/go.mod\''
+replace "$root/.github/workflows/site.yaml" "      - 'mod/go.mod'" $'      - \'mod/go.mod\'\n      - \'mod2/go.mod\''
+replace "$root/.github/workflows/ci.yaml" "              - 'mod/cmd/app/*'" "              - 'mod/**'"
+run_check "$root"
+check "passes while the command runs in its own module" "$(is "$status" 0)"
+replace "$root/.github/workflows/ci.yaml" "run: go test ./cmd/app ./lib" "run: cd ../mod2 && go test ./cmd/app ./lib"
+run_check "$root"
+check "fails once it runs in the other module, whose files its filter misses" "$(is "$status" 1)"
+check "names a file of that module" "$(contains "$out" 'mod2/')"
+
 summary "check-ci-filters.sh holds each filter to its job's Go closure, its rules and its table"
