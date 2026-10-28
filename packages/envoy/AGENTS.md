@@ -2219,31 +2219,17 @@ markdown a version records, never a list of forbidden characters: whatever the b
 back unchanged is refused, and an option label containing `": "` - the separator between a label
 and its description - is one example rather than the only one. A single newline is
 carried as a hard break; surrounding whitespace is trimmed, as the parser trims it.
-An edit of an ask whose body breaks its content rule (`pmdoc.AskContentError`) is refused
-`400 ASK_BLOCK_TEXT` with field `block` (`ErrAskBlockUnrepresentable`), whatever else it names,
-unless it sends `options`, which rebuilds the options as one list and so repairs the ask; the
-reason is the content rule's text plus "send options to rebuild the options as one list". The
-options sent must include, exactly (label and description), every option the block's lists hold
-that the ask row does not hold exactly (the row keeps its options from before the break;
-`SetAskBlockText` reads them first), else the edit is refused quoting each such option in full as
-`"Label: description"`; the reason for an edit with no options quotes them too. The rebuild
-writes each option as its plain text (`Label: description`, marks and links dropped), so an option
-the block holds and the row does not that holds more than its first paragraph (a nested list, a
-second paragraph) refuses every edit. The reason quotes in full (rendered markdown, nested
-content included) each list that must go, by block id, with the ready `dispatch doc-edit` delete
-of that block: the list holding such an option, and any other list but the first, so the delete
-leaves one list, which doc-edit accepts (a doc-edit that deletes only the nested text leaves the
-ask broken, which it refuses); then the ask edit sends every option. The quoted words below an
-option can come back in its description; no document edit nests them under an option. Two options in the block sharing a label cannot be rebuilt as one list, so
-every edit of such an ask is refused quoting both; the reason names the path that works: remove
-one with a document edit, then edit the ask sending every option, the removed one renamed (a
-document edit that only renames one leaves the ask broken, which it refuses). Before,
-an edit naming only `urgency` or `multiple` wrote the options joined across both lists to the row.
-An ask holding a non-list block after its first list (a paragraph after its options) is refused
-whatever the edit sends, `options` included (`refuseAskContentEdit` in `docs/ask_block_text.go`):
-the reason quotes that block's text and says the route will neither move it into the question nor
-delete it - move it out of the decision (a document edit's move places a block before or after
-the decision block, never inside it) or delete it with a document edit, then edit the ask.
+An edit of an ask whose body breaks its content rule (`pmdoc.AskContentError`: a second bullet
+list, or a block after its list, which concurrent browser edits can leave) is refused
+`400 ASK_BLOCK_TEXT` with field `block` (`ErrAskBlockUnrepresentable`), whatever it names
+(`refuseAskContentEdit` in `docs/ask_block_text.go`): the route never rebuilds such an ask, so it
+never moves or drops what a collaborator wrote. The reason quotes every child block of the ask in
+full (its rendered markdown, Go-quoted) with its block id given only as Go-quoted data - no shell
+command and no ready-made ops, since a block id is document text - and names one path: delete the
+block or blocks to drop with a document edit (`dispatch doc-edit`, deleting a block by its id)
+until the ask holds its question and at most one list, last, then edit the ask, which the route
+then applies as for any valid ask. Before, an edit naming only `urgency` or `multiple` wrote the
+options joined across both lists to the row.
 Settlement retracts an ask whose block left the document in its own name,
 `{kind: "system", id: "document-settlement"}`, and restores only a retraction it wrote - a
 person's or a session's retract stands however the document moves, which is why `resolve`

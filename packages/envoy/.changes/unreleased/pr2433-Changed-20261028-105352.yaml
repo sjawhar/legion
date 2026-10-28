@@ -1,20 +1,13 @@
 kind: Changed
 body: |-
     Editing an ask through the ask-edit route (`PATCH /api/v1/asks/{id}`, `dispatch edit-ask`) now
-    refuses, with HTTP 400 `ASK_BLOCK_TEXT`, an edit of a decision that breaks its
-    content rule, unless the edit sends `options`, which rebuilds them as one list and repairs the
-    ask. The options sent must include, with the same label and description, every option the
-    decision's lists hold that its ask does not, which the reason quotes in full; the rebuilt list
-    keeps each option's plain text, so such an option that holds more below its text (a nested list,
-    a second paragraph) is refused whatever the edit sends: the reason quotes in full, by block id,
-    the list to delete with a document edit (`dispatch doc-edit`), which leaves one list, before the
-    ask edit sends every option. A decision whose lists hold two options with one label is
-    refused whatever the edit sends, quoting both: remove one with a document edit, then edit the
-    ask sending every option, the removed one renamed. Before, an edit of only its urgency or `multiple` wrote its options, joined across both
-    lists, to the ask. A decision holding a paragraph after its options is refused whatever the
-    edit sends, `options` included, and the reason quotes that text: the route never moves it into
-    the question nor deletes it, so a document edit moves it out of the decision or deletes it
-    first.
+    refuses, with HTTP 400 `ASK_BLOCK_TEXT`, every edit of a decision that breaks its content rule
+    (a second option list, or a block after its options, which two people's concurrent edits can
+    leave), so the route never moves or drops what another person wrote. The reason quotes every
+    block of the decision in full with its block id as quoted data, and names the path: delete the
+    block or blocks to drop with a document edit (`dispatch doc-edit`) until the decision holds its
+    question and at most one list, then edit the ask. Before, an edit of only its urgency or
+    `multiple` wrote its options, joined across both lists, to the ask.
 time: 2026-10-28T10:53:52.572551815Z
 custom:
     Issue: pr2433
