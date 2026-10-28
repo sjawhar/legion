@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/provider/websocket"
 	ygsync "github.com/reearth/ygo/sync"
 
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -22,13 +24,15 @@ import (
 )
 
 // atCapStates holds the stored documents at the decode cap the tests share, each built once a test
-// process: the agent's rewrites (agentRewrittenState) and the long edit's keystrokes
-// (longEditedAtCapState) take minutes, and neither changes between tests.
+// process: the agent's rewrites (agentRewrittenState), the long edit's keystrokes
+// (longEditedAtCapState) and one client's keystrokes (oneClientAtCapState) take minutes, and none
+// changes between tests.
 var atCapStates struct {
 	sync.Mutex
 	agentRewritten []byte
 	agentRefusal   error
 	longEdited     []byte
+	oneClient      []byte
 }
 
 // longEditedAtCapState is the long-edited fixture (longEditedState) edited on until its struct
@@ -553,6 +557,217 @@ func TestABrowserHoldingTheHistoryARebuildReplacedCannotHandItBack(t *testing.T)
 		t.Fatalf("the room ended the rebuilt history's browser with %v", fresh.Closed())
 	default:
 	}
+}
+
+// oneClientWriter is the client that writes the whole of oneClientAtCapState's history, numbered
+// above the browser
+// TestABrowserHoldingAHistoryARebuildReplacedIsClosedThoughTheWalkRefusesItBeforeReadingAnyOfIt
+// connects with, so ygo writes the browser's own group before the history's.
+const oneClientWriter crdt.ClientID = 0x0ce1
+
+// oneClientAtCapState is a document's history one client wrote, standing at the decode cap: a
+// short document that client seeded, its first text typed into at its head a character at a time,
+// each its own item, until the decoded document counts maxUpdateItems structs, and those
+// characters then deleted, as longEditedAtCapState types the long-edited fixture. Its encoded state
+// is one client group.
+func oneClientAtCapState(t *testing.T) []byte {
+	t.Helper()
+	atCapStates.Lock()
+	defer atCapStates.Unlock()
+	if atCapStates.oneClient != nil {
+		return atCapStates.oneClient
+	}
+	tree, err := pmdoc.Parse("# One writer\n\nA paragraph its only writer typed into a character at a time.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := newDocumentCopy(crdt.WithClientID(oneClientWriter))
+	fragment := doc.GetXmlFragment(fragmentName)
+	doc.GetMap(marksMapName)
+	if err := doc.TransactE(func(txn *crdt.Transaction) error { return pmdoc.Update(txn, fragment, tree) }); err != nil {
+		t.Fatal(err)
+	}
+	text := firstText(fragment)
+	if text == nil {
+		t.Fatal("the seeded document holds no text")
+	}
+	typed := 0
+	for structs := countRoomStructs(doc); structs < maxUpdateItems; structs = countRoomStructs(doc) {
+		more := int(maxUpdateItems - structs)
+		doc.Transact(func(txn *crdt.Transaction) {
+			for range more {
+				text.Insert(txn, 0, "x", nil)
+			}
+		})
+		typed += more
+	}
+	doc.Transact(func(txn *crdt.Transaction) { text.Delete(txn, 0, typed) })
+	state := crdt.EncodeStateAsUpdateV1(doc, nil)
+	if structs, _, _ := structsAndRendering(t, state); structs+smallestReplacementAdds <= maxUpdateItems || structs > maxUpdateItems {
+		t.Fatalf("the one writer's document typed on by %d characters decodes to %d structs, want within %d of the %d cap", typed, structs, smallestReplacementAdds, maxUpdateItems)
+	}
+	if clients := doc.StateVector(); len(clients) != 1 {
+		t.Fatalf("the one writer's history holds the clocks of %d clients, want its writer's alone", len(clients))
+	}
+	atCapStates.oneClient = state
+	return state
+}
+
+// A browser holding the history a rebuild replaced is sent back to a fresh read whatever its
+// whole-state message lets the walk read before the walk refuses it. Here the history is one
+// client's, at the decode cap, and the browser's own client sorts before it, so the message the
+// browser hands back - its own unsent edits, then the history - is refused by the walk at the
+// history's header, the group that passes the cap, with no struct of the history read. Left
+// connected on that refusal the browser would be answered SyncStatus(0), and every later edit of
+// it, naming the old history's items, would park. The room closes it with the document's own close
+// and DOC_NEEDS_REBUILD; it reconnects from a fresh read of the rebuilt document, as the editor's
+// 4413 path does, not with its old state; and a new edit from it is applied and stored.
+func TestABrowserHoldingAHistoryARebuildReplacedIsClosedThoughTheWalkRefusesItBeforeReadingAnyOfIt(t *testing.T) {
+	const browserClient crdt.ClientID = 1
+	state := oneClientAtCapState(t)
+	service, artifactID := newTestService(t)
+	storeHistory(t, service, artifactID, state)
+	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(server.Close)
+	ctx := context.Background()
+	before, err := service.Text(ctx, artifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeResidentRoom(t, service, artifactID)
+
+	url := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + artifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
+	alice := http.Header{"X-Dispatch-User": []string{"alice"}}
+	held := docstest.Dial(t, url, alice, artifactID, crdt.New(crdt.WithClientID(browserClient)))
+	awaitAnswer(t, held, "the document at the cap")
+	if rendering, err := renderDocument(held.Doc); err != nil || rendering != before {
+		t.Fatalf("the browser holds a %d-byte rendering (%v), want the document's %d", len(rendering), err, len(before))
+	}
+	if clients := held.Doc.StateVector(); len(clients) != 1 || clients.Clock(oneClientWriter) == 0 {
+		t.Fatalf("the browser holds the clocks of %v, want the one writer's alone", clients)
+	}
+	held.Close()
+	// Each edit inserts at the text's head, so none merges with another: smallestReplacementAdds
+	// structs of the browser's own, which take its message past the cap the history stands within
+	// that many structs of.
+	unsentInto := firstText(held.Doc.GetXmlFragment(fragmentName))
+	for range smallestReplacementAdds {
+		docstest.Transact(held.Doc, func(txn *crdt.Transaction) { unsentInto.Insert(txn, 0, "unsent ", nil) })
+	}
+	closeResidentRoom(t, service, artifactID)
+	if _, _, err := rebuildDocument(t, service, artifactID, nil); err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, err := service.Text(ctx, artifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rebuilt != before {
+		t.Fatalf("the rebuilt document reads %d bytes, want the %d it read before", len(rebuilt), len(before))
+	}
+	stored, err := service.persistence.Load(ctx, artifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuiltHistory, err := decodeHistory(stored.Update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired := retiredClientsOf(rebuiltHistory); len(retired) != 1 || retired[oneClientWriter] == 0 {
+		t.Fatalf("the rebuilt history lists %v as retired, want the one writer alone", retired)
+	}
+	// The rebuilt room holds none of the browser's clients, so the message it hands back is its
+	// whole state, which the walk refuses having read the browser's own structs alone.
+	read, _, err := walkRecorded(crdt.EncodeStateAsUpdateV1(held.Doc, nil), fromPeer)
+	if !errors.Is(err, errUpdateUndecodable) || len(read.structs) != smallestReplacementAdds {
+		t.Fatalf("the walk answered the browser's message %v having read %d structs, want it refused past the cap after the browser's %d",
+			err, len(read.structs), smallestReplacementAdds)
+	}
+	for _, walked := range read.structs {
+		if crdt.ClientID(walked.client) != browserClient {
+			t.Fatalf("the walk read a struct of client %d before it refused, want the browser's alone", walked.client)
+		}
+	}
+
+	reconnected := docstest.Dial(t, url, alice, artifactID, held.Doc)
+	select {
+	case <-reconnected.Ended:
+	case <-time.After(time.Minute):
+		t.Fatal("the room left the browser holding the replaced history connected")
+	}
+	if closed := reconnected.Closed(); closed == nil || closed.Code != contracts.DocumentTooLargeCloseCode || closed.Text != contracts.DocumentNeedsRebuildCloseReason {
+		t.Fatalf("the room ended the browser holding the replaced history with %v, want %d %s", closed, contracts.DocumentTooLargeCloseCode, contracts.DocumentNeedsRebuildCloseReason)
+	}
+
+	fresh := docstest.Dial(t, url, alice, artifactID, crdt.New())
+	awaitAnswer(t, fresh, "the rebuilt document")
+	if rendering, err := renderDocument(fresh.Doc); err != nil || rendering != rebuilt {
+		t.Fatalf("the fresh read holds a %d-byte rendering (%v), want the rebuilt %d", len(rendering), err, len(rebuilt))
+	}
+	freshInto := firstText(fresh.Doc.GetXmlFragment(fragmentName))
+	if _, err := fresh.Send(func(txn *crdt.Transaction) { freshInto.Insert(txn, 0, "fresh ", nil) }); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 30*time.Second, "the fresh read's edit to be stored", func() bool {
+		stored, err := service.persistence.Load(ctx, artifactID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		history, err := decodeHistory(stored.Update)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rendering, err := renderDocument(history)
+		return err == nil && strings.Contains(rendering, "fresh ") && !strings.Contains(rendering, "unsent")
+	})
+	select {
+	case <-fresh.Ended:
+		t.Fatalf("the room ended the fresh read's connection with %v", fresh.Closed())
+	default:
+	}
+}
+
+// The hook reads a retired client's group by its header, so it closes a browser holding the
+// replaced history wherever the walk refuses that browser's message: at the header of the
+// history's group, past the cap, or in a struct of the group, after the browser's own group either
+// way, as well as when the walk refuses nothing. A group of a retired client from its retired clock
+// on - what that client wrote after the rebuild, which a browser of the rebuilt document can hold -
+// is not closed, and nor is a message of clients the rebuild did not retire that the walk refuses,
+// which is answered with the walk's own refusal.
+func TestAGroupOfARetiredClientBelowItsClockIsClosedWhereverTheWalkRefuses(t *testing.T) {
+	retired := map[crdt.ClientID]uint64{123: 5}
+	service, room, replica := rebuiltRoom(t, "# Rebuilt\n\nOne paragraph of ordinary prose.\n", retired)
+	// own starts a message of groups client groups with the browser's own: one GC struct of a
+	// client the rebuild did not retire.
+	own := func(groups int) v1Frame { return newV1Frame(groups).group(1, 1000, 0).gc(1) }
+	for _, row := range []struct {
+		name   string
+		update []byte
+		// closed is whether the hook closes the browser for a rebuild, never applying the
+		// message; otherwise refused is the error the hook answers with, nil for one it applies.
+		closed  bool
+		refused error
+	}{
+		{name: "the history's header past the cap", update: own(2).group(maxUpdateItems, 123, 0).done(), closed: true},
+		{name: "a struct of the history cut short", update: own(2).group(1, 123, 0).done(), closed: true},
+		{name: "the history the walk reads whole", update: own(2).group(1, 123, 0).gc(5).noDeletes(), closed: true},
+		{name: "a retired client's group from its retired clock on", update: own(2).group(1, 123, 5).gc(1).noDeletes()},
+		{name: "another client's header past the cap", update: own(2).group(maxUpdateItems, 456, 0).done(), refused: errUpdateUndecodable},
+	} {
+		err, called := weighInto(service, room, row.update)
+		var refusal *websocket.PeerClose
+		rebuildClose := errors.As(err, &refusal) && refusal.Code == contracts.DocumentTooLargeCloseCode &&
+			refusal.Reason == contracts.DocumentNeedsRebuildCloseReason
+		switch {
+		case row.closed && (!rebuildClose || called):
+			t.Errorf("%s was answered %v (applied %t), want it closed for a rebuild and never applied", row.name, err, called)
+		case !row.closed && row.refused == nil && (err != nil || !called):
+			t.Errorf("%s was answered %v (applied %t), want it applied", row.name, err, called)
+		case !row.closed && row.refused != nil && (!errors.Is(err, row.refused) || rebuildClose || called):
+			t.Errorf("%s was answered %v (applied %t), want %v and never applied", row.name, err, called, row.refused)
+		}
+	}
+	runtime.KeepAlive(replica)
 }
 
 // awaitAnswer waits for the room's sync step 2 to peer, its whole document.

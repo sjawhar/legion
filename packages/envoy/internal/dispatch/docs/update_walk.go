@@ -120,7 +120,11 @@ import (
 //
 // The visitor sees each struct and delete range as it is read, so a walk that ends in a refusal
 // has already shown it the structs before the refusal; a caller discards what it gathered from a
-// refused walk. visit may be nil when only the tally is wanted.
+// refused walk. visit may be nil when only the tally is wanted. A visitor that is also a
+// groupVisitor sees each client group's header once the header is read, before the group's
+// structs and before the walk weighs the group's count against maxUpdateItems, so a walk refused
+// for that count, or for anything in the group's structs, has shown it the header of the group it
+// was refused in.
 func walkUpdate(update []byte, source updateSource, visit updateVisitor) (updateTally, error) {
 	w := updateWalker{buf: update, source: source}
 	var tally updateTally
@@ -128,6 +132,7 @@ func walkUpdate(update []byte, source updateSource, visit updateVisitor) (update
 	if w.refusal == nil && (tally.clients > uint64(len(update)/2) || tally.clients > maxUpdateItems) {
 		w.undecodable("more clients than the frame can hold")
 	}
+	groups, _ := visit.(groupVisitor)
 	for range tally.clients {
 		if w.refusal != nil {
 			break
@@ -135,11 +140,18 @@ func walkUpdate(update []byte, source updateSource, visit updateVisitor) (update
 		start := w.pos
 		structs := w.uint()
 		tally.structs += structs
-		if w.refusal == nil && tally.structs > maxUpdateItems {
-			w.undecodable("more structs than ygo decodes in one update")
-		}
 		id := w.uint()
 		clock := w.uint()
+		if w.refusal != nil {
+			break
+		}
+		if groups != nil {
+			groups.walkedGroup(id, clock, structs)
+		}
+		if tally.structs > maxUpdateItems {
+			w.undecodable("more structs than ygo decodes in one update")
+			break
+		}
 		for range structs {
 			if w.refusal != nil {
 				break
@@ -245,6 +257,13 @@ const (
 type updateVisitor interface {
 	walkedStruct(updateStruct)
 	walkedDelete(client, clock, length uint64)
+}
+
+// groupVisitor is a visitor that is also handed each client group's header as walkUpdate reads
+// it: the group's client, the clock its first struct starts at, and how many structs it declares.
+// It is a separate interface because only the hook asks for it (peerWeighing.walkedGroup).
+type groupVisitor interface {
+	walkedGroup(client, clock, structs uint64)
 }
 
 // updateTally is what a walk counts, all of it from the update's own headers.

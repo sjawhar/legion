@@ -76,12 +76,12 @@ import (
 //
 // The unrendered total does not see everything a frame is made of: text inside an element nested
 // under the margin reads as text, which the walk cannot place, so one struct of it could carry the
-// frame past what the three bounds allow. So the room keeps a fourth total, its whole-state frame:
-// the bytes of its encoded state at each count, and the bytes each update the hook admits since
-// can add to it (frameBytes). The hook refuses with DocumentTooLargeCloseCode an update that
-// inserts anything and would take that total past heaviestHandoffBound, F, the heaviest frame the
-// bounds allow a browser to hand over; an update that only deletes is never refused by it, so a
-// room at F can still be shortened.
+// frame past what the three bounds allow. So the room keeps a fourth total, never below its
+// whole-state frame: its encoded state's bytes at each count with what deleting what it holds can
+// add (deletionReserve), and what each update the hook admits since can add (frameBytes,
+// deleteFrameBytes). The hook refuses with DocumentTooLargeCloseCode an update that inserts
+// anything and would take it past heaviestHandoffBound, F, the heaviest frame the bounds allow a
+// browser to hand over; one that only deletes is never refused by it, so a room at F can be cut.
 //
 // The hook has a third state, which is the room budget's rather than the document's: while the
 // open rooms are past their budget and nothing can be closed (roomBudget.full), an update that
@@ -233,11 +233,11 @@ const maxMessageBytes = 54 << 20
 //
 // Every update is walked first (walkUpdate, fromPeer), under the bound too. An update the walk
 // refuses - bytes ygo's decoder would refuse, or content the Proof editor never sends: a
-// subdocument, a root other than the fragment and the margin - is answered, unless what the walk
-// read of it carries the history a rebuild replaced (below), with the walk's error
-// and never applied, so ygo answers that browser SyncStatus(0), integrates nothing and leaves it
-// connected (provider/websocket/peer.go:247-263). The apply is not what answers such a frame:
-// though a room's bounded document takes a failed apply back out whole (newRoomScans), ygo
+// subdocument, a root other than the fragment and the margin - is answered, unless the walk
+// reached a client group of the history a rebuild replaced before it refused (below), with the
+// walk's error and never applied, so ygo answers that browser SyncStatus(0), integrates nothing and
+// leaves it connected (provider/websocket/peer.go:247-263). The apply is not what answers such a
+// frame: though a room's bounded document takes a failed apply back out whole (newRoomScans), ygo
 // would first decode and integrate every struct before the bad byte, at the cost the walk is there
 // to keep off the peer's read loop, and the room would have to be left to refuse what the editor
 // never sends.
@@ -256,21 +256,21 @@ const maxMessageBytes = 54 << 20
 // browser could otherwise add mebibytes of them in each update, under the bound and at it, and
 // carry the room's whole-state frame past the message floor (maxMessageBytes). An update that adds
 // none - typing, deleting, a whole-state message of what the room holds - is never refused by them.
-// The frame total holds the frame itself under F whatever the walk can place, and an update that
-// inserts nothing - a delete, a whole-state message of what the room holds - is never refused by it.
+// The frame total keeps the frame under F, short of what deletes add at F, whatever the walk can
+// place; an update that inserts nothing - a delete, the room's state handed back - it never refuses.
 //
-// An update carrying a struct of the history a rebuild replaced - a client the rebuilt history
-// lists as retired, below the clock it had reached (retiredMapName) - comes from a browser that
-// held the document before the rebuild and still holds that history: its whole-state message
-// hands back every struct of it, since the rebuilt room holds none, and applied it would put the
-// old document beside the rebuilt one, every block twice, and carry the room back toward the cap
-// the rebuild trimmed. It is refused before any other rule with DocumentTooLargeCloseCode and
-// DocumentNeedsRebuildCloseReason, so the editor drops what it sent and builds its document afresh
-// from the rebuilt room, and its saved rows typed against the old history are dropped as rows of a
-// rebuilt document are (pending-sync.ts, addsParking). An update that adds an entry to the retired
-// clients' list, overwrites one or deletes one is refused as the editor's never-sent content is:
-// only a rebuild writes the list, and nothing the editor runs writes or deletes an entry of it
-// (update_walk.go, the search of the editor's sources).
+// An update carrying a client group of the history a rebuild replaced - a group of a client the
+// rebuilt history lists as retired, starting below the clock it had reached (retiredMapName) -
+// comes from a browser that held the document before the rebuild and still holds that history
+// (walkedGroup gives why no other browser sends one, whatever the walk reads of it): applied, its
+// whole-state message would put the old document beside the rebuilt one, every block twice, and
+// carry the room back toward the cap the rebuild trimmed. It is refused before any other rule, the
+// walk's refusal included, with DocumentTooLargeCloseCode and DocumentNeedsRebuildCloseReason, so
+// the editor drops what it sent and builds its document afresh from the rebuilt room, and drops its
+// saved rows typed against the old history as rows of a rebuilt document (pending-sync.ts,
+// addsParking). An update that adds an entry to the retired clients' list, overwrites one or
+// deletes one is refused as the editor's never-sent content is: only a rebuild writes the list,
+// and nothing the editor runs writes or deletes an entry of it (update_walk.go's search).
 //
 // While the room budget is full (roomBudget.full), an update the document's bounds admit is then
 // refused with DocumentBusyCloseCode when it inserts anything (refusedUnderPressure), whatever it
@@ -340,12 +340,12 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 	tally, err := walkUpdate(info.Update, fromPeer, &weighed)
 	// A replaced history is closed before any other rule, its walk's refusal included: a
 	// browser's whole-state message of a history the rebuild found at the decode cap, with an
-	// edit it made since, is past the cap and refused by the walk, and left connected on that
-	// refusal the editor would hand it back on every reconnect. Whatever the walk read before it
-	// refused is the update's, so a struct of a retired client below its clock among it is the
-	// replaced history. It is closed before its entries are weighed as forged too: a history an
-	// earlier rebuild seeded carries that rebuild's list, which the room, seeded afresh, does not
-	// hold.
+	// edit it made since, is past the cap and refused by the walk; left connected, it would hand
+	// it back on every reconnect while each later edit, naming the old history's items, parked.
+	// What the walk read before it refused is the update's, the header of the group it refused in
+	// included (walkedGroup). It is closed before its entries are weighed as forged too: a
+	// history an earlier rebuild seeded carries that rebuild's list, which the room, seeded
+	// afresh, does not hold.
 	if weighed.former {
 		slog.Info("dispatch: refused a browser's update carrying the history its document's rebuild replaced",
 			"room", info.Room, "update_bytes", len(info.Update))
@@ -528,8 +528,9 @@ type peerWeighing struct {
 	// state that no rendering prices (unrenderedContentHeap).
 	content uint64
 	// unrendered is the unrendered bytes of the structs past the room's state (unrenderedBytes),
-	// what the update adds to the room's unrendered total, and frame the bytes they can add to the
-	// room's whole-state frame (frameBytes), what it adds to the room's frame total.
+	// what the update adds to the room's unrendered total, and frame the bytes its new structs and
+	// its new delete ranges can add to the room's whole-state frame (frameBytes,
+	// deleteFrameBytes), what it adds to the room's frame total.
 	unrendered, frame uint64
 	// born is whether any struct past the room's state integrates deleted (bornDeleted), whose
 	// clocks the room's delete set holds from then on (deletedRuns.record).
@@ -537,13 +538,53 @@ type peerWeighing struct {
 	// retired is the clients the room's history lists as retired by a rebuild, each with the clock
 	// it had reached (structTotal.retired), nil for a room never rebuilt or no load listed, and
 	// entries where that list's own entries sit (structTotal.entries). former is whether the update
-	// carries a struct of a retired client below that clock, which only a browser holding the
-	// replaced history sends; forged whether it changes the list - an entry past the room's state,
-	// a struct naming an entry as its origin, which is how an overwrite of a map key is written, or
-	// a delete range over an entry - which no browser does.
+	// carries a client group of a retired client starting below that clock (walkedGroup), which
+	// only a browser holding the replaced history sends; forged whether it changes the list - an
+	// entry past the room's state, a struct naming an entry as its origin, which is how an
+	// overwrite of a map key is written, or a delete range over an entry - which no browser does.
 	retired        map[crdt.ClientID]uint64
 	entries        retiredEntries
 	former, forged bool
+}
+
+// walkedGroup marks the update former when the group is a retired client's and starts below the
+// clock that client had reached: the group's first struct is then the replaced history's. Every
+// struct of a group starts at or past the group's clock, so this sees every struct of a retired
+// client below its clock.
+//
+// It reads each group's header - its client and the clock its first struct starts at - which the
+// walk hands over before it reads the group's structs or weighs the group's count against
+// maxUpdateItems (groupVisitor), so it answers whatever the walk read before a refusal. That is
+// what a browser holding a history at the decode cap needs: its whole-state message, the history
+// with an edit made since, is past the cap, and the walk refuses it at the header of the group
+// that passes it; when the browser's own client sorts before the history's (ygo writes groups by
+// ascending client, sjawhar/ygo v1.51.3-sami.7, crdt/update.go:251; Yjs by descending, yjs 13.6.32
+// src/utils/encoding.js:99), and a history one client wrote is one group, no struct of the history
+// is read before that refusal, and only the header shows it. Every rule the walk refuses a
+// history's handoff by - its count, its content, its delete set - comes at that header or after
+// it: the groups before it are the browser's own clients', carrying only what its editor wrote
+// since, which the walk refuses only for more structs than the cap or content no editor sends.
+//
+// It never closes an honest browser. A retired client's clocks below the one it had reached are
+// the replaced history's structs: a client numbers its structs from zero up, the rebuild reads
+// that clock from the history it replaces (rebuiltSeed), and the rebuilt room holds none of them -
+// its seed is a fresh client's, and the hook refuses every update carrying them - so a browser
+// that took the document from the rebuilt room holds none either, and writes a group of a retired
+// client, if any, only from that client's structs at or past that clock. The editor's 4413 path
+// builds its document afresh on a new connection, a new Y.Doc with a client id of its own
+// (packages/dispatch/web/src/features/doc/connection.ts:153, :222-231), so what it writes next is
+// no retired client's. And no encoder begins a client group with anything but a struct it holds of
+// that client: ygo starts each group inside its first item (encodeV1Locked, crdt/update.go:231-271;
+// encodeStructStoreV1, crdt/merge.go:162-188, which writes a skip only between two items), and Yjs
+// at the first struct of its store, which holds no skips (writeStructs, src/utils/encoding.js:57-71),
+// at the first struct of a merge, whose readers drop skips (mergeUpdatesV2, src/utils/updates.js:338,
+// writing a skip only between two structs of one client, :405-417), and never with a skip in a
+// diff (diffUpdateV2, :477-481). So a header of a retired client below that clock is a struct of
+// the replaced history, short of a fresh browser drawing a retired client's random 32-bit id.
+func (w *peerWeighing) walkedGroup(client, clock, structs uint64) {
+	if limit, listed := w.retired[crdt.ClientID(client)]; listed && structs > 0 && clock < limit {
+		w.former = true
+	}
 }
 
 func (w *peerWeighing) walkedStruct(walked updateStruct) {
@@ -551,9 +592,6 @@ func (w *peerWeighing) walkedStruct(walked updateStruct) {
 	w.decoded += cost.decode
 	if walked.kind == structSkip {
 		return
-	}
-	if limit, listed := w.retired[crdt.ClientID(walked.client)]; listed && walked.clock < limit {
-		w.former = true
 	}
 	known := w.held[crdt.ClientID(walked.client)]
 	end := walked.clock + walked.length
@@ -578,6 +616,7 @@ func (w *peerWeighing) walkedDelete(client, clock, length uint64) {
 	w.deletes++
 	if !w.known.covers(client, clock, length) {
 		w.newDeletes++
+		w.frame += deleteFrameBytes(client, clock, length)
 	}
 	w.forged = w.forged || w.entries.overlap(client, clock, length)
 }
@@ -597,9 +636,9 @@ func (w *peerWeighing) added() uint64 {
 }
 
 // addition is what the walked update can add to the room's totals (structTotal): its structs
-// (added), its unrendered bytes and its frame bytes.
+// (added), its unrendered bytes and its frame bytes, and whether it inserts a struct.
 func (w *peerWeighing) addition() roomCount {
-	return roomCount{structs: w.added(), unrendered: w.unrendered, frame: w.frame}
+	return roomCount{structs: w.added(), unrendered: w.unrendered, frame: w.frame, inserts: w.structs > 0}
 }
 
 // structureHeap is what the walked update adds to its room that a count of the rendering cannot
@@ -670,52 +709,151 @@ func unrenderedBytes(walked updateStruct) uint64 {
 	return uint64(len(walked.key) + len(walked.content))
 }
 
-// frameBytes is what walked, a struct past the room's state, can add to the room's whole-state
-// frame (crdt.EncodeStateAsUpdateV1): its own bytes in the update (updateStruct.size), and for the
-// content ygo keeps decoded and writes again as JSON text - a JSON item, a format, an embed - the
-// most that writing can grow it by (jsonReencodeGrowth). Every other struct ygo writes into its
-// state as it read it, or shorter: a run merged with its neighbour, a deleted item's content cut
-// to a length. What this does not count is what integrating it does to the room's own items - each
-// split of one adds a struct's header to the state - and what a delete range adds to the delete
-// set: both are bounded by the struct total (peerWeighing.added), and F's per-struct term prices
-// every struct up to the decode cap.
+// frameBytes is what walked, a struct past the room's state, can add to the room's frame total:
+// to the whole-state frame (crdt.EncodeStateAsUpdateV1, sjawhar/ygo v1.51.3-sami.7,
+// crdt/update.go:96-101 and :231-271, and encodeItem, :285-424), now and through whatever happens
+// to it later -
+//
+//   - its own bytes in the update (updateStruct.size), with what ygo's writing of its content
+//     again can grow them by. ygo keeps a JSON item's, a format's and an embed's values decoded
+//     and writes them as JSON text (jsonReencodeGrowth), and an Any item's values decoded and
+//     written by lib0's rules, which read an integer of more than 32 bits from as few as six bytes,
+//     a tag and a five-byte varint, and write it as a nine-byte float64 (writeAnyInt,
+//     encoding/encoder.go:283-299; internal/anycodec/decoder.go:276-284): half as much again.
+//     ygo writes every other content as it read it, and names a struct's origins and parent as
+//     the update did, or drops an origin it holds as a GC run for a parent named in no more bytes
+//     (encodeItem, :349-361 and :392-421);
+//   - its place among the room's structs (placeBytes);
+//   - its deletion, by its own delete range or by whatever deletes it later - a block deleted
+//     around it, an entry written over it, a parent deleted before it arrives (deleteRangeBytes);
+//   - the splits its integration can cause: one in the item holding its origin and one in the item
+//     holding its right origin, for each it names (splitsAStructCanCause gives where), so a GC run
+//     or an item naming only its parent splits nothing (splitFrameBytes).
+//
+// A delete range's share is deleteFrameBytes.
 func frameBytes(walked updateStruct) uint64 {
+	written := uint64(walked.size)
 	switch walked.kind {
 	case structJSON, structFormat, structEmbed:
-		return uint64(walked.size) + (jsonReencodeGrowth-1)*uint64(len(walked.content))
+		written += (jsonReencodeGrowth - 1) * uint64(len(walked.content))
+	case structAny:
+		written += uint64(len(walked.content)) / 2
 	}
-	return uint64(walked.size)
+	written += placeBytes(walked) + deleteRangeBytes(walked.client, walked.clock, walked.length)
+	if walked.hasOrigin {
+		written += splitFrameBytes
+	}
+	if walked.hasRightOrigin {
+		written += splitFrameBytes
+	}
+	return written
+}
+
+// deleteFrameBytes is what a delete range the room is not known to hold deleted (deletedRuns) can
+// add to the room's frame total: its range in the room's delete set, which a range of clocks the
+// room does not hold yet keeps there parked (deleteRangeBytes), and the splits it can cause in the
+// items at its two ends (splitFrameBytes). The items it deletes are already priced for their
+// deletion: by the count (deletionReserve) or by the update that brought them (frameBytes).
+func deleteFrameBytes(client, clock, length uint64) uint64 {
+	return deleteRangeBytes(client, clock, length) + splitsAStructCanCause*splitFrameBytes
+}
+
+// maxVarintBytes is the most bytes a lib0 varint takes for any client or clock a room holds: the
+// walk refuses a varint past 53 bits from a browser (update_walk.go), a server write's client is 32
+// bits (crdt.NewClientID, crdt/doc.go:414-421) and its clocks count its own structs, and 53 bits
+// take eight bytes of seven.
+const maxVarintBytes = 8
+
+// varintBytes is the bytes lib0 writes v in as a varint: seven bits a byte.
+func varintBytes(v uint64) uint64 {
+	n := uint64(1)
+	for ; v >= 0x80; v >>= 7 {
+		n++
+	}
+	return n
+}
+
+// placeBytes is the most walked's place among the room's structs adds beside its own bytes: a
+// group of its own, should the room hold nothing of its client - the group's struct count, client
+// and first clock, and a byte more of the count of groups - or, should it park beyond a gap in its
+// client's clocks, the skip ygo writes before it, a byte and the gap's length, no more than its
+// clock (encodeStructStoreV1, crdt/merge.go:162-200), with a byte more of its group's struct count.
+func placeBytes(walked updateStruct) uint64 {
+	return 2 + varintBytes(walked.client) + varintBytes(walked.clock)
+}
+
+// deleteRangeBytes is the most deleting the clocks [clock, clock+length) of client adds to the
+// room's delete set as ygo writes it (encodeDeleteSet, crdt/update.go:517-533): the range's clock
+// and length, and should the delete set hold no range of client, its client and a byte of its
+// count of ranges; and a byte more of a count, of ranges or of clients. A range that touches one
+// the delete set holds is merged with it (buildDeleteSet, :502-515) and adds less.
+func deleteRangeBytes(client, clock, length uint64) uint64 {
+	return 2 + varintBytes(client) + varintBytes(clock) + varintBytes(length)
+}
+
+// maxDeleteRangeBytes is deleteRangeBytes for a client, a clock and a length of maxVarintBytes
+// each.
+const maxDeleteRangeBytes = 2 + 3*maxVarintBytes
+
+// splitFrameBytes is the most one split of an item the room holds can add to the room's frame
+// total (splitItem, crdt/item.go:515). The right part becomes an item of its own, written with an
+// info byte, its origin - the left part's last clock - and the item's right origin, each a client
+// and a clock, and its content's length (a string's bytes, a run's values or clocks), whose bytes
+// are the item's own, moved and not added; an item with an origin names no parent; and its group's
+// struct count may take a byte more: 2 + 5 x maxVarintBytes. The right part can be deleted later,
+// a range of its own (maxDeleteRangeBytes), and the deletion of the two parts can add more than
+// the deletion of the item was priced at (deletionReserve) by the right part's length, which its
+// content no longer gives back (maxVarintBytes).
+const splitFrameBytes = 2 + 5*maxVarintBytes + maxDeleteRangeBytes + maxVarintBytes
+
+// deletionReserve is the most deleting walked, a struct of the room's encoded state, can add to
+// the room's frame: the range it adds to the delete set (deleteRangeBytes), less what ygo gives
+// back of its content, which it writes as a deleted run's length once the item is deleted
+// (gcTxnDeleteSet, crdt/snapshot.go:284-313, in every room, whose documents keep ygo's GC on). A
+// GC run, a deleted run and a skip are deleted already.
+func deletionReserve(walked updateStruct) uint64 {
+	switch walked.kind {
+	case structGC, structDeleted, structSkip:
+		return 0
+	}
+	added := deleteRangeBytes(walked.client, walked.clock, walked.length)
+	givenBack := uint64(len(walked.content)) - min(uint64(len(walked.content)), varintBytes(walked.length))
+	return added - min(added, givenBack)
 }
 
 // roomCount is a room's state as the hook's totals weigh it (structTotal): its structs, which the
 // decode cap bounds; its unrendered bytes (unrenderedBytes), which maxUnrenderedBytes bounds; and
-// its whole-state frame's bytes (frameBytes), which heaviestHandoffBound bounds.
+// its whole-state frame's bytes with what deleting what it holds can add (deletionReserve, and
+// frameBytes and deleteFrameBytes for an addition), which heaviestHandoffBound bounds. inserts is
+// whether an addition carries a struct the room does not hold, the only addition the frame bound
+// refuses (fitsBounds); a count's is false, and the totals do not sum it.
 type roomCount struct {
 	structs, unrendered, frame uint64
+	inserts                    bool
 }
 
 // fitsBounds reports whether a room holding held can take added within the decode cap; when added
-// carries any unrendered bytes, within maxUnrenderedBytes; and when it carries any struct the room
-// does not hold, which is what adds frame bytes, within heaviestHandoffBound. An update that adds
-// no unrendered bytes is never refused by the unrendered bound, and one that inserts nothing never
-// by the frame total, so a room past either - a stored document heavier than the bound, or one a
-// write the hook does not see took past it - can still be trimmed and handed back whole, and past
-// the unrendered bound typed in too.
+// carries any unrendered bytes, within maxUnrenderedBytes; and when it inserts a struct the room
+// does not hold, within heaviestHandoffBound. An update that adds no unrendered bytes is never
+// refused by the unrendered bound, and one that inserts nothing never by the frame total, though it
+// adds to it, so a room past either - a stored document heavier than the bound, or one a write the
+// hook does not see took past it - can still be trimmed and handed back whole, and past the
+// unrendered bound typed in too.
 func fitsBounds(held, added roomCount) bool {
 	return held.structs+added.structs <= maxUpdateItems &&
 		(added.unrendered == 0 || held.unrendered+added.unrendered <= maxUnrenderedBytes) &&
-		(added.frame == 0 || held.frame+added.frame <= heaviestHandoffBound)
+		(!added.inserts || held.frame+added.frame <= heaviestHandoffBound)
 }
 
 // nearBounds reports whether held, a stale total, is near enough a bound that added would take it
 // past should the writes since the count have used up the margin: within structTotalStaleMargin
 // of the decode cap; for an addition of unrendered bytes, within unrenderedStaleMargin of
-// maxUnrenderedBytes; and for an addition of frame bytes, within frameStaleMargin of
+// maxUnrenderedBytes; and for an addition that inserts, within frameStaleMargin of
 // heaviestHandoffBound.
 func nearBounds(held, added roomCount) bool {
 	return held.structs+added.structs > maxUpdateItems-structTotalStaleMargin ||
 		(added.unrendered > 0 && held.unrendered+added.unrendered > maxUnrenderedBytes-unrenderedStaleMargin) ||
-		(added.frame > 0 && held.frame+added.frame > heaviestHandoffBound-frameStaleMargin)
+		(added.inserts && held.frame+added.frame > heaviestHandoffBound-frameStaleMargin)
 }
 
 // structTotalStaleMargin is how near the cap a stale struct total must be for the hook to confirm
@@ -755,10 +893,12 @@ const structTotalRecheck = maxUpdateItems / 64
 // total is. Its stale margin and its recheck are unrenderedStaleMargin and unrenderedRecheck.
 //
 // And it keeps the room's frame total, against which the hook refuses an update that inserts
-// anything past heaviestHandoffBound: the length of the same encode at each count (countRoom),
-// plus what each update admitted since can add to it (peerWeighing.frame, frameBytes). A delete
-// adds nothing to it and takes nothing off it until the next count. Its stale margin and its
-// recheck are frameStaleMargin and frameRecheck.
+// anything past heaviestHandoffBound: the length of the same encode at each count with what
+// deleting what it holds can add (countRoom, deletionReserve), plus what each update admitted
+// since can add to it (peerWeighing.frame: frameBytes for each new struct, deleteFrameBytes for
+// each new delete range), so it is never below the frame. A delete adds to it what it can add to
+// the frame and takes nothing off it until the next count. Its stale margin and its recheck are
+// frameStaleMargin and frameRecheck.
 //
 // Those writes are every transaction on the room that is not a hook's apply: the server's own
 // writes (Server.Apply - an API write's publish, settlement and its repairs, the mark sweep, the
@@ -1164,21 +1304,26 @@ func (t *structTotal) recount(doc *crdt.Doc) roomCount {
 
 // countRoom is the exact count of doc's three totals: its struct total (countRoomStructs), the
 // unrendered bytes of every struct of its encoded state (unrenderedBytes), parked structs
-// included, and that state's length, its whole-state frame, from one encode and one walk.
+// included, and that state's length, its whole-state frame, with what deleting each struct of it
+// can add (deletionReserve), from one encode and one walk.
 func countRoom(doc *crdt.Doc) roomCount {
 	pending := doc.PendingStats()
-	var held unrenderedTally
+	var held roomTally
 	state := crdt.EncodeStateAsUpdateV1(doc, nil)
 	tally, err := walkUpdate(state, fromRoom, &held)
-	return roomCount{structs: structTotalOf(tally, err, pending), unrendered: held.bytes, frame: uint64(len(state))}
+	return roomCount{structs: structTotalOf(tally, err, pending), unrendered: held.unrendered, frame: uint64(len(state)) + held.reserve}
 }
 
-// unrenderedTally is countRoom's visitor, summing each walked struct's unrendered bytes.
-type unrenderedTally struct{ bytes uint64 }
+// roomTally is countRoom's visitor, summing each walked struct's unrendered bytes and its
+// deletion reserve.
+type roomTally struct{ unrendered, reserve uint64 }
 
-func (u *unrenderedTally) walkedStruct(walked updateStruct) { u.bytes += unrenderedBytes(walked) }
+func (r *roomTally) walkedStruct(walked updateStruct) {
+	r.unrendered += unrenderedBytes(walked)
+	r.reserve += deletionReserve(walked)
+}
 
-func (*unrenderedTally) walkedDelete(_, _, _ uint64) {}
+func (*roomTally) walkedDelete(_, _, _ uint64) {}
 
 // countRoomStructs is the exact count of doc's struct total: the structs of its encoded state as
 // ygo would decode them on the next load (walkUpdate, fromRoom), parked structs included, plus the

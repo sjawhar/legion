@@ -1609,10 +1609,26 @@ func builtOnce[V any](build func(t *testing.T) V) func(t *testing.T) V {
 // their own: with as many applying as the bound has room for, the next waits until one ends. A
 // keystroke, under the threshold, applies at once, even in the room whose heavy update is waiting,
 // since a waiter holds nothing of its room.
+//
+// Each heavy update is what a reconnect storm's handoffs are, a frame of what its room already
+// holds: 4,000,000 values for clocks of client 7 each room holds (heldClocks), so it inserts
+// nothing and adds no struct, and none of the document's rules refuses it - the byte rule weighs a
+// room no load measured by the update's own bytes, and a 4 MB frame that inserted its values would
+// be refused there before its apply - while ygo's apply decodes every value of it all the same,
+// which is what its estimate weighs. Every wait is bounded, so a heavy update that never applies
+// fails the test rather than hanging it.
 func TestTheApplyHeapBoundHoldsConcurrentApplies(t *testing.T) {
+	const heavyValues = 4_000_000
 	service := &Service{}
-	heavy := marginValues(4_000_000, nil)
-	estimate, own := applyHeapEstimate(t, boundRoomDocument(newDocumentCopy()), heavy)
+	heavy := marginValues(heavyValues, nil)
+	heldClocks := func(room *crdt.Doc) *crdt.Doc {
+		t.Helper()
+		if err := crdt.ApplyUpdateV1(room, newV1Frame(1).group(1, 7, 0).gc(heavyValues).noDeletes(), nil); err != nil {
+			t.Fatal(err)
+		}
+		return boundRoomDocument(room)
+	}
+	estimate, own := applyHeapEstimate(t, heldClocks(newDocumentCopy()), heavy)
 	fits := int(applyHeapBound / estimate)
 	if own <= unweighedApplyHeapBytes || fits < 1 || fits > 8 {
 		t.Fatalf("the heavy update is estimated at %d bytes, its own share %d, %d to the bound, want its share past %d and a few to the bound",
@@ -1630,7 +1646,7 @@ func TestTheApplyHeapBoundHoldsConcurrentApplies(t *testing.T) {
 	if err := crdt.ApplyUpdateV1(typedInto, seed, nil); err != nil {
 		t.Fatal(err)
 	}
-	boundRoomDocument(typedInto)
+	heldClocks(typedInto)
 	keystroke := peerTyping(t, typedInto, "y")
 	if _, typed := applyHeapEstimate(t, typedInto, keystroke); typed > unweighedApplyHeapBytes {
 		t.Fatalf("the keystroke's own share is %d bytes, past the %d unweighed", typed, unweighedApplyHeapBytes)
@@ -1639,8 +1655,32 @@ func TestTheApplyHeapBoundHoldsConcurrentApplies(t *testing.T) {
 	var holding, most atomic.Uint64
 	var running atomic.Int32
 	release := make(chan struct{})
+	var released sync.Once
+	releaseAll := func() { released.Do(func() { close(release) }) }
 	started := make(chan int, fits+1)
+	refused := make(chan error, fits+1)
 	var applies sync.WaitGroup
+	// awaitApplies releases every apply and waits a bounded time for each heavy update to return.
+	awaitApplies := func() bool {
+		releaseAll()
+		returned := make(chan struct{})
+		go func() {
+			applies.Wait()
+			close(returned)
+		}()
+		select {
+		case <-returned:
+			return true
+		case <-time.After(time.Minute):
+			return false
+		}
+	}
+	// A test that fails while heavy updates are applying or waiting releases them before it ends.
+	t.Cleanup(func() {
+		if !awaitApplies() {
+			t.Error("the heavy updates had not returned a minute after their release")
+		}
+	})
 	weigh := func(i int, room *crdt.Doc, weight uint64) {
 		applies.Go(func() {
 			err := service.weighPeerUpdate(websocket.PeerUpdateInfo{Room: "room", Doc: room, Update: heavy}, func() error {
@@ -1655,15 +1695,21 @@ func TestTheApplyHeapBoundHoldsConcurrentApplies(t *testing.T) {
 				return nil
 			})
 			if err != nil {
-				t.Errorf("the hook refused heavy update %d: %v", i, err)
+				refused <- fmt.Errorf("heavy update %d: %w", i, err)
 			}
 		})
 	}
 	for i := range fits {
-		weigh(i, boundRoomDocument(newDocumentCopy()), estimate)
+		weigh(i, heldClocks(newDocumentCopy()), estimate)
 	}
 	for range fits {
-		<-started
+		select {
+		case <-started:
+		case err := <-refused:
+			t.Fatalf("the hook refused a heavy update the bound has room for: %v", err)
+		case <-time.After(time.Minute):
+			t.Fatalf("%d heavy updates the bound has room for had not all started their applies after a minute", fits)
+		}
 	}
 	// The bound has no room for another: the heavy update left over waits, in the room the
 	// keystroke goes to, and the keystroke does not wait.
@@ -1671,6 +1717,8 @@ func TestTheApplyHeapBoundHoldsConcurrentApplies(t *testing.T) {
 	select {
 	case i := <-started:
 		t.Fatalf("heavy update %d applied with %d holding the bound", i, fits)
+	case err := <-refused:
+		t.Fatalf("the hook refused the heavy update the bound has no room for, want it waiting: %v", err)
 	case <-time.After(200 * time.Millisecond):
 	}
 	typed := make(chan error, 1)
@@ -1688,8 +1736,13 @@ func TestTheApplyHeapBoundHoldsConcurrentApplies(t *testing.T) {
 	if got := running.Load(); got != int32(fits) {
 		t.Fatalf("%d heavy updates are applying, want the %d the bound has room for", got, fits)
 	}
-	close(release)
-	applies.Wait()
+	if !awaitApplies() {
+		t.Fatal("the heavy updates had not returned a minute after their release")
+	}
+	close(refused)
+	for err := range refused {
+		t.Errorf("the hook refused a heavy update: %v", err)
+	}
 	if got := most.Load(); got > applyHeapBound || got < uint64(fits)*estimate {
 		t.Fatalf("the heavy applies held %d bytes of estimate at most, want at least the %d of %d at once and never past the %d-byte bound",
 			got, uint64(fits)*estimate, fits, applyHeapBound)
