@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -51,7 +54,18 @@ func createReferenceAPIComment(t *testing.T, handler http.Handler, issueKey, bod
 
 func issueReferencesRequest(t *testing.T, handler http.Handler, issueKey, etag string) *httptest.ResponseRecorder {
 	t.Helper()
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/issues/"+issueKey+"/references", nil)
+	return issueReferencesQueryRequest(t, handler, issueKey, "", etag)
+}
+
+// issueReferencesQueryRequest reads an issue's references as alice with query as the raw query
+// string ("" for none) and etag, when set, as If-None-Match.
+func issueReferencesQueryRequest(t *testing.T, handler http.Handler, issueKey, query, etag string) *httptest.ResponseRecorder {
+	t.Helper()
+	target := "/api/v1/issues/" + issueKey + "/references"
+	if query != "" {
+		target += "?" + query
+	}
+	request := httptest.NewRequest(http.MethodGet, target, nil)
 	request.Header.Set("X-Dispatch-User", "alice")
 	if etag != "" {
 		request.Header.Set("If-None-Match", etag)
@@ -217,118 +231,320 @@ func seedReferenceDocumentHistory(t *testing.T, database *store.Store, artifactI
 	}
 }
 
-func TestIssueReferencesMembersCarryTheirDocumentsOwnCreatorAndVersionAuthors(t *testing.T) {
+// referenceDocument is one document a referenceFixture cites: its name, how many versions
+// seedReferenceDocumentHistory gives it, the offset of its author lists and its creator.
+type referenceDocument struct {
+	name      string
+	versions  int
+	offset    int
+	createdBy string
+}
+
+// referenceFixtureDocuments is how many documents a referenceFixture's comment cites: production's
+// median closure is 158 members.
+const referenceFixtureDocuments = 160
+
+// referenceFixtureCreators are the creators of a referenceFixture's documents beyond its first three.
+var referenceFixtureCreators = []string{
+	`{"kind":"human","id":"alice"}`,
+	`{"kind":"session","id":"session-d","origin":{"host":"example-host-c","machine":"example-machine-c","cwd":"/work/example-c","session_title":"Writer session"}}`,
+	`{"kind":"human","id":"erin","owner":"alice"}`,
+	`{"kind":"service","id":"service-c","service":"example-service-c"}`,
+	`{"kind":"session","id":"session-e"}`,
+}
+
+// referenceFixture is an issue whose one comment cites referenceFixtureDocuments OPS documents,
+// each with a seeded history: one of 1 version, one of 40 whose versions 1-2 store JSON null
+// authors and 3-4 an empty list, one of 3,217, and the rest of 1 to 40 versions with varied
+// author offsets and creators: a full answer of over 1 MB.
+type referenceFixture struct {
+	handler  http.Handler
+	database *store.Store
+	served   *server
+	issueKey string
+	// documents are the cited documents in citation order, as created.
+	documents []model.Artifact
+	// versions is each cited document's version count, by artifact id.
+	versions map[string]int
+}
+
+func newReferenceFixture(t *testing.T) referenceFixture {
+	t.Helper()
+	started := time.Now()
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
-	ctx := context.Background()
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")
 	issue := createReferenceAPIIssue(t, handler, "CORE")
-	documents := []struct {
-		name      string
-		versions  int
-		offset    int
-		createdBy string
-	}{
+	documents := []referenceDocument{
 		{"Single version", 1, 3, `{"kind":"human","id":"creator-human"}`},
 		{"Forty versions", 40, 0, `{"kind":"session","id":"creator-session","origin":{"host":"example-host-b","machine":"example-machine-b","cwd":"/work/example-b","session_title":"Creator session"}}`},
 		{"Long history", 3217, 5, `{"kind":"service","id":"creator-service","service":"example-service-b"}`},
 	}
-	wantVersions := map[string]int{}
-	var forty model.Artifact
-	var citations []string
+	for index := 0; len(documents) < referenceFixtureDocuments; index++ {
+		documents = append(documents, referenceDocument{
+			name:      "Cited document " + strconv.Itoa(index+1),
+			versions:  1 + index%40,
+			offset:    (index * 5) % len(referenceAuthorLists),
+			createdBy: referenceFixtureCreators[index%len(referenceFixtureCreators)],
+		})
+	}
+	fixture := referenceFixture{handler: handler, database: database, served: served, issueKey: issue.Key, versions: map[string]int{}}
+	citations := make([]string, 0, len(documents))
+	totalVersions := 0
 	for _, document := range documents {
 		artifact := createProjectDocument(t, handler, "OPS", document.name, "# "+document.name+"\n")
 		seedReferenceDocumentHistory(t, database, artifact.ID, document.versions, document.offset, document.createdBy)
-		wantVersions[artifact.ID] = document.versions
-		if document.versions == 40 {
-			forty = artifact
-		}
+		fixture.documents = append(fixture.documents, artifact)
+		fixture.versions[artifact.ID] = document.versions
+		totalVersions += document.versions
 		citations = append(citations, "dispatch://OPS/artifact/"+artifact.Slug)
 	}
 	createReferenceAPIComment(t, handler, issue.Key, strings.Join(citations, "\n"))
+	t.Logf("reference fixture: %d documents, %d versions, built in %s", len(documents), totalVersions, time.Since(started).Round(time.Millisecond))
+	return fixture
+}
 
-	response := issueReferencesRequest(t, handler, issue.Key, "")
+// Every member of an issue's references carries what the per-document read (loadArtifact)
+// answers for its document, field for field, but for the approval that read attaches and the
+// references answer leaves out: the document's own creator and every version with its authors,
+// JSON null and an empty list kept apart.
+func TestIssueReferencesMembersCarryTheirDocumentsOwnCreatorAndVersionAuthors(t *testing.T) {
+	fixture := newReferenceFixture(t)
+	ctx := context.Background()
+
+	started := time.Now()
+	response := issueReferencesRequest(t, fixture.handler, fixture.issueKey, "")
+	elapsed := time.Since(started)
 	if response.Code != http.StatusOK {
 		t.Fatalf("get issue references: status=%d body=%s", response.Code, response.Body.String())
 	}
-	value := decodeBody[struct {
+	body := response.Body.Bytes()
+	var value struct {
 		Members []struct {
-			Artifact struct {
-				ID        string          `json:"id"`
-				CreatedBy json.RawMessage `json:"created_by"`
-				Versions  json.RawMessage `json:"versions"`
-			} `json:"artifact"`
+			Artifact json.RawMessage `json:"artifact"`
 		} `json:"members"`
-	}](t, response)
-	if len(value.Members) != len(documents) {
-		t.Fatalf("issue references members = %d; want %d", len(value.Members), len(documents))
 	}
+	if err := json.Unmarshal(body, &value); err != nil {
+		t.Fatalf("decode issue references: %v", err)
+	}
+	if len(value.Members) != len(fixture.versions) {
+		t.Fatalf("issue references members = %d; want %d", len(value.Members), len(fixture.versions))
+	}
+	wantVersions := maps.Clone(fixture.versions)
+	totalVersions := 0
 	for _, member := range value.Members {
-		artifact := member.Artifact
-		want, found := wantVersions[artifact.ID]
+		var got map[string]json.RawMessage
+		if err := json.Unmarshal(member.Artifact, &got); err != nil {
+			t.Fatalf("decode member artifact: %v", err)
+		}
+		var id string
+		if err := json.Unmarshal(got["id"], &id); err != nil {
+			t.Fatalf("decode member artifact id %s: %v", got["id"], err)
+		}
+		want, found := wantVersions[id]
 		if !found {
-			t.Fatalf("unexpected reference member %q", artifact.ID)
+			t.Fatalf("unexpected or repeated reference member %q", id)
 		}
-		delete(wantVersions, artifact.ID)
+		delete(wantVersions, id)
 
-		versions, err := served.loadVersions(ctx, database.Pool, artifact.ID)
+		oracle, err := fixture.served.loadArtifact(ctx, fixture.database.Pool, id)
 		if err != nil {
-			t.Fatalf("load versions of %q: %v", artifact.ID, err)
+			t.Fatalf("load artifact %q: %v", id, err)
 		}
-		if len(versions) != want {
-			t.Fatalf("stored versions of %q = %d; want %d", artifact.ID, len(versions), want)
+		if len(oracle.Versions) != want {
+			t.Fatalf("stored versions of %q = %d; want %d", id, len(oracle.Versions), want)
 		}
-		wantVersionsJSON, err := json.Marshal(versions)
-		if err != nil {
-			t.Fatalf("encode versions: %v", err)
+		totalVersions += len(oracle.Versions)
+		if oracle.Approval == nil {
+			t.Fatalf("loadArtifact of %q attached no approval; the check that the references answer leaves it out would pass vacuously", id)
 		}
-		gotVersionsJSON, err := json.Marshal(artifact.Versions)
-		if err != nil {
-			t.Fatalf("encode member versions: %v", err)
-		}
-		if !bytes.Equal(gotVersionsJSON, wantVersionsJSON) {
-			t.Fatalf("member %q versions differ from the per-version load:\n got %.600s\nwant %.600s", artifact.ID, gotVersionsJSON, wantVersionsJSON)
+		if approval, carried := got["approval"]; carried {
+			t.Fatalf("member %q carries approval %s; the references answer carries none", id, approval)
 		}
 
-		var storedCreator []byte
-		if err := database.Pool.QueryRow(ctx, `select created_by from artifacts where id = $1`, artifact.ID).Scan(&storedCreator); err != nil {
-			t.Fatalf("read creator of %q: %v", artifact.ID, err)
-		}
-		var creator model.Actor
-		if err := json.Unmarshal(storedCreator, &creator); err != nil {
-			t.Fatalf("decode creator of %q: %v", artifact.ID, err)
-		}
-		wantCreatorJSON, err := json.Marshal(creator)
+		wantCreatorJSON, err := json.Marshal(oracle.CreatedBy)
 		if err != nil {
 			t.Fatalf("encode creator: %v", err)
 		}
-		gotCreatorJSON, err := json.Marshal(artifact.CreatedBy)
+		gotCreatorJSON, err := json.Marshal(got["created_by"])
 		if err != nil {
 			t.Fatalf("encode member creator: %v", err)
 		}
 		if !bytes.Equal(gotCreatorJSON, wantCreatorJSON) {
-			t.Fatalf("member %q created_by = %s; want %s", artifact.ID, gotCreatorJSON, wantCreatorJSON)
+			t.Fatalf("member %q created_by = %s; want %s", id, gotCreatorJSON, wantCreatorJSON)
+		}
+		wantVersionsJSON, err := json.Marshal(oracle.Versions)
+		if err != nil {
+			t.Fatalf("encode versions: %v", err)
+		}
+		gotVersionsJSON, err := json.Marshal(got["versions"])
+		if err != nil {
+			t.Fatalf("encode member versions: %v", err)
+		}
+		if !bytes.Equal(gotVersionsJSON, wantVersionsJSON) {
+			t.Fatalf("member %q versions differ from loadArtifact's:\n got %.600s\nwant %.600s", id, gotVersionsJSON, wantVersionsJSON)
 		}
 
-		if artifact.ID != forty.ID {
-			continue
+		oracle.Approval = nil
+		oracleJSON, err := json.Marshal(oracle)
+		if err != nil {
+			t.Fatalf("encode artifact: %v", err)
 		}
-		var fortyVersions []struct {
-			Number  int             `json:"number"`
-			Authors json.RawMessage `json:"authors"`
+		var wantFields map[string]json.RawMessage
+		if err := json.Unmarshal(oracleJSON, &wantFields); err != nil {
+			t.Fatalf("decode encoded artifact: %v", err)
 		}
-		if err := json.Unmarshal(artifact.Versions, &fortyVersions); err != nil {
-			t.Fatalf("decode member versions: %v", err)
-		}
-		// Offset 0: versions 1-2 store JSON null and versions 3-4 an empty list.
-		for _, check := range []struct {
-			number  int
-			authors string
-		}{{1, `null`}, {2, `null`}, {3, `[]`}, {4, `[]`}} {
-			if got := string(fortyVersions[check.number-1].Authors); fortyVersions[check.number-1].Number != check.number || got != check.authors {
-				t.Fatalf("version %d authors in the response = %s (number %d); want %s", check.number, got, fortyVersions[check.number-1].Number, check.authors)
+		for _, field := range slices.Sorted(maps.Keys(wantFields)) {
+			if gotField, present := got[field]; !present || !bytes.Equal(gotField, wantFields[field]) {
+				t.Fatalf("member %q field %q = %.600s (present %t); loadArtifact answers %.600s", id, field, gotField, present, wantFields[field])
 			}
 		}
+		for field := range got {
+			if _, known := wantFields[field]; !known {
+				t.Fatalf("member %q carries field %q = %.600s that loadArtifact does not answer", id, field, got[field])
+			}
+		}
+	}
+	if len(wantVersions) != 0 {
+		t.Fatalf("documents missing from the references answer: %v", slices.Sorted(maps.Keys(wantVersions)))
+	}
+	if totalVersions < 2205 {
+		t.Fatalf("members carry %d versions in all; want at least 2205", totalVersions)
+	}
+	if len(body) < 1_000_000 {
+		t.Fatalf("references answer is %d bytes; want at least 1,000,000", len(body))
+	}
+	// Stored JSON null authors and a stored empty list are told apart in the answer.
+	if !bytes.Contains(body, []byte(`"authors":null`)) || !bytes.Contains(body, []byte(`"authors":[]`)) {
+		t.Fatalf("references answer lacks %q or %q", `"authors":null`, `"authors":[]`)
+	}
+	t.Logf("references answer: %d members, %d versions, %d bytes, served in %s", len(value.Members), totalVersions, len(body), elapsed.Round(time.Millisecond))
+}
+
+// ?versions=latest answers the full answer with each member's versions cut to its latest one,
+// under an ETag of its own that a conditional read of the trimmed answer matches, and that
+// changes, like the full answer's, when a cited document gains a version.
+func TestIssueReferencesLatestVersionsAnswerIsTheFullAnswerCutToEachLatestVersion(t *testing.T) {
+	fixture := newReferenceFixture(t)
+
+	full := issueReferencesRequest(t, fixture.handler, fixture.issueKey, "")
+	if full.Code != http.StatusOK {
+		t.Fatalf("get issue references: status=%d body=%s", full.Code, full.Body.String())
+	}
+	started := time.Now()
+	latest := issueReferencesQueryRequest(t, fixture.handler, fixture.issueKey, "versions=latest", "")
+	elapsed := time.Since(started)
+	if latest.Code != http.StatusOK {
+		t.Fatalf("get latest issue references: status=%d body=%s", latest.Code, latest.Body.String())
+	}
+	t.Logf("full answer %d bytes, latest answer %d bytes, served in %s", full.Body.Len(), latest.Body.Len(), elapsed.Round(time.Millisecond))
+
+	fullValue := decodeBody[model.IssueReferences](t, full)
+	latestValue := decodeBody[model.IssueReferences](t, latest)
+	if len(fullValue.Members) != len(fixture.versions) || len(latestValue.Members) != len(fullValue.Members) {
+		t.Fatalf("members: full %d, latest %d; want %d each", len(fullValue.Members), len(latestValue.Members), len(fixture.versions))
+	}
+	for index := range fullValue.Members {
+		versions := fullValue.Members[index].Artifact.Versions
+		fullValue.Members[index].Artifact.Versions = versions[len(versions)-1:]
+		if got := len(latestValue.Members[index].Artifact.Versions); got != 1 {
+			t.Fatalf("latest member %d (%s) carries %d versions; want 1", index, latestValue.Members[index].Artifact.ID, got)
+		}
+	}
+	encode := func(value model.IssueReferences) []byte {
+		var buffer bytes.Buffer
+		if err := json.NewEncoder(&buffer).Encode(value); err != nil {
+			t.Fatalf("encode issue references: %v", err)
+		}
+		return buffer.Bytes()
+	}
+	if cut, trimmed := encode(fullValue), encode(latestValue); !bytes.Equal(cut, trimmed) {
+		t.Fatalf("latest answer differs from the full answer cut to each latest version:\n got %.1000s\nwant %.1000s", trimmed, cut)
+	}
+
+	fullETag, latestETag := full.Header().Get("ETag"), latest.Header().Get("ETag")
+	if latestETag == "" || latestETag == fullETag {
+		t.Fatalf("latest ETag = %q, full ETag = %q; want a non-empty latest ETag of its own", latestETag, fullETag)
+	}
+	notModified := issueReferencesQueryRequest(t, fixture.handler, fixture.issueKey, "versions=latest", latestETag)
+	if notModified.Code != http.StatusNotModified || notModified.Body.Len() != 0 || notModified.Header().Get("ETag") != latestETag {
+		t.Fatalf("conditional latest issue references: status=%d etag=%q body=%.200q", notModified.Code, notModified.Header().Get("ETag"), notModified.Body.String())
+	}
+
+	// A new version of the forty-version document, which the comment still cites.
+	forty := fixture.documents[1]
+	var lastNumber int
+	for _, member := range latestValue.Members {
+		if member.Artifact.ID == forty.ID {
+			lastNumber = member.Artifact.Versions[0].Number
+		}
+	}
+	if lastNumber != fixture.versions[forty.ID] {
+		t.Fatalf("latest version of %q = %d; want %d", forty.Name, lastNumber, fixture.versions[forty.ID])
+	}
+	updated := dispatchRequest(t, fixture.handler, http.MethodPost, "/api/v1/projects/OPS/artifacts", map[string]string{
+		"name": forty.Name, "content": "# " + forty.Name + "\nA new version\n",
+	}, "alice")
+	if updated.Code != http.StatusCreated {
+		t.Fatalf("update %q: status=%d body=%s", forty.Name, updated.Code, updated.Body.String())
+	}
+	changedFull := issueReferencesRequest(t, fixture.handler, fixture.issueKey, fullETag)
+	if changedFull.Code != http.StatusOK || changedFull.Header().Get("ETag") == fullETag {
+		t.Fatalf("full issue references after a new version: status=%d etag=%q (was %q)", changedFull.Code, changedFull.Header().Get("ETag"), fullETag)
+	}
+	changedLatest := issueReferencesQueryRequest(t, fixture.handler, fixture.issueKey, "versions=latest", latestETag)
+	if changedLatest.Code != http.StatusOK || changedLatest.Header().Get("ETag") == latestETag {
+		t.Fatalf("latest issue references after a new version: status=%d etag=%q (was %q)", changedLatest.Code, changedLatest.Header().Get("ETag"), latestETag)
+	}
+	if changedLatest.Header().Get("ETag") == changedFull.Header().Get("ETag") {
+		t.Fatalf("latest and full answers share ETag %q after a new version", changedFull.Header().Get("ETag"))
+	}
+	changedValue := decodeBody[model.IssueReferences](t, changedLatest)
+	found := false
+	for _, member := range changedValue.Members {
+		if member.Artifact.ID != forty.ID {
+			continue
+		}
+		found = true
+		if len(member.Artifact.Versions) != 1 || member.Artifact.Versions[0].Number != lastNumber+1 {
+			t.Fatalf("latest member %q versions = %#v; want only version %d", forty.Name, member.Artifact.Versions, lastNumber+1)
+		}
+	}
+	if !found {
+		t.Fatalf("latest issue references after a new version lack %q", forty.Name)
+	}
+}
+
+// ?versions=all is the full answer, byte for byte and under the same ETag, as no parameter is;
+// any value but all and latest is refused.
+func TestIssueReferencesVersionsAllIsTheFullAnswerAndOtherValuesAreRefused(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createReferenceAPIIssue(t, handler, "CORE")
+	design := createProjectDocument(t, handler, "CORE", "Design notes", "# Design notes\n")
+	seedReferenceDocumentHistory(t, database, design.ID, 4, 0, `{"kind":"human","id":"alice"}`)
+	createReferenceAPIComment(t, handler, issue.Key, "dispatch://CORE/artifact/"+design.Slug)
+
+	plain := issueReferencesRequest(t, handler, issue.Key, "")
+	if plain.Code != http.StatusOK {
+		t.Fatalf("get issue references: status=%d body=%s", plain.Code, plain.Body.String())
+	}
+	if members := decodeBody[model.IssueReferences](t, plain).Members; len(members) != 1 || len(members[0].Artifact.Versions) != 4 {
+		t.Fatalf("issue references members = %#v; want Design notes with 4 versions", members)
+	}
+	all := issueReferencesQueryRequest(t, handler, issue.Key, "versions=all", "")
+	if all.Code != plain.Code ||
+		all.Header().Get("ETag") != plain.Header().Get("ETag") ||
+		all.Header().Get("Content-Type") != plain.Header().Get("Content-Type") ||
+		!bytes.Equal(all.Body.Bytes(), plain.Body.Bytes()) {
+		t.Fatalf("versions=all: status=%d etag=%q type=%q body=%s\nwant status=%d etag=%q type=%q body=%s",
+			all.Code, all.Header().Get("ETag"), all.Header().Get("Content-Type"), all.Body.String(),
+			plain.Code, plain.Header().Get("ETag"), plain.Header().Get("Content-Type"), plain.Body.String())
+	}
+
+	bogus := issueReferencesQueryRequest(t, handler, issue.Key, "versions=bogus", "")
+	if bogus.Code != http.StatusBadRequest || !strings.Contains(bogus.Body.String(), `"code":"INVALID_QUERY"`) {
+		t.Fatalf("versions=bogus: status=%d body=%s; want 400 INVALID_QUERY", bogus.Code, bogus.Body.String())
 	}
 }
 
@@ -356,10 +572,14 @@ func TestArtifactReferencesListOutgoingAndReferencedBy(t *testing.T) {
 
 func TestIssueReferencesRejectUnauthenticatedRequest(t *testing.T) {
 	handler := newTestHandler(t)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/issues/CORE-1/references", nil))
-	if response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), `"code":"NO_IDENTITY"`) {
-		t.Fatalf("unauthenticated issue references: status=%d body=%s", response.Code, response.Body.String())
+	// Authentication comes before the versions parameter: a value the route refuses still
+	// answers 401 to a caller with no identity.
+	for _, target := range []string{"/api/v1/issues/CORE-1/references", "/api/v1/issues/CORE-1/references?versions=bogus"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+		if response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), `"code":"NO_IDENTITY"`) {
+			t.Fatalf("unauthenticated %s: status=%d body=%s", target, response.Code, response.Body.String())
+		}
 	}
 }
 
