@@ -372,7 +372,7 @@ func queuedUpdateLocked(queue []documentUpdateClass, update []byte, from int) in
 }
 
 // committed is the room's bookkeeping for a committed append, before the transaction releases the
-// document's lock: the figures, INFRA-593's noteStoredUpdates with the head the append left and the
+// document's lock: the figures, noteStoredUpdates with the head the append left and the
 // oldest version the gate read, every class it stored marked stored, with its durable append, if
 // it is durable, finished on the record that holds it now (countsFellLocked, which wakes the
 // room's waiters once nothing is left to store), and the settlement scheduled once when one of
@@ -538,7 +538,7 @@ func (s *Service) warmRoomAppends() {
 // noteStoredUpdates is told of each committed append of room's browser updates, after its commit
 // and before it releases the document's lock: head is the last version it stored, the room's head
 // now, and oldest the least version the room stored when its gate read the head, 0 for none. It is
-// INFRA-593's hook for the room's stored history and keeps nothing yet.
+// the room loading work's hook for the room's stored history and keeps nothing yet.
 func (s *Service) noteStoredUpdates(room string, head, oldest int64) {}
 
 // roomAppendBatchSizes are the upper bounds of the batch-size histogram's buckets: 1, 2, 3-4, 5-8,

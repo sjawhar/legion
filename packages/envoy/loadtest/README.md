@@ -252,8 +252,8 @@ series directory.
 
 ## The document-room steps
 
-Four named steps measure the document rooms' database work before and after a change
-([INFRA-605](dispatch://INFRA-605), plan D7.6). Each is one `run-step.sh` command. Run each on
+Four named steps measure the document rooms' database work before and after a change. Each is
+one `run-step.sh` command. Run each on
 the build before the change and on the build after it, back to back, with the same seed, and
 give each run its own name (for example `1x-before` and `1x-after`):
 
@@ -912,7 +912,7 @@ the window's start and end. A build that serves no `dispatch_rooms` reads `not s
 build`, with the profiler's answer when it answered an error; the cell shows it on one line, its
 white space collapsed and `|` escaped.
 
-**Whole markdown per version** (INFRA-605 plan D6.5). At the window's start and end, over a direct
+**Whole markdown per version.** At the window's start and end, over a direct
 connection, `loadgen run` reads `pg_total_relation_size('artifact_versions')` (heap, TOAST and
 indexes) and the table's rows. The proxy times each round trip that runs a statement matching
 `insert into artifact_versions`: from its `Sync` or `Query` reaching Postgres (after the proxy's
