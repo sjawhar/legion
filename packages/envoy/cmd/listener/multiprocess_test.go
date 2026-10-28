@@ -1956,3 +1956,40 @@ func TestTwoPodsGracefulStopWithMessagesOnTheWireKeepsOrder(t *testing.T) {
 	serving.requireOrder(t, messages)
 	mpWaitActive(t, b, time.Second)
 }
+
+// SIGKILL of the active pod while a prompt to session T is in flight, then more messages to T. The
+// standby takes over: T must take every message, the one in flight at the kill included, in the
+// order they were published and within the hard bound (architect Q2: in order within 15 s; a
+// repeat with the same id is allowed). TestTwoPodsSIGKILLHandsOverInOrderWithin15s leaves the
+// message in flight out of what it checks. At 39a73080 (the INFRA-557 tester's round-4 finding)
+// the killed pod's ledger attempt for that message, under 35 s old, makes the new holder defer it
+// as another pod's live attempt, so it reaches T 35 s after the kill, after every newer message.
+// The killed pod is the lease holder whose expired record the new holder took, so its attempt is
+// no live pod's.
+func TestTwoPodsSIGKILLMidPromptKeepsTheSessionsOrderWithin15s(t *testing.T) {
+	uri := testnats.URL(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a, b := mpStartPair(t, binary, uri)
+	serving := mpStartServingPort(t)
+	const blocked = "ses_mp_midprompt"
+	a.registerPort(t, serving, blocked)
+	publisher := mpConnectPublisher(t, uri)
+
+	inHand := serving.hold(blocked)
+	first := publisher.mustPublish(t, blocked)
+	select {
+	case <-inHand:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s never prompted %s", a.instance, blocked)
+	}
+	killed := a.kill(t)
+	stop := publisher.every(200*time.Millisecond, blocked)
+	time.Sleep(3 * time.Second) // publish for a while after the kill
+	stop()
+
+	messages := append([]mpMessage{first}, publisher.since(killed)...)
+	serving.awaitAll(t, messages, mpHardBound+30*time.Second)
+	serving.requireOrder(t, messages)
+	serving.requireWithin(t, messages, mpHardBound, killed)
+	mpWaitActive(t, b, time.Second)
+}
