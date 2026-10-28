@@ -1,4 +1,11 @@
-import { type BrowserContext, expect, type Locator, type Page, test } from "@playwright/test";
+import {
+  type Browser,
+  type BrowserContext,
+  expect,
+  type Locator,
+  type Page,
+  test,
+} from "@playwright/test";
 
 import { createIssue, createProject, getArtifactText, getIssue } from "./api";
 import {
@@ -7,6 +14,7 @@ import {
   documentTransport,
   indexedBlockAsk,
   placeCaret,
+  selectTextIn,
 } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -26,6 +34,20 @@ test.beforeEach(async () => {
 
 function askBlock(page: Page): Locator {
   return documentEditor(page).locator('[data-dispatch-ask-block="a1"]');
+}
+
+/** The decision's content hole, the editable text under its banner: a malformed decision's banner
+ * (`contenteditable="false"`) quotes the block's text, so a caret is placed by a quote found here. */
+function askContent(page: Page): Locator {
+  return askBlock(page).locator(":scope > [data-proof-block-content]");
+}
+
+function questionParagraph(page: Page): Locator {
+  return askContent(page).locator(":scope > p").first();
+}
+
+function optionList(page: Page, index: number): Locator {
+  return askContent(page).locator(":scope > ul").nth(index);
 }
 
 /** Creates the issue whose spec holds the decision a1 and waits until it is an open ask. */
@@ -121,11 +143,12 @@ test("two editors that each add an option list to an ask while their edits cross
     // the two editors' Yjs client ids, so the second list is read from the page; Backspace at the
     // start of the first list would lift its item into the question instead.
     const [alicePage] = pages;
-    const secondList = (await askBlock(alicePage).locator("ul").nth(1).textContent()) ?? "";
+    const secondList = (await optionList(alicePage, 1).textContent()) ?? "";
     await placeCaret(
       alicePage,
       "before",
-      secondList.includes("Option B") ? "Option B" : "Option A"
+      secondList.includes("Option B") ? "Option B" : "Option A",
+      askContent(alicePage)
     );
     await alicePage.keyboard.press("Backspace");
     for (const page of pages) {
@@ -146,7 +169,22 @@ test("two editors that each add an option list to an ask while their edits cross
   }
 });
 
-test("Enter in the question of an ask holding two lists keeps every word", async ({ browser }) => {
+/** Opens the decision a1 in alice's and bob's pages and crosses their option lists, so the block
+ * holds two lists, then runs `act` on alice's page with the two lists' options in document order
+ * (the merge orders the lists by the two editors' Yjs client ids). `act` answers the words that
+ * must survive it; every page and the stored markdown must keep them, the ask must stay open, and
+ * no page error may escape. Page errors are checked first as well, so a keystroke that throws
+ * fails on its error rather than on the words it lost. */
+async function withTwoLists(
+  browser: Browser,
+  act: (input: {
+    alicePage: Page;
+    artifactId: string;
+    first: string;
+    pages: Page[];
+    second: string;
+  }) => Promise<readonly string[]>
+): Promise<void> {
   const issue = await seedDecision();
   const alice = await asUser(browser, "alice");
   const bob = await asUser(browser, "bob");
@@ -163,20 +201,100 @@ test("Enter in the question of an ask holding two lists keeps every word", async
     for (const page of pages) {
       await expect(askBlock(page)).toHaveAttribute("data-dispatch-ask-malformed", "true");
     }
-
     const [alicePage] = pages;
-    await placeCaret(alicePage, "after", "Which one?");
-    await alicePage.keyboard.press("Enter");
-    await alicePage.keyboard.type("More");
-    await expectWordsKept(pages, issue.primary_artifact_id, [
-      "Which one?",
-      "More",
-      "Option A",
-      "Option B",
-    ]);
+    await expect(askContent(alicePage).locator(":scope > ul")).toHaveCount(2);
+    // A list's text also holds bob's cursor label when his caret is in it, so it is matched, not
+    // compared.
+    const firstList = (await optionList(alicePage, 0).textContent()) ?? "";
+    const [first, second] = firstList.includes("Option A")
+      ? ["Option A", "Option B"]
+      : ["Option B", "Option A"];
+    await expect(optionList(alicePage, 1)).toContainText(second);
+
+    const words = await act({
+      alicePage,
+      artifactId: issue.primary_artifact_id,
+      first,
+      pages,
+      second,
+    });
+    expect(errors).toEqual([]);
+    await expectWordsKept(pages, issue.primary_artifact_id, words);
+    for (const page of pages) {
+      await expect(askBlock(page)).toBeVisible();
+    }
+    expect((await getIssue(issue.key)).open_asks.map((ask) => ask.block_id)).toContain("a1");
     expect(errors).toEqual([]);
   } finally {
     await bob.close();
     await alice.close();
   }
+}
+
+/** Gives the first list a second item, `Option C`, typed after `first`: Enter at the end of a
+ * list's item opens the next item. */
+async function addOptionToFirstList(page: Page, first: string): Promise<void> {
+  await placeCaret(page, "after", first, optionList(page, 0));
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("Option C");
+  await expect(optionList(page, 0).getByRole("listitem")).toContainText([first, "Option C"]);
+}
+
+test("Enter in the question of an ask holding two lists keeps every word", async ({ browser }) => {
+  await withTwoLists(browser, async ({ alicePage, artifactId, pages }) => {
+    await placeCaret(alicePage, "after", "Which one?", questionParagraph(alicePage));
+    await alicePage.keyboard.press("Enter");
+    await alicePage.keyboard.type("More");
+    for (const page of pages) {
+      await expect(questionParagraph(page)).toContainText("More");
+      await expect(optionList(page, 0)).not.toContainText("More");
+      await expect(optionList(page, 1)).not.toContainText("More");
+    }
+    await expect
+      .poll(async () =>
+        (await getArtifactText(artifactId)).markdown
+          .split("\n")
+          .filter((line) => line.includes("More"))
+      )
+      .toEqual(["Which one?More"]);
+    return ["Which one?", "More", "Option A", "Option B"];
+  });
+});
+
+// Each keystroke below throws inside ProseMirror's command on a block off its content rule; the
+// editor's key guard declines it, so no page error escapes and the browser makes no edit of its own.
+
+test("Enter twice at the end of the second list of an ask holding two lists keeps every word", async ({
+  browser,
+}) => {
+  await withTwoLists(browser, async ({ alicePage, second }) => {
+    await placeCaret(alicePage, "after", second, optionList(alicePage, 1));
+    await alicePage.keyboard.press("Enter");
+    await alicePage.keyboard.press("Enter");
+    return ["Which one?", "Option A", "Option B"];
+  });
+});
+
+test("Backspace at the start of the first list of an ask holding two lists keeps every word", async ({
+  browser,
+}) => {
+  await withTwoLists(browser, async ({ alicePage, first }) => {
+    await addOptionToFirstList(alicePage, first);
+    await placeCaret(alicePage, "before", first, optionList(alicePage, 0));
+    await alicePage.keyboard.press("Backspace");
+    return ["Which one?", "Option A", "Option B", "Option C"];
+  });
+});
+
+test("Backspace over a selection from the question into the first list of an ask holding two lists keeps the words outside it", async ({
+  browser,
+}) => {
+  await withTwoLists(browser, async ({ alicePage, first, second }) => {
+    // The first list keeps an item after the deleted range, so the block would hold two lists.
+    await addOptionToFirstList(alicePage, first);
+    // From after "Which " to after "Opt" in the first list's first item.
+    await selectTextIn(alicePage, askContent(alicePage), "one?Opt");
+    await alicePage.keyboard.press("Backspace");
+    return ["Which ", first.slice("Opt".length), "Option C", second];
+  });
 });

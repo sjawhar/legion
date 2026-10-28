@@ -106,9 +106,23 @@ export async function selectEditorText(page: Page, quote: string): Promise<void>
 }
 
 /** Puts the caret directly before or after the first occurrence of `quote`, the way a click
- * there does. */
-export function placeCaret(page: Page, edge: "before" | "after", quote: string): Promise<void> {
-  return setEditorRange(page, { extent: edge, quote });
+ * there does. `scope`, an element inside the editor, limits the search to the text in it a caret
+ * can enter: a quote that also stands in `contenteditable="false"` chrome, such as a block's banner,
+ * or that a collaborator's cursor label splits, is found where the caret can go. */
+export function placeCaret(
+  page: Page,
+  edge: "before" | "after",
+  quote: string,
+  scope?: Locator
+): Promise<void> {
+  return setEditorRange(page, { extent: edge, quote }, scope);
+}
+
+/** Selects the first occurrence of `quote` among the text a caret can enter inside `scope`, an
+ * element inside the editor, as `selectEditorText` does but without waiting for the selection bar.
+ * Its text nodes read as one text, so a quote may run from one paragraph into the next. */
+export function selectTextIn(page: Page, scope: Locator, quote: string): Promise<void> {
+  return setEditorRange(page, { extent: "whole", quote }, scope);
 }
 
 /** Over, before or after the first occurrence of `quote`, or the end of the last text a caret can
@@ -119,51 +133,55 @@ type EditorRange = { extent: "whole" | "before" | "after"; quote: string } | { e
  * the editor takes the selection before this returns. Without that read, ProseMirror's focus
  * handler (prosemirror-view `handlers.focus`) writes the editor's own selection back to the page
  * 20 ms after focus and undoes a caret placed in between. */
-async function setEditorRange(page: Page, target: EditorRange): Promise<void> {
+async function setEditorRange(page: Page, target: EditorRange, scope?: Locator): Promise<void> {
   const editor = documentEditor(page);
   await editor.waitFor();
   await editor.focus();
-  await editor.evaluate((root, target) => {
-    const range = document.createRange();
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    if (target.extent === "end") {
-      let last: Node | null = null;
-      for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
-        if (node.parentElement?.isContentEditable === true) last = node;
+  await (scope ?? editor).evaluate(
+    (root, { editableOnly, target }) => {
+      const range = document.createRange();
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      if (target.extent === "end") {
+        let last: Node | null = null;
+        for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+          if (node.parentElement?.isContentEditable === true) last = node;
+        }
+        if (last === null) throw new Error("the editor holds no text a caret can enter");
+        range.setStart(last, last.textContent?.length ?? 0);
+      } else {
+        // Reads the text nodes as one text, so a quote another mark's span splits is found as
+        // readily as one a single node holds, and maps the quote's two ends back to their nodes.
+        const { extent, quote } = target;
+        const runs: { node: Node; start: number; end: number }[] = [];
+        let text = "";
+        for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+          if (editableOnly && node.parentElement?.isContentEditable !== true) continue;
+          const start = text.length;
+          text += node.textContent ?? "";
+          runs.push({ end: text.length, node, start });
+        }
+        const index = text.indexOf(quote);
+        const first = runs.find((run) => run.start <= index && index < run.end);
+        const last = runs.find(
+          (run) => run.start < index + quote.length && index + quote.length <= run.end
+        );
+        if (index < 0 || first === undefined || last === undefined) {
+          throw new Error(`quote is not in the editor: ${quote}`);
+        }
+        const startAt = { node: first.node, offset: index - first.start };
+        const endAt = { node: last.node, offset: index + quote.length - last.start };
+        const from = extent === "after" ? endAt : startAt;
+        const to = extent === "before" ? startAt : endAt;
+        range.setStart(from.node, from.offset);
+        range.setEnd(to.node, to.offset);
       }
-      if (last === null) throw new Error("the editor holds no text a caret can enter");
-      range.setStart(last, last.textContent?.length ?? 0);
-    } else {
-      // Reads the text nodes as one text, so a quote another mark's span splits is found as
-      // readily as one a single node holds, and maps the quote's two ends back to their nodes.
-      const { extent, quote } = target;
-      const runs: { node: Node; start: number; end: number }[] = [];
-      let text = "";
-      for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
-        const start = text.length;
-        text += node.textContent ?? "";
-        runs.push({ end: text.length, node, start });
-      }
-      const index = text.indexOf(quote);
-      const first = runs.find((run) => run.start <= index && index < run.end);
-      const last = runs.find(
-        (run) => run.start < index + quote.length && index + quote.length <= run.end
-      );
-      if (index < 0 || first === undefined || last === undefined) {
-        throw new Error(`quote is not in the editor: ${quote}`);
-      }
-      const startAt = { node: first.node, offset: index - first.start };
-      const endAt = { node: last.node, offset: index + quote.length - last.start };
-      const from = extent === "after" ? endAt : startAt;
-      const to = extent === "before" ? startAt : endAt;
-      range.setStart(from.node, from.offset);
-      range.setEnd(to.node, to.offset);
-    }
-    const selection = window.getSelection();
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-    document.dispatchEvent(new Event("selectionchange"));
-  }, target);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      document.dispatchEvent(new Event("selectionchange"));
+    },
+    { editableOnly: scope !== undefined, target }
+  );
 }
 
 export async function deleteEditorText(page: Page, quote: string): Promise<void> {
