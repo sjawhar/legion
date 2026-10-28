@@ -19,7 +19,8 @@ type runFact struct {
 	before     string
 	sender     string
 	at         time.Time
-	late       bool // a synchronize older than the newest applied: it moves no head (NameMove)
+	late       bool // a synchronize that moves no head (NameMove): deliver decides it as the workflow does; a history may mark one it delivers late, for display
+	made       int  // a synchronize's place among the moves of its history, 1 for the first; 0 when unknown
 	settlement *SettlementCandidate
 	required   []string
 	cleared    bool

@@ -1114,6 +1114,62 @@ func LateLifecycle(observed, applied time.Time) bool {
 	return !observed.IsZero() && !applied.IsZero() && observed.Before(applied)
 }
 
+// LateSynchronize is whether a synchronize of the move from before to head, by sender, at GitHub's
+// clock at, is late: it names a move the record has already passed, so it moves no head and only
+// names its move (NameMove). It is late when GitHub's clock puts it before the newest applied
+// (LateLifecycle); and, since that clock is to the second, when it is in the newest applied second,
+// names its sender and a before other than the record's head, and its head is one the record has
+// passed (passed): two moves of one second whose synchronizes arrived in the reverse of their
+// order. A synchronize of one second delivered after a later one whose head the record cannot yet
+// tell it passed - one in the middle of skipped moves, its pushes still to come - is read as a move
+// (the floor of synchronizes of one second delivered reversed, unspentPushes). A synchronize naming
+// no sender is late by the clock alone, as the release before read it. The workflow decides
+// lateness with this, and the tests deliver every synchronize through it.
+func LateSynchronize(pr record.PullRequest, before, sender, head string, at time.Time) bool {
+	if LateLifecycle(at, pr.HeadUpdatedAt) {
+		return true
+	}
+	if sender == "" || before == "" || head == "" || at.IsZero() || !at.Equal(pr.HeadUpdatedAt) || before == pr.HeadSHA || head == pr.HeadSHA {
+		return false
+	}
+	return passed(pr, head)
+}
+
+// passed is whether the record has passed head: a head it held or moved from - its head, a move it
+// made, its head run's anchor and arrivals - or one a chain of recorded pushes and moves named late
+// leads from to such a head. A move the branch makes next leads away from the record's head, so its
+// head is passed only when the branch made a loop.
+func passed(pr record.PullRequest, head string) bool {
+	reached := map[string]bool{pr.HeadSHA: true}
+	links := clone(pr.Pushes)
+	for _, m := range pr.Moves {
+		reached[m.Before], reached[m.SHA] = true, true
+	}
+	if pr.Run != nil {
+		reached[pr.Run.Anchor.HeadSHA] = true
+		for _, s := range pr.Run.Steps {
+			if s.Head != "" {
+				reached[s.Head] = true
+				if s.Before != "" {
+					reached[s.Before] = true
+				}
+			}
+		}
+		for _, n := range pr.Run.Names {
+			links = append(links, record.ClassifiedPush{Before: n.Before, SHA: n.SHA})
+		}
+	}
+	if reached[head] {
+		return true
+	}
+	for r := range reached {
+		if chainOf(links, head, r) != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // RepeatedClose reports whether a close at observed repeats the close already applied to pr: pr is
 // recorded closed and the close's clock is not after the recorded one, or the close has none. A
 // later close is a second one, whose reopen between the two has not been delivered yet. Unlike

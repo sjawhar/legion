@@ -119,8 +119,9 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 // once either way, and the required-checks pass's compare carries the approval when only the
 // issue's handoffs changed (daemon's readApprovalCarry). A synchronize that moves nothing - a
 // redelivery, or one carrying no head - changes nothing the verdict or the round reads, and applies
-// and re-asks nothing. A synchronize that moves no head because it is older than the newest applied
-// (classify.LateLifecycle), or because it returned the branch to the recorded head, still names the
+// and re-asks nothing. A synchronize that moves no head because it is late (classify.LateSynchronize:
+// older than the newest applied, or in its second for a head the record has passed), or because it
+// returned the branch to the recorded head, still names the
 // push its move took, by its sender, while a head run is open (classify.NameMove): an arrival whose
 // synchronize said it moved from a head the record never held waits for it. Late, it records that
 // alone, and moves and sets nothing else; when the replay it starts closes the run or changes the
@@ -136,7 +137,7 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 	}
 	prior := *pr
 	named := record.Named{Before: fact.Before, SHA: fact.HeadSHA, Sender: fact.Sender, At: fact.UpdatedAt}
-	if classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
+	if classify.LateSynchronize(*pr, fact.Before, fact.Sender, fact.HeadSHA, fact.UpdatedAt) {
 		if *pr = classify.NameMove(*pr, named); pr.Run == prior.Run {
 			return intake.Result{}, nil
 		}

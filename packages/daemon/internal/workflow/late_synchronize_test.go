@@ -173,6 +173,31 @@ func TestARedHeldForALateSynchronizeIsDecidedWhenItArrives(t *testing.T) {
 	}
 }
 
+// Two moves in one second of GitHub's clock, head..h1 and h1..h2, their synchronizes delivered in
+// the reverse of their order, with h2's red between them: the older synchronize is in the newest
+// applied second, and its head h1 is one the record has passed (classify.LateSynchronize), so it
+// moves the head back to nothing and names its move; the head run closes and the red is decided at
+// once. Read by the clock alone it would move the record's head back to h1.
+func TestTwoMovesInOneSecondDeliveredReversedLeaveTheHeadAtTheNewer(t *testing.T) {
+	const dev = "legion-implementer[bot]"
+	second := time.Date(2026, 9, 22, 23, 51, 0, 0, time.UTC)
+	pool := migratedPool(t)
+	seedReviewOf(t, pool, "head", "green")
+	engine := testEngine(config.DesignGateRootIssues, nil)
+	applyRefusingNothing(t, pool, engine, sentPush("head", "h1", dev), sentPush("h1", "h2", dev), namedSync("h1", "h2", dev, second),
+		settledAt("h2", "ci", 2, "ci"), namedSync("head", "h1", dev, second))
+	pr := probePullRequest(t, pool)
+	if pr.HeadSHA != "h2" || pr.Run != nil {
+		t.Fatalf("pull request at %s with a head run open %v, want h2 and closed", pr.HeadSHA, pr.Run != nil)
+	}
+	if got := issuePhase(t, pool); got != phase.Implementing {
+		t.Fatalf("phase %s, want implementing: h2's red sends the work back", got)
+	}
+	if got := noticeKinds(t, pool, "LEGION-208"); !containsNotice(got, "checks-red") {
+		t.Fatalf("notices %v, want checks-red", got)
+	}
+}
+
 // The push handler records each push's sender, and the synchronize's sender picks its move's push
 // by it: two pushes of head..h1 on their way, the review App's first and the implementer's second,
 // and h1's synchronize naming the implementer. The implementer's code onto the red counts a fix

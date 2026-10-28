@@ -142,7 +142,7 @@ func sentFacts(rng *rand.Rand, steps []sentStep, bounded bool) sentDeliveries {
 		}
 	}
 	synced := func(p record.ClassifiedPush, k int, late bool) runFact {
-		return runFact{head: p.SHA, before: p.Before, sender: p.Sender, at: clock(k), late: late}
+		return runFact{head: p.SHA, before: p.Before, sender: p.Sender, at: clock(k), late: late, made: k + 1}
 	}
 	// The skeleton is each on-time synchronize and its settlement, in order.
 	var skeleton, oracleSkeleton [][2]runFact
@@ -259,6 +259,25 @@ func gapLoops(steps []sentStep) bool {
 	return false
 }
 
+// sameSecondReversed is whether order delivers a synchronize after one of a move made later in the
+// same second of GitHub's clock: two synchronizes the clock cannot order, delivered in the reverse
+// of their order.
+func sameSecondReversed(order []runFact) bool {
+	var seen []runFact
+	for _, f := range order {
+		if f.head == "" || f.made == 0 {
+			continue
+		}
+		for _, g := range seen {
+			if g.at.Equal(f.at) && g.made > f.made {
+				return true
+			}
+		}
+		seen = append(seen, f)
+	}
+	return false
+}
+
 // onTimeIndex is the step index of the j-th on-time synchronize.
 func onTimeIndex(onTimeAt []int, steps []sentStep, j int) int {
 	for k, s := range steps {
@@ -291,11 +310,15 @@ func TestEveryOrderOfASendersMovesIsJudgedAsTheOracleJudgesThem(t *testing.T) {
 	for _, bounded := range []bool{false, true} {
 		for _, lose := range []bool{false, true} {
 			rng := rand.New(rand.NewPCG(seed, 5))
-			unlike, unlikeOracle, open, failures, loops, loopFailures := 0, 0, 0, 0, 0, 0
+			unlike, unlikeOracle, open, failures, loops, loopFailures, ties, tieFailures := 0, 0, 0, 0, 0, 0, 0, 0
 			for it := range iters {
 				steps := sentHistory(rng, lose)
 				history := sentFacts(rng, steps, bounded)
 				loop := gapLoops(steps)
+				tie := !loop && sameSecondReversed(history.order)
+				if tie {
+					ties++
+				}
 				if loop {
 					loops++
 				}
@@ -320,7 +343,10 @@ func TestEveryOrderOfASendersMovesIsJudgedAsTheOracleJudgesThem(t *testing.T) {
 				if !lose && (orderWrong || oracleWrong || stuck) && loop {
 					loopFailures++
 				}
-				if !lose && (orderWrong || oracleWrong || stuck) && !loop {
+				if !lose && (orderWrong || oracleWrong || stuck) && tie {
+					tieFailures++
+				}
+				if !lose && (orderWrong || oracleWrong || stuck) && !loop && !tie {
 					if failures++; failures > 3 {
 						continue
 					}
@@ -328,8 +354,8 @@ func TestEveryOrderOfASendersMovesIsJudgedAsTheOracleJudgesThem(t *testing.T) {
 						history.reference, history.order, history.oracle, judged(got, "", ""), judged(want, "", ""), judged(truth, "", ""))
 				}
 			}
-			t.Logf("bounded %v, a synchronize lost %v: %d histories (%d with a loop in a skipped gap); judged unlike the reference order %d, unlike the oracle %d, a head run left open %d; misjudged with a loop %d",
-				bounded, lose, iters, loops, unlike, unlikeOracle, open, loopFailures)
+			t.Logf("bounded %v, a synchronize lost %v: %d histories (%d with a loop in a skipped gap, %d more with synchronizes of one second delivered reversed); judged unlike the reference order %d, unlike the oracle %d, a head run left open %d; misjudged with a loop %d, with reversed synchronizes %d",
+				bounded, lose, iters, loops, ties, unlike, unlikeOracle, open, loopFailures, tieFailures)
 			if failures > 3 {
 				t.Errorf("bounded %v: %d histories with every synchronize delivered misjudged in all", bounded, failures)
 			}
