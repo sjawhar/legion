@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Tests for `check-ci-filters.sh`: every ci.yaml filter must match every file its job reads, the
-# Go closures recomputed with go list, the table of go commands must say what ci.yaml says, a
-# claimed go command the check does not reduce counts as reading its whole module, ci-ok's
-# SELECTED_BY, PULL_REQUEST_ONLY and NOT_ON_PUSH must say what each needed job's if: tests, and a
-# PUSH_WORKFLOWS workflow's on.push.paths must equal its filter.
+# Go closures recomputed with go list (with -race for a -race command), the table of go commands
+# must say what ci.yaml says, a claimed go command the check does not reduce (another form, a
+# step that is more than the go line, a shell, a container, a BASH_ENV) and a step off its exact
+# entry's pinned script count as reading every Go file of the repository and every file under a
+# Go module's directory, ci-ok's SELECTED_BY, PULL_REQUEST_ONLY and NOT_ON_PUSH must say what each
+# needed job's if: tests, and a PUSH_WORKFLOWS workflow's on.push.paths must equal its filter.
 #
 # Each case builds a miniature repository under a temporary directory - a go.work binding one
 # module, a ci.yaml whose `changes` job gates one job, and a ci_job_reads.py describing it - and
@@ -417,7 +419,7 @@ replace "$root/.github/workflows/ci.yaml" "              - 'mod/**'" "          
 run_check "$root"
 check "fails once its filter misses one of them" "$(is "$status" 1)"
 check "names the command, why it is not reduced and the filter" \
-  "$(contains "$out" 'job app step "Test the app" runs `GOFLAGS=-tags=probe go test ./cmd/app ./lib`, which this check does not reduce (it starts with `GOFLAGS=-tags=probe`, not go), so it counts as reading every Go file of the repository; filter app must select it on any Go change')"
+  "$(contains "$out" 'job app step "Test the app" runs `GOFLAGS=-tags=probe go test ./cmd/app ./lib`, which this check does not reduce (it starts with `GOFLAGS=-tags=probe`, not go), so it counts as reading every Go file of the repository and every file under a Go module.s directory; filter app must select them all on any Go change')"
 
 echo "case: a script's go command is held to its pinned text, the whole line"
 root=$(fixture script-line)
@@ -487,5 +489,176 @@ replace "$root/.github/workflows/ci.yaml" "run: go test ./cmd/app ./lib" "run: c
 run_check "$root"
 check "fails once it runs in the other module, whose files its filter misses" "$(is "$status" 1)"
 check "names a file of that module" "$(contains "$out" 'mod2/')"
+
+echo "case: an unreduced go command reads every file under every Go module's directory, testdata included"
+root=$(fixture unreduced-module-tree)
+mkdir -p "$root/mod2/x/testdata"
+printf 'module example.com/m2\n\ngo 1.21\n' > "$root/mod2/go.mod"
+printf 'package x\n' > "$root/mod2/x/x.go"
+echo 'data' > "$root/mod2/x/testdata/data.txt"
+printf 'go 1.21\n\nuse (\n\t./mod\n\t./mod2\n)\n' > "$root/go.work"
+replace "$root/.github/workflows/ci.yaml" "              - 'mod/cmd/app/*'" \
+  $'              - \'**/*.go\'\n              - \'**/go.mod\'\n              - \'**/go.sum\'\n              - \'**/go.work\'\n              - \'**/go.work.sum\''
+replace "$root/.github/workflows/ci.yaml" "run: go test ./cmd/app ./lib" "run: GOFLAGS=-tags=probe go test ./cmd/app ./lib"
+run_check "$root"
+check "fails though its filter selects every Go and module file" "$(is "$status" 1)"
+check "names the other module's testdata file" \
+  "$(contains "$out" '::error file=mod2/x/testdata/data.txt::app reads mod2/x/testdata/data.txt, which its filter app does not match')"
+check "and the command that reads it" \
+  "$(contains "$out" 'runs `GOFLAGS=-tags=probe go test ./cmd/app ./lib`, which this check does not reduce (it starts with `GOFLAGS=-tags=probe`, not go), so it counts as reading every Go file of the repository and every file under a Go module.s directory')"
+
+echo "case: a cd on its own line before a simple go command in the same run"
+root=$(fixture cd-own-line)
+mkdir -p "$root/mod2/cmd/app" "$root/mod2/lib"
+printf 'module example.com/m2\n\ngo 1.21\n' > "$root/mod2/go.mod"
+printf 'package main\n\nfunc main() {}\n' > "$root/mod2/cmd/app/main.go"
+printf 'package lib\n' > "$root/mod2/lib/lib.go"
+printf 'go 1.21\n\nuse (\n\t./mod\n\t./mod2\n)\n' > "$root/go.work"
+replace "$root/.github/workflows/ci.yaml" "              - 'mod/go.mod'" $'              - \'mod/go.mod\'\n              - \'mod2/go.mod\''
+replace "$root/.github/workflows/site.yaml" "      - 'mod/go.mod'" $'      - \'mod/go.mod\'\n      - \'mod2/go.mod\''
+replace "$root/.github/workflows/ci.yaml" "              - 'mod/cmd/app/*'" "              - 'mod/**'"
+replace "$root/.github/workflows/ci.yaml" "        run: go test ./cmd/app ./lib" $'        run: |\n          cd ../mod2\n          go test ./cmd/app ./lib'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the command and that it is not its step's whole script" \
+  "$(contains "$out" 'job app step "Test the app" runs `go test ./cmd/app ./lib`, which this check does not reduce (it is not its step.s whole run: script, comments and blank lines aside)')"
+check "and a file of the module it cds into" "$(contains "$out" '::error file=mod2/')"
+
+echo "case: an export of GOFLAGS on its own line before a simple go command in the same run"
+root=$(fixture export-goflags)
+cat > "$root/mod/cmd/app/probe_test.go" <<'GO'
+//go:build probe
+
+package main
+
+import _ "example.com/m/other"
+GO
+replace "$root/.github/workflows/ci.yaml" "        run: go test ./cmd/app ./lib" $'        run: |\n          export GOFLAGS=-tags=probe\n          go test ./cmd/app ./lib'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the command and that it is not its step's whole script" \
+  "$(contains "$out" 'job app step "Test the app" runs `go test ./cmd/app ./lib`, which this check does not reduce (it is not its step.s whole run: script')"
+check "and the file the tags compile in" "$(contains "$out" '::error file=mod/other/other.go::')"
+
+echo "case: a step shell that sets GOFLAGS around a simple go command"
+root=$(fixture step-shell)
+cat > "$root/mod/cmd/app/probe_test.go" <<'GO'
+//go:build probe
+
+package main
+
+import _ "example.com/m/other"
+GO
+replace "$root/.github/workflows/ci.yaml" "        working-directory: mod" $'        working-directory: mod\n        shell: env GOFLAGS=-tags=probe bash -e {0}'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the command and the step's shell" \
+  "$(contains "$out" 'job app step "Test the app" runs `go test ./cmd/app ./lib`, which this check does not reduce (step "Test the app" runs under shell: `env GOFLAGS=-tags=probe bash -e {0}`)')"
+check "and the file the tags compile in" "$(contains "$out" '::error file=mod/other/other.go::')"
+
+echo "case: a job defaults.run.shell around a simple go command"
+root=$(fixture job-default-shell)
+replace "$root/.github/workflows/ci.yaml" "    if: needs.changes.outputs.app == 'true'" \
+  $'    if: needs.changes.outputs.app == \'true\'\n    defaults:\n      run:\n        shell: bash --noprofile --norc -eo pipefail {0}'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the command and the job's default shell" \
+  "$(contains "$out" 'job app step "Test the app" runs `go test ./cmd/app ./lib`, which this check does not reduce (the job.s defaults.run.shell is `bash --noprofile --norc -eo pipefail {0}`)')"
+check "and a file it falls to" "$(contains "$out" '::error file=mod/other/other.go::')"
+
+echo "case: a job container around a simple go command"
+root=$(fixture job-container)
+replace "$root/.github/workflows/ci.yaml" "    if: needs.changes.outputs.app == 'true'" \
+  $'    if: needs.changes.outputs.app == \'true\'\n    container: golang:1.21'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the command and the container" \
+  "$(contains "$out" 'job app step "Test the app" runs `go test ./cmd/app ./lib`, which this check does not reduce (the job runs in a container:)')"
+check "and a file it falls to" "$(contains "$out" '::error file=mod/other/other.go::')"
+
+echo "case: a BASH_ENV in a simple go command's env"
+root=$(fixture bash-env)
+cat > "$root/mod/cmd/app/probe_test.go" <<'GO'
+//go:build probe
+
+package main
+
+import _ "example.com/m/other"
+GO
+printf 'export GOFLAGS=-tags=probe\n' > "$root/mod/goflags.sh"
+replace "$root/.github/workflows/ci.yaml" "        working-directory: mod" $'        working-directory: mod\n        env:\n          BASH_ENV: ./goflags.sh'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the command and the BASH_ENV" \
+  "$(contains "$out" 'job app step "Test the app" runs `go test ./cmd/app ./lib`, which this check does not reduce (step "Test the app".s env sets BASH_ENV)')"
+check "and the file the tags compile in" "$(contains "$out" '::error file=mod/other/other.go::')"
+
+echo "case: a -race go command's closure is the one go list -race lists"
+root=$(fixture race-closure)
+cat > "$root/mod/cmd/app/race_test.go" <<'GO'
+//go:build race
+
+package main
+
+import _ "example.com/m/other"
+GO
+replace "$root/.github/workflows/ci.yaml" "run: go test ./cmd/app ./lib" "run: go test -race ./cmd/app ./lib"
+replace "$root/.github/scripts/ci_job_reads.py" 'text="go test ./cmd/app ./lib"),' 'text="go test -race ./cmd/app ./lib", race=True),'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the file the race build compiles in" \
+  "$(contains "$out" '::error file=mod/other/other.go::app reads mod/other/other.go, which its filter app does not match.*(go list -deps)')"
+
+echo "case: a -race go command claimed by a Run without race"
+root=$(fixture race-mismatch)
+replace "$root/.github/workflows/ci.yaml" "run: go test ./cmd/app ./lib" "run: go test -race ./cmd/app ./lib"
+replace "$root/.github/scripts/ci_job_reads.py" 'text="go test ./cmd/app ./lib"),' 'text="go test -race ./cmd/app ./lib"),'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the command and the race mismatch" \
+  "$(contains "$out" 'job app step "Test the app" runs `go test -race ./cmd/app ./lib`, which is not the Run.s (./cmd/app ./lib): it runs with -race, the Run without')"
+
+# exact_step_table <root>: the app gate pins its step's whole script (a loop over the packages) and
+# lists the Run that stands for what the loop compiles.
+exact_step_table() {
+  cat > "$1/.github/scripts/ci_job_reads.py" <<'PY'
+from ci_filter_coverage import Read, at, exact, gate, run
+
+RULES = {"mod/lib/lib_test.go": [Read("fixtures/data.json", "lib_test.go reads ../../fixtures/data.json")]}
+GATES = [
+    gate("app", "app", exact=[
+        exact("Test the app", "mod", 'for pkg in ./cmd/app ./lib; do\n  go test -count=1 "$pkg"\ndone', [
+            run("mod", ["./cmd/app", "./lib"], at("app", "Test the app") + " (its pinned script): go test of each package of the loop"),
+        ]),
+    ], reads=[Read(".github/workflows/ci.yaml", "a job reads its own definition")]),
+]
+EXCLUDED = {"image": "an image build another check proves"}
+PUSH_WORKFLOWS = {"site": ".github/workflows/site.yaml"}
+PY
+  replace "$1/.github/workflows/ci.yaml" "        run: go test ./cmd/app ./lib" \
+    $'        run: |\n          for pkg in ./cmd/app ./lib; do\n            go test -count=1 "$pkg"\n          done'
+}
+
+echo "case: a step pinned whole by an exact entry is held to its runs' closure"
+root=$(fixture exact-step)
+exact_step_table "$root"
+run_check "$root"
+check "passes while the step holds the pinned script" "$(is "$status" 0)"
+check "counts the runs' closure" "$(contains "$out" '^app: 7 files, 0 uncovered (filter app)$')"
+printf 'package lib\n\nimport _ "example.com/m/other"\n\nfunc Hello() {}\n' > "$root/mod/lib/lib.go"
+run_check "$root"
+check "fails once the closure reads a file outside the filter" "$(is "$status" 1)"
+check "and names it with the exact entry's run" \
+  "$(contains "$out" '::error file=mod/other/other.go::app reads mod/other/other.go.*"Test the app" (its pinned script): go test of each package of the loop (go list -deps)')"
+
+echo "case: a step one character off its pinned script falls to everything"
+root=$(fixture exact-step-changed)
+exact_step_table "$root"
+replace "$root/.github/workflows/ci.yaml" "-count=1" "-count=2"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the step and why it falls" \
+  "$(contains "$out" 'job app step "Test the app".s pinned script, which this check does not reduce (the step.s script is not the pinned text), so it counts as reading every Go file of the repository and every file under a Go module.s directory; filter app must select them all on any Go change')"
+check "and a file it falls to" "$(contains "$out" '::error file=mod/other/other.go::')"
 
 summary "check-ci-filters.sh holds each filter to its job's Go closure, its rules and its table"

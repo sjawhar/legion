@@ -5,10 +5,14 @@ header says what is proved).
   GATES     one Gate per filter: the job (or step) it gates, the go commands the job runs, and
             the files its other steps read. Each go command is pinned to the text that starts it:
             `step=` a step of the job whose run: holds `text`, or `source=` a script that holds it.
-            The check fails when a run: step of a ci.yaml job starts a go command no Run claims,
-            and when a pin's text is gone, so the table cannot drift from ci.yaml silently. A
-            claimed command the check does not reduce (check-ci-filters.sh's header says which it
-            does) counts as reading every Go file of its module; a script's pin is its whole line.
+            A step whose go commands are not in the simple form is an `exact=` entry instead
+            (pinned_step): its whole run: script and directory, and the Runs that stand for what
+            it compiles. The check fails when a run: step of a ci.yaml job starts a go command no
+            Run or exact entry claims, and when a pin's text is gone, so the table cannot drift
+            from ci.yaml silently. A claimed command the check does not reduce (check-ci-filters.sh's
+            header says which it does), and every Run of an exact entry whose step no longer holds
+            its script, counts as reading every Go file of the repository and every file under a
+            Go module's directory; a script's pin is its whole line.
   RULES     a source file -> what it does when a test run compiles it: a go command it starts (a
             Run, whose closure is added) or a file it reads outside its package (a Read). A
             _test.go file counts when go list lists it in a tested package under the job's tags;
@@ -31,7 +35,7 @@ as hand-kept as RULES: the check proves the filter covers them, not that they ar
 import json
 from pathlib import Path
 
-from ci_filter_coverage import Read, at, gate, run
+from ci_filter_coverage import Read, at, exact, gate, run
 
 ENVOY = "packages/envoy"
 DAEMON = "packages/daemon"
@@ -55,6 +59,14 @@ def step_run(job, step, text, workdir, pkgs, **options):
 def script_run(source, text, started_by, workdir, pkgs, **options):
     """A go command a script starts, pinned to the script and its text."""
     return run(workdir, pkgs, f"{source} ({started_by}): {text}", source=source, text=text, **options)
+
+
+def pinned_step(job, step, workdir, script, runs):
+    """A ci.yaml step pinned to its whole run: script and the directory it runs in (an Exact
+    entry). Each of `runs`, (workdir, packages, what the script compiles there, run options),
+    stands for a go command of the script; together they must name all it compiles."""
+    return exact(step, workdir, script, [run(where, pkgs, f"{at(job, step)} (its pinned script): {what}", **options)
+                                         for where, pkgs, what, options in runs])
 
 
 def reads(*entries):
@@ -298,10 +310,24 @@ def go_notices_runs():
     return out
 
 
-def envoy_pack_runs():
-    text = 'GOOS=linux GOARCH=$arch go build -buildvcs=false -o "$out/envoy-listener" ./cmd/listener'
-    return [step_run("envoy-go", "Pack envoy binaries", text, ENVOY, ["./cmd/listener"], mode="build", env={"GOOS": "linux", "GOARCH": arch})
-            for arch in targets(GO_TARGETS, "envoy")]
+# envoy-go's and envoy-smoke's steps whose go commands are not in the simple form, pinned whole.
+UNIT_TEST_STEP = "Unit test envoy Go package"
+UNIT_TEST_SCRIPT = """\
+go test ./internal/dispatch/api
+go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test"""
+PACK_STEP = "Pack envoy binaries"
+PACK_SCRIPT = """\
+for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
+  out="../../out/pr-artifacts/envoy-$arch"
+  mkdir -p "$out"
+  GOOS=linux GOARCH=$arch go build -buildvcs=false -o "$out/envoy-listener" ./cmd/listener
+  GOOS=linux GOARCH=$arch ../../scripts/go-third-party-notices.sh "$out/THIRD_PARTY_NOTICES" ./cmd/listener
+  tar czf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz" -C "$out" envoy-listener THIRD_PARTY_NOTICES
+  tar tzvf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz"
+done"""
+SCHEMA_STEP = "The envoy-infra plugin's schema carries the version it was built with"
+SCHEMA_SCRIPT = ('go build -ldflags "-X main.version=1.2.3" -o /tmp/pr ./cmd/pulumi-resource-envoy-infra && '
+                 """pulumi package get-schema /tmp/pr | jq -e '.version == "1.2.3"'""")
 
 
 RUN_SERVER = "packages/dispatch/e2e/run-server.sh"
@@ -323,7 +349,7 @@ GATES = [
         step_run("test", "Test the Go daemon", "go test -count=1 -timeout 20m ./...", DAEMON, ["./..."]),
         step_run("test", "Test the concurrent packages under the race detector",
                  "go test -count=1 -race ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/",
-                 DAEMON, ["./internal/daemon/", "./internal/record/", "./internal/sessionproxy/", "./internal/launcher/"]),
+                 DAEMON, ["./internal/daemon/", "./internal/record/", "./internal/sessionproxy/", "./internal/launcher/"], race=True),
         script_run("scripts/e2e/stage1-skeleton.sh", 'go build -o "$work/legion" ./cmd/legion', at("test", "Stage 1 live proof"),
                    DAEMON, ["./cmd/legion"], mode="build"),
         script_run("scripts/e2e/lib/held-port.test.ts", 'const build = Bun.spawnSync(["go", "build", "-o", listener, "./cmd/listener"], {',
@@ -520,19 +546,26 @@ GATES = [
     gate("claude_envoy", "claude-envoy", reads=CLAUDE_ENVOY_BUILD + biome(at("claude-envoy", "Lint Claude Envoy plugin")) + bun_job("claude-envoy") + CI_SELF),
 
     gate("envoy_go", "envoy-go", runs=[
-        # The API package first, on its own (582cb2a2: its Postgres-backed tests' cleanup queues
-        # on the service's one checkpointer beside the other package binaries), then ./... but it
-        # and internal/integration, which the integration step tests.
-        step_run("envoy-go", "Unit test envoy Go package", "go test ./internal/dispatch/api", ENVOY, ["./internal/dispatch/api"]),
-        step_run("envoy-go", "Unit test envoy Go package", "go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test",
-                 ENVOY, ["./..."]),
         step_run("envoy-go", "Integration test envoy (a real NATS server, in the test process)",
                  "go test ./internal/integration/ -timeout 300s -count=1", ENVOY, ["./internal/integration/"]),
         step_run("envoy-go", "Test the container-backed NATS matrix (natslive)", "go test -tags natslive ./internal/testnats/", ENVOY,
                  ["./internal/testnats/"], tags="natslive"),
         step_run("envoy-go", "Build envoy services", "go build ./cmd/dispatch ./cmd/listener", ENVOY, ["./cmd/dispatch", "./cmd/listener"],
                  mode="build"),
-        *envoy_pack_runs(),
+    ], exact=[
+        # The API package first, on its own (582cb2a2: its Postgres-backed tests' cleanup queues
+        # on the service's one checkpointer beside the other package binaries), then ./... but it
+        # and internal/integration, which the integration step tests: counted as all of ./....
+        pinned_step("envoy-go", UNIT_TEST_STEP, ENVOY, UNIT_TEST_SCRIPT, [
+            (ENVOY, ["./internal/dispatch/api"], "go test ./internal/dispatch/api", {}),
+            (ENVOY, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
+        ]),
+        # One linux build of the listener per architecture the loop reads from the target list.
+        pinned_step("envoy-go", PACK_STEP, ENVOY, PACK_SCRIPT, [
+            (ENVOY, ["./cmd/listener"], f"GOOS=linux GOARCH={arch} go build ./cmd/listener",
+             {"mode": "build", "env": {"GOOS": "linux", "GOARCH": arch}})
+            for arch in targets(GO_TARGETS, "envoy")
+        ]),
     ], reads=reads(
         (f"{ENVOY}/**", f"{at('envoy-go', 'Check Go formatting')}: gofmt -l . in packages/envoy reads every .go file under it, infra included; the script tests below live here too"),
         ("packages/contracts/scripts/gen-go.ts", f"{at('envoy-go', 'Check Go contracts are generated from the shared schema')} (packages/contracts/package.json check:go)"),
@@ -573,10 +606,10 @@ GATES = [
                  "go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... "
                  "./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/",
                  ENVOY, ["./internal/dispatch/docs/", "./internal/dispatch/api/", "./internal/dispatch/pmdoc/...",
-                         "./internal/dispatch/delivery/...", "./internal/dispatch/store/...", "./internal/bus/"]),
+                         "./internal/dispatch/delivery/...", "./internal/dispatch/store/...", "./internal/bus/"], race=True),
         step_run("envoy-go-race", "Race-test the listener, the registry store and kvwatch",
                  "go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/kvwatch/...", ENVOY,
-                 ["./cmd/listener/", "./internal/store/", "./internal/kvwatch/..."]),
+                 ["./cmd/listener/", "./internal/store/", "./internal/kvwatch/..."], race=True),
     ], reads=reads(
         (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/envoy/internal/dispatch/pmdoc/gen/decode.ts:16, differential.ts:21, edit-blocks.ts:21"),
         ("packages/proof-editor/src/**", "packages/envoy/internal/dispatch/pmdoc/gen/decode.ts:6, differential.ts:12-13, edit-blocks.ts:10 import @legion/proof-editor"),
@@ -614,9 +647,10 @@ GATES = [
                  ENVOY, ["./internal/smoke/"], tags="smoke"),
         step_run("envoy-smoke", "Live tests of envoy-infra's host:Listener", "go test -tags pulumilive -v -timeout 15m ./host/",
                  INFRA, ["./host/"], tags="pulumilive"),
-        step_run("envoy-smoke", "The envoy-infra plugin's schema carries the version it was built with",
-                 'go build -ldflags "-X main.version=1.2.3" -o /tmp/pr ./cmd/pulumi-resource-envoy-infra',
-                 INFRA, ["./cmd/pulumi-resource-envoy-infra"], mode="build"),
+    ], exact=[
+        pinned_step("envoy-smoke", SCHEMA_STEP, INFRA, SCHEMA_SCRIPT, [
+            (INFRA, ["./cmd/pulumi-resource-envoy-infra"], "go build ./cmd/pulumi-resource-envoy-infra", {"mode": "build"}),
+        ]),
     ], reads=reads(
         (".github/actions/pull-test-images/**", at("envoy-smoke", "Pull test container images")),
         (f"{ENVOY}/internal/testnats/nats.go", f"{at('envoy-smoke', 'Pull test container images')}: const Image"),

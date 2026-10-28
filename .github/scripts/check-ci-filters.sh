@@ -6,8 +6,8 @@
 # change to Go code, a module file or ci.yaml, and fails naming each file a filter misses.
 #
 # What a job reads is, per gate (.github/scripts/ci_job_reads.py, GATES):
-#   * the closure of each go command the job runs, live: `go list -deps [-test] [-tags ...]` over
-#     the command's packages, in its directory, with its GOOS/GOARCH/CGO_ENABLED and -overlay.
+#   * the closure of each go command the job runs, live: `go list -deps [-test] [-tags ...] [-race]`
+#     over the command's packages, in its directory, with its GOOS/GOARCH/CGO_ENABLED and -overlay.
 #     Each first-party package directory counts as `<dir>/*`; a test run adds its `testdata/**`;
 #     every run adds each embedded file and, for a `<root>/...` pattern, every directory with .go
 #     files under root (the go command reads their build constraints);
@@ -16,7 +16,9 @@
 #     of a go command it starts, and each file it reads through `..`;
 #   * the module files of each go command's workspace: go.work, go.work.sum and every bound
 #     module's go.mod and go.sum (`go env GOWORK`, `go work edit -json`);
-#   * for a claimed go command this check does not reduce (below), every Go file of the repository;
+#   * for a claimed go command this check does not reduce (below), and for every Run of an exact
+#     entry whose step no longer holds its pinned script, every Go file of the repository and
+#     every file under a Go module's directory;
 #   * the static reads of the job's other steps: actions, the Bun install, Biome, scripts, fixtures.
 # Those globs are expanded over the repository's files (tracked, and untracked ones git does not
 # ignore, so an uncommitted new file counts and a build output does not) and each file is held to
@@ -29,10 +31,12 @@
 #   2. a gate whose filter the changes job lacks, or whose job's (or step's) if: does not test it,
 #   3. a job or step gated on a filter the table neither lists in GATES nor EXCLUDES,
 #   4. a run: line of a ci.yaml job that starts a go command (test, vet, build, run, list,
-#      install, generate) no Run of a gate on that job claims, or a claimed line in the simple
-#      form (below) whose packages, -tags or mode (test, vet, or build) are not exactly its Run's,
-#   5. a Run whose pinned text its step or script no longer holds, a RULES source file that is
-#      gone, or a why citing a step the job no longer has,
+#      install, generate) no Run of a gate on that job claims and no exact entry's step holds, or
+#      a claimed line in the simple form (below) whose packages, -tags, -race or mode (test, vet,
+#      or build) are not exactly its Run's,
+#   5. a Run whose pinned text its step or script no longer holds, an exact entry whose step the
+#      job no longer has, a RULES source file that is gone, or a why citing a step the job no
+#      longer has,
 #   6. a go command that fails or a first-party package go list cannot load, since its closure
 #      is then unknown, and a `!` pattern under `some` or a brace in a gate's filter,
 #   7. a SELECTED_BY in ci-ok's step that is not exactly {job: the output its if: tests} for every
@@ -47,21 +51,30 @@
 #      on pull requests and merge groups (docs-pages.yaml, the docs filter), so the two lists
 #      cannot drift.
 #
-# A claimed go command is reduced only in its simple form, never parsed further: one physical
-# line, not continued with a backslash, of `go test|vet|build`, then relative package paths and
-# only -v, -race, -count=N, -timeout D, -buildvcs=false and one -tags T, with no GO* or CGO_*
-# variable in the workflow's, job's or step's env, no step of the job writing $GITHUB_ENV or
-# $GITHUB_PATH or running `go env -w` (each reaches every later go command unseen), and the
-# step's working directory (its own, else the job's or workflow's defaults.run, else the root)
-# the Run's. A script_run is held exact instead: the
-# script's line holding its text must be that text alone and uncontinued, under such an env (the
-# job's and every one of its steps') and such a job; the script's variables are the Run author's
-# to read, and anything appended to that line falls to everything. Any other claimed command - an
-# assignment such as GOFLAGS, another flag, a pipe, a quote, a substitution, a cd - counts as
-# reading every Go file of the repository, with every go.mod, go.sum, go.work and go.work.sum in
-# it, and fails naming the command unless its filter selects all of them. So a cd, `go -C` or
-# a step in another directory than the Run's can only widen what it reads. It fails wide, never
-# narrow: a new evasion is answered by falling to everything, not by more parsing.
+# A claimed go command is reduced only in its simple form, never parsed further: one line of
+# `go test|vet|build`, then relative package paths and only -v, -race, -count=N, -timeout D,
+# -buildvcs=false and one -tags T, that is its step's whole run: script (comments and blank lines
+# aside), with no shell: on the step and no defaults.run.shell on the job or the workflow, no
+# container: on the job, no GO* or CGO_* variable and no BASH_ENV or ENV in the workflow's, job's
+# or step's env, no step of the job writing $GITHUB_ENV or $GITHUB_PATH or running `go env -w`
+# (each reaches every later go command unseen), and the step's working directory (its own, else
+# the job's or workflow's defaults.run, else the root) the Run's. A -race line's closure is the
+# one `go list -race` lists, so its Run says race too. A script_run is held exact instead: the
+# script's line holding its text must be that text alone and uncontinued, under such an env,
+# shell and container (the job's and every one of its steps') and such a job; the script's
+# variables are the Run author's to read, and anything appended to that line falls to everything.
+# A step whose go commands are in no such form can be an exact entry instead: it pins the step's
+# whole run: script (compared as text after trailing whitespace, nothing parsed) and directory,
+# and lists Runs that stand for what the script compiles. While the step holds exactly that, under
+# such an env, shell, container and job, its go lines are claimed and the Runs' closures checked;
+# any difference makes every one of its Runs fall to everything. Any other claimed command - an
+# assignment such as GOFLAGS, another flag, a pipe, a quote, a substitution, a cd, another line in
+# its step - counts as reading every Go file of the repository, every file under a Go module's
+# directory (each directory holding a go.mod: testdata, embedded files and all) and every go.mod,
+# go.sum, go.work and go.work.sum, and fails naming the command unless its filter selects all of
+# them. So a cd, `go -C` or a step in another directory than the Run's can only widen what it
+# reads. It fails wide, never narrow: a new evasion is answered by falling to everything, not by
+# more parsing.
 #
 # The go commands run with GOPROXY=off over an empty module cache: nothing is downloaded, no
 # go.work.sum is rewritten, and a cold runner gives the answer a warm machine does. Third-party

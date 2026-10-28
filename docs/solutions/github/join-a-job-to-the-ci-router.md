@@ -149,20 +149,38 @@ fails the pull request that adds it.
 - `GATES`: per filter, the job, its go commands and its other steps' reads. Each go command is a
   `Run` pinned to its text: `step_run` for a `run:` step of the job, `script_run` for a script the
   job runs, pinned to the script's whole line. The check fails when a job's `run:` step starts a
-  go command (`go test`, `vet`, `build`, `run`, `list`, `install`, `generate`) no `Run` claims.
-  It reduces a claimed command only in its simple form: one uncontinued line of
-  `go test|vet|build`, relative package paths and only `-v`, `-race`, `-count=N`, `-timeout D`,
-  `-buildvcs=false` and one `-tags T`, with no `GO*` or `CGO_*` variable in the workflow's, job's
-  or step's `env:`, no step of the job writing `$GITHUB_ENV` or `$GITHUB_PATH` or running
+  go command (`go test`, `vet`, `build`, `run`, `list`, `install`, `generate`) nothing claims.
+  It reduces a claimed command only in its simple form: one line of `go test|vet|build`,
+  relative package paths and only `-v`, `-race`, `-count=N`, `-timeout D`, `-buildvcs=false` and
+  one `-tags T`, that is its step's whole `run:` script (comments and blank lines aside), with no
+  `shell:` on the step, no `defaults.run.shell` on the job or the workflow, no `container:` on
+  the job, no `GO*` or `CGO_*` variable and no `BASH_ENV` or `ENV` in the workflow's, job's or
+  step's `env:`, no step of the job writing `$GITHUB_ENV` or `$GITHUB_PATH` or running
   `go env -w`, and the step's working directory (its own, else a `defaults.run` one, else the
-  root) the `Run`'s; its packages, tags and mode must then be exactly the `Run`'s, and a script's
-  line must be exactly the pinned text. Any other claimed command (`GOFLAGS=...`, another flag,
-  a pipe, a quote, a continuation, a `cd`), and one whose step runs in another directory, counts
-  as reading every Go file and every `go.mod`, `go.sum`, `go.work` and `go.work.sum` of the
-  repository, and fails naming the command unless its filter selects them all. Pass a value to a
-  later step as a step output set in that step's `env:`, not through `$GITHUB_ENV`. The check
-  fails wide rather than parse further.
-  It fails too when a pinned text is gone, and when a job or step is
+  root) the `Run`'s; its packages, tags, `-race` and mode must then be exactly the `Run`'s (a
+  `-race` line's `Run` says `race=True`, and its closure is what `go list -race` lists), and a
+  script's line must be exactly the pinned text. Any other claimed command (`GOFLAGS=...`,
+  another flag, a pipe, a quote, a continuation, a `cd`, another line in its step), and one whose
+  step runs in another directory, counts as reading every Go file of the repository, every file
+  under a Go module's directory (each directory with a `go.mod`, testdata and embedded files
+  included) and every `go.mod`, `go.sum`, `go.work` and `go.work.sum`, and fails naming the
+  command unless its filter selects them all. Pass a value to a later step as a step output set
+  in that step's `env:`, not through `$GITHUB_ENV`. The check fails wide rather than parse
+  further.
+
+  A step whose go commands are in no simple form (a loop, a pipe, `GOOS=... go build`) gets an
+  exact entry instead of `step_run`s: add `pinned_step(job, step, workdir, script, runs)` to the
+  gate's `exact=[...]`, with `script` the step's whole `run:` text as YAML reads it, `workdir`
+  the directory the step runs in, and one `runs` item `(workdir, packages, what it compiles,
+  options)` per go command the script runs, naming exactly the packages, tags, mode, `race` and
+  `env` (`GOOS`, `GOARCH`) it compiles them with; a loop over targets is one item per target.
+  While the step holds exactly that script (after trailing whitespace) in that directory, under
+  the env, shell, container and job above, every go line of it is claimed and those runs'
+  closures are checked. Any edit of the script makes every one of its runs count as reading
+  everything, as above, so change the entry with the step. envoy-go's unit-test and pack steps
+  and envoy-smoke's plugin-schema step are exact entries.
+
+  It fails too when a pinned text or an exact entry's step is gone, and when a job or step is
   gated on a filter neither `GATES` nor `EXCLUDED` lists. A job with no go commands still gets a
   gate with its reads.
 - `RULES`: per source file, what a test does outside its package: a go command it starts, or a

@@ -41,8 +41,10 @@ class Read:
 class Run:
     """One go command. `mode` "test" runs the tests (closure with -test, testdata, and RULES
     applied to the files compiled in), "vet" compiles them (closure with -test, nothing runs),
-    "build" compiles the packages only. A gate's own runs are pinned to the text that starts them:
-    `step`, a step of the gate's job whose run: holds `text`, or `source`, a file that holds it."""
+    "build" compiles the packages only; `race` compiles them under -race (go list -race, with
+    CGO_ENABLED=1). A gate's own runs are pinned to the text that starts them: `step`, a step of
+    the gate's job whose run: holds `text`, or `source`, a file that holds it; or they are an
+    Exact entry's, which pins the step's whole script instead."""
 
     workdir: str
     pkgs: tuple
@@ -54,13 +56,32 @@ class Run:
     step: str = ""
     source: str = ""
     text: str = ""
+    race: bool = False
 
 
-def run(workdir, pkgs, why, *, tags="", mode="test", env=None, overlay=None, step="", source="", text=""):
+def run(workdir, pkgs, why, *, tags="", mode="test", env=None, overlay=None, step="", source="", text="", race=False):
     if mode not in ("test", "vet", "build"):
         raise ValueError(f"run mode {mode!r}")
     return Run(workdir, tuple(pkgs), why, tags, mode, tuple(sorted((env or {}).items())),
-               tuple(sorted((overlay or {}).items())), step, source, text)
+               tuple(sorted((overlay or {}).items())), step, source, text, race)
+
+
+@dataclass(frozen=True)
+class Exact:
+    """A run: step of the gate's job whose go commands are not in the simple form, pinned to its
+    whole script (compared as text, after trailing whitespace, and never parsed) and to the
+    directory it runs in. Its `runs`, unpinned, stand for what the script compiles: while the
+    step holds exactly that script, every go line of it is claimed and the runs' closures are
+    what the job reads; once it differs, every run counts as reading everything a go command can."""
+
+    step: str
+    workdir: str
+    script: str
+    runs: tuple
+
+
+def exact(step, workdir, script, runs):
+    return Exact(step, workdir, script, tuple(runs))
 
 
 @dataclass(frozen=True)
@@ -73,10 +94,16 @@ class Gate:
     runs: tuple = ()
     reads: tuple = ()
     step: str = ""
+    exact: tuple = ()
 
 
-def gate(filter, job, runs=(), reads=(), step=""):
-    return Gate(filter, job, tuple(runs), tuple(reads), step)
+def gate(filter, job, runs=(), reads=(), step="", exact=()):
+    return Gate(filter, job, tuple(runs), tuple(reads), step, tuple(exact))
+
+
+def gate_runs(g: Gate) -> list:
+    """Every go command of the gate: its pinned runs and its Exact entries' runs."""
+    return list(g.runs) + [r for e in g.exact for r in e.runs]
 
 
 # Every ci.yaml step a why cites through at(), checked to exist so a renamed step fails here.
@@ -115,6 +142,8 @@ class Session:
     def go(self, run_: Run, args: list) -> str:
         env = dict(os.environ, GOPROXY="off", GOMODCACHE=f"{self.tmp}/modcache", GOFLAGS="", GOWORK="")
         env.update(dict(run_.env))
+        if run_.race:
+            env["CGO_ENABLED"] = "1"  # -race needs cgo
         result = subprocess.run(["go", *args], cwd=REPO / run_.workdir, env=env, capture_output=True, text=True)
         if result.returncode != 0:
             self.problems.append(f"::error::in {run_.workdir}, go {' '.join(args)} failed, so the closure of "
@@ -129,7 +158,7 @@ class Session:
         return ["-overlay", str(path)]
 
     def listing(self, run_: Run, deps: bool) -> list:
-        key = ("list", run_.workdir, run_.pkgs, run_.tags, run_.mode, run_.env, run_.overlay, deps)
+        key = ("list", run_.workdir, run_.pkgs, run_.tags, run_.mode, run_.race, run_.env, run_.overlay, deps)
         if key not in self.cache:
             args = ["list", "-e", f"-json={FIELDS}"]
             if deps:
@@ -138,6 +167,8 @@ class Session:
                     args.append("-test")
             if run_.tags:
                 args += ["-tags", run_.tags]
+            if run_.race:
+                args.append("-race")
             args += self.overlay_args(run_)
             self.cache[key] = decode_stream(self.go(run_, args + list(run_.pkgs)))
         return self.cache[key]
@@ -263,11 +294,23 @@ def apply_rules(session: Session, rules: dict, source: str, seen: set) -> list:
 GO_FILE_NAMES = ("go.mod", "go.sum", "go.work", "go.work.sum")
 
 
-def every_go_file(files: list) -> list:
-    """What a claimed command this check does not reduce counts as reading: every Go file of the
-    repository, and every module's and workspace's go.mod, go.sum, go.work and go.work.sum. A cd,
-    `go -C` or any other move of the command can then only widen what it reads, never narrow it."""
-    return [f for f in files if f.endswith(".go") or os.path.basename(f) in GO_FILE_NAMES]
+def module_trees_and_go_files(files: list) -> list:
+    """What a claimed command this check does not reduce counts as reading: every file under the
+    directory of every Go module (each directory holding a go.mod, nested ones included: testdata,
+    embedded files and all), every .go file anywhere, and every go.mod, go.sum, go.work and
+    go.work.sum, the root's included. A cd, `go -C` or any other move of the command can then
+    only widen what it reads, never narrow it."""
+    modules = {os.path.dirname(f) for f in files if os.path.basename(f) == "go.mod"}
+
+    def in_module(path: str) -> bool:
+        parent = os.path.dirname(path)
+        while parent not in modules:
+            if not parent:
+                return False
+            parent = os.path.dirname(parent)
+        return True
+
+    return [f for f in files if f.endswith(".go") or os.path.basename(f) in GO_FILE_NAMES or in_module(f)]
 
 
 # ---------------------------------------------------------------- files and filters
@@ -350,12 +393,14 @@ def squash(text: str) -> str:
     return " ".join(text.split())
 
 
+def script_lines(text: str) -> list:
+    """The lines of a run: script, stripped, comments and blank lines aside."""
+    return [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+
+
 def go_lines(text: str) -> list:
-    """The physical lines of a run: script that hold a go command, comments aside, each with
-    whether it is part of a backslash continuation (it ends in one or follows a line that does)."""
-    lines = text.splitlines()
-    return [(line.strip(), continued(lines, i)) for i, line in enumerate(lines)
-            if not line.strip().startswith("#") and GO_COMMAND.search(line)]
+    """The lines of a run: script that hold a go command, stripped, comments aside."""
+    return [line for line in script_lines(text) if GO_COMMAND.search(line)]
 
 
 def continued(lines: list, i: int) -> bool:
@@ -363,7 +408,8 @@ def continued(lines: list, i: int) -> bool:
 
 
 # The one form of a go command this check reduces: `go test|vet|build`, then relative package paths
-# and only these flags. Any other claimed command counts as reading every Go file of the repository.
+# and only these flags. Any other claimed command counts as reading every Go file of the
+# repository and every file under a Go module's directory.
 NOT_SIMPLE = "$'\"`|&;()<>*?\\"
 PACKAGE = re.compile(r"\.\.?(/[A-Za-z0-9_./-]*)?")
 FLAG = re.compile(r"-v|-race|-count=[0-9]+|-timeout=[0-9]+[smh]|-buildvcs=false")
@@ -372,9 +418,9 @@ TAGS = re.compile(r"[A-Za-z0-9_,]+")
 
 
 def reduce_line(line: str) -> tuple:
-    """A go line in the one form this check reduces as (packages, tags, mode, ""), any other as
-    (None, None, None, the first reason it is not that form)."""
-    unreduced = (None, None, None)
+    """A go line in the one form this check reduces as (packages, tags, mode, whether it runs with
+    -race, ""), any other as (None, None, None, None, the first reason it is not that form)."""
+    unreduced = (None, None, None, None)
     special = next((c for c in line if c in NOT_SIMPLE), None)
     if special:
         return *unreduced, f"it has `{special}`"
@@ -398,20 +444,41 @@ def reduce_line(line: str) -> tuple:
         elif not FLAG.fullmatch(word):
             return *unreduced, f"`{word}` is neither a relative package path nor a flag this check reduces"
         index += 1
-    return pkgs, tag_set(tags or ""), words[1], ""
+    return pkgs, tag_set(tags or ""), words[1], "-race" in words, ""
 
 
 def env_reason(document: dict, job: dict, steps: list) -> str:
     """The first env: block of the workflow, the job or one of the steps that can change what a go
-    command compiles (a GO* or CGO_* variable, or an expression), or ''."""
+    command compiles (a GO* or CGO_* variable, BASH_ENV or ENV, which bash sources before the
+    script, or an expression), or ''."""
     blocks = [("the workflow's", document.get("env")), ("the job's", job.get("env"))]
     blocks += [(f'step "{step_label(s)}"\'s', s.get("env")) for s in steps]
     for where, env in blocks:
         if env is not None and not isinstance(env, dict):
             return f"{where} env is an expression"
         for name in env or {}:
-            if str(name).startswith(("GO", "CGO_")):
+            if str(name).startswith(("GO", "CGO_")) or name in ("BASH_ENV", "ENV"):
                 return f"{where} env sets {name}"
+    return ""
+
+
+def run_default(holder: dict, key: str):
+    """The workflow's or a job's defaults.run.<key>, or None."""
+    return ((holder.get("defaults") or {}).get("run") or {}).get(key)
+
+
+def shell_reason(document: dict, job: dict, steps: list) -> str:
+    """What runs the job's run: scripts other than GitHub's default bash does, unseen in the
+    script: a container: on the job, a defaults.run.shell of the workflow or the job, or a shell:
+    of one of the steps; or ''."""
+    if job.get("container") is not None:
+        return "the job runs in a container:"
+    for where, holder in (("the workflow's", document), ("the job's", job)):
+        if run_default(holder, "shell") is not None:
+            return f"{where} defaults.run.shell is `{run_default(holder, 'shell')}`"
+    for step in steps:
+        if step.get("shell") is not None:
+            return f'step "{step_label(step)}" runs under shell: `{step["shell"]}`'
     return ""
 
 
@@ -429,13 +496,22 @@ def job_reason(job: dict) -> str:
     return ""
 
 
+def around_reason(document: dict, job: dict, steps: list) -> str:
+    """The first thing outside a go command's line that can change what it compiles: an env:,
+    a step writing the job's environment, a shell or a container; or ''. `steps` are the steps
+    that may start it."""
+    return env_reason(document, job, steps) or job_reason(job) or shell_reason(document, job, steps)
+
+
 def step_workdir(document: dict, job: dict, step: dict) -> str:
     """The directory a run: step runs in: its own working-directory, else the job's or the
     workflow's defaults.run.working-directory, else the repository root."""
-    def default(holder: dict):
-        return ((holder.get("defaults") or {}).get("run") or {}).get("working-directory")
-    given = step.get("working-directory") or default(job) or default(document) or "."
-    return str(given).strip().removeprefix("./").rstrip("/") or "."
+    given = step.get("working-directory") or run_default(job, "working-directory") or run_default(document, "working-directory") or "."
+    return clean_dir(str(given))
+
+
+def clean_dir(path: str) -> str:
+    return path.strip().removeprefix("./").rstrip("/") or "."
 
 
 def tag_set(tags: str) -> frozenset:
@@ -483,11 +559,15 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
             problems.append(f"::error file=.github/scripts/ci_job_reads.py::EXCLUDED names filter {name}, which "
                             f"the changes job does not have")
 
-    # Every go command line of a run: step must be claimed by a pinned Run of a gate on that job. A
-    # claimed line is reduced only in its one simple form, whose packages, -tags and mode must then
-    # be exactly the Run's; any other claimed command is unreduced and falls to its whole module.
+    # Every go command line of a run: step must be claimed: by a pinned Run of a gate on that job,
+    # or by an Exact entry pinning the step's whole script. A line claimed by a Run is reduced only
+    # in its one simple form, the whole script of its step, under an env, job, shell and directory
+    # that cannot move it; its packages, -tags, -race and mode must then be exactly the Run's. Any
+    # other claimed command is unreduced and falls to everything a go command can read, as does
+    # every run of an Exact entry whose step's script, directory or surroundings differ.
     skipped = {j for j, names in gated.items() if names and names <= set(excluded)}
     claims = defaultdict(list)  # (job, step label) -> pinned texts
+    exacts = defaultdict(list)  # (job, step label) -> (the gate's filter, Exact)
     owner = {}  # id(Run) -> the gate's filter
     unreduced = defaultdict(list)  # filter -> (Run, the command as the job runs it, why it is not reduced)
     for g in data.GATES:
@@ -498,26 +578,39 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
             if r.step:
                 claims[(g.job, r.step)].append(r)
                 owner[id(r)] = g.filter
+        for e in g.exact:
+            exacts[(g.job, e.step)].append((g.filter, e))
     for job_id, job in jobs.items():
         if job_id in skipped:
             continue
         for step in job.get("steps") or []:
             if "run" not in step:
                 continue
+            script = str(step["run"])
+            workdir = step_workdir(document, job, step)
+            around = around_reason(document, job, [step])
+            entries = [fe for (j, ref), fes in exacts.items() if j == job_id and step_matches(step, ref) for fe in fes]
+            for name, e in entries:
+                reason = (around or ("" if script.rstrip() == e.script.rstrip() else "the step's script is not the pinned text")
+                          or ("" if workdir == clean_dir(e.workdir) else f"its step runs in {workdir}, the entry's in {e.workdir}"))
+                if reason:
+                    where = f"job {job_id} step \"{step_label(step)}\"'s pinned script"
+                    unreduced[name] += [(r, where, reason) for r in e.runs]
+            if entries:
+                continue  # every go line of the step is claimed by its Exact entries
             mine = [r for (j, ref), rs in claims.items() if j == job_id and step_matches(step, ref) for r in rs]
-            for line, joined in go_lines(str(step["run"])):
+            for line in go_lines(script):
                 where = f"job {job_id} step \"{step_label(step)}\" runs `{line}`"
                 pinned = [r for r in mine if squash(r.text) in squash(line)]
                 if not pinned:
                     problems.append(f"::error file={WORKFLOW}::{where}, which no Run in ci_job_reads.py lists; add it "
                                     f"to the job's gate so its closure is checked")
                     continue
-                reason = (env_reason(document, job, [step]) or job_reason(job)
-                          or ("it is part of a backslash continuation" if joined else ""))
-                named, tags, mode, reason = reduce_line(line) if not reason else (None, None, None, reason)
-                workdir = step_workdir(document, job, step)
+                reason = around or ("" if script_lines(script) == [line] else
+                                    "it is not its step's whole run: script, comments and blank lines aside")
+                named, tags, mode, race, reason = reduce_line(line) if not reason else (None, None, None, None, reason)
                 for r in pinned:
-                    if workdir != (r.workdir.removeprefix("./").rstrip("/") or "."):
+                    if workdir != clean_dir(r.workdir):
                         unreduced[owner[id(r)]].append((r, where, reason or f"its step runs in {workdir}, the Run in {r.workdir}"))
                         continue
                     if reason:
@@ -533,13 +626,21 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
                     if tags != tag_set(r.tags):
                         parts.append(f"it builds with -tags {','.join(sorted(tags)) or '(none)'}, the Run with "
                                      f"{','.join(sorted(tag_set(r.tags))) or '(none)'}")
+                    if race != r.race:
+                        parts.append("it runs with -race, the Run without" if race else "it runs without -race, the Run with it")
                     if mode != r.mode:
                         parts.append(f"its go command is a {mode} run, the Run a {r.mode} run")
                     if parts:
                         problems.append(f"::error file={WORKFLOW}::{where}, which is not the Run's "
                                         f"({' '.join(r.pkgs)}): {'; '.join(parts)}; make the Run in ci_job_reads.py "
-                                        f"name exactly the packages, tags and mode the line does, so the closure "
+                                        f"name exactly the packages, tags, -race and mode the line does, so the closure "
                                         f"checked against the job's filter is the one it compiles")
+    for (job_id, ref), fes in exacts.items():
+        steps = [s for s in (jobs.get(job_id) or {}).get("steps") or [] if "run" in s and step_matches(s, ref)]
+        if len(steps) != 1:
+            for name, _ in fes:
+                problems.append(f"::error file=.github/scripts/ci_job_reads.py::gate {name}'s exact entry names step "
+                                f"\"{ref}\" of job {job_id}, which is not one run: step of it; update or remove the entry")
     for (job_id, ref), rs in claims.items():
         steps = [s for s in (jobs.get(job_id) or {}).get("steps") or [] if step_matches(s, ref)]
         text = squash(" ".join(str(s.get("run", "")) for s in steps))
@@ -548,8 +649,9 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
                 problems.append(f"::error file=.github/scripts/ci_job_reads.py::job {job_id} step \"{ref}\" no longer "
                                 f"runs `{r.text}`; update or remove the Run")
     # A script's go command is held exact rather than reduced: the line holding the pinned text is
-    # that text alone, uncontinued, and no env: of the job or any of its steps (the check does not
-    # know which starts the script) names a variable go reads. Its variables are the Run author's.
+    # that text alone, uncontinued, and no env:, shell: or defaults.run.shell of the workflow, the
+    # job or any of its steps (the check does not know which starts the script), no container: and
+    # no environment write of the job can move it. Its variables are the Run author's.
     for g in data.GATES:
         for r in g.runs:
             if not r.source:
@@ -561,8 +663,7 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
             job = jobs.get(g.job) or {}
             lines = (REPO / r.source).read_text().splitlines()
             held = [i for i, line in enumerate(lines) if r.text in line]
-            reason = (env_reason(document, job, job.get("steps") or []) or job_reason(job)
-                      or ("" if held else "its text spans lines"))
+            reason = around_reason(document, job, job.get("steps") or []) or ("" if held else "its text spans lines")
             for i in held:
                 if not reason and lines[i].strip() != r.text:
                     reason = f"its line is `{lines[i].strip()}`, not the text alone"
@@ -703,6 +804,7 @@ def main() -> int:
     expander = Expander(files)
     session = Session()
     report = []
+    fallback = None  # module_trees_and_go_files(files), once a gate needs it
     for g in data.GATES:
         if g.filter not in filters:
             continue
@@ -716,25 +818,26 @@ def main() -> int:
                             f"a brace picomatch expands and this check does not read")
         whys = defaultdict(list)
         seen: set = set()
-        for r in g.runs:
+        for r in gate_runs(g):
             for read in closure(session, data.RULES, r, seen):
                 whys[read.glob].append(read.why)
         for read in g.reads:
             whys[read.glob].append(read.why)
-        # An unreduced command counts as reading every Go file of the repository, and fails naming
-        # the command when its filter misses one.
-        held = []
-        for r, command, why_not in unreduced.get(g.filter, []):
-            paths = every_go_file(files)
-            why = (f"{command}, which this check does not reduce ({why_not}), so it counts as reading every Go "
-                   f"file of the repository")
-            for path in paths:
-                whys[path].append(why)
-            held.append((f"::error file={WORKFLOW}::{why}; filter {g.filter} must select it on any Go change", paths))
         reason = {}
         for glob, why in whys.items():
             for f in expander.expand(glob):
                 reason.setdefault(f, why[0])
+        # An unreduced command counts as reading every Go file of the repository and every file
+        # under a Go module's directory, and fails naming the command when its filter misses one.
+        held = []
+        for r, command, why_not in unreduced.get(g.filter, []):
+            if fallback is None:
+                fallback = module_trees_and_go_files(files)
+            why = (f"{command}, which this check does not reduce ({why_not}), so it counts as reading every Go "
+                   f"file of the repository and every file under a Go module's directory")
+            for path in fallback:
+                reason.setdefault(path, why)
+            held.append(f"::error file={WORKFLOW}::{why}; filter {g.filter} must select them all on any Go change")
         matcher = PathsFilter(patterns, quantifiers[g.filter])
         uncovered = sorted(f for f in reason if not matcher.covers(f))
         where = g.job + (f' step "{g.step}"' if g.step else "")
@@ -745,7 +848,8 @@ def main() -> int:
         if len(uncovered) > SHOWN:
             problems.append(f"::error file={WORKFLOW}::{where} reads {len(uncovered) - SHOWN} more files its filter "
                             f"{g.filter} does not match")
-        problems += [message for message, paths in held if not set(paths).isdisjoint(uncovered)]
+        if held and not set(fallback).isdisjoint(uncovered):
+            problems += held
     problems += session.problems
     report += check_push_workflows(data, filters, problems)
     for line in report:

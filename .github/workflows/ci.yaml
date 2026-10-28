@@ -683,10 +683,6 @@ jobs:
               - 'scripts/third-party-notices.ts'
             envoy_go:
               - '.github/workflows/ci.yaml'
-              # Its unit-test step pipes `go list` into `go test` and its pack step sets GOOS inline,
-              # which check-ci-filters.sh does not reduce, so it counts as reading every Go file of
-              # the repository: any Go change selects it.
-              - &any_go_change ['**/*.go', '**/go.mod', '**/go.sum', '**/go.work', '**/go.work.sum']
               - *bun_install
               - *go_workspace
               # gofmt -l . walks every .go file under packages/envoy, and its tests walk it too
@@ -844,14 +840,6 @@ jobs:
             # steps' reads.
             envoy_smoke:
               - '.github/workflows/ci.yaml'
-              # Its plugin-schema step builds with -ldflags and pipes, which check-ci-filters.sh does
-              # not reduce, so any Go change selects it (any_go_change, written out because
-              # check-image-trigger-paths.sh reads this filter as a plain list of globs).
-              - '**/*.go'
-              - '**/go.mod'
-              - '**/go.sum'
-              - '**/go.work'
-              - '**/go.work.sum'
               # The image: the Dockerfile, its context's .dockerignore, the web stage's frozen
               # install (every workspace manifest), the packages it builds the SPA and the Go
               # binaries from, and the notices scripts.
@@ -887,13 +875,12 @@ jobs:
               - 'packages/envoy/daemonpermissions/*'
               # envoy-infra's host live tests and its plugin build, in packages/envoy/infra's own
               # workspace; the docker provider step reads pulumitest.DockerPluginVersion, under
-              # infra/internal. The plugin build's line (-ldflags, `&&`, a pipe) is one
-              # check-ci-filters.sh does not reduce, so every Go file of the infra module is here.
+              # infra/internal. The plugin build's step is pinned whole in check-ci-filters.sh's
+              # table (an exact entry), so what it compiles is here, not the infra module.
               - 'packages/envoy/infra/go.mod'
               - 'packages/envoy/infra/go.sum'
               - 'packages/envoy/infra/go.work'
               - 'packages/envoy/infra/go.work.sum'
-              - 'packages/envoy/infra/**/*.go'
               - 'packages/envoy/infra/aws/**'
               - 'packages/envoy/infra/cmd/pulumi-resource-envoy-infra/*'
               - 'packages/envoy/infra/core/**'
@@ -992,10 +979,12 @@ jobs:
             # the listener, the agent-secrets binaries and client, every envoy-infra command), the
             # workspaces they build in, the target lists and the notices script. Its go build lines
             # sit in backslash-continued subshells that cd out of the repository root the step runs
-            # in, which check-ci-filters.sh does not reduce, so any Go change selects it.
+            # in, which check-ci-filters.sh does not reduce, so it counts as reading every Go file of
+            # the repository and every file under a Go module's directory (packages/daemon,
+            # packages/envoy and, inside it, packages/envoy/infra): any Go change selects it.
             go_notices:
               - '.github/workflows/ci.yaml'
-              - *any_go_change
+              - &any_go_change ['**/*.go', '**/go.mod', '**/go.sum', '**/go.work', '**/go.work.sum', 'packages/daemon/**', 'packages/envoy/**']
               - '.github/go-release-targets.json'
               - '.github/agent-secrets-client-targets.json'
               - '.github/envoy-infra-targets.json'
