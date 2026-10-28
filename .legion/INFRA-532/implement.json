@@ -2,12 +2,20 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-532",
-  "completed": "2026-10-28T20:40:00Z",
+  "completed": "2026-10-28T22:50:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2472",
   "redCommit": "349f14eb48a3",
-  "round": 2,
-  "roundRedCommit": "8604eca55798",
+  "round": 3,
+  "roundRedCommit": "c7ed921aa5aa (rows run against the round-1 code ef163c71)",
   "proof": [
+    {
+      "criterion": "Review round 2 finding (architect's request): a past version's comment link lands on its quote the first time, with and without a diagram, and never throws the reader back to the top",
+      "surface": "Dispatch past version /issues/<KEY>/artifact/spec?v=1&comment=<id>, chromium (full spec also in iphone, webkit, firefox)",
+      "command": "cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --workers=1 --repeat-each 20 -g \"past version's\"",
+      "observed": "40 of 40 pass at the head (R8 now checks the first landing before the held diagram draws and the landing after; the no-diagram row checks the landing and that the per-frame scroll never returns to 0 after it began). Whole spec without the comment too-large row: 20/20 in each of chromium, iphone, webkit, firefox at c7ed921a.",
+      "headSha": "c7ed921a",
+      "negativeControl": "The same rows built at the round-1 code ef163c71 (test file copied in): 5 of 40 failed, R8's first landing twice (viewport ratio 0) and the no-diagram row's jump back to the top three times. A probe counted 14-22 .milkdown roots added per load there (several editor builds) against 6 (one build) at the head."
+    },
     {
       "criterion": "Review round 1 finding 1 (condition 3): a comment or ask link on the live document lands on its quote once a diagram above it draws",
       "surface": "Dispatch live document /issues/<KEY>/spec?comment=<id>, held worker, scroll anchoring off, chromium/iphone/webkit/firefox",
@@ -112,7 +120,7 @@
     "The focus runs again only when a diagram is still waiting (mermaidDrawsWaiting), so a document with no pending diagram pulses its target once. An earlier version focused twice; VersionView.test.tsx then failed and bun's failure diff of the fake editor grew past 3 GB, which OOM-killed the pod several times."
   ],
   "deviations": [
-    "Round 2: the past-version row (R8) no longer asserts the first landing before the release: at ef163c71 that landing failed 2 of 16 chromium runs with the page at its top before any diagram drew (pre-existing in VersionView's route); the row asserts the landing after the draw, which the re-run repairs. Reported to the architect as a finding.",
+    "Round 3: R8 checks the first landing again (the round-2 relaxation is undone); the cause was VersionView rebuilding its editor on every parent render (highlight keyed by object), fixed in f3f2427a. The reply-composer preventScroll change was not made: no row needed it. The no-diagram row did not miss in 60 plain runs at ef163c71 (0/60), so it also samples the scroll each frame and fails on a jump back to the top, which it caught 3 times in 20 there.",
     "Round 2: a margin focusBlock arriving a frame after the editor unbinds is dropped (bound flag), so no re-run is left behind for a destroyed editor.",
     "Round 2 cleanup from the review: the view's request counter and lib.ts's MermaidDrawer/MermaidDrawing re-export are removed, the false comment above R6 is corrected; the comment too-large row's duplication stays (INFRA-713's row) and blockId stays copied per the e2e helper convention.",
     "Plan v2 (dispatch://INFRA-532/artifact/plan-md) supersedes plan.json: documents draw in the worker by the INFRA-138 architect's decision.",
