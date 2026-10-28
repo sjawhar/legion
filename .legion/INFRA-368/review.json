@@ -2,22 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-368",
-  "completed": "2026-10-28T16:10:30Z",
-  "round": 3,
+  "completed": "2026-10-28T16:50:00Z",
+  "round": 4,
   "decision": "changes_requested",
-  "reviewedHead": "003852cff77a42ecbe39f1115ff60ad9cfefde90",
-  "codeHead": "32c9b9ac14e5",
+  "reviewedHead": "23817239df7d7f85ee741aed6d816b9e32972e20",
+  "codeHead": "c64a30a2b7d95673b62d27ca970c24cd5ce530b4",
   "critical": 0,
-  "important": 1,
+  "important": 2,
   "minor": 0,
-  "round2Findings": "Both round-2 findings are fixed. 32c9b9ac makes README.md:1335 and :1361 say 0136-0138 and 0137/0138, and the body's E2E (implementer) line says 0001-0138. The census now uses narrowed searches. I ran each of a1, a2, b1, b2, c, d1 and d2 again at the head with its X filter, and each gives exactly the rows listed under it. The old census's suggestion_outcomes.go row is out of scope under the narrowed search: that file reads the refs table, and this change keeps writing the item's own rows there.",
+  "round3Findings": "Fixed. 188066ab restores packages/claude-envoy/dist, and `git diff $(merge-base origin/main 23817239) 23817239 -- packages/claude-envoy/dist packages/claude-envoy/legion` is empty. The Production line names #2423's rebuild run and check-dist. The merge c64a30a2 lost nothing: its tree equals `git merge-tree --write-tree 188066ab 8b4a862b2`.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/claude-envoy/dist/",
-      "description": "The head changes dist/dispatch.js, dist/envoy-channel.js and dist/session-hook.js (+405/-105 against the merge-base). Main's #2423 (78d5f6b6, packages/claude-envoy/AGENTS.md) says a pull request never commits dist/ or legion/: main's Rebuild Claude Envoy plugin workflow builds them after each merge, and 'A reviewer asks for any change under the two directories to be dropped.' The architect asked the reviewer to approve only a head that changes nothing under those two directories. Fix: `jj -R \"$LEGION_WORKSPACE\" restore --from main@origin packages/claude-envoy/dist packages/claude-envoy/legion`. Merge main only for a conflict or a red check that main has fixed, as the architect directed. The production plan also has to name the rebuild run after the merge and its commit, and run `bun run check-dist` there."
+      "file": "skills/dispatch/SKILL.md:83",
+      "description": "The head fails packages/pi-envoy/src/skills-guard.test.ts:90-100, which envoy-and-contracts.yaml runs on skills/** changes: `bun test src/skills-guard.test.ts` → 'the three Dispatch skills total fewer than 2,000 words … Expected: < 2000 Received: 2034'. Main is at 1999, so this PR may add at most 0 net words to the dispatch, dispatch-first and dispatch-writing-specs skills. No CI run has completed on this branch since the first merge, so nothing caught it."
+    },
+    {
+      "severity": "important",
+      "file": "PR (mergeable CONFLICTING)",
+      "description": "GitHub reports the pull request CONFLICTING with main's e82b013b6 (#2324). There are 8 conflicting files: contracts dispatch-api.ts and its test, web RefPreview.tsx, reference-target.ts and routes.ts, envoy AGENTS.md, api/comment_actions.go and docs/reference_excerpts.go. GitHub runs no checks on a conflicting head. Besides the text conflicts, the merge has to combine three behaviours. (1) Main removed refs.ReplaceCountedRefs, and editComment now calls replaceEditedReferences → ReplaceCountedEdit(previous, body). The edit must keep both this PR's block index with its carried ids and moved targets, and main's naming of the cited targets. (2) Main's blockQuery uses staleTime Infinity and is refreshed only by an event that names the block. This PR's comment and message routes carry `block`, and item-block targets are stored as comment_block/message_block, which main's CountedChanges drops. Without a refresh rule, a link or card to a comment block keeps its pre-edit text after a comment.edited. (3) Main's BlockPreview, useBlockDocument and prefetchReference read a document or issue summary for a block route. The item-block early return has to survive, so an item block names its comment or message and author, not a document."
     }
   ],
-  "ci": "The CI head is d5f7c764, the push carrying 32c9b9ac. The compare to 003852cf is handoffs only (1 file). Every check there (lint, typecheck, test, pr-title, build x2, changes, the daemon Postgres 16 suite) was queued when this review was written. Every run at 1a19ad77 was cancelled. The request for changes does not wait on CI.",
-  "thermonuclear": "deep-review: `Verdict: APPROVE at 003852cf` (1 Minor: the body's two round-2 bullets were out of date, and I have rewritten them). code-quality: `Verdict: CHANGES at 003852cf`. These are the same structural items as round 2 (ItemKind.tables() and the per-kind forks, commentEventPayload hydrating in place, the copied reply preview, the node-id slicing in ReplyQuote.tsx, the pin regexp), plus three e2e and driver files that pass 1000 lines. I do not ask for them: none changes behaviour, I asked for none in rounds 1 or 2, and the architect scoped round 3 to the two text findings."
+  "ci": "Required checks are lint, typecheck, test and pr-title. Runs at c64a30a2 were still queued, and every earlier run since 7dc21ecd was cancelled, so no required check has passed at any code head since the first merge. The conflict now means GitHub runs nothing.",
+  "thermonuclear": "deep-review: `Verdict: CHANGES at 23817239` (M1, the skills word guard: confirmed by running the test). code-quality: `Verdict: APPROVE at 23817239` (nothing new; it lists the #2324 interactions, which I carry into the conflict finding)."
 }
