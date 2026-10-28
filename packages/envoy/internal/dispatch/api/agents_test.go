@@ -106,6 +106,8 @@ func TestAgentsIncludeGroupedOpenAskCountsAndLastActivity(t *testing.T) {
 
 	database := storetest.Open(t)
 	ctx := context.Background()
+	// TEST-2's open ask on a closed issue is what a close by a release older than the withdrawal
+	// leaves during a roll, until the repair withdraws it: the counts still leave it out.
 	for _, query := range []string{
 		`insert into projects (key, name) values ('TEST', 'Test')`,
 		`insert into issues (key, project_key, number, title, status, created_by, rank) values ('TEST-1', 'TEST', 1, 'Test issue', 'todo', '{"kind":"user","id":"alice"}', 'U')`,
