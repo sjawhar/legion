@@ -63,17 +63,14 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 		if !fact.Reopened || recorded.State == record.PullRequestMerged {
 			return intake.Result{}, nil
 		}
-		carried := *recorded
-		if fact.HeadSHA != recorded.HeadSHA {
-			carried = classify.AdvancePullRequestHead(carried, fact.HeadSHA)
-		}
+		// The reopen keeps the count, the planned mark, the pushes - facts about commits - and the
+		// head run, so a push that arrives after the reopen settles the move the reopen made as it
+		// would have had it arrived first (classify.Reopen); the CI settlement starts afresh.
+		carried := classify.Reopen(*recorded, fact.HeadSHA)
 		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen = carried.FixAttempts, carried.BlockedAttempts, recorded.ReviewSeen
-		pr.HeadCounted, pr.HeadCountedBefore, pr.HeadCountedFrom = carried.HeadCounted, carried.HeadCountedBefore, carried.HeadCountedFrom
-		// The pushes are facts about commits, and with where the head arrived from and the planned
-		// mark they let a push that arrives after the reopen settle the move the reopen made, as it
-		// would have had it arrived first (classify.ApplyPush).
-		pr.Pushes, pr.HeadArrivedFrom, pr.PlannedRed = carried.Pushes, carried.HeadArrivedFrom, carried.PlannedRed
-		pr.Required, pr.Workflows, pr.WorkflowsHead = recorded.Required, recorded.Workflows, recorded.WorkflowsHead
+		pr.HeadCounted, pr.PlannedRed, pr.Pushes, pr.Moves, pr.Run = carried.HeadCounted, carried.PlannedRed, carried.Pushes, carried.Moves, carried.Run
+		e.stampRun(&pr)
+		pr.Required, pr.Workflows, pr.WorkflowsHead = carried.Required, carried.Workflows, carried.WorkflowsHead
 		pr.HeadUpdatedAt = classify.LatestClock(recorded.HeadUpdatedAt, fact.UpdatedAt)
 	}
 	if err := e.store.PutPullRequest(ctx, tx, pr); err != nil {
@@ -133,6 +130,7 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 	moved := fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA
 	if moved {
 		*pr = classify.AdvancePullRequestHead(*pr, fact.HeadSHA)
+		e.stampRun(pr)
 	}
 	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.UpdatedAt)
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
@@ -190,7 +188,7 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	}
 	// Past its bound the record lets the oldest push waiting for a link go (classify.ApplyPush): a
 	// webhook behind it never arrived, and the move it would have linked into is judged without it.
-	for _, dropped := range classify.DroppedPushes(prior.Pushes, pr.Pushes) {
+	for _, dropped := range classify.DroppedPushes(prior, *pr) {
 		e.warnOnCommit(ctx, "workflow: a pull request holds the most pushes waiting for a link; the oldest is let go",
 			"issue", pr.Issue, "pullRequest", pr.Number, "before", dropped.Before, "after", dropped.SHA)
 	}
@@ -206,16 +204,25 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	// alone. A push for a head that has not arrived yet (its synchronize still on its way) leaves the
 	// record judging the head before it, whose red may be the one the push fixed: it acts only on a
 	// red it made stand, the carry it completed. A push naming the recorded head can change what the
-	// rule decides there (its planned-red mark, a fix attempt it takes back) and can be the first
-	// fact outside implementing to see a red that stood while implementing, so it applies the rule.
-	// So does a push for an earlier head that completes the chain sparing the recorded head's
-	// counted move (classify.ApplyPush), whose take-back can lift the fix-attempt cap off the red
-	// that stands there.
+	// rule decides there and can be the first fact outside implementing to see a red that stood
+	// while implementing, so it applies the rule. A push that closes a head run, or whose replay
+	// changed the pull request's judgement (classify.ApplyPush), decides the checks as the
+	// settlement it replayed would have (decideChecks): a count taken back can lift the fix-attempt
+	// cap off the red that stands, a planned mark or a settlement can change what the red is, a red
+	// held while the run waited is judged now, a red the replay makes stand in awaiting_merge
+	// withdraws the READY, and a count the red stays held at is reported.
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	if fact.After == prior.HeadSHA || !classify.RedSendsBack(prior) || pr.FixAttempts < prior.FixAttempts {
+	if classify.JudgementChanged(prior, *pr) || (prior.Run != nil && pr.Run == nil) {
+		if err := e.decideChecks(ctx, tx, pr, false); err != nil {
+			return intake.Result{}, err
+		}
+		if issue, err = e.store.Issue(ctx, tx, pr.Issue); err != nil || issue == nil {
+			return intake.Result{}, err
+		}
+	} else if fact.After == prior.HeadSHA || !classify.RedSendsBack(prior) {
 		if moved, err := e.standingRed(ctx, tx, *issue, pr); err != nil || moved {
 			return intake.Result{}, err
 		}
@@ -393,6 +400,7 @@ func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	repeated := classify.RepeatedClose(*pr, fact.UpdatedAt)
 	if fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA {
 		*pr = classify.AdvancePullRequestHead(*pr, fact.HeadSHA)
+		e.stampRun(pr)
 	}
 	pr.State = record.PullRequestClosed
 	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.UpdatedAt)

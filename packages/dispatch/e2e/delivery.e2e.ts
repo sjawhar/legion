@@ -83,7 +83,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("the Delivery sidebar nav entry opens the delivery timeline", async ({ browser }) => {
+test("the Delivery sidebar nav entry opens the delivery timeline @phone", async ({ browser }) => {
   await seedDeliveryFixture();
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -286,7 +286,7 @@ test("dragging the zoom slider zooms without setting a brush window", async ({ b
   await context.close();
 });
 
-test("on a phone a finger dragged along the chart sets a brush window and moves nothing else", async ({
+test("on a phone a finger dragged along the chart sets a brush window and moves nothing else @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "a finger drag exercises the phone project");

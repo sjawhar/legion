@@ -892,6 +892,9 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.WriteBudget
 		if code {
 			return next, refuseCodeThatReshapesItsBlock(tree, next, r, at, "with", op.With)
 		}
+		if err := refuseCodePipeInTableCell(tree, next, r, "with", "with", op.With, ""); err != nil {
+			return nil, err
+		}
 		if err := refuseUnreadableReplacement(tree, next, r, op.With); err != nil {
 			return nil, err
 		}
@@ -919,7 +922,10 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.WriteBudget
 			return nil, err
 		}
 		out, err := pmdoc.Splice(tree, r, empty)
-		return out, invalidSchemaOp("find", err)
+		if err != nil {
+			return nil, invalidSchemaOp("find", err)
+		}
+		return out, refuseCodePipeInTableCell(tree, out, r, "find", "deleting find", op.Find, "")
 	case "insert":
 		if op.Markdown == "" {
 			return nil, invalidOp("markdown")
@@ -1267,6 +1273,57 @@ func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, wit
 		"with %q is text the document reads back as another block where it lands (%v); write it inside a line of text",
 		with, reshaped,
 	)}
+}
+
+// refuseCodePipeInTableCell refuses a write that adds, to the document-level blocks it changed
+// (changedBlocks), code in a table cell whose text holds a `|` after an odd run of backslashes
+// (pmdoc.TableCodePipes): no markdown of a cell writes that code, so what the document stored would
+// read back otherwise. A replace's `with` is read as a paragraph's text, where `\|` in code is the
+// code's text, and a delete can cut code down to it. Such code a browser edit already left in those
+// blocks is no reason to refuse the write, so a document holding it still takes writes, the one
+// that rewrites that code to hold no such `|` among them; code the write adds beside it is. What
+// the blocks held before and hold after are compared by the code's text, counted, since a write can
+// move a cell to another row, and the refusal names the first code after that the blocks did not
+// hold before. field is the field the refusal names, opening the words it opens with and value
+// what the caller sent, which the refusal quotes after them, and advice what the caller can do
+// beside what pmdoc's refusal says, or "". An error from pmdoc, a panic (pmdoc.ErrPanic), is
+// pmdoc's bug, and is the error.
+func refuseCodePipeInTableCell(before, after *pmdoc.Node, match pmdoc.Range, field, opening, value, advice string) error {
+	first, last, lastAfter, err := changedBlocks(before, after, match)
+	if err != nil {
+		return err
+	}
+	var held map[string]int
+	for index := first; index <= last; index++ {
+		cells, err := pmdoc.TableCodePipes(before.Children[index])
+		if err != nil {
+			return err
+		}
+		for _, cell := range cells {
+			if held == nil {
+				held = map[string]int{}
+			}
+			held[cell.Code]++
+		}
+	}
+	for index := first; index <= lastAfter; index++ {
+		cells, err := pmdoc.TableCodePipes(after.Children[index])
+		if err != nil {
+			return err
+		}
+		for _, cell := range cells {
+			if held[cell.Code] > 0 {
+				held[cell.Code]--
+				continue
+			}
+			reason := fmt.Sprintf("%s %q leaves code the document cannot store where it lands: %v", opening, value, cell)
+			if advice != "" {
+				reason += "; " + advice
+			}
+			return &ErrInvalidOp{Field: field, Reason: reason}
+		}
+	}
+	return nil
 }
 
 // unreadableReason says why a replace left its block unreadable and what to do instead, by cause.

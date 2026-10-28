@@ -327,10 +327,10 @@ export interface Issue {
 export type IssueRouteStatus = (typeof ISSUE_ROUTE_STATUSES)[number];
 
 /**
- * Every issue read (the detail, the list, the pinned list) resolves this from the server's copy
- * of the listener's session list, at most 5 s old. It is stored in no table and is never on an
- * event payload, which is why it is not a field of `Issue`. Both are null when the issue has no
- * route.
+ * Every issue read (the detail, the list, the pinned list) and every ask read (`AskReach`, for
+ * the ask's issue's route) resolves this from the server's copy of the listener's session list,
+ * at most 5 s old. It is stored in no table and is never on an event payload, which is why it is
+ * not a field of `Issue`. Both are null when there is no route.
  */
 export interface IssueRouteReach {
   readonly route_status: IssueRouteStatus | null;
@@ -816,9 +816,30 @@ export interface Ask extends AnchorPosition {
 export const ASK_TURNS = ["human", "agent"] as const;
 export type AskTurn = (typeof ASK_TURNS)[number];
 
+/** Whom besides the followers a person's answer and replies on an ask reach, as every ask read
+ *  carries it: the single-ask read (`AskRead`) and each list row's thread (`AskThread`).
+ *
+ *  The inherited `route_status` and `route_holder` are the issue reads' `IssueRouteReach` for
+ *  `route`, resolved per read from one listener read and stored nowhere: `route_holder` is the
+ *  live session `route` reaches right now (the routed session while the Envoy listener lists it,
+ *  or the session holding the role), so a reader can count each session once (the claimant may be
+ *  the same session). `route_status` tells a route nobody holds (`no_holder`) from one Dispatch
+ *  cannot judge because the listener is unconfigured or did not answer (`unknown`); both leave
+ *  `route_holder` null. Both are null when there is no route, and on a project document's ask. */
+export interface AskReach extends IssueRouteReach {
+  /** The session holding the claim on the ask's issue: a person's answer and replies on the ask
+   *  reach it (Dispatch's claimant route) as well as the route and the followers. Null while
+   *  nobody or a person holds the claim, and on a project document's ask, which has no issue. */
+  readonly claimant: string | null;
+  /** The ask's issue's route (`session:<id>` or `role:<name>`): a person's answer and replies on
+   *  the ask reach that session or role holder as well as the claimant and the followers. Null
+   *  when the issue has no route, and on a project document's ask. */
+  readonly route: string | null;
+}
+
 /** An ask's thread as a list row carries it: everything a card needs before its first targeted
  *  thread refresh. */
-export interface AskThread {
+export interface AskThread extends AskReach {
   readonly replies: Comment[];
   /** Every rewording of the question, oldest first; empty when never edited. */
   readonly edits: AskEdit[];
@@ -996,7 +1017,9 @@ export interface AskAnswer {
 }
 
 export interface AskResolution {
-  readonly kind: "retracted" | "resolved";
+  /** `withdrawn` is written by the server alone, when the ask's issue is closed; no caller can
+   *  resolve an ask with it, and reopening the issue opens the ask again. */
+  readonly kind: "retracted" | "resolved" | "withdrawn";
   readonly reason: string;
   readonly actor: Actor;
   readonly at: string;
@@ -1229,16 +1252,22 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  *   error instead (a BTW whose side turn failed) was never handed over, so the host releases its
  *   key and a same-mode re-send of it reaches the agent.
  *
- * It fails in three places. A host holds its keys in memory, so one that restarts after the first
- * frame landed has forgotten it and a Retry reaches that agent a second time; that is ordinary,
- * not rare: `claude --resume` starts a new channel process on the same conversation, and a
- * Sandbox pod resumes its session in a new process. The stream stores a re-send of an attempt the
- * session answered with an error no more than any other repeat, so a session the listener pushes
- * to never receives it, and its attempt reads as a duplicate. The dashboard therefore offers no
- * same-mode Retry for such an attempt and points at a mode change, which is a new key; sending
- * that Retry under a new key is LEGION-431. And a host keeps at most `DELIVERY_DEDUPE_KEY_LIMIT`
- * keys, forgetting the oldest past it, so a re-send of a key it was handed before that many later
- * ones reaches the agent again. The limit is two and a half times what the whole stream stored in
+ * It fails in three places. A host's `createDeliveryDedupe` holds its keys in memory, so a host
+ * that keeps nothing else and restarts after the first frame landed has forgotten it, and a Retry
+ * reaches that agent a second time; that is ordinary, not rare: `claude --resume` starts a new
+ * channel process on the same conversation, and a Sandbox pod resumes its session in a new
+ * process. pi-envoy and claude-envoy, from the releases that carry `@legion/envoy-client/replay`,
+ * also keep a ledger of the frames their session was handed (pi-envoy in the session's
+ * transcript, claude-envoy in a file per session id) and drop a repeat it holds after a restart,
+ * for 72 hours and up to 20,000 frames; only a crash between the hand-over and the ledger write
+ * still lets that Retry through. Older plugins still forget, and the dashboard cannot tell which
+ * one a session runs. The stream stores a re-send of an attempt the session answered with an
+ * error no more than any other repeat, so a session the listener pushes to never receives it, and
+ * its attempt reads as a duplicate. The dashboard therefore offers no same-mode Retry for such an
+ * attempt and points at a mode change, which is a new key; sending that Retry under a new key is
+ * LEGION-431. And a host keeps at most `DELIVERY_DEDUPE_KEY_LIMIT` keys, forgetting the oldest
+ * past it, so a re-send of a key it was handed before that many later ones reaches the agent
+ * again. The limit is two and a half times what the whole stream stored in
  * one window when it was set, so a host reaches it only once traffic grows past that or a
  * producer floods a topic it follows.
  *
@@ -1413,6 +1442,13 @@ export type SearchOwner =
       readonly name: string;
     };
 
+/** Where an ask hit stands, read when the search ran. `answer` on a resolved ask is the last
+ *  answer a person gave before it was closed (rows document settlement retracted while answered). */
+export type SearchAsk =
+  | { readonly state: "open" }
+  | { readonly state: "answered"; readonly answer: AskAnswer }
+  | { readonly state: "resolved"; readonly resolution: AskResolution; readonly answer?: AskAnswer };
+
 export interface SearchResult {
   readonly kind: SearchResultKind;
   /** Who owns the hit: the issue (with its title and status) or the standalone project document. */
@@ -1434,6 +1470,9 @@ export interface SearchResult {
   /** The hit's fused score: 1/(60 + its position in its kind's ranked list). */
   readonly rank: number;
   readonly href: string;
+  /** Where the ask stands: present on every `ask` hit from a Dispatch of this release, absent on
+   *  every other kind and on any hit from an older Dispatch. */
+  readonly ask?: SearchAsk;
 }
 
 /** The four paging fields a Dispatch that supports search paging always answers together. */
@@ -1652,11 +1691,17 @@ export type GraphEdgeKind =
 // GraphNode is one end of a reference-graph edge. `ref` is its dispatch:// address; a
 // session node has none. A component node's id is `<project>/<component id>`.
 //
+// Every node carries six facts: `made_by` and `made_at` (who made it and when), `changed_by`
+// and `changed_at` (who last changed its own text or fields and when; the maker when nothing
+// changed it since), `parent` (the node it belongs to) and `parent_version` (the version of the
+// parent it belongs to). An actor list Dispatch never recorded is `[]`, any other fact `null`.
+// They are optional because a server older than them omits them.
+//
 // A block node (`kind: "block"`, id `<document ref_key>#<block id>`) also carries `block_id`,
-// its document's reference as `document`, and `changed_version` and `changed_at`, the document
-// version in which its text last changed. `text` and `pin` are set only on the node a reference
-// read names: `text` is the block's whole current text, and `pin` answers a reference pinned to
-// a version.
+// its document's reference as `document`, and `changed_version`, the document version in which
+// its text last changed (its `changed_at` is that version's time). `text` and `pin` are set only
+// on the node a reference read names: `text` is the block's whole current text, and `pin`
+// answers a reference pinned to a version.
 export interface GraphNode {
   readonly kind:
     | "issue"
@@ -1674,9 +1719,23 @@ export interface GraphNode {
   readonly ref?: string;
   readonly document?: string;
   readonly changed_version?: number;
-  readonly changed_at?: string;
+  readonly made_by?: Actor[];
+  readonly made_at?: string | null;
+  readonly changed_by?: Actor[];
+  readonly changed_at?: string | null;
+  readonly parent?: GraphNodeParent | null;
+  readonly parent_version?: number | null;
   readonly text?: string;
   readonly pin?: BlockPin;
+}
+
+// GraphNodeParent is the node a graph node belongs to: `id` is the parent node's own `id` (an
+// artifact's uuid, an issue's key, a component's `<project>/<id>`) and `ref` its dispatch://
+// reference, absent when it has none (a session).
+export interface GraphNodeParent {
+  readonly kind: GraphNode["kind"];
+  readonly id: string;
+  readonly ref?: string;
 }
 
 // BlockPin is a block reference pinned to a version of its document (`#b-<id>@v<N>`): the
@@ -2418,7 +2477,7 @@ export interface CommentRead {
   readonly replies: Comment[];
 }
 
-export interface AskRead {
+export interface AskRead extends AskReach {
   readonly ask: Ask;
   readonly replies: Comment[];
   /** Every rewording of the question, oldest first; empty when never edited. */
@@ -2704,7 +2763,7 @@ const askEventPayloadFields = {
     .optional(),
   resolution: z
     .object({
-      kind: z.enum(["retracted", "resolved"]).optional(),
+      kind: z.enum(["retracted", "resolved", "withdrawn"]).optional(),
       reason: z.string().optional(),
       actor: z
         .object({ kind: z.string().optional(), id: z.string().optional() })
