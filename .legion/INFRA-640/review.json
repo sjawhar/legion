@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-640",
+  "completed": "2026-10-28T16:29:03Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "f67fcb4298e9acf3a3ee24d6de9cc422f99031e2",
+  "critical": 0,
+  "important": 2,
+  "minor": 2,
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/pmdoc/find.go", "description": "FindMarks/markSearch is a second implementation of FindMark's quote rule (span joining, block separator, pending empty runs, first span only, NUL replacement) and MarkAttrs' first-mark rule, while FindMark and MarkAttrs stay in production (docs/marks.go applySuggestion 249/253, suggestion read 223, unmarkExpired 875). A later change to one copy does not reach the other, and refresh and applySuggestion then read different quotes. Fix: FindMark and MarkAttrs become one-key FindMarks lookups; today's FindMark/MarkAttrs bodies move into find_marks_test.go as frozen oracles (as ytext_ranges_test.go keeps frozenYTextRanges); readAnchored goes back to FindMark."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/pmdoc/find.go", "description": "yFragmentLocations (1201-1269) copies walk.go's position rules (opaque = text or leaf, doc adds no boundary tokens, others add 2, leaf counts 1) so ProseMirror positions are defined twice; a change to walk/nodeSize misplaces marks silently. Fix: extract the opaque and boundary-token rules into walk.go helpers used by walkNode, nodeSize and yFragmentLocations."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/find.go", "description": "FindMarks clones each found mark's attrs (line 809) on every write for refreshAnchors and readAnchored, which never read Attrs; ReplaceText's consumer (MarkWriter.Mark via markAttributeValue) already copies. New avoidable per-anchor allocation on the hot path. Fix: keep mark.Attrs uncloned and document MarkFound.Attrs as read-only."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/marks.go", "description": "markQuoteInTxn builds a one-use pmdoc.NewMarkWriter through writeQuoteMark (141), leaving pmdoc.MarkRange with no production caller. Fix: markQuoteInTxn calls documentSchemaError(pmdoc.MarkRange(...)) as at base, and ReplaceText calls documentSchemaError(writer.Mark(...)) directly; delete writeQuoteMark."}
+  ],
+  "ci": {
+    "ciHead": "f67fcb4298e9acf3a3ee24d6de9cc422f99031e2",
+    "required": {"lint": "success", "typecheck": "success", "test": "success", "pr-title": "success"},
+    "compareToHandoffHead": {"handoffsOnly": true, "files": 2},
+    "nonRequiredRed": "envoy-go (TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget, NATS listener route), envoy-infra-go (TestDispatchConnectionsPerPodIsTheServers: merge base 5fbd8391 has dispatchConnectionsPerPod 83 against store.ConnectionsPerProcess 84; main 8b4a862b sets 86), dispatch browser e2e (mermaid.e2e.ts:194, recipients-claim.e2e.ts:310): none in code this diff touches"
+  },
+  "thermonuclear": {"head": "df9bf6f71d5742e11ec6938e8bbec3ef41fbb5d3", "deepReview": "APPROVE: no medium/high; one minor (attrs clone)", "codeQuality": "CHANGES: two important duplications, minors"},
+  "threads": {"total": 0},
+  "e2eLines": {"implementer": "present", "tester": "present"}
+}
