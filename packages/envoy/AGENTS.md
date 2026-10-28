@@ -143,12 +143,24 @@ Each item below names a task and where its code is, then notes on it.
   the outbox publishes it on the issue's subject (`notifications.dispatch.issue.<KEY>.issue.deployed`), where the Legion daemon consumes it to wake the production check the issue's close opened.
   Payload shape: `IssueDeployedEventPayload` in `packages/contracts/src/dispatch-api.ts`
 
-- **Dispatch's own start on the bus**: `internal/dispatch/startup/`
+- **The server fleet's build on the bus**: `internal/dispatch/startup/`
 
-  `server.started`: when Dispatch starts with a stamped build commit (the one `/healthz` reports;
-  a build with none publishes nothing), it publishes one envelope naming it on `notifications.dispatch.server.started`, directly through the bus client rather than the outbox, retried on each reconnect until the stream acknowledges it.
-  The Legion daemon compares the commit against the merges of its open production checks in `sjawhar/legion`.
+  `server.started`: one envelope on `notifications.dispatch.server.started` each time every live server process (`internal/dispatch/processes`) comes to serve one stamped commit, published once per change.
+  Any process that finds the fleet agreeing on a commit the latest row of `server_build_announcements` does not name inserts a row, under an advisory lock;
+  any process whose bus is connected publishes each unpublished row, directly through the bus client rather than the outbox, with event id `dispatch-server-started-<commit>-<seq>` and `started_at` the database's time of the announcement.
+  A restart on the announced commit announces nothing; a rollback announces again.
+  `/healthz` reports the latest announcement's commit as `fleet_commit`, which the Legion daemon's boot reads;
+  the daemon compares the commit against the merges of its open production checks in `sjawhar/legion`.
   Subject and payload: `DISPATCH_SERVER_STARTED_SUBJECT` and `DispatchServerStartedPayload` in `packages/contracts/src/dispatch-api.ts`
+
+- **Registry of live server processes**: `internal/dispatch/processes/`
+
+  One `server_processes` row per serving `envoy-dispatch` process (migration `0135`):
+  registered after the port is bound and before serving, heartbeat every 5 s on a one-connection pool of its own, live while that heartbeat is within 15 s of the database's `now()`, deleted after the HTTP drain, pruned 10 minutes after its last heartbeat under the lease `server-processes`.
+  `Register` refuses a process whose signing key fingerprints a live process does not share both ways, so a minted key or a changed secret exits 1 before serving;
+  a refused process first waits up to one live window (15 s) and a heartbeat for the refusing process to stop heartbeating, trying again every heartbeat, so a restart after a kill starts once the dead process's row lapses.
+  A process whose heartbeat lapsed (frozen, cut from the database) or whose row was pruned checks its keys again under the registry's lock before it counts as live once more (`Registration.renew`);
+  beside a live process whose keys it does not share it is refused (`Registration.Lost`), stops serving after its HTTP drain, and exits 1
 
 - **Deploy/runtime**: `deploy/`
 
@@ -2089,17 +2101,23 @@ The deployed server's `DISPATCH_SERVER_URL` is separate:
 it overrides the merged `dispatch.serverUrl`, must be an absolute `http` or `https` URL with no path, and is the exact sign-in callback origin (Dispatch's client at the sign-in issuer, the sign-in pool's app client or the Google web client, must list `<DISPATCH_SERVER_URL>/auth/callback`).
 `NATS_URLS` likewise overrides the user file's `envoy.natsUrls` for the server.
 People sign in (`DISPATCH_SIGNIN_*`), through a Cognito sign-in pool for `DISPATCH_SIGNIN_GROUP` or with Google directly for `DISPATCH_SIGNIN_DOMAIN`, never both.
+A sign-in's state rides the browser's signed `dispatch_oauth_state` cookie rather than a process's memory, so any server process completes a sign-in another started, given one `DISPATCH_SERVER_URL` on every process;
+the issuer's discovery document is read in the background from boot, and until it is read `/auth/start` and the callback answer `503 SIGNIN_UNAVAILABLE`.
 Through the pool a person is named by the email their pool username carries (`<provider>_<email>`, the provider one the ID token's `identities` names), never by the `email` claim, which a person can write;
 with Google, by the verified `email` of an account whose `hd`, the token's Workspace domain and never the email's own domain, is `DISPATCH_SIGNIN_DOMAIN`, claims the code flow reads from the verified token in domain mode alone (the verifier pods' tokens and the listener share reads none of them), under Google's issuer alone, the only one whose tokens carry `hd`.
 A sign-in the issuer vouches for but Dispatch does not admit
 — a person outside `DISPATCH_SIGNIN_GROUP` or `DISPATCH_SIGNIN_DOMAIN`, an email Google has not verified, or a sign-in that names nobody by email
 — is logged (`dispatch: sign-in refused username=<username> reason=<reason>`, or `email=<email> hd=<hd>` in place of the username under a domain) and answered with a 403 HTML page naming the email and the reason and linking back to `/auth/start`, so an administrator can find who to add.
-Dispatch keeps the issuer's refresh token server-side, sealed under a key derived from `DISPATCH_SIGNING_KEY` (`people.refresh_token`;
+Dispatch keeps the issuer's refresh token server-side, sealed under a key derived from the current key of `DISPATCH_SIGNING_KEY` and opened under any key of the set (`people.refresh_token`;
 the format is in `cmd/dispatch/README.md`, Identity); a stored value that does not open counts as none and the person signs in again.
 Every boot revokes each refresh token stored in plain text at the pool, then clears it, and a sign-in that replaces one revokes it first, so a database backup without the signing key holds no token the pool would accept only once a boot of this release has retired them all.
-Rotating the signing key leaves every stored token unopenable but revokes none at the issuer: after a key leak, sign people out at the issuer.
-It confirms a cookie's person with the issuer at least hourly (`identity.Membership`);
-a refresh the issuer refuses or cannot answer, or one whose ID token no longer passes the group or domain rule, ends every session they hold, which the API answers as 401.
+`DISPATCH_SIGNING_KEY` holds one key or several separated by whitespace:
+the first signs cookies and seals tokens, and every one verifies a cookie and opens a seal, so a rotation (add the new key second, move it first, remove the old key no sooner than 30 days later;
+`cmd/dispatch/README.md`, Identity) signs nobody out.
+Removing a key leaves the tokens sealed under it unopenable but revokes none at the issuer: after a key leak, sign people out at the issuer.
+It confirms a cookie's person with the issuer at least hourly (`identity.Membership`), the hour measured on the database's clock;
+a refresh the issuer refuses (`invalid_grant`), or one whose ID token no longer passes the group or domain rule, ends every session they hold, which the API answers as 401, while a refresh the issuer does not answer ends nothing:
+the request is answered `503 SIGNIN_UNAVAILABLE` and the sign-in is kept for the next request.
 A person is their email, so under a domain `people.sub` records the Google account that last signed in to each address, and a sign-in or confirmation under another account ends every session of the address;
 under a group nothing does, so the old holder of a reassigned address keeps the cookies they hold until those expire.
 Browser sessions carry a server-side generation that logout advances, and unsafe cookie-authenticated requests must prove the configured same origin; bearer automation remains separate.
@@ -2405,7 +2423,8 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   None is a redelivery, and none is deduped.
   An envelope under any other key its caller chose carries no MsgId.
 
-- A `bus.ConnectOwningStream` caller reconciles `ENVOY_NOTIFICATIONS`'s subjects at start by adding its own to the deployed list.
+- A `bus.ConnectOwningStream` caller reconciles `ENVOY_NOTIFICATIONS`'s subjects by adding its own to the deployed list:
+  the listener at start, and Dispatch's server, which connects in the background, on its first connection.
   Only the deployed services call it: the listener (including the on-prem fleet's) and Dispatch's server.
   A caller that only publishes or only tails - `natstail`, the MCP server, `envoy-dispatch`'s operator commands - uses `bus.Connect`, which neither creates the stream nor updates it.
   **Either connect refuses a NATS server that is not this machine's unless the run sets `ENVOY_ALLOW_REMOTE_NATS=1`**, decided from the URL before anything dials (a set `ENVOY_NATS_SOCKS5_PROXY` counts as another machine's whatever the URL says, since the proxy chooses the server), because nothing distinguishes the deployed Dispatch from the same binary run out of a checkout:
@@ -3863,7 +3882,7 @@ Every client-facing lane's own test mounts the real broker handlers (`api.Regist
 `cmd/agent-secrets/main_test.go`'s hand-rolled `fakeBroker` and `secret_test.go`'s `secretBroker` (settings and reread alone) are the sanctioned exceptions, since they exist to test the CLI binary's own request-building and response-parsing logic, not broker behavior;
 `secret_e2e_test.go` runs the same forms against the real rig.
 `packages/envoy/scripts/dev-broker.sh`, `cmd/agent-secrets-devrelay` (a stand-in for Dispatch's relay:
-it presents a listed caller's ServiceAccount token, read from `--account-token-file` / `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, and a login, as Dispatch sends its own token and a login when a signed-in human clicks Approve) and `cmd/dev-oidc-issuer` (a stand-in for a cluster's ServiceAccount token issuer) run a whole local broker stack by hand for manual smoke testing, with no cluster and no Docker beyond the Postgres below;
+it presents a listed caller's ServiceAccount token, read from `--account-token-file` / `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, and a login, as Dispatch sends its own token and a login when a signed-in human clicks Approve) and `cmd/dev-oidc-issuer` (a stand-in for a cluster's ServiceAccount token issuer, and for the identity provider a person signs in to Dispatch at) run a whole local broker stack by hand for manual smoke testing, with no cluster and no Docker beyond the Postgres below;
 none ships in `docker/Dockerfile`, which builds exactly `envoy-listener`, `envoy-dispatch`, `envoy-broker`, and `agent-secrets`.
 `dev-oidc-issuer` serves `internal/oidc/oidctest`'s issuer, the Go tests' own, on a loopback port (a process `oidctest.TB` whose `Fatalf` exits), and keeps each `--token
 <audience>=<service account>=<file>` in its file, minted for `machine.MaxTokenLoginLifetime`, bound to a pod uid of its own, and rewritten by rename at four fifths of that life, as a kubelet rewrites a projected token;
@@ -3872,6 +3891,12 @@ Its key lives in its memory alone, so its tokens stop verifying when it stops.
 `dev-broker.sh` starts it with two tokens, `account-token` for `system:serviceaccount:example-ns:example-dispatch` (the broker's `BROKER_API_ACCOUNTS` caller `dispatch`) and `exchange-token` for `system:serviceaccount:example-ns:example-worker`'s pod at the exchange audience (its `BROKER_EXCHANGE_ACCOUNTS` entry, project `EXAMPLE` for `ada@example.com`, no fixed session), points the broker's `BROKER_K8S_OIDC_ISSUER` at it, and stops it on exit.
 It prints the exports a second shell needs (`AGENT_SECRETS_URL`, `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, `AGENT_SECRETS_APPROVER`, the helper's `AGENT_SECRETS_HELPER_SOCK`, `AGENT_SECRETS_OPERATOR_FILE` and `AGENT_SECRETS_MACHINE_FILE`, all in its workdir, where it writes the operator file, and `DEV_BROKER_DIR`, the workdir itself).
 The docs rig (`docs/site/media/broker/rig.sh`) starts the same issuer for Dispatch's own token.
+With `--code-flow <client id>=<client secret file>` it also serves the authorization code flow for that one confidential client (the values `DISPATCH_SIGNIN_CLIENT_ID` and `DISPATCH_SIGNIN_CLIENT_SECRET` take, the secret the file's content less surrounding whitespace), so a browser signs in to a local Dispatch with no Google:
+each authorization signs in the next person queued at `POST <issuer URL>/_dev/sign-in-as`, whose body is the JSON object of that person's ID token claims and which answers loopback callers alone (`403` otherwise);
+with none queued it signs in `--sign-in-as <email>`'s person, and without that flag it refuses the authorization.
+That person carries both claim shapes Dispatch reads:
+a Google Workspace account of the email's domain, and a Cognito pool user federated from `DevIdP`, a member of `--sign-in-group <group>`'s group when that flag is given.
+Dispatch accepts `DISPATCH_SIGNIN_DOMAIN` only under Google's issuer, so a local Dispatch signs in through this issuer with `DISPATCH_SIGNIN_GROUP` set to that group.
 Each `dev-broker.sh` run creates and drops its own isolated database, on the shared `dispatch-pg` container, which it boots through `dev-postgres.sh` (so a `dispatch-pg` off that script's pinned image is refused before anything is created), or, with `DEV_BROKER_POSTGRES_URL` set, through `psql` on the server that URL names (no Docker), so concurrent instances never see each other's enrollments, requests or grants, and listens on the port its own `cmd/broker` binds and logs (`BROKER_LISTEN_ADDR=127.0.0.1:0`), so concurrent instances can never collide on a shared port either.
 `dev-broker.test.sh` proves both kinds of isolation, and that each instance's broker trusts the issuer that instance started, lists its dev caller, exports the caller token that issuer wrote and stops the issuer on exit, with fakes (no real Postgres or network) and runs in CI's `envoy-go` job.
 

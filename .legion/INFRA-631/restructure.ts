@@ -288,7 +288,7 @@ const MIGRATION_NOTE = {
    * migration above it, or for a migration whose number main gave another name (MAIN_MIGRATIONS),
    * is reported (--strict fails: raise this; --lenient warns: move each note into its `.up.sql`).
    */
-  through: "0134",
+  through: "0135",
   text: (through: string) => [
     `The notes below describe migrations through \`${through}\`.`,
     "A new migration describes itself in the header comment of its own `.up.sql`, as `0129_document_edit_notices.up.sql` does, and adds nothing here, so two pull requests that each add a migration do not edit this section.",
@@ -435,6 +435,7 @@ const MAIN_MIGRATIONS: readonly string[] = [
   "0132_component_facts",
   "0133_comments_written_version_backfill",
   "0134_asks_written_version_backfill",
+  "0135_server_processes",
 ];
 
 /** Step 5. The layout instruction, after the first paragraph under each file's title. */
@@ -610,6 +611,13 @@ const SPLITS: Split[] = [
     guide: "agents",
     anchor: "A consumer that orders head changes by the PR's `updated_at`",
     reason: "the GitHub topics bullet, continued: head order and what a head publishes",
+  },
+  {
+    id: "split-cookie-pool",
+    guide: "readme",
+    anchor: "Through a shared Cognito sign-in pool (`DISPATCH_SIGNIN_GROUP`), the callback",
+    reason:
+      "the `cookie` identity item runs 58 screen rows on main d47dbf05; how each issuer names a person stands alone",
   },
   {
     id: "split-cookie-person",

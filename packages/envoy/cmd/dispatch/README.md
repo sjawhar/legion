@@ -38,18 +38,24 @@ Each item below names a variable, then its purpose.
 
 - `DISPATCH_SIGNING_KEY`
 
-  The HMAC key every session cookie is signed and verified with, and the key the stored refresh tokens' seal is derived from (Identity, below).
-  Unset, each process mints a key of its own in its own data directory (`auth.LoadOrCreateSigningKey`), so a deployment of more than one process sets one value every process is given:
-  with a key apiece, a session minted on one process is refused by the other
-  — every person is signed out by whichever process answers next — and every stored refresh token reads as absent.
-  No process can see another's key, so nothing refuses the boot and `/healthz` cannot report it;
-  it is a precondition of running more than one process, never a check (Running more than one process, below).
-  Rotating it signs everyone out and leaves every stored refresh token unopenable.
+  One key, or several separated by whitespace, the first the current key:
+  it signs every new session cookie, seals every refresh token Dispatch stores, and, under a key derived from it for that purpose alone, signs the sign-in's state cookie;
+  every key of the set verifies a cookie and opens a seal (Identity, below).
+  It is parsed as `DISPATCH_AGENT_TOKEN` is:
+  whitespace at either end is ignored, and startup refuses an empty or repeated entry, naming its position and never its value.
+  A value of nothing but whitespace counts as unset.
+  Unset, each process mints a key of its own in its own data directory (`auth.LoadOrCreateSigningKey`), which no other process holds, so a deployment of more than one process gives every process the same keys:
+  a session minted on one process is presented to whichever process answers next, and a key that process does not hold signs the person out and leaves their stored refresh token unopenable.
+  A process whose key set a live server process does not share both ways, a minted key included, refuses to start, exiting 1 before it serves (Running more than one process, below).
+  A rotation in three steps signs nobody out (Identity, below);
+  dropping the key a cookie or a seal was made under signs its person out and leaves that seal unopenable.
 
 - `NATS_NKEY_SEED_FILE`, `NATS_NKEY_SEED`
 
   The NATS nkey user Dispatch connects as: a file holding the seed (trimmed; wins), or the seed.
   A set but unusable value refuses startup naming the variable and path; neither set connects without a credential.
+  A NATS that does not answer at boot, or refuses the credential, refuses nothing:
+  the server starts and serves, each of its NATS clients connects in the background and retries forever, and a refused credential is logged at ERROR at most once a minute (Running more than one process, below).
 
 - `DISPATCH_TEST_HOOKS`
 
@@ -86,6 +92,8 @@ Each item below names a variable, then its purpose.
   It can mint a `dsp_` personal agent token, and its sign-out advances the person's session generation, and every server on the same database honours those rows.
   Give a dev-sign-in server a database no other server uses:
   the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on.
+  Since it generates its key at every start, a dev-sign-in server refuses to start beside any other live server on its database, and any other server refuses to start beside it (Running more than one process, below);
+  a restart after a kill, which leaves the killed process's row behind, waits up to about 20 seconds for that row to lapse.
   Any value other than `1` or unset is refused.
 
 - `DISPATCH_FILE_STORE_BUCKET`
@@ -124,7 +132,9 @@ Agents normally authenticate with a personal `dsp_` token minted in Settings, se
 `DISPATCH_AGENT_TOKEN` remains the shared devbox fallback and does not attribute callers to an owner.
 
 With `DISPATCH_OIDC_ISSUER` and `DISPATCH_OIDC_AUDIENCE` set, a Kubernetes pod's projected service-account token is a third bearer credential:
-the server reads the issuer's discovery document at boot (an unreachable issuer refuses to start, naming it) and verifies a JWT-shaped bearer against its published keys, the configured audience, and the token's expiry.
+the server reads the issuer's discovery document in the background from boot, retrying after one second and doubling to thirty while it fails (each failure logged at ERROR at most once a minute), and an issuer that cannot be reached refuses nothing;
+it verifies a JWT-shaped bearer against the issuer's published keys, the configured audience, and the token's expiry.
+Until the document has been read, a JWT-shaped bearer is `503 OIDC_ISSUER_UNAVAILABLE`, never a 401, and every other credential is served.
 Half the pair refuses to boot, naming the missing variable; neither leaves bearer handling exactly as it is without them.
 A verified caller acts as the `session` it names in the request body, and every actor it writes carries `service`, the token's verified subject (`system:serviceaccount:<namespace>:<name>`)
 — set from the token, never from the body.
@@ -198,6 +208,7 @@ So redelivering a delivery that did reach the stream adds nothing to the stream.
 
 The cursor, the last rate limit, and one record per delivery acted on live in the JetStream KV bucket `envoy_webhook_redelivery`.
 Its 72-hour TTL matches GitHub's horizon.
+The server opens the bucket on the first sweep that finds NATS connected, not at boot, so a NATS that is down at boot skips the sweeps until it answers, each logged as failed.
 A compare-and-swap claim keeps two Dispatch processes from requesting the same attempt twice, and the operator command honours the same rate limit.
 
 The operator command runs the same sweep over a chosen window.
@@ -257,7 +268,15 @@ The Go tests start one (`internal/tests3`, SeaweedFS in a container, since MinIO
   Beside `DISPATCH_SIGNIN_ISSUER`, `DISPATCH_SIGNIN_CLIENT_ID` and `DISPATCH_SIGNIN_CLIENT_SECRET`, exactly one of `DISPATCH_SIGNIN_GROUP` and `DISPATCH_SIGNIN_DOMAIN` is set;
   both, some without the others, a domain under any issuer but `https://accounts.google.com`, a group under that one, or a domain that is not a lowercase DNS name refuse the boot, each naming what is wrong (`checkSignInSettings`).
 
-  Through a shared Cognito sign-in pool (`DISPATCH_SIGNIN_GROUP`), the callback names the person by the email in their pool username (`<provider>_<email>`, for a provider the ID token's `identities` names), never by the `email` claim, which a person can write, and signs in only a member of `DISPATCH_SIGNIN_GROUP`;
+  The issuer's discovery document is read in the background from boot, on the service-account issuer's schedule (above), and an issuer that cannot be reached refuses nothing:
+  until the document has been read, `/auth/start` and the callback answer `503 SIGNIN_UNAVAILABLE`, and the rest of Dispatch serves.
+  A sign-in in flight (its state, its nonce, the page it returns to and when it lapses, ten minutes after it started) travels in the browser's `dispatch_oauth_state` cookie, signed under a key derived from the current signing key for that purpose alone, and no process keeps it:
+  a sign-in one process started completes on whichever process the issuer's redirect reaches, given one `DISPATCH_SERVER_URL` on every process:
+  the exchange must send the callback URL the sign-in started with, and each process builds it from that setting, or without one from the request's `Host`.
+  The callback clears the cookie first, and answers `400` "invalid or expired state" to a cookie that does not verify under a key of the set, has lapsed, or names a state other than the one the issuer returned.
+  Each sign-in completes at most once: the issuer's code is single-use, and the exchange accepts only an ID token carrying the cookie's nonce.
+
+- Through a shared Cognito sign-in pool (`DISPATCH_SIGNIN_GROUP`), the callback names the person by the email in their pool username (`<provider>_<email>`, for a provider the ID token's `identities` names), never by the `email` claim, which a person can write, and signs in only a member of `DISPATCH_SIGNIN_GROUP`;
   anyone else gets a 403 page naming them.
 
   With Google directly (`DISPATCH_SIGNIN_DOMAIN`, under Google's issuer and a Google web client whose redirect URI is `<DISPATCH_SERVER_URL>/auth/callback`), the authorization request asks for offline access with `prompt=consent`, so every exchange returns a refresh token, and names the domain as `hd`, a hint only.
@@ -268,8 +287,11 @@ The Go tests start one (`internal/tests3`, SeaweedFS in a container, since MinIO
   the shared verifier, which Cognito tokens, pods' tokens and the listener go through, reads none of them.
   A refusal logs `msg="dispatch: sign-in refused" email=<email> hd=<hd> reason=<reason>`, where a pool refusal logs `username=<username>`.
 
-  Either way, Dispatch keeps the issuer's refresh token and confirms the person with it at least hourly:
-  a refresh the issuer refuses or cannot answer (an outage included, so people are signed out as their hour lapses while it lasts), or one whose ID token no longer passes the rule or names another email, ends every session they hold.
+  Either way, Dispatch keeps the issuer's refresh token and confirms the person with it at least hourly, the hour measured on the database's clock (`people.confirmed_at`), so processes whose clocks differ agree on when it lapses.
+  A refresh the issuer refuses (`400` or `401` with the OAuth error `invalid_grant`:
+  the token expired, was revoked or is not the client's), or one whose ID token no longer passes the rule or names another email, ends every session they hold.
+  A refresh that fails any other way (the issuer undiscovered, down or slow, a `5xx` or `429`, another OAuth error, or an answer without an ID token that verifies) ends nothing:
+  the request that found the confirmation lapsed is refused `503 SIGNIN_UNAVAILABLE`, the sessions and the refresh token are kept, and the first request after the issuer answers again refreshes and is served.
   Logout ends Dispatch's session only, not the issuer's.
 
 - A person is their email, so an address passed from one account to another is one person.
@@ -280,8 +302,10 @@ The Go tests start one (`internal/tests3`, SeaweedFS in a container, since MinIO
   Group mode neither reads nor writes `sub`, so there the old holder of a reassigned address keeps the cookies they have until their cookie expires, 30 days after it was issued, unless the pool user is removed from `DISPATCH_SIGNIN_GROUP` or disabled.
 
   The refresh token is stored sealed (`people.refresh_token`):
-  AES-256-GCM under a key derived from `DISPATCH_SIGNING_KEY` with HKDF and a fixed purpose label, bound to the person's email, in a format whose `v1:` prefix names its version.
-  A stored value that does not open (sealed under another signing key, moved from another person's row, or in plain text) counts as no refresh token:
+  AES-256-GCM under a key derived from the current key of `DISPATCH_SIGNING_KEY` with HKDF and a fixed purpose label, bound to the person's email, in a format whose `v1:` prefix names its version.
+  A value is opened under each key of the set in turn, the GCM tag refusing a key it was not sealed under;
+  it names no key, so the `v1:` format is byte for byte the one earlier releases write and read.
+  A stored value that does not open (sealed under a key the set does not hold, moved from another person's row, or in plain text) counts as no refresh token:
   each read of it logs `msg="dispatch: a stored refresh token did not open; the person signs in again"` at WARN with the email and never the value, and writes nothing;
   the person's request answers `401 NO_IDENTITY`, and their next sign-in replaces the value.
 
@@ -289,7 +313,7 @@ The Go tests start one (`internal/tests3`, SeaweedFS in a container, since MinIO
   at every boot, after migrations, it revokes each plain-text token at the pool's revocation endpoint (the `revocation_endpoint` the issuer's discovery document names) as the app client, then clears it and its confirmation while the row still holds that value.
   A sign-in that replaces a plain-text token retires it the same way first.
   A sealed value is never sent to the pool, and a redirect from the revocation endpoint is a failure, never followed.
-  A token the boot cannot revoke stays in its row for the next boot and logs `msg="dispatch: the sign-in pool did not revoke a refresh token stored in plain text"` at ERROR with the email and the error (the pool's HTTP status, when it answered), never the token.
+  A token the boot cannot revoke, the issuer's discovery document not yet read included, stays in its row for the next boot and logs `msg="dispatch: the sign-in pool did not revoke a refresh token stored in plain text"` at ERROR with the email and the error (the pool's HTTP status, when it answered), never the token.
   A sign-in that cannot revoke the token it replaces goes on, since the person just signed in at the pool, and logs `msg="dispatch: a sign-in replaced a refresh token the pool did not revoke; sign this person out at the pool"` at ERROR with the email and the error:
   no later boot will see that token, so signing the person out at the pool is the only way to end it.
   The boot's retirement stops after 30 seconds, failing each token it has not revoked, and the start goes on;
@@ -298,8 +322,16 @@ The Go tests start one (`internal/tests3`, SeaweedFS in a container, since MinIO
   A database backup therefore holds no refresh token the pool would accept only once a boot of this release has retired every plain-text token, and then only for the tokens still in `people` when it ran:
   those stop working when the pool revokes them.
   A plain-text token `0068`'s release removed without revoking (a sign-in that replaced it, or a logout that cleared it) stays valid at the pool until it expires, in any backup that holds it (Database migrations, below).
-  Rotating `DISPATCH_SIGNING_KEY` leaves Dispatch unable to open any stored refresh token, so each person signs in again, but it revokes none at the pool:
-  whoever holds a backup and the old key can still redeem them until they expire, so after a key leak, sign each person out at the pool.
+
+  A rotation of `DISPATCH_SIGNING_KEY` signs nobody out when it is made in three steps, each rolled to every process before the next:
+  (a) add the new key second, after the current one; (b) move it first; (c) remove the old key, no sooner than 30 days after (b), the session cookie's lifetime.
+  A cookie made under the old key verifies until it expires, and a refresh token sealed under it is sealed again under the new key by the person's next hourly confirmation.
+  Each step passes the boot's key check beside processes still on the step before (Running more than one process, below).
+  Replacing the key in one step fails that check beside a live process that holds only the old key, and on a lone process signs everyone out.
+  The release that first ships the key set is never also the release of a first rotation, and no build older than the key set is rolled back to while the setting holds two values:
+  such a build reads `"K1 K0"` as one key, which signs everyone out.
+  Removing a key revokes no refresh token at the pool:
+  whoever holds a backup and the old key can still redeem the tokens sealed under it until they expire, so after a key leak, sign each person out at the pool.
 
 - `header:<Header-Name>` is for tests and local harnesses only, never for a production Dispatch deployment.
   It accepts a header value, lowercases it and records the person.
@@ -375,13 +407,25 @@ go tool pprof -seconds 30 http://127.0.0.1:<port>/debug/pprof/profile
 ## Running more than one process
 
 Two `envoy-dispatch` processes serve one Postgres and one NATS, so a release rolls instead of taking Dispatch away from everyone while it deploys.
-A rolling update is supported, under two preconditions, one of which the server cannot check for itself.
+A rolling update is supported, under two preconditions; the server checks the first itself.
 
 **Every process is given the same `DISPATCH_SIGNING_KEY`.**
-Unset, each process mints a key of its own in its own data directory (`cmd/dispatch/main.go`, `auth.LoadOrCreateSigningKey`), and a session is verified by HMAC under the key of the process that answers:
-at two processes with data directories of their own, every person is signed out by whichever process answers next, and every stored refresh token, sealed under a key derived from the same value (Identity, above), reads as absent (`store/refresh_token_seal.go`).
-One process cannot detect another's key, so nothing refuses the boot, no log line names it and `/healthz` cannot report it:
-it is a hard precondition of a multi-process deployment rather than something the server checks.
+A session cookie, or the sign-in's state cookie, minted by one process is presented to whichever process the next request reaches, and every stored refresh token is sealed under a key derived from the current key (Identity, above).
+Unset, each process mints a key of its own in its own data directory (`cmd/dispatch/main.go`, `auth.LoadOrCreateSigningKey`), which no other process holds.
+The server refuses that through the registry of live server processes (`internal/dispatch/processes`, migration `0135`):
+once a process has bound its port, and before it serves, it registers the fingerprint of each of its keys (none reveals its key), and it refuses to start, logging `msg="dispatch: register this server process"` at ERROR with an error that names the other process and the rotation steps, and exiting 1, when a live process's key set does not share its own both ways:
+the other's current key among its keys, and its current key among the other's.
+The refusal stands only beside a process that stays live:
+refused, a process logs at WARN which live process refuses it and waits up to one live window (15 seconds) and a heartbeat for that process to stop heartbeating, trying again every heartbeat, before it exits 1, serving nothing meanwhile (a SIGTERM or Ctrl-C during the wait is a clean stop:
+the process logs `msg="dispatch: stopped while
+waiting for admission to the registry of live server processes"` at INFO and exits 0).
+So a restart after a kill, whose dead process's row still counts as live, starts once that row lapses, while a live process, heartbeating every 5 seconds, keeps refusing.
+A process with a minted key therefore refuses beside any live process, and a process refuses beside it;
+processes that share one data directory share its key and start.
+A pod rolled with a changed secret beside pods that hold only the old key refuses the same way, so the roll stalls on the new pod while the old ones keep serving.
+Each step of a rotation (Identity, above) passes the check beside processes still on the step before.
+A process whose heartbeat lapsed (frozen, or cut from the database, for longer than the live window) or whose row was pruned drops out of the registry while it runs, so a process started meanwhile is checked without it;
+the first one checks its keys again before it counts as live once more, and beside a live process whose keys it does not share it logs `msg="dispatch: this server process no longer shares its signing keys with a live server process"` at ERROR, stops serving as a SIGTERM stops it (the listener closes at once, the requests in flight are answered, its row is deleted), and exits 1.
 
 **Every migration leaves the release before it able to read and write the schema** (Database migrations, below):
 a rolling update runs the old build and the new build against one database at once.
@@ -399,7 +443,7 @@ What the two processes share, and what each keeps to itself:
 - The two delivery durables keep their shape.
   NATS admits one binder; the second process stands by, asking every two seconds, and takes the durable over within seconds of the holder dying.
 
-- Nine periodic maintenance loops run once per period across the processes, not once per process.
+- Ten periodic maintenance loops run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a process whose tick lands inside another's pass logs a skip;
   and, under that lease, each pass is recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick lands between another's passes
   — the ordinary case, since each ticker draws its phase at boot and a rolling update starts the second process minutes after the first
@@ -407,6 +451,34 @@ What the two processes share, and what each keeps to itself:
   The settlement resumption, the delivery live hub, the event-stream relay, the stale-room evictor and the document rooms' timers stay per-process by design, and the embedding queue, the task progress reconciliation and the outbox's own scan claim their own work;
   the embedding queue's coverage pass runs in every process with no lease, each of its steps safe beside another process's, and drops every vector its own embedder did not make, so every process takes the same embedder settings (Search, below);
   `cmd/dispatch/main.go` says at the call site which loop is which and why.
+
+- The registry of live server processes is shared.
+  Each process stamps its `server_processes` row every 5 seconds, on a one-connection pool of its own, and counts as live while that heartbeat is within 15 seconds of the database's `now()`;
+  it deletes its row once its HTTP drain has ended, so a draining process counts as live until its last request is answered.
+  A row a process left behind (killed, its node lost) counts as live until 15 seconds after its last heartbeat, so a process refused beside it at boot waits up to that window and a heartbeat for it to lapse before it exits 1 (the signing key precondition, above);
+  the prune loop deletes such a row 10 minutes after its last heartbeat, under the lease `server-processes`.
+  A process whose heartbeat lapsed (frozen, cut from the database) or whose row was pruned checks its keys again, under the registry's lock, before it counts as live once more:
+  it writes its row again, logging that it rejoined at WARN, when every live process shares its key set, and otherwise stops, after draining, and exits 1 (the signing key precondition, above).
+  Operator subcommands never register.
+
+- A sign-in started on one process completes on the other:
+  its state travels in the browser's signed `dispatch_oauth_state` cookie, not in a process (Identity, above), given one `DISPATCH_SERVER_URL` on every process.
+
+- `server.started` names the build every live process serves, once each time that build changes.
+  A process that finds every live process serving one stamped, non-empty commit that the latest row of `server_build_announcements` does not name inserts a row;
+  any process whose bus is connected publishes each row not yet published, with the event id `dispatch-server-started-<commit>-<seq>` and `started_at` the database's time of the announcement.
+  Each process looks every 5 seconds, and an advisory lock keeps two from inserting or publishing at once.
+  So a roll announces nothing until its last old process is gone, a restart of every process on one commit announces nothing, and a rollback to an earlier commit announces it again.
+  A process whose NATS is down announces into the table and leaves the publish to one whose bus answers.
+  Builds before this registry do not register:
+  the first release that carries it announces as soon as its own processes agree, and a process of an earlier release that starts during that release still publishes its own start, so that release is deployed with no process of the earlier one serving beside it (production ran one pod with `Recreate` for it).
+
+- Neither NATS nor an OIDC issuer gates the boot.
+  A process whose NATS does not answer, or refuses its credential, starts and serves everything that does not need the bus, and each of its NATS clients connects in the background, retrying forever;
+  the outbox publishes what was written meanwhile once the bus answers, the webhook redelivery sweep opens its KV bucket on its first pass with NATS connected, and the agent conversation relay answers `503 STREAM_UNAVAILABLE` until then.
+  A sign-in issuer or service-account issuer that cannot be reached is discovered in the background (Identity, above);
+  until then only what needs it answers `503`.
+  `/healthz` reports each as `nats`, `signin` and `service_tokens`, and none of them fails the probe.
 
 **Two processes do not share a live document session.**
 Durable convergence is unconditional: every edit is appended under the document's advisory lock, Yjs updates commute, and the stored history is the union of them, so no edit is lost whichever process took it, no process writes a settlement or an ask retraction from a document state it does not hold (`ErrRoomBehindHead`), and a version whose room is behind the head is rendered from the stored document (`storedTree`).
@@ -469,7 +541,7 @@ end the holder or let it finish and start the server again.
 That query can come back empty: a prepared transaction's locks carry no pid, so the join to `pg_stat_activity` drops them (LEGION-432).
 A migration that needs another bound sets its own `SET LOCAL lock_timeout`.
 
-The notes below describe migrations through `0134`.
+The notes below describe migrations through `0135`.
 A new migration describes itself in the header comment of its own `.up.sql`, as `0129_document_edit_notices.up.sql` does, and adds nothing here, so two pull requests that each add a migration do not edit this section.
 
 Migrations `0056`–`0062` make search indexing linear.
@@ -773,6 +845,10 @@ Migration `0134_asks_written_version_backfill` does the same for `asks`, holding
 an approval ask takes `approval.version` of its `ask.opened` event (the type list of `events_ask_payload_id`, `0030`, lets the lookup read that index), the version the request named when it opened, and keeps null without one;
 another ask with `artifact_id` set, `anchor` null and `block_artifact_id` null takes the highest version of its document created at or before it, as `0133` reads a comment's.
 Its census answers `0` for the same reasons.
+
+Migration `0135_server_processes` creates two tables:
+`server_processes`, the registry of live server processes, and `server_build_announcements`, each build the fleet has announced as `server.started` (Running more than one process, above).
+It reads, locks and rewrites nothing that exists, and the release before it neither reads nor writes either table, so that release runs over the new schema unchanged and the census answers `0`.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
@@ -1141,8 +1217,9 @@ Each item below names a path with its method and identity, then its purpose.
 - `/auth/start` (GET; none)
 
   Start Google sign-in at the sign-in issuer:
-  the Cognito sign-in pool, or Google itself for `DISPATCH_SIGNIN_DOMAIN`, asking for offline access with `prompt=consent` and the domain as `hd`.
-  `503 SIGNIN_UNCONFIGURED` on a server with no `DISPATCH_SIGNIN_*`.
+  the Cognito sign-in pool, or Google itself for `DISPATCH_SIGNIN_DOMAIN`, asking for offline access with `prompt=consent` and the domain as `hd`, with the sign-in's state in the signed `dispatch_oauth_state` cookie.
+  `503 SIGNIN_UNCONFIGURED` on a server with no `DISPATCH_SIGNIN_*`;
+  `503 SIGNIN_UNAVAILABLE`, and no cookie, while the issuer's discovery document has not been read.
 
 - `/auth/callback` (GET; sign-in state)
 
@@ -1150,6 +1227,9 @@ Each item below names a path with its method and identity, then its purpose.
   under a group, named by the email in their pool username, anyone outside the group refused with a 403 page naming them;
   under a domain, named by the verified `email` of a Google account whose `hd` is the domain, anyone else refused with a 403 page giving the reason.
   Record the person and the refresh token (and, under a domain, the account's `sub`, ending the address's sessions when another account held it), issue the cookie.
+  Any process holding a key of the set completes a sign-in another process started.
+  `400` "invalid or expired state" when the state cookie is missing, does not verify, has lapsed or names another state;
+  `503 SIGNIN_UNAVAILABLE` while this process has not read the issuer's discovery document;
   `409 SIGNIN_SUPERSEDED` and no cookie when, under a domain, another account signed in to the address between this sign-in's record and its cookie.
 
 - `/auth/logout` (POST; cookie or trusted header)
@@ -1181,15 +1261,20 @@ Each item below names a path with its method and identity, then its purpose.
 
 - `/healthz` (GET; none)
 
-  Report that the process serves, Postgres answers within `store.healthProbeTimeout` (two seconds) on the health pool
-  — a dedicated one-connection pool, never the shared one
-  — NATS is connected where configured, and the file store's bucket answers a two-second `HeadBucket` where `DISPATCH_FILE_STORE_BUCKET` is set (`files`; null when it is not).
+  The readiness probe: `200` while this process can serve requests, which is while Postgres answers within `store.healthProbeTimeout` (two seconds) on the health pool
+  — a dedicated one-connection pool, never the shared one — and `ok` says the same.
   A database that stops answering is `503` with `db: false` inside that bound, never silence, and the reason is logged.
-  `files` is reported and never decides `ok` or the status:
-  a bucket that stops answering is `200` with `files: false`, so a bucket outage fails uploads and downloads and nothing else, and a deploy check that wants the bucket asserts `files: true` itself.
+  It is not a liveness check (`/livez` is):
+  it fails while the database is unreachable, so a liveness probe on it would restart every server process during a database failover.
+  Every other field is reported and never decides `ok` or the status, and a deploy check that needs one asserts it itself (`nats: true`, `files: true`, `signin: true`):
+  `nats`, whether the server's publisher is connected to NATS (`null` with `DISPATCH_NATS_DISABLED=1`), so a bus outage is `200` with `nats: false` while the process serves and its outbox waits for the bus;
+  the client pings every second and declares a connection lost at two pings outstanding, so a silently cut bus reads `false` within two to three seconds;
+  `files`, whether the file store's bucket answers a two-second `HeadBucket` where `DISPATCH_FILE_STORE_BUCKET` is set (`null` when it is not), so a bucket outage fails uploads and downloads and nothing else;
+  `signin` and `service_tokens`, whether the sign-in issuer's and the service-account token issuer's discovery documents have been read (`false` before, `null` where that issuer is not configured).
   Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five.
-  The body also names what is deployed: `commit`, the legion commit the image build stamped (the Dockerfile's `LEGION_COMMIT`;
-  `null` in an unstamped build), and `schema_version`, the highest migration `schema_migrations` records, read by the same probe (`null` when `db` is false).
+  The body also names what is deployed: `commit`, the legion commit this process's image build stamped (the Dockerfile's `LEGION_COMMIT`;
+  `null` in an unstamped build); `fleet_commit`, the commit of the latest announcement that every live server process serves one build, the one `server.started` carries (`null` when there is none, or before this process's announcer has first read the table, and up to one announcer pass, five seconds, behind it);
+  and `schema_version`, the highest migration `schema_migrations` records, read by the same probe (`null` when `db` is false).
 
 - `/livez` (GET; none)
 
