@@ -2781,8 +2781,8 @@ the synchronous listener call records the sent or failed attempt instead of blin
   `settle` records the event `deferred`, and `recordBatch` adds the destinations it reached to
   `published_destinations`, moves `next_attempt_at` out by `mentionPendingDelay` (2 s) and leaves
   `published_at` null and `attempt_count` as it was, so waiting on a send never runs the event to
-  its dead letter. A `pending` one past the minute (abandoned, by `mentionSendLapsed`; the API's
-  `claimLapsed` is built from the same `model.DeliveryClaimLapse`) is settled by the outbox
+  its dead letter. A `pending` one no sender ever claimed, past the minute (abandoned, by `mentionSendLapsed`;
+  the API's `claimLapsed` is built from the same `model.DeliveryClaimLapse`), is settled by the outbox
   before it publishes the copy, only when a copy asks about that session or target
   (`attempt.leftTo`), so a mention of a session no copy reaches is left to the stranded pass:
   `settleAbandonedMentions` takes the comment's owner lock, sets each such attempt `failed` with
@@ -2791,7 +2791,11 @@ the synchronous listener call records the sent or failed attempt instead of blin
   transaction, and re-reads the key: an attempt a sender claimed first is pending and holds the
   copy back; one the outbox settled is failed. A sender's claim after the settle finds the
   attempt settled and sends nothing (`claimCommentDeliveryAttempt`), and the stranded pass reads
-  pending attempts only, so the mention and the copy are exclusive per attempt. Every other
+  pending attempts only, so the mention and the copy are exclusive per attempt. An attempt a
+  sender claimed and never settled (a send in flight when its process was killed, which may have
+  reached the listener) is left to the stranded pass, whose resend repeats the attempt's
+  idempotency key so the listener drops a repeat; the outbox takes it as abandoned only past
+  `model.StrandedMentionWindow` (an hour), when no sender resumes it. Every other
   session - each attempt `failed`, or no row at all - is published to as if it had not been
   mentioned. A deferral with a denial
   (`bus.ErrPublishDenied`) or any other failure of the event is backed off as a failure, its

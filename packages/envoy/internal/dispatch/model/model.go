@@ -1108,15 +1108,28 @@ type Mention struct {
 // back. Two readers depend on the one window and must agree. The API's claimLapsed
 // (internal/dispatch/api) lets another sender resume or settle an attempt whose claim is older,
 // and the outbox (mentionSendLapsed, internal/dispatch/outbox) settles failed a pending mention
-// attempt whose claim - or creation, when no sender claimed it - is older, before it publishes
-// the mentioned session's own-topic copy instead, so the outbox never waits on an attempt a
-// sender may no longer finish, and a sender that claims it after that finds it settled. Both
-// judge it in Postgres against Postgres's own timestamps, through DeliveryClaimLapseInterval.
+// attempt no sender ever claimed once its creation is older, before it publishes the mentioned
+// session's own-topic copy instead, so the outbox never waits on an attempt no sender started,
+// and a sender that claims it after that finds it settled. An attempt a sender did claim is left
+// to the mention sender's stranded pass, which resends it under its own idempotency key, so a
+// send that had already reached the listener is dropped there as a repeat. Both judge it in
+// Postgres against Postgres's own timestamps, through DeliveryClaimLapseInterval.
 const DeliveryClaimLapse = time.Minute
 
 // DeliveryClaimLapseInterval is DeliveryClaimLapse as a Postgres interval literal in whole
 // seconds, for SQL that compares a delivery's claimed_at or created_at against now().
 var DeliveryClaimLapseInterval = fmt.Sprintf("interval '%d seconds'", int64(DeliveryClaimLapse/time.Second))
+
+// StrandedMentionWindow is how far back the API's mention sender resumes a stranded mention
+// attempt (strandedCommentMentions, internal/dispatch/api). It covers a deploy or a crash loop; an
+// older pending attempt has been in front of its author long enough that a late delivery is worse
+// than the retry the author already has. Past it no sender takes the attempt, so the outbox counts
+// it abandoned whoever claimed it (mentionSendLapsed, internal/dispatch/outbox).
+const StrandedMentionWindow = time.Hour
+
+// StrandedMentionWindowInterval is StrandedMentionWindow as a Postgres interval literal in whole
+// seconds.
+var StrandedMentionWindowInterval = fmt.Sprintf("interval '%d seconds'", int64(StrandedMentionWindow/time.Second))
 
 // CommentDelivery records one attempt to deliver a mention to its resolved session.
 type CommentDelivery struct {
@@ -1277,12 +1290,15 @@ type CommentEventPayload struct {
 	// copy when it publishes: it skips the copy once comment_deliveries shows the mention was sent,
 	// holds it back while that send is still pending, and publishes it when the send failed or was
 	// abandoned. It reads an unpinned session:<id> mention's attempts as that <id>'s. A pending
-	// attempt whose claim - or creation, when no sender claimed it - is older than
-	// DeliveryClaimLapse is abandoned: the outbox settles it failed, in one transaction under the
-	// comment's owner lock, before it publishes the copy, and a sender's claim that lands first
-	// keeps it pending, so whichever acts first settles the attempt and the session gets the
-	// mention or the copy, not both. A send queued behind its lane that long is settled so too, and
-	// its sender's later claim finds it settled and sends nothing.
+	// attempt no sender ever claimed, created more than DeliveryClaimLapse ago, is abandoned: the
+	// outbox settles it failed, in one transaction under the comment's owner lock, before it
+	// publishes the copy, and a sender's claim that lands first keeps it pending, so whichever acts
+	// first settles the attempt and the session gets the mention or the copy, not both. A send
+	// queued behind its lane that long is settled so too, and its sender's later claim finds it
+	// settled and sends nothing. An attempt a sender claimed - a send in flight when its process
+	// died, which may have reached the listener - is left to the stranded pass, which resends it
+	// under its own idempotency key, so the listener drops a repeat; the outbox takes it as
+	// abandoned only past StrandedMentionWindow, when no sender resumes it.
 	// SuppressRoute marks the issue route's copy as left to a mention: either the route names a
 	// candidate, because its lookup pinned it or because its own lookup went unanswered and it is
 	// session:<id> (SuppressedRoute is the route string, SuppressedRouteSessionID that candidate),

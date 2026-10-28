@@ -42,10 +42,11 @@ func seedMentionDelivery(t *testing.T, database *store.Store, commentID, session
 // its sender leave it, inserting the comment first when no test seeded it. sessionID is the
 // session the attempt names, "" for none: an unanswered mention's attempt names none until its
 // sender resolves it. outcome is the attempt's state - "sent", "failed", or "pending" for a send
-// its sender claimed just now - or "abandoned" for a pending attempt whose sender's claim lapsed
-// two minutes ago, "queued" for a pending attempt created just now that no sender has claimed
-// yet, and "backlogged" for one created two minutes ago that no sender has claimed. "" records no
-// attempt.
+// its sender claimed just now - or "resumed" for a pending attempt whose sender's claim lapsed
+// two minutes ago (its sender died with the send in flight; the API's stranded pass resends it),
+// "queued" for a pending attempt created just now that no sender has claimed yet, and
+// "backlogged" or "abandoned" for one created two minutes ago that no sender ever claimed. ""
+// records no attempt.
 func seedDelivery(t *testing.T, database *store.Store, commentID, target, sessionID, outcome string) {
 	t.Helper()
 	if outcome == "" {
@@ -53,11 +54,11 @@ func seedDelivery(t *testing.T, database *store.Store, commentID, target, sessio
 	}
 	state, age, claimed := outcome, time.Duration(0), true
 	switch outcome {
-	case "abandoned":
+	case "resumed":
 		state, age = "pending", 2*time.Minute
 	case "queued":
 		state, claimed = "pending", false
-	case "backlogged":
+	case "backlogged", "abandoned":
 		state, age, claimed = "pending", 2*time.Minute, false
 	}
 	ctx := context.Background()
@@ -611,12 +612,15 @@ func TestARetryReachesTheClaimantTheScanReads(t *testing.T) {
 	}
 }
 
-// TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst: a mention attempt
-// pending past the claim lease is settled by whichever of the outbox and a sender acts on its row
-// first. When the outbox does, the attempt reads failed with its comment.delivery receipt and the
-// route copy it held back is published; a sender that claims it afterwards finds it settled. When
-// a sender's claim commits while the outbox waits to settle it, the attempt is that sender's: it
-// stays pending under the fresh claim, no receipt is written, and the event defers on the send.
+// TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst: a mention attempt no
+// sender ever claimed, pending past the claim lease, is settled by whichever of the outbox and a
+// sender acts on its row first. When the outbox does, the attempt reads failed with its
+// comment.delivery receipt and the route copy it held back is published; a sender that claims it
+// afterwards finds it settled. When a sender's claim commits while the outbox waits to settle it,
+// the attempt is that sender's: it stays pending under the fresh claim, no receipt is written, and
+// the event defers on the send. An attempt a sender claimed whose claim lapsed (its sender died
+// with the send in flight) is the stranded pass's to resend: the outbox leaves it pending, writes
+// no receipt and publishes no copy, without waiting on it.
 func TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst(t *testing.T) {
 	const (
 		issueTopic = "notifications.dispatch.issue.T-1.comment.created"
@@ -624,6 +628,8 @@ func TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst(t
 	)
 	for _, tc := range []struct {
 		name string
+		// seeded is the attempt's outcome (seedDelivery).
+		seeded string
 		// claimFirst takes the attempt's claim, as a sender's claim transaction does, and
 		// commits it only once the outbox waits on the comment's owner lock to settle it.
 		claimFirst bool
@@ -631,18 +637,19 @@ func TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst(t
 		wantErr    error
 		wantState  string
 	}{
-		{name: "the outbox acts first", wantTopics: []string{issueTopic, routeTopic}, wantState: "failed"},
+		{name: "the outbox acts first", seeded: "abandoned", wantTopics: []string{issueTopic, routeTopic}, wantState: "failed"},
 		{
-			name: "a claim commits first", claimFirst: true,
+			name: "a claim commits first", seeded: "abandoned", claimFirst: true,
 			wantTopics: []string{issueTopic}, wantErr: errMentionPending, wantState: "pending",
 		},
+		{name: "a claim lapsed with its sender", seeded: "resumed", wantTopics: []string{issueTopic}, wantState: "pending"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := store.WithTransactionTracking(context.Background())
 			database := storetest.Open(t)
 			seedIssue(t, database, "T-1", nil)
 			commentID := "00000000-0000-0000-0003-000000000001"
-			seedMentionDelivery(t, database, commentID, "s1", "abandoned")
+			seedMentionDelivery(t, database, commentID, "s1", tc.seeded)
 			event := model.Event{
 				ID: 105, IssueKey: new("T-1"), Type: "comment.created", Actor: model.Actor{Kind: "user", ID: "alice"},
 				Payload: map[string]any{
@@ -735,7 +742,7 @@ func TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst(t
 			if err != nil {
 				t.Fatalf("decode the attempt's receipts: %v", err)
 			}
-			if !tc.claimFirst {
+			if tc.wantState == "failed" {
 				if failure == nil || *failure != mentionAbandonedError {
 					t.Fatalf("attempt error = %v, want %q", failure, mentionAbandonedError)
 				}
@@ -749,7 +756,7 @@ func TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst(t
 				return
 			}
 			if failure != nil {
-				t.Fatalf("attempt error = %q, want none: the claim that took it owns its outcome", *failure)
+				t.Fatalf("attempt error = %q, want none: the sender that claimed it owns its outcome", *failure)
 			}
 			if len(receipts) != 0 {
 				t.Fatalf("receipts = %#v, want none for an attempt the outbox did not settle", receipts)

@@ -760,13 +760,13 @@ type mentionDeliveries struct {
 // mentionOutcomes is what the attempts under each key of mentionDeliveries came to. A key in more
 // than one set counts as the first of sent, pending and abandoned it is in (attempt.leftTo).
 type mentionOutcomes struct {
-	// sent holds each key some attempt reached.
+	// sent holds each key some attempt reached, or whose attempt the API's stranded pass resends
+	// (mentionResumed): either way the mention, not the copy, delivers the comment.
 	sent map[string]struct{}
-	// pending holds each key with an attempt whose send is still live: it is pending and its
-	// claim, or its creation when no sender has claimed it yet, is younger than
-	// model.DeliveryClaimLapse.
+	// pending holds each key with an attempt whose send is live: pending, and claimed within
+	// model.DeliveryClaimLapse, or unclaimed and created within it.
 	pending map[string]struct{}
-	// abandoned holds each key with a pending attempt older than that lease.
+	// abandoned holds each key with a pending attempt mentionSendLapsed takes as abandoned.
 	abandoned map[string]struct{}
 	// settle settles the abandoned attempts under key failed, and reports whether key's attempts
 	// then hold a sent one and a pending one (settleAbandonedMentions).
@@ -845,21 +845,38 @@ func (a *attempt) leftTo(outcomes mentionOutcomes, key string) bool {
 // session, only under its target.
 const mentionSessionKey = `coalesce(session_id, case when target like 'session:%' then substr(target, 9) end)`
 
-// mentionSendLapsed is true of a pending attempt whose send is abandoned: its claim - or its
-// creation, when no sender ever claimed it - is older than model.DeliveryClaimLapse, the same
-// lease the API's claimLapsed gives a sender (internal/dispatch/api), so no sender is still
-// sending it. The mention sender leaves an attempt unclaimed until its lane starts the send, so a
-// send queued behind its lane for longer than that lease reads abandoned too.
-var mentionSendLapsed = `coalesce(claimed_at, created_at) < now() - ` + model.DeliveryClaimLapseInterval
+// mentionSendLapsed is true of a pending attempt whose send the outbox takes as abandoned: no
+// sender ever claimed it and it was created more than model.DeliveryClaimLapse ago (the mention
+// sender leaves an attempt unclaimed until its lane starts the send, so a send queued behind its
+// lane for longer than that lease reads abandoned too), or it is older than
+// model.StrandedMentionWindow, past which no sender resumes it. An attempt a sender claimed within
+// that window may have reached the listener before its sender died, so it is left to the API's
+// stranded pass, which resends it under the attempt's own idempotency key and the listener drops
+// the repeat; publishing the session's own copy for it too would give that session two copies.
+var mentionSendLapsed = `((claimed_at is null and created_at < now() - ` + model.DeliveryClaimLapseInterval +
+	`) or created_at < now() - ` + model.StrandedMentionWindowInterval + `)`
+
+// mentionResumed is true of a pending attempt a sender claimed and never settled, whose claim
+// lapsed a lease ago, within model.StrandedMentionWindow: its sender died with the send in flight,
+// perhaps after the listener took it, and the API's stranded pass resends it under its own
+// idempotency key, which the listener drops as a repeat when the first send landed. The outbox
+// leaves the session's copy to that resend, as to a sent mention, and does not wait on it.
+var mentionResumed = `(claimed_at is not null and claimed_at < now() - ` + model.DeliveryClaimLapseInterval +
+	` and created_at >= now() - ` + model.StrandedMentionWindowInterval + `)`
+
+// mentionLeftToMention is true of an attempt whose mention, not the outbox's copy, delivers the
+// comment: sent, or resumed by the stranded pass (mentionResumed).
+var mentionLeftToMention = `(state = 'sent' or (state = 'pending' and ` + mentionResumed + `))`
 
 // mentionDeliveryQuery groups a comment's mention attempts by the session each counts under
-// (mentionSessionKey) and by its target, and reports of each group whether an attempt was sent,
-// is pending and live, and is pending and abandoned (mentionSendLapsed).
+// (mentionSessionKey) and by its target, and reports of each group whether an attempt was sent
+// or is resumed by the stranded pass (mentionLeftToMention), is pending and live, and is pending
+// and abandoned (mentionSendLapsed).
 var mentionDeliveryQuery = `
 	select ` + mentionSessionKey + `,
 	       target,
-	       bool_or(state = 'sent'),
-	       bool_or(state = 'pending' and not (` + mentionSendLapsed + `)),
+	       bool_or(` + mentionLeftToMention + `),
+	       bool_or(state = 'pending' and not (` + mentionSendLapsed + `) and not (` + mentionResumed + `)),
 	       bool_or(state = 'pending' and ` + mentionSendLapsed + `)
 	from comment_deliveries
 	where comment_id = $1
@@ -976,7 +993,7 @@ func settleAbandonedMentions(
 		receipts = append(receipts, appended)
 	}
 	if err := tx.QueryRow(ctx, `
-		select coalesce(bool_or(state = 'sent'), false), coalesce(bool_or(state = 'pending'), false)
+		select coalesce(bool_or(`+mentionLeftToMention+`), false), coalesce(bool_or(state = 'pending'), false)
 		from comment_deliveries
 		where comment_id = $1 and `+keyColumn+` = $2
 	`, commentID, key).Scan(&sent, &pending); err != nil {

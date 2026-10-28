@@ -27,11 +27,6 @@ const maxQueuedMentionSends = 4096
 // stop grace (cmd/dispatch/shutdown.go).
 const mentionDrainTimeout = 10 * time.Second
 
-// strandedMentionWindow is how far back the stranded pass looks for a stranded attempt. It covers
-// a deploy or a crash loop; an older pending attempt has been in front of its author long enough
-// that a late delivery is worse than the retry the author already has.
-const strandedMentionWindow = "1 hour"
-
 // strandedPassInterval is how often the mention sender runs its stranded pass after the one at
 // start: half the claim lease (claimLease). An attempt left unclaimed is sent by whichever
 // process's pass reads it first, within the lease and one interval of its creation, and one a
@@ -252,7 +247,7 @@ func (m *mentionSender) next(lane string, finished mentionKey) (mentionSend, str
 
 // recoverStranded is the stranded pass: it queues the stranded attempts strandedCommentMentions
 // reads - pending, unclaimed or with a lapsed claim, a claim lease old or more and from the last
-// strandedMentionWindow, left by any process - except those this sender holds, so a busy sender
+// model.StrandedMentionWindow, left by any process - except those this sender holds, so a busy sender
 // never queues its own unstarted sends twice, at most as many as the queue has room for. Each is
 // sent through the claim protocol, so an attempt another sender claimed or settled after the read
 // is not sent twice. A pass once the sender has stopped, or with the queue full, does nothing.
@@ -268,17 +263,18 @@ func (m *mentionSender) next(lane string, finished mentionKey) (mentionSend, str
 // (contracts.DedupeKeyNamesTheUpstreamEvent; DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts
 // states for how long, and where that fails).
 //
-// The outbox counts the same attempts abandoned - a lease old by their claim or, unclaimed, by
-// their creation - and publishes the mentioned session's own-topic copy in place of a mention it
-// held that copy back for (mentionSendLapsed and attempt.leftTo in internal/dispatch/outbox). The
-// two are exclusive per attempt, by its comment_deliveries row: whichever acts first settles it.
-// The outbox settles the attempt failed under the comment's owner lock, which the claim
-// transaction takes first too (claimCommentDeliveryAttempt), so a claim that runs after it finds
-// the attempt settled and sends nothing, and a claim that commits first leaves it claimed just
-// now, which the outbox no longer counts abandoned: it waits on the send instead. So the
-// session gets one copy of the comment through a kill, from the mention or from the outbox, but
-// for a frame the killed process had already handed to the listener: when the outbox settles
-// that attempt, its copy repeats the comment under another dedupe key.
+// The outbox counts an attempt no sender ever claimed abandoned once it is a lease old, and
+// publishes the mentioned session's own-topic copy in place of a mention it held that copy back
+// for (mentionSendLapsed and attempt.leftTo in internal/dispatch/outbox). The two are exclusive
+// per attempt, by its comment_deliveries row: whichever acts first settles it. The outbox settles
+// the attempt failed under the comment's owner lock, which the claim transaction takes first too
+// (claimCommentDeliveryAttempt), so a claim that runs after it finds the attempt settled and sends
+// nothing, and a claim that commits first leaves it claimed, which the outbox does not count
+// abandoned: it waits on the send instead. An attempt a sender claimed and never settled - a send
+// in flight when its process was killed - is this pass's alone within model.StrandedMentionWindow:
+// its resend repeats the attempt's idempotency key, so a frame the killed process had already
+// handed to the listener is dropped there, and the session gets one copy of the comment through a
+// kill.
 func (m *mentionSender) recoverStranded() {
 	m.mu.Lock()
 	if m.stoppedLocked() {
@@ -344,7 +340,7 @@ func (s *server) sendCommentMention(ctx context.Context, item mentionSend) {
 
 // strandedCommentMentions reads at most limit of the attempts the stranded pass resumes: pending,
 // with a claim that lapsed or was never taken (claimLapsed), created at least claimLease ago and
-// within strandedMentionWindow, and not among held, oldest first. Postgres judges both times
+// within model.StrandedMentionWindow, and not among held, oldest first. Postgres judges both times
 // against the ones it wrote. An attempt younger than the lease is left to the process that
 // accepted it, which queued it behind that recipient's earlier comments, so a pass never takes a
 // live process's queue out of order; one that waited a lease unsent is stranded (the process
@@ -371,7 +367,7 @@ func (s *server) strandedCommentMentions(ctx context.Context, limit int, held []
 		from comment_deliveries d
 		join comments c on c.id = d.comment_id
 		where d.state = 'pending' and `+claimLapsed+`
-		  and d.created_at > now() - interval '`+strandedMentionWindow+`'
+		  and d.created_at > now() - `+model.StrandedMentionWindowInterval+`
 		  and d.created_at < now() - interval '`+claimLease+`'
 		  and (d.comment_id::text, d.target, d.attempt) not in (
 		    select * from unnest($2::text[], $3::text[], $4::int[])
