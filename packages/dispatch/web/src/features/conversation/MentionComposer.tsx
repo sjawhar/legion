@@ -824,21 +824,31 @@ export function MentionComposer({
     setAutocomplete(mentionQuery(value, selectionStart));
     setConfirmingDiscard(false);
   };
-  const onBeforeBodyInput = (event: FormEvent<HTMLTextAreaElement>) => {
-    const input = event.nativeEvent as InputEvent;
-    const element = event.currentTarget;
-    let start = element.selectionStart ?? 0;
-    let end = element.selectionEnd ?? start;
-    if (start === end && input.inputType === "deleteContentBackward")
-      start = Math.max(0, start - 1);
-    if (start === end && input.inputType === "deleteContentForward")
-      end = Math.min(element.value.length, end + 1);
-    pendingTextEdit.current = {
-      before: element.value,
-      inputType: input.inputType,
-      range: { end, start },
+  // The body field records each edit from the browser's own `beforeinput`: its type, which tells
+  // `mapSpans` a cut or a paste, and the range it replaces. React's `onBeforeInput` is the
+  // `textInput` event, which carries no type and which no deletion or cut fires.
+  const bodyFieldRef = useCallback((element: HTMLTextAreaElement | null) => {
+    textarea.current = element;
+    if (element === null) return;
+    const recordEdit = (input: InputEvent) => {
+      let start = element.selectionStart;
+      let end = element.selectionEnd;
+      if (start === end && input.inputType === "deleteContentBackward")
+        start = Math.max(0, start - 1);
+      if (start === end && input.inputType === "deleteContentForward")
+        end = Math.min(element.value.length, end + 1);
+      pendingTextEdit.current = {
+        before: element.value,
+        inputType: input.inputType,
+        range: { end, start },
+      };
     };
-  };
+    element.addEventListener("beforeinput", recordEdit);
+    return () => {
+      element.removeEventListener("beforeinput", recordEdit);
+      textarea.current = null;
+    };
+  }, []);
   const addAskOption = () => {
     focusAddedOption.current = true;
     setAskOptions((current) => [...current, emptyAskOption()]);
@@ -1109,7 +1119,6 @@ export function MentionComposer({
           aria-label={bodyLabel}
           className={`mt-1 block w-full rounded-lg border px-3 py-2 font-normal outline-none ${inline ? "min-h-11 resize-none" : "min-h-24"} ${inputClasses(true)} ${textPrimaryOnSurface}`}
           maxLength={kind === "ask" ? ASK_QUESTION_MAX : DISPATCH_BODY_MAX}
-          onBeforeInput={onBeforeBodyInput}
           onChange={(event) => onBodyChange(event.target.value, event.target.selectionStart)}
           onDrop={
             uploadOwner === undefined
@@ -1142,7 +1151,7 @@ export function MentionComposer({
               ? undefined
               : (event: ClipboardEvent<HTMLTextAreaElement>) => upload.paste(event, uploadOwner)
           }
-          ref={textarea}
+          ref={bodyFieldRef}
           rows={1}
           value={body}
         />

@@ -841,6 +841,48 @@ test("an edit's save an older server refuses keeps the draft", async () => {
   }
 });
 
+// The field reads each edit's type from the browser's own `beforeinput`, which a cut and a paste
+// fire and React's `onBeforeInput` (the `textInput` event) never carries.
+test("a block cut and pasted elsewhere keeps its id in the edit's save", async () => {
+  const commentBlocks = spyOn(api, "commentBlocks").mockResolvedValue(alphaBetaBlocks(true));
+  const editComment = spyOn(api, "editComment").mockResolvedValue(createdComment);
+  const { view } = renderComposer({ edit: { body: "Alpha\n\nBeta", id: "comment-1" } });
+  const beforeInput = (field: HTMLTextAreaElement, start: number, end: number, type: string) => {
+    field.setSelectionRange(start, end);
+    field.dispatchEvent(
+      new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: type })
+    );
+  };
+
+  try {
+    await waitFor(() => expect(commentBlocks).toHaveBeenCalledWith("comment-1"));
+    await act(async () => {});
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Edit comment");
+    // Cut `Alpha` with the blank line after it, then paste it after `Beta`.
+    beforeInput(field, 0, 7, "deleteByCut");
+    fireEvent.change(field, { target: { value: "Beta" } });
+    beforeInput(field, 4, 4, "insertFromPaste");
+    fireEvent.change(field, { target: { value: "Beta\n\nAlpha" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(editComment).toHaveBeenCalledTimes(1));
+    expect(editComment.mock.calls[0]).toEqual([
+      "comment-1",
+      {
+        base_revision: 3,
+        blocks: [
+          { from: 0, id: "b2" },
+          { from: 6, id: "b1" },
+        ],
+        body: "Beta\n\nAlpha",
+      },
+    ]);
+  } finally {
+    view.unmount();
+    commentBlocks.mockRestore();
+    editComment.mockRestore();
+  }
+});
+
 test("a failed send keeps its draft and retries", async () => {
   const createComment = spyOn(api, "createComment")
     .mockRejectedValueOnce(new ApiError(500, { error: "boom" }))
