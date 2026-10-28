@@ -1,11 +1,12 @@
 package supervise
 
 // A runtime the operator moved a project onto, taking over the claims another runtime recorded
-// (the tmux runtime's `runtime.tmux.take_over: kubernetes`), may find a taken-over claim's session
-// file nowhere it runs the agent: the session stayed with the other runtime. It answers the resume
+// (the tmux runtime's `runtime.tmux.take_over: kubernetes`), may find a claim's session file
+// nowhere it runs the agent: most such sessions stayed with the other runtime, and while the key
+// is set nothing tells them from this host's own. It answers the resume
 // with runtime.ErrSessionFileMissing, the same on every try, so rather than spend the launch budget
 // on it and fail the claim, the same try spawns a fresh agent, which registers a session of its own.
-// Every other refusal of a resume — a session file missing anywhere else among them — is a charged
+// Every other refusal of a resume — a session file missing with the key off among them — is a charged
 // launch failure, and the claim keeps the session it recorded: a fresh agent on a claim that had
 // one is what the same-agent refusal exists to catch.
 
@@ -64,8 +65,8 @@ func TestATakenOverResumeOfASessionFoundNowhereSpawnsAFreshSessionUncharged(t *t
 }
 
 // Any other refusal of a resume is a launch failure as before, charged, and the recorded session
-// kept for the next try: the refusal to start fresh over a session file missing where the claim's
-// own runtime recorded it (no takeover), and a refusal for another reason alike. Nothing is
+// kept for the next try: the refusal to start fresh over a session file found nowhere while the
+// takeover key is off, and a refusal for another reason alike. Nothing is
 // spawned in the session's place.
 func TestAResumeRefusedForAnyOtherReasonIsChargedAndKeepsTheSession(t *testing.T) {
 	for name, refusal := range map[string]error{

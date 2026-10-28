@@ -41,6 +41,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/pglisten"
+	"github.com/sjawhar/envoy/internal/redact"
 	"github.com/sjawhar/envoy/listenfd"
 )
 
@@ -722,7 +723,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 	if agentSecretsURL != "" {
 		parsed, err := url.Parse(agentSecretsURL)
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.Path != "" {
-			return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_SECRETS_URL=%q (expected an absolute http(s) URL with no path)", agentSecretsURL)
+			return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_SECRETS_URL=%q (expected an absolute http(s) URL with no path)", redact.URL(agentSecretsURL))
 		}
 		boot.AgentSecretsURL = agentSecretsURL
 		boot.AgentSecretsTokenFile = strings.TrimSpace(env.get("DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE"))
@@ -773,7 +774,7 @@ func devSignInFence(boot bootConfig, env settingValues) error {
 	}
 	if boot.AgentSecretsURL != "" {
 		if !routes.LoopbackURL(boot.AgentSecretsURL) {
-			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 decides credential requests on this machine's secrets broker only: DISPATCH_AGENT_SECRETS_URL=%q must name 127.0.0.1, [::1] or localhost", boot.AgentSecretsURL)
+			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 decides credential requests on this machine's secrets broker only: DISPATCH_AGENT_SECRETS_URL=%q must name 127.0.0.1, [::1] or localhost", redact.URL(boot.AgentSecretsURL))
 		}
 	}
 	if !routes.LoopbackURL(boot.EnvoyURL) {

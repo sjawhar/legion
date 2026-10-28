@@ -39,6 +39,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
+	"github.com/sjawhar/envoy/internal/redact"
 )
 
 const (
@@ -192,6 +193,57 @@ func TestATokenFileItCannotUseSendsNothing(t *testing.T) {
 	}
 	if reached.Load() {
 		t.Error("the broker was called with a token file devrelay could not use")
+	}
+}
+
+// TestABrokerItCannotReachNamesNoCredentialTheURLCarries: devrelay's refusal for a broker that
+// never answers, or a --broker URL that does not parse, names a URL redact.URL will not print as
+// redact.NotPrinted with the failure's class alone, and a clean URL as net/http wrote it.
+func TestABrokerItCannotReachNamesNoCredentialTheURLCarries(t *testing.T) {
+	token := tokenFile(t, "caller-token")
+	np := `"` + redact.NotPrinted + `": `
+	plain := httptest.NewServer(http.NotFoundHandler())
+	defer plain.Close()
+	closing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			conn.Close()
+		}
+	}))
+	defer closing.Close()
+	overHTTPS := "https://" + strings.TrimPrefix(plain.URL, "http://")
+	for _, row := range []struct{ base, want string }{
+		{"http://127.0.0.1:1", `Post "http://127.0.0.1:1/v1/credential-requests/record-1/approve": dial tcp 127.0.0.1:1: connect: connection refused`},
+		{overHTTPS, `Post "` + overHTTPS + `/v1/credential-requests/record-1/approve": http: server gave HTTP response to HTTPS client`},
+		{closing.URL, `Post "` + closing.URL + `/v1/credential-requests/record-1/approve": EOF`},
+		{"http://tokuser9f3:hunter2pw@127.0.0.1:1", np + "connection refused"},
+		{"http://127.0.0.1:1/?token=qtok77", np + "connection refused"},
+		{"http://tokuser9f3:hunter2pw%zz@127.0.0.1:1", np + "not a valid URL"},
+		{"http://ada@corp.example:hunter2pw%40127.0.0.1:1", np + "not a valid URL"},
+	} {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"approve", "--record", "record-1", "--broker", row.base, "--account-token-file", token, "--login", testApprover}, &stdout, &stderr)
+		if code != 1 || !strings.Contains(stderr.String(), row.want) {
+			t.Errorf("--broker %s: exit %d, stderr %q; want 1 naming %s", row.base, code, stderr.String(), row.want)
+		}
+		for _, secret := range []string{"tokuser9f3", "hunter2pw", "qtok77", "%zz", "ada@corp"} {
+			if strings.Contains(stdout.String()+stderr.String(), secret) {
+				t.Errorf("--broker %s: output %q names %q", row.base, stdout.String()+stderr.String(), secret)
+			}
+		}
+	}
+}
+
+// TestUsageNamesNoCredentialTheEnvironmentURLCarries: a bad flag prints the usage text, which
+// prints each flag's default; AGENT_SECRETS_URL is read after parsing, so its credential is not
+// one of them.
+func TestUsageNamesNoCredentialTheEnvironmentURLCarries(t *testing.T) {
+	t.Setenv("AGENT_SECRETS_URL", "https://tokuser9f3:hunter2pw@broker.invalid")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"approve", "--bogus"}, &stdout, &stderr); code != exitUsageError {
+		t.Fatalf("exit %d, want %d", code, exitUsageError)
+	}
+	if out := stdout.String() + stderr.String(); strings.Contains(out, "hunter2pw") || strings.Contains(out, "tokuser9f3") {
+		t.Fatalf("usage output names the URL's credential: %q", out)
 	}
 }
 

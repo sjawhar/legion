@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -975,6 +976,69 @@ func TestWorkflowBootServingNoRepositoryReportsWhatItLeftOut(t *testing.T) {
 	}
 }
 
+// A project whose every mapped repository's installation read fails boots all the same, serving
+// none: its API answers, its state names each repository left out with the App, the repository and
+// GitHub's failure, and one ERROR line says so, where the boot used to exit into its supervisor's
+// restart and the same failure.
+func TestWorkflowBootWhoseEveryInstallationReadFailsAnswersItsState(t *testing.T) {
+	cfg := workflowConfig(t, workflowNATS(t))
+	failure := errors.New("read whether the implement App is installed on acme/widgets failed (403)")
+	tokens := &workflowTokenRecorder{failing: map[string]error{"implement acme/widgets": failure}}
+	var logged syncBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, cfg, Build{}, slog.New(slog.NewJSONHandler(&logged, nil)), overrides{
+			listen: heldListen, runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{},
+			workflowTokens: tokens, githubAPI: repositoriesGitHub(t),
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("run: %v", err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Error("daemon did not stop")
+		}
+	})
+	var state api.State
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if response, err := pollClient.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/legion/v1/state"); err == nil {
+			err = json.NewDecoder(response.Body).Decode(&state)
+			response.Body.Close()
+			if err == nil && response.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("the daemon stopped instead of booting: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the daemon never answered its state")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	want := []api.RefusedRepositoryView{{Repo: "acme/widgets", Reason: "the implement App's installation on acme/widgets could not be read: " + failure.Error() + "; Legion reads it again"}}
+	if len(state.Repositories.Mapped) != 0 || !reflect.DeepEqual(state.Repositories.Refused, want) {
+		t.Fatalf("state's repositories = %+v, want none served and acme/widgets left out for its failed read", state.Repositories)
+	}
+	var errorLines []string
+	for line := range strings.SplitSeq(logged.String(), "\n") {
+		if strings.Contains(line, `"level":"ERROR"`) {
+			errorLines = append(errorLines, line)
+		}
+	}
+	if len(errorLines) != 1 || !strings.Contains(errorLines[0], "every mapped repository's GitHub App installation read failed") || !strings.Contains(errorLines[0], failure.Error()) {
+		t.Fatalf("ERROR lines = %q, want one naming the failed read", errorLines)
+	}
+}
+
 // The workflow has to assemble every integration boundary before opening its API. The order in
 // this log is the boot sequence operators rely on when an external dependency refuses.
 func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
@@ -1361,8 +1425,10 @@ func workflowJetStream(t *testing.T, natsURL string) jetstream.JetStream {
 type workflowTokenRecorder struct {
 	mu    sync.Mutex
 	roles []appauth.AppRole
-	// missing names the installations not made, "<role> <owner/name>"; every other is.
+	// missing names the installations not made, "<role> <owner/name>"; every other is. failing
+	// names the installation reads that fail, with their error.
 	missing map[string]bool
+	failing map[string]error
 }
 
 func (r *workflowTokenRecorder) Token(_ context.Context, role appauth.AppRole, _ string) (appauth.Lease, error) {
@@ -1381,9 +1447,14 @@ func (r *workflowTokenRecorder) AppLogin(_ context.Context, role appauth.AppRole
 // Forget drops nothing: every lease is minted afresh.
 func (r *workflowTokenRecorder) Forget(appauth.AppRole, string) {}
 
-// InstalledOn answers each App installed on every repository but those missing names.
+// InstalledOn answers each App installed on every repository but those missing names, and fails
+// the reads failing names.
 func (r *workflowTokenRecorder) InstalledOn(_ context.Context, role appauth.AppRole, repo ghrepo.Repository) (bool, error) {
-	return !r.missing[string(role)+" "+repo.String()], nil
+	key := string(role) + " " + repo.String()
+	if err := r.failing[key]; err != nil {
+		return false, err
+	}
+	return !r.missing[key], nil
 }
 
 // servedMapping answers Dispatch's repository mapping, acme/widgets the default of project, and
