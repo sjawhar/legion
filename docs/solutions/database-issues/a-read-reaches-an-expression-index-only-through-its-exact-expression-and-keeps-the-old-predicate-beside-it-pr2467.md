@@ -46,6 +46,10 @@ related_issues:
   predicates selected the same rows for all 1,157 documents (3,400 = 3,400, symmetric difference 0).
 - The only writer of `block_artifact_id` is the ask-block insert (`docs/ask_blocks.go:718`), which
   writes no anchor, so an anchored ask's `coalesce` is its anchor's artifact id. No constraint
-  enforces this; the comment above `recordedMarkRefs` records the assumption.
+  enforces this, and rows written by earlier releases are unchecked: an ask holding both columns
+  was listed under neither document, so its mark was swept. Since sjawhar/legion#2483 the read no
+  longer depends on it: asks are read by the anchor's artifact alone, the same predicate as
+  comments, through `asks_anchor_artifact_id` (migration `0137`), an index added for that exact
+  expression rather than a predicate bent to fit the index that existed.
 - The tester added an anchor with an upper-case artifact id to the equivalence harness. The kept
   text comparison excludes it on both sides.

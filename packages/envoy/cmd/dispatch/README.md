@@ -1093,6 +1093,16 @@ while both run — its own pages are served from its own image, as before — an
 back past `0136` is an image rollback alone, with no schema to restore: the tables are left for
 the next release that carries them, whose boot prunes what no build still needs.
 
+Migration `0137_asks_anchor_artifact_id` creates `asks_anchor_artifact_id`, an index of
+`(anchor->>'artifact_id')::uuid` over the asks whose `anchor` is set, the expression of
+`comments_anchor_artifact` (`0032`). Settlement's sweep reads through it the marks a document's
+asks record, by the anchor's document alone, so an ask that also names an ask block on another
+document (`block_artifact_id`) keeps its mark on the document its anchor names. Building it takes
+`SHARE` on `asks`, so ask writes wait for the build; it rewrites and refuses no row, and its census
+answers `0`. The release before it never reads the index and serves beside it unchanged, except
+that its sweep still drops such an ask's mark (no such row is written today), and rolling Dispatch
+back past `0137` is an image rollback alone: the index is left for the next release that reads it.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success

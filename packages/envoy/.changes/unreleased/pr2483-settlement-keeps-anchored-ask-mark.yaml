@@ -1,0 +1,8 @@
+kind: Fixed
+body: |-
+  Dispatch's document settlement keeps the mark of an ask on the document its anchor names when
+  the ask also names an ask block on another document; it reads asks by the anchor's document
+  alone through a new index, `asks_anchor_artifact_id` (migration `0137`), so the read stays an
+  index scan and the marks of every other ask are unchanged.
+custom:
+  Issue: pr2483
