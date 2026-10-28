@@ -241,3 +241,46 @@ func contend() {
 	}
 	wg.Wait()
 }
+
+// A serving process's scrape lists every pool of its connection budget (store.ConnectionsPerProcess)
+// by name, the registry's included: processes.Register opens that one-connection pool beside the
+// store's, as dispatch-registry, and the heartbeat it carries is what keeps a serving process live,
+// so a heartbeat waiting for its connection, or timing out, is a wait an operator must read here
+// as for any other pool.
+func TestAServingProcessScrapeListsTheRegistryPool(t *testing.T) {
+	database := storetest.Open(t)
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := held.Addr().String()
+	if err := held.Close(); err != nil {
+		t.Fatal(err)
+	}
+	process := startDispatchProcessWith(t, database.Pool.Config().ConnString(), dispatchOptions{
+		Env: map[string]string{"DISPATCH_METRICS_ADDR": addr},
+	})
+	process.waitHealthy(t)
+	response, err := http.Get("http://" + addr + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	scraped, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET /metrics = %d %s", response.StatusCode, scraped)
+	}
+	body := string(scraped)
+	label := `{pool="` + store.RegistryPool + `"}`
+	for _, series := range []string{
+		"dispatch_db_pool_total_conns", "dispatch_db_pool_in_use_conns", "dispatch_db_pool_idle_conns",
+		"dispatch_db_pool_waiting", "dispatch_db_pool_acquire_timeouts_total",
+		"dispatch_db_pool_acquire_seconds_sum", "dispatch_db_pool_acquire_seconds_count",
+	} {
+		requireLine(t, body, series+label+" ")
+	}
+	requireLine(t, body, "dispatch_db_pool_max_conns"+label+" 1\n")
+}
