@@ -2,17 +2,19 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-536",
-  "completed": "2026-10-28T10:11:13Z",
-  "round": 3,
-  "kind": "confirmation after a conflict-forced merge",
-  "approvedBefore": "35a47ab1c0bf0eff1dd96ea8dac1db7d720280ab",
-  "codeHead": "c07181dc2fa1fd4ba2a97497e700a0d8b46b1dd1",
-  "fingerprint": "e27cb169e075462183b62c43f00c842eab3501a4722a0f38d27833145cfec4a4 at 35a47ab1 and at 824b7482: unchanged",
+  "completed": "2026-10-28T13:58:20Z",
+  "round": 4,
+  "codeHead": "1de823fc1d016fa17a2345191a0a83e3a545cd9d",
+  "fingerprint": "changed: e27cb169… at 7762bc53 (my last approval), bdac1476… at 25bda80e. The only difference is that the changelog entry moved, word for word, from packages/envoy/CHANGELOG.md to packages/envoy/.changes/unreleased/pr2361-Fixed-20261028-101341.yaml. This is a full new round.",
   "decision": "approved",
   "critical": 0,
   "important": 0,
   "minor": 0,
-  "ci": "CI head c07181dc (the merge of main b295a3fb, which carries INFRA-534's pmdoc tilde and alt-text changes). The required lint, typecheck, test and pr-title passed. envoy-go, envoy-go-race, dispatch-memory, dispatch-multiprocess, envoy-e2e-local, envoy-smoke and envoy-infra-go passed too. The non-required dispatch was still in progress. compare c07181dc...824b7482: handoffsOnly true.",
-  "conflict": "GitHub reports the pull request CONFLICTING again: main moved to aeeee6c0. git merge-tree finds one conflict, packages/envoy/CHANGELOG.md. Main's #2419 moves changelog entries into fragment files, so the merge must carry this entry the new way. Main's #2313 runs the iphone project only for tests tagged @phone, and doc.e2e.ts auto-merges.",
+  "ci": "CI head 35613295 (the newest pull_request run). The required lint, typecheck, test and pr-title passed. envoy-go, envoy-go-race, dispatch, dispatch-memory, dispatch-multiprocess, envoy-e2e-local, envoy-smoke and envoy-infra-go passed too. The non-required Worker Image build failed in main's worker TLS probe: chromium was killed while it verified refusal of the emSign chain (run 40671279654). This PR changes no file of the worker image (no Dockerfile, no .github change). compare 35613295...25bda80e: handoffsOnly true.",
+  "thermonuclear": {
+    "deepReview": "Verdict: APPROVE at 1de823fc. The merge 73ef8a6a keeps main's CHANGELOG.md exactly. changie v1.26.0 and release-push.sh fold-notes render the fragment as a bullet byte-identical to the old entry, and changelog-fold.test.sh passes 12 of 12. Nothing reads the fragment's file name or Issue value beyond uniqueness. Main's new changes touch no pmdoc file and none of the e2e helpers this PR moved. Under #2313 the new browser test runs in chromium only, and it correctly carries no @phone tag. The pmdoc tests pass (115.8 s).",
+    "codeQuality": "Verdict: CHANGES at 1de823fc. Two naming findings: the fragment is named pr2361, not the issue key AGENTS.md:151 asks for; the learning was renamed to -pr2361.md with related_issues removed. Both declined: they follow the controller's rulings dispatch://INFRA-514/comment/6955275b-19f4-40eb-88d7-7c0ad7f302da (fragments use Issue=pr<pull request number> and never a Dispatch key) and dispatch://INFRA-523/comment/e475b2ed-3f13-4831-9e19-eb45edfb6f47 (learnings named -pr<number>.md, with no key in the front matter). dispatch://INFRA-472 tracks the AGENTS.md wording."
+  },
+  "threads": "All six threads are resolved and carry my accepting reply. This round adds no thread.",
   "keyFindings": []
 }
