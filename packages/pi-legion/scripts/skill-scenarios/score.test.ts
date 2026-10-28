@@ -1737,6 +1737,39 @@ specRun("spec-writing-head-58", {
     finish
   ),
 });
+// The same refusals printed after the call's exit code, as `print(r.returncode, r.stdout)` prints
+// them: an argument check's (exit 1) and a usage refusal's (exit 2). Neither is fixed.
+const askPython =
+  'import subprocess\nr = subprocess.run(["dispatch", "ask", "--issue", "LWEVAL-7", "--question", "Which name?"], capture_output=True, text=True)\nprint(r.returncode, r.stdout)';
+const askRefusal = "dispatch ask was not called: 1 problem\n- --question gives no recommendation";
+specRun("spec-writing-head-103", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish,
+    evalCell("x16", askPython, `1 ${askRefusal}\n`)
+  ),
+});
+specRun("spec-writing-head-104", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish,
+    evalCell(
+      "x17",
+      pythonCall.replace("print(r.stdout)", "print(r.returncode, r.stderr)"),
+      `2 ${noHost}`
+    )
+  ),
+});
 // A spec write made from Python as a list-literal call, its answer printed after the exit code.
 // The first write is checked; run 91 makes the same write with no check before it.
 const pythonWrite =
@@ -2668,6 +2701,17 @@ test("refusals: a refusal in an eval cell's output counts when the CLI logged no
   expect(row).toContain(`    ${noHost.trim()}`);
   expect(row).toContain("no later dispatch call succeeded");
   expect(scoresOf("spec-writing-head-58")).toEqual(allPass);
+});
+
+test("refusals: a refusal an eval cell prints after the call's exit code counts", () => {
+  expect(scoresOf("spec-writing-head-103")).toEqual({ ...allPass, refusals: "false" });
+  const argument = rowOf("spec-writing-head-103");
+  expect(argument).toContain("refused call: eval cell x16, which the CLI logged no call of");
+  expect(argument).toContain("    dispatch ask was not called: 1 problem");
+  expect(scoresOf("spec-writing-head-104")).toEqual({ ...allPass, refusals: "false" });
+  const usage = rowOf("spec-writing-head-104");
+  expect(usage).toContain("refused call: eval cell x17, which the CLI logged no call of");
+  expect(usage).toContain(`    ${noHost.trim()}`);
 });
 
 // Catches: a usage refusal the CLI prints and logs counted twice, once from the output and once from

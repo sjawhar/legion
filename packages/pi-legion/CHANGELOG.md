@@ -21,7 +21,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   list literal (`subprocess.run(["dispatch", "doc-edit", ...])`) as the command it runs, and the
   CLI's answer printed after the call's exit code. Such a spec write was invisible to `checked`:
   a run whose every write came from Python failed with "no spec write", and other runs had writes
-  left out, which made `checked` easier to pass.
+  left out, which made `checked` easier to pass. A refusal printed after the exit code
+  (`1 dispatch ask was not called: …`, `2 dispatch: DISPATCH_HOST is not set…`) is read too: it was
+  invisible to `refusals`, so a refused call never fixed could pass.
 - The skill-scenario scorer flags a run whose tool calls (its own or a subagent's) name an absolute
   path outside its work directory, its label's checkout and the system locations, such as the
   operator's home or another repository: nothing isolates an agent from the operator's files. The

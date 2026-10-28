@@ -925,6 +925,11 @@ const ANSWER: Readonly<Record<string, RegExp>> = {
   artifact: /^Uploaded \S+ as version \d+/,
   issue: /^Created [A-Z][A-Z0-9]*-[1-9]\d*: /,
 };
+/** The exit code an eval cell often prints before the CLI's line (`print(r.returncode, r.stdout)`):
+ * before an answer ("0 Applied 1 ops (version 2)") or a refusal ("1 dispatch ask was not called:
+ * …", "2 dispatch: DISPATCH_HOST is not set…"). The line is the CLI's with it taken off. */
+const EVAL_EXIT =
+  /^-?\d+ (?=(?:Applied|Uploaded|Created) |dispatch(?::| [a-z][a-z-]* was not called:))/gm;
 
 /** A `dispatch` command's flags, read from its text. */
 function shellCall(text: string, command: string): DispatchCall {
@@ -1102,13 +1107,7 @@ function operationsOf(step: Step, outcome: Outcome | undefined): Operation[] {
   }
   const text = outcome?.text ?? "";
   const output = text.replace(/\s*Command exited with code \d+\s*$/, "");
-  // An eval cell often prints `r.returncode, r.stdout`, so the CLI's answer follows the exit code
-  // on its line ("0 Applied 1 ops (version 2)"); read it as the answer it is.
-  const lines = output
-    .split("\n")
-    .map((line) =>
-      step.tool === "eval" ? line.replace(/^-?\d+ (?=(?:Applied|Uploaded|Created) )/, "") : line
-    );
+  const lines = (step.tool === "eval" ? output.replace(EVAL_EXIT, "") : output).split("\n");
   const failed =
     outcome?.failed === true && (step.tool !== "bash" || outcome.exit === 1 || outcome.exit === 2);
   const native = /^dispatch_([a-z_]+)$/.exec(step.tool)?.[1];
@@ -1442,13 +1441,15 @@ function refusalBlocks(
         )
       )
         return [];
-      return cliRefusals(results.get(call.step.id)?.text ?? "").map((found) => ({
-        where: `eval cell ${call.step.id}, which the CLI logged no call of`,
-        text: found.line,
-        call: call as Call | undefined,
-        op: undefined as number | undefined,
-        at: call.start,
-      }));
+      return cliRefusals((results.get(call.step.id)?.text ?? "").replace(EVAL_EXIT, "")).map(
+        (found) => ({
+          where: `eval cell ${call.step.id}, which the CLI logged no call of`,
+          text: found.line,
+          call: call as Call | undefined,
+          op: undefined as number | undefined,
+          at: call.start,
+        })
+      );
     }),
   ].sort((a, b) => a.at - b.at || (a.op ?? 0) - (b.op ?? 0));
 
