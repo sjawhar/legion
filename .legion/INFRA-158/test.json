@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-158",
+  "completed": "2026-10-28T10:40:00Z",
+  "round": 21,
+  "generation": 4,
+  "head": "1abb49baf88e",
+  "handoffHead": "5aab73398102",
+  "verdictProvider": "No subagent judged anything in this re-check; the tester's own session ran every check, so no provider or model needs naming.",
+  "recheck": "ec86df97ac82 → 1abb49baf88e. I compared the branch's diff against its fork point file by file, with docs/solutions and packages/claude-envoy/dist left out. Only these moved: the CHANGELOG.md files and 9 pr2233 changie fragments; prose in packages/envoy/AGENTS.md and cmd/dispatch/README.md; one comment line each in cmd/dispatch/main.go and store/pool.go (the issue key dropped); AgentName.tsx, where the branch's hunk now removes main #2363's doc-comment line, comment text only; and one blank line in EventBody.test.tsx. No code statement changed. The merge with main's #2363 was still driven on the real surface, as the architect asked.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "The implementer's per-file claim matches my comparison. The six CHANGELOG.md files equal main 460facf5's byte for byte. The diff against main adds no line and no path naming INFRA-158 outside .legion/, and 22 paths name pr2233 (9 fragments, 13 learnings)."
+  },
+  "failed": 0,
+  "failures": [],
+  "knownLimits": [
+    "A person's edit inside the edit-notice window before a close gets no notice: main's #2137 rule, ruled main's accepted behaviour (Envoy d37afb29).",
+    "In the deploy order, an original copy of a repeated paragraph left unmatched is dated to the reopen's version (architect's accepted limit, Envoy 3d1ba166)."
+  ],
+  "proof": [
+    {
+      "criterion": "Main's #2363 with this branch: a withdrawn ask's search hit shows it not answered and offers no answer, its line and card name the closer, and answered, resolved and retracted asks' hits read as on main",
+      "surface": "dispatch:local with the head's server and web app on a fresh Postgres 17 (port 5434); searchprobe.ts and linesprobe.ts in Chromium as alice; GET /api/v1/search?q=orrery",
+      "command": "SR-1 holds four plain asks (open; answered by alice choosing Brass; resolved; retracted); search 'orrery' before and after alice's PATCH close; open /issues/SR-1/conversation, /activity and /asks/<withdrawn id>",
+      "observed": "Before the close: Open; 'Answered alice · just now · Chose Brass Keep the brass one.'; 'Closed, no answer Resolved by session:tester-a…'; 'Closed, no answer Retracted by session:tester-a…'. After: the withdrawn hit reads 'Closed, no answer Withdrawn when alice closed the issue · just now', with 0 controls in the option, and the API gives state=resolved, kind=withdrawn, actor alice, no answer. The other three hits are unchanged. The conversation and ask pages show 'Withdrawn … Withdrawn when alice closed the issue' with no answer control, and the activity line reads 'Withdrawn when alice closed the issue'.",
+      "headSha": "1abb49baf88e",
+      "negativeControl": "Before the close, the same ask's hit reads 'Open'. The resolved and retracted hits name their own resolvers, so the line is not one fixed text."
+    },
+    {
+      "criterion": "The branch's and #2363's browser specs at the merged head",
+      "surface": "Dispatch's Playwright harness through main's bun e2e/run.ts, chromium and iphone (iphone runs only @phone tests since main's #2313)",
+      "command": "bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts close-withdraws-asks offline-edits search agents-search --project chromium --project iphone",
+      "observed": "26 passed, 1 skipped, 0 failed (2.0 minutes)",
+      "headSha": "1abb49baf88e",
+      "negativeControl": "Round 9: the web apps without the fix failed the review's reconnect path 2 of 2"
+    }
+  ],
+  "ci": "At 1abb49ba: Tests 40670982729, Docs 40670982731, Worker Image 40670982748 and Legion Envoy and Contracts 40670982769 are queued.",
+  "evidenceComments": [
+    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6466631631"
+  ]
+}
