@@ -2,24 +2,24 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-581",
-  "completed": "2026-10-28T18:45:12Z",
+  "completed": "2026-10-28T19:13:44Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2403",
   "proof": [
     {
-      "criterion": "Review 5685122469: Go no longer accepts, with a list-item spread the browser reads otherwise, the two shapes main refused (quoted item ending in a footnote definition whose typed block holds an unclosed fence before blank lines; footnote definition in a typed block with a list item around it)",
-      "surface": "pmdoc.ParseForWrite, the API's document write path, driven by the reviewer pair's probe harness (/legion/scratch/tmp/rv581r2) rebuilt from this workspace",
-      "command": "go test -c -overlay /legion/scratch/tmp/infra581/probe/overlay.json then /legion/scratch/tmp/infra581/r6/exp.sh broad (all 20 reviewer sets, 137,187 inputs, plus generated family probes of 14,927 inputs) and bun regmain.ts",
-      "observed": "inputs main refused and head accepts with another reading: 0 for both shapes (l4: 6 refused, 6 accepted and equal; l6: 0 accepted mismatches; generated families: 0, from 85 + 18 at 5ea2cdfb); 2 unique documents remain, differing only in an indented code block's trailing whitespace line, which main misreads with no typed block; the 192 inputs 799b379f accepted that are now refused were all refused at main",
-      "headSha": "c54bf052c3e078c431b9f8d21813c1c51b1d43f0",
-      "negativeControl": "At 799b379f the reviewer's two inputs (`Text[^f].\\n\\n- x\\n  :::callout{kind=\"note\" title=\"T\"}\\n  [^f]:\\n      note\\n  :::\\n` and `> - [^f]: :::callout{}\\n>       ```\\n>\\n>\\n`) are accepted; at head both are refused naming the spacing the browser reads otherwise"
+      "criterion": "Tester round fail (46396a19) and architect's direction: a footnote definition inside a typed block is refused unless it holds paragraphs alone; the round-1 paragraph case stays stored",
+      "surface": "the API's document write against the real Go Dispatch server and Postgres 17 (e2e harness, implementer lane)",
+      "command": "a throwaway Playwright row (removed after the run) through `bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts <row> --project=chromium` calling createIssueArtifact",
+      "observed": "`:::callout{}\\n[^f]: - a\\n\\n    - b\\n:::\\n\\nText[^f].\\n` -> 400 INVALID_MARKDOWN 'a footnote definition inside a typed block holding a block other than a paragraph, whose spacing the browser editor reads otherwise'; `Ref[^1].\\n\\n:::callout{#c1 kind=\"note\" title=\"T\"}\\n[^1]: x\\n:::\\n` and a two-paragraph definition in a callout -> accepted",
+      "headSha": "fef578d632635407df87357dea13e18f99cd9264",
+      "negativeControl": "At c54bf052 the tester's write of the same list-in-definition body was accepted and stored with the writer's blank line dropped (test.json), and TestAListInADefinitionInATypedBlockIsReadSpreadAsTheBrowserReadsItOrRefused fails there"
     },
     {
-      "criterion": "The corpus holds the shapes, with no regression and no stored version changing its reading",
-      "surface": "pmdoc's corpus-errors contract and the stored-document differential",
-      "command": "cd packages/envoy && go test -p 1 -count=1 -skip Linear ./internal/dispatch/pmdoc/ (then docs, api separately); bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base main; cd pmdoc/gen && bun run check",
-      "observed": "pmdoc, docs, api ok; TestCorpusErrorsOfItemSpreadReadOtherwiseAreRefused refuses all 23 new corpus-errors files in every caller-markdown reader; TestParseReadsAFootnoteDefinitionInsideATypedBlockAsTheBrowserDoes passes unchanged; differential every gate 0, PASS (head 100/100, main 91); fixtures up to date; stored versions holding either shape: 0 of 31,160 (round-4 census found no footnote definition inside a ::: block)",
-      "headSha": "c54bf052c3e078c431b9f8d21813c1c51b1d43f0",
-      "negativeControl": "The 23 corpus-errors files are accepted by ParseForWrite at 799b379f (previous workers' stash runs: 36 + 33 test errors with the refusals removed)"
+      "criterion": "No newly accepted misread of a footnote definition in a typed block; no regression against main; no stored version changes its reading",
+      "surface": "pmdoc.ParseForWrite over the reviewer pair's probe sets and generated families; the stored-document differential",
+      "command": "/legion/scratch/tmp/infra581/r6/exp.sh para; bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base main; cd packages/envoy && go test -p 1 -count=1 -skip Linear ./internal/dispatch/pmdoc/ (then docs, api)",
+      "observed": "137,187 + 14,927 inputs: main-refused and head-accepted-mismatched inputs with a footnote definition in a typed block: 0 (2 unique documents left are main's whitespace-only code-block shapes); 259 inputs 799b379f accepted are now refused, all refused at main; differential every gate 0, PASS; pmdoc, docs, api ok; stored versions holding a footnote definition in a ::: block: 0 of 31,160",
+      "headSha": "fef578d632635407df87357dea13e18f99cd9264",
+      "negativeControl": "The tester's red test's three inputs are accepted with the first list item stored tight at c54bf052 and refused at head"
     }
   ],
   "filesChanged": [
@@ -39,7 +39,8 @@
     "round 2: packages/envoy/internal/dispatch/pmdoc/refusals.go, parse_test.go, packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md; merge 1075e8a3 resolving packages/proof-editor/AGENTS.md and packages/envoy/CHANGELOG.md",
     "round 3: merge 8c392590 resolving packages/envoy/CHANGELOG.md (both sides kept)",
     "round 4: proof-editor directive-container.ts, new directive-factories.ts, AGENTS.md; pmdoc code_text.go, list_spacing.go, source_lines.go, fixtures_test.go, 11 corpus files, fixtures.json; dispatch e2e nested-directive.e2e.ts; packages/envoy/.changes/unreleased/pr2403-*.yaml (CHANGELOG.md restored to main); merges 67fe5f9e and 799b379f",
-    "round 5: pmdoc list_spacing.go, refusals.go, list_spacing_test.go, 23 corpus-errors files; packages/envoy/AGENTS.md; changelog fragment pr2403-Fixed-20261028-133501.yaml"
+    "round 5: pmdoc list_spacing.go, refusals.go, list_spacing_test.go, 23 corpus-errors files; packages/envoy/AGENTS.md; changelog fragment pr2403-Fixed-20261028-133501.yaml",
+    "round 6: pmdoc refusals.go; packages/envoy/AGENTS.md; changelog fragment pr2403-Fixed-20261028-133501.yaml"
   ],
   "trickyParts": [
     "The construct keeps the old flow construct's reading through a resolveAll on the document construct: it rewrites the lineEndingBlank after each fence to lineEnding in each child flow's events before subtokenize, and moves container exit events so trailing blank lines and lazy lines attach as they did; a lazyContentEnd construct registered under the null code ends a block on a line that does not reach it, as the old sub-document did.",
@@ -57,7 +58,8 @@
     "Round 4: Go's spread for a typed block holding a blank line in a list item keeps the documented goldmark-looseness policy (architect agreed); stored latest versions holding it: 0.",
     "Round 4: main's playwright config runs only @phone-tagged rows on the iphone project, so the nested-directive rows run on chromium only.",
     "Round 4: the browser engine half of the census ran on the 3,679 versions that can open a `:::name` block; a sample of skipped versions showed no difference.",
-    "Round 5: refused every footnote definition in a typed block with a list item around it (main's refusal, minus top-level typed blocks) instead of narrower predicates, which still left 103 mismatches in generated family probes; 192 inputs 799b379f accepted are refused again, all refused at main."
+    "Round 5: refused every footnote definition in a typed block with a list item around it (main's refusal, minus top-level typed blocks) instead of narrower predicates, which still left 103 mismatches in generated family probes; 192 inputs 799b379f accepted are refused again, all refused at main.",
+    "Round 6: the architect's paragraph-only rule sits beside the list-item rule from round 5 (both refuse); 2 main whitespace-only code-block shapes left alone, as directed (own child issue)."
   ],
   "openQuestions": []
 }
