@@ -422,10 +422,10 @@ run_check "$root"
 check "a call-mode gate does not excuse a caller's narrow push" "$(is "$status" 1)"
 check "  which is named" "$(contains "$out" 'release.yaml on.push.paths (jobs.build) does not cover')"
 
-root=$(fixture call-mode-case-and-not-equal)
-call_modes "$root" "if: \"!cancelled() && Inputs.MODE != 'Attest'\"" ""
+root=$(fixture call-mode-case)
+call_modes "$root" "if: \"!cancelled() && Inputs.MODE == ''\"" ""
 run_check "$root"
-check "!= and any letter case read the same, as GitHub compares" "$(is "$status" 0)"
+check "any letter case reads the same, as GitHub compares" "$(is "$status" 0)"
 
 # worker-image.yaml's build job: the call mode beside the closed and draft event terms. The draft
 # term still needs every pull request trigger that runs the build to list ready_for_review.
@@ -441,21 +441,51 @@ run_check "$root"
 check "  and without ready_for_review the draft term is refused as before" "$(is "$status" 1)"
 check "  naming the trigger" "$(contains "$out" 'image.yaml on.pull_request, which runs it, does not list ready_for_review')"
 
-# The input is unset - compared as '' - on the called workflow's own pull_request and on the
-# call that leaves it out, so a term false for '' would skip the build on both.
+# An input left out is "" on a call (its default) and null on the called workflow's own
+# pull_request, which GitHub compares equal to '', so only `== ''` holds on both; every other
+# comparison is refused.
 root=$(fixture call-mode-equals-non-empty)
 call_modes "$root" "if: inputs.mode == 'attest'" ""
 run_check "$root"
-check "inputs.mode == 'attest', false while mode is unset, is refused" "$(is "$status" 1)"
+check "inputs.mode == 'attest', false while mode is left out, is refused" "$(is "$status" 1)"
 check "  and quotes the term" "$(contains "$out" "jobs.docker builds or calls an image, and its if: is narrowed by \`inputs.mode == 'attest'\`")"
-check "  and says why" "$(contains "$out" "\`inputs.mode == 'attest'\` is false while the input is unset, which GitHub compares as '', so it would skip the build on the workflow's own path triggers and on every call that leaves the input unset")"
+check "  and says what is admitted" "$(contains "$out" "an \`inputs.<name> == ''\` comparison is admitted only in a job's if:, on a \`type: string\` input the workflow's \`on.workflow_call.inputs\` declares with no default or \`default: \"\"\`")"
 
 root=$(fixture call-mode-not-equals-empty)
 call_modes "$root" "if: inputs.mode != ''" ""
 run_check "$root"
-check "inputs.mode != '', false while mode is unset, is refused" "$(is "$status" 1)"
+check "inputs.mode != '', false while mode is left out, is refused" "$(is "$status" 1)"
 check "  and quotes the term" "$(contains "$out" "jobs.docker builds or calls an image, and its if: is narrowed by \`inputs.mode != ''\`")"
-check "  and says why" "$(contains "$out" "\`inputs.mode != ''\` is false while the input is unset")"
+
+root=$(fixture call-mode-not-equal)
+call_modes "$root" "if: \"!cancelled() && Inputs.MODE != 'Attest'\"" ""
+run_check "$root"
+check "Inputs.MODE != 'Attest' is refused: != admits nothing" "$(is "$status" 1)"
+check "  and quotes the term" "$(contains "$out" "jobs.docker builds or calls an image, and its if: is narrowed by \`Inputs.MODE != 'Attest'\`")"
+
+# Null coerces to 0 against a numeric-looking literal, so this is false on the own pull_request.
+root=$(fixture call-mode-not-equals-zero)
+call_modes "$root" "if: inputs.mode != '0'" ""
+run_check "$root"
+check "inputs.mode != '0' is refused" "$(is "$status" 1)"
+check "  and quotes the term" "$(contains "$out" "jobs.docker builds or calls an image, and its if: is narrowed by \`inputs.mode != '0'\`")"
+
+# A call that leaves the input out gets its default, so == '' is false on it.
+root=$(fixture call-mode-non-empty-default)
+call_modes "$root" "if: inputs.mode == ''" ""
+sed -i 's|^        default: ""$|        default: "build"|' "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "inputs.mode == '' on an input with default: \"build\" is refused" "$(is "$status" 1)"
+check "  and quotes the term" "$(contains "$out" "jobs.docker builds or calls an image, and its if: is narrowed by \`inputs.mode == ''\`")"
+
+# A boolean input's default is never ''.
+root=$(fixture call-mode-boolean)
+call_modes "$root" "if: inputs.mode == ''" ""
+sed -i -e 's|^        type: string$|        type: boolean|' -e 's|^        default: ""$|        default: false|' \
+  "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "inputs.mode == '' on a type: boolean input is refused" "$(is "$status" 1)"
+check "  and quotes the term" "$(contains "$out" "jobs.docker builds or calls an image, and its if: is narrowed by \`inputs.mode == ''\`")"
 
 # '''' is GitHub's escaped quote: a one-quote literal, not the empty one.
 root=$(fixture call-mode-escaped-quote)
@@ -465,7 +495,8 @@ check "inputs.mode == '''' (one quote, not empty) is refused" "$(is "$status" 1)
 root=$(fixture call-mode-not-escaped-quote)
 call_modes "$root" "if: inputs.mode != ''''" ""
 run_check "$root"
-check "inputs.mode != '''' (one quote, so true while unset) passes" "$(is "$status" 0)"
+check "inputs.mode != '''' is refused" "$(is "$status" 1)"
+check "  and quotes the term" "$(contains "$out" "jobs.docker builds or calls an image, and its if: is narrowed by \`inputs.mode != ''''\`")"
 
 echo "case: an inputs. term is refused where it is no call mode of the job's own workflow"
 # A caller's own if: in a workflow with no workflow_call: there `inputs.` is whatever its
@@ -475,7 +506,7 @@ call_modes "$root" "if: inputs.mode == ''" "if: inputs.mode == ''"
 run_check "$root"
 check "inputs.mode == '' in a caller's own job if: is refused" "$(is "$status" 1)"
 check "  and quotes the term" "$(contains "$out" "jobs.build builds or calls an image, and its if: is narrowed by \`inputs.mode == ''\`")"
-check "  and says where it is admitted" "$(contains "$out" "admitted only in a job's if:, in a workflow whose on.workflow_call.inputs declares <name>")"
+check "  and says where it is admitted" "$(contains "$out" "admitted only in a job's if:, on a \`type: string\` input the workflow's \`on.workflow_call.inputs\` declares with no default or \`default: \"\"\`")"
 
 # A workflow_dispatch input of that name is not a workflow_call one.
 root=$(fixture call-mode-in-caller-dispatch-input)

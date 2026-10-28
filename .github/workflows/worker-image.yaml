@@ -120,7 +120,10 @@ on:
 # off for those events, so a running main, workflow_call or workflow_dispatch build is never
 # cancelled, and none of those runs cancels a pull request's build. GitHub may still replace a
 # pending run with a newer one at the same sha, which builds the same image, so a dropped pending
-# main run never leaves a commit with no image to pin (why: this PR's description). Under
+# main run never leaves a commit with no image to pin (why: this PR's description), except that a
+# further run at that sha (a manual `gh workflow run worker-image.yaml` at main's sha) replacing
+# release.yaml's pending attest-only call leaves the digest worker_image_release names
+# unattested, which the consumers' verify refuses: that fails closed. Under
 # workflow_call the github context is the caller's (release.yaml, on push or workflow_dispatch),
 # so a release run keys worker-image-<sha>, apart from release.yaml's own
 # `release-${{ github.ref }}` group. Both of a release run's calls key that group, and neither

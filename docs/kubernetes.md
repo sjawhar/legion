@@ -453,7 +453,7 @@ Where the digest is published:
 Worker-image tags: `sha-<12 hex of the built commit>` on every run that builds (on a pull request that is the
 PR head, never the ephemeral merge commit); `<legion version>` only on `main` when the `publish`
 job released that version in the same run, added after it by `release.yaml`'s `worker_image_release`
-job on the digest that run's `sha-` tag names. Runs from any other ref publish the `sha-` worker-image tag
+job on the digest that run's `worker_image` pushed. Runs from any other ref publish the `sha-` worker-image tag
 only and never touch a release. The package also currently holds `sha256-<image digest hex>` OCI
 referrer indexes from earlier proof runs; each holds an attestation, not a worker image, so
 inspecting one does not print a worker-image digest.
@@ -551,9 +551,10 @@ or by pushing the branch again. In a `release.yaml` run, `--failed` keeps the bu
 and a failed `publish` reruns whole, each step safe to repeat: npm reuses a published version, the tag step
 accepts its own tag, the push to `main` pushes nothing once `main` holds that version, and the release step
 reuses a published release. A whole-run rerun of `release.yaml`, or a `workflow_dispatch` of it while main's
-tip still carries a `legion-v` tag, re-executes `legion_build`, which releases that tag again: the image is
-rebuilt, the `<legion version>` tag moves to the rebuild's digest, and the release body's "Worker image" names
-that digest. `release-envoy-listener.yaml` needs no re-run when its `release_publish` finds, at "Confirm the
+tip still carries a `legion-v` tag, re-executes `legion_build`, which decides the same version (it holds no
+credential), and `publish` releases that tag again, each step safe to repeat: the image is rebuilt,
+`worker_image_release` moves the `<legion version>` tag to the rebuild's digest, and the release body's
+"Worker image" names that digest. `release-envoy-listener.yaml` needs no re-run when its `release_publish` finds, at "Confirm the
 version", that another run took the tag first: it publishes nothing and, when its commit still needs a release
 and no later run on main still running holds it, starts a new run on main itself, which decides the version again
 and re-stamps the binaries.

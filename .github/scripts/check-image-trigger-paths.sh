@@ -26,22 +26,24 @@
 #     check does too. Two event terms are admitted beside those, `github.event.action !=
 #     'closed'` and `!github.event.pull_request.draft`, the draft term only while every
 #     pull request trigger that runs its holder lists `ready_for_review`; the comment above
-#     NEUTRAL says why. One more such term is a CALL MODE, in a job's `if:`, in a workflow
-#     whose own `on.workflow_call.inputs` declares <name>: `inputs.<name> == ''`, or
-#     `inputs.<name> != '<literal>'` for a non-empty literal - a term TRUE while the input is
-#     unset, which GitHub compares as ''. worker-image.yaml's build job runs only on
-#     `inputs.attest_digest == ''` (beside the two event terms), so release.yaml's
-#     attest-only call, which sets attest_digest, skips it. The caller picks that value, not
-#     the change: a run the workflow's own path triggers start leaves the input unset, so the
-#     term holds and the build runs, and every caller's triggers and gates are
-#     traced below as triggers of this workflow anyway. `== '<non-empty>'` and `!= ''` are
-#     refused: false while the input is unset, they would skip the build on the workflow's own
-#     path triggers and on every call that leaves the input unset. The one gap: this check
-#     does not read a caller's `with:`, so a caller passing a path-derived value (a
-#     paths-filter output, say) into such an input would narrow by path unseen. No caller does
-#     that today, and review holds it. Everywhere else an `inputs.` term is refused: in a
-#     step's `if:`, in a workflow without `workflow_call` or whose `workflow_call` does not
-#     declare that input, and in any shape but a plain comparison with a literal.
+#     NEUTRAL says why. One more such term is a CALL MODE, in a job's `if:`: `inputs.<name> ==
+#     ''`, exactly the empty literal, on a <name> the workflow's own `on.workflow_call.inputs`
+#     declares `type: string` with no `default` or `default: ""`. It holds on every run whose
+#     starter leaves the input out: a call that omits it gets its default, "", and on the
+#     workflow's own `pull_request` or `workflow_dispatch` run it is null, which GitHub
+#     compares equal to '' (both coerce to 0), so the build runs. worker-image.yaml's build
+#     job runs only on `inputs.attest_digest == ''` (beside the two event terms), so
+#     release.yaml's attest-only call, which sets attest_digest, skips it. The caller picks
+#     that value, not the change, and every caller's triggers and gates are traced below as
+#     triggers of this workflow anyway. Every other comparison is refused, since each is false
+#     on some run that leaves the input out and so skips the build there: `== ''` on a
+#     non-empty default (or a boolean or number input, whose default is never ''), `!=` the
+#     declared default, `!= '0'` (null coerces to 0), `== '<non-empty>'` and `!= ''`. The one
+#     gap: this check does not read a caller's `with:`, so a caller passing a path-derived
+#     value (a paths-filter output, say) into such an input would narrow by path unseen. No
+#     caller does that today, and review holds it. Everywhere else an `inputs.` term is
+#     refused: in a step's `if:`, in a workflow without `workflow_call` or whose
+#     `workflow_call` does not declare that input as such a string, and in any shape but `== ''`.
 #   * A build in a `run:` step is DETECTED, and EVERY detection is refused - there is no
 #     pattern that can excuse one. The detector judges ONE COMMAND at a time and is drawn
 #     broad: a container-CLI word followed later on the command by `build`, `bake` or `b`, the
@@ -143,40 +145,37 @@ DRAFT = re.compile(r"!\s*github\.event\.pull_request\.draft", re.I)
 # The activity types a `pull_request` or `pull_request_target` trigger without `types` runs on.
 DEFAULT_PULL_REQUEST_TYPES = ("opened", "synchronize", "reopened")
 RESULT_TERM = re.compile(r"needs\.([\w-]+)\.result\s*(==|!=)\s*'([A-Za-z_]+)'", re.I)
-# A CALL MODE (the GATES paragraph above): a `workflow_call` input compared with a literal, in
-# which `''` is GitHub's escaped quote, so `''''` is the one-quote string, not the empty one.
-# Neutral only for the input names gate_outputs is handed, which are the ones the job's own
-# workflow declares under `on.workflow_call.inputs`, and only when true_unset holds.
-CALL_MODE = re.compile(r"inputs\.([\w-]+)\s*(==|!=)\s*'((?:[^']|'')*)'", re.I)
+# A CALL MODE (the GATES paragraph above): `inputs.<name> == ''`, exactly the empty literal, so
+# `== ''''` (GitHub's escaped quote, the one-quote string) is not one. Neutral only for the input
+# names gate_outputs is handed, the ones call_inputs returns for the job's own workflow.
+CALL_MODE = re.compile(r"inputs\.([\w-]+)\s*==\s*''", re.I)
 INPUTS_TERM = re.compile(r"(?<![\w.])inputs\.", re.I)
 
 
 def call_inputs(document: dict) -> frozenset[str]:
-    """The input names the workflow's own `on.workflow_call` declares, lowercased since GitHub
-    reads names case-insensitively: the only inputs a job-level CALL_MODE term may test."""
+    """The input names a job-level CALL_MODE term may test, lowercased since GitHub reads names
+    case-insensitively: those the workflow's own `on.workflow_call.inputs` declares `type:
+    string` with no `default` or `default: ""`. Only such an input is "" on a call that omits
+    it and null, which GitHub compares equal to '', on the workflow's own triggers."""
     call = events(document).get("workflow_call")
     declared = call.get("inputs") if isinstance(call, dict) else None
     if not isinstance(declared, dict):
         return frozenset()
-    return frozenset(str(name).lower() for name in declared)
-
-
-def true_unset(mode: re.Match) -> bool:
-    """True for a CALL_MODE match that holds while its input is unset, which GitHub compares as
-    '': `== ''`, or `!=` a non-empty literal. Any other is false on the workflow's own path
-    triggers and on every call that leaves the input unset, so it skips the build there."""
-    _, operator, literal = mode.groups()
-    return (literal == "") == (operator == "==")
+    return frozenset(
+        str(name).lower()
+        for name, spec in declared.items()
+        if isinstance(spec, dict) and spec.get("type") == "string" and spec.get("default", "") == ""
+    )
 
 
 def neutral(term: str, modes: frozenset[str]) -> bool:
     """True for an `if:` term that cannot narrow which CHANGES reach a job: a NEUTRAL term, or
-    a CALL_MODE comparison on one of `modes` that is true while the input is unset."""
+    a CALL_MODE comparison on one of `modes`."""
     term = unwrap(term).strip()
     if NEUTRAL.fullmatch(term):
         return True
     mode = CALL_MODE.fullmatch(term)
-    return bool(mode) and mode.group(1).lower() in modes and true_unset(mode)
+    return bool(mode) and mode.group(1).lower() in modes
 
 
 def admits_skipped(term: str) -> bool:
@@ -730,10 +729,10 @@ def gate_outputs(condition: str, modes: frozenset[str]) -> list[tuple[str, str]]
     other `||` terms there only widen, so they are allowed), or made entirely of terms that do
     not narrow by path — `always()`, `success()`, `!cancelled()`, `needs.<job>.result`, the two
     event terms `!github.event.pull_request.draft` and `github.event.action != 'closed'`, and a
-    CALL_MODE comparison on one of `modes` that is true while the input is unset — or it is
-    refused, quoting the term. gating_filters admits the draft term only under triggers that
-    list `ready_for_review`; the comment above NEUTRAL says why. `modes` is empty unless the
-    `if:` is a job's, in a workflow that declares those `workflow_call` inputs."""
+    CALL_MODE comparison on one of `modes` — or it is refused, quoting the term.
+    gating_filters admits the draft term only under triggers that list `ready_for_review`; the
+    comment above NEUTRAL says why. `modes` is empty unless the `if:` is a job's, in a workflow
+    whose `workflow_call` declares inputs call_inputs returns."""
     if not condition.strip():
         return []
     conjuncts = [unwrap(part) for part in split_top(unwrap(condition), "&&")]
@@ -743,24 +742,11 @@ def gate_outputs(condition: str, modes: frozenset[str]) -> list[tuple[str, str]]
             continue
         if all(neutral(term, modes) for term in split_top(part, "||")):
             continue
-        modes_false_unset = [
-            mode
-            for term in split_top(part, "||")
-            for mode in [CALL_MODE.fullmatch(unwrap(term).strip())]
-            if mode and mode.group(1).lower() in modes and not true_unset(mode)
-        ]
-        if modes_false_unset:
+        if INPUTS_TERM.search(part):
             hint = (
-                f"; `{' '.join(modes_false_unset[0].group(0).split())}` is false while the input "
-                f"is unset, which GitHub compares as '', so it would skip the build on the "
-                f"workflow's own path triggers and on every call that leaves the input unset: "
-                f"test `inputs.<name> == ''`, or `!=` a non-empty literal"
-            )
-        elif INPUTS_TERM.search(part):
-            hint = (
-                "; an `inputs.<name> == ''` or `inputs.<name> != '<non-empty literal>'` "
-                "comparison is admitted only in a job's if:, in a workflow whose "
-                "on.workflow_call.inputs declares <name>"
+                "; an `inputs.<name> == ''` comparison is admitted only in a job's if:, on a "
+                "`type: string` input the workflow's `on.workflow_call.inputs` declares with no "
+                'default or `default: ""`'
             )
         else:
             hint = ""
