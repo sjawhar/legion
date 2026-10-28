@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-653",
+  "completed": "2026-10-28T18:24:30Z",
+  "decision": "approved",
+  "round": 1,
+  "reviewedCodeHead": "f6b53858836912f62cc4afda0813a90be6e19ce2",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "ci": "Required set (rulesets: lint, typecheck, test, pr-title; no branch protection) all completed/success at CI head f6b53858; compare f6b53858...950feecc handoffsOnly true (2 files). Non-required `dispatch` job failed on mermaid.e2e.ts:194 (INFRA-713) and recipients-claim.e2e.ts:310; the same three failures appear on unrelated PRs' runs 40718679507 (INFRA-607), 40716033788 (INFRA-531), 40704919982 (INFRA-643).",
+  "thermonuclear": "deep-review: no findings (base c44c1469 pmdoc vs head in one binary: 3,303 mutated corpus documents, 0 differences in RenderWithBlockOffsets/RefuseMisreadDocument/NewMisread; 3 min base-vs-head fuzz ~95k execs; FuzzReadBackSkips 2 min ~378k execs; -race concurrent Render/misread on shared docs clean). code-quality: no behaviour finding; four cleanup items carried as the one fast-follow.",
+  "keyFindings": [
+    {"severity": "cleanup", "file": "packages/envoy/internal/dispatch/pmdoc/render.go", "description": "Anchor-strip and run-merge now exist twice (childrenAsWritten and find.go StripAnchorMarks); a separate nulsWritten walk after writtenTree would let StripAnchorMarks be cloneNode(writtenTree(node,false)). Fast-follow."},
+    {"severity": "cleanup", "file": "packages/envoy/internal/dispatch/pmdoc/render_inline.go", "description": "readsBackUnder binds each skip to readBackReaders[1]/[2] by index; naming the readers would keep a reorder from moving a skip silently. Fast-follow."},
+    {"severity": "cleanup", "file": "packages/envoy/internal/dispatch/pmdoc/marks.go", "description": "visibleMarks inlines a SortFunc comparator beside sortMarks' sort.Slice over the same markLess. Fast-follow."},
+    {"severity": "cleanup", "file": "packages/envoy/internal/dispatch/pmdoc/render_inline.go", "description": "holdsTilde's label check cannot fire: every label is written into the source by escapeFootnoteLabel, which keeps `~`. Fast-follow."}
+  ]
+}
