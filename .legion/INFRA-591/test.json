@@ -2,59 +2,21 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-591",
-  "completed": "2026-10-28T15:52:24Z",
-  "headTested": "6adb22b48f0aa2aae2f08d77e375cc4e180a20cc (code 1adb786e0343, a forward merge of main 25ef8cd2 plus the horizon pool in store.ConnectionsPerProcess and dispatchConnectionsPerPod 86 -> 88; 6adb22b4 adds only .legion/)",
-  "rebaseCheck": "The fingerprint changed: the merge brought main 25ef8cd2 (server registry, rolling rolls) and changed pool.go, infra/gcp/dispatch.go, infra/README.md and the fragment. So this was a full round, at the merged code against main 25ef8cd2.",
+  "completed": "2026-10-28T16:31:32Z",
+  "headTested": "2fa32e09165026bb6586bf5f3e2e00f50aab8fa2 (code 84299bf5af3b; 2fa32e09 adds only .legion/)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently at 1adb786e, with main 25ef8cd2 built the same way as the negative control, on a Postgres 16.2 and a NATS of the tester's own, with a shared DISPATCH_SIGNING_KEY, which main's registry now requires of two processes. Covered: its out-of-order steps, its newly-started-process steps, its lock check and its failing-observation case. The budget change: a process under 150 concurrent clients peaked at 73 Postgres backends, one of them the horizon's, against 72 and none on main; both are under 88. Three alternating 1x load pairs: the median comment write went from 13.4 s to 0.47 s and committed from 3.98 to 3.99 events/s. One run in three tipped into a queue on each side. The pair a single run showed (after7 3.86, 86% answered 2xx, against before7 3.99) was not borne out."
+    "how": "84299bf5 changes only docs/site/src/content/docs/dispatch/running-dispatch.md. I read its new count against store/pool.go:167-314 at the head: 64 requests + 12 periodic work + 4 documents + 1 health + 1 outbox + 2 event horizon = 84, plus 4 held open (3 permanent listeners + 1 registry) = 88 = ConnectionsPerProcess = infra/gcp dispatchConnectionsPerPod. That is the review's finding, fixed. The code is unchanged since round 7 (1adb786e), whose real-surface proof stands for it."
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "The global serialization is gone: a write holds no lock shared with writes to other issues.",
-      "surface": "Local Dispatch built from the head's code, through the REST API; INFRA-589's harness with its 1 s lock sampler",
-      "command": "adv.py lock; run-step.sh tester7-{after7,a2,a3}-1x --events 4 --sessions 400 --requests 60",
-      "observed": "POST on a third issue: 201 in 15 ms while the old lock was held and another issue's write was open. Commit-order lock held 0% in all three 1x after runs. The waits sampled were on an issue's own row, tuple locks on issues, and the NOTIFY commit lock (1%).",
-      "headSha": "1adb786e0343658dd682332fda284d1df51459d4",
-      "negativeControl": "Main 25ef8cd2: no answer within 8 s. Lock held 70%, 100% and 100% in its three 1x runs, with up to 55 writers waiting."
-    },
-    {
-      "criterion": "A reader resuming from a cursor never misses an event that commits later with a lower id; a test commits two writes out of id order and a resuming reader gets both in a defined order.",
-      "surface": "GET /api/v1/events (SSE) cold and with Last-Event-ID, on one and two registered processes; newly started processes with the horizon held or failing; an event log reset",
-      "command": "adv.py ooo commit|rollback; adv.py concurrent; STREAM_PORT=17778 adv.py concurrent; adv.py reset; adv.py fresh resume|cold; adv.py shutdown <pid>; adv.py dialfail <log>; adv.py churn 12; adv.py stall; adv.py lastid",
-      "observed": "123 open and 124 committed: nothing was sent, then 123 and 124 after the commit, and a resume sent the same; on rollback only 126, 31 ms after. Concurrency: 3 streams and a mid-run resume each got exactly the 92 committed ids in order, on one process and across two. Reset: the stream was ended and a resume went on with the new log. Newly started process with a foreign id held: a resuming stream opened in 17 ms and got the held-back event 16 ms after the commit; SIGTERM exited in 0.05 s. Every slot taken: the stream ended at 10.2 s with the failure logged, and the process recovered. Overlapping 2 s holders delayed frames 1.5 to 2.2 s. 0 SSE order violations in all six 1x runs.",
-      "headSha": "1adb786e0343658dd682332fda284d1df51459d4",
-      "negativeControl": "Main 25ef8cd2: 124 was sent at once and never 123. Each concurrency stream missed 10 committed ids, and the resume missed 7."
-    },
-    {
-      "criterion": "Every consumer of the event stream keeps the order it relies on; the plan lists each and the test covers each.",
-      "surface": "SSE and relay (above), GET /api/v1/references?since=, the outbox's per-issue NATS subject",
-      "command": "adv.py refs_quiet (newly started process); adv.py refs_open; adv.py nats",
-      "observed": "References: the first since read on a quiet process listed the mention in 47 ms. With a foreign id held, or a lower id open, a read answered in about 1 s without the newer mention and listed it afterwards. NATS: 30 concurrent comments on TSB-51 reached its subject in seq order, equal to the database. The delivery hub has no reachable surface here, so it rests on CI's Go lanes.",
-      "headSha": "1adb786e0343658dd682332fda284d1df51459d4",
-      "negativeControl": "Main 4e55b2e0, rounds 4 and 5, same driver: the since read listed the mention above the open lower id."
-    },
-    {
-      "criterion": "Before and after on the committed load reproduction at tonight's step and twice it: lock hold samples, committed vs offered, write latency p50/p99, delivery latency from the write's arrival.",
-      "surface": "INFRA-589's committed harness (#2369 at bdc451d3), seeded with main 4e55b2e0, migrated forward at each step; one 2-vCPU pod",
-      "command": "LOADTEST_SRC=<before7|after7> run-step.sh tester7-{before7,after7,a2,b2,a3,b3}-1x --events 4 --sessions 400 --requests 60, alternating (TABLES-r7-*.md in dispatch://INFRA-591/artifact/infra591-tester-evidence-tar-gz v6)",
-      "observed": "Before, three runs: committed 3.99, 2.98 and 3.98 of 3.99; comment p50 0.42, 23.1 and 13.4 s; NATS delivery from arrival p50 1.6, 23.1 and 14.7 s; 2xx 100%, 76% and 100%; lock held 70%, 100% and 100%. After, three runs: committed 3.86, 3.99 and 3.99; comment p50 5.0, 0.18 and 0.47 s; NATS delivery p50 9.0, 0.86 and 1.06 s; 2xx 86%, 100% and 100%; lock held 0% each time. The SSE frame after the write's response (after, runs 2 and 3) was 0.46 and 0.57 s, against before-run-1's 14 ms, which is the accepted live-reader cost. 0 SSE order violations.",
-      "headSha": "1adb786e0343658dd682332fda284d1df51459d4",
-      "negativeControl": "Main tips into the lock queue at 1x in two of its three runs: lock held 100% with 46 to 47 writers waiting."
-    },
-    {
-      "criterion": "Connection budget (review round 3): one server process opens at most store.ConnectionsPerProcess connections, which now counts the horizon pool, and infra/gcp's dispatchConnectionsPerPod equals it.",
-      "surface": "A running envoy-dispatch process's backends in pg_stat_activity; the two constants in the tree",
-      "command": "adv.py conns 20 (150 concurrent clients, 5 streams, a foreign id held 2 s of every 3, pg_stat_activity sampled every 100 ms); read pool.go:304-314 and infra/gcp/dispatch.go:97",
-      "observed": "Head: peak 73 backends, of which up to 1 ran the horizon's observation statement. sharedPoolSize 64 + rooms 4 + health 1 + leases 12 + outbox 1 + registry 1 + horizon 2 + 3 listeners = 88 = ConnectionsPerProcess = dispatchConnectionsPerPod. infra/README.md sizes databaseTier by ConnectionsPerProcess, so it follows. TestDispatchConnectionsPerPodIsTheServers is CI's to run.",
-      "headSha": "1adb786e0343658dd682332fda284d1df51459d4",
-      "negativeControl": "Main 25ef8cd2 under the same load: peak 72 backends, none running a horizon observation. Its sum, 86, has no horizon pool in it."
+      "criterion": "The head that merges is the head tested, and CI is green on it.",
+      "evidence": "gh api repos/sjawhar/legion/pulls/2392 -> mergeable false, mergeable_state dirty, head 2fa32e09. git merge-tree --write-tree 2fa32e09 e82b013b (main@origin) conflicts in packages/envoy/internal/dispatch/api/events.go, packages/envoy/internal/dispatch/api/references.go and packages/envoy/AGENTS.md. The conflicting main commit is e82b013b66ff (#2324, 'a tab fetches again only what an event changes'). check-runs at 84299bf5: total_count 0, since GitHub runs no pull_request workflow on a conflicting head. The events.go conflict is in the SSE handler. #2324 adds the response header X-Dispatch-Event-Replay: complete (eventReplayHeader) on a resuming connection whose since is at or below the head when it subscribed. That header tells the browser it missed nothing, so it may skip the refresh it owes a gap. The resolution must keep that promise under this PR's horizon semantics. Send the header only when since <= head, including on the stream that opens early before its subscription arrives (this PR's resuming path). Send no header on a cold connect, or on a since above the log's newest id (a replaced log). Keep 'ends the stream on a reset found while it subscribed'. The browser then reconnects instead of trusting a 'complete' replay of a log that no longer exists. references.go: #2324 adds replaceEditedReferences next to this PR's since/Through doc comment. Fix: forward-merge main into legion/INFRA-591 and resolve the three files. The next round re-drives the SSE resume, the reset and the replay header on the merged code."
     }
   ],
-  "ci": "Read at about 15:52Z, recorded here only. At 1adb786e build and lint were in progress; test, typecheck, changes, a second build and the daemon Postgres 16 suite were queued; nothing had completed. Main's own reds, which the controller ruled are not this pull request's: recipients-claim.e2e.ts route-close (#2324), TestDispatchConnectionsPerPodIsTheServers on main (#2464; this branch changes both constants), mermaid.e2e.ts:194 (#2311).",
+  "failed": 1,
+  "ci": "Read at about 16:35Z, recorded here only. No runs at 84299bf5 (conflicting). At 1adb786e (round 7's code) the Worker Image workflow's build failed in 'Build and push'. The image's TLS probe refused emSign/AAA test hosts ('CERT_REVOKED', 'CertDistrusted'). This PR changes no Dockerfile or worker-image file, and a branch fix/legion-819-tls-probe-browser-cold-start is open on that probe. My inference is that the failure is not this PR's; it is recorded here for the architect. The other Envoy lanes at 1adb786e were still queued.",
   "risks": [
-    "On a newly started process, the first stream with no Last-Event-ID gets no headers until every transaction holding an id on the Postgres instance ends. It opened 137 ms after the commit at this head. This is the implementer's recorded deviation."
+    "On a newly started process, the first stream with no Last-Event-ID gets no headers until every transaction holding an id on the Postgres instance ends. This is the implementer's recorded deviation; it is unchanged since round 7."
   ]
 }
