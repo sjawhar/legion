@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -173,15 +172,6 @@ func TestAPersonsCommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 			"body": "@writer, is the day firm?", "anchor": passage(projectDocument, "The plan"),
 			"mentions": []map[string]any{{"target": "session:session-writer"}},
 		}, "alice")
-		var suppressed []string
-		if err := database.Pool.QueryRow(context.Background(), `
-			select payload->'suppressed_authors' from events where type = 'comment.created' and payload->>'id' = $1
-		`, id).Scan(&suppressed); err != nil {
-			t.Fatalf("read the comment's suppressed authors: %v", err)
-		}
-		if !slices.Equal(suppressed, []string{"session-writer"}) {
-			t.Fatalf("suppressed_authors = %v, want the mentioned author alone", suppressed)
-		}
 		expect(t, id, true, contracts.AgentSubject("session-editor"))
 		sendsMu.Lock()
 		defer sendsMu.Unlock()

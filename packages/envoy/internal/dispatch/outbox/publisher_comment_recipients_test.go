@@ -268,7 +268,8 @@ func TestAPersonsCommentOnAnIssueNobodyRoutesOrClaimsReachesItsSpecsSessions(t *
 		arrange func(t *testing.T, database *store.Store, broker *events.Broker, spec string) []recipientCheck
 	}{
 		{
-			// A spec written without a claim: the session that wrote every version of the spec held no claim.
+			// A spec written without a claim: the session that wrote every version of the spec held
+			// no claim.
 			name: "a person's conversation comment and its edit reach the spec's sessions, and a reopening does not",
 			arrange: func(t *testing.T, database *store.Store, broker *events.Broker, spec string) []recipientCheck {
 				root := seedThreadComment(t, database, "T-1", "", alice, nil)

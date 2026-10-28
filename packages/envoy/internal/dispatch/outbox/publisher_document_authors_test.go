@@ -182,7 +182,7 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
 				doc := seedDocument(t, database, new("T-1"), "notes", writer, []model.Actor{writer})
 				return model.Event{IssueKey: new("T-1"), Type: "comment.edited", Actor: alice, Payload: map[string]any{
-					"id": "00000000-0000-0000-0000-000000000006", "anchor": anchorOn(doc), "suppressed_authors": nil,
+					"id": "00000000-0000-0000-0000-000000000006", "anchor": anchorOn(doc),
 				}}, ""
 			},
 			wantAgents: []string{"notifications.agent.session-writer"},
@@ -193,7 +193,7 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 				doc := seedDocument(t, database, new("T-1"), "notes", writer, []model.Actor{writer, editor})
 				return model.Event{IssueKey: new("T-1"), Type: "comment.created", Actor: alice, Payload: map[string]any{
 					"id": "00000000-0000-0000-0000-000000000007", "anchor": anchorOn(doc),
-					"mentions": mentionsOf("session-writer"), "suppressed_authors": []any{"session-writer"},
+					"mentions": mentionsOf("session-writer"),
 				}}, ""
 			},
 			deliveries: map[string]string{"session-writer": "sent"},
@@ -205,7 +205,7 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 				doc := seedDocument(t, database, new("T-1"), "notes", writer, []model.Actor{writer, editor})
 				return model.Event{IssueKey: new("T-1"), Type: "comment.created", Actor: alice, Payload: map[string]any{
 					"id": "00000000-0000-0000-0000-000000000015", "anchor": anchorOn(doc),
-					"mentions": mentionsOf("session-writer"), "suppressed_authors": []any{"session-writer"},
+					"mentions": mentionsOf("session-writer"),
 				}}, ""
 			},
 			deliveries: map[string]string{"session-writer": "failed"},

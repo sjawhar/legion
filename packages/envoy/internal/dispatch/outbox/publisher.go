@@ -1368,27 +1368,6 @@ func suppressesCurrentRoute(payload any, current *string, a *attempt) bool {
 	return a.leftToMention(sessionID)
 }
 
-func payloadStringSet(payload any, key string) map[string]struct{} {
-	values, ok := payload.(map[string]any)
-	if !ok {
-		return nil
-	}
-	result := map[string]struct{}{}
-	switch entries := values[key].(type) {
-	case []string:
-		for _, entry := range entries {
-			result[entry] = struct{}{}
-		}
-	case []any:
-		for _, entry := range entries {
-			if value, ok := entry.(string); ok {
-				result[value] = struct{}{}
-			}
-		}
-	}
-	return result
-}
-
 // payloadMentionedSessions reads the sessions a comment payload's mentions resolved to (each
 // mentions[].session_id), as the scan decodes the payload from JSON. A mention that resolved to no
 // session (session_id null) names none. These are candidates only: a session route skips one

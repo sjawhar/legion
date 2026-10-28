@@ -1268,21 +1268,17 @@ type CommentEventPayload struct {
 	// comment.answered a delivery callback appends; empty when the comment replies to an
 	// ask or is a root comment.
 	ThreadRootID string `json:"thread_root_id,omitempty"`
-	// SuppressRoute and SuppressedAuthors are resolved before the comment event commits,
-	// so the outbox can deduplicate without consulting the live session registry. They name
-	// candidates only: the sessions the comment's mentions resolved to when it was written. The
-	// mention's send runs after the commit and can fail, so the outbox skips a candidate's copy only
-	// once comment_deliveries shows its mention was sent to it, holds the copy back while that send
-	// is still pending, and publishes it when the send failed or was abandoned.
-	// SuppressedRoute is the route that resolved to SuppressedRouteSessionID, the candidate whose
-	// mention suppresses the route. SuppressedAuthors names the candidates the author routes skip:
-	// on a reply, its thread's root author when mentioned; on a new comment not in an ask's thread,
-	// every session a mention resolved to, since the outbox reads the document's authors only when
-	// it publishes.
-	SuppressRoute            bool     `json:"suppress_route"`
-	SuppressedRoute          string   `json:"suppressed_route,omitempty"`
-	SuppressedRouteSessionID *string  `json:"suppressed_route_session_id,omitempty"`
-	SuppressedAuthors        []string `json:"suppressed_authors"`
+	// SuppressRoute is resolved before the comment event commits, so the outbox can deduplicate
+	// without consulting the live session registry. It names a candidate only: the session the
+	// route resolved to when the comment was written, which the comment's mentions also resolved
+	// to. The mention's send runs after the commit and can fail, so the outbox skips the route's
+	// copy only once comment_deliveries shows the mention was sent to that session, holds the copy
+	// back while the send is still pending, and publishes it when the send failed or was
+	// abandoned. SuppressedRoute is the route that resolved to SuppressedRouteSessionID. The
+	// outbox's session routes read the comment's own mentions for the same rule.
+	SuppressRoute            bool    `json:"suppress_route"`
+	SuppressedRoute          string  `json:"suppressed_route,omitempty"`
+	SuppressedRouteSessionID *string `json:"suppressed_route_session_id,omitempty"`
 	// ReferenceChangesPayload names the nodes whose inbound reference edges this write moved,
 	// so a reader carrying their batched backlink counts refreshes exactly those rows.
 	ReferenceChangesPayload

@@ -252,8 +252,7 @@ func seedCommentReplyBacklog(t *testing.T, database *store.Store, broker *events
 		seeded = append(seeded, appendEvent(t, database, broker, model.Event{
 			IssueKey: new(key), Type: "comment.created", Actor: person,
 			Payload: model.CommentEventPayload{
-				Comment:           model.Comment{ID: reply, IssueKey: new(key), Author: person, Body: "Load", ReplyTo: new(root)},
-				SuppressedAuthors: []string{},
+				Comment: model.Comment{ID: reply, IssueKey: new(key), Author: person, Body: "Load", ReplyTo: new(root)},
 			},
 		}))
 	}
@@ -319,8 +318,7 @@ func seedUnclaimedCommentBacklog(t *testing.T, database *store.Store, broker *ev
 		seeded = append(seeded, appendEvent(t, database, broker, model.Event{
 			IssueKey: new(key), Type: "comment.created", Actor: person,
 			Payload: model.CommentEventPayload{
-				Comment:           model.Comment{ID: comment, IssueKey: new(key), Author: person, Body: "Load", ReplyTo: replyTo},
-				SuppressedAuthors: []string{},
+				Comment: model.Comment{ID: comment, IssueKey: new(key), Author: person, Body: "Load", ReplyTo: replyTo},
 			},
 		}))
 	}
