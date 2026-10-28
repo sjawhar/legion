@@ -1860,6 +1860,57 @@ specRun("spec-writing-head-95", {
     finish
   ),
 });
+// A spec about the Dispatch skills names their files, and the check the skill requires pastes it
+// whole: the name is prose, flagged and scored. So is a bash heredoc plan that names the file.
+specRun("spec-writing-head-105", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1", outlined({ design: "The change edits `skills/dispatch/SKILL.md`." })),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+specRun("spec-writing-head-106", {
+  transcript: conversation(
+    routedRead,
+    sh("o4", "cat > plan.md <<'EOF'\n### Task 9\n- Modify: skills/dispatch/SKILL.md\nEOF"),
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+// A read of a skill file outside the label's own, by a `read` call or a `cat` of another label's
+// copy, is still a rig error.
+specRun("spec-writing-head-107", {
+  transcript: conversation(
+    routedRead,
+    sh("o5", "cat /checkouts/base/skills/dispatch/SKILL.md"),
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+specRun("spec-writing-head-108", {
+  transcript: conversation(
+    routedRead,
+    readOf("o6", "/opt/legion/skills/dispatch-writing-specs/SKILL.md"),
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
 // A usage refusal the CLI both prints and logs (an unknown command, under tool `dispatch`), after a
 // skill read earlier in the same call. The ledger line and the printed refusal are one refusal:
 // counted once, at the command, so the read before it is no read between it and its fix.
@@ -2279,8 +2330,34 @@ test("the tester ran the CLI when the bun stand-in recorded a run of greet.ts, n
   expect(out).toMatch(/tester-proof-ran-2\tpass=false\tref=false\tran=false /);
 });
 
-test("a tool call naming the other label's checkout is a rig error wherever the name falls in it", () => {
-  expect(out).toContain("tester-proof-cross-1\trig error: a bash call names base's checkout");
+test("a tool call reading the other label's checkout is a rig error wherever the path falls in it", () => {
+  expect(out).toContain(
+    "tester-proof-cross-1\trig error: a bash call reads base's checkout: /checkouts/base/skills/legion-worker/SKILL.md"
+  );
+});
+
+test("a skill file outside the label's own is a rig error when read, and a flag when only named", () => {
+  // Named in a check's pasted spec, and in a heredoc plan: scored, and flagged where it sits.
+  expect(scoresOf("spec-writing-head-105")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-105").split("\n")[0]).toContain(
+    " skills=ran:0,wrote:0,assigned:1"
+  );
+  expect(rowOf("spec-writing-head-105")).toContain(
+    "  skills (assigned): a task call names skills/dispatch: …"
+  );
+  expect(scoresOf("spec-writing-head-106")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-106").split("\n")[0]).toContain(
+    " skills=ran:1,wrote:0,assigned:0"
+  );
+  // Read: by a `cat` of another label's copy, and by a `read` call of a skill elsewhere.
+  expect(out).toContain(
+    "spec-writing-head-107\trig error: a bash call reads base's checkout: /checkouts/base/skills/dispatch/SKILL.md"
+  );
+  expect(out).toContain(
+    "spec-writing-head-108\trig error: a read call reads a skill outside head's own: /opt/legion/skills/dispatch-writing-specs/SKILL.md"
+  );
+  // The run's own copy, in its HOME, is no hit.
+  expect(rowOf("spec-writing-head-29")).not.toContain(" skills=");
 });
 
 test("a run whose tool call names a path outside its sandbox is scored and flagged, saying where", () => {

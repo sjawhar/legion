@@ -159,9 +159,10 @@
 #     session a work directory starts carries the directory's digest in its name.
 #   - Its agent can still read the whole filesystem, the operator's home included, and write the
 #     machine's /tmp, which nothing here cleans: a namespace sandbox needs user namespaces, which
-#     Ubuntu's AppArmor policy denies unprivileged users. score.ts does not score a run that names
-#     a skill outside its own label, or whose PR body carries another run's line (unscored,
-#     testerProof). It flags, and still scores, a run whose tool calls name a path outside its
+#     Ubuntu's AppArmor policy denies unprivileged users. score.ts does not score a run that reads
+#     a skill file outside its own label or a file of another label's checkout, or whose PR body
+#     carries another run's line (unscored, testerProof). It flags, and still scores, a run whose
+#     tool calls only name such a skill file or checkout (skillReaches), or name a path outside its
 #     work directory, its label's checkout and the system locations (outsideReaches): a flag shows
 #     the path was named, not that it was read. A path a call reaches without naming it, as a
 #     glob from `/` does, is not caught.

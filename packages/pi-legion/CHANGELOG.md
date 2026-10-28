@@ -32,6 +32,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   three of each with the call's text around them. A flag shows the run named the path, not that it
   read it nor that its result is wrong; prose and reaches share the same arguments. A path a call
   reaches without naming it, as a glob from `/` does, is not caught.
+- The skill-scenario scorer voids a run for another label's skills only when the run read one: a
+  `read` call of a skill file outside its label's own or of a file under another label's checkout,
+  a `cat`, `sed`, `head` or other reading command in a `bash` call or eval cell that names one, or
+  a file an eval cell opens. A run that only names one (a spec about the Dispatch skills pasted into
+  the check the skill requires, a heredoc plan naming `skills/dispatch/SKILL.md`, a relative
+  mention) was voided, and is now scored and flagged `skills=ran:N,wrote:N,assigned:N`, with up to
+  three hits of each kind printed as the `outside` flag prints them. Subagents' calls count too.
 - The skill-scenario scorer reads a spec-only check from the subagent's own transcript
   (`sessions/<session>/<name>.jsonl`), not only from a `task` tool call. A check the agent started
   from an eval cell (`tool.task(…)` with the spec pasted in, or the `agent(…)` helper) leaves no
