@@ -869,6 +869,10 @@ pinned in mise. `LEGION_CLAUDE_PATH` is set to the `claude` on the operator's `P
 `LEGION_BUN_PATH` to that real `bun`, and `LEGION_CLAUDE_PLUGIN_DIR` to the run's own copy of the
 claude-envoy plugin, which it builds from this checkout into its work directory
 (`packages/claude-envoy/scripts/build.ts --out`), with `dist/envoy-channel.js` and `legion/` fresh.
+That build refuses any Bun but the release the repository's `.bun-version` pins, so the `bun` first
+on the run's `PATH` must be that release: `prerequisites` compares `bun --version` with the pin and
+refuses another by name. On a devbox whose version manager defaults to another release, put the
+pinned release's own `bin` directory first on `PATH` for the run.
 Legion's role Apps resolve as Stage 3's do: the daemon runs `<runner> <implement App key> -- …`
 and `<runner> <review App key> -- …` (the runner `LEGION_E2E_APP_KEY_RUNNER` names, `agent-secrets`
 by default, which `prerequisites` requires on `PATH`; the key names `LEGION_E2E_IMPLEMENT_APP_KEY_NAME`

@@ -559,6 +559,16 @@ fi
 # Legion's two role Apps proved against GitHub before the run writes anything (lib/github-apps.sh);
 # legion.yaml's github_apps is the block proved.
 write_github_apps implement review
+# The Bun on PATH must be the release the repository's .bun-version pins, the file
+# packages/claude-envoy/scripts/build.ts reads: the rig builds the run's claude-envoy with it, and
+# that build refuses any other (assertPinnedBun, LEGION-568). Checked here, before the first bun this
+# run starts (lib/app-logins.ts, just below), so a devbox whose version manager defaults to another
+# release is refused by name rather than at the build line in the rig. After write_github_apps, so
+# the App keys' own checks above run whatever the Bun.
+bun_pin=$(tr -d '[:space:]' <"$root/.bun-version")
+bun_running=$(bun --version 2>/dev/null | tr -d '[:space:]') || bun_running=
+[ "$bun_running" = "$bun_pin" ] ||
+  fail "refusing to run under Bun ${bun_running:-<no version>}: .bun-version pins $bun_pin, and the run builds claude-envoy with packages/claude-envoy/scripts/build.ts, whose bundler output depends on the exact Bun build (LEGION-568). Put the pinned Bun first on PATH ($(command -v bun) is the one found)"
 read_app_logins
 claude_bin=$(command -v claude)
 # The daemon and every pane run with HOME moved to the run's own (make_omp_home), which hides mise's
