@@ -138,7 +138,17 @@ func (s *Store) createVersionTable(ctx context.Context) error {
 	return tx.Commit(ctx)
 }
 
+// applyMigration applies one migration in a transaction of its own, trying it again while its lock
+// wait outlasts its lock_timeout, up to pgmigrate.LockTimeoutAttempts times, holding nothing between
+// attempts (pgmigrate.RetryLockTimeouts). A migration that times out on every attempt fails the
+// runner, and boot with it.
 func (s *Store) applyMigration(ctx context.Context, migration pgmigrate.Migration) error {
+	return pgmigrate.RetryLockTimeouts(ctx, migration.Name, func(ctx context.Context) error {
+		return s.applyMigrationOnce(ctx, migration)
+	})
+}
+
+func (s *Store) applyMigrationOnce(ctx context.Context, migration pgmigrate.Migration) error {
 	// A migration is a transaction like any other, so it is marked like any other: nothing it
 	// runs may take a second pooled connection while it is open.
 	ctx = WithTransactionTracking(ctx)

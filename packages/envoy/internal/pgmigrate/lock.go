@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +32,46 @@ const lockNotAvailable = "55P03"
 
 // lockTimeoutSetting is LockTimeout as lock_timeout takes it.
 var lockTimeoutSetting = strconv.FormatInt(LockTimeout.Milliseconds(), 10) + "ms"
+
+// LockTimeoutAttempts is how many times RetryLockTimeouts applies a migration whose lock wait
+// outlasts its lock_timeout before the runner gives up and fails. LockTimeoutRetryPause is how long
+// it waits between attempts, holding nothing: the attempt's transaction has rolled back, so the
+// reads and writes that queued behind the migration's lock request run. A holder that ends within
+// the pause, or soon after, lets the next attempt through; one that outlives every attempt fails
+// the runner, as one outliving LockTimeout did before, after at most LockTimeoutAttempts waits of
+// LockTimeout, each of which is all the time the migration can hold up those reads and writes.
+const (
+	LockTimeoutAttempts   = 3
+	LockTimeoutRetryPause = 2 * time.Second
+)
+
+// RetryLockTimeouts runs attempt, which applies the migration named migration in a transaction of
+// its own, until it succeeds, fails with anything but a *LockTimeoutError, or has timed out
+// LockTimeoutAttempts times. It logs each timed-out attempt at WARN with its error, which names the
+// lock, the sessions holding it and their diagnoses (LockTimeoutError), and pauses
+// LockTimeoutRetryPause before the next. The last attempt's error comes back, wrapped with the
+// number of attempts, so errors.As still finds the *LockTimeoutError. A runner that applies every
+// migration in one transaction cannot use it: rolling back an attempt there would roll back the
+// earlier migrations too, and retrying inside it would hold their locks across the pause.
+func RetryLockTimeouts(ctx context.Context, migration string, attempt func(context.Context) error) error {
+	for n := 1; ; n++ {
+		err := attempt(ctx)
+		var lockTimeout *LockTimeoutError
+		if err == nil || !errors.As(err, &lockTimeout) {
+			return err
+		}
+		if n == LockTimeoutAttempts {
+			slog.Warn("pgmigrate: a migration gave up waiting for a lock on its last attempt; the runner fails", "migration", migration, "attempt", n, "attempts", LockTimeoutAttempts, "reason", err.Error())
+			return fmt.Errorf("after %d attempts: %w", n, err)
+		}
+		slog.Warn("pgmigrate: a migration gave up waiting for a lock; the runner tries it again", "migration", migration, "attempt", n, "attempts", LockTimeoutAttempts, "pause", LockTimeoutRetryPause, "reason", err.Error())
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("after %d attempts: %w", n, err)
+		case <-time.After(LockTimeoutRetryPause):
+		}
+	}
+}
 
 // Exec is how a runner applies one migration's statements in tx. It first sets tx's lock_timeout
 // to LockTimeout, so every migration a runner applies is bounded whatever the migration's file
@@ -78,9 +119,40 @@ func Exec(ctx context.Context, tx pgx.Tx, migration Migration, signIn func(conte
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == lockNotAvailable {
-		return &LockTimeoutError{Migration: migration.Name, Wait: wait, WatchErr: watchErr, Err: err}
+		timedOut := &LockTimeoutError{Migration: migration.Name, Wait: wait, WatchErr: watchErr, Err: err}
+		if wait != nil {
+			timedOut.Diagnoses = diagnoseHolders(ctx, dial, wait.Holders)
+		}
+		return timedOut
 	}
 	return fmt.Errorf("migration %s: %w", migration.Name, err)
+}
+
+// diagnoseHolders reads holderDiagnosis for each of holders on a connection of its own, in a
+// read-only transaction, within LockTimeout: the migration's own transaction is aborted by its
+// cancellation, and a diagnosis that cannot be had must not hold the runner up. A connection that
+// cannot be had is one diagnosis saying why.
+func diagnoseHolders(ctx context.Context, dial func(context.Context) (*pgx.Conn, error), holders []Session) []string {
+	if len(holders) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, LockTimeout)
+	defer cancel()
+	conn, err := dial(ctx)
+	if err != nil {
+		return []string{"diagnosis not collected: " + err.Error()}
+	}
+	defer conn.Close(context.WithoutCancel(ctx))
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return []string{"diagnosis not collected: " + diagnosisFailure(err)}
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	diagnoses := make([]string, len(holders))
+	for i, holder := range holders {
+		diagnoses[i] = holderDiagnosis(ctx, tx, holder.PID)
+	}
+	return diagnoses
 }
 
 // LockWait is a lock a migration's backend was waiting for and the sessions ahead of it.
@@ -165,6 +237,9 @@ type LockTimeoutError struct {
 	Wait *LockWait
 	// WatchErr is the last error the watch's reads met, which is why Wait can be nil.
 	WatchErr error
+	// Diagnoses are the holders' diagnoses (holderDiagnosis), read just after the cancellation,
+	// one for each of Wait.Holders.
+	Diagnoses []string
 	// Err is Postgres's own cancellation.
 	Err error
 }
@@ -194,6 +269,9 @@ func (e *LockTimeoutError) Error() string {
 		default:
 			fmt.Fprintf(&b, ". Find the transactions open longer than the timeout: select pid, usename, application_name, state, xact_start, query from pg_stat_activity where xact_start < now() - interval '%d milliseconds' order by xact_start", LockTimeout.Milliseconds())
 		}
+	}
+	for _, diagnosis := range e.Diagnoses {
+		b.WriteString("; " + diagnosis)
 	}
 	fmt.Fprintf(&b, "; end the holder or let it finish, then start the service again: %v", e.Err)
 	return b.String()

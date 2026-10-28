@@ -1,0 +1,5 @@
+kind: Changed
+body: 'Dispatch''s migration runner tries a migration again when its lock wait outlasts its five-second `lock_timeout`: it rolls the migration''s transaction back, holds nothing for two seconds so the reads and writes queued behind it run, and tries again, up to three attempts (`pgmigrate.RetryLockTimeouts`), logging each timed-out attempt at WARN. A migration that times out on every attempt fails the boot, as one timing out once did before. The lock-timeout error now carries a diagnosis of each session the migration was queued behind, as the census''s refusals do. The secrets broker''s runner, which applies every migration in one transaction, does not retry.'
+time: 2026-10-28T11:50:00.000000000Z
+custom:
+    Issue: census-catalog-only-exemption

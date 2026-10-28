@@ -503,13 +503,22 @@ not by file name, and the store's tests require every file on disk to be embedde
 on `main`.
 
 Every migration's lock waits are bounded at five seconds (`pgmigrate.LockTimeout`, which
-`pgmigrate.Exec` sets on each migration it applies, after the runner's advisory lock), so a
-migration queued behind a long transaction fails the boot instead of holding every read and write
-of its table behind its request. The failure names the migration, the lock it wanted, the sessions
-it was queued behind, and a `pg_stat_activity` query for the sessions holding the lock; end the
-holder or let it finish and start the server again. That query can come back empty: a prepared
-transaction's locks carry no pid, so the join to `pg_stat_activity` drops them (LEGION-432). A
-migration that needs another bound sets its own `SET LOCAL lock_timeout`.
+`pgmigrate.Exec` sets with `set_config(…, true)`, local to the one transaction the runner applies
+that migration in, after the runner's advisory lock), so a migration queued behind a long
+transaction gives up instead of holding every read and write of its table behind its request. The
+runner then rolls that transaction back, holds nothing for two seconds
+(`pgmigrate.LockTimeoutRetryPause`) so the requests queued behind it run, and tries again, up to
+three attempts (`pgmigrate.LockTimeoutAttempts`, `pgmigrate.RetryLockTimeouts`). Each timed-out
+attempt is logged at WARN. A migration that times out on every attempt fails the boot; it has then
+held its table's reads and writes for at most three waits of five seconds. The failure names the
+migration, the lock it wanted, the sessions it was queued behind with each one's diagnosis (as the
+census's refusals carry it, "Pre-deploy census" below), and a `pg_stat_activity` query for the
+sessions holding the lock; end the holder or let it finish and start the server again. That query
+can come back empty: a prepared transaction's locks carry no pid, so the join to
+`pg_stat_activity` drops them (LEGION-432). A migration that needs another bound sets its own
+`SET LOCAL lock_timeout`, which each attempt sets again. The secrets broker's runner applies every
+migration in one transaction, so it does not try again: rolling one attempt back would roll back
+the migrations before it too.
 
 Migrations `0056`–`0062` make search indexing linear. Each table has its own migration, so its
 transaction holds an `ACCESS EXCLUSIVE` lock only for the `DROP EXPRESSION` and trigger setup;
@@ -539,8 +548,8 @@ it: Postgres checks a waiter once, `deadlock_timeout` (1 s by default) after it 
 a write that closes the cycle within that second fails `0066` and one that closes it later is
 itself the victim, answered `500`. `0066` therefore sets its own `lock_timeout` of 500 ms, shorter
 than `deadlock_timeout`: it gives up first (`55P03`, nothing applied), the write finishes, and the
-next boot applies it; the cost is that a comment write holding `comments` past half a second fails
-that boot too, and so does an autovacuum of either table where `deadlock_timeout` is not shorter,
+runner's next attempt, or the next boot, applies it; the cost is that a comment write holding
+`comments` past half a second on every attempt fails that boot too, and so does an autovacuum of either table where `deadlock_timeout` is not shorter,
 which the census refuses (below). Every census answers `0`: 0053's check guarantees every approval
 ask a `version` to backfill from, and the other two change no row.
 
