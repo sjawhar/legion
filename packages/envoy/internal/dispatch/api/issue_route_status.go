@@ -51,8 +51,10 @@ type routeRoster struct {
 	// (last claim wins); should two live rows ever name one role, the most recently seen session
 	// is named, and the id breaks a tie, so a read never flips between them.
 	holders map[string]string
-	// err is why a fetch did not answer: the listener client's own error, so it still matches
-	// envoy.ErrUnavailable. It is nil when the roster answered or the listener is unconfigured.
+	// err is why the roster did not answer: the listener client's own error, or, for a read whose
+	// request ended while it waited on the shared fetch, envoy.ErrUnavailable wrapping the
+	// request's context error, so it always matches envoy.ErrUnavailable. It is nil when the
+	// roster answered or the listener is unconfigured.
 	err error
 }
 
@@ -111,10 +113,12 @@ type rosterFetch struct {
 // readRouteRoster answers who is running: the cached roster while it is fresh, else the answer of
 // the one fetch in flight, starting it when none is. A listener that is unconfigured, does not
 // answer, or answers late leaves the roster unanswered, and so does a read whose own request ends
-// while it waits; the fetch runs on for the other reads, and its answer fills the cache. What an
-// unanswered roster means is the caller's: an issue read reads every route unknown and still
-// succeeds, while listAgents, which has nothing to list without the listener, answers 503 with
-// the roster's err.
+// while it waits (its err then wraps the request's context error); the fetch runs on for the
+// other reads, and its answer fills the cache. The fetch runs on the process's lifetime, so once
+// a shutdown begins it ends or fails at once, and that failure is kept for the silence window.
+// What an unanswered roster means is the caller's: an issue read reads every route unknown and
+// still succeeds, while listAgents, which has nothing to list without the listener, answers 503
+// with the roster's err, or, during a shutdown drain, asks the listener on its own request.
 func (s *server) readRouteRoster(ctx context.Context) routeRoster {
 	if s.deps.Envoy == nil {
 		return routeRoster{}

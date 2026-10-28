@@ -259,23 +259,19 @@ func TestAgentsListsAndIssueReadsWithinTheTTLShareOneListenerCall(t *testing.T) 
 }
 
 // A listener that fails answers every agents list 503 ENVOY_UNAVAILABLE with the fetch's own
-// error, and is asked once within the silence window; once the window has passed, a list asks
-// the recovered listener and lists its sessions. The window is two seconds, so a loaded machine's
-// second list still lands inside it.
-func TestAgentsAnswer503ThroughTheSilenceWindowAndListOnceTheListenerRecovers(t *testing.T) {
+// error, and is asked once within the silence window: the second list answers the kept failure
+// without asking again. A list after the window asking the listener again is the cache's own
+// rule (issue_route_status_cache_test.go). The window is a minute, so a loaded machine's second
+// list still lands inside it.
+func TestAgentsAnswer503ThroughTheSilenceWindow(t *testing.T) {
 	roster := &fakeRoster{}
 	roster.down.Store(true)
 	handler, _, served := cachedRouteStatusServer(t, roster)
-	const silence = 2 * time.Second
-	served.rosters.ttl, served.rosters.silenceTTL = time.Minute, silence
+	served.rosters.ttl, served.rosters.silenceTTL = time.Minute, time.Minute
 	before := roster.lookups.Load()
 
-	var failed time.Time
 	for read := 1; read <= 2; read++ {
 		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents", nil, "alice")
-		if read == 1 {
-			failed = time.Now()
-		}
 		body := response.Body.String()
 		if response.Code != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"ENVOY_UNAVAILABLE"`) ||
 			!strings.Contains(body, "GET /v1/sessions returned 503") {
@@ -284,16 +280,6 @@ func TestAgentsAnswer503ThroughTheSilenceWindowAndListOnceTheListenerRecovers(t 
 	}
 	if calls := roster.lookups.Load() - before; calls != 1 {
 		t.Fatalf("two agents lists inside the silence window made %d listener calls, want 1", calls)
-	}
-
-	roster.down.Store(false)
-	roster.set("ses-sre", "sre")
-	time.Sleep(time.Until(failed.Add(silence + 200*time.Millisecond)))
-	if got := agentIDs(t, handler); !reflect.DeepEqual(got, []string{"ses-sre"}) {
-		t.Fatalf("agents list after the silence window = %v, want [ses-sre]", got)
-	}
-	if calls := roster.lookups.Load() - before; calls != 2 {
-		t.Fatalf("agents lists either side of the silence window made %d listener calls, want 2", calls)
 	}
 }
 
