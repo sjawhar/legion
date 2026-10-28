@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-523",
+  "completed": "2026-10-28T09:18:00Z",
+  "headSha": "d022f3964002da0c41f110b94c6de4f6a7363ee2",
+  "ci": "read on GitHub at d022f396, attempt 1 of every run: Tests 40544123561, Legion Envoy and Contracts 40544123530, Worker Image 40544123483, Docs 40544123698, PR Title 40544123450 all success (envoy-go, envoy-go-race, dispatch, claude-envoy, test, lint, typecheck, build success); nothing re-run",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran each cause's command at d022f396 in the issue pod (Postgres 17.11 + pgvector 0.8.0, nats-server 2.10.29, tmux 3.5a, bun 1.3.14, Playwright chromium and webkit on the real Dispatch stack), with 2-3 shared CPUs loaded by sibling loops: T1 60/60, T2 30/30 boundary + 15/15 race, T3 30/30, T4 15/15, T5 6/6 race + 30/30, T6 lane tests 80/80 race, T7+T8 50/50 race, T9 110/110, T10 100/100 race, T11 10/10 + 5/5 real tmux, T12 10/10 race, T13 30/30, T14 20/20, T15 200/200, T16 100/100 chromium, T24 10/10, deep-links 20/20 webkit, claude-envoy reconciliation 200/200 and role claim 200/200 and full package 192 pass 0 fail, queryTmux 20/20, frozen omp-plugins install, A1 job ids 109 = catalog 109. Reproduced negative controls: T1 main's two statements fail the new test 3/3; T2 main's bucketing fails 5/5; T10 split read fails 5/5; T11 main's truncate-then-write fails 5/5 and main's spawn order fails the real-tmux test 2/2; T13 stale-lock sweep skipping packed-refs.lock fails; T14 isStreaming false fails 2/2; T15 setHighlightMissing(false) fails 3/3; reconciliation guard removed fails 28/400; queryTmux SIGTERM kill fails 7/10 and no timeout 5/5; frozen install with an added dependency exits 1; check-private-names passes on the 137 files and refuses a planted internal host. Not reproduced this round (the pod was recreated mid-round and took the web rig): the deep-links and T16 negative controls; the next round runs them."
+  },
+  "failures": [
+    {
+      "criterion": "A2 T2: a leased loop's tick is counted in the period it was due in, so a lone process never loses a period (PR body Change line 1)",
+      "evidence": "duty.Exclusive measures time.Since(due) in the process (packages/envoy/internal/dispatch/duty/exclusive.go:230) and the database subtracts it from its own now(), read when the statement starts; any stall between the two (a descheduled or GC-paused process, a slow socket write) moves the tick's boundary later by the stall, so a tick due within that stall of a boundary still lands in the next period and the on-time tick after it is refused: the INFRA-523 defect, narrowed from the lease acquire to one send but not removed. Red test committed: packages/envoy/internal/dispatch/duty/exclusive_latency_test.go, TestExclusiveCountsATickStalledAfterItsMeasureInThePeriodItWasDueIn (every write on the lease connection stalls 100 ms during the first tick, due 50 ms before a boundary; same shape as TestExclusiveCountsALateTickInThePeriodItWasDueIn's 400 ms acquire delay). Command: cd packages/envoy && go test -count=3 -v -run '^TestExclusiveCountsATickStalledAfterItsMeasureInThePeriodItWasDueIn$' ./internal/dispatch/duty/ -> FAIL 3/3 'exclusive_latency_test.go:73: the tick due one period after a stalled one was refused (first due 50ms before a boundary, its writes stalled 100ms each); a lone loop lost that period'. Control: the same test with the stall set to 0 passes 3/3, so the failure is the stall. Every other TestExclusive* passes."
+    },
+    {
+      "criterion": "A2 T12: the launcher test still proves a generation whose session database never answers is refused while the daemon waits (its name)",
+      "evidence": "TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits (packages/daemon/internal/launcher/launcher_test.go:1186-1214) now asserts only the proof dial's deadline; main's test also bounded when the refusal reached the daemon. Mutant in a scratch copy: time.Sleep(m.cfg.StopGrace) before the proxy-start error return in startSession (launcher.go:810-812), i.e. a refusal sent after the daemon stopped waiting with a correct dial deadline. go test -count=2 -v -run '^TestAGenerationWhoseSessionDatabaseNeverAnswersIsRefusedWhileTheDaemonWaits$' ./internal/launcher/ -> PASS 2/2 (3.04 s each, past the 2 s grace); main's test fails that mutant ('the start was answered 606ms after it was sent, past the 400ms stop grace'). One way to keep the end-to-end bound without the old race: record time.Now() after g.reply() and fail when answered.Sub(proof.entered) >= grace (fails the mutant 2/2 'generation 1 was refused 3.01s after its proof dial began, past the 2s stop grace the daemon waits'; passes 30/30 at d022f396 under -race -test.cpu=1). No red test committed: the product is correct at d022f396, so only a mutant shows the gap."
+    },
+    {
+      "criterion": "A1/A3 measurement: rerun-measure.py counts each run once over [from, to)",
+      "evidence": "dispatch://INFRA-523/artifact/rerun-measure-py version 1, line 96 queries created=<s>..<u> per 2-hour slice; GitHub's range includes both ends, so a run created exactly on a slice boundary is read twice and never de-duplicated (the docstring at line 7 says [from, to)). Over 2026-10-19T23:50Z..2026-10-26T23:50Z with a fresh cache: 13117 runs read, 13112 unique; 178 re-run runs, 177 unique; run 40059906749 (created 2026-10-24T03:50:00Z) is read twice, so job 120771000438 appears twice in --list (cut -f1 list.out | sort | uniq -d) and its 46 re-run minutes count twice. The catalog's job set (109 = 109) is right; its header counts are one run and about 46 minutes high, and the A3 production check reads the same script."
+    },
+    {
+      "criterion": "T25: the merge-gate re-run text says one thing",
+      "evidence": "skills/legion-worker/references/merge-gate.md:56-64 (and its generated copy packages/claude-envoy/legion/skills/legion-worker/references/merge-gate.md) says 're-run that job alone, once ... never the whole run' and then prescribes 'gh run rerun <run-id> --failed', which GitHub applies to every failed and cancelled job of the run and their dependents (the PR's own proof, run 40521376914 attempt 2, re-queued lint and test); with two cancelled jobs it is not 'that job alone'. gh 2.98.0 `gh run rerun --help` says only 'Rerun only failed jobs, including dependencies'."
+    },
+    {
+      "criterion": "T20: comments and docs made false by the change are fixed (plan gapAnalysis)",
+      "evidence": "packages/daemon/internal/capabilities/image.go:196 still says the codegraph plugin is enabled in the profile's plugin lock 'where `omp plugin install` recorded it'; at d022f396 the image records it with `omp plugin link /opt/omp-plugins/node_modules/@bopstack/pi-codegraph` (worker.Dockerfile:669)."
+    }
+  ],
+  "failed": 5,
+  "observations": [
+    "T6: main's wakeLane order restored in a scratch copy passes the four lane tests 80/80 under -race and the two most sensitive 200/200 at -cpu=4; only the implementer's forced-order probe (not in the suite) shows the race deterministically. The suite guards T6 only as often as CI hit the flake.",
+    "Deep-links WebKit test (architect's check, dispatch://INFRA-662): deep-links.e2e.ts:651 stores Alice's read mark through the API (request() throws on a non-OK answer, e2e/api.ts:131-160) before the page opens at :657, so no read-mark write and no layout shift happen during the click; no retry, no fixed sleep added in any e2e or claude-envoy test diff. The test still opens the deep link and clicks back through View in document (:612-632, :670-678).",
+    "T22: the Dispatch binary built from d022f396 booted on Postgres 55599, served /healthz 200 and an /api/v1/events stream that received project.created; SIGTERM with the stream open ended curl cleanly and left 0 backends in pg_stat_activity (from 10, incl. listen dispatch_events). A nil Deps.Lifetime panics at boot ('api.Register: Deps.Lifetime is required').",
+    "T5 sensitivity: a quadratic term at a sixteenth or quarter of the line length passes the render linearity test (ratios 10.5-20.9 against 24) while 1 MiB render time grows from about 0.35 s to 1.7 s; full-size quadratics fail (34x). A design limit, not made worse by this change."
+  ]
+}
