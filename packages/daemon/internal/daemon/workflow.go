@@ -115,8 +115,12 @@ type workflowRuntime struct {
 	// and then the sequence it was delivered at, under awaitingMu. recovering is each repository,
 	// lowercased, a read of the mapping stopped leaving out for a failed installation read whose
 	// issues are still to recover from Dispatch's listing (markRecovered, recoverRepositories),
-	// under recoveringMu. recheckAfter is refreshOnMappingChange's wait before a read of its own,
-	// time.After when nil; a test sees each wait through it.
+	// under recoveringMu. silenced is, by the same repository, each issue whose apply said nothing
+	// because the repository was unread (noteUnread), which the repository's recovery takes into its
+	// scope whatever the issue resolves to by then; releaseWaits is, by repository, each child a
+	// release_children left unrecorded on it (awaitRecovery), whose tree's architect the recovery
+	// tells of each it did not record. recheckAfter is refreshOnMappingChange's wait before a read
+	// of its own, time.After when nil; a test sees each wait through it.
 	repositories     *repositories
 	installs         appauth.Installations
 	mappingMu        sync.Mutex
@@ -127,6 +131,8 @@ type workflowRuntime struct {
 	awaiting         map[string]map[int64]uint64
 	recoveringMu     sync.Mutex
 	recovering       map[string]bool
+	silenced         map[string]map[string]bool
+	releaseWaits     map[string]map[string]releaseWait
 	recheckAfter     func(time.Duration) <-chan time.Time
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
 	// review it submits decides a round by that login and the reviewer's recorded session
@@ -295,7 +301,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// through the runtime, since the outbox itself is built later (attach).
 	w.records = projectRecords{Store: record.NewStore(), project: cfg.Project, wake: w.wakeOutbox, log: log}
 	engineCfg := engineConfig(cfg, reviewAppLogin, build)
-	engineCfg.Repositories = w
+	engineCfg.Repositories, engineCfg.NoteUnread = w, w.noteUnread
 	w.engine = workflow.New(w.records, engineCfg, log)
 	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
 	// The mirror runs before both deciders, and that order is load-bearing. The engine decides

@@ -113,10 +113,14 @@ type Options struct {
 	PrepareRepository func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
 	// RepositoryUnread says whether a repository is left out for now because its GitHub App
 	// installation read failed (the daemon's repositoryUnread): the daemon recovers the issues on
-	// it from Dispatch's listing once GitHub answers. release_children answers a todo child on one,
-	// under a recorded parent, released, and one whose parent is unrecorded and on such a
-	// repository, or itself on one, REPOSITORY_READ_FAILED naming it. Nil leaves none out.
+	// it from Dispatch's listing once GitHub answers. release_children never ends a wave on a todo
+	// child it leaves unrecorded for one: it answers the child released and goes on, telling the
+	// architect at once when the recovery will not record it (enterTodoChild). Nil leaves none out.
 	RepositoryUnread func(resolved string) bool
+	// AwaitRecovery leaves a child release_children left unrecorded on an unread repository to that
+	// repository's recovery (the daemon's awaitRecovery), which tells the tree's architect of each
+	// such child it did not record. Nil leaves none.
+	AwaitRecovery func(repo, tree, child, parent string)
 	// RoleFor is the role that works a phase (the daemon's workflow.RoleFor, handed in because the
 	// workflow's tests import this package). The operator's retry of a failed phase worker applies
 	// its issue's held phase only when that phase's role is the claim's (retryClaim); nil retries no
@@ -181,6 +185,7 @@ type server struct {
 	handlers     []intake.Handler
 	prepare      func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
 	unread       func(resolved string) bool
+	await        func(repo, tree, child, parent string)
 	roleFor      func(phase.Phase) claim.Role
 	records      record.Store
 	dispatch     dispatch.Client
@@ -226,6 +231,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		handlers:           opts.Handlers,
 		prepare:            opts.PrepareRepository,
 		unread:             opts.RepositoryUnread,
+		await:              opts.AwaitRecovery,
 		roleFor:            opts.RoleFor,
 		records:            opts.Record,
 		dispatch:           opts.Dispatch,

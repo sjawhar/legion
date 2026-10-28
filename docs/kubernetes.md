@@ -5358,7 +5358,8 @@ issue's pod (every role of it alike) and the image probe's.
   named under `repositories.refused` with the App, the repository and the failure; an event of
   an issue on it is applied and acknowledged with nothing said on it and nothing kept, and once
   GitHub answers, the daemon recovers the repository: one read of Dispatch's project listing,
-  applied as the boot applies it, to the unrecorded issues on it or under a parent on it (a
+  applied as the boot applies it, to the unrecorded issues on it, under a parent on it, or whose
+  event it applied silently for it during the outage (a
   labelled root admitted, a child of a live tree recorded under it, parents first, a person's
   issue left as it is), tried again on a failed listing; the mapping is read again, 30 s
   doubling to 10 min, until GitHub answers, then the repository is served with no restart (a

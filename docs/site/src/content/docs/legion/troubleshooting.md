@@ -53,8 +53,8 @@ cluster and the image:
   again on its own, 30 s doubling to 10 min, and serves the repository once GitHub answers; an
   issue handed to Legion on it, before the boot or after, has nothing said on it, and the daemon
   recovers it from Dispatch's listing once GitHub answers, with nothing to move. A
-  `release_children` answer of `REPOSITORY_READ_FAILED` naming such a repository is the same wait:
-  release the child again once GitHub answers.
+  `child-release-stalled` notice that names such a repository says which parent to release first:
+  the recovery records no child under a parent that is not `todo`.
 - **Records with no repository.** `<n> issue records have no repository and Dispatch resolves none
   for them (<KEY>, …): set the project's default repository in Dispatch …`: the first boot of this
   release records each issue it already runs on the repository Dispatch resolves for it, and these

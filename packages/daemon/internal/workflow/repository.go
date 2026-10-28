@@ -77,11 +77,16 @@ const setRepositoryHint = "the issue header's Repository picker, or dispatch iss
 // resolved, resolves to none or to one Legion does not serve (refused). It says it once per
 // resolution (record.RepoNote), so a repeated event of the issue says nothing again, and reports
 // whether it said it now. A child's refusal is also told to its tree's architect (refuseChild). An
-// Unread resolution says nothing, to the issue or to an architect, and keeps nothing: the daemon
-// recovers the issue from Dispatch's listing once GitHub answers for its repository, with nothing
-// for anyone to move.
+// Unread resolution says nothing, to the issue or to an architect: the daemon recovers the issue
+// from Dispatch's listing once GitHub answers for its repository, with nothing for anyone to move,
+// and it is noted for that recovery (Config.NoteUnread), so an issue whose resolution moves off
+// the repository meanwhile (its parent's repository, or the project's default, changed) is still
+// recovered.
 func (e *Engine) RefuseRecording(ctx context.Context, tx pgx.Tx, key, resolved string, refused Resolution) (bool, error) {
 	if refused.Unread {
+		if note := e.cfg.NoteUnread; note != nil {
+			note(key, resolved)
+		}
 		return false, nil
 	}
 	note := "Legion did not admit this issue: " + refused.Refusal + ". Set its repository (" + setRepositoryHint + ") and move it to todo again."

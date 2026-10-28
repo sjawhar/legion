@@ -50,15 +50,21 @@ again, 30 seconds doubling to 10 minutes between reads, until GitHub answers, th
 restart. While it is left out, an event of an issue on it is applied and acknowledged with
 nothing said on it and nothing kept, so it holds up no other issue's admission. Once GitHub answers
 for the repository, the daemon recovers it: it reads Dispatch's project listing once and applies
-it as its boot does, to the issues it does not record that are on that repository, or under a
-parent on it. Each ends where its events would have ended had the repository been served: a
-labelled root is admitted, a child of a live tree is recorded under it, parents before children,
-and a person's issue is left as it is, with no one moving anything. A recovery whose listing fails
-is tried again, 30 seconds doubling to 10 minutes; a restart's boot listing is that recovery.
-While the repository is unread, `release_children` answers a todo child on it released, with
-nothing for the architect to retry, when the child's parent is recorded (the recovery records the
-child), and `REPOSITORY_READ_FAILED` naming the repository when the parent is not recorded and the
-child's or the parent's repository is unread: the architect releases it again once GitHub answers.
+it as its boot does, to the issues it does not record that are on that repository, under a parent
+on it, or whose event it applied silently for that repository during the outage (one that took its
+repository from a parent or the project's default, which changed meanwhile). Each ends where its
+events would have ended had the repository been served: a labelled root is admitted, a child of a
+live tree is recorded under it, parents before children, and a person's issue is left as it is,
+with no one moving anything. A recovery whose listing fails is tried again, 30 seconds doubling to
+10 minutes; a restart's boot listing is that recovery. While the repository is unread,
+`release_children` never stops a wave on a child it cannot record for it: it answers the child
+released and goes on with the rest of the wave. When the recovery will record the child (its
+parent is recorded, or every unrecorded issue up to the recorded one is `todo` and the topmost is
+on the unread repository), nothing more is needed. Otherwise the architect gets a
+`child-release-stalled` notice at once naming the parent to release first; a child the wave would
+write `todo` under such a child is not written, and its notice says to release it again once that
+child is recorded. When the repository is recovered, the architect gets one more such notice for
+each child the release left to the recovery that the recovery still did not record.
 A served repository whose read fails stays served on its last answer and is read again the same
 way. A project with no repository mapped does not boot; one whose every repository lacks an App
 boots serving none and admits nothing until an App is installed, and one whose every repository's

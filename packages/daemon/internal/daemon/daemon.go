@@ -1425,10 +1425,11 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	var claimReady func(supervise.Claim)
 	var prepare func(context.Context, intake.DispatchIssue) (intake.DispatchIssue, error)
 	var unread func(string) bool
+	var await func(repo, tree, child, parent string)
 	var githubAPI string
 	if workflow != nil {
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
-		claimReady, prepare, unread = workflow.claimReady, workflow.prepareObserved, workflow.repositoryUnread
+		claimReady, prepare, unread, await = workflow.claimReady, workflow.prepareObserved, workflow.repositoryUnread, workflow.awaitRecovery
 		githubAPI = workflow.githubAPI
 	}
 	// Under `controller: daemon` the keeper launches and keeps the project's controller, and takes
@@ -1471,6 +1472,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Handlers:           handlers,
 		PrepareRepository:  prepare,
 		RepositoryUnread:   unread,
+		AwaitRecovery:      await,
 		RoleFor:            phaseRole,
 		Record:             records,
 		Dispatch:           client,

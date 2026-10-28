@@ -674,19 +674,29 @@ func (w *workflowRuntime) recoveringReasons() []string {
 // recoverRepositories recovers the repositories markRecovered named, after a read of the mapping
 // that published them as no longer unread: one read of Dispatch's project listing, applied as the
 // boot's reconcile applies it (reconcileListing), scoped to the issues the workflow does not record
-// that resolve to one of them, or whose parent chain in the listing reaches one that does (a child
-// on a served repository under a parent that was unread). Those are what an event applied while the
-// repository was unread left: it said nothing and recorded nothing. A recorded issue is left out:
-// its own events carried it, and a snapshot with no actor applied mid-run could overwrite a
-// session's write. Each issue then ends where its event would have ended had the repository been
-// served: a labelled root admitted or queued, a child of a live tree recorded under it (parents
-// first), and a person's issue left as it is. A listing the consumer may still be behind is held
-// as the boot's is (admission's pending), and released by pollHoldRelease. The repositories are
-// let go once the recovery commits; a failed one stays to recover, tried again on the refresher's
-// backoff. A restart loses the set, and the boot's reconcile is that recovery.
+// that resolve to one of them, whose parent chain in the listing reaches one that does (a child on
+// a served repository under a parent that was unread), or whose apply said nothing while one of
+// them was unread (noteUnread: an issue that took its repository from a parent, or from the
+// project's default, changed meanwhile). Those are what an event applied while the repository was
+// unread left: it said nothing and recorded nothing. A recorded issue is left out: its own events
+// carried it, and a snapshot with no actor applied mid-run could overwrite a session's write. Each
+// issue then ends where its event would have ended had the repository been served: a labelled
+// root admitted or queued, a child of a live tree recorded under it (parents first), and a
+// person's issue left as it is. A listing the consumer may still be behind is held as the boot's
+// is (admission's pending), and released by pollHoldRelease. Then each tree's architect is told,
+// once, of every child its release_children left unrecorded on one of them that is still
+// unrecorded (tellReleaseWaits). The repositories are let go once both commit; a failed one stays
+// to recover, tried again on the refresher's backoff. A restart loses the set, and the boot's
+// reconcile is that recovery; what a release left waiting is told to no one then.
 func (w *workflowRuntime) recoverRepositories(ctx context.Context) {
 	w.recoveringMu.Lock()
 	repos := maps.Clone(w.recovering)
+	silenced := map[string]bool{}
+	waits := map[string]releaseWait{}
+	for repo := range repos {
+		maps.Copy(silenced, w.silenced[repo])
+		maps.Copy(waits, w.releaseWaits[repo])
+	}
 	w.recoveringMu.Unlock()
 	if len(repos) == 0 {
 		return
@@ -696,7 +706,16 @@ func (w *workflowRuntime) recoverRepositories(ctx context.Context) {
 	defer cancel()
 	issues, err := w.dispatch.ListIssues(attempt, w.dispatchProject, nil)
 	if err == nil {
-		err = w.reconcileListing(attempt, issues, recoveredOn(repos, issues), false)
+		err = w.reconcileListing(attempt, issues, recoveredOn(repos, silenced, issues), false)
+	}
+	if err == nil && len(waits) != 0 && w.admission != nil && w.admission.Held() {
+		// The listing waits on the consumer (admission's pending), so a child it records is not
+		// recorded yet: the waits are told on a later recovery, once nothing is held.
+		w.log.Info("workflow: the recovery's listing waits on the Dispatch consumer; its release waits are told once it is released", "repositories", names)
+		return
+	}
+	if err == nil {
+		err = w.tellReleaseWaits(attempt, names, waits)
 	}
 	if err != nil {
 		w.log.Warn("workflow: the issues of the repositories GitHub answered for again were not recovered from Dispatch's listing; recovering them again",
@@ -706,14 +725,112 @@ func (w *workflowRuntime) recoverRepositories(ctx context.Context) {
 	w.recoveringMu.Lock()
 	for _, repo := range names {
 		delete(w.recovering, repo)
+		for key := range silenced {
+			delete(w.silenced[repo], key)
+		}
+		for key := range waits {
+			delete(w.releaseWaits[repo], key)
+		}
 	}
 	w.recoveringMu.Unlock()
 	w.log.Info("workflow: recovered the issues of the repositories GitHub answered for again", "repositories", names)
 }
 
+// releaseWait is a child release_children left unrecorded while a repository was unread
+// (awaitRecovery): the tree it was released in, and its Dispatch parent.
+type releaseWait struct {
+	tree, parent string
+}
+
+// noteUnread is the workflow's Config.NoteUnread: key's apply said nothing because resolved was
+// unread. It is called inside the apply's transaction, so it is noted before any read of the
+// mapping can publish resolved again, under the fact lock, and so before that recovery's scope is
+// read. A rolled-back apply leaves a note that only takes an unrecorded issue into the scope.
+func (w *workflowRuntime) noteUnread(key, resolved string) {
+	repo := strings.ToLower(resolved)
+	w.recoveringMu.Lock()
+	defer w.recoveringMu.Unlock()
+	if w.silenced == nil {
+		w.silenced = map[string]map[string]bool{}
+	}
+	if w.silenced[repo] == nil {
+		w.silenced[repo] = map[string]bool{}
+	}
+	w.silenced[repo][key] = true
+}
+
+// awaitRecovery is api.Options.AwaitRecovery: child, released in tree under parent, is left
+// unrecorded while repo is unread, and the recovery of repo tells tree's architect if it is still
+// unrecorded then.
+func (w *workflowRuntime) awaitRecovery(repo, tree, child, parent string) {
+	repo = strings.ToLower(repo)
+	w.recoveringMu.Lock()
+	defer w.recoveringMu.Unlock()
+	if w.releaseWaits == nil {
+		w.releaseWaits = map[string]map[string]releaseWait{}
+	}
+	if w.releaseWaits[repo] == nil {
+		w.releaseWaits[repo] = map[string]releaseWait{}
+	}
+	w.releaseWaits[repo][child] = releaseWait{tree: tree, parent: parent}
+}
+
+// tellReleaseWaits tells each tree's architect, in one child-release-stalled notice, which of waits
+// the recovery of repos left unrecorded, each with whether its parent is recorded now: what to
+// release again. A child recorded since is told nothing; its record's own notices carry it.
+func (w *workflowRuntime) tellReleaseWaits(ctx context.Context, repos []string, waits map[string]releaseWait) error {
+	if len(waits) == 0 {
+		return nil
+	}
+	byTree := map[string][]string{}
+	for _, child := range slices.Sorted(maps.Keys(waits)) {
+		wait := waits[child]
+		recorded, err := w.recordOf(ctx, child)
+		if err != nil {
+			return err
+		}
+		if recorded != nil {
+			continue
+		}
+		parent, err := w.recordOf(ctx, wait.parent)
+		if err != nil {
+			return err
+		}
+		line := fmt.Sprintf("%s (its parent %s is recorded now: release %s again)", child, wait.parent, child)
+		if parent == nil {
+			line = fmt.Sprintf("%s (its parent %s is not recorded: release %s first, then %s)", child, wait.parent, wait.parent, child)
+		}
+		byTree[wait.tree] = append(byTree[wait.tree], line)
+	}
+	if len(byTree) == 0 {
+		return nil
+	}
+	now := time.Now().UTC()
+	scoped, committed := intake.WithCommitHooks(ctx)
+	if err := pgx.BeginFunc(scoped, w.pool, func(tx pgx.Tx) error {
+		for _, tree := range slices.Sorted(maps.Keys(byTree)) {
+			row, err := record.NewOutboxRow(tree, record.Notice{Kind: "child-release-stalled", Role: claim.RoleArchitect, Reason: fmt.Sprintf(
+				"GitHub answered %s's App installation read again, and the daemon recovered its issues from Dispatch's listing, but these children your release_children released while it was unread are still not recorded: %s",
+				strings.Join(repos, ", "), strings.Join(byTree[tree], "; "))}, now)
+			if err != nil {
+				return err
+			}
+			if err := w.records.Enqueue(scoped, tx, row); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("tell the architects of the children the recovery left unrecorded: %w", err)
+	}
+	committed()
+	return nil
+}
+
 // recoveredOn is recoverRepositories' scope over listing: an issue records does not hold whose
-// repository repos names (lowercased), or one of whose ancestors in listing resolves to one.
-func recoveredOn(repos map[string]bool, listing []dispatch.IssueSummary) func(records map[string]*record.Issue, summary dispatch.IssueSummary) bool {
+// repository repos names (lowercased), one of whose ancestors in listing resolves to one, or one
+// silenced names.
+func recoveredOn(repos, silenced map[string]bool, listing []dispatch.IssueSummary) func(records map[string]*record.Issue, summary dispatch.IssueSummary) bool {
 	byKey := make(map[string]dispatch.IssueSummary, len(listing))
 	for _, summary := range listing {
 		byKey[summary.Key] = summary
@@ -722,7 +839,7 @@ func recoveredOn(repos map[string]bool, listing []dispatch.IssueSummary) func(re
 		if records[summary.Key] != nil {
 			return false
 		}
-		if repos[strings.ToLower(summary.ResolvedRepo)] {
+		if silenced[summary.Key] || repos[strings.ToLower(summary.ResolvedRepo)] {
 			return true
 		}
 		seen := map[string]bool{summary.Key: true}
@@ -731,7 +848,7 @@ func recoveredOn(repos map[string]bool, listing []dispatch.IssueSummary) func(re
 			if !listed {
 				return false
 			}
-			if repos[strings.ToLower(above.ResolvedRepo)] {
+			if silenced[parent] || repos[strings.ToLower(above.ResolvedRepo)] {
 				return true
 			}
 			seen[parent] = true

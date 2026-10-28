@@ -97,7 +97,7 @@ func mappingRigJS(t *testing.T, installs *installations, opts ...func(*workflowR
 	w := &workflowRuntime{pool: isolatedOutboxPool(t), records: record.NewStore(), dispatch: client, dispatchProject: "LEGION", installs: installs,
 		repositories: newRepositories("LEGION"), defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now), log: quietLogger(),
 		mappingChanged: make(chan struct{}, 1)}
-	engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
+	engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, NoteUnread: w.noteUnread, DesignGate: config.DesignGateOff}, quietLogger())
 	w.engine, w.admission = engine, admit.New(w.records, engine, 3, "LEGION", quietLogger())
 	w.handlers = []intake.Handler{w.engine, w.admission}
 	for _, opt := range opts {
@@ -1420,5 +1420,83 @@ func TestTheUnreadRepositoryBackoffDoublesToItsCapAndResets(t *testing.T) {
 	testwait.Eventually(t, "a wait after zeta/tools' read fails again", func() bool { return len(recorded()) > idle })
 	if got := recorded()[idle]; got != 30*time.Second {
 		t.Fatalf("the first wait after the read failed again = %s, want 30s", got)
+	}
+}
+
+// treeNotices is the reason of every notice queued on tree, in queue order.
+func treeNotices(t *testing.T, w *workflowRuntime, tree string) []string {
+	t.Helper()
+	rows, err := w.pool.Query(context.Background(), "select payload::text from outbox where issue = $1 and kind = 'notice' order by id", tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var notices []string
+	for rows.Next() {
+		var notice string
+		if err := rows.Scan(&notice); err != nil {
+			t.Fatal(err)
+		}
+		notices = append(notices, notice)
+	}
+	return notices
+}
+
+// A labelled todo root whose event the daemon applied silently while its repository was unread is
+// recovered even when Dispatch resolves it to another repository by the time GitHub answers (it
+// took its repository from the project's default, or from a parent, and that changed, with no
+// event of its own): the event's silence is noted with the repository it was silent for, and that
+// repository's recovery takes the issue in whatever it resolves to. Scoped by its resolution at
+// the recovery alone, it waited for the next boot.
+func TestAnIssueSilentForAnUnreadRepositoryIsRecoveredWhereverItResolvesThen(t *testing.T) {
+	quickInstallReads(t)
+	installs := &installations{}
+	installs.setFailing(errors.New("GitHub answered 502"), "implement zeta/tools")
+	w, client, installs, _ := mappingRigWith(t, installs)
+	const key = "LEGION-1500"
+	deliver(t, w, client, issue(key, "zeta/tools", "todo", true, "", 1))
+	if recordedIssue(t, w, key) != nil {
+		t.Fatalf("%s recorded while zeta/tools' read fails", key)
+	}
+	// The project's default moves to acme/widgets: Dispatch resolves the issue there now, and sends
+	// no event of it.
+	moved := issue(key, "acme/widgets", "todo", true, "", 1)
+	client.show(moved)
+	serveAndRecover(t, w, installs)
+	if got := recordedIssue(t, w, key); got == nil || got.Repo != "acme/widgets" {
+		t.Fatalf("%s = %+v once zeta/tools is recovered, want it admitted on acme/widgets, where it resolves now", key, got)
+	}
+}
+
+// A repository's recovery tells each tree's architect, once, which children its release_children
+// left for the repository the recovery still did not record, with what to release: here C, todo
+// under a backlog parent P, which the recovery records no child under. A child the recovery
+// recorded, E, is not named. Before, such a child stranded silently.
+func TestARecoveryTellsTheArchitectOfTheChildrenItDidNotRecord(t *testing.T) {
+	quickInstallReads(t)
+	installs := &installations{}
+	installs.setFailing(errors.New("GitHub answered 502"), "implement zeta/tools")
+	w, client, installs, _ := mappingRigWith(t, installs)
+	const tree, p, c, e = "LEGION-1600", "LEGION-1601", "LEGION-1602", "LEGION-1603"
+	liveRoot(t, w, client, tree)
+	client.show(issue(p, "zeta/tools", "backlog", false, tree, 1), issue(c, "zeta/tools", "todo", false, p, 1), issue(e, "zeta/tools", "todo", false, tree, 1))
+	w.awaitRecovery("zeta/tools", tree, c, p)
+	w.awaitRecovery("zeta/tools", tree, e, tree)
+	before := len(treeNotices(t, w, tree))
+	serveAndRecover(t, w, installs)
+	if got := recordedIssue(t, w, e); got == nil || got.Tree != tree {
+		t.Fatalf("%s = %+v, want the recovery to record it in %s's tree", e, got, tree)
+	}
+	if got := recordedIssue(t, w, c); got != nil {
+		t.Fatalf("%s recorded as %+v under backlog %s", c, got, p)
+	}
+	notices := treeNotices(t, w, tree)[before:]
+	if len(notices) != 1 || !strings.Contains(notices[0], "child-release-stalled") ||
+		!strings.Contains(notices[0], c+" (its parent "+p+" is not recorded: release "+p+" first, then "+c+")") || strings.Contains(notices[0], e) {
+		t.Fatalf("notices to %s's architect after the recovery = %q, want one naming %s and %s, not %s", tree, notices, c, p, e)
+	}
+	time.Sleep(10 * installReadRetry.Max)
+	if got := treeNotices(t, w, tree)[before:]; len(got) != 1 {
+		t.Fatalf("notices after the recovery = %d, want the one only", len(got))
 	}
 }

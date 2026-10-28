@@ -7,7 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -157,103 +157,193 @@ func (r unreadRepositories) ResolveRepository(resolved string) (workflow.Resolut
 	return workflow.Resolution{Repo: resolved, DefaultBranch: "main", GitHubRepo: resolved}, nil
 }
 
-// While a repository's GitHub App installation read fails, release_children answers a todo child
-// on it by what the daemon will do once GitHub answers and it recovers the repository's issues from
-// Dispatch's listing. Under the recorded root, the child is answered released, neither started nor
-// held, since that recovery records it under the root. Under a parent that is not recorded, on
-// that repository, it is answered REPOSITORY_READ_FAILED naming the repository, as often as the
-// architect asks, with no release-retry record and no notice: CHILD_NOT_RECORDED's few quick
-// retries would run out in seconds of an outage and tell the architect the parent never reached
-// the daemon. Once GitHub answers and the parent is recorded, the architect's retry records the
-// child and answers it released.
-func TestWaveReleaseAnswersAChildOnAnUnreadRepositoryByWhatItsRecoveryWillDo(t *testing.T) {
-	h := newHarness(t)
-	records := record.NewStore()
-	var unread atomic.Bool
-	unread.Store(true)
-	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: unreadRepositories{&unread}, DesignGate: config.DesignGateOff}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	statuses := &statusRecorder{}
-	h.handler = NewServer("127.0.0.1", 8437, Options{
-		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
-		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
-		Handlers: []intake.Handler{engine}, Dispatch: statuses,
-		RepositoryUnread: func(resolved string) bool { return resolved == "zeta/tools" && unread.Load() },
+// unreadRelease is a harness whose release_children runs over a live tree LEGION-208 on
+// acme/widgets, with zeta/tools left out while unread is set, and every child it leaves to a
+// recovery (Options.AwaitRecovery) in awaited.
+type unreadRelease struct {
+	h        *harness
+	records  record.Store
+	engine   *workflow.Engine
+	statuses *statusRecorder
+	unread   *atomic.Bool
+	awaited  []string
+	grant    func() string
+}
+
+const unreadRoot = "LEGION-208"
+
+func newUnreadRelease(t *testing.T, issues ...dispatch.Issue) *unreadRelease {
+	t.Helper()
+	u := &unreadRelease{h: newHarness(t), records: record.NewStore(), statuses: &statusRecorder{}, unread: &atomic.Bool{}}
+	u.unread.Store(true)
+	u.engine = workflow.New(u.records, workflow.Config{Project: testProject, Repositories: unreadRepositories{u.unread}, DesignGate: config.DesignGateOff}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	u.h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: u.h.supervisor, BootTokens: u.h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Controller: u.h.store, Grants: credential.New(nil), Pool: u.h.store.Pool(), Record: u.records,
+		Handlers: []intake.Handler{u.engine}, Dispatch: u.statuses,
+		RepositoryUnread: func(resolved string) bool { return resolved == "zeta/tools" && u.unread.Load() },
+		AwaitRecovery: func(repo, tree, child, _ string) {
+			u.awaited = append(u.awaited, repo+" "+tree+" "+child)
+		},
 	}).Handler
-	root, child, middle, grandchild := "LEGION-208", "LEGION-209", "LEGION-210", "LEGION-211"
-	h.recordIssue(record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
-	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
-		return records.PutSlot(context.Background(), tx, record.Slot{Issue: root, Index: 0, AdmittedAt: time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)})
+	u.h.recordIssue(record.Issue{Key: unreadRoot, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: unreadRoot, Project: testProject, Title: unreadRoot, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
+	if err := u.h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		return u.records.PutSlot(context.Background(), tx, record.Slot{Issue: unreadRoot, Index: 0, AdmittedAt: time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)})
 	}); err != nil {
 		t.Fatalf("seed the live tree: %v", err)
 	}
-	statuses.issues = map[string]dispatch.Issue{
-		root:       {Key: root, ResolvedRepo: "acme/widgets", Status: "in_progress"},
-		child:      {Key: child, ResolvedRepo: "zeta/tools", Title: child, Status: "todo", Parent: &root, LastSeq: 7},
-		middle:     {Key: middle, ResolvedRepo: "zeta/tools", Title: middle, Status: "todo", Parent: &root, LastSeq: 3},
-		grandchild: {Key: grandchild, ResolvedRepo: "zeta/tools", Title: grandchild, Status: "todo", Parent: &middle, LastSeq: 5},
+	u.statuses.issues = map[string]dispatch.Issue{unreadRoot: {Key: unreadRoot, ResolvedRepo: "acme/widgets", Status: "in_progress"}}
+	for _, issue := range issues {
+		u.statuses.issues[issue.Key] = issue
 	}
-	architect := newLiveClaim(t, h, root, claim.RoleArchitect)
-	release := func(key string) *httptest.ResponseRecorder {
-		t.Helper()
-		return h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{"grantId": architect.grant(t), "issues": []string{key}}, nil)
-	}
-	released := func(recorder *httptest.ResponseRecorder, key string) {
-		t.Helper()
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("wave release of %s = %d: %s, want it released", key, recorder.Code, recorder.Body)
-		}
-		var answer WaveReleaseResponse
-		if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
-			t.Fatal(err)
-		}
-		if len(answer.Released) != 1 || answer.Released[0] != key || len(answer.Held) != 0 {
-			t.Fatalf("wave release = %+v, want %s released and held on no link", answer, key)
-		}
-	}
-	retryRow := func(key string) bool {
-		t.Helper()
-		var row *record.ReleaseRetry
-		if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
-			var err error
-			row, err = records.ReleaseRetry(context.Background(), tx, key)
-			return err
-		}); err != nil {
-			t.Fatal(err)
-		}
-		return row != nil
-	}
+	architect := newLiveClaim(t, u.h, unreadRoot, claim.RoleArchitect)
+	u.grant = func() string { return architect.grant(t) }
+	return u
+}
 
-	released(release(child), child)
-	if recordedChild(t, h, child) != nil {
-		t.Fatalf("%s recorded while zeta/tools is unread, want it left for the recovery", child)
+// release releases wave and answers the release's answer, failing unless it is 200 with every
+// child of wave released and none held on a link.
+func (u *unreadRelease) release(t *testing.T, wave ...string) {
+	t.Helper()
+	recorder := u.h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{"grantId": u.grant(), "issues": wave}, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("wave release of %v = %d: %s, want it released", wave, recorder.Code, recorder.Body)
 	}
-	for range 5 {
-		recorder := release(grandchild)
-		body := recorder.Body.String()
-		assertFailure(t, recorder, http.StatusBadGateway, "REPOSITORY_READ_FAILED")
-		if !strings.Contains(body, "zeta/tools is left out for now") {
-			t.Fatalf("the answer %s does not name zeta/tools", body)
-		}
-	}
-	if retryRow(grandchild) || recordedChild(t, h, grandchild) != nil {
-		t.Fatalf("%s has a release-retry record %t or a record, want neither while zeta/tools is unread", grandchild, retryRow(grandchild))
-	}
-	if rows := outboxRows(t, h, root); rows["notice"] != 0 {
-		t.Fatalf("notices to %s's architect = %d, want none", root, rows["notice"])
-	}
-
-	// GitHub answers: the recovery records the parent, as its listing does; the retry records the
-	// grandchild.
-	unread.Store(false)
-	if _, err := intake.ApplyFact(context.Background(), h.store.Pool(), "daemon", "recovery-"+middle, intake.ObservedIssue(statuses.issues[middle]), engine); err != nil {
+	var answer WaveReleaseResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
 		t.Fatal(err)
 	}
-	if recordedChild(t, h, middle) == nil {
-		t.Fatalf("%s not recorded under %s", middle, root)
+	if !slices.Equal(answer.Released, wave) || len(answer.Held) != 0 {
+		t.Fatalf("wave release = %+v, want %v released and held on no link", answer, wave)
 	}
-	released(release(grandchild), grandchild)
-	if got := recordedChild(t, h, grandchild); got == nil || got.Tree != root {
-		t.Fatalf("%s = %+v after the retry, want it recorded in %s's tree", grandchild, got, root)
+}
+
+// notices is the reason of every notice queued to the root's architect.
+func (u *unreadRelease) notices(t *testing.T) []string {
+	t.Helper()
+	var reasons []string
+	if err := u.h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(context.Background(), `select payload::text from outbox where issue = $1 and kind = 'notice' order by id`, unreadRoot)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var reason string
+			if err := rows.Scan(&reason); err != nil {
+				return err
+			}
+			reasons = append(reasons, reason)
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return reasons
+}
+
+func (u *unreadRelease) retryRow(t *testing.T, key string) bool {
+	t.Helper()
+	var row *record.ReleaseRetry
+	if err := u.h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		var err error
+		row, err = u.records.ReleaseRetry(context.Background(), tx, key)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return row != nil
+}
+
+func on(key, repo, status string, parent string, seq int64) dispatch.Issue {
+	return dispatch.Issue{Key: key, ResolvedRepo: repo, Title: key, Status: status, Parent: &parent, LastSeq: seq}
+}
+
+// While a repository's GitHub App installation read fails, release_children never ends a wave on a
+// child it leaves unrecorded for it: the wave goes on, and each such child is answered by what the
+// daemon's recovery of the repository will do. P (backlog, zeta) holds C (todo, zeta), and C holds
+// G (backlog, acme); Q (backlog, acme) holds D (todo, acme). Released together while zeta is
+// unread, Q is written and recorded and D recorded under it, after C in the wave's order; C is
+// left to the recovery and its architect told at once that P must be released first, since the
+// recovery records no child under a backlog parent; G, under C, is not written, and its architect
+// told to release it again once C is recorded. Neither has a release-retry record: they are no
+// unrecorded parent that has not reached the daemon. Before, C's answer, REPOSITORY_READ_FAILED,
+// ended the wave: D was never recorded and nothing told the architect when zeta was answered.
+func TestWaveReleaseGoesOnPastAChildLeftForAnUnreadRepository(t *testing.T) {
+	const p, c, q, d, g = "LEGION-220", "LEGION-221", "LEGION-222", "LEGION-223", "LEGION-224"
+	u := newUnreadRelease(t,
+		on(p, "zeta/tools", "backlog", unreadRoot, 1), on(c, "zeta/tools", "todo", p, 2),
+		on(q, "acme/widgets", "backlog", unreadRoot, 3), on(d, "acme/widgets", "todo", q, 4),
+		on(g, "acme/widgets", "backlog", c, 5))
+	u.release(t, c, d, q, g)
+	for _, key := range []string{q, d} {
+		if got := recordedChild(t, u.h, key); got == nil || got.Tree != unreadRoot {
+			t.Fatalf("%s = %+v, want it recorded in %s's tree past the child left for zeta/tools", key, got, unreadRoot)
+		}
+	}
+	for _, key := range []string{c, g} {
+		if got := recordedChild(t, u.h, key); got != nil {
+			t.Fatalf("%s recorded as %+v while zeta/tools is unread", key, got)
+		}
+		if u.retryRow(t, key) {
+			t.Fatalf("%s has a release-retry record, want none", key)
+		}
+	}
+	if want := []statusWrite{{issue: q, status: "todo"}}; !slices.Equal(u.statuses.writes, want) {
+		t.Fatalf("Dispatch writes = %#v, want only %s's: %s waits for %s", u.statuses.writes, q, g, c)
+	}
+	if want := []string{"zeta/tools " + unreadRoot + " " + c, "zeta/tools " + unreadRoot + " " + g}; !slices.Equal(u.awaited, want) {
+		t.Fatalf("children left to the recovery = %q, want %q", u.awaited, want)
+	}
+	notices := u.notices(t)
+	if len(notices) != 2 ||
+		!strings.Contains(notices[0], c+" is todo but not recorded") || !strings.Contains(notices[0], p+", on its parent chain, is backlog") || !strings.Contains(notices[0], "Release "+p+" first, then release "+c+" again") ||
+		!strings.Contains(notices[1], g+" was not written todo: it is under "+c) || !strings.Contains(notices[1], "Release "+g+" again once "+c+" is recorded") {
+		t.Fatalf("notices to %s's architect = %q, want one for %s naming %s and one for %s naming %s", unreadRoot, notices, c, p, g, c)
+	}
+}
+
+// A todo child left for an unread repository is answered released, with no notice, when the
+// recovery will record it: under the recorded root, or under a chain of todo issues up to it
+// whose topmost is on the unread repository. Under a parent the recovery will not record (one in
+// backlog on a served repository), it is answered released too, with a notice naming the parent to
+// release first: the parent is unrecorded for a reason of its own, not for GitHub, so the message
+// says so. Once GitHub answers and the parent is recorded, the architect's release records the
+// child.
+func TestWaveReleaseAnswersAChildOnAnUnreadRepositoryByWhatItsRecoveryWillDo(t *testing.T) {
+	const child, middle, grandchild, held, orphan = "LEGION-209", "LEGION-210", "LEGION-211", "LEGION-212", "LEGION-213"
+	u := newUnreadRelease(t,
+		on(child, "zeta/tools", "todo", unreadRoot, 7),
+		on(middle, "zeta/tools", "todo", unreadRoot, 3), on(grandchild, "zeta/tools", "todo", middle, 5),
+		on(held, "acme/widgets", "backlog", unreadRoot, 2), on(orphan, "zeta/tools", "todo", held, 6))
+	u.release(t, child)
+	u.release(t, grandchild)
+	if notices := u.notices(t); len(notices) != 0 {
+		t.Fatalf("notices = %q, want none: the recovery records %s and %s", notices, child, grandchild)
+	}
+	u.release(t, orphan)
+	notices := u.notices(t)
+	if len(notices) != 1 || !strings.Contains(notices[0], held+", on its parent chain, is backlog and not recorded") || !strings.Contains(notices[0], "Release "+held+" first, then release "+orphan+" again") {
+		t.Fatalf("notices = %q, want one naming %s, in backlog on acme/widgets, to release first", notices, held)
+	}
+	for _, key := range []string{child, grandchild, orphan} {
+		if recordedChild(t, u.h, key) != nil || u.retryRow(t, key) {
+			t.Fatalf("%s has a record or a release-retry record while zeta/tools is unread, want neither", key)
+		}
+	}
+
+	// GitHub answers: the recovery records the parent, as its listing does; the release records the
+	// grandchild.
+	u.unread.Store(false)
+	if _, err := intake.ApplyFact(context.Background(), u.h.store.Pool(), "daemon", "recovery-"+middle, intake.ObservedIssue(u.statuses.issues[middle]), u.engine); err != nil {
+		t.Fatal(err)
+	}
+	if recordedChild(t, u.h, middle) == nil {
+		t.Fatalf("%s not recorded under %s", middle, unreadRoot)
+	}
+	u.release(t, grandchild)
+	if got := recordedChild(t, u.h, grandchild); got == nil || got.Tree != unreadRoot {
+		t.Fatalf("%s = %+v after the release, want it recorded in %s's tree", grandchild, got, unreadRoot)
 	}
 }
 
