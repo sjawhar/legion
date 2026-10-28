@@ -5335,8 +5335,10 @@ describe("executeDispatchTool", () => {
             {
               id: "ask-1",
               state: "open",
+              author: { kind: "session", id: "session-1" },
               question: "Which API?",
-              anchor: { artifact_id: "artifact-42" },
+              anchor: { artifact_id: "artifact-42", quote: "the API" },
+              created_at: "2026-10-20T09:00:00Z",
             },
           ],
         });
@@ -5360,14 +5362,323 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result).toEqual({
-      text: "Version three\n\nOpen anchored asks/comments: ask ask-1",
+      text: [
+        "Version three",
+        "",
+        "Open anchored threads:",
+        "",
+        "ask ask-1 · session session-1 · 2026-10-20T09:00:00Z",
+        "> the API",
+        "Question: Which API?",
+      ].join("\n"),
       details: { issue: "DSP-42" },
     });
     expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual([
       "/api/v1/issues/DSP-42",
       "/api/v1/artifacts/artifact-42/versions/3",
-      "/api/v1/issues/DSP-42/comments?artifact=artifact-42",
+      "/api/v1/issues/DSP-42/comments",
+    ]);
+  });
+
+  // A reply carries no anchor, so a read of the comments anchored on the document misses every
+  // reply: a thread a person reopened by replying read as its root's id alone, and the reply's text
+  // never reached the agent (sjawhar/legion#2366). A person's reply under an open ask is the same:
+  // the ask printed its question alone.
+  test("dispatch_doc_read prints each open anchored thread with its root and every reply", async () => {
+    const requests: string[] = [];
+    const agent = { kind: "session", id: "session-1" };
+    const sami = { kind: "user", id: "sami" };
+    const comment = (fields: Record<string, unknown>) => ({
+      issue_key: "DSP-42",
+      author: agent,
+      anchor: null,
+      reply_to: null,
+      ask_id: null,
+      turn: null,
+      resolved: false,
+      resolved_by: null,
+      resolved_at: null,
+      edited_at: null,
+      suggestion: null,
+      mentions: [],
+      deliveries: [],
+      ...fields,
+    });
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-42",
+          artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+          open_asks: [
+            {
+              id: "ask-open",
+              state: "open",
+              author: agent,
+              question: "Which release carries it?",
+              anchor: { artifact_id: "artifact-42", quote: "the release" },
+              created_at: "2026-10-20T09:00:00Z",
+            },
+            {
+              id: "ask-elsewhere",
+              state: "open",
+              author: agent,
+              question: "Asked on another document?",
+              anchor: { artifact_id: "artifact-99", quote: "other" },
+              created_at: "2026-10-20T09:30:00Z",
+            },
+          ],
+        });
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/text") {
+        return response({ markdown: "# Spec", version: 4, token: "sha256:spec" });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/comments") {
+        return response([
+          comment({
+            id: "c-root",
+            body: "Can this ship Friday?",
+            anchor: { artifact_id: "artifact-42", mark_id: "m-1", quote: "ship Friday" },
+            created_at: "2026-10-20T10:00:00Z",
+          }),
+          comment({
+            id: "c-resolved",
+            body: "Old nit.",
+            anchor: { artifact_id: "artifact-42", mark_id: "m-2", quote: "nit" },
+            resolved: true,
+            resolved_by: agent,
+            resolved_at: "2026-10-20T12:00:00Z",
+            created_at: "2026-10-20T10:30:00Z",
+          }),
+          comment({
+            id: "c-other-document",
+            body: "On another document.",
+            anchor: { artifact_id: "artifact-99", mark_id: "m-3", quote: "other" },
+            created_at: "2026-10-20T10:40:00Z",
+          }),
+          comment({ id: "c-issue", body: "An issue comment.", created_at: "2026-10-20T10:50:00Z" }),
+          comment({
+            id: "c-ask-reply",
+            body: "The 4.2 release, if QA passes.",
+            ask_id: "ask-open",
+            author: sami,
+            created_at: "2026-10-20T10:55:00Z",
+          }),
+          comment({
+            id: "c-ask-elsewhere-reply",
+            body: "Reply under the ask on another document.",
+            ask_id: "ask-elsewhere",
+            author: sami,
+            created_at: "2026-10-20T10:56:00Z",
+          }),
+          comment({
+            id: "c-resolved-ask-reply",
+            body: "Reply under a resolved ask.",
+            ask_id: "ask-resolved",
+            author: sami,
+            created_at: "2026-10-20T10:57:00Z",
+          }),
+          comment({
+            id: "c-reply-agent",
+            body: "Closing: shipped.",
+            reply_to: "c-root",
+            created_at: "2026-10-21T10:00:00Z",
+          }),
+          comment({
+            id: "c-resolved-reply",
+            body: "Fixed.",
+            reply_to: "c-resolved",
+            created_at: "2026-10-21T11:00:00Z",
+          }),
+          // Sami's reply reopened the root, which reads resolved: false again.
+          comment({
+            id: "c-reply-sami",
+            body: "Not yet: QA found a crash on resume.",
+            reply_to: "c-root",
+            author: sami,
+            created_at: "2026-10-22T10:00:00Z",
+          }),
+        ]);
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { issue: "DSP-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result).toEqual({
+      text: [
+        "# Spec",
+        "",
+        "Document token: sha256:spec",
+        "",
+        "Open anchored threads:",
+        "",
+        "ask ask-open · session session-1 · 2026-10-20T09:00:00Z",
+        "> the release",
+        "Question: Which release carries it?",
+        "reply c-ask-reply · user sami · 2026-10-20T10:55:00Z",
+        "Body: The 4.2 release, if QA passes.",
+        "",
+        "comment c-root · session session-1 · 2026-10-20T10:00:00Z",
+        "> ship Friday",
+        "Body: Can this ship Friday?",
+        "reply c-reply-agent · session session-1 · 2026-10-21T10:00:00Z",
+        "Body: Closing: shipped.",
+        "reply c-reply-sami · user sami · 2026-10-22T10:00:00Z",
+        "Body: Not yet: QA found a crash on resume.",
+      ].join("\n"),
+      details: { issue: "DSP-42" },
+    });
+    // One read of the issue's comments, unfiltered, so the replies come back with their roots.
+    expect(requests).toEqual([
+      "/api/v1/issues/DSP-42",
+      "/api/v1/artifacts/artifact-42/text",
+      "/api/v1/issues/DSP-42/comments",
+    ]);
+  });
+
+  test("dispatch_doc_read prints a project document's open anchored threads with their replies", async () => {
+    const requests: string[] = [];
+    const agent = { kind: "session", id: "session-1" };
+    const sami = { kind: "user", id: "sami" };
+    const notes = {
+      id: "artifact-42",
+      issue_key: null,
+      project: "CORE",
+      ref_key: "CORE/notes",
+      slug: "notes",
+      name: "notes.md",
+      kind: "doc",
+      primary: false,
+      created_by: agent,
+      created_at: "2026-09-18T00:00:00Z",
+      versions: [],
+    };
+    const comment = (fields: Record<string, unknown>) => ({
+      issue_key: null,
+      artifact_id: "artifact-42",
+      author: agent,
+      anchor: null,
+      reply_to: null,
+      ask_id: null,
+      turn: null,
+      resolved: false,
+      resolved_by: null,
+      resolved_at: null,
+      edited_at: null,
+      suggestion: null,
+      mentions: [],
+      deliveries: [],
+      ...fields,
+    });
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/projects/CORE/artifacts/notes") return response(notes);
+      if (target.pathname === "/api/v1/projects/CORE/artifacts") return response([notes]);
+      if (target.pathname === "/api/v1/artifacts/artifact-42/text") {
+        return response({ markdown: "# Notes", version: 1 });
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/asks") {
+        return response([
+          {
+            id: "ask-answered",
+            state: "answered",
+            author: agent,
+            question: "Already settled?",
+            anchor: { artifact_id: "artifact-42", quote: "settled" },
+            created_at: "2026-10-19T09:00:00Z",
+          },
+          {
+            id: "ask-open",
+            state: "open",
+            author: agent,
+            question: "Keep the runbook?",
+            anchor: { artifact_id: "artifact-42", quote: "runbook" },
+            created_at: "2026-10-20T09:00:00Z",
+          },
+        ]);
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/comments") {
+        return response([
+          comment({
+            id: "c-root",
+            body: "Is step 3 still right?",
+            anchor: { artifact_id: "artifact-42", mark_id: "m-1", quote: "step 3" },
+            created_at: "2026-10-20T10:00:00Z",
+          }),
+          comment({
+            id: "c-reply",
+            body: "No: it now runs before step 2.",
+            reply_to: "c-root",
+            author: sami,
+            created_at: "2026-10-21T10:00:00Z",
+          }),
+          comment({
+            id: "c-answered-ask-reply",
+            body: "Settled: keep it.",
+            ask_id: "ask-answered",
+            anchor: { artifact_id: "artifact-42", quote: "settled" },
+            author: sami,
+            created_at: "2026-10-21T11:00:00Z",
+          }),
+          comment({
+            id: "c-ask-reply",
+            body: "Keep it, but trim the rollback section.",
+            ask_id: "ask-open",
+            author: sami,
+            created_at: "2026-10-21T12:00:00Z",
+          }),
+        ]);
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { project: "CORE", artifact: "notes" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result).toEqual({
+      text: [
+        "# Notes",
+        "",
+        "Open anchored threads:",
+        "",
+        "ask ask-open · session session-1 · 2026-10-20T09:00:00Z",
+        "> runbook",
+        "Question: Keep the runbook?",
+        "reply c-ask-reply · user sami · 2026-10-21T12:00:00Z",
+        "Body: Keep it, but trim the rollback section.",
+        "",
+        "comment c-root · session session-1 · 2026-10-20T10:00:00Z",
+        "> step 3",
+        "Body: Is step 3 still right?",
+        "reply c-reply · user sami · 2026-10-21T10:00:00Z",
+        "Body: No: it now runs before step 2.",
+      ].join("\n"),
+      details: { project: "CORE", document: "CORE/notes" },
+    });
+    expect(requests.filter((request) => request.endsWith("/comments"))).toEqual([
+      "/api/v1/artifacts/artifact-42/comments",
     ]);
   });
 

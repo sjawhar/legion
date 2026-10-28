@@ -934,13 +934,8 @@ export class DispatchClient {
     return this.#json("POST", ["api", "v1", "comments", id, "resolve"], { actor });
   }
 
-  async getComments(issue: string, artifact?: string): Promise<Comment[]> {
-    return this.#json(
-      "GET",
-      ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"],
-      undefined,
-      artifact ? { artifact } : undefined
-    );
+  async getComments(issue: string): Promise<Comment[]> {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"]);
   }
 
   /** `POST /api/v1/issues/{key}/handoffs/{phase}`: records `body`, the handoff's exact text, as
