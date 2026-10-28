@@ -22,7 +22,9 @@ body: |-
     committed before it; past that it answers the mentions at or below the horizon, and a later read
     the rest. Each observation of the horizon uses one transaction id (none while readers are idle)
     and runs on a two-connection pool of its own, so a full shared pool does not hold live readers
-    back. The horizon is read on the primary only.
+    back. A failed observation is logged (at most every 30 s), and a reader waiting on the horizon
+    gets the error back once every observation has failed for 10 s. The horizon is read on the
+    primary only.
 time: 2026-10-28T10:11:32.084745099Z
 custom:
-    Issue: pr2392
+    Issue: INFRA-591
