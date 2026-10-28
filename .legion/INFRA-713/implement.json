@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-713",
+  "completed": "2026-10-28T19:57:00Z",
+  "proof": [
+    {
+      "criterion": "Round scope: after the reviewed code head 315813eb, head 59d29784 changes nothing but docs/solutions/ and .legion/, so the A1-A3 proofs at 315813eb still hold",
+      "surface": "The sjawhar/legion issue branch legion/INFRA-713 as GitHub holds it (the tree the PR merges)",
+      "command": "jj diff --from 315813eb6f1b429c0c2aa9aa432d29eecb4f6981 --to 59d2978409f5675ddf44cdeac102a41374497c9a --stat; gh pr view 2470 -R sjawhar/legion --json headRefOid",
+      "observed": "3 files: .legion/INFRA-713/plan.json removed (retro), and two new docs/solutions/testing/*-pr2470.md files. No path under packages/ changed. Head on GitHub: 59d2978409f5675ddf44cdeac102a41374497c9a. The 59d29784 commit only renames the retro's two learnings from *-INFRA-713.md to *-pr2470.md and takes the Dispatch key out of their front matter and text, as the controller's ruling relayed by the INFRA-138 architect requires.",
+      "headSha": "59d2978409f5675ddf44cdeac102a41374497c9a",
+      "negativeControl": "The same diff from the base commit 80cc97a6 to 59d29784 lists packages/dispatch/e2e/mermaid.e2e.ts, mermaid-diagrams.ts and packages/dispatch/AGENTS.md, so a code change would appear in this command. From 315813eb it lists none."
+    },
+    {
+      "criterion": "A1 pod and A1 CI: the row passes in chromium, iphone, webkit and firefox on the issue pod and in CI's dispatch job",
+      "surface": "Pod: real Go Dispatch server, Postgres 17 with pgvector and Playwright 1.63.0 on the issue pod. CI: the dispatch job of the 'Legion Envoy and Contracts' workflow on a GitHub-hosted runner",
+      "command": "Pod: cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project=<p> --workers=1, plus -g 'too large to draw' --repeat-each=5 (https://github.com/sjawhar/legion/pull/2470#issuecomment-6475984614). CI: gh run view 40732897855 -R sjawhar/legion --job 123006375476 --log (https://github.com/sjawhar/legion/pull/2470#issuecomment-6479047265)",
+      "observed": "Pod: whole spec 8/8 in each project, row 20/20. CI: ✓ e2e/mermaid.e2e.ts:216:1 › a diagram too large to draw in time … in chromium (6.4s), iphone (6.3s), webkit (7.2s) and firefox (7.0s).",
+      "headSha": "315813eb6f1b429c0c2aa9aa432d29eecb4f6981",
+      "negativeControl": "Control PR #2471 (head da4fb160 = 315813eb + RENDER_TIME_LIMIT_MS = 600_000), run 40732919704 job 123006617590: ✘ in all four projects at mermaid.e2e.ts:269, the refusal toHaveText. On the pod, the same control and window.setTimeout(noop, timeLimitMs) fail at :269 in all four projects. A chunk route that never matches fails at the hold poll (:251)."
+    }
+  ],
+  "filesChanged": [
+    "docs/solutions/testing/a-browser-row-that-needs-work-to-outlast-a-deadline-holds-the-worker-rather-than-trusting-a-slow-input-pr2470.md (renamed from *-INFRA-713.md)",
+    "docs/solutions/testing/a-ci-negative-control-for-a-browser-row-changes-a-value-the-earlier-gates-accept-and-runs-on-its-own-throwaway-pull-request-pr2470.md (renamed from *-INFRA-713.md)"
+  ],
+  "deviations": [
+    "Commit 59d29784 was pushed during awaiting_merge at the INFRA-138 architect's direction (Envoy message 149b479866a3485cb9a8d29fc23aca98) to apply the controller's naming ruling. This round makes no further code change and completes on it, as the architect asked. The architect ruled that existing commit messages and the PR body stay as they are (Envoy message fd560bed59b19b8ac0fcce8622d3d865)."
+  ]
+}
