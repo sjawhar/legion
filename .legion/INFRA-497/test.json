@@ -2,53 +2,36 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-497",
-  "completed": "2026-10-28T19:43:30Z",
-  "round": 6,
-  "headTested": "66dac7acdebbffc455f83068181e544e978ab2b6",
-  "codeHead": "5ce792cd0d15",
+  "completed": "2026-10-28T20:41:07Z",
+  "round": 7,
+  "headTested": "a8280b0ad076b43bfe1b7808ef7bcb286cba595f",
+  "codeHead": "d7184ba26791e5cb292d790f493e0a9cf1cadcea",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's commands on the pinned release binary with a fresh nats-server 2.10.29. `cd packages/pi-legion && LEGION_TEST_OMP=$TMPDIR/omp-pin/omp-v18.12.2-sami.20261026-135627-linux-x64/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:15338 bun test ./extensions/controller-start-omp.test.ts` gave 15 pass, 0 fail: the implementer's 12 and my 3 round-5 red tests. pi-envoy `bun run test` gave 1474 pass, then 9 pass. Its change to my red test, 5cb1b868, only moves `cleanup.push(async () => registration.release())` after `startController(...)`, so the release runs before the stand-in's server.stop; no assertion changed."
+    "how": "I re-ran the implementer's commands on the pinned release binary with a fresh nats-server 2.10.29 on 127.0.0.1:15339. `cd packages/pi-legion && LEGION_TEST_OMP=$TMPDIR/omp-pin/omp-v18.12.2-sami.20261026-135627-linux-x64/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:15339 bun test ./extensions/controller-start-omp.test.ts`: 16 pass, 0 fail, including its RPC-abort start-turn case. pi-envoy `bun run test`: 1480 pass, then 9 pass. Its changes to my round-5 red tests make the two unsent-mark cases stricter: they now use `until` with a 90 s bound and also assert that the first request ends with the wake. With card-wake.ts from f0fb9ec9 swapped in, all 3 red tests still fail (restored by cmp)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Round-5 failure 1 / A5: a startup card that a turn after the start turn reads gets no second wake.",
-      "surface": "Pinned Oh My Pi v18.12.2-sami.20261026-135627 in a pseudo-terminal as the operator's controller with this checkout's pi-envoy and pi-legion, real nats-server 2.10.29 on 127.0.0.1:15338, controller stand-ins",
-      "command": "cd packages/pi-legion && bun test ./extensions/controller-start-omp.test.ts -t 'no second wake', plus scratch case C1 ($TMPDIR/tester-r5-controller.test.ts; a direct card and a lane card during startup, a notice during the start turn)",
-      "observed": "The red test passes. In C1, exactly 1 turn follows the start turn. It carries the direct card, the lane card and the notice, and no wake follows it. Round 5 had a 2nd turn: the wake.",
-      "headSha": "66dac7acdebbffc455f83068181e544e978ab2b6",
-      "negativeControl": "With card-wake.ts from f0fb9ec9 swapped in, the red test fails with Expected 1, Received 3. Restored by cmp."
+      "criterion": "Review round 6 finding / A3: an interrupt of the controller's start turn (Esc on the operator's terminal) starts no turn for an owed startup card; the card stays folded and the person's next turn reads it.",
+      "surface": "Pinned Oh My Pi v18.12.2-sami.20261026-135627 in a pseudo-terminal as the operator's controller with this checkout's pi-envoy and pi-legion, real nats-server 2.10.29, controller stand-ins",
+      "command": "Scratch $TMPDIR/tester-r7-esc.test.ts, two cases: Esc while the start turn's model request is held, and Esc while a real blocking bash tool call runs. Each then has the operator type a prompt. Run from packages/pi-legion/extensions.",
+      "observed": "Both pass. No model request comes after the Esc. The operator's prompt is the 2nd request and carries the card with no wake text. The session settles with 2 requests.",
+      "headSha": "a8280b0ad076b43bfe1b7808ef7bcb286cba595f",
+      "negativeControl": "With card-wake.ts from 5ce792cd swapped in, the held-request case fails: the wake starts a turn, so the busy row never leaves the screen. Restored by cmp."
     },
     {
-      "criterion": "Round-5 failure 2 / architect item 4: an unsent start mark does not hold a startup card for good.",
+      "criterion": "Round-5 failures stay fixed (A5 no second wake; the unsent start mark is bounded), under the implementer's stricter versions of my red tests.",
       "surface": "Same surface",
-      "command": "bun test ./extensions/controller-start-omp.test.ts -t 'unsent start mark' (both variants), plus scratch cases H (a register request that never answers, and no /legion-controller-start word) and R1 (register refused with 403)",
-      "observed": "Both red tests pass. H: the card's wake came 30113 ms after startup (claim never answers) and 30068 ms after startup (no start word); in round 5 nothing came within 95 s. R1: the wake came 1104 ms after the refusal; in round 5 it came after 29967 ms.",
-      "headSha": "66dac7acdebbffc455f83068181e544e978ab2b6",
-      "negativeControl": "With card-wake.ts from f0fb9ec9 swapped in, both fail on their own assertion, 'no model request within 90 s', not in cleanup. Restored by cmp."
-    },
-    {
-      "criterion": "The owed-card rule does not over-correct: a startup card still gets its one wake when the start turn calls a tool and no other turn reads it.",
-      "surface": "Same surface",
-      "command": "Scratch $TMPDIR/tester-r6-tool.test.ts case T1: the start turn's first reply calls read, its second reply stops",
-      "observed": "The 3rd model request is the wake, '1 Envoy message above arrived with no turn to read it'. There are 3 requests in total.",
-      "headSha": "66dac7acdebbffc455f83068181e544e978ab2b6",
-      "negativeControl": "With unreadCards changed to count an owed card as read by any later assistant message, the wake never comes ('timed out waiting for the startup wake's request'). Restored by cmp."
-    },
-    {
-      "criterion": "Architect item 3: a session with no start mark keeps the earlier behaviour.",
-      "surface": "Same terminal surface with no Legion environment",
-      "command": "Scratch case P1",
-      "observed": "A card during startup starts its own turn at once: its last message is the card, with no wake. A later idle card does the same.",
-      "headSha": "66dac7acdebbffc455f83068181e544e978ab2b6",
-      "negativeControl": "The controller environment on the same surface holds the card behind the start turn (C1)."
+      "command": "bun test ./extensions/controller-start-omp.test.ts (all 16), then -t 'no second wake|unsent start mark' with f0fb9ec9's card-wake.ts",
+      "observed": "All 16 pass at head. With f0fb9ec9's card-wake.ts, 0 of 3 pass. The unsent-mark cases fail with 'timed out waiting for the startup card's model request, within 90 s'. The second-wake case fails with 'timed out waiting for the session to settle on the reply': the extra wake turn is already held when the settle check runs.",
+      "headSha": "a8280b0ad076b43bfe1b7808ef7bcb286cba595f",
+      "negativeControl": "The f0fb9ec9 swap is the control. Restored by cmp."
     }
   ],
-  "ciAtHead": "Read on GitHub at about 2026-10-28T19:42Z for code head 5ce792cd: lint, typecheck, test, build and the daemon Go suite were all queued. I did not wait for them.",
+  "ciAtHead": "Read on GitHub at about 2026-10-28T20:40Z for code head d7184ba2: lint, typecheck, test, build and the daemon Go suite were all queued. I did not wait for them.",
   "notes": [
-    "Trade-off for the reviewer: the hold on an unsent start now ends 30 s after card-wake.ts first reads the mark. A start claim slower than that lets a startup card take its turn before the start message. packages/pi-envoy/AGENTS.md and the changelog fragment state this bound.",
-    "Items 1, 2 and 5 and the forward merge were checked in round 5 at f0fb9ec9. This round's runtime change is card-wake.ts only; the interface.ts change is a comment."
+    "The second-wake red test now fails at f0fb9ec9 with a settle timeout rather than round 5's 'Expected 1, Received 3'. The cause is the same extra wake turn, seen while it is still held. The test was not changed in this respect."
   ]
 }
