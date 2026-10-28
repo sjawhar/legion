@@ -1481,6 +1481,27 @@ func TestAgentSecretsBlockRefusals(t *testing.T) {
 	}
 }
 
+// TestAgentSecretsURLRefusalNamesNoCredential: a url carrying a user, a password, a query or a
+// fragment is refused without echoing it.
+func TestAgentSecretsURLRefusalNamesNoCredential(t *testing.T) {
+	for _, raw := range []string{
+		"https://tokuser9f3:hunter2pw@secrets.example",
+		"https://secrets.example/?token=qtok77",
+		"https://secrets.example/#qtok77",
+		"https://tokuser9f3:hunter2pw%zz@secrets.example",
+	} {
+		_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    agent_secrets:\n      url: \""+raw+"\"\n"+agentSecretsTokenFile), noEnv)
+		if err == nil || !strings.Contains(err.Error(), "agent_secrets.url must be an absolute URL") {
+			t.Fatalf("url %q: err %v, want the url refused", raw, err)
+		}
+		for _, secret := range []string{"tokuser9f3", "hunter2pw", "qtok77"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("url %q: refusal %q names %q", raw, err, secret)
+			}
+		}
+	}
+}
+
 func TestLoopbackBrokerMayBePlainHTTP(t *testing.T) {
 	for _, url := range []string{"http://127.0.0.1:13380", "http://LOCALHOST:13380"} {
 		t.Run(url, func(t *testing.T) {

@@ -362,17 +362,23 @@ a {
 }
 
 /* A decision block is a card inside prose. Its first/last child would otherwise carry the
-   prose paragraph margins into the card (a 20px gap under a 12px header). */
+   prose paragraph margins into the card (a 20px gap under a 12px header). The repeated attribute
+   selector lifts these rules to (0,5,0): a decision inside a reply drawn in another decision's
+   footer thread is also matched by the footer's `prose-sm` rules below — `[data-dispatch-ask-footer]
+   .dispatch-markdown :is(p, ul, ol, blockquote, pre)` (0,4,1) and `[data-dispatch-ask-footer] li
+   .dispatch-markdown :is(ul, ol)` (0,4,2) — and these must outrank both so the nested card's
+   question and source list sit flush too. They touch only a hole's own first/last child, so a
+   reply's own paragraphs and lists keep the footer's spacing. */
 :is(.dispatch-doc, .dispatch-markdown)
   .proof-typed-block-ask
-  > [data-proof-block-content]
+  > [data-proof-block-content][data-proof-block-content]
   > :first-child {
   margin-top: 0;
 }
 
 :is(.dispatch-doc, .dispatch-markdown)
   .proof-typed-block-ask
-  > [data-proof-block-content]
+  > [data-proof-block-content][data-proof-block-content]
   > :last-child {
   margin-bottom: 0;
 }
@@ -432,6 +438,21 @@ a {
   > [data-proof-block-content]
   > ul {
   display: block;
+}
+
+/* A malformed decision shows its source list, the only place its options show. A blank item in
+   that list (`-` alone: an empty item, an empty paragraph, or the editor's trailing break) is no
+   option, so it shows no bullet where nothing is edited: in a body (`.dispatch-markdown`, a reply
+   under a document's decision included) and in a read-only document. In an editable document the
+   blank item is where the caret is, the option a human is typing (Enter after the question, then
+   `- `), so it shows there and the typed text lands in it. The child combinators keep the rule to
+   the decision's own list, never a typed block inside a reply or answer note its card renders. */
+:is(.dispatch-markdown, .dispatch-doc[data-read-only="true"])
+  .proof-typed-block-ask[data-dispatch-ask-malformed="true"]
+  > [data-proof-block-content]
+  > :is(ul, ol)
+  > li:is(:empty, :has(> p:empty), :has(> p > br:only-child)) {
+  display: none;
 }
 
 /* On touch screens the library docks the selection bar at the viewport bottom.
