@@ -2,9 +2,25 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-520",
-  "completed": "2026-10-28T16:11:39Z",
+  "completed": "2026-10-28T18:13:43Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2316",
   "proof": [
+    {
+      "criterion": "Review 5686812253 findings 1-4: the filter-drift check reduces only whole-script simple steps, reads -race, pins non-simple steps whole, and falls to every file under a Go module",
+      "surface": "check-ci-filters.sh and its test suite on the merged tree (main 53f39ba0)",
+      "command": "PATH=$TMPDIR/pyenv/bin:$PATH bash .github/scripts/check-ci-filters.test.sh; .github/scripts/check-ci-filters.sh",
+      "observed": "Tests 113 passed, 0 failed; the 11 new cases (testdata in another module, cd and export on their own line, step shell, defaults shell, container, BASH_ENV, -race closure, race mismatch, exact entry checked, exact entry edited) each failed against the engine at 44544200 (red run 83 passed, 30 failed). Check exit 0, 24 gates 0 uncovered, envoy-go 1941 files and envoy-smoke 179 with narrow filters. Every tester-authored line (0f243125, dc1e05b6, 71dfada1, 5b6fb964, 0c15655f) still present. actionlint 0; image-trigger, action-pins, private-names, bun-version, release-credentials checks 0; ci-ok 42/0, image-trigger tests 991/0.",
+      "headSha": "757229848e8c2dd1c8cd7b5a2babc89520644629",
+      "negativeControl": "On the real tree, `export GOFLAGS=-tags=e2e` on its own line above `go test -count=1 -timeout 20m ./...` in 'Test the Go daemon' fails naming the command ('it is not its step's whole run: script') and 411 files the test filter misses; a one-character edit of 'Pack envoy binaries' fails naming envoy-go (908 uncovered). Both reverted."
+    },
+    {
+      "criterion": "The cost of the fallback rule is restated against the narrow filters",
+      "surface": "GitHub Actions run history of the 3-day projection window, re-measured from the API",
+      "command": "python3 $TMPDIR/infra520/widen/analyze.py <workspace> f343a775 757229848e8c (and the reverse)",
+      "observed": "187 pull requests, 1,201 heads, 1,149 non-draft: envoy_go and envoy_smoke select exactly the heads they did at f343a775; go_notices newly selects 27 heads, +163 min of lint's notices step (25 at their own run's minutes); the reverse run deselects nothing. Round 9's widening would have added 4,382 min. PR body updated.",
+      "headSha": "757229848e8c2dd1c8cd7b5a2babc89520644629",
+      "negativeControl": "The same script with df1f30f5 as the wide revision gives +4,382 min (161 envoy_go heads, 149 envoy_smoke heads), so it does detect widening."
+    },
     {
       "criterion": "Filter drift (round 9, the tester's 71dfada1): an unreduced command falls wide, so a cd into another module cannot narrow what it reads",
       "surface": "check-ci-filters.sh and its test suite on the branch tree (main 690c0136 merged in)",
@@ -351,7 +367,8 @@
     "worker_image's exclusions need the step's predicate-quantifier some-with-excludes: under some a `!` pattern matches every file outside it; no other filter may carry a `!`.",
     "Running go list inside packages/envoy/infra rewrites packages/envoy/infra/go.work.sum; restore it after the coverage script.",
     "GitHub's queue was 160-210 runs deep on 2026-10-27; scratch runs waited up to three hours for a runner.",
-    "A line whose step directory differs from its Run's falls to the modules of both, since a cd in the script may move it to either; above every module (the repository root) that is each module of the go.work there."
+    "A line whose step directory differs from its Run's falls to the modules of both, since a cd in the script may move it to either; above every module (the repository root) that is each module of the go.work there.",
+    "Exact entries pin the step's whole run: script and its working directory; the Pack entry's architectures come from go-release-targets.json, the file its loop reads."
   ],
   "deviations": [
     "#2244 (worker image cancel) was not merged, so it is folded in; its owner was asked through the INFRA-490 architect to close it.",
