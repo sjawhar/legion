@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-630",
-  "completed": "2026-10-28T11:29:13Z",
+  "completed": "2026-10-28T12:35:30Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2423",
   "proof": [
+    {
+      "criterion": "Conflict return: main (#2358) merged forward; each workflow still limited to its own push command; the release and credential suites pass at the merge",
+      "surface": ".github/scripts shell tests at the merge commit",
+      "command": "bash .github/scripts/check-release-credentials.sh; bash .github/scripts/check-release-credentials.test.sh; bash .github/scripts/release-push.test.sh; bash .github/scripts/changelog-fold.test.sh (changie v1.26.0); grep -c '^land_on_main()' .github/scripts/release-push.sh",
+      "observed": "7 credentialed and 10 build jobs across 5 workflows, exit 0; 265 passed, 0 failed; 539 passed, 0 failed; 12 passed, 0 failed; 1",
+      "headSha": "f3a3370f9df2d6c1523ac7c703caab0b99ba3e7b",
+      "negativeControl": "the suite's per-workflow refusals (push-built in release.yaml, push-main in the rebuild, push-built/push-main in the fold, push-fold in a release) still fail as expected inside the 265-case run"
+    },
     {
       "criterion": "Round 6 fast-follow: the four places that listed the jobs running verify-build or extract-built point to the two script headers; no code change",
       "surface": "release-push.sh check-built paragraph, packages/claude-envoy/README.md, packages/claude-envoy/AGENTS.md, claude-envoy-rebuild.yaml header",
@@ -190,7 +198,7 @@
     "scripts/e2e/dispatch-user-turns.sh: `bun run build:web` of the Dispatch web app.",
     "scripts/pi-plugin-prepack.sh: pi-envoy's/pi-legion's `bun run build --metafile`, other packages."
   ],
-  "round": 7,
+  "round": 8,
   "round1": [
     "Finding 1: deleted the scheduled run's age-based red step and its header sentences; schedule hourly -> daily (23 5 * * *) (783ad752).",
     "Finding 2: '## Contract change census' added to the PR body: searches, every hit with its disposition, rollout = immediate refusal and what it closes.",
@@ -228,5 +236,8 @@
   ],
   "round6": [
     "Job lists for verify-build and extract-built cut from release-push.sh's check-built paragraph, packages/claude-envoy/README.md, packages/claude-envoy/AGENTS.md and the rebuild workflow header; each now points to verify-build.sh's header or release-push.sh's extract-built paragraph."
+  ],
+  "round7": [
+    "Forward merge of main 2d872499 (#2358) as f3a3370f: conflicts in check-release-credentials.sh (2 header comments), its test (3 header/label lines) and AGENTS.md (2 bullets) resolved keeping #2358's wording and this change's per-workflow push commands; nothing else changed. Fingerprint 81f58bca \u2192 5e4abe70 (changed only in those resolved lines)."
   ]
 }
