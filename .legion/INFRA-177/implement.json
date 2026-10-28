@@ -2,15 +2,15 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-177",
-  "completed": "2026-10-28T12:06:26Z",
+  "completed": "2026-10-28T13:59:46Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2354",
   "proof": [
     {
       "criterion": "A9 / round 2: under the records' daemon the import does not push a held, merging or awaiting_merge branch, and re-reads the phase before each removal",
       "surface": "legion handoffs import (handoffimport.Run) against the GitHub REST and Dispatch stand-ins",
       "command": "cd packages/daemon && go test -count=1 -p 1 ./internal/handoffimport/",
-      "observed": "package ok at f508510f",
-      "headSha": "f508510f50df2108a4c447705016fa40902e7618",
+      "observed": "package ok at d0a5a0ca",
+      "headSha": "d0a5a0cafa83c99c54a5bf28b00927fef62cf1ff",
       "negativeControl": "with 4dbcd232's handoffimport.go: the held branch LEG-2 moved (c0005 -> c0021) and TestThePhaseIsReadAgainBeforeTheRemoval failed; with the merging guard removed, the merging branch LEG-3 was moved"
     },
     {
@@ -24,9 +24,9 @@
     {
       "criterion": "A6: a 40 KB handoff writes and reads back; two writes give versions 1 and 2",
       "surface": "the real `dispatch` CLI against the real Dispatch server, in scripts/e2e/handoff-records.sh",
-      "command": "source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_m7?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh",
-      "observed": "all checks ok at f508510f, PASS in 55s (evidence /legion/scratch/tmp/legion-e2e-handoff-records-evidence.JWY52BAH)",
-      "headSha": "f508510f50df2108a4c447705016fa40902e7618",
+      "command": "source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_m8?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh",
+      "observed": "all checks ok at d0a5a0ca, PASS in 58s (evidence /legion/scratch/tmp/legion-e2e-handoff-records-evidence.ZV4w1DNk)",
+      "headSha": "d0a5a0cafa83c99c54a5bf28b00927fef62cf1ff",
       "negativeControl": "a 262145-byte body: the CLI refuses it before sending, and a raw POST is answered 413 CAP_EXCEEDED"
     },
     {
@@ -122,12 +122,10 @@
     "Main's #2287 (an approval stands across handoff-only commits) extended the machinery this issue removes. In the merge, its classification and carry code, its approval-carry pass and its fixtures were dropped. Kept: its CI flag change, and its round-ends-on-the-approved-head case as an adapted test."
   ],
   "openQuestions": [],
-  "round": 7,
+  "round": 8,
   "mergeRound": [
-    "The red required test job at 1783e41b (TestADeployRunDuringAnOpenLookIsKeptForTheNextLook, the check_wake flake dispatch://INFRA-623) passed on its re-run: https://github.com/sjawhar/legion/actions/runs/40542910070 attempt 2, success.",
-    "GitHub then reported #2354 CONFLICTING: forward merges b72bb4a3 (main 460facf5, 41 commits) and f508510f (main 8dfaf3a7). Daemon migration renumbered to 0062_handoff_records (main took 0061_pull_request_head_run); recordsSchema = 62; Dispatch 0135 and contract 41 unchanged.",
-    "Main's #2379 (head runs, migration 0061), #2385 (the pass never moves a head back, branch check, declined opened once, shared githubrest compare) and #2440 (push bound) kept with run links limited to review App pushes; their approval carry and handoff-only/forced cases dropped. READY uses the shared compare, which now carries each file's Status.",
-    "Changelog entries moved to changie fragments (packages/*/.changes/unreleased/pr2354-*.yaml, Issue=pr2354, no Dispatch key in names or text); every CHANGELOG.md equals main's text.",
-    "gh: #2354 MERGEABLE at f508510f. Fingerprint 418b227b… → fce3eb01… (changed), posted on the PR."
+    "Review round 5's one finding is fixed in d0a5a0ca: packages/envoy-client/.changes/unreleased/pr2354-Added-20261028-135519.yaml (handoff-write/handoff-read and the DispatchClient methods) and pr2354-Changed-20261028-135521.yaml (the dispatch command acts as ENVOY_SESSION_ID ?? CLAUDE_CODE_SESSION_ID under Claude Code), both from changie new --custom Issue=pr2354, no Dispatch key; changie batch --dry-run renders both. Thread PRRT_kwDORFy7ds6xIGoy answered and resolved.",
+    "GitHub reported a conflict: the same commit d0a5a0ca is the forward merge with main adee0aba. #2436 is kept with chain/run links limited to review App pushes; the approval carry and handoff-only/forced cases stay out; deploy_order_test digests were regenerated over histories with no handoff-only pushes. No renumbering (daemon 0062, Dispatch 0135, contract 41 still free).",
+    "gh: #2354 MERGEABLE at d0a5a0ca. Fingerprint fce3eb01… → f121987b… (changed), posted on the PR."
   ]
 }
