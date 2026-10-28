@@ -2,19 +2,18 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-589",
-  "completed": "2026-10-28T13:52:51Z",
-  "round": 4,
+  "completed": "2026-10-28T15:52:31Z",
+  "round": 5,
   "decision": "changes_requested",
-  "reviewedCodeHead": "8530db16ff548fa0ab01d09e0182eef0f4ee3edb",
-  "roundCap": "Under the INFRA-514 architect's cap only correctness findings block; both findings here give wrong numbers or put a credential in a step file. No wording or naming point is raised.",
-  "ci": "Required checks (lint, typecheck, test, pr-title) queued at code head 8530db16 when read; compare 8530db16...3f3ee896 is .legion/ only (2 files). A request for changes does not wait on CI.",
-  "thermonuclear": "deep-review: CHANGES at 3f3ee896 (two Mediums: NATS token kept in meta.json; ctx-ended sample counted as zeros). code-quality: CHANGES at 3f3ee896 (the same two). Both confirm the fd-8 lock fix, the refusal wording, the failed-NATS-read rule and every round-3 cleanup item.",
-  "threads": "All 19 round-3 threads answered: 17 accepted; PRRT_kwDORFy7ds6xHEDv and PRRT_kwDORFy7ds6xHED0 not accepted and unresolved. The fragment thread PRRT_kwDORFy7ds6xHEEn accepted under the controller ruling (pr2369-*.yaml, Issue: pr2369).",
+  "reviewedCodeHead": "2e8dde7633304d66c292b57f8a20eee3be520275",
+  "roundCap": "Only correctness blocks (INFRA-514 architect's cap); the one finding is a credential leak this round's fix introduced. No wording point raised.",
+  "ci": "At code head 2e8dde76: lint, typecheck success; test failed in 'Test the Go daemon' (TestFetchKeepsAFeedAfterGitGC/killed_during_repack in packages/daemon/internal/workspace, a path this PR does not touch); I re-ran the failed job (run 40710200535), queued when read; pr-title queued. Known main reds (recipients-claim route-close, TestDispatchConnectionsPerPodIsTheServers, mermaid.e2e.ts:194) are main's per the controller. compare 2e8dde76...242ddb8a is .legion/ only.",
+  "thermonuclear": "deep-review: CHANGES at 242ddb8a (Medium: -pg comma split leaks a password fragment). code-quality: CHANGES at 242ddb8a (same). Both confirm the sampler fix, the NATS token/list fix, and that the forward merge left the PR diff unchanged apart from the README lines of 2e8dde76.",
+  "threads": "Round-4 threads: PRRT_kwDORFy7ds6xJnQJ and PRRT_kwDORFy7ds6xHEDv accepted; PRRT_kwDORFy7ds6xJnQN and PRRT_kwDORFy7ds6xHED0 partly accepted (NATS fixed, -pg regression), HED0 unresolved.",
   "critical": 0,
-  "important": 2,
+  "important": 1,
   "minor": 0,
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/loadtest/sample.go", "description": "sample.go:317: a sample whose reads failed after ctx ended is appended unmarked with PGTotal 0, Goroutines 0 and an empty NATS map; summarizeResources counts it as a good read, so pg_conns_total and goroutines take a 0 and nats_in/out_msgs_per_s go negative (reproduced by both passes); reachable with -grace under 5 s or a Postgres read stalled until cancel. Keep no sample once ctx has ended; TestSamplerMarksNoReadThatFailedOnceTheStepEnded asserts the bug."},
-    {"severity": "important", "file": "packages/envoy/loadtest/guard.go", "description": "Security[secret]: guard.go:150 redactURL keeps the URL user; nats.go v1.50.0 uses a user with no password as the auth token (nats.go:2812), so -nats nats://<token>@host is written to meta.json args; a comma-separated NATS server list keeps every password after the first. README.md:547 is false for both. Drop the userinfo of each URL in a -nats list (internal/bus/log_url_test.go already settled that Redacted is not enough)."}
+    {"severity": "important", "file": "packages/envoy/loadtest/guard.go", "description": "Security[secret]: guard.go:147 redactURL splits every URL flag at commas before parsing; pgx parses a -pg URL whole, so a comma in its password or password= parameter is part of the credential, and the split writes a fragment to meta.json (postgres://u:123,abc@h/db -> postgres://u:123,h/db; ?password=Abc,def123 -> ...,def123), which isURLList accepts. Regression from f93dbc53. Split at commas only for -nats; parse -pg and HTTP flags whole."}
   ]
 }
