@@ -33,11 +33,14 @@ body: |-
       refuses Dispatch's `ENVOY_TOKEN` (401), a 403, a 500 or an answer that does not decode is
       recorded `envoy listener answered: …` rather than `envoy listener: …`, which now means only a
       listener nothing answered.
-    - A comment on an issue with a route, a reply to a thread, or a comment on a document resolves
-      its mentions and the issue's route through a take-over before it is written, so the sessions
-      its route and author fan-out skip are decided on the listener's answer and a mentioned session
-      hears the comment once; a mention whose resolution waited the take-over out settles with that
-      outcome rather than waiting a second time. Its `comment.created` payload carries
+    - A comment on an issue with a route or a session claimant, a reply to a thread, a reply on an
+      ask that has a follower, a comment on a document, or a comment on an issue whose primary
+      document credits a session resolves its mentions and the issue's route through a take-over
+      before it is written, so the sessions its route and its session fan-outs (the claimant, the
+      thread's and ask's sessions, the document's authors) skip are decided on the listener's answer
+      and a mentioned session hears the comment once; a mention whose resolution waited the
+      take-over out settles with that outcome rather than waiting a second time. Its
+      `comment.created` payload carries
       `mentions_decide_routes: true`, and each mention's first attempt keeps that resolution when the
       resume loop or a person's Retry finishes it after its sender stopped, so a mention that reached
       nobody settles `failed` rather than reaching the route holder a second time. A comment's

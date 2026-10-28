@@ -265,8 +265,9 @@ func (r *takeoverRetry) retry(ctx context.Context, try func() string, renew func
 // and, when wait is set, waits out a listener take-over the way a sender does: a resolution whose
 // outcome is a take-over's (retryableDeliveryFailure) is taken again after takeoverRetry's backoff
 // until the listener answers otherwise or the window closes. A comment resolves this way the
-// mentions and the route its transaction decides suppress_route and suppressed_authors from, so
-// those are decided on what the listener answered rather than on its silence.
+// mentions and the route its transaction decides suppress_route and the payload's mentions from,
+// which the outbox's session routes skip, so those are decided on what the listener answered
+// rather than on its silence.
 //
 // It returns the pacing with the resolution, and the mention's sender after the commit carries on
 // in it (deliverResolvedCommentMention) rather than opening a window of its own: a resolution that
