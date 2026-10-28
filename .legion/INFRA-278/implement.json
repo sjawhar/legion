@@ -2,43 +2,44 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-278",
-  "completed": "2026-10-27T17:29:11Z",
+  "completed": "2026-10-28T08:52:38Z",
   "generation": 3,
-  "round": 6,
-  "answers": "the reviewer's pre-review of b31c73a4 (four items) and the tester's confirmation of items 1 and 4 (handoff 26557553); there are no review threads, and none is open",
+  "round": 7,
+  "scope": "Final integration: forward merge of main b295a3fb, which carries both children (#2237 INFRA-440 at 2c66134f, #2228 INFRA-439 at 85713740), after GitHub reported CONFLICTING. The workspace was recreated before this round; it held exactly the pushed branch (code head 970b1209, handoff b8afd70b), so nothing was lost.",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2225",
-  "headSha": "970b120978cebe49b893e9fa4c35cee35af3808b",
+  "headSha": "99f818ca1d0b9b792f678a08ce7c8c5e54d18067",
+  "mergedMain": "b295a3fbcb42; fingerprint 168284eb… → 733db2a9…, changed (PR comment 6464719458). Only text was resolved by hand (five CHANGELOGs with both sides kept; SKILL.md takes main's shortened lines 28-30 and keeps the approved lines 46 and 48). claude-envoy dist was rebuilt under main's newly pinned Bun 1.4.4. No Go, TS or e2e source needed a change. MERGEABLE after the push",
   "proof": [
     {
-      "criterion": "Item 2: a held-back copy defers only an attempt that failed nowhere else; a denial backs the event off and a lost connection releases it",
-      "surface": "Go outbox suite on real Postgres, driving the real scan",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5433/outbox_test?sslmode=disable' go test -count=1 -v -run 'Defer|Denied|Mention|Claimant' ./internal/dispatch/outbox/; then go test -count=1 ./internal/dispatch/outbox/",
-      "observed": "TestAHeldBackClaimantCopyDefersNoAttemptThatFailedElsewhere passes: a_denied_role_route_backs_the_event_off (attempt_count 1, next_attempt_at at retry.Delay(1), published_destinations [issue, agent.writer]) and an_unavailable_connection_releases_the_event (attempt_count 0, next_attempt_at null); whole package ok",
-      "headSha": "970b120978cebe49b893e9fa4c35cee35af3808b",
-      "negativeControl": "settle checking errMentionPending before failures makes both subtests fail"
+      "criterion": "Claimant delivery at the integration head",
+      "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener",
+      "command": ". /legion/harness/env.sh && DATABASE_URL='postgres://postgres@127.0.0.1:5433/claimant?sslmode=disable' bash scripts/e2e/dispatch-claimant-delivery.sh",
+      "observed": "summary: 9 ok, 0 FAIL (case3-ask-answer, case2-thread-reply, untargeted-message, the three controls, and the delivered, failed-claimant and failed-follower mention cases)",
+      "headSha": "99f818ca1d0b9b792f678a08ce7c8c5e54d18067",
+      "negativeControl": "a binary built from main fails the claimant cases (generation 3: 5 ok, 4 FAIL); main still has no claimant route"
     },
     {
-      "criterion": "Item 1: the follower-holds-claim scenario no longer races the 5 s route roster",
+      "criterion": "Reaches panel rows drawn with INFRA-440's AgentName, and INFRA-440's own browser tests",
       "surface": "Dispatch browser suite, Chromium",
-      "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts --project chromium --retries 0",
-      "observed": "8 passed. Before the role-route change, the scenario reads a probe issue routed to role:reviewer until route_holder is the reviewer, so the card's one SSE refresh reads a roster that holds it",
-      "headSha": "970b120978cebe49b893e9fa4c35cee35af3808b",
-      "negativeControl": "the tester saw the roster read no_holder at once and live 5.5 s later at b31c73a4: an unwarmed refresh shows a bare role row, and the scenario fails without the poll"
+      "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts agent-name.e2e.ts --project chromium --retries 0",
+      "observed": "13 passed, 2 skipped (agent-name's phone-only cases, which skip outside the iphone project)",
+      "headSha": "99f818ca1d0b9b792f678a08ce7c8c5e54d18067",
+      "negativeControl": "recipients-claim fails on a build of main (generation 3: 6 failed)"
     },
     {
-      "criterion": "Item 4: SKILL.md:46's last clause names what it refers to",
-      "surface": "repository text and the skills word guard",
-      "command": "sed -n 46p skills/dispatch/SKILL.md; find skills/dispatch skills/dispatch-first skills/dispatch-writing-specs -type f | xargs cat | wc -w; bun test src/skills-guard.test.ts in packages/pi-envoy and packages/pi-legion",
-      "observed": "'… as a suspended architect's does: taking it removes the tree from the workflow.'; 1999 words; guards 10 and 13 pass",
-      "headSha": "970b120978cebe49b893e9fa4c35cee35af3808b",
-      "negativeControl": "at b31c73a4 the clause read 'that takes the tree out of the workflow', where 'that' could point at the suspended architect's claim"
+      "criterion": "Outbox and api suites unskipped",
+      "surface": "Go suites on real Postgres",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=… go test -count=1 -v ./internal/dispatch/outbox/; DISPATCH_TEST_DATABASE_URL=… go test -count=1 -timeout 40m -run 'Ask|Inbox|RouteStatus|Comment|Mention|Delivery' ./internal/dispatch/api/",
+      "observed": "outbox ok: 150 PASS, 0 SKIP; api ok",
+      "headSha": "99f818ca1d0b9b792f678a08ce7c8c5e54d18067",
+      "negativeControl": "reordering settle so the pending mention wins fails TestAHeldBackClaimantCopyDefersNoAttemptThatFailedElsewhere (round 6)"
     }
   ],
   "filesChanged": [
-    "6ff13d39: packages/envoy/internal/dispatch/outbox/publisher.go (settle defers only when err is exactly errMentionPending), publisher_mentions_test.go (scan test), packages/envoy/AGENTS.md (item 3: a deferral that meets a lost connection or a stopping process is released, not backed off)",
-    "d56b0642: packages/dispatch/e2e/recipients-claim.e2e.ts",
-    "970b1209: skills/dispatch/SKILL.md"
+    "99f818ca (merge): packages/{claude-envoy,contracts,envoy-client,envoy,pi-envoy}/CHANGELOG.md, skills/dispatch/SKILL.md (main's wording for lines 28-30), packages/claude-envoy/dist rebuilt"
   ],
-  "deviations": [],
+  "deviations": [
+    "The Postgres and Playwright harness under /legion/harness was rebuilt, since the workspace recreation lost the volume."
+  ],
   "openQuestions": []
 }
