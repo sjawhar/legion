@@ -3,14 +3,21 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/bus/bustest"
+	"github.com/sjawhar/envoy/internal/cmdtest"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
@@ -18,14 +25,26 @@ import (
 )
 
 // The Dispatch server's starts of the stream here go through dispatchStreamOptions over what
-// resolveBootConfig read from the settings table, as main's do, on an in-process three-server
-// cluster (testnats.StartCluster), one per test or subtest, unless a test says single server.
+// resolveBootConfig read from the settings table, connecting in the background as main's do
+// (serverClient, startDispatchStream), on an in-process three-server cluster
+// (testnats.StartCluster), one per test or subtest, unless a test says single server.
 
 // replicasTestClientID is the GitHub App the tests' webhook sweeper signs as.
 const replicasTestClientID = "Iv1.replicas"
 
+// reconcileWait bounds startDispatchStream's wait for the background reconcile of the stream.
+const reconcileWait = 30 * time.Second
+
 // startDispatchStream is the Dispatch server's publisher connect for the settings overrides
-// names, as main makes it on the servers at urls: it reconciles the stream (dispatchStreamOptions).
+// names, exactly as main makes it on the servers at urls: ConnectOwningStream with serverClient
+// over dispatchStreamOptions. The client returns before it has connected, and its first
+// connection reconciles the stream and only then starts its keeper (bus.WithConnectInBackground),
+// so the helper waits, at the latest for reconcileWait, until the stream holds what the settings
+// ask of it (reconciledFor), or until the client logs that reconcile's failure: main's constructor
+// no longer returns a refusal of the server, which reaches the log as the reconnect hook's failure
+// (`envoy nats reconnect hook failed`). A refused start is closed, so it retries no more, and the
+// logged error is returned. It sets the default logger to record the client's lines until the
+// test ends: a test that calls it must not run in parallel.
 func startDispatchStream(t *testing.T, urls []string, overrides map[string]string) (*bus.Client, error) {
 	t.Helper()
 	env := bootEnvironment(overrides)
@@ -33,11 +52,60 @@ func startDispatchStream(t *testing.T, urls []string, overrides map[string]strin
 	if err != nil {
 		t.Fatalf("resolveBootConfig(%v): %v", overrides, err)
 	}
-	client, err := bus.ConnectOwningStream(urls, dispatchStreamOptions(boot, env)...)
-	if err == nil {
-		t.Cleanup(client.Close)
+	var logged cmdtest.LockedBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logged, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	client, err := bus.ConnectOwningStream(urls, serverClient(dispatchStreamOptions(boot, env)...)...)
+	if err != nil {
+		return nil, err
 	}
-	return client, err
+	t.Cleanup(client.Close)
+	reconciled := reconciledFor(boot)
+	var info *natsgo.StreamInfo
+	for deadline := time.Now().Add(reconcileWait); ; {
+		if refusal := reconcileFailure(logged.String()); refusal != "" {
+			client.Close()
+			return nil, errors.New(refusal)
+		}
+		if client.Connected() {
+			if info, err = client.JS().StreamInfo(bus.Stream); err == nil && reconciled(info.Config) {
+				return client, nil
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Dispatch's start for %v did not reconcile the stream within %s, nor log a failure: %+v (%v)", overrides, reconcileWait, info, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// reconciledFor reports whether a stream holds what a Dispatch start with boot's settings writes:
+// every subject this binary compiles in, at least boot's copies, at least its byte limit when it
+// sets one, the binary's age, duplicate window and DiscardNew, and an id.
+func reconciledFor(boot bootConfig) func(natsgo.StreamConfig) bool {
+	return func(c natsgo.StreamConfig) bool {
+		for _, subject := range bus.StreamSubjects() {
+			if !slices.Contains(c.Subjects, subject) {
+				return false
+			}
+		}
+		return c.Replicas >= boot.NATSReplicas && (boot.StreamMaxBytes == 0 || c.MaxBytes >= boot.StreamMaxBytes) &&
+			c.MaxAge == contracts.DeliveryDuplicateWindow && c.Duplicates == contracts.DeliveryDuplicateWindow &&
+			c.Discard == natsgo.DiscardNew && c.Metadata[bus.StreamIDMetadataKey] != ""
+	}
+}
+
+// reconcileFailure is the error of the first `envoy nats reconnect hook failed` record the
+// Dispatch publisher logged in logs, JSON lines, and "" when it logged none.
+func reconcileFailure(logs string) string {
+	for line := range strings.Lines(logs) {
+		var record map[string]any
+		if json.Unmarshal([]byte(line), &record) == nil && record["msg"] == "envoy nats reconnect hook failed" && record["name"] == "dispatch" {
+			return fmt.Sprint(record["error"])
+		}
+	}
+	return ""
 }
 
 // startDispatchNATS is all the Dispatch server's boot writes to NATS for overrides when it holds
@@ -169,5 +237,40 @@ func TestADefaultDispatchStartOnASingleServerCreatesEverythingAtOneCopyAndTheNex
 	}
 	if got := writes.Take(t); len(got) != 0 {
 		t.Fatalf("the second start wrote %v, want nothing", got)
+	}
+}
+
+// keeperWait bounds the wait for the Dispatch publisher's keeper to restore a lowered stream: its
+// period is the bus's default of 30 seconds, which no exported option shortens, and a replica
+// change the cluster takes to apply.
+const keeperWait = 45 * time.Second
+
+// The Dispatch server's publisher, started as main starts it, keeps the stream once its background
+// reconcile has run: an operator who lowers the stream to one copy and half the byte limit finds
+// both back at the deployment's settings within one keeper period.
+func TestTheDispatchPublishersKeeperRestoresALoweredStream(t *testing.T) {
+	cluster := testnats.StartCluster(t, 3)
+	js := cluster.JetStream(t)
+	if _, err := startDispatchStream(t, cluster.URLs(), map[string]string{"ENVOY_NATS_REPLICAS": "3", "ENVOY_STREAM_MAX_BYTES": strconv.Itoa(bustest.StreamMaxBytes)}); err != nil {
+		t.Fatalf("start Dispatch's stream: %v", err)
+	}
+	lowered := testnats.AwaitSettledStream(t, js, bus.Stream).Config
+	lowered.Replicas = 1
+	lowered.MaxBytes = bustest.StreamMaxBytes / 2
+	if _, err := js.UpdateStream(&lowered); err != nil {
+		t.Fatalf("operator lowering: %v", err)
+	}
+	for deadline := time.Now().Add(keeperWait); ; {
+		info, err := js.StreamInfo(bus.Stream)
+		if err == nil && info.Config.Replicas == 3 && info.Config.MaxBytes == bustest.StreamMaxBytes {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the stream was not restored to three copies and a byte limit of %d within %s: %+v (%v)", bustest.StreamMaxBytes, keeperWait, info, err)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if info := testnats.AwaitSettledStream(t, js, bus.Stream); testnats.Copies(info.Cluster) != 3 {
+		t.Fatalf("the restored stream has %d copies, want 3", testnats.Copies(info.Cluster))
 	}
 }

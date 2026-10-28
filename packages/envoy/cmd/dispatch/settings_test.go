@@ -909,12 +909,23 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			// Its three readers, on a single server, which refuses a create at more than one copy
 			// and names the setting: the stream main's publisher reconciles
-			// (dispatchStreamOptions), the webhook sweeper's bucket (webhookSweeper's Open) and the bucket
-			// redeliver-webhooks opens. stream_replicas_test.go raises the same on a cluster.
+			// (dispatchStreamOptions) on its first connection, in the background, so the refusal
+			// reaches the reconnect hook's logged error (startDispatchStream), the webhook
+			// sweeper's bucket (webhookSweeper's Open) and the bucket redeliver-webhooks opens.
+			// stream_replicas_test.go raises the same on a cluster.
 			_, url := testnats.Start(t)
 			three := map[string]string{"ENVOY_NATS_REPLICAS": "3"}
-			if _, err := startDispatchStream(t, []string{url}, three); err == nil || !strings.HasPrefix(err.Error(), "ENVOY_NATS_REPLICAS=3: ") {
-				t.Errorf("the stream at ENVOY_NATS_REPLICAS=3 on one server: err = %v, want the server's refusal naming the setting", err)
+			if _, err := startDispatchStream(t, []string{url}, three); err == nil || !strings.Contains(err.Error(), "ENVOY_NATS_REPLICAS=3: ") {
+				t.Errorf("the stream at ENVOY_NATS_REPLICAS=3 on one server: logged %v, want the server's refusal naming the setting", err)
+			}
+			conn := testnats.Connect(t, url)
+			t.Cleanup(conn.Close)
+			js, err := conn.JetStream()
+			if err != nil {
+				t.Fatalf("open JetStream: %v", err)
+			}
+			if info, err := js.StreamInfo(bus.Stream); !errors.Is(err, natsgo.ErrStreamNotFound) {
+				t.Errorf("after the refused start at ENVOY_NATS_REPLICAS=3 the stream is %+v (%v), want none created", info, err)
 			}
 			client, err := startDispatchStream(t, []string{url}, nil)
 			if err != nil {
