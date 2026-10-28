@@ -265,3 +265,30 @@ test("a link to a block of a comment shows the block's new text once its author 
     `/issues/${issue.key}/comments/${cited.id}#b-b2`
   );
 });
+
+// The author's edit that deletes the cited paragraph is an edit too: the open card and the link
+// stop showing the paragraph's text without a reload, and read as a freshly loaded page reads the
+// same link (no text of a paragraph the comment no longer holds).
+test("a link to a block of a comment stops showing the block's text once its author deletes it, with no reload", async ({
+  page,
+}) => {
+  const issue = await createIssue({ project: "CORE", title: "Deleted comment block" });
+  const cited = await createComment(issue.key, { body: "Alpha first.\n\nBeta soon deleted." });
+  await createComment(issue.key, {
+    body: `The detail was in dispatch://${issue.key}/comment/${cited.id}#b-b2 today.`,
+  });
+
+  const stream = page.waitForResponse(
+    (response) => /\/api\/v1\/events(\?|$)/.test(response.url()) && response.status() === 200
+  );
+  await page.goto(`/issues/${issue.key}/conversation`);
+  await stream;
+  const turns = page.getByRole("list", { name: "Conversation turns" });
+  const link = turns.getByRole("link", { name: "Beta soon deleted." });
+  const card = await openCard(page, link);
+  await expect(card).toContainText("Beta soon deleted.");
+
+  await editComment(cited.id, { body: "Alpha first." });
+  await expect(card).not.toContainText("Beta soon deleted.", { timeout: 5_000 });
+  await expect(turns.getByRole("link", { name: "Beta soon deleted." })).toHaveCount(0);
+});
