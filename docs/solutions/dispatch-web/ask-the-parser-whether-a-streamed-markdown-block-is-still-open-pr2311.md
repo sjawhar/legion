@@ -9,9 +9,6 @@ tags:
 date: 2026-10-27
 status: active
 module: packages/dispatch/web
-related_issues:
-  - "INFRA-528"
-  - "sjawhar/legion#2311"
 ---
 
 # Ask the parser whether a streamed Markdown block is still open, with a probe line inside the last line's containers

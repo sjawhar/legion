@@ -9,9 +9,6 @@ tags:
 date: 2026-10-27
 status: active
 module: packages/dispatch/web
-related_issues:
-  - "INFRA-528"
-  - "sjawhar/legion#2311"
 ---
 
 # A Vite Web Worker is its own bundle, so an inventory plugin needs a worker instance

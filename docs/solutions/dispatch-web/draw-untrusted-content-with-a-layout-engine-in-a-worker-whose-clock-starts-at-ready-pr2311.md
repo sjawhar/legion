@@ -10,9 +10,6 @@ tags:
 date: 2026-10-27
 status: active
 module: packages/dispatch/web
-related_issues:
-  - "INFRA-528"
-  - "sjawhar/legion#2311"
 ---
 
 # Draw untrusted content with a layout engine in a worker whose clock starts at ready, and end a late job by terminating the worker

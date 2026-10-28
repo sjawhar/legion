@@ -9,9 +9,6 @@ tags:
 date: 2026-10-27
 status: active
 module: packages/dispatch/web
-related_issues:
-  - "INFRA-528"
-  - "sjawhar/legion#2311"
 ---
 
 # Hand a code block's text to a line-splitting library with its line ends read as LF, and key the cache on that text

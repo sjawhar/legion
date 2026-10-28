@@ -9,9 +9,6 @@ tags:
 date: 2026-10-27
 status: active
 module: packages/dispatch/web
-related_issues:
-  - "INFRA-528"
-  - "sjawhar/legion#2311"
 ---
 
 # A library that sniffs self behaves differently in a browser worker than under Bun, so prove the worker path in every engine

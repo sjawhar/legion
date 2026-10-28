@@ -9,9 +9,6 @@ tags:
 date: 2026-10-27
 status: active
 module: skills/legion-worker
-related_issues:
-  - "INFRA-528"
-  - "sjawhar/legion#2311"
 ---
 
 # At a forward merge, hold your branch's readers of the same input to the incoming change's input rules

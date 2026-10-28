@@ -10,9 +10,6 @@ tags:
 date: 2026-10-27
 status: active
 module: packages/proof-editor
-related_issues:
-  - "INFRA-528"
-  - "sjawhar/legion#2311"
 ---
 
 # Sanitize a third-party renderer's SVG by allowlist, filter what CSS can fetch, and scope it in a shadow root
