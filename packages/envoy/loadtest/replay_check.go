@@ -18,6 +18,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -187,7 +188,10 @@ type sizeAnchorCheck struct {
 // coalesce(size, octet_length(markdown))) with production's (VersionSizes): equal, or equal with
 // the sign flipped (counted, not a mismatch), else a mismatch; and checks every anchored item the
 // seed should have placed: its branch is recorded in loadtest.replay_anchors and its stored quote
-// lies, once, inside the span of the text at At its rule chose.
+// lies, once, inside the span of the text at At its rule chose. An answer version's expected
+// change counts its answers' answered_at as the seed's answer wrote it: Dispatch writes the time
+// of the answer with its trailing zeros trimmed, so its length is not production's (the same
+// attribute the text comparison masks).
 func checkSizesAndAnchors(ctx context.Context, conn *pgx.Conn, b *replayBundle, plans []seedIssuePlan, ids map[[2]string]string) (sizeAnchorCheck, error) {
 	r := sizeAnchorCheck{Rules: map[string]int{}}
 	type anchorRow struct {
@@ -235,13 +239,34 @@ func checkSizesAndAnchors(ctx context.Context, conn *pgx.Conn, b *replayBundle, 
 			if err != nil {
 				return r, err
 			}
+			plan, err := docPlan(is, a, texts[a.ID])
+			if err != nil {
+				return r, err
+			}
+			answeredAt := map[int]int{} // version -> seeded less production answered_at bytes
+			for v, asks := range plan.AnswerAt {
+				for _, i := range asks {
+					ask := &is.Asks[i]
+					localAsk, ok := ids[[2]string{idAsk, ask.ID}]
+					if !ok || ask.Answer == nil {
+						continue
+					}
+					var seeded string
+					if err := conn.QueryRow(ctx, `select coalesce(answer->>'at', '') from asks where id = $1`, localAsk).Scan(&seeded); err != nil {
+						return r, err
+					}
+					if seeded != "" {
+						answeredAt[v] += len(seeded) - len(ask.Answer.At.UTC().Format(time.RFC3339Nano))
+					}
+				}
+			}
 			for n := 2; n <= min(len(sizes), len(a.VersionSizes)); n++ {
 				if a.VersionSizes[n-1] < 0 || a.VersionSizes[n-2] < 0 {
 					r.SizesMissing++
 					continue
 				}
 				r.SizeChanges++
-				want, got := a.VersionSizes[n-1]-a.VersionSizes[n-2], sizes[n-1]-sizes[n-2]
+				want, got := a.VersionSizes[n-1]-a.VersionSizes[n-2]+answeredAt[n], sizes[n-1]-sizes[n-2]
 				switch {
 				case got == want:
 				case got == -want:

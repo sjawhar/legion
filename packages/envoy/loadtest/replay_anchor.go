@@ -221,6 +221,14 @@ type historyPlan struct {
 // padMin is the shortest padding paragraph a version carries.
 const padMin = 8
 
+// padLen is the length of padded version n's padding paragraph: version n-1's (prevPad bytes)
+// changed by the planned size change, so version n changes size by exactly the plan's change
+// whatever size Dispatch stored version n-1 at: version 1's base canonicalised to other bytes than
+// sent, or an answer version whose change differs from production's. A padding paragraph is plain
+// words, which Dispatch stores as sent. The stored padding, not the seeder's memory, is prevPad,
+// so a resumed seed continues alike.
+func (p historyPlan) padLen(n, prevPad int) int { return prevPad + p.Sizes[n-1] - p.Sizes[n-2] }
+
 // padOverhead is what a padding paragraph adds to a document beyond its own bytes: the blank line
 // before it and its line feed; one byte when the base is empty (no blank line).
 func padOverhead(baseLen int) int {

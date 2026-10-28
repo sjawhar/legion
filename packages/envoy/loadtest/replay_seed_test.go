@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -74,5 +75,63 @@ func TestWithDatabase(t *testing.T) {
 	got, err := withDatabase("postgres://postgres@127.0.0.1:15432/dispatch?sslmode=disable", "dispatch_replay_build")
 	if err != nil || got != "postgres://postgres@127.0.0.1:15432/dispatch_replay_build?sslmode=disable" {
 		t.Fatalf("withDatabase = %q, %v", got, err)
+	}
+}
+
+// TestHistoryPadsFromStoredSizes walks a document's history as history does, against a fake
+// Dispatch that stores every version shift bytes off what was sent (a base it canonicalises to
+// other bytes) and an answer drift bytes off production's change: version 1 lands off its plan,
+// yet every padded and restored version changes size by exactly its planned change, and only the
+// answer version itself carries the drift.
+func TestHistoryPadsFromStoredSizes(t *testing.T) {
+	blockID, docID := "b1", "d1"
+	answered := `:::ask{#b1 urgency="med" multiple="false" state="answered" answered_by="u@example.com" answered_at="2026-10-25T10:00:00.5Z" selected="[]" answer="yes"}`
+	text := "Intro paragraph.\n\n" + answered + "\nShip it?\n:::\n\n## One\n\n" + strings.Repeat("first section words. ", 20) +
+		"\n\n## Two\n\n" + strings.Repeat("second section words. ", 20) + "\n"
+	stripped := stripAnswers(text, map[string]bool{blockID: true})
+	grow := len(text) - len(stripped)
+	real := []int{300, 340, 340 + grow, 200, 260, len(text) + 40}
+	is := &replayIssue{Key: "PRJ-1", Asks: []replayAsk{{ID: "a1", BlockID: &blockID, BlockArtifactID: &docID, State: "answered", AnswerVersion: 3}}}
+	a := &replayArtifact{ID: docID, Kind: "doc", Version: len(real), VersionSizes: real}
+	p, err := docPlan(is, a, text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Restore != 6 || !slices.Equal(p.AnswerAt[3], []int{0}) || p.Unreachable != 0 {
+		t.Fatalf("plan %+v", p)
+	}
+	strippedLine := stripAnswers(answered, map[string]bool{blockID: true})
+	for _, c := range []struct{ shift, drift int }{{-4, 0}, {3, 0}, {-2, 1}} {
+		md := firstVersionText(is, a, text, p)
+		drift := 0
+		stored := func() int { return len(md) + c.shift + drift }
+		sizes := []int{stored()}
+		if sizes[0] == p.Sizes[0] {
+			t.Fatalf("shift %d: version 1 must land off its plan", c.shift)
+		}
+		for n := 2; n <= p.Final; n++ {
+			switch {
+			case len(p.AnswerAt[n]) > 0:
+				md = strings.Replace(md, strippedLine, answered, 1)
+				drift += c.drift
+			case n == p.Restore:
+				md = text
+			default:
+				pad := currentPad(md)
+				l := p.padLen(n, len(pad))
+				if pad == "" || l < padMin {
+					t.Fatalf("shift %d: version %d: padding %q, next %d bytes", c.shift, n, pad, l)
+				}
+				md = strings.Replace(md, pad, nextPad(pad, l, n), 1)
+			}
+			sizes = append(sizes, stored())
+			want := p.Sizes[n-1] - p.Sizes[n-2]
+			if len(p.AnswerAt[n]) > 0 {
+				want += c.drift
+			}
+			if got := sizes[n-1] - sizes[n-2]; got != want {
+				t.Fatalf("shift %d drift %d: version %d changes %d, want %d", c.shift, c.drift, n, got, want)
+			}
+		}
 	}
 }

@@ -678,7 +678,12 @@ func (s *replaySeeder) seedIssue(ctx context.Context, p seedIssuePlan) error {
 			return err
 		}
 	}
-	// Step 5: the issue's fields, then its claim.
+	// Step 5: the issue's fields, then its claim. The marks the comments and asks left are settled
+	// first: a closed issue's documents settle nothing, so closing it with a settlement owed would
+	// leave that settlement owed for good.
+	if err := s.waitSettled(ctx, p.Key, locals); err != nil {
+		return err
+	}
 	return s.finishIssue(ctx, p)
 }
 
@@ -789,11 +794,13 @@ func (s *replaySeeder) ensureFile(ctx context.Context, key string, a *replayArti
 }
 
 // history takes a document from the version it stands at to its logged version as its plan says
-// (planHistory): each padded version resizes the padding paragraph so the version has its planned
-// size (a version whose size does not change gets padding of the same length with other words);
-// an answer version re-sends that typed ask block's answer; the restore version removes the
-// padding and puts the run back. Every step must write exactly one version, and each padded or
-// restored version must have exactly its planned size.
+// (planHistory): each padded version resizes the padding paragraph so the version changes size by
+// its planned change from the version Dispatch stored before it (historyPlan.padLen; a version
+// whose size does not change gets padding of the same length with other words); an answer version
+// re-sends that typed ask block's answer, a change Dispatch makes; the restore version removes the
+// padding and puts the run back. Version 1's own size is free: no change is compared for it. Every
+// step must write exactly one version, and each padded or restored version must change size by
+// exactly its planned change.
 func (s *replaySeeder) history(ctx context.Context, key string, docs map[string]*issueDoc, d *issueDoc) error {
 	p := d.plan
 	cur, err := s.maxVersion(ctx, d.local)
@@ -802,13 +809,6 @@ func (s *replaySeeder) history(ctx context.Context, key string, docs map[string]
 	}
 	if cur < 1 || cur > p.Final {
 		return fmt.Errorf("history %s: document stands at version %d, logged version %d", d.a.ID, cur, p.Final)
-	}
-	if p.Restore > 1 {
-		if got, _, err := s.versionSize(ctx, d.local, 1); err != nil {
-			return err
-		} else if got != p.Sizes[0] {
-			return fmt.Errorf("history %s: version 1 has %d bytes, planned %d", d.a.ID, got, p.Sizes[0])
-		}
 	}
 	edit := func(n int, ops ...any) error {
 		size, _, err := s.versionSize(ctx, d.local, n-1)
@@ -891,15 +891,19 @@ func (s *replaySeeder) history(ctx context.Context, key string, docs map[string]
 			if pad == "" {
 				return fmt.Errorf("history %s: version %d holds no padding paragraph", d.a.ID, n-1)
 			}
-			next := nextPad(pad, p.Sizes[n-1]-(size-len(pad)), n)
+			l := p.padLen(n, len(pad))
+			if l < padMin {
+				return fmt.Errorf("history %s: version %d would hold padding of %d bytes, under %d", d.a.ID, n, l, padMin)
+			}
+			next := nextPad(pad, l, n)
 			if err := edit(n, map[string]any{"op": "replace", "find": pad, "with": next}); err != nil {
 				return err
 			}
 		}
 		if got, _, err := s.versionSize(ctx, d.local, n); err != nil {
 			return err
-		} else if got != p.Sizes[n-1] {
-			return fmt.Errorf("history %s: version %d has %d bytes, planned %d", d.a.ID, n, got, p.Sizes[n-1])
+		} else if got-size != p.Sizes[n-1]-p.Sizes[n-2] {
+			return fmt.Errorf("history %s: version %d changes size by %d bytes (%d to %d), planned %d", d.a.ID, n, got-size, size, got, p.Sizes[n-1]-p.Sizes[n-2])
 		}
 	}
 	return nil
