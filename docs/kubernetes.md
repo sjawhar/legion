@@ -5447,15 +5447,16 @@ issue's pod (every role of it alike) and the image probe's.
   process of the pod's own user that removes the CLI's AskGate record or a marker, acts as another
   session id or state directory, or otherwise goes around the CLI (pi-envoy's README, "What
   AskGate is not").
-  **Turning AskGate off in a pod:** put `{"askgate":{"enabled":false}}` in the `envoy.json` that
-  the pod's pi-envoy reads. The image sets `OMP_PROFILE=legion`, so Oh My Pi sets
+
+  **Turning AskGate off in a pod:** put `{"askgate":{"enabled":false}}` in the `envoy.json` that the
+  pod's pi-envoy reads. The image sets `OMP_PROFILE=legion`, so Oh My Pi sets
   `PI_CODING_AGENT_DIR` to the profile's agent directory in its own process, and pi-envoy reads
   `/home/legion/.omp/profiles/legion/agent/envoy.json`. It reads that path before the file
-  `ENVOY_CONFIG_FILE` names, so that variable does not move it. The image has no file at that
-  path, and the pod gets Dispatch from the `DISPATCH_URL` and `DISPATCH_TOKEN_FILE` that the
-  runtime sets. A file that holds only the `askgate` section has no `dispatch` section, so Dispatch
-  stays on from those variables. Mount the file at that path as the operator's `models.yml` is
-  mounted, from a ConfigMap of its own:
+  `ENVOY_CONFIG_FILE` names, so that variable does not move it. The image writes no file there, and
+  the pod gets Dispatch from the `DISPATCH_URL` and `DISPATCH_TOKEN_FILE` that the runtime sets. A
+  file that holds only the `askgate` section has no `dispatch` section, so Dispatch stays on from
+  those variables. Mount the file at that path as the operator's `models.yml` is mounted, from a
+  ConfigMap of its own:
 
   ```yaml
   # askgate.json: kubectl -n legion create configmap legion-askgate --from-file=envoy.json=askgate.json
