@@ -283,14 +283,15 @@ func (s slowLeases) Acquire(ctx context.Context) (*pgxpool.Conn, error) {
 	return s.Leases.Acquire(ctx)
 }
 
-// A lone loop's ticks come one period apart, and each must run: no other process has served
-// either period. Here the first tick is due 200 ms before a period boundary on this process's
-// clock, the clock Exclusive buckets a due time on, and its lease takes 400 ms, so the query that
-// reads its period runs 200 ms into the next one; the second tick is due exactly one period after
-// the first and takes its lease at once. Read by the moment its query ran, the late first tick
-// serves the second tick's period and the second is refused - an interval of the loop's work that
-// no process did, which is how TestALoneRunnerMakesAPassOnEveryTick lost one tick in ten. Read by
-// when it was due, each tick serves its own period.
+// A lone loop's ticks come at least one period apart (RunLeased, RunJittered), and each must run:
+// no other process has served either period. Here the first tick is due 200 ms before a period
+// boundary on this process's clock, the clock Exclusive buckets a due time on, and its lease takes
+// 400 ms, so the query that reads its period runs 200 ms into the next one; the second tick is due
+// exactly one period after the first, the least that spacing allows, and takes its lease at once.
+// Read by the moment its query ran, the late first tick serves the second tick's period and the
+// second is refused - an interval of the loop's work that no process did, which is how
+// TestALoneRunnerMakesAPassOnEveryTick lost one tick in ten. Read by when it was due, each tick
+// serves its own period.
 func TestExclusiveCountsALateTickInThePeriodItWasDueIn(t *testing.T) {
 	database := storetest.Open(t)
 	leases := leasesOf(t, database)

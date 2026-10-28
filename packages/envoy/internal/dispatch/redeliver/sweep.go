@@ -231,24 +231,16 @@ const webhookRedeliveryLease = "webhook-redelivery"
 // sweep runs under webhookRedeliveryLease for one interval, so one sweep's listings are what the
 // installation's rate limit pays for that interval however many processes sweep - a process that
 // starts in the middle of another's interval, which is what a rolling update makes, finds that
-// interval swept and skips. The period is interval itself, the loop's own tick, and not the
-// package's Interval; each sweep is due at the time its tick delivered, the first at the moment Run
-// starts, read before the ticker is armed, so the ticker's first tick, one interval after it was
-// armed, is at least one period after the first sweep's due time and never in its period. leases
-// is required, as it is of every leased loop (cmd/dispatch exits at boot if the lease pool cannot
-// be opened).
+// interval swept and skips. The period is interval itself, the loop's own wait, and not the
+// package's Interval. The ticks are duty.RunLeased's: the first at the moment Run starts, then
+// each interval after the tick before it returns, so two sweeps' due times are never inside one
+// period. leases is required, as it is of every leased loop (cmd/dispatch exits at boot if the
+// lease pool cannot be opened).
 func (s *Sweeper) Run(ctx context.Context, interval time.Duration, leases duty.Leases) {
-	due := time.Now()
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		duty.Exclusive(ctx, leases, webhookRedeliveryLease, due, interval, s.sweepAndReport)
-		select {
-		case <-ctx.Done():
-			return
-		case due = <-ticker.C:
-		}
-	}
+	duty.RunLeased(ctx, leases, webhookRedeliveryLease, interval, duty.TickAtStart, func(ctx context.Context) time.Duration {
+		s.sweepAndReport(ctx)
+		return interval
+	})
 }
 
 // sweepAndReport is one sweep of the running loop and its log line.

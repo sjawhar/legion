@@ -89,9 +89,10 @@ func RepairIssueAsks(ctx context.Context, deps Deps, markedSince *time.Time) (Is
 
 // RunIssueAskRepair runs RepairIssueAsks every IssueAskRepairInterval until ctx ends, each pass
 // under issueAskRepairLease for one interval, so one process repairs per interval however many
-// serve the database; leases is required, as it is of every leased loop. A pass that fails or runs
-// out of time is logged, and the next interval's pass repairs what it left. The boot runs its own
-// pass before this starts (cmd/dispatch).
+// serve the database; leases is required, as it is of every leased loop. The ticks are
+// duty.RunLeased's: the first one interval after the call, then each interval after the tick
+// before it returns. A pass that fails or runs out of time is logged, and the next interval's pass
+// repairs what it left. The boot runs its own pass before this starts (cmd/dispatch).
 //
 // The sweeps are bounded the same way: a closed issue's document keeps owing the settlement its
 // close's own write left for as long as the issue stays closed, so a pass that swept every such
@@ -111,18 +112,10 @@ func RunIssueAskRepair(ctx context.Context, deps Deps, leases duty.Leases) {
 	s := &server{deps: deps}
 	var markedSince *time.Time
 	var unrepaired []string
-	ticker := time.NewTicker(IssueAskRepairInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case due := <-ticker.C:
-			duty.Exclusive(ctx, leases, issueAskRepairLease, due, IssueAskRepairInterval, func(ctx context.Context) {
-				markedSince, unrepaired = s.repairIssueAsksOnTick(ctx, markedSince, unrepaired)
-			})
-		}
-	}
+	duty.RunLeased(ctx, leases, issueAskRepairLease, IssueAskRepairInterval, duty.TickAfterInterval, func(ctx context.Context) time.Duration {
+		markedSince, unrepaired = s.repairIssueAsksOnTick(ctx, markedSince, unrepaired)
+		return IssueAskRepairInterval
+	})
 }
 
 // repairIssueAsksOnTick is one interval pass of RunIssueAskRepair, bounded by

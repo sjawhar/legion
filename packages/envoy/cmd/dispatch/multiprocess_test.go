@@ -1301,7 +1301,7 @@ func lockTables(t *testing.T, database *store.Store, mode string, tables ...stri
 // Four of the nine leases are observable inside a window a test can wait out:
 // reference-excerpts, block-index and webhook-redelivery, whose first pass is immediate, and
 // suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other five
-// are not, and this row says so rather than pretending: document-compaction's ticker is 24 h;
+// are not, and this row says so rather than pretending: document-compaction's interval is 24 h;
 // issue-ask-repair's first leased pass is one IssueAskRepairInterval (10 min) in, the boot's
 // repair taking no lease; architecture-import's and delivery-reconcile's first pass is jittered
 // uniformly over SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether
@@ -1364,7 +1364,7 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	requireLeasedOnce(t, pair, "reference-excerpts")
 	requireLeasedOnce(t, pair, "suggestion-outcomes")
 	for _, unobserved := range []struct{ lease, why string }{
-		{"document-compaction", "its ticker is 24 h, so no pass is due inside any window a test can wait out"},
+		{"document-compaction", "its interval is 24 h, so no pass is due inside any window a test can wait out"},
 		{"issue-ask-repair", "its first leased pass is one IssueAskRepairInterval (10 min) after each process started"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
 		{"delivery-reconcile", "its first pass is jittered over ReconcileInterval (5 min) and each process draws its own"},
@@ -1380,7 +1380,7 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 }
 
 // A rolling update starts the second process minutes after the first, and at a steady two
-// replicas each process keeps a ticker of its own: two ticks of one leased loop almost never
+// replicas each process keeps a timer of its own: two ticks of one leased loop almost never
 // overlap, because a pass is seconds and its interval is minutes. This row is that shape - the
 // second process is started only after the first has finished a pass and given the lease back -
 // and it is where "runs once overall" has to hold, not only while a pass is in flight.
