@@ -35,6 +35,14 @@ const (
 	// each taken by its intake's bind poll (delivery.consumerLease maps a durable to its name).
 	DeliveryEventsConsumerLease = "delivery-consumer-delivery-events"
 	DeliveryJobsConsumerLease   = "delivery-consumer-delivery-jobs"
+	// IssueAskRepairLease is api.RunIssueAskRepair's: the repair of closed and reopened issues'
+	// asks. Two passes running at once are correct - they serialise on each issue's row, and the
+	// second finds nothing left - but they would read the same documents for the same result,
+	// which is reason enough for one process to run it each interval.
+	IssueAskRepairLease = "issue-ask-repair"
+	// ServerProcessesLease is processes.RunPrune's: the prune of the server process registry, so
+	// one process prunes per PruneInterval however many serve the database.
+	ServerProcessesLease = "server-processes"
 )
 
 // leaseNames is every lease Exclusive takes, and Exclusive refuses any other: the lease pool has a
@@ -53,6 +61,8 @@ var leaseNames = [...]string{
 	DeliveryReconcileLease,
 	DeliveryEventsConsumerLease,
 	DeliveryJobsConsumerLease,
+	IssueAskRepairLease,
+	ServerProcessesLease,
 }
 
 // LeaseNames is every lease name Exclusive accepts.

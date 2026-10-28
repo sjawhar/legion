@@ -435,7 +435,9 @@ export const dispatchToolSpecs = [
       "replaces the issue's own attachment. Closing an issue " +
       "(status done) requires reason, the note that says why: it is posted on the issue as a " +
       "message, then the issue closes, because a closed issue refuses messages, comments, and " +
-      "artifacts; reason goes only with status done. A closed issue takes only a board move " +
+      "artifacts; reason goes only with status done. Closing an issue withdraws every open ask " +
+      "it holds (resolution kind withdrawn, naming the closer), and reopening it brings exactly " +
+      "those asks back. A closed issue takes only a board move " +
       "(before, after), components, " +
       "a reopening status (any status but done), and an external_links write that adds no new " +
       "link (so a link can move to the issue that replaced it); everything else, priority " +
@@ -528,7 +530,15 @@ export const dispatchToolSpecs = [
       "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " +
       "and release it when you stop. Pass the issue alone to claim it, or --release to give it up. " +
       "Your claim records your own session and shows on every read of the issue: the dashboard header, the " +
-      "issue list and board, dispatch read, and dispatch issues. Claiming is refused with 409 ISSUE_CLAIMED " +
+      "issue list and board, dispatch read, and dispatch issues. While you hold it, a person's answers, " +
+      "comments and messages on the issue reach your session directly (a new comment that mentions you " +
+      "arrives once, as the mention, when the mention reached you; when the mention's send fails, the " +
+      "comment still reaches you directly; a mention whose receipt timed out can arrive twice, and the " +
+      "second copy is the same comment); an agent's events and every other change on the issue still " +
+      "need a subscription to it, except in an ask you follow: anyone else's answer, hand-back, " +
+      "resolution or edit of it (other than a quiet edit), and every reply there (new, edited, resolved " +
+      "or reopened), reach you " +
+      "as its follower. Claiming is refused with 409 ISSUE_CLAIMED " +
       "when another session holds the issue and is still running; the refusal names that session, so talk to " +
       "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " +
       "person, not a session: there is nothing running to message, so ask them on the issue rather than " +
@@ -729,7 +739,9 @@ export const dispatchToolSpecs = [
       'closed in the document too. A reason beginning "removed from the document in version" is ' +
       "refused: that marks a retraction the document's own settlement wrote. Use retracted for an ask " +
       "a newer one replaces or the design made moot, resolved for one whose answer you found; an " +
-      "answered ask cannot be resolved, and resolving records no decision by a person.",
+      "answered ask cannot be resolved, and resolving records no decision by a person. An issue's " +
+      "close withdrew its open asks (kind withdrawn, which only Dispatch writes, never this tool); " +
+      "an ask on a closed issue is refused (409 ISSUE_CLOSED): reopen the issue first.",
     arguments: (z) => ({
       ask: z
         .string()

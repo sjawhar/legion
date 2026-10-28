@@ -1,330 +1,212 @@
-import { expect, test } from "bun:test";
-import { QueryClient } from "@tanstack/react-query";
+import { expect, spyOn, test } from "bun:test";
+import { QueryClient, QueryClientProvider, type QueryKey } from "@tanstack/react-query";
+import { renderHook, waitFor } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
+
+import { api } from "../api/client";
+import { askThreadsIssue, eventRefreshTargets } from "../api/event-refresh";
 import {
   architectureSourcesQuery,
   inboxQuery,
-  projectDefaultAssigneesQuery,
+  myRepliesCountQuery,
+  projectArchitectureSourcesQuery,
+  projectIssuesQuery,
   projectsQuery,
   userStateQuery,
 } from "../api/queries";
-import { coalescePrefixKeys } from "../api/query-refresh";
-import { eventQueryKeys, mergeEventPages, prependEventToLog } from "../api/sse";
-import type { Event, EventType } from "../api/types";
+import { refreshQueries } from "../api/query-refresh";
+import {
+  markAskThreadsSeededByAnInFlightInbox,
+  mergeEventPages,
+  prependEventToLog,
+} from "../api/sse";
+import type { Ask, AskRead, Event, EventType, InboxRow } from "../api/types";
+import { hasPendingAskThreadInvalidation } from "../features/inbox/ask-thread-freshness";
+import { issueAsk } from "../features/inbox/inbox-fixture";
+import { useAskAnswerForm } from "../features/inbox/useAskAnswerForm";
+import {
+  askQuery,
+  blockQuery,
+  commentQuery,
+  documentSummaryQuery,
+  issueQuery,
+  issueSummaryQuery,
+  messageQuery,
+} from "../features/refs/reference-target";
 
-/**
- * The pre-#1248 reference implementation, copied verbatim from `main`'s
- * `packages/dispatch/web/src/api/sse.ts`. It is the oracle this PR's behaviour is compared
- * against: every event must invalidate exactly what main invalidated, except the single
- * documented subtraction (the Inbox query for plain messages and non-ask comments). One type is
- * newer than the copy: `artifact.human_edited`, a person's edits of a document, which
- * refreshes what that document's `artifact.version` refreshes, so the copy maps it beside it.
- */
-function mainArtifactId(event: Event): string | undefined {
-  return event.type === "artifact.version" || event.type === "artifact.human_edited"
-    ? event.payload.artifact_id
-    : undefined;
+// The page every rule is read against: one read of each family a Dispatch tab holds, under the
+// key its own reader builds, for issue CORE-1 (child of CORE-0, grandchild of CORE-00) and for
+// what sits beside it. A rule is what an event marks stale here, through the real scheduler.
+const READS = {
+  agentsPicker: { key: ["agents", "issue-picker"] },
+  answers: { key: ["me", "answers"] },
+  architecture: { key: ["architecture", "CORE"] },
+  ask: { key: askQuery("ask-1").queryKey },
+  askPanel: {
+    data: { edges: [], node: { id: "ask-9", kind: "ask" } },
+    key: ["references", "to", "dispatch://CORE-9/ask/ask-9"],
+  },
+  asks: { key: ["asks", "CORE-1"] },
+  comment: { key: commentQuery("comment-1").queryKey },
+  comments: { key: ["comments", "CORE-1"] },
+  components: { key: ["components", "CORE"] },
+  conversationMessages: { key: ["issue-messages", "CORE-1"] },
+  detail: { key: issueQuery("CORE-1").queryKey },
+  docAskPanel: {
+    data: { edges: [], node: { id: "ask-7", kind: "ask" } },
+    key: ["references", "to", "dispatch://CORE/artifact/plan-md/ask/ask-7"],
+  },
+  // A project document's ask list and its block listing: the first's rows are asks.
+  docAsks: {
+    data: [{ id: "ask-7", question: "Ship it?" }],
+    key: ["artifact", "artifact-1", "asks"],
+  },
+  docBlocks: {
+    data: [{ from: 0, id: "intro", to: 4, type: "paragraph" }],
+    key: ["artifact", "artifact-1", "blocks"],
+  },
+  docSummary: { data: { id: "artifact-1" }, key: documentSummaryQuery("CORE", "plan-md").queryKey },
+  documentPage: { data: { id: "artifact-1" }, key: ["artifact-ref", "CORE/plan-md"] },
+  documentPanel: {
+    data: { edges: [], node: { id: "artifact-1", kind: "artifact" } },
+    key: ["references", "to", "dispatch://CORE/artifact/plan-md"],
+  },
+  grandparent: { key: issueQuery("CORE-00").queryKey },
+  inbox: { key: inboxQuery().queryKey },
+  issuePanel: {
+    data: { edges: [], node: { id: "CORE-1", kind: "issue" } },
+    key: ["references", "to", "dispatch://CORE-1"],
+  },
+  labelledProjectList: { key: projectIssuesQuery("CORE", ["ui"]).queryKey },
+  log: { key: ["events", "CORE-1"] },
+  message: { key: messageQuery("CORE-1", "message-1").queryKey },
+  newParentPanel: {
+    data: { edges: [], node: { id: "CORE-8", kind: "issue" } },
+    key: ["references", "to", "dispatch://CORE-8"],
+  },
+  otherAsk: { key: askQuery("ask-9").queryKey },
+  otherDocSummary: {
+    data: { id: "artifact-2" },
+    key: documentSummaryQuery("CORE", "notes-md").queryKey,
+  },
+  otherDocumentPage: { data: { id: "artifact-2" }, key: ["artifact-ref", "CORE/notes-md"] },
+  otherIssueMessage: { key: messageQuery("CORE-9", "message-9").queryKey },
+  otherProjectList: { key: projectIssuesQuery("OTHER", []).queryKey },
+  // Another block of CORE-1's spec, which a link elsewhere on the page names.
+  otherSpecBlock: {
+    data: { edges: [], node: { id: "CORE-1/spec#outro", kind: "block" } },
+    key: blockQuery("dispatch://CORE-1/spec#b-outro").queryKey,
+  },
+  parent: { key: issueQuery("CORE-0").queryKey },
+  // CORE-1 is CORE-0's child: CORE-0's panel lists the `child_of` edge from it.
+  parentPanel: {
+    data: {
+      edges: [{ direction: "in", kind: "child_of", node: { id: "CORE-1", kind: "issue" } }],
+      node: { id: "CORE-0", kind: "issue" },
+    },
+    key: ["references", "to", "dispatch://CORE-0"],
+  },
+  parentSummary: { key: issueSummaryQuery("CORE-0").queryKey },
+  pinned: { key: ["issues", "pinned"] },
+  projectInbox: { key: ["inbox", "CORE"] },
+  projectList: { key: projectIssuesQuery("CORE", []).queryKey },
+  projects: { key: projectsQuery().queryKey },
+  referencePicker: { key: ["issues", "CORE"] },
+  referencesTab: { key: ["issue", "CORE-1", "references"] },
+  replies: { key: myRepliesCountQuery().queryKey },
+  repliesPage: { key: ["me", "replies", "page"] },
+  rootComment: { key: commentQuery("root-1").queryKey },
+  rootMessage: { key: messageQuery("CORE-1", "message-0").queryKey },
+  // A block of CORE-1's spec, read by a link to it (its panel shares the key) and, pinned to
+  // version 2, by another link.
+  specBlock: {
+    data: { edges: [], node: { id: "CORE-1/spec#intro", kind: "block" } },
+    key: blockQuery("dispatch://CORE-1/spec#b-intro").queryKey,
+  },
+  specBlockPinned: {
+    data: { edges: [], node: { id: "CORE-1/spec#intro", kind: "block" } },
+    key: blockQuery("dispatch://CORE-1/spec#b-intro@v2").queryKey,
+  },
+  // CORE-1's spec, one document, opened on two spellings of its address.
+  specPanel: {
+    data: { edges: [], node: { id: "artifact-3", kind: "artifact" } },
+    key: ["references", "to", "dispatch://CORE-1/spec"],
+  },
+  specPanelBySlug: {
+    data: { edges: [], node: { id: "artifact-3", kind: "artifact" } },
+    key: ["references", "to", "dispatch://CORE-1/artifact/spec"],
+  },
+  summary: { key: issueSummaryQuery("CORE-1").queryKey },
+  unrelatedDetail: { key: issueQuery("CORE-9").queryKey },
+  unrelatedPanel: {
+    data: { edges: [], node: { id: "CORE-9", kind: "issue" } },
+    key: ["references", "to", "dispatch://CORE-9"],
+  },
+  userState: { key: userStateQuery().queryKey },
+} satisfies Record<string, { data?: unknown; key: QueryKey }>;
+
+type ReadName = keyof typeof READS;
+
+interface PageOptions {
+  /** Whether the viewer has CORE-1 pinned. */
+  readonly pinned: boolean;
+  /** Whether the Inbox lists CORE-1's ask-1 and CORE-9's ask-9. */
+  readonly inboxHolds: boolean;
+  /** Where the Architecture page's tree lists CORE-1: in a component's work list, among the
+   *  unassigned issues, or nowhere. */
+  readonly treeLists: "component" | "unassigned" | "nowhere";
+  /** Whether the Replies page lists a thread on CORE-1. */
+  readonly repliesHold: boolean;
 }
 
-function mainAppendDocumentKey(keys: (readonly unknown[])[], event: Event): void {
-  let id: string | undefined;
-  switch (event.type) {
-    case "ask.opened":
-    case "ask.edited":
-    case "ask.handed_back":
-    case "ask.answered":
-    case "ask.resolved":
-    case "ask.anchor_refreshed":
-      id = event.payload.block_artifact?.id ?? event.payload.anchor?.artifact_id;
-      break;
-    case "comment.created":
-    case "comment.delivery":
-    case "comment.answered":
-    case "comment.resolved":
-    case "comment.reopened":
-    case "comment.edited":
-    case "comment.anchor_refreshed":
-    case "suggestion.accepted":
-    case "suggestion.rejected":
-      id = "anchor" in event.payload ? event.payload.anchor?.artifact_id : undefined;
-      break;
-    default:
-      throw new Error(`${event.type} events do not name a document`);
+function dataFor(name: ReadName, page: PageOptions): unknown {
+  if (name === "pinned") {
+    return page.pinned ? [{ key: "CORE-1" }] : [{ key: "CORE-5" }];
   }
-  if (id !== undefined) {
-    keys.push(["artifact", id]);
+  if (name === "inbox" || name === "projectInbox") {
+    return page.inboxHolds
+      ? [
+          { id: "ask-1", issue_key: "CORE-1" },
+          { id: "ask-9", issue_key: "CORE-9" },
+        ]
+      : [{ id: "ask-5", issue_key: "CORE-5" }];
   }
+  if (name === "architecture") {
+    const listed = [{ key: page.treeLists === "nowhere" ? "CORE-5" : "CORE-1" }];
+    return {
+      components: [{ id: "web", issues: page.treeLists === "unassigned" ? [] : listed }],
+      not_architectural: [],
+      retired_links: [],
+      unassigned: page.treeLists === "unassigned" ? listed : [],
+    };
+  }
+  if (name === "repliesPage") {
+    const key = page.repliesHold ? "CORE-1" : "CORE-5";
+    return {
+      pageParams: [0],
+      pages: [{ rows: [{ issue: { key, title: "Ship the release" }, thread_id: "root-1" }] }],
+    };
+  }
+  const read: { data?: unknown; key: QueryKey } = READS[name];
+  return read.data ?? { loaded: name };
 }
 
-function mainPayloadString(event: Event, key: string): string | undefined {
-  const payload = event.payload;
-  if (typeof payload !== "object" || payload === null || !(key in payload)) {
-    return undefined;
+/** The reads of the page `event` marks stale, signed in as alice. */
+function refreshedReads(event: Event, page: Partial<PageOptions> = {}): ReadName[] {
+  const options: PageOptions = {
+    inboxHolds: true,
+    pinned: true,
+    repliesHold: true,
+    treeLists: "component",
+    ...page,
+  };
+  const queryClient = new QueryClient();
+  const names = Object.keys(READS) as ReadName[];
+  for (const name of names) {
+    queryClient.setQueryData(READS[name].key, dataFor(name, options));
   }
-  const value = Reflect.get(payload, key);
-  return typeof value === "string" ? value : undefined;
-}
-
-function mainAppendAskDetailKeys(keys: (readonly unknown[])[], event: Event): void {
-  const id =
-    event.type === "ask.follower_added" || event.type === "ask.follower_removed"
-      ? mainPayloadString(event, "ask_id")
-      : mainPayloadString(event, "id");
-  if (id !== undefined) {
-    keys.push(["ask", id], ["ask-thread", id]);
-  }
-}
-
-function mainAppendCommentDetailKeys(keys: (readonly unknown[])[], event: Event): void {
-  const id =
-    event.type === "comment.delivery" ? event.payload.comment_id : mainPayloadString(event, "id");
-  if (id !== undefined) {
-    keys.push(["comment", id]);
-  }
-  const askID = mainPayloadString(event, "ask_id");
-  if (askID !== undefined) {
-    keys.push(["ask", askID], ["ask-thread", askID]);
-  }
-}
-
-function mainIsCommentLikeEvent(event: Event): boolean {
-  return (
-    event.type === "comment.created" ||
-    event.type === "comment.delivery" ||
-    event.type === "comment.answered" ||
-    event.type === "comment.resolved" ||
-    event.type === "comment.reopened" ||
-    event.type === "comment.edited" ||
-    event.type === "comment.anchor_refreshed" ||
-    event.type === "suggestion.accepted" ||
-    event.type === "suggestion.rejected"
-  );
-}
-
-function mainIsMessageEvent(event: Event): boolean {
-  return (
-    event.type === "message.created" ||
-    event.type === "message.delivery" ||
-    event.type === "message.accepted" ||
-    event.type === "message.answered"
-  );
-}
-
-function mainEventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown[])[] {
-  if (event.type === "project.created" || event.type === "project.updated") {
-    if (event.project === undefined) {
-      throw new Error("project event is missing its project");
-    }
-    return [
-      projectsQuery().queryKey,
-      ["project", event.project],
-      ["issues", "project", event.project],
-      ["repo-projects"],
-    ];
-  }
-  if (event.type === "settings.repo_project.updated") {
-    if (event.project === undefined) {
-      throw new Error("project event is missing its project");
-    }
-    return [
-      projectsQuery().queryKey,
-      ["project", event.project],
-      ["issues", "project", event.project],
-      ["repo-projects"],
-      ["issue"],
-    ];
-  }
-  // A default decides who a later create lands on; no issue already listed moves.
-  if (event.type === "settings.project_default_assignee.updated") {
-    return [projectDefaultAssigneesQuery().queryKey];
-  }
-  if (
-    event.type === "settings.architecture_source.updated" ||
-    event.type === "architecture.synced" ||
-    event.type === "architecture.sync_failed"
-  ) {
-    if (event.project === undefined) {
-      throw new Error("project event is missing its project");
-    }
-    return [
-      architectureSourcesQuery().queryKey,
-      // The project's own source list (projectArchitectureSourcesQuery).
-      ["architecture-sources", event.project],
-      ["components", event.project],
-      ["architecture", event.project],
-    ];
-  }
-  if (event.type === "user_state.updated") {
-    return mainPayloadString(event, "login") === signedInLogin
-      ? [userStateQuery().queryKey, inboxQuery().queryKey]
-      : [];
-  }
-  if (event.type === "user_agent_state.updated") {
-    return mainPayloadString(event, "login") === signedInLogin ? [["user-agent-state"]] : [];
-  }
-  // An event main never had: it names no key main refreshed. repliesAdditions adds its own.
-  if (event.type === "user_thread_state.updated") {
-    return [];
-  }
-  if (event.type === "subscription.remove_requested") {
-    return [];
-  }
-  if (event.issue_key === null && mainIsMessageEvent(event)) {
-    const target = mainPayloadString(event, "target");
-    if (
-      target === undefined ||
-      !target.startsWith("session:") ||
-      target.length === "session:".length
-    ) {
-      throw new Error("issue-less message event is missing its session target");
-    }
-    // An issue-less targeted message is also how a broadcast reaches one recipient, so the
-    // open broadcast views refresh with the agent's own conversation, and a reply in it can be
-    // unread for its asker, which the viewer's per-agent state counts.
-    return [
-      ["agents", target.slice("session:".length), "messages"],
-      ["broadcast"],
-      ...(event.type === "message.answered" ? [["user-agent-state"]] : []),
-    ];
-  }
-  if (event.issue_key === null) {
-    if (event.artifact_id === null || event.artifact_id === undefined) {
-      throw new Error("document event is missing its artifact id");
-    }
-    if (event.project === undefined) {
-      throw new Error("document event is missing its project");
-    }
-    const keys: (readonly unknown[])[] = [
-      ["artifact", event.artifact_id],
-      ["artifact-ref"],
-      ["project", event.project, "artifacts"],
-      projectsQuery().queryKey,
-    ];
-    if (event.type.startsWith("ask.")) {
-      mainAppendAskDetailKeys(keys, event);
-      keys.push(inboxQuery().queryKey);
-    }
-    if (mainIsCommentLikeEvent(event)) {
-      mainAppendCommentDetailKeys(keys, event);
-    }
-    if (event.type === "artifact.approved" || event.type === "artifact.changes_requested") {
-      keys.push(inboxQuery().queryKey);
-    }
-    if (event.type === "subscription.removed") {
-      keys.push(["subscribers", event.artifact_id]);
-    }
-    return keys;
-  }
-
-  const keys: (readonly unknown[])[] = [
-    ["issue", event.issue_key],
-    ["events", event.issue_key],
-    ["issues"],
-    userStateQuery().queryKey,
-    inboxQuery().queryKey,
-  ];
-
-  if (
-    event.type === "issue.created" ||
-    event.type === "issue.updated" ||
-    event.type === "issue.closed"
-  ) {
-    if (event.project !== undefined) {
-      keys.push(
-        ["issues", "project", event.project],
-        ["components", event.project],
-        ["architecture", event.project]
-      );
-    }
-    if (event.type === "issue.updated") {
-      keys.push(["issue"]);
-    }
-    return keys;
-  }
-  if (event.type.startsWith("issue.")) {
-    return keys;
-  }
-
-  if (
-    event.type === "artifact.created" ||
-    event.type === "artifact.version" ||
-    event.type === "artifact.human_edited"
-  ) {
-    keys.push(["artifacts", event.issue_key]);
-    const id = mainArtifactId(event);
-    if (id !== undefined) {
-      keys.push(["artifact", id]);
-    }
-    keys.push(["comments", event.issue_key]);
-    return keys;
-  }
-
-  if (event.type === "artifact.approved" || event.type === "artifact.changes_requested") {
-    keys.push(
-      ["artifacts", event.issue_key],
-      ["artifact", event.payload.artifact_id],
-      ["asks", event.issue_key]
-    );
-    if (event.payload.ask_id !== null) {
-      keys.push(["ask-thread", event.payload.ask_id]);
-    }
-    return keys;
-  }
-
-  if (
-    event.type === "ask.opened" ||
-    event.type === "ask.answered" ||
-    event.type === "ask.resolved" ||
-    event.type === "ask.edited" ||
-    event.type === "ask.handed_back" ||
-    event.type === "ask.anchor_refreshed"
-  ) {
-    keys.push(["asks", event.issue_key]);
-    if (
-      event.type !== "ask.edited" &&
-      event.type !== "ask.handed_back" &&
-      event.type !== "ask.anchor_refreshed"
-    ) {
-      keys.push(projectsQuery().queryKey);
-    }
-    mainAppendDocumentKey(keys, event);
-    mainAppendAskDetailKeys(keys, event);
-    return keys;
-  }
-  if (event.type === "ask.follower_added" || event.type === "ask.follower_removed") {
-    mainAppendAskDetailKeys(keys, event);
-    return keys;
-  }
-  if (event.type === "block.repaired" || event.type === "block.invalid") {
-    keys.push(["asks", event.issue_key], projectsQuery().queryKey);
-    return keys;
-  }
-
-  if (mainIsCommentLikeEvent(event)) {
-    keys.push(["comments", event.issue_key]);
-    if (mainPayloadString(event, "ask_id") !== undefined) {
-      keys.push(["asks", event.issue_key]);
-    }
-    mainAppendDocumentKey(keys, event);
-    mainAppendCommentDetailKeys(keys, event);
-    return keys;
-  }
-
-  if (mainIsMessageEvent(event)) {
-    const target = mainPayloadString(event, "target");
-    if (target?.startsWith("session:") && target.length > "session:".length) {
-      keys.push(["agents", target.slice("session:".length), "messages"]);
-    }
-    keys.push(["messages", event.issue_key]);
-    return keys;
-  }
-
-  if (event.type === "subscription.removed") {
-    keys.push(["subscribers", event.issue_key]);
-    return keys;
-  }
-
-  keys.push(["children", event.issue_key]);
-  return keys;
+  refreshQueries(queryClient, eventRefreshTargets(event, "alice"));
+  return names.filter((name) => queryClient.getQueryState(READS[name].key)?.isInvalidated);
 }
 
 function event(
@@ -333,8 +215,8 @@ function event(
   overrides: Partial<Event> = {}
 ): Event {
   return {
-    actor: { kind: "user", id: "alice" },
-    created_at: "2026-09-09T00:00:00Z",
+    actor: { id: "planner", kind: "session" },
+    created_at: "2026-10-26T00:00:00Z",
     id: 12,
     issue_key: "CORE-1",
     notify: true,
@@ -346,549 +228,698 @@ function event(
   } as Event;
 }
 
+/** An `issue.*` payload as the server writes it: the issue after the write, flat. */
+function issue(fields: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    assignee: "alice@example.com",
+    blocked_by: [],
+    closed_at: null,
+    components: { ids: [], inherited_from: null, mode: "inherit", reason: null, unknown: [] },
+    key: "CORE-1",
+    parent: "CORE-0",
+    priority: 1,
+    project: "CORE",
+    status: "in_progress",
+    title: "Ship the release",
+    ...fields,
+  };
+}
+
 const documentOwner = { artifact_id: "artifact-1", issue_key: null, project: "CORE" } as const;
 
-/**
- * One representative event per contract type, plus the payload variants that change routing.
- * Keyed by `EventType` so a new event type fails to compile here instead of going unchecked.
- */
-const eventsByType: Record<EventType, readonly Event[]> = {
-  "project.created": [event("project.created", {}, { issue_key: null })],
-  "project.updated": [event("project.updated", {}, { issue_key: null })],
-  "settings.repo_project.updated": [
-    event("settings.repo_project.updated", {}, { issue_key: null }),
-  ],
-  "settings.project_default_assignee.updated": [
-    event(
-      "settings.project_default_assignee.updated",
-      { assignee: "alice", project: "CORE" },
-      { issue_key: null }
+interface Rule {
+  readonly event: Event;
+  readonly page?: Partial<PageOptions>;
+  readonly refreshes: readonly ReadName[];
+  readonly spares: readonly ReadName[];
+}
+
+const rules: Record<string, Rule> = {
+  "a retitle refreshes the issue, its summary, the lists and pages showing its title, and every ancestor's children":
+    {
+      event: event(
+        "issue.updated",
+        issue({ ancestors: ["CORE-0", "CORE-00"], changed: ["title"] })
+      ),
+      refreshes: [
+        "detail",
+        "log",
+        "projectList",
+        "labelledProjectList",
+        "summary",
+        "referencePicker",
+        "agentsPicker",
+        "pinned",
+        "inbox",
+        "projectInbox",
+        "parent",
+        "grandparent",
+        "referencesTab",
+        "architecture",
+        "repliesPage",
+      ],
+      spares: [
+        "unrelatedDetail",
+        "parentSummary",
+        "otherProjectList",
+        "projects",
+        "replies",
+        "userState",
+        "components",
+        "message",
+        "ask",
+        "comment",
+        "issuePanel",
+        "parentPanel",
+        "docSummary",
+      ],
+    },
+  "a retitle leaves the pinned list, the Inbox, the Replies page and the Architecture page alone when none lists the issue":
+    {
+      event: event("issue.updated", issue({ ancestors: ["CORE-0"], changed: ["title"] })),
+      page: { inboxHolds: false, pinned: false, repliesHold: false, treeLists: "nowhere" },
+      refreshes: ["summary"],
+      spares: ["pinned", "inbox", "projectInbox", "repliesPage", "architecture", "components"],
+    },
+  "a retitle refreshes the Architecture page that lists the issue as unassigned": {
+    event: event("issue.updated", issue({ ancestors: [], changed: ["title"] })),
+    page: { treeLists: "unassigned" },
+    refreshes: ["architecture"],
+    spares: ["components"],
+  },
+  "a status move that leaves the issue open refreshes every ancestor's rollup, and neither the project counts nor an Inbox that does not list it":
+    {
+      event: event(
+        "issue.updated",
+        issue({ ancestors: ["CORE-0", "CORE-00"], changed: ["status"], thread_logins: [] })
+      ),
+      page: { inboxHolds: false },
+      refreshes: [
+        "detail",
+        "parent",
+        "grandparent",
+        "summary",
+        "pinned",
+        "components",
+        "architecture",
+        "referencePicker",
+        "agentsPicker",
+      ],
+      spares: [
+        "inbox",
+        "projectInbox",
+        "projects",
+        "unrelatedDetail",
+        "replies",
+        "parentPanel",
+        "referencesTab",
+        "parentSummary",
+      ],
+    },
+  "a reopen refreshes the whole Inbox and the project counts, since its open asks come back": {
+    event: event(
+      "issue.updated",
+      issue({
+        ancestors: ["CORE-0", "CORE-00"],
+        changed: ["status", "closed_at"],
+        closed_at: null,
+        status: "backlog",
+        thread_logins: [],
+      })
     ),
-  ],
-  "settings.architecture_source.updated": [
-    event("settings.architecture_source.updated", {}, { issue_key: null }),
-  ],
-  "architecture.synced": [
-    // Retained from before a project had several sources: no repo or branch.
-    event("architecture.synced", { commit: "c0ffee", components: 2 }, { issue_key: null }),
-    event(
-      "architecture.synced",
-      { branch: "main", commit: "c0ffee", components: 2, repo: "legion/arch" },
-      { issue_key: null }
+    page: { inboxHolds: false },
+    refreshes: [
+      "detail",
+      "parent",
+      "grandparent",
+      "summary",
+      "pinned",
+      "inbox",
+      "projectInbox",
+      "projects",
+      "components",
+      "architecture",
+      "referencePicker",
+      "agentsPicker",
+    ],
+    spares: ["unrelatedDetail", "replies", "parentPanel", "referencesTab", "parentSummary"],
+  },
+  "a close refreshes the Inbox only where it lists the issue, and the Replies of those it moves": {
+    event: event(
+      "issue.closed",
+      issue({
+        ancestors: ["CORE-0"],
+        changed: ["status", "closed_at"],
+        closed_at: "2026-10-26T00:00:00Z",
+        status: "done",
+        thread_logins: ["alice"],
+      })
     ),
-  ],
-  "architecture.sync_failed": [
-    event("architecture.sync_failed", { error: "broken" }, { issue_key: null }),
-    event(
-      "architecture.sync_failed",
-      { branch: "main", error: "broken", repo: "legion/arch" },
-      { issue_key: null }
+    page: { inboxHolds: false },
+    refreshes: ["detail", "parent", "summary", "projects", "replies", "agentsPicker"],
+    spares: ["inbox", "projectInbox", "unrelatedDetail"],
+  },
+  "a close that moves someone else's Replies leaves the viewer's alone": {
+    event: event(
+      "issue.closed",
+      issue({
+        ancestors: [],
+        changed: ["status", "closed_at"],
+        closed_at: "2026-10-26T00:00:00Z",
+        status: "done",
+        thread_logins: ["bob"],
+      })
     ),
-  ],
-  "user_state.updated": [
-    event("user_state.updated", { login: "alice" }, { issue_key: null }),
-    event("user_state.updated", { login: "bob" }, { issue_key: null }),
-  ],
-  "user_agent_state.updated": [
-    event("user_agent_state.updated", { login: "alice", session_id: "s1" }, { issue_key: null }),
-    event("user_agent_state.updated", { login: "bob", session_id: "s1" }, { issue_key: null }),
-  ],
-  "user_thread_state.updated": [
-    event("user_thread_state.updated", { login: "alice", thread_id: "c1" }, { issue_key: null }),
-    event("user_thread_state.updated", { login: "bob", thread_id: "c1" }, { issue_key: null }),
-  ],
-  "issue.created": [event("issue.created")],
-  "issue.updated": [event("issue.updated")],
-  "issue.closed": [event("issue.closed")],
-  "issue.claimed": [
-    event("issue.claimed", {
-      claim: { actor: { kind: "session", id: "session-one" }, at: "2026-09-24T06:00:00Z" },
+    refreshes: ["inbox", "projects"],
+    spares: ["replies"],
+  },
+  "a reparent refreshes every issue detail and the panels of the old parent and the new": {
+    event: event(
+      "issue.updated",
+      issue({ ancestors: ["CORE-8"], changed: ["parent"], parent: "CORE-8" })
+    ),
+    refreshes: [
+      "detail",
+      "parent",
+      "grandparent",
+      "unrelatedDetail",
+      "parentPanel",
+      "newParentPanel",
+      "components",
+      "architecture",
+      "referencesTab",
+    ],
+    spares: ["unrelatedPanel", "issuePanel", "summary", "projects", "inbox", "pinned"],
+  },
+  "a component change refreshes every issue detail and the component tree": {
+    event: event("issue.updated", issue({ ancestors: ["CORE-0"], changed: ["components"] })),
+    refreshes: ["unrelatedDetail", "components", "architecture"],
+    spares: ["projects", "summary", "inbox", "pinned"],
+  },
+  "an issue write that does not say what it changed refreshes as broadly as before": {
+    event: event("issue.updated", issue()),
+    refreshes: [
+      "detail",
+      "unrelatedDetail",
+      "summary",
+      "referencePicker",
+      "agentsPicker",
+      "pinned",
+      "inbox",
+      "projects",
+      "replies",
+      "repliesPage",
+      "components",
+      "architecture",
+      "referencesTab",
+      "parentPanel",
+    ],
+    spares: ["otherProjectList", "userState"],
+  },
+  "a priority change refreshes the Inbox row, the work list showing it, every ancestor's children, and nothing that shows no priority":
+    {
+      event: event("issue.updated", issue({ ancestors: ["CORE-0"], changed: ["priority"] })),
+      refreshes: ["detail", "projectList", "inbox", "parent", "architecture"],
+      spares: [
+        "summary",
+        "pinned",
+        "projects",
+        "grandparent",
+        "unrelatedDetail",
+        "referencePicker",
+        "agentsPicker",
+        "components",
+        "repliesPage",
+      ],
+    },
+  "a write of any field refreshes every ancestor's children, which show the subtree's newest activity":
+    {
+      event: event(
+        "issue.updated",
+        issue({ ancestors: ["CORE-0", "CORE-00"], changed: ["labels"] })
+      ),
+      page: { treeLists: "nowhere" },
+      refreshes: ["detail", "parent", "grandparent"],
+      spares: ["unrelatedDetail", "parentSummary", "summary", "architecture", "components"],
+    },
+  "an issue write that does not name its ancestors refreshes every issue detail": {
+    event: event("issue.updated", issue({ changed: ["priority"] })),
+    refreshes: ["detail", "parent", "grandparent", "unrelatedDetail"],
+    spares: ["summary", "pinned"],
+  },
+  "an assignee change leaves an Inbox that does not list the issue alone": {
+    event: event("issue.updated", issue({ ancestors: [], changed: ["assignee"] })),
+    page: { inboxHolds: false },
+    refreshes: ["detail"],
+    spares: ["inbox", "projectInbox"],
+  },
+  "a blocker change refreshes the detail of each blocker it names, whose Referenced by count moved":
+    {
+      event: event(
+        "issue.updated",
+        issue({
+          ancestors: [],
+          changed: ["blocked_by"],
+          references_changed: [{ id: "CORE-9", kind: "issue" }],
+        })
+      ),
+      refreshes: ["detail", "unrelatedDetail"],
+      spares: ["parent", "grandparent", "summary"],
+    },
+  "a new issue refreshes its ancestors' rollups and the pickers, not every detail or the project counts":
+    {
+      event: event(
+        "issue.created",
+        issue({
+          ancestors: ["CORE-0"],
+          changed: ["title", "status", "parent", "components", "repo"],
+        })
+      ),
+      refreshes: [
+        "detail",
+        "parent",
+        "summary",
+        "referencePicker",
+        "agentsPicker",
+        "components",
+        "architecture",
+        "referencesTab",
+        "projectList",
+        "parentPanel",
+      ],
+      spares: ["unrelatedDetail", "grandparent", "projects", "pinned", "inbox", "replies"],
+    },
+  "a child's status move refreshes its parent's detail alone": {
+    event: event(
+      "child.status",
+      { child_key: "CORE-1", from: "todo", to: "in_progress" },
+      { issue_key: "CORE-0" }
+    ),
+    refreshes: ["parent", "projectList"],
+    spares: [
+      "detail",
+      "grandparent",
+      "unrelatedDetail",
+      "parentSummary",
+      "projects",
+      "inbox",
+      "pinned",
+      "parentPanel",
+    ],
+  },
+  "a child added refreshes its parent's backlink panel": {
+    event: event("child.added", { child_key: "CORE-1" }, { issue_key: "CORE-0" }),
+    refreshes: ["parent", "parentPanel"],
+    spares: ["issuePanel", "detail"],
+  },
+  "a claim refreshes the issue and its project list only": {
+    event: event("issue.claimed", {
+      claim: { actor: { id: "planner", kind: "session" }, at: "2026-10-26T00:00:00Z" },
+      key: "CORE-1",
       reason: "claimed",
+      status: "in_progress",
     }),
-  ],
-  "issue.released": [
-    event("issue.released", {
-      claim: null,
-      previous_claim: {
-        actor: { kind: "session", id: "session-one" },
-        at: "2026-09-24T06:00:00Z",
-      },
-      reason: "released",
-    }),
-  ],
-  "issue.deployed": [
-    event("issue.deployed", {
-      repo: "acme/widgets",
-      number: 501,
-      run_id: 900,
-      completed_at: "2024-01-01T02:10:00Z",
-    }),
-  ],
-  "artifact.created": [event("artifact.created", { artifact: { id: "artifact-1" } })],
-  "artifact.version": [
-    event("artifact.version", { artifact_id: "artifact-1" }),
-    // A project document whose new version cites an ask: the document has no issue, and the
-    // ask's rows — its document's ask list and the Inbox — are what the write moved.
-    event(
-      "artifact.version",
-      {
+    refreshes: ["detail", "log", "projectList"],
+    spares: ["summary", "pinned", "inbox", "referencePicker", "projects", "replies", "userState"],
+  },
+  "a person's edit notice refreshes the issue's log only, since each edit's version refreshed the rest":
+    {
+      event: event("artifact.human_edited", {
         artifact_id: "artifact-1",
-        references_changed: [{ kind: "ask", id: "ask-9", artifact_id: "artifact-9" }],
-      },
-      documentOwner
+        from_version: 4,
+        to_version: 7,
+      }),
+      refreshes: ["detail", "log", "projectList"],
+      spares: ["summary", "pinned", "inbox", "referencePicker", "projects", "replies", "userState"],
+    },
+  "a message refreshes the issue's message reads, and the Replies of those in its thread": {
+    event: event("message.created", { id: "message-2", thread_logins: ["alice"] }),
+    refreshes: ["detail", "log", "message", "rootMessage", "conversationMessages", "replies"],
+    spares: ["otherIssueMessage", "inbox", "pinned", "projects", "ask", "summary", "userState"],
+  },
+  "a message in a thread the viewer has no row in leaves the viewer's Replies alone": {
+    event: event("message.created", { id: "message-2", thread_logins: ["bob"] }),
+    refreshes: ["message"],
+    spares: ["replies"],
+  },
+  "the viewer's own message refreshes the viewer's Replies": {
+    event: event(
+      "message.created",
+      { id: "message-2", thread_logins: [] },
+      { actor: { id: "alice", kind: "user" } }
     ),
-  ],
-  "artifact.human_edited": [
-    event("artifact.human_edited", { artifact_id: "artifact-1", from_version: 4, to_version: 7 }),
-  ],
-  "artifact.approved": [
-    event("artifact.approved", { artifact_id: "artifact-1", ask_id: "ask-1" }),
-    event("artifact.approved", { artifact_id: "artifact-1", ask_id: "ask-1" }, documentOwner),
-  ],
-  "artifact.changes_requested": [
-    event("artifact.changes_requested", { artifact_id: "artifact-1", ask_id: null }),
-  ],
-  "ask.opened": [
-    event("ask.opened", { id: "ask-1", anchor: { artifact_id: "artifact-1" } }),
-    event("ask.opened", { id: "ask-1", anchor: null }, documentOwner),
-    // A question that cites an issue moves that issue's own header count.
-    event("ask.opened", {
-      id: "ask-1",
+    refreshes: ["replies"],
+    spares: [],
+  },
+  "a message that does not say whose Replies it moves refreshes the viewer's": {
+    event: event("message.answered", { id: "message-2", in_reply_to: "message-0" }),
+    refreshes: ["replies", "rootMessage"],
+    spares: ["inbox"],
+  },
+  "a reply refreshes the comment it replies to, and no Inbox row": {
+    event: event("comment.created", {
       anchor: null,
-      references_changed: [{ kind: "issue", id: "CORE-4" }],
-    }),
-  ],
-  // Every ask type carries a document-scoped row as well: the ask branch on that path is an
-  // explicit member list, and only a document-scoped row reaches it, so without one per member
-  // the oracle cannot see a member being dropped.
-  "ask.anchor_refreshed": [
-    event("ask.anchor_refreshed", { id: "ask-1", anchor: { artifact_id: "artifact-1" } }),
-    event("ask.anchor_refreshed", { id: "ask-1", anchor: null }, documentOwner),
-  ],
-  "ask.edited": [
-    event("ask.edited", { id: "ask-1", anchor: null }),
-    event("ask.edited", { id: "ask-1", anchor: null }, documentOwner),
-  ],
-  // A hand-back moves an approval card between the Inbox's sections and changes no text.
-  "ask.handed_back": [
-    event("ask.handed_back", { id: "ask-1", anchor: null }),
-    event("ask.handed_back", { id: "ask-1", anchor: null }, documentOwner),
-  ],
-  "ask.answered": [
-    event("ask.answered", { id: "ask-1", anchor: null }),
-    event("ask.answered", { id: "ask-1", anchor: null }, documentOwner),
-  ],
-  "ask.resolved": [
-    event("ask.resolved", { id: "ask-1", anchor: null }),
-    event("ask.resolved", { id: "ask-1", anchor: null }, documentOwner),
-  ],
-  "ask.follower_added": [
-    event("ask.follower_added", { ask_id: "ask-1", session_id: "s1" }),
-    event("ask.follower_added", { ask_id: "ask-1", session_id: "s1" }, documentOwner),
-  ],
-  "ask.follower_removed": [
-    event("ask.follower_removed", { ask_id: "ask-1", session_id: "s1" }),
-    event("ask.follower_removed", { ask_id: "ask-1", session_id: "s1" }, documentOwner),
-  ],
-  "block.repaired": [event("block.repaired", { block_id: "b-1" })],
-  "block.invalid": [event("block.invalid", { block_id: "b-1" })],
-  "comment.created": [
-    event("comment.created", { id: "comment-1", anchor: { artifact_id: "artifact-1" } }),
-    event("comment.created", { id: "comment-1", ask_id: "ask-1", anchor: null }),
-    // A reply on a project document's ask: the replier's answers page lists it.
-    event("comment.created", { id: "comment-1", ask_id: "ask-1", anchor: null }, documentOwner),
-    event("comment.created", { id: "comment-1", anchor: null }, documentOwner),
-    // A comment that replies to no ask but cites one: the Inbox row carrying that ask's count
-    // moves, so the subtraction cannot apply, and only that ask's rows refresh.
-    event("comment.created", {
+      ask_id: null,
       id: "comment-1",
-      anchor: null,
-      references_changed: [{ kind: "ask", id: "ask-9", issue_key: "CORE-4" }],
+      reply_to: "root-1",
+      thread_logins: [],
     }),
-    // A comment citing an ask on a project document: its row is in that document's ask list.
-    event("comment.created", {
+    refreshes: ["comment", "rootComment", "comments"],
+    spares: ["inbox", "projectInbox", "ask", "asks", "answers", "replies"],
+  },
+  "a reply on an ask refreshes the ask, its Inbox row and the answers page": {
+    event: event("comment.created", { anchor: null, ask_id: "ask-1", id: "comment-2" }),
+    refreshes: ["ask", "inbox", "projectInbox", "asks", "answers"],
+    spares: ["projects", "pinned"],
+  },
+  "an ask opening refreshes the Inbox, the project counts and the pinned row": {
+    event: event("ask.opened", { anchor: null, id: "ask-1", thread_logins: [] }),
+    refreshes: ["ask", "inbox", "projects", "pinned", "asks", "referencesTab"],
+    spares: ["summary", "unrelatedDetail", "replies"],
+  },
+  "an ask edit moves its Inbox row and no count": {
+    event: event("ask.edited", { anchor: null, id: "ask-1" }),
+    refreshes: ["ask", "inbox"],
+    spares: ["projects", "pinned"],
+  },
+  "a citation refreshes the cited issue's count, its references and its panel": {
+    event: event("message.created", {
+      id: "message-2",
+      references_changed: [{ id: "CORE-9", kind: "issue" }],
+    }),
+    refreshes: ["unrelatedDetail", "unrelatedPanel"],
+    spares: ["issuePanel", "parentPanel", "inbox"],
+  },
+  "a citation of an ask refreshes its reads, its Inbox row and its panel": {
+    event: event("message.created", {
+      id: "message-2",
+      references_changed: [{ id: "ask-9", issue_key: "CORE-9", kind: "ask" }],
+    }),
+    refreshes: ["otherAsk", "askPanel", "inbox"],
+    spares: ["ask", "unrelatedPanel"],
+  },
+  "a citation of an ask the Inbox does not list leaves the Inbox alone": {
+    event: event("message.created", {
+      id: "message-2",
+      references_changed: [{ id: "ask-9", issue_key: "CORE-9", kind: "ask" }],
+    }),
+    page: { inboxHolds: false },
+    refreshes: ["otherAsk"],
+    spares: ["inbox", "projectInbox"],
+  },
+  "a citation of a project document's ask refreshes that ask's panel": {
+    event: event("comment.edited", {
+      anchor: null,
       id: "comment-1",
-      anchor: null,
-      references_changed: [{ kind: "ask", id: "ask-9", artifact_id: "artifact-9" }],
+      references_changed: [{ artifact_id: "artifact-1", id: "ask-7", kind: "ask" }],
     }),
-    // A comment citing an issue moves no ask row, so the Inbox stays subtracted.
-    event("comment.created", {
-      id: "comment-1",
+    refreshes: ["docAskPanel"],
+    spares: ["askPanel", "documentPanel"],
+  },
+  "a citation of a project document refreshes the panel opened on its address": {
+    event: event("comment.created", {
       anchor: null,
-      references_changed: [{ kind: "issue", id: "CORE-4" }],
-    }),
-  ],
-  "comment.anchor_refreshed": [
-    event("comment.anchor_refreshed", { id: "comment-1", anchor: { artifact_id: "artifact-1" } }),
-  ],
-  "comment.delivery": [event("comment.delivery", { comment_id: "comment-1" })],
-  "comment.answered": [event("comment.answered", { id: "comment-1", anchor: null })],
-  "comment.resolved": [event("comment.resolved", { id: "comment-1", anchor: null })],
-  "comment.reopened": [event("comment.reopened", { id: "comment-1", anchor: null })],
-  "comment.edited": [
-    event("comment.edited", { id: "comment-1", anchor: null }),
-    // An edit that dropped the mention names the ask it stopped citing.
-    event("comment.edited", {
-      id: "comment-1",
-      anchor: null,
-      references_changed: [{ kind: "ask", id: "ask-9", issue_key: "CORE-4" }],
-    }),
-  ],
-  "suggestion.accepted": [event("suggestion.accepted", { id: "comment-1", anchor: null })],
-  "suggestion.rejected": [event("suggestion.rejected", { id: "comment-1", anchor: null })],
-  "message.created": [
-    event("message.created", {}),
-    event("message.created", { target: "session:planner" }),
-    event("message.created", { target: "session:planner" }, { artifact_id: null, issue_key: null }),
-    event("message.created", {
+      id: "comment-2",
       references_changed: [
-        { kind: "issue", id: "CORE-4" },
-        { kind: "ask", id: "ask-9", issue_key: "CORE-4" },
+        { id: "artifact-1", kind: "artifact", ref: "dispatch://CORE/artifact/plan-md" },
       ],
     }),
-    // More counted targets than an event carries: nothing is named and every list refreshes.
-    event("message.created", { references_changed_truncated: true }),
-  ],
-  "message.delivery": [event("message.delivery", { target: "session:planner" })],
-  // A session took a person's direct message as its own turn: the Agents list's card for it
-  // changes, owned by the conversation, and an issue message's by its issue.
-  "message.accepted": [
-    event(
-      "message.accepted",
-      { target: "session:planner" },
-      { artifact_id: null, issue_key: null }
-    ),
-    event("message.accepted", { target: "session:planner" }),
-  ],
-  "message.answered": [
-    event("message.answered", {}),
-    event("message.answered", { in_reply_to: "message-1", thread_target: "session:planner" }),
-    event("message.answered", { target: "session:planner", thread_target: "session:planner" }),
-    event("message.answered", {
-      references_changed: [{ kind: "ask", id: "ask-9", issue_key: "CORE-4" }],
+    refreshes: ["documentPanel"],
+    spares: ["specPanel", "specPanelBySlug", "docAskPanel", "issuePanel", "unrelatedPanel"],
+  },
+  "a citation of an issue's spec refreshes its panel under every spelling of the document": {
+    event: event("message.created", {
+      id: "message-2",
+      references_changed: [{ id: "artifact-3", kind: "artifact", ref: "dispatch://CORE-1/spec" }],
     }),
-  ],
-  "child.status": [event("child.status", { child_key: "CORE-2" })],
-  "child.added": [event("child.added", { child_key: "CORE-2" })],
-  "child.removed": [event("child.removed", { child_key: "CORE-2" })],
-  "subscription.remove_requested": [event("subscription.remove_requested", { session_id: "s1" })],
-  "subscription.removed": [
-    event("subscription.removed", { session_id: "s1" }),
-    event("subscription.removed", { session_id: "s1" }, documentOwner),
-  ],
+    refreshes: ["specPanel", "specPanelBySlug"],
+    spares: ["documentPanel", "issuePanel"],
+  },
+  "a citation of a document that names no address refreshes the panel whose read is that document":
+    {
+      event: event("comment.edited", {
+        anchor: null,
+        id: "comment-1",
+        references_changed: [{ id: "artifact-1", kind: "artifact" }],
+      }),
+      refreshes: ["documentPanel"],
+      spares: ["specPanel", "docAskPanel"],
+    },
+  "a citation of a block refreshes every read of that block and its document's panel": {
+    event: event("message.created", {
+      id: "message-2",
+      references_changed: [
+        {
+          artifact_id: "artifact-3",
+          id: "CORE-1/spec#intro",
+          kind: "block",
+          ref: "dispatch://CORE-1/spec#b-intro",
+        },
+      ],
+    }),
+    refreshes: ["specBlock", "specBlockPinned", "specPanel", "specPanelBySlug"],
+    spares: ["otherSpecBlock", "documentPanel", "issuePanel", "summary", "unrelatedDetail"],
+  },
+  "a version of a document that changes a cited block refreshes the reads of that block": {
+    event: event("artifact.version", {
+      artifact_id: "artifact-3",
+      name: "Plan",
+      references_changed: [
+        {
+          artifact_id: "artifact-3",
+          id: "CORE-1/spec#intro",
+          kind: "block",
+          ref: "dispatch://CORE-1/spec#b-intro",
+        },
+      ],
+    }),
+    refreshes: ["specBlock", "specBlockPinned", "specPanel", "summary"],
+    spares: ["otherSpecBlock", "documentPanel"],
+  },
+  "a version of a document that names none of its blocks leaves every block read alone": {
+    event: event("artifact.version", { artifact_id: "artifact-3", name: "Plan" }),
+    refreshes: ["summary"],
+    spares: ["specBlock", "specBlockPinned", "otherSpecBlock"],
+  },
+  "an event cut past the server's cap that names no kinds (an older server) refreshes every count and every panel":
+    {
+      event: event("message.created", { id: "message-2", references_changed_truncated: true }),
+      refreshes: [
+        "unrelatedDetail",
+        "parent",
+        "issuePanel",
+        "unrelatedPanel",
+        "documentPanel",
+        "specBlock",
+        "inbox",
+      ],
+      spares: ["projects"],
+    },
+  "an event that cut only documents refreshes every document panel and still the issue it names": {
+    event: event("message.created", {
+      id: "message-2",
+      references_changed: [{ id: "CORE-9", kind: "issue" }],
+      references_changed_truncated: true,
+      references_changed_truncated_kinds: ["artifact"],
+    }),
+    refreshes: [
+      "documentPanel",
+      "specPanel",
+      "specPanelBySlug",
+      "unrelatedDetail",
+      "unrelatedPanel",
+    ],
+    spares: [
+      "parent",
+      "issuePanel",
+      "inbox",
+      "projectInbox",
+      "asks",
+      "askPanel",
+      "docAsks",
+      "specBlock",
+    ],
+  },
+  "an event that cut only issues refreshes every issue detail and issue panel": {
+    event: event("message.created", {
+      id: "message-2",
+      references_changed_truncated: true,
+      references_changed_truncated_kinds: ["issue"],
+    }),
+    refreshes: [
+      "unrelatedDetail",
+      "parent",
+      "grandparent",
+      "referencesTab",
+      "issuePanel",
+      "unrelatedPanel",
+      "parentPanel",
+    ],
+    spares: ["inbox", "asks", "askPanel", "documentPanel", "specBlock", "docAsks"],
+  },
+  "an event that cut only asks refreshes every ask read, ask list and panel, and the Inbox": {
+    event: event("message.created", {
+      id: "message-2",
+      references_changed_truncated: true,
+      references_changed_truncated_kinds: ["ask"],
+    }),
+    refreshes: [
+      "ask",
+      "otherAsk",
+      "asks",
+      "docAsks",
+      "inbox",
+      "projectInbox",
+      "askPanel",
+      "docAskPanel",
+    ],
+    spares: ["unrelatedDetail", "parent", "issuePanel", "documentPanel", "docBlocks", "specBlock"],
+  },
+  "an event that cut only blocks refreshes every block read and every document panel": {
+    event: event("message.created", {
+      id: "message-2",
+      references_changed_truncated: true,
+      references_changed_truncated_kinds: ["block"],
+    }),
+    refreshes: ["specBlock", "specBlockPinned", "otherSpecBlock", "specPanel", "documentPanel"],
+    spares: ["unrelatedDetail", "issuePanel", "inbox", "askPanel", "docAsks", "docBlocks"],
+  },
+  "an event that cut a kind this build does not know refreshes every count and every panel": {
+    event: event("message.created", {
+      id: "message-2",
+      references_changed_truncated: true,
+      references_changed_truncated_kinds: ["component"],
+    }),
+    refreshes: ["unrelatedDetail", "issuePanel", "documentPanel", "specBlock", "inbox"],
+    spares: ["projects"],
+  },
+  "the viewer's pin in another tab refreshes the pinned list": {
+    event: event(
+      "user_state.updated",
+      { changed: ["pinned"], login: "alice", state: {} },
+      { issue_key: null }
+    ),
+    refreshes: ["userState", "pinned"],
+    spares: ["inbox", "projectInbox", "detail"],
+  },
+  "the viewer's read mark in another tab leaves the pinned list alone": {
+    event: event(
+      "user_state.updated",
+      { changed: ["last_read_seq"], login: "alice", state: {} },
+      { issue_key: null }
+    ),
+    refreshes: ["userState"],
+    spares: ["pinned", "inbox"],
+  },
+  "the viewer's state write that does not say what it changed refreshes the pinned list": {
+    event: event("user_state.updated", { login: "alice", state: {} }, { issue_key: null }),
+    refreshes: ["userState", "pinned"],
+    spares: ["inbox"],
+  },
+  "the viewer's snooze in another tab refreshes every Inbox read": {
+    event: event(
+      "user_state.updated",
+      { changed: ["snoozed"], login: "alice" },
+      { issue_key: null }
+    ),
+    refreshes: ["userState", "inbox", "projectInbox"],
+    spares: ["pinned", "detail", "replies"],
+  },
+  "the viewer's snooze refreshes the Inbox reads whatever rows they hold": {
+    event: event(
+      "user_state.updated",
+      { changed: ["snoozed"], login: "alice" },
+      { issue_key: null }
+    ),
+    page: { inboxHolds: false },
+    refreshes: ["userState", "inbox", "projectInbox"],
+    spares: ["pinned"],
+  },
+  "another person's snooze refreshes nothing": {
+    event: event("user_state.updated", { changed: ["snoozed"], login: "bob" }, { issue_key: null }),
+    refreshes: [],
+    spares: ["userState", "inbox", "projectInbox"],
+  },
+  "another person's state write refreshes nothing": {
+    event: event(
+      "user_state.updated",
+      { changed: ["pinned"], login: "bob", state: {} },
+      { issue_key: null }
+    ),
+    refreshes: [],
+    spares: ["userState", "pinned", "inbox"],
+  },
+  "a version of an issue's document refreshes the issue's reference summary": {
+    event: event("artifact.version", { artifact_id: "artifact-3", name: "Plan" }),
+    refreshes: ["summary", "detail"],
+    spares: ["projects", "inbox", "docSummary", "parentSummary"],
+  },
+  "a version of a project document refreshes that document's summary and page alone": {
+    event: event("artifact.version", { artifact_id: "artifact-1", name: "Plan" }, documentOwner),
+    refreshes: ["docSummary", "documentPage"],
+    spares: ["otherDocSummary", "otherDocumentPage", "projects", "inbox", "detail", "summary"],
+  },
+  "a comment anchored in a project document refreshes that document's panel": {
+    event: event(
+      "comment.created",
+      { anchor: { artifact_id: "artifact-1" }, ask_id: null, id: "comment-1" },
+      documentOwner
+    ),
+    refreshes: ["documentPanel", "comment"],
+    spares: ["inbox", "projects", "issuePanel"],
+  },
+  "an edit of a comment a project document owns refreshes that document's panel": {
+    event: event("comment.edited", { anchor: null, ask_id: null, id: "comment-1" }, documentOwner),
+    refreshes: ["documentPanel", "comment"],
+    spares: ["specPanel", "issuePanel", "inbox"],
+  },
+  "an edit of an ask anchored in an issue's spec refreshes the spec's panel": {
+    event: event("ask.edited", { anchor: { artifact_id: "artifact-3" }, id: "ask-1" }),
+    refreshes: ["specPanel", "specPanelBySlug", "ask", "inbox"],
+    spares: ["documentPanel", "issuePanel"],
+  },
+  "a resolution of a comment on a project document leaves that document's panel alone": {
+    event: event(
+      "comment.resolved",
+      { anchor: { artifact_id: "artifact-1" }, ask_id: null, id: "comment-1" },
+      documentOwner
+    ),
+    refreshes: ["comment"],
+    spares: ["documentPanel"],
+  },
+  "a suggestion's verdict leaves the document's panel alone": {
+    event: event(
+      "suggestion.rejected",
+      { anchor: { artifact_id: "artifact-1" }, ask_id: null, id: "comment-1" },
+      documentOwner
+    ),
+    refreshes: ["comment"],
+    spares: ["documentPanel"],
+  },
+  "a repository mapping refreshes every issue detail": {
+    event: event(
+      "settings.repo_project.updated",
+      { deleted: false, mapping: { default: true, project: "CORE", repo: "acme/widgets" } },
+      { issue_key: null }
+    ),
+    refreshes: ["detail", "unrelatedDetail", "projects", "projectList"],
+    spares: ["inbox", "pinned"],
+  },
 };
 
-const representativeEvents: readonly Event[] = Object.values(eventsByType).flat();
-
-/**
- * The events whose server handler rewrites the reference index (`refs.ReplaceCounted` /
- * `refs.Stamp` in
- * `packages/envoy/internal/dispatch`) or moves a structural `graph_edges` row: an issue write
- * (its body, parent, or components), a child link, a document upload or version, an ask's
- * creation, edit, anchor refresh or follower change, and every comment or message body — an
- * answer's reply body is indexed exactly like any other write. Listed here independently of the
- * implementation, so a handler that starts or stops writing references fails this file.
- *
- * `architecture.synced` is deliberately absent: an import replaces every `part_of` and
- * `depends_on` row (`architecture/importer.go`), but those edges point at components and no
- * surface renders a component's backlinks, so nothing holds a stale panel to refresh. Add it
- * here the day a component page grows one.
- */
-const referenceWrites: ReadonlySet<EventType> = new Set([
-  "artifact.created",
-  "artifact.version",
-  "ask.anchor_refreshed",
-  "ask.edited",
-  "ask.follower_added",
-  "ask.follower_removed",
-  "ask.opened",
-  "child.added",
-  "child.removed",
-  "comment.answered",
-  "comment.anchor_refreshed",
-  "comment.created",
-  "comment.edited",
-  "issue.created",
-  "issue.updated",
-  "message.answered",
-  "message.created",
-]);
-
-/** The rows a changed target's backlink count sits on, written independently of `sse.ts`. */
-function countedRowKeys(incoming: Event): unknown[][] {
-  if (truncatedTargets(incoming)) {
-    return [["issue"], ["asks"], ["ask-thread"], ["artifact"], ["inbox"]];
+test.each(Object.entries(rules))("%s", (_name, rule) => {
+  const refreshed = refreshedReads(rule.event, rule.page);
+  for (const name of rule.refreshes) {
+    expect({ read: name, refreshed: refreshed.includes(name) }).toEqual({
+      read: name,
+      refreshed: true,
+    });
   }
-  const keys: unknown[][] = [];
-  for (const target of changedTargets(incoming)) {
-    if (target.kind === "issue") {
-      keys.push(["issue", target.id]);
-      continue;
-    }
-    // An answered card reads its ask from the thread, which is fetched once and never goes
-    // stale on its own.
-    keys.push(["ask", target.id], ["ask-thread", target.id]);
-    if (typeof target.issue_key === "string") {
-      keys.push(["asks", target.issue_key]);
-    } else if (typeof target.artifact_id === "string") {
-      keys.push(["artifact", target.artifact_id, "asks"]);
-    }
-    // The Inbox lists every open ask, whoever owns it — including one on a project document.
-    keys.push(["inbox"]);
-  }
-  return keys;
-}
-
-function rollupAdditions(incoming: Event): unknown[][] {
-  if (incoming.issue_key === null) {
-    return [];
-  }
-  if (incoming.type === "issue.created" || incoming.type === "issue.closed") {
-    return [["issue"], [...projectsQuery().queryKey]];
-  }
-  if (incoming.type === "issue.updated") {
-    return [[...projectsQuery().queryKey]];
-  }
-  if (
-    incoming.type === "child.status" ||
-    incoming.type === "child.added" ||
-    incoming.type === "child.removed"
-  ) {
-    return [["issue"]];
-  }
-  // The conversation a reply belongs to is its thread root's, which main read only from the
-  // reply's own `target` - absent on a session's reply to a message aimed at that session.
-  const threadTarget = mainPayloadString(incoming, "thread_target");
-  if (
-    mainIsMessageEvent(incoming) &&
-    threadTarget !== undefined &&
-    threadTarget !== mainPayloadString(incoming, "target") &&
-    threadTarget.startsWith("session:") &&
-    threadTarget.length > "session:".length
-  ) {
-    return [["agents", threadTarget.slice("session:".length), "messages"]];
-  }
-  return [];
-}
-
-/** The person's answers page (`["me", "answers"]`) lists every answer and every reply on an ask,
- *  so the two events that write one refresh it; the query exists only while the page is open. */
-function answersPageAdditions(incoming: Event): unknown[][] {
-  if (incoming.type === "ask.answered") {
-    return [["me", "answers"]];
-  }
-  if (incoming.type === "comment.created" && mainPayloadString(incoming, "ask_id") !== undefined) {
-    return [["me", "answers"]];
-  }
-  return [];
-}
-
-/** The Replies page, its count and every owner's unread set live under `["me", "replies"]`. Only
- *  an event that can move a row refreshes it, on an issue or a document alike: a write the
- *  `user_threads` triggers count (a comment, a session's reply to a mention, an issue message or
- *  a reply to one, an answer), an ask opening or being resolved, and an issue closing
- *  (`issue.closed`) or reopening (an `issue.updated`, whose payload cannot tell a reopen from
- *  any other write), since each decides whether the Inbox lists an ask's thread instead; so
- *  does the signed-in viewer's own read mark from another tab. */
-const repliesWrites: Record<string, true> = {
-  "comment.created": true,
-  "comment.answered": true,
-  "message.created": true,
-  "message.answered": true,
-  "ask.opened": true,
-  "ask.answered": true,
-  "ask.resolved": true,
-};
-
-function repliesAdditions(incoming: Event): unknown[][] {
-  if (incoming.type === "user_thread_state.updated") {
-    return mainPayloadString(incoming, "login") === "alice" ? [["me", "replies"]] : [];
-  }
-  if (incoming.issue_key === null && mainIsMessageEvent(incoming)) {
-    return [];
-  }
-  const issueOpenedOrClosed = incoming.type === "issue.closed" || incoming.type === "issue.updated";
-  return repliesWrites[incoming.type] === true || issueOpenedOrClosed ? [["me", "replies"]] : [];
-}
-
-/** The targets the server named on this event; an event from before the field carries none. */
-function changedTargets(incoming: Event): { [key: string]: unknown }[] {
-  const payload: unknown = incoming.payload;
-  if (typeof payload !== "object" || payload === null) {
-    return [];
-  }
-  const changed: unknown = Reflect.get(payload, "references_changed");
-  return Array.isArray(changed) ? (changed as { [key: string]: unknown }[]) : [];
-}
-
-function truncatedTargets(incoming: Event): boolean {
-  const payload: unknown = incoming.payload;
-  return typeof payload === "object" && payload !== null
-    ? Reflect.get(payload, "references_changed_truncated") === true
-    : false;
-}
-
-/** The documented subtraction: an issue-scoped message, or a comment that replies to no ask.
- *  It applies to the baseline; a write that cited an ask brings the Inbox back through the
- *  rows that carry that ask's count. */
-function subtractsInbox(incoming: Event): boolean {
-  if (incoming.issue_key === null) {
-    return false;
-  }
-  if (mainIsMessageEvent(incoming)) {
-    return true;
-  }
-  return mainIsCommentLikeEvent(incoming) && mainPayloadString(incoming, "ask_id") === undefined;
-}
-
-function invalidatedKeys(incoming: Event): unknown[][] {
-  return eventQueryKeys(incoming, "alice").map((key) => [...key]);
-}
-
-/** The set of rows an event refreshes, independent of queue order and repetition. */
-function keySet(keys: readonly (readonly unknown[])[]): string[] {
-  return [...new Set(keys.map((key) => JSON.stringify(key)))].sort();
-}
-
-/** The Conversation builds its list from the issue's own asks, comments and messages
- *  (`features/conversation/ConversationTab.tsx`). Its asks and its comments are the reads the
- *  margin already holds, under the keys it owns, so only the message list is a key of the
- *  Conversation's own - and it refreshes exactly when the Agents-page list it mirrors does. */
-const CONVERSATION_LISTS: Record<string, string> = {
-  messages: "issue-messages",
-};
-
-function conversationListAdditions(keys: readonly unknown[][]): unknown[][] {
-  return keys.flatMap((key) => {
-    const list = typeof key[0] === "string" ? CONVERSATION_LISTS[key[0]] : undefined;
-    return list === undefined ? [] : [[list, ...key.slice(1)]];
-  });
-}
-
-// One case per corpus entry, so a failure names the event and the rest still run.
-const corpus = representativeEvents.map(
-  (incoming, index) => [`${incoming.type}#${index}`, incoming] as const
-);
-
-test.each(
-  corpus
-)("%s maps to main's keys, minus the Inbox subtraction, plus the additions", (_name, incoming) => {
-  const oracle = mainEventQueryKeys(incoming, "alice").map((key) => [...key]);
-  const kept = subtractsInbox(incoming) ? oracle.filter((key) => key[0] !== "inbox") : oracle;
-  // The rows a cited node's count sits on are appended once: a key the baseline already
-  // refreshes is not repeated, which is what puts the Inbox back after the subtraction.
-  const base = [
-    ...kept,
-    ...rollupAdditions(incoming),
-    ...answersPageAdditions(incoming),
-    ...repliesAdditions(incoming),
-  ];
-  const counted = countedRowKeys(incoming);
-  const references = referenceWrites.has(incoming.type) ? [["references"]] : [];
-  const lists = conversationListAdditions([...base, ...counted]);
-  // Which rows refresh is the contract; the order they are queued in and whether a key is
-  // repeated are not, since the stream's pending map is keyed on the serialised key.
-  expect(keySet(invalidatedKeys(incoming))).toEqual(
-    keySet([...base, ...counted, ...references, ...lists])
-  );
-});
-
-test("the corpus contains events the subtraction applies to", () => {
-  expect(representativeEvents.filter(subtractsInbox).length).toBeGreaterThan(0);
-});
-
-// A write that cited an ask restores the Inbox through the rows that carry its count, so the
-// subtraction is observable only on the writes that cited nothing counted.
-function keepsTheInboxSubtraction([, incoming]: (typeof corpus)[number]): boolean {
-  return subtractsInbox(incoming) && countedRowKeys(incoming).length === 0;
-}
-
-test.each(
-  corpus.filter(keepsTheInboxSubtraction)
-)("%s loses the Inbox refresh and nothing else", (_name, incoming) => {
-  const before = mainEventQueryKeys(incoming, "alice").map((key) => [...key]);
-  expect(before).toContainEqual(["inbox"]);
-  expect(invalidatedKeys(incoming)).not.toContainEqual(["inbox"]);
-});
-
-test("a queued key keeps only the broadest of its family, and never a sibling's", () => {
-  expect(
-    coalescePrefixKeys([
-      ["issue", "CORE-1"],
-      ["issue"],
-      ["inbox"],
-      ["artifact"],
-      ["artifact-ref"],
-      ["artifact", "a-1"],
-    ])
-  ).toEqual([["issue"], ["inbox"], ["artifact"], ["artifact-ref"]]);
-  // Nothing is ever emptied: the shortest queued key of a family always survives.
-  expect(coalescePrefixKeys([["issues"]])).toEqual([["issues"]]);
-  // An element-wise comparison, so a longer key that only shares a string prefix stays.
-  expect(coalescePrefixKeys([["ask"], ["ask-thread", "ask-1"]])).toEqual([
-    ["ask"],
-    ["ask-thread", "ask-1"],
-  ]);
-});
-
-// An Inbox row carries its ask's `referenced_by_count`, so the subtraction's premise — a plain
-// message cannot change an Inbox row — holds only while the write cited no ask. The refresh is
-// the cited node's own rows, never a sweep of every list.
-test("a write refreshes the rows of the nodes it cited, and a plain one refreshes none", () => {
-  const askTarget = [{ kind: "ask", id: "ask-9", issue_key: "CORE-4" }];
-  for (const cited of [
-    event("message.created", { references_changed: askTarget }),
-    event("comment.created", { id: "comment-1", anchor: null, references_changed: askTarget }),
-  ]) {
-    const keys = invalidatedKeys(cited);
-    expect(keys).toContainEqual(["inbox"]);
-    expect(keys).toContainEqual(["ask", "ask-9"]);
-    expect(keys).toContainEqual(["asks", "CORE-4"]);
-    // The cited issue's own list is never swept: only the rows that carry the moved count.
-    expect(keys).not.toContainEqual(["issue"]);
-    expect(keys).not.toContainEqual(["asks"]);
-  }
-
-  const citedIssue = invalidatedKeys(
-    event("message.created", {
-      references_changed: [{ kind: "issue", id: "CORE-4" }],
-    })
-  );
-  expect(citedIssue).toContainEqual(["issue", "CORE-4"]);
-  // No ask row moved, so #1248's Inbox saving still applies.
-  expect(citedIssue).not.toContainEqual(["inbox"]);
-
-  const truncated = invalidatedKeys(
-    event("message.created", { references_changed_truncated: true })
-  );
-  expect(truncated).toContainEqual(["issue"]);
-  expect(truncated).toContainEqual(["asks"]);
-  expect(truncated).toContainEqual(["inbox"]);
-
-  for (const plain of [
-    event("message.created", {}),
-    event("comment.created", { id: "comment-1", anchor: null }),
-  ]) {
-    const keys = invalidatedKeys(plain);
-    expect(keys).not.toContainEqual(["inbox"]);
-    expect(keys.some((key) => key[0] === "ask")).toBe(false);
-  }
-});
-
-// A mapping write can change which repository every issue of its project resolves to (a new
-// default, a removed or moved one), and the issue header shows that from the issue's detail, so the
-// event refreshes every loaded issue detail.
-test("a repository mapping event refreshes every loaded issue detail", () => {
-  for (const deleted of [false, true]) {
-    expect(
-      invalidatedKeys(
-        event(
-          "settings.repo_project.updated",
-          { deleted, mapping: { repo: "acme/widgets", project: "CORE", default: true } },
-          { issue_key: null, project: "CORE" }
-        )
-      )
-    ).toContainEqual(["issue"]);
+  for (const name of rule.spares) {
+    expect({ read: name, refreshed: refreshed.includes(name) }).toEqual({
+      read: name,
+      refreshed: false,
+    });
   }
 });
 
@@ -913,96 +944,102 @@ test("an architecture event refreshes the source lists and the project's model",
       { issue_key: null }
     ),
   ]) {
-    expect(keySet(invalidatedKeys(incoming))).toEqual(
-      keySet([
-        ["architecture-sources"],
-        ["architecture-sources", "CORE"],
-        ["components", "CORE"],
-        ["architecture", "CORE"],
-      ])
-    );
+    expect(eventRefreshTargets(incoming, "alice").map((target) => target.queryKey)).toEqual([
+      architectureSourcesQuery().queryKey,
+      projectArchitectureSourcesQuery("CORE").queryKey,
+      ["components", "CORE"],
+      ["architecture", "CORE"],
+    ]);
   }
 });
 
-test("an ask reply keeps the ask-thread key the delayed-Inbox freshness marker reads", () => {
-  const keys = invalidatedKeys(event("comment.created", { id: "comment-1", ask_id: "ask-1" }));
-  expect(keys).toContainEqual(["ask-thread", "ask-1"]);
-  expect(keys).toContainEqual(["inbox"]);
-});
+/** One event of every type the stream can carry, keyed by type so a new one fails to compile here
+ *  until it has a row. */
+const eventsByType: Record<EventType, Event> = {
+  "architecture.sync_failed": event("architecture.sync_failed", {}, { issue_key: null }),
+  "architecture.synced": event("architecture.synced", {}, { issue_key: null }),
+  "artifact.approved": event("artifact.approved", { artifact_id: "artifact-3", ask_id: null }),
+  "artifact.changes_requested": event("artifact.changes_requested", {
+    artifact_id: "artifact-3",
+    ask_id: "ask-1",
+  }),
+  "artifact.created": event("artifact.created", { artifact: { id: "artifact-3" } }),
+  "artifact.version": event("artifact.version", { artifact_id: "artifact-3" }),
+  "artifact.human_edited": event("artifact.human_edited", {
+    artifact_id: "artifact-3",
+    from_version: 4,
+    to_version: 7,
+  }),
+  "ask.anchor_refreshed": event("ask.anchor_refreshed", { anchor: null, id: "ask-1" }),
+  "ask.answered": event("ask.answered", { anchor: null, id: "ask-1" }),
+  "ask.edited": event("ask.edited", { anchor: null, id: "ask-1" }),
+  "ask.follower_added": event("ask.follower_added", { ask_id: "ask-1", session_id: "s1" }),
+  "ask.follower_removed": event("ask.follower_removed", { ask_id: "ask-1", session_id: "s1" }),
+  "ask.handed_back": event("ask.handed_back", { anchor: null, id: "ask-1" }),
+  "ask.opened": event("ask.opened", { anchor: null, id: "ask-1" }),
+  "ask.resolved": event("ask.resolved", { anchor: null, id: "ask-1" }),
+  "block.invalid": event("block.invalid", { block_id: "b-1" }),
+  "block.repaired": event("block.repaired", { block_id: "b-1" }),
+  "child.added": event("child.added", { child_key: "CORE-2" }),
+  "child.removed": event("child.removed", { child_key: "CORE-2" }),
+  "child.status": event("child.status", { child_key: "CORE-2", from: "todo", to: "done" }),
+  "comment.anchor_refreshed": event("comment.anchor_refreshed", { anchor: null, id: "comment-1" }),
+  "comment.answered": event("comment.answered", { anchor: null, id: "comment-1" }),
+  "comment.created": event("comment.created", { anchor: null, id: "comment-1" }),
+  "comment.delivery": event("comment.delivery", { comment_id: "comment-1" }),
+  "comment.edited": event("comment.edited", { anchor: null, id: "comment-1" }),
+  "comment.reopened": event("comment.reopened", { anchor: null, id: "comment-1" }),
+  "comment.resolved": event("comment.resolved", { anchor: null, id: "comment-1" }),
+  "issue.claimed": event("issue.claimed", { key: "CORE-1" }),
+  "issue.closed": event("issue.closed", issue({ status: "done" })),
+  "issue.created": event("issue.created", issue()),
+  "issue.deployed": event("issue.deployed", { number: 1, repo: "acme/widgets" }),
+  "issue.released": event("issue.released", { key: "CORE-1" }),
+  "issue.updated": event("issue.updated", issue()),
+  "message.accepted": event("message.accepted", { target: "session:planner" }),
+  "message.answered": event("message.answered", { id: "message-2" }),
+  "message.created": event("message.created", { id: "message-2" }),
+  "message.delivery": event("message.delivery", { target: "session:planner" }),
+  "project.created": event("project.created", {}, { issue_key: null }),
+  "project.updated": event("project.updated", {}, { issue_key: null }),
+  "settings.architecture_source.updated": event(
+    "settings.architecture_source.updated",
+    {},
+    { issue_key: null }
+  ),
+  "settings.project_default_assignee.updated": event(
+    "settings.project_default_assignee.updated",
+    {},
+    { issue_key: null }
+  ),
+  "settings.repo_project.updated": event("settings.repo_project.updated", {}, { issue_key: null }),
+  "subscription.remove_requested": event("subscription.remove_requested", { session_id: "s1" }),
+  "subscription.removed": event("subscription.removed", { session_id: "s1" }),
+  "suggestion.accepted": event("suggestion.accepted", { anchor: null, id: "comment-1" }),
+  "suggestion.rejected": event("suggestion.rejected", { anchor: null, id: "comment-1" }),
+  "user_agent_state.updated": event(
+    "user_agent_state.updated",
+    { login: "alice" },
+    { issue_key: null }
+  ),
+  "user_state.updated": event("user_state.updated", { login: "alice" }, { issue_key: null }),
+  "user_thread_state.updated": event(
+    "user_thread_state.updated",
+    { login: "alice", thread_id: "c1" },
+    { issue_key: null }
+  ),
+};
 
-/** The payload of an `issue.*` event as `issue_patch.go` sends it: `model.NewIssueEventPayload`
- *  over the issue after the write, `model.Issue`'s fields flat, and no `references_changed` from a
- *  patch, which indexes no text (the field is `omitempty`). It carries no ask count. */
-function issuePayload(status: string, closedAt: string | null): Record<string, unknown> {
-  return {
-    key: "CORE-1",
-    project: "CORE",
-    number: 1,
-    title: "Ship the release",
-    status,
-    priority: null,
-    rank: "a0",
-    labels: [],
-    parent: null,
-    blocked_by: [],
-    assignee: "alice@example.com",
-    claim: null,
-    components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
-    external_links: [],
-    route: null,
-    created_by: { kind: "user", id: "alice" },
-    created_at: "2026-09-09T00:00:00Z",
-    updated_at: "2026-09-10T00:00:00Z",
-    closed_at: closedAt,
-    primary_artifact_id: "artifact-1",
-    last_seq: 5,
-  };
-}
-
-test("the Replies page refreshes only on events that can move a row, and the viewer's own mark", () => {
-  for (const mover of [
-    event("comment.created", { id: "c1", anchor: null }),
-    event("message.answered", { id: "m2" }),
-    event("ask.answered", { id: "ask-1", anchor: null }),
-    event("comment.created", { id: "c1", anchor: null }, documentOwner),
-    // Closing an issue, and reopening it (an `issue.updated` off `done`), moves whether the Inbox
-    // or the Replies page lists each of its open asks' threads.
-    event("issue.closed", issuePayload("done", "2026-09-10T00:00:00Z")),
-    event("issue.updated", issuePayload("todo", null)),
-  ]) {
-    expect(invalidatedKeys(mover)).toContainEqual(["me", "replies"]);
-  }
-  // A claim, a release, an edit, a comment's resolution and a delivery move no row.
-  for (const unrelated of [
-    event("issue.claimed", {
-      key: "CORE-1",
-      status: "in_progress",
-      claim: { actor: { kind: "session", id: "session-one" }, at: "2026-09-24T06:00:00Z" },
-      reason: "claimed",
-    }),
-    event("issue.released", {
-      key: "CORE-1",
-      status: "done",
-      claim: null,
-      previous_claim: { actor: { kind: "session", id: "session-one" }, at: "2026-09-24T06:00:00Z" },
-      reason: "closed",
-    }),
-    event("comment.edited", { id: "c1", anchor: null }),
-    event("comment.resolved", { id: "c1", anchor: null }, documentOwner),
-    event("message.delivery", { id: "m1" }),
-  ]) {
-    expect(invalidatedKeys(unrelated)).not.toContainEqual(["me", "replies"]);
-  }
-  expect(
-    invalidatedKeys(
-      event("user_thread_state.updated", { login: "alice", thread_id: "c1" }, { issue_key: null })
-    )
-  ).toEqual([["me", "replies"]]);
-  expect(
-    invalidatedKeys(
-      event("user_thread_state.updated", { login: "bob", thread_id: "c1" }, { issue_key: null })
-    )
-  ).toEqual([]);
+test.each(
+  Object.entries(eventsByType).filter(
+    ([type, incoming]) => incoming.issue_key !== null && type !== "subscription.remove_requested"
+  )
+)("%s refreshes its issue's detail, its log and its project list, and no other issue's detail", (_type, incoming) => {
+  const refreshed = refreshedReads(incoming);
+  expect(refreshed).toContain("detail");
+  expect(refreshed).toContain("log");
+  expect(refreshed).toContain("projectList");
+  expect(refreshed).not.toContain("otherProjectList");
 });
 
 test("SSE event prepends a newer event to the loaded log page", () => {
@@ -1039,4 +1076,169 @@ test("a log page that predates streamed events keeps them in front of it", () =>
     pageParams: [null],
     pages: [[seq(7)]],
   });
+});
+
+// Every open ask card lists who a person's answer reaches through its issue, read from its thread:
+// the issue's claimant and the session its route reaches. The thread key holds only the ask id, so
+// the rule tests each cached thread's ask for its issue.
+
+/** A thread read as `GET /asks/{id}` answers it, cut to the one field the rule reads. */
+function cacheThread(client: QueryClient, id: string, issueKey: string | null): void {
+  client.setQueryData(["ask-thread", id], { ask: { id, issue_key: issueKey } });
+}
+
+function refreshedThreads(incoming: Event): string[] {
+  const client = new QueryClient();
+  cacheThread(client, "ask-1", "CORE-1");
+  cacheThread(client, "ask-2", "CORE-2");
+  cacheThread(client, "ask-doc", null);
+  refreshQueries(client, eventRefreshTargets(incoming, "alice"));
+  return ["ask-1", "ask-2", "ask-doc"].filter(
+    (id) => client.getQueryState(["ask-thread", id])?.isInvalidated
+  );
+}
+
+test("a claim, a release or a write that moves the route refreshes the ask threads on its issue and no other", () => {
+  const onIssue = [
+    event("issue.claimed", { key: "CORE-1", claim: null }),
+    event("issue.released", { key: "CORE-1", claim: null }),
+    event("issue.updated", issue({ changed: ["route"], route: "role:reviewer" })),
+    // One PATCH that sets the route and closes the issue emits this alone.
+    event(
+      "issue.closed",
+      issue({
+        changed: ["status", "closed_at", "route"],
+        closed_at: "2026-10-26T00:00:00Z",
+        route: "role:reviewer",
+        status: "done",
+      })
+    ),
+    // An older server says nothing of what moved, so the route may have.
+    event("issue.updated", issue()),
+  ];
+  for (const incoming of onIssue) {
+    expect(askThreadsIssue(incoming)).toBe("CORE-1");
+    expect(refreshedThreads(incoming)).toEqual(["ask-1"]);
+  }
+});
+
+test("a write that moves neither the claimant nor the route refreshes no ask thread", () => {
+  const elsewhere = [
+    event("issue.updated", issue({ changed: ["title"], title: "Renamed" })),
+    // A close that releases a claim appends its own issue.released.
+    event(
+      "issue.closed",
+      issue({ changed: ["status", "closed_at"], closed_at: "2026-10-26T00:00:00Z", status: "done" })
+    ),
+    event("issue.deployed", { number: 501, repo: "acme/widgets" }),
+  ];
+  for (const incoming of elsewhere) {
+    expect(askThreadsIssue(incoming)).toBeNull();
+    expect(refreshedThreads(incoming)).toEqual([]);
+  }
+});
+
+test("a thread on its first load is judged on the response that lands: refreshed on the claimed issue, left alone elsewhere", async () => {
+  const client = new QueryClient();
+  const onIssue = Promise.withResolvers<AskRead>();
+  const elsewhere = Promise.withResolvers<AskRead>();
+  // Neither ask is read yet, so the cache cannot tell their issues when the claim arrives.
+  const loads = [
+    client.prefetchQuery({ queryFn: () => onIssue.promise, queryKey: ["ask-thread", "ask-3"] }),
+    client.prefetchQuery({ queryFn: () => elsewhere.promise, queryKey: ["ask-thread", "ask-4"] }),
+  ];
+  refreshQueries(client, eventRefreshTargets(event("issue.claimed", { key: "CORE-1" }), "alice"));
+  onIssue.resolve({ ask: { id: "ask-3", issue_key: "CORE-1" } } as unknown as AskRead);
+  elsewhere.resolve({ ask: { id: "ask-4", issue_key: "CORE-2" } } as unknown as AskRead);
+  await Promise.all(loads);
+  expect(client.getQueryState(["ask-thread", "ask-3"])?.isInvalidated).toBe(true);
+  expect(client.getQueryState(["ask-thread", "ask-4"])?.isInvalidated).toBe(false);
+});
+
+function threadOf(row: InboxRow, claimant: string | null = row.thread.claimant): AskRead {
+  return { ask: row, ...row.thread, claimant };
+}
+
+test("a claim that moves while the Inbox is in flight sends that issue's later cards to the ask endpoint, until a newer Inbox lands", async () => {
+  const onIssue = issueAsk({ id: "ask-1" });
+  const sibling = issueAsk({ id: "ask-3" });
+  const elsewhere = issueAsk({
+    id: "ask-2",
+    issue: { assignee: "alice", key: "CORE-2", title: "Other" },
+    issue_key: "CORE-2",
+  });
+  const rows = [onIssue, sibling, elsewhere];
+  const inFlight = Promise.withResolvers<InboxRow[]>();
+  const getInbox = spyOn(api, "getInbox").mockImplementationOnce(() => inFlight.promise);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(["whoami"], { kind: "user", login: "alice" });
+  const inboxKey = inboxQuery().queryKey;
+  const reads: string[] = [];
+  // The endpoint answers after the claim: every thread on CORE-1 names the new claimant.
+  const getAskThread = async (id: string): Promise<AskRead> => {
+    reads.push(id);
+    const row = rows.find((candidate) => candidate.id === id) as InboxRow;
+    return threadOf(row, row.issue_key === "CORE-1" ? "session-now" : null);
+  };
+  const wrapper = ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
+  const mountCard = (row: InboxRow) =>
+    renderHook(
+      () =>
+        useAskAnswerForm({
+          answer: async () => row as Ask,
+          ask: row,
+          createReply: async () => {
+            throw new Error("no reply in this test");
+          },
+          getAskThread,
+          initialThread: threadOf(row),
+          initialThreadUpdatedAt: Date.now(),
+        }),
+      { wrapper }
+    );
+  const cards: { unmount: () => void }[] = [];
+  try {
+    void client.prefetchQuery(inboxQuery());
+    await waitFor(() => expect(client.getQueryState(inboxKey)?.fetchStatus).toBe("fetching"));
+    const claimed = event("issue.claimed", {
+      claim: { actor: { id: "session-now", kind: "session" }, at: "2026-09-24T06:00:00Z" },
+      reason: "claimed",
+    });
+    markAskThreadsSeededByAnInFlightInbox(
+      client,
+      eventRefreshTargets(claimed, "alice"),
+      askThreadsIssue(claimed)
+    );
+    // The in-flight body was composed before the claim.
+    inFlight.resolve(rows);
+    await waitFor(() => expect(client.getQueryState(inboxKey)?.fetchStatus).toBe("idle"));
+    expect(hasPendingAskThreadInvalidation(client, onIssue)).toBe(true);
+    expect(hasPendingAskThreadInvalidation(client, elsewhere)).toBe(false);
+
+    const first = mountCard(onIssue);
+    cards.push(first);
+    await waitFor(() =>
+      expect(first.result.current.threadQuery.data?.claimant).toBe("session-now")
+    );
+    const other = mountCard(elsewhere);
+    cards.push(other);
+    expect(other.result.current.threadQuery.data?.claimant).toBeNull();
+    // One card's own read leaves the issue's mark for the next card on it.
+    const second = mountCard(sibling);
+    cards.push(second);
+    await waitFor(() =>
+      expect(second.result.current.threadQuery.data?.claimant).toBe("session-now")
+    );
+    expect([...reads].sort()).toEqual(["ask-1", "ask-3"]);
+
+    // A newer Inbox, composed after the claim, clears the issue's mark.
+    getInbox.mockResolvedValueOnce(rows);
+    await client.refetchQueries({ queryKey: inboxKey });
+    expect(hasPendingAskThreadInvalidation(client, onIssue)).toBe(false);
+    expect(hasPendingAskThreadInvalidation(client, sibling)).toBe(false);
+  } finally {
+    for (const card of cards) card.unmount();
+    getInbox.mockRestore();
+  }
 });

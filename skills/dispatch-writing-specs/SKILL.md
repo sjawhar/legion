@@ -30,11 +30,10 @@ Another agent can build and check the work from the spec alone. A small change g
 For each spec, ask, comment and message:
 
 - Write in `skill://asd-ste100`'s strict mode.
-- State the current design, never how people reached it.
-- Link each source where the person wrote it: `dispatch://KEY/comment/<id>`, `/ask/<id>`, `/message/<id>`, or a Slack URL. With no link, state the design.
+- Write about the current design, never the person or how people reached it. Never quote people or upload their words.
+- Link each source where the person wrote it. With no link, state the design.
 - In a spec, cite code by file and symbol, never a line number: it goes stale at the next edit.
 - A sentence that cites a gate passing (a test, review, check or proof) also says, in that sentence, what the pass does not show: "The tests pass; they catch a wrong verdict, not a proof of a contradiction."
-- Write about the design, never the person. Never quote people or upload their words.
 - Name your session only if a reader must reach it.
 - Keep only text that helps a reader understand, decide, build, check.
 - Explain each name or term a new reader may not know. Say in a clause what each issue you name does for this reader.
@@ -60,11 +59,11 @@ For each spec, ask, comment and message:
 - Each design choice no source states is a `###` entry: choice, reason, options weighed, parts shaped.
 - An unsure entry adds an `Unsure:` paragraph: what would change your mind.
 - A replaced entry moves under a final `### Replaced`.
-- A person's decision is their answered ask block. Each part it shapes links it.
+- Link a person's answered ask block from each part it shapes.
 
 ## Old specs
 
-At your next edit, rewrite a spec outside the outline whole, in one version. Move its ask blocks with `doc-edit`'s `move`.
+At your next edit, rewrite a spec outside the outline whole, in one version. Move its ask blocks with `doc-edit`'s `move`. Kept text follows the text rules: restate each retelling, quotation or unlinked attribution as design, or cut it.
 
 ## Approval
 
@@ -73,4 +72,4 @@ At your next edit, rewrite a spec outside the outline whole, in one version. Mov
 
 ## The plan
 
-Write the approved spec's plan with `writing-plans` as the issue's `plan.md`, not a repository file.
+Write the plan with `writing-plans` as the issue's `plan.md`, not a repository file.

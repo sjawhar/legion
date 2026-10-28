@@ -386,11 +386,18 @@ type PullRequestOpened struct {
 func (PullRequestOpened) isFact() {}
 
 // PullRequestSynchronized records a new observed head, including the fields the shipped reducer
-// reads to fence stale observations and find its issue.
+// reads to fence stale observations and find its issue. Before is the head GitHub's synchronize
+// says the branch moved from, the move the head arrives by (classify.AdvancePullRequestHead):
+// empty from a listener that predates the field, and from the daemon's own read of the head
+// (daemon's followHead), which knows no move. Sender is the login of the account whose push moved
+// the branch (the webhook's sender), empty from a listener that predates the field and from the
+// daemon's own read.
 type PullRequestSynchronized struct {
 	Repo      string
 	Number    int
 	Branch    string
+	Before    string
+	Sender    string
 	HeadSHA   string
 	Body      string
 	UpdatedAt time.Time
@@ -577,6 +584,9 @@ type Push struct {
 	Forced *string
 	// Pusher is the push's pusher login (the listener's `pusher`, GitHub's pusher.name).
 	Pusher string
+	// Sender is the login of the account that pushed (the webhook's sender), which a synchronize's
+	// sender names; empty from a listener that predates the field.
+	Sender string
 }
 
 func (Push) isFact() {}
@@ -792,9 +802,10 @@ func (LingerExpired) isFact() {}
 // boot replayed what its claims' terminal states owe the workflow. Boot is the boot's record id
 // (daemon_boot), which makes each boot's fact its own. Revision is the daemon's own build commit,
 // stamped into a release build and empty outside one, where the boot wakes no production check;
-// DispatchBuild is the build commit Dispatch's /healthz reported to the boot, empty when it
-// reported none. The workflow compares each against the open checks of the repository the daemon
-// is built from (workflow.Config.BuiltFrom), one check_compare row per check.
+// DispatchBuild is the build Dispatch's /healthz reported to the boot as its server fleet's
+// (dispatch.Client.BuildCommit), empty when it reported none. The workflow compares each against
+// the open checks of the repository the daemon is built from (workflow.Config.BuiltFrom), one
+// check_compare row per check.
 type DaemonBooted struct {
 	Boot          int64
 	Revision      string
@@ -831,9 +842,12 @@ type IssueDeployed struct {
 
 func (IssueDeployed) isFact() {}
 
-// ServerStarted is Dispatch's `server.started`: Dispatch started on the build Commit names. The
-// workflow compares the build against the open checks of the repository the daemon is built from,
-// as it compares the daemon's own revision at boot; an event with no commit is decoded to none.
+// ServerStarted is Dispatch's `server.started`: every live Dispatch server process serves the
+// build Commit names, announced once each time that fleet-wide build changes, so a rolling update
+// is announced once it has replaced the last process of the build before, and a restart on the
+// announced build is not announced. The workflow compares the build against the open checks of
+// the repository the daemon is built from, as it compares the daemon's own revision at boot; an
+// event with no commit is decoded to none.
 type ServerStarted struct {
 	Commit string
 }

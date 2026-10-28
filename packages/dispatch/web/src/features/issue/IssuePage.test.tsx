@@ -900,7 +900,16 @@ test("IssuePage opens the Spec tab and leaves open asks out of the main column",
       ...openIssueAsk,
       priority: issue.priority,
       snoozed_until: null,
-      thread: { answers: [], edits: [], followers: [], replies: [] },
+      thread: {
+        answers: [],
+        claimant: null,
+        edits: [],
+        followers: [],
+        replies: [],
+        route: null,
+        route_status: null,
+        route_holder: null,
+      },
     },
   ]);
   const view = renderIssuePage("/issues/CORE-1");
@@ -1715,6 +1724,32 @@ test("IssuePage fills and marks the issue pin when it is pinned", async () => {
     expect(pin.querySelector("path")?.getAttribute("fill")).toBe("currentColor");
   } finally {
     view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage's pin refreshes the sidebar's pinned list once the pin is saved", async () => {
+  const restore = stubIssuePage(issue);
+  const saved = { dismissed: [], last_read_seq: 0, pinned: true, seq: 1 };
+  const putIssueState = spyOn(api, "putIssueState").mockResolvedValue(saved);
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  // The sidebar's read of the pinned issues, as it is cached beside the page.
+  queryClient.setQueryData(["issues", "pinned"], []);
+  const view = renderIssuePage("/issues/CORE-1/conversation", undefined, undefined, queryClient);
+
+  try {
+    await within(view.container).findByRole("heading", { level: 1, name: issue.title });
+    expect(queryClient.getQueryState(["issues", "pinned"])?.isInvalidated).toBe(false);
+    fireEvent.click(within(view.container).getByRole("button", { name: "Pin issue" }));
+    await waitFor(() =>
+      expect(queryClient.getQueryState(["issues", "pinned"])?.isInvalidated).toBe(true)
+    );
+    expect(putIssueState).toHaveBeenCalledWith("CORE-1", { pinned: true });
+  } finally {
+    view.unmount();
+    putIssueState.mockRestore();
     restore();
   }
 });

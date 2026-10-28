@@ -89,7 +89,7 @@ func refusalReason(err error) Reason {
 // Each queued request takes the whole limit, so the next is admitted only once the one before it
 // is released: the order they are admitted in is the order the queue serves them.
 func TestQueuedRequestsAreAdmittedInArrivalOrder(t *testing.T) {
-	l := newLimiter(3, 1, patient) // the queue holds three requests
+	l := newLimiter(3, 1, patient) // the queue holds six requests
 	held := admit(t, l, Read, 3)
 	order := make(chan int, 3)
 	for index := range 3 {
@@ -163,13 +163,13 @@ func TestEachClassHasItsOwnLimit(t *testing.T) {
 	}
 }
 
-// A class's queue holds as many requests as its limit; the next request is refused at once.
+// A class's queue holds twice as many requests as its limit; the next request is refused at once.
 func TestAFullQueueRefusesAtOnce(t *testing.T) {
 	l := newLimiter(1, 2, patient)
 	held := []*Ticket{admit(t, l, Write, 1), admit(t, l, Write, 1)}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	for range 2 { // the queue holds the limit's two requests
+	for range 4 { // the queue holds twice the limit's two requests
 		admitInBackground(t, l, ctx, Write, 1)
 	}
 	started := time.Now()
@@ -181,8 +181,8 @@ func TestAFullQueueRefusesAtOnce(t *testing.T) {
 		t.Fatalf("a full queue refused after %v, want at once", waited)
 	}
 	stats := classStats(l, Write)
-	if stats.QueueFull != 1 || stats.WaitExceeded != 0 || stats.Queued != 2 {
-		t.Fatalf("write stats %+v, want one queue_full refusal and the two still queued", stats)
+	if stats.QueueFull != 1 || stats.WaitExceeded != 0 || stats.Queued != 4 {
+		t.Fatalf("write stats %+v, want one queue_full refusal and the four still queued", stats)
 	}
 	if read := classStats(l, Read); read.QueueFull != 0 {
 		t.Fatalf("read stats %+v, want the refusal counted against writes only", read)
@@ -194,8 +194,8 @@ func TestAFullQueueRefusesAtOnce(t *testing.T) {
 	}
 }
 
-// A request waits DefaultWait, 75 ms, for room and is then refused, so its refusal is answered
-// within the 100 ms the architect set for one.
+// A request waits DefaultWait, 1 s, for room and is then refused, so its refusal is answered once
+// its wait has run out and not much later.
 func TestAWaitPastItsBoundIsRefused(t *testing.T) {
 	l := newLimiter(1, 1, 0) // a zero wait is DefaultWait
 	held := admit(t, l, Read, 1)
@@ -205,8 +205,8 @@ func TestAWaitPastItsBoundIsRefused(t *testing.T) {
 	if refusalReason(err) != WaitExceeded {
 		t.Fatalf("admit behind a held request: %v, want a wait_exceeded refusal", err)
 	}
-	if waited < 75*time.Millisecond || waited >= 100*time.Millisecond {
-		t.Fatalf("refused after %v, want after its wait of 75ms and within 100ms", waited)
+	if waited < DefaultWait || waited >= DefaultWait+250*time.Millisecond {
+		t.Fatalf("refused after %v, want after its wait of %v and within 250ms of it", waited, DefaultWait)
 	}
 	stats := classStats(l, Read)
 	if stats.WaitExceeded != 1 || stats.Queued != 0 || stats.InFlight != 1 {
@@ -219,7 +219,7 @@ func TestAWaitPastItsBoundIsRefused(t *testing.T) {
 // A request whose client goes away while it waits leaves the queue and takes no unit with it:
 // the units it would have held go to the request behind it.
 func TestACancelledWaitLeaksNoUnits(t *testing.T) {
-	l := newLimiter(1, 2, patient) // the queue holds two requests
+	l := newLimiter(1, 2, patient) // the queue holds four requests
 	held := admit(t, l, Write, 2)
 	ctx, cancel := context.WithCancel(context.Background())
 	gone := admitInBackground(t, l, ctx, Write, 1)
@@ -329,19 +329,21 @@ func TestClassOfMethods(t *testing.T) {
 	}
 }
 
-// The server reads four at once per CPU it may use, at least four and at most MaxReadLimit, and
-// writes DefaultWriteLimit at once whatever the CPUs, each waiting DefaultWait.
+// The server reads 14 at once and writes 6 at once per CPU it may use, at least one CPU's worth
+// and at most MaxReadLimit (28) and MaxWriteLimit (12), so two CPUs already reach both caps and 16
+// get no more; each waits DefaultWait, 1 s.
 func TestTheDefaultLimitsFollowTheCPUs(t *testing.T) {
-	for procs, want := range map[int]int{0: 4, 1: 4, 2: 8, 3: 12, 7: 28, 8: 28, 64: 28} {
-		if got := readLimit(procs); got != want {
-			t.Errorf("readLimit(%d) = %d, want %d", procs, got, want)
+	for procs, want := range map[int][2]int{0: {14, 6}, 1: {14, 6}, 2: {28, 12}, 3: {28, 12}, 16: {28, 12}, 64: {28, 12}} {
+		if got := [2]int{readLimit(procs), writeLimit(procs)}; got != want {
+			t.Errorf("readLimit, writeLimit(%d) = %v, want %v", procs, got, want)
 		}
 	}
 	limits := DefaultLimits()
-	if want := readLimit(runtime.GOMAXPROCS(0)); limits.Read != want {
-		t.Errorf("DefaultLimits().Read = %d, want %d for GOMAXPROCS %d", limits.Read, want, runtime.GOMAXPROCS(0))
+	procs := runtime.GOMAXPROCS(0)
+	if limits.Read != readLimit(procs) || limits.Write != writeLimit(procs) {
+		t.Errorf("DefaultLimits() = %+v, want reads %d and writes %d for GOMAXPROCS %d", limits, readLimit(procs), writeLimit(procs), procs)
 	}
-	if limits.Write != 8 || limits.Wait != 75*time.Millisecond {
-		t.Errorf("DefaultLimits() = %+v, want 8 writes and a 75 ms wait", limits)
+	if limits.Wait != time.Second {
+		t.Errorf("DefaultLimits() = %+v, want a 1 s wait", limits)
 	}
 }

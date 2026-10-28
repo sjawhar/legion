@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-589",
+  "completed": "2026-10-28T16:15:00Z",
+  "round": 11,
+  "answersReview": "review.json round 5 at code head 2e8dde76: one correctness finding (Security[secret], a comma in a -pg password leaked a fragment into meta.json, a regression of f93dbc53), fixed in 6eeea895. Threads PRRT_kwDORFy7ds6xM_rN, PRRT_kwDORFy7ds6xHED0 and PRRT_kwDORFy7ds6xJnQN answered and resolved; PRRT_kwDORFy7ds6xJnQJ resolved as the reviewer accepted it. All 47 threads resolved.",
+  "filesChanged": [
+    "packages/envoy/loadtest/guard.go",
+    "packages/envoy/loadtest/run.go",
+    "packages/envoy/loadtest/run_test.go",
+    "packages/envoy/loadtest/README.md"
+  ],
+  "proof": [
+    {
+      "criterion": "Only -nats is split at commas; -pg and the HTTP flags are parsed whole and lose their userinfo and password parameter, so a comma in a -pg password leaks no fragment into any step file or output; the URL check follows the same rule",
+      "surface": "packages/envoy/loadtest CLI (stack.sh loadgen run -allow-foreign, every endpoint given) against the local stack on this 2-vCPU gVisor Legion pod, LOADTEST_ROOT=/legion/scratch/tmp/dispatch-loadtest",
+      "command": "three foreign steps with -pg 'postgres://postgres:<A>,<B>@127.0.0.1:15432/dispatch?sslmode=disable', 'postgres://127.0.0.1:15432/dispatch?sslmode=disable&user=postgres&password=<A>,<B>' and 'postgres://postgres:<A>:1,<B>@127.0.0.1:15432/dispatch?sslmode=disable' (A, B random), -events 1 -sessions 10 -requests 2 -duration 20s; then grep -cF for A, B and both bearer tokens over every step file, TABLES.md, stdout and stderr",
+      "observed": "each step exited 0 with 0 lock and 0 Postgres read errors (pgx read each URL whole); 0 matches of A, B or either token; meta.json recorded -pg=postgres://127.0.0.1:15432/dispatch?sslmode=disable (the parameter form keeps &user=postgres). The first step committed 26 of 26; the next two had 4 non-2xx edits each (404 quote not found), since foreign runs without a reset between them keep no revision file. go test ./loadtest, run-step.test.sh (4 PASS) and common.test.sh (7 PASS) pass.",
+      "headSha": "6eeea89551c86748191e3c3a759a3d764b2c1918",
+      "negativeControl": "The previous head's redactURL (guard.go/run.go at 1c5729e7, via go test -overlay) records postgres://u:123,h/db, postgres://h/db,def123 and postgres://u:a:1,h/db for the review's three values, and TestAForeignRunsMetaHoldsNoTokenOrPassword with the three new cases fails on it and passes at 6eeea895."
+    }
+  ],
+  "trickyParts": [
+    "url.Parse reads a multi-host Postgres URL (postgres://u@h1:1,h2:2/db) with Host 'h1:1,h2:2', so parsing -pg whole still drops the userinfo of a host list; only nats.go splits its raw string at commas, each server with userinfo of its own."
+  ],
+  "deviations": [],
+  "openQuestions": [],
+  "discoveredComplexity": []
+}

@@ -35,12 +35,15 @@ const (
 	LivePool = "live"
 	// SettlementsPool is the document settlements' pool (Pool.Settlements).
 	SettlementsPool = "settlements"
+	// RegistryPool is the server process registry's one connection (Pool.RegistryConfig).
+	RegistryPool = "registry"
 )
 
-// poolNames is every pool name, in the order Stats reports them.
+// poolNames is every pool name, in the order Stats reports them. The registry's pool is never in
+// Stats: processes.Register opens and closes it itself (Pool.RegistryConfig).
 var poolNames = [...]string{
 	RequestsPool, RoomsPool, HealthPool, ListenPool, LeasesPool, OutboxPool,
-	BackgroundPool, LivePool, SettlementsPool,
+	BackgroundPool, LivePool, SettlementsPool, RegistryPool,
 }
 
 // applicationNamePrefix begins every pool's application_name: dispatch-<pool>, the one convention
@@ -81,8 +84,8 @@ const (
 
 // defaultAcquireBound is pool name's acquire bound; zero is none. The health probe bounds its own
 // wait, dial and query together (healthProbeTimeout), so its acquire needs nothing more; the
-// outbox is its pool's only caller and holds at most its one connection, so its acquire never
-// waits behind another caller.
+// outbox and the registry are each their pool's only caller, one statement or transaction at a
+// time, and hold at most its one connection, so their acquires never wait behind another caller.
 func defaultAcquireBound(name string) time.Duration {
 	switch name {
 	case RequestsPool, RoomsPool, LivePool:

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-589",
+  "completed": "2026-10-28T16:22:58Z",
+  "round": 6,
+  "decision": "changes_requested",
+  "reviewedCodeHead": "6eeea89551c86748191e3c3a759a3d764b2c1918",
+  "roundCap": "Only correctness blocks; the finding is a credential leak. No wording point raised.",
+  "ci": "At code head 6eeea895: lint, typecheck, test and pr-title queued when read; compare 6eeea895...17eb1a97 is .legion/ only. A request for changes does not wait on CI.",
+  "thermonuclear": "deep-review: CHANGES at 17eb1a97 (Medium: -pg redaction follows net/url, not pgx v5.11's parser). code-quality: CHANGES at 17eb1a97 (same, plus pgx keyword-fallback errors for non-postgres:// schemes). Both confirm the comma fix, its regression test, the -nats redaction and that no stack value is refused.",
+  "threads": "PRRT_kwDORFy7ds6xM_rN answered and unresolved (comma cases fixed; -pg parser mismatch stands; my round-5 premise about pgx was wrong). PRRT_kwDORFy7ds6xHED0 stays unresolved.",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/loadtest/guard.go",
+      "description": "Security[secret]: guard.go:148 redacts -pg with net/url, but pgx v5.11.0 parses with pgconn/parse_url.go (userinfo ends at the first @ before /, query split at & only, password and sslpassword secret). The guard accepts and meta.json records the credential for postgres://u:#secret@h/db, postgres://u:?pw@h/db, ?password=a;b, ?password=ab#cd (records #cd), ?sslpassword=...; a non-postgres:// scheme falls to pgx's keyword parser whose error keeps a password fragment (postgres_version_error, pgpoll). Pre-existing since the redaction began; the comment and README claim 'as pgx parses'. Fix: accept -pg only with a postgres:// or postgresql:// prefix that pgconn.ParseConfig accepts, and record it from pgx's own parse (host, port, database) or as <redacted>."
+    }
+  ]
+}

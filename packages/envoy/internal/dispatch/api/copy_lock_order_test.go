@@ -44,6 +44,20 @@ var (
 	eventInsert     = regexp.MustCompile(`\binsert into events\b`)
 )
 
+// ownTransactionFunctions are the functions that run in a transaction of their own, never their
+// caller's, and end it before they return (see TestCopyLockComesBeforeEveryPendingRowAndEvent):
+// each settlement settleOwedNow runs opens and commits its own, and SettleIssueDocuments, which
+// settleIssueBeforeClose calls, refuses a joined context; sweepClosedIssueAsks begins and commits
+// its own; and settleRoomWithin calls settlePass in a loop, each pass opening a transaction of its
+// own and committing or rolling it back, so what one pass took is released before the next pass
+// takes the copy lock.
+var ownTransactionFunctions = []string{
+	"docs.Service.settleOwedNow",
+	"docs.Service.settlePass",
+	"api.server.settleIssueBeforeClose",
+	"api.server.sweepClosedIssueAsks",
+}
+
 // TestCopyLockComesBeforeEveryPendingRowAndEvent enforces the order the copy lock's deadlock
 // freedom rests on (docs.lockProjectCopies): no transaction takes a project's copy lock after it
 // has written a doc_settlements_pending row or appended an event. A holder of the copy lock goes
@@ -77,11 +91,12 @@ var (
 // that took either; a statement is ordered only through a function of its own, as
 // markSettlementPending, clearSettlementPending, lockProjectCopies and events.Broker.Append each
 // run theirs. Nor does it tell transactions apart, so a function that commits one transaction and
-// takes the copy lock in the next reads as one. One function is called in a loop that does exactly
-// that: docs.Service.settlePass opens, and commits or rolls back, a transaction of its own each
-// pass, so what one pass took is released before the next pass takes the copy lock. Its calls are
-// listed in transactionsOfTheirOwn: each is still checked against what its caller holds when it
-// runs, and what it takes is not carried past it.
+// takes the copy lock in the next reads as one, except across a call of a function
+// ownTransactionFunctions lists: that function runs in a transaction of its own and ends it, so
+// what it takes does not order its caller's later calls. Its own body is checked as every other is,
+// and a call of it that takes the copy lock is still refused after its caller took a pending row or
+// appended an event, whose transaction can still be open while it waits. The guard fails when a
+// listed name no longer names a function, so a rename cannot drop it from the list unseen.
 // TestCopyLockOrderGuardFollowsTheLockTakers holds the resolution to the chains this rule is about,
 // so the check cannot pass by losing them.
 func TestCopyLockComesBeforeEveryPendingRowAndEvent(t *testing.T) {
@@ -160,6 +175,8 @@ type lockFunction struct {
 	source moduleSource
 	seeds  lockEffect
 	reach  lockEffect
+	// ownTransaction marks a function ownTransactionFunctions lists.
+	ownTransaction bool
 }
 
 type lockGraph struct {
@@ -318,6 +335,13 @@ func buildCopyLockGraph() (*lockGraph, error) {
 	}
 	for _, source := range modules.sources {
 		graph.addFile(source)
+	}
+	for _, name := range ownTransactionFunctions {
+		fn := graph.named[name]
+		if fn == nil {
+			return nil, fmt.Errorf("%s, which ownTransactionFunctions lists as running in a transaction of its own, is gone: point the list at its replacement", name)
+		}
+		fn.ownTransaction = true
 	}
 	for _, source := range modules.sources {
 		graph.addStored(source)
@@ -795,23 +819,22 @@ func (c *orderCheck) evaluate(node ast.Node) {
 	})
 }
 
-// transactionsOfTheirOwn names the functions that end, within the call, every transaction they
-// open, and that no caller runs inside a transaction of its own.
-var transactionsOfTheirOwn = map[string]bool{"docs.Service.settlePass": true}
-
 func (c *orderCheck) call(call *ast.CallExpr) {
-	var effect lockEffect
-	ownTransaction := true
+	// held leaves out what a function running in a transaction of its own takes: that
+	// transaction has ended once the call returns.
+	var effect, held lockEffect
 	for _, callee := range c.graph.callees(call) {
 		effect |= callee.reach
-		ownTransaction = ownTransaction && transactionsOfTheirOwn[callee.name]
+		if !callee.ownTransaction {
+			held |= callee.reach
+		}
 	}
 	callee := types.ExprString(call.Fun)
 	if effect&takesCopyLock != 0 && c.now.effect&(takesPendingRow|appendsEvent) != 0 {
 		c.offences = append(c.offences, fmt.Sprintf("%s: %s calls %s, which takes the copy lock, after %s",
 			c.graph.line(c.fn.source, call), c.fn.name, callee, c.now.first))
 	}
-	if held := effect &^ takesCopyLock; held != 0 && !ownTransaction {
+	if held &^= takesCopyLock; held != 0 {
 		if c.now.first == "" {
 			c.now.first = fmt.Sprintf("%s, which takes %s (%s)", callee, held, c.graph.line(c.fn.source, call))
 		}

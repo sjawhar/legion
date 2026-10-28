@@ -198,3 +198,40 @@ func newCommentDocuments(ctx context.Context, q queryer, owner owner, input comm
 	}
 	return append(anchored, root...), nil
 }
+
+// issueDocuments is every document of issue key, in id order: the documents its close and its
+// reopen write (withdrawIssueAsksTx, restoreIssueAsksTx, sweepClosedIssueAsks), and the ask repair
+// with them (repairIssueAsksOf). Read in a transaction holding the issue's row, it cannot move
+// before that transaction ends: a document is created only under its issue's row.
+func issueDocuments(ctx context.Context, q queryer, key string) ([]string, error) {
+	if q == nil {
+		return nil, nil
+	}
+	rows, err := q.Query(ctx, `select id::text from artifacts where issue_key = $1 and kind = 'doc' order by id`, key)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
+// issueStatusDocuments is, read with no transaction open, every document a PATCH moving issue
+// key's status writes: the issue's documents when the move closes the open issue (closes) or
+// reopens the closed one, none otherwise. The PATCH decides the move again under the issue's row,
+// and names the documents again there.
+func (s *server) issueStatusDocuments(ctx context.Context, key string, closes bool) ([]string, error) {
+	q := s.documentQueryer()
+	if q == nil {
+		return nil, nil
+	}
+	var closed bool
+	if err := q.QueryRow(ctx, `select closed_at is not null from issues where key = $1`, key).Scan(&closed); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if closes == closed {
+		return nil, nil
+	}
+	return issueDocuments(ctx, q, key)
+}

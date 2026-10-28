@@ -186,17 +186,17 @@ func NewPool(pool *pgxpool.Pool) *Pool {
 // median. The ceiling is picked here rather than derived from the task's CPU allotment or read
 // out of the DSN another repository's URL builder writes.
 //
-// It is 48 of one connection budget of 83 (ConnectionsPerProcess) that every pool of a process
+// It is 48 of one connection budget of 86 (ConnectionsPerProcess) that every pool of a process
 // shares, partitioned rather than grown: requests 48, background 6 (Background), live 4 (Live),
 // settlements 4 (Settlements), rooms 4, health 1, the three permanent listeners (the listener
-// pool's one dial is one of them redialling), leases leasePoolSize (12) and outbox 1. The total is
-// the 83 the process opened before the partition: the request pool gave up 16, which background,
-// live, settlements and the leases' two spare connections took. A write takes a connection per
-// statement one after another, and a read pins one
-// for its whole length (PinConnection), so under load the API holds every connection of this pool;
-// the background loops, the live-update readers and the settlements wait on pools of their own, so
-// neither side can starve the other, and an acquire here waits at most requestAcquireBound before
-// it is refused with ErrPoolBusy rather than queueing without end.
+// pool's one dial is one of them redialling), leases leasePoolSize (14), outbox 1 and the server
+// process registry's own 1 (registryPoolSize). The total is the 86 the process opened before the
+// partition: the request pool gave up 16, which background, live, settlements and the leases' two
+// spare connections took. A write takes a connection per statement one after another, and a read
+// pins one for its whole length (PinConnection), so under load the API holds every connection of
+// this pool; the background loops, the live-update readers and the settlements wait on pools of
+// their own, so neither side can starve the other, and an acquire here waits at most
+// requestAcquireBound before it is refused with ErrPoolBusy rather than queueing without end.
 //
 // The database bounds the budget from above. Dispatch's database is the gcp:Dispatch component's
 // Cloud SQL Postgres instance, whose default max_connections follows its tier's memory
@@ -312,7 +312,7 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 
 // leaseNameCount is how many lease names duty.Exclusive accepts: the names of duty's lease list,
 // counted here because store cannot import duty, and held to that list by a test.
-const leaseNameCount = 10
+const leaseNameCount = 12
 
 // leasePoolSize bounds the pool a periodic maintenance loop takes its once-overall lease on
 // (duty.Exclusive): a connection for every lease name on duty's list, and two spare. A caller and
@@ -349,16 +349,22 @@ func (p *Pool) Leases() (*pgxpool.Pool, error) {
 // statement, so one connection is every connection it can use.
 const outboxPoolSize = 1
 
+// registryPoolSize bounds the pool the registry of live server processes stamps this process's row
+// through: processes.Register opens it from RegistryConfig, outside the pools above and closed by
+// its Deregister, so it is counted here rather than by a method that opens it.
+const registryPoolSize = 1
+
 // permanentListeners is how many connections the listener pool dials and hands off for the life
 // of the process: the delivery hub, the event stream relay and the stale-room evictor (Listener).
 const permanentListeners = 3
 
 // ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres, the
-// budget of 83 sharedPoolSize describes: every pool's size, and one connection per permanent
-// listener, which the listener pool dials and hands off rather than holds (its one dial in flight
-// is a permanent listener redialling, so it is not counted twice).
+// budget of 86 sharedPoolSize describes: every pool's size, the registry's own pool
+// (processes.Register) among them, and one connection per permanent listener, which the listener
+// pool dials and hands off rather than holds (its one dial in flight is a permanent listener
+// redialling, so it is not counted twice).
 const ConnectionsPerProcess = sharedPoolSize + backgroundPoolSize + livePoolSize + settlementsPoolSize +
-	roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + permanentListeners
+	roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + registryPoolSize + permanentListeners
 
 // Outbox is the pool the events outbox claims, reads and records events through, and reads the
 // followers and authors a publish routes to. Under load the API's requests queue for the shared
@@ -371,9 +377,11 @@ func (p *Pool) Outbox() (*Pool, error) {
 // backgroundPoolSize bounds the pool for work no request waits on: background loops such as the
 // embedding queue and its coverage pass, the suggestion sweep, the delivery reconcile and intakes,
 // the architecture importer's ticker, the documents' resumption query, task progress,
-// reference-excerpt and block-index reconciliation, and the edit-notice sweep. Six is the
-// background's share of the budget sharedPoolSize describes; nobody waits on these loops, so they
-// wait for each other here (up to backgroundAcquireBound) instead of for the requests' connections.
+// reference-excerpt and block-index reconciliation, the edit-notice sweep, the repair of closed and
+// reopened issues' asks, the server process registry's prune and the fleet build announcer. Six is
+// the background's share of the budget sharedPoolSize describes; nobody waits on these loops, so
+// they wait for each other here (up to backgroundAcquireBound) instead of for the requests'
+// connections.
 const backgroundPoolSize = 6
 
 // Background is the pool for background loops, so that under load a request never queues behind a
@@ -493,6 +501,19 @@ func (p *Pool) Close() {
 
 // Config returns a copy of the pool's configuration.
 func (p *Pool) Config() *pgxpool.Config { return p.pool.Config() }
+
+// RegistryConfig is the configuration of the server process registry's own pool, which
+// processes.Register opens and its Deregister closes: this pool's configuration sized at
+// registryPoolSize and named as the registry's (configurePool, RegistryPool), so its connection is
+// dispatch-registry in pg_stat_activity and its acquires are counted apart from the requests'.
+func (p *Pool) RegistryConfig() *pgxpool.Config {
+	config := p.pool.Config()
+	config.MaxConns = registryPoolSize
+	config.MinConns = 0
+	config.MinIdleConns = 0
+	configurePool(config, RegistryPool, defaultAcquireBound(RegistryPool))
+	return config
+}
 
 // Stat reports the pool's current connection counts.
 func (p *Pool) Stat() *pgxpool.Stat { return p.pool.Stat() }

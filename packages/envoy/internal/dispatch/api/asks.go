@@ -267,18 +267,21 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, r, err)
 		return
 	}
-	events := []model.Event{}
+	appended := []model.Event{}
 	if snapshot != nil {
 		snapshotEvent, err := s.commitArtifactVersionEvent(r.Context(), tx, owner, actor, anchor.ArtifactID, artifactName, *snapshot, nil)
 		if err != nil {
 			s.writeHandlerError(w, r, err)
 			return
 		}
-		events = append(events, snapshotEvent)
+		appended = append(appended, snapshotEvent)
 	}
-	event, err := s.appendEvent(r.Context(), tx, owner.event(
-		"ask.opened", actor, model.NewAskEventPayload(ask, askChanges),
-	))
+	openedPayload, err := events.AskEventPayload(r.Context(), tx, ask, askChanges)
+	if err != nil {
+		s.writeHandlerError(w, r, err)
+		return
+	}
+	event, err := s.appendEvent(r.Context(), tx, owner.event("ask.opened", actor, openedPayload))
 	if err != nil {
 		s.writeHandlerError(w, r, err)
 		return
@@ -288,7 +291,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		return
 	}
 	ask.OpenedEventID = &event.ID
-	events = append(events, event)
+	appended = append(appended, event)
 	var advice *writeAdvice
 	if owner.IssueKey != nil && status != nil {
 		advice = s.writeAdvice(
@@ -299,7 +302,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, r, err)
 		return
 	}
-	s.publish(events...)
+	s.publish(appended...)
 	// LEGION-550. An ask on an issue searches that issue's project and, normally, rides its
 	// suggestions on the issue's own advice; one on an unlinked project document searches the
 	// document's and has no issue state to report, so its advice carries the suggestions alone.
@@ -501,7 +504,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ask.EditedAt = timestampPtr(&editedAt)
-	askChanges, err := s.replaceReferences(documentCtx, tx, "ask", ask.ID, ask.Question)
+	askChanges, err := s.replaceEditedReferences(documentCtx, tx, "ask", ask.ID, previous.Question, ask.Question)
 	if err != nil {
 		s.writeHandlerError(w, r, err)
 		return
@@ -746,7 +749,7 @@ func (s *server) attachIssueAskThreads(ctx context.Context, rows []issueAskRow) 
 	for index := range rows {
 		askIDs[index] = rows[index].ID
 	}
-	threads, err := s.loadAskThreads(ctx, s.deps.Store.Pool, askIDs)
+	threads, err := s.loadAskThreads(ctx, askIDs)
 	if err != nil {
 		return err
 	}
@@ -827,13 +830,19 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, r, err)
 		return
 	}
+	reaches, err := s.loadAskReaches(r.Context(), []string{ask.ID})
+	if err != nil {
+		s.writeHandlerError(w, r, err)
+		return
+	}
+	// The single-ask read is a thread with the ask beside it, so it and every Inbox or ask-list
+	// thread serialise through one definition and carry the same keys.
 	WriteJSON(w, http.StatusOK, struct {
-		Ask       model.Ask           `json:"ask"`
-		Replies   []model.Comment     `json:"replies"`
-		Edits     []model.AskEdit     `json:"edits"`
-		Answers   []model.AskAnswer   `json:"answers"`
-		Followers []model.AskFollower `json:"followers"`
-	}{Ask: ask, Replies: replies, Edits: edits, Answers: answers, Followers: followers})
+		Ask model.Ask `json:"ask"`
+		askThread
+	}{Ask: ask, askThread: askThread{
+		Replies: replies, Edits: edits, Answers: answers, Followers: followers, askReach: reaches[ask.ID],
+	}})
 }
 
 // loadAskEdits reads every rewording of an ask back from its ask.edited events,

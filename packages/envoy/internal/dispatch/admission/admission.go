@@ -69,52 +69,74 @@ func (r *Refusal) Error() string {
 	return fmt.Sprintf("admission refused a %s request: %s", r.Class, r.Reason)
 }
 
-// The starting limits. The request pool (store.sharedPoolSize) holds 48 connections, and an
-// admitted request holds at most one of them at a time, or Weight of them for a route that reads
-// side by side. 12 of the 48 are left to the pool's users that admission does not count: the
-// event streams' catch-up and their heartbeat's identity read, the websockets' identity checks
+// The limits. The request pool (store.sharedPoolSize) holds 48 connections, and an admitted
+// request holds at most one of them at a time, or Weight of them for a route that reads side by
+// side. 8 of the 48 are left to the pool's users that admission does not count: the event streams'
+// catch-up and their heartbeat's identity read, the websockets' identity checks
 // (whileCallerResolves), the browsers' durable document appends, the /auth routes and the GitHub
-// proxy, and the work a handler leaves running after it has answered. The other 36 are split so
-// that writes, which wait on each other at the commit order, hold at most 8, and reads at most
-// the remaining 28 (MaxReadLimit).
+// proxy, and the work a handler leaves running after it has answered. The other 40 are split so
+// that writes, which wait on each other at the commit order, hold at most 12 (MaxWriteLimit), and
+// reads at most 28 (MaxReadLimit).
 //
-// Reads get fewer than 28 on a small machine: readsPerCPU for each CPU the process may use
-// (runtime.GOMAXPROCS, which follows the container's CPU limit), so 8 on the production task's
-// two. Reads are CPU-bound, and every read running beside a write that holds the events'
-// commit-order lock slows that write while every other write waits on it (INFRA-591), so above
-// about four concurrent reads per CPU committed events fall while reads gain little. INFRA-589's
-// reproduction on 2 CPUs measured it, each step offered with the same seed (10x is 40 writes/s
-// and 600 reads/s), as committed events/s and successful reads/s:
+// Each class's limit follows the CPUs the process may use (runtime.GOMAXPROCS, which follows the
+// container's CPU limit) up to its cap: readsPerCPU reads and writesPerCPU writes per CPU, at least
+// one CPU's worth. Two CPUs, the production task's, already reach both caps, 28 reads and 12 writes,
+// and so does every larger pod: at 16 CPUs the limits are still 28 and 12, because the request
+// pool's 48 connections bound what admission may let in, so a larger pod's limit comes from the
+// pool, not its cores. One CPU gets 14 reads and 6 writes.
 //
-//	read limit   2x            5x            10x
-//	28           4.47 / 116.4  2.18 / 142.6  1.91 / 121.7 (commit-order lock hold p50 492 ms)
-//	14                                       3.09 / 94.8  (hold p50 281 ms)
-//	12           4.71 / 98.7   3.65 / 98.7   3.29 / 86.5
-//	8            5.34 / 87.3   4.41 / 78.9   4.46 / 78.1  (hold p50 200 ms)
+// INFRA-589's reproduction on 2 CPUs chose them, with INFRA-591's commit-order change in, each step
+// offered with the same seed (1x is 4 writes/s and 60 reads/s for 180 s, 10x is 40 and 600), as
+// committed events/s at 10x and requests refused at 1x (reads / writes):
 //
-// With 8 reads on 2 CPUs committed events at 5x and 10x stay above 80% of the best step (5.34
-// at 2x), and successful reads above 80% of theirs.
+//	reads  writes  wait    queue     10x commits  1x refused
+//	8      8       75 ms   1x limit  4.67         629 / 34
+//	16     8       75 ms   1x limit  3.01         889 / 118
+//	28     8       75 ms   1x limit  2.47         454 / 111
+//	8      8       500 ms  1x limit  4.57         384 / 12
+//	8      8       1 s     1x limit  4.91         638 / 6
+//	8      8       1 s     8x limit  5.32         724 / 30
+//	16     8       1 s     2x limit               112 / 25
+//	28     8       1 s     2x limit  2.81         0 / 2
+//	28     12      1 s     2x limit  2.92         0 / 5, and 9 / 11 on a second run
+//
+// Fewer reads lift 10x commits on this box - 8 reads committed 4.46 events/s at 10x against 28
+// reads' 3.09 before INFRA-591 too - but refuse 4-6% of the reads at 1x, a load the server must
+// serve whole. At 1x on the 2-core reproduction reads stall in bursts, mostly in garbage collection
+// and system calls, with all 28 read slots busy for over a second, and a 1x write can be in flight
+// for over a second, so 28 reads, 12 writes, a 1 s wait (DefaultWait) and a queue of twice the limit
+// (queueFactor) keep 1x refusals to 0-9 reads and 5-11 writes in 180 s.
 const (
-	MaxReadLimit      = 28
-	readsPerCPU       = 4
-	DefaultWriteLimit = 8
+	MaxReadLimit  = 28
+	MaxWriteLimit = 12
+	readsPerCPU   = 14
+	writesPerCPU  = 6
 )
 
-// readLimit is the read limit for procs usable CPUs: readsPerCPU each, at least one CPU's worth
-// and at most MaxReadLimit.
-func readLimit(procs int) int {
-	return min(MaxReadLimit, readsPerCPU*max(procs, 1))
+// readLimit and writeLimit are the limits for procs usable CPUs: perCPU each, at least one CPU's
+// worth and at most the class's cap.
+func readLimit(procs int) int  { return perCPULimit(procs, readsPerCPU, MaxReadLimit) }
+func writeLimit(procs int) int { return perCPULimit(procs, writesPerCPU, MaxWriteLimit) }
+
+func perCPULimit(procs, perCPU, ceiling int) int {
+	return min(ceiling, perCPU*max(procs, 1))
 }
 
-// DefaultWait is how long a request waits in its class's queue for room before it is refused:
-// 75 ms, so a refused request has its answer within the 100 ms p99 the architect set for a refusal
-// (INFRA-514), with 25 ms left for the rest of the request's path. Room that does not come free in
-// that time is not coming free in time for the request either: an admitted request holds its unit
-// for the length of its work, tens of milliseconds at best. A 25 ms wait was measured too, in
-// INFRA-589's 10x step with 8 reads on 2 CPUs: 3.88 committed events/s and 66.2 successful
-// reads/s against 75 ms's 4.46 and 78.1, for a refusal p99 of 130 ms against 140 ms, so the wait
-// stayed 75 ms.
-const DefaultWait = 75 * time.Millisecond
+// DefaultWait is how long a request waits in its class's queue for room before it is refused: 1 s.
+// At 1x on INFRA-589's 2-core reproduction every read slot stays busy for over a second in a stall
+// and a write can be in flight for over a second (the measurements above), so a shorter wait
+// refuses requests at a load the server serves: with 8 reads a 75 ms wait refused 34 writes in
+// 180 s at 1x and a 1 s wait 6, and with 28 reads, 12 writes and a queue of twice the limit a 1 s
+// wait refused 0-9 reads and 5-11 writes. A refused request is answered once its wait has run out,
+// so a refusal's p99 is about the wait.
+const DefaultWait = time.Second
+
+// queueFactor is how many requests each class's queue holds per unit of its limit: twice the
+// limit, room for two more bursts of the class's full width behind the one running. A 1 s wait
+// outlasts a full width's work, so a request two widths back still expects room within it: 16
+// reads with a 75 ms wait and a queue of one limit refused 889 reads at 1x, and with a 1 s wait and
+// a queue of two limits 112.
+const queueFactor = 2
 
 // Limits are a Limiter's concurrency limits per class, in units (a request takes its route's
 // weight), and how long a request may wait for room; a zero Wait is DefaultWait.
@@ -123,15 +145,16 @@ type Limits struct {
 	Wait        time.Duration
 }
 
-// DefaultLimits are the limits the server runs with: reads by the CPUs the process may use
-// (readLimit of runtime.GOMAXPROCS), DefaultWriteLimit writes and DefaultWait.
+// DefaultLimits are the limits the server runs with: reads and writes by the CPUs the process may
+// use (readLimit and writeLimit of runtime.GOMAXPROCS) and DefaultWait.
 func DefaultLimits() Limits {
-	return Limits{Read: readLimit(runtime.GOMAXPROCS(0)), Write: DefaultWriteLimit, Wait: DefaultWait}
+	procs := runtime.GOMAXPROCS(0)
+	return Limits{Read: readLimit(procs), Write: writeLimit(procs), Wait: DefaultWait}
 }
 
 // Limiter admits requests per class under Limits. Each class runs at most its limit's units at
 // once; a request that finds no room waits in that class's queue, first come first served, for at
-// most Limits.Wait, and a request that finds the queue already holding as many requests as the
+// most Limits.Wait, and a request that finds the queue already holding queueFactor times the
 // limit is refused at once. A Limiter is safe for concurrent use.
 type Limiter struct {
 	classes [classCount]*gate
@@ -306,10 +329,8 @@ func (g *gate) acquire(ctx context.Context, units int) error {
 		g.mu.Unlock()
 		return nil
 	}
-	// The queue holds as many requests as the class's limit: room for one more burst of the
-	// class's full width behind the one running, and no more, since a request that would queue
-	// behind two full widths cannot expect room within the wait.
-	if g.waiters.Len() >= g.limit {
+	// The queue holds queueFactor times the class's limit (queueFactor says why).
+	if g.waiters.Len() >= queueFactor*g.limit {
 		g.mu.Unlock()
 		g.queueFull.Add(1)
 		return &Refusal{Class: g.class, Reason: QueueFull}

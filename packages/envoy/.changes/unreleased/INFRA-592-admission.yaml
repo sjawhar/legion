@@ -2,12 +2,13 @@ kind: Changed
 body: |-
   Past what it can serve, Dispatch refuses a request at once rather than queueing it without end.
   Every `/api/v1` route but the two event streams and the test hooks is admitted first: reads
-  (GET, HEAD) up to 4 at once per CPU the server may use, at most 28 (8 on two CPUs), and writes
-  up to 8, of the request pool's 48 connections, the delivery timeline, measures and pipeline
-  counting two each (they now run at most two reads at once, where the timeline ran up to seven).
-  Above about four reads per CPU, measured on two CPUs, committed events fell while reads gained
-  little. A request that finds no room waits at most 75 ms in a
-  queue as long as its class's limit, and is otherwise answered `429 OVERLOADED` with
+  (GET, HEAD) up to 14 at once and writes up to 6 at once per CPU the server may use, at most 28
+  reads and 12 writes (28 and 12 on two CPUs or more), of the request pool's 48 connections, the
+  delivery timeline, measures and pipeline counting two each (they now run at most two reads at
+  once, where the timeline ran up to seven). Measured on two CPUs, fewer reads committed more
+  events at ten times the load but refused 4-6% of the reads at the everyday load. A request that
+  finds no room waits at most 1 second in a queue twice as long as its class's limit, and is
+  otherwise answered `429 OVERLOADED` with
   `Retry-After: 1` and `Cache-Control: no-store`, after its body is drained: nothing of it ran, so
   any method may be sent again. A read has a deadline of 20 seconds, 5 minutes for the four file
   version downloads, and past it is `503 REQUEST_TIMEOUT`; a write has none and runs to completion

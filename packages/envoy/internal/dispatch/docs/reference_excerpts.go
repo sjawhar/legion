@@ -52,7 +52,7 @@ func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string
 // document itself.
 func (s *Service) indexDocument(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string, rendered renderedTree) (model.ReferenceChanges, error) {
 	if rendered.tree == nil {
-		return s.indexUnrenderedVersion(ctx, tx, artifactID, versionAt, markdown)
+		return s.indexUnrenderedVersion(ctx, tx, artifactID, version, versionAt, markdown)
 	}
 	blocks := make([]model.ArtifactBlock, len(rendered.offsets))
 	for index, offset := range rendered.offsets {
@@ -65,8 +65,8 @@ func (s *Service) indexDocument(ctx context.Context, tx pgx.Tx, artifactID strin
 // holding the document's owner row: its references, the excerpt of each mention, and its blocks
 // with the mentions each holds (refs.IndexBlocks), all from one extraction of markdown. blocks
 // index into markdown, the render they came from. The event the caller appends names the counted
-// targets both the document's references and its blocks' mentions moved, since a node is counted
-// once for each block citing it.
+// targets the document's references and their excerpts, its blocks and its blocks' mentions moved
+// (refs.ReplaceDocumentCounted), since a node is counted once for each block citing it.
 func (s *Service) indexRenderedVersion(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string, blocks []model.ArtifactBlock) (model.ReferenceChanges, error) {
 	located := text.ExtractAt(markdown, s.serverURL)
 	// The blocks are indexed before the document's own references are reconciled: a first
@@ -76,33 +76,26 @@ func (s *Service) indexRenderedVersion(ctx context.Context, tx pgx.Tx, artifactI
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
-	changes, err := replaceVersionRefs(ctx, tx, artifactID, versionAt, located, moved)
-	if err != nil {
-		return model.ReferenceChanges{}, err
-	}
-	return changes, refs.RecordExcerpts(ctx, tx, artifactID, version, refs.MentionExcerpts(markdown, blocks, located))
+	return replaceVersionRefs(ctx, tx, artifactID, version, versionAt, located, moved, refs.MentionExcerpts(markdown, blocks, located))
 }
 
 // indexUnrenderedVersion indexes one document version with no rendering, written at versionAt, in
 // a transaction holding the document's owner row: its references alone. It indexes no blocks and
 // marks the document's mentions owed an excerpt (refs.ClearExcerpts) for the excerpt
 // reconciliation, which reads the document itself.
-func (s *Service) indexUnrenderedVersion(ctx context.Context, tx pgx.Tx, artifactID string, versionAt time.Time, markdown string) (model.ReferenceChanges, error) {
-	changes, err := replaceVersionRefs(ctx, tx, artifactID, versionAt, text.ExtractAt(markdown, s.serverURL), nil)
-	if err != nil {
-		return model.ReferenceChanges{}, err
-	}
-	return changes, refs.ClearExcerpts(ctx, tx, artifactID)
+func (s *Service) indexUnrenderedVersion(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string) (model.ReferenceChanges, error) {
+	return replaceVersionRefs(ctx, tx, artifactID, version, versionAt, text.ExtractAt(markdown, s.serverURL), nil, nil)
 }
 
 // replaceVersionRefs reconciles the document's references, dated versionAt, to the mentions
-// located in its version, counting the targets moved, which its blocks' mentions moved, as well.
-func replaceVersionRefs(ctx context.Context, tx pgx.Tx, artifactID string, versionAt time.Time, located []text.Located, moved []refs.Target) (model.ReferenceChanges, error) {
+// located in its version, stores excerpts on them (nil: marks them owed), and counts the targets
+// moved, which its blocks and their mentions moved, as well (refs.ReplaceDocumentCounted).
+func replaceVersionRefs(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, located []text.Located, moved []refs.Target, excerpts map[refs.Target]model.GraphExcerpt) (model.ReferenceChanges, error) {
 	found := make([]text.Ref, len(located))
 	for i, mention := range located {
 		found[i] = mention.Ref
 	}
-	return refs.ReplaceCountedRefs(ctx, tx, "artifact", artifactID, found, &versionAt, moved)
+	return refs.ReplaceDocumentCounted(ctx, tx, artifactID, version, versionAt, found, moved, excerpts)
 }
 
 // referenceExcerptBatch is how many documents one reconciliation tick reads; referenceExcerptStep
@@ -221,7 +214,9 @@ func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int
 		default:
 			excerpts = refs.MentionExcerpts(markdown, blocks, text.ExtractAt(markdown, s.serverURL))
 		}
-		if err := refs.RecordExcerpts(ctx, background, document.FromID, document.Version, excerpts); err != nil {
+		// The reconciliation appends no event, so what it moved is named nowhere: until it stores
+		// an excerpt, the route answers a mention owed one with the document's name.
+		if _, err := refs.RecordExcerpts(ctx, background, document.FromID, document.Version, excerpts); err != nil {
 			if ctx.Err() != nil {
 				return documents, false, ctx.Err()
 			}

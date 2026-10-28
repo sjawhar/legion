@@ -79,11 +79,16 @@ func shutdownContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), stopGrace-shutdownMargin)
 }
 
-// serveUntilStopped serves on listener until ctx ends, and returns then, with the error that ended
-// serving when serving failed, which cancels ctx. Stopping is the caller's (shutdown). It logs the
-// address listener is bound to, whether main bound it or inherited it (DISPATCH_LISTEN_FD), so the
-// line names the port a kernel chose.
-func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *http.Server, listener net.Listener) error {
+// serveUntilStopped serves on listener until ctx ends, and returns then. Stopping is the caller's
+// (shutdown). It logs the address listener is bound to, whether main bound it or inherited it
+// (DISPATCH_LISTEN_FD), so the line names the port a kernel chose. Two things end serving before
+// the signal does, and it returns either one, so main exits 1 once shutdown has run and a
+// supervisor never reads either as a clean stop: serving failed, or the registry refused to count
+// this process as live again beside a live process whose signing keys it does not share (lost,
+// processes.Registration.Lost), which it logs at ERROR. Either cancels ctx, so the stop is the one
+// a signal makes: the listener closes at once, the requests in flight are answered, and the
+// registry's row is deleted.
+func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *http.Server, listener net.Listener, lost <-chan error) error {
 	serveErr := make(chan error, 1)
 	go func() {
 		slog.Info("dispatch: listening", "addr", listener.Addr().String())
@@ -92,13 +97,19 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 			cancel()
 		}
 	}()
-	<-ctx.Done()
+	var refused error
+	select {
+	case <-ctx.Done():
+	case refused = <-lost:
+		slog.Error("dispatch: this server process no longer shares its signing keys with a live server process", "error", refused)
+		cancel()
+	}
 	slog.Info("dispatch: shutting down")
 	select {
 	case err := <-serveErr:
 		return err
 	default:
-		return nil
+		return refused
 	}
 }
 
@@ -110,17 +121,21 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 //     silentProbeReserve), when it logs that it settles documents with requests still in flight.
 //  2. The document service settles the documents owed until silentProbeReserve before the deadline.
 //  3. Hijacked delivery sockets and the delivery hub finish their Lifetime-driven shutdown.
-//  4. (INFRA-555's process registry deregisters here.)
-//  5. It waits until every request has answered and no connection of writePools is in use.
+//  4. It waits until every request has answered and no connection of writePools is in use.
+//  5. deregister takes this process out of the registry of live server processes, within what is
+//     left of ctx: only once HTTP has drained, so a draining process counts as live until its last
+//     request is answered, and before the pools close.
 //  6. It closes the database pools; main then writes the buffered log lines last.
 //
-// While the database answers, only the deadline bounds the wait of stage 5, so a write in flight
+// While the database answers, only the deadline bounds the wait of stage 4, so a write in flight
 // commits and is answered if it finishes before it. A database that has stopped answering
 // (silentProbes) holds its connections forever, so Dispatch exits without them, and the database
-// rolls back whatever they held open. Writes carry no deadline of their own, so a write still in
-// flight at the deadline is cut off with the process, as the runtime's kill would cut it moments
-// later.
-func shutdown(ctx context.Context, server *http.Server, documentService *docs.Service, pool *store.Pool, waitDelivery func()) {
+// rolls back whatever they held open; it deregisters nothing then, since the delete would wait on
+// that database too, and its row's heartbeat stops with the process instead. Writes carry no
+// deadline of their own, so a write still in flight at the deadline is cut off with the process,
+// as the runtime's kill would cut it moments later.
+func shutdown(ctx context.Context, server *http.Server, documentService *docs.Service, pool *store.Pool, waitDelivery func(),
+	deregister func(context.Context)) {
 	deadline, _ := ctx.Deadline()
 	drained := make(chan struct{})
 	go func() {
@@ -152,11 +167,8 @@ func shutdown(ctx context.Context, server *http.Server, documentService *docs.Se
 		slog.Warn("dispatch: exit with delivery work still running at the shutdown deadline")
 		return
 	}
-	// INFRA-555's processes.Deregister goes here, bounded by context.WithTimeout(ctx, 5 s) rather
-	// than the whole deadline, so a silent database leaves the pool wait below its time: the process
-	// leaves the registry once the HTTP drain and its own delivery work have ended and before its
-	// pools close (agreed with INFRA-555's implementer).
 	if waitUntilIdle(ctx, drained, pool) {
+		deregister(ctx)
 		pool.Close()
 	}
 }

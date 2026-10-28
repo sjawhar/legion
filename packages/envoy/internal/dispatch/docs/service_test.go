@@ -20,6 +20,7 @@ import (
 	"github.com/reearth/ygo/persistence"
 	ygws "github.com/reearth/ygo/provider/websocket"
 
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -28,9 +29,12 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
+// testSigningKey is the one-key set the package's people stores seal refresh tokens under.
+var testSigningKey = auth.SingleSigningKey("signing-key")
+
 // headerIdentity is the test header identity that records each named person in the database.
 func headerIdentity(database *store.Store) identity.HeaderIdentity {
-	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, "signing-key", nil)}
+	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, testSigningKey, nil)}
 }
 
 func newTestService(t *testing.T) (*Service, string) {
@@ -2679,7 +2683,26 @@ func takeWriterGates(service *Service, ctx context.Context, artifactIDs ...strin
 // tests assert on, or the gate's or the transaction's, and never fails the test itself, so a
 // goroutine may call it.
 func joinedWrite(service *Service, artifactID string, write func(ctx context.Context) error) error {
-	ctx, release, err := takeWriterGates(service, context.Background(), artifactID)
+	return joinedWriteOf(service, []string{artifactID}, write)
+}
+
+// joinedIssueWrite is joinedWrite for a write to every document of issueKey (WriteIssueAskStates),
+// as the issue route and the ask repair take every one's writer gate before their transaction.
+func joinedIssueWrite(service *Service, issueKey string, write func(ctx context.Context) error) error {
+	rows, err := service.store.Pool.Query(context.Background(), issueDocumentIDs, issueKey)
+	if err != nil {
+		return fmt.Errorf("list the issue's documents: %w", err)
+	}
+	documents, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return fmt.Errorf("list the issue's documents: %w", err)
+	}
+	return joinedWriteOf(service, documents, write)
+}
+
+// joinedWriteOf is joinedWrite holding the writer gates of artifactIDs.
+func joinedWriteOf(service *Service, artifactIDs []string, write func(ctx context.Context) error) error {
+	ctx, release, err := takeWriterGates(service, context.Background(), artifactIDs...)
 	if err != nil {
 		return err
 	}

@@ -187,6 +187,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, r, err)
 		return
 	}
+	previousBody := comment.Body
 	comment.Body = input.Body
 	comment.EditedAt = timestampPtr(&editedAt)
 	if comment.Anchor != nil {
@@ -205,7 +206,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	referenceChanges, err := s.replaceReferences(r.Context(), tx, "comment", comment.ID, comment.Body)
+	referenceChanges, err := s.replaceEditedReferences(r.Context(), tx, "comment", comment.ID, previousBody, comment.Body)
 	if err != nil {
 		s.writeHandlerError(w, r, err)
 		return
