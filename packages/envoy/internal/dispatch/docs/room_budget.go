@@ -37,10 +37,10 @@ const roomBudgetBytes = 2 << 30
 
 // bytesOfHeapAnElement is the heap one copy of a document holds for each element its rendering
 // makes (pmdoc.MeasureDocument): about 470 bytes at 524 KiB and at 1 MiB, 578 at 51 KiB, where
-// what every document holds whatever its size is a larger share. A room that is only read holds
-// one copy, its live document; a room that has taken an update holds two, the live document and
-// the rendered replica its update observer keeps (renderedReplica); the budget charges every room
-// at both from its admission on (roomCopies). The heap follows the elements and not the markdown's
+// what every document holds whatever its size is a larger share. A room holds two from its load on,
+// the live document and the rendered replica its update observer keeps (renderedReplica), which is
+// the copy the load decoded of the stored state (keepReplica); the budget charges every room at
+// both from its admission on (roomCopies). The heap follows the elements and not the markdown's
 // bytes, which misprice a dense document by several times: the figure before this one, 120 bytes
 // of heap a byte of markdown, was measured on a shape no room can hold (room_heap_test.go).
 // TestAResidentRoomsHeapPerByteOfItsMarkdown measures rooms of each size, read and edited, and
@@ -425,17 +425,14 @@ type roomReservation struct {
 
 // roomCopies is the copies of its document a room is charged at, from the reservation its
 // admission makes (storedRoomReservation) through its load (load) to its retirement (retire): its
-// live document and the rendered replica its update observer keeps (renderedReplica). A room only
-// read holds the first alone, and both are charged before the second exists, because the replica
-// is taken by the room's own update observer at the room's first transaction since its load, from
-// the state its update log records just before it (renderedReplica.start), inside ygo's apply of
-// an update the peer hook has already admitted, and nothing at that point can refuse it. Charged
-// one copy until then, rooms only read would be admitted at half their price: an admission of a
-// mebibyte of prose reserves 54,144,000 bytes, its room would then be charged 27,072,000, and an
-// empty budget would admit seventy-eight of them rather than thirty-nine; once they were typed
-// into, each would take its replica with nothing able to refuse it, and the open rooms would come
-// to about twice the 2 GiB budget in a 4 GiB pod. Every part of a charge is at both copies: the
-// replica copies the live document's whole state and then takes every update the room commits
+// live document and the rendered replica its update observer keeps (renderedReplica), which the
+// room holds from its load on, the copy its load decoded of the stored state (keepReplica). Both
+// are charged before the load holds either, since an admission reserves the room as it will stand:
+// charged one copy, rooms would be admitted at half their price, an admission of a mebibyte of
+// prose reserving 27,072,000 bytes rather than 54,144,000, and an empty budget admitting
+// seventy-eight of them rather than thirty-nine, whose open rooms would come to about twice the
+// 2 GiB budget in a 4 GiB pod. Every part of a charge is at both copies: the replica holds the
+// live document's whole state and then takes every update the room commits
 // (renderedReplica.observe), so each struct, split and byte of content the live document takes,
 // the replica takes too.
 const roomCopies = 2
@@ -985,8 +982,9 @@ func (*renderedContent) walkedDelete(_, _, _ uint64) {}
 // reserveRoom admits a browser's socket to room's document against the room budget, before anything
 // loads the document (ServeHTTP). A room already charged admits it with nothing reserved: the
 // browser joins a room whose heap is counted. Otherwise it reserves what the stored document will
-// cost at both copies (storedRoomReservation, roomCopies), since a browser's first keystroke takes
-// the room's second copy in its update observer, where nothing can refuse it. The reservation is
+// cost at both copies (storedRoomReservation, roomCopies), the room's live document and the replica
+// its load keeps, both made before anything can refuse them: the admission's own decode, which
+// becomes the replica (loadTree, keepReplica), and ygo's decode into the room. The reservation is
 // made before the load, not when the room has loaded: fifty browsers could otherwise pass an
 // unreserved check and each build a whole cold copy before any of their rooms exists.
 //

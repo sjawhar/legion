@@ -1,11 +1,16 @@
 package docs
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/reearth/ygo/crdt"
+
+	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -128,4 +133,156 @@ func TestATransactionsUpdateIsChargedOnceWhenAnotherObserverRendersItFirst(t *te
 	if _, content, _, _ := chargeParts(charge); content-before != added {
 		t.Fatalf("once Bob's observer ran, the room's charge holds %d bytes of content, want the %d both edits added, each charged once", content-before, added)
 	}
+}
+
+// A room's load decodes its stored state once of its own, and that copy is the room's replica: the
+// copy a socket's admission decoded for its schema check (loadTree), or, with no admission before
+// it, the one the load decoded for its scan count (LoadDoc). The replica holds it from the load on,
+// before the room's first transaction, apart from the room's own document; neither the admission's
+// preload nor the load's record keeps it; and the room's first transaction moves that same copy
+// rather than decoding the room again.
+func TestARoomsReplicaIsTheCopyItsLoadDecoded(t *testing.T) {
+	for _, admitted := range []bool{true, false} {
+		name := "with no admission before the load"
+		if admitted {
+			name = "after a socket's admission"
+		}
+		t.Run(name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour // no settlement writes into the room while it is read
+			seedServiceText(t, service, artifactID, "Alpha paragraph.\n\nBravo paragraph.\n")
+			closeDocumentRoom(t, service, artifactID)
+			ctx := context.Background()
+			var preload *preloadedDocument
+			if admitted {
+				var err error
+				if _, preload, err = service.loadTree(ctx, artifactID); err != nil || preload == nil || preload.decoded.doc == nil {
+					t.Fatalf("the admission decoded no copy to preload (%v)", err)
+				}
+				defer service.leavePreload(artifactID, preload)()
+			}
+			var copied *crdt.Doc
+			if preload != nil {
+				copied = preload.decoded.doc
+			}
+			if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+				t.Fatal(err)
+			}
+			live := roomDocument(t, service, artifactID)
+			replica := service.liveReplica(live)
+			if replica == nil {
+				t.Fatal("the loaded room lists no replica")
+			}
+			doc := replica.hold()
+			if doc == nil {
+				t.Fatal("the replica holds no document before the room's first transaction")
+			}
+			held, err := renderDocument(doc)
+			replica.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch {
+			case doc == live:
+				t.Fatal("the replica is the room's own document")
+			case copied != nil && doc != copied:
+				t.Fatal("the replica is not the copy the socket's admission decoded")
+			case preload != nil && preload.decoded.doc != nil:
+				t.Fatal("the socket's preload still holds the copy its room's replica took")
+			}
+			if want := renderedLive(t, service, artifactID); held != want {
+				t.Fatalf("the replica renders %q before any transaction, want the room's %q", held, want)
+			}
+			value, _ := service.roomLoads.Load(artifactID)
+			load := value.(*roomLoad)
+			load.mu.Lock()
+			kept := load.decoded.doc
+			load.mu.Unlock()
+			if kept != nil {
+				t.Fatal("the load's record still holds the copy its room's replica took")
+			}
+
+			editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+				added, err := pmdoc.Parse("Charlie paragraph.\n")
+				if err != nil {
+					t.Fatal(err)
+				}
+				tree.Children = append(tree.Children, added.Children...)
+				return tree
+			})
+			want := renderedLive(t, service, artifactID)
+			moved := replica.hold()
+			if moved == nil {
+				t.Fatal("the replica holds no document once the room's first transaction is observed")
+			}
+			after, err := renderDocument(moved)
+			replica.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if moved != doc || after != want {
+				t.Fatalf("after the room's first transaction the replica is the load's copy (%t) rendering %q, want that copy rendering the room's %q", moved == doc, after, want)
+			}
+		})
+	}
+}
+
+// A socket's preload that no load will take gives up its copy at once: one left while the room is
+// resident, which the socket joins as it is, and one left while a load that read the store before
+// it runs, which that load drops as it ends. Neither stays listed, nor holds its copy for the
+// socket's handler, which keeps the preload until the socket ends (leavePreload).
+func TestAPreloadNoLoadWillTakeGivesUpItsCopy(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	store := &roomDuringColdReadStore{VersionedStore: NewPgVersioned(database), room: artifactID}
+	service := New(Deps{
+		Store:       database,
+		Persistence: store,
+		Events:      events.NewBroker(),
+		Identity:    headerIdentity(database),
+		ServerURL:   "https://dispatch.example",
+		Settle:      time.Hour,
+	})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	seedServiceText(t, service, artifactID, "Alpha paragraph.\n\nBravo paragraph.\n")
+	closeDocumentRoom(t, service, artifactID)
+	ctx := context.Background()
+	admit := func() *preloadedDocument {
+		t.Helper()
+		_, preload, err := service.loadTree(ctx, artifactID)
+		if err != nil || preload == nil || preload.decoded.doc == nil {
+			t.Fatalf("the admission decoded no copy to preload (%v)", err)
+		}
+		return preload
+	}
+	requireGivenUp := func(preload *preloadedDocument, when string) {
+		t.Helper()
+		if _, listed := service.preloads.Load(artifactID); listed {
+			t.Fatalf("a preload is still listed %s", when)
+		}
+		if preload.decoded.doc != nil {
+			t.Fatalf("the preload still holds its copy %s", when)
+		}
+	}
+
+	// Both admissions decode while no room holds the document.
+	during, resident := admit(), admit()
+	var forget func()
+	store.opened = func() { forget = service.leavePreload(artifactID, during) }
+	store.armed.Store(true)
+	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatal(err)
+	}
+	if forget == nil {
+		t.Fatal("the load did not read the store")
+	}
+	defer forget()
+	requireGivenUp(during, "once the load it was left during has ended")
+
+	defer service.leavePreload(artifactID, resident)()
+	requireGivenUp(resident, "when it was left for a resident room")
 }

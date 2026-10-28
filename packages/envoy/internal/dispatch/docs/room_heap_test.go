@@ -16,11 +16,10 @@ import (
 // (bytesOfHeapAnElement), and it was first read off a benchmark of a read's second replica rather
 // than measured of a room: about 120 bytes of heap for every byte of markdown for one copy, and
 // two copies for a room under edit (AGENTS.md:590-591). This measures the room itself: the live
-// document alone, which is all a room that is only read holds, and the live document beside the
-// rendered replica the update observer takes on the room's first transaction and keeps while the
-// room is resident (keepReplica, renderedReplica.observe), which is what a room under edit holds.
-// A room under edit measures about twice a room that is only read, which is the two copies, and
-// the second is the whole of the difference.
+// document beside the rendered replica its update observer keeps while the room is resident
+// (keepReplica, renderedReplica.observe), which every room holds from its load on - the replica is
+// the copy the load decoded of the stored state (decodeStoredState) - whether it is only read or
+// has taken an update since. Each measures about two copies, the budget's roomCopies.
 //
 // Both are weighed against the room's rendering, the markdown its stored version holds. A byte of
 // markdown is not what the heap follows, though: what it follows is the elements that markdown
@@ -45,7 +44,7 @@ func TestAResidentRoomsHeapPerByteOfItsMarkdown(t *testing.T) {
 			copies                    int
 			leastPerByte, mostPerByte float64
 		}{
-			{"read", false, 1, 15, 60},
+			{"read", false, 2, 30, 120},
 			{"edited", true, 2, 30, 120},
 		} {
 			t.Run(fmt.Sprintf("%dKiB/%s", size>>10, room.name), func(t *testing.T) {
@@ -68,9 +67,9 @@ func TestAResidentRoomsHeapPerByteOfItsMarkdown(t *testing.T) {
 }
 
 // residentRoom is what one open document holds in memory: the room's live document, and the
-// replica its update observer renders and keeps once the room has taken an update
-// (renderedReplica). The service is held because it is what lists the replica, and it lists it
-// weakly (keepReplica), so nothing else here would keep that listing alive.
+// replica its update observer renders and keeps from the room's load on (renderedReplica). The
+// service is held because it is what lists the replica, and it lists it weakly (keepReplica), so
+// nothing else here would keep that listing alive.
 type residentRoom struct {
 	service *Service
 	live    *crdt.Doc
@@ -105,21 +104,26 @@ func heldByResidentRoom(t *testing.T, state []byte, edited bool) int64 {
 	return held
 }
 
-// buildResidentRoom loads state as a room's cold load decodes it (newDocumentCopy) and, for a room
-// that has had an update, takes the replica its observer takes: keepReplica, as the room's load
-// does, and one drain of the room's update log, which copies the document from the log's base and
-// renders it, as the room's first transaction does (observedReplica).
+// buildResidentRoom loads state as a room's load decodes it twice, into the room's document and
+// into the copy the load keeps as the replica (newDocumentCopy, decodeStoredState, keepReplica),
+// and, for a room that has had an update, takes the replica as the room's observer moves it
+// through that update instead: one drain of the room's update log, which copies the document from
+// the log's base and renders it (observedReplica), a replica holding the same state.
 func buildResidentRoom(t *testing.T, state []byte, edited bool) *residentRoom {
 	t.Helper()
 	live := newDocumentCopy()
 	if err := crdt.ApplyUpdateV1(live, state, nil); err != nil {
 		t.Fatalf("decode the stored state: %v", err)
 	}
-	room := &residentRoom{live: live}
+	room := &residentRoom{service: &Service{}, live: live}
 	if !edited {
+		decoded, err := decodeStoredState(state)
+		if err != nil {
+			t.Fatalf("decode the stored state's copy: %v", err)
+		}
+		room.replica = room.service.keepReplica(live, nil, nil, decoded.doc)
 		return room
 	}
-	room.service = &Service{}
 	room.replica = observedReplica(t, room.service, live, nil)
 	if _, _, measured := room.replica.size(); !measured {
 		t.Fatal("the room's observer published no measurement, so it rendered no markdown and the replica this weighs is not a room's")

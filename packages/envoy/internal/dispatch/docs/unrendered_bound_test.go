@@ -243,7 +243,7 @@ func TestAnUnmeasuredRoomWeighsAPeerUpdateOnItsOwnBytes(t *testing.T) {
 			}
 			service := &Service{}
 			if row.listed {
-				replica := service.keepReplica(room, nil, nil)
+				replica := service.keepReplica(room, nil, nil, nil)
 				t.Cleanup(func() { runtime.KeepAlive(replica) })
 				if _, _, measured := replica.size(); measured {
 					t.Fatal("the room's load published a measurement, want none")

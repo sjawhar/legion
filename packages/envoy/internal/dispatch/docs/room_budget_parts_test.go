@@ -266,7 +266,7 @@ func TestTheMeasurerCountsARoomEarlyOnceItsUncountedPartPassesTheThresholdAndNev
 	service.measurer.beforeCount = func(markdown string) { counted <- markdown }
 	loaded := headings(1)
 	live := newDocumentCopy()
-	replica := service.keepReplica(live, nil, &loaded)
+	replica := service.keepReplica(live, nil, &loaded, nil)
 	charge := service.chargeLoadedRoom("room", live, replica)
 	early := int64(earlyCountCharge/(bytesOfHeapAByteAtTheDensest*roomCopies)) + 1
 

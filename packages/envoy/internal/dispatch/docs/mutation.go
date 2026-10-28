@@ -523,10 +523,11 @@ func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.
 }
 
 // loadTree is the tree of the document a socket's admission check reads (heldTree, else the stored
-// document decoded), with the durable state it decoded the document from and what that decode's
-// conflict scans passed (decodeCountingScans), nil when this server holds the document. A durable
-// history that does not decode is ErrDocumentUnloadable and fails the room, as ygo's own load of
-// it would.
+// document decoded), with the durable state it read and that decode (decodeStoredState): the copy
+// and what its conflict scans passed, which the room's load takes for its scan total and its
+// replica (preloadedDocument, LoadDoc), so the admission's decode is the load's own. The preload is
+// nil when this server holds the document. A durable history that does not decode is
+// ErrDocumentUnloadable and fails the room, as ygo's own load of it would.
 func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node, *preloadedDocument, error) {
 	tree, held, err := s.heldTree(ctx, artifactID)
 	if err != nil || held {
@@ -543,16 +544,15 @@ func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node,
 	if len(loaded.Update) == 0 {
 		return nil, &preloadedDocument{loaded: loaded}, nil
 	}
-	doc := newDocumentCopy()
-	scans, err := decodeCountingScans(doc, loaded.Update)
+	decoded, err := decodeStoredState(loaded.Update)
 	if err != nil {
 		// The room carries the decode failure as its cause, which a reader that meets the
 		// failed room answers as DOC_SERVICE_UNAVAILABLE; this read met the history itself.
 		s.failRoom(artifactID, fmt.Errorf("decode live document: %w", err))
 		return nil, nil, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
 	}
-	tree, err = treeOf(doc)
-	return tree, &preloadedDocument{loaded: loaded, scans: scans}, err
+	tree, err = treeOf(decoded.doc)
+	return tree, &preloadedDocument{loaded: loaded, decoded: decoded}, err
 }
 
 func renderTokenTree(tree *pmdoc.Node) (string, string, error) {

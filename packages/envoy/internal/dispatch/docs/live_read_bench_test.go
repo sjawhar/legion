@@ -234,7 +234,7 @@ func BenchmarkPeerUpdateWeighing(b *testing.B) {
 		b.Fatal(err)
 	}
 	service := &Service{}
-	replica := service.keepReplica(live, nil, &rendering)
+	replica := service.keepReplica(live, nil, &rendering, nil)
 	update := benchmarkKeystrokeUpdate(b, live)
 	published, _, measured := replica.size()
 	if !measured || published+int64(len(update)) >= pmdoc.MaxDocumentBytes {
@@ -298,7 +298,7 @@ func observedReplica(tb testing.TB, service *Service, live *crdt.Doc, markdown *
 	tb.Helper()
 	log := live.OpenUpdateLog()
 	tb.Cleanup(log.Close)
-	replica := service.keepReplica(live, log, markdown)
+	replica := service.keepReplica(live, log, markdown, nil)
 	live.Transact(func(*crdt.Transaction) {})
 	replica.observe("bench", nil)
 	if replica.hold() == nil {

@@ -251,6 +251,32 @@ func rescan(update []byte) (uint64, error) {
 	return decodeCountingScans(newDocumentCopy(), update)
 }
 
+// decodedState is a stored state decoded as a room decodes it (decodeStoredState): doc, the copy
+// it decoded into, and scans, what that decode's conflict scans passed, the room's scan total at
+// its load (roomScans.rescanned). doc is nil for an empty state, which decodes into nothing.
+type decodedState struct {
+	doc   *crdt.Doc
+	scans uint64
+}
+
+// decodeStoredState is rescan keeping the copy it decoded: the one decode of the stored state a
+// room's load makes of its own, shared by the socket admission's schema check (loadTree), the
+// room's scan count (LoadDoc) and the room's replica, which takes the copy as its own
+// (keepReplica). The scans are counted in the transaction that decodes the copy, so they are the
+// copy's. A state that does not decode leaves no copy: what a refused decode left in its document
+// is no state the store holds.
+func decodeStoredState(update []byte) (decodedState, error) {
+	if len(update) == 0 {
+		return decodedState{}, nil
+	}
+	doc := newDocumentCopy()
+	scans, err := decodeCountingScans(doc, update)
+	if err != nil {
+		return decodedState{scans: scans}, err
+	}
+	return decodedState{doc: doc, scans: scans}, nil
+}
+
 // decodeCountingScans applies update to doc, a fresh unbounded copy, in one remote transaction, and
 // returns what its scans passed. An observer of the transaction is all it adds to the decode: ygo
 // encodes no update for an observer of the transaction (crdt/update_log.go:153-156).

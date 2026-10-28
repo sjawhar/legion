@@ -299,7 +299,7 @@ func TestALongEditsKeystrokesLeaveTheRoomWhatTheirUpdatesLeaveThroughTheHook(t *
 			t.Fatal(err)
 		}
 		service := &Service{}
-		replica = service.keepReplica(through, nil, &rendering)
+		replica = service.keepReplica(through, nil, &rendering, nil)
 		return func(update []byte) {
 			if err, called := weighInto(service, through, update); err != nil || !called {
 				t.Fatalf("the hook answered %v (applied %t) to keystroke %d, want it applied", err, called, relayed+1)

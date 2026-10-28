@@ -240,8 +240,9 @@ type Service struct {
 	// rebuilding names the documents a rebuild holds (RebuildDocument): their rooms refuse
 	// loads and injections until the rebuild's transaction ends (Ledger.endRebuilds).
 	rebuilding sync.Map
-	// preloads holds, per room, the durable state a document socket's admission check decoded
-	// (*preloadedDocument), for the room load that socket makes next (takePreload).
+	// preloads holds, per room, the durable state a document socket's admission check read and its
+	// decode of it (*preloadedDocument), for the room load that socket makes next (takePreload),
+	// whose replica that decode's copy becomes.
 	preloads sync.Map
 	// replicas holds, for each resident room document, a weak pointer to the replica its update
 	// observer keeps (weak.Pointer[renderedReplica]), which the document's reads walk (readLive),
@@ -270,8 +271,9 @@ type Service struct {
 	// pending author, and the durable version the instance stands at, keyed by a weak pointer to
 	// the document (keepInstance). roomLoads holds what each room's load records between its read
 	// of the store (servicePersistenceAdapter.LoadDoc) and the instance the hook ygo calls next on
-	// the same goroutine starts (onLoadDocument): the head that read saw, and every version this
-	// process appended while the load ran, which reaches no instance of its own (roomLoad).
+	// the same goroutine starts (onLoadDocument): the head that read saw, the decode of the state it
+	// read until the hook takes it, and every version this process appended while the load ran,
+	// which reaches no instance of its own (roomLoad).
 	instances sync.Map
 	roomLoads sync.Map
 	// reads holds the renderings of the documents cold reads served, each under the stored state

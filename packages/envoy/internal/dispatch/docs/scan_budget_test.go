@@ -547,7 +547,7 @@ func TestAUsedUpRoomStillTakesTypingAndRefusesALargerApplyAsNeedingARebuild(t *t
 		t.Fatal(err)
 	}
 	service := &Service{}
-	replica := service.keepReplica(room, nil, &rendering)
+	replica := service.keepReplica(room, nil, &rendering, nil)
 	loaded, err := rescan(state)
 	if err != nil {
 		t.Fatal(err)

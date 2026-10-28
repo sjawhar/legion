@@ -71,7 +71,7 @@ type measuredUpdate struct {
 
 // heldByUpdates is the heap one copy of a room keeps once it has applied each update, every room
 // made fresh: what stays allocated once collections have freed everything else the apply made. It
-// follows heldByResidentRoom (room_heap_test.go:87): each reading follows two collections, since a
+// follows heldByResidentRoom (room_heap_test.go:86): each reading follows two collections, since a
 // sync.Pool's contents survive the first, and the least of the passes' readings is taken, since
 // what anything else allocates meanwhile only adds to a reading. Each pass makes every room before
 // its first reading and keeps them all until its end, so each reading after an apply is the next

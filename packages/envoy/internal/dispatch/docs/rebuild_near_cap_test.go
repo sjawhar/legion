@@ -255,7 +255,7 @@ func rebuiltRoom(t *testing.T, markdown string, retired map[crdt.ClientID]uint64
 		t.Fatal(err)
 	}
 	service := &Service{}
-	return service, room, service.keepReplica(room, nil, &rendering)
+	return service, room, service.keepReplica(room, nil, &rendering, nil)
 }
 
 // The retired clients' list is the rebuild's alone: an update that adds an entry to it, one that

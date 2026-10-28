@@ -306,7 +306,7 @@ const maxMessageBytes = 54 << 20
 // room's total is used up.
 //
 // A room with no measurement at all is a document that left the Proof schema while it was live,
-// which the socket path refuses to open in the first place (refuseOutsideSchema, websocket.go:189),
+// which the socket path refuses to open in the first place (refuseOutsideSchema, websocket.go:235),
 // or one no load listed: the byte bound weighs its updates on their own bytes, as if the room
 // rendered nothing, and the creep cap, which needs a rendering to measure, never applies to it.
 //

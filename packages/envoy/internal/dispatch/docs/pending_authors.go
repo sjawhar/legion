@@ -199,9 +199,16 @@ type roomInstance struct {
 type roomLoad struct {
 	mu   sync.Mutex
 	head int64
-	// scans is what the conflict scans of the read state's decode passed (rescan): the room's
-	// scan total at its load, which onLoadDocument hands the room's scan budget (roomScans).
-	scans uint64
+	// decoded is the read state's one decode of the load's own (decodeStoredState): its scans are
+	// the room's scan total at its load, which onLoadDocument hands the room's scan budget
+	// (roomScans), and its copy becomes the room's replica (keepReplica). onLoadDocument takes it
+	// first thing (takeLoadedState), so the record, which stays until the room's document is
+	// collected (keepInstance), never holds the replica's copy. Between LoadDoc's record and that
+	// hook ygo only decodes the same bytes into the room's document, as that decode did and with
+	// the pending queue lifted (sjawhar/ygo v1.51.3-sami.7, provider/websocket/server.go:1871-1890),
+	// which takes whatever this decode took; the room's next load replaces the record of one that
+	// failed there all the same (beginRoomLoad).
+	decoded decodedState
 	// appended are the versions took recorded before the instance existed, folded into its cursor
 	// when it does (start). instance is that instance, which took advances directly from then on.
 	appended []int64
@@ -220,24 +227,28 @@ func (s *Service) beginRoomLoad(room string) *roomLoad {
 }
 
 // read records the head the load's read of the store saw, the version the room it loads holds
-// every update through, and what the decode of the state it read scanned.
-func (load *roomLoad) read(head persistence.Version, scans uint64) {
+// every update through, and the decode of the state it read.
+func (load *roomLoad) read(head persistence.Version, decoded decodedState) {
 	load.mu.Lock()
 	defer load.mu.Unlock()
-	load.head, load.scans = int64(head), scans
+	load.head, load.decoded = int64(head), decoded
 }
 
-// loadedScans is what the decode of the state room's load under way read scanned (roomLoad.read),
-// and whether a load of room read the store through this service's persistence at all.
-func (s *Service) loadedScans(room string) (uint64, bool) {
+// takeLoadedState is the decode of the state room's load under way read (roomLoad.read), which it
+// takes off the load's record, and whether a load of room read the store through this service's
+// persistence at all. Only the room's load takes it, once (onLoadDocument), on the goroutine that
+// recorded it (ygo's loadRoom).
+func (s *Service) takeLoadedState(room string) (decodedState, bool) {
 	value, ok := s.roomLoads.Load(room)
 	if !ok {
-		return 0, false
+		return decodedState{}, false
 	}
 	load := value.(*roomLoad)
 	load.mu.Lock()
 	defer load.mu.Unlock()
-	return load.scans, true
+	decoded := load.decoded
+	load.decoded = decodedState{}
+	return decoded, true
 }
 
 // took records version, which this process has made durable for the room while its load runs: on

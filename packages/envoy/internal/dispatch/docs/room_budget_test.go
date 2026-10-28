@@ -28,9 +28,9 @@ import (
 
 // A room is charged three parts: its latest count at both copies; the content its transactions
 // have added since that count, at the densest price at both copies; and its structure part. Both
-// copies are charged from its load, before its first update makes the second (roomCopies). Each
-// count replaces the last rather than adding to it, so the charge falls when the document does, and
-// clears the content added up to the rendering it measured; no count touches the structure part. A
+// copies are charged from its load, which keeps both (roomCopies). Each count replaces the last
+// rather than adding to it, so the charge falls when the document does, and clears the content
+// added up to the rendering it measured; no count touches the structure part. A
 // rendering goldmark could not finish counting is priced from its bytes at the densest price, past
 // the element bound and never at nothing. A socket's reservation is replaced by its room's charge
 // when the room loads, and the whole charge goes when ygo retires the room.
@@ -42,7 +42,7 @@ func TestTheRoomBudgetChargesARoomItsCountItsUncountedContentAndItsStructure(t *
 	requireCharged(t, budget, charge, counted, "a room that has taken no update is charged both copies")
 
 	charge.adds(100)
-	requireCharged(t, budget, charge, counted+100*densest, "the content the first update adds, which makes the second copy, is charged at the densest price")
+	requireCharged(t, budget, charge, counted+100*densest, "the content the first update adds is charged at the densest price at both copies")
 	charge.grew(5_000)
 	requireCharged(t, budget, charge, counted+100*densest+5_000, "the structure an update adds is charged as it is")
 	charge.adds(50)
@@ -154,7 +154,7 @@ func TestTheMeasurersCountClearsOnlyTheContentAddedUpToTheRenderingItMeasured(t 
 	}
 
 	live := newDocumentCopy()
-	replica := service.keepReplica(live, nil, &loaded)
+	replica := service.keepReplica(live, nil, &loaded, nil)
 	charge := service.chargeLoadedRoom("room", live, replica)
 	requireCharged(t, &service.budget, charge, 2*int64(len(loaded))*bytesOfHeapAByteAtTheDensest,
 		"a room loaded with a rendering the counter cannot finish is priced from its bytes at the densest price")
