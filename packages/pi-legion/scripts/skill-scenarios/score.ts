@@ -2473,7 +2473,9 @@ function outsidePath(
       if (!parsed.success || parsed.data.message?.role !== "assistant") continue;
       for (const part of parsed.data.message.content ?? []) {
         if (part.type !== "toolCall") continue;
-        for (const [target] of argumentStrings(part.arguments).join("\n").matchAll(ABSOLUTE_PATH)) {
+        for (const [named] of argumentStrings(part.arguments).join("\n").matchAll(ABSOLUTE_PATH)) {
+          // `/../tmp/x` is /tmp/x: judge the path a call reaches, not how it spells it.
+          const target = path.posix.normalize(named);
           const top = `/${target.split("/")[1] ?? ""}`;
           if (top !== "/" && existsSync(top) && !inside(target))
             return { tool: part.name ?? "tool", path: target };
