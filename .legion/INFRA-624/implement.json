@@ -2,48 +2,40 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-624",
-  "completed": "2026-10-28T12:45:00Z",
+  "completed": "2026-10-28T15:05:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2433",
   "proof": [
+    {
+      "criterion": "Review round 2 item 1: typing over a selection from the question into a list, Ctrl+X, input with no keypress, an input method composition and a drag inside a decision two editors broke neither throw nor lose an unselected word",
+      "surface": "Dispatch document editor in headless Chromium against the real Go server and Postgres (five rows in ask-concurrent-edit.e2e.ts), plus happy-dom rows in packages/proof-editor/tests/ask-concurrent-edit.test.ts",
+      "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts unknown-directive.e2e.ts ask-blocks.e2e.ts editor-paste.e2e.ts text-typed-blocks.e2e.ts --project chromium --project iphone; cd packages/proof-editor && bun run test",
+      "observed": "173 passed (11.2m), 0 failed; the 10 ask-concurrent-edit rows pass, including the five new ones (every unselected word in both pages and the stored markdown, the ask still open, no page error); ask-concurrent-edit alone passed 20/20 with --repeat-each 2; proof-editor 179 pass, 0 fail.",
+      "headSha": "af271aab85eabf74d050e2ac5b2652abadee016b",
+      "negativeControl": "With lib.ts installing only the old keydown guard: typing over -> page error 'Content does not fit in gap'; Ctrl+X -> 'Content does not fit in gap'; input with no keypress -> Option A lost (received 'Which xion BOption C…'); composition -> 'Content does not fit in gap' twice; drag -> 'Called contentMatchAt on a node with invalid content' (5 failed); happy-dom rows 3 fail."
+    },
+    {
+      "criterion": "Review round 2 items 2 and 3: an ask-edit of a decision with a paragraph after its options keeps that paragraph in place, neither moved into the question nor deleted; the content-rule decision is in one place",
+      "surface": "Go document service against Postgres (packages/envoy/internal/dispatch/docs)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55433/postgres go test ./internal/dispatch/docs/ ./internal/dispatch/api/ -count=1 -run 'AskBlock|SetAsk|EditAsk|AskEdit|Invalid|Settlement|Idempot' -timeout 40m",
+      "observed": "ok (docs 126s, api 65s); TestSetAskBlockTextRefusesAnEditOfAnAskWithAParagraphAfterItsOptions (options only, options and question, question only) refuses with field block, quoting 'Stray words after the list' and naming dispatch doc-edit, live tree and row unchanged; the two-list repair tests (the tester's included, unmodified) pass.",
+      "headSha": "af271aab85eabf74d050e2ac5b2652abadee016b",
+      "negativeControl": "Before the change the options-only and options-and-question subtests failed: err = <nil> (the edit moved the paragraph into the question, or deleted it)."
+    },
     {
       "criterion": "Test failure (round 2): the ask-edit route repairs a decision two editors broke when the edit sends every option it holds, with or without a new question",
       "surface": "Dispatch's real Go server + Postgres + headless Chromium: two editors break decision a1, then PATCH /api/v1/asks/{id} through the e2e API client (throwaway probe spec built from ask-concurrent-edit.e2e.ts's helpers, deleted after the run)",
       "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- zz-tmp-edit-probe.e2e.ts --project chromium",
-      "observed": "Stored before: 'Which one?\\n\\n- Option B\\n\\n* Option A' (malformed in both pages). PATCH {question:'Which one now?', options:[Option A, Option B]} returned the ask with those options; both pages then show one list and no malformed mark; stored 'Which one now?\\n\\n- Option A\\n- Option B'; open_asks a1 options Option A, Option B, edited_at set; no page error. The tester's red test TestSetAskBlockTextRepairsATwoListAskWhenSentEveryOptionItHolds (unmodified) passes both subtests.",
-      "headSha": "524cda673566538829d33bd344dd8d7ada0ad794",
+      "observed": "Stored before: 'Which one?\\n\\n- Option B\\n\\n* Option A' (malformed in both pages). PATCH {question:'Which one now?', options:[Option A, Option B]} returned the ask with those options; both pages then show one list and no malformed mark; stored 'Which one now?\\n\\n- Option A\\n- Option B'; open_asks a1 options Option A, Option B, edited_at set; no page error. The tester's red test TestSetAskBlockTextRepairsATwoListAskWhenSentEveryOptionItHolds (unmodified) passes both subtests. Re-run at af271aab: passes.",
+      "headSha": "af271aab85eabf74d050e2ac5b2652abadee016b",
       "negativeControl": "In the same run, a question-only PATCH of the broken decision is refused 400 ASK_BLOCK_TEXT 'block: ask block \"a1\" … holds a second bullet list … send options to rebuild the options as one list'. Before the fix the red test failed both subtests ('… send options to rebuild the options as one list' and 'options: the block carries 1 options, not 3'), the tester's 400 on the real surface."
     },
     {
       "criterion": "A1. Two editors whose crossed edits leave an ask holding two lists keep the question and both options in both editors and the stored document; the ask stays open, is marked malformed, and joining the lists clears that",
       "surface": "Dispatch document editor in headless Chromium against the real Go Dispatch server and Postgres 17 in the issue pod",
       "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts unknown-directive.e2e.ts ask-blocks.e2e.ts editor-paste.e2e.ts text-typed-blocks.e2e.ts --project chromium --project iphone",
-      "observed": "168 passed (9.5m), 0 failed (main's #2313 makes the iphone project run only @phone rows). The ask-concurrent-edit rows pass: words kept in both pages and the stored markdown, data-dispatch-ask-malformed=true, open_asks holds a1, Backspace at the start of the second list clears the mark and the ask takes both options; Enter in the question (caret now placed in the question paragraph of the content hole, not the banner) keeps every word and More lands in the question paragraph. (code unchanged since b1f6d7bb except ask_block_text.go's repair fix)",
-      "headSha": "b1f6d7bb69a0188d6da551be9975ad9a5edf8f74",
+      "observed": "168 passed (9.5m), 0 failed (main's #2313 makes the iphone project run only @phone rows). The ask-concurrent-edit rows pass: words kept in both pages and the stored markdown, data-dispatch-ask-malformed=true, open_asks holds a1, Backspace at the start of the second list clears the mark and the ask takes both options; Enter in the question (caret now placed in the question paragraph of the content hole, not the banner) keeps every word and More lands in the question paragraph. (code unchanged since b1f6d7bb except ask_block_text.go's repair fix) Re-run at af271aab: passes.",
+      "headSha": "af271aab85eabf74d050e2ac5b2652abadee016b",
       "negativeControl": "At the base 2df3353c the same spec file fails every row at toHaveAttribute data-dispatch-ask-malformed \"true\" -> element(s) not found (the ask and its words deleted)."
-    },
-    {
-      "criterion": "Review item 2: Enter twice to leave a list, Backspace at the start of a first list's first item, and Backspace over a selection from the question into a list are declined inside a broken ask, keeping every word, with no page error",
-      "surface": "Dispatch document editor in headless Chromium (three rows in ask-concurrent-edit.e2e.ts) and the proof-editor live stack in happy-dom (three rows in tests/ask-concurrent-edit.test.ts)",
-      "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts unknown-directive.e2e.ts ask-blocks.e2e.ts editor-paste.e2e.ts text-typed-blocks.e2e.ts --project chromium --project iphone; cd packages/proof-editor && bun run test",
-      "observed": "the three browser rows pass in the run above (words kept in both pages and the stored markdown, ask still in open_asks, no page error); proof-editor 164 pass, 0 fail. (code unchanged since b1f6d7bb except ask_block_text.go's repair fix)",
-      "headSha": "b1f6d7bb69a0188d6da551be9975ad9a5edf8f74",
-      "negativeControl": "With the guard's install line `view.setProps({ handleKeyDown: guardBrokenAskKeys })` commented out, the browser rows fail with page errors \"Called contentMatchAt on a node with invalid content\", \"Content does not fit in gap\", \"Content does not fit in gap\", and the happy-dom rows throw the same TransformErrors (3 fail)."
-    },
-    {
-      "criterion": "Review item 1: a past version's view (live setMarkdown) keeps an answered decision's server attributes after main's INFRA-612 merge",
-      "surface": "@legion/proof-editor live stack in happy-dom (tests/typed-block-drawing.test.ts)",
-      "command": "cd packages/proof-editor && bun run test",
-      "observed": "the row 'the live editor's version view keeps an answered decision's server attributes' passes: state answered, answered_by and selected kept (code unchanged since b1f6d7bb except ask_block_text.go's repair fix)",
-      "headSha": "b1f6d7bb69a0188d6da551be9975ad9a5edf8f74",
-      "negativeControl": "with liveTypedBlocksRemarkPlugin calling remarkReadOnlyDirectives (which drops server attributes): Expected \"answered\", Received \"open\""
-    },
-    {
-      "criterion": "Settlement marks a content-rule break invalid and keeps an open ask open and a decided ask decided; the ask-edit route refuses an edit that leaves the break unless it sends options",
-      "surface": "Go document service against Postgres (packages/envoy/internal/dispatch/docs)",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55433/postgres go test ./internal/dispatch/docs/ -count=1 -timeout 50m",
-      "observed": "ok (777s), TestSetAskBlockTextRefusesAnEditLeavingASecondBulletList and TestSettlementMarksADecidedAskWithASecondBulletListInvalid included (code unchanged since b1f6d7bb except ask_block_text.go's repair fix)",
-      "headSha": "b1f6d7bb69a0188d6da551be9975ad9a5edf8f74",
-      "negativeControl": "with refuseAskContentBreak switched off: urgency only edit of a two-list ask: err = <nil>, want ErrAskBlockUnrepresentable"
     }
   ],
   "filesChanged": [
@@ -62,7 +54,8 @@
     "round 2: packages/envoy/internal/dispatch/pmdoc/schema/block-node-types.json (new), pmdoc/node.go (embeds it), docs/ask_block_text.go (refuseAskContentBreak), docs/ask_blocks.go",
     "round 2: tests in proof-editor, docs/service_test.go, dispatch e2e (ask-concurrent-edit.e2e.ts, editor.ts placeCaret scope), VersionView.test.tsx",
     "round 2: packages/envoy/.changes/unreleased/pr2433-*.yaml (CHANGELOG.md back to main's), packages/envoy/AGENTS.md, packages/proof-editor/AGENTS.md",
-    "round 3: packages/envoy/internal/dispatch/docs/ask_block_text.go (options sent to a block off its content rule always rebuild one list)"
+    "round 3: packages/envoy/internal/dispatch/docs/ask_block_text.go (options sent to a block off its content rule always rebuild one list)",
+    "round 4: proof-editor src/ask-content.ts (brokenAskInputGuards), src/lib.ts; docs/ask_block_text.go (refuseAskContentEdit, withoutUnchanged); e2e editor.ts (every range search editable-only); pmdoc node_test.go (test removed); two docs/solutions notes; AGENTS.md files; pr2433 fragment bodies"
   ],
   "trickyParts": [
     "Which of the two crossed option lists comes first is decided by the two editors' Yjs client ids, so the browser test reads the second list from the page before Backspace; Backspace at the start of the first list lifts its item into the question (a valid ask with one option), which made the first version of the test flaky (2 of 3 runs).",
@@ -74,8 +67,10 @@
     "The census read every live document through the API (2,520 issues unpaged, 6,029 documents, 636 ask blocks, 19 open): 0 newly marked, so the mark was implemented without waiting, as the architect's condition allows.",
     "GitHub reported #2433 CONFLICTING after the daemon outage: main@origin merged forward (merge commit 1c67b209, CHANGELOG conflict only, both sides kept); fingerprint unchanged.",
     "Round 2: two Go api tests (TestEventPayloadsAreServedAsStoredForEveryEventKind, TestIssueRanksStayOrdered…) fail on the pod's SQL_ASCII/C Postgres cluster and pass on a UTF-8 ICU en-US cluster (port 55433); environment only, so the docs suite ran there too.",
-    "Round 2: the reviewer's fast-follow (press() key table in tests/marks-editor.ts) is done in this PR."
+    "Round 2: the reviewer's fast-follow (press() key table in tests/marks-editor.ts) is done in this PR.",
+    "Round 4: fragment names stay pr2433-*.yaml per the controller's ruling; the reviewer withdrew that finding. Still open, reachable only from scripts: document.execCommand('insertText'|'delete') over a cross-block selection fires no beforeinput, so ProseMirror reads the DOM edit back and the second list is lost.",
+    "Round 4: the reviewer's fast-follow (test setup duplication) is not done in this round, as the architect narrowed the round to the review's must-change list."
   ],
   "openQuestions": [],
-  "round": 3
+  "round": 4
 }
