@@ -77,16 +77,21 @@
 # window_start>` of --stored-order-commit, with the copy's DATABASE_URL on its standard input (never
 # on a command line), for at most 30 min. Its output goes into <step>/stored-order.txt, its summary
 # line into <step>/stored-order.json, and one line names the counts. A non-zero exit is a
-# correctness finding, not a step failure. collect writes <run>/STORED-ORDER.md. Without
+# correctness finding, not a step failure. Before the next reset drops the database, the rows of
+# each mismatched or refused document (artifacts, doc_checkpoints, artifact_versions, doc_updates)
+# go into <step>/stored-order-evidence/<artifact uuid>/ as gzipped CSVs, with version-<n>.md for
+# each mismatched version's stored markdown, through psql \copy to stdout in the Postgres pod,
+# within 600 s; stored-order.json evidence names them. A failed export is reported, never a step
+# failure, and the evidence is never uploaded. collect writes <run>/STORED-ORDER.md. Without
 # --stored-order-commit, each step prints one line saying that the check is skipped.
 #
 # Every subcommand needs --namespace (no default; a Legion pod's own namespace is builds), and
 # every kubectl call names it. Subcommands after up find the run from the lock's `run` and its
 # directory ${LOADTEST_CLUSTER_ROOT:-$TMPDIR/dispatch-loadtest-cluster}/<run id>/ (state.json, mode
 # 600, holds the digests and the run's random credentials; cgroup.jsonl; steps/; logs/); --run ID
-# names the run instead. Needs kubectl, jq, curl, gh, go, setsid, timeout, tar, sha256sum, uv
-# (collect), git (up --stored-order-commit), dispatch (collect --upload-issue), and DISPATCH_URL and
-# DISPATCH_TOKEN_FILE (replay-prepare's downloads, without --from-dir).
+# names the run instead. Needs kubectl, jq, curl, gh, go, setsid, timeout, tar, gzip, base64,
+# sha256sum, uv (collect), git (up --stored-order-commit), dispatch (collect --upload-issue), and
+# DISPATCH_URL and DISPATCH_TOKEN_FILE (replay-prepare's downloads, without --from-dir).
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -123,6 +128,11 @@ OUTAGE_CORES=11.1,13.8
 OUTAGE_MEMORY_GIB=13.8
 # The stored-order check's bound, in seconds (its timeout's exit status is 124).
 STORED_ORDER_SECONDS=1800
+# The stored-order evidence export's bound for all of one step's documents, in seconds, and the
+# tables it exports for each document, as table:key column[:order]: every table that `envoy-dispatch
+# stored-order` reads of a document (INFRA-707's internal/dispatch/docs/storedorder.go).
+STORED_ORDER_EVIDENCE_SECONDS=600
+STORED_ORDER_TABLES=(artifacts:id doc_checkpoints:artifact_id artifact_versions:artifact_id:number doc_updates:artifact_id:version)
 # What down deletes and then lists: the kinds of `kubectl get all` that the load-test Role may
 # read (it may not list replicationcontrollers, daemonsets, horizontalpodautoscalers or
 # cronjobs, so `get all` itself is refused), and the claims, ConfigMaps and Secrets.
@@ -975,13 +985,163 @@ stored_order_summary() {
         else $s | map_values(tonumber) end)' <"$1"
 }
 
+# stored_order_flagged TXT: each document that stored-order's output TXT names as mismatched or
+# refused, once, in the order TXT first names it: a document line with mismatches above 0 or a
+# refused=, or a mismatch line (`version number=N ...`, `class update=N ...`, `pending update=N
+# ...`). One line each: the artifact id, then the numbers of its mismatched versions. A document
+# that failed to read (`<id> error (...)`) is not named.
+stored_order_flagged() {
+  local line id rest
+  local re_line='^stored-order: ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) (.*)$'
+  local re_doc='^base=[0-9]+ .* mismatches=([0-9]+)( refused=.*)?$'
+  local re_version='^version number=([0-9]+) ' re_update='^(class|pending) update=[0-9]+ '
+  local order=()
+  local -A versions=()
+  while IFS= read -r line; do
+    [[ $line =~ $re_line ]] || continue
+    id=${BASH_REMATCH[1]} rest=${BASH_REMATCH[2]}
+    if [[ $rest =~ $re_doc ]]; then
+      [[ ${BASH_REMATCH[1]} != 0 || -n ${BASH_REMATCH[2]} ]] || continue
+    elif [[ $rest =~ $re_version ]]; then
+      versions[$id]+=" ${BASH_REMATCH[1]}"
+    elif ! [[ $rest =~ $re_update ]]; then
+      continue
+    fi
+    [ -n "${versions[$id]+x}" ] || order+=("$id")
+    versions[$id]+=""
+  done <"$1"
+  for id in "${order[@]}"; do printf '%s%s\n' "$id" "${versions[$id]}"; done
+}
+
+# csv_rows FILE: the records of the CSV file FILE less its header line. A quoted field keeps its
+# line breaks inside the record, and a quote inside one is two quotes, so a record ends at the
+# line where the count of quotes so far is even.
+csv_rows() { awk '{ q += gsub(/"/, "") } q % 2 == 0 { n++ } END { print (n > 0 ? n - 1 : 0) }' "$1"; }
+
+# stored_order_psql SECONDS OUT SQL...: psql in the Postgres pod on database dispatch, each SQL a
+# -c (a psql \copy runs there and writes to its standard output), that output streamed back through
+# kubectl exec into OUT, bounded at SECONDS. Nothing is written in the pod. psql's standard error
+# goes to OUT.err, removed when psql succeeds.
+stored_order_psql() {
+  local seconds=$1 out=$2 sql args=()
+  shift 2
+  for sql in "$@"; do args+=(-c "$sql"); done
+  if kube_for "$seconds" exec postgres-0 -c postgres -- psql -X -q -U dispatch -d dispatch -v ON_ERROR_STOP=1 "${args[@]}" \
+    </dev/null >"$out" 2>"$out.err"; then
+    rm -f -- "$out.err"
+  else
+    return 1
+  fi
+}
+
+# stored_order_failure OUT EXIT: why stored_order_psql of OUT failed, on one line: the timeout, or
+# psql's first line of standard error. OUT and OUT.err are removed.
+stored_order_failure() {
+  local why
+  if (($2 == 124)); then
+    why="timed out (exit 124)"
+  else
+    why="exit $2: $(head -n1 -- "$1.err" 2>/dev/null)"
+  fi
+  rm -f -- "$1" "$1.err"
+  printf '%s\n' "$why"
+}
+
+# stored_order_export ID OUT DEADLINE VERSION...: one document's rows from the copy's database, each
+# psql call bounded by what is left of DEADLINE (epoch seconds), into OUT: <table>.csv.gz (a header
+# line, then every row) for each table of STORED_ORDER_TABLES, and version-<n>.md, each mismatched
+# VERSION's stored markdown, byte for byte, when artifact_versions holds one. Prints one JSON
+# object: artifact, tables (each exported table's row count), versions (the version-<n>.md
+# written) and, when a part failed, error (each failed part, with why).
+stored_order_export() {
+  local id=$1 out=$2 deadline=$3 spec table key order file rows left rc n tables='{}' errors=() written=()
+  shift 3
+  mkdir -p -- "$out" || return 1
+  for spec in "${STORED_ORDER_TABLES[@]}"; do
+    IFS=: read -r table key order <<<"$spec"
+    file=$out/$table.csv
+    left=$((deadline - EPOCHSECONDS))
+    if ((left <= 0)); then
+      errors+=("$table: not exported: the export's $STORED_ORDER_EVIDENCE_SECONDS s ran out")
+      continue
+    fi
+    rc=0
+    stored_order_psql "$left" "$file" \
+      "\\copy (select * from $table where $key = '$id'${order:+ order by $order}) to stdout with csv header" || rc=$?
+    if ((rc != 0)); then
+      errors+=("$table: $(stored_order_failure "$file" "$rc")")
+    elif rows=$(csv_rows "$file") && gzip -f -- "$file"; then
+      tables=$(jq -c --arg t "$table" --argjson n "$rows" '. + {($t): $n}' <<<"$tables")
+    else
+      errors+=("$table: counting or compressing its rows failed")
+      rm -f -- "$file" "$file.gz"
+    fi
+  done
+  for n in "$@"; do
+    file=$out/.version-$n.base64
+    left=$((deadline - EPOCHSECONDS))
+    if ((left <= 0)); then
+      errors+=("version $n: not exported: the export's $STORED_ORDER_EVIDENCE_SECONDS s ran out")
+      continue
+    fi
+    rc=0
+    # No row when the version holds no markdown; base64, so the markdown's bytes come back as stored.
+    stored_order_psql "$left" "$file" "\\pset tuples_only on" "\\pset format unaligned" \
+      "select encode(convert_to(markdown, 'UTF8'), 'base64') from artifact_versions where artifact_id = '$id' and number = $n and markdown is not null" || rc=$?
+    if ((rc != 0)); then
+      errors+=("version $n: $(stored_order_failure "$file" "$rc")")
+    elif [ -s "$file" ]; then
+      if base64 -d <"$file" >"$out/version-$n.md"; then
+        written+=("$n")
+      else
+        errors+=("version $n: its markdown did not decode from base64")
+        rm -f -- "$out/version-$n.md"
+      fi
+    fi
+    rm -f -- "$file"
+  done
+  jq -nc --arg a "$id" --argjson t "$tables" \
+    --argjson e "$(printf '%s\n' "${errors[@]}" | jq -Rsc 'split("\n") | map(select(. != ""))')" \
+    '{artifact: $a, tables: $t, versions: ($ARGS.positional | map(tonumber))} + (if $e == [] then {} else {error: $e} end)' \
+    --args "${written[@]}"
+}
+
+# stored_order_evidence NAME TXT DIR: before the next reset drops the database, the rows of each
+# document that stored-order's output TXT names as mismatched or refused (stored_order_flagged),
+# exported into DIR/stored-order-evidence/<artifact>/ (stored_order_export), all within
+# STORED_ORDER_EVIDENCE_SECONDS. Prints the JSON array of what was exported (stored-order.json's
+# evidence) and one line naming the documents and each failure. A failure never fails the step.
+# Nothing is uploaded: pack_tar leaves stored-order-evidence out of the tar parts.
+stored_order_evidence() {
+  local name=$1 txt=$2 out=$3/stored-order-evidence deadline entry why entries=() flagged=() words=() line
+  rm -rf -- "$out"
+  mapfile -t flagged < <(stored_order_flagged "$txt")
+  if ((${#flagged[@]} == 0)); then
+    echo '[]'
+    return 0
+  fi
+  deadline=$((EPOCHSECONDS + STORED_ORDER_EVIDENCE_SECONDS))
+  for line in "${flagged[@]}"; do
+    read -ra words <<<"$line"
+    entry=$(stored_order_export "${words[0]}" "$out/${words[0]}" "$deadline" "${words[@]:1}") ||
+      entry=$(jq -nc --arg a "${words[0]}" '{artifact: $a, tables: {}, versions: [], error: ["the export did not complete"]}')
+    entries+=("$entry")
+    why=$(jq -r '(.error // []) | join("; ")' <<<"$entry")
+    [ -z "$why" ] || note "step $name: the stored-order evidence of ${words[0]} is incomplete: $why"
+  done
+  note "step $name: the stored-order evidence of ${#flagged[@]} mismatched or refused documents is in $out (kept on this pod, not uploaded)"
+  printf '%s\n' "${entries[@]}" | jq -sc .
+}
+
 # stored_order_check NAME DIR: the stored-order check of step NAME (see the header) after its
 # loadgen run, while Dispatch still runs: DIR/stored-order.txt (the command's standard output and
-# error), DIR/stored-order.json (stored_order_summary) and one line naming the counts. A non-zero
-# exit is a finding, never the step's failure. Without the run's envoy-dispatch (up was given no
-# --stored-order-commit), one line says that the check is skipped.
+# error), DIR/stored-order.json (stored_order_summary, and evidence: stored_order_evidence's
+# export of each mismatched or refused document, made here, before the next reset drops the
+# database) and one line naming the counts. A non-zero exit is a finding, never the step's failure.
+# Without the run's envoy-dispatch (up was given no --stored-order-commit), one line says that the
+# check is skipped.
 stored_order_check() {
-  local name=$1 dir=$2 commit since rc=0 txt=$2/stored-order.txt
+  local name=$1 dir=$2 commit since evidence rc=0 txt=$2/stored-order.txt
   commit=$(state '.stored_order.commit // empty')
   if [ -z "$commit" ]; then
     note "step $name: the stored-order check is skipped: up was given no --stored-order-commit"
@@ -1003,6 +1163,12 @@ stored_order_check() {
     + if .exit == null then "not run: meta.json holds no window_start"
       else "exit \(.exit)\(if .exit == 124 then " (timed out)" else "" end), documents=\(.documents | n) clean=\(.clean | n) mismatched=\(.mismatched | n) refused=\(.refused | n) failed=\(.failed | n)"
         + (if .exit == 0 then "" else "; a correctness finding, not a step failure: \($name)/stored-order.txt" end) end' "$dir/stored-order.json")"
+  evidence=$(stored_order_evidence "$name" "$txt" "$dir") || {
+    note "step $name: the stored-order evidence export did not complete"
+    evidence='[]'
+  }
+  jq --argjson evidence "$evidence" '. + {evidence: $evidence}' "$dir/stored-order.json" >"$dir/stored-order.json.tmp"
+  mv -- "$dir/stored-order.json.tmp" "$dir/stored-order.json"
 }
 
 # stored_order_table DIR...: <run>/STORED-ORDER.md: the commit the check's envoy-dispatch was built
@@ -1621,7 +1787,9 @@ zstd_compress() {
 # of steps) as it was at the last pack, so a tar packed and uploaded from the same list is left
 # alone, and a list that gained a step, however soon after the last pack, packs again. The copy is
 # compared, not the two files' times, since two steps of a phase can end within one tick of the
-# file system's clock. With no STAMP, the tar is packed and uploaded again.
+# file system's clock. With no STAMP, the tar is packed and uploaded again. A step's
+# stored-order-evidence/ (document text, which a replay recreates from a production bundle) is left
+# out: it stays on the pod, never uploaded.
 pack_tar() {
   local name=$1 issue=$2 stamp=$3 dir=$4 up=$RUN_DIR/upload base part
   shift 4
@@ -1629,7 +1797,7 @@ pack_tar() {
   base=$up/cluster-load-test-$(state '.created[0:10]')-raw-$name.tar.zst.part
   if [ -z "$stamp" ] || ! cmp -s -- "$stamp" "$up/$name.packed"; then
     rm -f -- "$base"[0-9][0-9] "$up/$name.uploaded" "$up/$name.packed"
-    tar -C "$dir" -cf - "$@" | zstd_compress | split -b 24000000 -d -a 2 - "$base" ||
+    tar -C "$dir" --exclude=stored-order-evidence -cf - "$@" | zstd_compress | split -b 24000000 -d -a 2 - "$base" ||
       die "packing phase $name failed"
     if [ -n "$stamp" ]; then cp -- "$stamp" "$up/$name.packed"; else : >"$up/$name.packed"; fi
     note "phase $name packed: $(printf '%s ' "$base"[0-9][0-9])"
@@ -1772,7 +1940,7 @@ up_run() {
   local so_commit=${OPT[stored-order-commit]:-}
   PRODUCTION_REPO=${OPT[production-repo]:-}
   local tool
-  for tool in kubectl jq curl gh go setsid timeout sha256sum awk tar; do
+  for tool in kubectl jq curl gh go setsid timeout sha256sum awk tar gzip base64; do
     command -v "$tool" >/dev/null || die "up needs $tool on PATH"
   done
   [ -n "$sc" ] || die "up: --storage-class is required (for GKE: premium-rwo)"

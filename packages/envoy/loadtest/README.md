@@ -1388,10 +1388,11 @@ credential: every token and password is random and made for the run.
   4-vCPU tier (`db-size 4 15Gi`) Postgres requests 12 CPUs and 45Gi less. No Service is a
   LoadBalancer or a NodePort, and no pod has a priority class.
 - **The tools on the worker's `PATH`:** `kubectl`, `jq`, `curl`, `gh`, `go`, `setsid`, `timeout`,
-  `tar`, `sha256sum`, `uv` (collect's zstd compression), `git` (only for `--stored-order-commit`)
-  and `dispatch` (only for `--upload-issue`). `gh` must read the deployment repository that
-  `--production-repo` names: `up` reads its main's `dispatch/main.go` (`databaseVersion`) and
-  `dispatch/Pulumi.prod.yaml` (`<project>:listenerImage`).
+  `tar`, `gzip` and `base64` (the stored-order evidence), `sha256sum`, `uv` (collect's zstd
+  compression), `git` (only for `--stored-order-commit`) and `dispatch` (only for
+  `--upload-issue`). `gh` must read the deployment repository that `--production-repo` names: `up`
+  reads its main's `dispatch/main.go` (`databaseVersion`) and `dispatch/Pulumi.prod.yaml`
+  (`<project>:listenerImage`).
 - **For the replay:** `DISPATCH_URL` and `DISPATCH_TOKEN_FILE` (a token that may read
   INFRA-639's artifacts), from which `replay-prepare` downloads INFRA-639's parts, as
   `stack.sh replay-get` does. The copy's pods never reach production: the worker downloads, and
@@ -1571,6 +1572,24 @@ order the steps ran: `since`, the exit and the five counts (`not run` for a step
 stored-order check is skipped: up was given no --stored-order-commit`, and `STORED-ORDER.md` says
 that no step ran the check.
 
+The next step's reset drops the database, and with it the rows behind a mismatch. So when
+`stored-order.txt` names a document as mismatched or refused (its document line has
+`mismatches` above 0 or a `refused=`, or a `version number=`, `class update=` or `pending
+update=` line names it), the check exports that document's rows before the step ends, into
+`<step>/stored-order-evidence/<artifact uuid>/`: one gzipped CSV with a header line per table that
+`stored-order` reads for it, `artifacts.csv.gz` (`id`), `doc_checkpoints.csv.gz`,
+`artifact_versions.csv.gz` (by `number`) and `doc_updates.csv.gz` (by `version`, the `update`
+bytes as psql's hex), each the rows `artifact_id` names, and `version-<n>.md`, the stored markdown
+of each mismatched version, byte for byte, when it has one. Each table is one `psql -c '\copy
+(select * from <table> where ...) to stdout with csv header'` in the Postgres pod, streamed out
+through `kubectl exec`, so no file is left in the pod. A document that failed to read (`error`)
+is not exported. `stored-order.json` `evidence` lists each document as `{artifact, tables: {<table>:
+<rows>}, versions: [<n>], error}`, with `error` only when a part failed; a clean run's is `[]`. The
+export of one step stops after 600 s; a part that fails or runs out of time is printed and named
+in `error`, and is never a step failure. The evidence holds document text, which a replay recreates
+from a production bundle, so it stays in the run directory on the worker pod: `collect` leaves it
+out of the tar parts and uploads nothing of it.
+
 ### Profiles and timings
 
 | Profile | Step window | Hour | Replays | Refinement | Time |
@@ -1619,7 +1638,7 @@ its cores and working set from `cgroup.json`. It also holds:
 | `step-failed.json` | Only when the step failed: `reasons`, each with `kind`, `role` and `detail`. `restart`: a container of the copy restarted during the step. `loadgen_exit`: `loadgen run` exited non-zero. `sampler_gap`: a container had no good cgroup read for more than 30 s in the window. |
 | `cgroup.json` | `loadgen cgroup-merge` of `cgroup.jsonl` over the window: `window_start`, `window_end`, `window_s`, `failed` and `failures`, and for each role `pods`, `container`, `samples`, `failed_reads`, `restarts`, `cpu_max`, `limit_cores`, `cores_mean`, `cores_peak_5s`, `cpu_s`, `throttled_s`, `working_set_bytes_mean` and `working_set_bytes_max` (`memory.current` less `inactive_file`), `max_gap_s`, and `minutes` (each whole minute's cores and mean working set; `null` for a minute with a gap over 30 s). A figure the reads cannot give is `null`, never 0. |
 | `loadgen.out` | The output of `loadgen run` in the runner. |
-| `stored-order.txt`, `stored-order.json` | Only with `--stored-order-commit`: the output of `envoy-dispatch stored-order --since <window_start>` after the step, and `commit`, `exit`, `since` and the counts of its summary line (`null` without one, never 0; The stored-order check, above). A non-zero exit is a correctness finding, not a `step-failed.json` reason. |
+| `stored-order.txt`, `stored-order.json`, `stored-order-evidence/` | Only with `--stored-order-commit`: the output of `envoy-dispatch stored-order --since <window_start>` after the step, and `commit`, `exit`, `since` and the counts of its summary line (`null` without one, never 0) and `evidence`; and the rows of each mismatched or refused document, never uploaded (The stored-order check, above). A non-zero exit is a correctness finding, not a `step-failed.json` reason. |
 | `dispatch.log`, `listener.log`, `postgres.log`, `nats-0.log`, `nats-1.log`, `nats-2.log` | Each container's log from the step's start. |
 | `CODEPATHS.md`, `codepaths.json` | `loadgen codepaths` (a replay step's from `replay` and again from `collect`, with the replay's flags; every other step's from `collect`): Dispatch's CPU by entry point and by subsystem (cores = the share × the Dispatch container's `cores_mean`), its working set at the window's end split into heap by code path, heap idle, stacks, other runtime memory and non-Go memory, and the outage's 10-minute buckets beside it. |
 

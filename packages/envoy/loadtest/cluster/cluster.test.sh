@@ -29,8 +29,12 @@
 # GOWORK=off and CGO_ENABLED=0 and records its commit and sha256; each step and replay then runs
 # stored-order --since its window start with DATABASE_URL set, the password on no command line and
 # in no recorded file, and writes stored-order.txt and stored-order.json (a clean run's counts, a
-# mismatching run's, which is no step failure, and nulls for a missing summary line); all without
-# the flag prints one skip line per step;
+# mismatching run's, which is no step failure, and nulls for a missing summary line); a mismatching
+# run exports each mismatched or refused document's rows (one psql \copy to stdout per table in the
+# Postgres pod, which the fake kubectl records and answers) and mismatched versions' markdown into
+# stored-order-evidence/<artifact>/, a failed table reported and no step failure, stored-order.json
+# evidence naming them, and collect's tar parts leave it out; a clean run exports nothing; all
+# without the flag prints one skip line per step;
 # replay-prepare downloads and verifies the parts, streams the dump into the Postgres pod,
 # restores it and renames it to dispatch_replay, writing replay-prepared.json and keeping the
 # manifest as replay-manifest.json; a replay's loadgen run holds -source replay -replay-rate 1
@@ -54,7 +58,9 @@
 # check's anchors by placement rule (with the share on the nearest surviving block) and its
 # sign-flipped versions, a count the check lacks written as "not recorded"; (j) stored-order.json
 # holds a clean run's and a mismatching run's counts, and nulls (never 0) for a missing summary
-# line, a timeout (exit 124) and a check not run.
+# line, a timeout (exit 124) and a check not run; (k) the evidence export takes each mismatched or
+# refused document once with its mismatched versions, never a clean or failed one, and counts CSV
+# records past quoted line breaks.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -204,6 +210,18 @@ case $verb in
       *"show all"*) echo 'max_connections|800|Sets the maximum number of concurrent connections.' ;;
       *"max(version)"*) echo 121 ;;
       *json_build_object*) echo '{"projects": 4, "issues": 1000}' ;;
+      # The stored-order evidence export: each table's CSV (a quoted field holding a line break and
+      # quotes, so a record is not a line), doc_checkpoints with no row and failing for
+      # 22222222-..., and version 7's markdown as base64.
+      *"\\copy (select * from doc_checkpoints where artifact_id = '22222222-"*)
+        echo 'ERROR:  canceling statement due to statement timeout' >&2
+        exit 1
+        ;;
+      *"\\copy (select * from doc_checkpoints "*) printf 'artifact_id,ceiling,state\n' ;;
+      *"\\copy (select * from artifacts "*) printf 'id,name\nfake,"a ""quoted""\nname"\n' ;;
+      *"\\copy (select * from artifact_versions "*) printf 'number,markdown\n1,"# One\n\nbody"\n7,"# Seven ""x"""\n' ;;
+      *"\\copy (select * from doc_updates "*) printf 'version,update\n1,\\x01\n2,\\x02\n3,\\x03\n' ;;
+      *"encode(convert_to(markdown, 'UTF8'), 'base64')"*"number = 7 "*) printf '# Seven "x"\n\nbody\n' | base64 ;;
       psql*) ;;
       *cpuinfo*) printf 'model name\t: Fake CPU @ 2.00GHz\n' ;;
       # Dispatch's container keeps its 16-core limit; Postgres's reads FAKE_DIR/cpu.max.
@@ -333,8 +351,9 @@ case ${FAKE_STORED_ORDER:-clean} in
     echo 'stored-order: documents=2 clean=2 mismatched=0 refused=0 failed=0'
     ;;
   mismatch)
-    echo 'stored-order: 11111111-1111-4111-8111-111111111111 base=4 updates_checked=9 updates_skipped=3 versions_checked=2 versions_skipped=1 mismatches=1'
-    echo 'stored-order: 11111111-1111-4111-8111-111111111111 version 7: markdown md5 0cc175b9 length 12, folded md5 92eb5ffe length 13'
+    echo 'stored-order: 11111111-1111-4111-8111-111111111111 base=4 updates_checked=9 updates_skipped=3 versions_checked=2 versions_skipped=1 mismatches=2'
+    echo 'stored-order: 11111111-1111-4111-8111-111111111111 class update=9 stored=false expected=true'
+    echo 'stored-order: 11111111-1111-4111-8111-111111111111 version number=7 doc_update_version=9 stored_md5=0cc175b9c0f1b6a831c399e269772661 stored_length=12 fold_md5=92eb5ffee6ae2fec3ad71c777531578f fold_length=13'
     echo 'stored-order: 22222222-2222-4222-8222-222222222222 base=0 updates_checked=0 updates_skipped=0 versions_checked=0 versions_skipped=0 mismatches=0 refused="no stored class"'
     echo 'stored-order: 33333333-3333-4333-8333-333333333333 base=1 updates_checked=2 updates_skipped=0 versions_checked=1 versions_skipped=0 mismatches=0'
     echo 'stored-order: documents=3 clean=1 mismatched=1 refused=1 failed=0'
@@ -712,20 +731,59 @@ so_call=$(grep -F '/work/envoy-dispatch stored-order' "$fake/kubectl.log") || fa
 ! grep -qF -- "$pg_password" <<<"$so_call" || fail "stored-order's kubectl call carries the Postgres password"
 grep -qx 'stored-order: documents=2 clean=2 mismatched=0 refused=0 failed=0' "$run_dir/steps/smoke/stored-order.txt" ||
   fail "stored-order.txt does not hold the command's output: $(cat "$run_dir/steps/smoke/stored-order.txt" 2>/dev/null)"
-jq -e --arg c "$commit_so" '. == {commit: $c, exit: 0, since: "2026-10-28T10:00:00Z", documents: 2, clean: 2, mismatched: 0, refused: 0, failed: 0}' \
+jq -e --arg c "$commit_so" '. == {commit: $c, exit: 0, since: "2026-10-28T10:00:00Z", documents: 2, clean: 2, mismatched: 0, refused: 0, failed: 0, evidence: []}' \
   "$run_dir/steps/smoke/stored-order.json" >/dev/null || fail "a clean run's stored-order.json is wrong: $(cat "$run_dir/steps/smoke/stored-order.json" 2>/dev/null)"
 grep -qF "step smoke: stored-order (envoy-dispatch of eeeeeeeeeeee) since 2026-10-28T10:00:00Z: exit 0, documents=2 clean=2 mismatched=0 refused=0 failed=0" "$tmp/out" ||
   fail "step smoke did not print the stored-order counts"
+# A clean run exports no evidence.
+! grep -qF -- '\copy' "$fake/kubectl.log" || fail "a clean stored-order run exported evidence: $(grep -F -- '\copy' "$fake/kubectl.log")"
+[ ! -e "$run_dir/steps/smoke/stored-order-evidence" ] || fail "a clean stored-order run wrote stored-order-evidence/"
 
 boxes=$(grep -c -- "-l dispatch-loadtest/run=$run,dispatch-loadtest/role=nats-box -o json" "$fake/kubectl.log" || true)
 FAKE_STORED_ORDER=mismatch run_cluster step --namespace "$ns" reads 10 --duration 1m --reads-only
 ((RC == 0)) || fail "step --reads-only with a stored-order mismatch exited $RC"
-jq -e --arg c "$commit_so" '. == {commit: $c, exit: 1, since: "2026-10-28T10:00:00Z", documents: 3, clean: 1, mismatched: 1, refused: 1, failed: 0}' \
+jq -e --arg c "$commit_so" 'del(.evidence) == {commit: $c, exit: 1, since: "2026-10-28T10:00:00Z", documents: 3, clean: 1, mismatched: 1, refused: 1, failed: 0}' \
   "$run_dir/steps/reads/stored-order.json" >/dev/null || fail "a mismatching run's stored-order.json is wrong: $(cat "$run_dir/steps/reads/stored-order.json" 2>/dev/null)"
 grep -qF 'step reads: stored-order (envoy-dispatch of eeeeeeeeeeee) since 2026-10-28T10:00:00Z: exit 1, documents=3 clean=1 mismatched=1 refused=1 failed=0; a correctness finding, not a step failure' "$tmp/out" ||
   fail "step reads did not print the mismatching stored-order counts as a finding"
 [ ! -f "$run_dir/steps/reads/step-failed.json" ] || fail "a stored-order mismatch was recorded as a step failure: $(cat "$run_dir/steps/reads/step-failed.json")"
 grep -q "^cgroup-merge $run_dir/steps/reads " "$fake/loadgen.log" || fail "step reads did not go on to cgroup-merge after a stored-order mismatch"
+# The evidence of the mismatched document (11111111-...) and the refused one (22222222-...): each
+# table psql \copy'd to stdout in the Postgres pod, gzipped here, and version 7's markdown; none of
+# the clean 33333333-.... The fake's doc_checkpoints of 22222222-... fails: reported, no step failure.
+so_mismatch=11111111-1111-4111-8111-111111111111 so_refused=22222222-2222-4222-8222-222222222222
+ev=$run_dir/steps/reads/stored-order-evidence
+psql_call="-n $ns exec postgres-0 -c postgres -- psql -X -q -U dispatch -d dispatch -v ON_ERROR_STOP=1 -c"
+for id in "$so_mismatch" "$so_refused"; do
+  for t in "artifacts where id = '$id'" "doc_checkpoints where artifact_id = '$id'" \
+    "artifact_versions where artifact_id = '$id' order by number" "doc_updates where artifact_id = '$id' order by version"; do
+    grep -qxF -- "$psql_call \\copy (select * from $t) to stdout with csv header" "$fake/kubectl.log" ||
+      fail "the evidence export did not \\copy $t to stdout in the Postgres pod: $(grep -F -- '\copy' "$fake/kubectl.log")"
+  done
+done
+[ "$(grep -cF -- '\copy' "$fake/kubectl.log")" = 8 ] || fail "the evidence export ran other \\copy calls: $(grep -F -- '\copy' "$fake/kubectl.log")"
+! grep -qF 33333333 "$fake/kubectl.log" || fail "the evidence export took the clean document 33333333-..."
+grep -qxF -- "$psql_call \\pset tuples_only on -c \\pset format unaligned -c select encode(convert_to(markdown, 'UTF8'), 'base64') from artifact_versions where artifact_id = '$so_mismatch' and number = 7 and markdown is not null" \
+  "$fake/kubectl.log" || fail "the evidence export did not read version 7's markdown: $(grep -F markdown "$fake/kubectl.log")"
+[ "$(grep -cF "encode(convert_to(markdown" "$fake/kubectl.log")" = 1 ] || fail "the evidence export read the markdown of a version that did not mismatch"
+# names DIR: the names in DIR, sorted, on one line.
+names() { find "$1" -mindepth 1 -printf '%f\n' | LC_ALL=C sort | tr '\n' ' '; }
+[ "$(names "$ev/$so_mismatch")" = "artifact_versions.csv.gz artifacts.csv.gz doc_checkpoints.csv.gz doc_updates.csv.gz version-7.md " ] ||
+  fail "the mismatched document's evidence is not one gzipped CSV per table and version-7.md: $(names "$ev/$so_mismatch")"
+[ "$(names "$ev/$so_refused")" = "artifact_versions.csv.gz artifacts.csv.gz doc_updates.csv.gz " ] ||
+  fail "the refused document's evidence is not the tables that exported: $(names "$ev/$so_refused")"
+printf 'number,markdown\n1,"# One\n\nbody"\n7,"# Seven ""x"""\n' | cmp -s - <(gzip -dc "$ev/$so_mismatch/artifact_versions.csv.gz") ||
+  fail "artifact_versions.csv.gz is not psql's CSV: $(gzip -dc "$ev/$so_mismatch/artifact_versions.csv.gz")"
+printf '# Seven "x"\n\nbody\n' | cmp -s - "$ev/$so_mismatch/version-7.md" || fail "version-7.md is not the stored markdown: $(cat "$ev/$so_mismatch/version-7.md")"
+jq -e --arg m "$so_mismatch" --arg r "$so_refused" '.evidence == [
+    {artifact: $m, tables: {artifacts: 1, doc_checkpoints: 0, artifact_versions: 2, doc_updates: 3}, versions: [7]},
+    {artifact: $r, tables: {artifacts: 1, artifact_versions: 2, doc_updates: 3}, versions: [],
+     error: ["doc_checkpoints: exit 1: ERROR:  canceling statement due to statement timeout"]}]' \
+  "$run_dir/steps/reads/stored-order.json" >/dev/null || fail "stored-order.json's evidence is wrong: $(jq -c .evidence "$run_dir/steps/reads/stored-order.json")"
+grep -qF "step reads: the stored-order evidence of $so_refused is incomplete: doc_checkpoints: exit 1: ERROR:  canceling statement due to statement timeout" "$tmp/out" ||
+  fail "step reads did not report the failed part of the evidence export"
+grep -qF "step reads: the stored-order evidence of 2 mismatched or refused documents is in $ev (kept on this pod, not uploaded)" "$tmp/out" ||
+  fail "step reads did not name where the stored-order evidence is"
 start=$(grep '^step-reads ' "$fake/runner-starts")
 [[ $start == *"-events 0 "* && $start == *"-requests 600 "* ]] || fail "a --reads-only step at 10x is not 0 events and 600 requests: $start"
 boxes=$(($(grep -c -- "-l dispatch-loadtest/run=$run,dispatch-loadtest/role=nats-box -o json" "$fake/kubectl.log") - boxes))
@@ -751,7 +809,7 @@ jq -e --arg dump "$(jq -r .seed.dump_sha256 "$seeded")" --arg tar "$(jq -r .bund
   "$run_dir/replay-prepared.json" >/dev/null || fail "replay-prepared.json lacks a field: $(cat "$run_dir/replay-prepared.json")"
 FAKE_STORED_ORDER=nosummary run_cluster replay --namespace "$ns" r16
 ((RC == 0)) || fail "replay r16 exited $RC"
-jq -e --arg c "$commit_so" '. == {commit: $c, exit: 1, since: "2026-10-28T10:00:00Z", documents: null, clean: null, mismatched: null, refused: null, failed: null}' \
+jq -e --arg c "$commit_so" '. == {commit: $c, exit: 1, since: "2026-10-28T10:00:00Z", documents: null, clean: null, mismatched: null, refused: null, failed: null, evidence: []}' \
   "$run_dir/steps/r16/stored-order.json" >/dev/null || fail "a stored-order run with no summary line does not record null counts: $(cat "$run_dir/steps/r16/stored-order.json" 2>/dev/null)"
 grep -qF 'stored-order: open database: failed to connect' "$run_dir/steps/r16/stored-order.txt" || fail "stored-order.txt does not hold the command's standard error"
 [ "$(grep -c -- "^-n $ns cp $run_dir/envoy-dispatch runner:/work/envoy-dispatch " "$fake/kubectl.log")" = 1 ] ||
@@ -803,6 +861,10 @@ run_cluster collect --namespace "$ns" --upload-issue TEST-1
 part=$(find "$run_dir/upload" -name 'cluster-load-test-*-raw-steps.tar.zst.part00' | head -n1)
 [ -n "$part" ] || fail "collect wrote no part of phase steps"
 grep -q -- "artifact --issue TEST-1 --name ${part##*/} --path $part" "$fake/dispatch.log" || fail "collect did not upload ${part##*/}"
+# The evidence stays on the pod: the steps tar leaves it out, and collect leaves it in place.
+tar -tf "$part" | grep -qx 'reads/stored-order.json' || fail "the steps tar lacks reads/stored-order.json: $(tar -tf "$part" | tr '\n' ' ')"
+! tar -tf "$part" | grep -q stored-order-evidence || fail "the steps tar, which collect uploads, holds the stored-order evidence"
+[ -f "$ev/$so_mismatch/doc_updates.csv.gz" ] || fail "collect did not leave the stored-order evidence in the step directory"
 [ "$(logged_steps 'tables -tops=false')" = "smoke reads r16" ] ||
   fail "collect's TABLES.md lists the steps as '$(logged_steps 'tables -tops=false')', not in the order they ran (smoke reads r16)"
 [ "$(logged_steps 'curves -out')" = "smoke reads" ] ||
@@ -920,8 +982,10 @@ tar -tf "$part" | grep -q '^\./r4/\|^r4/' || fail "the phase replay's tar lacks 
 # all --stored-order-commit: every step and replay runs the check while Dispatch runs, before the
 # next scale-down of Dispatch (a reset, replay-prepare or db-size).
 for s in 1x 2x 3x 5x 7x 10x 10x-reads 10x-hour r16 1x-db4 r4; do
-  jq -e '.exit == 0 and .documents == 2' "$run_dir/steps/$s/stored-order.json" >/dev/null || fail "all's step $s has no clean stored-order.json"
+  jq -e '.exit == 0 and .documents == 2 and .evidence == []' "$run_dir/steps/$s/stored-order.json" >/dev/null || fail "all's step $s has no clean stored-order.json"
 done
+! grep -qF -- '\copy' "$fake/kubectl.log" || fail "all's clean stored-order runs exported evidence"
+[ -z "$(find "$run_dir/steps" -name stored-order-evidence)" ] || fail "all's clean stored-order runs wrote stored-order-evidence/"
 [ "$(awk '/ scale deployment dispatch --replicas / { up = $NF } /envoy-dispatch stored-order/ { n++; if (up != 1) bad++ } END { print n + 0, bad + 0 }' "$fake/kubectl.log")" = "11 0" ] ||
   fail "all did not run the stored-order check once per step and replay, each while Dispatch was scaled up"
 [ "$(logged_steps 'tables -tops=false')" = "1x 2x 3x 5x 7x 10x 10x-reads 10x-hour r16 1x-db4 r4" ] ||
@@ -1154,7 +1218,7 @@ pass "the replay residual is the notes, then the seed check's anchors by placeme
   since=2026-10-28T10:00:00.123456789Z
   doc='stored-order: 11111111-1111-4111-8111-111111111111 base=4 updates_checked=9 updates_skipped=3 versions_checked=2 versions_skipped=1 mismatches=0'
   printf '%s\n' "$doc" 'stored-order: documents=1 clean=1 mismatched=0 refused=0 failed=0' >"$dir/clean.txt"
-  printf '%s\n' "$doc" 'stored-order: 11111111-1111-4111-8111-111111111111 version 3: markdown md5 0cc175b9 length 1, folded md5 92eb5ffe length 2' \
+  printf '%s\n' "$doc" 'stored-order: 11111111-1111-4111-8111-111111111111 version number=3 doc_update_version=7 stored_md5=0cc175b9c0f1b6a831c399e269772661 stored_length=1 fold_md5=92eb5ffee6ae2fec3ad71c777531578f fold_length=2' \
     'stored-order: 22222222-2222-4222-8222-222222222222 error (read updates: context canceled)' \
     'stored-order: documents=4 clean=1 mismatched=2 refused=0 failed=1' >"$dir/mismatch.txt"
   printf '%s\n' 'stored-order: open database: failed to connect' 'command terminated with exit code 1' >"$dir/missing.txt"
@@ -1175,3 +1239,33 @@ pass "the replay residual is the notes, then the seed check's anchors by placeme
   done
 )
 pass "stored-order.json holds a clean and a mismatching run's counts, and nulls, never 0, for a missing or truncated summary line, a timeout and a check not run"
+
+# ---- (k) the documents whose stored-order evidence is exported -----------------------------------
+
+(
+  # shellcheck source=packages/envoy/loadtest/cluster/cluster.sh
+  source "$cluster"
+  dir=$tmp/stored-order-flagged
+  mkdir -p "$dir"
+  a=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa b=bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb c=cccccccc-cccc-4ccc-8ccc-cccccccccccc
+  d=dddddddd-dddd-4ddd-8ddd-dddddddddddd e=eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee
+  counts='updates_checked=2 updates_skipped=0 versions_checked=2 versions_skipped=0'
+  printf '%s\n' "stored-order: $a base=1 $counts mismatches=0" \
+    "stored-order: $b base=1 $counts mismatches=3" \
+    "stored-order: $b version number=4 doc_update_version=9 stored_md5=0cc175b9c0f1b6a831c399e269772661 stored_length=1 fold_renders=false" \
+    "stored-order: $b pending update=9 parked_items=1 parked_delete_ranges=0" \
+    "stored-order: $b version number=12 doc_update_version=20 stored_md5=0cc175b9c0f1b6a831c399e269772661 stored_length=1 fold_md5=92eb5ffee6ae2fec3ad71c777531578f fold_length=2" \
+    "stored-order: $c base=0 updates_checked=0 updates_skipped=0 versions_checked=0 versions_skipped=0 mismatches=0 refused=\"a prune checkpoint stands at update 4: the history above it is being rewritten\"" \
+    "stored-order: $d error (read the document's stored updates: context canceled)" \
+    "stored-order: $e base=2 $counts mismatches=1 refused=\"update 5 does not apply to the fold before it: x\"" \
+    "stored-order: $e class update=3 stored=true expected=false" \
+    'stored-order: documents=5 clean=1 mismatched=1 refused=2 failed=1' >"$dir/out.txt"
+  printf '%s\n' "$b 4 12" "$c" "$e" >"$dir/want"
+  stored_order_flagged "$dir/out.txt" >"$dir/got" || fail "stored_order_flagged failed"
+  diff -u "$dir/want" "$dir/got" >&2 || fail "stored_order_flagged does not name each mismatched or refused document once, with its mismatched versions"
+  printf 'a,b\n1,"x\n""y"",\n"\n2,z\n' >"$dir/rows.csv"
+  [ "$(csv_rows "$dir/rows.csv")" = 2 ] || fail "csv_rows counts $(csv_rows "$dir/rows.csv") records, not 2, past a quoted line break"
+  printf 'a,b\n' >"$dir/header.csv"
+  [ "$(csv_rows "$dir/header.csv")" = 0 ] || fail "csv_rows of a header alone is not 0"
+)
+pass "the stored-order evidence takes each mismatched or refused document once with its mismatched versions, never a clean or failed one, and counts CSV records past quoted line breaks"
