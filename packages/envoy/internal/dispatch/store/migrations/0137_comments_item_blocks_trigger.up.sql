@@ -1,7 +1,7 @@
--- 0136_comments_item_blocks_trigger.up.sql
+-- 0137_comments_item_blocks_trigger.up.sql
 --
 -- A comment any build writes, on insert and on an edit of its body, is owed a block index
--- (0135's comment_block_state.owed_at). A block-aware build indexes the comment later in the same
+-- (0136's comment_block_state.owed_at). A block-aware build indexes the comment later in the same
 -- transaction, which clears owed_at, so a comment still owed was written by a build without the
 -- index, during the roll or after a rollback, and the server's block index reconciliation drains
 -- it.

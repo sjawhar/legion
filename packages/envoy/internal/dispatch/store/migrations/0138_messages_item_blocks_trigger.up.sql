@@ -1,7 +1,7 @@
--- 0137_messages_item_blocks_trigger.up.sql
+-- 0138_messages_item_blocks_trigger.up.sql
 --
--- A message any build inserts, a direct message included, is owed a block index (0135's
--- message_block_state.owed_at), as 0136 owes a comment. A message is never edited, so only an
+-- A message any build inserts, a direct message included, is owed a block index (0136's
+-- message_block_state.owed_at), as 0137 owes a comment. A message is never edited, so only an
 -- insert owes it.
 --
 -- Then every message already stored is owed too, in the same transaction, after the trigger:
