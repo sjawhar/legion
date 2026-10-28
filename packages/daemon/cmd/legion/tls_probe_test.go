@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
-	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeTLSClient struct {
@@ -118,6 +118,7 @@ func TestTLSCommandClientClassifiesApplicationErrorBeforeTruncatingDetail(t *tes
 	response := strings.Repeat("x", tlsDetailLimit) + " invalid XML received " + strings.Repeat("y", tlsDetailLimit)
 	client := tlsCommandClient{
 		clientName:      "aws",
+		timeout:         tlsDefaultProbeTimeout,
 		applicationSeen: awsResponseSeen,
 		command: func(tlsSite) (string, []string, []string) {
 			return "sh", []string{"-c", `printf %s "$1" >&2; exit 255`, "sh", response}, nil
@@ -133,13 +134,45 @@ func TestTLSCommandClientClassifiesApplicationErrorBeforeTruncatingDetail(t *tes
 
 func TestImageTLSClientsCoverTheWorkerInventory(t *testing.T) {
 	clients := imageTLSClients("omp", nil, "")
-	names := make([]string, 0, len(clients))
-	for _, client := range clients {
-		names = append(names, client.name())
+	want := []struct {
+		name    string
+		timeout time.Duration
+	}{
+		{"node", tlsDefaultProbeTimeout},
+		{"bun", tlsDefaultProbeTimeout},
+		{"omp", tlsDefaultProbeTimeout},
+		{"codegraph-node", tlsDefaultProbeTimeout},
+		{"uv", tlsDefaultProbeTimeout},
+		{"aws", tlsDefaultProbeTimeout},
+		{"curl", tlsDefaultProbeTimeout},
+		{"python3", tlsDefaultProbeTimeout},
+		{"gh", tlsDefaultProbeTimeout},
+		{"chromium", tlsChromiumProbeTimeout},
 	}
-	want := []string{"node", "bun", "omp", "codegraph-node", "uv", "aws", "curl", "python3", "gh", "chromium"}
-	if !slices.Equal(workerTLSClientNames(), want) || !slices.Equal(names, want) {
-		t.Fatalf("inventory = %v; imageTLSClients() = %v; want %v", workerTLSClientNames(), names, want)
+	if len(workerTLSClients) != len(want) || len(clients) != len(want) {
+		t.Fatalf("inventory has %d specifications and %d clients, want %d", len(workerTLSClients), len(clients), len(want))
+	}
+	for index, expected := range want {
+		spec := workerTLSClients[index]
+		if spec.name != expected.name || spec.timeout != expected.timeout || clients[index].name() != expected.name {
+			t.Errorf("inventory client %d = (%q, %s, %q), want (%q, %s, %q)", index, spec.name, spec.timeout, clients[index].name(), expected.name, expected.timeout, expected.name)
+		}
+		var timeout time.Duration
+		switch client := clients[index].(type) {
+		case tlsCommandClient:
+			timeout = client.timeout
+		case tlsChromiumClient:
+			timeout = client.timeout
+		default:
+			t.Errorf("inventory client %d = %T, want a command client", index, client)
+			continue
+		}
+		if timeout != expected.timeout {
+			t.Errorf("image client %s timeout = %s, want inventory timeout %s", expected.name, timeout, expected.timeout)
+		}
+	}
+	if workerTLSClients[len(workerTLSClients)-1].timeout <= tlsDefaultProbeTimeout {
+		t.Errorf("Chromium timeout %s must exceed the default %s", workerTLSClients[len(workerTLSClients)-1].timeout, tlsDefaultProbeTimeout)
 	}
 }
 
@@ -196,6 +229,36 @@ func TestTLSPositiveControlsRequireTheExpectedChain(t *testing.T) {
 		})
 	}
 }
+
+func TestTLSCommandPastTheProbeDeadlineIsUnavailableAndFailsTheProbe(t *testing.T) {
+	originalSites := tlsSites
+	tlsSites = []tlsSite{emSignTLSSite, aaaTLSSite}
+	t.Cleanup(func() { tlsSites = originalSites })
+
+	client := tlsCommandClient{
+		clientName: "curl",
+		timeout:    tlsDefaultProbeTimeout,
+		command: func(site tlsSite) (string, []string, []string) {
+			if site.name == emSignTLSSite.name {
+				return "sh", []string{"-c", "echo certificate verify failed >&2; exit 1"}, nil
+			}
+			return "sh", []string{"-c", "exec sleep 1"}, nil
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	observations, err := probeTLSClients(ctx, []tlsClient{client})
+	if len(observations) != 2 {
+		t.Fatalf("probeTLSClients() returned %d observations, want the client to reach both sites", len(observations))
+	}
+	if got := observations[1]; got.status != tlsNetworkUnavailable || got.detail != "probe deadline" {
+		t.Fatalf("AAA outcome = %+v, want unavailable (probe deadline)", got.tlsOutcome)
+	}
+	if err == nil || !strings.Contains(err.Error(), "curl cannot verify refusal of the AAA chain: probe deadline") {
+		t.Fatalf("probeTLSClients() = %v, want the deadline to name curl and AAA", err)
+	}
+}
 func TestTLSPositiveControlsLineNamesEverySite(t *testing.T) {
 	sites := []tlsSite{{name: "first"}, {name: "second"}, {name: "third"}}
 	const want = "probe-image: TLS positive controls: first, second and third chains verified"
@@ -217,6 +280,7 @@ func TestTLSCommandClientClassifiesOutputStreams(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			client := tlsCommandClient{
 				clientName: "generic",
+				timeout:    tlsDefaultProbeTimeout,
 				command: func(tlsSite) (string, []string, []string) {
 					return "sh", []string{"-c", `printf %s "$1"; printf %s "$2" >&2; test "$3" != failure`, "sh", testCase.stdout, testCase.stderr, testCase.exit}, nil
 				},
@@ -242,6 +306,7 @@ func TestTLSChromiumClientClassifiesNavigationResult(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			client := tlsChromiumClient{tlsCommandClient: tlsCommandClient{
 				clientName: "chromium",
+				timeout:    tlsChromiumProbeTimeout,
 				command: func(tlsSite) (string, []string, []string) {
 					return "sh", []string{"-c", `printf %s "$1"; printf %s "$2" >&2`, "sh", testCase.stdout, testCase.stderr}, nil
 				},
@@ -255,5 +320,23 @@ func TestTLSChromiumClientClassifiesNavigationResult(t *testing.T) {
 				t.Fatalf("client.probe() detail = %q, must not read the DOM", outcome.detail)
 			}
 		})
+	}
+}
+
+// Chromium's first process in a probe pod needs more time than the other clients,
+// while each ordinary client keeps the short refusal bound.
+func TestImageTLSChromiumClientHasColdStartHeadroom(t *testing.T) {
+	clients := imageTLSClients("omp", nil, "")
+	chromium, ok := clients[len(clients)-1].(tlsChromiumClient)
+	if !ok {
+		t.Fatalf("last image TLS client = %T, want tlsChromiumClient", clients[len(clients)-1])
+	}
+	chromium.command = func(tlsSite) (string, []string, []string) {
+		return "sh", []string{"-c", "exec sleep 21"}, nil
+	}
+
+	outcome := chromium.probe(context.Background(), controlTLSSite)
+	if outcome.status != tlsConnectionAccepted {
+		t.Fatalf("Chromium probe after a 21s cold start = %+v, want accepted", outcome)
 	}
 }
