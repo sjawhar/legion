@@ -524,8 +524,9 @@ func ApplyPushDropping(pr record.PullRequest, push record.ClassifiedPush) (recor
 	var dropped Dropped
 	pr.Moves, dropped.Repeat = pushedMoves(pr.Moves, push)
 	unspent := unspentPushes(withPush(pr.Pushes, push), pr.Moves, false)
-	pr.Pushes = boundedPushes(unspent, pr.HeadSHA)
-	dropped.Waiting = withoutCopies(unspent, pr.Pushes)
+	var gone map[[2]string]bool
+	pr.Pushes, gone = boundedPushes(unspent, pr.HeadSHA)
+	dropped.Waiting = newestOfKeys(unspent, gone)
 	if pr.Run == nil {
 		return pr, dropped
 	}
@@ -534,7 +535,7 @@ func ApplyPushDropping(pr record.PullRequest, push record.ClassifiedPush) (recor
 	if !carriesApproval(push) {
 		run.Pushes = append(run.Pushes, push)
 	}
-	run.Pushes = withoutCopies(run.Pushes, dropped.Waiting)
+	run.Pushes = withoutKeys(run.Pushes, gone)
 	if dropped.Repeat != nil {
 		run.Pushes = withoutCopies(run.Pushes, []record.ClassifiedPush{*dropped.Repeat})
 	}
@@ -542,12 +543,14 @@ func ApplyPushDropping(pr record.PullRequest, push record.ClassifiedPush) (recor
 	return replayRun(pr), dropped
 }
 
-// withPush is pushes with push recorded: in place of an earlier record of the same two heads when
-// push carries an approval across, after every earlier push otherwise.
+// withPush is pushes with push recorded, after every earlier push. A push that carries an approval
+// across replaces every earlier record of the same two heads, and any push replaces an earlier
+// one of the same two heads that carries an approval: those are kept once, as the release before
+// kept every push. Code pushes of the same two heads are each kept, in delivery order.
 func withPush(pushes []record.ClassifiedPush, push record.ClassifiedPush) []record.ClassifiedPush {
 	recorded := make([]record.ClassifiedPush, 0, len(pushes)+1)
 	for _, p := range pushes {
-		if !carriesApproval(push) || pushKey(p) != pushKey(push) {
+		if pushKey(p) != pushKey(push) || (!carriesApproval(push) && !carriesApproval(p)) {
 			recorded = append(recorded, p)
 		}
 	}
@@ -572,34 +575,64 @@ func withoutCopies(pushes, gone []record.ClassifiedPush) []record.ClassifiedPush
 	return kept
 }
 
-// maxWaitingPushes bounds the pushes a pull request keeps that wait for a link: a push that
-// neither carries an approval across nor lies on the path forward from the head, and that no move
-// spent (unspentPushes) - one of a line of commits the branch never takes, or one behind a webhook
-// that never arrives. Past the bound the oldest such push goes, and a move it would have linked
-// into is judged without it; an open head run lets the same push go (ApplyPush).
-const maxWaitingPushes = 16
-
-// boundedPushes is pushes with at most maxWaitingPushes waiting pushes, the oldest dropped first.
-func boundedPushes(pushes []record.ClassifiedPush, head string) []record.ClassifiedPush {
-	onPath := onPathFrom(pushes, head)
-	waiting := 0
-	for _, p := range pushes {
-		if !carriesApproval(p) && !onPath[pushKey(p)] {
-			waiting++
-		}
-	}
-	if waiting <= maxWaitingPushes {
+// withoutKeys is pushes less every push of two heads gone holds.
+func withoutKeys(pushes []record.ClassifiedPush, gone map[[2]string]bool) []record.ClassifiedPush {
+	if len(gone) == 0 {
 		return pushes
 	}
 	kept := make([]record.ClassifiedPush, 0, len(pushes))
 	for _, p := range pushes {
-		if waiting > maxWaitingPushes && !carriesApproval(p) && !onPath[pushKey(p)] {
-			waiting--
-			continue
+		if !gone[pushKey(p)] {
+			kept = append(kept, p)
 		}
-		kept = append(kept, p)
 	}
 	return kept
+}
+
+// newestOfKeys is, for each two heads keys holds, the newest push of pushes with them, in the
+// order those newest pushes stand.
+func newestOfKeys(pushes []record.ClassifiedPush, keys map[[2]string]bool) []record.ClassifiedPush {
+	if len(keys) == 0 {
+		return nil
+	}
+	var newest []record.ClassifiedPush
+	for _, p := range newestOfEachMove(pushes) {
+		if keys[pushKey(p)] {
+			newest = append(newest, p)
+		}
+	}
+	return newest
+}
+
+// maxWaitingPushes bounds the pushes a pull request keeps that wait for a link: a push that
+// neither carries an approval across nor lies on the path forward from the head, and that no move
+// spent (unspentPushes) - one of a line of commits the branch never takes, or one behind a webhook
+// that never arrives. The bound counts the two heads of such pushes, each pair once however many
+// of its pushes wait, as the release before kept one push of each two heads. Past the bound the
+// pushes of the two heads whose newest push is oldest go, and a move they would have linked into is
+// judged without them; an open head run lets the same pushes go (ApplyPush).
+const maxWaitingPushes = 16
+
+// boundedPushes is pushes with at most maxWaitingPushes pairs of heads of waiting pushes, and the
+// pairs it let go, oldest first by their newest push.
+func boundedPushes(pushes []record.ClassifiedPush, head string) ([]record.ClassifiedPush, map[[2]string]bool) {
+	onPath := onPathFrom(pushes, head)
+	newest := map[[2]string]int{}
+	for i, p := range pushes {
+		if !carriesApproval(p) && !onPath[pushKey(p)] {
+			newest[pushKey(p)] = i
+		}
+	}
+	if len(newest) <= maxWaitingPushes {
+		return pushes, nil
+	}
+	gone := map[[2]string]bool{}
+	for i, p := range pushes {
+		if newest[pushKey(p)] == i && !carriesApproval(p) && !onPath[pushKey(p)] && len(newest)-len(gone) > maxWaitingPushes {
+			gone[pushKey(p)] = true
+		}
+	}
+	return withoutKeys(pushes, gone), gone
 }
 
 // ApplySettlement applies a listener CI settlement only when ClassifySettlement says it is newer,

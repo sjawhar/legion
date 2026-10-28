@@ -141,3 +141,46 @@ func TestARunALostPushOpenedClosesAtItsBoundWithNoMoveNamed(t *testing.T) {
 		t.Errorf("the run a lost push opened closed after n%d (0: never), want n%d", closedAt, maxRunSteps)
 	}
 }
+
+// With no move named, a push of two heads already recorded by a push that carries an approval
+// across replaces it, as the release before replaced every earlier push of the same two heads: a
+// handoff push h0..h1, then h0..h1 read as forced (a listener that predates the forced field, or a
+// force push of the same commits), leaves no approval carrier behind, so an approval of h0 does not
+// stand for h1 and h0's red is not carried to it once h1 arrives.
+func TestAPushReplacesAnApprovalCarrierOfItsTwoHeads(t *testing.T) {
+	carrier := record.ClassifiedPush{SHA: "h1", Before: "h0", HandoffOnly: true}
+	forced := record.ClassifiedPush{SHA: "h1", Before: "h0", HandoffOnly: true, Forced: true}
+	pr := delivered(t, redAtH0(), pushed(carrier), pushed(forced))
+	if len(pr.Pushes) != 1 || pr.Pushes[0] != forced {
+		t.Fatalf("pushes %+v, want the forced push alone", pr.Pushes)
+	}
+	pr = delivered(t, pr, arrives("h1"))
+	if ApprovalStands(pr, "h0") || len(pr.Pushes) != 0 {
+		t.Errorf("after h1: an approval of h0 stands %v, pushes %+v, want neither", ApprovalStands(pr, "h0"), pr.Pushes)
+	}
+	again := delivered(t, redAtH0(), pushed(forced), pushed(carrier))
+	if len(again.Pushes) != 1 || again.Pushes[0] != carrier {
+		t.Errorf("the carrier after the forced push: pushes %+v, want the carrier alone", again.Pushes)
+	}
+}
+
+// The bound on pushes waiting for a link counts their pairs of heads, each once, as the release
+// before kept one push of each two heads: sixteen pairs waiting, each pushed twice, are all kept,
+// and a seventeenth pair lets go every push of the pair whose newest push is oldest.
+func TestTheBoundCountsEachTwoHeadsOnce(t *testing.T) {
+	pr := redAtH0()
+	for round := range 2 {
+		for i := 1; i <= maxWaitingPushes; i++ {
+			pr = delivered(t, pr, pushed(record.ClassifiedPush{SHA: fmt.Sprintf("w%d", i), Before: fmt.Sprintf("w%d", i-1), ByReviewApp: round == 1}))
+		}
+	}
+	if len(pr.Pushes) != 2*maxWaitingPushes {
+		t.Fatalf("%d pairs pushed twice keep %d pushes, want all %d", maxWaitingPushes, len(pr.Pushes), 2*maxWaitingPushes)
+	}
+	next := record.ClassifiedPush{SHA: fmt.Sprintf("w%d", maxWaitingPushes+1), Before: fmt.Sprintf("w%d", maxWaitingPushes)}
+	got, dropped := ApplyPushDropping(pr, next)
+	want := record.ClassifiedPush{SHA: "w1", Before: "w0", ByReviewApp: true}
+	if len(dropped.Waiting) != 1 || dropped.Waiting[0] != want || len(got.Pushes) != 2*maxWaitingPushes-1 {
+		t.Errorf("the seventeenth pair let go %+v and kept %d pushes, want w0..w1 named once (its newest push) and %d kept", dropped.Waiting, len(got.Pushes), 2*maxWaitingPushes-1)
+	}
+}
