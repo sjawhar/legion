@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-717",
+  "completed": "2026-10-28T19:25:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2476",
+  "codeHead": "839a67cb5ae5a704eb1cce2abbd8729a0cacab05",
+  "proof": [
+    {
+      "criterion": "No workflow under .github/workflows names the 0.8.7-pg16 digest or an '(until production runs Postgres 18)' job, and actionlint is clean.",
+      "surface": "The workflow files GitHub Actions reads (.github/workflows at the code head).",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && grep -rnE '7b822b0a|until production runs Postgres 18|postgres-16' .github/workflows; echo exit=$? ; export GOPATH=$TMPDIR/gopath GOMODCACHE=$TMPDIR/gomod GOCACHE=$TMPDIR/gocache && SC=$(uvx --from shellcheck-py@0.10.0.1 which shellcheck) && go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck \"$SC\" .github/workflows/envoy-and-contracts.yaml .github/workflows/pr-and-main.yaml; echo exit=$? ; then the same actionlint with -oneline over the whole directory at the head and over main a409c128's .github exported with jj file show into $TMPDIR/main-wf, and diff of the two outputs",
+      "observed": "grep: no output, exit=1. actionlint on the two edited files: no output, exit=0. Whole directory: 9 findings at the head (8 syntax-check cache-mode/concurrency.queue in changelog-fold, claude-envoy-rebuild, release-envoy-infra, release-envoy-listener, release; 1 if-cond in tests-closed.yaml), byte-identical to main's 9 (diff empty). None in the two edited files.",
+      "headSha": "839a67cb5ae5a704eb1cce2abbd8729a0cacab05",
+      "negativeControl": "A $TMPDIR/neg copy of the head's envoy-and-contracts.yaml with envoy-go's needs set to [changes, dispatch-go-postgres-16]: actionlint exits 1 with 'job \"envoy-go\" needs job \"dispatch-go-postgres-16\" which does not exist in this workflow [job-needs]'. The workspace copy was not edited."
+    },
+    {
+      "criterion": "The lint job's workflow checks still pass on the edited workflows.",
+      "surface": "The required lint job's scripts, run locally at the code head.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bash .github/scripts/check-private-names.sh; for s in check-bun-version check-image-trigger-paths check-action-pins check-release-credentials; do uv run --no-project --with pyyaml==6.0.2 bash .github/scripts/$s.sh; done",
+      "observed": "All five exit 0: private names clean over 5902 files; Bun version 1.4.4 everywhere; every image trigger covers every input (5 image builds); every remote action across 18 files pinned; 7 credentialed and 10 build jobs across 5 workflows keep credentials out.",
+      "headSha": "839a67cb5ae5a704eb1cce2abbd8729a0cacab05",
+      "negativeControl": "The four yaml-reading scripts run without PyYAML available exit 1 (ModuleNotFoundError: No module named 'yaml'), so exit 0 above means each script read the workflows."
+    },
+    {
+      "criterion": "No added line or path names the deployment's Dispatch keys or dispatch:// links; no changelog fragment; new commit subjects carry no key.",
+      "surface": "The PR's diff, files and commits on GitHub (PR #2476).",
+      "command": "jj -R \"$LEGION_WORKSPACE\" diff --git --from main --to legion/INFRA-717@origin .github .dispatch scripts/dispatch/README.md | grep -E '^\\+' | grep -vE '^\\+\\+\\+ ' | grep -nE '\\b[A-Z][A-Z0-9]+-[0-9]+\\b|dispatch://'; gh pr view 2476 -R sjawhar/legion --json files,title,commits --jq '.title, (.files[].path), (.commits[].messageHeadline)'",
+      "observed": "Word-bounded grep: no output, exit=1. The plan's unbounded regex matches one token, 'SQL-18' inside 'pgvector-on-PostgreSQL-18' in release-engineering.md line 6: that text is on main already, and the line shows as added only because the whole one-line paragraph changed. Files: the 4 changed files plus .legion/INFRA-717/plan.json, none under /.changes/. Title and the code commit's subject: 'ci: stop running the Postgres 16 jobs now that production runs Postgres 18', no key.",
+      "headSha": "839a67cb5ae5a704eb1cce2abbd8729a0cacab05",
+      "negativeControl": "printf '+# see INFRA-1\\n' | grep -nE '\\b[A-Z][A-Z0-9]+-[0-9]+\\b|dispatch://' prints the line (exit 0), so the bounded grep still catches a key."
+    }
+  ],
+  "filesChanged": [
+    ".github/workflows/envoy-and-contracts.yaml: deleted jobs dispatch-go-postgres-16 and broker-go-postgres-16 with their comment blocks; three comments (filter list L52, envoy filter gate L402, envoy filter image-pull L429) now name only the remaining jobs.",
+    ".github/workflows/pr-and-main.yaml: deleted job daemon-go-postgres-16 with its comment block; file ends at the test job's cache/save step.",
+    ".dispatch/architecture/release-engineering.md: cut the clause and sentence about the three Postgres 16 jobs.",
+    "scripts/dispatch/README.md: line 328 now says 'Any Postgres 18 works, as production and CI run 18:' (task 5a from the architect via the planner)."
+  ],
+  "trickyParts": [
+    "No paths-filter, trigger or pull-test-images entry existed only for the deleted jobs, so every filter entry stays; envoy-go, envoy-infra-go and envoy-smoke still use pull-test-images.",
+    "The PR's Tests (40748621006) and Legion Envoy and Contracts (40748620346) runs at the code head were queued when this handoff was written: their job lists and envoy-go's 180006|0.8.7 line are not read here. The tester reads them if finished; the reviewer approves only after envoy-go finishes success."
+  ],
+  "deviations": [
+    "The edits were made directly, not by a deep-worker subagent: the change is five deletions and four one-line text edits, each checked above.",
+    "AC3's key grep uses word boundaries (\\b...\\b): the plan's unbounded regex matches 'SQL-18' in 'PostgreSQL-18', which is not a key and is on main already.",
+    "scripts/dispatch/README.md line 328 is now 110 characters wide; the rest of the paragraph is unchanged, as task 5a says."
+  ],
+  "openQuestions": []
+}
