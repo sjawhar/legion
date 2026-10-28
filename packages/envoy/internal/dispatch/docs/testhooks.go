@@ -198,3 +198,12 @@ func DocumentReadWeightForTest(markdown string) (int64, error) {
 	}
 	return read.weight, nil
 }
+
+// StateStructsForTest is the structs of state, a document's encoded Yjs state, as a walk of a
+// room's own state counts them (walkUpdate, fromRoom; countRoomStructs, but for parked structs'
+// splits). A real-process drive counts a document's stored state with it to know how many structs
+// the writes it made added, without duplicating the walk.
+func StateStructsForTest(state []byte) (int64, error) {
+	tally, err := walkUpdate(state, fromRoom, nil)
+	return int64(tally.structs), err
+}

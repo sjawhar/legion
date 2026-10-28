@@ -3,6 +3,7 @@ package docs
 import (
 	"fmt"
 	"math"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -64,6 +65,126 @@ func TestAResidentRoomsHeapPerByteOfItsMarkdown(t *testing.T) {
 			})
 		}
 	}
+}
+
+// structHeapMeasurement is the environment variable that runs the heavy rows of
+// TestAResidentRoomsHeapPerStructOfItsState, each a document at or near the decode cap.
+const structHeapMeasurement = "DISPATCH_MEASURE_STRUCT_HEAP"
+
+// A room's copy holds bytesOfHeapAStructHeld or less for each struct of its state, and a
+// struct-dense document at least 0.85 of it, so the struct price neither under-charges a document
+// whose history outgrows its rendering nor drifts far past what such a document holds. It is
+// measured as TestAResidentRoomsHeapPerByteOfItsMarkdown measures a room (heldByResidentRoom): a
+// room as its load leaves it, the live document and the replica its load decoded, read and not
+// edited, against the struct total its load counts (countRoomStructs), each shape in a process of
+// its own (measuredAlone). The struct-dense shapes are priced at their structs, which outweigh
+// their elements; the others are priced at their elements, which the struct price leaves as they
+// were: a mebibyte of prose, whose structs carry its text, and a run of a million keystrokes, which
+// the decode of its state merges into a few structs (squashRuns), so it is struct-dense only in
+// the room that typed it.
+//
+// The fast rows are a mebibyte of prose, a small document typed into 100,000 times before its last
+// character and then deleted (typedBeforeState), and the long-edited fixture (longEditedState),
+// which took 4.7 to 6.4, 1.7 to 2.0 and 9.1 to 10.6 s here on 2026-10-28, each in its own process.
+// Set DISPATCH_MEASURE_STRUCT_HEAP=1 for the heavy rows, each at the decode cap or a million
+// keystrokes long: the document an agent rewrote whole until the cap refused a write
+// (agentRewrittenState, about 200 s to build, kept between runs in the file
+// DISPATCH_AGENT_REWRITTEN_CACHE names), the long-edited document typed on until the cap
+// (longEditedAtCapState) and a run of a million keystrokes (keystrokeRunStates), 26.9 to 29.4,
+// 26.6 to 38.5 and 21.0 to 27.0 s with the agent's state cached, about 100 s together.
+func TestAResidentRoomsHeapPerStructOfItsState(t *testing.T) {
+	const leastPerStruct, mostPerStruct = 0.85, 1.0
+	heavy := os.Getenv(structHeapMeasurement) != ""
+	for _, shape := range []struct {
+		name  string
+		heavy bool
+		// dense is whether the shape's structs, not its elements, price it.
+		dense bool
+		state func(t *testing.T) []byte
+	}{
+		{"a mebibyte of prose", false, false, func(t *testing.T) []byte {
+			state, _ := residentRoomState(t, 1<<20)
+			return state
+		}},
+		{"a paragraph typed before its last character 100,000 times and deleted", false, true, func(t *testing.T) []byte {
+			return typedBeforeState(t, 100_000)
+		}},
+		{"the long-edited document", false, true, func(t *testing.T) []byte { return longEditedState(t) }},
+		{"an agent's whole rewrites until the cap refused one", true, true, cachedAgentRewrittenState},
+		{"a long-edited document typed on until the cap", true, true, longEditedAtCapState},
+		{"a run of a million keystrokes", true, false, func(t *testing.T) []byte {
+			keystrokes, _ := keystrokeRunStates(t)
+			return keystrokes
+		}},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			if shape.heavy && !heavy {
+				t.Skip("set " + structHeapMeasurement + "=1 to run the heavy rows")
+			}
+			if !measuredAlone(t) {
+				return
+			}
+			state := shape.state(t)
+			held := heldByResidentRoom(t, state, false)
+			live := newDocumentCopy()
+			if err := crdt.ApplyUpdateV1(live, state, nil); err != nil {
+				t.Fatal(err)
+			}
+			structs := int64(countRoomStructs(live))
+			markdown, err := renderDocument(live)
+			if err != nil {
+				t.Fatal(err)
+			}
+			elements := countElements(markdown)
+			perStruct := float64(held) / float64(structs*roomCopies)
+			ratio := perStruct / bytesOfHeapAStructHeld
+			t.Logf("%d B of state, %d structs, %d B of markdown making %d elements; heap held %d B, %.1f B a struct for each of %d copies, %.2fx the %d B price",
+				len(state), structs, len(markdown), elements, held, perStruct, roomCopies, ratio, bytesOfHeapAStructHeld)
+			byStructs, byElements := structs*bytesOfHeapAStructHeld, elements*bytesOfHeapAnElement
+			if !shape.dense {
+				if byStructs > byElements {
+					t.Errorf("%d structs price a copy at %d B, past the %d B its %d elements price it at, want the struct price to leave it at its elements",
+						structs, byStructs, byElements, elements)
+				}
+				return
+			}
+			if byStructs <= byElements {
+				t.Errorf("%d structs price a copy at %d B, no more than the %d B its %d elements price it at, want a shape its structs price", structs, byStructs, byElements, elements)
+			}
+			if ratio < leastPerStruct || ratio > mostPerStruct {
+				t.Errorf("the room holds %.1f B of heap a struct for each copy, %.2fx the %d B the room budget charges, want %.2fx to %.2fx",
+					perStruct, ratio, bytesOfHeapAStructHeld, leastPerStruct, mostPerStruct)
+			}
+		})
+	}
+}
+
+// typedBeforeState is the state of a small document whose first paragraph took typed characters,
+// each typed before the one typed last, as longEditedAtCapState types them, and then lost them all
+// again: a room holding typed structs, each its own item, that renders the document it began as.
+func typedBeforeState(t *testing.T, typed int) []byte {
+	t.Helper()
+	tree, err := pmdoc.Parse("# Title\n\nOne paragraph of ordinary prose.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed, err := encodeDocumentTree(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := newDocumentCopy(crdt.WithClientID(0x5eed))
+	if err := crdt.ApplyUpdateV1(doc, seed, nil); err != nil {
+		t.Fatal(err)
+	}
+	text := paragraphTexts(doc)[0]
+	doc.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "x", nil) })
+	doc.Transact(func(txn *crdt.Transaction) {
+		for range typed - 1 {
+			text.Insert(txn, 1, "x", nil)
+		}
+	})
+	doc.Transact(func(txn *crdt.Transaction) { text.Delete(txn, 0, typed) })
+	return crdt.EncodeStateAsUpdateV1(doc, nil)
 }
 
 // residentRoom is what one open document holds in memory: the room's live document, and the

@@ -627,26 +627,33 @@ func (r *renderedReplica) recover(room string, unplaced []crdt.LoggedUpdate, cla
 	}
 }
 
-// chargeAdded charges the room's charge in the room budget the content each of updates added
-// (contentAdded): what is charged is the content a transaction added, whoever wrote it - a
-// browser's update the peer hook admitted, or the server's own write, a repair's included - never
-// the update's bytes, which carry the room's whole delete set on every transaction. Each committed
-// update is charged exactly once, by the observer whose drain of the room's update log hands it
-// over, whichever observer that is: charged by the observer it was handed to, as it once was, an
-// update another observer had already drained and rendered would be charged after the rendering
-// that holds it was published, so the count of that rendering would not re-base the charge past
-// it. Charged here, before the replica renders any of them, each is held by the rendering the
-// replica publishes next (publishSize), and that rendering's count re-bases the charge past it.
-// The replica's own copy of the room, which the room's load hands it (keepReplica), is the room's
-// second copy, which the charge has held since the room loaded (roomCopies). A replica no room's
-// load charged (a test's) charges nothing.
+// chargeAdded charges the room's charge in the room budget what each of updates added: the content
+// a transaction added (contentAdded), whoever wrote it - a browser's update the peer hook
+// admitted, or the server's own write, a repair's included - never the update's bytes, which carry
+// the room's whole delete set on every transaction; and, for a transaction the hook did not apply
+// (structTotal.hookApplies) - an API write's publish, an injected update, settlement's repair, any
+// other write of the server's own - its structure too, as the hook charges a browser's
+// (roomCharge.wrote), which refuses none of them. Each committed update is charged exactly once,
+// by the observer whose drain of the room's update log hands it over, whichever observer that is:
+// charged by the observer it was handed to, as it once was, an update another observer had
+// already drained and rendered would be charged after the rendering that holds it was published,
+// so the count of that rendering would not re-base the charge past it. Charged here, before the
+// replica renders any of them, each is held by the rendering the replica publishes next
+// (publishSize), and that rendering's count re-bases the charge past it. The replica's own copy of
+// the room, which the room's load hands it (keepReplica), is the room's second copy, which the
+// charge has held since the room loaded (roomCopies). A replica no room's load charged (a test's)
+// charges nothing.
 func (r *renderedReplica) chargeAdded(updates []crdt.LoggedUpdate) {
 	charge := r.roomCharge()
 	if charge == nil {
 		return
 	}
 	for _, update := range updates {
-		charge.adds(contentAdded(update.Update))
+		if r.structs.hookApplies(update.Origin) {
+			charge.adds(contentAdded(update.Update))
+			continue
+		}
+		charge.wrote(update.Update)
 	}
 }
 
@@ -667,11 +674,11 @@ func (r *renderedReplica) chargeAdded(updates []crdt.LoggedUpdate) {
 // markdown is live's rendering at its load, nil for a document outside the schema. It is the
 // room's first measurement (publishLoadedSize), which the hook weighs the room's first peer update
 // against and the room budget charges the load by (chargeLoadedRoom). It also counts live's struct
-// total (newStructTotal), an encode of live's state and a walk of it, here beside the load's
-// rendering, which has already walked the whole document; the load is not a keystroke. And it sets
-// live's scan budget (newRoomScans), so from here every remote apply on live is bounded, with
-// nothing of the room's scan total used until the load records its re-scan
-// (roomScans.rescanned).
+// total (newStructTotal), which the room budget charges the load by beside it (copyHeap), an
+// encode of live's state and a walk of it, here beside the load's rendering, which has already
+// walked the whole document; the load is not a keystroke. And it sets live's scan budget
+// (newRoomScans), so from here every remote apply on live is bounded, with nothing of the room's
+// scan total used until the load records its re-scan (roomScans.rescanned).
 func (s *Service) keepReplica(live *crdt.Doc, log *crdt.UpdateLog, markdown *string, decoded *crdt.Doc) *renderedReplica {
 	replica := &renderedReplica{log: log, doc: decoded, markdown: markdown, measurer: &s.measurer, structs: newStructTotal(live), scans: newRoomScans(live)}
 	replica.publishLoadedSize(markdown)

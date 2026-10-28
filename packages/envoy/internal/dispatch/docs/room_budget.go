@@ -17,6 +17,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/persistence"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -29,10 +30,13 @@ import (
 // 54 MB each at both copies, roomCopies) as they load, and since an admission reserves its stored
 // version's count at that same price (storedRoomReservation), an empty budget admits thirty-nine
 // of them and refuses the fortieth; what browsers add to a room after its load is charged beside
-// that count (roomCharge), so rooms typed into hold fewer. No room has a ceiling: a mebibyte of the
-// densest markdown measured is priced at more than the whole budget (bytesOfHeapAByteAtTheDensest),
-// and what answers a room that heavy is the hook's refusal of every insert while nothing can be
-// closed (refusedUnderPressure), not a cap on its charge (TestTheRoomBudgetsArithmetic).
+// that count (roomCharge), so rooms typed into hold fewer. A document whose history outgrows its
+// rendering is priced at its structs instead (bytesOfHeapAStructHeld): six documents at the decode
+// cap, 356,515,840 bytes each at both copies, whatever they render. No room has a ceiling: a
+// mebibyte of the densest markdown measured is priced at more than the whole budget
+// (bytesOfHeapAByteAtTheDensest), and what answers a room that heavy is the hook's refusal of every
+// insert while nothing can be closed (refusedUnderPressure), not a cap on its charge
+// (TestTheRoomBudgetsArithmetic).
 const roomBudgetBytes = 2 << 30
 
 // bytesOfHeapAnElement is the heap one copy of a document holds for each element its rendering
@@ -44,8 +48,32 @@ const roomBudgetBytes = 2 << 30
 // bytes, which misprice a dense document by several times: the figure before this one, 120 bytes
 // of heap a byte of markdown, was measured on a shape no room can hold (room_heap_test.go).
 // TestAResidentRoomsHeapPerByteOfItsMarkdown measures rooms of each size, read and edited, and
-// fails once a copy's heap an element leaves 0.85x to 1.3x of this.
+// fails once a copy's heap an element leaves 0.85x to 1.3x of this. A document whose structs weigh
+// more at bytesOfHeapAStructHeld than its elements at this is priced at its structs (copyHeap).
 const bytesOfHeapAnElement = 470
+
+// bytesOfHeapAStructHeld is the heap one copy of a document holds for each struct of its state
+// (countRoomStructs, the count the room's struct total keeps, structTotal). A copy is priced at its
+// elements (bytesOfHeapAnElement) or at its structs at this price, whichever is more (copyHeap),
+// because a document's history, which no rendering shows, can hold far more than the document
+// renders: the long-edited document typed on until the decode cap renders 5,314 bytes making 53
+// elements, 24,910 bytes of heap at the element price, from 1,048,576 structs, which hold
+// 168,652,856 bytes in each copy.
+//
+// Measured on 2026-10-28 (TestAResidentRoomsHeapPerStructOfItsState), what one copy of a resident
+// room holds for each struct of its state: the document an agent rewrote whole until the decode cap
+// refused a write, 1,048,576 structs rendering a mebibyte, 162.8 bytes; the long-edited document
+// typed on until the cap, 160.8; the long-edited fixture itself, 494,308 structs, 161.4; and a
+// paragraph typed into 100,000 times before its last character and then deleted, 161.6. It is set
+// past the largest. A mebibyte of prose holds 345.7 bytes for each of its 77,600 structs, which
+// carry its text, and is priced by its elements, 27,072,000 bytes a copy against 13,192,000 at
+// this price. A run of a million keystrokes typed one after another is no struct-dense document:
+// the decode of its state merges the run into one item (squashRuns, sjawhar/ygo v1.51.3-sami.7,
+// crdt/transaction.go:168-323), so a loaded copy holds 11 structs and 9 elements, priced at 4,230
+// bytes, while both copies hold 20,410,464 bytes, about 10.2 bytes a character of the paragraph's
+// mebibyte of text in each copy: text in one paragraph is a cost neither price follows. That test
+// fails once a struct-dense shape holds more than this a struct, or less than 0.85 of it.
+const bytesOfHeapAStructHeld = 170
 
 // bytesOfHeapAByteAtTheDensest is the densest price: the heap one copy of a document is charged
 // for each byte of a rendering pmdoc.MeasureDocument could not finish counting (DocumentSize.Counted
@@ -236,9 +264,9 @@ type budgetedRoom struct {
 
 // roomCharge is one loaded room's charge (weight), the sum of three parts (roomWeight):
 //
-//   - the counted part: its latest measured document, priced from the count of its rendering
-//     (copyHeap), at both copies. Each count replaces the last rather than adding to it, so a
-//     document that shrinks is charged less.
+//   - the counted part: its latest measured document, priced from the count of its rendering and
+//     the struct total of its state (copyHeap), at both copies. Each count replaces the last rather
+//     than adding to it, so a document that shrinks is charged less.
 //   - the uncounted part: the content bytes the room's transactions have added since the rendering
 //     that count measured (contentAdded), each at the densest price at both copies, since what
 //     elements they make is unknown until a count. Every transaction is charged it once, whoever
@@ -246,30 +274,38 @@ type budgetedRoom struct {
 //     by the update observer whose drain of the room's update log hands it over (chargeAdded). A
 //     count re-bases it: it clears the bytes added up to the rendering it measured, never those
 //     added since. A whole-state handoff of a document the room already holds adds nothing here.
-//   - the structure part: what each update the peer hook admitted adds that a count of the
-//     rendering cannot see (peerWeighing.structureHeap) - each new struct with the splits its
-//     integration can cause, two splits for each delete range the room did not already hold
-//     deleted (deletedRuns), all at bytesOfHeapAStruct, and the content no rendering prices at
-//     its kind's heap a byte - at both copies. A count never clears it: one update of GC structs
-//     keeps tens of megabytes with the rendering unchanged. Only the room's retirement drops it,
-//     with the rest of the charge. The server's own writes add nothing here.
+//   - the structure part: what each update the room integrates adds that a count of the rendering
+//     cannot see (peerWeighing.structureHeap) - each new struct with the splits its integration
+//     can cause, two splits for each delete range the room did not already hold deleted
+//     (deletedRuns), all at bytesOfHeapAStruct, and the content no rendering prices at its kind's
+//     heap a byte - at both copies. A browser's update is charged it by the peer hook that
+//     admitted it (grew); every other transaction - an API write's publish, an injected update,
+//     settlement's repair, any of the server's own writes - by the update observer whose drain of
+//     the room's update log hands it over (wrote), at the same prices, as each of their scans
+//     counts toward the room's scan total (roomScans.observed). The server's writes are never
+//     refused for it: they only raise the charge, so the budget refuses browsers or closes unused
+//     rooms sooner. A count never clears it: one update of GC structs keeps tens of megabytes with
+//     the rendering unchanged. Only the room's retirement drops it, with the rest of the charge.
 //
-// What no part sees is what Yjs deletes leave behind while browsers stay - tombstones a count
-// cannot price - and what the server's own writes add beyond their rendering; the room's own
-// retirement a minute after its last use, and the compaction that folds its updates as it
-// closes, reclaim them. The structure part over-charges what merges back: ygo squashes a run of
-// typed characters into one item and re-merges a split nothing came between (sjawhar/ygo
-// v1.51.3-sami.7, crdt/transaction.go:23-31), while each struct is charged as one of its own with
-// both its splits; and it charges every struct at the heaviest kind's price, rendered or not, so
-// a rendered struct is charged here beside its count's price of the elements it makes.
+// Two parts can charge one struct: the structure part charges what each update adds, and a count
+// prices the struct total of the whole state once its structs outweigh its elements (copyHeap),
+// which every struct the structure part charged is part of. The structure part over-charges what
+// merges back too: ygo squashes a run of typed characters into one item and re-merges a split
+// nothing came between (sjawhar/ygo v1.51.3-sami.7, crdt/transaction.go:23-31), while each struct
+// is charged as one of its own with both its splits; and it charges every struct at the heaviest
+// kind's price, rendered or not, so a rendered struct is charged here beside its count's price of
+// the elements it makes. What deletes leave behind - tombstones a rendering does not show - is
+// priced between counts only as far as the structure part charged their ranges' splits, and by
+// the next count with every other struct of the state.
 //
 // What a room is charged has a lifecycle. Its admission reserves the count of its stored version
-// at both copies (roomReservation); its load, once the rendering it loaded with is counted
-// (keepReplica), replaces that reservation with this charge (load); the room's update observer
-// charges each transaction's added content (adds), the hook each admitted update's structure
-// (grew); and each count the measurer makes after that replaces the counted part (measured), on
-// its cadence or sooner once the uncounted part passes earlyCountCharge. A rendering published
-// without a count of its own (renderedReplica.publishSize) re-bases nothing.
+// and the structs of its stored history at both copies (roomReservation); its load, once the
+// rendering it loaded with is counted (keepReplica), replaces that reservation with this charge
+// (load); the room's update observer charges each transaction's added content (adds) and the
+// structure of each transaction the hook did not apply (wrote), the hook each admitted update's
+// structure (grew); and each count the measurer makes after that replaces the counted part
+// (measured), on its cadence or sooner once the uncounted part passes earlyCountCharge. A rendering
+// published without a count of its own (renderedReplica.publishSize) re-bases nothing.
 type roomCharge struct {
 	budget *roomBudget
 	room   string
@@ -293,23 +329,24 @@ type roomCharge struct {
 
 // deletedRuns is the delete ranges a room is known to hold deleted, each client's sorted and
 // merged: the room's whole delete set at its load (seed, crdt.DeleteSetFromDoc), and every range of
-// every update the peer hook admitted since with the GC runs and deleted items it integrated
-// (record). A delete range it covers whole is one the room holds deleted already. ygo's apply
-// still splits the items at the range's two ends (sjawhar/ygo v1.51.3-sami.7,
-// crdt/delete_set.go:170-172), but nothing comes between the halves, and the commit merges them
-// back (crdt/transaction.go:26-31, :374-402), so such a range adds no struct and the structure part
-// charges it nothing (peerWeighing.newDeletes). Without it the structure part, which no count
-// clears, would charge the room's whole delete set again on every browser's sync, whose whole-state
-// handoff carries it, and on every update of a client that encodes its whole delete set with each
-// transaction, as ygo's own update observer does (crdt/doc.go:597-612): an edited room held open
-// across reconnects would grow its charge with nothing added to its heap.
+// every update the room has been charged the structure of since - a browser's update the peer hook
+// admitted, a transaction of the server's own (roomCharge.wrote) - with the GC runs and deleted
+// items it integrated (record). A delete range it covers whole is one the room holds deleted
+// already. ygo's apply still splits the items at the range's two ends (sjawhar/ygo
+// v1.51.3-sami.7, crdt/delete_set.go:170-172), but nothing comes between the halves, and the
+// commit merges them back (crdt/transaction.go:26-31, :374-402), so such a range adds no struct
+// and the structure part charges it nothing (peerWeighing.newDeletes). Without it the structure
+// part, which no count clears, would charge the room's whole delete set again on every browser's
+// sync, whose whole-state handoff carries it, and on every transaction, whose update ygo encodes
+// with the room's whole delete set (crdt/doc.go:597-612): an edited room held open across
+// reconnects would grow its charge with nothing added to its heap.
 //
-// A range the server's own writes deleted is listed only once a browser's update carries it, so it
-// is charged that once; a range of an update whose apply failed is neither listed nor charged,
-// since the room's bounded document took that update back out whole (newRoomScans). Two
-// browsers' updates weighed at once can each find the same new range unlisted, and both are
-// charged it, which over-charges and never under-charges. The list holds sixteen bytes for each
-// run of the room's delete set, beside the tombstone of at least one struct, 129 bytes or more
+// A range of an update whose apply failed is neither listed nor charged, since the room's bounded
+// document took that update back out whole (newRoomScans). Two updates weighed at once - two
+// browsers', or a browser's whose ranges the hook lists only once its apply returns and a server
+// write committed meanwhile - can each find the same new range unlisted, and both are charged it,
+// which over-charges and never under-charges. The list holds sixteen bytes for each run of the
+// room's delete set, beside the tombstone of at least one struct, 129 bytes or more
 // (bytesOfHeapAStruct), that each run deletes, and it goes with the room.
 type deletedRuns struct {
 	mu      sync.RWMutex
@@ -348,11 +385,15 @@ func (d *deletedRuns) covers(client, clock, length uint64) bool {
 }
 
 // record lists every range of the delete set of update, which a walk found at deletesAt
-// (updateTally.deletesAt), once the peer hook has admitted it; and, where born says the update
-// carries structs that integrate deleted - a GC run, a deleted item, which the delete set of every
-// encode of the room's state lists from then on (buildDeleteSet, crdt/update.go:502-515) though no
-// delete range named them - their clocks too, from a walk of the whole update rather than of its
-// delete set alone. Nil records nothing.
+// (updateTally.deletesAt), once the room has been charged its structure - a browser's update the
+// peer hook admitted, or a transaction of the server's own (roomCharge.wrote); and, where born says
+// the update carries structs that integrate deleted - a GC run, a deleted item, which the delete
+// set of every encode of the room's state lists from then on (buildDeleteSet,
+// crdt/update.go:502-515) though no delete range named them - their clocks too, from a walk of the
+// whole update rather than of its delete set alone. It walks as a room's own state is walked
+// (fromRoom), which refuses only what ygo cannot decode: the server's writes can carry what no
+// browser sends, and an update the hook admitted passed the stricter walk already. Nil records
+// nothing.
 func (d *deletedRuns) record(update []byte, deletesAt int, born bool) {
 	if d == nil {
 		return
@@ -360,10 +401,10 @@ func (d *deletedRuns) record(update []byte, deletesAt int, born bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if born {
-		_, _ = walkUpdate(update, fromPeer, (*deletedRunsRecorder)(d))
+		_, _ = walkUpdate(update, fromRoom, (*deletedRunsRecorder)(d))
 		return
 	}
-	_ = walkDeleteSet(update, deletesAt, fromPeer, (*deletedRunsRecorder)(d))
+	_ = walkDeleteSet(update, deletesAt, fromRoom, (*deletedRunsRecorder)(d))
 }
 
 // deletedRunsRecorder is record's visitor, which its caller holds the lock for.
@@ -448,19 +489,23 @@ func roomWeight(heap, content, structure int64) int64 {
 }
 
 // copyHeap is the heap one copy of a document is priced at whose rendering is bytes long and makes
-// elements elements (renderedReplica.size): its count at bytesOfHeapAnElement, or, for a rendering
-// goldmark stopped counting (elementsPastCounting), its bytes at the densest price. Nothing caps
-// it: a room is charged what its document holds, however heavy. A room that renders no markdown
-// (sizeUnmeasured) is priced at nothing, and charged its uncounted and structure parts alone.
-func copyHeap(bytes, elements int64) int64 {
+// elements elements (renderedReplica.size), and whose state holds structs structs (structTotal, or
+// a stored history's walk, storedStructs): its elements at bytesOfHeapAnElement or its structs at
+// bytesOfHeapAStructHeld, whichever is more. A rendering goldmark stopped counting
+// (elementsPastCounting) is priced from its bytes at the densest price in place of its elements,
+// and one the room could not render (sizeUnmeasured) at nothing in place of them, so such a room
+// is priced at its structs alone. Nothing caps it: a room is charged what its document holds,
+// however heavy.
+func copyHeap(bytes, elements, structs int64) int64 {
+	rendered := int64(0)
 	switch {
 	case bytes == sizeUnmeasured || elements == sizeUnmeasured:
-		return 0
 	case elements == elementsPastCounting:
-		return bytes * bytesOfHeapAByteAtTheDensest
+		rendered = bytes * bytesOfHeapAByteAtTheDensest
 	default:
-		return elements * bytesOfHeapAnElement
+		rendered = elements * bytesOfHeapAnElement
 	}
+	return max(rendered, structs*bytesOfHeapAStructHeld)
 }
 
 // join reports whether room has a loaded instance the budget charges, which a socket joins with
@@ -606,13 +651,13 @@ func (b *roomBudget) release(reservation *roomReservation) {
 }
 
 // load charges room's newly loaded instance, whose one copy is priced at heap (copyHeap) from the
-// count of the rendering it loaded with, at roomCopies, in place of every reservation its
-// admissions hold: the room's own document replaces its stored version at the same two copies, and
-// the two documents differ only by the updates stored since that version was cut. A room loaded
-// with no socket's reservation is the server's own work's - an API write's publish
-// (livewrite.go:327), settlement's repair and warm-up, the mark sweep, a mark's verification, a
-// snapshot read, a warm-up, a live tree's read, settlement resumed at boot: every opener of
-// Server.Apply - and where its charge leaves the budget over its limit it is marked
+// count of the rendering it loaded with and the struct total of its state, at roomCopies, in place
+// of every reservation its admissions hold: the room's own document replaces its stored version at
+// the same two copies, and the two documents differ only by the updates stored since that version
+// was cut. A room loaded with no socket's reservation is the server's own work's - an API write's
+// publish (livewrite.go:327), settlement's repair and warm-up, the mark sweep, a mark's
+// verification, a snapshot read, a warm-up, a live tree's read, settlement resumed at boot: every
+// opener of Server.Apply - and where its charge leaves the budget over its limit it is marked
 // closeOnceUnused, to be closed once that work no longer holds it (Service.closeIfOpenedOverBudget)
 // rather than staying charged until it retires a minute later.
 func (b *roomBudget) load(room string, heap int64) *roomCharge {
@@ -658,6 +703,60 @@ func (c *roomCharge) grew(structure int64) {
 	defer c.budget.unlock()
 	c.structure += structure
 	c.budget.reweighLocked(c)
+}
+
+// wrote charges the room what update added, one transaction's update the peer hook did not apply -
+// an API write's publish, an injected update, settlement's repair, any of the server's own writes:
+// its content a rendering can show to the uncounted part, as contentAdded counts it, and its
+// structure to the structure part, priced as the hook prices a browser's update
+// (peerWeighing.structureHeap). Every struct the update carries is new to the room, since ygo
+// encodes a transaction's update from the state before it (sjawhar/ygo v1.51.3-sami.7,
+// buildPhase2, crdt/doc.go:597-612), so each is charged with the splits its integration can cause,
+// with two splits for each delete range the room did not already hold deleted (deletedRuns) and
+// the content no rendering prices. It refuses nothing: the write has committed, and its charge only
+// raises the budget's figures, so the budget refuses browsers and closes unused rooms sooner. The
+// update's delete ranges, and the structs it integrated deleted, are listed as the room's
+// (deletedRuns.record). One walk reads the content and the structure both. An update the walk
+// cannot read is charged its bytes as content, as contentAdded charges it, and the structure the
+// walk read before it refused. Nil, a replica no room's load charged (a test's), charges nothing.
+func (c *roomCharge) wrote(update []byte) {
+	if c == nil {
+		return
+	}
+	weighed := writtenWeighing{structure: peerWeighing{known: c.deletes()}}
+	tally, err := walkUpdate(update, fromRoom, &weighed)
+	content := weighed.content.bytes
+	if err != nil {
+		content = int64(len(update))
+	}
+	if structure := weighed.structure.structureHeap(); content != 0 || structure != 0 {
+		c.budget.mu.Lock()
+		c.content += content
+		c.structure += structure
+		c.budget.reweighLocked(c)
+		c.budget.unlock()
+	}
+	if err == nil {
+		c.deleted.record(update, tally.deletesAt, weighed.structure.born)
+	}
+}
+
+// writtenWeighing is wrote's visitor: the content a rendering can show (contentAdded's
+// renderedContent) and the structure (peerWeighing) of one walk of a server write's update. Its
+// peerWeighing holds no state vector, so every struct counts as past the room's state, as every
+// struct of a transaction's update is.
+type writtenWeighing struct {
+	content   renderedContent
+	structure peerWeighing
+}
+
+func (w *writtenWeighing) walkedStruct(walked updateStruct) {
+	w.content.walkedStruct(walked)
+	w.structure.walkedStruct(walked)
+}
+
+func (w *writtenWeighing) walkedDelete(client, clock, length uint64) {
+	w.structure.walkedDelete(client, clock, length)
 }
 
 // gaveBack takes structure back out of the room's structure part: what growWithin charged before
@@ -949,12 +1048,12 @@ func (b *roomBudget) reweighLocked(charge *roomCharge) {
 //
 // What no rendering shows is left out: a struct directly under the margin, under a rebuilt
 // history's retired clients (parentRetired) or under any other named root, a GC run or a skip, and
-// JSON, binary, deleted and GC content, which the Proof schema renders nowhere. A browser's are
-// charged in the structure part instead (peerWeighing.structureHeap); the server's own writes
-// bound the margin at maxMarginBytes (growth.go:171) and their margin is priced through the
-// rendering alone. Any content under an item or beside a neighbour may be an XML element's
-// attribute, which renders, and is counted. An update the walk cannot read is counted whole, which
-// is never less than its content.
+// JSON, binary, deleted and GC content, which the Proof schema renders nowhere. Every
+// transaction's are charged in the structure part instead (peerWeighing.structureHeap): a
+// browser's by the peer hook, the server's own by the update observer (roomCharge.wrote). Any
+// content under an item or beside a neighbour may be an XML element's attribute, which renders,
+// and is counted. An update the walk cannot read is counted whole, which is never less than its
+// content.
 func contentAdded(update []byte) int64 {
 	var added renderedContent
 	if _, err := walkUpdate(update, fromRoom, &added); err != nil {
@@ -1012,24 +1111,28 @@ func (s *Service) reserveRoom(ctx context.Context, room string) (*roomReservatio
 }
 
 // storedRoomReservation is what an admission to room reserves: its latest version's stored
-// markdown, counted (pmdoc.MeasureDocument) and priced as a loaded room's rendering is (copyHeap),
-// at both copies. A version is stored as its rendering (pmdoc/parse.go:120-122), so this is the
-// count the room's load makes of the rendering it loads with (keepReplica) wherever no update has
-// been stored since that version, and that count replaces this reservation (roomBudget.load). So
-// a mebibyte of prose reserves about the 54 MB it costs once counted
+// markdown, counted (pmdoc.MeasureDocument), and the structs of its stored history (storedStructs),
+// priced as a loaded room's rendering and struct total are (copyHeap), at both copies. A version is
+// stored as its rendering (pmdoc/parse.go:120-122), so the element count is the count the room's
+// load makes of the rendering it loads with (keepReplica) wherever no update has been stored since
+// that version, and that count replaces this reservation (roomBudget.load). So a mebibyte of prose
+// reserves about the 54 MB it costs once counted
 // (TestAnAdmissionReservesTheCountOfItsStoredVersion), where its bytes at the densest price would
-// reserve 2.2 GB, past the whole budget, and refuse it on an empty pod. Only markdown
+// reserve 2.2 GB, past the whole budget, and refuse it on an empty pod; and a document whose
+// history outgrows its rendering reserves its structs, as its load is charged them
+// (TestAStructDenseDocumentReservesAndIsChargedItsStructs). Only markdown
 // MeasureDocument cannot finish is priced from its bytes (bytesOfHeapAByteAtTheDensest). A
 // document with no version yet reserves nothing.
 //
 // The count is a whole goldmark parse: about 89 ms for a mebibyte, and up to about 130 MiB of heap
-// for a mebibyte of the heaviest shape (pmdoc/elements.go:31-37). It is paid on the path a person
-// reaches when they open a document, once for each version in each process, since the count is
-// kept (storedCounts) - never on a keystroke, and never inside a room's update observer. The
-// admissions that miss one version at once share one count, the others waiting for the one that
-// counts, and counts of different documents run one at a time (storedCounts.counting), so a burst
-// of admissions holds one parse's heap rather than one for each. Only the latest version's number
-// is read on every admission; its markdown is read only to count it.
+// for a mebibyte of the heaviest shape (pmdoc/elements.go:31-37), and a walk of the stored history,
+// which decodes nothing. It is paid on the path a person reaches when they open a document, once
+// for each version in each process, since the count is kept (storedCounts) - never on a keystroke,
+// and never inside a room's update observer. The admissions that miss one version at once share
+// one count, the others waiting for the one that counts, and counts of different documents run one
+// at a time (storedCounts.counting), so a burst of admissions holds one parse's heap and one stored
+// update's bytes rather than one for each. Only the latest version's number is read on every
+// admission; its markdown and the stored history are read only to count them.
 func (s *Service) storedRoomReservation(ctx context.Context, room string) (int64, error) {
 	var number int64
 	err := s.queryFrom(ctx).QueryRow(ctx, `
@@ -1059,14 +1162,15 @@ func (s *Service) storedRoomReservation(ctx context.Context, room string) (int64
 }
 
 // countStoredVersion is the price of one copy of room's version number (copyHeap), counted from its
-// stored markdown and kept (storedCounts.put), unless an admission that started its count before
-// this one's miss has kept it already. It runs once for each version however many admissions miss
-// it at once (storedRoomReservation), so it belongs to the version rather than to the admission
-// that started it: it reads on a context no admission's end cancels, bounded as a cold read's fold
-// is (coldReadTimeout), and through the pool rather than any caller's transaction, and an
-// admission whose request ends returns at once and leaves the count to the others. Its error is
-// the read's, or a panic recovered from the parse: singleflight re-panics an unrecovered panic of
-// a call it has waiters for in a goroutine nothing can recover, as foldDocument says.
+// stored markdown and the structs of the history stored when it counts (storedStructs) and kept
+// (storedCounts.put), unless an admission that started its count before this one's miss has kept
+// it already. It runs once for each version however many admissions miss it at once
+// (storedRoomReservation), so it belongs to the version rather than to the admission that started
+// it: it reads on a context no admission's end cancels, bounded as a cold read's fold is
+// (coldReadTimeout), and through the pool rather than any caller's transaction, and an admission
+// whose request ends returns at once and leaves the count to the others. Its error is a read's, or
+// a panic recovered from the parse or the walk: singleflight re-panics an unrecovered panic of a
+// call it has waiters for in a goroutine nothing can recover, as foldDocument says.
 func (s *Service) countStoredVersion(ctx context.Context, room string, number int64) (heap int64, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -1091,9 +1195,47 @@ func (s *Service) countStoredVersion(ctx context.Context, room string, number in
 	if counts.beforeCount != nil {
 		counts.beforeCount(room, number)
 	}
-	heap = copyHeap(int64(len(markdown)), countElements(markdown))
+	structs, err := s.storedStructs(readCtx, room)
+	if err != nil {
+		return 0, err
+	}
+	heap = copyHeap(int64(len(markdown)), countElements(markdown), structs)
 	counts.put(&storedCount{room: room, number: number, heap: heap})
 	return heap, nil
+}
+
+// storedStructs is the structs room's stored history holds, as a room's load would read it: every
+// stored update through the head (headVersion), read one row at a time in one snapshot
+// (eachUpdateThrough, as a load's fold reads them), each walked as a room's own state is
+// (walkUpdate, fromRoom), which reads the update's headers and the lengths of its contents,
+// decodes nothing and allocates nothing per struct, its structs summed. A compacted history is one
+// update, the state a closed room's compaction encoded from its decode (compactKeep), whose count
+// is the state's own as its room's load counts it (countRoomStructs), but for the splits that
+// parked structs can still cause. A history with updates appended since its last compaction counts
+// each update's structs as stored: a run typed one transaction at a time is a struct for each
+// keystroke here, where a decode merges what it can (squashRuns), and the splits a delete range
+// makes are not here. Either way the room's load replaces the reservation with the count of the
+// room it decoded (chargeLoadedRoom). An update the walk refuses would fail the room's load; it
+// counts what the walk read before refusing.
+func (s *Service) storedStructs(ctx context.Context, room string) (int64, error) {
+	tx, err := s.store.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return 0, fmt.Errorf("begin the read of the document's stored history: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	stamp, err := readDocumentStamp(ctx, tx, room)
+	if err != nil {
+		return 0, err
+	}
+	var structs uint64
+	if err := eachUpdateThrough(ctx, tx, room, persistence.Version(stamp.Version), func(update []byte) error {
+		tally, _ := walkUpdate(update, fromRoom, nil)
+		structs += tally.structs
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	return int64(structs), nil
 }
 
 // storedCountsHeld is the most documents whose stored version's count is kept (storedCounts). An
@@ -1101,7 +1243,7 @@ func (s *Service) countStoredVersion(ctx context.Context, room string, number in
 // 4,096 of them hold about a mebibyte, and counting entries bounds their weight: the cold reads'
 // cache weighs each of its entries (documentRead.weight) because they run from bytes to
 // megabytes, and these do not vary. A document the bound has dropped costs its next admission one
-// parse again, nothing more.
+// parse and one walk of its stored history again, nothing more.
 const storedCountsHeld = 4_096
 
 // storedCounts keeps, for each document an admission counted, the price of one copy of its latest
@@ -1111,12 +1253,17 @@ const storedCountsHeld = 4_096
 // document, a newer version's count replacing an older one's, and a singleflight group, so that
 // the admissions missing one version at once share one count rather than each parsing it.
 //
-// Unlike that cache's renderings, a count never goes stale, and needs no stamp: a version's
-// markdown is written once, by the insert that makes the version (api/artifacts.go:296,
-// api/issue_create.go:349), and no running server rewrites it - the other writes to
-// artifact_versions move a file's content (files/backfill.go:177,215) or are migrations, which run
-// before it serves - so the count of a document's version number is that version's for as long as
-// it stands. An entry is used only for the version the store names latest at the admission.
+// Unlike that cache's renderings, an element count never goes stale, and needs no stamp: a
+// version's markdown is written once, by the insert that makes the version
+// (api/artifacts.go:296, api/issue_create.go:349), and no running server rewrites it - the other
+// writes to artifact_versions move a file's content (files/backfill.go:177,215) or are
+// migrations, which run before it serves - so the count of a document's version number is that
+// version's for as long as it stands. The struct count is kept beside it, for the version: it is
+// of the history as stored when the version was first counted, and updates stored after that move
+// it only once a later version is counted, which costs nothing more than the reservation's
+// staleness, since an admission's reservation stands only until the room loads and its own count
+// replaces it (roomBudget.load). An entry is used only for the version the store names latest at
+// the admission.
 type storedCounts struct {
 	mu      sync.Mutex
 	entries map[string]*list.Element
@@ -1130,7 +1277,8 @@ type storedCounts struct {
 	beforeCount func(room string, number int64)
 }
 
-// storedCount is the price of one copy of room's version number (copyHeap).
+// storedCount is the price of one copy of room's version number (copyHeap): its elements or the
+// structs of its stored history, whichever is more.
 type storedCount struct {
 	room         string
 	number, heap int64
@@ -1177,12 +1325,13 @@ func (c *storedCounts) put(count *storedCount) {
 // chargeLoadedRoom charges room's newly loaded instance, live, whose replica has just published
 // its load's count (keepReplica), in place of the reservations of the sockets admitted to it, and
 // hands the replica the charge its counts re-base from then on (renderedReplica.storeCounted). The
-// charge lists live's delete set as the ranges the room holds deleted (deletedRuns) before the
-// replica hands it to the peer hook: a walk of the document's whole store, beside the load's
-// rendering of it, which is not a keystroke.
+// load is priced from that count and from the struct total the replica counted at the load
+// (newStructTotal), whichever is more (copyHeap). The charge lists live's delete set as the ranges
+// the room holds deleted (deletedRuns) before the replica hands it to the peer hook: a walk of the
+// document's whole store, beside the load's rendering of it, which is not a keystroke.
 func (s *Service) chargeLoadedRoom(room string, live *crdt.Doc, replica *renderedReplica) *roomCharge {
 	bytes, elements, _ := replica.size()
-	charge := s.budget.load(room, copyHeap(bytes, elements))
+	charge := s.budget.load(room, copyHeap(bytes, elements, replica.structs.countedStructs()))
 	charge.deleted.seed(crdt.DeleteSetFromDoc(live))
 	replica.sizeMu.Lock()
 	replica.charge = charge

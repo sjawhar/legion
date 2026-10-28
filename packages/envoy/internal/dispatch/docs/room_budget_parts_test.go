@@ -16,6 +16,7 @@ import (
 	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -106,7 +107,7 @@ func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount
 	replica.publishSize(&rendering)
 	service.measurer.waitIdle()
 	after, _, _, weight := chargeParts(charge)
-	if heap := copyHeap(int64(len(rendering)), countElements(rendering)); after != structure || weight != heap*roomCopies+structure {
+	if heap := copyHeap(int64(len(rendering)), countElements(rendering), replica.structs.countedStructs()); after != structure || weight != heap*roomCopies+structure {
 		t.Fatalf("after a count the room is charged %d bytes with a %d-byte structure part, want its count's %d at both copies beside the %d-byte structure part as it was",
 			weight, after, heap*roomCopies, structure)
 	}
@@ -171,9 +172,10 @@ func TestTheRoomBudgetChargesADeleteRangeOnlyOnce(t *testing.T) {
 // the server's own writes - to the uncounted part, at the densest price at both copies, and never
 // the transaction's bytes: ygo's update for a transaction carries the room's whole delete set
 // every time (crdt/doc.go:597-612), so a keystroke into a document of 2,000 deleted runs is a
-// frame of thousands of bytes that adds two. A transaction that only deletes adds nothing, and a
-// whole-state handoff of the document the room holds adds nothing. A count re-bases the uncounted
-// part, here one the measurer makes early, as the content passes earlyCountCharge.
+// frame of thousands of bytes that adds two, and its structure part one struct, whatever runs the
+// frame carries. A transaction that only deletes adds nothing, and a whole-state handoff of the
+// document the room holds adds nothing. A count re-bases the uncounted part, here one the measurer
+// makes early, as the content passes earlyCountCharge.
 func TestTheRoomBudgetChargesATransactionsAddedContentNotItsDeleteSet(t *testing.T) {
 	ctx := context.Background()
 	database := storetest.Open(t)
@@ -231,9 +233,11 @@ func TestTheRoomBudgetChargesATransactionsAddedContentNotItsDeleteSet(t *testing
 	keystroke := write("type one character", inText(func(text *crdt.YXmlText, txn *crdt.Transaction) { text.Insert(txn, 0, "y", nil) }))
 	_, _, _, after := chargeParts(charge)
 	added := uncounted() - typed
-	if keystroke < 2_000 || added != 2 || after-before != 2*bytesOfHeapAByteAtTheDensest*roomCopies {
-		t.Fatalf("a keystroke's %d-byte update added %d bytes of content and %d of charge, want a frame carrying the 2,000 deleted runs that adds its 2 bytes of content, %d of charge",
-			keystroke, added, after-before, 2*bytesOfHeapAByteAtTheDensest*roomCopies)
+	// The keystroke's struct, its splits and its content, a character and its length, as text.
+	structure := int64(((1+splitsAStructCanCause)*bytesOfHeapAStruct + 2*bytesOfHeapAByteOfText) * roomCopies)
+	if keystroke < 2_000 || added != 2 || after-before != 2*bytesOfHeapAByteAtTheDensest*roomCopies+structure {
+		t.Fatalf("a keystroke's %d-byte update added %d bytes of content and %d of charge, want a frame carrying the 2,000 deleted runs that adds its 2 bytes of content and one struct, %d of charge",
+			keystroke, added, after-before, 2*bytesOfHeapAByteAtTheDensest*roomCopies+structure)
 	}
 	held := uncounted()
 	write("hand over the whole state the room holds", func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
@@ -250,8 +254,99 @@ func TestTheRoomBudgetChargesATransactionsAddedContentNotItsDeleteSet(t *testing
 	write("paste 8,000 characters", inText(func(text *crdt.YXmlText, txn *crdt.Transaction) { text.Insert(txn, 0, strings.Repeat("z", 8_000), nil) }))
 	waitFor(t, 10*time.Second, "the early count to re-base the uncounted part", func() bool { return uncounted() == 0 })
 	service.measurer.waitIdle()
-	if structure, _, _, _ := chargeParts(charge); structure != 0 {
-		t.Fatalf("the server's own writes grew the structure part to %d bytes, want nothing: only the peer hook adds to it", structure)
+}
+
+// Every transaction the peer hook did not apply is charged its structure as the hook charges a
+// browser's update (roomCharge.wrote), and none is refused for it: here the server's own writes,
+// into a room one browser holds, with the budget far past its limit and full raised. A struct is
+// charged with its splits and its content no rendering prices; a delete range the room did not
+// hold deleted its two splits; a whole-state handoff of the document the room holds, as an
+// injected update can be, nothing; an API write's publish (publishLiveWrite) at least its new
+// struct's price. A browser's update the hook admits is charged once, by the hook, and not again by
+// the update observer that drains it from the room's log.
+func TestTheRoomBudgetChargesEveryServerWritesStructureAndRefusesNone(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	service.settle = time.Hour // no settlement writes into the room while it is weighed
+	service.measurer.mu.Lock()
+	service.measurer.interval = time.Hour
+	service.measurer.mu.Unlock()
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	room := createDocumentsHolding(t, database, 1, "First paragraph of ordinary prose.")[0]
+	browser := connectBrowser(t, httpServer.URL, room, "alice")
+	t.Cleanup(browser.Close)
+	live := service.srv.GetDoc(room)
+	replica := service.liveReplica(live)
+	charge := replica.roomCharge()
+	if charge == nil {
+		t.Fatal("the browser's room holds no charge in the room budget")
+	}
+	structure := func() int64 {
+		structure, _, _, _ := chargeParts(charge)
+		return structure
+	}
+	// struck is one struct with its two splits and its content, a string of characters and its
+	// length, as text.
+	struck := func(characters int) int64 {
+		return int64(((1+splitsAStructCanCause)*bytesOfHeapAStruct + (characters+1)*bytesOfHeapAByteOfText) * roomCopies)
+	}
+
+	// A browser's keystroke, through the hook into the room the observer drains.
+	origin := &struct{ browser string }{"alice"}
+	keystroke := peerTyping(t, live, "y")
+	before := structure()
+	if err := service.weighPeerUpdate(websocket.PeerUpdateInfo{Room: room, Doc: live, Update: keystroke, Origin: origin}, func() error {
+		return crdt.ApplyUpdateV1(live, keystroke, origin)
+	}); err != nil {
+		t.Fatalf("the hook refused a keystroke: %v", err)
+	}
+	if grew, want := structure()-before, struck(1); grew != want {
+		t.Fatalf("a browser's keystroke grew the structure part by %d bytes, want its one struct's %d, charged by the hook alone", grew, want)
+	}
+
+	service.SetRoomBudgetForTest(1)
+	t.Cleanup(func() { service.SetRoomBudgetForTest(0) })
+	waitFor(t, 10*time.Second, "the budget to report itself full", service.budget.full.Load)
+	write := func(what string, change func(doc *crdt.Doc, transact func(func(*crdt.Transaction)))) int64 {
+		t.Helper()
+		before := structure()
+		if err := service.srv.Apply(ctx, room, change); err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+			t.Fatalf("%s on a full budget: %v", what, err)
+		}
+		return structure() - before
+	}
+	inText := func(edit func(text *crdt.YXmlText, txn *crdt.Transaction)) func(*crdt.Doc, func(func(*crdt.Transaction))) {
+		return func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			// Read before the transaction, which holds the document's lock the read takes.
+			text := firstText(doc.GetXmlFragment(fragmentName))
+			transact(func(txn *crdt.Transaction) { edit(text, txn) })
+		}
+	}
+	if grew, want := write("type three characters", inText(func(text *crdt.YXmlText, txn *crdt.Transaction) { text.Insert(txn, 0, "abc", nil) })), struck(3); grew != want {
+		t.Fatalf("three characters the server typed grew the structure part by %d bytes, want their one struct's %d", grew, want)
+	}
+	if grew, want := write("delete one character", inText(func(text *crdt.YXmlText, txn *crdt.Transaction) { text.Delete(txn, 8, 1) })), int64(splitsAStructCanCause*bytesOfHeapAStruct*roomCopies); grew != want {
+		t.Fatalf("a character the server deleted grew the structure part by %d bytes, want its range's two splits, %d", grew, want)
+	}
+	if grew := write("hand the room its own state", func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		if err := crdt.ApplyUpdateV1(doc, crdt.EncodeStateAsUpdateV1(doc, nil), "inject"); err != nil {
+			t.Fatal(err)
+		}
+	}); grew != 0 {
+		t.Fatalf("a whole-state handoff of the document the room holds, its delete ranges included, grew the structure part by %d bytes, want nothing", grew)
+	}
+	before = structure()
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	if _, err := joinedApplyOps(service, room, []model.EditOp{{Op: "replace", Find: "ordinary", With: "plain"}}, agent, nil); err != nil {
+		t.Fatalf("an API write on a full budget: %v", err)
+	}
+	if grew, least := structure()-before, int64((1+splitsAStructCanCause)*bytesOfHeapAStruct*roomCopies); grew < least {
+		t.Fatalf("an API write's publish grew the structure part by %d bytes, want at least its new struct's %d", grew, least)
+	}
+	if text := renderedLive(t, service, room); !strings.Contains(text, "plain prose") {
+		t.Fatalf("the room reads %q after the API write, want it to hold the write", text)
 	}
 }
 

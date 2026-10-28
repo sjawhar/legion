@@ -17,11 +17,12 @@ import (
 // A room a browser opens over a real socket is measured and charged at its load, and its replica
 // follows the room's update log. The load's rendering is the room's first measurement: the bytes
 // the peer update hook weighs (renderedReplica.size, which the hook reads through liveReplica) and
-// the elements the room budget charges the load by (chargeLoadedRoom), at both copies, in place of
-// the socket's reservation. The replica then moves only through the room's commits as the update
-// log hands them over (keepReplica, doc.OpenUpdateLog): once the browser's edit is in, the replica
-// holds the room as of that commit with nothing left in the log, its rendering is the measurement,
-// and the content every logged update added is charged once.
+// the elements the room budget charges the load by (chargeLoadedRoom) beside the struct total the
+// load counted, at both copies, in place of the socket's reservation. The replica then moves only
+// through the room's commits as the update log hands them over (keepReplica, doc.OpenUpdateLog):
+// once the browser's edit is in, the replica holds the room as of that commit with nothing left in
+// the log, its rendering is the measurement, and the content every logged update added is charged
+// once.
 func TestAFreshlyLoadedRoomIsMeasuredAndChargedWithItsUpdateLog(t *testing.T) {
 	database := storetest.Open(t)
 	service := newRoomBudgetService(t, database, NewPgVersioned(database))
@@ -49,7 +50,7 @@ func TestAFreshlyLoadedRoomIsMeasuredAndChargedWithItsUpdateLog(t *testing.T) {
 	if charge == nil {
 		t.Fatal("the loaded room's replica holds no charge in the room budget")
 	}
-	if want, used := roomWeight(copyHeap(bytes, elements), 0, 0), budgetUsed(service); used != want {
+	if want, used := roomWeight(copyHeap(bytes, elements, replica.structs.countedStructs()), 0, 0), budgetUsed(service); used != want {
 		t.Fatalf("the budget holds %d bytes for the loaded room, want its load's count at both copies, %d", used, want)
 	}
 

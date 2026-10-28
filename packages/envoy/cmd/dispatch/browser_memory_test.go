@@ -38,7 +38,7 @@ const (
 	podGoMemoryLimit = 3_865_470_566
 
 	// These mirror constants of internal/dispatch/docs, which this package cannot read:
-	// roomBudgetBytes (room_budget.go:36), bytesOfHeapAnElement (:48), roomCopies (:441),
+	// roomBudgetBytes (room_budget.go:40), bytesOfHeapAnElement (:53), roomCopies (:479),
 	// maxPeerInsertAtTheBound (peer_update.go:109), maxPeerByteCreep (:114) and maxMessageBytes
 	// (:226). No drive takes a mirror on trust. The server names its budget and what each refused
 	// document needs in the line it logs for a refusal (refuseOverRoomBudget), and the budget
@@ -59,7 +59,7 @@ const (
 	// whole state within one paste of the second.
 	maxUnrenderedBytesForTest   = 9_961_472
 	heaviestHandoffBoundForTest = 44_936_089
-	// perFrameScanCeilingForTest mirrors perFrameScanCeiling (internal/dispatch/docs/scan_budget.go:32),
+	// perFrameScanCeilingForTest mirrors perFrameScanCeiling (internal/dispatch/docs/scan_budget.go:34),
 	// the most items one browser's update the room weighs may scan. The server names the allowance
 	// it refused each update at in the line it logs for the refusal (scanRefusalLine), and
 	// TestAScanFrameIsRefusedWholeAndTheRoomIsAsItWas fails unless the first is this.
@@ -72,10 +72,22 @@ const (
 	// person's typing; a wrong mirror changes only how far growth runs past the budget before it
 	// is refused, which the bound on peak resident memory catches.
 	roomCountIntervalForTest = 15 * time.Second
+
+	// bytesOfHeapAStructHeldForTest mirrors bytesOfHeapAStructHeld
+	// (internal/dispatch/docs/room_budget.go:76), the heap one copy of a room holds for each struct
+	// of its state, measured (TestAResidentRoomsHeapPerStructOfItsState); bytesOfHeapAStructForTest
+	// mirrors bytesOfHeapAStruct (:128), what the structure part charges each struct an update adds
+	// and each split it can cause, and splitsAStructCanCauseForTest splitsAStructCanCause
+	// (peer_update.go:631). TestARoomFedOnlyByAPIWritesIsChargedTheStructsTheyAdd weighs a room's
+	// growth against them; a wrong mirror moves only how much growth it asks for, and its log line
+	// prints each figure beside the server's own.
+	bytesOfHeapAStructHeldForTest = 170
+	bytesOfHeapAStructForTest     = 620
+	splitsAStructCanCauseForTest  = 2
 )
 
 // One browser's update is bounded by bytes, over a real document socket of a real server
-// (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:228-444): an update that would
+// (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:228-445): an update that would
 // take a document past the bound is refused with 4413 and DOC_TOO_LARGE, and the document is kept;
 // small updates carry a document over the bound only by the creep they are allowed; a document at
 // or over the bound can be opened, handed back whole, edited and shortened; an edit under it
@@ -571,7 +583,7 @@ func (p *memoryServer) setRoomBudget(t *testing.T, bytes int64) {
 
 // unboundedRoomBudget is a room budget no drive of one document's bounds comes near: the budget
 // charges a byte of content the measurer has not yet counted at the densest price, 2,116 bytes at
-// both copies (bytesOfHeapAByteAtTheDensest, internal/dispatch/docs/room_budget.go:78), so a
+// both copies (bytesOfHeapAByteAtTheDensest, internal/dispatch/docs/room_budget.go:106), so a
 // mebibyte written in one update would fill the real budget until the room's next count.
 const unboundedRoomBudget = 1 << 50
 
@@ -756,7 +768,7 @@ func TestTheHeaviestHandoffTheBoundsAllowIsNotClosedForSize(t *testing.T) {
 // The room budget refuses the browser its own arithmetic says it has no room for: documents of a
 // mebibyte of prose, each edited once, opened until one is refused with 4503 and DOC_BUSY, under the
 // Go limit a 4 GiB pod gives the server. A room is charged at both copies from its admission
-// (roomCopies, internal/dispatch/docs/room_budget.go:438), so the refusals begin within one room of
+// (roomCopies, internal/dispatch/docs/room_budget.go:479), so the refusals begin within one room of
 // the budget divided by what one such room reserves - its stored version's elements at the price of
 // one, at both copies - computed here from the server's constants and held to the numbers the server
 // logs, both when the browsers come one after another and when fifty open at once.
@@ -1397,6 +1409,120 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 	}
 }
 
+// The room budget charges a room the structs the server's own writes add to it, over a real
+// server: a room fed only by API writes, with one browser connected that sends nothing but its
+// first sync, has its charge grow by at least the price of what a room's copy holds for a struct
+// (bytesOfHeapAStructHeld) for each struct those writes add to its stored state, and its structure
+// part by at least each write's one new struct with the splits its integration can cause, at both
+// copies (roomCharge.wrote, internal/dispatch/docs/room_budget.go). None of the writes is refused,
+// though the budget is past its limit throughout. Each write replaces one word of the room's
+// paragraph with another of the same length, so the rendering, and what its elements are charged,
+// stay as they were, and what grows is the structure part and the struct total each count prices.
+//
+// The charge is read the way the budget drives read the budget's figures, from the line the server
+// logs for a browser it refuses (budgetRefusalLine): on a budget of one byte, a browser opening a
+// document no room holds is refused with what the open rooms are charged, which is the fed room's
+// charge alone once the sweeps have closed every room nothing holds. It is read once the room's
+// count of its rendering has landed, before the writes and after them, so neither reading holds
+// the uncounted part the writes' content adds until a count.
+func TestARoomFedOnlyByAPIWritesIsChargedTheStructsTheyAdd(t *testing.T) {
+	const writes = 200
+	memory := newMemoryHarness(t)
+	server := memory.start(t)
+	var words strings.Builder
+	for word := range writes {
+		fmt.Fprintf(&words, " w%03d", word)
+	}
+	fed := server.upload(t, "json", memory.issue, "# Fed\n\nThe words"+words.String()+".\n")
+	probe := server.upload(t, "json", memory.issue, "# Probe\n\nA document no browser is admitted to.\n")
+	for _, stored := range []uploadResult{fed, probe} {
+		if stored.status != http.StatusCreated {
+			t.Fatalf("upload: status %d body %.300s, want 201", stored.status, stored.body)
+		}
+		memory.waitForSettlement(t, stored)
+	}
+	held := server.openBrowser(t, fed.artifactID)
+	t.Cleanup(held.leave)
+	// The fed room alone passes a budget of one byte: the sweep that follows closes every room
+	// nothing holds, the probe's among them if the upload left it open, and leaves the browser's.
+	server.setRoomBudget(t, 1)
+	for deadline := time.Now().Add(2 * time.Minute); server.roomLive(t, probe.artifactID); time.Sleep(time.Second) {
+		if time.Now().After(deadline) {
+			t.Fatal("the probe's room was never closed on a budget of one byte")
+		}
+	}
+	charged := func(when string) int64 {
+		t.Helper()
+		// The room's count of what was written lands within roomCountIntervalForTest, and its
+		// settlement after the room's settle delay.
+		time.Sleep(roomCountIntervalForTest + 2*time.Second)
+		memory.waitForSettled(t, fed.artifactID)
+		seen := len(budgetRefusalLine.FindAllStringSubmatch(server.output.String(), -1))
+		refused, err := server.tryOpenBrowser(probe.artifactID)
+		if err == nil {
+			refused.leave()
+			t.Fatalf("%s: a browser was admitted to the probe on a budget of one byte", when)
+		}
+		var closed *gws.CloseError
+		if !errors.As(err, &closed) {
+			t.Fatalf("%s: the probe's socket failed with %v, want the budget's close", when, err)
+		}
+		requireClose(t, closed, contracts.DocumentBusyCloseCode, contracts.DocumentBusyCloseReason, when+", the probe's socket")
+		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+			if refusals := budgetRefusalLine.FindAllStringSubmatch(server.output.String(), -1); len(refusals) > seen {
+				last := refusals[len(refusals)-1]
+				charged, chargedErr := strconv.ParseInt(last[1], 10, 64)
+				limit, limitErr := strconv.ParseInt(last[2], 10, 64)
+				if chargedErr != nil || limitErr != nil || limit != 1 {
+					t.Fatalf("%s: the server refused the probe with %q, want what is charged against a budget of one byte", when, last[0])
+				}
+				return charged
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: the server logged no refusal of the probe:\n%s", when, server.output.tail())
+			}
+		}
+	}
+	structs := func() int64 {
+		t.Helper()
+		count, err := docs.StateStructsForTest(memory.storedState(t, fed.artifactID))
+		if err != nil {
+			t.Fatalf("count the stored state's structs: %v", err)
+		}
+		return count
+	}
+
+	before, structsBefore := charged("before the writes"), structs()
+	for word := range writes {
+		find, with := fmt.Sprintf("w%03d", word), fmt.Sprintf("v%03d", word)
+		if answer := server.edit(t, fed.artifactID, map[string]any{"op": "replace", "find": find, "with": with}); answer.status != http.StatusOK {
+			t.Fatalf("API write %d answered %d %.300s on a budget of one byte, want 200", word+1, answer.status, answer.body)
+		}
+	}
+	after := charged("after the writes")
+	added := structs() - structsBefore
+	grew := after - before
+	byStructs := added * bytesOfHeapAStructHeldForTest
+	byStructure := int64(writes * (1 + splitsAStructCanCauseForTest) * bytesOfHeapAStructForTest * roomCopiesForTest)
+	t.Logf("%d API writes added %d structs to the stored state (%d -> %d); the room was charged %d bytes before them and %d after, %d more, against %d for the structs at %d bytes each and %d for a struct each in the structure part",
+		writes, added, structsBefore, structsBefore+added, before, after, grew, byStructs, bytesOfHeapAStructHeldForTest, byStructure)
+	if added < writes {
+		t.Fatalf("%d API writes added %d structs to the stored state, want at least one each", writes, added)
+	}
+	if grew < byStructs {
+		t.Errorf("the room's charge grew by %d bytes for %d structs its API writes added, want at least %d, %d bytes a struct", grew, added, byStructs, bytesOfHeapAStructHeldForTest)
+	}
+	if grew < byStructure {
+		t.Errorf("the room's charge grew by %d bytes for %d API writes, want at least %d, one struct each with its splits at both copies in its structure part", grew, writes, byStructure)
+	}
+	text := server.text(t, fed.artifactID)
+	for word := range writes {
+		if !strings.Contains(text, fmt.Sprintf(" v%03d", word)) || strings.Contains(text, fmt.Sprintf(" w%03d", word)) {
+			t.Fatalf("the room reads %q, want word %d replaced", text, word)
+		}
+	}
+}
+
 // requireBusyAndUnchanged sends update to room from a browser of its own and fails the test unless
 // the room refuses it with 4503 and DOC_BUSY, and the document is as it was before, read through
 // the server's text and through the store.
@@ -1656,7 +1782,7 @@ func requireRoomAbsent(t *testing.T, server *memoryServer, artifactID, what stri
 }
 
 // proseMarkdown is the shape TestAResidentRoomsHeapPerByteOfItsMarkdown weighs rooms in
-// (internal/dispatch/docs/room_heap_test.go:188-214), whole sections to at most size bytes: a
+// (internal/dispatch/docs/room_heap_test.go:309-335), whole sections to at most size bytes: a
 // heading, a paragraph of marks and plain words, a list, a table and a code block. Each paragraph
 // ends in about 1,400 bytes of plain words (paddingTexts), which a drive can lengthen or shorten
 // without touching a mark.
@@ -1817,7 +1943,7 @@ func requirePodGoMemoryLimit(t *testing.T, server *memoryServer) {
 }
 
 // budgetRefusalLine is the reason the room budget gives a refused browser, as the server logs it
-// (errRoomBudgetFull, internal/dispatch/docs/room_budget.go:499-536).
+// (errRoomBudgetFull, internal/dispatch/docs/room_budget.go:544-581).
 var budgetRefusalLine = regexp.MustCompile(`the open documents fill their memory budget: (\d+) of (\d+) bytes are charged(?:, and this document needs (\d+))?`)
 
 // budgetRefusal is one refusal the server logged: what its rooms were charged, its budget, and
@@ -1859,7 +1985,7 @@ func requireBudgetRefusals(t *testing.T, server *memoryServer, reserved int64) [
 }
 
 // budgetCloseLine is the line the room budget's sweep logs for each unused room it closes, in the
-// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1217-1250).
+// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1366-1399).
 var budgetCloseLine = regexp.MustCompile(`msg="dispatch: the room budget closed an unused document" room=(\S+) charged_before=(\d+) charged=(\d+) limit=(\d+) making_room_for=(\d+)`)
 
 // budgetClose is one close the server logged: the room, what the budget charged before and after

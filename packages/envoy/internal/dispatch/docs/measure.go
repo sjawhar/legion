@@ -182,10 +182,10 @@ func (m *elementMeasurer) next() (weak.Pointer[renderedReplica], bool) {
 // and re-bases the room's counted and uncounted parts on it (storeCounted). In the same turn it
 // counts the room's struct total afresh (structTotal.recountLive), an encode of the live
 // document's state and a walk of it, which re-bases the total the peer update hook refuses past
-// the decode cap on and nothing else: neither it nor the element count touches the room's
-// structure part. A replica already collected, or one whose waiting rendering a later publication
-// withdrew (one the room could not read), has nothing to count. The parse and the walk run in the
-// measurer's turn.
+// the decode cap on, and which the re-base prices the room's counted part by beside the element
+// count, whichever is more (copyHeap): neither count touches the room's structure part. A replica
+// already collected, or one whose waiting rendering a later publication withdrew (one the room
+// could not read), has nothing to count. The parse and the walk run in the measurer's turn.
 func (m *elementMeasurer) count(replica weak.Pointer[renderedReplica]) {
 	markdown, publication, content := takeUncounted(replica)
 	if markdown == nil {
@@ -296,18 +296,19 @@ func takeUncounted(replica weak.Pointer[renderedReplica]) (*string, uint64, int6
 
 // storeCounted stores elements, the count of the bytes-long rendering the replica's publication-th
 // publication made when the room had added content bytes of content, and re-bases the room's
-// charge on its price (copyHeap, roomCharge.measured), unless a later publication has already
-// stored a count of its own: the room's load, or a rendering the room could not read. Those are
-// newer than this count, and a count landing after them would put an older document's weight back
-// on the room. The content it clears from the uncounted part is what the room had added when the
-// counted rendering was published, never what was added since, which the rendering does not hold;
-// the structure part it leaves as it is.
+// charge on its price with the room's struct total as the measurer has just counted it in the same
+// turn (copyHeap, structTotal.countedStructs, roomCharge.measured), unless a later publication has
+// already stored a count of its own: the room's load, or a rendering the room could not read.
+// Those are newer than this count, and a count landing after them would put an older document's
+// weight back on the room. The content it clears from the uncounted part is what the room had
+// added when the counted rendering was published, never what was added since, which the
+// rendering does not hold; the structure part it leaves as it is.
 func (r *renderedReplica) storeCounted(bytes, elements int64, publication uint64, content int64) {
 	r.sizeMu.Lock()
 	defer r.sizeMu.Unlock()
 	if publication > r.settled {
 		r.elements.Store(elements)
-		r.charge.measured(copyHeap(bytes, elements), content)
+		r.charge.measured(copyHeap(bytes, elements, r.structs.countedStructs()), content)
 	}
 }
 

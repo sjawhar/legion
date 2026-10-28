@@ -288,7 +288,8 @@ const maxMessageBytes = 54 << 20
 // is known to hold deleted already is charged nothing (deletedRuns), so a browser's whole-state
 // handoff is not charged the room's whole delete set. The content it adds that a rendering can show
 // is charged by the room's update observer, from the transaction the apply commits (contentAdded),
-// not here.
+// not here; and every transaction the hook did not apply, the server's own writes, is charged the
+// same structure by that observer (roomCharge.wrote), which the hook never refuses or weighs.
 //
 // Every update's apply is weighed too, by what the walk estimates ygo's apply of it allocates into
 // this room (peerWeighing.applyHeap), which is proportional to the values and structs it carries
@@ -1106,12 +1107,39 @@ func (t *structTotal) retiredEntries() retiredEntries {
 // observed is the total's update observer: a transaction that is not one of the hook's applies
 // marks the total stale.
 func (t *structTotal) observed(_ []byte, origin any) {
-	t.originMu.Lock()
-	hook := t.origins[origin] > 0
-	t.originMu.Unlock()
-	if !hook {
+	if !t.hookApplies(origin) {
 		t.writes.Add(1)
 	}
+}
+
+// hookApplies reports whether origin is the origin of an apply the hook is running (applying): a
+// browser's update, whose structure the hook charges itself (roomCharge.grew). Every transaction
+// commits inside the apply that made it, whose update observers ygo fires before the apply returns
+// (crdt/doc.go:795-798), so the room's update observer, which drains the room's update log there,
+// finds each of the hook's updates while its apply is still running; any other origin is the
+// server's own write, whose structure that observer charges (renderedReplica.chargeAdded). Nil, a
+// total no load made, runs no apply of the hook's.
+func (t *structTotal) hookApplies(origin any) bool {
+	if t == nil {
+		return false
+	}
+	t.originMu.Lock()
+	defer t.originMu.Unlock()
+	return t.origins[origin] > 0
+}
+
+// countedStructs is the struct total of the room's last exact count (countRoomStructs): the one
+// its load made (newStructTotal), then each count since - the measurer's in its turn
+// (recountLive), or a confirmation of the hook's (confirm). It is the struct count the room
+// budget prices one copy of the room at (copyHeap); what the hook has admitted since the count is
+// in the room's structure part already. Zero for a total no load made.
+func (t *structTotal) countedStructs() int64 {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return int64(t.counted.structs)
 }
 
 // applying runs apply, which applies an update with origin, as one of the hook's own applies.

@@ -504,7 +504,7 @@ func heaviestDocument(t *testing.T) *crdt.Doc {
 // bound with its full margin and anchor marks, through the hook itself (weighPeerUpdate), with
 // updates a browser's copy of the room makes the way the editor makes them (pmdoc.Update of its
 // tree), of the densest markdown this repository measures: empty items of alternating bullet lists,
-// `- \n\n* \n\n`, 2.25 elements a byte (room_budget.go:62-64), each list and item and paragraph
+// `- \n\n* \n\n`, 2.25 elements a byte (room_budget.go:90-92), each list and item and paragraph
 // carrying the block id a browser's write mints. Each update is as large as the hook admits at the
 // bound, and the last is taken from a rendering under the creep cap by at most a pair, so the
 // document ends as far past the cap as one admitted update can take it; one more pair is then

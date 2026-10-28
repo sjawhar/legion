@@ -30,14 +30,15 @@ import (
 // have added since that count, at the densest price at both copies; and its structure part. Both
 // copies are charged from its load, which keeps both (roomCopies). Each count replaces the last
 // rather than adding to it, so the charge falls when the document does, and clears the content
-// added up to the rendering it measured; no count touches the structure part. A
-// rendering goldmark could not finish counting is priced from its bytes at the densest price, past
-// the element bound and never at nothing. A socket's reservation is replaced by its room's charge
-// when the room loads, and the whole charge goes when ygo retires the room.
+// added up to the rendering it measured; no count touches the structure part. A count prices a
+// copy at its elements or at its structs, whichever is more. A rendering goldmark could not finish
+// counting is priced from its bytes at the densest price, past the element bound and never at
+// nothing. A socket's reservation is replaced by its room's charge when the room loads, and the
+// whole charge goes when ygo retires the room.
 func TestTheRoomBudgetChargesARoomItsCountItsUncountedContentAndItsStructure(t *testing.T) {
 	const densest = bytesOfHeapAByteAtTheDensest * roomCopies
 	budget := &roomBudget{limit: roomBudgetBytes}
-	charge := budget.load("room", copyHeap(10_000, 1_000))
+	charge := budget.load("room", copyHeap(10_000, 1_000, 0))
 	counted := int64(2 * 1_000 * bytesOfHeapAnElement)
 	requireCharged(t, budget, charge, counted, "a room that has taken no update is charged both copies")
 
@@ -50,22 +51,30 @@ func TestTheRoomBudgetChargesARoomItsCountItsUncountedContentAndItsStructure(t *
 
 	// The count of the rendering published once the room had added 100 bytes re-bases the charge
 	// there: the 50 bytes added since stay beside it, and so does the structure.
-	charge.measured(copyHeap(8_000, 800), 100)
+	charge.measured(copyHeap(8_000, 800, 0), 100)
 	requireCharged(t, budget, charge, 2*800*bytesOfHeapAnElement+50*densest+5_000, "a count of a smaller document lowers the charge")
-	charge.measured(copyHeap(8_000, 800), 150)
+	charge.measured(copyHeap(8_000, 800, 0), 150)
 	requireCharged(t, budget, charge, 2*800*bytesOfHeapAnElement+5_000, "a count of the latest rendering leaves no uncounted content, and the structure part as it was")
+	// The same rendering over a history of 100,000 structs: its structs outweigh its elements,
+	// and price it; structs that weigh less than the elements leave it at its elements.
+	charge.measured(copyHeap(8_000, 800, 100_000), 150)
+	requireCharged(t, budget, charge, 2*100_000*bytesOfHeapAStructHeld+5_000, "a count whose structs outweigh its elements is priced at its structs")
+	charge.measured(copyHeap(8_000, 800, 2_000), 150)
+	requireCharged(t, budget, charge, 2*800*bytesOfHeapAnElement+5_000, "a count whose elements outweigh its structs is priced at its elements")
 
 	// A rendering MeasureDocument leaves uncounted answers no elements at all; priced as that, the
 	// heaviest room in the pod would be free. It is priced from its bytes at the densest price,
 	// with no ceiling at the element bound.
 	const uncounted = 64 << 10
-	charge.measured(copyHeap(uncounted, elementsPastCounting), 150)
+	charge.measured(copyHeap(uncounted, elementsPastCounting, 0), 150)
 	requireCharged(t, budget, charge, 2*uncounted*bytesOfHeapAByteAtTheDensest+5_000, "a rendering goldmark stopped counting is priced from its bytes at the densest price")
-	if atTheBound := roomWeight(copyHeap(pmdoc.MaxDocumentBytes, pmdoc.MaxDocumentElements), 0, 0); charge.weight <= atTheBound {
+	if atTheBound := roomWeight(copyHeap(pmdoc.MaxDocumentBytes, pmdoc.MaxDocumentElements, 0), 0, 0); charge.weight <= atTheBound {
 		t.Fatalf("an uncounted 64 KiB rendering is charged %d bytes, want more than the %d of a document at the element bound", charge.weight, atTheBound)
 	}
-	charge.measured(copyHeap(sizeUnmeasured, sizeUnmeasured), 150)
-	requireCharged(t, budget, charge, 5_000, "a room that renders no markdown is charged its uncounted content and structure alone")
+	charge.measured(copyHeap(sizeUnmeasured, sizeUnmeasured, 0), 150)
+	requireCharged(t, budget, charge, 5_000, "a room that renders no markdown and holds no struct is charged its uncounted content and structure alone")
+	charge.measured(copyHeap(sizeUnmeasured, sizeUnmeasured, 1_000), 150)
+	requireCharged(t, budget, charge, 2*1_000*bytesOfHeapAStructHeld+5_000, "a room that renders no markdown is priced at its structs")
 
 	budget.retire("room")
 	charge.adds(1_000)
@@ -78,12 +87,12 @@ func TestTheRoomBudgetChargesARoomItsCountItsUncountedContentAndItsStructure(t *
 	// at the room's load by the charge of the room's own document at both copies, here one an
 	// update stored since that version has made smaller.
 	ctx := context.Background()
-	reserved := roomWeight(copyHeap(3_000, 30), 0, 0)
+	reserved := roomWeight(copyHeap(3_000, 30, 0), 0, 0)
 	reservation, err := budget.reserve(ctx, time.Time{}, "other", reserved)
 	if err != nil || reservation == nil || budget.used != reserved {
 		t.Fatalf("a reservation held %d bytes (%v), want %d", budget.used, err, reserved)
 	}
-	other := budget.load("other", copyHeap(3_000, 10))
+	other := budget.load("other", copyHeap(3_000, 10, 0))
 	if budget.used != 2*10*bytesOfHeapAnElement || len(budget.rooms["other"].reservations) != 0 {
 		t.Fatalf("the loaded room is charged %d bytes beside %d reservations, want its own %d alone",
 			budget.used, len(budget.rooms["other"].reservations), 2*10*bytesOfHeapAnElement)
@@ -148,7 +157,7 @@ func TestTheMeasurersCountClearsOnlyTheContentAddedUpToTheRenderingItMeasured(t 
 			t.Fatalf("a dense rendering of %d bytes counts %d elements, want it past counting", len(rendering), elements)
 		}
 	}
-	countedHeap := copyHeap(int64(len(counted)), countElements(counted))
+	countedHeap := copyHeap(int64(len(counted)), countElements(counted), 0)
 	if countedHeap <= 0 || countedHeap == int64(len(later))*bytesOfHeapAByteAtTheDensest {
 		t.Fatalf("the counted rendering prices %d bytes, want a price no other rendering here has", countedHeap)
 	}
@@ -195,12 +204,13 @@ func TestTheMeasurersCountClearsOnlyTheContentAddedUpToTheRenderingItMeasured(t 
 
 // The budget's arithmetic at the shapes its design is stated in, each room admitted against an
 // empty budget, loaded and then given what browsers add to it before the next arrives. A room of a
-// mebibyte of prose (57,600 elements, TestAResidentRoomsHeapPerByteOfItsMarkdown's shape) is
-// charged 54 MB once counted, at both copies whether it is read or edited (roomCopies), and since
-// an admission reserves the same count at the same two copies (storedRoomReservation), the budget
-// admits thirty-nine such documents and refuses the fortieth: a load charged at one copy would
-// admit seventy-eight, whose replicas their first keystrokes would then take with nothing able to
-// refuse them.
+// mebibyte of prose (57,600 elements from 77,600 structs,
+// TestAResidentRoomsHeapPerByteOfItsMarkdown's shape) is charged 54 MB once counted, at its
+// elements, at both copies whether it is read or edited (roomCopies), and since an admission
+// reserves the same count at the same two copies (storedRoomReservation), the budget admits
+// thirty-nine such documents and refuses the fortieth: a load charged at one copy would admit
+// seventy-eight, whose replicas their first keystrokes would then take with nothing able to refuse
+// them.
 //
 // What browsers add is charged beside the count. A 4 KiB paste not yet counted is its content at
 // the densest price at both copies, 4,096 x 1,058 x 2 = 8,667,136 bytes, so rooms each holding one
@@ -212,12 +222,16 @@ func TestTheMeasurersCountClearsOnlyTheContentAddedUpToTheRenderingItMeasured(t 
 // 2 x 620 x 2 = 2,480 bytes, and one it held deleted already nothing (deletedRuns). One frame of
 // 500,000 GC structs (plan.md, departure 4: 64,645,200 bytes kept in one copy, the rendering
 // unchanged) is a structure part of 500,000 x 3 x 620 x 2 = 1,860,000,000 bytes, so two such rooms
-// take the whole budget. There is no ceiling on one room: a mebibyte of the densest rendering,
-// which goldmark stops counting and which is priced from its bytes (bytesOfHeapAByteAtTheDensest),
-// is more than the whole budget at both copies, so the budget admits none, and the pressure rule
-// is what answers a room grown that heavy (refusedUnderPressure).
+// take the whole budget. A document at the decode cap is priced at its 1,048,576 structs whatever
+// it renders (bytesOfHeapAStructHeld), 1,048,576 x 170 x 2 = 356,515,840 bytes: the long-edited
+// document's 53 elements and the agent-rewritten document's 65,536 alike, so the budget admits six
+// of either, where their elements would have admitted over forty thousand of the first. There is
+// no ceiling on one room: a mebibyte of the densest rendering, which goldmark stops counting and
+// which is priced from its bytes (bytesOfHeapAByteAtTheDensest), is more than the whole budget at
+// both copies, so the budget admits none, and the pressure rule is what answers a room grown that
+// heavy (refusedUnderPressure).
 func TestTheRoomBudgetsArithmetic(t *testing.T) {
-	prose := copyHeap(pmdoc.MaxDocumentBytes, 57_600)
+	prose := copyHeap(pmdoc.MaxDocumentBytes, 57_600, 77_600)
 	for _, shape := range []struct {
 		name               string
 		heap               int64
@@ -228,7 +242,9 @@ func TestTheRoomBudgetsArithmetic(t *testing.T) {
 		{"a mebibyte of prose with a 4 KiB paste not yet counted", prose, 4 << 10, 0, 62_811_136, 34},
 		{"a mebibyte of prose typed into with 2,000 keystrokes", prose, 0, 2_000 * ((1+splitsAStructCanCause)*bytesOfHeapAStruct + 2*bytesOfHeapAByteOfText) * roomCopies, 61_600_000, 34},
 		{"a mebibyte of prose given a frame of 500,000 GC structs", prose, 0, 500_000 * (1 + splitsAStructCanCause) * bytesOfHeapAStruct * roomCopies, 1_914_144_000, 2},
-		{"a mebibyte of the densest rendering", copyHeap(pmdoc.MaxDocumentBytes, elementsPastCounting), 0, 0, 2_218_786_816, 0},
+		{"the long-edited document typed on until the decode cap", copyHeap(5_314, 53, maxUpdateItems), 0, 0, 356_515_840, 6},
+		{"an agent's whole rewrites until the decode cap refused one", copyHeap(1_048_575, 65_536, maxUpdateItems), 0, 0, 356_515_840, 6},
+		{"a mebibyte of the densest rendering", copyHeap(pmdoc.MaxDocumentBytes, elementsPastCounting, 0), 0, 0, 2_218_786_816, 0},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
 			if weight := roomWeight(shape.heap, shape.content, shape.structure); weight != shape.weight {
@@ -515,7 +531,7 @@ func TestTheDocumentSocketReturnsItsReservationOnEveryWayOut(t *testing.T) {
 	ids := createDocuments(t, database, 4)
 	outside, failing, refused, joined := ids[0], ids[1], ids[2], ids[3]
 	stored := latestVersionMarkdown(t, database, joined)
-	reserved := roomWeight(copyHeap(int64(len(stored)), countElements(stored)), 0, 0)
+	reserved := roomWeight(copyHeap(int64(len(stored)), countElements(stored), storedHistoryStructs(t, database, joined)), 0, 0)
 	if reserved <= 0 {
 		t.Fatalf("the stored document reserves %d bytes, want some", reserved)
 	}
@@ -556,7 +572,7 @@ func TestTheDocumentSocketReturnsItsReservationOnEveryWayOut(t *testing.T) {
 		waitFor(t, 10*time.Second, "the room to go live", func() bool { return service.srv.GetDoc(joined) != nil })
 		watch.requireHeldAtLoad(t, joined, reserved)
 		rendering := renderedLive(t, service, joined)
-		loaded := roomWeight(copyHeap(int64(len(rendering)), countElements(rendering)), 0, 0)
+		loaded := roomWeight(copyHeap(int64(len(rendering)), countElements(rendering), liveStructs(t, service, joined)), 0, 0)
 		requireNothingReserved(t, service)
 		if used := budgetUsed(service); used != loaded {
 			t.Fatalf("the budget holds %d bytes for the open room, want its own charge at both copies, %d", used, loaded)
@@ -608,7 +624,7 @@ func TestAnAdmissionReservesTheCountOfItsStoredVersion(t *testing.T) {
 	if err != nil || reservation == nil {
 		t.Fatalf("a mebibyte of prose was refused at admission to an empty budget: %v", err)
 	}
-	if want := roomWeight(copyHeap(int64(len(stored)), elements), 0, 0); reservation.weight != want || parses.Load() != 1 {
+	if want := roomWeight(copyHeap(int64(len(stored)), elements, storedHistoryStructs(t, database, room)), 0, 0); reservation.weight != want || parses.Load() != 1 {
 		t.Fatalf("the admission reserved %d bytes after %d parses, want its count at both copies, %d, after one", reservation.weight, parses.Load(), want)
 	}
 	service.budget.release(reservation)
@@ -651,7 +667,7 @@ func TestAnAdmissionReservesTheCountOfItsStoredVersion(t *testing.T) {
 	const second = "A second version.\n"
 	appendVersion(second)
 	next, err := service.reserveRoom(ctx, room)
-	if want := roomWeight(copyHeap(int64(len(second)), countElements(second)), 0, 0); err != nil || next == nil || next.weight != want || parses.Load() != 2 {
+	if want := roomWeight(copyHeap(int64(len(second)), countElements(second), storedHistoryStructs(t, database, room)), 0, 0); err != nil || next == nil || next.weight != want || parses.Load() != 2 {
 		t.Fatalf("an admission to a new version reserved %v (%v) after %d parses, want its own count, %d, after a second parse", next, err, parses.Load(), want)
 	}
 	service.budget.release(next)
@@ -715,7 +731,7 @@ func TestTwoAdmissionsAtOnceCountTheStoredVersionOnce(t *testing.T) {
 	default:
 	}
 	close(release)
-	want := roomWeight(copyHeap(int64(len(stored)), countElements(stored)), 0, 0)
+	want := roomWeight(copyHeap(int64(len(stored)), countElements(stored), storedHistoryStructs(t, database, room)), 0, 0)
 	for range 2 {
 		select {
 		case got := <-admissions:
@@ -733,6 +749,61 @@ func TestTwoAdmissionsAtOnceCountTheStoredVersionOnce(t *testing.T) {
 	if used := budgetUsed(service); used != 2*want {
 		t.Fatalf("the budget holds %d bytes, want both admissions' %d", used, 2*want)
 	}
+}
+
+// A document whose history outgrows its rendering reserves its structs and is charged them once
+// loaded: a small document whose first paragraph took 100,000 characters, each typed before the
+// last and then deleted (typedBeforeState), renders the paragraph it began as, a few elements, from
+// over 100,000 structs. Its admission reads the struct count from a walk of its stored history,
+// which decodes nothing (storedStructs), and reserves it at bytesOfHeapAStructHeld at both copies;
+// its room's load prices the struct total it counts the same way (chargeLoadedRoom), within 1.05x
+// of the reservation.
+func TestAStructDenseDocumentReservesAndIsChargedItsStructs(t *testing.T) {
+	const factor = 1.05
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	service.settle = time.Hour // no settlement writes into the room while it is weighed
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	room := createDocumentsHolding(t, database, 1, "# Title\n\nOne paragraph of ordinary prose.\n")[0]
+	storeHistory(t, service, room, typedBeforeState(t, 100_000))
+	stored := latestVersionMarkdown(t, database, room)
+	structs := storedHistoryStructs(t, database, room)
+	elements := countElements(stored)
+	if structs < 100_000 || structs*bytesOfHeapAStructHeld <= elements*bytesOfHeapAnElement {
+		t.Fatalf("the stored history holds %d structs beside a rendering of %d elements, want over 100,000 structs that outweigh the elements", structs, elements)
+	}
+
+	reservation, err := service.reserveRoom(ctx, room)
+	if err != nil || reservation == nil {
+		t.Fatalf("the admission was refused: %v", err)
+	}
+	if want := int64(structs * bytesOfHeapAStructHeld * roomCopies); reservation.weight != want {
+		t.Fatalf("the admission reserved %d bytes, want its %d structs at both copies, %d, where its %d elements would reserve %d",
+			reservation.weight, structs, want, elements, elements*bytesOfHeapAnElement*roomCopies)
+	}
+	service.budget.release(reservation)
+
+	connection, err := dialDocument(httpServer.URL, room)
+	if err != nil {
+		t.Fatalf("open the document: %v", err)
+	}
+	waitFor(t, 30*time.Second, "the room to go live", func() bool { return service.srv.GetDoc(room) != nil })
+	requireNothingReserved(t, service)
+	counted := liveStructs(t, service, room)
+	rendering := renderedLive(t, service, room)
+	loaded := budgetUsed(service)
+	if want := counted * bytesOfHeapAStructHeld * roomCopies; loaded != want || counted*bytesOfHeapAStructHeld <= countElements(rendering)*bytesOfHeapAnElement {
+		t.Fatalf("the loaded room is charged %d bytes for %d structs and %d elements, want its structs at both copies, %d",
+			loaded, counted, countElements(rendering), want)
+	}
+	ratio := float64(reservation.weight) / float64(loaded)
+	t.Logf("%d stored structs reserve %d bytes; the loaded room counts %d and is charged %d (%.4fx)", structs, reservation.weight, counted, loaded, ratio)
+	if ratio < 1/factor || ratio > factor {
+		t.Fatalf("the admission reserved %d bytes, %.4fx the %d its room is charged once loaded, want within %.2fx", reservation.weight, ratio, loaded, factor)
+	}
+	leaveDocument(connection)
 }
 
 // Over the budget, the sweep closes the rooms nothing is still using and leaves the ones something
@@ -986,4 +1057,43 @@ func renderedLive(t *testing.T, service *Service, room string) string {
 		t.Fatal(err)
 	}
 	return markdown
+}
+
+// storedHistoryStructs is the structs of every update room's history stores, each walked as a
+// room's own state is (walkUpdate, fromRoom), summed: what an admission prices the stored history
+// at (storedStructs), read here row by row.
+func storedHistoryStructs(t *testing.T, database *store.Store, room string) int64 {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), `select update from doc_updates where artifact_id = $1`, room)
+	if err != nil {
+		t.Fatalf("read the stored history: %v", err)
+	}
+	defer rows.Close()
+	var structs uint64
+	for rows.Next() {
+		var update []byte
+		if err := rows.Scan(&update); err != nil {
+			t.Fatalf("read a stored update: %v", err)
+		}
+		tally, err := walkUpdate(update, fromRoom, nil)
+		if err != nil {
+			t.Fatalf("walk a stored update: %v", err)
+		}
+		structs += tally.structs
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the stored history: %v", err)
+	}
+	return int64(structs)
+}
+
+// liveStructs is the struct total room's resident document counted last (structTotal), which its
+// load charged it by.
+func liveStructs(t *testing.T, service *Service, room string) int64 {
+	t.Helper()
+	replica := service.liveReplica(service.srv.GetDoc(room))
+	if replica == nil {
+		t.Fatal("the room lists no replica")
+	}
+	return replica.structs.countedStructs()
 }
