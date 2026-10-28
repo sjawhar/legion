@@ -2,27 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-571",
-  "completed": "2026-10-28T10:07:26Z",
-  "round": 6,
-  "decision": "changes_requested",
-  "reviewedCodeHead": "670e2054f960 (forward merge of main 184897ac; branch head before this handoff 9b85ff7f adds only .legion/)",
+  "completed": "2026-10-28T12:36:42Z",
+  "round": 7,
+  "decision": "approved",
+  "reviewedCodeHead": "c7f751fcbbcb (branch head before this handoff: 352a518d, which adds only .legion/)",
   "critical": 0,
-  "important": 1,
-  "minor": 1,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": ".github/workflows/envoy-and-contracts.yaml:1155,1157,1163,1448,1450,1457; .github/workflows/pr-and-main.yaml:461,463,468; .dispatch/architecture/release-engineering.md:6; packages/envoy/.changes/unreleased/INFRA-571-Changed-20261028-095229.yaml (name and line 16)",
-      "description": "The PR adds the deployment's Dispatch issue keys and dispatch:// links to files of a public repository: the three '(until INFRA-572)' job names, the six job comments naming INFRA-572 and INFRA-573, the architecture sentence, and the fragment's file name and Issue field. The INFRA controller's ruling (relayed by the INFRA-148 architect at 2026-10-28T10:05Z, under 'Stop new leaks only', INFRA-472) forbids any added line outside .legion/ naming one. Fix: describe the condition instead ('until production runs Postgres 18'), rename the fragment by `changie new --custom Issue=pr2364` (file pr2364-Changed-<time>.yaml, Issue: pr2364). Check: `jj diff --git --from <merge base> --to <head> '~glob:\".legion/**\"'` has no added line or path matching INFRA-[0-9]+, LEGION-[0-9]+ or dispatch://. Retro cannot carry this: it may touch only docs/solutions and .legion/."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/.changes/unreleased/INFRA-571-Changed-20261028-095229.yaml:5-6",
-      "description": "The fold files packages/envoy fragments under legion-envoy-v releases (changelog-fold.yaml:65-68), while the default ships on envoy-infra-v tags, so 'moves to this release or later' will sit under a listener version. Name the release explicitly, e.g. 'the first envoy-infra release after v2.9.1'."
-    }
-  ],
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
   "verified": [
-    "The 670e2054 resolution keeps both sides of release-engineering.md:6, moves the Breaking entry out of CHANGELOG.md (equal to main's) into a fragment valid for packages/envoy/.changie.yaml; thermonuclear pair at 670e2054: both APPROVE, the deep review's one Minor is the second finding above.",
-    "CI at 670e2054 was queued when read at 2026-10-28T10:02Z; a request for changes does not wait on it."
-  ]
+    "Forward merge 6517991e of main aeeee6c0 (#2368): every resolution keeps both sides. gcp/dispatch.go keeps main's constant block (tier db-custom-4-15360, front-door and listener replica defaults) with POSTGRES_18; dispatch_test.go keeps main's tier assertion; README keeps main's rows and paragraphs with the branch's POSTGRES_18 row, inputs text and upgrade paragraph. ENTERPRISE edition, db-custom-4-15360 and the REGIONAL instance take POSTGRES_18 and an in-place major upgrade (deep review read dispatch_cloud.go, Google's docs and the provider's update order).",
+    "c7f751fc: the diff from merge base aeeee6c0 to c7f751fc, .legion/ excluded, adds no line or path naming a deployment issue key or dispatch:// (grep, two audits); the fragment is pr2364-Changed-20261028-102355.yaml, Issue pr2364, valid for packages/envoy/.changie.yaml and rendered by changie in the deep review.",
+    "CI at c7f751fc: required lint, typecheck, test, pr-title success; envoy-go 180006|0.8.7, 82 packages ok, 0 FAIL; the Dispatch, Broker and Daemon Postgres 16 jobs success on 160015|0.8.7; every other Envoy job success (run 40671931218 attempt 1). Compare c7f751fc...352a518d: 2 files, all under .legion/. GitHub reports MERGEABLE against main 2d872499.",
+    "Every review thread carries the reviewer's answer and is resolved.",
+    "A stray change to packages/envoy/infra/go.work.sum made by a review subagent's go test in the working copy was abandoned, never committed."
+  ],
+  "thermonuclear": "deep-review and code-quality ran once at c7f751fc: both APPROVE. Deep review's one Minor (the PR body says 'v2.9.1 and earlier' where main's next envoy-infra release will also default to 16) is on the Fast-follow line; the README and fragment wording stays true.",
+  "fastFollow": "PR body: say 'every envoy-infra release before this change' rather than 'v2.9.1 and earlier'. Repository rule for the controller: AGENTS.md:151 still names fragments <ISSUE KEY>-<slug>, which conflicts with the ruling that fragments carry the pull request number."
 }
