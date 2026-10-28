@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-278",
+  "completed": "2026-10-28T09:56:54Z",
+  "generation": 3,
+  "round": 8,
+  "reviewedCodeHead": "ecfdba034cac173e607d53e464ab9987e48d97a2",
+  "scope": "Per the architect: the one-sentence fix 0e96c0ff to packages/envoy/AGENTS.md, and that nothing else changed since my approval at 8dc667cd. Since then: retro's docs/solutions learnings (4eb64228) and its removal of .legion/INFRA-278/ (5b013cb9), which the merge gate exempts, and 0e96c0ff.",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "ci": "CI head ecfdba03: required lint, typecheck, test and pr-title queued at the read; nothing red. The request does not depend on CI.",
+  "thermo": "Not run: docs-only change. No subagent ran, so no provider to name.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/AGENTS.md:2623-2625",
+      "description": "The exception names only either's non-quiet ask.edited and an agent's reply, but publishFollowerRoutes (publisher.go:886-905) ignores notify for ask.answered, ask.handed_back, ask.resolved and comment.created/edited/resolved/reopened with an ask_id, so a following claimant also gets an agent's answer, hand-back or resolution of the ask and an agent's edit, resolution or reopening of a reply in it; 'only through that subscription' still overclaims."
+    }
+  ]
+}
