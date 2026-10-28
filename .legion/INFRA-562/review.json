@@ -2,34 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-562",
-  "completed": "2026-10-28T17:06:01Z",
-  "round": 4,
-  "scope": "Narrowed by the INFRA-63 architect: the forward merge is faithful, the changelog fragments carry no Dispatch key, envoy-go is green at the new code head, and a shortened api test still covers its finding. Everything else was approved; a non-correctness finding goes on Fast-follow.",
-  "reviewedHead": "6d92367e4d59a650d13e161c6572de8f4cfc9d73",
-  "codeHead": "f10b3d868f03f4005b696854f83a6b47c58adfea",
-  "decision": "approved",
+  "completed": "2026-10-28T19:59:37Z",
+  "round": 5,
+  "scope": "Narrowed by the INFRA-63 architect: the forward merge onto main's #2366 keeps both its payload change and mentions_decide_routes; the pre-commit take-over wait covers #2366's claimant and thread-agent routes; two tests (a claimed issue with no route, a reply in an agent's thread) fail first; plus the fingerprint and envoy-go. Added by the architect at 19:58Z: renumber this PR's migrations above main's new 0136_dashboard_assets (#2323).",
+  "reviewedHead": "5a8279b778ce073313adfa16cf1ad28178309146",
+  "codeHead": "c63149d0ac9a908491bf25c1ba3ab299f2bb134b",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
-  "minor": 2,
+  "important": 1,
+  "minor": 0,
+  "fingerprint": "Changed. With --context 0, excluding .legion and docs/solutions: at 234eef90 (my last approval) 84c6cb970dcc60097f38a29ff3fb598dc457af6f1ab7152bc8b507e6ec658006; at 5a8279b7 59d17ba89a018d1d6bc5bb3e7d353ecf4a4e2ae80c8e780a1648dbe9f99b0f54. So this is a new round, narrowed.",
   "scopeResults": {
-    "forwardMerge": "Faithful. I compared the PR's patch against its merge base at round 3 (2df3353c -> 14d17e59) with its patch now (d47dbf05 -> f10b3d86), file by file. Every difference is one of four things. (a) Main's own changes carried through: main.go's SigningKey move; redeliver's lazy Open/openState, with the PR's Limits field and s.state; listAgents now on the shared stored roster, reading its error and asserting rosters.built; loadAskReaches on routeRosterOrUnknown; the lease allowlist gaining server-processes. (b) Renumbering: migrations 0136-0139 above main's 0135, with every in-file name and code/doc reference updated. (c) leasePoolSize 13 = main's 12 + delivery-resume, and dispatchConnectionsPerPod 87 = 64+4+1+13+1+1+3, the branch's true sum. (d) 78db860e, the test-hook timeout made a test setting (Deps.TestHookTimeout, zero = 10 s; set only by server_test.go). go vet (with and without -tags multiprocess) and gofmt are clean at the head.",
-    "changelogFragments": "CHANGELOG.md is out of the PR's diff. Ten fragments, packages/envoy/.changes/unreleased/pr2387-*.yaml, with no Dispatch key: grep for [A-Z][A-Z0-9]+-[0-9]+ and dispatch:// finds 0 hits. Their migration numbers (0136-0139) match the files.",
-    "envoyGo": "GREEN at f10b3d86 (job 122933045369): internal/dispatch/api ok 512.639 s. envoy-infra-go (TestDispatchConnectionsPerPodIsTheServers) and dispatch-multiprocess are also green.",
-    "shortenedTests": "Each still covers its finding. TestASenderWaitingOutAListenerTakeOverRenewsItsClaimBeforeEachTry, now on a 3 s window, still waits for two held tries, runs a resume pass that must leave attempt 1 alone and pending, requires at least four claimed_at reads each strictly later than the one before, and requires one send and one receipt. TestATestHookNamesTheProcessThatNeverAcknowledged, now on a 2 s timeout, still requires the 504 naming the silent process's key, after at least the timeout. In TestAListenerTakeOverIsWaitedOutAndARefusalSettlesAtOnce, the late answer at 600 ms still misses the 300 ms receipt window."
+    "mergeOnto2366": "Holds. CommentEventPayload at the head has no SuppressedAuthors, which #2366 dropped; the outbox's session routes read the comment's own mentions (payloadMentionedSessions, outbox/publisher.go:1375). MentionsDecideRoutes is kept (model.go:1320-1328) and written at comment_create.go:718. No suppressed_authors remains in code, contracts or the envoy client. Migrations 0136-0139 sat above 20ba65a6's 0135; leasePoolSize 13 = main's 12 + 1; dispatchConnectionsPerPod 87 = 64+4+1+13+1+1+3. infra/go.work.sum is back to main's copy (no longer in the PR's diff). go vet (with and without -tags multiprocess) and gofmt are clean.",
+    "waitCoversRoutes": "Holds. comment_create.go:297 waits when route, sessionRoutes, ReplyTo, Anchor or ArtifactID is set. readCommentRoutes (:336-383) sets sessionRoutes for a session claimant, a follower of the replied-to ask, or a session credit on the issue's primary document. I checked these against every session route outbox publishDestinations (publisher.go:660-686) sends a comment.created to: route; publishClaimantRoute; publishPrimaryDocumentAuthors; publishAuthorRoutes (reply_to threadSessions, covered by ReplyTo; a document comment, covered by Anchor/ArtifactID; an ask thread defers to followers); and publishFollowerRoutes. Each is covered. publishPreviousClaimant fires only on claim events.",
+    "tests": "Accepted, with two departures from the wording. The architect asked for two two-process tests. c63149d0 adds three tests in comment_mention_takeover_test.go: claimant on an issue with no route, an ask-thread reply reaching its follower, and a primary-document author. They run one Dispatch server on real Postgres against the take-over fake listener, not the cmd/dispatch multiprocess harness. The double copy is decided by one process (the mention's pre-commit resolution against the outbox's route on the same event), so a second process adds nothing to the path. Each failed first: the implementer's red log on the merged code before the predicate, and the tester's throwaway mutation dropping sessionRoutes, both give 'session s1 received the comment 2 times, want once'. The 'reply in an agent's thread' that the merge put at risk is the ask-thread reply (no reply_to). A reply_to thread was already in the wait before #2366, so a test of it could not fail first."
   },
-  "ci": "Required set (lint, typecheck, test, pr-title) green at f10b3d86; the compare from it to the head touches only .legion/ (2 files). 'Dispatch Go suite on production's Postgres 16' failed in 'Initialize containers' on mirror.gcr.io's 'toomanyrequests: Quota exceeded' pulling pgvector (job 122933045581, which GitHub will not rerun). That is an infrastructure failure, and the lane is not required. dispatch, dispatch-memory and envoy-go-race were still running at 17:05Z.",
-  "mergeState": "GitHub reports the PR CONFLICTING again: main moved past d47dbf05 in files the PR touches, among them comment_delivery.go, message_delivery.go, comment_create.go and messages.go. The forward merge after this approval gets the fingerprint check: a confirmation if the diff is unchanged, otherwise a new round.",
-  "threads": "No open thread.",
+  "ci": "At c63149d0 at 19:59Z: lint, typecheck and pr-title success; test in progress; envoy-go, envoy-infra-go and dispatch-multiprocess queued. Not waited for: this round requests changes, and the renumbering merge makes a new code head whose envoy-go the next round reads.",
   "keyFindings": [
     {
-      "severity": "minor",
-      "file": "packages/envoy/AGENTS.md:1360",
-      "description": "Fast-follow, by the architect's ruling: name the second duplicate path that comes after main's #2225. A process dies between claiming a mention and sending it; the mentioned session is also a session route of the comment; it gets the outbox's copy after the one-minute hold and the resume loop's mention. The paragraph's 'once-only guarantee is attempt 1's' does not say this."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/infra/go.work.sum",
-      "description": "Fast-follow: the forward merge f10b3d86 rewrote infra/go.work.sum, dropping about 30 checksum lines main carries. This is a file the PR has no reason to touch. envoy-infra-go is green, so nothing breaks; restore main's copy at the next merge."
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/store/migrations/0136_message_delivery_urgency.up.sql",
+      "description": "main's #2323 (merged 19:56Z) added 0136_dashboard_assets. This PR's 0136_message_delivery_urgency shares version 0136, and pgmigrate refuses two migrations with one version (internal/pgmigrate/set.go:138: 'migrations %s share version %d ... renumber the rest to the next free numbers on main'). The merged tree would fail the store's migration guard, and envoy-dispatch would not boot. GitHub shows no conflict because the file names differ. Merge main forward and renumber this PR's four migrations above main's highest (0137-0140 today), with every in-file name and every code, doc and changelog-fragment reference."
     }
   ]
 }
