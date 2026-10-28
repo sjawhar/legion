@@ -1087,13 +1087,8 @@ jobs:
             packages/envoy/internal/testnats/nats.go Image
             packages/envoy/internal/testnats/nats.go HubImage
             packages/envoy/internal/tests3/seaweedfs.go Image
-      # -timeout is the deadline of each package, not of the step. internal/dispatch/api spends
-      # 546 s of go test's ten-minute default on a green run (run 40607107406), so a slower runner
-      # takes it red at 600 s with no test having failed (runs 40611192721 and its rerun). 20m
-      # keeps a hung test printing the goroutine dump that names it, which is what the deadline is
-      # for, rather than the job's own wall clock ending the run with nothing.
       - name: Unit test envoy Go package
-        run: go list ./... | grep -v /integration | xargs go test -timeout 20m
+        run: go list ./... | grep -v /integration | xargs go test
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
@@ -1269,10 +1264,9 @@ jobs:
 
   # The real-process memory tests (packages/envoy/cmd/dispatch/memory_test.go, LEGION-481): each
   # row starts a Dispatch server, drives it over HTTP and the document websocket and reads its
-  # resident memory from /proc, and together they run past the deadline envoy-go's unit step gives
-  # a package, which took that step red at 600 s under its old ten-minute default (run
-  # 37116639565). They build only under the `memory` tag, so envoy-go's unit run leaves them out
-  # and this job runs them with a deadline of its own. It
+  # resident memory from /proc, and together they run past go test's default ten-minute deadline,
+  # which took envoy-go red at 600 s (run 37116639565). They build only under the `memory` tag, so
+  # envoy-go's unit run leaves them out and this job runs them with a deadline of its own. It
   # runs when a file its `dispatch_memory` filter names changes.
   dispatch-memory:
     needs: changes
@@ -1307,9 +1301,9 @@ jobs:
   # starts two real envoy-dispatch processes against one Postgres and one NATS - which is what
   # production runs - and drives them over HTTP, their own logs and NATS's own consumer and
   # stream reads. They build only under the `multiprocess` tag, so envoy-go's unit run leaves
-  # them out, and they are a job of their own for the reason dispatch-memory is: the deadline
-  # envoy-go's unit step gives a package, which the memory tests already took red at 600 s under
-  # its old ten-minute default (run 37116639565), and one row here waits out a durable hand-over
+  # them out, and they are a job of their own for the reason dispatch-memory is: envoy-go's unit
+  # step runs under go test's default ten-minute package deadline, which the memory tests
+  # already took red at 600 s (run 37116639565), and one row here waits out a durable hand-over
   # or a maintenance loop's tick, tens of seconds each. Each row's NATS runs in its own test
   # process (internal/testnats), so the job needs no container runtime of its own. It runs when a
   # file its `dispatch_multiprocess` filter names changes.
@@ -1351,14 +1345,14 @@ jobs:
   # readiness while it serves a request out past the old shutdown budget.
   #
   # They build only under the `multiprocess` tag, so envoy-go's unit run leaves them out, and
-  # they could not run there in any case: that step gives each package one deadline, which the
-  # memory tests already took red at 600 s under its old ten-minute default (run 37116639565),
-  # and the rows here wait out a migration race, a ten-second fan-out window and a twelve-second
-  # drain, tens of seconds each. A job of their own rather than a step in dispatch-multiprocess,
-  # whose Postgres service and shape this copies: the broker rows compile their own import
-  # closure, so they get their own job and their own filter, `broker_multiprocess`, which gates
-  # this one. They need no NATS and no test-container pull - the broker starts nothing in a
-  # container - so neither step is here.
+  # they could not run there in any case: that step runs under go test's default ten-minute
+  # package deadline, which the memory tests already took red at 600 s (run 37116639565), and the
+  # rows here wait out a migration race, a ten-second fan-out window and a twelve-second drain,
+  # tens of seconds each. A job of their own rather than a step in dispatch-multiprocess, whose
+  # Postgres service and shape this copies: the broker rows compile their own import closure, so
+  # they get their own job and their own filter, `broker_multiprocess`, which gates this one. They
+  # need no NATS and no test-container pull - the broker starts nothing in a container - so
+  # neither step is here.
   broker-multiprocess:
     needs: changes
     if: needs.changes.outputs.broker_multiprocess == 'true'
