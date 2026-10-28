@@ -39,6 +39,9 @@ type renderer struct {
 	spanBudget   int
 	err          error
 	blockOffsets []BlockOffset
+	// layout, when the render records one (RenderWithLayout), is what it records of the
+	// document's top-level blocks as it writes them.
+	layout *Layout
 }
 
 // BlockOffset identifies one rendered block in byte offsets of the markdown.
@@ -105,7 +108,12 @@ func RenderWithBlockOffsets(doc *Node) (string, []BlockOffset, error) {
 }
 
 // render writes doc, its tables' spans adding at most spanCells empty cells (tableGrid).
-func render(doc *Node, spanCells int) (r *renderer, err error) {
+func render(doc *Node, spanCells int) (*renderer, error) {
+	return renderDocument(doc, spanCells, false)
+}
+
+// renderDocument is render, recording the renderer's layout as well when recordLayout says so.
+func renderDocument(doc *Node, spanCells int, recordLayout bool) (r *renderer, err error) {
 	// The renderer reads back what it writes (blockKinds, parseInlineWithDefinitions).
 	defer recoverPanic(&r, &err, "rendering a document")
 	if doc == nil || doc.Type != "doc" {
@@ -121,29 +129,42 @@ func render(doc *Node, spanCells int) (r *renderer, err error) {
 	// runs, and an escape is decided within one run: rendering the document without them merges
 	// the runs, so a mark never changes the markdown (`snake_case`, never `snake\_case`). The line
 	// breaks the browser editor holds that markdown has no form for are written as it draws them.
+	read := doc
 	doc = asWritten(doc)
 	if holdsOnlyAnEmptyParagraph(doc) {
-		return &renderer{spanBudget: spanCells}, nil
+		r = &renderer{spanBudget: spanCells}
+		if recordLayout {
+			r.layout = onlyAnEmptyParagraphLayout()
+		}
+		return r, nil
 	}
 	labels := definedFootnoteLabels(doc)
-	r = renderBlocks(doc, labels, false, spanCells)
+	r = renderBlocks(doc, labels, false, spanCells, recordLayout)
+	blankEmptyCode := r.wroteBlankEmptyCode
 	// An empty code block in a typed block in a spread list item is written with a line between its
 	// fences, as main wrote it, except in a document holding a shape this parser reads only as the
 	// browser editor does, where that line is refused (emptyCodeWrittenBare): there the document is
 	// written again with the fences alone.
 	if r.err == nil && r.wroteBlankEmptyCode && holdsBrowserOnlyShape(r.b.Bytes()) {
-		r = renderBlocks(doc, labels, true, spanCells)
+		r = renderBlocks(doc, labels, true, spanCells, recordLayout)
 	}
 	if r.err != nil {
 		return nil, r.err
+	}
+	if recordLayout {
+		r.layout.finish(read, doc, spanCells, r, blankEmptyCode)
 	}
 	return r, nil
 }
 
 // renderBlocks writes doc's blocks, an empty code block in a typed block in a spread list item as
-// its fences alone when bareEmptyCode says so, its tables' spans adding at most spanCells cells.
-func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool, spanCells int) *renderer {
+// its fences alone when bareEmptyCode says so, its tables' spans adding at most spanCells cells,
+// recording the layout of its top-level blocks when recordLayout says so.
+func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool, spanCells int, recordLayout bool) *renderer {
 	r := &renderer{footnoteLabels: labels, bareEmptyCode: bareEmptyCode, spanBudget: spanCells}
+	if recordLayout {
+		r.layout = newLayout(len(doc.Children))
+	}
 	r.blocks(doc.Children, "")
 	if r.err != nil {
 		return r
@@ -223,6 +244,8 @@ func definedFootnoteLabels(doc *Node) footnoteLabelSet {
 	return labels
 }
 
+// blocks writes the document's top-level blocks (renderBlocks), each separated from the next by a
+// blank line, recording each block's layout when the render records one.
 func (r *renderer) blocks(nodes []*Node, prefix string) {
 	otherMarkers := otherListMarkers(nodes)
 	for i, n := range nodes {
@@ -230,7 +253,11 @@ func (r *renderer) blocks(nodes []*Node, prefix string) {
 			r.writeSyntax("\n" + strings.TrimRight(prefix, " ") + "\n")
 		}
 		r.otherListMarker = otherMarkers[i]
+		spans := r.spanBudget
 		r.block(n, prefix)
+		if r.layout != nil {
+			r.layout.record(r, n, otherMarkers[i], spans)
+		}
 	}
 	if len(nodes) > 0 {
 		r.writeSyntax("\n")

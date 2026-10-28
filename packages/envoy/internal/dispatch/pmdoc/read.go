@@ -20,6 +20,16 @@ func ReadForRendering(frag *crdt.YXmlFragment) (*Node, error) {
 	return readDocument(frag, yTextDeltaLive, false)
 }
 
+// ReadBlockForRendering is ReadForRendering for one block at the document's top level, the
+// element e of the document's fragment: the node ReadForRendering reads it as, without
+// ownedValue's copy. It does not validate the block (Layout.Splice does, as Render would).
+func ReadBlockForRendering(e *crdt.YXmlElement) (*Node, error) {
+	if e == nil {
+		return nil, fmt.Errorf("%w: ReadBlockForRendering wants an element, got nil", ErrSchema)
+	}
+	return readElement(e, yTextDeltaLive, 1, false)
+}
+
 // yTextDeltaLive is text's delta outside any transaction, as Read and ReadForRendering walk it.
 func yTextDeltaLive(text *crdt.YXmlText) ([]crdt.Delta, error) {
 	return text.ToDelta(), nil
