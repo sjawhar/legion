@@ -865,6 +865,17 @@
 
 ### Changed
 
+- A Dispatch write holds its transaction id only for its database statements, the last few round
+  trips before its commit, where it held one from its first lock through its document work
+  (rendering, anchor walks, version capture, reference extraction) and its write advice. A live
+  update that waits for every older transaction id to end before it is published (INFRA-591's
+  event horizon) therefore waits only for other writes' statements, so live updates publish
+  promptly under load. Writers of one issue or document still take turns, now on a transaction
+  advisory lock (`pg_advisory_xact_lock`, namespace `0x4F574E52`) in place of a lock of the
+  owner's row; a write still holds its pooled connection while it does its document work.
+  Rollout: a pod of this release and a pod of an earlier one do not exclude each other's writes
+  to the same issue or document, so roll this release out with the `Recreate` strategy at one
+  pod, and ship it before any release that runs Dispatch on more than one pod (INFRA-636).
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
