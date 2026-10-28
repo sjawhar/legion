@@ -333,20 +333,20 @@ var workerTLSClients = []tlsClientSpec{
 	},
 }
 
-// chromiumTLSArgs loads one site with every other host name unresolvable. Chromium's certificate
-// verifier fetches the AIA issuer URLs of a chain it cannot anchor before it refuses it, and Chromium
-// has no switch that turns those fetches off; emSign's AIA host, repository.emsign.com, stalls or
-// resets its connections, and a stalled fetch held the emSign load past tlsProbeTimeout. With the
-// AIA host unresolvable, each fetch fails at once and the verdict comes from the served chain and
-// Chromium's own trust store alone. That is the verdict to prove: both test sites serve every
-// certificate up to the subject of the distrusted root, and their AIA URLs hold only self-signed
-// roots, which a path can end at only as anchors of the local trust store.
+// chromiumTLSArgs returns the Chromium arguments that load one site with every other host name
+// unresolvable. Chromium's certificate verifier fetches the AIA issuer URLs of a chain it cannot
+// anchor before it refuses it, and Chromium has no switch that turns those fetches off; emSign's AIA
+// host, repository.emsign.com, stalls or resets its connections, and a stalled fetch held the emSign
+// load past tlsProbeTimeout. With the AIA host unresolvable, each fetch fails at once and the verdict
+// comes from the served chain and Chromium's own trust store alone. That is the verdict to prove:
+// the positive controls show that each test site serves every certificate up to its pinned root's
+// subject, and the sites' AIA URLs hold only self-signed roots, which a path can end at only as
+// anchors of the local trust store. A proxy in env is a host name or address this rule also leaves
+// unresolvable, so behind one every load fails as unavailable, never as a refusal.
 func chromiumTLSArgs(site tlsSite) []string {
-	host := site.url
-	if parsed, err := url.Parse(site.url); err == nil {
-		host = parsed.Hostname()
-	}
-	return []string{"--headless", "--no-sandbox", "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE " + host, "--dump-dom", site.url}
+	// Every tlsSites URL is an absolute https URL, which url.Parse reads without error.
+	parsed, _ := url.Parse(site.url)
+	return []string{"--headless", "--no-sandbox", "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE " + parsed.Hostname(), "--dump-dom", site.url}
 }
 
 // imageTLSClients returns the image's TLS-capable programs. The gh wrapper manages worker tokens,

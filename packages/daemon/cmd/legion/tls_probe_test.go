@@ -60,6 +60,15 @@ func TestProbeTLSClientsDecisions(t *testing.T) {
 			want: "node accepts the emSign chain",
 		},
 		{
+			name: "compromised chain neither refused nor accepted",
+			outcomes: map[string]tlsOutcome{
+				emSignTLSSite.name:  unavailable,
+				aaaTLSSite.name:     refused,
+				controlTLSSite.name: accepted,
+			},
+			want: "node cannot verify refusal of the emSign chain: dial tcp: network is unreachable",
+		},
+		{
 			name: "control unreachable",
 			outcomes: map[string]tlsOutcome{
 				emSignTLSSite.name:  refused,
@@ -138,14 +147,21 @@ func TestImageTLSClientsCoverTheWorkerInventory(t *testing.T) {
 // instead of waiting on the CA's repository host.
 func TestImageChromiumResolvesOnlyTheProbedSite(t *testing.T) {
 	var chromium tlsChromiumClient
+	found := false
 	for _, client := range imageTLSClients("omp", nil, "") {
 		if client.name() == "chromium" {
-			chromium = client.(tlsChromiumClient)
+			chromium, found = client.(tlsChromiumClient)
 		}
 	}
-	for _, site := range tlsSites {
+	if !found {
+		t.Fatal("imageTLSClients() has no chromium client of type tlsChromiumClient")
+	}
+	for site, host := range map[tlsSite]string{
+		emSignTLSSite:  "dv-g3b-emudhra.we-have-a-problem.com",
+		aaaTLSSite:     "dv-g3b-aaa-emudhra.we-have-a-problem.com",
+		controlTLSSite: "example.com",
+	} {
 		program, args, _ := chromium.command(site)
-		host := strings.TrimSuffix(strings.TrimPrefix(site.url, "https://"), "/")
 		want := []string{"--headless", "--no-sandbox", "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE " + host, "--dump-dom", site.url}
 		if program != "chromium" || !slices.Equal(args, want) {
 			t.Errorf("chromium command for %s = %s %q, want chromium %q", site.name, program, args, want)
@@ -220,6 +236,7 @@ func TestTLSChromiumClientClassifiesNavigationResult(t *testing.T) {
 	}{
 		{name: "accepts a loaded DOM with certificate text", stdout: "page body NET::ERR_CERT_AUTHORITY_INVALID", want: tlsConnectionAccepted},
 		{name: "refuses a certificate navigation failure", stdout: "page body NET::ERR_CERT_AUTHORITY_INVALID", stderr: "Page load failed: net::ERR_CERT_AUTHORITY_INVALID", want: tlsCertificateRefused},
+		{name: "refuses after failed AIA fetches", stderr: "[5:18:1028/173830.670117:ERROR:net/cert/internal/cert_issuer_source_aia.cc:138] AiaRequest::OnFetchCompleted got error -105\n[5:5:1028/173830.690777:ERROR:components/headless/command_handler/headless_command_handler.cc:403] Page load failed: net::ERR_CERT_AUTHORITY_INVALID\n", want: tlsCertificateRefused},
 		{name: "reports another navigation failure as unavailable", stderr: "Page load failed: net::ERR_NAME_NOT_RESOLVED", want: tlsNetworkUnavailable},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
