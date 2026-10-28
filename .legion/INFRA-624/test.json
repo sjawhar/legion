@@ -2,42 +2,40 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-624",
-  "completed": "2026-10-28T17:47:02Z",
-  "round": 6,
-  "headSha": "b0ff3408d08ff8dd83a7ce1297bb0d3c50349739",
+  "completed": "2026-10-28T20:00:36Z",
+  "round": 7,
+  "headSha": "f32723d4f306f9f013eb810cdf1dd0ca05a7c7ca",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the browser specs at b0ff3408: `bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts --project chromium --project iphone` gave 16 passed, including my execCommand rows (unchanged) and the implementer's new substring row. Reproduced the substring case with my own setup. Drove the ask-edit route's new label rule through the real dispatch CLI."
+    "how": "Re-ran the browser specs at f32723d4: `bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts --project chromium --project iphone` gave 17 passed, including its undo/redo row and my execCommand rows. Reproduced undo/redo with my own probe. Drove the exact-item rule and the duplicate-label refusal through the real dispatch CLI."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review round 3 item 1: the read-back filter keeps an unselected list even when another block holds its text",
+      "criterion": "Review round 4 item 1: the read-back filter applies an edit that deletes nothing (an insertion into an unselected option, prosemirror-history's undo and redo) and still refuses one that deletes an unselected block",
       "surface": "Dispatch document editor in headless Chromium, real Go server and Postgres 17 in the issue pod",
-      "command": "Throwaway Playwright probe K7 (chromium): two-list break; first list [<first>, Option C, <second>]; execCommand('insertText','x') over 'one?Opt'. Also the spec row: bun run e2e -- ask-concurrent-edit.e2e.ts --project chromium --project iphone. Record: https://github.com/sjawhar/legion/pull/2433#issuecomment-6476366746",
-      "observed": "Refused. Stored text: 'Which one?\\n\\n- Option B\\n- Option C\\n- Option A\\n\\n* Option A', so both Option A lines are kept and the decision stays malformed. No page error.",
-      "headSha": "b0ff3408d08ff8dd83a7ce1297bb0d3c50349739",
-      "negativeControl": "The reviewer recorded this case at 2796bcaf (text-substring check): stored 'Which xion B\\n\\n- Option A later', with the unselected list gone. The implementer's row fails against that check (Expected 1 item, Received 0)."
+      "command": "Throwaway Playwright probes (chromium), U1 and U2 plus round 5/6's X and K probes; record https://github.com/sjawhar/legion/pull/2433#issuecomment-6479217133",
+      "observed": "U1: typed x inside the second list's option ('Optionx B'), moved the caret to the question, Ctrl+Z → 'Option B' in the DOM and in storage; Ctrl+Shift+Z → 'Optionx B'. U2: deleted the second list's option text, moved the caret to the question, Ctrl+Z → restored. K7 substring case refused, both Option A lines kept. X and K probes match rounds 5 and 6. No page error.",
+      "headSha": "f32723d4f306f9f013eb810cdf1dd0ca05a7c7ca",
+      "negativeControl": "execCommand('insertText','x') over 'one?Opt' with a first-list option equal to the second list's text is refused, and storage is unchanged"
     },
     {
-      "criterion": "The character-based filter still applies edits that delete no unselected character: caret input, list joins, single-block replacements, deletions of selected text",
-      "surface": "Dispatch document editor in headless Chromium, real Go server and Postgres 17",
-      "command": "Throwaway probes X1-X8 (round 5's) and K1-K6 (chromium)",
-      "observed": "IME composition at a caret in the question ('Whichか one?') and in the second list ('Option Aん'); CDP insertText at a caret ('Option C!'); a clipboard paste into the question ('Which one?pasted'). Backspace at the start of the second list and Delete at the end of the first list join the lists: the decision becomes valid and the row is [Option A, Option C, Option B]. The X probes match round 5: a refused read-back redraws the DOM, single-block execCommand applies, deletions remove only the selected text, and the paragraph after the list is kept. No page error.",
-      "headSha": "b0ff3408d08ff8dd83a7ce1297bb0d3c50349739",
-      "negativeControl": "execCommand('insertText','x') over 'one?Opt' with Option C in the first list is refused, the DOM is redrawn and storage is unchanged"
-    },
-    {
-      "criterion": "Review round 3 item 2: an options edit of a two-list decision never deletes an option its ask row does not hold unless the edit sends it, and the refusal names those options",
+      "criterion": "Review round 4 item 2: an options edit of a two-list decision keeps each item its row never held whole (label and description), quotes it whole, and refuses repeated labels",
       "surface": "Dispatch ask-edit route through the real dispatch CLI (packages/envoy-client/bin/dispatch.ts) against the harness server; decision broken by two real editors",
-      "command": "dispatch edit-ask --ask <id> with --urgency high; --option 'Option A'; --option 'Option Z'; --option 'Option A: first' --option 'Option B'; then --question 'Which one now?' --option 'Option A' --option 'Option B'",
-      "observed": "--urgency high exits 1: 'send options to rebuild the options as one list, keeping \"Option A\", \"Option B\", which the decision holds but its ask does not'. The single and new-only options exit 1, naming the missing labels. Nothing is written. Both options: 'Ask edited'; stored '- Option A: first\\n- Option B'; pages unmarked; row [Option A, Option B]. The later edit applies. The round 4 paragraph-after-list path (refusal quoting \"Context\", then doc-edit delete or move, then edit-ask) passes again.",
-      "headSha": "b0ff3408d08ff8dd83a7ce1297bb0d3c50349739",
-      "negativeControl": "edit-ask --option 'Option A' on the two-list decision → exit 1, 'the edit leaves out \"Option B\" …', with the live document and the row unchanged"
+      "command": "dispatch edit-ask / doc-edit sequences D1 (collaborator's 'Option B: only Fridays'), D2 (104-character label), D5 ('Option A: cheap' and 'Option A: fast'), D4 (doc-edit elsewhere)",
+      "observed": "D1: [Option A, Option B] and [Option A, 'Option B: every day'] exit 1 quoting \"Option B: only Fridays\"; the exact quote → applied, stored '- Option A\\n- Option B: only Fridays', pages unmarked. D2: the refusal quotes the whole 104-character label, and sending it back repairs. D5: edit-ask exits 1 with '… share a label: rename or remove one with a document edit'; doc-edit delete of 'Option A: fast' makes the decision valid; edit-ask [Option A: cheap, Option A2: fast] → stored '- Option A: cheap\\n- Option A2: fast', every word kept. D4: doc-edit replace and insert elsewhere apply on a document that holds a broken decision.",
+      "headSha": "f32723d4f306f9f013eb810cdf1dd0ca05a7c7ca",
+      "negativeControl": "edit-ask --option 'Option A' --option 'Option B' where the block holds 'Option B: only Fridays' → exit 1, nothing written"
     }
   ],
-  "ci": "Read on GitHub at b0ff3408 during testing: build x2, changes, lint, pr-title x2, test, typecheck and the daemon Postgres 16 suite were pending; mergeable UNKNOWN. Not re-run.",
+  "findings": [
+    {
+      "severity": "minor (wording; a working path exists)",
+      "description": "The duplicate-label refusal ('rename or remove one with a document edit (dispatch doc-edit), then edit the ask') names a rename that doc-edit refuses. doc-edit replace 'Option A: fast' → 'Option A2: fast' exits 1 with only the content-rule text, because doc-edit refuses an edit that leaves the ask breaking its rule, and a rename leaves both lists. Removing one, then edit-ask, keeps every word. Sent to the architect; not counted as a failure under the architect's round 4 bar (a failure is a refusal that leaves the agent no path)."
+    }
+  ],
+  "ci": "Read on GitHub at f32723d4 during testing: build x2, changes, lint, pr-title x2, test, typecheck and the daemon Postgres 16 suite were pending; mergeable UNKNOWN. Not re-run.",
   "notes": [
     "Throwaway probe specs were moved out of the workspace. The working copy holds only this handoff."
   ]
