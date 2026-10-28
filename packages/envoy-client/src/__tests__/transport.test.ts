@@ -28,6 +28,8 @@ function recordFetch(responses: readonly Response[]): RecordedFetch {
   };
 }
 
+const PLUGIN = { name: "@sjawhar/pi-envoy", version: "11.0.0" };
+
 function jsonResponse(body: unknown): Response {
   return Response.json(body);
 }
@@ -51,6 +53,7 @@ describe("EnvoyClient", () => {
       port: 13381,
       title: "Envoy QA",
       driving: true,
+      plugin: PLUGIN,
     });
 
     expect(interest).toEqual({
@@ -71,6 +74,8 @@ describe("EnvoyClient", () => {
       title: "Envoy QA",
       driving: true,
       host: machineID(),
+      plugin: "@sjawhar/pi-envoy",
+      plugin_version: "11.0.0",
     });
   });
 
@@ -104,6 +109,7 @@ describe("EnvoyClient", () => {
         driving: false,
         selfSubscribed: true,
         delivery: { consumer: true, epoch: "epoch-1", resume: { stream_id: "stream-1", seq: 41 } },
+        plugin: PLUGIN,
       });
 
     expect(deliveryAnswerOf(await register())).toEqual(consumer);
@@ -115,9 +121,12 @@ describe("EnvoyClient", () => {
       mode: "core",
       reason: "unreadable_answer",
     });
+    // The registration carries the plugin beside the delivery request.
     expect(await recorded.requests[0]?.json()).toMatchObject({
       self_subscribed: true,
       delivery: { consumer: true, epoch: "epoch-1", resume: { stream_id: "stream-1", seq: 41 } },
+      plugin: "@sjawhar/pi-envoy",
+      plugin_version: "11.0.0",
     });
   });
 
@@ -142,6 +151,7 @@ describe("EnvoyClient", () => {
       port: 0,
       title: "",
       driving: true,
+      plugin: PLUGIN,
     });
     await client.unsubscribe({ sessionID: "ses_sender", topics: [wildcard] });
 
@@ -171,6 +181,7 @@ describe("EnvoyClient", () => {
       port: 0,
       title: "",
       driving: true,
+      plugin: PLUGIN,
     });
 
     expect(await recorded.requests[0]?.json()).toMatchObject({ topics: [wildcard] });
@@ -188,6 +199,7 @@ describe("EnvoyClient", () => {
           port: 0,
           title: "",
           driving: true,
+          plugin: PLUGIN,
         })
       ).rejects.toThrow("concrete base");
     }
@@ -503,35 +515,29 @@ describe("EnvoyClient", () => {
     ).rejects.toBeInstanceOf(EnvoyApiError);
   });
 
-  test("lists listener sessions and retains their registration metadata", async () => {
-    const recorded = recordFetch([
-      jsonResponse([
-        {
-          session_id: "ses_sender",
-          machine_id: "host-a",
-          dir: "/work",
-          port: 13381,
-          title: "Envoy QA",
-          topics: ["notifications.agent.ses_sender"],
-          self_subscribed: false,
-        },
-      ]),
-    ]);
+  test("lists listener sessions and retains their registration metadata, plugin or none", async () => {
+    const unversioned = {
+      session_id: "ses_sender",
+      machine_id: "host-a",
+      dir: "/work",
+      port: 13381,
+      title: "Envoy QA",
+      topics: ["notifications.agent.ses_sender"],
+      self_subscribed: false,
+    };
+    const versioned = {
+      ...unversioned,
+      session_id: "ses_versioned",
+      topics: ["notifications.agent.ses_versioned"],
+      plugin: "@sjawhar/claude-envoy",
+      plugin_version: "afe10b2f3e1b",
+    };
+    const recorded = recordFetch([jsonResponse([unversioned, versioned])]);
     const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
 
     const sessions = await client.listSessions();
 
-    expect(sessions).toEqual([
-      {
-        session_id: "ses_sender",
-        machine_id: "host-a",
-        dir: "/work",
-        port: 13381,
-        title: "Envoy QA",
-        topics: ["notifications.agent.ses_sender"],
-        self_subscribed: false,
-      },
-    ]);
+    expect(sessions).toEqual([unversioned, versioned]);
     expect(recorded.requests[0]?.url).toBe("http://listener/v1/sessions");
   });
 

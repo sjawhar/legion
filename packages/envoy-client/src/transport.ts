@@ -65,6 +65,10 @@ const SessionWireSchema = z.object({
   capabilities: z.array(z.string()).optional(),
   self_subscribed: z.boolean(),
   last_seen: z.number().int().optional(),
+  // The plugin the session registered through and its build; absent from a listener predating the
+  // fields and for a session whose plugin predates them.
+  plugin: z.string().optional(),
+  plugin_version: z.string().optional(),
 });
 
 const RoleWireSchema = z.object({
@@ -218,6 +222,10 @@ export type SubscribeInput = {
   readonly selfSubscribed?: boolean;
   /** Asks for consumer delivery (`DeliveryRequest`); absent keeps the core path. */
   readonly delivery?: DeliveryRequest;
+  /** The plugin this session registers through (its npm package name) and that plugin's build,
+   * sent on every registration so the listener's session list shows which build each session
+   * runs. */
+  readonly plugin: { readonly name: string; readonly version: string };
 };
 
 export type UnsubscribeInput = {
@@ -475,6 +483,8 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
             // leaves inbox messages to it silently. With a port, a value that is not a host name
             // or IP address is refused with 400 (expected: ["host"]).
             host: machineID(),
+            plugin: input.plugin.name,
+            plugin_version: input.plugin.version,
           })
         )
       ),

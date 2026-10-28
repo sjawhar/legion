@@ -316,6 +316,7 @@ export function sessionOptions(
     heartbeatMs: 60_000,
     configFile: sessionConfigFile("claude", process.env),
     stateDirectory,
+    pluginVersion: "source",
     ...extra,
   }
 }

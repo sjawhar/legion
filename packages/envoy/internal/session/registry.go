@@ -56,6 +56,10 @@ type SessionEntry struct {
 	// plugin NATS connection, so a new one tells the relay the session reconnected and its consumer
 	// restarts at its ack floor.
 	Epoch string `json:"epoch,omitempty"`
+	// Plugin is the npm package the session registered through and PluginVersion that plugin's
+	// build; both empty for a session whose plugin predates the fields.
+	Plugin        string `json:"plugin,omitempty"`
+	PluginVersion string `json:"plugin_version,omitempty"`
 }
 
 // DeliveryConsumer is SessionEntry.Delivery for a session whose stored messages its session consumer

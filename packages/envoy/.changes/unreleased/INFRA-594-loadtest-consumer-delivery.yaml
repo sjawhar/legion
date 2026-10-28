@@ -1,0 +1,14 @@
+kind: Added
+body: |-
+  `packages/envoy/loadtest/` measures consumer delivery. `LOADTEST_SESSION_DELIVERY=consumer`
+  (`loadgen run -session-delivery consumer`, which `stack.sh loadgen` passes on) has each simulated
+  session subscribe its relay subject before it registers, ask for consumer delivery with one epoch
+  per NATS connection and its resume point (left out with `LOADTEST_NO_RESUME=1`), and answer each
+  relay frame `received`, then `done`, the frame being its receipt. `summary.json` gains
+  `config.session_delivery`, `sessions.delivery` (the sessions answered consumer and core, by
+  reason, and the relay frames, duplicates and redeliveries), `events.delivery_ms_from_publish`
+  (receipt time minus the frame's `Envoy-Stored-At`), and under `resources` the JetStream consumers
+  and API requests from `/jsz`, the pull requests on the stream's consumers and on session
+  consumers, and each process's CPU and RSS in the first and last third of the window. Each relay
+  frame is a row of `relay-frames.csv`, and `TABLES.md` gains the table "Session delivery, listener
+  and NATS".

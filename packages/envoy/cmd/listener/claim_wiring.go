@@ -1,6 +1,10 @@
 package main
 
-import "github.com/sjawhar/envoy/internal/session"
+import (
+	"strings"
+
+	"github.com/sjawhar/envoy/internal/session"
+)
 
 // subscribeBody is the POST /v1/interests/subscribe payload sent by each
 // agent session's envoy extension, on subscribe and on every heartbeat.
@@ -30,6 +34,11 @@ type subscribeBody struct {
 	// this field; its owning listener then falls back to host.docker.internal when the session
 	// registered through it, else to the machine id of the listener it registered through.
 	Host string `json:"host"`
+	// Plugin and PluginVersion name the plugin the session registers through (its npm package
+	// name) and that plugin's build, so the session list shows which build each session runs.
+	// Empty for a session whose plugin predates the fields.
+	Plugin        string `json:"plugin"`
+	PluginVersion string `json:"plugin_version"`
 	// Delivery asks for consumer delivery (subscribeDelivery); absent from an older plugin's
 	// registration, which stays on the core path.
 	Delivery *subscribeDelivery `json:"delivery"`
@@ -67,6 +76,8 @@ func sessionEntryFromSubscribe(body subscribeBody, machineID string, delivery se
 		Driving:        body.Driving,
 		SelfSubscribed: body.SelfSubscribed,
 		Host:           body.Host,
+		Plugin:         strings.TrimSpace(body.Plugin),
+		PluginVersion:  strings.TrimSpace(body.PluginVersion),
 	}
 	if delivery.relayed {
 		entry.Delivery = session.DeliveryConsumer

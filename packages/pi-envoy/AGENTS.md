@@ -205,6 +205,11 @@ still arrive, and so do notices on a subject the replaced session's role holds, 
 addressed to the role until a pass ends it: the controller claims its role again for the session
 its pane is left on when the switch's event runs, and a wake dropped there would be lost.
 
+Every registration (`registerSession`, at the first and on every heartbeat) names the plugin the
+session runs: `plugin` `@sjawhar/pi-envoy` and `plugin_version` the `version` of this package's
+`package.json` (imported, so the release's bundle carries the version the release wrote there), and
+the listener's `GET /v1/sessions` and `GET /v1/registry/<id>`, and `envoy_sessions`, show both.
+
 ## Consumer delivery
 
 The listener can hold a durable consumer for the session and relay it to the session in stream
@@ -217,7 +222,10 @@ order ("Session consumers" in `packages/envoy/AGENTS.md`). `@legion/envoy-client
   registration (`registerSession`) carries `delivery`: `consumer: true`, the epoch of the current
   NATS connection, and the resume point when one is known. A new relay subscription begins a new
   epoch, and so does every nats.js `reconnect` status, which also registers at once
-  (`renewRelayEpoch`), so the listener restarts the relay at the consumer's ack floor.
+  (`renewRelayEpoch`), so the listener restarts the relay at the consumer's ack floor. A frozen
+  path left after two unanswered pings (`natsConnectionOptions`, below) ends in such a reconnect:
+  nats.js subscribes the relay subject again on the new connection, and the registration names the
+  new epoch.
 - Answered `consumer` (`takeDeliveryAnswer`), the relay carries the agent subject and every followed
   topic the stream stores (`streamStores`). The core copy of a frame on such a subject answers only
   its lane receipt and shows nothing (`relaysCoreTopic`), and the replay engine makes no
@@ -339,6 +347,15 @@ on each nats.js `reconnect` status (`watchReconnects`), on every heartbeat tick,
 `envoy_subscribe`. A topic followed now gets its cursor at the stream's end at the next sweep,
 so it brings up no older history, and a new session, or one first run under this plugin, starts
 every cursor at the first answer it gets.
+
+How soon a reconnect comes: `ensureConnection` dials with the shared options of
+`@legion/envoy-client/nats-connection` (`natsConnectionOptions`), which ping the server every 10 s
+(`NATS_PING_INTERVAL_MS`) and drop the connection on the tick that finds two pings unanswered
+(`NATS_MAX_PINGS_OUT`), so a path that freezes without closing (packets stop, neither side closes)
+is left within 30 s and redialed at once; a redial that also hangs costs nats.js's 20 s dial
+timeout and the 2 s reconnect wait, 52 s in all. It reconnects forever, 2 s apart, and the
+`reconnect` status starts the sweep. nats.js's default 120 s ping interval left a frozen path for
+up to 6 minutes.
 
 What is replayed: the frames the stream keeps on the agent subject and on the topics the session
 follows (the issue topics, and any other topic the deployed stream captures). What is not: role
@@ -616,7 +633,13 @@ pass it only when none of the session's subscriptions, as the Envoy listener rec
 the owner. What a write does give the session is a *follow* on the ask it
 opened or replied to (`details.follows.ask`): the ask's answer and replies then reach
 the session's own agent topic directly, server-side, with no NATS subscription to
-manage. The `dispatch` command prints the first `details.follows` for each ask id as one
+manage. The outbox gives a session more server-side deliveries, with no write and no
+subscription. A person's reply in a comment thread the session wrote in reaches it, and so does a
+person's comment on a document the session wrote. A person's answers, comments and messages on an
+issue reach the session that holds the issue's claim (#2225). A person's comment on an issue with
+no route and no session claim, and its edit, reach every session that wrote the issue's spec (its
+primary document). The `dispatch` command prints the
+first `details.follows` for each ask id as one
 notice after the call's result (the session's `state.json` remembers which asks it already
 announced, the once-per-ask policy over `followedAsk` and `followNoticeText` every host shares); a later
 write on the same ask stays quiet, and reads (`dispatch read`, `dispatch doc-read`) return only
@@ -783,6 +806,7 @@ state never nudges.
 | Real end-to-end delivery smoke | `scripts/smoke-delivery.sh`, `scripts/smoke-btw.sh`, `scripts/README.md` | Manual installed-plugin smokes against live Envoy; `smoke-btw.sh` creates a targeted Dispatch BTW or Steer attempt and verifies its correlated reply |
 | Consumer delivery | `extensions/envoy.ts` (`createRelay`, `deliverRelayed`, `takeDeliveryAnswer`, `renewRelayEpoch`, `relaysCoreTopic`), `src/missed-messages.ts` (`CONSUMER_STATE_ENTRY`, `consumerSnapshot`), `../envoy-client/src/consumer-delivery.ts`, `../../scripts/e2e/envoy-session-delivery.sh` | The listener's relay of the session's durable consumer ("Consumer delivery" above): the relay subscription and epoch, the frame's `received`, `progress`, `done` and `nak`, and the persisted resume point; the live proof is the repository's `scripts/e2e/envoy-session-delivery.sh` (`scripts/e2e/README.md`) |
 | Missed messages | `extensions/envoy.ts` (`replay`, `showReplayed`, `triggerReplay`), `src/missed-messages.ts`, `src/unwritten-frames.ts` (`UnwrittenFrames`: the cards and turns handed and not yet written, each claim's settle and release), `../envoy-client/src/replay.ts`, `scripts/smoke-replay.sh` | The replay of what the stream stored while a subscription was down ("Missed messages" above); the engine and its rules, with the host policy both plugins share (`replayFollowedSubjects`, `rememberedTopics`, `closeReplayedRemoval`, `routeReplayNotice`), are `@legion/envoy-client/replay`'s; this package holds its triggers, cards and transcript entries |
+| NATS stall test | `extensions/envoy.test.ts` (the row `a session whose NATS path freezes subscribes its relay subject again …`, `-t "NATS path freezes"`), `../envoy-client/test/stall-proxy.ts`, `../envoy-client/test/envoy-stack.ts`, `../envoy-client/test/stall-scenario.ts` | Runs only with `LEGION_E2E_ENVOY_STACK=1` (CI's `envoy-session-stall` job), and needs `go` on `PATH` to build natsd and the listener from `packages/envoy`: with the gate set, a missing `go` or a failed build fails the row rather than skipping it. The real extension registers against that listener (its row shows `plugin` and `plugin_version`), which answers `consumer`, and the proxy freezes its NATS path. Within 60 s the connection nats.js dials in place of the frozen one subscribes the relay subject again (natsd's `/connz`), the session registers a new epoch (its `envoy_sessions` entry), and the message sent during the freeze and one sent after it are each shown once, neither as a replay: the freeze and what it checks are `runFreezeScenario`, which claude-envoy's stall test runs too. Without `renewRelayEpoch` on the `reconnect` status the message sent during the freeze is never shown |
 
 ## Critical conventions
 
