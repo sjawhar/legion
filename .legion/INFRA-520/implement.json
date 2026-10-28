@@ -2,31 +2,31 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-520",
-  "completed": "2026-10-28T12:46:06Z",
+  "completed": "2026-10-28T13:58:39Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2316",
   "proof": [
     {
-      "criterion": "Filter drift: a claimed go command's -tags and subcommand are held to its Run, and the closure the line compiles is checked (review finding 2)",
+      "criterion": "Filter drift: the check reduces only simple go commands; anything else counts as reading every Go file of its module (tester round 6, GOFLAGS)",
       "surface": ".github/scripts/check-ci-filters.sh on the repository tree, the check ci.yaml's ci-filters job runs",
-      "command": "PATH=<python with PyYAML>:$PATH bash .github/scripts/check-ci-filters.test.sh; then the reviewer's probe: packages/envoy/cmd/broker/probe_test.go (//go:build probe, import _ \"github.com/sjawhar/envoy/internal/routing\") and ci.yaml's broker-multiprocess line `... -v ./cmd/broker -tags multiprocess,probe`, then .github/scripts/check-ci-filters.sh (reverted after)",
-      "observed": "tests 'Results: 48 passed, 0 failed' (new cases: a trailing -tags; a Run whose tags and mode disagree with its text). The probe exits 1: 'broker-multiprocess: 281 files, 2 uncovered', '\u2026it builds with -tags multiprocess,probe, the Run with multiprocess\u2026', and 'broker-multiprocess reads packages/envoy/internal/routing/match.go, which its filter broker_multiprocess does not match' (and match_test.go)",
-      "headSha": "18c8e316903f7ee2fdf123e93a1307d5cab67c34",
-      "negativeControl": "The new cases against the round-5 engine: 'Results: 42 passed, 6 failed'; the reviewer reproduced the probe passing at ff92bbdf ('broker-multiprocess: 279 files, 0 uncovered')"
+      "command": "PATH=<python with PyYAML>:$PATH bash .github/scripts/check-ci-filters.test.sh; .github/scripts/check-ci-filters.sh on the tree",
+      "observed": "tests 'Results: 72 passed, 0 failed', including the tester's two GOFLAGS cases from 0f243125 unchanged (inline `GOFLAGS=-tags=probe go test \u2026` and GOFLAGS in step env each fail naming mod/other), the appended package by path, import path and continued line, the trailing -tags and the Run disagreeing with its text (all exit 1); a non-simple command whose filter selects the whole module passes. On the tree all 21 gates pass with 0 uncovered after widening go_notices (packages/envoy/**/*.go) and envoy_smoke (packages/envoy/infra/**/*.go), whose builds sit in continued or quoted lines",
+      "headSha": "e1b679415f759f2efd87b555f89e6e8e4e78cd7a",
+      "negativeControl": "The tester's GOFLAGS cases against 4a082051: 'Results: 60 passed, 4 failed'; narrowing the passing whole-module fixture back fails with 'which this check does not reduce \u2026 so it counts as reading every Go file of module mod'"
     },
     {
-      "criterion": "GitHub Pages ends at the newest docs-selecting main commit's build (review finding 1)",
-      "surface": "the docs job's 'Find whether a later main commit selects docs' step, run as GitHub Actions runs it, in a scratch repository whose bare origin holds main",
-      "command": "the step's run: script extracted from ci.yaml, run with GITHUB_SHA=X (a commit holding this ci.yaml) and origin main at (A) X, (B) a child of X changing docs/site/README.md, (C) a child of X changing only docs/solutions/github/join-a-job-to-the-ci-router.md",
-      "observed": "(A) newest=true; (B) newest=false, stderr 'main's tip changed docs/site/README.md (and 0 more docs input(s)) after this commit; its run publishes the site'; (C) newest=true. docs-deploy runs only when newest == 'true', so an older build never enters the pages group after a newer docs commit merged",
-      "headSha": "18c8e316903f7ee2fdf123e93a1307d5cab67c34",
-      "negativeControl": "Case (B): an older commit's run whose docs build finishes after a newer docs-selecting commit merged is skipped, where before it deployed over the newer site"
+      "criterion": "GitHub Pages: every docs-selecting push to main builds and deploys in push order, never an older site after a newer one (review finding 1, the architect's form)",
+      "surface": ".github/workflows/docs-pages.yaml and check-ci-filters.sh on the tree",
+      "command": ".github/scripts/check-ci-filters.sh; the check-ci-filters.test.sh push-workflow cases; actionlint v1.7.7 on docs-pages.yaml",
+      "observed": "'.github/workflows/docs-pages.yaml: on.push.paths equals filter docs (158 patterns)'; tests for a missing path, an extra path and a missing workflow fail naming each. docs-pages.yaml: on push to main with those paths, workflow-level concurrency group pages, cancel-in-progress false, queue: max (GitHub keeps up to 100 runs pending in order, none replaced); ci.yaml's docs job runs on pull requests and merge groups only and ci-ok's NOT_ON_PUSH accepts its skip on push (ci-ok.test.sh 42 passed). actionlint's only finding is the queue key it does not know, as for release-envoy-listener.yaml. The workflow runs only on main, so its first run is after the merge",
+      "headSha": "e1b679415f759f2efd87b555f89e6e8e4e78cd7a",
+      "negativeControl": "Removing one pattern from docs-pages.yaml's paths makes check-ci-filters.sh fail naming it; the test case 'a path missing' fails against the round-6 engine"
     },
     {
       "criterion": "check-image-trigger-paths.sh tidy-ups carried with #2358 (INFRA-600 fast-follow, INFRA-576 wording, workflow_dispatch non-empty default refused)",
       "surface": ".github/scripts/check-image-trigger-paths.sh and its test, on the tree merged with main 8dfaf3a7",
       "command": "PATH=<python with PyYAML>:$PATH bash .github/scripts/check-image-trigger-paths.test.sh; .github/scripts/check-image-trigger-paths.sh",
       "observed": "'Results: 991 passed, 0 failed'; on the tree 'every image trigger covers every input its build reads (5 image build(s))'. New cases: a call mode on an input workflow_dispatch declares with default: \"build\" is refused naming the default; a widening `|| !github.event.pull_request.draft` reads as widening; draft cases for pull_request_target, list and string on:, types: [] and string types",
-      "headSha": "18c8e316903f7ee2fdf123e93a1307d5cab67c34",
+      "headSha": "e1b679415f759f2efd87b555f89e6e8e4e78cd7a",
       "negativeControl": "The non-empty-default case against the merged script before the fix: 'Results: 974 passed, 3 failed' ('\u2026 default: \"build\" is refused', 'and quotes the term', 'and names the workflow_dispatch default')"
     },
     {
@@ -42,7 +42,7 @@
       "surface": "GitHub on sjawhar/legion#2316",
       "command": "two forward merges (cc8af3c4 with main b295a3fb, 863afe7b with main 184897ac); gh pr view 2316 --json mergeable,mergeStateStatus; .github/scripts/check-ci-filters.sh on the merged tree",
       "observed": "MERGEABLE (BLOCKED only on checks and review). Main's #2356, #2325, #2229, #2328, #2159, 582cb2a2 and #2419 changes to the deleted workflows are in the ci.yaml jobs of the same ids; tests-closed.yaml cancels ci.yaml's run of a closed pull request; check-ci-filters.sh passes all 21 gates (e.g. test 3232 files, broker-multiprocess 278, 0 uncovered). Fingerprint comment https://github.com/sjawhar/legion/pull/2316#issuecomment-6465963425",
-      "headSha": "18c8e316903f7ee2fdf123e93a1307d5cab67c34",
+      "headSha": "e1b679415f759f2efd87b555f89e6e8e4e78cd7a",
       "negativeControl": "At 932ad88d GitHub reported CONFLICTING/DIRTY; the trial merge listed the deleted workflows as 2-sided conflicts including 1 deletion"
     },
     {
@@ -66,7 +66,7 @@
       "surface": "ci.yaml's changes filters, read with .github/scripts/workflow_paths.py, and scratch pull requests on GitHub Actions",
       "command": "PYTHONPATH=.github/scripts coverage.py .github/workflows/ci.yaml (dispatch://INFRA-520/artifact/infra-520-coverage-tar-gz: live `go list -deps -test [-tags]` closures of every job's go commands, the closures of the go commands its tests start, repository-root reads, embeds, module files, and every non-Go step input); then 16 scratch pull requests stacked on legion/INFRA-520 (#2332, #2334-#2349), each changing one file, run up to `changes` and cancelled",
       "observed": "At 0ae68a17 (merged with main 719aae24) every one of the 21 filters prints `0 uncovered` (e.g. test 2981 files, docs 2885, envoy-go-race 1741, dispatch-memory 1034). Each scratch run selected exactly the jobs whose filter names its file: #2343 (a guide memory_profile_test.go reads) only dispatch-memory, at the filter of 6467a0a7 (at 6b0588e3 that guide left the filter: the test reads it only when DISPATCH_EDIT_PROFILE_OUT is set), #2348 (install-pulumi) only envoy-smoke, #2335 envoy-plugin only, #2341 claude-envoy only, #2339 (AGENTS.md) pi-legion only, #2346 (infra seed.go) envoy-infra-go, envoy-go, envoy-go-race and changes' log `Filter go_notices = true`, #2349 (a docs/solutions page) no job but lint (`Filter go_notices = false`, run 40449412482). The scratch runs used ci.yaml as of 6467a0a7 (the scratch pull requests' base when they were pushed)",
-      "headSha": "18c8e316903f7ee2fdf123e93a1307d5cab67c34",
+      "headSha": "e1b679415f759f2efd87b555f89e6e8e4e78cd7a",
       "negativeControl": "coverage.py --drop 'dispatch=packages/envoy/internal/routing/*' prints routing/match.go and match_test.go uncovered and exits 1; the docs/solutions-only scratch #2349 selected no test job"
     },
     {
@@ -98,7 +98,7 @@
       "surface": ".github/scripts tests and the checks on the tree",
       "command": "PATH=<pyyaml venv>:$PATH bash .github/scripts/check-image-trigger-paths.test.sh; bash .github/scripts/check-bun-version.test.sh; .github/scripts/check-image-trigger-paths.sh; .github/scripts/check-bun-version.sh",
       "observed": "image-trigger tests 'Results: 896 passed, 0 failed'; bun-version tests 'Results: 110 passed, 0 failed'; on the tree: 'every image trigger covers every input its build reads (4 image build(s))', the worker-image gate 'matches only files its image builds read', envoy-smoke's left alone as it does more than build",
-      "headSha": "18c8e316903f7ee2fdf123e93a1307d5cab67c34",
+      "headSha": "e1b679415f759f2efd87b555f89e6e8e4e78cd7a",
       "negativeControl": "The new tests against the unmodified checkers: 'Results: 829 passed, 17 failed' (event/draft/cache), 'Results: 863 passed, 33 failed' (reverse check, some-with-excludes), bun-version '108 passed, 2 failed'; the tree with one worker_image `!` line removed fails naming a .dockerignore-dropped file"
     },
     {
@@ -106,7 +106,7 @@
       "surface": "actionlint",
       "command": "GOFLAGS=-mod=mod go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/ci.yaml .github/workflows/worker-image.yaml .github/workflows/pr-title.yaml",
       "observed": "exit 0, no findings",
-      "headSha": "18c8e316903f7ee2fdf123e93a1307d5cab67c34",
+      "headSha": "e1b679415f759f2efd87b555f89e6e8e4e78cd7a",
       "negativeControl": "The same actionlint over release-envoy-listener.yaml reports `cache-mode`/`queue` keys it does not know (exit 1), so it does read and refuse"
     },
     {
@@ -278,6 +278,7 @@
     ".github/scripts/release-push.test.sh",
     ".github/scripts/workflow_paths.py",
     ".github/workflows/ci.yaml",
+    ".github/workflows/docs-pages.yaml",
     ".github/workflows/docs.yaml",
     ".github/workflows/envoy-and-contracts.yaml",
     ".github/workflows/pr-and-main.yaml",
@@ -343,7 +344,8 @@
     "Round 3: two forward merges of main (#2356, #2325, #2229, #2328, #2159, 582cb2a2, #2419); #2356's draft handling in check-image-trigger-paths.sh is kept as the one draft implementation; restore-keys are set only off main (#2328's rule).",
     "Round 4 (architect's narrowing at the round cap): only the tester's finding is fixed; a claimed go line's relative package arguments must equal its Run's packages.",
     "Round 5: continuations joined before a go line is read, and every positional argument of a claimed go command must be one of the Run's packages (fail closed), per the architect's 'fix the class'.",
-    "Review round 1: docs-deploy is gated on the docs job's newest output; check-ci-filters.sh holds -tags and mode; the router guide's cache recipe matches ci.yaml; main merged with #2358 and the three check-image-trigger-paths.sh tidy-ups carried. Known, pre-existing: the image reverse check does not model a widening || term in an image-only gate's filters clause (no workflow has one)."
+    "Review round 1: docs-deploy is gated on the docs job's newest output; check-ci-filters.sh holds -tags and mode; the router guide's cache recipe matches ci.yaml; main merged with #2358 and the three check-image-trigger-paths.sh tidy-ups carried. Known, pre-existing: the image reverse check does not model a widening || term in an image-only gate's filters clause (no workflow has one).",
+    "Round 7: docs-deploy replaced by the push-only docs-pages.yaml (architect comment 6c83c); the drift check made conservative (architect, at the INFRA controller's direction): simple commands reduced, everything else counts as the whole module; go_notices and envoy_smoke widened. Script runs are held exact (the script line must equal the pinned text) rather than parsed. Main's two reds from #2233 are not fixed here (architect)."
   ],
   "openQuestions": [],
   "productionCheck": [
