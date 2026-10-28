@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-523",
-  "completed": "2026-10-28T11:59:09Z",
+  "completed": "2026-10-28T12:43:25Z",
   "proof": [
     {
       "criterion": "A1: the catalog lists every job attempt in the window that failed with a later attempt of that job",
@@ -101,12 +101,20 @@
       "negativeControl": "a wait made unsatisfiable prints 'timed out waiting for the heartbeat reclaiming the held role (holder now ...; claims [...]; ...)' instead of bun's timeout; the reconciliation guard removed: 24 of 700 fail 'Received: 4'; before the fix 97 of 2000 failed"
     },
     {
-      "criterion": "Bun-under-gVisor workaround (architect's request): the queryTmux bound test holds in a pod and still fails a missing timeout or a SIGTERM kill",
-      "surface": "packages/claude-envoy bun test in the issue pod (gVisor)",
-      "command": "bun test --timeout=15000 tests/session-title.test.ts -t 'ignores SIGTERM' --rerun-each 60",
-      "observed": "60 pass 0 fail (before: about half failed at 5 s)",
-      "headSha": "117ffae4e3fe66ae46278548d2ade214eb4a637a",
-      "negativeControl": "killSignal SIGTERM in queryTmux: 2 of 5 fail on the got-term file (the rest are Bun sending no signal); no timeout: 3 of 3 fail with the stub's answer"
+      "criterion": "Review finding 1: the queryTmux bound test requires the kill to arrive (main's strict test restored); the Bun the pins name sends it",
+      "surface": "packages/claude-envoy bun test in the issue pod",
+      "command": "/legion/scratch/tmp/bun144/bun-linux-x64/bun test --timeout=60000 tests/session-title.test.ts -t 'ignores SIGTERM' --rerun-each 40 (Bun 1.4.4, .bun-version's pin and worker.Dockerfile's ARG BUN_VERSION)",
+      "observed": "40 pass 0 fail",
+      "headSha": "621cf3e59315b4e1b828a73d93dc0fc53e8a09bf",
+      "negativeControl": "the same test under the pod's own Bun 1.3.14, which misses the kill: 6 of 10 fail 'Expected: < 3000, Received: 5016'"
+    },
+    {
+      "criterion": "Review findings 4 and 5: the redelivery sweep's first two sweeps never share a period; the boundary tests aim at the clock the gate buckets on",
+      "surface": "packages/envoy go test against Postgres 17 + pgvector in the issue pod",
+      "command": "go test -count=5 -run '^(TestExclusiveCountsATickStalledAfterItsMeasureInThePeriodItWasDueIn|TestExclusiveCountsALateTickInThePeriodItWasDueIn)$' ./internal/dispatch/duty/; go test -count=1 ./internal/dispatch/duty/ ./internal/dispatch/redeliver/",
+      "observed": "ok 10 of 10 boundary runs; both packages ok",
+      "headSha": "621cf3e59315b4e1b828a73d93dc0fc53e8a09bf",
+      "negativeControl": "the gate bucketing the moment it runs (periodBoundary(time.Now(), ...)) by overlay: 6 of 6 boundary runs fail (the latency test caught it 9 of 13 while aimed at the database's clock)"
     },
     {
       "criterion": "A2 T19, T20: the worker image needs no Dockerfile frontend image and installs CodeGraph from a committed lockfile",
@@ -157,7 +165,7 @@
   "trickyParts": [
     "Rig for the tester (round 2; the pod was recreated, so round 1's rig is gone): the tester's own rig, `. /legion/scratch/tmp/infra523-tester/env.sh` (Postgres 17 + pgvector on 127.0.0.1:55599, started with `pg_ctl -D pgdata -o \"-p 55599 -k $PWD/sock\"` from that directory); a tmux wrapper that sets the extracted root's LD_LIBRARY_PATH is /legion/scratch/tmp/infra523-impl2/tmuxbin (the claude-envoy tab test passes PATH alone to tmux); main now pins Bun 1.4.4 while the image carries 1.3.14, so claude-envoy's build and check-dist ran with /legion/scratch/tmp/bun144/bun-linux-x64/bun",
     "Pod-only failures on the unchanged base (gVisor, not this change): Envoy agent-secrets/broker helper tests (SO_PEERPIDFD), cmdtest port range, seaweedfs S3 test, broker/store IAM test (trust-auth rig); daemon tmux TestNewRefusesLaunchersItCannotRun and TestNewRefusesAnOperatorPaneVariableTheRuntimeOwns (tmux not in /usr/bin); three daemon tests needing Docker",
-    "GitHub reported the pull request CONFLICTING after round 1, so it ran no checks at 6a9c3cc6; f26dca26 merges main forward (fingerprint comment on the pull request). Round 3 changes no product code. Read CI at 55265661"
+    "GitHub reported the pull request CONFLICTING after round 1, so it ran no checks at 6a9c3cc6; f26dca26 merges main forward (fingerprint comment on the pull request). Review round 1 changes one product line (sweep.go's first due time) and tests, comments, changelog fragments. Read CI at 621cf3e5. changie v1.26.0 is at /legion/scratch/tmp/changie/changie"
   ],
   "deviations": [
     "T17's target test never failed in 3,000 loaded runs plus 200 full suites: its cause is not found; the permanent instrumentation names the step if CI hits it (architect agreed, 2026-10-27).",
@@ -167,9 +175,8 @@
     "T20: `omp plugin link` does not run omp's own extension load check that `omp plugin install <npm spec>` ran; `legion probe-image` still certifies the codegraph capability as before.",
     "T25's text left this pull request at 5bcf850e and came back at d022f396 (the review rule was withdrawn); it says --failed takes the failed and cancelled jobs' dependents and drops `--job <id>` alone, per INFRA-657's planner; round 2 (6a9c3cc6) makes its opening say it re-runs the run's failed and cancelled jobs, not 'that job alone'.",
     "T26's background clone of the next test's database was removed (29bfc579): it saved about 75 s but loaded Postgres during every test and made TestAHealthyRoomUnderWritesIsNeverRefused fail 4 of 6.",
-    "Added beyond the plan: the claude-envoy reconciliation flake (product: a missing handoff file triggered a second heartbeat), the queryTmux test workaround for Bun under gVisor (with dispatch://INFRA-523/artifact/bun-spawnsync-timeout-issue-md), the deep-links WebKit flake (run 40463123196), and TestRunRecordsAnOperatorSuspension (covered by T8)."
+    "Added beyond the plan: the claude-envoy reconciliation flake (product: a missing handoff file triggered a second heartbeat), the deep-links WebKit flake (run 40463123196), and TestRunRecordsAnOperatorSuspension (covered by T8). The queryTmux workaround of rounds 1-3 is reverted (review finding 1): the failure is the pod image's Bun 1.3.14, and the pinned 1.4.4 sends the kill.",
+    "Review finding 2 (deep-links.e2e.ts) is not changed, on the architect's decision for this round: the layout shift is dispatch://INFRA-662's."
   ],
-  "openQuestions": [
-    "Possible product issue seen in the deep-links trace, not changed: the read mark removes the 'New' mark about 1 s after a conversation opens and moves the cards up about 24 px, so a person's click that straddles that moment can miss its link."
-  ]
+  "openQuestions": []
 }
