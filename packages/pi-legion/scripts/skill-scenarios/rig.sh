@@ -1066,7 +1066,9 @@ judge_keys() {
 #   DIR/OUTPUT, DIR/sessions  writable: its one answer file and its transcript
 #   the pinned omp's install read-only (SKILL_SCENARIOS_JUDGE_OMP names another binary, for tests)
 #   the profile's agent directory read-only, copied into a fresh tmpfs HOME at start, where Oh My
-#     Pi writes its databases and logs; the operator's native module cache read-only
+#     Pi writes its databases and logs, and extracts its own native addon (the operator's native
+#     cache is not mounted: other sessions prune it, and a judge that found its version gone failed
+#     to start)
 #   the judge's own key directory read-only at /opt/key (judge_keys): a key command and a
 #     models.yml that names it, and on the gateway route the token. It sits beside DIR, is the
 #     owner's alone (0700, the token 0600), and is removed when the judge ends. On the key-file
@@ -1080,7 +1082,7 @@ judge_keys() {
 # `NAME=value` words to the container's environment, for tests.
 cmd_judge_omp() {
   [ $# = 3 ] || fail "usage: rig.sh judge-omp <ste|bare> <dir> <output file name>"
-  local kind=$1 dir output=$3 skills status=0 omp P agent natives keys key_file h=/home/judge
+  local kind=$1 dir output=$3 skills status=0 omp P agent keys key_file h=/home/judge
   case $kind in ste) skills=(--skills asd-ste100) ;; bare) skills=(--no-skills) ;; *) fail "judge-omp: '$kind' is ste or bare" ;; esac
   dir=$(cd "$2" && pwd -P) || fail "judge-omp: $2 is not a directory"
   [ -f "$dir/prompt.txt" ] || fail "judge-omp: $dir has no prompt.txt"
@@ -1110,7 +1112,6 @@ cmd_judge_omp() {
   : >>"$dir/$output"
   omp=${SKILL_SCENARIOS_JUDGE_OMP:-$(mise where "$(<"$work/judge-profiles/pin")")/bin/omp}
   [ -x "$omp" ] || fail "judge-omp: $omp is not an executable omp"
-  natives=$(readlink -f "$P/home/.omp/natives")
   local extra=() word
   for word in ${SKILL_SCENARIOS_JUDGE_ENV:-}; do extra+=(-e "$word"); done
   # Pulled here, quietly, so a first run's pull progress never lands in the judge's out.txt, and a
@@ -1119,7 +1120,7 @@ cmd_judge_omp() {
     fail "judge-omp: docker could not pull $judge_image"
   docker run --rm --init --cpus 2 --memory 4g --user "$(id -u):$(id -g)" --read-only \
     --tmpfs /tmp:exec,mode=1777 --tmpfs "$h:exec,uid=$(id -u),gid=$(id -g)" \
-    -v "$(dirname "$omp"):/opt/omp:ro" -v "$natives:/opt/natives:ro" -v "$agent:/opt/profile:ro" \
+    -v "$(dirname "$omp"):/opt/omp:ro" -v "$agent:/opt/profile:ro" \
     "${route[@]}" \
     -v "$dir:$dir:ro" -v "$dir/sessions:$dir/sessions" -v "$dir/$output:$dir/$output" \
     -w "$dir" -e HOME="$h" -e USER=judge -e TERM=xterm-256color -e TMPDIR=/tmp -e OMP_PROFILE="judge-$kind" \
@@ -1129,7 +1130,6 @@ cmd_judge_omp() {
       mkdir -p "$a" && cp /opt/profile/config.yml "$a"/ || exit 125
       cp /opt/key/models.yml "$a"/ || exit 125
       if [ -d /opt/profile/skills ]; then cp -r /opt/profile/skills "$a"/ || exit 125; fi
-      ln -s /opt/natives "$HOME/.omp/natives" || exit 125
       exec timeout "$1" "$2" "${@:3}"' - "${SKILL_SCENARIOS_TIMEOUT:-1500}" "/opt/omp/$(basename "$omp")" \
     -p "$(<"$dir/prompt.txt")" --no-extensions "${skills[@]}" \
     --model "$judge_model" --thinking "$judge_thinking" --session-dir "$dir/sessions" </dev/null >"$dir/out.txt" 2>&1 || status=$?
