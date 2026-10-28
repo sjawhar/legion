@@ -533,7 +533,11 @@ however many paths share them; `TestADocumentReadWeighsAboutTheHeapItHolds` hold
 entries, which callers write, and shares a table's descendant ids and a path's table position with
 every later read of that head, which no caller writes (`documentRead`). Concurrent misses of one
 head share one bounded document fold, while a request that ends leaves that fold running for the
-other callers. A document outside the schema stores no rendering and keeps the tree/error behavior
+other callers. The fold reads the history it has just decoded, which nothing else holds, through
+`pmdoc.ReadUnshared` (`docs.foldLoaded`): each text's items walked directly rather than through
+ygo's `ToDelta`, the tree copied as `pmdoc.Read` copies it and validated once, and the rendering's
+placement walk, token encoding and render take that `pmdoc.ValidDocument` without validating it
+again. A document outside the schema stores no rendering and keeps the tree/error behavior
 each read had before. Websocket admission still uses `loadTree`, because it needs the raw stored
 update to preload the room.
 
