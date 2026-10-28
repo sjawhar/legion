@@ -188,7 +188,7 @@ func hasMark(node *Node, markType string) bool {
 
 func decodeWithYProsemirror(t *testing.T, update []byte) *Node {
 	t.Helper()
-	output := genResult(t, "decode.ts", update)
+	output := genResult(t, "decode.ts", base64.StdEncoding.EncodeToString(update))
 	t.Log("y-prosemirror decoded with decode.ts")
 
 	decoded, err := FromJSON(output)
@@ -198,14 +198,14 @@ func decodeWithYProsemirror(t *testing.T, update []byte) *Node {
 	return decoded
 }
 
-// genResult runs gen/<script> on the base64 of update and returns what the script wrote to the
-// file it is given as its last argument. A gen script hands its result back in a file, never on
-// stdout, which a Bun script can cut short while exiting 0
+// genResult runs gen/<script> with args and, last, a file to write its result to, and returns what
+// the script wrote there. A gen script hands its result back in a file, never on stdout, which a
+// Bun script can cut short while exiting 0
 // (docs/solutions/testing/bun-console-log-drops-what-a-full-non-blocking-pipe-cannot-take-and-exits-0.md),
 // so anything it prints to stdout fails the test rather than going unread, as does exiting 0
 // without creating the file. A file the script created and left empty passes that check; the
 // test's own check of the result is what fails on it.
-func genResult(t *testing.T, script string, update []byte) []byte {
+func genResult(t *testing.T, script string, args ...string) []byte {
 	t.Helper()
 	if _, err := exec.LookPath("bun"); err != nil {
 		if os.Getenv("CI") == "" {
@@ -214,7 +214,7 @@ func genResult(t *testing.T, script string, update []byte) []byte {
 		t.Fatalf("bun is required in CI: %v", err)
 	}
 	out := filepath.Join(t.TempDir(), "result")
-	cmd := genScript(script, base64.StdEncoding.EncodeToString(update), out)
+	cmd := genScript(script, append(args, out)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	stdout, err := cmd.Output()
@@ -260,7 +260,7 @@ func TestNullAttributesSurviveABrowserEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	update := genResult(t, "edit-blocks.ts", crdt.EncodeStateAsUpdateV1(doc, nil))
+	update := genResult(t, "edit-blocks.ts", base64.StdEncoding.EncodeToString(crdt.EncodeStateAsUpdateV1(doc, nil)))
 	edited := crdt.New()
 	if err := crdt.ApplyUpdateV1(edited, update, nil); err != nil {
 		t.Fatal(err)

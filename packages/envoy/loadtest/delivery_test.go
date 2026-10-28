@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 )
 
 const msNs = int64(1e6)
@@ -100,5 +103,24 @@ func TestJoinDeliveryCountsClockAnomalies(t *testing.T) {
 	}
 	if !slices.Equal([]int{got.IssueTopicReceipts, got.ExpectedIssueTopicReceipts}, []int{2, 2}) {
 		t.Fatalf("receipts got %d expected %d, want 2 and 2", got.IssueTopicReceipts, got.ExpectedIssueTopicReceipts)
+	}
+}
+
+// TestReadCommitsNamesTheTableWhenItCannotRead: given a Postgres it cannot reach, readCommits
+// returns no rows and an error naming loadtest.event_commits, never an empty result that reads as
+// no commits; with no write in the window it reads nothing and fails nothing.
+func TestReadCommitsNamesTheTableWhenItCannotRead(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rows, err := readCommits(ctx, unreachablePG, 1, []int64{1, 2})
+	if err == nil || rows != nil {
+		t.Fatalf("readCommits on an unreachable Postgres = %v, %v; want no rows and an error", rows, err)
+	}
+	if !strings.Contains(err.Error(), "loadtest.event_commits") {
+		t.Fatalf("error %q does not name loadtest.event_commits", err)
+	}
+	// With no write in the window there is no row to read, and nothing depends on one.
+	if rows, err := readCommits(ctx, unreachablePG, 1, nil); err != nil || rows != nil {
+		t.Fatalf("readCommits with no markers = %v, %v; want nothing read and no error", rows, err)
 	}
 }

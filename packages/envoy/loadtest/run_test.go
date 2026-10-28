@@ -60,48 +60,189 @@ func TestOpenLoopSchedule(t *testing.T) {
 	}
 }
 
-// TestAForeignRunsMetaHoldsNoToken: under -allow-foreign the tokens are flags, and meta.json
-// records the run's arguments; it holds neither token, whichever spelling gave it.
-func TestAForeignRunsMetaHoldsNoToken(t *testing.T) {
+// TestAForeignRunsMetaHoldsNoTokenOrPassword: under -allow-foreign the tokens and the URLs are
+// flags, and meta.json records them as the normalized flag list: each token as <redacted>, each URL
+// without its userinfo, the user too, since nats.go takes a user with no password as the auth
+// token; a comma-separated -nats server list loses every element's, and -pg is recorded from pgx's
+// own parse as its hosts, ports and database alone. Neither meta.json nor the log holds a token, a
+// password or a NATS token user.
+func TestAForeignRunsMetaHoldsNoTokenOrPassword(t *testing.T) {
 	t.Setenv("LOADTEST_ROOT", t.TempDir())
-	const agent, listener = "agent-token-7f3a", "listener-token-9c1e"
-	for _, args := range [][]string{
-		{"-allow-foreign", "-token", agent, "-listener-token", listener, "-name", "-token", "-pg", "postgres://postgres@127.0.0.1:1/dispatch?sslmode=disable"},
-		{"-allow-foreign", "-token=" + agent, "-listener-token=" + listener, "-pg", "postgres://postgres@127.0.0.1:1/dispatch?sslmode=disable"},
-		{"--allow-foreign", "--token", agent, "--listener-token", listener, "-pg", "postgres://postgres@127.0.0.1:1/dispatch?sslmode=disable"},
-		{"--allow-foreign=true", "--token=" + agent, "--listener-token=" + listener, "-pg=postgres://postgres@127.0.0.1:1/dispatch?sslmode=disable"},
+	isolatePG(t)
+	const agent, listener, password, natsToken = "agent-token-7f3a", "listener-token-9c1e", "url-password-51d2", "nats-token-4b2e"
+	pg, pgRecorded := "postgres://127.0.0.1:1/dispatch?sslmode=disable", "postgres://127.0.0.1:1/dispatch"
+	foreignPG := func(pg string) []string {
+		return []string{"-allow-foreign", "-token", agent, "-listener-token", listener, "-pg", pg}
+	}
+	recordedPG := func(pg string) []string {
+		return []string{"-allow-foreign=true", "-listener-token=" + redacted, "-pg=" + pg, "-token=" + redacted}
+	}
+	for _, c := range []struct {
+		args, want []string
+		secrets    []string // fragments of a case's own credentials, found in no output
+	}{
+		{
+			args: []string{"-allow-foreign", "-token", agent, "--listener-token=" + listener, "-name", "-token", "-pg", pg},
+			want: []string{"-allow-foreign=true", "-listener-token=" + redacted, "-name=-token", "-pg=" + pgRecorded, "-token=" + redacted},
+		},
+		{
+			args: []string{
+				"-allow-foreign", "-token", agent, "-listener-token", listener,
+				"-url", "http://agent:" + password + "@127.0.0.1:1", "-listener", "http://agent:" + password + "@127.0.0.1:2",
+				"-nats", "nats://loadgen:" + password + "@127.0.0.1:3", "-nats-mon", "http://monitor:" + password + "@127.0.0.1:4",
+				"-pprof", "http://pprof:" + password + "@127.0.0.1:5",
+				"-pg", "postgres://postgres:" + password + "@127.0.0.1:1/dispatch?sslmode=disable&password=" + password,
+			},
+			want: []string{
+				"-allow-foreign=true", "-listener=http://127.0.0.1:2", "-listener-token=" + redacted,
+				"-nats=nats://127.0.0.1:3", "-nats-mon=http://127.0.0.1:4", "-pg=" + pgRecorded,
+				"-pprof=http://127.0.0.1:5", "-token=" + redacted, "-url=http://127.0.0.1:1",
+			},
+		},
+		{
+			// A -nats URL whose user is the NATS token.
+			args: []string{"-allow-foreign", "-token", agent, "-listener-token", listener, "-nats", "nats://" + natsToken + "@127.0.0.1:3"},
+			want: []string{"-allow-foreign=true", "-listener-token=" + redacted, "-nats=nats://127.0.0.1:3", "-token=" + redacted},
+		},
+		{
+			// A -nats server list and a -pg host list, credentials in more than the first element.
+			args: []string{
+				"-allow-foreign", "-token", agent, "-listener-token", listener,
+				"-nats", "nats://" + natsToken + "@127.0.0.1:3,nats://loadgen:" + password + "@127.0.0.1:6",
+				"-pg", "postgres://postgres:" + password + "@127.0.0.1:1,127.0.0.1:2/dispatch?sslmode=disable",
+			},
+			want: []string{
+				"-allow-foreign=true", "-listener-token=" + redacted, "-nats=nats://127.0.0.1:3,nats://127.0.0.1:6",
+				"-pg=postgres://127.0.0.1:1,127.0.0.1:2/dispatch", "-token=" + redacted,
+			},
+		},
+		{
+			// A -pg password or password parameter with a comma, which pgx reads whole: the
+			// value is one URL, not a list, and no fragment of the password is recorded.
+			args:    foreignPG("postgres://u:123,abc@h/db"),
+			want:    recordedPG("postgres://h:5432/db"),
+			secrets: []string{"123", "abc"},
+		},
+		{
+			args:    foreignPG("postgres://h/db?password=Abc,def123"),
+			want:    recordedPG("postgres://h:5432/db"),
+			secrets: []string{"Abc", "def123"},
+		},
+		{
+			args:    foreignPG("postgres://u:a:1,b@h/db"),
+			want:    recordedPG("postgres://h:5432/db"),
+			secrets: []string{"a:1", "1,b"},
+		},
+		{
+			// pgx ends the userinfo at the first @ before any /, so a # or ? in the password
+			// stays in it, where net/url would read a fragment or a query.
+			args:    foreignPG("postgres://u:#secret@h/db"),
+			want:    recordedPG("postgres://h:5432/db"),
+			secrets: []string{"secret"},
+		},
+		{
+			args:    foreignPG("postgres://postgres:?Hunter2@h:5432/dispatch"),
+			want:    recordedPG("postgres://h:5432/dispatch"),
+			secrets: []string{"Hunter2"},
+		},
+		{
+			args:    foreignPG("postgres://u:12#34ab@h/db"),
+			want:    recordedPG("postgres://h:5432/db"),
+			secrets: []string{"34ab", "12#"},
+		},
+		{
+			// pgx splits the query at & alone and reads no fragment, so ; and # stay in the
+			// password parameter; sslpassword is a secret too.
+			args:    foreignPG("postgres://h/db?sslmode=disable&password=a;b"),
+			want:    recordedPG("postgres://h:5432/db"),
+			secrets: []string{"a;b"},
+		},
+		{
+			args:    foreignPG("postgres://h/db?password=ab#cd"),
+			want:    recordedPG("postgres://h:5432/db"),
+			secrets: []string{"ab#cd", "cd"},
+		},
+		{
+			args:    foreignPG("postgres://h/db?sslpassword=keypass"),
+			want:    recordedPG("postgres://h:5432/db"),
+			secrets: []string{"keypass"},
+		},
 	} {
 		fs := flag.NewFlagSet("run", flag.ContinueOnError)
 		var ef endpointFlags
 		ef.register(fs)
 		name := fs.String("name", "", "")
-		if err := fs.Parse(args); err != nil {
+		if err := fs.Parse(c.args); err != nil {
 			t.Fatal(err)
 		}
 		if ef.token != agent || ef.listenerToken != listener || !ef.allowForeign {
-			t.Fatalf("%q parsed to token %q, listener token %q: the test does not pass the tokens", args, ef.token, ef.listenerToken)
+			t.Fatalf("%q parsed to token %q, listener token %q: the test does not pass the tokens", c.args, ef.token, ef.listenerToken)
 		}
 		var logged bytes.Buffer
 		cfg := runConfig{
-			name: *name, allowForeign: true, boxBusyBefore: 0, args: redactArgs(fs, args),
+			name: *name, allowForeign: true, boxBusyBefore: 0, args: recordedArgs(fs),
 			ep: endpoints{pg: ef.pg, token: ef.token, listenerToken: ef.listenerToken, pids: map[string]int{}},
 		}
 		meta, err := json.Marshal(collectMeta(context.Background(), cfg, log.New(&logged, "", 0)))
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, token := range []string{agent, listener} {
-			if strings.Contains(string(meta), token) || strings.Contains(logged.String(), token) {
-				t.Fatalf("%q: meta.json or the log holds a token:\n%s\n%s", args, meta, logged.String())
+		for _, secret := range append([]string{agent, listener, password, natsToken}, c.secrets...) {
+			if strings.Contains(string(meta), secret) || strings.Contains(logged.String(), secret) {
+				t.Errorf("%q: meta.json or the log holds %q, a token or a password:\n%s\n%s", c.args, secret, meta, logged.String())
+				break
 			}
 		}
-		if len(cfg.args) != len(args) {
-			t.Fatalf("%q recorded as %q: arguments lost", args, cfg.args)
+		if !slices.Equal(cfg.args, c.want) {
+			t.Errorf("%q recorded as %q, want %q", c.args, cfg.args, c.want)
 		}
-		for i, a := range cfg.args {
-			if a != args[i] && !strings.HasSuffix(a, redacted) {
-				t.Fatalf("%q recorded as %q: an argument that is not a token changed", args, cfg.args)
-			}
-		}
+	}
+}
+
+// TestStepFailsWhenItsCommitRowsWereNotRead: the committed, receipt and delivery columns depend on
+// the commit rows, so a step whose read of them failed fails, naming it; a failed read of the other
+// probes marks its own table and does not fail the step.
+func TestStepFailsWhenItsCommitRowsWereNotRead(t *testing.T) {
+	const commitsErr = `read loadtest.event_commits (is commit-trigger.sql installed?): ERROR: relation "loadtest.event_commits" does not exist (SQLSTATE 42P01)`
+	err := stepFailure(summary{Events: eventsSummary{CommitsError: commitsErr}})
+	if err == nil {
+		t.Fatal("a step whose commit rows were not read does not fail")
+	}
+	if !strings.Contains(err.Error(), commitsErr) || !strings.Contains(err.Error(), "events.commits_error") {
+		t.Fatalf("error %q does not name the commit-row read and its summary.json key", err)
+	}
+
+	gone := stackExit{Name: "dispatch", PID: 4242, FirstSeenGone: time.Date(2026, 10, 27, 9, 0, 15, 0, time.UTC)}
+	both := stepFailure(summary{Events: eventsSummary{CommitsError: commitsErr}, StackExits: []stackExit{gone}})
+	if both == nil || !strings.Contains(both.Error(), "pid 4242") || !strings.Contains(both.Error(), commitsErr) {
+		t.Fatalf("error %v does not name both the stack exit and the commit-row read", both)
+	}
+
+	otherReads := summary{
+		Resources:       &resourcesSummary{PGReadErrors: 5, PprofReadErrors: 2, XIDReadError: "xid probe: failed to connect"},
+		CommitOrderLock: lockSummary{Errors: 1},
+		UngrantedLocks:  ungrantedSummary{Errors: 160},
+	}
+	if err := stepFailure(otherReads); err != nil {
+		t.Fatalf("failed reads that feed no committed, receipt or delivery column fail the step: %v", err)
+	}
+}
+
+// TestMetaRecordsAFailedPostgresVersionRead: meta.json's postgres_version is empty when it could not
+// be read, and postgres_version_error says why, so an empty version is never a silent gap.
+func TestMetaRecordsAFailedPostgresVersionRead(t *testing.T) {
+	t.Setenv("LOADTEST_ROOT", t.TempDir())
+	var logged bytes.Buffer
+	cfg := runConfig{boxBusyBefore: 0, ep: endpoints{pg: "postgres://postgres@127.0.0.1:1/dispatch?sslmode=disable", pids: map[string]int{}}}
+	meta := collectMeta(context.Background(), cfg, log.New(&logged, "", 0))
+	if meta.PostgresVersion != "" || meta.PostgresVersionError == "" {
+		t.Fatalf("postgres_version %q, postgres_version_error %q: want empty and the error", meta.PostgresVersion, meta.PostgresVersionError)
+	}
+	b, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"postgres_version_error":`) {
+		t.Fatalf("meta.json lacks postgres_version_error:\n%s", b)
 	}
 }

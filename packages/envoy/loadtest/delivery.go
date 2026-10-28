@@ -78,9 +78,16 @@ type eventsSummary struct {
 	ClockAnomalies int         `json:"clock_anomalies"`
 	WriteErrors    writeErrors `json:"write_errors"`
 	ConnWaitMs     stat        `json:"conn_wait_ms"`
-	// CommitsError is why loadtest.event_commits could not be read, when it could not.
+	// CommitsError is why loadtest.event_commits could not be read, when it could not. Then every
+	// count and latency above that comes from the commit rows (committed, by_kind committed, the
+	// receipts, missing, other events and receipts, commit_times_missing, clock_anomalies and the
+	// delivery latencies) is 0 because nothing was read, not measured; the tables show it as "-"
+	// with the mark "(commit rows not read)", and the step fails (stepFailure).
 	CommitsError string `json:"commits_error,omitempty"`
 }
+
+// commitsUnread reports that the run's commit rows could not be read (CommitsError).
+func (e eventsSummary) commitsUnread() bool { return e.CommitsError != "" }
 
 type kindSummary struct {
 	PrimaryType           string `json:"primary_type"`
@@ -222,11 +229,15 @@ func primaryCommit(rows []commitRow, primaryType string) *commitRow {
 
 // readCommits reads the commit rows of the given markers of the run with this nonce over a direct
 // Postgres connection (commit-trigger.sql installs the table; track_commit_timestamp gives the
-// times).
+// times). Every error names loadtest.event_commits. With no markers there is no row to read, and
+// it reads nothing: a step with no write in the window has nothing that depends on the rows.
 func readCommits(ctx context.Context, pgURL string, nonce int64, markers []int64) ([]commitRow, error) {
+	if len(markers) == 0 {
+		return nil, nil
+	}
 	conn, err := pgx.Connect(ctx, pgURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read loadtest.event_commits: %w", err)
 	}
 	defer conn.Close(context.Background())
 	tags := make([]string, len(markers))
@@ -244,12 +255,12 @@ func readCommits(ctx context.Context, pgURL string, nonce int64, markers []int64
 	for rows.Next() {
 		var c commitTagRow
 		if err := rows.Scan(&c.EventID, &c.Type, &c.Tag, &c.At); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read loadtest.event_commits: %w", err)
 		}
 		read = append(read, c)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read loadtest.event_commits: %w", err)
 	}
 	return runCommits(read, nonce), nil
 }

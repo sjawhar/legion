@@ -73,4 +73,4 @@ if [ -n "$failed" ]; then
   [ ${#dirs[@]} -gt 0 ] || die "step $failed failed (run-step.sh above names why); the series stopped there, before any step wrote summary.json"
   die "step $failed failed (run-step.sh above names why); the series stopped there; $series/TABLES.md holds the steps that ran"
 fi
-printf 'run-series.sh: series done: %s\n' "$series" >&2
+note "series done: $series"

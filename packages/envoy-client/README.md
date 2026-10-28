@@ -1,7 +1,12 @@
 # Envoy client
 
-Shared HTTP transport, tool contract, and inbound delivery renderer for Envoy hosts. pi-envoy and
-claude-envoy consume these modules rather than maintaining host-specific envelope parsers.
+Shared HTTP transport, tool contract, inbound delivery renderer, and missed-message replay for Envoy
+hosts. pi-envoy and claude-envoy consume these modules rather than maintaining host-specific
+envelope parsers.
+
+This package has no release of its own: `.github/workflows/changelog-fold.yaml` folds its
+changelog fragments (`.changes/unreleased/`) into `CHANGELOG.md` under `main@<commit>` at the
+first fold run after they merge.
 
 ## Inbound delivery
 
@@ -20,6 +25,127 @@ all falls back to the same `summary` field every other source gets and marks `un
 payload`. The renderer skips Dispatch events marked `notify: false` on an issue topic before a host
 can steer or record them in its inbox, as well as events authored by the reader's own session.
 
+## Missed messages
+
+`createReplayEngine` (`@legion/envoy-client/replay`) shows a session, once, each message the
+notification stream stored on a subject it follows while its own NATS subscription was down. A
+host makes one per session process and hands it its live path's `createDeliveryDedupe`, the
+listener client and callbacks (`ReplayHost`): the session id, the followed subjects, how to show
+a stored frame (as a card that runs nothing), a failure notice and a one-time notice, and how to
+persist a change. `sweep()` asks the listener's `POST /v1/replay` for each followed subject's
+messages after its cursor, merges them by stream sequence and hands the host each frame neither
+path showed; it never rejects, and one runs at a time with at most one queued behind it. A
+subject with no cursor starts at the stream's end, so a new follow brings up no history. Role
+forwards are passed over: role messages stay live only.
+
+The ledger holds the identity of each frame the session finished with (its `event_id`, and its
+`dedupe_key` when that names its event, `replayLedgerIdentity`), each expiring 72 hours after it
+was recorded, at most 20,000, the oldest dropped first. A host's live path calls
+`recordDelivered` once the host wrote the frame to the session's record, before it settles the
+claim, and drops a frame `delivered` finds. A `createDeliveryDedupe` claim is settled (`settle()`)
+once the host is done with the frame, shown or not, or released as before; until then `pending()`
+reads it true, and a sweep leaves that frame's stored copy for a later sweep rather than show it
+beside the live one. A host that hands a stored frame, or a failure notice, on without having
+written it yet (Oh My Pi holds a card sent mid-turn until the turn takes it) claims the frame and
+answers `queued`: nothing is recorded and its subjects' cursors stay before it, so a process that
+ends first shows it after the restart, until the host calls `recordDelivered` and settles the
+claim once written. `recordDeliveredFor(sessionID, frame)` records the same way for the session a
+frame was delivered in while the host shuts down: it writes while the host's optional
+`writeSessionID()` still names that session, once `sessionID()` already answers none, and the
+ledger holds the frame from the call on (Oh My Pi records every BTW's event id so, before its side
+turn and before any reply is posted).
+
+The state holds each followed subject's `since` and `after`, the stream's `id` (`stream_id`, the
+`envoy_stream_id` the listener answers as `stream.id`) and `created` time, and the one-time
+notices raised but not told yet (`notices`);
+`restore(snapshot)` loads what a host persisted, dropping expired ledger entries and keeping the
+state at any age. A write carries the state only when it changed; a sweep that handled no message
+and only moved its cursors to the stream's end goes with the next write, or once the state last
+written is an hour old (`REPLAY_STATE_REFRESH_MS`). A frame the host fails to show is retried, and
+on its third failure the host shows a notice naming it instead (`showFailureNotice`); a host whose
+live path failed a frame calls `liveFailed(followed, envelope, error, receivedAt)`, which shows
+that notice at once unless a sweep will show the stream's copy, which it will not for a frame
+received before its subject's cursor started (a new follow, a new session, or a reset after a
+stream recreation), since that cursor can start past it. A host stamps `receivedAt` when the
+subscription yielded the frame: `readArrivals(subscription)` (`@legion/envoy-client/delivery`)
+reads a subscription as its messages arrive and yields each, in order, with that time, so a frame
+queued behind a slow delivery is not stamped late. A replayed removal closes a topic only
+when `followedBefore(topic, seq)`; `replaySuppressed` says which rendered frames a replay does
+not show, `replayedText`, `failureNoticeFields` and `replayNoticeFields` word the cards, and
+`envoyNoticeText` renders a notice's fields under `envoy:` in TOON, so a sender's summary that
+holds a newline stays inside its own field. The session is
+told once when the stream was recreated, when it moved back, when its cursor fell behind the
+stream's oldest message (older than 72 hours), and when the listener does not replay (404) or
+cannot (503 `REPLAY_UNAVAILABLE`, 401, 403). A stream is recreated when its `id` differs from the
+stored one; a `created` that moved under the same id is a restore (or, after a clustered restore,
+a later leader election), not a recreation. An
+answer without an id (an older listener) is judged by `created`, and a state stored before ids
+takes the answer's id. A stream that is not recreated has moved back when any cursor's `after` is
+past the stream's `last_seq`: restored from a backup older than the cursors, or re-added empty
+from its exported configuration, which keeps the id, so its sequences restarted below them.
+Nothing tells which of its messages the session was shown, so every followed subject's `after`
+becomes `first_seq - 1` (each `since` stays) and the sweep reads everything the stream holds
+again: the ledger passes over what the session was already shown (a restore keeps event ids),
+what was published after the restore is shown, and the session is told once (`stream_moved_back`)
+that messages may be shown again and that any published between the backup and the restore are
+missing. A message may be shown twice; none is lost. A recreation's cursor reset, a moved-back
+stream's cursor rewind, and a retention gap's cursor move are written at once, with their notice
+in `notices`, which is dropped once told: a session that ends before telling it tells it once at
+its first sweep after the restart. Work started for one session stops, writing nothing, once
+`sessionID()` names another.
+
+The host policy both plugins share sits beside the engine, so each host keeps only how it shows a
+card, how it warns, and how it persists. `replayFollowedSubjects(ownAgentSubject, topics,
+heldForRole?)` is what a host's `followedSubjects()` answers: its own agent subject and every
+topic it follows but a role lane, a subject it holds for a role, and a topic reaching a private
+stream subject (`reachesPrivateStreamSubject`, which a host's registration applies too: another
+session's agent subject, a failed-delivery lane on an agent subject, the Legion controller lane,
+or a wildcard reaching one, the listener's own rule, `privateStreamSubjects` and
+`ReachesPrivateStreamSubject` in `packages/envoy/internal/bus/stream.go`). `rememberedTopics(state)`
+is what a restore follows again from a persisted state: every
+subject but agent subjects and role lanes. `closeReplayedRemoval(frame, host)` acts on a replayed
+`subscription.removed` naming the session: it closes each topic the session followed before the
+frame was stored (`followedBefore`, through the host's `close`), then starts the host's
+`unregister` of the closed topics from the listener's registry and waits on it and on the host's
+`followedChanged`. `routeReplayNotice(notice, {warn, card})` sends a one-time notice where its kind
+belongs: `not_served` and `unavailable` are a warning, `stream_recreated`, `stream_moved_back` and
+`retention_gap` a card rendered by `envoyNoticeText`.
+
+## NATS connection
+
+`natsConnectionOptions({ servers, name, seed })` (`@legion/envoy-client/nats-connection`) is the
+nats.js `connect` options every session plugin dials with: the credential `natsAuthOptions` builds
+from the seed (`src/nats-auth.ts`, which the package does not export, so a plugin dials only with
+these options), reconnecting forever 2 s apart, and a ping every 10 s (`NATS_PING_INTERVAL_MS`)
+with the connection dropped on the tick that finds two pings unanswered (`NATS_MAX_PINGS_OUT`). So a
+path that freezes without closing is left within 30 s and redialed at once, and a session is back
+within 52 s when that redial also hangs on nats.js's 20 s dial timeout and the 2 s wait; nats.js's
+default 120 s interval left a frozen path for up to 6 minutes.
+
+nats.js 2.29.3, the last 2.x release, leaves a redial's socket open when it gives up on that dial
+at its 20 s timeout (a TCP connect that hangs, or a server that never sends `INFO`): it closes
+only a transport that finished connecting, so the socket keeps the process alive and a channel
+server never exits on SIGTERM. Its stale-connection close (two unanswered pings) flushes the
+transport before it destroys the socket, and behind data a dead path never acknowledged that flush
+never completes, so the transport never closes and a client that wrote since the path froze never
+redials. `patches/nats@2.29.3.patch` (root `package.json`'s `patchedDependencies`, applied by bun
+at install and so carried by both plugins' bundles) makes `NodeTransport` keep the socket from the
+moment it dials and destroy it when a transport that never connected is closed, and makes the
+stale-connection close skip the flush (`transport.close()` in place of `transport.disconnect()`
+in `ProtocolHandler.disconnect()`; a client-initiated `reconnect()` still flushes);
+`src/__tests__/nats-stall.test.ts` fails without either. Bun ignores a `patchedDependencies` entry
+for a version that is not installed without a word, so moving nats means carrying the patch to
+the new version.
+
+`@legion/envoy-client/test/stall-proxy`, `@legion/envoy-client/test/envoy-stack` and
+`@legion/envoy-client/test/stall-scenario` (Bun only, not built, in `test/`) are what the stall
+tests run: a TCP proxy whose `freeze()` stops forwarding on, and stops reading, the connections
+open at that moment without closing either side, and which records when each connection was
+accepted, first subscribed and closed; a real natsd and listener that each stack builds with
+`go build` from `packages/envoy` into its own scratch directory; and `runFreezeScenario`, the
+freeze both plugins' stall tests put their session through. A test that uses the stack runs only
+with `LEGION_E2E_ENVOY_STACK=1`.
+
 ## HTTP transport
 
 `createEnvoyClient` sends and receives the listener's `/v1` JSON contracts. Send and publish
@@ -30,9 +156,15 @@ the envelope and an optional role holder. Network failures and 5xx responses ret
 listener's bearer is the `token` the client is given (`envoySettings`); without one it sends no
 `Authorization` header.
 
-`subscribe` exposes listener warnings, including a topic that has no event in the configured
-stream. `getRole` returns a role holder with its last-seen timestamp, and `listSessions` accepts
-optional directory and title filters.
+`subscribe` sends the host's `plugin` (`{name, version}`, required) as `plugin` and
+`plugin_version` on every registration, and exposes listener warnings, including a topic that has
+no event in the configured stream. `getRole` returns a role holder with its last-seen timestamp,
+and `listSessions` accepts optional directory and title filters; its rows carry `plugin` and
+`plugin_version` when the session registered them.
+
+`replay` posts `POST /v1/replay` once, with no retry and a 10 s timeout, and returns the
+listener's answer in its wire shape; an error body's `code` (such as `REPLAY_UNAVAILABLE`) is on
+`EnvoyApiError.code`.
 
 ## envoy.json
 
@@ -213,11 +345,18 @@ session's commands, or null when that is unset or empty. `sessionSettings(file, 
 notice the session shows at its start: the file's error (`<error>: Dispatch and Envoy are off`),
 the missing file's notice, the missing-file text for a section still off when a variable turned
 the other on, or a section's own error (`Dispatch is off: <error>`, `Envoy is off: <error>`), then
-what a checkout's files hold that the session does not read (its `envoy` section, the file's own
+what a checkout's files hold that the session does not read (its `envoy` section, its `askgate`
+section as `askgate in <checkout file> is not read; set it in <session file>`, the file's own
 error while `DISPATCH_URL` replaces it, or its `.opencode/envoy.json`), then, for a session that
 opens a NATS connection (`nats` not `false`), that an Envoy that is on takes no inbound messages:
 `Envoy's inbound messages are off: <inbound.off>; the Envoy tools still work`. A file that turns a
 section off, or holds no section for it, says nothing.
+`askgateSetting(file)` reads the session file's top-level `askgate` section now, on its own, so a
+section that does not parse never fails the Dispatch or Envoy read: `{"askgate":{"enabled":false}}`
+turns AskGate off (`{ enabled: false, error: null }`); no file, no section or `enabled: true`
+leaves it on. A section that does not parse, or a file that cannot be read or is not JSON, leaves
+it on with an `error` naming the file and `askgate.enabled` and ending `AskGate stays on`. A
+checkout's `.envoy/envoy.json` cannot set it.
 `sessionDispatchSettings(file, env, { cwd })` reads
 Dispatch alone, now: `{ dispatch, warnings, missing }`, Dispatch's resolution beside the files the
 read found and did not read and the missing-file record, for a command, which says the `warnings`

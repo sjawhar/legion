@@ -5,5 +5,5 @@ package bus
 // tell a publish is inside that wait, or act at the moment the wait ends. It is compiled into the
 // package's tests only; no production connect can set it.
 func WithReconnectWaitTick(tick func()) ConnectOption {
-	return func(o *connectOpts) { o.reconnectWaitTick = tick }
+	return clientOption(func(o *connectOpts) { o.reconnectWaitTick = tick })
 }

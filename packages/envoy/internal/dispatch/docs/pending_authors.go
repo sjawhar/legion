@@ -186,6 +186,12 @@ func (hold *roomHold) snapshot() heldUpdates {
 type roomInstance struct {
 	hold   roomHold
 	cursor roomCursor
+	// loadedHead is the head the instance's load read (roomLoad.head), the version through which
+	// the document it loaded holds every stored update: the load folds the stored history through
+	// that head (servicePersistenceAdapter.LoadDoc, PgVersioned.Load). It is not the cursor's
+	// start, which also folds in the versions took recorded while the load ran - those are durable,
+	// but not in the loaded document. Set once, when the load starts the instance (roomLoad.start).
+	loadedHead int64
 }
 
 // roomLoad is one room load's record of the durable history behind the room it loads, kept from
@@ -278,7 +284,7 @@ func (load *roomLoad) start() *roomInstance {
 		}
 	}
 	load.appended = nil
-	load.instance = &roomInstance{hold: roomHold{loaded: load.head}, cursor: roomCursor{through: through}}
+	load.instance = &roomInstance{hold: roomHold{loaded: load.head}, cursor: roomCursor{through: through}, loadedHead: load.head}
 	return load.instance
 }
 
@@ -327,15 +333,6 @@ func (s *Service) instanceOf(live *crdt.Doc) *roomInstance {
 func (s *Service) cursorOf(live *crdt.Doc) *roomCursor {
 	if instance := s.instanceOf(live); instance != nil {
 		return &instance.cursor
-	}
-	return nil
-}
-
-// replicaOf is live's rendered replica, nil for a document no update observer listed or one whose
-// replica has been collected.
-func (s *Service) replicaOf(live *crdt.Doc) *renderedReplica {
-	if listed, ok := s.replicas.Load(weak.Make(live)); ok {
-		return listed.(weak.Pointer[renderedReplica]).Value()
 	}
 	return nil
 }

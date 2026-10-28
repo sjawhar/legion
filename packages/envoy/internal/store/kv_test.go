@@ -282,6 +282,35 @@ func TestMergeForUpsert_PreservesMachineIDAndDirFromExistingEntry(t *testing.T) 
 	}
 }
 
+// A row stored before the listener refused topics reaching a private stream subject keeps them
+// until the session's next registration, which drops them: another session's agent subject, a
+// failed-delivery lane wildcard, a Legion controller lane and notifications.> go, while the
+// session's own agent subject, the issue topic it followed and the topic it registers now stay.
+func TestMergeForUpsert_DropsStoredTopicsReachingAPrivateStreamSubject(t *testing.T) {
+	cur := Interest{
+		SessionID: "ses_x",
+		MachineID: "m1",
+		Topics: []string{
+			"notifications.agent.ses_other",
+			"notifications.agent.ses_x",
+			"notifications.dispatch.issue.KEY-1.>",
+			"notifications.envoy.exceptions.>",
+			"notifications.legion.ACME.controller",
+			"notifications.>",
+		},
+	}
+	item := Interest{SessionID: "ses_x", MachineID: "m1"}
+
+	result, err := mergeForUpsert(cur, nil, item, []string{"notifications.agent.ses_x", "notifications.github.acme.widgets.pr.7.>"}, 7)
+	if err != nil {
+		t.Fatalf("mergeForUpsert returned unexpected error: %v", err)
+	}
+	want := []string{"notifications.agent.ses_x", "notifications.dispatch.issue.KEY-1.>", "notifications.github.acme.widgets.pr.7.>"}
+	if !slices.Equal(result.Topics, want) {
+		t.Fatalf("merged topics = %v, want %v", result.Topics, want)
+	}
+}
+
 // --- Integration Tests (a real NATS server) ---
 
 // connectNATS connects to the package's shared NATS server, in the JetStream account
@@ -372,12 +401,12 @@ func TestWatch_PropagatesUpsert(t *testing.T) {
 	}
 
 	// Upsert writes to KV — the watcher should propagate to cache
-	if _, err := reg.Upsert(Interest{SessionID: "ses_new", MachineID: "m1"}, []string{"notifications.>"}); err != nil {
+	if _, err := reg.Upsert(Interest{SessionID: "ses_new", MachineID: "m1"}, []string{"notifications.test.>"}); err != nil {
 		t.Fatalf("Upsert failed: %v", err)
 	}
 
 	// Poll with bounded timeout
-	got = pollMatch(t, reg, "m1", "notifications.test", 1, 5*time.Second)
+	got = pollMatch(t, reg, "m1", "notifications.test.x", 1, 5*time.Second)
 	if got[0].SessionID != "ses_new" {
 		t.Fatalf("expected ses_new, got %s", got[0].SessionID)
 	}
@@ -959,6 +988,66 @@ func TestRemove_ColdCacheReadsFromKV(t *testing.T) {
 	}
 }
 
+// An unsubscribe and a role claim rewrite the session's row too, and neither keeps a topic the row
+// stored before the listener refused topics reaching a private stream subject: another session's
+// agent subject and a failed-delivery lane are dropped, so Match stops fanning that lane out to the
+// session, while its own agent subject and the issue topic it follows stay.
+func TestRemoveAndSetRole_DropStoredTopicsReachingAPrivateStreamSubject(t *testing.T) {
+	const lane = "notifications.envoy.exceptions.notifications.agent.ses_other"
+	stale := []string{
+		"notifications.agent.ses_other",
+		"notifications.agent.ses_stale",
+		"notifications.dispatch.issue.KEY-1.>",
+		"notifications.envoy.exceptions.>",
+		"topic.gone",
+	}
+	for name, write := range map[string]func(*Registry) ([]string, error){
+		"unsubscribe": func(reg *Registry) ([]string, error) {
+			return []string{"notifications.agent.ses_stale", "notifications.dispatch.issue.KEY-1.>"},
+				reg.Remove(context.Background(), "ses_stale", []string{"topic.gone"})
+		},
+		"role set": func(reg *Registry) ([]string, error) {
+			_, err := reg.SetRole("ses_stale", "m1", "reviewer", false)
+			return []string{"notifications.agent.ses_stale", "notifications.dispatch.issue.KEY-1.>", "notifications.role.reviewer", "topic.gone"}, err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			conn, cleanup := connectNATS(t)
+			defer cleanup()
+			reg, kv := coldRegistry(t, conn)
+			putInterest(t, kv, Interest{SessionID: "ses_stale", MachineID: "m1", Topics: stale})
+			// Get caches the stored row, so Match fans the lane out to the session before the write.
+			if _, err := reg.Get(context.Background(), "ses_stale"); err != nil {
+				t.Fatalf("read the seeded row: %v", err)
+			}
+			if matched := reg.Match("m1", lane); len(matched) != 1 {
+				t.Fatalf("Match(%s) before the write = %v, want the seeded session", lane, matched)
+			}
+
+			want, err := write(reg)
+			if err != nil {
+				t.Fatalf("write the row: %v", err)
+			}
+
+			entry, err := kv.Get("ses_stale")
+			if err != nil {
+				t.Fatalf("read the stored row: %v", err)
+			}
+			var item Interest
+			if err := json.Unmarshal(entry.Value(), &item); err != nil {
+				t.Fatalf("decode the stored row: %v", err)
+			}
+			got := slices.Sorted(slices.Values(item.Topics))
+			if !slices.Equal(got, want) {
+				t.Fatalf("stored topics = %v, want %v", got, want)
+			}
+			if matched := reg.Match("m1", lane); len(matched) != 0 {
+				t.Fatalf("Match(%s) = %v, want no session", lane, matched)
+			}
+		})
+	}
+}
+
 func TestSetRole_ClaimNewRole(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -1179,7 +1268,8 @@ func TestInterestReaper(t *testing.T) {
 		t.Fatalf("Get ses_dead failed: %v", err)
 	}
 
-	// Reap with 0 grace window — all dead sessions should be reaped
+	// Reap with 0 grace window: a dead session's row older than InterestRefreshAge (this
+	// one is 10 minutes old) is reaped, and the live session's row is kept.
 	count, err := reg.Reap(func(sessionID string) bool {
 		return sessionID == "ses_alive"
 	}, 0)
@@ -1216,7 +1306,7 @@ func TestReapKeepsRoleClaimsForSessionRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get role interest: %v", err)
 	}
-	stale.UpdatedAt = time.Now().Add(-time.Minute).UnixMilli()
+	stale.UpdatedAt = time.Now().Add(-(InterestRefreshAge + time.Minute)).UnixMilli()
 	raw, err := json.Marshal(stale)
 	if err != nil {
 		t.Fatalf("marshal stale interest: %v", err)
@@ -1371,28 +1461,40 @@ func TestReaperGraceWindow(t *testing.T) {
 	defer cleanup()
 
 	reg, kv := coldRegistry(t, conn)
+	fixed := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	reg.now = func() time.Time { return fixed }
 
-	// Create interest updated 2 min ago — session is dead but within 10 min grace window
-	now := time.Now().UnixMilli()
-	putInterest(t, kv, Interest{SessionID: "ses_recent", MachineID: "m1", Topics: []string{"notifications.>"}, UpdatedAt: now - 120_000})
-
-	// Warm cache
-	if _, err := reg.Get(context.Background(), "ses_recent"); err != nil {
-		t.Fatalf("Get ses_recent failed: %v", err)
+	// Dead sessions whose rows were last written 14, exactly 15, and 16 minutes ago: the
+	// listener's grace (InterestReapGrace) plus InterestRefreshAge is 15 minutes, and only a
+	// row strictly older than that is reaped.
+	rows := map[string]time.Duration{
+		"ses_14m": 14 * time.Minute,
+		"ses_15m": 15 * time.Minute,
+		"ses_16m": 16 * time.Minute,
+	}
+	for sid, age := range rows {
+		putInterest(t, kv, Interest{SessionID: sid, MachineID: "m1", Topics: []string{"notifications.>"}, UpdatedAt: fixed.Add(-age).UnixMilli()})
+		// Warm cache
+		if _, err := reg.Get(context.Background(), sid); err != nil {
+			t.Fatalf("Get %s failed: %v", sid, err)
+		}
 	}
 
-	// Reap with 10 min grace window — ses_recent updated only 2 min ago, should survive
-	count, err := reg.Reap(func(string) bool { return false }, 10*time.Minute)
+	count, err := reg.Reap(func(string) bool { return false }, InterestReapGrace)
 	if err != nil {
 		t.Fatalf("Reap failed: %v", err)
 	}
-	if count != 0 {
-		t.Fatalf("expected 0 reaped (within grace window), got %d", count)
+	if count != 1 {
+		t.Fatalf("expected 1 reaped (only the 16-minute row), got %d", count)
 	}
 
-	// ses_recent should still exist in KV
-	if _, err := kv.Get("ses_recent"); err != nil {
-		t.Fatalf("ses_recent should still exist within grace window: %v", err)
+	for _, sid := range []string{"ses_14m", "ses_15m"} {
+		if _, err := kv.Get(sid); err != nil {
+			t.Fatalf("%s should still exist within grace window plus refresh age: %v", sid, err)
+		}
+	}
+	if _, err := kv.Get("ses_16m"); err != natsgo.ErrKeyNotFound {
+		t.Fatalf("ses_16m should be deleted, got err: %v", err)
 	}
 }
 

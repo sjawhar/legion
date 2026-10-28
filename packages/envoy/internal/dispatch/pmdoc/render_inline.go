@@ -100,11 +100,31 @@ type lineCandidate struct {
 // character reference, which is punctuation to the flanking rules, as the browser editor writes it
 // (flanking).
 //
-// A spelling is taken first where it reads back by CommonMark's flanking rules as well
-// (flankingOnlyMarkdown), the rules goldmark reads by, and only where none does by the browser
-// editor's alone, which also let a run beside another `*` or `_` open or close (emphasisParser):
-// the writer keeps the bytes it wrote while it read by CommonMark's rules, wherever they read back
-// by the editor's too.
+// It reads a run back under readBackReaders, in order: inlineMarkdown, which reads as every
+// document is read now (editorRules), and the two readers Dispatch read stored markdown under
+// before, storedMarkdown (storedRules: a `*` or `_` run may open or close beside a `*` or `_` but
+// not a `~`, a `~` run is read by goldmark's strikethrough, which pairs runs of either length and
+// refuses one after any `~`, and every run is paired in goldmark's one loop over them in order) and
+// flankingMarkdown (flankingRules: those, with a `*` or `_` run judged by CommonMark's flanking
+// rules alone). It keeps the first writing if it reads back under all three; else the first
+// respelling that does; else the first writing if it reads back under the first two; else the
+// first respelling that does; else the first writing if it reads back under inlineMarkdown; else
+// the first respelling that does; else the first writing.
+//
+// Main's writer read back under storedMarkdown and flankingMarkdown alone, in five steps: the
+// first writing if it reads back under both; else the first respelling that does; else the first
+// writing if it reads back under storedMarkdown; else the first respelling that does; else the
+// first writing. Each of the first five steps here is main's step with inlineMarkdown added to
+// what a writing must read back under, so wherever the writing main chose reads back under
+// inlineMarkdown this writer chooses it too: every writing an earlier step here tries, main's
+// matching step tried under a test it asks less of and found failing, so it fails here, and the
+// writing main chose passes its own step here. Stored markdown keeps its bytes wherever they read
+// back as the browser editor reads them.
+//
+// A read that is provably the same parse as one already made is not made again (readsBackUnder):
+// storedMarkdown reads markdown holding no `~` as inlineMarkdown does, since the rules differ only
+// beside a `~`, and flankingMarkdown reads markdown as storedMarkdown does where no `*` or `_` run
+// could open or close otherwise under flankingRules (flankingDivergenceKey).
 func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlineContext) {
 	from := r.b.Len()
 	fused := r.writeInlineRun(nodes, prefix, context, runSpelling{})
@@ -114,8 +134,10 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 	if r.err != nil || held == delimitersAsRuled && !bareURL && !fused && !flanking {
 		return
 	}
-	firstReadsBack := r.runReadsBack(from, prefix, nodes, inlineMarkdown)
-	if firstReadsBack && r.runReadsBack(from, prefix, nodes, flankingOnlyMarkdown) {
+	labels, signature := referencedLabels(nodes), inlineSignature(nodes)
+	// firstReads is how many of readBackReaders, from the first, the first writing reads back under.
+	firstReads := r.readsBackUnder(from, prefix, labels, signature, len(readBackReaders))
+	if firstReads == len(readBackReaders) {
 		return
 	}
 	written := string(r.b.Bytes()[from:])
@@ -131,15 +153,11 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 		}
 		spellings = append(spellings, flanked...)
 	}
-	for _, flankingToo := range []bool{true, false} {
-		if !flankingToo && firstReadsBack {
-			break
-		}
+	for under := len(readBackReaders); under > 0 && firstReads < under; under-- {
 		for _, spelling := range spellings {
 			r.b.Truncate(from)
 			fusedAgain := r.writeInlineRun(nodes, prefix, context, spelling)
-			if r.err == nil && !(spelling.keepOpen && fusedAgain) && r.runReadsBack(from, prefix, nodes, inlineMarkdown) &&
-				(!flankingToo || r.runReadsBack(from, prefix, nodes, flankingOnlyMarkdown)) {
+			if r.err == nil && !(spelling.keepOpen && fusedAgain) && r.readsBackUnder(from, prefix, labels, signature, under) == under {
 				return
 			}
 		}
@@ -147,6 +165,10 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 	r.b.Truncate(from)
 	r.b.WriteString(written)
 }
+
+// readBackReaders is the readers inlineWithEscapes reads a run back under, in the order it drops
+// them from the last: inlineMarkdown, storedMarkdown and flankingMarkdown (readsBackUnder).
+var readBackReaders = [...]inlineReader{inlineMarkdown, storedMarkdown, flankingMarkdown}
 
 // runSpelling is how writeInlineRun writes a run beyond the escape rules: the delimiters in its
 // text it escapes, whether it escapes the character after each bare URL goldmark's parser reads
@@ -236,17 +258,53 @@ func followsBareURL(nodes []*Node, index int, escapePipes bool) bool {
 		literalLength(previous.Text) == 0
 }
 
-// runReadsBack reports whether the inline markdown written since from reads back as nodes by
-// reader: the run's own lines, with the prefix its later lines are written behind taken off, read
-// after a definition for each footnote label it refers to, since a reference reads as one only
-// then.
-func (r *renderer) runReadsBack(from int, prefix string, nodes []*Node, reader inlineReader) bool {
+// readsBackUnder is how many of the first n of readBackReaders, from the first, the inline markdown
+// written since from reads back under as the nodes whose footnote labels are labels and whose
+// inlineSignature is signature: the run's own lines, with the prefix its later lines are written
+// behind taken off, read after a definition for each label, since a reference reads as one only
+// then. It stops at the first reader the run does not read back under, and makes no read that is
+// the same parse as one it made: storedMarkdown reads a source holding no `~`, its labels included,
+// as inlineMarkdown does, since editorRules and storedRules differ only beside a `~` (a `*` or `_`
+// run's widening by one, tildeParser, tildeDelimiters, and the `~` runs' own group in
+// delimiterList), so that parse's nodes, error and divergence are inlineMarkdown's; and
+// flankingMarkdown reads a source as storedMarkdown does unless the stored parse reported a `*` or
+// `_` run that could open or close otherwise under flankingRules (parseInlineWithDefinitions).
+func (r *renderer) readsBackUnder(from int, prefix string, labels, signature []string, n int) int {
 	source := string(r.b.Bytes()[from:])
 	if prefix != "" {
 		source = strings.ReplaceAll(source, "\n"+prefix, "\n")
 	}
-	parsed, err := parseInlineWithDefinitions(source, referencedLabels(nodes), reader)
-	return err == nil && slices.Equal(inlineSignature(parsed), inlineSignature(nodes))
+	readsBack := func(reader inlineReader) (bool, bool) {
+		parsed, diverged, err := parseInlineWithDefinitions(source, labels, reader)
+		return err == nil && slices.Equal(inlineSignature(parsed), signature), diverged
+	}
+	reads, diverged := readsBack(readBackReaders[0])
+	if !reads {
+		return 0
+	}
+	if n == 1 {
+		return 1
+	}
+	if holdsTilde(source, labels) {
+		if reads, diverged = readsBack(readBackReaders[1]); !reads {
+			return 1
+		}
+	}
+	if n == 2 {
+		return 2
+	}
+	if diverged {
+		if reads, _ = readsBack(readBackReaders[2]); !reads {
+			return 2
+		}
+	}
+	return 3
+}
+
+// holdsTilde reports whether a run's source or any of the footnote labels whose definitions are
+// read after it holds a `~`.
+func holdsTilde(source string, labels []string) bool {
+	return strings.Contains(source, "~") || slices.ContainsFunc(labels, func(label string) bool { return strings.Contains(label, "~") })
 }
 
 // delimiterBesidePunctuation reports whether nodes write a delimiter run (a strong, emphasis or
@@ -453,7 +511,7 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 			src, _ := n.Attrs["src"].(string)
 			alt, _ := n.Attrs["alt"].(string)
 			title, _ := n.Attrs["title"].(string)
-			r.writeSyntax("![" + imageAlt(alt, context) + "](" + escapeLinkDestination(src, escapePipes) + titleSuffix(title, escapePipes) + ")")
+			r.writeSyntax("![" + imageAlt(alt, context) + "](" + escapeImageSource(src, escapePipes) + titleSuffix(title, escapePipes) + ")")
 			position.atLineStart, position.atTextStart = false, false
 		case "html":
 			r.closeMarks(active, escapePipes)
@@ -628,9 +686,8 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 	if nodeHasMark(node, "inlineCode") {
 		// A code span's text is written as it is; a line feed in it still ends a line. In a table
 		// cell each pipe is written `\|`, which both parsers read back as the code's pipe. Code
-		// holding an odd run of backslashes before a pipe has no spelling the browser editor's
-		// parser reads back: it removes one backslash before a pipe and ends the cell after an even
-		// run, so such code is written as Parse reads it back, and that parser splits the cell there.
+		// holding an odd run of backslashes before a pipe has no spelling there, and tableRow takes
+		// each such pipe out of the code before it reaches here (codePipesOutOfCode).
 		value := escapeTablePipes(node.Text, context.tableCell)
 		endsLine := false
 		for {

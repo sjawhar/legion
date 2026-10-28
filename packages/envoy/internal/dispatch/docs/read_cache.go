@@ -297,23 +297,23 @@ func tablePositionsWeight(positions map[*pmdoc.TablePosition]struct{}) int64 {
 }
 
 // buildDocumentRead renders tree, the document as of stamp, into everything the four reads answer,
-// with one render and one placement walk, which lays each table out once for its paths and its
-// rows: an error when any of them refuses the tree, a document outside the schema, as the read
-// computing it from the tree would.
+// with one render, one placement walk, which lays each table out once for its paths and its rows,
+// and one token encoding for the document and its blocks: an error when any of them refuses the
+// tree, a document outside the schema, as the read computing it from the tree would. The document
+// token's error is returned as nodeToken returns it, after the rendering's.
 func buildDocumentRead(artifactID string, stamp DocumentStamp, tree *pmdoc.Node) (*documentRead, error) {
 	paths, rows, err := pmdoc.BlockPathsAndTableRows(tree)
 	if err != nil {
 		return nil, err
 	}
-	markdown, blocks, err := renderedBlocks(tree, rows)
+	rendered, err := renderedBlocks(tree, rows)
 	if err != nil {
 		return nil, err
 	}
-	token, err := nodeToken(tree)
-	if err != nil {
-		return nil, err
+	if rendered.tokenErr != nil {
+		return nil, rendered.tokenErr
 	}
-	read := &documentRead{artifactID: artifactID, stamp: stamp, markdown: markdown, token: token, blocks: blocks, paths: paths}
+	read := &documentRead{artifactID: artifactID, stamp: stamp, markdown: rendered.markdown, token: rendered.token, blocks: rendered.blocks, paths: paths}
 	read.weight = read.measure()
 	return read, nil
 }

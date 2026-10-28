@@ -21,8 +21,8 @@ import type {
   EditOp,
   EditPrecondition,
   Event,
-  GraphEdge,
   GraphNode,
+  GraphReferences,
   Issue,
   IssueClaim,
   IssueComponents,
@@ -62,6 +62,7 @@ import {
 } from "@legion/contracts";
 import { canonicalRepo } from "@legion/contracts/repo";
 import { z } from "zod";
+import { actorText } from "./actor-text";
 import { askAnswerText, textHead } from "./ask-answer";
 import { commandLine, commandName } from "./dispatch-command";
 import type { ActiveDispatchConfig } from "./dispatch-config";
@@ -153,6 +154,11 @@ export interface ExecuteDispatchToolInput {
   readonly tool: string;
   readonly args: ToolArguments;
   readonly cwd: string;
+  /**
+   * The bytes of an upload's `--path` file as the CLI already read them for AskGate's check, sent
+   * in place of a fresh read, so the upload sends exactly the bytes that check digested.
+   */
+  readonly uploadBytes?: Uint8Array;
   readonly host: DispatchHost;
   readonly sessionId?: string;
   readonly sessionTitle?: string;
@@ -1921,12 +1927,12 @@ function issueSummary(
   ].join("\n");
 }
 
-/** One graph edge as a read shows it: edge type, the other node and its address, excerpt, when,
- *  and on a document's read the document's block at the queried end. */
-function referenceLines(edges: readonly GraphEdge[] | string): string[] {
-  if (typeof edges === "string") return [`- ${edges}`];
-  if (edges.length === 0) return ["- none"];
-  return edges.map((edge) => {
+/** A graph read's edges as a read shows them: edge type, the other node and its address,
+ *  excerpt, when, and on a document's read the document's block at the queried end. */
+function referenceLines(read: GraphReferences | string): string[] {
+  if (typeof read === "string") return [`- ${read}`];
+  if (read.edges.length === 0) return ["- none"];
+  return read.edges.map((edge) => {
     const excerpt = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} · `;
     const block = edge.block === undefined ? "" : ` (block ${edge.block.ref ?? edge.block.id})`;
     return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt}${edge.created_at})${block}`;
@@ -1941,12 +1947,14 @@ function unavailableReason(error: unknown): string {
   return dispatchAnswered(error, 404) ? "unavailable" : `unavailable: ${messageFor(error)}`;
 }
 
-async function graphEdges(
+/** One direction of a node's reference graph: the answer's node and its edges, or why the server
+ *  could not serve it. */
+async function graphReferences(
   client: DispatchClient,
   query: GraphReferencesQuery
-): Promise<GraphEdge[] | string> {
+): Promise<GraphReferences | string> {
   try {
-    return (await client.getReferences(query)).edges;
+    return await client.getReferences(query);
   } catch (error) {
     return unavailableReason(error);
   }
@@ -1964,24 +1972,53 @@ async function issueReferencesOrUnavailable(
 }
 
 /**
- * The two sections every read ends with: `Referenced by:` (edges pointing at the node, mentions
- * and structure alike) and `Links:` (edges it writes), read from the reference graph in both
- * directions. A graph the server cannot serve degrades to one "unavailable" row, like the
- * closure section, so the read itself still answers.
+ * The sections every read ends with: the `Node:` line (the read node's maker, last change and
+ * parent), `Referenced by:` (edges pointing at the node, mentions and structure alike) and
+ * `Links:` (edges it writes), read from the reference graph in both directions. A graph the
+ * server cannot serve degrades to one "unavailable" row, like the closure section, so the read
+ * itself still answers.
  */
 async function graphSections(client: DispatchClient, ref: string): Promise<string[]> {
   const [incoming, outgoing] = await Promise.all([
-    graphEdges(client, { to: ref }),
-    graphEdges(client, { from: ref }),
+    graphReferences(client, { to: ref }),
+    graphReferences(client, { from: ref }),
   ]);
   return graphSectionLines(incoming, outgoing);
 }
 
 function graphSectionLines(
-  incoming: readonly GraphEdge[] | string,
-  outgoing: readonly GraphEdge[] | string
+  incoming: GraphReferences | string,
+  outgoing: GraphReferences | string
 ): string[] {
-  return ["Referenced by:", ...referenceLines(incoming), "Links:", ...referenceLines(outgoing)];
+  return [
+    ...(typeof incoming === "string" ? [] : nodeLine(incoming.node)),
+    "Referenced by:",
+    ...referenceLines(incoming),
+    "Links:",
+    ...referenceLines(outgoing),
+  ];
+}
+
+/**
+ * The read node's facts on one line: `Node: <kind> <ref> · made by <actors> at <time> · changed
+ * by <actors> at <time> · part of <parent> (version <N>)`. An empty actor list is "nobody
+ * recorded"; a null time, version or parent leaves its part out. A server older than the facts
+ * sends no `made_by`, and the read prints no line.
+ */
+function nodeLine(node: GraphNode): string[] {
+  if (node.made_by === undefined) return [];
+  const fact = (by: Actor[] | undefined, time: string | null | undefined) =>
+    `${by === undefined || by.length === 0 ? "nobody recorded" : by.map(actorText).join(", ")}${time == null ? "" : ` at ${time}`}`;
+  const made = fact(node.made_by, node.made_at);
+  const changed = fact(node.changed_by, node.changed_at);
+  const { parent } = node;
+  const partOf =
+    parent == null
+      ? ""
+      : ` · part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (version ${node.parent_version})`}`;
+  return [
+    `Node: ${node.kind} ${node.ref ?? node.id} · made by ${made} · changed by ${changed}${partOf}`,
+  ];
 }
 
 /**
@@ -2058,19 +2095,6 @@ function eventHead(event: Event): string | undefined {
     default:
       return undefined;
   }
-}
-
-/** How an event, comment, message or ask author reads in the tools: `<kind> <id>`, plus
- *  ` (as <namespace>/<name>)` — the verified service token's subject through
- *  `serviceSubjectLabel`, which keeps the namespace because every namespace has a `default`
- *  service account — when a service token authenticated the write. A claim's holder is named by
- *  `claimText` instead, which follows the dashboard's session label. */
-function actorText(actor: Actor): string {
-  const service = actor.kind === "session" ? actor.service : undefined;
-  if (service === undefined) {
-    return `${actor.kind} ${actor.id}`;
-  }
-  return `${actor.kind} ${actor.id} (as ${serviceSubjectLabel(service)})`;
 }
 
 /** The `dispatch://` reference of the message, comment or ask an issue event carries, so a log
@@ -2269,7 +2293,12 @@ function messageSummary({ message, replies }: MessageRead, graph: readonly strin
   ].join("\n");
 }
 
-async function openArtifactMarks(
+/** Each open thread anchored on the document, in full, as dispatch_doc_read prints it: an open ask
+ *  with its question and every reply under it (a comment whose `ask_id` names the ask), then each
+ *  open comment thread with its root and every reply in order. A reply carries no anchor, so the
+ *  threads are read from the owner's comments unfiltered and grouped by their ask or root. A
+ *  resolved or answered ask and a resolved thread are not printed, nor are their replies. */
+async function openAnchoredThreads(
   client: DispatchClient,
   resolved: ResolvedArtifact
 ): Promise<string[]> {
@@ -2280,30 +2309,78 @@ async function openArtifactMarks(
   const commentsPromise =
     resolved.owner.kind === "project"
       ? client.getArtifactComments(resolved.artifact.id)
-      : client.getComments(resolved.issue?.key ?? "", resolved.artifact.id);
+      : client.getComments(resolved.issue?.key ?? "");
   const commentsResultPromise = commentsPromise.then(
     (value) => ({ status: "fulfilled" as const, value }),
     (reason) => ({ status: "rejected" as const, reason })
   );
   // An ask error takes precedence over a comment error. Capture a concurrent comment failure
   // so it is handled without delaying an ask failure.
-  const asks = await asksPromise;
-  const marks = asks
-    .filter((ask) => ask.state === "open" && ask.anchor?.artifact_id === resolved.artifact.id)
-    .map((ask) => `ask ${ask.id}`);
+  const asks = (await asksPromise).filter(
+    (ask) => ask.state === "open" && ask.anchor?.artifact_id === resolved.artifact.id
+  );
   const commentsResult = await commentsResultPromise;
-  if (commentsResult.status === "rejected") {
-    if (dispatchAnswered(commentsResult.reason, 404)) return marks;
+  if (commentsResult.status === "rejected" && !dispatchAnswered(commentsResult.reason, 404)) {
     throw commentsResult.reason;
   }
-  return [
-    ...marks,
-    ...commentsResult.value
-      .filter(
-        (comment) => !comment.resolved && comment.anchor?.artifact_id === resolved.artifact.id
-      )
-      .map((comment) => `comment ${comment.id}`),
-  ];
+  const comments = commentsResult.status === "fulfilled" ? commentsResult.value : [];
+  const askReplies = new Map<string, Comment[]>(asks.map((ask) => [ask.id, []]));
+  for (const comment of comments) {
+    if (comment.ask_id) askReplies.get(comment.ask_id)?.push(comment);
+  }
+  const askThreads = asks.map((ask) =>
+    [
+      `ask ${ask.id} · ${actorText(ask.author)} · ${ask.created_at}`,
+      ...anchorLines(ask),
+      `Question: ${ask.question}`,
+      ...threadReplyLines(askReplies.get(ask.id) ?? []),
+    ].join("\n")
+  );
+  const byId = new Map(comments.map((comment) => [comment.id, comment]));
+  const roots = comments.filter(
+    (comment) =>
+      comment.reply_to === null &&
+      !comment.ask_id &&
+      !comment.resolved &&
+      comment.anchor?.artifact_id === resolved.artifact.id
+  );
+  const replies = new Map<string, Comment[]>(roots.map((root) => [root.id, []]));
+  for (const comment of comments) {
+    const root = comment.reply_to === null ? undefined : threadRootId(comment, byId);
+    if (root !== undefined) replies.get(root)?.push(comment);
+  }
+  const commentThreads = roots.map((root) =>
+    [
+      `comment ${root.id} · ${actorText(root.author)} · ${root.created_at}`,
+      ...anchorLines(root),
+      `Body: ${root.body}`,
+      ...threadReplyLines(replies.get(root.id) ?? []),
+    ].join("\n")
+  );
+  return [...askThreads, ...commentThreads];
+}
+
+/** A thread's replies as dispatch_doc_read prints them under their ask or root comment. */
+function threadReplyLines(replies: readonly Comment[]): string[] {
+  return replies.flatMap((reply) => [
+    `reply ${reply.id} · ${actorText(reply.author)} · ${reply.created_at}`,
+    `Body: ${reply.body}`,
+  ]);
+}
+
+/** The root of a reply's thread: Dispatch points `reply_to` at the root, and an older row may point
+ *  at another reply, so the walk follows it up. undefined for a chain that leaves the list or loops. */
+function threadRootId(comment: Comment, byId: ReadonlyMap<string, Comment>): string | undefined {
+  const seen = new Set<string>();
+  let current = comment;
+  while (current.reply_to !== null) {
+    if (seen.has(current.id)) return undefined;
+    seen.add(current.id);
+    const parent = byId.get(current.reply_to);
+    if (parent === undefined) return undefined;
+    current = parent;
+  }
+  return current.id;
 }
 
 /** The asks of the document's `ask` blocks. An issue lists them under the issue, since the artifact
@@ -3217,9 +3294,13 @@ export async function executeDispatchTool(
           throw new Error(`Dispatch claimed ${issueKey} but answered with no claim`);
         }
         const claimed = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}`;
+        // The claimant route (Dispatch's outbox) delivers a person's answers, comments and
+        // messages on the issue to this session; the notSubscribed suffix below is about every
+        // other event on the issue.
+        const reaches = `A person's answers, comments and messages on ${issueKey} now reach you directly.`;
         text = legionManaged
-          ? `${claimed}; ${LEGION_OWNS_STATUS} Release the claim when you stop.`
-          : `${claimed}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
+          ? `${claimed}; ${LEGION_OWNS_STATUS} Release the claim when you stop. ${reaches}`
+          : `${claimed}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop. ${reaches}`;
       }
       return {
         text: `${text}${await notSubscribed(issueTopic(issueKey), input.subscriptions)}`,
@@ -3840,30 +3921,30 @@ export async function executeDispatchTool(
         );
       }
       const documentPromise = client.docRead(resolved.artifact.id, version);
-      const marksPromise = openArtifactMarks(client, resolved);
-      const marksResultPromise = marksPromise.then(
+      const threadsPromise = openAnchoredThreads(client, resolved);
+      const threadsResultPromise = threadsPromise.then(
         (value) => ({ status: "fulfilled" as const, value }),
         (reason) => ({ status: "rejected" as const, reason })
       );
-      // A document error takes precedence over a mark error. Capture the concurrent mark failure
-      // so it is handled without delaying a document failure.
+      // A document error takes precedence over a thread error. Capture the concurrent thread
+      // failure so it is handled without delaying a document failure.
       const document = await documentPromise;
-      const marksResult = await marksResultPromise;
-      if (marksResult.status === "rejected") throw marksResult.reason;
-      const marks = marksResult.value;
+      const threadsResult = await threadsResultPromise;
+      if (threadsResult.status === "rejected") throw threadsResult.reason;
+      const threads = threadsResult.value;
       const approval = approvalLine(resolved.artifact);
       const trailer = [
         ...("token" in document && document.token !== undefined
           ? [`Document token: ${document.token}`]
           : []),
-        ...(marks.length === 0 ? [] : [`Open anchored asks/comments: ${marks.join(", ")}`]),
         ...(approval === undefined ? [] : [approval]),
       ];
       return {
-        text:
-          trailer.length === 0
-            ? document.markdown
-            : `${document.markdown}\n\n${trailer.join("\n")}`,
+        text: [
+          document.markdown,
+          ...(trailer.length === 0 ? [] : [trailer.join("\n")]),
+          ...(threads.length === 0 ? [] : ["Open anchored threads:", ...threads]),
+        ].join("\n\n"),
         details:
           resolved.owner.kind === "project"
             ? {
@@ -3916,7 +3997,14 @@ export async function executeDispatchTool(
         content === undefined
           ? {
               name,
-              file: Bun.file(resolvePath(input.cwd, stringArg(args, "path"))),
+              // The bytes AskGate's check read, when it read them, typed as Bun types the path.
+              file:
+                input.uploadBytes === undefined
+                  ? Bun.file(resolvePath(input.cwd, stringArg(args, "path")))
+                  : // The copy gives the bytes a plain buffer of their own, which a Blob takes.
+                    new Blob([new Uint8Array(input.uploadBytes)], {
+                      type: Bun.file(resolvePath(input.cwd, stringArg(args, "path"))).type,
+                    }),
               ...(summary === undefined ? {} : { summary }),
               actor,
             }
@@ -4121,13 +4209,12 @@ export async function executeDispatchTool(
             }
             throw error;
           }),
-          graphEdges(client, { from: blockRef }),
+          graphReferences(client, { from: blockRef }),
         ]);
         return {
-          text: [
-            ...blockLines(incoming.node, ref),
-            ...graphSectionLines(incoming.edges, outgoing),
-          ].join("\n"),
+          text: [...blockLines(incoming.node, ref), ...graphSectionLines(incoming, outgoing)].join(
+            "\n"
+          ),
           details: {
             ...(ref.owner.kind === "project"
               ? { project: ref.owner.project }

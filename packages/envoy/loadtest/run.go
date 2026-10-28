@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -50,8 +51,8 @@ type runConfig struct {
 	// with `loadgen box-busy` before its reset); negative means collectMeta reads it itself.
 	boxBusyBefore float64
 	editors       editorConfig
-	// args are the run's arguments as meta.json records them: the token values redacted
-	// (redactArgs).
+	// args are the run's flags as meta.json records them: the normalized flag list, the token
+	// values redacted and the URL passwords removed (recordedArgs).
 	args []string
 }
 
@@ -161,42 +162,29 @@ func runLoad(args []string) error {
 		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore,
 		// Fewer editors than documents edit only as many documents as there are editors.
 		editors: editorConfig{editors: *editors, rate: *editorRate, docs: min(*editorDocs, max(*editors, 1))},
-		args:    redactArgs(fs, args),
+		args:    recordedArgs(fs),
 	}, sf)
 }
 
-// redacted replaces a token in the arguments that meta.json records.
+// redacted replaces a token, or a value whose password cannot be found, in what a step records.
 const redacted = "<redacted>"
 
-// redactArgs is args with the value of each tokenFlags flag replaced by redacted. It reads args as
-// fs.Parse does: "-name" or "--name", the value after "=" or, for a flag that is not boolean, in
-// the next argument, up to "--" or the first argument that is not a flag.
-func redactArgs(fs *flag.FlagSet, args []string) []string {
-	out := slices.Clone(args)
-	for i := 0; i < len(out); i++ {
-		a := out[i]
-		if len(a) < 2 || a[0] != '-' || a == "--" {
-			break
+// recordedArgs is every flag given to fs, once parsed, as "-name=value" in fs's (lexical) order:
+// the value of each tokenFlags flag replaced by redacted, and each urlFlags flag's value without
+// its credentials (redactEndpoint: -pg as its hosts, ports and database alone). runLoad takes no
+// positional argument, so these are all of its arguments.
+func recordedArgs(fs *flag.FlagSet) []string {
+	var out []string
+	fs.Visit(func(f *flag.Flag) {
+		name, value := "-"+f.Name, f.Value.String()
+		switch {
+		case slices.Contains(tokenFlags, name):
+			value = redacted
+		case slices.Contains(urlFlags, name):
+			value = redactEndpoint(name, value)
 		}
-		name, _, inline := strings.Cut(strings.TrimPrefix(a[1:], "-"), "=")
-		secret := slices.Contains(tokenFlags, name)
-		if inline {
-			if secret {
-				out[i] = a[:strings.IndexByte(a, '=')+1] + redacted
-			}
-			continue
-		}
-		f := fs.Lookup(name)
-		if f == nil {
-			continue
-		}
-		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
-			continue
-		}
-		if i++; i < len(out) && secret {
-			out[i] = redacted
-		}
-	}
+		out = append(out, name+"="+value)
+	})
 	return out
 }
 
@@ -299,10 +287,13 @@ type metaFile struct {
 	Kernel      string    `json:"kernel"`
 	// BoxBusyBefore is the box's busy fraction over the BoxBusyBeforeWindowS seconds before the
 	// step, from /proc/stat; null when /proc/stat gave no ticks.
-	BoxBusyBefore        *float64        `json:"box_busy_before"`
-	BoxBusyBeforeWindowS float64         `json:"box_busy_before_window_s"`
-	GOMAXPROCS           string          `json:"gomaxprocs"`
+	BoxBusyBefore        *float64 `json:"box_busy_before"`
+	BoxBusyBeforeWindowS float64  `json:"box_busy_before_window_s"`
+	GOMAXPROCS           string   `json:"gomaxprocs"`
+	// PostgresVersion is select version() on -pg, "" when it could not be read, and then
+	// PostgresVersionError is why.
 	PostgresVersion      string          `json:"postgres_version"`
+	PostgresVersionError string          `json:"postgres_version_error,omitempty"`
 	BuildCommit          string          `json:"build_commit"`
 	BuildDirty           bool            `json:"build_dirty"`
 	SeedMeta             json.RawMessage `json:"seed_meta,omitempty"`
@@ -377,14 +368,17 @@ func execute(cfg runConfig, sf seedFile) error {
 	writeJSONFile(filepath.Join(cfg.out, "summary.json"), sum, 0o644, lg)
 	meta.End = time.Now()
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
+	committed := fmt.Sprintf("committed %d, receipts %d of %d", sum.Events.Committed, sum.Events.IssueTopicReceipts, sum.Events.ExpectedIssueTopicReceipts)
+	if sum.Events.commitsUnread() {
+		committed = "committed and receipts not read"
+	}
 	editorsSent := 0
 	if sum.Editors != nil {
 		editorsSent = sum.Editors.Sent
 	}
-	lg.Printf("step %s done: events offered %d committed %d, receipts %d of %d, requests sent %d (%.1f/s of %g), editor updates sent %d",
-		cfg.name, sum.Events.Offered, sum.Events.Committed, sum.Events.IssueTopicReceipts, sum.Events.ExpectedIssueTopicReceipts,
-		sum.Requests.Sent, sum.Requests.SentPerS, cfg.requests, editorsSent)
-	if err := errStackExits(sum.StackExits); err != nil {
+	lg.Printf("step %s done: events offered %d %s, requests sent %d (%.1f/s of %g), editor updates sent %d",
+		cfg.name, sum.Events.Offered, committed, sum.Requests.Sent, sum.Requests.SentPerS, cfg.requests, editorsSent)
+	if err := stepFailure(sum); err != nil {
 		lg.Print(err)
 		return err
 	}
@@ -569,6 +563,7 @@ type probes struct {
 	lp       *lockProbe
 	ls       *lockSampler
 	xidsPerS *float64
+	xidErr   error // why xidsPerS is nil
 	// roomsStart and roomsEnd are the rooms' counters at the window's start and end (readWindow);
 	// rs is nil in a step without editors.
 	roomsStart, roomsEnd windowReading
@@ -591,7 +586,7 @@ func (st *step) startProbes(ctx context.Context) *probes {
 	pg := st.cfg.ep.pg
 	p.wg.Go(func() { p.lp.loop(ctx, pg, lockFrom, st.winEnd, st.lg) })
 	p.wg.Go(func() { p.ls.loop(ctx, pg, lockFrom, st.winEnd, st.lg) })
-	p.wg.Go(func() { p.xidsPerS = xidRate(ctx, pg, st.winStart, st.winEnd, st.lg) })
+	p.wg.Go(func() { p.xidsPerS, p.xidErr = xidRate(ctx, pg, st.winStart, st.winEnd, st.lg) })
 	p.wg.Go(func() { st.profile(ctx) })
 	p.wg.Go(func() {
 		if !sleepUntil(ctx, st.winStart) {
@@ -692,9 +687,37 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 	sum.Resources = summarizeResources(ss, sum.Events.Committed+sum.Requests.Sent, durS)
 	if sum.Resources != nil {
 		sum.Resources.XIDsPerS = pr.xidsPerS
+		if pr.xidErr != nil {
+			sum.Resources.XIDReadError = pr.xidErr.Error()
+		}
+		if commitsErr != nil {
+			// Its operations count the committed events, which were not read.
+			sum.Resources.DispatchCPUSPerOp = nil
+		}
 	}
 	sum.StackExits = pr.smp.stackExits()
 	return sum
+}
+
+// stepFailure is why the step failed, nil when it did not: a stack process exited during it
+// (errStackExits), or the run's commit rows were not read (events.commits_error), so its
+// committed, receipt and delivery columns measure nothing. The other reads of the run's database,
+// the lock probe, the ungranted-lock sampler, the 5 s sampler's pg_stat_activity, the
+// transaction-id probe and the Postgres version, feed none of those columns: a failure of one
+// marks its own table, or meta.json, and does not fail the step.
+func stepFailure(sum summary) error {
+	var why []string
+	if err := errStackExits(sum.StackExits); err != nil {
+		why = append(why, err.Error())
+	}
+	if sum.Events.commitsUnread() {
+		why = append(why, fmt.Sprintf("the run's commit rows were not read (summary.json events.commits_error: %s); this row's committed, receipt and delivery columns do not measure the load",
+			sum.Events.CommitsError))
+	}
+	if len(why) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(why, "; "))
 }
 
 // errStackExits is the step's failure when a stack process exited during it, nil otherwise.
@@ -804,16 +827,26 @@ func collectMeta(ctx context.Context, cfg runConfig, lg *log.Logger) metaFile {
 	}
 	pgCtx, pgCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer pgCancel()
-	if conn, err := pgx.Connect(pgCtx, cfg.ep.pg); err == nil {
-		if err := conn.QueryRow(pgCtx, "select version()").Scan(&m.PostgresVersion); err != nil {
-			lg.Printf("meta: postgres version: %v", err)
-		}
-		conn.Close(context.Background())
+	if v, err := postgresVersion(pgCtx, cfg.ep.pg); err != nil {
+		m.PostgresVersionError = err.Error()
+		lg.Printf("meta: postgres version: %v", err)
 	} else {
-		lg.Printf("meta: postgres: %v", err)
+		m.PostgresVersion = v
 	}
 	if b, err := os.ReadFile(filepath.Join(loadtestRoot(), "seed.meta.json")); err == nil && json.Valid(b) {
 		m.SeedMeta = b
 	}
 	return m
+}
+
+// postgresVersion reads select version() on the Postgres at url.
+func postgresVersion(ctx context.Context, url string) (string, error) {
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close(context.Background())
+	var v string
+	err = conn.QueryRow(ctx, "select version()").Scan(&v)
+	return v, err
 }

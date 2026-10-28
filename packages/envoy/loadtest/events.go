@@ -43,13 +43,15 @@ var primaryEventType = map[string]string{
 }
 
 // replyAnchoredShare is the share of replies made in anchored threads: production had 1,217 of
-// 1,576 replies in anchored threads (INFRA-512 report §2).
+// 1,576 replies in anchored threads (the 2026-10-26 production write counts, §2 of their replay
+// report).
 const replyAnchoredShare = 0.77
 
 var eventMixPresets = map[string]string{
-	// INFRA-512's counts for LINUX 22:55-23:34Z (plain roots 153, anchored roots 1,495, replies
-	// 1,576, document versions 1,329). The 3:1 edit/upload split of the versions is INFERENCE
-	// from the production profile's write counts (editArtifact 6, uploadArtifact 2).
+	// The orchestration project's writes of 2026-10-26 22:55-23:34Z (plain roots 153, anchored
+	// roots 1,495, replies 1,576, document versions 1,329). The 3:1 edit/upload split of the
+	// versions is INFERENCE from the production profile's write counts (editArtifact 6,
+	// uploadArtifact 2).
 	"production-2026-10-26": "comment=3,anchored=33,reply=35,edit=22,upload=7",
 	// The root report's mix, so its 1x row can be compared.
 	"report-2026-10-27": "comment=50,anchored=30,edit=20",

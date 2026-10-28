@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -258,7 +259,10 @@ func socketRoom(r *http.Request) string {
 	return path.Base(r.URL.Path)
 }
 
-// ServeHTTP serves the Hocuspocus-framed document websocket endpoint. A socket's admission
+// ServeHTTP serves the Hocuspocus-framed document websocket endpoint. A caller that does not
+// resolve is refused 401, except a person whose lapsed confirmation the sign-in issuer could not
+// renew (identity.ErrSignInUnavailable), who is still signed in and is refused 503
+// SIGNIN_UNAVAILABLE as every other route refuses them (identity.WriteError). A socket's admission
 // resolves the caller and reads the document's issue once each, here, and hands both to ygo's
 // authorization of the same request (authorize) on the connection's state; a warm room's schema
 // verdict is the one its update observer recorded (residentVerdict), so admitting a socket to a
@@ -278,6 +282,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	room := socketRoom(r)
 	actor, err := s.requestActor(r)
 	if err != nil {
+		if errors.Is(err, identity.ErrSignInUnavailable) {
+			identity.WriteError(w, err)
+			return
+		}
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -694,15 +702,15 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		// be waiting for the replica, and runs its persistence observer as soon as it has it.
 		var classified, changed bool
 		var own *documentUpdateClass
-		replica.observe(room, func(logged crdt.LoggedUpdate, contentChanged bool, tree *pmdoc.Node) {
+		replica.observe(room, func(logged crdt.LoggedUpdate, contentChanged bool, asks *observedAsks) {
 			if _, identityRepair := logged.Origin.(*identityClosureOrigin); identityRepair {
 				// Its own observer records its class (above). The replica takes it all the same,
 				// so the update after it is measured against the room the repair left.
 				return
 			}
 			classified = true
-			if tree != nil {
-				s.observeAskBlocksForUpdate(room, tree)
+			if asks != nil {
+				s.observeAskBlocksForUpdate(room, asks.askBlocks())
 			}
 			// The cursor is this instance's, taken here rather than looked up when the update
 			// reaches the store: a room evicted and reloaded in between is a different instance,
@@ -758,14 +766,14 @@ func soleConnectedActor(connected map[uint64]model.Actor) (sole *model.Actor, am
 	return sole, ambiguous
 }
 
-// observeAskBlocksForUpdate records the ask blocks an update left in room's document and
-// attributes each one not already recorded (observeAskBlocks), in the same critical section the
-// update observer renders tree in (renderedReplica.observe): the observer renders each update in
-// the order the replica took them, so the room's record of its ask blocks moves forward only. The
-// tree walk that lists those ask blocks runs only once the cheap markdown comparison inside
-// observe already showed a real change, so the no-op path, the common one, pays for neither.
-func (s *Service) observeAskBlocksForUpdate(room string, tree *pmdoc.Node) {
-	askBlocks := askBlockIDs(tree)
+// observeAskBlocksForUpdate records askBlocks, the ask blocks an update left in room's document,
+// and attributes each one not already recorded (observeAskBlocks), in the same critical section
+// the update observer classifies the update in (renderedReplica.observe): the observer classifies
+// each update in the order the replica took them, so the room's record of its ask blocks moves
+// forward only. The tree walk that lists those ask blocks (observedAsks.askBlocks) runs only once
+// the cheap markdown comparison inside observe already showed a real change, so the no-op path,
+// the common one, pays for neither.
+func (s *Service) observeAskBlocksForUpdate(room string, askBlocks map[string]struct{}) {
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
 	var author *model.Actor

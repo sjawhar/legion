@@ -77,12 +77,19 @@ func tablePosition(doc, table *Node, id string, below []int) *TablePosition {
 		return position
 	}
 	column := below[1]
-	header := ""
-	if h := layoutTable(spansBefore(doc, table), table).cellHeaders(table, row)[column]; h >= 0 {
-		header = oneLineText(table.Children[0].Children[h])
-	}
+	header, _ := headerAbove(spansBefore(doc, table), table, row, column)
 	position.Column, position.Header = &column, &header
 	return position
+}
+
+// headerAbove is the text of the header cell drawn above the cell at column in table's row at row,
+// on one line, with the table laid out on spans (layoutTable), or false where no header cell is.
+func headerAbove(spans *renderer, table *Node, row, column int) (string, bool) {
+	header := layoutTable(spans, table).cellHeaders(table, row)[column]
+	if header < 0 {
+		return "", false
+	}
+	return oneLineText(table.Children[0].Children[header]), true
 }
 
 // spansBefore is the span budget a render of doc has left when it reaches table: maxSpanCells,

@@ -63,7 +63,7 @@ func TestThePassCarriesAnApprovalAcrossCommitsThatChangeOnlyTheIssuesHandoffs(t 
 		return fmt.Sprintf(`{"status":%q,"ahead_by":1,"behind_by":0,"files":[%s]}`, status, strings.Join(files, ","))
 	}
 	review := file(".legion/CAPTURE-1/review.json")
-	// GitHub's compare lists at most 300 changed files (compareFilesCap).
+	// GitHub's compare lists at most 300 changed files (githubrest.CompareFilesLimit).
 	many := make([]string, 300)
 	for i := range many {
 		many[i] = file(fmt.Sprintf(".legion/CAPTURE-1/x%d.json", i))
@@ -119,6 +119,34 @@ func TestThePassCarriesAnApprovalAcrossCommitsThatChangeOnlyTheIssuesHandoffs(t 
 				t.Fatalf("after the pass the pushes recorded are %+v, want %+v", pr.Pushes, pushes)
 			}
 		})
+	}
+}
+
+// The handoff-only push the compare records leaves the approved head, not the head the fix-attempt
+// count moved from, so it takes back no count: here the recorded head was counted as a fix pushed
+// from a red head between the two (middle) before its push arrived, and the head run that count
+// opened replays with the compare's push and still finds no chain from middle. The approval stands
+// and the count stands with it, its run still waiting for the push from middle.
+func TestTheCarryFromAnApprovedHeadTakesBackNoCountFromAnotherHead(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	seedApprovalBelowHead(t, pool, "code")
+	setCapturePullRequest(t, pool, func(pr *record.PullRequest) {
+		pr.FixAttempts, pr.HeadCounted = 3, "handoff"
+		pr.Run = &record.HeadRun{Steps: []record.RunStep{{Head: "handoff"}},
+			Anchor: record.Judgement{HeadSHA: "middle", FixAttempts: 2, CheckedHead: "middle", Failing: []string{"ci"},
+				CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Required: []string{"ci"}, Workflows: []record.RequiredWorkflow{}}}
+	})
+	var compares atomic.Int64
+	review, test := `{"filename":".legion/CAPTURE-1/review.json","status":"modified"}`, `{"filename":".legion/CAPTURE-1/test.json","status":"modified"}`
+	api := compareStandIn(t, http.StatusOK, `{"status":"ahead","ahead_by":2,"behind_by":0,"files":[`+review+`,`+test+`]}`, &compares).URL
+	reviewReadRuntime(pool, api).readRequiredChecks(context.Background())
+	got, pr := capturePhase(t, pool)
+	if got != phase.Accepting {
+		t.Fatalf("after the pass the issue is in %s, want %s: the approval of code stands", got, phase.Accepting)
+	}
+	if pr.FixAttempts != 3 || pr.HeadCounted != "handoff" || pr.Run == nil {
+		t.Fatalf("after the pass fixAttempts=%d headCounted=%q run open %v, want 3, \"handoff\" and open: the carry from code took back the count of the move from middle",
+			pr.FixAttempts, pr.HeadCounted, pr.Run != nil)
 	}
 }
 

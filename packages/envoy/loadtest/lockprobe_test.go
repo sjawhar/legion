@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"log"
 	"slices"
 	"testing"
 	"time"
@@ -29,5 +32,24 @@ func TestHoldSegmentation(t *testing.T) {
 	sum := summarizeLock(samples, 0)
 	if sum.HeldFraction != 0.7 || sum.HoldsObserved != 4 {
 		t.Fatalf("held fraction %g holds %d, want 0.7 and 4", sum.HeldFraction, sum.HoldsObserved)
+	}
+}
+
+// TestLockProbeCountsAFailedConnect: a lock probe that never connects has no sample and one failed
+// read, and its table row shows "-" with the mark "(1 failed read)".
+func TestLockProbeCountsAFailedConnect(t *testing.T) {
+	var logged bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	now := time.Now()
+	lp := &lockProbe{}
+	lp.loop(ctx, unreachablePG, now, now, log.New(&logged, "", 0))
+	lock := summarizeLock(lp.samples, lp.errors)
+	if lock.Samples != 0 || lock.Errors != 1 {
+		t.Fatalf("lock probe %d samples %d errors; want 0 and 1", lock.Samples, lock.Errors)
+	}
+	md := renderTables([]stepData{{name: "unreachable", sum: summary{Config: summaryConfig{Step: "unreachable"}, CommitOrderLock: lock}}})
+	if cells := rowCells(section(md, "Commit-order lock"), "unreachable"); cells == nil || cells[0] != "unreachable (1 failed read)" || cells[1] != "-" {
+		t.Errorf("the probe that never connected reads %q, want '-' with the failed-read mark", cells)
 	}
 }

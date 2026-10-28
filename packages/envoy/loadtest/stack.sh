@@ -67,8 +67,6 @@ declare -A PORT_DEFAULT=(
   [dispatch]=18777 [pprof]=16061
 )
 
-note() { printf 'stack.sh: %s\n' "$*" >&2; }
-
 # base_env is every stack process's environment: a PATH and a HOME and XDG directories of the
 # stack's own, nothing inherited.
 base_env=(

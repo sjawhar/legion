@@ -35,13 +35,13 @@ func sleepUntil(ctx context.Context, t time.Time) bool {
 func fetchTo(url, path string, timeout time.Duration, lg *log.Logger) {
 	resp, err := (&http.Client{Timeout: timeout}).Get(url)
 	if err != nil {
-		lg.Printf("fetch %s: %v", url, err)
+		lg.Printf("fetch %s: %v", redactURL(url), err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		lg.Printf("fetch %s: %d %s", url, resp.StatusCode, trunc(b))
+		lg.Printf("fetch %s: %d %s", redactURL(url), resp.StatusCode, trunc(b))
 		return
 	}
 	f, err := os.Create(path)
@@ -51,7 +51,7 @@ func fetchTo(url, path string, timeout time.Duration, lg *log.Logger) {
 	}
 	defer f.Close()
 	if _, err := io.Copy(f, resp.Body); err != nil {
-		lg.Printf("fetch %s: %v", url, err)
+		lg.Printf("fetch %s: %v", redactURL(url), err)
 	}
 }
 
@@ -71,7 +71,7 @@ func writeJSONFile(path string, v any, mode os.FileMode, lg *log.Logger) {
 }
 
 // metaMode is meta.json's mode: owner only, since it records the step's command line and the
-// stack it ran against. Its token values are redacted all the same (redactArgs).
+// stack it ran against. Its tokens and URL passwords are redacted all the same (recordedArgs).
 const metaMode os.FileMode = 0o600
 
 // collector gathers the items that many goroutines record during a step.

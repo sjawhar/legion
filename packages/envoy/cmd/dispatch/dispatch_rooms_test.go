@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"testing"
@@ -58,4 +59,18 @@ func TestDispatchRoomsReportsTheRoomsHeld(t *testing.T) {
 	if rooms.ResidentRooms == nil || *rooms.ResidentRooms != 2 || rooms.Connections == nil || *rooms.Connections != 2 {
 		t.Fatalf("dispatch_rooms = %s, want resident_rooms 2 and connections 2 with two editors in two documents", exported)
 	}
+}
+
+// freeLoopbackPort is a loopback port the kernel chose and nothing held when it returned. The
+// profiler takes its port by number (DISPATCH_PPROF_PORT, never 0), not as an inherited socket, so
+// the port is free only until another program binds it, which on a test machine none does.
+func freeLoopbackPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	listener.Close()
+	return port
 }
