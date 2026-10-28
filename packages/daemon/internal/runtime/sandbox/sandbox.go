@@ -84,6 +84,7 @@ type Runtime struct {
 	natsURLs                       []string
 	tools                          Tools
 	pod                            Pod
+	roleConfigFiles                map[claim.Role][]string
 	providerKeys                   map[string]string
 	providersSecrets               []string
 	natsUser                       string
@@ -314,12 +315,22 @@ func configureProber(opts Options) (*Runtime, error) {
 			return refuse("providers secret %s is not a launch secret (%s)", name, strings.Join(opts.LaunchSecrets, ", "))
 		}
 	}
+	for role, files := range opts.RoleConfigFiles {
+		if !slices.Contains(roleConfigRoles, role) {
+			return refuse("Oh My Pi overlays for %q, which is not a Legion role", role)
+		}
+		for _, file := range files {
+			if !filepath.IsAbs(file) || strings.Contains(file, ":") {
+				return refuse("%s's Oh My Pi overlay %q is not an absolute path PI_CONFIG_FILES can name", role, file)
+			}
+		}
+	}
 	r := &Runtime{
 		namespace: opts.Namespace, project: opts.Project, image: opts.Image, storageClass: opts.StorageClass,
 		volumeSize: opts.IssueVolume, scheduling: opts.Scheduling, resources: opts.Resources,
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agentSecrets: opts.AgentSecrets,
-		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
+		pod: opts.Pod, roleConfigFiles: opts.RoleConfigFiles, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
 		sessionStore: opts.SessionStore, controllerSlackChannels: slices.Clone(opts.ControllerSlackChannels),
 		bootTimeout: opts.BootTimeout, registrationIntervals: opts.RegistrationIntervals,
 		busyBackoff: opts.BusyBackoff, provisionBound: provisionBound, terminationGrace: opts.TerminationGrace,
@@ -341,6 +352,10 @@ func configureProber(opts Options) (*Runtime, error) {
 	}
 	return r, nil
 }
+
+// roleConfigRoles are the roles Options.RoleConfigFiles may name, in the workflow's order: every
+// issue role, then the controller.
+var roleConfigRoles = append(slices.Clone(claim.Roles), claim.RoleController)
 
 // checkRequirements is why requirements, what's (an issue pod's, the controller's pod's, or the
 // repository cache's), is not a reservation, or nil when it is one: cpu and memory each limited and

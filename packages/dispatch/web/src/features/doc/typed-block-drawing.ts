@@ -179,7 +179,8 @@ export function askBlockFacts(node: ProseMirrorNode): AskBlockFacts {
 /** A mounted decision block: the React card portals into its two slots. A new object is issued
  * on every node change so a host list in React state re-renders. */
 export interface AskBlockHost {
-  /** Stable per mounted view, for React keys. */
+  /** Stable per mounted view in the editor, for React keys; on the text path, the block's index
+   * in the body. */
   readonly key: number;
   readonly node: ProseMirrorNode;
   readonly header: HTMLElement;
@@ -187,18 +188,20 @@ export interface AskBlockHost {
 }
 
 /** The attributes every decision shell stamps on its frame, wherever it is drawn: its urgency,
- * its state, and `data-dispatch-ask-malformed="true"` only while the block is malformed (the key
- * is absent otherwise). */
-export type AskBlockStamps = {
+ * its state, and `data-dispatch-ask-malformed`, `"true"` while the block is malformed and
+ * `undefined` otherwise. The key is always present so one loop writes every stamp: a static spec
+ * skips an undefined attribute (prosemirror-model's `renderSpec`), and `applyAskBlockShell`
+ * removes it. */
+type AskBlockStamps = {
   readonly "data-dispatch-ask-urgency": AskUrgency;
   readonly "data-dispatch-ask-state": string;
-  readonly "data-dispatch-ask-malformed"?: "true";
+  readonly "data-dispatch-ask-malformed": "true" | undefined;
 };
 
 /** How a decision block's shell presents itself: the frame's classes (the card frame with its
  * urgency accent and tint), the content hole's classes, the attributes the frame stamps, and
  * whether a mounted card folds the source option list. */
-export interface AskBlockShell {
+interface AskBlockShell {
   readonly frameClass: string;
   readonly contentClass: string;
   readonly stamps: AskBlockStamps;
@@ -208,18 +211,16 @@ export interface AskBlockShell {
   readonly foldsOptions: boolean;
 }
 
-export function askBlockShell(facts: AskBlockFacts): AskBlockShell {
+function askBlockShell(facts: AskBlockFacts): AskBlockShell {
   const malformed = facts.malformedReason !== undefined;
   return {
-    contentClass: malformed
-      ? `${textMutedOnSurfaceMuted} [&_li:has(>p:empty)]:hidden [&_li:has(>p>br:only-child)]:hidden`
-      : textPrimaryOnSurface,
+    contentClass: malformed ? textMutedOnSurfaceMuted : textPrimaryOnSurface,
     foldsOptions: !malformed,
     frameClass: `proof-typed-block proof-typed-block-ask my-5 rounded-xl border border-l-4 px-4 pt-3 pb-4 shadow-sm ${borderDefault} ${askUrgencyAccent[facts.urgency]} ${askBlockTint[facts.urgency]}`,
     stamps: {
       "data-dispatch-ask-urgency": facts.urgency,
       "data-dispatch-ask-state": facts.state,
-      ...(malformed ? { "data-dispatch-ask-malformed": "true" } : {}),
+      "data-dispatch-ask-malformed": malformed ? "true" : undefined,
     },
   };
 }
@@ -230,14 +231,13 @@ export function askBlockShell(facts: AskBlockFacts): AskBlockShell {
  * message body) both draw this one spec, so the two shells cannot drift apart. The slots hold the
  * app's own card, not document text: `not-prose` keeps the surrounding Typography (`prose`, from
  * the editor's library theme or a body's `markdownClassName`) off everything React renders into
- * them, in every state of the card. The frame carries the shell's `stamps`. Three of the node
- * view's attributes are absent on purpose; `AskBlockView` adds them over this drawing.
- * `data-dispatch-ask-block` marks a live decision under the editor root, and a body
- * rendered inside a document's decision footer (a reply, an answer note) would otherwise add a
- * second decision id there. `data-block-id` is the schema's own wrapper's to add. And
- * `data-dispatch-ask-options` folds the source option list, so it is set, as the shell's
- * `foldsOptions` says, only where a card whose rows render the options is mounted; without it the
- * list stays visible.
+ * them, in every state of the card. The frame carries the shell's `stamps`. Three attributes are
+ * absent on purpose. `data-dispatch-ask-options` folds the source option list, so
+ * `applyAskBlockShell` adds it, as the shell's `foldsOptions` says, only where a card whose rows
+ * render the options is mounted; without it the list stays visible. `AskBlockView` adds the two
+ * identity attributes: `data-dispatch-ask-block` marks a live decision under the editor root, and
+ * a body rendered inside a document's decision footer (a reply, an answer note) would otherwise
+ * add a second decision id there; `data-block-id` is the schema's own wrapper's to add.
  */
 export function renderAskBlockShell(node: ProseMirrorNode): DOMOutputSpec {
   const shell = askBlockShell(askBlockFacts(node));
@@ -248,4 +248,61 @@ export function renderAskBlockShell(node: ProseMirrorNode): DOMOutputSpec {
     ["div", { class: shell.contentClass, "data-proof-block-content": "" }, 0],
     ["div", { class: "not-prose", contenteditable: "false", "data-dispatch-ask-footer": "" }],
   ];
+}
+
+/** A decision shell's own three slots: the header and footer the card portals into, and the
+ * content hole. */
+export interface AskShellSlots {
+  readonly header: HTMLElement;
+  readonly content: HTMLElement;
+  readonly footer: HTMLElement;
+}
+
+/**
+ * The slots of the decision shell `frame` (`renderAskBlockShell`): its own direct children
+ * marked `data-dispatch-ask-header`, `data-proof-block-content` and `data-dispatch-ask-footer`,
+ * never the slots of a decision nested in its content. It answers `undefined` when any is missing
+ * rather than throwing, because the text path must show a body without a card rather than crash
+ * its layout effect; the editor's node view throws on that answer itself.
+ */
+export function askShellSlots(frame: HTMLElement): AskShellSlots | undefined {
+  const header = frame.querySelector<HTMLElement>(":scope > [data-dispatch-ask-header]");
+  const content = frame.querySelector<HTMLElement>(":scope > [data-proof-block-content]");
+  const footer = frame.querySelector<HTMLElement>(":scope > [data-dispatch-ask-footer]");
+  if (header === null || content === null || footer === null) {
+    return undefined;
+  }
+  return { content, footer, header };
+}
+
+/**
+ * Writes `node`'s shell (`askBlockShell`) over the drawn decision shell `frame` and its content
+ * hole `content`: the frame's class, every stamp (an undefined one removed), the fold, and the
+ * content's class. The shell's class is this writer's. It is called only where a card is mounted
+ * into the shell (the editor's node view always; the text path only under the `TextAskCard`
+ * provider), so the static spec stays card-less, with no fold, and a body with no card keeps its
+ * options as the source list. Where it folds, the card renders the options as rows; the source
+ * list still shows while the block is malformed (no fold), or, in the editor, while the caret is
+ * inside the block (`askBlockEditingPlugin`).
+ */
+export function applyAskBlockShell(
+  frame: HTMLElement,
+  content: HTMLElement,
+  node: ProseMirrorNode
+): void {
+  const shell = askBlockShell(askBlockFacts(node));
+  frame.className = shell.frameClass;
+  for (const [name, value] of Object.entries(shell.stamps)) {
+    if (value === undefined) {
+      frame.removeAttribute(name);
+    } else {
+      frame.setAttribute(name, value);
+    }
+  }
+  if (shell.foldsOptions) {
+    frame.setAttribute("data-dispatch-ask-options", "rows");
+  } else {
+    frame.removeAttribute("data-dispatch-ask-options");
+  }
+  content.className = shell.contentClass;
 }
