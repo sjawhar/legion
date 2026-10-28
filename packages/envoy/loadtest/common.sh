@@ -218,17 +218,26 @@ prepare_stack() {
   "$stack" setup
   "$stack" start
   "$stack" seed
-  # A build cannot start on a seed that a newer build migrated: compare the highest migration file
-  # of this checkout with the seed's level.
-  local migrations=$SRC/packages/envoy/internal/dispatch/store/migrations build_file build_level seed_level
-  build_file=$(cd -- "$migrations" && printf '%s\n' [0-9]*.up.sql | sort -n | tail -n1)
-  build_level=$((10#${build_file%%_*}))
+  # A build cannot start on a seed that a newer build migrated: compare the highest migration of the
+  # Dispatch that setup built (bin/envoy-dispatch.json, which names LOADTEST_DISPATCH_COMMIT's tree
+  # when that is set, and the checkout's otherwise) with the seed's level. Without that record, the
+  # checkout's highest migration file stands for it.
+  local build_json=$ROOT/bin/envoy-dispatch.json build_level build_what seed_level
+  if [ -f "$build_json" ]; then
+    build_level=$(jq -er .newest_migration "$build_json")
+    build_what="Dispatch $(jq -r .dispatch_commit "$build_json")"
+  else
+    local migrations=$SRC/packages/envoy/internal/dispatch/store/migrations build_file
+    build_file=$(cd -- "$migrations" && printf '%s\n' [0-9]*.up.sql | sort -n | tail -n1)
+    build_level=$((10#${build_file%%_*}))
+    build_what=$migrations/$build_file
+  fi
   seed_level=$(jq -er .migration "$ROOT/seed.meta.json")
   if ((build_level < seed_level)); then
-    die "this build's highest migration is $build_level ($migrations/$build_file), older than the seed's $seed_level (seed made by $(jq -r .build_commit "$ROOT/seed.meta.json")); reseed with this build (stack.sh seed --force) or run a newer one"
+    die "this build's highest migration is $build_level ($build_what), older than the seed's $seed_level (seed made by $(jq -r .build_commit "$ROOT/seed.meta.json")); reseed with this build (stack.sh seed --force) or run a newer one"
   fi
   if ((build_level > seed_level)); then
-    note "the seed is at migration $seed_level and this build at $build_level. Dispatch migrates each step's copy forward at start, and any backfill those migrations start runs inside the step; reseed with this build (stack.sh seed --force) to measure it alone"
+    note "the seed is at migration $seed_level and this build ($build_what) at $build_level. Dispatch migrates each step's copy forward at start, and any backfill those migrations start runs inside the step; reseed with this build (stack.sh seed --force) to measure it alone"
   fi
   BUILD=$("$stack" build-info)
 }

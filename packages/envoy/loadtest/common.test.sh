@@ -394,6 +394,28 @@ case_foreign_record_live_pid() {
   printf 'PASS: a record of another PID namespace whose pid runs here is refused as not visible, not naming that pid\n'
 }
 
+# case_prepare_stack_built_migration: prepare_stack compares the seed's migration with the Dispatch
+# that setup built (bin/envoy-dispatch.json), not with the checkout's migration files, so a seed a
+# newer Dispatch made is accepted for a build of that newer Dispatch and refused for an older one.
+case_prepare_stack_built_migration() {
+  local dir="${temporary_dir}/prepare" rc
+  mkdir -p "$dir/lib" "$dir/src/packages/envoy/internal/dispatch/store/migrations" "$dir/root/bin"
+  cp -- "$helper" "$dir/lib/common.sh"
+  printf '#!/usr/bin/env bash\n[ "$1" = build-info ] && echo "abc false"\nexit 0\n' >"$dir/lib/stack.sh"
+  chmod +x "$dir/lib/stack.sh"
+  : >"$dir/src/packages/envoy/internal/dispatch/store/migrations/0129_checkout.up.sql"
+  printf '{"migration":134,"build_commit":"seedmaker"}\n' >"$dir/root/seed.meta.json"
+  printf '{"newest_migration":135,"dispatch_commit":"newer"}\n' >"$dir/root/bin/envoy-dispatch.json"
+  out=$(LOADTEST_SRC="$dir/src" LOADTEST_ROOT="$dir/root" bash -c 'source "$1"; resolve_paths; prepare_stack' _ "$dir/lib/common.sh" 2>&1) && rc=0 || rc=$?
+  ((rc == 0)) || { fail "(h) prepare_stack refused a seed at 134 for a built Dispatch at 135 (the checkout's files stop at 129)"; return; }
+  printf '{"newest_migration":113,"dispatch_commit":"older"}\n' >"$dir/root/bin/envoy-dispatch.json"
+  out=$(LOADTEST_SRC="$dir/src" LOADTEST_ROOT="$dir/root" bash -c 'source "$1"; resolve_paths; prepare_stack' _ "$dir/lib/common.sh" 2>&1) && rc=0 || rc=$?
+  ((rc != 0)) || { fail "(h) prepare_stack accepted a seed at 134 for a built Dispatch at 113"; return; }
+  [[ $out == *"Dispatch older"* ]] || { fail "(h) the refusal does not name the built Dispatch commit"; return; }
+  out=""
+  printf 'PASS: prepare_stack compares the seed with the built Dispatch'"'"'s migrations, not the checkout'"'"'s\n'
+}
+
 failed=0
 case_orphaned_child || failed=$((failed + 1))
 case_stale_record || failed=$((failed + 1))
@@ -402,7 +424,8 @@ case_invisible_holder || failed=$((failed + 1))
 case_holder_ended || failed=$((failed + 1))
 case_waiting_callers || failed=$((failed + 1))
 case_foreign_record_live_pid || failed=$((failed + 1))
+case_prepare_stack_built_migration || failed=$((failed + 1))
 if ((failed > 0)); then
-  printf 'FAIL: %d of 7 cases failed\n' "$failed" >&2
+  printf 'FAIL: %d of 8 cases failed\n' "$failed" >&2
   exit 1
 fi
