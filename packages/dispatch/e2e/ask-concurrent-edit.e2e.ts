@@ -375,3 +375,25 @@ test("dragging a selection from the question into the first list of an ask holdi
     return ["Which one?", first.slice("Opt".length), "Option C", second];
   });
 });
+
+// A grammar or writing extension replaces selected text with document.execCommand, which fires no
+// beforeinput: the browser edits the DOM itself and ProseMirror reads the edit back. Over a
+// selection across blocks of a decision two editors broke, that read-back must not drop the
+// option list after the selection, which the person did not select.
+for (const [command, value] of [
+  ["insertText", "x"],
+  ["delete", undefined],
+] as const) {
+  test(`document.execCommand("${command}") over a selection from the question into the first list of an ask holding two lists keeps the words outside it`, async ({
+    browser,
+  }) => {
+    await withTwoLists(browser, async ({ alicePage, first, second }) => {
+      const words = await selectQuestionIntoFirstList(alicePage, first, second);
+      await alicePage.evaluate(([name, text]) => document.execCommand(name, false, text), [
+        command,
+        value,
+      ] as const);
+      return words;
+    });
+  });
+}
