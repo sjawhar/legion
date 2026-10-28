@@ -1,0 +1,5 @@
+kind: Changed
+body: The bundled `legion-worker` merge-gate skill has the reviewer re-run only a run's failed and cancelled jobs (`gh run rerun <run> --failed`), never the whole run.
+time: 2026-10-28T12:40:16.854180597Z
+custom:
+    Issue: pr2396
