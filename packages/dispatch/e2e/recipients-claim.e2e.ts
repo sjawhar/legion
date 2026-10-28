@@ -9,6 +9,7 @@ import {
   getAsk,
   getIssue,
   patchIssue,
+  putIssueState,
   releaseClaim,
 } from "./api";
 import { resetDatabase } from "./seed";
@@ -307,19 +308,19 @@ test("unfollowing a follower while a role route's holder is unknown says the rou
   }
 });
 
-test("a route change that closes the issue moves the open card's route row without a reload", async ({
+test("a route change in a status write moves the open card's route row without a reload, and the close that follows withdraws the card", async ({
   browser,
 }) => {
   const moved = "e2e-reach-routed-next";
   await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "The route moves as it closes" });
+  const issue = await createIssue({ project: "CORE", title: "The route moves, then it closes" });
   const ask = await createAsk(
     issue.key,
     { options: [{ label: "Ship" }, { label: "Hold" }], question: "Ship it?" },
     { actor: asker, as: "agent" }
   );
-  // No claim: closing a claimed issue releases it in the same write, and that `issue.released`
-  // would refresh the card on its own, so only `issue.closed` carries the route change here.
+  // No claim: a claim's `issue.released` would refresh the card on its own, so only the issue
+  // event of each PATCH carries what moves here.
   await patchIssue(issue.key, { route: `session:${routed}` });
   await setLiveSessions([
     { session_id: asker.id, title: "Asker (e2e)" },
@@ -336,19 +337,26 @@ test("a route change that closes the issue moves the open card's route row witho
     await expect(recipients).toContainText("Reaches 2");
     // Focus stays on this toggle inside the card's row. The Inbox lists an open ask only while its
     // issue is open, but it holds a row the reader's focus is in where they last saw it, so the
-    // card stays mounted in the Inbox after the close and its own thread is what must move.
+    // card stays mounted in the Inbox after the close below.
     await recipients.getByRole("button", { name: /^Reaches/ }).click();
     const viaIssue = recipients.getByRole("list", { name: "Via claim or route" });
     const routeRow = (session: string) =>
       viaIssue.getByRole("listitem").filter({ has: page.locator(`[title='${session}']`) });
     await expect(routeRow(routed)).toContainText("via route");
 
-    // One PATCH sets the new route and closes the issue: the server emits `issue.closed` alone.
-    await patchIssue(issue.key, { route: `session:${moved}`, status: "done" });
+    // One PATCH sets the new route and moves the status: one `issue.updated` names both, and the
+    // card's own thread is what must move.
+    await patchIssue(issue.key, { route: `session:${moved}`, status: "in_progress" });
     await expect(routeRow(moved)).toContainText("Routed next (e2e)");
     await expect(routeRow(moved)).toContainText("via route");
     await expect(recipients.locator(`[title='${routed}']`)).toHaveCount(0);
     await expect(recipients).toContainText("Reaches 2");
+
+    // The close withdraws the open ask: the mounted card says so and lists no recipients, since
+    // nobody can answer it any more.
+    await patchIssue(issue.key, { status: "done" });
+    await expect(card).toContainText("Withdrawn when alice closed the issue");
+    await expect(recipients).toHaveCount(0);
     await expect(card).toBeVisible();
   } finally {
     await alice.close();
@@ -366,6 +374,8 @@ test("a claim that lands while the Inbox is loading reaches the card that mounts
     { options: [{ label: "Ship" }, { label: "Hold" }], question: "Ship it?" },
     { actor: asker, as: "agent" }
   );
+  // Pinned, so a rename of it refreshes alice's pinned list and nothing the Inbox shows.
+  await putIssueState(other.key, { pinned: true });
   await setLiveSessions([
     { session_id: asker.id, title: "Asker (e2e)" },
     { session_id: claimant.id, title: "Claimant (e2e)" },
@@ -373,34 +383,22 @@ test("a claim that lands while the Inbox is loading reaches the card that mounts
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
-  // The stale body must land after the claim's flush, or the flush itself refreshes the card it
-  // seeded (it reads the cached threads on the issue) and nothing here depends on the issue's
-  // mark. A flush cancels an Inbox first load the first time it reaches it, so the first request
-  // is held only until an earlier, unrelated write's flush has spent that cancel; the second
-  // request is the first load the claim then finds in flight, and is let land (and refreshed when
-  // it settles) rather than cancelled. Every later request reaches the server.
-  const firstRequested = Promise.withResolvers<void>();
-  const secondFetched = Promise.withResolvers<void>();
-  const releaseSecond = Promise.withResolvers<void>();
+  // The Inbox's first load is composed now, before the claim, and held until the claim has been
+  // handled. No cached thread names the ask yet, so the claim's refresh of the threads on its
+  // issue reaches nothing: only the issue's mark sends the card that mounts from this body to the
+  // ask endpoint. Every later request reaches the server.
+  const firstFetched = Promise.withResolvers<void>();
+  const releaseFirst = Promise.withResolvers<void>();
   let staleClaimant: unknown;
   let inboxRequests = 0;
   await page.route("**/api/v1/inbox*", async (route) => {
     inboxRequests += 1;
     if (inboxRequests === 1) {
       const response = await route.fetch();
-      firstRequested.resolve();
-      await secondFetched.promise;
-      // Cancelled by the first flush: the client discards this body.
-      await route.fulfill({ response });
-      return;
-    }
-    if (inboxRequests === 2) {
-      // Composed after the unrelated write and before the claim.
-      const response = await route.fetch();
       const rows = (await response.json()) as { id: string; thread: { claimant: unknown } }[];
       staleClaimant = rows.find((row) => row.id === ask.id)?.thread.claimant;
-      secondFetched.resolve();
-      await releaseSecond.promise;
+      firstFetched.resolve();
+      await releaseFirst.promise;
       await route.fulfill({ response });
       return;
     }
@@ -409,25 +407,25 @@ test("a claim that lands while the Inbox is loading reaches the card that mounts
   const streamOpened = page.waitForResponse(
     (response) => new URL(response.url()).pathname === "/api/v1/events"
   );
-  // Every issue event's flush refreshes the issue lists, the shell's pinned list among them: its
-  // request is the page's own word that it has handled the event.
-  const pinnedListRequested = () =>
+  const pinnedListRead = () =>
     page.waitForRequest((request) => {
       const url = new URL(request.url());
       return url.pathname === "/api/v1/issues" && url.searchParams.get("pinned") === "true";
     });
   try {
+    const firstPinnedRead = pinnedListRead();
     const navigation = page.goto("/");
-    // The writes must reach an open stream: a cold client's stream replays nothing from before.
-    await Promise.all([firstRequested.promise, streamOpened]);
-    await patchIssue(other.key, { title: "Edited while the Inbox loads" });
-    await secondFetched.promise;
+    // The claim must reach an open stream: a cold client's stream replays nothing from before.
+    await Promise.all([firstFetched.promise, streamOpened, firstPinnedRead]);
     expect(staleClaimant).toBeNull();
 
-    const claimFlushed = pinnedListRequested();
     await claimIssue(issue.key, { actor: claimant, as: "agent" });
-    await claimFlushed;
-    releaseSecond.resolve();
+    // Events reach the page in order, so once the rename written after the claim has made the
+    // page read its pinned list again, the claim's event has been handled too.
+    const renameHandled = pinnedListRead();
+    await patchIssue(other.key, { title: "Renamed after the claim" });
+    await renameHandled;
+    releaseFirst.resolve();
     await navigation;
 
     // The card mounts from the body that names no claimant, and shows the claim anyway.
@@ -442,8 +440,7 @@ test("a claim that lands while the Inbox is loading reaches the card that mounts
     await expect(claimRow).toContainText("Claimant (e2e)");
     await expect(claimRow).toContainText("via claim");
   } finally {
-    secondFetched.resolve();
-    releaseSecond.resolve();
+    releaseFirst.resolve();
     await alice.close();
   }
 });

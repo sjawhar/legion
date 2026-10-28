@@ -2022,7 +2022,7 @@ at 53, and a second run changed nothing. Applying 0054 again afterwards, as the 
 `pg_dump`, run as a login that cannot read the session tables, exited 1 without the two `-T`
 options and 0 with them.
 
-**Handoff records on the Dispatch issue (daemon API contract 41).** A release at contract 41
+**Handoff records on the Dispatch issue (daemon API contract 42).** A release at contract 42
 takes a file-backed phase's completion (planning, implementing, testing, reviewing) only when it
 names the handoff record its worker wrote on the Dispatch issue with `dispatch handoff-write`, and
 reads that record back from Dispatch (`GET /api/v1/handoffs/{id}`) before it records anything;
@@ -2030,7 +2030,7 @@ its workers' plugins report the record, so the daemon and the plugins move toget
 contract bump does. Store migration 0062 adds two columns to `phases`, `handoff_record` and
 `handoff_version`: the record a role's completion of its current phase named, and its version.
 
-To roll this release back to contract 40, stop the daemon and drop both columns, with the row
+To roll this release back to contract 41, stop the daemon and drop both columns, with the row
 `schema_version` records for 0062, which leaves the store at 61, the earlier release's schema:
 
 ```sh
@@ -6464,10 +6464,14 @@ to the same rule, and lets the group read only a root-owned file, as a pod's kub
 `--daemon-url <url>`, which replaces it) is the daemon's API as your machine reaches it. In order, and
 keeping nothing until the daemon has answered, the command:
 
-1. reads the file and refuses as above, and refuses a blank or unreadable Envoy or Dispatch token
-   file, a `nats_nkey_seed_file` that is blank, unreadable, readable by its group or others, or
-   holds no nkey user seed, a missing or blank instructions file, and an Oh My Pi invocation that
-   does not resolve;
+1. reads the file and refuses as above, the operator token file others can read included; then
+   refuses a stdin that is not a terminal (``stdin is not a terminal: Oh My Pi would run headless
+   print mode, …; run `legion controller start` at a terminal``), since given step 6's positional
+   word with no terminal Oh My Pi runs headless print mode, which would run the start command only
+   after step 3's mint had revoked the running controller; then a blank or unreadable Envoy or
+   Dispatch token file, a `nats_nkey_seed_file` that is blank, unreadable, readable by its group or
+   others, or holds no nkey user seed, a missing or blank instructions file, and an Oh My Pi
+   invocation that does not resolve;
 2. reads the project's repositories from the daemon's unauthenticated `GET /legion/v1/state`
    (`repositories`), since the controller's addressing names them, and refuses a daemon that does
    not answer, a body with no `repositories` object, and a mapped entry that is not `owner/name`;
@@ -6514,16 +6518,19 @@ keeping nothing until the daemon has answered, the command:
    script, a `gh` wrapper of the operator's machine that would answer in place of the review App;
 6. runs Oh My Pi interactive in the foreground (`omp_launch_prefix` and `omp_invocation`, one joined
    `--append-system-prompt` holding the controller prompt, the daemon's `Design gate policy:` line,
-   the project's repositories sentence and the deployment instructions, no `--resume`, no
-   `--mode rpc`) with the controller's
+   the project's repositories sentence and the deployment instructions, then the one positional
+   word `/legion-controller-start`, no `--resume`, no `--mode rpc`) with the controller's
    environment (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_URL`,
-   `LEGION_PROJECT`, `LEGION_STATE_DIR`, `LEGION_CONTROLLER_START_MESSAGE` (the pi-legion
-   extension sends it as the session's first turn right after its role claim succeeds and before
-   it opens the live wake subscription, so the controller's first turn runs its start procedure
-   deterministically, with nothing typed, rather than racing a wake for the session's one
-   first-turn slot — LEGION-392), its grant and secret files, `LEGION_GH_OWNERS_DIR` naming
-   `<state_dir>/gh` (the bundle step 5 wrote), `GH_CONFIG_DIR` its default owner's directory (the
-   bundle's root, empty, when the daemon has no GitHub App), `LEGION_GH_PATH` the real gh, with
+   `LEGION_PROJECT`, `LEGION_STATE_DIR`, `LEGION_CONTROLLER_START_MESSAGE` (Oh My Pi runs the
+   positional word once its startup is over and its TUI listens, and pi-legion's command of that
+   name claims the controller and sends the message as the session's first turn, which the
+   operator sees, can type during and can interrupt with Esc; it sends it once the controller is
+   registered, right before the role claim and the live wake subscription, so the controller's
+   first turn runs its start procedure deterministically, with nothing typed, rather than racing a
+   card or a wake for the session's one first-turn slot — LEGION-392), its grant and secret files,
+   `LEGION_GH_OWNERS_DIR` naming `<state_dir>/gh` (the bundle step 5 wrote), `GH_CONFIG_DIR` its
+   default owner's directory (the bundle's root, empty, when the daemon has no GitHub App),
+   `LEGION_GH_PATH` the real gh, with
    `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` emptied, so nothing inherited outranks the files, the
    Envoy and Dispatch
    endpoints, and `NATS_NKEY_SEED_FILE` naming `nats_nkey_seed_file` when the file sets it) on top

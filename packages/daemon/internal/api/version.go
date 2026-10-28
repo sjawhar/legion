@@ -373,7 +373,20 @@ package api
 // on main before this change, so this change takes the number above it, as the collision note
 // says.)
 //
-// 41: INFRA-177 (sjawhar/legion) -- a phase's handoff is a record on its Dispatch issue, which the
+// 41: `legion controller start` passes `/legion-controller-start`
+// (daemon.ControllerStartCommand) on the operator's Oh My Pi command line, and pi-legion sends the
+// controller's start message from that extension command rather than from session_start: Oh My Pi
+// drains every session_start send at the end of its startup, so the start turn ran inside the
+// startup wait, with no TUI and no input, while a command-line word runs as a prompt after startup
+// and once the TUI listens. Under this CLI a pi-legion before 41 sends from session_start and then
+// gets the word as a prompt, and a pi-legion at 41 under an older CLI never sends the start, so the
+// controller probe refuses either pair before the mint. The daemon-launched controller is unchanged
+// on the wire. (This branch took 40; main then landed the awaiting_person change at 40 and released
+// pi-legion v11.1.0 declaring it, without these shapes, so this branch takes the number above it,
+// as the collision note says. Other open branches may declare 41 too: whichever merges after
+// another takes the next free number, as the collision note says.)
+//
+// 42: INFRA-177 (sjawhar/legion) -- a phase's handoff is a record on its Dispatch issue, which the
 // worker writes with `dispatch handoff-write` under its own session, rather than a committed
 // `.legion/<KEY>/<phase>.json`. `api.HandoffCompleteRequest` gains `handoffId` and
 // `handoffVersion`, the record a file-backed phase's completion (planning, implementing, testing,
@@ -386,16 +399,17 @@ package api
 // commit) and the merger's; the planner, tester and reviewer send none, and the daemon no longer
 // requires one of them. `api.PhaseView` gains `handoffRecord`, `{id, version}`, absent until the
 // worker's completion of its current file-backed phase names one; store migration 0062 keeps it
-// on the phase row. A 40 plugin posts a commit and no record, which this daemon refuses, and its
+// on the phase row. A 41 plugin posts a commit and no record, which this daemon refuses, and its
 // strict reader refuses a state carrying `handoffRecord`, so the boot gate and `legion
 // probe-image` refuse the mixed pair. (This branch took 40 and store migration 0055; main then
 // landed `awaiting_person` at 40 with store migrations 0055 to 0058, and `issue_ancestry` as store
 // migration 0059, so this change took 41 and store migration 0060; main then landed
 // `pull_request_head_move_starts` as store migration 0060 at 40, so this change took store
 // migration 0061; main then landed `pull_request_head_run` as store migration 0061, so this change
-// keeps 41 and takes store migration 0062, as the collision note says. Other open branches may
-// declare 41 or a store migration 0062 too: whichever merges after another takes the next free
+// took store migration 0062; main then landed the controller start command at 41, so this change
+// takes 42 and keeps store migration 0062, as the collision note says. Other open branches may
+// declare 42 or a store migration 0062 too: whichever merges after another takes the next free
 // contract number and renumbers its store migration past main's, every site that names either
 // included, among them the rollback's `delete from schema_version where version = 62` in
 // docs/kubernetes.md.)
-const DaemonAPIVersion = 41
+const DaemonAPIVersion = 42
