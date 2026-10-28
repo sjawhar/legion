@@ -2,52 +2,43 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-549",
-  "completed": "2026-10-28T14:51:26Z",
-  "round": 6,
-  "headSha": "d6bf2a1e073d3a366fbb9af9e41eadc33b263763",
-  "codeHeadSha": "16234e5e20b8981bbd9250aa9a1097f386633500",
+  "completed": "2026-10-28T15:21:28Z",
+  "round": 7,
+  "headSha": "aebf0159552021658c069b9b055bf93cf46be1b1",
+  "codeHeadSha": "e105aef3e044",
   "evidence": [
-    "https://github.com/sjawhar/legion/pull/2371#issuecomment-6472259776",
-    "https://github.com/sjawhar/legion/pull/2371#issuecomment-6471097545"
+    "https://github.com/sjawhar/legion/pull/2371#issuecomment-6472998571",
+    "https://github.com/sjawhar/legion/pull/2371#issuecomment-6472259776"
   ],
-  "ci": "Read on GitHub at 16234e5e when this was written: build, changes, lint, test, typecheck queued (superseded pr-title runs cancelled). Read as queued, not as a pass. The PR is MERGEABLE/CLEAN.",
-  "scope": "c85984cd (the live test draws distinct ports and draws new ones on a refused start) and 16234e5e (the hub's pods held to Autopilot's 250m floor for a pod without pod anti-affinity) answer the round-4 review. Everything else is unchanged since round 5's full round.",
+  "ci": "Read on GitHub at e105aef3 when this was written: build, changes, lint, test, typecheck queued (superseded pr-title runs cancelled). Read as queued, not as a pass. The PR is MERGEABLE/CLEAN.",
+  "scope": "e105aef3 changes only packages/envoy/infra/gcp/clusteredhub_live_test.go (a restart keeps its ports; only a first start draws new ones). git diff 16234e5e..e105aef3 over packages/envoy/infra outside that file is empty, so round 6's Pulumi-engine and Autopilot-floor evidence stands.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command at 16234e5e: cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/ -> ok 30.775s (leader kill at 211/1000 acks with a new leader in 6.6 s, users reloaded with cid 20 and 0 reconnects, (f) passes). Both findings were also driven independently: a port held on a different server and port kind than the implementer's, and the floor boundaries through the real Pulumi engine."
+    "how": "Re-ran the implementer's command at e105aef3: cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/ -> ok 86.397s (leader kill at 203/1000 acks with a new leader in 4.2 s, users reloaded with cid 40 and 0 reconnects). The finding was driven independently with a holder on a different port, at every restart rather than in (b) only."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review round 4 (thread PRRT_kwDORFy7ds6xKae8): the live test's hub servers get distinct ports, and a start that finds a port taken retries on new ones, so the natslive lane does not go red at random.",
-      "surface": "The natslive live test's three nats-server v2.15.1 processes, with another program holding one of their drawn ports, and three concurrent runs on one host",
-      "command": "go test -count=1 -tags natslive -overlay <throwaway: net.Listen on serverPorts[5], envoy-nats-1's route port, right after the nine-port draw, held for the test> -run 'TestClusteredNatsHubCluster$' -v ./gcp/; and three concurrent runs of the compiled test binary (-test.run 'TestClusteredNatsHubCluster$')",
-      "observed": "Head: ok 36.003s. With 127.0.0.1:39080 held, envoy-nats-1 started on --cluster nats://127.0.0.1:40140; envoy-nats-0 still routes to 39080 and envoy-nats-2 to 40140, and the cluster formed in 117 ms with each server routing to the other two. Concurrent: all three PASS (44.5 s, 48.0 s, 44.5 s).",
-      "headSha": "16234e5e20b8981bbd9250aa9a1097f386633500",
-      "negativeControl": "The same thief over the 253b920c live test -> FAIL: 11 '[FTL] Error listening on router port: 50870 ... bind: address already in use', one per attempt, all on the same port."
-    },
-    {
-      "criterion": "Review round 4 (thread PRRT_kwDORFy7ds6xKafG): the hub's pods are held to GKE Autopilot's floor for their own shape (250m CPU and 512Mi, no pod anti-affinity or safe-to-evict), not gcp:Dispatch's 500m.",
-      "surface": "The plugin built at 16234e5e run by the Pulumi CLI v3.268.0 on the README's program against a real kube-apiserver v1.33.0",
-      "command": "pulumi preview --json, hub without streamMaxBytes, with natsCpu 150m + natsMemory 512Mi; natsCpu 149m; natsCpu 150m with the default memory; natsMemory 300Mi; natsCpu 300m + natsMemory 1Gi; tailnet.listener.cpu 1m (256Mi) and 150m",
-      "observed": "150m/512Mi (a 250m / 704Mi pod) accepted; 300m/1Gi accepted; listener 1m and 150m accepted (the tailnet pod is already 300m / 576Mi). The rendered StatefulSet and tailnet Deployment have affinity null and no safe-to-evict annotation, so GKE's general-purpose row (250m / 512 MiB without bursting, read 2026-10-28) applies; gcp:Dispatch's pods carry PodAntiAffinity (dispatch_kube.go:123).",
-      "headSha": "16234e5e20b8981bbd9250aa9a1097f386633500",
-      "negativeControl": "natsCpu 149m -> refused naming natsCpu ('must be at least 150m ... less than 250m, below which Autopilot raises a pod with neither pod anti-affinity nor the safe-to-evict annotation'); natsMemory 300Mi -> 'at least 320Mi ... less than 512Mi'; natsCpu 150m with 2Gi -> the 1-6.5 GiB per CPU rule."
+      "criterion": "Review round 6: a hub server's restart in the live test keeps its ports, since the clients' urls and the exporters' scrape targets name them, so a restart that has to retry does not fail a later assertion.",
+      "surface": "The natslive live test's three nats-server v2.15.1 processes with the real exporter and reloader, with another program holding a restarting server's monitor port on 0.0.0.0 for 1.5 s at each restart ((b), (c), (e), (f))",
+      "command": "go test -count=1 -tags natslive -overlay <throwaway: at the top of hubServer.start, when s.proc != nil, net.Listen on 0.0.0.0:<s.monitor>, closed after 1.5 s> -run 'TestClusteredNatsHubCluster$' -v -timeout 20m ./gcp/",
+      "observed": "Head: ok 39.544s. envoy-nats-0 restarted on monitor port 63868 each time. (b) current at seq 1000 1.241 s after the restart; (c) 3/2/1 nats_stream_last_seq series; (e) the restarted server uses the new session user; (f) the restarted server admits live-added.",
+      "headSha": "e105aef3e044",
+      "negativeControl": "The same overlay over the 16234e5e test -> FAIL at (c). The restarted server logged '[FTL] Can't start monitoring: ... listen tcp 0.0.0.0:37862: bind: address already in use' and came up on a new port, and the exporter kept the old target: '3 nats_stream_last_seq series of LIVE_R3 at 1000: not within 30s: 2 series'."
     },
     {
       "criterion": "The rendered NATS configuration is run by three local nats-server processes: they form a cluster, a stream created at three copies survives one server's kill with a leader and no lost publish, and a user added and removed through the rendered auth file reloads with no restart and no client reconnect.",
       "surface": "Three local nats-server v2.15.1 processes with the real nats-server-config-reloader v0.24.0 and prometheus-nats-exporter v0.20.2, on the helm v3.20.2 render of the component's values",
       "command": "cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/",
-      "observed": "ok 30.775s. SIGKILL of R3 leader envoy-nats-2 after 211 of 1000 acks; envoy-nats-1 led 6.616 s later; every acknowledged message stored exactly once. Users reloaded with cid 20 and 0 reconnects and 0 disconnects.",
-      "headSha": "16234e5e20b8981bbd9250aa9a1097f386633500",
+      "observed": "ok 86.397s. SIGKILL of R3 leader envoy-nats-2 after 203 of 1000 acks; envoy-nats-0 led 4.209 s later; every acknowledged message stored exactly once. Users reloaded with cid 40 and 0 reconnects and 0 disconnects.",
+      "headSha": "e105aef3e044",
       "negativeControl": "(e) and (f) of the same run: a no_auth_user change and a lower max_file_store are each refused by reload, and only a restart applies them."
     }
   ],
   "observations": [
-    "Not driven: Autopilot's own admission. The only namespace this pod can create Jobs in (builds) requires the custom build ComputeClass, whose minimums differ, so it cannot show the general-purpose floor.",
-    "For the reviewer, not a failure: GKE says a cluster without bursting rounds a pod's CPU up to the next 0.25 vCPU, and the ratio check uses the CPU as written. So, for example, natsCpu 450m with natsMemory 400Mi (550m / 592Mi, 1.05 GiB per CPU) is accepted but would be rounded to 750m there, and Autopilot would then raise its memory. A cluster with bursting rounds nothing. The rule came with the helper from gcp:Dispatch, and this round did not add it.",
-    "My go builds touched packages/envoy/infra/go.work.sum in the working copy; I restored it before committing.",
-    "Unchanged and not reachable here: claim expansion, a real tailscaled and the Linux PID-1 signal drop, the README PromQL, and GKE-only behaviour (GMP, Dataplane V2, Autopilot scheduling) belong to INFRA-551's live proof."
+    "A first holder bound 127.0.0.1 and made both versions of the test fail the same way. nats-server binds its monitor and client ports on 0.0.0.0, so both binds succeeded and the test's /connz request reached the more specific holder. This was a rig artefact; the holder was rebound on 0.0.0.0. The round-6 route-port thief on 127.0.0.1 was valid, since nats-server binds the route port on 127.0.0.1, as its FTL lines showed.",
+    "My go test runs touched packages/envoy/infra/go.work.sum in the working copy; I restored it before committing.",
+    "Carried from round 6: GKE's 0.25 vCPU rounding on clusters without bursting is not modelled by the ratio check (it came with the helper from gcp:Dispatch). Autopilot admission itself, claim expansion, a real tailscaled, the README PromQL and GKE-only behaviour belong to INFRA-551's live proof."
   ]
 }
