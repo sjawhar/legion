@@ -2,10 +2,28 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-532",
-  "completed": "2026-10-28T18:05:00Z",
+  "completed": "2026-10-28T20:40:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2472",
   "redCommit": "349f14eb48a3",
+  "round": 2,
+  "roundRedCommit": "8604eca55798",
   "proof": [
+    {
+      "criterion": "Review round 1 finding 1 (condition 3): a comment or ask link on the live document lands on its quote once a diagram above it draws",
+      "surface": "Dispatch live document /issues/<KEY>/spec?comment=<id>, held worker, scroll anchoring off, chromium/iphone/webkit/firefox",
+      "command": "cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project <p> --workers=1 -g \"a comment link below a diagram\"",
+      "observed": "Passes in all four projects at d4201ff0 (and 12/12 repeats in chromium). Against the round-1 build it failed in chromium, iphone and webkit at toBeInViewport with 'viewport ratio 0'.",
+      "headSha": "d4201ff0",
+      "negativeControl": "The margin bridge's focusMark calling handle.focusMark directly (no re-run): fails in chromium with 'viewport ratio 0' at the final toBeInViewport"
+    },
+    {
+      "criterion": "Review round 1 finding 2 (condition 4): an edited diagram whose worker fails after a first drawing shows its source, not the old diagram",
+      "surface": "Dispatch document editor, Worker wrapped to fail after a first drawing, four projects",
+      "command": "bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project <p> --workers=1 -g \"worker fails after its first drawing\"",
+      "observed": "Passes in all four at d4201ff0: no diagram, source 'Start --> FinishLine' visible, no status, one console error. Against the round-1 build it failed in chromium, iphone and webkit on the old diagram still shown (count 1).",
+      "headSha": "d4201ff0",
+      "negativeControl": "fail() clearing its waiting draws without answering them: fails at toHaveCount(0), received 1"
+    },
     {
       "criterion": "A1: a document's mermaid diagram draws, styles nothing outside it, and the browser makes no request to fonts.googleapis.com; fails at the commit before",
       "surface": "Dispatch document page /issues/<KEY>/spec in the editor, real Go server and Postgres, chromium/iphone/webkit/firefox",
@@ -94,6 +112,9 @@
     "The focus runs again only when a diagram is still waiting (mermaidDrawsWaiting), so a document with no pending diagram pulses its target once. An earlier version focused twice; VersionView.test.tsx then failed and bun's failure diff of the fake editor grew past 3 GB, which OOM-killed the pod several times."
   ],
   "deviations": [
+    "Round 2: the past-version row (R8) no longer asserts the first landing before the release: at ef163c71 that landing failed 2 of 16 chromium runs with the page at its top before any diagram drew (pre-existing in VersionView's route); the row asserts the landing after the draw, which the re-run repairs. Reported to the architect as a finding.",
+    "Round 2: a margin focusBlock arriving a frame after the editor unbinds is dropped (bound flag), so no re-run is left behind for a destroyed editor.",
+    "Round 2 cleanup from the review: the view's request counter and lib.ts's MermaidDrawer/MermaidDrawing re-export are removed, the false comment above R6 is corrected; the comment too-large row's duplication stays (INFRA-713's row) and blockId stays copied per the e2e helper convention.",
     "Plan v2 (dispatch://INFRA-532/artifact/plan-md) supersedes plan.json: documents draw in the worker by the INFRA-138 architect's decision.",
     "R7 and R8 fail at the red commit (they assert no diagram is drawn before the release), as the architect requires every new row to fail before the change; the plan's table said they pass.",
     "R6 routes the worker bundle to a stub that never answers (INFRA-713's approach, the architect's instruction); the INFRA-528 comment too-large row keeps main's text except its openCommentThread lead, and is left to INFRA-713 and CI.",
