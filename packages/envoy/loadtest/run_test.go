@@ -63,19 +63,27 @@ func TestOpenLoopSchedule(t *testing.T) {
 // TestAForeignRunsMetaHoldsNoTokenOrPassword: under -allow-foreign the tokens and the URLs are
 // flags, and meta.json records them as the normalized flag list: each token as <redacted>, each URL
 // without its userinfo, the user too, since nats.go takes a user with no password as the auth
-// token; a comma-separated -nats server list or -pg host list loses every element's. Neither
-// meta.json nor the log holds a token, a password or a NATS token user.
+// token; a comma-separated -nats server list loses every element's, and -pg is recorded from pgx's
+// own parse as its hosts, ports and database alone. Neither meta.json nor the log holds a token, a
+// password or a NATS token user.
 func TestAForeignRunsMetaHoldsNoTokenOrPassword(t *testing.T) {
 	t.Setenv("LOADTEST_ROOT", t.TempDir())
+	isolatePG(t)
 	const agent, listener, password, natsToken = "agent-token-7f3a", "listener-token-9c1e", "url-password-51d2", "nats-token-4b2e"
-	pg := "postgres://127.0.0.1:1/dispatch?sslmode=disable"
+	pg, pgRecorded := "postgres://127.0.0.1:1/dispatch?sslmode=disable", "postgres://127.0.0.1:1/dispatch"
+	foreignPG := func(pg string) []string {
+		return []string{"-allow-foreign", "-token", agent, "-listener-token", listener, "-pg", pg}
+	}
+	recordedPG := func(pg string) []string {
+		return []string{"-allow-foreign=true", "-listener-token=" + redacted, "-pg=" + pg, "-token=" + redacted}
+	}
 	for _, c := range []struct {
 		args, want []string
 		secrets    []string // fragments of a case's own credentials, found in no output
 	}{
 		{
 			args: []string{"-allow-foreign", "-token", agent, "--listener-token=" + listener, "-name", "-token", "-pg", pg},
-			want: []string{"-allow-foreign=true", "-listener-token=" + redacted, "-name=-token", "-pg=" + pg, "-token=" + redacted},
+			want: []string{"-allow-foreign=true", "-listener-token=" + redacted, "-name=-token", "-pg=" + pgRecorded, "-token=" + redacted},
 		},
 		{
 			args: []string{
@@ -87,7 +95,7 @@ func TestAForeignRunsMetaHoldsNoTokenOrPassword(t *testing.T) {
 			},
 			want: []string{
 				"-allow-foreign=true", "-listener=http://127.0.0.1:2", "-listener-token=" + redacted,
-				"-nats=nats://127.0.0.1:3", "-nats-mon=http://127.0.0.1:4", "-pg=" + pg,
+				"-nats=nats://127.0.0.1:3", "-nats-mon=http://127.0.0.1:4", "-pg=" + pgRecorded,
 				"-pprof=http://127.0.0.1:5", "-token=" + redacted, "-url=http://127.0.0.1:1",
 			},
 		},
@@ -105,25 +113,59 @@ func TestAForeignRunsMetaHoldsNoTokenOrPassword(t *testing.T) {
 			},
 			want: []string{
 				"-allow-foreign=true", "-listener-token=" + redacted, "-nats=nats://127.0.0.1:3,nats://127.0.0.1:6",
-				"-pg=postgres://127.0.0.1:1,127.0.0.1:2/dispatch?sslmode=disable", "-token=" + redacted,
+				"-pg=postgres://127.0.0.1:1,127.0.0.1:2/dispatch", "-token=" + redacted,
 			},
 		},
 		{
 			// A -pg password or password parameter with a comma, which pgx reads whole: the
 			// value is one URL, not a list, and no fragment of the password is recorded.
-			args:    []string{"-allow-foreign", "-token", agent, "-listener-token", listener, "-pg", "postgres://u:123,abc@h/db"},
-			want:    []string{"-allow-foreign=true", "-listener-token=" + redacted, "-pg=postgres://h/db", "-token=" + redacted},
+			args:    foreignPG("postgres://u:123,abc@h/db"),
+			want:    recordedPG("postgres://h:5432/db"),
 			secrets: []string{"123", "abc"},
 		},
 		{
-			args:    []string{"-allow-foreign", "-token", agent, "-listener-token", listener, "-pg", "postgres://h/db?password=Abc,def123"},
-			want:    []string{"-allow-foreign=true", "-listener-token=" + redacted, "-pg=postgres://h/db", "-token=" + redacted},
+			args:    foreignPG("postgres://h/db?password=Abc,def123"),
+			want:    recordedPG("postgres://h:5432/db"),
 			secrets: []string{"Abc", "def123"},
 		},
 		{
-			args:    []string{"-allow-foreign", "-token", agent, "-listener-token", listener, "-pg", "postgres://u:a:1,b@h/db"},
-			want:    []string{"-allow-foreign=true", "-listener-token=" + redacted, "-pg=postgres://h/db", "-token=" + redacted},
+			args:    foreignPG("postgres://u:a:1,b@h/db"),
+			want:    recordedPG("postgres://h:5432/db"),
 			secrets: []string{"a:1", "1,b"},
+		},
+		{
+			// pgx ends the userinfo at the first @ before any /, so a # or ? in the password
+			// stays in it, where net/url would read a fragment or a query.
+			args:    foreignPG("postgres://u:#secret@h/db"),
+			want:    recordedPG("postgres://h:5432/db"),
+			secrets: []string{"secret"},
+		},
+		{
+			args:    foreignPG("postgres://postgres:?Hunter2@h:5432/dispatch"),
+			want:    recordedPG("postgres://h:5432/dispatch"),
+			secrets: []string{"Hunter2"},
+		},
+		{
+			args:    foreignPG("postgres://u:12#34ab@h/db"),
+			want:    recordedPG("postgres://h:5432/db"),
+			secrets: []string{"34ab", "12#"},
+		},
+		{
+			// pgx splits the query at & alone and reads no fragment, so ; and # stay in the
+			// password parameter; sslpassword is a secret too.
+			args:    foreignPG("postgres://h/db?sslmode=disable&password=a;b"),
+			want:    recordedPG("postgres://h:5432/db"),
+			secrets: []string{"a;b"},
+		},
+		{
+			args:    foreignPG("postgres://h/db?password=ab#cd"),
+			want:    recordedPG("postgres://h:5432/db"),
+			secrets: []string{"ab#cd", "cd"},
+		},
+		{
+			args:    foreignPG("postgres://h/db?sslpassword=keypass"),
+			want:    recordedPG("postgres://h:5432/db"),
+			secrets: []string{"keypass"},
 		},
 	} {
 		fs := flag.NewFlagSet("run", flag.ContinueOnError)
@@ -147,11 +189,12 @@ func TestAForeignRunsMetaHoldsNoTokenOrPassword(t *testing.T) {
 		}
 		for _, secret := range append([]string{agent, listener, password, natsToken}, c.secrets...) {
 			if strings.Contains(string(meta), secret) || strings.Contains(logged.String(), secret) {
-				t.Fatalf("%q: meta.json or the log holds a token or a password:\n%s\n%s", c.args, meta, logged.String())
+				t.Errorf("%q: meta.json or the log holds %q, a token or a password:\n%s\n%s", c.args, secret, meta, logged.String())
+				break
 			}
 		}
 		if !slices.Equal(cfg.args, c.want) {
-			t.Fatalf("%q recorded as %q, want %q", c.args, cfg.args, c.want)
+			t.Errorf("%q recorded as %q, want %q", c.args, cfg.args, c.want)
 		}
 	}
 }

@@ -10,13 +10,17 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // stackFile is $LOADTEST_ROOT/stack.json. stack.sh setup writes it; run-step.sh rewrites it once
@@ -132,19 +136,18 @@ func (f *endpointFlags) register(fs *flag.FlagSet) {
 
 // tokenFlags are the endpoint flags whose values are bearer tokens, and urlFlags those whose values
 // are URLs. meta.json records the run's flags with each token replaced by redacted and each URL
-// without its userinfo (recordedArgs, redactURL).
+// without its credentials (recordedArgs, redactEndpoint).
 var (
 	tokenFlags = []string{"-token", "-listener-token"}
 	urlFlags   = []string{"-url", "-listener", "-nats", "-nats-mon", "-pprof", "-pg"}
 )
 
-// redactURL is raw without its userinfo and without a password query parameter (a Postgres URL
-// can carry one), for every place that records or prints an endpoint. The whole userinfo goes,
-// the user name too: nats.go takes a user name with no password as the auth token. raw is parsed
-// whole, as pgx parses a Postgres URL (a comma in its password or its password parameter is part
-// of the password, and its host list is one host field); only -nats is a comma-separated list
-// (redactEndpoint). A value that does not parse is redacted whole, since no credential in it can
-// be found for sure.
+// redactURL is raw without its userinfo and without a password query parameter, for every place
+// that records or prints an HTTP endpoint (redactEndpoint does each -nats server the same way).
+// The whole userinfo goes, the user name too: nats.go takes a user name with no password as the
+// auth token. raw is read whole by url.Parse, as net/http reads it. A value that does not parse,
+// or names no scheme, is redacted whole, since no credential in it can be found for sure. A -pg
+// value is never read here (redactPG).
 func redactURL(raw string) string {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Scheme == "" {
@@ -153,10 +156,14 @@ func redactURL(raw string) string {
 	return withoutCredentials(u).String()
 }
 
-// redactEndpoint is redactURL for the value of endpoint flag flag: a -nats value is a server list
-// that nats.go splits at commas (processUrlString), each server with userinfo of its own, so each
-// loses its own; any other flag's value is one URL.
+// redactEndpoint is the value of endpoint flag flag as it is recorded or printed: a -nats value is
+// a server list that nats.go splits at commas (processUrlString), each server with userinfo of its
+// own, so each loses its own; a -pg value is redactPG's; any other flag's value is one URL
+// (redactURL).
 func redactEndpoint(flag, raw string) string {
+	if flag == "-pg" {
+		return redactPG(raw)
+	}
 	if flag != "-nats" {
 		return redactURL(raw)
 	}
@@ -185,6 +192,36 @@ func withoutCredentials(u *url.URL) *url.URL {
 	return u
 }
 
+// parsePG is pgx's own parse of a -pg value, and ok is false when pgx would not read raw as a
+// URL: raw must start with postgres:// or postgresql:// (the prefixes pgconn.ParseConfig checks,
+// case-sensitive; any other value goes to its keyword/value parser, whose error can quote the
+// value) and pgconn.ParseConfig, the parser pgx.Connect uses, must accept it. ParseConfig also
+// reads the PG* environment variables and may read the passfile, as pgx.Connect does.
+func parsePG(raw string) (config *pgconn.Config, ok bool) {
+	if !strings.HasPrefix(raw, "postgres://") && !strings.HasPrefix(raw, "postgresql://") {
+		return nil, false
+	}
+	config, err := pgconn.ParseConfig(raw)
+	return config, err == nil
+}
+
+// redactPG is a -pg value as it is recorded or printed, built from parsePG's result alone:
+// postgres://, each host:port pgx would try (Host and Port, then each of Fallbacks, a repeat of
+// the one before it dropped: sslmode prefer and allow give each host twice), comma-separated,
+// then / and the database. It holds no user, password, sslpassword or other parameter. A value
+// parsePG refuses is redacted whole.
+func redactPG(raw string) string {
+	config, ok := parsePG(raw)
+	if !ok {
+		return redacted
+	}
+	addrs := []string{net.JoinHostPort(config.Host, strconv.Itoa(int(config.Port)))}
+	for _, fb := range config.Fallbacks {
+		addrs = append(addrs, net.JoinHostPort(fb.Host, strconv.Itoa(int(fb.Port))))
+	}
+	return "postgres://" + strings.Join(slices.Compact(addrs), ",") + "/" + url.PathEscape(config.Database)
+}
+
 // natsScheme stands in for the scheme of a NATS server that names none ("host:4222", which
 // nats.go reads as nats://host:4222), so that url.Parse reads its host.
 const natsScheme = "nats://"
@@ -200,20 +237,25 @@ func parseNATSServer(server string) (u *url.URL, scheme bool, err error) {
 	return u, scheme, err
 }
 
-// isEndpointURL reports whether v is a valid value of endpoint flag flag: for -nats, a
-// comma-separated server list whose every server names a host; for any other flag, one URL with
-// a scheme and a host (a Postgres URL's host list is one host field, "h1:5432,h2:5432").
+// isEndpointURL reports whether v is a valid value of endpoint flag flag: for -pg, a value
+// parsePG accepts; for -nats, a comma-separated server list whose every server names a host; for
+// any other flag, one URL with a scheme and a host, as url.Parse reads it.
 func isEndpointURL(flag, v string) bool {
-	if flag != "-nats" {
+	switch flag {
+	case "-pg":
+		_, ok := parsePG(v)
+		return ok
+	case "-nats":
+		for _, server := range strings.Split(v, ",") {
+			if u, _, err := parseNATSServer(server); err != nil || u.Host == "" {
+				return false
+			}
+		}
+		return true
+	default:
 		u, err := url.Parse(strings.TrimSpace(v))
 		return err == nil && u.Scheme != "" && u.Host != ""
 	}
-	for _, server := range strings.Split(v, ",") {
-		if u, _, err := parseNATSServer(server); err != nil || u.Host == "" {
-			return false
-		}
-	}
-	return true
 }
 
 // foreignFlagError refuses an endpoint flag that names something other than the stack's own.
@@ -296,8 +338,11 @@ func resolveEndpoints(f endpointFlags, st *stackFile) (endpoints, error) {
 			return endpoints{}, &foreignFlagError{Flag: field.flag}
 		case field.given != "":
 			// A foreign URL that does not parse would reach an error that prints it whole,
-			// credentials included; the refusal names the flag alone.
+			// credentials included; the refusal names the flag and the reason alone.
 			if slices.Contains(urlFlags, field.flag) && !isEndpointURL(field.flag, field.given) {
+				if field.flag == "-pg" {
+					return endpoints{}, errors.New("-pg is not a postgres:// or postgresql:// URL that pgx accepts")
+				}
 				return endpoints{}, fmt.Errorf("%s is not a URL with a scheme and a host (for -nats, a comma-separated list of servers)", field.flag)
 			}
 			*field.dst = field.given

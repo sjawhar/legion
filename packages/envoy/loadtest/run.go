@@ -154,8 +154,9 @@ func runLoad(args []string) error {
 const redacted = "<redacted>"
 
 // recordedArgs is every flag given to fs, once parsed, as "-name=value" in fs's (lexical) order:
-// the value of each tokenFlags flag replaced by redacted, and each urlFlags flag's URL without its
-// userinfo (redactEndpoint). runLoad takes no positional argument, so these are all of its arguments.
+// the value of each tokenFlags flag replaced by redacted, and each urlFlags flag's value without
+// its credentials (redactEndpoint: -pg as its hosts, ports and database alone). runLoad takes no
+// positional argument, so these are all of its arguments.
 func recordedArgs(fs *flag.FlagSet) []string {
 	var out []string
 	fs.Visit(func(f *flag.Flag) {

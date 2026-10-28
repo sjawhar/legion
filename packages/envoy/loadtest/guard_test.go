@@ -5,9 +5,25 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// isolatePG keeps a test's -pg values from the environment: pgconn.ParseConfig, which the guard
+// and meta.json read -pg with, takes defaults from the PG* variables and from files under $HOME.
+func isolatePG(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD", "PGSERVICE", "PGSERVICEFILE",
+		"PGSSLMODE", "PGSSLKEY", "PGSSLCERT", "PGSSLROOTCERT", "PGSSLPASSWORD",
+	} {
+		t.Setenv(name, "")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PGPASSFILE", filepath.Join(home, "absent.pgpass"))
+}
 
 func testStack() *stackFile {
 	return &stackFile{
@@ -38,6 +54,7 @@ func TestGuardRefusesAFlagThatDiffersFromTheStack(t *testing.T) {
 }
 
 func TestGuardTakesEndpointsFromTheStack(t *testing.T) {
+	isolatePG(t)
 	e, err := resolveEndpoints(endpointFlags{url: "http://127.0.0.1:18777/"}, testStack())
 	if err != nil {
 		t.Fatalf("a flag equal to the stack's value was refused: %v", err)
@@ -48,6 +65,9 @@ func TestGuardTakesEndpointsFromTheStack(t *testing.T) {
 	}
 	if e.pids["postgres"] != 11 || e.pids["dispatch"] != 12 {
 		t.Fatalf("pids %v, want the stack's", e.pids)
+	}
+	if got := redactEndpoint("-pg", e.pg); got != "postgres://127.0.0.1:15432/dispatch" {
+		t.Fatalf("the stack's -pg recorded as %q, want its host, port and database", got)
 	}
 }
 
@@ -110,11 +130,29 @@ func TestGuardAllowForeignRefusesAMissingFlag(t *testing.T) {
 // TestGuardPrintsNoURLPassword: a foreign URL that does not parse is refused naming its flag
 // alone, and a failed guard check names the endpoint without its userinfo, user or password.
 func TestGuardPrintsNoURLPassword(t *testing.T) {
+	isolatePG(t)
 	const password = "url-password-51d2"
 	flags := foreignFlags()
 	flags.pg = "host=db.example user=postgres password=" + password
 	if _, err := resolveEndpoints(flags, testStack()); err == nil || !strings.Contains(err.Error(), "-pg") || strings.Contains(err.Error(), password) {
 		t.Fatalf("a -pg that is not a URL: refusal %v, want one naming -pg without its password", err)
+	}
+	// pgx reads a -pg value as a URL only when it starts with postgres:// or postgresql://
+	// (case-sensitive), and an invalid port fails its parse: each is refused by name, with no
+	// part of the value and none of pgx's error.
+	for _, pg := range []string{"POSTGRES://u:pw-frag1@h/db", "pg://u:pw-frag2@h/db", "postgres://u:pw-frag3@h:notaport/db"} {
+		flags := foreignFlags()
+		flags.pg = pg
+		_, err := resolveEndpoints(flags, testStack())
+		if err == nil || !strings.Contains(err.Error(), "-pg") {
+			t.Errorf("-pg %q: refusal %v, want one naming -pg", pg, err)
+			continue
+		}
+		for _, part := range []string{"pw-frag", "u:", "@h", "notaport", "parse"} {
+			if strings.Contains(err.Error(), part) {
+				t.Errorf("-pg %q: refusal %q holds %q", pg, err, part)
+			}
+		}
 	}
 	flags = foreignFlags()
 	flags.nats = "nats://tok@127.0.0.1:3,nats://u:" + password + "@127.0.0.1:4"
