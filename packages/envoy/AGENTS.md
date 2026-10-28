@@ -2770,7 +2770,9 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
 
 - GitHub repository topics start with `notifications.github.<owner>.<repo>`, each name one segment with a dot written `_` (`sjawhar/.github` is `notifications.github.sjawhar._github`).
   A ref or workflow file name in a topic is one segment the same way, with whitespace, `*` and `>`, which a published subject may not hold, written `_` too (`SanitizeSubjectSegment`).
-  Pull requests use `pr.<n>` for lifecycle (a closed event carries `merged`, `merge_commit_sha`, `merged_by`, and `head_sha`), plus `pr.<n>.comment`, `pr.<n>.review`, `pr.<n>.mention`, and `pr.<n>.checks` when a commit's checks settle:
+  Pull requests use `pr.<n>` for lifecycle (a closed event carries `merged`, `merge_commit_sha`, `merged_by`, and `head_sha`;
+  a synchronize carries `head_sha` and `before`, the head GitHub says the branch moved from;
+  every lifecycle event, like a push, carries `sender`, the login GitHub says triggered it), plus `pr.<n>.comment`, `pr.<n>.review`, `pr.<n>.mention`, and `pr.<n>.checks` when a commit's checks settle:
   every commit of the pull request, its current head or not, whose `sha` the settlement carries (a head pushed with GitHub's `skip-checks` trailer runs no CI, so the commit it replaced settles for it, and consumers decide which commit a settlement stands for).
   Check settlement is at-least-once: a settlement can be followed by a `superseded_settlement: "true"` payload.
   Every settlement carries its attempt set `check_runs` — the latest GitHub check-run id per check name, sorted by name
