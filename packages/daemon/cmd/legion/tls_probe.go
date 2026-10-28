@@ -351,7 +351,7 @@ var workerTLSClients = []tlsClientSpec{
 // unresolvable. Chromium's certificate verifier fetches the AIA issuer URLs of a chain it cannot
 // anchor before it refuses it, and Chromium has no switch that turns those fetches off; emSign's AIA
 // host, repository.emsign.com, stalls or resets its connections, and a stalled fetch held the emSign
-// load past tlsProbeTimeout. With the AIA host unresolvable, each fetch fails at once and the verdict
+// load past the probe's limit. With the AIA host unresolvable, each fetch fails at once and the verdict
 // comes from the served chain and Chromium's own trust store alone. That is the verdict to prove:
 // the positive controls show that each test site serves every certificate up to its pinned root's
 // subject, and the sites' AIA URLs hold only self-signed roots, which a path can end at only as
