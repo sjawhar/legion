@@ -246,7 +246,8 @@ const testRoleReferencesJSON = `{"LEGION_PROMPT_AGENTS":{"oracle":["roles/core/p
 // passing test nothing. A test whose attempt must run out sets unfinishedBudget.
 func probeOptions(t *testing.T) ImageProbe {
 	return ImageProbe{
-		Contract: 3, Budget: 10 * time.Second, RoleReferences: testRoleReferences, commandReserve: time.Millisecond,
+		Contract: 3, Budget: 10 * time.Second, RoleReferences: testRoleReferences,
+		commandReserve: time.Millisecond, startupBudget: unfinishedBudget,
 		Retry: bootprobe.Retry{Initial: time.Millisecond, Max: time.Millisecond, Attempts: 2},
 	}
 }
@@ -545,7 +546,7 @@ func TestProbeImageRetriesAProbeThatNeverFinished(t *testing.T) {
 		want  []string
 	}{
 		{"an image still being pulled", func(g *probeRig) { g.waits("ImagePullBackOff") },
-			[]string{"probe pod " + probeSandboxName + " still Pending after 300ms (container probe waiting: ImagePullBackOff)"}},
+			[]string{"probe pod " + probeSandboxName + " did not start within 300ms (phase Pending) (container probe waiting: ImagePullBackOff)"}},
 		// A pull that failed for any reason but the registry not having the image says nothing
 		// about the image: credentials, the network and a rate limit may all change by the next
 		// attempt.
@@ -598,7 +599,7 @@ func TestProbeImageRetriesAProbeThatNeverFinished(t *testing.T) {
 			g.waitsSaying("ErrImagePull", pullFailure("ErrImagePull", "NotFound", resolving(testImage+": not found"))).pullsFailed(1, "NotFound", resolving(testImage+": not found"))
 		}, []string{"(container probe waiting: ErrImagePull)"}},
 		{"no pod at all", func(g *probeRig) { g.hold.Store(true) },
-			[]string{"probe sandbox " + probeSandboxName + " has no pod after 300ms"}},
+			[]string{"probe pod " + probeSandboxName + " did not start within 300ms: no pod"}},
 		// A pod whose probe outlasts the attempt: what it logged so far is quoted.
 		{"a pod still probing", func(g *probeRig) {
 			g.with(func() {
@@ -1457,7 +1458,7 @@ func TestProbeImageWaitsOnAProbePodThePoolCannotPlace(t *testing.T) {
 		err := g.probe(p)
 
 		wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)",
-			"probe pod "+probeSandboxName+" still Pending after 300ms")
+			"probe pod "+probeSandboxName+" did not start within 300ms (phase Pending)")
 		if strings.Contains(logged.String(), "waiting on capacity") {
 			t.Errorf("a pod unschedulable for less than the boot timeout was read as a capacity wait:\n%s", logged.String())
 		}
@@ -1539,7 +1540,7 @@ func TestProbeImagesCapacityStopNeedsTheBudgetToOutliveTheBootTimeout(t *testing
 		err := g.probe(p)
 
 		wantContains(t, err, "the worker image probe never completed within its retry budget (1 attempts)",
-			"probe pod "+probeSandboxName+" still Pending after 300ms")
+			"probe pod "+probeSandboxName+" did not start within 300ms (phase Pending)")
 		if strings.Contains(logged.String(), "waiting on capacity") {
 			t.Errorf("a budget below the boot timeout read a capacity wait it never had time to see:\n%s", logged.String())
 		}
