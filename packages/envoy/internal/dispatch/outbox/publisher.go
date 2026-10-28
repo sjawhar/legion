@@ -796,6 +796,19 @@ type mentionDeliveries struct {
 	// targets is keyed by each attempt's target as written, for a route suppressed by that string
 	// alone (payloadSuppressedRouteTarget).
 	targets mentionOutcomes
+	// fallbackKeys is keyed like sessions, and holds for each session with a failed attempt - or
+	// an abandoned one, which the outbox settles failed before it publishes the copy - the dedupe
+	// key that attempt's send went under (contracts.AgentSendDedupeKey of
+	// model.CommentMentionIdempotencyKey), which the session's copy carries (attempt.sessionCopy).
+	// A send that landed before its attempt failed - a receipt timeout, or a send handed the
+	// listener before a kill whose resend then failed - has already given the host that key, so
+	// the host drops the copy; a session no mention reached shows it. A session whose failed
+	// attempts span several targets keys by the lowest target, and a target with several failed
+	// attempts by the latest one's mode. One key is enough: each target is a send of its own, so a
+	// comment naming one session under two targets gives it one copy per target that lands, and
+	// a copy shown beside another target's landed mention leaves the session no more copies than
+	// had every one of its mentions landed.
+	fallbackKeys map[string]string
 }
 
 // mentionOutcomes is what the attempts under each key of mentionDeliveries came to. A key in more
@@ -850,7 +863,9 @@ func (a *attempt) leftToMentionOf(target string) bool {
 // took is failed, and the copy is the outbox's. Only one of the two acts on an attempt, so the
 // session gets the mention or the copy, not both. A settle that fails holds the copy back and
 // fails the attempt, so the event is retried. Any other key - every attempt failed, or none was
-// recorded - is published to as if it had not been mentioned.
+// recorded - is published to as if it had not been mentioned, except that a session copy for a
+// failed attempt carries that attempt's dedupe key (attempt.sessionCopy): a send that landed
+// before its attempt failed has given the host the comment already, and the host drops the copy.
 //
 // The copy also follows a send that fails after this decision: the API's settle of a failed
 // mention send reopens the comment's comment.created (reopenCommentCreated in
@@ -915,11 +930,10 @@ var mentionSendLapsed = `((claimed_at is null and created_at < now() - ` + model
 // settled failed by the API, whose settle reopens the comment.created (reopenCommentCreated in
 // internal/dispatch/api) when the comment mentions the session and the event has not reached its
 // topic, and the next scan reads the attempt failed and publishes whichever copy reaches the
-// session (attempt.leftTo), so a mentioned session loses no comment through a kill. One duplicate
-// remains: a send the killed process had handed the listener before it
-// died, whose resend then fails for good (the listener down after the restart), gives the session
-// that mention and then the copy, under different dedupe keys
-// (agent.<session>.<comment>:<target>:<mode> for the mention, dispatch-<event id> for the copy).
+// session (attempt.leftTo), so a mentioned session loses no comment through a kill. A send the
+// killed process had handed the listener before it died, whose resend then fails for good (the
+// listener down after the restart), gives the host that mention and then the copy, which carries
+// the mention's own dedupe key (mentionDeliveries.fallbackKeys), so the host drops the copy.
 var mentionResumed = `(claimed_at is not null and claimed_at < now() - ` + model.DeliveryClaimLapseInterval +
 	` and created_at >= now() - ` + model.StrandedMentionWindowInterval + `)`
 
@@ -930,13 +944,16 @@ var mentionLeftToMention = `(state = 'sent' or (state = 'pending' and ` + mentio
 // mentionDeliveryQuery groups a comment's mention attempts by the session each counts under
 // (mentionSessionKey) and by its target, and reports of each group whether an attempt was sent
 // or is resumed by the stranded pass (mentionLeftToMention), is pending and live, and is pending
-// and abandoned (mentionSendLapsed).
+// and abandoned (mentionSendLapsed), and the mode of its latest attempt that failed or is
+// abandoned, null when none did (mentionDeliveries.fallbackKeys).
 var mentionDeliveryQuery = `
 	select ` + mentionSessionKey + `,
 	       target,
 	       bool_or(` + mentionLeftToMention + `),
 	       bool_or(state = 'pending' and not (` + mentionSendLapsed + `) and not (` + mentionResumed + `)),
-	       bool_or(state = 'pending' and ` + mentionSendLapsed + `)
+	       bool_or(state = 'pending' and ` + mentionSendLapsed + `),
+	       (array_agg(delivery order by attempt desc)
+	           filter (where state = 'failed' or (state = 'pending' and ` + mentionSendLapsed + `)))[1]
 	from comment_deliveries
 	where comment_id = $1
 	group by 1, 2
@@ -971,16 +988,25 @@ func loadMentionDeliveries(ctx context.Context, deps Deps, event model.Event) (m
 			},
 		}
 	}
-	result := mentionDeliveries{sessions: outcomes(mentionSessionKey), targets: outcomes("target")}
+	result := mentionDeliveries{
+		sessions: outcomes(mentionSessionKey), targets: outcomes("target"), fallbackKeys: map[string]string{},
+	}
+	fallbackTargets := map[string]string{}
 	for rows.Next() {
-		var sessionID *string
+		var sessionID, failedDelivery *string
 		var target string
 		var sent, live, abandoned bool
-		if err := rows.Scan(&sessionID, &target, &sent, &live, &abandoned); err != nil {
+		if err := rows.Scan(&sessionID, &target, &sent, &live, &abandoned, &failedDelivery); err != nil {
 			return mentionDeliveries{}, fmt.Errorf("load mention deliveries of comment %q: %w", commentID, err)
 		}
 		if sessionID != nil {
 			result.sessions.record(*sessionID, sent, live, abandoned)
+			if chosen, ok := fallbackTargets[*sessionID]; failedDelivery != nil && (!ok || target < chosen) {
+				fallbackTargets[*sessionID] = target
+				result.fallbackKeys[*sessionID] = contracts.AgentSendDedupeKey(
+					*sessionID, model.CommentMentionIdempotencyKey(commentID, target, *failedDelivery),
+				)
+			}
 		}
 		result.targets.record(target, sent, live, abandoned)
 	}
@@ -1067,17 +1093,32 @@ func settleAbandonedMentions(
 	return sent, pending, nil
 }
 
-// publishSessionRoutes sends item to each session's own topic, naming a failure or a denial by
-// label and the session.
+// publishSessionRoutes sends item to each session's own topic (attempt.sessionCopy), naming a
+// failure or a denial by label and the session.
 func publishSessionRoutes(deps Deps, eventID int64, item contracts.Envelope, a *attempt, sessionIDs []string, label string) error {
 	for _, sessionID := range sessionIDs {
-		routed := item
-		routed.Topic = contracts.AgentSubject(sessionID)
-		if err := publishDestination(deps, eventID, routed, a, label, sessionID); err != nil {
+		if err := publishDestination(deps, eventID, a.sessionCopy(item, sessionID), a, label, sessionID); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// sessionCopy is item as sent to sessionID's own topic. Its dedupe key is item's, the event's
+// own (envelope), except for the copy of a new comment sent to a session one of whose mention
+// attempts failed - the copy that reaches it because its mention failed: that copy carries the
+// dedupe key the failed attempt's send went under (mentionDeliveries.fallbackKeys), and keeps the
+// event's own event id. A host drops a frame whose event id it has seen or whose dedupe key it
+// claimed (createDeliveryDedupe in packages/envoy-client), so a host the mention reached before
+// its attempt failed drops the copy, and one no mention reached shows it. The stream also stores
+// the copy no second time when the mention's message is on the same subject within its duplicate
+// window, its MsgId being the dedupe key and the subject (internal/bus).
+func (a *attempt) sessionCopy(item contracts.Envelope, sessionID string) contracts.Envelope {
+	item.Topic = contracts.AgentSubject(sessionID)
+	if key, ok := a.mentions.fallbackKeys[sessionID]; ok {
+		item.DedupeKey = key
+	}
+	return item
 }
 
 // publishPreviousClaimant tells a session that lost an issue's claim, on its own topic: a
@@ -1460,13 +1501,18 @@ func publishRoute(deps Deps, eventID int64, item contracts.Envelope, a *attempt,
 	case "role":
 		item.Topic = contracts.RoleTopicPrefix + parsed.ID
 	case "session":
-		item.Topic = contracts.AgentSubject(parsed.ID)
+		item = a.sessionCopy(item, parsed.ID)
 	default:
 		return fmt.Errorf("unsupported route %q", *route)
 	}
 	return publishDestination(deps, eventID, item, a, "publish route", *route)
 }
 
+// envelope is event's envelope as its owner topic receives it. Its event id and dedupe key are
+// both dispatch-<event id>, and every destination the event reaches carries the same pair, so a
+// host handed one event on several subjects shows it once - except the copy of a new comment
+// sent to a session whose mention failed, which carries that mention's dedupe key instead
+// (attempt.sessionCopy).
 func envelope(event model.Event, slug string) (contracts.Envelope, error) {
 	payload, err := json.Marshal(event)
 	if err != nil {

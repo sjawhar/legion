@@ -1103,6 +1103,16 @@ type Mention struct {
 	SessionID *string `json:"session_id"`
 }
 
+// CommentMentionIdempotencyKey is the idempotency key every send of a comment's mention of target
+// in mode delivery goes under, <comment>:<target>:<mode>: stable across every attempt of that
+// triple, so a retry of a send that already landed repeats it and is recognised as the repeat it
+// is (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts). The API sends the mention under it,
+// and the outbox keys the copy it publishes to a session whose mention failed by the same send's
+// dedupe key (contracts.AgentSendDedupeKey).
+func CommentMentionIdempotencyKey(commentID, target, delivery string) string {
+	return commentID + ":" + target + ":" + delivery
+}
+
 // DeliveryClaimLapse is the lease on a pending delivery attempt (a comment_deliveries or
 // message_deliveries row): a sender's claim older than this was left by a sender that never came
 // back. Two readers depend on the one window and must agree. The API's claimLapsed
@@ -1304,11 +1314,13 @@ type CommentEventPayload struct {
 	// route suppression below names the attempt's target alone (published_at and next_attempt_at
 	// cleared, this payload unchanged), so the outbox publishes then whichever route, author,
 	// claimant or follower copy reaches the session, to the destinations the event has not reached:
-	// a mentioned session loses no comment through a kill. One duplicate remains: a send the killed process had handed the listener
-	// before it died, whose resend then fails for good (the listener down after the restart),
-	// gives the session that mention and then the copy, under different dedupe keys
-	// (agent.<session>.<comment>:<target>:<mode> for the mention, dispatch-<event id> for the
-	// copy).
+	// a mentioned session loses no comment through a kill. A copy on the session's own topic
+	// carries the failed attempt's own dedupe key (contracts.AgentSendDedupeKey of
+	// CommentMentionIdempotencyKey) rather than the event's dispatch-<event id>, so a send the
+	// killed process had handed the listener before it died, whose resend then fails for good (the
+	// listener down after the restart), is not shown twice: the host that holds the mention drops
+	// the copy, and the stream stores it no second time within its duplicate window. A session no
+	// mention reached is shown the copy.
 	// SuppressRoute marks the issue route's copy as left to a mention: either the route names a
 	// candidate, because its lookup pinned it or because its own lookup went unanswered and it is
 	// session:<id> (SuppressedRoute is the route string, SuppressedRouteSessionID that candidate),

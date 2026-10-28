@@ -2822,19 +2822,33 @@ the synchronous listener call records the sent or failed attempt instead of blin
   mentioned session no copy reaches gets nothing new. So a mentioned session loses no comment
   through a kill.
   Every other session - each attempt `failed`, or no row at all - is published to as if it had
-  not been mentioned. A deferral with a denial
+  not been mentioned, but for the dedupe key of its copy: a copy on the own topic of a session
+  with a `failed` attempt (or an abandoned one, which the outbox settles `failed` first) carries
+  the key that attempt's send went under, `contracts.AgentSendDedupeKey(session,
+  model.CommentMentionIdempotencyKey(comment, target, mode))` - the listener's
+  `agent.<session>.<comment>:<target>:<mode>` for the mention - in place of `dispatch-<event id>`,
+  and keeps the event id `dispatch-<event id>` (`attempt.sessionCopy`,
+  `mentionDeliveries.fallbackKeys`). Of several failed targets the lowest target string keys it,
+  and of one target's failed attempts the latest one's mode. Every other destination, a role
+  route included, carries `dispatch-<event id>`. A deferral with a denial
   (`bus.ErrPublishDenied`) or any other failure of the event is backed off as a failure, its
   attempt counted; a deferral that meets a lost NATS connection (`bus.ErrUnavailable`) or a
   stopping process is released, not backed off, like any event that met them.
   A comment's edit, resolution and reopening, and every other event, are never left to a mention.
-  One copy is not guaranteed: a receipt timeout records the attempt `failed` though the listener
-  may have delivered the mention, a first attempt stranded `pending` past the minute may have
-  landed before its sender stopped, and the outbox settles it and publishes the copy, and a send
-  the killed process had handed the listener before it died, whose stranded-pass resend then
-  fails for good (the listener down after the restart), is followed by the copy the failure
-  reopens. Each way the session receives the comment twice, under different dedupe keys (the
-  mention's `agent.<session>.<comment>:<target>:<mode>` and the outbox's `dispatch-<event id>`);
-  a host treats the second copy as the same comment (same comment id).
+  A mention that landed before its attempt failed is not shown twice: a receipt timeout records
+  the attempt `failed` though the listener may have delivered the mention, a first attempt
+  stranded `pending` past the minute may have landed before its sender stopped, and the outbox
+  settles it and publishes the copy, and a send the killed process had handed the listener before
+  it died, whose stranded-pass resend then fails for good (the listener down after the restart),
+  is followed by the copy the failure reopens. Each way the copy carries the mention's own dedupe
+  key, so the host, which drops a frame whose event id it saw or whose named dedupe key it claimed
+  within `DELIVERY_DUPLICATE_WINDOW_MS` (`createDeliveryDedupe` in `packages/envoy-client`), drops
+  it; and the stream, whose MsgId is the dedupe key and the subject, stores it no second time
+  within its 72-hour duplicate window. A session no mention reached never claimed that key and is
+  shown the copy. A session one comment mentions under two targets is sent one mention per
+  target, so it can still see the copy beside a mention of the other target, no more copies than
+  had every mention landed. A same-mode retry of the mention after the copy landed repeats the
+  copy's key too: the stream reports it a duplicate and the host drops it.
   Nor is order: while a `comment.created` is deferred, the same comment's `comment.edited`,
   `comment.resolved` and `comment.reopened` are events of their own and publish at once, so a
   claimant, follower, author or route topic can receive the edit before the creation - for as

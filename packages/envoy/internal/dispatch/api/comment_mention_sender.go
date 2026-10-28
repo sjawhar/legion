@@ -276,9 +276,10 @@ func (m *mentionSender) next(lane string, finished mentionKey) (mentionSend, str
 // handed to the listener is dropped there. A resend that fails is settled failed, which reopens
 // the comment's comment.created when the comment mentions that session and the event has not
 // reached its topic (reopenCommentCreated), so the outbox publishes then whichever copy reaches
-// the session: a mentioned session loses no comment through a kill. A kill gives it two copies only when the killed process had handed its
-// frame over and the resend then fails for good (the listener down after the restart): that
-// mention, then the copy, under different dedupe keys.
+// the session: a mentioned session loses no comment through a kill. When the killed process had
+// handed its frame over and the resend then fails for good (the listener down after the
+// restart), the copy follows the mention under the mention's own dedupe key (attempt.sessionCopy
+// in internal/dispatch/outbox), so the host drops it.
 func (m *mentionSender) recoverStranded() {
 	m.mu.Lock()
 	if m.stoppedLocked() {

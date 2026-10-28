@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
@@ -760,6 +761,121 @@ func TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst(t
 			}
 			if len(receipts) != 0 {
 				t.Fatalf("receipts = %#v, want none for an attempt the outbox did not settle", receipts)
+			}
+		})
+	}
+}
+
+// TestTheCopyOfAFailedMentionCarriesTheMentionsDedupeKey: the copy of a new comment on the own
+// topic of a session whose mention failed carries the dedupe key that mention's send went under
+// (agent.<session>.<comment>:<target>:<mode>), so a host the send reached before its attempt
+// failed drops the copy; every other destination carries the event's own key, and every one the
+// event's own id. Of several failed targets the lowest keys the copy, and of one target's failed
+// attempts the latest one's mode; an abandoned attempt the outbox settles failed keys it too.
+// The copy goes out as the route and as the claimant route alike.
+func TestTheCopyOfAFailedMentionCarriesTheMentionsDedupeKey(t *testing.T) {
+	const (
+		issueTopic     = "notifications.dispatch.issue.T-1.comment.created"
+		mentionedTopic = "notifications.agent.mentioned"
+		otherTopic     = "notifications.agent.someone-else"
+		eventKey       = "dispatch-106"
+	)
+	for _, tc := range []struct {
+		name      string
+		commentID string
+		// viaRoute sends the mentioned session's copy as the route (its suppression held only
+		// while the mention was not failed), the unmentioned session's as the claimant route;
+		// otherwise the other way round.
+		viaRoute bool
+		seed     func(t *testing.T, database *store.Store, commentID string)
+		wantKey  string
+	}{
+		{
+			name:      "failed under two targets, as the route",
+			commentID: "00000000-0000-0000-0004-000000000001",
+			viaRoute:  true,
+			seed: func(t *testing.T, database *store.Store, commentID string) {
+				seedDelivery(t, database, commentID, "session:mentioned", "mentioned", "failed")
+				seedDelivery(t, database, commentID, "role:reviewer", "mentioned", "failed")
+			},
+			wantKey: "agent.mentioned.00000000-0000-0000-0004-000000000001:role:reviewer:steer",
+		},
+		{
+			name:      "failed under two targets, as the claimant route",
+			commentID: "00000000-0000-0000-0004-000000000002",
+			seed: func(t *testing.T, database *store.Store, commentID string) {
+				seedDelivery(t, database, commentID, "session:mentioned", "mentioned", "failed")
+				seedDelivery(t, database, commentID, "role:reviewer", "mentioned", "failed")
+			},
+			wantKey: "agent.mentioned.00000000-0000-0000-0004-000000000002:role:reviewer:steer",
+		},
+		{
+			name:      "two failed attempts of one target in two modes",
+			commentID: "00000000-0000-0000-0004-000000000003",
+			seed: func(t *testing.T, database *store.Store, commentID string) {
+				seedDelivery(t, database, commentID, "session:mentioned", "mentioned", "failed")
+				seedDelivery(t, database, commentID, "session:mentioned", "mentioned", "failed")
+				if _, err := database.Pool.Exec(context.Background(), `
+					update comment_deliveries set delivery = 'btw' where comment_id = $1 and attempt = 2
+				`, commentID); err != nil {
+					t.Fatalf("retry the mention in another mode: %v", err)
+				}
+			},
+			wantKey: "agent.mentioned.00000000-0000-0000-0004-000000000003:session:mentioned:btw",
+		},
+		{
+			name:      "abandoned, settled failed by the outbox",
+			commentID: "00000000-0000-0000-0004-000000000004",
+			viaRoute:  true,
+			seed: func(t *testing.T, database *store.Store, commentID string) {
+				seedDelivery(t, database, commentID, "session:mentioned", "mentioned", "abandoned")
+			},
+			wantKey: "agent.mentioned.00000000-0000-0000-0004-000000000004:session:mentioned:steer",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := store.WithTransactionTracking(context.Background())
+			database := storetest.Open(t)
+			seedIssue(t, database, "T-1", nil)
+			tc.seed(t, database, tc.commentID)
+			payload := map[string]any{
+				"id": tc.commentID,
+				"mentions": append(mentionsOf("mentioned"), map[string]any{
+					"target": "role:reviewer", "delivery": "steer", "session_id": "mentioned",
+				}),
+			}
+			route, claimant := "session:someone-else", "mentioned"
+			if tc.viaRoute {
+				route, claimant = "session:mentioned", "someone-else"
+				payload["suppress_route"] = true
+				payload["suppressed_route"] = "session:mentioned"
+				payload["suppressed_route_session_id"] = "mentioned"
+			}
+			event := model.Event{
+				ID: 106, IssueKey: new("T-1"), Type: "comment.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+				Payload: payload, Notify: true, CreatedAt: time.Now(),
+			}
+			publisher := &recordingPublisher{}
+			deps := Deps{Store: database, Publisher: publisher, Broker: events.NewBroker()}
+			if err := publish(ctx, deps, event, "", routing{route: &route, claimant: claimant}, map[string]struct{}{}); err != nil {
+				t.Fatalf("publish the comment: %v", err)
+			}
+			keys := map[string]string{}
+			for _, item := range publisher.all() {
+				if item.EventID != eventKey {
+					t.Errorf("%s: event_id = %q, want the event's own %q", item.Topic, item.EventID, eventKey)
+				}
+				if err := item.Validate(); err != nil {
+					t.Errorf("%s: envelope invalid: %v", item.Topic, err)
+				}
+				if !contracts.DedupeKeyNamesTheUpstreamEvent(item) {
+					t.Errorf("%s: dedupe key %q is not one a host claims", item.Topic, item.DedupeKey)
+				}
+				keys[item.Topic] = item.DedupeKey
+			}
+			want := map[string]string{issueTopic: eventKey, otherTopic: eventKey, mentionedTopic: tc.wantKey}
+			if !reflect.DeepEqual(keys, want) {
+				t.Fatalf("dedupe keys by topic = %#v, want %#v", keys, want)
 			}
 		})
 	}

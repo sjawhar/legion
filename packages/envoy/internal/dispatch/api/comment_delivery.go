@@ -500,12 +500,10 @@ func (s *server) deliverResolvedCommentMention(
 	if err != nil {
 		return model.CommentDelivery{}, fmt.Errorf("encode comment mention delivery frame: %w", err)
 	}
-	// The key is scoped to the mention's target and mode, stable across every attempt of that
-	// triple, so a retry of a send that already landed repeats its dedupe key and is recognised as
-	// the repeat it is (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts says by what).
+	// The key is scoped to the mention's target and mode (model.CommentMentionIdempotencyKey).
 	// When the issue route's copy is suppressed for this send: model.CommentEventPayload.SuppressRoute.
 	envelopeID, duplicate, deliveryError := s.sendResolvedDelivery(
-		ctx, target, stored.Body, stored.ID+":"+target.Target+":"+target.Delivery, nil, frame,
+		ctx, target, stored.Body, model.CommentMentionIdempotencyKey(stored.ID, target.Target, target.Delivery), nil, frame,
 	)
 	return s.completeCommentDelivery(
 		ctx, stored, recorded, actor, claimed.attemptClaim, envelopeID, duplicate, deliveryError,
