@@ -418,6 +418,12 @@ export function mermaidDrawsSettled(): Promise<void> {
   return promise;
 }
 
+/** Whether any source is waiting for the worker, so a diagram may still draw and move what is
+ *  below it. A block link or a highlighted mark is focused again only then. */
+export function mermaidDrawsWaiting(): boolean {
+  return requests.size > 0;
+}
+
 /**
  * Terminates the worker and forgets it, every cached drawing, every waiting draw and a failure,
  * so a test starts from a page that has drawn nothing. `timeLimitMs` replaces

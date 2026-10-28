@@ -1,4 +1,4 @@
-import { mermaidDrawsSettled } from "../refs/mermaid-diagrams";
+import { mermaidDrawsSettled, mermaidDrawsWaiting } from "../refs/mermaid-diagrams";
 
 /** What a reader does to move on from where a link put them: press, scroll, touch or type. */
 const READER_ACTIONS = ["pointerdown", "wheel", "touchstart", "keydown"] as const;
@@ -11,8 +11,9 @@ const READER_ACTIONS = ["pointerdown", "wheel", "touchstart", "keydown"] as cons
  * target, and each one that draws above the target pushes it down by the diagram's height. The
  * focus scrolls smoothly, and a script scroll during a smooth scroll cuts it short, so the focus
  * runs again once, when no source is waiting (`mermaidDrawsSettled`), rather than being corrected
- * as each diagram lands. With none waiting it runs on the next microtask and lands where the
- * first focus did.
+ * as each diagram lands. With none waiting when it is called (no diagram, or every one drawn
+ * from the cache already) nothing can move the target, so it does not run again and the target
+ * is pulsed once.
  *
  * It runs only while `stillWanted()` holds when the diagrams settle, and only if the reader has
  * not pressed, scrolled, touched or typed since this was called, so a reader who moved on is
@@ -20,6 +21,7 @@ const READER_ACTIONS = ["pointerdown", "wheel", "touchstart", "keydown"] as cons
  * listeners also go once the diagrams settle.
  */
 export function refocusAfterDiagrams(refocus: () => void, stillWanted: () => boolean): () => void {
+  if (!mermaidDrawsWaiting()) return () => {};
   let done = false;
   const stop = () => {
     if (done) return;
