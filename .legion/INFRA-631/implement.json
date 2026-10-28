@@ -2,23 +2,23 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-631",
-  "completed": "2026-10-28T16:10:00Z",
+  "completed": "2026-10-28T16:35:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2422",
   "proof": [
     {
       "criterion": "1. Outside fenced code blocks no line holds more than one sentence, list items are separated by blank lines, and no list item or table row is longer than one screen; a check shows it.",
       "surface": "scripts/semantic-line-breaks.ts on the two guides as a contributor runs it, and its unit tests as CI runs them",
       "command": "cd -- \"$LEGION_WORKSPACE\" && bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md; bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts",
-      "observed": "at code head 4e67dd97 (guides as at merge head 838af5ad): checker exit 0 on both guides; 87 pass, 0 fail (the tester's red tests unmodified; CRLF, \\f, \\v, bare \\r and invalid UTF-8 files refused with exit 2 and their bytes unchanged; a byte order mark kept)",
-      "headSha": "4e67dd97d93668a0be0dc6f4ff03f3b5b8dab22e",
-      "negativeControl": "the previous script (838af5ad) fails the CRLF and UTF-8 refusal tests (84 pass, 2 fail); deleting the whitespace refusal's continue fails 4; writing the U+FFFD text fails 1; the strict decoder without ignoreBOM fails the BOM test"
+      "observed": "at merge head 0c77df5c (code faeb4057, main 8b4a862b merged): checker exit 0 on both guides; 88 pass, 0 fail (the tester's red tests unmodified; a BOM-led <source block left unchanged; check mode reads a fence on line 1 behind a BOM; the mark kept on write)",
+      "headSha": "0c77df5c24b40f278e67e7be0f5303c34562d6c7",
+      "negativeControl": "the previous script (4e67dd97) fails the byte-order-mark test (86 pass, 1 fail); check mode keeping the mark fails it; a write that does not put the mark back fails the keep-the-mark test"
     },
     {
       "criterion": "Tool contract: --write changes only whitespace and never how a file renders (the architect's structural guarantee, 2026-10-28 09:03Z).",
       "surface": "scripts/semantic-line-breaks.ts --write on copies of every tracked .md file of the repository",
       "command": "git ls-files '*.md' | grep -v '^.legion/' (1,245 files) copied under $TMPDIR/infra631/c17/files at merge head 7d024719; xargs bun scripts/semantic-line-breaks.ts --write, twice",
-      "observed": "sweep of 1,249 tracked .md files at 4e67dd97, --write twice: 1,177 rewritten, 0 whitespace-folded different; refusals 4, all render guard, 0 odd whitespace, 0 invalid UTF-8, 0 idempotence; pass 2 changes no file; restructure.ts --strict on main 690c0136's files is byte-identical to the head guides",
-      "headSha": "4e67dd97d93668a0be0dc6f4ff03f3b5b8dab22e",
+      "observed": "sweep of 1,253 tracked .md files at 0c77df5c, --write twice: 1,181 rewritten, 0 whitespace-folded different; refusals 4, all render guard; pass 2 changes no file; restructure.ts --strict on main 8b4a862b's files is byte-identical to the head guides",
+      "headSha": "0c77df5c24b40f278e67e7be0f5303c34562d6c7",
       "negativeControl": "the reviewer's round-4 inputs were written with exit 0 and a changed rendering by the previous script; now each is left unchanged"
     },
     {
@@ -26,7 +26,7 @@
       "surface": "git history of the branch, compared as folded words and as CommonMark+GFM renderings (micromark 4.0.2 + micromark-extension-gfm 3.0.0), and restructure.ts as the reviewer re-runs it",
       "command": "bun .legion/INFRA-631/restructure.ts --strict <main d47dbf05 AGENTS.md> <out> <README.md> <out>, cmp with the head guides (merge head 7d024719)",
       "observed": "byte-identical",
-      "headSha": "4e67dd97d93668a0be0dc6f4ff03f3b5b8dab22e",
+      "headSha": "0c77df5c24b40f278e67e7be0f5303c34562d6c7",
       "negativeControl": "semantic-line-breaks.ts --write on a copy whose relayout replaced one word refused with exit 2 and the file unchanged; restructure.ts --strict on main's AGENTS.md with 'Shutdown stops HTTP first' reworded: exit 1, nothing written"
     },
     {
@@ -34,7 +34,7 @@
       "surface": "git merge-tree --write-tree on branches made from the head's files with the committed patches (refreshed against this head)",
       "command": "the tester's case through PR-body recipe steps 4-8: base.md = main aeeee6c0's README, ours.md = it plus '\\n- a\\n  - -\\n'; bun .legion/INFRA-631/restructure.ts --lenient --line-breaks scripts/semantic-line-breaks.ts base.md base.new ours.md ours.new; hand edit of the named block; semantic-line-breaks.ts --write ours.new; git merge-file -p ours.new base.new <head README> > F; semantic-line-breaks.ts F",
       "observed": "restructure exit 2 with base.new (= --strict on base.md alone) and ours.new (= --structural-only on ours.md) written; the warning names ours.new line 1955, which is the refused block '- a' / '  - -'; after '  - -' → '  - \\-', --write exit 0; merge-file 0 conflicts; checker on F exit 0",
-      "headSha": "4e67dd97d93668a0be0dc6f4ff03f3b5b8dab22e",
+      "headSha": "0c77df5c24b40f278e67e7be0f5303c34562d6c7",
       "negativeControl": "--strict on the same pair: exit 2, nothing written, the message names ours.md and says its line numbers count the --structural-only text"
     },
     {
@@ -42,7 +42,7 @@
       "surface": "the repository's checks that read packages/envoy/AGENTS.md, Dispatch's document element measure, and the porting recipe driven on open PRs #2387, #2414, #2404 against this head",
       "command": ".github/scripts/check-body-embed-limit.sh; bash .github/scripts/check-body-embed-limit.test.sh; .github/scripts/check-private-names.sh; go test -overlay … -run TestMeasureGuides ./internal/dispatch/pmdoc/; the PR body's porting recipe (steps 1-7, S = the checkout's checker) on open PRs #2391 and #2245 (README) and #2404 (AGENTS)",
       "observed": "embed limit pass; private names exit 0; AGENTS 25,646 elements / 586,442 bytes, README 10,626 / 187,035",
-      "headSha": "4e67dd97d93668a0be0dc6f4ff03f3b5b8dab22e",
+      "headSha": "0c77df5c24b40f278e67e7be0f5303c34562d6c7",
       "negativeControl": "restructure.ts --strict on PR #2391's README: exit 1 naming each migration above 0134, nothing written"
     }
   ],
@@ -95,8 +95,9 @@
     "Round 14 (review round 6; architect's decision 2026-10-28 14:15Z): any case-insensitive verbatim open inside a raw-HTML node's value (never a code span or code block) makes that block and every later block byte for byte, in --write, check mode and the guard; no close counted; nesting and close-count code removed. Tests changed: two of mine (the block after a </pre> now stays; a <pre> in backticks in an HTML block now counts), and, on the architect's written authorization (Envoy 2026-10-28 14:25Z), the tester's 'a paragraph that starts with inline HTML is checked for R2 like any other': input '<kbd>Ctrl</kbd>' -> '<span>Ctrl</span>', name and assertion kept; a new test pins the <kbd> case. Main 75833475 and then d47dbf05 merged forward; for d47dbf05 (a README migration note for 0135_server_processes, a longer cookie item) MIGRATION_NOTE.through is raised to 0135, 0135_server_processes added to MAIN_MIGRATIONS, and split-cookie-pool added.",
     "Round 15 (review round 7; architect's decision 2026-10-28 14:55Z): 'source' added to the scanner's kind-6 HTML block names (cmark-gfm still has it; 'search' kept); the guard refuses a re-layout that moves a '<source' line off its line's start (GFM_ONLY_HTML_BLOCK_LINE), since micromark does not read it as a block; a table-driven test pins VERBATIM_OPEN's names and letter case.",
     "Round 16 (review round 8; architect's decision 2026-10-28 15:19Z): --write refuses a file holding \\v, \\f or a bare \\r (ODD_WHITESPACE); kind 1 and kind 6 accept \\v\\f\\r after the tag name; GFM_ONLY_HTML_BLOCK_LINE deleted; main 690c0136 merged forward and the guides regenerated.",
-    "Round 17 (review round 9; architect's decision 2026-10-28 15:49Z): --write refuses any carriage return (CRLF included) and invalid UTF-8 (fatal decoder with ignoreBOM, plus a BOM test against the decoder switch dropping it); refusal tests use inputs R1 would split; the round-4 CRLF <pre test (implementer-authored) is replaced by the CRLF refusal test."
+    "Round 17 (review round 9; architect's decision 2026-10-28 15:49Z): --write refuses any carriage return (CRLF included) and invalid UTF-8 (fatal decoder with ignoreBOM, plus a BOM test against the decoder switch dropping it); refusal tests use inputs R1 would split; the round-4 CRLF <pre test (implementer-authored) is replaced by the CRLF refusal test.",
+    "Round 18 (review round 10; architect's decision 2026-10-28 16:16Z): a leading BOM is dropped by both decoders and put back only on write; main 8b4a862b merged in the same code push; only .legion/ handoffs follow so the Tests run is not cancelled."
   ],
   "openQuestions": [],
-  "round": 17
+  "round": 18
 }
