@@ -16,7 +16,12 @@
 #        claude-envoy as packages/daemon/internal/runtime/tmux/claude.go configures it (an MCP
 #        config naming dist/envoy-channel.js, both plugin directories, LEGION_CLAUDE_INBOX).
 #
-# Each session reaches NATS only through a socat proxy of its own, which the script can cut. At
+# Each session reaches NATS only through a socat proxy of its own, which the script can cut. Every
+# server takes its port as lib/held-port.py gives it, never a port picked free a moment earlier:
+# natsd binds ports the kernel chooses and reports them (-p -1 -m -1); each listener, Dispatch and
+# each proxy (socat's ACCEPT-FD) serves on a copy of a socket a keeper holds for the whole run, so a
+# restart serves the same port. Only a --build-from listener that takes no ENVOY_LISTEN_FD binds a
+# number, a port picked free below the kernel's ephemeral range, which its restart binds again. At
 # setup each session is told (one model turn) to follow the issue topic
 # notifications.dispatch.issue.<KEY>.> and to hold a role of its own; the listener's registry is
 # then read to show both. Then six windows run, one disruption each, with every event of the window
@@ -67,6 +72,8 @@
 #                                 postgres://<user>@127.0.0.1:<port>/<db>?sslmode=disable; the run
 #                                 creates a database of its own there and drops it on exit
 #   ANTHROPIC_API_KEY             required: passed to Oh My Pi and Claude Code only, never printed
+#   ANTHROPIC_BASE_URL            when set, passed to Oh My Pi and Claude Code only, beside the key
+#                                 (a model gateway, such as an issue pod's, whose key it is)
 #   SESSION_DELIVERY_OMP          Oh My Pi (default: omp on PATH, else /opt/omp/bin/omp)
 #   SESSION_DELIVERY_MODEL        default claude-haiku-4-5 (Oh My Pi gets anthropic/<model>)
 #   SESSION_DELIVERY_CLAUDE_CODE  the Claude Code version bunx runs (default 2.1.311)
@@ -77,7 +84,8 @@
 #
 # No DISPATCH_*, ENVOY_*, NATS_*, OMP*, PI_*, LEGION_* or CLAUDE_* variable of the caller reaches
 # anything the run starts. Every service and session gets PATH, what the script sets, and, for the
-# sessions alone, ANTHROPIC_API_KEY (and BUN_INSTALL_CACHE_DIR for bunx when the caller sets it).
+# sessions alone, ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL when the caller sets it (and
+# BUN_INSTALL_CACHE_DIR for bunx when the caller sets it).
 # Everything started is stopped on exit by the pid it was started as; the database is dropped; the
 # evidence directory is kept. Manual only, never CI: it needs a model provider.
 #
@@ -140,9 +148,12 @@ done
 pg_server=${BASH_REMATCH[1]}
 pg_params=${BASH_REMATCH[4]}
 [ -n "$anthropic_key" ] || refuse "ANTHROPIC_API_KEY is required: both sessions run their turns on it"
-for tool in go bun jq curl socat setsid psql git tar pgrep mkfifo; do
+for tool in go bun jq curl socat setsid psql git tar pgrep mkfifo python3; do
   command -v "$tool" >/dev/null 2>&1 || refuse "$tool is required and is not on PATH"
 done
+socat_help=$(socat -h 2>/dev/null || true)
+[[ "$socat_help" == *"ACCEPT-FD:"* ]] ||
+  refuse "socat $(socat -V 2>/dev/null | sed -n 's/^socat version \([^ ]*\).*/\1/p') has no ACCEPT-FD address (socat 1.8.0 or later): the proxies serve on a held socket"
 omp=${SESSION_DELIVERY_OMP:-$(command -v omp || true)}
 if [ -z "$omp" ] && [ -x /opt/omp/bin/omp ]; then omp=/opt/omp/bin/omp; fi
 [[ -n "$omp" && -x "$omp" ]] || refuse "no Oh My Pi: set SESSION_DELIVERY_OMP (omp is not on PATH and /opt/omp/bin/omp is absent)"
@@ -154,16 +165,15 @@ hold_s=${SESSION_DELIVERY_HOLD_S:-15}
 for value in "$heartbeat_ms" "$settle_s" "$hold_s"; do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || refuse "SESSION_DELIVERY_HEARTBEAT_MS, _SETTLE_S and _HOLD_S take positive integers, not '$value'"
 done
-read -r ephemeral_low _ </proc/sys/net/ipv4/ip_local_port_range
-readonly port_floor=10000
-((ephemeral_low > port_floor + 1000)) ||
-  refuse "the kernel's ephemeral range starts at ${ephemeral_low}, leaving no ports below it above ${port_floor}"
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 readonly repo_root
+readonly held_port="$repo_root/scripts/e2e/lib/held-port.py"
+# shellcheck source-path=SCRIPTDIR source=lib/port-file.sh
+. "$repo_root/scripts/e2e/lib/port-file.sh"
 [ -f "$repo_root/node_modules/nats/package.json" ] || refuse "$repo_root/node_modules has no nats package: run bun install in the checkout"
 work=${SESSION_DELIVERY_EVIDENCE_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/$me.XXXXXXXX")}
-mkdir -p "$work/logs" "$work/bin" "$work/sessions"
+mkdir -p "$work/logs" "$work/bin" "$work/sessions" "$work/ports"
 work=$(cd -- "$work" && pwd -P)
 readonly work
 events="$work/events.jsonl"
@@ -213,7 +223,10 @@ cleanup() {
   trap - EXIT
   set +e
   for label in pi cc; do close_fd "$label"; stop_label "$label"; done
-  for label in proxy-pi proxy-cc dispatch proxy-dispatch listener-shared listener-dispatch natsd; do stop_label "$label"; done
+  for label in proxy-pi proxy-cc dispatch proxy-dispatch listener-shared listener-dispatch natsd \
+    keep-proxy-pi keep-proxy-cc keep-proxy-dispatch keep-dispatch keep-listener-shared keep-listener-dispatch; do
+    stop_label "$label"
+  done
   if [[ -n "$database" ]]; then
     psql "$LEGION_TEST_PG_DSN" -qtA -c "drop database if exists \"$database\" with (force)" >/dev/null 2>&1 ||
       printf '%s: could not drop database %s\n' "$me" "$database" >&2
@@ -262,20 +275,60 @@ await() {
   done
   "$@" >/dev/null 2>&1 || fail "timed out after ${limit}s waiting for $label: $(tail -n 5 "$log" | tr '\n' ' ')"
 }
-port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
-# pick_port VAR: a loopback port nothing answers on, below the ephemeral range and new to this run.
+# ---- ports ------------------------------------------------------------------------------------
+# Every server's port is held from the kernel's choice until it serves (lib/held-port.py), so no
+# other process can take it in between. A server that restarts in a window serves on a copy of a
+# keeper's socket, so the restart serves the same port. Between two servers a kept port still
+# listens and nothing answers (the kernel queues the connection), so every poll of one carries a
+# timeout (curl --max-time, read -t) and takes the timeout for down.
+
+# await_port_file LABEL FILE VAR: waits (read_port_file, lib/port-file.sh) for FILE, the port file
+# held-port.py writes for LABEL's process, and assigns VAR its port. The locals' names are ones no
+# caller passes.
+await_port_file() {
+  local _apf_label=$1 _apf_file=$2 _apf_var=$3 _apf_status=0
+  read_port_file "$_apf_file" "${pid[$_apf_label]}" "$_apf_var" || _apf_status=$?
+  case $_apf_status in
+  0) ;;
+  1) fail "$_apf_label exited before it held a port: $(tail -n 5 "$work/logs/$_apf_label.log" | tr '\n' ' ')" ;;
+  *) fail "timed out after ${port_file_seconds}s waiting for $_apf_label to hold a port" ;;
+  esac
+}
+# keep_port LABEL VAR: the keeper LABEL (held-port.py keep), which holds one socket listening on
+# 127.0.0.1 for the whole run and hands a copy to each server started with
+# `held-port.py exec --from $work/ports/LABEL.sock`; assigns VAR its port.
+keep_port() {
+  rm -f "$work/ports/$1.port" "$work/ports/$1.sock"
+  (isolated_exec "" -- python3 "$held_port" keep --port-file "$work/ports/$1.port" --socket "$work/ports/$1.sock") \
+    >>"$work/logs/$1.log" 2>&1 &
+  pid[$1]=$!
+  await_port_file "$1" "$work/ports/$1.port" "$2"
+}
+# reported_port LOG PATTERN VAR: assigns VAR the port a process that bound port 0 itself reported,
+# the digits right after the first match of the extended regular expression PATTERN in LOG. It
+# fails while LOG holds no such line, so it is also the poll that waits for one.
+reported_port() {
+  local match
+  match=$(grep -m1 -oE -- "$2[0-9]+" "$1" 2>/dev/null) || return 1
+  printf -v "$3" '%s' "${match##*[!0-9]}"
+}
+# pick_port VAR: a loopback port nothing answers on, below the kernel's ephemeral range (which
+# every connection's own local port comes from) and new to this run. Only for a server that can
+# only bind a number it is given: a --build-from listener that takes no ENVOY_LISTEN_FD.
 picked_ports=" "
 pick_port() {
-  local candidate i
+  local candidate i low
+  read -r low _ </proc/sys/net/ipv4/ip_local_port_range
+  ((low > 11000)) || fail "the kernel's ephemeral range starts at ${low}, leaving no ports below it above 10000"
   for ((i = 0; i < 100; i++)); do
-    candidate=$((port_floor + RANDOM % (ephemeral_low - port_floor)))
+    candidate=$((10000 + RANDOM % (low - 10000)))
     [[ "$picked_ports" != *" ${candidate} "* ]] || continue
-    port_open "$candidate" && continue
+    (exec 3<>"/dev/tcp/127.0.0.1/$candidate") 2>/dev/null && continue
     picked_ports+="${candidate} "
     printf -v "$1" '%s' "$candidate"
     return 0
   done
-  fail "no free loopback port below ${ephemeral_low}"
+  fail "no free loopback port below ${low}"
 }
 new_uuid() { cat /proc/sys/kernel/random/uuid; }
 
@@ -323,36 +376,53 @@ chmod +x "$work/bin/claude"
 bun_bin=$(command -v bun)
 claude_reported=$("$work/bin/claude" --version 2>"$work/logs/claude-version.log") ||
   fail "bunx could not run Claude Code $claude_version; see $work/logs/claude-version.log"
-note "pi-envoy $(jq -r .version "$work/pi-envoy/package.json"); claude-envoy $(jq -r .version "$claude_plugin/package.json"); Claude Code ${claude_reported}; omp $("$omp" --version 2>/dev/null | head -n 1); bridge argv ${replay_flag[*]:-without --replay-user-messages}"
+# A listener that takes ENVOY_LISTEN_FD serves on a keeper's socket; an earlier revision's binds the
+# number it is given (PORT), so it gets a picked one.
+listener_held=0
+if grep -rqs --include='*.go' --exclude='*_test.go' ENVOY_LISTEN_FD "$tree/packages/envoy/cmd/listener"; then listener_held=1; fi
+listener_ports="serve on kept ports (ENVOY_LISTEN_FD)"
+((listener_held == 1)) || listener_ports="take no ENVOY_LISTEN_FD: each binds a picked port, again on its restart"
+note "pi-envoy $(jq -r .version "$work/pi-envoy/package.json"); claude-envoy $(jq -r .version "$claude_plugin/package.json"); Claude Code ${claude_reported}; omp $("$omp" --version 2>/dev/null | head -n 1); bridge argv ${replay_flag[*]:-without --replay-user-messages}; the listeners ${listener_ports}"
 
 # ---- services ---------------------------------------------------------------------------------
 begin services
-nats_port="" monitor_port="" shared_port="" dispatch_listener_port="" dispatch_port="" proxy_pi_port="" proxy_cc_port="" proxy_dispatch_port=""
-pick_port nats_port
-pick_port monitor_port
-pick_port shared_port
-pick_port dispatch_listener_port
-pick_port dispatch_port
-pick_port proxy_pi_port
-pick_port proxy_cc_port
-pick_port proxy_dispatch_port
-nats_url="nats://127.0.0.1:${nats_port}"
-nats_monitor="http://127.0.0.1:${monitor_port}"
-declare -A listener_port=([shared]=$shared_port [dispatch]=$dispatch_listener_port)
-listener_url() { printf 'http://127.0.0.1:%s' "${listener_port[$1]}"; }
-dispatch_url="http://127.0.0.1:${dispatch_port}"
-
-(isolated_exec "" HOME="$work/nats-home" -- "$work/bin/natsd" -p "$nats_port" -m "$monitor_port" -js -store_dir "$work/nats-store") \
+# natsd binds the ports the kernel chooses (-p -1, -m -1) and reports both in its log.
+(isolated_exec "" HOME="$work/nats-home" -- "$work/bin/natsd" -p -1 -m -1 -js -store_dir "$work/nats-store") \
   >"$work/logs/natsd.log" 2>&1 &
 pid[natsd]=$!
+nats_port="" monitor_port=""
+await natsd "$work/logs/natsd.log" 30 reported_port "$work/logs/natsd.log" 'Listening for client connections on [^ ]*:' nats_port
+await natsd "$work/logs/natsd.log" 30 reported_port "$work/logs/natsd.log" 'Starting http monitor on [^ ]*:' monitor_port
+nats_url="nats://127.0.0.1:${nats_port}"
+nats_monitor="http://127.0.0.1:${monitor_port}"
 nats_ready() { curl -fsS --max-time 2 "${nats_monitor}/healthz" | jq -e '.status == "ok"'; }
 await natsd "$work/logs/natsd.log" 30 nats_ready
+
+# Each listener, Dispatch and each proxy restarts in a window, and the sessions' envoy.json and
+# Dispatch's environment name their ports before they first start: each serves on a keeper's port.
+declare -A listener_port=() proxy_port=()
+for name in shared dispatch; do
+  if ((listener_held == 1)); then
+    keep_port "keep-listener-$name" "listener_port[$name]"
+  else
+    pick_port "listener_port[$name]"
+  fi
+done
+for label in proxy-pi proxy-cc proxy-dispatch; do keep_port "keep-$label" "proxy_port[$label]"; done
+dispatch_port=""
+keep_port keep-dispatch dispatch_port
+listener_url() { printf 'http://127.0.0.1:%s' "${listener_port[$1]}"; }
+dispatch_url="http://127.0.0.1:${dispatch_port}"
 
 listener_ready() { curl -fsS --max-time 2 "$(listener_url "$1")/healthz" | jq -e '.status == "healthy"'; }
 start_listener() {
   local name=$1
+  local -a serve=("$work/bin/envoy-listener")
+  if ((listener_held == 1)); then
+    serve=(python3 "$held_port" exec --from "$work/ports/keep-listener-$name.sock" --fd-env ENVOY_LISTEN_FD -- "${serve[@]}")
+  fi
   (isolated_exec "" HOME="$work/listener-$name-home" PORT="${listener_port[$name]}" ENVOY_LISTEN_HOST=127.0.0.1 \
-    ENVOY_MACHINE_ID="$name" NATS_URLS="$nats_url" -- "$work/bin/envoy-listener") \
+    ENVOY_MACHINE_ID="$name" NATS_URLS="$nats_url" -- "${serve[@]}") \
     >>"$work/logs/listener-$name.log" 2>&1 &
   pid[listener-$name]=$!
   await "listener-$name" "$work/logs/listener-$name.log" 90 listener_ready "$name"
@@ -361,19 +431,27 @@ start_listener() {
 start_listener shared
 start_listener dispatch
 
-# start_proxy LABEL PORT: socat in a process group of its own (setsid execs it in place), one fork
-# per connection, so one SIGKILL to the group cuts every connection through it.
+# proxy_ready PORT: a connection to PORT reads natsd's INFO line within 2 s, so the proxy there
+# accepts and forwards (a kept port with no proxy accepts the connection and sends nothing).
+proxy_ready() {
+  local word=""
+  (exec 3<>"/dev/tcp/127.0.0.1/$1" && read -r -t 2 -N 4 word <&3 && [[ "$word" == INFO ]]) 2>/dev/null
+}
+# start_proxy LABEL: socat forwarding to natsd from the socket the keeper keep-LABEL holds
+# (ACCEPT-FD; held-port.py names the descriptor PROXY_LISTEN_FD, which socat does not read), one
+# fork per connection, in a process group of its own (setsid and held-port.py exec in place), so
+# one SIGKILL to the group cuts every connection through it and the keeper keeps the port.
 start_proxy() {
-  local label=$1 port=$2 group
-  (isolated_exec "" -- setsid socat "TCP-LISTEN:${port},bind=127.0.0.1,reuseaddr,fork" "TCP:127.0.0.1:${nats_port}") \
-    >>"$work/logs/$label.log" 2>&1 &
+  local label=$1 group
+  (isolated_exec "" -- setsid python3 "$held_port" exec --from "$work/ports/keep-$label.sock" --fd-env PROXY_LISTEN_FD -- \
+    socat "ACCEPT-FD:3,fork" "TCP:127.0.0.1:${nats_port}") >>"$work/logs/$label.log" 2>&1 &
   pid[$label]=$!
-  wait_until 10 port_open "$port" || fail "$label did not listen on 127.0.0.1:${port} within 10s"
+  await "$label" "$work/logs/$label.log" 10 proxy_ready "${proxy_port[$label]}"
   read -r _ _ _ _ group _ <"/proc/${pid[$label]}/stat"
   [[ "$group" == "${pid[$label]}" ]] || fail "$label (pid ${pid[$label]}) is not in a process group of its own"
 }
-start_proxy proxy-pi "$proxy_pi_port"
-start_proxy proxy-cc "$proxy_cc_port"
+start_proxy proxy-pi
+start_proxy proxy-cc
 
 database="session_delivery_$$_$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
 psql "$LEGION_TEST_PG_DSN" -qtA -c "create database \"$database\"" >/dev/null || fail "could not create database $database in LEGION_TEST_PG_DSN"
@@ -387,13 +465,14 @@ start_dispatch() {
     DATABASE_URL="$database_url" DISPATCH_AGENT_TOKEN="$agent_token" DISPATCH_IDENTITY=header:X-Dispatch-User \
     DISPATCH_IDENTITY_HEADER_TRUSTED=1 DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$dispatch_port" \
     DISPATCH_SERVER_URL="$dispatch_url" DISPATCH_SIGNING_KEY="$signing_key" DISPATCH_WEB_DIST="$work/web-dist" \
-    ENVOY_URL="$(listener_url dispatch)" NATS_URLS="nats://127.0.0.1:${proxy_dispatch_port}" -- "$work/bin/envoy-dispatch") \
+    ENVOY_URL="$(listener_url dispatch)" NATS_URLS="nats://127.0.0.1:${proxy_port[proxy-dispatch]}" -- \
+    python3 "$held_port" exec --from "$work/ports/keep-dispatch.sock" --fd-env DISPATCH_LISTEN_FD -- "$work/bin/envoy-dispatch") \
     >>"$work/logs/dispatch.log" 2>&1 &
   pid[dispatch]=$!
   await dispatch "$work/logs/dispatch.log" 120 dispatch_ready
   note "Dispatch (pid ${pid[dispatch]}) serving ${dispatch_url}, with NATS"
 }
-start_proxy proxy-dispatch "$proxy_dispatch_port"
+start_proxy proxy-dispatch
 start_dispatch
 
 # dispatch_user METHOD PATH [BODY]: a request as the person live-delivery (the trusted header).
@@ -431,18 +510,18 @@ natives=$HOME/.omp/natives
 if [ -n "${XDG_DATA_HOME:-}" ] && [ -d "$XDG_DATA_HOME/omp" ]; then natives=$XDG_DATA_HOME/omp/natives; fi
 
 prepare_session() {
-  local label=$1 proxy_port=$2
+  local label=$1
   home[$label]="$work/sessions/$label"
   mkdir -p "${home[$label]}/home/.config/legion" "${home[$label]}/home/.omp" "${home[$label]}/cwd" \
     "${home[$label]}/sessions" "${home[$label]}/tmp" "${home[$label]}/config"
   local config=${home[$label]}/home/.config/legion/envoy.json
   [[ "$label" == pi ]] || config=${home[$label]}/config/envoy.json
-  jq -n --arg url "$(listener_url shared)" --arg nats "nats://127.0.0.1:${proxy_port}" \
+  jq -n --arg url "$(listener_url shared)" --arg nats "nats://127.0.0.1:${proxy_port[proxy-$label]}" \
     '{envoy: {url: $url, natsUrls: [$nats]}, dispatch: {enabled: false}}' >"$config"
   launches[$label]=0
 }
-prepare_session pi "$proxy_pi_port"
-prepare_session cc "$proxy_cc_port"
+prepare_session pi
+prepare_session cc
 [ -d "$natives" ] && ln -sfT "$natives" "${home[pi]}/home/.omp/natives"
 jq -n --arg bun "$bun_bin" --arg entry "$claude_plugin/dist/envoy-channel.js" --arg data "${home[cc]}/config/envoy-plugin-data" \
   '{mcpServers: {legion: {command: $bun, args: [$entry], env: {CLAUDE_PLUGIN_DATA: $data}}}}' >"${home[cc]}/config/mcp.json"
@@ -472,7 +551,7 @@ start_pi() {
     --session-dir "${home[pi]}/sessions" --no-extensions --no-skills --no-rules --no-tools --no-lsp
     --no-title --append-system-prompt "$pi_note" -e "$pi_plugin")
   [[ -z "$resume" ]] || args+=(--resume "$resume")
-  (isolated_exec "" HOME="${home[pi]}/home" TMPDIR="${home[pi]}/tmp" OMP_SESSION_STORAGE=file \
+  (isolated_exec ANTHROPIC_BASE_URL HOME="${home[pi]}/home" TMPDIR="${home[pi]}/tmp" OMP_SESSION_STORAGE=file \
     ENVOY_HEARTBEAT_MS="$heartbeat_ms" ANTHROPIC_API_KEY="$anthropic_key" -- setsid "$omp" "${args[@]}") \
     <"${home[pi]}/stdin" >"$(rpc_log pi)" 2>"$(err_log pi)" &
   pid[pi]=$!
@@ -493,8 +572,7 @@ start_cc() {
   [[ "$how" != fresh ]] || sid[cc]=$(new_uuid)
   launches[cc]=$((launches[cc] + 1))
   open_stdin cc
-  local keep=""
-  [[ -z "${BUN_INSTALL_CACHE_DIR:-}" ]] || keep=BUN_INSTALL_CACHE_DIR
+  local keep="ANTHROPIC_BASE_URL BUN_INSTALL_CACHE_DIR"
   (cd "${home[cc]}/cwd" && isolated_exec "$keep" HOME="${home[cc]}/home" TMPDIR="${home[cc]}/tmp" CLAUDE_CONFIG_DIR="${home[cc]}/config" \
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_DISABLE_CRON=1 LEGION_ROLE=implementer \
     LEGION_ISSUE="$followed_issue" ENVOY_HEARTBEAT_MS="$heartbeat_ms" ANTHROPIC_API_KEY="$anthropic_key" -- \
@@ -748,8 +826,8 @@ run_window() {
     publish_dispatch b
     publish_rest b "$via"
     sleep 3
-    start_proxy proxy-pi "$proxy_pi_port"
-    start_proxy proxy-cc "$proxy_cc_port"
+    start_proxy proxy-pi
+    start_proxy proxy-cc
     note "both proxies back"
     ;;
   c)
@@ -779,7 +857,7 @@ run_window() {
     note "Dispatch's NATS connection cut, its writes made, and Dispatch SIGKILLed right after they returned"
     publish_rest e "$via"
     sleep 3
-    start_proxy proxy-dispatch "$proxy_dispatch_port"
+    start_proxy proxy-dispatch
     local restarted
     restarted=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)
     start_dispatch
