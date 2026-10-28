@@ -844,6 +844,7 @@ func TestAnIssueTitleChangeReachesPagesThatNameTheIssue(t *testing.T) {
 		}
 	}
 
+	rig.settle(t)
 	start := rig.mark()
 	patchHubIssue(t, rig.handler, named, map[string]any{"title": "Ship the widgets"})
 	delta := conn.delta(t, 3*time.Second, "names")
@@ -1111,6 +1112,15 @@ func (r *hubRig) startCaughtUp(t *testing.T) int64 {
 	head := eventHead(t, r.database)
 	r.waitForEventCursor(t, head, "the log's head")
 	return head
+}
+
+// settle waits for the hub's event cursor to reach the log's head, so that the events the test's
+// setup wrote are all acted on before it measures what happens next. A transaction another package
+// holds open on the shared test Postgres can keep the safe horizon below them for a while, and a
+// catch-up that reaches them only then would count against the measurement.
+func (r *hubRig) settle(t *testing.T) {
+	t.Helper()
+	r.waitForEventCursor(t, eventHead(t, r.database), "the log's head before the measurement")
 }
 
 // waitForEventCursor waits for the hub's event cursor to reach want. The wait is generous: an open
@@ -1405,6 +1415,7 @@ func TestAPresetViewSendsItsOldestPullRequestLeavingWithoutAReadingTheDatabase(t
 	rig.hub.Subscribe(conn, subscribeFrame("p", presetView(deliveryLiveTimeline, 28, "")))
 	snapshot := conn.snapshot(t, 5*time.Second, "p")
 	rig.waitConnected(t)
+	rig.settle(t)
 	before := acquires(rig.database)
 
 	delta := conn.delta(t, 4*time.Second, "p")
@@ -1426,6 +1437,7 @@ func TestAPipelineViewMovesItsDaysAtMidnightWithoutReadingTheDatabase(t *testing
 	rig.hub.Subscribe(conn, subscribeFrame("p", livePipelineView(nil)))
 	conn.snapshot(t, 5*time.Second, "p")
 	rig.waitConnected(t)
+	rig.settle(t)
 	before := acquires(rig.database)
 
 	now := clock.Now()
@@ -1789,6 +1801,7 @@ func TestABurstCoalescesIntoOneRecompute(t *testing.T) {
 	rig.hub.Subscribe(conn, subscribeFrame("p", presetView(deliveryLiveTimeline, 7, "")))
 	conn.snapshot(t, 5*time.Second, "p")
 
+	rig.settle(t)
 	start := rig.mark()
 	now := clock.Now()
 	for n := 1; n <= 50; n++ {
@@ -1866,6 +1879,7 @@ func TestAChangeOutsideAWindowRecomputesNothing(t *testing.T) {
 	rig.hub.Subscribe(conn, subscribeFrame("m", measuresRange(from, to, "")))
 	conn.snapshot(t, 5*time.Second, "m")
 
+	rig.settle(t)
 	start := rig.mark()
 	upsertPR(t, rig.database, hubPR(1, time.Now().UTC()))
 	rig.hub.catchUpNow()
