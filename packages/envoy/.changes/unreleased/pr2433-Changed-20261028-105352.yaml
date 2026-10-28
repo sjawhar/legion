@@ -4,10 +4,12 @@ body: |-
     refuses, with HTTP 400 `ASK_BLOCK_TEXT`, an edit of a decision that breaks its
     content rule, unless the edit sends `options`, which rebuilds them as one list and repairs the
     ask. The options sent must include, with the same label and description, every option the
-    decision's lists hold that its ask does not, which the reason quotes in full, so an edit built
-    from the ask and the reason never deletes or rewrites what the other person wrote; a decision
-    whose lists hold two options with one label is refused whatever the edit sends, quoting both,
-    so a document edit renames or removes one first. Before, an edit of only its urgency or `multiple` wrote its options, joined across both
+    decision's lists hold that its ask does not, which the reason quotes in full; the rebuilt list
+    keeps each option's plain text, so such an option that holds more below its text (a nested list,
+    a second paragraph) is refused whatever the edit sends, quoting that content, and a document
+    edit moves or deletes it first. A decision whose lists hold two options with one label is
+    refused whatever the edit sends, quoting both: remove one with a document edit, then edit the
+    ask sending every option, the removed one renamed. Before, an edit of only its urgency or `multiple` wrote its options, joined across both
     lists, to the ask. A decision holding a paragraph after its options is refused whatever the
     edit sends, `options` included, and the reason quotes that text: the route never moves it into
     the question nor deletes it, so a document edit moves or deletes it first.

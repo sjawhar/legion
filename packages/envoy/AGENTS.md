@@ -2181,10 +2181,14 @@ reason is the content rule's text plus "send options to rebuild the options as o
 options sent must include, exactly (label and description), every option the block's lists hold
 that the ask row does not hold exactly (the row keeps its options from before the break;
 `SetAskBlockText` reads them first), else the edit is refused quoting each such option in full as
-`"Label: description"`, so an edit built from the row and the reason never deletes or rewrites
-what another collaborator wrote; the reason for an edit with no options quotes them too. Two
-options in the block sharing a label cannot be rebuilt as one list, so every edit of such an ask
-is refused quoting both and pointing to a document edit. Before,
+`"Label: description"`; the reason for an edit with no options quotes them too. The rebuild
+writes each option as its plain text (`Label: description`, marks and links dropped), so an option
+the block holds and the row does not that holds more than its first paragraph (a nested list, a
+second paragraph) refuses every edit, quoting that content and pointing to a document edit
+(`dispatch doc-edit`). Two options in the block sharing a label cannot be rebuilt as one list, so
+every edit of such an ask is refused quoting both; the reason names the path that works: remove
+one with a document edit, then edit the ask sending every option, the removed one renamed (a
+document edit that only renames one leaves the ask broken, which it refuses). Before,
 an edit naming only `urgency` or `multiple` wrote the options joined across both lists to the row.
 An ask holding a non-list block after its first list (a paragraph after its options) is refused
 whatever the edit sends, `options` included (`refuseAskContentEdit` in `docs/ask_block_text.go`):
