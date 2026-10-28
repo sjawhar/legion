@@ -2,13 +2,13 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-548",
-  "completed": "2026-10-28T12:32:29Z",
-  "round": 5,
+  "completed": "2026-10-28T13:57:58Z",
+  "round": 6,
   "decision": "approved",
-  "reviewedHead": "10cee132b8440a69337315187291a9775cb64a5b",
-  "codeHead": "bb869e980064227a3844cde2bc81c865c6fe024a",
-  "previousApprovedHead": "815c711a9bee9a5ccae7b16dbd21e4135169b8dc",
-  "fingerprint": "815c711a 86ee20ea19d7246f2cf2cd16d418426b2ab32ebf45b362bcdf10d2af56388ab1 -> 10cee132 d4c90c021fe1fa1beea9555513faf0558b6c02828bfa2f1d5abf90543c192fcb: changed (the conflict merge d26157e2 of main aeeee6c0 moved the CHANGELOG entries into changie fragments), so a new round",
+  "reviewedHead": "5e3b80ec9382e4cd3787adc822222033a9504a54",
+  "codeHead": "90142b43da37b0502a1549953a225b832512c9df",
+  "previousApprovedHead": "478ede921fbb0b7a20ab1a5fa3262d8b8db5235f",
+  "fingerprint": "478ede92 d4c90c021fe1fa1beea9555513faf0558b6c02828bfa2f1d5abf90543c192fcb -> 5e3b80ec 9e0d4632c5b38aca59db47f8d78f3b69ede1300904b066c746db4e98ea3245f9: changed (the conflict merge 5384eb84 of main 2d872499 moved this PR's release.yaml hunk into main's restructured file), so a new round",
   "critical": 0,
   "important": 0,
   "minor": 4,
@@ -16,17 +16,17 @@
     {
       "severity": "minor",
       "file": "packages/*/.changes/unreleased/pr2331-*.yaml",
-      "description": "Naming only: the 12 fragments are named and tagged Issue=pr2331 where AGENTS.md:151 asks for the issue key (INFRA-548), and their bodies dropped the (INFRA-548) reference the old entries carried. Nothing reads the name or Issue field (release-push.sh fold_plan needs only a .yaml file; changeFormat renders only the body; push-fold deletes the files), so no behaviour, error or gate is affected."
+      "description": "Naming only, carried from round 5: fragments named and tagged Issue=pr2331 rather than the issue key AGENTS.md asks for; nothing reads the name or tag."
     },
     {
       "severity": "minor",
       "file": "packages/envoy-client/test/stall-proxy.ts",
-      "description": "Cleanup (Fast-follow): closedAt doc does not say a connection paused by freeze() never records its close; dead frozen guards in the data handlers."
+      "description": "Cleanup (Fast-follow): closedAt doc for paused connections; dead frozen guards in the data handlers."
     },
     {
       "severity": "minor",
       "file": "packages/envoy-client/test/stall-scenario.ts",
-      "description": "Cleanup (Fast-follow): RECOVERY_BOUND_MS duplicated in nats-stall.test.ts and a bare 60_000 in claude-envoy's envoy-channel-stall.test.ts."
+      "description": "Cleanup (Fast-follow): RECOVERY_BOUND_MS duplicated; a bare 60_000 in claude-envoy's envoy-channel-stall.test.ts."
     },
     {
       "severity": "minor",
@@ -35,15 +35,15 @@
     }
   ],
   "verified": [
-    "Per-file interdiff of this issue's change, old b295a3fb->c2db0543 vs new aeeee6c0->d26157e2: every source, test, workflow, patch and dist file is identical; the five CHANGELOG.md edits left the diff (each equals main's); 12 changie fragments were added, one per old entry with the same kinds; .dispatch/architecture/claude-envoy-bridge.md and envoy-client.md keep main's new sentence word for word with this issue's text after it.",
-    "Both thermonuclear agents rendered the fragments with changie v1.26.0 (the fold's pinned binary): every kind valid, continuation lines indented, no '## ' line; no CI check reads fragments on a pull request."
+    "Per-file interdiff of this issue's change, old aeeee6c0->d26157e2 vs new 2d872499->5384eb84: every file identical but .github/workflows/release.yaml.",
+    "release.yaml resolution: --patch-path patches/ and positional patches/ in main's PI_ENVOY_VERSION_ARGS (release.yaml:109-117), satisfying release-bump.sh:56-61; main's on.push.paths already lists patches/** (release.yaml:9) and pi_envoy_build is gated only on main, so the old pi_envoy paths-filter entry has no counterpart to carry. packages/pi-shared/test/skills-partition.test.ts passes (7/7). The deep-review agent ran release-bump 46/46, release-push 437/437 and check-release-credentials 240/240 tests, and a scratch-clone patches/-only commit bumped pi-envoy 99.0.0 -> 99.0.1."
   ],
   "thermonuclear": {
-    "head": "10cee132",
-    "deepReview": "Verdict: APPROVE at 10cee132 (Minor: fragment naming)",
-    "codeQuality": "Verdict: CHANGES at 10cee132, its one finding the fragment naming, marked cleanup-only; judged Minor by the reviewer"
+    "head": "5e3b80ec",
+    "deepReview": "Verdict: APPROVE at 5e3b80ec",
+    "codeQuality": "Verdict: APPROVE at 5e3b80ec"
   },
-  "ci": "Required checks at code head bb869e98 (newest pull_request run's head): lint, typecheck, pr-title success; test failed in attempt 1 on TestARateLimitedPermissionReadWaitsTheTimeGitHubNames (packages/daemon/internal/intake, 'the permission was read 3 times, want twice'), a known load flake tracked as dispatch://INFRA-400 in code this PR does not touch; re-run once with gh run rerun --failed, attempt 2 completed success at 12:32Z. Compare bb869e98...10cee132 changes only .legion/.",
-  "threads": "All four threads (PRRT_kwDORFy7ds6wkMTK, PRRT_kwDORFy7ds6wkMTS, PRRT_kwDORFy7ds6wkMTU, PRRT_kwDORFy7ds6xDx3g) carry the reviewer's answer and are resolved; no new thread this round; no bot threads.",
-  "proofLines": "E2E (implementer) and E2E (tester) both name d26157e2 on Bun 1.4.4."
+  "ci": "Required checks at code head 90142b43 (newest pull_request run's head): lint, typecheck, test and pr-title completed success at 13:57Z; compare 90142b43...5e3b80ec changes only .legion/ (1 file).",
+  "threads": "All four threads carry the reviewer's answer and are resolved; none new; no bot threads.",
+  "proofLines": "E2E (implementer) and E2E (tester) both name 5384eb84."
 }
