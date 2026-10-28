@@ -1,0 +1,13 @@
+kind: Changed
+body: |-
+    A Markdown document now nests at most 32 typed blocks inside one another, whatever other blocks
+    stand between them, within its 100 blocks. A document write refuses a typed block opened inside
+    32 typed blocks, `400 INVALID_MARKDOWN` with `line N opens a typed block inside 32 typed blocks;
+    a document nests at most 32 typed blocks`, and a write whose own markdown nests within the bound
+    but lands deep enough that the result would nest past it is refused with `the result nests N
+    typed blocks inside one another` (an accepted suggestion's `INVALID_OP` on `replace_with`). 32 is
+    where the browser's parser stops opening `:::` blocks, so the server stores no document the
+    browser would read differently.
+time: 2026-10-28T13:34:58.770962034Z
+custom:
+    Issue: pr2403

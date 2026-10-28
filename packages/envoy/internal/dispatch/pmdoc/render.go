@@ -156,7 +156,8 @@ func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool, spanCe
 	// misread; there it is `***`, the same length. A `---` there opens front matter: a later line
 	// that is `---` - a second rule, a code line - closes it and everything up to there reads as
 	// front matter, and with no such line the browser editor's parser, having tried the front
-	// matter to the document's end, reads no list, quote or footnote definition in the rest.
+	// matter to the document's end, reads no list, quote, footnote definition or typed block in the
+	// rest.
 	if doc.Children[0].Type == "hr" {
 		if front, _, _ := parseFrontmatterBlock(r.b.Bytes()); front != nil || holdsAContainerTheBrowserDrops(doc) {
 			copy(r.b.Bytes(), "***")
@@ -174,12 +175,15 @@ func holdsBrowserOnlyShape(markdown []byte) bool {
 }
 
 // holdsAContainerTheBrowserDrops reports whether doc holds, at its top level, a block the browser
-// editor's parser reads no more after an unclosed `---` opener: a list, a quote or a footnote
-// definition.
+// editor's parser reads no more after an unclosed `---` opener: a list, a quote, a footnote
+// definition or a typed block (frontmatterAttempt).
 func holdsAContainerTheBrowserDrops(doc *Node) bool {
 	for _, child := range doc.Children {
 		switch child.Type {
 		case "bullet_list", "ordered_list", "blockquote", "footnote_definition":
+			return true
+		}
+		if IsTypedBlock(child.Type) {
 			return true
 		}
 	}

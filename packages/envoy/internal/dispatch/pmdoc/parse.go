@@ -38,7 +38,7 @@ var blockReader = markdownReader{md: goldmark.New(
 	goldmark.WithParserOptions(
 		parser.WithBlockParsers(
 			util.Prioritized(elementBlockCounter{}, -1),
-			util.Prioritized(nestingGuard{BlockParser: &typedDirectiveParser{}}, 950),
+			util.Prioritized(frontmatterAttempt{nestingGuard{BlockParser: &typedDirectiveParser{}}}, 950),
 			util.Prioritized(&unsupportedDirectiveParser{}, 900),
 			util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 999),
 		),
