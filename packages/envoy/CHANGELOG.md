@@ -885,6 +885,14 @@
 
 ### Changed
 
+- A write to a Dispatch document with many open anchored comments and asks no longer costs a walk
+  of the whole document per anchor. Every edit, upload, version and new anchored comment refreshes
+  the open anchors from one walk (`pmdoc.FindMarks`) with the same quotes, rows, events and order
+  as before. An upload re-anchors every row with one quote finder and one mark writer, and a miss
+  it drops no longer ranks the nearest blocks. A new anchored comment or ask reads its anchor off
+  the tree its write already read, and `MarkRange` and `Unmark` read the document's text ranges
+  in one pass. On a 150 KB document a doc-edit, an anchored comment and an upload cost the same at
+  80 open anchors as at 10.
 - A dead session's subscriptions now stay 5 minutes longer: the interest reaper deletes one only
   15 minutes after its row's last write, where it was 10, because it now adds
   `store.InterestRefreshAge` to its grace window. For that time the subscribers page and the

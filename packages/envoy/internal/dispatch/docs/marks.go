@@ -88,7 +88,6 @@ type Anchored struct {
 
 // MarkQuote marks one matching quote and returns what the new mark anchors to.
 func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (Anchored, error) {
-	var anchored Anchored
 	err := s.applyLive(ctx, artifactID, mark.By, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		tree, err := startTree(current, doc)
@@ -100,23 +99,19 @@ func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpe
 		transact(func(txn *crdt.Transaction) {
 			_, markErr = markQuoteInTxn(txn, fragment, tree, quote, occurrence, nil, mark)
 		})
-		if markErr != nil {
-			return markErr
-		}
-
-		tree, err = treeOf(doc)
-		if err != nil {
-			return err
-		}
-		anchored, err = readAnchored(tree, mark.Kind, mark.ID)
-		if errors.Is(err, ErrAnchorMissing) {
-			return fmt.Errorf("%w: written mark %q is missing", ErrDocSchema, mark.ID)
-		}
-		if err != nil {
-			return err
-		}
-		return nil
+		return markErr
 	})
+	if err != nil {
+		return Anchored{}, err
+	}
+	// The anchor is read off the tree applyLive read from the fork after this callback wrote the
+	// mark and kept as the operation's tree: nothing changes the fork between the callback's end
+	// and that read, so reading the fork again in the callback would walk the whole document a
+	// second time for the same tree.
+	anchored, err := readAnchored(joinedLiveWrite(ctx, artifactID).tree, mark.Kind, mark.ID)
+	if errors.Is(err, ErrAnchorMissing) {
+		return Anchored{}, fmt.Errorf("%w: written mark %q is missing", ErrDocSchema, mark.ID)
+	}
 	if err != nil {
 		return Anchored{}, err
 	}
@@ -143,10 +138,17 @@ func markQuoteInTxn(txn *crdt.Transaction, fragment *crdt.YXmlFragment, doc *pmd
 	if err != nil {
 		return pmdoc.Range{}, err
 	}
-	if err := pmdoc.MarkRange(txn, fragment, range_, spec.pmMark()); err != nil {
-		return pmdoc.Range{}, documentSchemaError(err)
+	if err := writeQuoteMark(txn, pmdoc.NewMarkWriter(fragment), range_, spec); err != nil {
+		return pmdoc.Range{}, err
 	}
 	return range_, nil
+}
+
+// writeQuoteMark writes spec's mark over the range a quote resolved to. A refusal to read the
+// fragment's text is the stored document's: a peer can have left it outside the schema after the
+// write read its tree.
+func writeQuoteMark(txn *crdt.Transaction, writer *pmdoc.MarkWriter, range_ pmdoc.Range, spec MarkSpec) error {
+	return documentSchemaError(writer.Mark(txn, range_, spec.pmMark()))
 }
 
 // VerifyMark returns what a browser-written mark anchors to, now or after its next document
@@ -502,13 +504,26 @@ func (s *Service) refreshAnchors(ctx context.Context, tx pgx.Tx, artifactID stri
 		return err
 	}
 	skippedMarkID, skipping := ctx.Value(skippedAnchorRefreshKey{}).(string)
+	skipped := func(mark anchoredMark) bool { return skipping && mark.anchor.MarkID == skippedMarkID }
+	// One walk finds every anchor: a walk per row would make each write quadratic in a document
+	// carrying many anchors. Rows sharing a key look the same result up, each refreshed in turn.
+	keys := make([]pmdoc.MarkRef, 0, len(anchors))
 	for _, mark := range anchors {
-		if skipping && mark.anchor.MarkID == skippedMarkID {
+		if !skipped(mark) {
+			keys = append(keys, pmdoc.MarkRef{Type: mark.markType, ID: mark.anchor.MarkID})
+		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	found := pmdoc.FindMarks(tree, keys)
+	for _, mark := range anchors {
+		if skipped(mark) {
 			continue
 		}
 		refreshed := mark.anchor
-		if _, quote, found := pmdoc.FindMark(tree, mark.markType, mark.anchor.MarkID); found {
-			refreshed.Quote = quote
+		if hit, ok := found[pmdoc.MarkRef{Type: mark.markType, ID: mark.anchor.MarkID}]; ok {
+			refreshed.Quote = hit.Quote
 			refreshed.Orphaned = false
 		} else {
 			refreshed.Orphaned = true

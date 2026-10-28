@@ -365,17 +365,20 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 			attrs  pmdoc.Attrs
 		}
 		reanchors := make([]reanchor, 0, len(anchors))
-		if !repairing {
-			for _, mark := range anchors {
-				range_, _, found := pmdoc.FindMark(current, mark.markType, mark.anchor.MarkID)
-				if !found {
+		if !repairing && len(anchors) > 0 {
+			// One walk reads every row's mark, where one per row would make an upload cost the
+			// document once per open anchor.
+			keys := make([]pmdoc.MarkRef, len(anchors))
+			for index, mark := range anchors {
+				keys[index] = pmdoc.MarkRef{Type: mark.markType, ID: mark.anchor.MarkID}
+			}
+			marks := pmdoc.FindMarks(current, keys)
+			for index, mark := range anchors {
+				found, ok := marks[keys[index]]
+				if !ok {
 					continue
 				}
-				attrs, found := pmdoc.MarkAttrs(current, mark.markType, mark.anchor.MarkID)
-				if !found {
-					return fmt.Errorf("%w: mark %q is missing attributes", ErrDocSchema, mark.anchor.MarkID)
-				}
-				reanchors = append(reanchors, reanchor{mark: mark, range_: range_, attrs: attrs})
+				reanchors = append(reanchors, reanchor{mark: mark, range_: found.Range, attrs: found.Attrs})
 			}
 		}
 		var updateErr error
@@ -389,15 +392,26 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 			if updateErr = pmdoc.Update(transaction, fragment, target); updateErr != nil {
 				return
 			}
+			// One finder over target and one writer over the updated fragment serve every row, so
+			// the upload flattens target and reads the fragment's text ranges once, not once a row.
+			// Both read nothing until the first row needs them. A row whose quote no longer
+			// resolves keeps no mark, so its miss is never described.
+			finder := pmdoc.NewQuoteFinder(target)
+			writer := pmdoc.NewMarkWriter(fragment)
 			for _, reanchor := range reanchors {
-				if _, updateErr = markQuoteInTxn(transaction, fragment, target, reanchor.mark.anchor.Quote, nil, &reanchor.range_.From, MarkSpec{
-					Kind:  MarkKind(reanchor.mark.markType),
-					ID:    reanchor.mark.anchor.MarkID,
-					Attrs: reanchor.attrs,
-				}); errors.Is(updateErr, pmdoc.ErrTargetNotFound) {
-					updateErr = nil
+				range_, err := finder.FindDiscardingMiss(reanchor.mark.anchor.Quote, nil, &reanchor.range_.From)
+				if err == nil {
+					err = writeQuoteMark(transaction, writer, range_, MarkSpec{
+						Kind:  MarkKind(reanchor.mark.markType),
+						ID:    reanchor.mark.anchor.MarkID,
+						Attrs: reanchor.attrs,
+					})
+				}
+				if errors.Is(err, pmdoc.ErrTargetNotFound) {
 					continue
-				} else if updateErr != nil {
+				}
+				if err != nil {
+					updateErr = err
 					return
 				}
 			}
