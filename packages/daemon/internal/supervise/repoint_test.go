@@ -152,10 +152,10 @@ func TestAStaleAddressWithAHeldSuspensionSuspendsTheClaimChargingNothing(t *test
 	}
 }
 
-// (M7) A reclaim relaunch is uncharged: a RoleUnheld on a ready claim leaves Budgets{} unchanged
-// and calls Resume once on the recorded session. A mutation that adds LaunchFailures++ to the
-// replaceProcess path fails here, which pins the uncharged property the death-budget residual rests
-// on: a run of healthy heals must not spend the launch budget.
+// (M7) The reclaim row charges nothing: a RoleUnheld on a ready claim whose Resume succeeds leaves
+// Budgets{} unchanged and calls Resume once on the recorded session. A mutation that adds
+// LaunchFailures++ to the replaceProcess path fails here. A Resume the runtime refuses is still
+// charged, as any launch's is; the fake runtime's Resume does not refuse a live previous process.
 func TestAReclaimRelaunchIsUnchargedAndResumesOnce(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)

@@ -117,21 +117,26 @@ type outbox struct {
 	// limitsMu guards it (deferral, noteLimit).
 	limitsMu sync.Mutex
 	limits   map[githubrest.Budget]rateLimit
-	// The running-but-unheld reclaim limiter (reclaim_unheld.go), guarded by reclaimMu: reclaimInFlight
-	// is each claim admitted for a relaunch to re-claim a lost Envoy role that has not finished booting,
-	// true once the relaunch was handed to its machine; reclaimTries is each claim's history for the
-	// incident in progress (count, backoff, give-up, and the healing clock); and reclaimNextAt is the
-	// earliest the next relaunch of any claim may start (the fleet-wide stagger). reclaimCap bounds how
-	// many relaunch at once, reclaimTryCap how many times one claim is relaunched per incident, and
+	// The running-but-unheld reclaim limiter (reclaim_unheld.go), guarded by reclaimMu:
+	// reclaimInFlight is each claim admitted for a relaunch to re-claim a lost Envoy role that has
+	// not finished booting (reclaimReservation); reclaimTries is each claim's record, of the incident
+	// in progress or, once it healed, its tombstone (reclaimTry); and reclaimNextAt is the earliest the
+	// next relaunch of any claim may start (the fleet-wide stagger). reclaimCap bounds how many
+	// relaunch at once, reclaimTryCap how many times one claim is relaunched per incident, and
 	// reclaimInterval the stagger; each zero takes its maxReclaimsInFlight/maxReclaimAttempts/
-	// reclaimMinInterval default, so a test can set small ones.
+	// reclaimMinInterval default, so a test can set small ones. reclaimGoMu guards reclaimDetach, which
+	// is on while Run runs and hands the exception lane's relaunches to goroutines reclaimWG counts
+	// (reclaimUnheldDetached), so Run's stop joins them.
 	reclaimMu       sync.Mutex
-	reclaimInFlight map[claim.Token]bool
+	reclaimInFlight map[claim.Token]reclaimReservation
 	reclaimTries    map[claim.Token]reclaimTry
 	reclaimNextAt   time.Time
 	reclaimCap      int
 	reclaimTryCap   int
 	reclaimInterval time.Duration
+	reclaimGoMu     sync.Mutex
+	reclaimDetach   bool
+	reclaimWG       sync.WaitGroup
 	// The lane registry (outbox_lanes.go). mu guards running, laneCtx and lanes; running is true
 	// between Run's start and its stop, laneCtx is Run's context, which every lane runs under, and
 	// lanes is each live lane by its key. wg counts the lane goroutines, so Run returns only once
@@ -696,13 +701,20 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 		return fmt.Errorf("%w: %s's notice row %d waits behind its row %d", errNoticeWaits, architect, row.ID, earlier)
 	}
 	notice, key := payload.Published(row.ID)
+	// The reclaim record learns of the publish before it goes out, since a failed forward's report
+	// can come back before Publish returns; a re-held copy is reported under its original's key.
+	keyRow := row.ID
+	if payload.ResendOf != 0 {
+		keyRow = payload.ResendOf
+	}
+	r.noteReclaimPublishing(architect, reclaimCopy{keyRow: keyRow, resends: payload.Resends}, row.ID)
 	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
 	switch {
 	case published == nil:
 		// The listener accepted the publish, which starts the architect's healing clock if it is in
 		// a reclaim incident; accepted is not taken, so the incident ends only once no failed forward
 		// follows for reclaimHealedAfter (reclaim_unheld.go, noteReclaimDelivered).
-		r.noteReclaimDelivered(architect)
+		r.noteReclaimDelivered(architect, row.ID)
 		return nil
 	case !errors.Is(published, notify.ErrNoHolder):
 		return fmt.Errorf("publish notice for %s to its architect %s: %w", row.Issue, architect, published)
@@ -713,9 +725,10 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 		return nil
 	}
 	// The architect can hold its role again, yet the listener has no holder for it (ErrNoHolder is
-	// authoritative: a role genuinely unheld now). If the pane is a running one that went deaf,
-	// relaunch it so its claim boot re-claims; the notice is held either way and lands on the next
-	// copy once the role is re-held.
+	// authoritative: a role genuinely unheld now), which stops any healing clock it has. If the pane
+	// is a running one that went deaf, relaunch it so its claim boot re-claims; the notice is held
+	// either way and lands on the next copy once the role is re-held.
+	r.noteReclaimFailed(architect, row.ID)
 	r.reclaimUnheldRunning(ctx, architect, "publish")
 	return fmt.Errorf("%w: %s holds no role for %s: %w", errNoticeWaits, architect, row.Issue, published)
 }

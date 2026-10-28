@@ -129,8 +129,8 @@ type StalePlugin struct {
 // envoy instance still believes it holds, which the reset can erase
 // (docs/solutions/envoy/heartbeat-role-reassertion-and-regain-hooks.md), so nothing on the session
 // side re-claims until the pane's next claim boot. The pane is relaunched on its own session so
-// that claim boot re-claims the role and the next copy of the held message lands: the uncharged
-// relaunch refreshPlugin and repoint share (replaceProcess), reached only for a ready or idle
+// that claim boot re-claims the role and the next copy of the held message lands: the relaunch
+// refreshPlugin and repoint share (replaceProcess), charged nothing by its row, reached only for a ready or idle
 // claim (the table), so no turn is interrupted, and the relaunch moves the claim out of ready/idle
 // at once, so a burst of publishes or exceptions for one topic triggers one relaunch and no more
 // while it is in flight. Trigger says where it came from — "publish" or "exception" — for the
