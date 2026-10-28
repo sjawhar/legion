@@ -117,7 +117,8 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   whole item. An edit of a comment carries each block's id through the edit: the composer reads
   `GET /api/v1/comments/{id}/blocks` when the edit opens, follows each block's span through every
   edit of the field by the type the browser's own `beforeinput` names (`block-spans.ts`: a block a
-  cut or a drag took out is held and comes back where the same text is pasted or dropped), and the
+  cut or a drag took out is held and comes back where the same text is pasted or dropped, and a
+  block whose whole text alone is typed or pasted over is reworded and keeps its span), and the
   save sends `{body, base_revision, blocks}` (`send-request.ts`, `api.editComment`), or `{body}`
   alone when the route failed or answered `indexed: false`. It never splits the body; the server
   does, and the new block holding a carried span's start keeps that span's id.

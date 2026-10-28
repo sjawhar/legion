@@ -1584,13 +1584,15 @@ it, a node whose `parent` is the item, and `refs.BacklinkCounts` counts it once 
 a comment citing a node from two paragraphs counts 2. A comment's or message's own read (`?to=`
 or `?from=` its reference) lists the edges at its current blocks, each naming its block as
 `block`, and leaves out their `part_of` edges unless `?kind=` names them. A direct message writes
-no mention, as before, so its blocks hold none and its text never shows on a `?to=` read. The API
+no mention, as before, and has no address, so its blocks resolve to no node (`loadMessageBlockNodes`
+reads only an issue message's): no reference reads one (`404 NOT_FOUND`, naming none of its text),
+an edge at one is omitted, and its text never shows on a `?to=` read. The API
 names the node kind `block`, id `<item kind>/<item uuid>#<block id>` (`comment/1b2c…#b2`,
 `text.TargetID`), with `block_id`, no `document`, and `text` its whole text (a comment block's
 latest `comment_block_texts` row, a message block's slice of the stored body); an edge from one
 carries its stored excerpt. `graph_edges` and `refs.to_kind` store it under the kind
 `comment_block` or `message_block` (`refs.TargetOf`, `ItemKind.BlockKind`), both of which
-`nodeLoaders` resolves through `loadItemBlockNodes` to a `block` node: a build without item blocks
+`nodeLoaders` resolves through `loadCommentBlockNodes` and `loadMessageBlockNodes` to a `block` node: a build without item blocks
 skips both as unknown kinds (`resolveNodes`) where it would count a `block` row and resolve it
 through `document_blocks`, so during the roll, and after a rollback, it neither doubles a count
 nor fails a read, and lists the item's own edge as before (`itemBlocksKnown`). An edge at an item
@@ -1728,7 +1730,7 @@ a block found at the first indexing of a comment edited before blocks were recor
 changed by the author at `changed_at`, and part of its comment at `changed_revision`, which is
 its node's `changed_version` too. A message's block is made by the message's author at its
 `created_at`, last changed by its maker when it was made, and part of its message, with no
-version (`loadItemBlockNodes`).
+version (`loadCommentBlockNodes`, `loadMessageBlockNodes`).
 
 Two records serve those facts from this release on. `comments.written_version` and
 `asks.written_version` (migrations `0130` and `0131`) hold the version current when an item was
