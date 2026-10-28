@@ -286,10 +286,14 @@ var inlineMarkdown, storedMarkdown, flankingMarkdown = newInlineReader(editorRul
 // parseInlineWithDefinitions reads one textblock's inline markdown with reader as ParseInline
 // does, after a definition for each of labels, the footnote labels it refers to. It is the
 // renderer's read-back of a run it wrote, where a reference is only a reference beside its
-// definition.
-func parseInlineWithDefinitions(markdown string, labels []string, reader inlineReader) ([]*Node, error) {
+// definition. diverged is whether the parse, under editorRules or storedRules, read a `*` or `_`
+// run that could open or close otherwise under flankingRules (flankingDivergenceKey); where it did
+// not, flankingMarkdown reads the same source as storedMarkdown does, to the same nodes and error.
+func parseInlineWithDefinitions(markdown string, labels []string, reader inlineReader) (nodes []*Node, diverged bool, err error) {
+	context := parser.NewContext()
 	if len(labels) == 0 {
-		return readInline(markdown, reader.run, nil)
+		nodes, err = readInline(markdown, reader.run, context, nil)
+		return nodes, context.Get(flankingDivergenceKey) != nil, err
 	}
 	var full strings.Builder
 	full.WriteString(markdown)
@@ -297,20 +301,21 @@ func parseInlineWithDefinitions(markdown string, labels []string, reader inlineR
 		full.WriteString("\n\n[^" + escapeFootnoteLabel(label) + "]: x")
 	}
 	source := []byte(full.String())
-	root, err := parseSource(reader.withDefinitions, source, parser.NewContext())
+	root, err := parseSource(reader.withDefinitions, source, context)
+	diverged = context.Get(flankingDivergenceKey) != nil
 	if err != nil {
-		return nil, err
+		return nil, diverged, err
 	}
 	first, ok := root.FirstChild().(*ast.Paragraph)
 	if !ok {
-		return nil, fmt.Errorf("%w: inline markdown does not read as a paragraph", ErrSchema)
+		return nil, diverged, fmt.Errorf("%w: inline markdown does not read as a paragraph", ErrSchema)
 	}
 	paragraph, err := convert(first, source, 1, footnoteLabels(root))
 	if err != nil {
-		return nil, err
+		return nil, diverged, err
 	}
 	sortNodeMarks(paragraph)
-	return paragraph.Children, nil
+	return paragraph.Children, diverged, nil
 }
 
 // referencedLabels is the footnote labels nodes refer to, each once, in order.
@@ -331,15 +336,15 @@ func referencedLabels(nodes []*Node) []string {
 // budget, its caller write's, on the elements it makes. Markdown that forms more than one
 // paragraph, or holds text after its paragraph's last line, is ErrSchema.
 func ParseInline(markdown string, budget *WriteBudget) (nodes []*Node, err error) {
-	return readInline(markdown, inlineMarkdown.run, budget)
+	return readInline(markdown, inlineMarkdown.run, parser.NewContext(), budget)
 }
 
-// readInline is ParseInline read with inline, one of an inlineReader's parsers, counting the
+// readInline is ParseInline read with inline, one of an inlineReader's parsers, in context, a new
+// parse context its caller may read after the parse (parseInlineWithDefinitions), counting the
 // elements it makes on budget, a caller write's, or none when budget is nil (a read-back).
-func readInline(markdown string, inline parser.Parser, budget *WriteBudget) (nodes []*Node, err error) {
+func readInline(markdown string, inline parser.Parser, context parser.Context, budget *WriteBudget) (nodes []*Node, err error) {
 	defer recoverPanic(&nodes, &err, "reading inline markdown")
 	source := []byte(LineFeeds(markdown))
-	context := parser.NewContext()
 	var count *parseCount
 	if budget != nil {
 		context.Set(writeBudgetKey, budget)
