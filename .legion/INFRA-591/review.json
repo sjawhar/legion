@@ -2,24 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-591",
-  "completed": "2026-10-28T14:51:14Z",
+  "completed": "2026-10-28T16:24:01Z",
   "decision": "changes_requested",
-  "round": 3,
-  "reviewedHead": "21c336688c08f86d43982f6e28ed338e7027441b",
-  "codeHead": "8e7111478fb3",
-  "ciHead": "e6b6698ad80f",
+  "round": 4,
+  "reviewedHead": "e55f771e43de56abe988f4678af71533d920bc2a",
+  "codeHead": "1adb786e0343",
   "critical": 0,
   "important": 1,
   "minor": 0,
-  "previousRound": "Every item the architect's round cap named is done, and I verified each in the code at 8e711147: Await returns an observation's error after 10 s of failures and run logs failures, rate-limited; the hub seed, the relay start and the relay reseed each surface it and retry; the stall diagnosis runs on context.Background(); start checks the lifetime under mu before running.Add, and wait takes mu before Wait (waitBackground runs only after the lifetime ends: cmd/dispatch/shutdown.go:68, server_test.go:158); the seed send selects on the lifetime; a resuming stream that opened early ends on a reset it finds while it subscribes; streamEvents waits in one select; horizon() now lives in event_stream_relay.go. The changelog fragment carries no issue key, per the controller's ruling on this public repository.",
+  "previousRound": "The round-3 finding is fixed in 1adb786e: store.ConnectionsPerProcess adds horizonPoolSize (pool.go:310-314), and gcp dispatchConnectionsPerPod is 88 (infra/gcp/dispatch.go:97). Every separate pool is counted: 64+4+1+12+1+1+2+3 = 88. The auto-merge of main dropped and doubled nothing (both review agents re-ran the three-way merges). The go.work.sum change is toolchain regeneration: each removed line still sits in packages/envoy/go.sum or infra/go.sum, and a readonly build passes. The D2 rollout note (one replica, which Recreate gives at replicas <= minDispatchReplicas, dispatch.go:481-484) is accurate.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/store/pool.go:308",
-      "description": "This is a semantic conflict with main that no text merge shows. Since #2368 and #2390, main's store.ConnectionsPerProcess (pool.go:312 on main) is the sum of every pool the server opens, and gcp's dispatchConnectionsPerPod (infra/gcp/dispatch.go:97, now 86) must equal it, because the pair sizes the Cloud SQL max_connections budget for every pod during a roll. main's comment says a new pool goes into ConnectionsPerProcess with it. This PR adds the 2-connection horizon pool (horizonPoolSize), and the merged tree counts it in neither constant, so each pod can open 2 more connections than the budget allows. Fix: forward-merge main, add horizonPoolSize to ConnectionsPerProcess, and raise dispatchConnectionsPerPod by 2."
+      "file": "docs/site/src/content/docs/dispatch/running-dispatch.md:346",
+      "description": "The operator page that main brought in with #2390 tells an operator how many Postgres connections one server opens at its ceiling, and how to size max_connections from that number. It lists 64 + 12 + 4 + 1 + 1 plus four held open and says 'That is 86 connections for one server'. After this PR's merge the server opens 88: the horizon's pool of 2 is missing from the list and from the total. An operator who follows the page under-provisions max_connections by 2 per server. This is the same semantic conflict as round 3, at the one place the count is written in prose that the fix did not reach. Fix: add the event horizon's up to 2 connections to the list and change 86 to 88."
     }
   ],
-  "ci": "At CI head e6b6698a (code 8e711147) the required checks lint, typecheck, test and pr-title are green. envoy-go is green; internal/dispatch/api took 507 s under the 20 m deadline. envoy-infra-go is red on TestDispatchConnectionsPerPodIsTheServers (expected 84, actual 83); the controller has ruled that red is main's (#2233). dispatch and envoy-go-race were still running.",
-  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at 21c33668 (code 8e711147): both APPROVE with no correctness-blocking finding. Their non-blocking notes: an observation that hangs rather than fails still waits silently, because take has no per-observation deadline, which is also true of main's readCursors; queued relay starts each run their own 10 s Await; the seed send's select is redundant; the heartbeat reads 'opened' from ready == nil. The connection-budget finding is mine, from reading main.",
-  "notes": "D2 (from the plan) is now live on main: since #2368, gcp:Dispatch can run more than one replica with a rolling roll. I sent this to the architect."
+  "ci": "At CI head 1adb786e the required checks lint, typecheck, test and pr-title are green. The Worker Image build is red on probe-image's TLS client checks against an external revoked-certificate test site; that job is not required and this PR changes nothing in the image. envoy-go and the other envoy jobs were still queued.",
+  "thermo": "thermonuclear-deep-review at 1adb786e: APPROVE, no findings. It reported no stale count anywhere, but that search missed the docs page. thermonuclear-code-quality at 1adb786e: CHANGES, the docs-page count above, which I verified."
 }
