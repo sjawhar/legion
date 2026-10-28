@@ -59,11 +59,7 @@ test.beforeEach(async () => {
 
 test("Ctrl+K and Cmd+K open the palette, grouped results navigate a document to its highlighted term", async ({
   browser,
-}, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+}) => {
   const fixture = await seedSearchFixture();
   const context = await asUser(browser, "alice");
 
@@ -133,8 +129,7 @@ test("Ctrl+K and Cmd+K open the palette, grouped results navigate a document to 
 
 test("a search term lists marked document, comment, ask, and issue-title results in issue groups", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "result-kind coverage is independent of viewport");
+}) => {
   await seedSearchFixture();
   const titleIssue = await createIssue({ project: "CORE", title: "Astrolabe calibration" });
   await createAsk(titleIssue.key, { question: "Who calibrates the astrolabe?" }, searchSession);
@@ -166,8 +161,7 @@ test("a search term lists marked document, comment, ask, and issue-title results
 
 test("a project-document hit is grouped under the document and opens it; a message hit opens its Conversation turn", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "result routing is independent of viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const document = await createProjectDocument("CORE", {
     content: "# Design notes\n\nThe sextant sights the horizon.\n",
@@ -221,7 +215,7 @@ test("a project-document hit is grouped under the document and opens it; a messa
   }
 });
 
-test("the rail Search control opens the palette and Escape returns focus to it", async ({
+test("the rail Search control opens the palette and Escape returns focus to it @phone", async ({
   browser,
 }, testInfo) => {
   await seedSearchFixture();
@@ -253,7 +247,7 @@ test("the rail Search control opens the palette and Escape returns focus to it",
   }
 });
 
-test("phone search rows are at least 44px, do not overflow, and a comment result opens Conversation", async ({
+test("phone search rows are at least 44px, do not overflow, and a comment result opens Conversation @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(
@@ -306,7 +300,9 @@ test("phone search rows are at least 44px, do not overflow, and a comment result
   }
 });
 
-test("no results and short queries are stated, not silent", async ({ browser }, testInfo) => {
+test("no results and short queries are stated, not silent @phone", async ({
+  browser,
+}, testInfo) => {
   await seedSearchFixture();
   const context = await asUser(browser, "alice");
 
@@ -363,7 +359,7 @@ test("the agent issue API returns POSSIBLE_DUPLICATE and force creates the issue
 
 // The hint names keys a touch reader does not have, and 33px of palette is 33px of hits, so it
 // shows only where a pointer that can hover exists.
-test("the palette's keyboard hints show for a pointer and not for a touch reader", async ({
+test("the palette's keyboard hints show for a pointer and not for a touch reader @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -399,8 +395,7 @@ test("the palette's keyboard hints show for a pointer and not for a touch reader
 
 // The hits of one owner are a group named by the row above them, so a reader who cannot see
 // that row still hears which issue a hit belongs to.
-test("each palette group is named by its owner row", async ({ browser }, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "the grouping is independent of viewport");
+test("each palette group is named by its owner row", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Conversation view" });
 

@@ -308,6 +308,11 @@ jobs:
       - name: Test release scripts
         run: .github/scripts/release-push.test.sh
 
+      - uses: ./.github/actions/install-changie
+
+      - name: Test the changelog fold with changie
+        run: .github/scripts/changelog-fold.test.sh
+
       - name: Test the release version bump
         run: .github/scripts/release-bump.test.sh
 

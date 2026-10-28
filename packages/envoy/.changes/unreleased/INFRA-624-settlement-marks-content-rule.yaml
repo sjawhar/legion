@@ -1,0 +1,10 @@
+kind: Fixed
+body: |-
+  Settlement now reads an ask that parses but breaks its content rule, a second bullet list or a
+  paragraph after its list, as malformed (INFRA-624): it marks the block `invalid` with the
+  content rule's reason (`pmdoc.AskContentError`), emits `block.invalid`, and keeps the ask's row
+  open and unchanged, as it already did for an ask holding a heading; an edit that makes the ask
+  conform clears `invalid` and updates the row. It used to index such an ask as valid, with its
+  option lists concatenated and its question's paragraphs joined. This changes how such a
+  document is read: at the time of the change, a census of every live document in all 11 Dispatch
+  projects (6,029 documents, 636 ask blocks, 19 of them open) found no ask it newly marks.

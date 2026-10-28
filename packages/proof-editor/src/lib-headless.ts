@@ -88,15 +88,17 @@ export interface HeadlessProofOptions {
   renderBlock?: HostBlockRenderer;
   /** Read-only parse, for display: a container directive the block schema refuses is drawn as
    *  its literal fence lines around its formatted content, as is an accepted typed block whose
-   *  content breaks its content rule (both through `remarkReadOnlyDirectives`, the live
-   *  (browser) editor's typed-block step too), and the paragraph-line directive refusals are not
-   *  applied. The default, false, with a `blockSchema` keeps the parser's directive refusals
-   *  listed at `parseMarkdown`, which the pmdoc fixture generators rely on to refuse what the
-   *  document service refuses, and draws a typed block whose content breaks its content rule as
-   *  its literal lines through `remarkUnfitTypedBlocks` rather than dropping it. In both modes an
-   *  ask's content check (a built node's, not a parse's) accepts what the document service
-   *  accepts (`relaxAskContentCheck`). A general read-only mode, so later read-only rules hang on
-   *  it too. */
+   *  content breaks its content rule (both through `remarkReadOnlyDirectives`), the
+   *  paragraph-line directive refusals are not applied, and a typed block kept typed loses the
+   *  block schema's `server` attributes, so they read at their defaults. The live (browser)
+   *  editor's typed-block step makes the same drawing decision but keeps those attributes
+   *  (`liveTypedBlocksRemarkPlugin`). The default, false, with a `blockSchema` keeps the parser's
+   *  directive refusals listed at `parseMarkdown`, which the pmdoc fixture generators rely on to
+   *  refuse what the document service refuses, and draws a typed block whose content breaks its
+   *  content rule as its literal lines through `remarkUnfitTypedBlocks` rather than dropping it.
+   *  In both modes an ask's content check (a built node's, not a parse's) accepts what the
+   *  document service accepts (`relaxAskContentCheck`). A general read-only mode, so later
+   *  read-only rules hang on it too. */
   readOnly?: boolean;
 }
 

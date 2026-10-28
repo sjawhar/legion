@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## Before changelog fragments
 
 ### Added
 
@@ -1805,34 +1805,6 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
-
-- An ask that two people's concurrent edits leave holding two option lists, or a paragraph after
-  its options, now keeps every word in every editor and in the stored document, stays open, and
-  shows as a malformed decision until its text is fixed (INFRA-624). The browser editor refused to
-  build such an ask, so y-prosemirror deleted it, with all its text, from the shared document
-  every editor and the server read, and settlement then retracted it. The editor now builds an ask
-  holding any non-empty run of the blocks the server accepts in one; its own edits, input rules,
-  pastes and markdown imports still hold an ask to `paragraph+ bullet_list?`.
-
-- Settlement now reads an ask that parses but breaks its content rule, a second bullet list or a
-  paragraph after its list, as malformed (INFRA-624): it marks the block `invalid` with the
-  content rule's reason (`pmdoc.AskContentError`), emits `block.invalid`, and keeps the ask's row
-  open and unchanged, as it already did for an ask holding a heading; an edit that makes the ask
-  conform clears `invalid` and updates the row. It used to index such an ask as valid, with its
-  option lists concatenated and its question's paragraphs joined. This changes how such a
-  document is read: at the time of the change, a census of every live document in all 11 Dispatch
-  projects (6,029 documents, 636 ask blocks, 19 of them open) found no ask it newly marks.
-
-- The document editor now draws a pasted container directive it refuses, an unknown typed block
-  such as `:::note` or a typed block with a refused attribute, as its literal lines around its
-  formatted content, and so does a past version's view that holds one (INFRA-624). It threw, so a
-  paste fell back to the browser's own plain-text paste, with the lines joined. The editor also no
-  longer refuses the paragraph-line directive forms: a line opening `::name` (a leaf directive), a
-  `:name{…}` text directive, and a malformed `:::` line such as a Pandoc `::: warning` fence now
-  stay the text they are, which the server escapes when it saves them. Only those inputs read
-  differently: a pasted ask with two option lists or a paragraph after its list is still drawn as
-  its lines, as since INFRA-565, and the headless engine's default mode, which the server's parity
-  fixtures are generated with, still refuses all of them.
 
 - A document now strikes tilde runs as a comment does. A run of `~` pairs only with a run of its
   own length, so `Plain ~a~~ text.` and `Plain ~~a~ text.` keep their tildes where a document
