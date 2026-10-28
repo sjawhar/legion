@@ -2,24 +2,38 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-528",
-  "completed": "2026-10-27T16:05:00Z",
+  "completed": "2026-10-28T10:45:00Z",
   "proof": [
     {
-      "criterion": "The conflict with main (INFRA-172 #2272 and INFRA-565 #2388, up to 2df3353c) is resolved by a forward merge that keeps both sides and changes nothing else",
-      "surface": "Dispatch Conversation and Inbox against the real Go Dispatch server and Postgres 17 + pgvector: Desktop Chrome, iPhone 13, Desktop Safari (WebKit), Desktop Firefox",
+      "criterion": "CI red at ec8f0722 (test job): the required test job is green again, with no code changed",
+      "surface": "GitHub Actions, Tests run 40538589181 (https://github.com/sjawhar/legion/actions/runs/40538589181)",
+      "command": "gh run rerun 40538589181 --failed -R sjawhar/legion",
+      "observed": "Attempt 2 failed only TestAnIssueDeployedEventWakesTheCheck (packages/daemon/internal/daemon/check_wake_test.go:433, timed out; the INFRA-623 flake in Go code this pull request does not touch). Attempt 3 of the failed job: test, lint and typecheck success.",
+      "headSha": "ec8f07227271c608fd8070b81c3cbbdadb65157d",
+      "negativeControl": "Attempt 2 at the same commit: test failure with that one timed-out daemon test; the pull request changes no file under packages/daemon."
+    },
+    {
+      "criterion": "GitHub then reported the pull request CONFLICTING: a forward merge of main 460facf5 keeps both sides; the changelog entry moves to a fragment and the learnings lose the issue key, as the controller ruled",
+      "surface": "Dispatch Conversation and Inbox against the real Go Dispatch server and Postgres 17 + pgvector: Desktop Chrome, Desktop Safari (WebKit), Desktop Firefox (main's iphone project now runs only @phone-tagged tests, so the mermaid spec has no iphone rows)",
       "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox; then the same runner for e2e/text-typed-blocks.e2e.ts e2e/unknown-directive.e2e.ts e2e/task-items.e2e.ts e2e/typed-block-content-rule.e2e.ts",
-      "observed": "At the merge bf7eb796: mermaid suite 32 passed (2.7m); text-typed-blocks, unknown-directive, task-items and typed-block-content-rule 28 passed (1.9m); `bun test --parallel web/src e2e/__tests__` 2539 pass / 0 fail; proof-editor 155 pass; biome, tsc, check:classes green.",
-      "headSha": "bf7eb796259d3b997dc1e14221477edfa0340339",
-      "negativeControl": "Before the merge GitHub reported the pull request CONFLICTING (biome.json and packages/proof-editor/AGENTS.md) and ran no checks on a46b8afd."
+      "observed": "At 1add418c (merge 81b5d79e, fragment d7a3285c, learnings rename 1add418c): mermaid suite 24 passed (2.1m), 8 rows in each of chromium, webkit and firefox; text-typed-blocks, unknown-directive, task-items and typed-block-content-rule 23 passed; `bun test --parallel web/src e2e/__tests__` 2546 pass / 0 fail; proof-editor 157 pass; biome, tsc, check:classes green.",
+      "headSha": "1add418c85d9b3a3b1fd614c6849ff288e243430",
+      "negativeControl": "Before the merge GitHub reported the pull request CONFLICTING (packages/dispatch/AGENTS.md, packages/proof-editor/AGENTS.md, packages/envoy/CHANGELOG.md) and ran no checks on ac17074b."
     }
   ],
   "filesChanged": [
-    "biome.json (merge resolution: main's typed-block-drawing.ts line kept beside the two mermaid lines)",
-    "packages/proof-editor/AGENTS.md (merge resolution: 'Thirteen files' (main's eleven plus the two mermaid files), main's typed-block-drawing and rewritten read-only-directives rows, then the two mermaid rows, and the Conventions list naming all of them)"
+    "packages/dispatch/AGENTS.md (merge resolution: main's rewritten typed-block paragraph after the mermaid paragraph)",
+    "packages/proof-editor/AGENTS.md (merge resolution: main's rewritten read-only-directives row, then the two mermaid rows)",
+    "packages/envoy/CHANGELOG.md (restored to main's text)",
+    "packages/envoy/.changes/unreleased/pr2311-Fixed-20261028-100919.yaml (new: the entry as a fragment, made with `changie new --custom Issue=pr2311`, no issue key in its text)",
+    "docs/solutions/*/*-pr2311.md (the nine learnings renamed from *-INFRA-528.md, related_issues dropped)"
   ],
   "trickyParts": [
-    "Both conflicts were list entries both sides added. Fingerprint a46b8afd c2f25b53face... -> merge bf7eb796 b41f344dc455...: changed only in two documentation lines of packages/proof-editor/AGENTS.md that main changed too (the legion-own file count and the Conventions list, which now also name main's typed-block-drawing.ts). No code line or function differs."
+    "Fingerprint ac17074b b41f344dc455... -> 1add418c d739c1f666b8...: changed only by the changelog entry moving from packages/envoy/CHANGELOG.md to the fragment and losing its trailing issue key. No code line differs; the two AGENTS.md conflicts took main's rewritten row and paragraph beside this branch's additions.",
+    "The issue volume was recreated: the browser harness was rebuilt at /legion/harness (setup.sh, env.sh; lanes by LEGION_ROLE: implementer 18787, tester 18788 with ports 19131-19134 and db dispatch_tester_e2e, reviewer 18789)."
   ],
-  "deviations": [],
+  "deviations": [
+    "The changelog fragment and the learnings rename follow the controller's rulings relayed by the INFRA-138 architect (10:04-10:13Z): fragment named by `--custom Issue=pr2311`, no Dispatch key in fragment, learnings or commit subjects. They change paths after the approved head outside docs/solutions (the fragment, CHANGELOG.md), so the pull request goes back through review."
+  ],
   "openQuestions": []
 }
