@@ -2,47 +2,40 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-631",
-  "completed": "2026-10-28T11:55:57Z",
-  "round": 2,
-  "headReviewed": "the handoff commit this file is pushed in (code head 74b63566, merge of main 0a921021)",
+  "completed": "2026-10-28T12:34:50Z",
+  "round": 3,
+  "headReviewed": "the handoff commit this file is pushed in (code head c2a08196, merge parent main 0a921021)",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 3,
+  "important": 2,
   "minor": 1,
-  "roundOneFindings": "fixed: the quoted-attribute, setext and front matter reproductions of round 1 are left as they are at this head (re-run); recipe step 4 covers a refused --write and step 7 a heading R1; both E2E lines link their runs",
+  "roundTwoFindings": "fixed: the five reproductions refuse or stay unchanged (k, k2, c, c2 unchanged and stable on a second run; k3 and the '...'-then-'---' front matter refused, exit 2); the frontMatterEnd comment is corrected; the round-1 reproductions still hold",
   "verified": [
     "restructure.ts --strict on main 0a921021's two files: exit 0, byte-identical to the head guides",
-    "checker exit 0 on both guides; bun test of the two test files: 30 pass, 0 fail",
-    "required checks (rulesets: lint, typecheck, test, pr-title) at CI head 74b63566 all queued at 11:43Z (105 runs queued repository-wide); compare 74b63566...fbc585b0 is .legion/ only"
+    "checker exit 0 on both guides; bun test of the two test files: 36 pass, 0 fail",
+    "GitHub reports the pull request CONFLICTING with main 2d872499, which changed both guides (packages/envoy/AGENTS.md +81 lines, cmd/dispatch/README.md +39 lines since 0a921021)",
+    "required checks (lint, typecheck, test, pr-title) at CI head c2a08196 queued at 12:22Z; compare c2a08196...964d4a82 is .legion/ only"
   ],
   "keyFindings": [
     {
       "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts:549",
-      "description": "htmlEnd now treats any '<' plus letter as an open tag and jumps quoted values, so it masks text micromark does not read as a tag. 'See <K, V=\"x > `code\" > here \\nand` then more.' is joined, exit 0: the inline code value changes from 'here \\nand' (two spaces rendered) to 'here and'. 'See <K, V=\"x > <code>a\" > here \\nand</code> then more.' loses a line break inside <code>, which round 5 keeps because GitHub shows it. Fix: accept only a CommonMark open tag (tag name [A-Za-z][A-Za-z0-9-]*, then its attribute grammar)."
+      "file": "scripts/semantic-line-breaks.ts:875",
+      "description": "The render guard folds whitespace in every text node, including the text between an inline <pre>/<code>/<kbd>/<samp>/<tt> open tag and its close tag. Where scanBlocks splits a paragraph micromark reads as one (a blockquote's lazy continuation, a footnote definition's text, a tab-indented line) or the close-tag regex ignores an escape (\\</code>), --write joins inside the element and exits 0: '> Quote <pre>\\nline one\\nline two</pre>' becomes 'line one line two</pre>'; '[^1]: Run <pre>…' likewise; '> Run <code>make\\nbuild\\ntest</code> first.' and 'Use <code>a \\\\</code> b\\nc</code> here.' likewise. Fix in the guard: keep text values exact between a VERBATIM_OPEN html sibling and its close tag."
     },
     {
       "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts:845",
-      "description": "The guard folds whitespace in inlineCode values, so any mask misread inside a code span is written with exit 0: 'See [a](b `c d) e \\nf` g.' (destinationEnd) is joined to 'e f'. Compare inlineCode values exactly, as round 6 did for inline html; relayout never changes masked text, so no false refusal."
-    },
-    {
-      "severity": "important",
-      "file": "scripts/semantic-line-breaks.ts:747",
-      "description": "Round 8's idempotence rule covers a tag alone on its line but not the other whole-line block starts in CONTINUATION_BLOCK_START (:81, '[-=*_|: \\t]+$'): 'Intro text\\n:\\nmore text' becomes 'Intro text\\n: more text' on the first --write and 'Intro text : more text' on the second, exit 0 both. One predicate for lines that only stand alone (task box, tag line, whole-line underline/rule/delimiter) on the previous line, named in joinParagraph's doc."
+      "file": "packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md",
+      "description": "The head conflicts with main 2d872499. Merge main and regenerate the two guides with restructure.ts --strict on main's files, as the PR body says."
     },
     {
       "severity": "minor",
-      "file": "scripts/semantic-line-breaks.ts:256",
-      "description": "frontMatterEnd's doc says the compared text is the same on both sides for a block '...' closes; with a later '---' line micromark reads the body as YAML and --write refuses ('a yaml became a yaml'). Refusal is safe; the comment is false. Correct it, or pick the parser from the one reading's closer."
+      "file": "scripts/semantic-line-breaks.ts:973",
+      "description": "The second-relayout refusal counts its line in the re-laid-out text, while the render refusal counts in the file: 'Alpha one. Beta two. Gamma three.\\n\\nIntro text\\n[see. Next [a]: b' is refused at 'line 5' of a 4-line file. Name which text the line counts in, or map it to the file."
     }
   ],
-  "notRequested": [
-    "File over 1000 lines (code quality): no repository rule; a module split changes no behaviour.",
-    "CRLF input gets mixed line endings: renders the same, no tracked .md file holds a CR, and the whitespace-only guarantee holds."
-  ],
+  "fastFollow": "Cleanup that changes no behaviour (code quality, 964d4a82): the inText/TEXT_PARENTS machinery no longer changes renderedForm's result; HTML_TAG_LINE and OPEN_TAG/closing tag write the same tag grammar twice; three refusal tests copy the run() spawn.",
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at fbc585b0 (1 Medium: htmlEnd plus inlineCode fold; 3 Minor)",
-    "codeQuality": "Verdict: CHANGES at fbc585b0 (idempotence predicate; front matter mode flag; file length)"
+    "deepReview": "Verdict: CHANGES at 964d4a82 (1 High: the verbatim-element fold; 2 Minor: refusal line number, stale brief)",
+    "codeQuality": "Verdict: CHANGES at 964d4a82 (three cleanups that change no behaviour)"
   }
 }
