@@ -2664,15 +2664,48 @@ client (a box's or pod's own key, or a machine session's `cmd/agent-secrets-help
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
 state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
 its environment. Every line it prints about a secret names the store it answered from
-(`cmd/agent-secrets/source.go`): the broker `AGENT_SECRETS_URL` names, by host, and that broker's
-own store, read once from the public `GET /v1/settings` and named as `AWS Secrets Manager account
-<id> in <region>` or `GCP Secret Manager project <number>`, the broker alone where those settings
-cannot be read. The injection form writes one line to stderr before it execs, naming the injected
-names and that source and never a value; `request`, `status` and `self` print it as `source:`,
-`secret show` the store as `store:` (and `secret list` one line on stderr, with `store` on each
-row under `--json`), and every refusal carries it, so no answer or refusal of this CLI's is read
-as another secrets CLI's about the same name. No line names a secret's version: a grant's release
-carries names and values alone, and a session holds no sign-in of its own to the store.
+(`cmd/agent-secrets/source.go`): the broker `AGENT_SECRETS_URL` names, and the kind of that
+broker's own store, read once from the public `GET /v1/settings` (`AWS Secrets Manager`, `GCP
+Secret Manager`), the broker alone where those settings cannot be read, as `the broker
+AGENT_SECRETS_URL names (GCP Secret Manager)`. The injection form writes one line to stderr before
+it execs, naming the injected names and that source, never a value (`agent-secrets: NAME from the
+broker AGENT_SECRETS_URL names (GCP Secret Manager)`; `packages/envoy-client/src/slack-post.ts`
+matches its `agent-secrets: NAME from ` prefix); `request`, `status` and `self` print it as
+`source:`, and every denial, pending request and refusal carries it, so no answer or refusal of
+this CLI's is read as another secrets CLI's about the same name. None of these lines names the
+broker's host or the store's account, region or project, since an agent's output is quoted
+wherever it goes, a public pull request among them; only a broker that could not be reached is
+named, by its URL through `redact.URL`, so a stale address reads as one. Only the secret forms, which a person runs
+under their own cloud sign-in, name the store's account or project (`AWS Secrets Manager account
+<id> in <region>`, `GCP Secret Manager project <number>`): `secret show` as `store:`, `secret list`
+one line on stderr, with `store` on each row under `--json`. No line names a secret's version: a
+grant's release carries names and values alone, and a session holds no sign-in of its own to the
+store. No output of `agent-secrets`, `agent-secrets-helper` (`internal/broker/helper`'s broker
+calls included) or `agent-secrets-devrelay` prints a credential the broker's URL carries: a
+message names that URL through `internal/redact`'s `URL`, an allow-list that prints the value as
+written only when it is provably a plain http(s) URL (printable ASCII with no `@`, `%`, `?`, `#`,
+backslash or whitespace; net/url reads it back byte for byte as an http or https scheme, a DNS
+name, IPv4 or bracketed zone-less IPv6 host with an optional port of one to five digits, and a
+path of `[A-Za-z0-9._~/-]`), and as `redact.NotPrinted` otherwise, printing no part of it. A URL
+with user info prints as `NotPrinted` too, not as `xxxxx@host`: a host-less value whose password
+holds an `@` would print the password's tail as the host. An error net/http or net/url makes
+passes through `redact.Error(err, base)` (or `redact.Cause`, the same without net/http's
+`*url.Error` wrapper): it is err itself only when base is clean, the URL that error names is base
+followed by nothing or a plain `/v1/` path (`redact.Call`; a redirect's target on another host or
+path, or with a query, is not), and the error it wraps is a transport failure (`net.OpError`, name
+resolution, refused, timeout, TLS, `http.ErrSchemeMismatch`, EOF, a reset, a broken pipe: the set
+`peerAnswered` reads), an HTTP status answer, or text the allow-list passes (a
+malformed `Location`'s error quotes the target and is not). Otherwise its text is the class alone
+(`name resolution failed`, `connection refused`, `timed out`, `TLS failed`, `the broker answered
+HTTP <n>`, `not a valid URL`, `the request failed`), found with errors.Is and errors.As on err,
+and it unwraps to err so callers classify as before. `agent-secrets` refuses an id that
+`url.PathEscape` would change (`pathID`) before any call, never escaping it: the proof signs the
+URL as built and the broker rebuilds the htu from the decoded path. That refusal is a
+`refusedBeforeCall`, which `refusalText` prints with no `asked the broker` ending.
+Extend the allow-list
+only with a check a test proves, never a parser that prints part of a value it rejects.
+`agent-secrets-helper install` writes its unit `0600`, since its `Environment=` line holds the
+URL.
 `--json` on `request`, `status`, `self`, `whoami`, `machine list` and `grant list` is the broker's
 body verbatim as before, and makes no settings call. The other secrets CLI a box may hold,
 `secrets`, is secretsd, shipped from `sjawhar/forward` (the old `sjawhar/secretsd` repository is
