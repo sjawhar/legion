@@ -525,7 +525,12 @@ func (s *Service) askRowOptions(ctx context.Context, artifactID, blockID string)
 // body would move that block's text into the question or delete it, and the caller, reading the
 // row, cannot know it is there. A document edit moves or deletes it. So is an ask whose lists
 // hold two items with one label: its options cannot be rebuilt as one list of unique labels
-// without losing one, so a document edit renames or removes it.
+// without losing one, so a document edit removes one and the ask edit sends it renamed (a
+// document edit renaming it leaves the decision broken, which doc-edit refuses).
+//
+// An ask holding only paragraphs and then two or more lists, where an item the block holds and
+// the row does not (below) holds more than its first paragraph, is refused whatever the edit
+// sends: rebuilding keeps each item's plain text only, so a document edit moves or deletes the rest.
 //
 // An ask holding only paragraphs and then two or more lists is refused unless the edit sends
 // options, which rebuilds them as one list and so repairs the ask. Settlement keeps such an ask's
@@ -554,10 +559,17 @@ func refuseAskContentEdit(block askBlock, rowOptions []model.AskOption, edit Ask
 		return &ErrAskBlockUnrepresentable{
 			Field: "block",
 			Reason: broken.Error() + "; the options cannot be rebuilt as one list, since " + quotedItems(shared) +
-				" share a label: rename or remove one with a document edit (dispatch doc-edit), then edit the ask",
+				" share a label: remove one with a document edit (dispatch doc-edit), then edit the ask sending every option, the removed one renamed",
 		}
 	}
-	protected := slices.DeleteFunc(items, func(item model.AskOption) bool { return slices.Contains(rowOptions, item) })
+	protected := slices.DeleteFunc(slices.Clone(items), func(item model.AskOption) bool { return slices.Contains(rowOptions, item) })
+	if extra, found := textBeyondItems(block.node, items, protected); found {
+		return &ErrAskBlockUnrepresentable{
+			Field: "block",
+			Reason: broken.Error() + "; an option the decision holds but its ask does not holds " + extra +
+				" below its text, which rebuilding the options as text would delete: move it or delete it with a document edit (dispatch doc-edit), then edit the ask",
+		}
+	}
 	if edit.Options == nil {
 		reason := broken.Error() + "; send options to rebuild the options as one list"
 		if len(protected) > 0 {
@@ -591,6 +603,51 @@ func quotedItems(options []model.AskOption) string {
 	return strings.Join(parts, ", ")
 }
 
+// textBeyondItems quotes what the items of ask's lists that read as one of protected hold after
+// their first paragraph - nested lists, further paragraphs - cut short where it runs on, and
+// reports whether any holds such content. items are ask's options in list order, as parseAskBlock
+// reads them.
+func textBeyondItems(ask *pmdoc.Node, items, protected []model.AskOption) (string, bool) {
+	parts := []string{}
+	found := false
+	index := 0
+	for _, child := range ask.Children {
+		if child.Type != "bullet_list" {
+			continue
+		}
+		for _, item := range child.Children {
+			option := items[index]
+			index++
+			if len(item.Children) < 2 || !slices.Contains(protected, option) {
+				continue
+			}
+			found = true
+			for _, rest := range item.Children[1:] {
+				if text := strings.Join(strings.Fields(pmdoc.TextContent(rest)), " "); text != "" {
+					parts = append(parts, text)
+				}
+			}
+		}
+	}
+	if !found {
+		return "", false
+	}
+	return quoteCut(parts, "the empty block below an option's text"), true
+}
+
+// quoteCut quotes parts joined by spaces, cut short where they run on, or names empty when they
+// hold no text.
+func quoteCut(parts []string, empty string) string {
+	if len(parts) == 0 {
+		return empty
+	}
+	text := []rune(strings.Join(parts, " "))
+	if len(text) > quotedRunes {
+		return fmt.Sprintf("%q", strings.TrimRight(string(text[:quotedRunes]), " ")+"…")
+	}
+	return fmt.Sprintf("%q", string(text))
+}
+
 // quotedRunes is how much of a block's text a refusal quotes before cutting it short.
 const quotedRunes = 80
 
@@ -615,12 +672,5 @@ func textAfterOptions(ask *pmdoc.Node) (string, bool) {
 	if !found {
 		return "", false
 	}
-	if len(parts) == 0 {
-		return "the empty paragraph after the options", true
-	}
-	text := []rune(strings.Join(parts, " "))
-	if len(text) > quotedRunes {
-		return fmt.Sprintf("%q", strings.TrimRight(string(text[:quotedRunes]), " ")+"…"), true
-	}
-	return fmt.Sprintf("%q", string(text)), true
+	return quoteCut(parts, "the empty paragraph after the options"), true
 }

@@ -834,7 +834,37 @@ func TestSetAskBlockTextRefusesEveryEditOfAnAskRepeatingALabel(t *testing.T) {
 	} {
 		err := sendAskOptions(service, artifactID, edit)
 		t.Logf("%s: %v", name, err)
-		assertAskEditRefusedQuoting(t, service, artifactID, before, err, `"Ship: Release it"`, `"Ship: Only on Fridays"`, "dispatch doc-edit")
+		assertAskEditRefusedQuoting(t, service, artifactID, before, err, `"Ship: Release it"`, `"Ship: Only on Fridays"`, "dispatch doc-edit", "remove")
+		if strings.Contains(err.Error(), "rename or remove") {
+			t.Fatalf("%s: err = %v, want it to name only removal by document edit", name, err)
+		}
+	}
+}
+
+// An item the row never held that holds more than its first paragraph (a nested list, a second
+// paragraph) cannot be rebuilt from its label and description without losing the rest, so every
+// edit is refused, quoting the extra content and naming the document edit that moves or deletes it.
+func TestSetAskBlockTextRefusesEveryEditOfAnAskWhoseNewItemHoldsMoreThanItsText(t *testing.T) {
+	ship := model.AskOption{Label: "Ship", Description: "Release it"}
+	hold := model.AskOption{Label: "Hold", Description: "Wait for review"}
+	for name, test := range map[string]struct{ list, extra string }{
+		"nested list":      {"- Defer: Wait a week\n  - only if finance agrees\n", `"only if finance agrees"`},
+		"second paragraph": {"- Defer: Wait a week\n\n  Finance must sign off first.\n", `"Finance must sign off first."`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+			editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, test.list)))
+			settleCurrentGeneration(t, service, artifactID)
+			before := liveTree(t, service, artifactID)
+			for edit, sent := range map[string]AskBlockEdit{
+				"every item":   {Options: &[]model.AskOption{ship, hold, {Label: "Defer", Description: "Wait a week"}}},
+				"urgency only": {Urgency: new("high")},
+			} {
+				err := sendAskOptions(service, artifactID, sent)
+				t.Logf("%s: %v", edit, err)
+				assertAskEditRefusedQuoting(t, service, artifactID, before, err, test.extra, "dispatch doc-edit")
+			}
+		})
 	}
 }
 
