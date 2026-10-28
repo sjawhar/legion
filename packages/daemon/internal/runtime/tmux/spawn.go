@@ -205,10 +205,12 @@ type PaneInputs struct {
 	// then told no gh variable at all: every pane of a runtime whose GitHubCredential function is
 	// nil.
 	GHOwnersDir, GHDefault, GH string
-	// OperatorEnv is the operator's pane variables (runtime.tmux.pane_env) and PiConfigFiles the
-	// operator's Oh My Pi overlays (runtime.tmux.pi_config_files); nil for none.
-	OperatorEnv   map[string]string
-	PiConfigFiles []string
+	// OperatorEnv is the operator's pane variables (runtime.tmux.pane_env), PiConfigFiles the
+	// operator's Oh My Pi overlays every pane names (runtime.tmux.pi_config_files), and
+	// RoleConfigFiles the ones this pane's role alone names (role_config_files); nil for none.
+	OperatorEnv     map[string]string
+	PiConfigFiles   []string
+	RoleConfigFiles []string
 }
 
 // panePairs are a pane's -e pairs, in one order: the variables every Legion pane is told (the
@@ -220,8 +222,9 @@ type PaneInputs struct {
 // file — a non-empty GH_TOKEN would — then LEGION_GH_OWNERS_DIR, the bundle's root, and
 // LEGION_GH_PATH, the real gh the `legion gh` wrapper first on the pane's PATH runs;
 // PI_SHELL_PREFIX, which keeps this daemon's launcher directory (its legion and gh) first in the
-// agent's bash tool; PI_CONFIG_FILES, the operator's overlays then the turn-scoping overlay
-// writeTurnScopeOverlay writes (podsafety.TurnScopeOverlay), last so its keys outrank theirs), the
+// agent's bash tool; PI_CONFIG_FILES, the operator's overlays, then the role's own, then the
+// turn-scoping overlay writeTurnScopeOverlay writes (podsafety.TurnScopeOverlay), last so its keys
+// outrank theirs), the
 // four XDG base directories under `<state_dir>/home`, the operator's pane variables sorted, the
 // spec's own variables sorted, then a `<NAME>_FILE` pointer per secret file. PATH is never among
 // them — tmux would replace it (LEGION-91) — and neither is any secret's value. No other tool path
@@ -263,7 +266,7 @@ func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile
 		add("LEGION_GH_PATH", in.GH)
 	}
 	add("PI_SHELL_PREFIX", shellprefix.For(workerbin.LauncherDir(in.StateDir)))
-	overlays := append(slices.Clone(in.PiConfigFiles), filepath.Join(in.StateDir, podsafety.TurnScopeFile))
+	overlays := slices.Concat(in.PiConfigFiles, in.RoleConfigFiles, []string{filepath.Join(in.StateDir, podsafety.TurnScopeFile)})
 	add("PI_CONFIG_FILES", strings.Join(overlays, ":"))
 	add("GIT_TERMINAL_PROMPT", "0")
 	for _, dir := range xdgDirectories(in.StateDir) {
@@ -368,7 +371,7 @@ func (r *Runtime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Lo
 	if spec.ResumeSessionFile != "" {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: a ResumeSessionFile is Resume's to set", spec.Claim)
 	}
-	return r.launch(ctx, spec, false)
+	return r.launch(ctx, spec)
 }
 
 // Resume starts the agent prev's claim recorded, again, from spec.ResumeSessionFile — after
@@ -379,11 +382,11 @@ func (r *Runtime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Lo
 // is refused, naming the key (paneOf). The session is resumed where it is: at its recorded path,
 // or, by its name, in another working directory's folder of the recorded path's sessions directory
 // or of the pane's own (sessionFileOf), where a session carried over from a pod lands. One found
-// nowhere starts nothing. A session this runtime takes over found nowhere wraps
-// runtime.ErrSessionFileMissing, which the claim's machine answers by forgetting the session and
-// spawning a fresh agent: the session was another runtime's, and the operator chose the takeover.
-// That is a resume over a foreign prev, and every session found nowhere while take_over is set
-// (takingOverSession), since neither the recorded path nor the previous incarnation tells the
+// nowhere starts nothing. While take_over is set (takingOverSession), a session found nowhere
+// wraps runtime.ErrSessionFileMissing, which the claim's machine answers by forgetting the session
+// and spawning a fresh agent: most such sessions are the taken-over runtime's, and the operator
+// chose that cost. It holds for a resume over a foreign prev and for every other resume alike,
+// since neither the recorded path nor the previous incarnation tells the
 // other runtime's sessions from this host's own. With the key off, a session found nowhere is a
 // refusal, never a fresh agent: the claim resumes the agent it recorded or none
 // (assertResumeSessionFile, runtime.ts), and the refusal is charged as any launch failure is.
@@ -400,7 +403,7 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 			return runtime.Locator{}, err
 		}
 	}
-	return r.launch(ctx, spec, takenOver)
+	return r.launch(ctx, spec)
 }
 
 // awaitGone waits, up to the stop grace, until loc's incarnation is no longer its pane's process,
@@ -430,10 +433,11 @@ func (r *Runtime) awaitGone(ctx context.Context, loc runtime.Locator) error {
 }
 
 // launch is Spawn's and Resume's shared half: every check that needs no tmux, the secret files,
-// the claim's gh bundle, then the pane. takenOver is a resume over a previous incarnation of the
-// runtime this one takes over (Resume); its session, or any session while take_over is set
-// (takingOverSession), found nowhere is runtime.ErrSessionFileMissing rather than a refusal.
-func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec, takenOver bool) (runtime.Locator, error) {
+// the claim's gh bundle, then the pane. While the operator's takeover is on (takingOverSession), a
+// session found nowhere is runtime.ErrSessionFileMissing rather than a refusal, whatever the
+// claim recorded: a resume over the taken-over runtime's own incarnation is one such launch, and
+// nothing tells its session from this host's own (sessionfile.go).
+func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	if err := validateSpawnSpec(spec, r.providerKeys, r.operatorEnv); err != nil {
 		return runtime.Locator{}, err
 	}
@@ -469,7 +473,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec, takenOver 
 		switch {
 		case err != nil:
 			return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
-		case found == "" && (takenOver || r.takingOverSession()):
+		case found == "" && r.takingOverSession():
 			return runtime.Locator{}, fmt.Errorf("resume %s: %w: no %s session at %s, and no other folder of %s holds that session",
 				spec.Claim, runtime.ErrSessionFileMissing, harness, spec.ResumeSessionFile, searchedIn(searched))
 		case found == "":
@@ -534,7 +538,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec, takenOver 
 	pairs := panePairs(spec, PaneInputs{
 		StateDir: r.stateDir, Workspace: workDir, DaemonURL: r.daemonURL, EnvoyURL: r.envoyURL, NATSURLs: r.natsURLs,
 		DispatchURL: r.dispatchURL, DispatchTokenFile: r.dispatchToken, GHOwnersDir: ghRoot, GHDefault: ghDefault, GH: r.gh,
-		OperatorEnv: r.operatorEnv, PiConfigFiles: r.piConfigFiles,
+		OperatorEnv: r.operatorEnv, PiConfigFiles: r.piConfigFiles, RoleConfigFiles: r.roleConfigFiles[spec.Role],
 	}, files)
 	return r.openPane(ctx, spec, ghWriter, paneCommand(append(pairs, backendPairs...), command))
 }

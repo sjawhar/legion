@@ -4,6 +4,13 @@
 
 ### Changed
 
+- The `dispatch` CLI reads an AskGate store with no recorded mode as warn, not block, and refuses
+  a gated write without a matching marker only when a live owner's store records `block`.
+- `dispatch ask` and `dispatch edit-ask` take a question of up to 2,000 characters, from 800, and
+  their `--help` asks for the concrete case first and the choice in its terms
+  (`@legion/contracts`' question contract). On `dispatch ask`, which alone takes `--ref` and
+  `--image`, the appended `Ref:` line and picture lines count toward the limit.
+
 - **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
   one per repository, and prints each source's answer in turn: `Synced P architecture from
   repo@branch: commit C (time).`, or `Sync failed for P (repo@branch): error` followed by `The
@@ -42,6 +49,87 @@
 
 ### Added
 
+- `askgate-marker` holds AskGate's enforcement at the `dispatch` CLI, shared by the CLI and
+  pi-envoy's gate: `gatedWrite(tool, args)`, the one list of gated writes (`ask`, `message`,
+  `edit-ask`, `comment`, `doc-edit`, `request-approval`, an `issue` with a spec, an `artifact`
+  that uploads a markdown document); the record a live Oh My Pi process keeps in a session's
+  state directory, one owner-only file per process under `askgate/` (`<pid>-<start>.json`), naming
+  its pid, its Linux start time and its marker store, so two processes that bind one session never
+  drop each other (an owner whose process is gone, or whose pid another process holds, is inert);
+  and single-use markers (version 2), minted exclusively and owner-only, keyed by the argv's
+  digest and bound to the dry run's arguments and to the sha256 of each file the argv names
+  (`fileOperands`) for a reviewed write. A marker older than two hours, longer than any tool's
+  time limit, is refused. Before a gated write posts, after `--help`, `--dry-run` and the session
+  and Dispatch settings, the CLI reads the session's record; with a live one it reads each named
+  file once and consumes one matching marker by unlinking it, and an upload by `--path` sends the
+  bytes of that read. In block mode it refuses a write with no matching marker
+  (`dispatch <command> was not called: AskGate is on for this session, …`, logged to the ledger
+  with an `askgate` field), and a file that changed after the review with the advice to send the
+  call again in a later message. In warn mode it writes that ledger line before it posts, refuses
+  the write when the ledger cannot take it, and posts with a `dispatch: warning:` line. A record
+  that cannot be read, or names a store that is gone, is a refusal; a session no live record names
+  needs no marker, so a terminal, CI, Claude Code, OpenCode and a pod without pi-envoy are
+  unchanged. `pruneSessions` keeps a directory whose record is live, and removes the marker store
+  of a process that is gone and that nothing changed for two hours (`sweepStores`).
+- The `dispatch` refusal for a missing `DISPATCH_HOST` says to send the command as a bash call from
+  an agent's session, or to set your own session id to run it by hand.
+- `@legion/envoy-client/replay`: `createReplayEngine` shows a session, once, each message the
+  notification stream stored on a subject it follows while its own NATS subscription was down,
+  through the listener's `POST /v1/replay`. A sweep reads each followed subject after its cursor,
+  merges subjects by stream sequence, passes over role forwards, leaves a frame the live path is
+  still delivering for later, and hands the host each frame neither path showed; one sweep runs at
+  a time and none rejects. A ledger of the frames the session finished with (event id, and dedupe
+  key when it names its event), kept 72 hours from when each was recorded and capped at 20,000,
+  lets the live path drop a repeat after a restart. A frame the host fails to show three times
+  becomes a failure notice the host shows instead, and `liveFailed` shows it at once for a live
+  frame no sweep will show, a frame received before its subject's cursor started included (a host
+  stamps when the frame arrived with `readArrivals` from `@legion/envoy-client/delivery`, which
+  reads a subscription as its messages arrive, so a frame queued behind a slow delivery is not
+  stamped late, and yields every message it read before the subscription's end or error, as
+  nats.js's own iterator does);
+  `envoyNoticeText` renders a notice in TOON, so a sender's multi-line summary cannot forge a
+  field; a recreated stream (a stored `stream_id` the listener's `stream.id` no longer matches, or,
+  from a listener that answers no id, a changed `created`; a `created` that moved under the same
+  id is no recreation, and a state stored before ids takes the answer's id), a stream that moved
+  back, a cursor older than the stream's oldest message,
+  and a listener that does not replay (404) or cannot (503 `REPLAY_UNAVAILABLE`, 401, 403) are
+  each told once. A stream that is not recreated has moved back when any cursor stands past its
+  end (restored from a backup older than the cursor, or re-added empty from its exported
+  configuration, keeping its id): every followed subject is read again from the stream's oldest
+  message, so the session is shown what was published after the restore and, through the ledger,
+  nothing it was shown before, and is told once (`stream_moved_back`) that messages may be shown
+  again and any published between the backup and the restore are missing. A sweep that only moved
+  its cursors to the stream's end is written at most hourly; a recreation's cursor reset, a
+  moved-back stream's cursor rewind and a retention gap's cursor move are written at once with
+  their
+  notice pending in the state (`notices`), so a session that ends before the notice is raised
+  raises it once at its first sweep after the restart, and a resume does not find the gap again.
+  A host that handed a frame or a failure
+  notice on without writing it yet answers `queued`: the frame stays claimed and unrecorded, its
+  cursor before it, until the host records it once written (`recordDelivered`), so a process that
+  ends first shows it after the restart;
+  `recordDeliveredFor` records for the session a frame was delivered in while the host shuts down
+  (through the host's optional `writeSessionID`); `replayLedgerIdentity` names a frame as the
+  ledger does. The transport gains `replay()` (one
+  try, 10 s) and `EnvoyApiError.code`; a `createDeliveryDedupe` claim gains `settle()` and the
+  dedupe `pending()`, true until the claim is settled or released. Beside the engine sits the host
+  policy both plugins share: the subjects followed for replay (`replayFollowedSubjects`), never a
+  role's or one reaching a private stream subject (`reachesPrivateStreamSubject`, the listener's
+  rule in `packages/envoy/internal/bus/stream.go`: another session's `notifications.agent.<id>`,
+  a failed-delivery lane `notifications.envoy.exceptions.notifications.agent.<id>` the session's
+  own included, a `notifications.legion.` controller lane, or a wildcard reaching one such as
+  `notifications.agent.*` or `notifications.>`, which the listener neither stores as an interest
+  nor replays), the topics a restore follows again (`rememberedTopics`), a replayed removal's
+  close and unregister (`closeReplayedRemoval`), and which one-time notices are a card or a
+  warning (`routeReplayNotice`) (INFRA-439).
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line. The line comes before
+  `Referenced by:` on the read of an issue, a document, a block, an ask, a comment and an issue
+  message:
+  `Node: <kind> <ref> · made by <actors> at <time> · changed by <actors> at <time> · part of <parent> (version <N>)`,
+  an empty actor list written `nobody recorded` and a null time, version or parent left out.
+  Against a Dispatch older than the facts, whose nodes carry no `made_by`, the read prints no
+  `Node:` line.
 - `renderInbound` renders an `artifact.human_edited` card as `edit: spec.md v4 to v7, edited by
   person@example.com`, then the diff in a fenced `diff` block after the card, then `(diff cut at
   4,096 bytes)` when Dispatch cut it; an issue's event log (`dispatch read dispatch://KEY/log`)
@@ -96,6 +184,12 @@
   session's start notice (`sessionSettings`' `notice`, which pi-envoy shows at `session_start`)
   names that value beside the deadline in force. The field reports that one raise: the 25 ms
   interval floor and the timer's ceiling are applied in silence and are not reported by it.
+
+- `askgateSetting(file)` reads AskGate's switch, the top-level `askgate` section of the session's
+  envoy.json: `{"askgate":{"enabled":false}}` turns AskGate off. A section that does not parse
+  leaves AskGate on and names the file and `askgate.enabled`, and never fails the Dispatch or Envoy
+  read. A checkout's `askgate` section is not read: `CheckoutEnvoyConfig.askgateError` names it,
+  and `sessionSettings` says it in its notice.
 
 ### Fixed
 
