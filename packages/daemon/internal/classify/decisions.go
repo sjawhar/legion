@@ -813,8 +813,9 @@ func HeadPushKnown(pr record.PullRequest, head string) bool {
 //     (TestAnArrivalThatNamesNoMoveIsJudgedAsTheReleaseBefore), a head run that a lost push opened
 //     closing at its bound the one change; so this daemon may deploy before the listener.
 //
-// The rule over before and sender has two floors, each pinned by the fuzz of a sender's moves
-// (TestEveryOrderOfASendersMovesIsJudgedAsTheOracleJudgesThem), outside which every order of
+// The rule over before and sender has three floors, each pinned by the fuzz of a sender's moves
+// (TestEveryOrderOfASendersMovesIsJudgedAsTheOracleJudgesThem), which delivers every synchronize
+// through the workflow's own lateness rule (LateSynchronize) and outside which every order of
 // delivery is judged alike and as the fresh-commit oracle judges it:
 //
 //   - A loop in a skipped gap: the moves whose synchronizes are late reach a head twice (the record's
@@ -826,7 +827,16 @@ func HeadPushKnown(pr record.PullRequest, head string) bool {
 //     the loop is read as the release before reads it - erased, and a return to the recorded head
 //     no move - because the fresh-commit oracle judged by this rule and the same oracle judged by
 //     the release before then agree that this rule is right where the release before is wrong more
-//     often than the reverse; counting the loop's pushes, they did not agree.
+//     often than the reverse; counting the loop's pushes, they did not agree. In the fuzz's long
+//     mode about 119,500 of 200,000 histories have such a loop, and about 58,500 of those are judged
+//     unlike their reference order or the oracle, or leave a run open (78,000 with the clock alone
+//     deciding lateness, as before LateSynchronize). With no synchronize lost, about 39,100 of the
+//     200,000 leave a head run open to its bound, every one in this floor or the next (108,000 with
+//     the clock alone).
+//   - Synchronizes of one second delivered reversed, whose head the record cannot yet tell it
+//     passed (LateSynchronize): read as moves, they move the record's head back. About 40,400 of
+//     200,000 histories deliver two synchronizes of one second reversed with no loop; about 1,450
+//     of those are misjudged (with the clock alone, about 36,500).
 //   - A synchronize never delivered: the arrival after it waits for the move it names, judged for
 //     now by the newest push of each two heads (provisional, the release before's), until the run's
 //     bound cuts it off.
@@ -834,7 +844,7 @@ func HeadPushKnown(pr record.PullRequest, head string) bool {
 // Outside those floors the rule is never wrong where the release before is right, by the
 // fresh-commit oracle judged by this rule, in the gates' comparison (the undo and any generators,
 // the reference, random and bounded orders, seeds 11, 20261028 and 4242, 40,000 histories each,
-// synchronizes on time, late or never delivered).
+// synchronizes on time, late or never delivered, clocks a minute apart or in one second).
 //
 // A head whose push is lost for good is judged unchained and holds its head run open, and every
 // head after it joins the run. The run drops exactly the pushes the record's own bound lets go and
