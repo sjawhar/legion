@@ -2,47 +2,37 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-220",
-  "completed": "2026-10-27T16:07:00Z",
-  "round": 10,
-  "testedHead": "2ec1b811b8ff4c63d42183d1e17b1b0a9f9d3880 (the implementer's handoff commit, run by CI and the image; same code as merge 86b9ecce0c, plus .legion/)",
+  "completed": "2026-10-28T08:38:00Z",
+  "round": 11,
+  "testedHead": "3a451bc1ea740effe22fbdf37300c4f07093342f (code head; e694f2a7 above it changes only .legion/). GitHub reports #2186 CONFLICTING at e694f2a7 (architect, 2026-10-28 08:37Z), so this head cannot merge; the issue goes back to implementing for a forward merge.",
+  "outcome": "Incomplete round, moved back by the architect's decision: no verdict at 3a451bc1. The live proofs and the SIGINT control must run at the merged head, and only on the Anthropic key the controller names (Legion was stopped for using another company's key).",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The round 10 merge changed lib/bridge-tunnel.sh (main's #2229 held-port mechanism with this branch's six-port bridge and bridge_down) and the tmux tool list (python3). The devbox runs below cover this head. I drove the merged watchdog myself (proof 3)."
+    "how": "In this pod against a real Postgres 16.4 (UTF8), with the pod's own OMP_SESSION_*/LEGION_WORKSPACE* unset: `go test ./internal/launcher/ ./internal/ompsessions/` ok, and TestAClaudeSaveTakesEverySaveThatMayHaveLandedAsSavedWhenTheRowMovedToIt passed all 4 subtests."
   },
   "failures": [],
   "failed": 0,
-  "proof": [
+  "results": [
     {
-      "criterion": "N1/N3 at the final head: a Claude Code implementer under tmux registers, is reminded by the Stop hook while its phase is open, completes through the legion MCP tool, and resumes the same session after its pane is killed",
-      "surface": "devbox (INFRA lead's lane on sami-rocqperf): real Go daemon with the tmux runtime, real Claude Code, real Envoy/Dispatch/NATS, sjawhar/legion-smoke, role Apps 5341240/5341243",
-      "command": "agent-secrets register --exec -- env LEGION_E2E_APP_KEY_RUNNER=agent-secrets LEGION_E2E_IMPLEMENT_APP_ID=5341240 LEGION_E2E_REVIEW_APP_ID=5341243 LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> LEGION_E2E_CLAUDE_KEY_FILE=<same> bash scripts/e2e/claude-backend-tmux.sh (14:48:50-15:01:41Z)",
-      "observed": "exit 0, 'claude backend e2e: PASS', 10/10 checks ok (prerequisites, rig, admission, architect-registers-the-gate, planner-handoff, claude-implementer-registers, stop-hook-reminds-the-open-phase, claude-implementer-handoff, kill-resumes-the-same-claude-session, every-launch-endpoint-checked). GET /app answered legion-implementer[bot] and legion-reviewer[bot]. legion, envoy-listener and envoy-dispatch stamped 2ec1b811 modified=false. I read the transcript: dispatch://INFRA-220/artifact/infra220-2ec1b811-tmux-transcript-log",
-      "headSha": "2ec1b811b8ff4c63d42183d1e17b1b0a9f9d3880",
-      "negativeControl": "In the bridge rig (proof 3), a chisel client that exits after teardown began leaves no TERM and no bridge-failed. For the tmux script the round 8 refusals still apply, and that code is unchanged: a missing key runner -> 'FAIL prerequisites: <runner>, the App key runner LEGION_E2E_APP_KEY_RUNNER names, is required'"
+      "what": "Tmux live proof at 3a451bc1ea740effe22fbdf37300c4f07093342f",
+      "result": "PASS. INFRA lead's lane, 17:48:07-17:56:35Z, exit 0, 10/10 checks, binaries stamped 3a451bc1 modified=false, GET /app answered legion-implementer[bot] and legion-reviewer[bot] (dispatch://INFRA-220/artifact/infra220-3a451bc1-tmux-transcript-log; I read it). It used the Anthropic key from the broker, which the architect now says must not be used."
     },
     {
-      "criterion": "N2/N4 at the final head: a Claude Code implementer under the Kubernetes runtime runs the bridge in its issue pod, is reminded by the Stop hook, completes, and a replacement pod resumes the same Claude Code session from the session table",
-      "surface": "devbox daemon with bridge reachability (merged held-port bridge) against the production GKE cluster, namespace legion. Worker image ghcr.io/sjawhar/legion-worker@sha256:ac7e9e34a96da7c3795abcde7443bd4931a20d586021e10808d010ec422c09fa (Worker Image run 40521619614; I read org.opencontainers.image.revision=2ec1b811b8ff4c63d42183d1e17b1b0a9f9d3880 from its config blob). Scratch Postgres session store, no priority class.",
-      "command": "agent-secrets register --exec -- env LEGION_E2E_POD_REACHABILITY=bridge LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_STORAGE_CLASS=standard-rwo LEGION_E2E_CLAUDE_MODEL=claude-sonnet-5 LEGION_E2E_RUNTIME_KUBECONFIG=<0600 copy> LEGION_E2E_APP_KEY_RUNNER=agent-secrets LEGION_E2E_IMPLEMENT_APP_ID=5341240 LEGION_E2E_REVIEW_APP_ID=5341243 LEGION_E2E_IMAGE=<digest above> ports 13380-13385 bash scripts/e2e/claude-backend-sandbox.sh (15:26:25-16:01:30Z)",
-      "observed": "exit 0, 'claude backend sandbox e2e: PASS', 15/15 ok: prerequisites, rig, snapshot, bridge, operator-route, daemon, admission, architect-registers-the-gate, planner-handoff, claude-implementer-registers, claude-pod-runs-the-bridge, stop-hook-reminds-the-open-phase, claude-implementer-handoff, pod-deleted-resumes-the-same-claude-session, namespace-clean (0 of the run's objects before and after). No BRIDGE TUNNEL DOWN line. legion, envoy-listener and envoy-dispatch stamped 2ec1b811 modified=false. I read the transcript: dispatch://INFRA-220/artifact/infra220-2ec1b811-sandbox-transcript-log",
-      "headSha": "2ec1b811b8ff4c63d42183d1e17b1b0a9f9d3880",
-      "negativeControl": "SIGINT after 'ok prerequisites' (job control on, 16:02:05Z), same head and image: exit 130, 'claude backend sandbox e2e: FAIL (check rig)', no 'FAIL cleanup', `ls -d $XDG_RUNTIME_DIR/legion-e2eccs-app-keys.*` finds nothing (dispatch://INFRA-220/artifact/infra220-2ec1b811-sandbox-sigint-transcript-log)"
+      "what": "Sandbox live proof and SIGINT control at 3a451bc1ea740effe22fbdf37300c4f07093342f",
+      "result": "Not run. Both transcripts stop at 'FAIL prerequisites: LEGION_E2E_CLAUDE_KEY_FILE names /run/user/1000/infra220-anthropic-key, which is not a readable file' (dispatch://INFRA-220/artifact/infra220-3a451bc1-sandbox-transcript-log, -sandbox-sigint-transcript-log). The key file was gone before the run. That is the lane's input, not a code result."
     },
     {
-      "criterion": "The merged bridge watchdog still ends the run at once when the bridge is really down, and recovers a dropped port-forward",
-      "surface": "scripts/e2e/lib/bridge-tunnel.sh at 86b9ecce, sourced by a bash driver under `set -Eeuo pipefail` in this issue pod, with bridge_start's real code and stand-ins for kubectl (port-forward printing 'Forwarding from 127.0.0.1:<port>'), op, go and the chisel client",
-      "command": "bridge_start 13380 13381, then four cases: kill the chisel client; kill the port-forward once (restart allowed); kill the port-forward with every restart failing; write $work/bridge-stopping, then kill the client",
-      "observed": "Client exit: 'BRIDGE TUNNEL DOWN: the chisel client exited … ending the run'. kill_harness was called, bridge-failed holds the reason and the pod's events, and the script got TERM 6 s after the client died. One drop: 'recovered after 2s on local port 40002; chisel client restarted against it'. The second client dialed http://127.0.0.1:40002 and the run went on. Every restart failing: 'could not be restarted within 60s; ending the run', TERM at +68 s, exit 143, 12 port-forward attempts. Stopping flag: no TERM in 12 s and no bridge-failed.",
-      "headSha": "86b9ecce0c",
-      "negativeControl": "The teardown case: once bridge-stopping exists, a dead client neither TERMs the run nor writes bridge-failed"
+      "what": "Keeper fix probes (throwaway, removed), real Postgres in this pod",
+      "result": "A save cancelled by saveTimeout behind an ACCESS EXCLUSIVE lock, then a lock release: the table caught up to both lines, the fresh transcript's .legion-saved marker was written, and no 'stops saving' line. A resume whose database is down: refused after 3.0 s ('after 29 attempts in 3s'), and the child never ran."
+    },
+    {
+      "what": "Script checks",
+      "result": "bash -n ok on claude-backend-sandbox.sh, claude-backend-tmux.sh, lib/claude-transcript.sh, lib/session-db.sh, stage4b-sandbox-tree.sh. bun test claude-backend-key-runner, app-logins, claude-backend-guards: 44 pass, 0 fail. cleanup() now removes $work/auth-plugin.env (claude-backend-sandbox.sh:1025)."
     }
   ],
-  "observations": [
-    "The TERM lands when the shell's foreground command returns: bash runs a trap only between commands. With the script's 2 s polling sleeps that is at most a few seconds. A long foreground command defers it, and kill_harness, which stops the daemon, is what ends such a command."
+  "testEnvironmentNotes": [
+    "The launcher and ompsessions suites need a UTF8 Postgres (SQL_ASCII fails TestImportRefusesContentNoTextValueHolds). Run them with the pod's OMP_SESSION_SQL_DSN_FILE, OMP_SESSION_STORAGE, LEGION_WORKSPACE and LEGION_WORKSPACE_RECREATED unset: the inherited pod values fail TestStartRefusesAResumeWithNoURLFile and TestAResumeIsToldWhetherItsWorkspaceWasRecreatedSinceTheTableWroteItsSession. That is the test environment, not a code defect."
   ],
-  "ci": "Read at 16:05Z for 2ec1b811: Tests 40521619423 (lint, typecheck, test) success, Docs 40521619636 success, PR Title 40521619706 success, Worker Image 40521619614 success. Legion Envoy and Contracts 40521619432 still queued.",
-  "notTested": [
-    "The sandbox runtime identity is ADC (the operator's identity), not the daemon's restricted identity (the implementer's recorded deviation)."
-  ],
-  "risks": []
+  "ci": "At 3a451bc1: Tests 40553153884 (lint, typecheck, test) success, Docs success, PR Title success, Worker Image 40553153892 success. Legion Envoy and Contracts 40553153893 failed in envoy-go (TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget in packages/envoy cmd/listener, and internal/dispatch/api timing out at 600 s). That workflow is not required, and the branch changes no file under packages/envoy.",
+  "nextRound": "After the forward merge: the tmux proof, the sandbox proof and the SIGINT control at the merged head, on the Worker Image of that head (revision label checked), with the Anthropic key the controller names."
 }
