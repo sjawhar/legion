@@ -2,39 +2,39 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-631",
-  "completed": "2026-10-27T19:05:00Z",
+  "completed": "2026-10-27T20:10:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2422",
   "proof": [
     {
       "criterion": "1. Outside fenced code blocks no line holds more than one sentence, list items are separated by blank lines, and no list item or table row is longer than one screen; a check shows it.",
       "surface": "scripts/semantic-line-breaks.ts on the two guides as a contributor runs it, and its unit tests as CI runs them",
       "command": "cd -- \"$LEGION_WORKSPACE\" && bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md; bun test scripts/semantic-line-breaks.test.ts scripts/semantic-line-breaks.guides.test.ts",
-      "observed": "checker exit 0 at head (the seven lowercase sentence starts the tester found are split); 8 pass, 0 fail (the tester's 7 unit tests unmodified, plus the moved guides test)",
-      "headSha": "3c583c55614c7082387a52fdf4070ce52c91639b",
-      "negativeControl": "the tester's unit tests against the previous checker 43aac0eb: 0 pass, 7 fail; the checker on main 2df3353c's old files: exit 1, AGENTS 1566 R1 / 99 R2 / 7 R3, README 547 R1 / 23 R2 / 1 R3"
+      "observed": "checker exit 0 at head; bun test of the unit file and the moved guides file: 8 pass, 0 fail (the tester's 7 unit tests unmodified)",
+      "headSha": "798895461a677b990e200fda595a41d4675f5494",
+      "negativeControl": "the tester's unit tests against the previous checker 43aac0eb: 0 pass, 7 fail; the checker on main b295a3fb's old files: exit 1, AGENTS 1599 R1 / 101 R2 / 8 R3, README 547 R1 / 23 R2 / 1 R3"
     },
     {
       "criterion": "2. Nothing is lost: every difference is a move the plan names, a pointer to the new place, or a listed format word or statement edit.",
       "surface": "git history of the branch, compared as folded words and as CommonMark+GFM renderings (micromark 4.0.2 + micromark-extension-gfm 3.0.0), and restructure.ts as the reviewer re-runs it",
-      "command": "bun .legion/INFRA-631/restructure.ts --strict <main 2df3353c AGENTS.md> <out> <README.md> <out>, cmp with the head files; tr -s '[:space:]' ' ' + cmp and compare.mjs on 3e604ca8→4b7a6bf9 and 2b4b7ddc→43aac0eb; git diff --no-index --word-diff=porcelain of 43aac0eb vs head on folded words",
-      "observed": "regeneration byte-identical to the head; whitespace-only commits folded-equal and render-equal; 43aac0eb→head words differ only by the new rewording 'the fence the configuration table lists' → 'the fence its Required configuration item lists'; headings unchanged",
-      "headSha": "3c583c55614c7082387a52fdf4070ce52c91639b",
+      "command": "bun .legion/INFRA-631/restructure.ts --strict <main b295a3fb AGENTS.md> <out> <README.md> <out>, cmp with the head files; diff of grep '^#' between main and head; folded and rendered equality of the whitespace-only commits 3e604ca8→4b7a6bf9 and 2b4b7ddc→43aac0eb (checked in round 1, those commits unchanged)",
+      "observed": "regeneration from main b295a3fb byte-identical to the head; headings unchanged in both files; the only word changes against round 1's guides are main's own edits and the round's rewording 'the fence its Required configuration item lists'",
+      "headSha": "798895461a677b990e200fda595a41d4675f5494",
       "negativeControl": "semantic-line-breaks.ts --write on a copy whose relayout replaced one word refused with exit 2 and the file unchanged; restructure.ts --strict on main's AGENTS.md with 'Shutdown stops HTTP first' reworded: exit 1, nothing written"
     },
     {
       "criterion": "3. Replay: real conflicting pairs ported to the new layout merge clean wherever the two edits changed different, non-adjacent sentences or added items at different places; two new items added at different places of one list merge clean.",
       "surface": "git merge-tree --write-tree on branches made from the head's files with the committed patches (refreshed against this head)",
-      "command": "TMPDIR=/legion/scratch/tmp/infra631/replay-work bash .legion/INFRA-631/replay/run.sh",
+      "command": "TMPDIR=$TMPDIR/infra631 bash .legion/INFRA-631/replay/run.sh (base read from 3c583c55, the regeneration of main 2df3353c the patches were written against)",
       "observed": "exit 0, 11/11 PASS: 5e45356e68aa, 4671996e14fd, 56d31191f8f1, 949ebe03bd4e clean; 5aee84d6930e and 125a3bfb0484 classified same-or-adjacent and conflict; append(a), append(b) clean",
-      "headSha": "3c583c55614c7082387a52fdf4070ce52c91639b",
+      "headSha": "798895461a677b990e200fda595a41d4675f5494",
       "negativeControl": "the four clean pairs on the old layout: git merge-tree exit 1 each; append(c), two items at one point of Routes, conflicts; controls 728b5e297fb5 and 4440fc7b57a2 conflict"
     },
     {
       "criterion": "4. Every citation of a moved section still resolves; and the PR body's porting recipe works as written on open pull requests.",
       "surface": "the repository's checks that read packages/envoy/AGENTS.md, Dispatch's document element measure, and the porting recipe driven on open PRs #2387, #2414, #2404 against this head",
-      "command": ".github/scripts/check-body-embed-limit.sh; bash .github/scripts/check-body-embed-limit.test.sh; .github/scripts/check-private-names.sh; go test -overlay … -run TestMeasureGuides ./internal/dispatch/pmdoc/; $TMPDIR/infra631/recipe.sh refs/remotes/pr/<n> <file> 3c583c55 1d6349a9 (the recipe's steps 2-7)",
-      "observed": "embed limit pass; 49 passed; private names exit 0; AGENTS 24,325 elements / 556,872 bytes, README 10,016 / 169,028; recipe: no merge conflict on any of the five files, #2414 README no longer conflicts on the migration sentence, #2387/#2414 README warn their 0138/0137 notes belong in the .up.sql, #2404 warns split-self-health-shutdown skipped and the checker names the 85-row item",
-      "headSha": "3c583c55614c7082387a52fdf4070ce52c91639b",
+      "command": ".github/scripts/check-body-embed-limit.sh; bash .github/scripts/check-body-embed-limit.test.sh; .github/scripts/check-private-names.sh; go test -overlay … -run TestMeasureGuides ./internal/dispatch/pmdoc/; the PR body's porting recipe (steps 2-7) on open PRs #2404 (AGENTS) and #2387 (both files), main.md = this head's files",
+      "observed": "embed limit pass; 49 passed; private names exit 0; AGENTS 24,923 elements / 568,671 bytes, README 10,016 / 169,028 (under 65,536 and 1 MiB); recipe: 0 merge conflicts on all three files; #2404 warns split-self-health-shutdown and its citation skipped for ours.md only and the checker names its 85-row item (recipe step 6/7 says to split it); #2387 README warns its 0138 note belongs in the .up.sql; #2387 AGENTS has one 54-row item from its own additions",
+      "headSha": "798895461a677b990e200fda595a41d4675f5494",
       "negativeControl": "restructure.ts --strict on a README log noting `0138`: exit 1 'the log notes a migration above `0134`', nothing written; --lenient on main's AGENTS.md with the shutdown anchor reworded warns citation-shutdown-bullet skipped and writes no '(the shutdown bullet below)'"
     }
   ],
@@ -53,7 +53,8 @@
     "Main moved twice on both files after the plan (452e46479082, c210f10d6588): the PR conflicted at open and was resolved by the forward merge 52f2ecef, whose two guides are restructure.ts --strict on main 2df3353c's files. Any later merge to main touching either file conflicts again; resolve the same way and re-run .legion/INFRA-631/replay/run.sh.",
     "Items at 48-50 screen rows after the re-layout (AGENTS repo bullet 48, delete-markers 49, shutdown 50, /v1/interests/subscribe 48): a later main edit that grows one past 50 makes restructure.ts --strict fail; add a split anchor at a sentence that stands alone.",
     "semantic-line-breaks.ts check mode reads a paragraph whole (7150c044): a code span broken across lines in the old layout had hidden 61 sentence ends on five AGENTS lines from both the check and --write.",
-    "The replay patches were refreshed against this head (git apply then re-diff); 5aee84d6930e-theirs and 5e45356e68aa-theirs touched the line the lowercase split broke, ported by hand with the same change."
+    "Main moved again (b295a3fb: a4960862, 85713740 and others edit AGENTS.md); the forward merge 79889546 regenerates the guides from main b295a3fb's files and adds two split anchors (split-listener-replay-subjects, split-listener-subscribe-owner) for main's longer /v1/replay and /v1/interests/subscribe items. Each later main edit that grows an item past 50 rows needs another anchor before --strict passes.",
+    "replay/run.sh reads its base from commit 3c583c55 (REPLAY_BASE overrides), not the live head, so the patches need not be ported again at every regeneration; the layout rules are the same."
   ],
   "deviations": [
     "Body-cap wording is 'so keep a line of this bullet that names both constants' (plan: 'keep the sentence that names both constants on one line', which the re-layout makes false).",
