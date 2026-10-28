@@ -4,8 +4,18 @@
 // packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md keep this layout, and
 // `--write` fixes it by changing only whitespace.
 //
+// `--write` writes a file only when two guards hold: the text is the same once whitespace is
+// folded, and the file renders the same, parsed before and after with micromark and its GFM
+// extension (CommonMark and GitHub's tables, footnotes, task lists and strikethrough). A construct
+// this script misreads therefore leaves the file as it was and fails loudly, naming the first block
+// whose rendering would change. The comparison ignores only what a re-layout must change: where a
+// line breaks inside text, and whether a list is loose (the blank lines R2 puts between items).
+//
 // Lengths are UTF-16 code units (JavaScript string length), and a tab counts as one column.
 import { readFile, writeFile } from "node:fs/promises";
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { gfmFromMarkdown } from "mdast-util-gfm";
+import { gfm } from "micromark-extension-gfm";
 
 const USAGE = "usage: bun scripts/semantic-line-breaks.ts [--write] <file.md>...\n";
 
@@ -74,7 +84,15 @@ const ABBREVIATIONS = [
   "Mr.",
   "Dr.",
   "U.S.",
+  "incl.",
+  "approx.",
+  "a.k.a.",
+  "resp.",
+  "et al.",
+  "pp.",
 ];
+/** A numbered label a bold or italic span opens with, not a sentence end: `**4a.`, `_2._`. */
+const EMPHASIS_LABEL = /(?:^|[^\p{L}\p{N}*_])(?:\*\*|__|\*|_)\(?\d{1,3}[A-Za-z]?\.$/u;
 const LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
 /** Text up to a `.` that numbers an item or heading, not a sentence end: `1.`, `- 12.`, `## 3.`. */
 const LIST_MARKER_PREFIX = /^[ \t]*(?:#{1,6}[ \t]+)?(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*\d{1,9}\.$/;
@@ -115,7 +133,8 @@ interface Fence {
 
 interface ItemMarker {
   bullet: boolean;
-  start: number;
+  /** The marker is `1.` or `1)`, the only ordered marker that may interrupt a paragraph. */
+  startsAtOne: boolean;
   empty: boolean;
   contentStart: number;
   contentColumn: number;
@@ -161,7 +180,7 @@ function parseItemMarker(line: string, at: number): ItemMarker | undefined {
   const contentColumn = empty || spaces > 4 ? markerEnd + 1 : markerEnd + spaces;
   return {
     bullet: match[1] !== undefined,
-    start: Number(match[2] ?? 0),
+    startsAtOne: match[2] === "1",
     empty,
     contentStart: empty ? line.length : contentColumn,
     contentColumn,
@@ -221,7 +240,7 @@ function blockStart(
   if (interrupts && SETEXT_UNDERLINE.test(rest)) return { type: "other" };
   if (THEMATIC_BREAK.test(rest)) return { type: "other" };
   const marker = parseItemMarker(line, at);
-  if (marker && (!interrupts || (!marker.empty && (marker.bullet || marker.start === 1)))) {
+  if (marker && (!interrupts || (!marker.empty && (marker.bullet || marker.startsAtOne)))) {
     return { type: "item", marker };
   }
   if (rest.startsWith(">")) return { type: "other" };
@@ -389,8 +408,12 @@ function scanBlocks(source: readonly string[]): Blocks {
       html = undefined;
     }
     if (fence) {
+      // A closing fence is indented at most three columns past its container's content column.
       const run = FENCE_CLOSE.exec(line)?.[1] ?? "";
-      if (run.startsWith(fence.char) && run.length >= fence.length) fence = undefined;
+      const fenceIndent = indentLength(line) - (innermost?.contentColumn ?? 0);
+      if (fenceIndent <= 3 && run.startsWith(fence.char) && run.length >= fence.length) {
+        fence = undefined;
+      }
       lines.push(info("fence"));
     } else if (html && (html !== BLANK || !isBlank(line))) {
       if (html.test(line)) html = undefined;
@@ -499,7 +522,7 @@ function sentenceBreaks(line: string): number[] {
     const abbreviation = ABBREVIATIONS.find((word) => sentence.endsWith(word));
     const before = sentence.charAt(sentence.length - (abbreviation?.length ?? 0) - 1);
     if (abbreviation !== undefined && !LETTER_OR_DIGIT.test(before)) continue;
-    if (LIST_MARKER_PREFIX.test(sentence)) continue;
+    if (LIST_MARKER_PREFIX.test(sentence) || EMPHASIS_LABEL.test(sentence)) continue;
     const lowercase = /[a-z]/.test(line.charAt(space + 1));
     if (lowercase && (!/^\.[*_]*$/.test(line.slice(mark, space)) || sentence.endsWith(".."))) {
       continue;
@@ -628,6 +651,70 @@ function foldedDifference(before: string, after: string): string | undefined {
   return `first difference at folded offset ${at}: ${show(a)} became ${show(b)}`;
 }
 
+/** Parent node types whose children run as text, where a line break is only whitespace. */
+const TEXT_PARENTS: Record<string, true> = {
+  paragraph: true,
+  heading: true,
+  tableCell: true,
+  emphasis: true,
+  strong: true,
+  delete: true,
+  link: true,
+  linkReference: true,
+};
+
+interface ParsedNode {
+  type: string;
+  children?: ParsedNode[];
+  position?: { start: { line: number } };
+}
+
+/**
+ * A parsed node as it renders: positions dropped, the looseness of lists dropped, and whitespace
+ * folded in values that run as text (text, inline code, inline HTML, an image's alt text). Code
+ * blocks, HTML blocks and link titles keep their values exactly.
+ */
+function renderedForm(node: ParsedNode, inText: boolean): unknown {
+  const form: Record<string, unknown> = {};
+  const childrenInText = inText || TEXT_PARENTS[node.type] === true;
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "position") continue;
+    if (key === "spread" && (node.type === "list" || node.type === "listItem")) continue;
+    if (key === "children") {
+      form.children = node.children?.map((child) => renderedForm(child, childrenInText));
+    } else if ((key === "value" || key === "alt") && inText && typeof value === "string") {
+      form[key] = value.replace(WHITESPACE_RUN, " ");
+    } else {
+      form[key] = value;
+    }
+  }
+  return form;
+}
+
+/** The first top-level block whose rendering differs between the two texts, or undefined. */
+function renderDifference(before: string, after: string): string | undefined {
+  const parse = (text: string): ParsedNode[] =>
+    fromMarkdown(text, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] }).children;
+  const blocksBefore = parse(before);
+  const blocksAfter = parse(after);
+  for (let n = 0; n < Math.max(blocksBefore.length, blocksAfter.length); n++) {
+    const was = blocksBefore[n];
+    const now = blocksAfter[n];
+    if (
+      was !== undefined &&
+      now !== undefined &&
+      JSON.stringify(renderedForm(was, false)) === JSON.stringify(renderedForm(now, false))
+    ) {
+      continue;
+    }
+    const where = was?.position
+      ? `the block at line ${was.position.start.line}`
+      : `a block past the end, at line ${now?.position?.start.line} of the rewrite`;
+    return `${where} would render differently (a ${was?.type ?? "nothing"} became a ${now?.type ?? "nothing"})`;
+  }
+  return undefined;
+}
+
 function screenRows(lines: readonly string[]): number {
   return lines.reduce((rows, line) => rows + Math.max(1, Math.ceil(line.length / SCREEN_WIDTH)), 0);
 }
@@ -644,7 +731,12 @@ function check(text: string): Finding[] {
   const findings: Finding[] = [];
   for (const [index, line] of lines.entries()) {
     const info = blocks.lines[index];
-    if (info === undefined || info.kind === "fence" || info.kind === "code") continue;
+    if (info === undefined) continue;
+    // R2 first: an item may open with a fence or indented code.
+    if (needsBlankBefore(lines, info, index)) {
+      findings.push({ line: index, rule: 2, message: excerpt(line, 0) });
+    }
+    if (info.kind === "fence" || info.kind === "code") continue;
     // R1 reads a paragraph whole, so a code span a line break cuts in two still masks its text.
     // Outside paragraphs it reads only headings and table rows, never lines `--write` keeps as
     // they are for another reason: HTML blocks, link reference definitions, quotes.
@@ -663,9 +755,6 @@ function check(text: string): Finding[] {
         const message = excerpt(source[offset] ?? "", column);
         findings.push({ line: paragraph.first + offset, rule: 1, message });
       }
-    }
-    if (needsBlankBefore(lines, info, index)) {
-      findings.push({ line: index, rule: 2, message: excerpt(line, 0) });
     }
     if (info.kind === "table") {
       const rows = screenRows([line]);
@@ -717,10 +806,15 @@ async function writeFiles(paths: readonly string[]): Promise<number> {
     if (text === undefined) return 2;
     const next = relayout(text);
     const difference = foldedDifference(text, next);
+    const rendering =
+      difference === undefined && next !== text ? renderDifference(text, next) : undefined;
     if (difference !== undefined) {
       process.stderr.write(
         `${path}: refusing to write: the re-layout would change more than whitespace (${difference})\n`
       );
+      status = 2;
+    } else if (rendering !== undefined) {
+      process.stderr.write(`${path}: refusing to write: ${rendering}\n`);
       status = 2;
     } else if (next !== text) {
       await writeFile(path, next);
@@ -731,7 +825,8 @@ async function writeFiles(paths: readonly string[]): Promise<number> {
 
 // `bun scripts/semantic-line-breaks.ts [--write] <file.md>...` prints `file:line: R<n>: <excerpt>`
 // for each finding and exits 1 when there is one; with `--write` it re-lays out each file in place
-// and exits 2, writing nothing for that file, when the result would differ in more than whitespace.
+// and exits 2, writing nothing for that file, when the result would differ in more than whitespace
+// or would render differently.
 if (import.meta.main) {
   const args = process.argv.slice(2);
   const write = args[0] === "--write";
