@@ -16,14 +16,15 @@ type sseFrame struct {
 	at         int64 // Unix ns when the frame's closing blank line arrived
 	id         int64 // the event's id (data JSON "id"; the frame's id: field when the JSON has none)
 	created    int64 // Unix ns of the event's created_at; 0 when absent or unparsable
-	marker     int64 // the lgm<N>x marker in the frame's data; 0 when none
+	marker     int64 // the counter of the run's marker in the frame's data (findMarker); 0 when none
 	outOfOrder bool  // id <= the previous frame's id on the same connection
 }
 
 // readSSE parses one SSE connection's body until it ends, calling onFrame for each data frame with
-// at set from now(). It returns the bytes read and the error that ended the body (io.EOF at a clean
-// end). A partial frame at the end is dropped: a frame counts only on its closing blank line.
-func readSSE(body io.Reader, now func() time.Time, onFrame func(sseFrame)) (int64, error) {
+// at set from now() and the marker of the run with this nonce. It returns the bytes read and the
+// error that ended the body (io.EOF at a clean end). A partial frame at the end is dropped: a
+// frame counts only on its closing blank line.
+func readSSE(body io.Reader, nonce int64, now func() time.Time, onFrame func(sseFrame)) (int64, error) {
 	br := bufio.NewReaderSize(body, 64<<10)
 	var n int64
 	var data []byte
@@ -39,7 +40,7 @@ func readSSE(body io.Reader, now func() time.Time, onFrame func(sseFrame)) (int6
 		if len(line) == 0 {
 			if hasData {
 				f := sseFrame{at: now().UnixNano(), id: idField}
-				f.marker, _ = parseMarker(string(markerPattern.Find(data)))
+				f.marker, _ = findMarker(data, nonce)
 				var ev struct {
 					ID        *int64    `json:"id"`
 					CreatedAt time.Time `json:"created_at"`

@@ -9,10 +9,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -46,40 +43,31 @@ type roomSample struct {
 
 type roomSampler struct {
 	samples []roomSample
-	errors  int
+	errors  int // failed reads (poll), a failed connect included
 }
 
-// loop samples every 100 ms from from to to over its own direct connection.
+// roomSamplerInterval is how often the room sampler reads.
+const roomSamplerInterval = 100 * time.Millisecond
+
+// loop samples every roomSamplerInterval from from to to over its own direct connection, named
+// so that roomConnectionsQuery leaves it out. A failed connect counts as one failed read, as
+// pollPG counts it.
 func (s *roomSampler) loop(ctx context.Context, url string, from, to time.Time, lg *log.Logger) {
 	conn, err := connectAs(ctx, url, "loadgen-room-sampler")
 	if err != nil {
 		lg.Printf("room sampler: %v", err)
+		s.errors = 1
 		return
 	}
 	defer conn.Close(context.Background())
-	if !sleepUntil(ctx, from) {
-		return
-	}
-	t := time.NewTicker(100 * time.Millisecond)
-	defer t.Stop()
-	for time.Now().Before(to) {
+	s.errors = poll(ctx, from, to, roomSamplerInterval, "room sampler", lg, func(ctx context.Context) error {
 		var r roomSample
 		if err := conn.QueryRow(ctx, roomConnectionsQuery, commitOrderLockClassID, commitOrderLockObjID).Scan(&r.held, &r.shared); err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			if s.errors++; s.errors <= 3 {
-				lg.Printf("room sampler: %v", err)
-			}
-		} else {
-			s.samples = append(s.samples, r)
+			return err
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-	}
+		s.samples = append(s.samples, r)
+		return nil
+	})
 }
 
 // connectAs opens a direct connection over url under application name name. loadgen's own
@@ -129,14 +117,14 @@ func readWindow(ctx context.Context, ep endpoints) windowReading {
 		r.proxyErr = "no proxy wire counts to read: -allow-foreign, or a stack.json from before proxy_stats"
 	default:
 		var s proxyStats
-		if err := getJSON(ctx, ep.proxyStats+"/stats", &s); err != nil {
+		if err := getJSON(ep.proxyStats+"/stats", &s); err != nil {
 			r.proxyErr = "the proxy serves no wire counts: " + err.Error()
 		} else {
 			r.proxy = &s
 		}
 	}
 	var vars map[string]json.RawMessage
-	if err := getJSON(ctx, ep.pprof+"/debug/vars", &vars); err != nil {
+	if err := getJSON(ep.pprof+"/debug/vars", &vars); err != nil {
 		r.roomsErr = notServed + " (" + err.Error() + ")"
 	} else if raw, ok := vars["dispatch_rooms"]; !ok {
 		r.roomsErr = notServed
@@ -163,21 +151,14 @@ func readWindow(ctx context.Context, ep endpoints) windowReading {
 	return r
 }
 
-func getJSON(ctx context.Context, url string, v any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// getJSON decodes the body of a GET of url (getOK) into v.
+func getJSON(url string, v any) error {
+	body, err := getOK(shortClient, url)
 	if err != nil {
 		return err
 	}
-	resp, err := shortClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("%s: %d %s", url, resp.StatusCode, trunc(b))
-	}
-	return json.NewDecoder(resp.Body).Decode(v)
+	defer body.Close()
+	return json.NewDecoder(body).Decode(v)
 }
 
 type roomsSummary struct {

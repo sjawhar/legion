@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"math/rand/v2"
 	"net/http"
 	"slices"
@@ -441,45 +440,43 @@ type editorWorkload struct {
 	all       sync.WaitGroup
 }
 
-// startEditors connects cfg.editors editors, editor i to the (i mod D)-th of the first D seeded
-// specs in key order, as person-<i>, and runs each one's schedule from start to winEnd: updates
-// at cfg.rate a second, open-loop Poisson from the step's RNG seed (stream 3+i). An update is
+// startEditors starts the browser editors (nil in a step without editors): it connects
+// cfg.editors editors, editor i to the (i mod D)-th of the first D seeded specs in key order, as
+// person-<i>, and runs each one's schedule from the step's start to the window's end: updates at
+// cfg.rate a second, open-loop on stream 3+i of the step's RNG seed (openLoop). An update is
 // scheduled whether or not its editor is connected; one whose editor is not connected and synced
 // is counted as not sent. The durable probe reads its floors before the first editor connects.
-func startEditors(ctx context.Context, rc runConfig, sf seedFile, start, winStart, winEnd time.Time, lg *log.Logger) *editorWorkload {
-	cfg := rc.editors
+func (st *step) startEditors(ctx context.Context) *editorWorkload {
+	cfg := st.cfg.editors
+	if cfg.editors == 0 {
+		return nil
+	}
+	lg := st.lg
 	w := &editorWorkload{cfg: cfg, stats: newEditorStats()}
 	ids := make([]string, cfg.docs)
 	for i := range cfg.docs {
-		is := sf.Issues[i]
+		is := st.sf.Issues[i]
 		w.docs = append(w.docs, &editorDoc{key: is.Key, artifactID: is.ArtifactID})
 		ids[i] = is.ArtifactID
 	}
 	for i := range cfg.editors {
 		w.docs[i%cfg.docs].editors++
 	}
-	w.probe, w.probeErr = newDurableProbe(ctx, rc.ep.pg, ids)
+	w.probe, w.probeErr = newDurableProbe(ctx, st.cfg.ep.pg, ids)
 	if w.probeErr != nil {
 		lg.Printf("editors: durable probe: %v; durable latency is not measured", w.probeErr)
 	} else {
-		w.all.Add(1)
-		go func() {
-			defer w.all.Done()
-			w.probe.loop(ctx)
-		}()
+		w.all.Go(func() { w.probe.loop(ctx) })
 	}
-	base := "ws" + strings.TrimPrefix(rc.ep.dispatch, "http")
+	base := "ws" + strings.TrimPrefix(st.cfg.ep.dispatch, "http")
 	schema := strconv.Itoa(pmdoc.SchemaVersion())
-	inWindow := func(t time.Time) bool { return !t.Before(winStart) && t.Before(winEnd) }
 	lg.Printf("editors: %d on %d documents at %g updates/s each, schema_version %s", cfg.editors, cfg.docs, cfg.rate, schema)
 	for i := range cfg.editors {
 		d := w.docs[i%cfg.docs]
 		url := base + "/ws/doc/" + d.artifactID + "?schema_version=" + schema
 		login := fmt.Sprintf("person-%d", i)
 		var current atomic.Pointer[editorConn]
-		w.all.Add(1)
-		go func() {
-			defer w.all.Done()
+		w.all.Go(func() {
 			for ctx.Err() == nil {
 				c, err := dialEditor(ctx, url, login, schema, d, w.stats)
 				if err != nil {
@@ -504,35 +501,23 @@ func startEditors(ctx context.Context, rc runConfig, sf seedFile, start, winStar
 				current.Store(nil)
 				sleepUntil(ctx, time.Now().Add(editorReconnectDelay))
 			}
-		}()
+		})
 		w.schedules.Add(1)
-		w.all.Add(1)
-		go func() {
-			defer w.all.Done()
+		w.all.Go(func() {
 			defer w.schedules.Done()
 			// The schedule and the words come from one stream, which every scheduled update
 			// draws from whether or not it is sent, so two runs offer the same arrivals; where an
 			// update lands in the document comes from another.
-			r := rand.New(rand.NewPCG(rc.rngSeed, 3+uint64(i)))
-			positions := rand.New(rand.NewPCG(rc.rngSeed, 1<<32+uint64(i)))
-			next := start
+			positions := rand.New(rand.NewPCG(st.cfg.rngSeed, 1<<32+uint64(i)))
 			updates := 0
-			for {
-				next = next.Add(time.Duration(r.ExpFloat64() / cfg.rate * float64(time.Second)))
-				if !next.Before(winEnd) {
-					return
-				}
+			openLoop(ctx, st.cfg.rngSeed, 3+uint64(i), cfg.rate, st.start, st.winStart, st.winEnd, func(r *rand.Rand, in bool) {
 				word := words[r.IntN(len(words))]
-				if !sleepUntil(ctx, next) {
-					return
-				}
-				in := inWindow(next)
 				c := current.Load()
 				if c == nil || !c.synced.Load() {
 					if in {
 						w.stats.add(func(s *editorStats) { s.notSent["disconnected"]++ })
 					}
-					continue
+					return
 				}
 				updates++
 				text, marker := " "+word, ""
@@ -559,8 +544,8 @@ func startEditors(ctx context.Context, rc runConfig, sf seedFile, start, winStar
 						}
 					})
 				}
-			}
-		}()
+			})
+		})
 	}
 	return w
 }

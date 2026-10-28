@@ -18,7 +18,7 @@ func TestSummarizeUngranted(t *testing.T) {
 		{waits: []lockWait{commit("select pg_advisory_xact_lock", "COMMIT"), commit("insert into events", "COMMIT"), commit("insert into events", "COMMIT"), row}},
 	}
 
-	got := summarizeUngranted(samples)
+	got := summarizeUngranted(samples, 0)
 
 	want := ungrantedSummary{
 		Samples:      4,
@@ -53,7 +53,7 @@ func TestSummarizeUngranted(t *testing.T) {
 }
 
 func TestSummarizeUngrantedWithNoSamples(t *testing.T) {
-	got := summarizeUngranted(nil)
+	got := summarizeUngranted(nil, 0)
 	if got.Samples != 0 || got.ShareWithAny != 0 || got.Groups == nil || len(got.Groups) != 0 {
 		t.Fatalf("summary %+v, want 0 samples and an empty, non-nil group list", got)
 	}

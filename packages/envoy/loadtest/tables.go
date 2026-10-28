@@ -139,20 +139,58 @@ func (s stepData) label() string {
 	return s.name + " (" + strings.Join(names, ", ") + " exited)"
 }
 
-func renderTables(steps []stepData) string {
-	var b strings.Builder
-	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
-	row := func(cells ...string) { w("| %s |", strings.Join(cells, " | ")) }
-	header := func(cells ...string) {
-		row(cells...)
-		w("|%s", strings.Repeat("---|", len(cells)))
+// probeLabel is the step's label in a table of a probe, marked "(<n> failed reads)" when the probe
+// had failed reads.
+func (s stepData) probeLabel(failedReads int) string {
+	if failedReads == 0 {
+		return s.label()
 	}
+	return fmt.Sprintf("%s (%d failed reads)", s.label(), failedReads)
+}
 
-	w("# Load test tables\n")
-	w("One row per step. Latencies are ms over the measured window; cores are CPU-seconds per second.\n")
+// markdown is TABLES.md as it is written.
+type markdown struct {
+	strings.Builder
+}
 
-	w("## Events, delivery and requests\n")
-	header("step", "start (UTC)", "sessions", "events/s target / offered / committed", "write errors non-2xx / transport",
+func (m *markdown) line(format string, args ...any) { fmt.Fprintf(m, format+"\n", args...) }
+
+func (m *markdown) row(cells ...string) { m.line("| %s |", strings.Join(cells, " | ")) }
+
+func (m *markdown) header(cells ...string) {
+	m.row(cells...)
+	m.line("|%s", strings.Repeat("---|", len(cells)))
+}
+
+// emptyRow is a row of label, then "-" in each of the other columns.
+func (m *markdown) emptyRow(label string, columns int) {
+	cells := []string{label}
+	for range columns - 1 {
+		cells = append(cells, "-")
+	}
+	m.row(cells...)
+}
+
+func renderTables(steps []stepData) string {
+	var md markdown
+	md.line("# Load test tables\n")
+	md.line("One row per step. Latencies are ms over the measured window; cores are CPU-seconds per second.\n")
+	eventsTable(&md, steps)
+	kindsTable(&md, steps)
+	resourcesTable(&md, steps)
+	commitOrderLockTable(&md, steps)
+	sseTable(&md, steps)
+	ungrantedTable(&md, steps)
+	xidTable(&md, steps)
+	editorsTable(&md, steps)
+	roomsTable(&md, steps)
+	routesTable(&md, steps)
+	return md.String()
+}
+
+func eventsTable(md *markdown, steps []stepData) {
+	md.line("## Events, delivery and requests\n")
+	md.header("step", "start (UTC)", "sessions", "events/s target / offered / committed", "write errors non-2xx / transport",
 		"delivery ms from arrival p50 / p99", "delivery ms from commit p50 / p99", "issue-topic receipts got / expected",
 		"req/s target / sent", "req 2xx", "req ms p50 / p99", "requests dropped at the in-flight cap")
 	below, exited := false, false
@@ -181,26 +219,28 @@ func renderTables(steps []stepData) string {
 		if len(s.sum.StackExits) > 0 {
 			exited = true
 		}
-		row(s.label(), start, num(float64(c.Sessions), 0), events,
+		md.row(s.label(), start, num(float64(c.Sessions), 0), events,
 			fmt.Sprintf("%s / %s", num(float64(e.WriteErrors.Non2xx), 0), num(float64(e.WriteErrors.Transport), 0)),
 			pair(e.DeliveryMsFromArrival, p50, p99, 0), pair(e.DeliveryMsFromCommit, p50, p99, 0),
 			fmt.Sprintf("%s / %s", num(float64(e.IssueTopicReceipts), 0), num(float64(e.ExpectedIssueTopicReceipts), 0)),
 			reqRate, share, pair(q.LatencyMs, p50, p99, 0), num(float64(q.DroppedInflightCap), 0))
 	}
 	if below {
-		w("\n(below 95%%): the step sent fewer than 95%% of its target requests per second, so its request columns describe a lighter load than its name.")
+		md.line("\n(below 95%%): the step sent fewer than 95%% of its target requests per second, so its request columns describe a lighter load than its name.")
 	}
 	if exited {
-		w("\n(<process> exited): that stack process exited during the step (summary.json `stack_exits`), so the step failed and its row, in every table here, does not measure the load.")
+		md.line("\n(<process> exited): that stack process exited during the step (summary.json `stack_exits`), so the step failed and its row, in every table here, does not measure the load.")
 	}
+}
 
-	w("\n## Write latency by kind\n")
-	w("Write ms p50 / p99 over 2xx writes, then committed / offered.\n")
+func kindsTable(md *markdown, steps []stepData) {
+	md.line("\n## Write latency by kind\n")
+	md.line("Write ms p50 / p99 over 2xx writes, then committed / offered.\n")
 	cells := []string{"step"}
 	for _, k := range eventKinds {
 		cells = append(cells, k+" ms p50 / p99 (committed / offered)")
 	}
-	header(cells...)
+	md.header(cells...)
 	for _, s := range steps {
 		cells := []string{s.label()}
 		for _, k := range eventKinds {
@@ -211,15 +251,17 @@ func renderTables(steps []stepData) string {
 			}
 			cells = append(cells, fmt.Sprintf("%s (%s / %s)", pair(ks.WriteMs, p50, p99, 0), num(float64(ks.Committed), 0), num(float64(ks.Offered), 0)))
 		}
-		row(cells...)
+		md.row(cells...)
 	}
+}
 
-	w("\n## Resources\n")
-	resourceCells := []string{"step", "Dispatch cores mean / peak 5 s", "Postgres cores", "listener cores", "NATS cores", "loadgen cores", "proxy cores",
+func resourcesTable(md *markdown, steps []stepData) {
+	md.line("\n## Resources\n")
+	md.header("step", "Dispatch cores mean / peak 5 s", "Postgres cores", "listener cores", "NATS cores", "loadgen cores", "proxy cores",
 		"box busy", "box busy before", "Dispatch RSS max MiB", "heap in use MiB p50 / max", "goroutines p50 / max",
 		"goroutines waiting for a pool connection p50 / max", "Postgres connections max", "connections waiting on a lock p50",
-		"Dispatch CPU-s per operation"}
-	header(resourceCells...)
+		"Dispatch CPU-s per operation")
+	marked := false
 	for _, s := range steps {
 		busyBefore := "-"
 		if s.meta != nil && s.meta.BoxBusyBefore != nil {
@@ -227,15 +269,12 @@ func renderTables(steps []stepData) string {
 		}
 		r := s.sum.Resources
 		if r == nil {
-			cells := []string{s.label()}
-			for range len(resourceCells) - 1 {
-				cells = append(cells, "-")
-			}
-			// The reading before the step is meta.json's, not the sampler's.
-			cells[slices.Index(resourceCells, "box busy before")] = busyBefore
-			row(cells...)
+			// No sampler window: every cell is "-" but box busy before, which is meta.json's
+			// reading, not the sampler's.
+			md.row(s.label(), "-", "-", "-", "-", "-", "-", "-", busyBefore, "-", "-", "-", "-", "-", "-", "-")
 			continue
 		}
+		marked = marked || r.failedReads() > 0
 		cores := func(name string, d int) string {
 			v, ok := r.CPUCoresMean[name]
 			if !ok {
@@ -265,23 +304,33 @@ func renderTables(steps []stepData) string {
 		if r.PGConnsTotal.N > 0 {
 			pgMax = num(r.PGConnsTotal.Max, 0)
 		}
-		row(s.label(), dispatch, cores("postgres", 2), cores("listener", 3), cores("nats", 3), cores("loadgen", 2), cores("proxy", 2),
+		md.row(s.probeLabel(r.failedReads()), dispatch, cores("postgres", 2), cores("listener", 3), cores("nats", 3), cores("loadgen", 2), cores("proxy", 2),
 			num(100*r.SysBusyFrac, 0)+"%", busyBefore, rss, pair(r.HeapInuseMiB, p50, smax, 0), pair(r.Goroutines, p50, smax, 0),
 			pair(r.PoolAcquireGoroutines, p50, smax, 0), pgMax, lockWait, perOp)
 	}
+	failedReadsNote(md, marked, "the 5 s sampler's reads of pg_stat_activity and of Dispatch's goroutine and heap profiles",
+		"`resources.pg_read_errors` and `resources.pprof_read_errors`")
+}
 
-	w("\n## Commit-order lock\n")
-	w("Sampled every 20 ms from 20 s into the window to its end.\n")
-	lockCells := []string{"step", "time held", "waiters p50 / max", "hold ms p50 / p90 / p99", "holds seen", "what the holder was doing (share of held samples)"}
-	header(lockCells...)
+// failedReadsNote defines the "(<n> failed reads)" mark under a table, when a row has it: what
+// failed, and the summary.json keys that count the failures.
+func failedReadsNote(md *markdown, marked bool, what, keys string) {
+	if marked {
+		md.line("\n(<n> failed reads): %s failed n times, a failed connect included (summary.json %s); those reads enter no statistic, and a cell with no successful read shows `-`, not 0.", what, keys)
+	}
+}
+
+func commitOrderLockTable(md *markdown, steps []stepData) {
+	md.line("\n## Commit-order lock\n")
+	md.line("Sampled every 20 ms from 20 s into the window to its end.\n")
+	columns := []string{"step", "time held", "waiters p50 / max", "hold ms p50 / p90 / p99", "holds seen", "what the holder was doing (share of held samples)"}
+	md.header(columns...)
+	marked := false
 	for _, s := range steps {
 		l := s.sum.CommitOrderLock
+		marked = marked || l.Errors > 0
 		if l.Samples == 0 {
-			cells := []string{s.label()}
-			for range len(lockCells) - 1 {
-				cells = append(cells, "-")
-			}
-			row(cells...)
+			md.emptyRow(s.probeLabel(l.Errors), len(columns))
 			continue
 		}
 		holds := "-"
@@ -297,47 +346,37 @@ func renderTables(steps []stepData) string {
 			if len(what) > 70 {
 				what = what[:70]
 			}
-			doing = append(doing, fmt.Sprintf("%s %s%%", strings.ReplaceAll(what, "|", `\|`), num(100*d.Share, 0)))
+			doing = append(doing, fmt.Sprintf("%s %s%%", mdEscape(what), num(100*d.Share, 0)))
 		}
-		row(s.label(), num(100*l.HeldFraction, 0)+"%", pair(l.Waiters, p50, smax, 0), holds, num(float64(l.HoldsObserved), 0), strings.Join(doing, "; "))
+		md.row(s.probeLabel(l.Errors), num(100*l.HeldFraction, 0)+"%", pair(l.Waiters, p50, smax, 0), holds, num(float64(l.HoldsObserved), 0), strings.Join(doing, "; "))
 	}
+	failedReadsNote(md, marked, "the probe's read of pg_locks", "`commit_order_lock.errors`")
+}
 
-	emptyRow := func(label string, columns int) {
-		cells := []string{label}
-		for range columns - 1 {
-			cells = append(cells, "-")
-		}
-		row(cells...)
-	}
-
-	w("\n## Delivery from sending, and SSE frames\n")
-	w("NATS: every issue-topic receipt of a primary event. SSE: the dashboard stream frames that arrived in the window; from write response counts only the frames that carry the primary event of a committed in-window write with a 2xx status.\n")
-	sseCells := []string{"step", "NATS delivery ms from sent p50 / p99", "SSE frame ms from created_at p50 / p99",
-		"SSE frame ms from write response p50 / p99", "SSE frames", "SSE order violations"}
-	header(sseCells...)
+func sseTable(md *markdown, steps []stepData) {
+	md.line("\n## Delivery from sending, and SSE frames\n")
+	md.line("NATS: every issue-topic receipt of a primary event. SSE: the dashboard stream frames that arrived in the window; from write response counts only the frames that carry the primary event of a committed in-window write with a 2xx status.\n")
+	md.header("step", "NATS delivery ms from sent p50 / p99", "SSE frame ms from created_at p50 / p99",
+		"SSE frame ms from write response p50 / p99", "SSE frames", "SSE order violations")
 	for _, s := range steps {
 		sse := s.sum.SSE
-		if sse == nil {
-			cells := []string{s.label(), pair(s.sum.Events.DeliveryMsFromSent, p50, p99, 0)}
-			for range len(sseCells) - 2 {
-				cells = append(cells, "-")
-			}
-			row(cells...)
-			continue
-		}
-		row(s.label(), pair(s.sum.Events.DeliveryMsFromSent, p50, p99, 0), pair(sse.FrameMsFromCreatedAt, p50, p99, 0),
+		md.row(s.label(), pair(s.sum.Events.DeliveryMsFromSent, p50, p99, 0), pair(sse.FrameMsFromCreatedAt, p50, p99, 0),
 			pair(sse.FrameMsFromWriteResponse, p50, p99, 0), num(float64(sse.Frames), 0), num(float64(sse.OrderViolations), 0))
 	}
+}
 
-	w("\n## Ungranted locks\n")
-	w("Every ungranted heavyweight lock in pg_locks, sampled once a second from 20 s into the window to its end. Up to four locks per step, most samples with a waiter first.\n")
-	ungrantedCells := []string{"step", "samples with an ungranted lock", "locks waited for: type target mode, samples with a waiter, waiters p50 / max",
+func ungrantedTable(md *markdown, steps []stepData) {
+	md.line("\n## Ungranted locks\n")
+	md.line("Every ungranted heavyweight lock in pg_locks, sampled once a second from 20 s into the window to its end. Up to four locks per step, most samples with a waiter first.\n")
+	columns := []string{"step", "samples with an ungranted lock", "locks waited for: type target mode, samples with a waiter, waiters p50 / max",
 		"top waiter query → first blocker query (count), per lock"}
-	header(ungrantedCells...)
+	md.header(columns...)
+	marked := false
 	for _, s := range steps {
 		u := s.sum.UngrantedLocks
+		marked = marked || u.Errors > 0
 		if u.Samples == 0 {
-			emptyRow(s.label(), len(ungrantedCells))
+			md.emptyRow(s.probeLabel(u.Errors), len(columns))
 			continue
 		}
 		var locks, pairs []string
@@ -358,25 +397,30 @@ func renderTables(steps []stepData) string {
 		if len(locks) > 0 {
 			lockText, pairText = strings.Join(locks, "; "), strings.Join(pairs, "; ")
 		}
-		row(s.label(), num(100*u.ShareWithAny, 0)+"%", lockText, pairText)
+		md.row(s.probeLabel(u.Errors), num(100*u.ShareWithAny, 0)+"%", lockText, pairText)
 	}
+	failedReadsNote(md, marked, "the sampler's read of pg_locks", "`ungranted_locks.errors`")
+}
 
-	w("\n## Transaction ids\n")
-	header("step", "transaction ids per s")
+func xidTable(md *markdown, steps []stepData) {
+	md.line("\n## Transaction ids\n")
+	md.header("step", "transaction ids per s")
 	for _, s := range steps {
 		if r := s.sum.Resources; r != nil && r.XIDsPerS != nil {
-			row(s.label(), num(*r.XIDsPerS, 1))
+			md.row(s.label(), num(*r.XIDsPerS, 1))
 			continue
 		}
-		emptyRow(s.label(), 2)
+		md.emptyRow(s.label(), 2)
 	}
+}
 
-	w("\n## Editors\n")
-	w("Browser editors on document websockets. Updates, latencies and markers count the updates scheduled in the window; connects, connect failures and closes count the whole step. Relay: one editor's send to another editor's receipt of that update on the same document. Durable: send to the marker's row in doc_updates, ±10 ms.\n")
-	editorCells := []string{"step", "editors on documents (with one editor)", "updates/s target / sent", "updates sent / acknowledged / refused",
+func editorsTable(md *markdown, steps []stepData) {
+	md.line("\n## Editors\n")
+	md.line("Browser editors on document websockets. Updates, latencies and markers count the updates scheduled in the window; connects, connect failures and closes count the whole step. Relay: one editor's send to another editor's receipt of that update on the same document. Durable: send to the marker's row in doc_updates, ±10 ms.\n")
+	columns := []string{"step", "editors on documents (with one editor)", "updates/s target / sent", "updates sent / acknowledged / refused",
 		"updates not sent", "relay ms p50 / p99", "durable ms p50 / p99 (found / markers)", "connects / connect failures", "closes by code"}
-	header(editorCells...)
-	var single, editorNotes []string
+	md.header(columns...)
+	var single, notes []string
 	// counted is a count map as "<total> (<key> <n>, ...)", most frequent first, or "0".
 	counted := func(m map[string]int) string {
 		total := 0
@@ -393,7 +437,7 @@ func renderTables(steps []stepData) string {
 	for _, s := range steps {
 		e := s.sum.Editors
 		if e == nil {
-			emptyRow(s.label(), len(editorCells))
+			md.emptyRow(s.label(), len(columns))
 			continue
 		}
 		if len(e.SingleEditorDocs) > 0 {
@@ -403,7 +447,7 @@ func renderTables(steps []stepData) string {
 		if e.DurableNote == "" {
 			durable = fmt.Sprintf("%s (%s / %s)", pair(e.DurableMs, p50, p99, 0), num(float64(e.MarkersFound), 0), num(float64(e.Markers), 0))
 		} else {
-			editorNotes = append(editorNotes, fmt.Sprintf("%s: durable latency %s", s.label(), e.DurableNote))
+			notes = append(notes, fmt.Sprintf("%s: durable latency %s", s.label(), e.DurableNote))
 		}
 		var closes []string
 		for _, kv := range byCount(e.Closes) {
@@ -413,30 +457,33 @@ func renderTables(steps []stepData) string {
 		if len(closes) > 0 {
 			closeText = strings.Join(closes, "; ")
 		}
-		row(s.label(), fmt.Sprintf("%s on %s (%s)", num(float64(e.Editors), 0), num(float64(e.Docs), 0), num(float64(len(e.SingleEditorDocs)), 0)),
+		md.row(s.label(), fmt.Sprintf("%s on %s (%s)", num(float64(e.Editors), 0), num(float64(e.Docs), 0), num(float64(len(e.SingleEditorDocs)), 0)),
 			num(e.TargetPerS, 1)+" / "+num(e.SentPerS, 1),
 			fmt.Sprintf("%s / %s / %s", num(float64(e.Sent), 0), num(float64(e.Acknowledged), 0), num(float64(e.Refused), 0)),
 			counted(e.NotSent), pair(e.RelayMs, p50, p99, 0), durable,
 			num(float64(e.Connects), 0)+" / "+counted(e.ConnectFailures), closeText)
 	}
 	if len(single) > 0 {
-		w("\nDocuments with one editor, which have no relay latency: %s.", strings.Join(single, "; "))
+		md.line("\nDocuments with one editor, which have no relay latency: %s.", strings.Join(single, "; "))
 	}
-	for _, n := range editorNotes {
-		w("\n%s.", strings.TrimSuffix(n, "."))
+	for _, n := range notes {
+		md.line("\n%s.", strings.TrimSuffix(n, "."))
 	}
+}
 
-	w("\n## Document rooms\n")
-	w("Round trips: the latency proxy's count of Dispatch's round trips (each Sync and simple Query) from the window's start to its end; room work names a room table or the document's advisory lock. Connections held by rooms: backends holding or waiting for a document advisory lock, or running a statement on doc_updates, every 100 ms in a step with editors. Batches: dispatch_rooms on /debug/vars. Versions: artifact_versions' growth, and the proxy's timing of its inserts.\n")
-	roomCells := []string{"step", "round trips room / all", "room round trips per update", "connections held by rooms p50 / p99 / max",
+func roomsTable(md *markdown, steps []stepData) {
+	md.line("\n## Document rooms\n")
+	md.line("Round trips: the latency proxy's count of Dispatch's round trips (each Sync and simple Query) from the window's start to its end; room work names a room table or the document's advisory lock. Connections held by rooms: backends holding or waiting for a document advisory lock, or running a statement on doc_updates, every 100 ms in a step with editors. Batches: dispatch_rooms on /debug/vars. Versions: artifact_versions' growth, and the proxy's timing of its inserts.\n")
+	columns := []string{"step", "round trips room / all", "room round trips per update", "connections held by rooms p50 / p99 / max",
 		"shared-pool share", "append batches / updates / round trips", "batch sizes (updates: batches)", "artifact_versions KiB/s",
 		"versions written", "version insert ms p50 / p99 (count, total ms)"}
-	header(roomCells...)
-	var roomNotes []string
+	md.header(columns...)
+	var notes []string
+	marked := false
 	for _, s := range steps {
 		r := s.sum.Rooms
 		if r == nil {
-			emptyRow(s.label(), len(roomCells))
+			md.emptyRow(s.label(), len(columns))
 			continue
 		}
 		trips, perUpdate := "-", "-"
@@ -446,18 +493,24 @@ func renderTables(steps []stepData) string {
 				perUpdate = num(*rt.RoomPerUpdate, 2)
 			}
 			if rt.UnparsedConnections > 0 {
-				roomNotes = append(roomNotes, fmt.Sprintf("%s: the proxy could not follow %s connections, whose round trips are not counted", s.label(), num(float64(rt.UnparsedConnections), 0)))
+				notes = append(notes, fmt.Sprintf("%s: the proxy could not follow %s connections, whose round trips are not counted", s.label(), num(float64(rt.UnparsedConnections), 0)))
 			}
 		} else {
-			roomNotes = append(roomNotes, fmt.Sprintf("%s: round trips not measured: %s", s.label(), r.RoundTripsNote))
+			notes = append(notes, fmt.Sprintf("%s: round trips not measured: %s", s.label(), r.RoundTripsNote))
 		}
+		// The room sampler's failed reads mark the row, as the other probes' tables do.
+		failedReads := 0
 		held, share := "-", "-"
-		if c := r.Connections; c != nil && c.Held.N > 0 {
-			held = fmt.Sprintf("%s / %s / %s", num(c.Held.P50, 0), num(c.Held.P99, 0), num(c.Held.Max, 0))
-			if c.SharedPoolShare != nil {
-				share = num(100**c.SharedPoolShare, 0) + "%"
+		if c := r.Connections; c != nil {
+			failedReads = c.Errors
+			if c.Held.N > 0 {
+				held = fmt.Sprintf("%s / %s / %s", num(c.Held.P50, 0), num(c.Held.P99, 0), num(c.Held.Max, 0))
+				if c.SharedPoolShare != nil {
+					share = num(100**c.SharedPoolShare, 0) + "%"
+				}
 			}
 		}
+		marked = marked || failedReads > 0
 		batches, sizes := r.BatchesNote, r.BatchesNote
 		if b := r.Batches; b != nil {
 			batches = fmt.Sprintf("%s / %s / %s", num(float64(b.AppendBatches), 0), num(float64(b.AppendedUpdates), 0), num(float64(b.AppendRoundTrips), 0))
@@ -472,21 +525,24 @@ func renderTables(steps []stepData) string {
 			written = num(float64(*v.Written), 0)
 		}
 		if v.Note != "" {
-			roomNotes = append(roomNotes, fmt.Sprintf("%s: artifact_versions not read: %s", s.label(), v.Note))
+			notes = append(notes, fmt.Sprintf("%s: artifact_versions not read: %s", s.label(), v.Note))
 		}
 		inserts := "-"
 		if v.InsertCount != nil && v.InsertTotalMs != nil {
 			inserts = fmt.Sprintf("%s (%s, %s)", pair(v.InsertMs, p50, p99, 1), num(float64(*v.InsertCount), 0), num(*v.InsertTotalMs, 0))
 		}
-		row(s.label(), trips, perUpdate, held, share, mdCell(batches), mdCell(sizes), kibPerS, written, inserts)
+		md.row(s.probeLabel(failedReads), trips, perUpdate, held, share, mdCell(batches), mdCell(sizes), kibPerS, written, inserts)
 	}
-	for _, n := range roomNotes {
-		w("\n%s.", strings.TrimSuffix(n, "."))
+	failedReadsNote(md, marked, "the room sampler's read of pg_locks and pg_stat_activity", "`rooms.connections.errors`")
+	for _, n := range notes {
+		md.line("\n%s.", strings.TrimSuffix(n, "."))
 	}
+}
 
-	w("\n## Requests by route\n")
-	w("p50 / p99 ms (failures, non-2xx or transport, / count).\n")
-	cells = []string{"route"}
+func routesTable(md *markdown, steps []stepData) {
+	md.line("\n## Requests by route\n")
+	md.line("p50 / p99 ms (failures, non-2xx or transport, / count).\n")
+	cells := []string{"route"}
 	routes := map[string]bool{}
 	for _, s := range steps {
 		cells = append(cells, s.label())
@@ -494,10 +550,9 @@ func renderTables(steps []stepData) string {
 			routes[name] = true
 		}
 	}
-	header(cells...)
-	names := slices.Sorted(maps.Keys(routes))
-	for _, name := range names {
-		cells := []string{strings.ReplaceAll(name, "|", `\|`)}
+	md.header(cells...)
+	for _, name := range slices.Sorted(maps.Keys(routes)) {
+		cells := []string{mdEscape(name)}
 		for _, s := range steps {
 			r, ok := s.sum.Requests.Routes[name]
 			if !ok {
@@ -506,9 +561,8 @@ func renderTables(steps []stepData) string {
 			}
 			cells = append(cells, fmt.Sprintf("%s (%s/%s)", pair(r.LatencyMs, p50, p99, 0), num(float64(r.Failures), 0), num(float64(r.Count), 0)))
 		}
-		row(cells...)
+		md.row(cells...)
 	}
-	return b.String()
 }
 
 // pprofTops writes cpu.top.txt, cpu.cum.txt and heap.top.txt beside each profile with go tool
@@ -643,13 +697,17 @@ func byCount(m map[string]int) []countKV {
 	return out
 }
 
-// mdCell is s as text in a markdown table cell: "|" escaped, "(none)" when empty.
+// mdCell is s as text in a markdown table cell: on one line, its runs of white space (newlines
+// included) collapsed to one space, "|" escaped, "(none)" when empty.
 func mdCell(s string) string {
-	if s = strings.TrimSpace(s); s == "" {
+	if s = strings.Join(strings.Fields(s), " "); s == "" {
 		return "(none)"
 	}
-	return strings.ReplaceAll(s, "|", `\|`)
+	return mdEscape(s)
 }
+
+// mdEscape escapes "|" in s, so s stays inside one markdown table cell.
+func mdEscape(s string) string { return strings.ReplaceAll(s, "|", `\|`) }
 
 // batchSizesText is dispatch_rooms' batch-size histogram as "<updates>: <batches>" for each
 // bucket that holds a batch, smallest bucket first; "0" when none does.

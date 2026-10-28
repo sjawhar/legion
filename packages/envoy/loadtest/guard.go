@@ -105,12 +105,16 @@ type endpoints struct {
 	stack    string
 	pgDirect bool
 	// proxyStats is the latency proxy's wire-count URL (http://127.0.0.1:<proxy_stats>), from
-	// stack.json only; empty under -allow-foreign or when stack.json names no such port.
+	// stack.json only; empty when stack.json names no such port, and under -allow-foreign. It is
+	// no endpoint flag: a foreign run takes nothing from stack.json, so it reads no proxy's counts
+	// (a foreign stack has no latency proxy of loadgen's) and reports its round trips as not
+	// measured; the rule that a foreign run gives every endpoint flag does not cover it.
 	proxyStats string
 }
 
 // endpointFlags are the endpoint flags seed and run share. Each defaults empty, so the stack's
-// value applies; one that differs from it is refused unless allowForeign is set.
+// value applies; one that differs from it is refused unless allowForeign is set, and then every
+// one is required.
 type endpointFlags struct {
 	stack                                   string
 	url, listener, nats, natsMon, pprof, pg string
@@ -133,6 +137,10 @@ func (f *endpointFlags) register(fs *flag.FlagSet) {
 	fs.BoolVar(&f.allowForeign, "allow-foreign", false, "allow endpoint flags that differ from stack.json (another stack, such as a cluster copy)")
 }
 
+// tokenFlags are the endpoint flags whose values are bearer tokens; meta.json records the run's
+// arguments with their values redacted (redactArgs).
+var tokenFlags = []string{"token", "listener-token"}
+
 // foreignFlagError refuses an endpoint flag that names something other than the stack's own.
 type foreignFlagError struct {
 	Flag string
@@ -140,6 +148,18 @@ type foreignFlagError struct {
 
 func (e *foreignFlagError) Error() string {
 	return fmt.Sprintf("%s differs from stack.json; it would target something other than the local stack, so it is refused (pass -allow-foreign to target another stack on purpose)", e.Flag)
+}
+
+// missingForeignFlagError refuses a run under -allow-foreign that leaves an endpoint flag empty:
+// it would fall back to the local stack's value, so the run would write to one stack and count,
+// sample or profile another. All are every endpoint and token flag.
+type missingForeignFlagError struct {
+	Flag string
+	All  []string
+}
+
+func (e *missingForeignFlagError) Error() string {
+	return fmt.Sprintf("%s is required with -allow-foreign: a foreign run takes no endpoint or token from stack.json, so give every one of %s", e.Flag, strings.Join(e.All, ", "))
 }
 
 // resolve reads stack.json and resolves the endpoints. It opens no connection.
@@ -160,53 +180,49 @@ func (f endpointFlags) resolve() (endpoints, error) {
 }
 
 // resolveEndpoints takes every endpoint from st, refusing a flag that differs from it, unless
-// f.allowForeign: then a given flag wins, an empty one falls back to st, and pids stay empty.
+// f.allowForeign: then every endpoint flag is required, none falls back to st, and pids stay
+// empty.
 func resolveEndpoints(f endpointFlags, st *stackFile) (endpoints, error) {
 	if st == nil && !f.allowForeign {
 		return endpoints{}, fmt.Errorf("no stack.json, and -allow-foreign is not set")
 	}
 	var e endpoints
-	stackValue := map[string]string{}
+	// Under -allow-foreign without stack.json, the stack values below are never used.
+	var sv stackFile
 	if st != nil {
-		local := func(scheme string, port int) string { return fmt.Sprintf("%s://127.0.0.1:%d", scheme, port) }
-		stackValue = map[string]string{
-			"-url":            local("http", st.Ports.Dispatch),
-			"-listener":       local("http", st.Ports.Listener),
-			"-nats":           local("nats", st.Ports.NATS),
-			"-nats-mon":       local("http", st.Ports.NATSMonitor),
-			"-pprof":          local("http", st.Ports.Pprof),
-			"-pg":             fmt.Sprintf("postgres://postgres@127.0.0.1:%d/dispatch?sslmode=disable", st.Ports.Postgres),
-			"-token":          st.DispatchToken,
-			"-listener-token": st.ListenerToken,
-		}
-		e.pgDirect = st.PGDirect
+		sv = *st
+		e.pgDirect = st.PGDirect && !f.allowForeign
 	}
+	local := func(scheme string, port int) string { return fmt.Sprintf("%s://127.0.0.1:%d", scheme, port) }
+	// The endpoint and token flags, in the order the guard checks them: each one's name, the value
+	// given, the stack's value and the endpoint it sets.
 	fields := []struct {
-		flag  string
-		given string
-		dst   *string
+		flag, given, stack string
+		dst                *string
 	}{
-		{"-url", strings.TrimRight(f.url, "/"), &e.dispatch},
-		{"-listener", strings.TrimRight(f.listener, "/"), &e.listener},
-		{"-nats", f.nats, &e.nats},
-		{"-nats-mon", strings.TrimRight(f.natsMon, "/"), &e.natsMon},
-		{"-pprof", strings.TrimRight(f.pprof, "/"), &e.pprof},
-		{"-pg", f.pg, &e.pg},
-		{"-token", f.token, &e.token},
-		{"-listener-token", f.listenerToken, &e.listenerToken},
+		{"-url", strings.TrimRight(f.url, "/"), local("http", sv.Ports.Dispatch), &e.dispatch},
+		{"-listener", strings.TrimRight(f.listener, "/"), local("http", sv.Ports.Listener), &e.listener},
+		{"-nats", f.nats, local("nats", sv.Ports.NATS), &e.nats},
+		{"-nats-mon", strings.TrimRight(f.natsMon, "/"), local("http", sv.Ports.NATSMonitor), &e.natsMon},
+		{"-pprof", strings.TrimRight(f.pprof, "/"), local("http", sv.Ports.Pprof), &e.pprof},
+		{"-pg", f.pg, fmt.Sprintf("postgres://postgres@127.0.0.1:%d/dispatch?sslmode=disable", sv.Ports.Postgres), &e.pg},
+		{"-token", f.token, sv.DispatchToken, &e.token},
+		{"-listener-token", f.listenerToken, sv.ListenerToken, &e.listenerToken},
 	}
 	for _, field := range fields {
-		want := stackValue[field.flag]
 		switch {
-		case !f.allowForeign && field.given != "" && field.given != want:
+		case f.allowForeign && field.given == "":
+			all := make([]string, len(fields))
+			for i, fl := range fields {
+				all[i] = fl.flag
+			}
+			return endpoints{}, &missingForeignFlagError{Flag: field.flag, All: all}
+		case !f.allowForeign && field.given != "" && field.given != field.stack:
 			return endpoints{}, &foreignFlagError{Flag: field.flag}
 		case field.given != "":
 			*field.dst = field.given
 		default:
-			*field.dst = want
-		}
-		if *field.dst == "" {
-			return endpoints{}, fmt.Errorf("%s is required: stack.json does not supply it", field.flag)
+			*field.dst = field.stack
 		}
 	}
 	if f.natsServerName != "" && !f.allowForeign {
