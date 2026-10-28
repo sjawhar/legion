@@ -2,45 +2,36 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-492",
-  "completed": "2026-10-27T16:52:00Z",
-  "round": 4,
-  "scope": "Architect's ruling (Envoy, 13:32Z) after the reviewer's changes at 614e0003: (1) adding or removing a blocker updates the blocker's open Referenced by count; (2) a failed summary or block read recovers on refocus; then spec acceptance 1-2 and the existing freshness file, for regressions.",
-  "headTested": "3d9222f40d153534c01200b7664715310bebaac1 (code head 27152a78691f774dc3053eb90c44126773cad943)",
+  "completed": "2026-10-28T09:03:00Z",
+  "round": 5,
+  "scope": "Architect's ruling (Envoy, 2026-10-28 08:41Z): the round changes only claude-envoy's committed dist/ (rebuilt for the new @legion/contracts fields) and a merge of main for a conflict. Confirm claude-envoy's check-dist passes, then re-run spec acceptance 1-2 and the freshness file for regressions from the merge. Nothing else.",
+  "headTested": "3261a378b28f5dcf0c33247b2b6461d67a9a80d3 (code head 5d84d0775ae9; merge ee6e83dbe142 of main b295a3fb)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The implementer proved (1) and (2) with a Go api test and a unit test. I drove both on the real surface myself, in a throwaway Playwright spec (deleted), against the SPA built from the workspace at 3d9222f4. I also ran the same spec against my git archive of the previous head 5873436a, where both failed. I re-ran its browser command (refresh-freshness.e2e.ts and refetch-budget.e2e.ts on chromium and iphone, through main's new `bun e2e/run.ts` harness) on my own database: 30 passed."
+    "how": "I ran claude-envoy's check-dist myself on the Bun version .bun-version pins (1.4.4; the pod's own Bun is 1.3.14, so I fetched the 1.4.4 release into $TMPDIR). I re-ran refresh-freshness.e2e.ts and refetch-budget.e2e.ts through `bun e2e/run.ts` on a Postgres 17.11 + pgvector 0.8.0 of my own. The pod recreate had removed every earlier rig: the base export, Chromium and the loopback Postgres on 5433. I rebuilt all of them before these runs. Neither test file changed since my round-2 commits (`jj diff --from a9d9f449 --to @` on both is empty)."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Reviewer thread PRRT_kwDORFy7ds6wtE7Z: a blocker added or removed updates the blocker's open Referenced by count (and its panel)",
-      "surface": "Dispatch in Chromium and iPhone (Playwright), production SPA bundle from the head, against the branch's Go server and a loopback Postgres 17 + pgvector; the blocker's issue page with its Referenced by panel open, and bob's PATCHes through the bearer API",
-      "command": "cd packages/dispatch && bun run build:web && DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_e2e_tester?sslmode=disable bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/zz-tester-r4.e2e.ts (throwaway): open CORE-1's page and its panel, PATCH CORE-2 blocked_by [CORE-1], then blocked_by []",
-      "observed": "Passed on both projects. The toggle read 'Referenced by (1)', then 'Referenced by (2)' and the panel listed CORE-2 within 2 s of the add. After the removal the toggle was back to 'Referenced by (1)' and CORE-2 had left the panel, within 2 s.",
-      "headSha": "3d9222f40d153534c01200b7664715310bebaac1",
-      "negativeControl": "The same spec at the previous head 5873436a (git archive, chromium) fails: after the add, the toggle still read 'Referenced by (1)' (expected not 'Referenced by (1)'), because no event named the blocker."
+      "criterion": "claude-envoy's committed bundle is fresh for the new @legion/contracts fields (CI's `Check the committed bundle is fresh` step)",
+      "surface": "packages/claude-envoy's build script in its --check mode, as the claude-envoy CI job runs it, on the pinned Bun 1.4.4 after `bun install --frozen-lockfile`",
+      "command": "cd packages/claude-envoy && PATH=$TMPDIR/bun-1.4.4/bun-linux-x64:$PATH bun run check-dist",
+      "observed": "exit 0: '$ bun scripts/build.ts --check' then 'dist/ and legion/ match a fresh build'",
+      "headSha": "3261a378b28f5dcf0c33247b2b6461d67a9a80d3",
+      "negativeControl": "The same command in a git archive of the merge ee6e83dbe142 (before the dist rebuild 5d84d077) exits 1: 'generated files are stale (dist/dispatch.js, dist/envoy-channel.js, dist/session-hook.js); run `bun run build` on Bun 1.4.4 and commit the result'."
     },
     {
-      "criterion": "Reviewer thread PRRT_kwDORFy7ds6wtE7f: a failed summary read recovers when the tab regains focus, and a healthy one reads nothing on refocus",
-      "surface": "Dispatch in Chromium and iPhone (Playwright), same rig. An issue's Conversation tab holds a reference to another issue whose GET /api/v1/issues/{key}/summary is answered 500 by page.route until the test lets it through. Focus is a window 'visibilitychange' from hidden to visible, the event TanStack's focusManager listens to (query-core build/modern/focusManager.js:12).",
-      "command": "same throwaway spec, test 'summary: ...'",
-      "observed": "Passed on both projects. Three summary reads failed (the first load and its two retries), and the link did not show the title. After the read was let through and the tab was refocused, the link showed 'Recovered target' within 2 s. A second refocus with the read healthy sent 0 summary reads.",
-      "headSha": "3d9222f40d153534c01200b7664715310bebaac1",
-      "negativeControl": "The same spec at the previous head 5873436a fails: after the refocus the link never shows 'Recovered target'. A block read's recovery I did not drive in a browser; it rests on the implementer's reference-target.test.ts (7 pass), since blockQuery uses the same refetchFailedOnFocus option (reference-target.ts:152)."
-    },
-    {
-      "criterion": "Spec acceptance 1 and 2, and every earlier freshness test (rounds 1-2), still hold on the merged head",
-      "surface": "Dispatch in Chromium and iPhone (Playwright), same rig",
-      "command": "cd packages/dispatch && DISPATCH_E2E_PORT=18777 FAKE_ENVOY_PORT=19021 FAKE_GITHUB_PORT=19022 FAKE_BROKER_PORT=19024 PLAIN_HTTP_PORT=19023 DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_e2e_tester?sslmode=disable bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/refresh-freshness.e2e.ts e2e/refetch-budget.e2e.ts",
-      "observed": "30 passed (3.3m). REFETCH-BUDGET on both projects: 0 GETs under /api/, 0 untouched-issue reads. REFETCH-SIDEBAR on both: inbox 1, pinned 1, projects 1. REFETCH-INDEX: no GETs. The pin, Replies and board checks are unchanged (1, 0, 6).",
-      "headSha": "3d9222f40d153534c01200b7664715310bebaac1",
-      "negativeControl": "refetch-budget.e2e.ts in my git archive of base 16e4bb0f758e (chromium, -g 'budget:|sidebar:') fails on its counts: budget 'Received: 1120' against '<= 5' (1020 untouched-issue reads); sidebar inbox 2, pinned 2, projects 2."
+      "criterion": "Spec acceptance 1 (budget and freshness) and 2 (sidebar keeps its first responses), and every freshness test of rounds 1-2, hold after the merge of main",
+      "surface": "Dispatch in Chromium and iPhone (Playwright), production SPA bundle built from the head on Bun 1.4.4, against the branch's Go server, fake Envoy and a loopback Postgres 17.11 + pgvector 0.8.0 (ICU cluster)",
+      "command": "cd packages/dispatch && bun run build:web && DISPATCH_E2E_PORT=18777 FAKE_ENVOY_PORT=19021 FAKE_GITHUB_PORT=19022 FAKE_BROKER_PORT=19024 PLAIN_HTTP_PORT=19023 DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_e2e_tester?sslmode=disable bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/refresh-freshness.e2e.ts e2e/refetch-budget.e2e.ts",
+      "observed": "30 passed (2.6m). REFETCH-BUDGET on chromium and iphone: 0 GETs under /api/, 0 untouched-issue reads. REFETCH-SIDEBAR on both: inbox 1, pinned 1, projects 1. REFETCH-INDEX: no GETs. Pin, Replies and board checks unchanged (1, 0, 6).",
+      "headSha": "3261a378b28f5dcf0c33247b2b6461d67a9a80d3",
+      "negativeControl": "The same refetch-budget.e2e.ts (sha256 253c18d8...7290), run in a fresh git archive of base 16e4bb0f758e on chromium with -g 'budget:|sidebar:', fails on its counts: budget 'Received: 1008' against '<= 5' (918 reads of untouched issues); sidebar inbox 2, pinned 2, projects 2 against 1 each."
     }
   ],
-  "ciAtHead": "Read at 16:47Z on 27152a78 (3d9222f4 is handoff-only). build, changes, lint, typecheck and pr-title success; the per-package lanes (dispatch, envoy-go, contracts and others) still queued. The 'test' job (run 40530660220, job 122282727347) failed on one Go daemon test: TestADispatchStartOnABuildCarryingTheMergeWakesTheCheck, check_wake_test.go:393 'timed out waiting for the look's start row resuming the implementer'. This PR does not change packages/daemon: `jj diff --from 452e4647 --to 27152a78 --stat packages/daemon` is empty, and the same test job passed on main at 452e4647 (run 40526698321) and c210f10d (run 40526519133). I read it as a timing flake in main's daemon test, which the implementer re-runs once. Not re-run by me, and not waited on.",
+  "ciAtHead": "Read at 09:00Z on 5d84d0775ae9 (3261a378 is handoff-only): build and changes success; claude-envoy, dispatch, lint, test, typecheck and the other lanes queued, none settled. Not waited on.",
   "notes": [
-    "Main changed the browser harness during this round: a local run now goes through `bun e2e/run.ts -- bunx playwright test ...`. My commands above use it. The base and previous-head archives predate it and run Playwright directly.",
-    "Rigs: $TMPDIR/tester-base (16e4bb0f758e), $TMPDIR/tester-prev (5873436a), databases dispatch_e2e_tester, _base, _prev on the shared loopback Postgres."
+    "Rigs rebuilt after the recreate: Postgres 17.11 and pgvector 0.8.0 from Debian trixie debs extracted under $TMPDIR/pgdeb, cluster $TMPDIR/pgdata on 127.0.0.1:5433 (my service 'tester-pg'); Chromium under $TMPDIR/ms-playwright; base export $TMPDIR/tester-base; merge export $TMPDIR/tester-premerge; Bun 1.4.4 under $TMPDIR/bun-1.4.4."
   ]
 }
