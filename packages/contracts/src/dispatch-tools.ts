@@ -55,9 +55,13 @@ const OWNER_REFERENCE =
   "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
 
 const ASK_QUESTION_CONTRACT =
-  "The question carries the problem the reader recognises and why it matters now, what constrains " +
-  "the answer, and the recommendation with its reason. It asks how to solve the problem or which " +
-  "outcome is wanted; never enumerate choices in the question.";
+  "The question names the concrete case first: which machines, files, sessions or people, and the " +
+  "numbers. It asks the choice in those terms, saying what happens to whom under each option " +
+  '("Ship Friday and risk signing out 1,240 users, or hold to Monday?"), never "How should we ' +
+  'proceed?" or "Which option?", because a reader cannot work back from a general question to ' +
+  "the case. It carries every fact the reader needs to decide and nothing " +
+  "that does not change the decision. Generalize only after the specifics, if at all. Then give " +
+  "your recommendation and its reason.";
 
 const ASK_OPTIONS_CONTRACT =
   "Options carry the genuinely different approaches. Each option has a label, and its description " +
@@ -263,8 +267,13 @@ function imagesArgument<E extends SchemaNode<E>>(z: SchemaApi<E>, owner: string,
 /** Ask urgency levels the Dispatch server accepts, in ascending order. */
 export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
 
-/** Longest ask question the Dispatch server accepts, in characters. */
-export const ASK_QUESTION_MAX = 800;
+/**
+ * Longest ask question the Dispatch server accepts, in UTF-16 code units. Generated into Go as
+ * `contracts.AskQuestionMax`, which the server enforces on an ask's question and from which it
+ * derives the room an approval request's summary has. A question names its concrete case, and
+ * 800 was too short for that: capped asks crowded the limit while uncapped ask blocks ran past it.
+ */
+export const ASK_QUESTION_MAX = 2000;
 
 /**
  * Longest comment, comment edit, message and broadcast body the Dispatch server accepts, in
@@ -421,7 +430,9 @@ export const dispatchToolSpecs = [
       "replaces the issue's own attachment. Closing an issue " +
       "(status done) requires reason, the note that says why: it is posted on the issue as a " +
       "message, then the issue closes, because a closed issue refuses messages, comments, and " +
-      "artifacts; reason goes only with status done. A closed issue takes only a board move " +
+      "artifacts; reason goes only with status done. Closing an issue withdraws every open ask " +
+      "it holds (resolution kind withdrawn, naming the closer), and reopening it brings exactly " +
+      "those asks back. A closed issue takes only a board move " +
       "(before, after), components, " +
       "a reopening status (any status but done), and an external_links write that adds no new " +
       "link (so a link can move to the issue that replaced it); everything else, priority " +
@@ -514,7 +525,15 @@ export const dispatchToolSpecs = [
       "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " +
       "and release it when you stop. Pass the issue alone to claim it, or --release to give it up. " +
       "Your claim records your own session and shows on every read of the issue: the dashboard header, the " +
-      "issue list and board, dispatch read, and dispatch issues. Claiming is refused with 409 ISSUE_CLAIMED " +
+      "issue list and board, dispatch read, and dispatch issues. While you hold it, a person's answers, " +
+      "comments and messages on the issue reach your session directly (a new comment that mentions you " +
+      "arrives once, as the mention, when the mention reached you; when the mention's send fails, the " +
+      "comment still reaches you directly; a mention whose receipt timed out can arrive twice, and the " +
+      "second copy is the same comment); an agent's events and every other change on the issue still " +
+      "need a subscription to it, except in an ask you follow: anyone else's answer, hand-back, " +
+      "resolution or edit of it (other than a quiet edit), and every reply there (new, edited, resolved " +
+      "or reopened), reach you " +
+      "as its follower. Claiming is refused with 409 ISSUE_CLAIMED " +
       "when another session holds the issue and is still running; the refusal names that session, so talk to " +
       "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " +
       "person, not a session: there is nothing running to message, so ask them on the issue rather than " +
@@ -541,16 +560,19 @@ export const dispatchToolSpecs = [
     example: {
       issue: "DSP-1",
       question:
-        "The release cannot pass its review gate because the revised plan is unreviewed. " +
-        "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+        "Release 4.2 ships Friday. Tuesday's plan change makes its migration drop the " +
+        "sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a " +
+        "wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships " +
+        "Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user " +
+        "waits on 4.2, and 1,240 forced sign-ins cost more than three days.",
       options: [
         {
-          label: "Review the revised plan",
-          description: "Delays release for review but keeps the release gate.",
+          label: "Hold to Monday",
+          description: "4.2 ships three days late, with the column drop reviewed.",
         },
         {
-          label: "Release without review",
-          description: "Ships sooner but bypasses the review gate.",
+          label: "Ship Friday",
+          description: "On time; a wrong drop signs out 1,240 users.",
         },
       ],
     },
@@ -625,16 +647,19 @@ export const dispatchToolSpecs = [
     example: {
       ask: "01234567-0000-4000-8000-000000000001",
       question:
-        "The release cannot pass its review gate because the revised plan is unreviewed. " +
-        "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+        "Release 4.2 ships Friday. Tuesday's plan change makes its migration drop the " +
+        "sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a " +
+        "wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships " +
+        "Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user " +
+        "waits on 4.2, and 1,240 forced sign-ins cost more than three days.",
       options: [
         {
-          label: "Review the revised plan",
-          description: "Delays release for review but keeps the release gate.",
+          label: "Hold to Monday",
+          description: "4.2 ships three days late, with the column drop reviewed.",
         },
         {
-          label: "Release without review",
-          description: "Ships sooner but bypasses the review gate.",
+          label: "Ship Friday",
+          description: "On time; a wrong drop signs out 1,240 users.",
         },
       ],
     },
@@ -709,7 +734,9 @@ export const dispatchToolSpecs = [
       'closed in the document too. A reason beginning "removed from the document in version" is ' +
       "refused: that marks a retraction the document's own settlement wrote. Use retracted for an ask " +
       "a newer one replaces or the design made moot, resolved for one whose answer you found; an " +
-      "answered ask cannot be resolved, and resolving records no decision by a person.",
+      "answered ask cannot be resolved, and resolving records no decision by a person. An issue's " +
+      "close withdrew its open asks (kind withdrawn, which only Dispatch writes, never this tool); " +
+      "an ask on a closed issue is refused (409 ISSUE_CLOSED): reopen the issue first.",
     arguments: (z) => ({
       ask: z
         .string()
@@ -1228,6 +1255,9 @@ export const dispatchToolSpecs = [
       'Websearch syntax: "quoted phrase", -excluded, OR. ' +
       "Each kind of content is ranked on its own and the lists are merged, so the top holds the best " +
       "issue, document, ask, comment and message; an issue key searched alone lists that issue first. " +
+      "An ask hit says whether it is answered: an answered one shows the latest answer, who gave it, " +
+      "when, the options chosen and its text; a closed one says it was closed with no answer, or " +
+      "shows the last answer it had. " +
       `The answer names how many results match; offset pages through them, and each kind lists at most its best ${SEARCH_KIND_DEPTH}, ` +
       "so narrow the query or name a project to reach the rest. Paging is exact only while the " +
       "corpus holds still: content added, changed, or removed between two offsets can shift rows " +

@@ -130,7 +130,19 @@ func inlineNesting(root ast.Node, source []byte, measured map[*ast.Image]int) (r
 // before parseSource checks either bound. An image whose marks nest past maxInlineNesting has its
 // children dropped as soon as it is made, so no later walk enters them, and its measure refuses its
 // textblock (inlineNesting).
-type imageNesting struct{ goldmarkLinkParser }
+//
+// It also pairs the delimiter runs of each label that forms a link or an image
+// (delimiterList.pairLabel), where goldmark's parser pairs its own list, which pmdoc's runs never
+// join (processLinkLabel). It keeps on the delimiter list the bottoms goldmark's parser keeps, how
+// many runs were pushed when each label opened: one opened at every `[` and `![` that opens a label
+// (delimiterList.openLabel), closed at every `]` that finds a label open (delimiterList.closeLabel),
+// on every path the parser takes from there (parser/link.go:124-215). A textblock gets a delimiter
+// list here only once a label opens in it. The label's runs are paired once its nodes are the
+// link's children, as goldmark pairs them just before it moves them there, and before the image is
+// measured, so the measure counts its marks.
+type imageNesting struct {
+	goldmarkLinkParser
+}
 
 // goldmarkLinkParser is goldmark's link parser: an inline parser that also closes the labels a
 // block leaves open.
@@ -144,7 +156,24 @@ type goldmarkLinkParser interface {
 var imageNestingKey = parser.NewContextKey()
 
 func (p imageNesting) Parse(parent ast.Node, block gmtext.Reader, pc parser.Context) ast.Node {
+	if line, _ := block.PeekLine(); line[0] != ']' {
+		// Opening a label pushes no run, so the runs pushed before it are those pushed once it opens.
+		node := p.goldmarkLinkParser.Parse(parent, block, pc)
+		if node != nil {
+			delimiters := delimitersOf(pc)
+			delimiters.openLabel(delimiters.pushed)
+		}
+		return node
+	}
+	delimiters, _ := pc.Get(delimitersKey).(*delimiterList)
+	bottom, open := delimiters.closeLabel()
 	node := p.goldmarkLinkParser.Parse(parent, block, pc)
+	switch node.(type) {
+	case *ast.Link, *ast.Image:
+		if open {
+			delimiters.pairLabel(bottom)
+		}
+	}
 	image, ok := node.(*ast.Image)
 	if !ok {
 		return node
