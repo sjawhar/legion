@@ -523,7 +523,15 @@ export const dispatchToolSpecs = [
       "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " +
       "and release it when you stop. Pass the issue alone to claim it, or --release to give it up. " +
       "Your claim records your own session and shows on every read of the issue: the dashboard header, the " +
-      "issue list and board, dispatch read, and dispatch issues. Claiming is refused with 409 ISSUE_CLAIMED " +
+      "issue list and board, dispatch read, and dispatch issues. While you hold it, a person's answers, " +
+      "comments and messages on the issue reach your session directly (a new comment that mentions you " +
+      "arrives once, as the mention, when the mention reached you; when the mention's send fails, the " +
+      "comment still reaches you directly; a mention whose receipt timed out can arrive twice, and the " +
+      "second copy is the same comment); an agent's events and every other change on the issue still " +
+      "need a subscription to it, except in an ask you follow: anyone else's answer, hand-back, " +
+      "resolution or edit of it (other than a quiet edit), and every reply there (new, edited, resolved " +
+      "or reopened), reach you " +
+      "as its follower. Claiming is refused with 409 ISSUE_CLAIMED " +
       "when another session holds the issue and is still running; the refusal names that session, so talk to " +
       "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " +
       "person, not a session: there is nothing running to message, so ask them on the issue rather than " +
@@ -1243,6 +1251,9 @@ export const dispatchToolSpecs = [
       'Websearch syntax: "quoted phrase", -excluded, OR. ' +
       "Each kind of content is ranked on its own and the lists are merged, so the top holds the best " +
       "issue, document, ask, comment and message; an issue key searched alone lists that issue first. " +
+      "An ask hit says whether it is answered: an answered one shows the latest answer, who gave it, " +
+      "when, the options chosen and its text; a closed one says it was closed with no answer, or " +
+      "shows the last answer it had. " +
       `The answer names how many results match; offset pages through them, and each kind lists at most its best ${SEARCH_KIND_DEPTH}, ` +
       "so narrow the query or name a project to reach the rest. Paging is exact only while the " +
       "corpus holds still: content added, changed, or removed between two offsets can shift rows " +
