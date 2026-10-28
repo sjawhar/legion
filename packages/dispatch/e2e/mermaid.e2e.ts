@@ -260,6 +260,14 @@ async function holdMermaidWorkers(page: Page): Promise<void> {
   });
 }
 
+/** Turns the browser's scroll anchoring off on `page`, as in Safari before 27, which has none.
+ *  Every engine Playwright runs anchors the scroll on the target when a diagram above it grows,
+ *  so with anchoring on a row would pass without the page's own focus re-run; with it off, only
+ *  that re-run brings the target back into view. */
+async function withoutScrollAnchoring(page: Page): Promise<void> {
+  await page.addStyleTag({ content: "* { overflow-anchor: none !important; }" });
+}
+
 /** Makes the page's `new Worker(...)` throw, as a browser with no worker to give does. */
 async function refuseWorkers(page: Page): Promise<void> {
   await page.addInitScript(() => {
@@ -883,7 +891,7 @@ test("a block link below a diagram lands on its block once the diagram draws @ph
     const diagram = diagramIn(editor);
     await expect(paragraph).toBeInViewport();
     await expect(diagram).toHaveCount(0);
-
+    await withoutScrollAnchoring(page);
     await page.evaluate(() => window.__releaseMermaid?.());
     await expect(diagram).toBeVisible();
     await expect(paragraph).toBeInViewport();
@@ -920,7 +928,7 @@ test("a past version's highlighted mark lands on its block once a diagram above 
     await expect(highlight).toHaveText("quoted words");
     await expect(highlight).toBeInViewport();
     await expect(diagram).toHaveCount(0);
-
+    await withoutScrollAnchoring(page);
     await page.evaluate(() => window.__releaseMermaid?.());
     await expect(diagram).toBeVisible();
     await expect(highlight).toBeInViewport();
