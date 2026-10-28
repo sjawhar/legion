@@ -565,6 +565,9 @@ func TestSessionAnswersListsAnEditedCommentAtItsCurrentBody(t *testing.T) {
 // The author routes skip a session a comment's mention reaches (suppressed_authors), so a comment
 // reaches one session both ways only where the ask's follower route does, which ignores mentions:
 // a person's reply on the session's ask that also mentions it.
+// A reply in the session's ask's thread that mentions the session would reach it twice, by the
+// mention and as the ask's follower; the outbox leaves the follower copy to the delivered mention,
+// and the list holds the reply once, as a mention.
 func TestSessionAnswersListsACommentReachedByAMentionAndARouteOnce(t *testing.T) {
 	f := newAnswersFixture(t)
 	askID := f.ask(t, answersSession, "Which database backs the queue?")
@@ -575,8 +578,8 @@ func TestSessionAnswersListsACommentReachedByAMentionAndARouteOnce(t *testing.T)
 	if !f.sentCommentDelivery(t, reply, answersSession) {
 		t.Fatal("the mention was not delivered to the session")
 	}
-	if topics := f.destinations(t, "comment.created", reply); !slices.Contains(topics, contracts.AgentSubject(answersSession)) {
-		t.Fatalf("the reply reached %v, want the session's own topic too", topics)
+	if topics := f.destinations(t, "comment.created", reply); slices.Contains(topics, contracts.AgentSubject(answersSession)) {
+		t.Fatalf("the reply reached %v, want the follower copy left to the delivered mention", topics)
 	}
 
 	item := f.only(t, answersSession)

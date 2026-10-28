@@ -33,9 +33,9 @@ func answered(err error) <-chan error {
 }
 
 // publish runs one attempt of event to its end, as scanBatch does for each event of a batch, and
-// returns why it failed.
-func publish(ctx context.Context, deps Deps, event model.Event, slug string, route *string, delivered map[string]struct{}) error {
-	a := send(ctx, deps, deps.Publisher.Window(), event, slug, route, delivered)
+// returns why it did not finish: errMentionPending when it held a mentioned session's copy back.
+func publish(ctx context.Context, deps Deps, event model.Event, slug string, routing routing, delivered map[string]struct{}) error {
+	a := send(ctx, deps, deps.Publisher.Window(), event, slug, routing, delivered)
 	a.wait(ctx)
 	return a.err()
 }
