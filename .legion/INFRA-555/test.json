@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-555",
+  "completed": "2026-10-28T12:37:46Z",
+  "round": 7,
+  "testedHead": "3e09540a3c7b29d4c8c21b2c5c29326dada61e95",
+  "evidence": "https://github.com/sjawhar/legion/pull/2390#issuecomment-6469167171",
+  "rebaseCheck": {
+    "from": "75c172e235dd0134c1941e76f577de9f0b23028a",
+    "to": "3e09540a3c7b29d4c8c21b2c5c29326dada61e95",
+    "fingerprintBefore": "a6be691f047c4a09a8414b1894623f10e153e4691e87b253786a181795c2343f",
+    "fingerprintAfter": "19f9412e9220bec786b7536f6ff1076028ba4f575442eecbfd029e52fb95cf45",
+    "verdict": "changed, so a full test round was run",
+    "why": "Main's #2233 added the issue-ask-repair leased loop, so the branch's lease pool is 12, ConnectionsPerProcess 86 and infra/gcp dispatchConnectionsPerPod 86, with the prose counts updated. Retro's removal of .legion/ took the earlier rounds' test.json; this file is written again for round 7."
+  },
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Rebuilt every binary at 3e09540a and drove each surface of the implementer's proofs independently with the tester's own harness, on Postgres 17.5 and natsd. It also checked the merge's change directly: the real process's Postgres connections against ConnectionsPerProcess = 86, and the leased loops, the registry's server-processes prune included, running on the enlarged lease pool across two processes."
+  },
+  "failures": [],
+  "failed": 0,
+  "ci": "At 3e09540a, read at 12:37Z: test, typecheck, lint, build (x2), changes and pr-title queued. Read as queued, not as a pass. GitHub reports MERGEABLE.",
+  "notReached": "Main's issue-ask-repair loop takes its first leased pass 10 minutes after boot, outside the 75 s window watched. The lease pool's size for it is the static count CI's infra/gcp TestDispatchConnectionsPerPodIsTheServers and the store tests hold.",
+  "proof": [
+    {
+      "criterion": "Merge resolution: a process stays within the per-process connection budget (86), and the registry's prune runs on the shared lease pool beside main's added loop",
+      "surface": "the real envoy-dispatch at the head with NATS connected, its database's pg_stat_activity; two processes on one Postgres and natsd for 75 s",
+      "command": "tester's harness: count pg_stat_activity backends at idle and every 50 ms during 1500 GET /api/v1/projects, 150 concurrent; grep both processes' logs for 'dispatch duty: leased pass ran' and duty ERROR lines",
+      "observed": "10 connections at idle, peak 71, all 200, within 86; leased passes: server-processes 1, block-index 3, edit-notices 16, reference-excerpts 1, suggestion-outcomes 1; 0 duty ERROR lines",
+      "headSha": "3e09540a3c7b29d4c8c21b2c5c29326dada61e95",
+      "negativeControl": "a database cut made /healthz answer 503 while /livez kept 204, so the probe that may restart a pod does not read Postgres"
+    },
+    {
+      "criterion": "A process started while NATS is unreachable becomes healthy (/healthz 200, nats false) and serves an API read; once NATS is reachable it reports nats true and publishes",
+      "surface": "real envoy-dispatch stamped 3e09540a on Postgres 17.5 (schema 135), natsd from the head",
+      "command": "tester's harness: boot with NATS_URLS at an unused port, /healthz, /livez, API read, relay, start natsd, read notifications.dispatch.server.started, SIGSTOP natsd",
+      "observed": "/healthz 200 nats:false 1.0 s after start; /livez 204; API 200; relay 503; nats:true 0.25 s after natsd started; one envelope ...-3e09540a...-1; silent cut shown in 2.53 s",
+      "headSha": "3e09540a3c7b29d4c8c21b2c5c29326dada61e95",
+      "negativeControl": "b08a56bc with NATS down: exit 1 at boot"
+    },
+    {
+      "criterion": "A sign-in started on A completes on B; a key rotation keeps people signed in; a process with no key or an unshared key set does not serve, also on resume",
+      "surface": "two real envoy-dispatch processes (\"K1 K0\"/\"K0 K1\") with dev-oidc-issuer; a third beside them; A on KX frozen or cut 17 s with B started meanwhile; a dev sign-in server SIGKILLed and restarted",
+      "command": "tester's harness: A /auth/start -> issuer -> B callback, whoami both, bad state cookies, refresh on A then B, A-minted cookie to B; K9, unset and 'K1 K0' beside the pair; SIGTERM 4 s into the wait; freeze/cut scenarios; dev restart",
+      "observed": "B callback 302, whoami 200 on both; bad state cookies 400 x3; refresh re-seals on both; A's cookie 200 on B; K9 and unset exit 1 after 20.3 s; 'K1 K0' serves; SIGTERM in the wait exits 0; B=KY: A exits 1 (0.3 s after the freeze, 2.5 s after the cut ends); B=KX both serve; dev restart serves after 15.6 s",
+      "headSha": "3e09540a3c7b29d4c8c21b2c5c29326dada61e95",
+      "negativeControl": "b08a56bc: B's callback 400 and K9 serves beside the pair; 0b7f2af5: frozen A beside B=KY resumes and both serve with both rows live"
+    },
+    {
+      "criterion": "A process started while the discovery document is unreachable serves agent-token requests and completes a sign-in once discovery succeeds",
+      "surface": "real envoy-dispatch with both issuers at a SIGSTOPped dev-oidc-issuer",
+      "command": "tester's harness: boot frozen; /healthz, agent token, JWT, /auth/start; SIGCONT; poll; JWT; sign-in; refresh during a second freeze",
+      "observed": "200 signin:false service_tokens:false; agent token 200; JWT 503; /auth/start 503; recovered in 7 s; JWT 200; sign-in 302, whoami 200; refresh during the outage 503, then 200",
+      "headSha": "3e09540a3c7b29d4c8c21b2c5c29326dada61e95",
+      "negativeControl": "b08a56bc with the issuer frozen: exit 1"
+    },
+    {
+      "criterion": "A test of the started-event contract on both sides",
+      "surface": "two real envoy-dispatch processes stamped c1/c2 on one Postgres and natsd; the daemon's HTTPClient.BuildCommit against a live c1 process",
+      "command": "tester's harness: roll c1 -> c2 -> rollback, reading the stream and fleet_commit after each step; a temporary go test calling New(url).BuildCommit (deleted after the run)",
+      "observed": "envelopes (c1,1), none, none (fleet_commit c1 on both mid-roll), (c2,2), (c1,3); BuildCommit returned c1c1...",
+      "headSha": "3e09540a3c7b29d4c8c21b2c5c29326dada61e95",
+      "negativeControl": "BuildCommit against a dead port: 'connect: connection refused' and no commit; restarting B on the announced build published no second envelope"
+    }
+  ],
+  "residualRisks": [
+    "The state cookie can be replayed for its 10 minutes; only the issuer's single-use code stops a second callback.",
+    "A request whose confirmation has lapsed waits for the refresh timeout (about 15 s) while the issuer does not answer, then answers 503.",
+    "A process refused at boot holds its bound port without serving (and without answering /livez) for up to about 20 s before it exits; the app's startup probe covers that window."
+  ]
+}
