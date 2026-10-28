@@ -226,12 +226,13 @@ function answer(from: Renderer, reply: MermaidReply): void {
   sendNext();
 }
 
-/** Refuses the source `from` has not answered in time, and terminates it, which stops its
- *  layout; the next request starts a fresh worker. */
-function refuseLate(from: Renderer, source: string): void {
-  from.worker.terminate();
-  from.current = undefined;
-  renderer = undefined;
+/** Refuses `source`, which the worker has not answered within the time limit, and stops the
+ *  worker, which stops its layout; the next request starts a fresh one. The timer that calls this
+ *  was set by `sendNext` for the current renderer, and every path that ends that request or drops
+ *  that renderer clears the timer first (`answer` on the reply, `stopRenderer` on every other), so
+ *  the renderer it stops is always the one it timed. */
+function refuseLate(source: string): void {
+  stopRenderer();
   settle(source, refusal(`it did not finish within ${timeLimitMs / 1000} seconds`));
   sendNext();
 }
@@ -264,12 +265,11 @@ function sendNext(): void {
     return;
   }
   if (!renderer.ready || renderer.current !== undefined) return;
-  const from = renderer;
   const source = next.value;
   const id = ++lastRequestId;
-  const timer = window.setTimeout(() => refuseLate(from, source), timeLimitMs);
-  from.current = { id, source, timer };
-  from.worker.postMessage({ id, source } satisfies MermaidRequest);
+  const timer = window.setTimeout(() => refuseLate(source), timeLimitMs);
+  renderer.current = { id, source, timer };
+  renderer.worker.postMessage({ id, source } satisfies MermaidRequest);
 }
 
 /** Drops every source no draw waits for any more, so it is never sent; the worker drawing one is
@@ -329,25 +329,21 @@ export function drawMermaidDiagrams(
   markdown: string,
   reparse: Reparse
 ): () => void {
-  const blocks = Array.from(element.querySelectorAll<HTMLPreElement>("pre[data-language]")).filter(
-    (pre) => isMermaidLanguage(pre.getAttribute("data-language"))
-  );
-  if (blocks.length > 0 && endsInOpenMermaidFence(parsed, markdown, reparse)) blocks.pop();
   // A code block keeps its source's line ends, and the renderer splits lines at LF alone, so a
   // source written with lone CRs reaches it as LF; CRLF too, so one diagram is one cache entry.
-  const sources = new Map(
-    blocks.map((pre) => [pre, (pre.textContent ?? "").replace(/\r\n?/g, "\n")])
-  );
-  const late: HTMLPreElement[] = [];
-  for (const pre of blocks) {
-    const drawn = drawings.get(sources.get(pre) ?? "");
-    if (drawn === undefined) late.push(pre);
+  const blocks = Array.from(element.querySelectorAll<HTMLPreElement>("pre[data-language]"))
+    .filter((pre) => isMermaidLanguage(pre.getAttribute("data-language")))
+    .map((pre): [HTMLPreElement, string] => [pre, (pre.textContent ?? "").replace(/\r\n?/g, "\n")]);
+  if (blocks.length > 0 && endsInOpenMermaidFence(parsed, markdown, reparse)) blocks.pop();
+  const late: [HTMLPreElement, string][] = [];
+  for (const [pre, source] of blocks) {
+    const drawn = drawings.get(source);
+    if (drawn === undefined) late.push([pre, source]);
     else drawBlock(pre, drawn);
   }
   if (late.length === 0 || failed) return noop;
   const waiting: [string, LateDraw][] = [];
-  for (const pre of late) {
-    const source = sources.get(pre) ?? "";
+  for (const [pre, source] of late) {
     const draw: LateDraw = (drawn) => drawBlock(pre, drawn);
     waiting.push([source, draw]);
     const draws = requests.get(source);
