@@ -2,21 +2,18 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-177",
-  "completed": "2026-10-28T14:58:37Z",
-  "round": 6,
-  "headReviewed": "fa54d71930de34da882f63a4a0119a9fec4530b8 (code head d0a5a0cafa83; 366909b6 and fa54d719 add only .legion/INFRA-177/)",
-  "fingerprint": "changed by forward merge d0a5a0ca (main adee0aba, conflicting commit #2436), per the comment of 2026-10-28T13:59Z, so a full round",
-  "decision": "approved",
+  "completed": "2026-10-28T15:55:37Z",
+  "round": 7,
+  "headReviewed": "46727fbea446d8b0bb6b25fefaeaa8a449472175 (code head e99901ae5857; 8ab4da93 and 46727fbe add only .legion/INFRA-177/)",
+  "fingerprint": "changed by forward merge e99901ae (main 78d5f6b6), per the comment of 2026-10-28T15:31Z, so a full round",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
-  "minor": 2,
-  "roundFiveFinding": "Fixed in d0a5a0ca: packages/envoy-client gains pr2354-Added-20261028-135519.yaml and pr2354-Changed-20261028-135521.yaml, both matching the package's diff.",
-  "code": "Merge d0a5a0ca keeps #2436 (synchronize sender, named moves, late-synchronize gap rules, pushOf by sender, Dropped warnings) with run and chain links limited to review-App pushes; nothing of the handoff-only, forced or approval-carry code came back; the one main test it deleted (TestAPushReplacesAnApprovalCarrierOfItsTwoHeads) pinned carrier replacement. The regenerated deploy_order_test.go digests were recomputed independently from main ec0263277, b5d2a262 and #2436's own trees, and a sparesAttempt mutation fails all twelve. Daemon 0062, Dispatch 0135 and contract 41 unchanged.",
-  "ci": "Read 14:58Z at CI head d0a5a0ca (compare to fa54d719: handoffsOnly true, 2 files): required lint, typecheck, test (run 40701047270) and pr-title (runs 40701574915, 40701523253) completed success. Required set re-read: lint, typecheck, test, pr-title.",
-  "thermonuclear": "deep-review: Verdict APPROVE at fa54d719 (no findings). code-quality: Verdict CHANGES at fa54d719, both findings cleanup-only, none correctness.",
+  "important": 1,
+  "minor": 0,
+  "code": "Merge e99901ae is sound: every conflict keeps both sides (client.go, dispatch-api.ts and its test, envoy AGENTS.md and cmd/dispatch/README.md, scripts/e2e/README.md); skills-guard.test.ts keeps this PR's deletion of a trailer test main only reworded. Dispatch migration is 0136_handoffs after main's 0135_server_processes, with every reference renumbered; daemon 0062 and contract 41 unchanged. claude-envoy dist/** and legion/** equal main's, per #2423, and every test or script that reads them builds fresh.",
+  "ci": "Read 15:45Z at CI head e99901ae (compare to 46727fbe: handoffsOnly true, 2 files): required lint, typecheck, test and pr-title queued. A request for changes does not wait on CI.",
+  "thermonuclear": "deep-review: Verdict APPROVE at 46727fbe (the fragment, confirmed, as its one Minor). code-quality: Verdict CHANGES at 46727fbe (the fragment alone).",
   "keyFindings": [
-    {"severity": "minor", "file": "packages/daemon/internal/classify/decisions.go", "description": "withPush (:967-969) is now a one-caller wrapper of append(clone(...)); inline it. Fast-follow."},
-    {"severity": "minor", "file": "packages/daemon/internal/classify/decisions.go", "description": "pathPlan's empty-path 'decides nothing' case (:169-177) is unreachable after the handoff rule went; return only planned and set decided = chained. Fast-follow."}
-  ],
-  "workspaceNote": "A go.work.sum change the review subagents' go test left in the working copy was abandoned before this handoff; it was not review work."
+    {"severity": "important", "file": "packages/claude-envoy/.changes/unreleased/pr2354-Changed-20261028-103904.yaml", "description": "The release note states two false things: 'since dist/ and legion/ were regenerated' (line 13) and 'Install it with a legion built from the same commit' (line 9). After main's #2423 this PR regenerates neither; main's rebuild builds the plugin from this commit's source after the merge, and until that rebuild lands the committed bundle is the contract-40 build, which a contract-41 daemon refuses at registration. Reword to say that, as the INFRA-138 architect asked."}
+  ]
 }
