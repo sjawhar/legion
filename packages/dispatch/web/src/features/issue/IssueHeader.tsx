@@ -278,6 +278,9 @@ export function IssueHeader({
     onSettled: () => {
       pinGuard.release();
       void queryClient.invalidateQueries({ queryKey: userStateQuery().queryKey });
+      // The sidebar lists the pinned issues from their own read, which follows the pin however
+      // its write settled: with an answer, landed with none (`null`), or refused.
+      void queryClient.invalidateQueries({ exact: true, queryKey: ["issues", "pinned"] });
     },
     onMutate: async (pinned) => {
       await queryClient.cancelQueries({ queryKey: userStateQuery().queryKey });
@@ -300,8 +303,6 @@ export function IssueHeader({
         ...current,
         [issue.key]: next,
       }));
-      // The sidebar lists the pinned issues from their own read.
-      void queryClient.invalidateQueries({ exact: true, queryKey: ["issues", "pinned"] });
     },
   });
   const saveTitleOnEnter = (event: KeyboardEvent<HTMLInputElement>) => {
