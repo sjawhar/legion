@@ -357,12 +357,13 @@ Deployment rolls: during the roll an old page reaching a new pod has those effec
 page reaching an old pod cannot open its live socket and its broadcast omits the body field that
 old server requires. Reload after the roll reaches one compatible page and server version.
 
-From that release on, every `POST` and `PATCH` a page or the `dispatch` command makes carries an
+From that release on, every page write that could otherwise happen twice carries an
 `Idempotency-Key`, and Dispatch keeps each key's answer for 24 hours, so a change tried again after
-a lost answer, a timeout or an outage is made once. A `PUT` and a `DELETE` carry none and go once,
-since asking again makes the same change. A page that has not heard back keeps trying
-and says so, and a script that calls the API itself can send a key of its own
-([For agents](/legion/dispatch/for-agents/#the-http-api)).
+a lost answer, a timeout or an outage is made once. `PUT`, `DELETE`, and the sign-out
+(`POST /auth/logout`) carry no key; the first two are already idempotent and sign-out cannot create
+content twice. The `dispatch` command keys every `POST` and `PATCH` it makes. A page that has not
+heard back keeps trying and says so, and a script that calls the API itself can send a key of its
+own ([For agents](/legion/dispatch/for-agents/#the-http-api)).
 
 The release that lets a project import its components from several repositories (migration
 `0117`) is deployed the same way: stop every server of the earlier version, or scale it to zero,
