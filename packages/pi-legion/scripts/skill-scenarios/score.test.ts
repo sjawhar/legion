@@ -1647,6 +1647,25 @@ specRun("spec-writing-head-93", {
     finish
   ),
 });
+// A plan the agent writes names the skill file a later task changes: text in a file, no read.
+specRun("spec-writing-head-94", {
+  transcript: conversation(
+    routedRead,
+    [
+      toolCall("o3", "write", {
+        path: "plan.md",
+        content: "### Task 9\n- Modify: `skills/dispatch/SKILL.md` in sjawhar/legion.\n",
+      }),
+      result("o3", "Wrote plan.md"),
+    ],
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
 // A usage refusal the CLI both prints and logs (an unknown command, under tool `dispatch`), after a
 // skill read earlier in the same call. The ledger line and the printed refusal are one refusal:
 // counted once, at the command, so the read before it is no read between it and its fix.
@@ -2073,6 +2092,8 @@ test("a run whose tool call names a path outside its sandbox is a rig error; URL
   );
   expect(out).not.toContain("spec-writing-head-92\tpass=");
   expect(scoresOf("spec-writing-head-93")).toEqual(allPass);
+  // A skill path inside the text a write puts in a file is no read of that skill.
+  expect(scoresOf("spec-writing-head-94")).toEqual(allPass);
 });
 
 test("two runs of one batch that name one Dispatch database are rig errors, saying so", () => {

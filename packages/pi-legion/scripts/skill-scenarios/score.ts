@@ -2389,7 +2389,10 @@ function unscored(
     for (const [other, checkout] of labels)
       if (other !== label && call.args.includes(checkout))
         return `a ${call.tool} call names ${other}'s checkout: ${call.args.slice(0, 200)}`;
-    for (const [skillPath] of call.args.matchAll(
+    // The text a write or edit puts in a file is no read of a skill: a plan that names
+    // `skills/dispatch/SKILL.md` as a file to change reads nothing.
+    const named = argumentStrings(JSON.parse(call.args)).join("\n");
+    for (const [skillPath] of named.matchAll(
       /[^\s"'`=:;|&<>()]*skills\/(?:dispatch-first|dispatch-writing-specs|dispatch|legion-worker)\b/g
     ))
       if (!allowed.some((dir) => skillPath.startsWith(dir)))
