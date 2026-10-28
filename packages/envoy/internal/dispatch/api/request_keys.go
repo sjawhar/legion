@@ -1100,6 +1100,19 @@ func markRequestKeyCommitted(claim requestKeyClaim, running *atomic.Bool) store.
 	}
 }
 
+// outlivingTheClient is the context for work a handler does before it answers that must finish
+// even if its client goes away. A keyed request already runs on such a context, with the keyed
+// run's bound (keyedRunLimit), and context.WithoutCancel would drop that bound, so it is used as
+// it is. An unkeyed request's context has the client's cancellation taken off, as before. Work
+// that runs after the handler returns still takes context.WithoutCancel: the keyed run's context
+// ends with the handler.
+func outlivingTheClient(r *http.Request) context.Context {
+	if _, keyed := r.Context().Value(requestKeyClaimKey{}).(requestKeyClaim); keyed {
+		return r.Context()
+	}
+	return context.WithoutCancel(r.Context())
+}
+
 // recoveryPoint is every value a keyed write commits as its key's recovery point: the message a
 // send to one session or an issue message made, the broadcast, the comment whose mentions deliver
 // it. A route binds one (bindRequestKeyRecovery) and its keyedReplay reads the same type back

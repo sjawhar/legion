@@ -440,3 +440,63 @@ func TestARunPastItsLimitStopsRenewingItsLease(t *testing.T) {
 	releaseOnce()
 	awaitResponse(t, answered)
 }
+
+// A keyed close whose own work waits on a lock ends at the keyed run's bound (keyedRunLimit), as
+// every keyed handler does, and releases its key, so the repeat runs it once the lock is free. The
+// close settles the issue's documents before its transaction and sweeps them after it, on a
+// context that must outlive the client; a keyed request's context already does, and
+// context.WithoutCancel on it dropped the bound with the cancellation, so a close held on the
+// issue's row kept its background-work slot, and the shutdown's wait for it, as long as the row
+// stayed held.
+func TestAKeyedCloseHeldOnTheIssuesRowEndsAtItsRunsBound(t *testing.T) {
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
+	served.requestKeyRunLimit = time.Second
+	issue := createInteractionIssue(t, handler, "TEST", "Closed while its row is held", "Context\n")
+	awaitSettled(t, database, issue.PrimaryArtifactID)
+	ctx := context.Background()
+	// The spec owes a settlement, which the close runs before its own transaction, and another
+	// writer holds the issue's row, which that settlement's transaction waits for.
+	if _, err := database.Pool.Exec(ctx,
+		`insert into doc_settlements_pending (artifact_id) values ($1)`, issue.PrimaryArtifactID); err != nil {
+		t.Fatalf("mark the spec owed a settlement: %v", err)
+	}
+	holder, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the holder's transaction: %v", err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	if _, err := holder.Exec(ctx, `select 1 from issues where key = $1 for no key update`, issue.Key); err != nil {
+		t.Fatalf("hold the issue's row: %v", err)
+	}
+
+	closing := map[string]any{"status": "done"}
+	answered := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		answered <- keyedRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, closing, "alice", "close-held")
+	}()
+	select {
+	case response := <-answered:
+		if response.Code < http.StatusInternalServerError {
+			t.Fatalf("a close held past its run's bound: status=%d body=%s, want a 5xx that releases its key",
+				response.Code, response.Body.String())
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("a keyed close still waited on the held issue row 15 s after its run's 1 s bound")
+	}
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatalf("release the issue's row: %v", err)
+	}
+	var open bool
+	if err := database.Pool.QueryRow(ctx,
+		`select closed_at is null from issues where key = $1`, issue.Key).Scan(&open); err != nil {
+		t.Fatalf("read the issue: %v", err)
+	}
+	if !open {
+		t.Fatal("the close that ended at its bound closed the issue")
+	}
+	repeat := keyedRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, closing, "alice", "close-held")
+	if repeat.Code != http.StatusOK || replayed(repeat) {
+		t.Fatalf("the repeat once the row is free: status=%d body=%s, want the key released and the close run",
+			repeat.Code, repeat.Body.String())
+	}
+}

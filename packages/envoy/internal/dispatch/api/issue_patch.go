@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -141,7 +140,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	closes := input.Status != nil && status == "done"
 	if closes {
 		// Before the transaction, which settlement's own would queue behind on the issue's row.
-		s.settleIssueBeforeClose(context.WithoutCancel(r.Context()), key)
+		s.settleIssueBeforeClose(outlivingTheClient(r), key)
 	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -512,14 +511,14 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		// rooms that never got the closed flag keep taking edits until they are reloaded.
 		// Dropping only the cancellation keeps the context's transaction mark, which is what
 		// lets the pool refuse a refresh run while a transaction is still open.
-		s.deps.Docs.SetIssueClosed(context.WithoutCancel(r.Context()), key, after.ClosedAt != nil)
+		s.deps.Docs.SetIssueClosed(outlivingTheClient(r), key, after.ClosedAt != nil)
 	}
 	s.publish(events...)
 	if closing {
 		// The rooms are closed now, so no browser of this process writes another ask block
 		// into them; the sweep catches the ones written since the close forked each document.
 		// It runs after the publish so every event reaches subscribers in commit order.
-		s.sweepClosedIssueAsks(context.WithoutCancel(r.Context()), key, withdrawn, actor)
+		s.sweepClosedIssueAsks(outlivingTheClient(r), key, withdrawn, actor)
 	}
 	WriteJSON(w, http.StatusOK, withAdvice(after, advice))
 }
