@@ -5,6 +5,11 @@ package pmdoc
 // each rendering back; the engine reads the same renderings; then the head judges the base against
 // itself. Both tests skip unless the driver sets their inputs. The driver copies this file into the
 // base revision, so it uses only what every revision since the write-path read-back check has.
+//
+// Among what TestDifferentialCompare counts: a document the head reads as the engine but its
+// writer refuses, because its rendering reads back otherwise, is reported ("refused by the
+// writer") and gates where the base stores it ("newly refused by the writer"); any other document
+// the base stores and the head does not is reported ("newly refused").
 
 import (
 	"bufio"
@@ -415,6 +420,18 @@ func TestDifferentialCompare(t *testing.T) {
 		if !base.engineOnly && head.engineOnly {
 			flag("new engine-only read-back", sides)
 		}
+		// The writer refuses a document the head reads as the engine because its rendering reads
+		// back otherwise; one the base stores is newly refused by the writer, and gates.
+		writerRefuses := head.dump.Parse == "" && strings.Contains(head.dump.Write, "reads back otherwise") && head.ReadsAsEngine
+		if writerRefuses {
+			flag("refused by the writer", sides)
+		}
+		switch {
+		case writerRefuses && base.stores:
+			flag("newly refused by the writer", sides)
+		case base.stores && !head.stores:
+			flag("newly refused", sides)
+		}
 	}
 
 	var summary strings.Builder
@@ -427,8 +444,15 @@ func TestDifferentialCompare(t *testing.T) {
 		{"engine-tree churn (base renders the engine's tree correctly, head's bytes differ)", "engine-tree churn"},
 		{"head panics (recovered or not)", "head panic"},
 		{"lost fixed points (base reads the markdown as the engine and writes it back as read, head does not)", "lost fixed point"},
+		{"newly refused by the writer (base stores, head's rendering reads back otherwise)", "newly refused by the writer"},
 	} {
 		fmt.Fprintf(&summary, "GATE %-86s %d\n", line.label, counts[line.key])
+	}
+	for _, line := range []struct{ label, key string }{
+		{"refused by the writer (head reads it as the engine, its rendering reads back otherwise)", "refused by the writer"},
+		{"newly refused (base stores, head does not, other than newly refused by the writer)", "newly refused"},
+	} {
+		fmt.Fprintf(&summary, "REPORTED %-82s %d\n", line.label, counts[line.key])
 	}
 	keys := make([]string, 0, len(counts))
 	for key := range counts {
@@ -439,7 +463,7 @@ func TestDifferentialCompare(t *testing.T) {
 		fmt.Fprintf(&summary, "  %s: %d\n", key, counts[key])
 	}
 	fmt.Print(summary.String())
-	for _, gate := range []string{"regression", "misread", "churn", "engine-tree regression", "engine-tree churn", "head panic", "lost fixed point"} {
+	for _, gate := range []string{"regression", "misread", "churn", "engine-tree regression", "engine-tree churn", "head panic", "lost fixed point", "newly refused by the writer"} {
 		if counts[gate] > 0 {
 			t.Errorf("%d %s; see %s", counts[gate], gate, os.Getenv("PMDOC_DIFF_REPORT"))
 		}
