@@ -2,27 +2,25 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-278",
-  "completed": "2026-10-28T10:22:32Z",
+  "completed": "2026-10-28T10:27:52Z",
   "generation": 3,
-  "round": 11,
-  "answersTest": "test.json round 10 (fail): the dispatch_claim description said an agent's events need a subscription, false for a claimant that follows an ask",
+  "round": 12,
+  "answersTest": "test.json round 11 (fail): 'edit of it' in the dispatch_claim description also covered a quiet ask.edited, which publishFollowerRoutes does not send",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2225",
-  "headSha": "a51b7121fff693d6cd5aa89b351be1b1572f8ada",
+  "headSha": "ad1d162b0647c41ee8edb0d6e2685d9850e385b4",
   "proof": [
     {
       "criterion": "The dispatch_claim description agents read is true against publishFollowerRoutes, in source and in the shipped claude-envoy bundle",
       "surface": "packages/contracts/src/dispatch-tools.ts and packages/claude-envoy/dist, rebuilt with the pinned Bun 1.4.4",
-      "command": "sed -n 526,534p packages/contracts/src/dispatch-tools.ts; cd packages/claude-envoy && $TMPDIR/bun-1.4.4/bun-linux-x64-baseline/bun scripts/build.ts --check; grep -c 'except in an ask you follow' dist/{dispatch,envoy-channel,session-hook}.js",
-      "observed": "The description reads '…an agent's events and every other change on the issue still need a subscription to it, except in an ask you follow: anyone else's answer, hand-back, resolution or edit of it, and every reply there (new, edited, resolved or reopened), reach you as its follower.' That is the tester's wording (PR comment 6466417890) word for word. check-dist reports 'dist/ and legion/ match a fresh build', and each of the three bundles holds the sentence once. contracts tsc clean, bun test 293 pass 0 fail; envoy-client tsc clean",
-      "headSha": "a51b7121fff693d6cd5aa89b351be1b1572f8ada",
-      "negativeControl": "At b9747469 the description ended 'still need a subscription to it.', which the tester's live case disproved: agent Q's reply in C's ask reached claimant P, a follower with no subscription"
+      "command": "sed -n 526,534p packages/contracts/src/dispatch-tools.ts; cd packages/claude-envoy && $TMPDIR/bun-1.4.4/bun-linux-x64-baseline/bun scripts/build.ts --check; grep -c 'edit of it (other than a quiet edit)' dist/{dispatch,envoy-channel,session-hook}.js",
+      "observed": "The description reads '…except in an ask you follow: anyone else's answer, hand-back, resolution or edit of it (other than a quiet edit), and every reply there (new, edited, resolved or reopened), reach you as its follower.' That is the tester's fix word for word, and the fragment says the same. check-dist reports 'dist/ and legion/ match a fresh build', and each of the three bundles holds the phrase once. contracts tsc clean, bun test 293 pass 0 fail, biome clean",
+      "headSha": "ad1d162b0647c41ee8edb0d6e2685d9850e385b4",
+      "negativeControl": "At 9a50e6d3 the description said 'edit of it' with no exception, though publisher.go:889-891 skips a quiet ask.edited (the tester's round-11 finding)"
     }
   ],
   "filesChanged": [
-    "a51b7121: packages/contracts/src/dispatch-tools.ts (the description), packages/contracts/.changes/unreleased/pr2225-claim-description.yaml (the same wording), packages/claude-envoy/dist/{dispatch,envoy-channel,session-hook}.js (rebuilt)"
+    "ad1d162b: packages/contracts/src/dispatch-tools.ts, packages/contracts/.changes/unreleased/pr2225-claim-description.yaml, packages/claude-envoy/dist/{dispatch,envoy-channel,session-hook}.js (rebuilt)"
   ],
   "deviations": [],
-  "openQuestions": [
-    "The tester's 'edit of it' includes a quiet ask.edited, which publishFollowerRoutes does not send. I applied the wording as given, as the architect directed; the gap is the word 'quiet', which this description does not explain anywhere"
-  ]
+  "openQuestions": []
 }
