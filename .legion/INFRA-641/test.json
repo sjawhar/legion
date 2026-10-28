@@ -2,61 +2,50 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-641",
-  "completed": "2026-10-28T14:14:22Z",
-  "round": 2,
-  "headTested": "914ac117300e (code; merge of main adee0aba at 6075f457 plus the changie fragment); PR head 3db01a61bd9c adds only .legion/INFRA-641/implement.json",
-  "fingerprint": "changed: 21368ea8fc6d1011133bfd3ec04a56f9842527de2e04d6fbaedeac7b43ed3a07 at 2aa76f13 -> d8e266ea374137232383885ad5d38166df88b1708c64e08daadff1e641b863aa at 3db01a61. The changed files of the diff (position.go, position_test.go, splice.go, walk.go, walk_test.go) are byte-identical to round 1. Only the changelog moved, from CHANGELOG.md to packages/envoy/.changes/unreleased/pr2455-Changed-20261028-125858.yaml. The base under them is now main adee0aba, which changes pmdoc's parse, render and table code, so this was a full round at the merged head.",
+  "completed": "2026-10-28T15:14:04Z",
+  "round": 3,
+  "headTested": "cfec98cf76f0 (code); PR head dffcb898c65f adds only .legion/INFRA-641/implement.json",
+  "scope": "This round answers review round 1. The only runtime change is walk.go's doc comment (32065ac7): a visitor must change no node's Type, Text or Children, the visited node's included. The test changes (cfec98cf): the reference walk uses isLeafNodeType; the tests are renamed TestWalkMatchesTheReferenceWalk and TestWalkMatchesTheReferenceWalkOnACorpus; the header line about the base commit is gone; and TestLen16CountsTheUnitsUTF16EncodingWrites is deleted, because FuzzLen16's seeds run the same 22 cases.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 2's proof says the conflict is resolved with the code unchanged. Confirmed: the five pmdoc files are byte-identical to 64a0d984; GitHub reports the PR MERGEABLE at 3db01a61; CI ran at 914ac117. I repeated every real-surface check at the merged head with my own builds of base adee0aba (sha256 f73b47f0...) and head 914ac117 (sha256 0cad9297...)."
+    "how": "The implementer says the server binary is unchanged. Confirmed independently: go build -trimpath ./cmd/dispatch from git-archive exports of 914ac117 and cfec98cf gives the same sha256, b81b9e1d...896c. The implementer's corpus run under the new test name was repeated on my own corpus (below)."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "A1: merge rule on the replay of production's writes (every head run below every base run)",
-      "surface": "Local Dispatch server, my builds of base adee0aba (main at the merge) and head 914ac117, Postgres 17.11 + pgvector (fresh copy of the settled seed per run, migrated on boot), NATS 2.12.1 JetStream, fake Envoy listener, INFRA-512 replay tools/load.py F=0.3 rho=1 window 27-35 min, 2 SSE streams, GOMAXPROCS=2",
-      "command": "$TMPDIR/tester/replay/tools/four2.sh (tools/run-x2.sh mbase-1, mhead-1, mbase-2, mhead-2, interleaved, 13:39-14:13Z)",
-      "observed": "Dispatch CPU-s over 481 s: base 381.28 / 386.74, head 243.17 / 240.66. Every head run is below every base run (about -37%). 293 write events in each run; box_busy_before 1.07-1.33%; server alive and 0 pending actions at the end of each run. alloc_space per run: base 96.48 / 96.30 GB, head 54.56 / 53.51 GB (about -44%).",
-      "headSha": "914ac117300e",
-      "negativeControl": "The base build, with the same seed, inputs and harness, interleaved: 381.28-386.74 CPU-s against head 240.66-243.17."
+      "criterion": "Review round 1 answered with the runtime unchanged: the server that serves the change is the same build as the one round 2 verified",
+      "surface": "The Dispatch server binary built from the head",
+      "command": "GOWORK=off go build -trimpath -o ... ./cmd/dispatch in exports of 914ac117 and cfec98cf; sha256sum",
+      "observed": "Both builds: b81b9e1da0888808da5b696dd75b1dd0e974d4eaac36321be4cd5cedcefd896c. Only position_test.go, walk.go (a comment) and walk_test.go differ between the two exports.",
+      "headSha": "cfec98cf76f0",
+      "negativeControl": "Round 2's base build adee0aba, from the same pipeline, differs (f73b47f0... against 0cad9297..., without -trimpath), so this comparison does detect a runtime change."
     },
     {
-      "criterion": "A2: identical sizes and positions over every node of the real specs",
-      "surface": "go test over my read-only fetch of all 1,203 LINUX primary specs, at the merged head",
-      "command": "cd packages/envoy && PMDOC_WALK_CORPUS=$TMPDIR/tester/corpus go test ./internal/dispatch/pmdoc -run TestWalkMatchesTodaysWalkOnACorpus -count=1 -v -timeout 3h",
-      "observed": "1203 files; 0 parse refusals; 0 Update/mark/Read failures; nodes 3,693,317 parsed + 3,777,939 read back; text nodes 2,383,721 + 2,468,343; 48,265 marks; max depth 12; mismatches 0; PASS (1471.3 s). TestWalkVisitsEveryNodeWithTodaysRange and TestSpliceMatchesEngineReplaceRange also PASS.",
-      "headSha": "914ac117300e",
-      "negativeControl": "Round 1 mutation run on the same walk.go: walkNode advancing a child by the wrong slot makes 11 tests fail; nodeSize no longer sharing walk's size rule makes TestWalkVisitsEveryNodeWithTodaysRange, TestSpliceMatchesEngineReplaceRange and TestFindHeadingMatchesTitleAcrossLevels fail."
+      "criterion": "A5: insertAt results unchanged, re-driven on the round 3 build (doc-edit inserts through the Dispatch API)",
+      "surface": "dispatch doc-edit insert through the real API (the dispatch CLI against a local server built at cfec98cf, on a fresh copy of the seed), compared with round 2's base adee0aba run",
+      "command": "python3 $TMPDIR/tester/insert_probe.py probe-head3 <84 pmdoc/testdata/corpus docs + 7 LINUX specs>, then compared with probe-base2",
+      "observed": "1,190 inserts on 91 documents: 0 differences in result code or message from the base build once advisory lines are removed (1,182 applied, 8 refused); all 91 final documents byte-identical to the base build's.",
+      "headSha": "cfec98cf76f0",
+      "negativeControl": "The same refused inputs as the base: 5 ambiguous quote anchors (for example 'FR (this group):' matches 4 places) and 3 inserts at the start of a front-matter document (INVALID_OP: would read back otherwise)."
     },
     {
-      "criterion": "A3: len16 equal to today's for every string and allocation-free",
-      "surface": "go test (table, AllocsPerRun, fuzz) at the merged head",
-      "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc -run 'TestWalk|Len16' -count=1 -v; go test ./internal/dispatch/pmdoc -run '^$' -fuzz FuzzLen16 -fuzztime 300s -parallel 1",
-      "observed": "TestLen16CountsTheUnitsUTF16EncodingWrites and TestLen16DoesNotAllocate PASS; fuzz for 5 minutes: 1,336,048 execs, no failure.",
-      "headSha": "914ac117300e",
-      "negativeControl": "Round 1 mutation: len16 counting a character above U+FFFF as one unit makes FuzzLen16, TestLen16CountsTheUnitsUTF16EncodingWrites and TestWalkVisitsEveryNodeWithTodaysRange fail."
+      "criterion": "A2: identical sizes and positions over every node of the real specs, under the renamed test",
+      "surface": "go test over my read-only fetch of all 1,203 LINUX primary specs, at the head",
+      "command": "cd packages/envoy && PMDOC_WALK_CORPUS=$TMPDIR/tester/corpus go test ./internal/dispatch/pmdoc -run TestWalkMatchesTheReferenceWalkOnACorpus -count=1 -v -timeout 3h",
+      "observed": "1203 files; 0 parse refusals; 0 Update/mark/Read failures; nodes 3,693,317 parsed + 3,777,939 read back; 48,265 marks; max depth 12; mismatches 0; PASS (1301.8 s).",
+      "headSha": "cfec98cf76f0",
+      "negativeControl": "The mutation run below: the round 3 tests catch every mutation of the change."
     },
     {
-      "criterion": "A5: insertAt results unchanged (doc-edit inserts at boundaries through the Dispatch API, base vs head)",
-      "surface": "dispatch doc-edit insert through the real API (dispatch CLI against the local server): base adee0aba, then head 914ac117, each on a fresh copy of the same seed",
-      "command": "python3 $TMPDIR/tester/insert_probe.py probe-base2|probe-head2 <84 pmdoc/testdata/corpus docs + 7 LINUX specs>: per document, inserts at start, at end, at up to 8 spread blocks and up to 12 nested blocks, and at one quote anchor, with paragraph, bullet, ordered, quote, heading, inline, table and task fragments; then doc-read",
-      "observed": "1,190 inserts on 91 documents on each build: every result code and message identical once the CLI's session-state advisory lines are removed (1,182 applied, 8 refused); all 91 final documents byte-identical between base and head.",
-      "headSha": "914ac117300e",
-      "negativeControl": "The same refused inputs on both builds: 5 ambiguous quote anchors (for example 'FR (this group):' matches 4 places; pass a zero-based occurrence) and 3 inserts at the start of a front-matter document (INVALID_OP: would read back otherwise)."
-    },
-    {
-      "criterion": "A6: each walk measures each subtree once",
-      "surface": "BenchmarkPositionedWalk: base adee0aba export (with this test file and a referenceLen16 shim) against head 914ac117 export",
-      "command": "go test ./internal/dispatch/pmdoc -run '^$' -bench BenchmarkPositionedWalk -benchmem -count 8 at each; go run golang.org/x/perf/cmd/benchstat@v0.0.0-20261009192801-be2c69fb417e bench-base2.txt bench-head2.txt",
-      "observed": "generated spec 42.72 ms -> 2.63 ms (-93.9%), 14.6 MiB -> 894 KiB, 298.55k -> 17.28k allocs/op; depth=5 23.06 -> 5.31 ms; depth=20 28.91 -> 4.23 ms. At equal node count, base time grows with depth and head time does not.",
-      "headSha": "914ac117300e",
-      "negativeControl": "The base build in the same export is the control."
+      "criterion": "The round 3 tests still catch the ways the change breaks (the table test is gone and the reference shares isLeafNodeType)",
+      "surface": "pmdoc test suite on a scratch export of cfec98cf, judged by the tests failing beyond the unmutated export's baseline (15 engine tests fail there because @legion/proof-editor is absent from the export)",
+      "command": "python3 $TMPDIR/tester/mutate.py",
+      "observed": "insertAt early return at pos == start: TestSpliceMatchesEngineReplaceRange fails. At pos == end: TestSpliceMatchesEngineReplaceRange fails. len16 counting a character above U+FFFF as one unit: FuzzLen16 (its seeds under plain go test) and TestWalkMatchesTheReferenceWalk fail. walkNode advancing by the wrong slot: 11 tests fail (TestBlockRangeCoversTheBlock, TestMarkRangeThenFindMark, ...). nodeSize and walk no longer sharing the size rule: TestWalkMatchesTheReferenceWalk, TestSpliceMatchesEngineReplaceRange and TestFindHeadingMatchesTitleAcrossLevels fail.",
+      "headSha": "cfec98cf76f0",
+      "negativeControl": "M0, the unmutated export, is the baseline each mutation is compared against: no test fails beyond it."
     }
   ],
-  "ci": "Read on GitHub at 914ac117 at 14:14Z: lint, typecheck, build (2) and changes success. test is in progress. dispatch, dispatch-memory, dispatch-multiprocess, envoy-go, envoy-go-race, envoy-infra-go, envoy-e2e-local and envoy-smoke are queued, so they are recorded as running. The architect relayed the controller's 13:57Z note: two reds on main are main's (packages/dispatch/e2e recipients-claim, and packages/envoy/infra/gcp TestDispatchConnectionsPerPodIsTheServers).",
-  "notes": [
-    "The changie fragment matches packages/envoy/.changie.yaml (kind Changed, custom Issue) and its siblings (pr2425-Changed-..., pr2311-Fixed-...).",
-    "Visitor audit from round 1 still holds: no pmdoc walk visitor writes Text or Children during a walk, and walk is unexported."
-  ]
+  "carriedProof": "Round 2's merge rule (base 381.28/386.74 CPU-s, head 243.17/240.66), the 5-minute FuzzLen16 run and the benchmark were run on a server and a len16/walk identical to this head's, so they carry: the -trimpath binaries are byte-identical, and position.go and splice.go are unchanged.",
+  "ci": "Read on GitHub at cfec98cf at 15:14Z: lint, typecheck, changes and the Daemon Go suite on Postgres 16 succeeded. test and build are in progress. dispatch, dispatch-memory, dispatch-multiprocess, envoy-go, envoy-go-race, envoy-infra-go, envoy-e2e-local, envoy-smoke, pr-title and the Broker and Dispatch Go suites on Postgres 16 are queued. All are recorded as running."
 }
