@@ -7,7 +7,7 @@
 - `dispatch claim`'s answer says what the claim now delivers: `A person's answers, comments and
   messages on <KEY> now reach you directly.`, after the status advice and before the note that the
   session is not subscribed to the issue, which still names the subscription every other event on
-  it needs (INFRA-278).
+  it needs.
 - The `dispatch` CLI reads an AskGate store with no recorded mode as warn, not block, and refuses
   a gated write without a matching marker only when a live owner's store records `block`.
 - `dispatch ask` and `dispatch edit-ask` take a question of up to 2,000 characters, from 800, and

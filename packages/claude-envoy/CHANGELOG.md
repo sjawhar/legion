@@ -76,7 +76,7 @@
   reaches it directly when the mention's send fails (a mention whose receipt timed out can arrive
   twice: the second copy is the same comment). A `session:` route to the session brings a person's
   answers, comments and messages as a claim does; a subscription to the issue brings other agents'
-  activity, beyond a reply in an ask the session follows (INFRA-278).
+  activity, beyond a reply in an ask the session follows.
 - The linked `dispatch-writing-specs` skill tells a session to cite code in a spec by file and
   symbol, never a line number, and to say, in each sentence that cites a gate passing, what the pass
   does not show. To stay under the 2,000-word guard it cuts lines another loaded text already says:

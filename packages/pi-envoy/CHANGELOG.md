@@ -334,7 +334,7 @@
   and a new comment that mentions it arrives as the mention alone once that mention was delivered,
   or twice when the mention's receipt timed out. A `session:` route to the session brings a
   person's answers, comments and messages as a claim does; a subscription to the issue brings
-  other agents' activity, beyond a reply in an ask the session follows (INFRA-278).
+  other agents' activity, beyond a reply in an ask the session follows.
 - `dispatch-writing-specs` adds two rules for the text. A spec cites code by file and symbol, never
   a line number, since a line number is stale at the next edit. A sentence that cites a gate
   passing (a test, review, check or proof) also says, in that sentence, what the pass does not

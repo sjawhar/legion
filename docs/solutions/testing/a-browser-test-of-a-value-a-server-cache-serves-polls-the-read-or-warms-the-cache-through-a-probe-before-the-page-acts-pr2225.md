@@ -9,9 +9,6 @@ tags:
 date: 2026-10-28
 status: active
 module: packages/dispatch/e2e
-related_issues:
-  - "INFRA-278"
-  - "sjawhar/legion#2225"
 ---
 
 # A browser test of a value a server cache serves polls the read, or warms the cache through a probe, before the page acts

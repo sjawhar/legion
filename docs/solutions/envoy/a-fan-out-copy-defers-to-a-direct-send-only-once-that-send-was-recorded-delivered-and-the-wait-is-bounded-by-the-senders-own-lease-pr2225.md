@@ -10,9 +10,6 @@ tags:
 date: 2026-10-28
 status: active
 module: packages/envoy/internal/dispatch/outbox
-related_issues:
-  - "INFRA-278"
-  - "sjawhar/legion#2225"
 ---
 
 # A fan-out copy defers to a direct send only once that send was recorded delivered, and the wait is bounded by the sender's own lease

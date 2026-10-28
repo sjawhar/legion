@@ -9,9 +9,6 @@ tags:
 date: 2026-10-28
 status: active
 module: packages/dispatch/e2e
-related_issues:
-  - "INFRA-278"
-  - "sjawhar/legion#2225"
 ---
 
 # A held list read proves a race only after the client's one first-load cancel is spent

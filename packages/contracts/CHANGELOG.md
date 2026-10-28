@@ -10,7 +10,7 @@
   since it extends `IssueRouteReach`, `route_status` (`live`, `no_holder` or `unknown`) and
   `route_holder` (the live session that route reaches), resolved per read as on the issue reads, so
   a reader counts each session once and tells a route nobody holds from one Dispatch could not
-  judge; each is null when absent and on a project document's ask (INFRA-278).
+  judge; each is null when absent and on a project document's ask.
 - The event `artifact.human_edited` and its payload, `ArtifactHumanEditedEventPayload` and
   `ArtifactHumanEditedEventPayloadSchema`: `artifact_id`, `name`, `from_version`, `to_version`,
   `editors`, `diff` and `diff_truncated`. Dispatch sends it once a document has been quiet for 30
@@ -219,7 +219,7 @@
   comment that mentions it arrives once, as the mention, when the mention reached it, and still
   reaches it directly when the mention's send fails (a mention whose receipt timed out can arrive
   twice, and the second copy is the same comment), and that an agent's events and every other
-  change on the issue still need a subscription (INFRA-278).
+  change on the issue still need a subscription.
 - `ASK_QUESTION_MAX` is 2,000, from 800, and `scripts/gen-go.ts` emits it as
   `contracts.AskQuestionMax`, which the Dispatch server enforces in place of its own literal. The
   question contract `dispatch ask` and `dispatch edit-ask` print in `--help` now asks for the

@@ -18,7 +18,7 @@
   its row carries the issue page's `Route reach unknown` marker: a `session:` route's row shows its
   session's running state, from the agent registry, beside the marker and still counts the
   session, and a role route reads `Reaches N + route (unknown)`. A role route nobody holds shows
-  the issue's `Nobody holds it right now` marker, `UnreachableRouteMarker` (INFRA-278).
+  the issue's `Nobody holds it right now` marker, `UnreachableRouteMarker`.
 - The listener answers `POST /v1/replay` with the messages `ENVOY_NOTIFICATIONS` stored for a
   session after a cursor per subject, so a session that receives on its own NATS subscriptions
   (pi-envoy, claude-envoy) reads back what it missed while they were down. It serves only the
@@ -1028,7 +1028,7 @@
   claim changed hands reaches the new holder, and a claimant that is also the route, a follower or
   an author gets one copy. A claim or a `session:` route brings a person's answers, comments and
   messages, and a route a person's other changes on the issue too; a subscription to the issue
-  brings other agents' activity, beyond a reply in an ask the session follows (INFRA-278).
+  brings other agents' activity, beyond a reply in an ask the session follows.
 - A new comment (`comment.created`) is left to its mention only once the mention delivered it: the
   route, claimant, author and ask follower copies skip a session the comment's mentions resolved
   to only when `comment_deliveries` records the mention `sent` to that session, so such a comment
@@ -1047,7 +1047,7 @@
   have delivered it, and a first attempt stranded past the minute is abandoned though it may have
   landed, so the session also gets its own-topic copy, under a different dedupe key; a host treats
   the second copy as the same comment. The pending window is `model.DeliveryClaimLapse`, the one
-  lease the API's delivery claims and the outbox's mention deferral both read (INFRA-278).
+  lease the API's delivery claims and the outbox's mention deferral both read.
 - A dead session's subscriptions now stay 5 minutes longer: the interest reaper deletes one only
   15 minutes after its row's last write, where it was 10, because it now adds
   `store.InterestRefreshAge` to its grace window. For that time the subscribers page and the
