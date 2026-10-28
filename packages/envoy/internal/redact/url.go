@@ -12,37 +12,31 @@ import (
 // carries something there.
 const mask = "xxxxx"
 
-// parts is raw split as URL reads it. Each field is a slice of raw, and a field holds no
-// separator: scheme ends before "://", userinfo before its '@', query after its '?' and fragment
-// after its '#'.
+// parts is raw split as URL reads it. Each field is a slice of raw: prefix is the scheme with
+// its separator as written ("https://", or "http:/" and "https//" for a mistyped http(s)), and
+// the others hold no separator: userinfo ends before its '@', query follows its '?' and
+// fragment its '#'.
 type parts struct {
-	scheme, userinfo, rest, query, fragment   string
-	hasScheme, hasUser, hasQuery, hasFragment bool
+	prefix, userinfo, rest, query, fragment string
+	hasUser, hasQuery, hasFragment          bool
 }
 
 // split reads raw as a string rather than through net/url, so a value no URL parser reads (a
 // misconfigured variable is the case it is printed for most) is read too, and errs toward hiding:
-//   - "://" is the scheme's end only before the first '/', '?' or '#', so a scheme-less value
-//     whose query names a URL is not read as one with a scheme;
-//   - the userinfo is what the authority (up to the first '/', '?' or '#') holds before its last
-//     '@', so an '@' in a path or query hides no host; and when the authority holds no '@' and is
-//     no host[:port] (a password holding a '/', '?' or '#', which a URL must escape, ends it
-//     early), everything up to the last '@' is the userinfo;
+//   - the prefix is a scheme name (a letter, then letters, digits, '+', '-' or '.') followed by
+//     "://", or "http" or "https" followed by ":/" or "//"; anything else has no prefix, so a
+//     user name before a ':' is never printed as a scheme;
+//   - the userinfo is everything after the prefix up to the last '@' anywhere in raw. A password
+//     or token holding a '/', '?', '#', ':' or digits (which a URL must escape, or which reads as
+//     a port) therefore hides whole; an '@' in a path or query hides the host before it too,
+//     which a broker's base URL, having neither, never shows;
 //   - the query is what follows the first '?' after the userinfo, up to a '#', and the fragment
 //     what follows the first '#'.
 func split(raw string) parts {
 	var p parts
-	s := raw
-	if i := strings.Index(raw, "://"); i >= 0 && !strings.ContainsAny(raw[:i], "/?#") {
-		p.scheme, s, p.hasScheme = raw[:i], raw[i+len("://"):], true
-	}
-	end := strings.IndexAny(s, "/?#")
-	if end < 0 {
-		end = len(s)
-	}
-	if at := strings.LastIndexByte(s[:end], '@'); at >= 0 {
-		p.userinfo, s, p.hasUser = s[:at], s[at+1:], true
-	} else if at := strings.LastIndexByte(s, '@'); at >= 0 && !hostPort(s[:end]) {
+	p.prefix = prefix(raw)
+	s := raw[len(p.prefix):]
+	if at := strings.LastIndexByte(s, '@'); at >= 0 {
 		p.userinfo, s, p.hasUser = s[:at], s[at+1:], true
 	}
 	if i := strings.IndexAny(s, "?#"); i >= 0 {
@@ -63,36 +57,32 @@ func split(raw string) parts {
 	return p
 }
 
-// hostPort reports whether authority reads as a host with an optional port of digits: a name or
-// IPv4 address, or a bracketed IPv6 address.
-func hostPort(authority string) bool {
-	port := ""
-	if strings.HasPrefix(authority, "[") {
-		end := strings.IndexByte(authority, ']')
-		if end < 0 {
-			return false
+// prefix is raw's scheme with its separator as split reads it, or "" for none.
+func prefix(raw string) string {
+	n := 0
+	for n < len(raw) {
+		c := raw[n]
+		letter := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+		if !letter && (n == 0 || !(c >= '0' && c <= '9' || c == '+' || c == '-' || c == '.')) {
+			break
 		}
-		rest := authority[end+1:]
-		if rest == "" {
-			return true
-		}
-		if rest[0] != ':' {
-			return false
-		}
-		port = rest[1:]
-	} else {
-		host, p, found := strings.Cut(authority, ":")
-		if strings.Contains(host, ":") || (found && strings.Contains(p, ":")) {
-			return false
-		}
-		port = p
+		n++
 	}
-	for _, c := range port {
-		if c < '0' || c > '9' {
-			return false
+	if n == 0 {
+		return ""
+	}
+	name, after := raw[:n], raw[n:]
+	if strings.HasPrefix(after, "://") {
+		return name + "://"
+	}
+	if strings.EqualFold(name, "http") || strings.EqualFold(name, "https") {
+		for _, sep := range []string{":/", "//"} {
+			if strings.HasPrefix(after, sep) {
+				return name + sep
+			}
 		}
 	}
-	return true
+	return ""
 }
 
 // URL is raw with everything that can carry a credential replaced by "xxxxx": the userinfo,
@@ -102,9 +92,7 @@ func hostPort(authority string) bool {
 func URL(raw string) string {
 	p := split(raw)
 	var b strings.Builder
-	if p.hasScheme {
-		b.WriteString(p.scheme + "://")
-	}
+	b.WriteString(p.prefix)
 	if p.hasUser {
 		b.WriteString(masked(p.userinfo) + "@")
 	}
@@ -142,7 +130,9 @@ func hidden(raw string) []string {
 	}
 	if p.hasUser {
 		add(p.userinfo)
-		for piece := range strings.SplitSeq(p.userinfo, ":") {
+		// Each piece between separators too, so a cause naming the host net/url read out of a
+		// token holding a '/' (a DNS lookup of it, say) is caught.
+		for _, piece := range strings.FieldsFunc(p.userinfo, func(r rune) bool { return strings.ContainsRune(":/?#@", r) }) {
 			add(piece)
 		}
 	}
@@ -161,6 +151,18 @@ type withheld struct {
 
 func (w withheld) Error() string { return w.text }
 func (w withheld) Unwrap() error { return w.err }
+
+// Timeout and Temporary answer as the withheld error does, since (*url.Error).Timeout and
+// Temporary ask the error they wrap directly, not through Unwrap.
+func (w withheld) Timeout() bool {
+	t, ok := w.err.(interface{ Timeout() bool })
+	return ok && t.Timeout()
+}
+
+func (w withheld) Temporary() bool {
+	t, ok := w.err.(interface{ Temporary() bool })
+	return ok && t.Temporary()
+}
 
 // Error is err with the URL of the *url.Error it holds (net/http's and net/url's errors name the
 // URL they were given; net/http masks a password as "***" but prints the user name and the

@@ -11,7 +11,7 @@ import (
 
 // secretsIn are the credential-like values the rows below put in a URL; no redacted form may
 // hold one.
-var secretsIn = []string{"tokuser9f3", "hunter2pw", "hunt", "er2pw", "qtok77", "frag9z"}
+var secretsIn = []string{"tokuser9f3", "hunter2pw", "hunt", "er2pw", "nter2pw", "qtok77", "frag9z", "AbCtok9f3", "dEfgh", "ij=", "1234"}
 
 // TestURLHidesEveryPartThatCanCarryACredential: a user name, a password, a query and a fragment
 // each print as "xxxxx" after their separator, in a URL net/url reads and in one it does not;
@@ -39,13 +39,25 @@ func TestURLHidesEveryPartThatCanCarryACredential(t *testing.T) {
 		// IPv6 hosts, with and without userinfo.
 		{"http://[::1]:13380/v1/requests", "http://[::1]:13380/v1/requests"},
 		{"http://tokuser9f3:hunter2pw@[::1]:13380/v1/requests", "http://xxxxx@[::1]:13380/v1/requests"},
-		// An '@' in the path or query is no userinfo: the host stays named.
-		{"https://secrets.internal.example/v1/users/ada@example.com", "https://secrets.internal.example/v1/users/ada@example.com"},
-		{"https://secrets.internal.example/?next=ada@example.com", "https://secrets.internal.example/?xxxxx"},
+		// An '@' in the path or query hides everything before it, host included: a broker's base
+		// URL has neither, and a credential holding '/' or '?' reads the same way.
+		{"https://secrets.internal.example/v1/users/ada@example.com", "https://xxxxx@example.com"},
+		{"https://secrets.internal.example/?next=ada@example.com", "https://xxxxx@example.com"},
 		// No scheme at all, and no scheme with "://" later in the value.
 		{"tokuser9f3:hunter2pw@secrets.internal.example", "xxxxx@secrets.internal.example"},
 		{"tokuser9f3:hunter2pw@secrets.internal.example/?next=https://x", "xxxxx@secrets.internal.example/?xxxxx"},
-		{"secrets.internal.example/v1?next=https://tokuser9f3:hunter2pw@x", "secrets.internal.example/v1?xxxxx"},
+		{"secrets.internal.example/v1?next=https://tokuser9f3:hunter2pw@x", "xxxxx@x"},
+		{"tokuser9f3:hu://nter2pw@secrets.example", "xxxxx@secrets.example"},
+		// A mistyped scheme separator: one slash, or no colon.
+		{"http:/tokuser9f3:hunter2pw@127.0.0.1:1/v1", "http:/xxxxx@127.0.0.1:1/v1"},
+		{"https//tokuser9f3:hunter2pw@secrets.example", "https//xxxxx@secrets.example"},
+		{"http:tokuser9f3:hunter2pw@secrets.example", "xxxxx@secrets.example"},
+		// A token holding '/', '?' or '#', and a password that begins with digits, which reads
+		// as a port.
+		{"https://AbCtok9f3/dEfgh+ij=@secrets.example", "https://xxxxx@secrets.example"},
+		{"https://AbCtok9f3?dEfgh@secrets.example", "https://xxxxx@secrets.example"},
+		{"https://AbCtok9f3#dEfgh@secrets.example", "https://xxxxx@secrets.example"},
+		{"https://tokuser9f3:1234/hunter2pw@secrets.example", "https://xxxxx@secrets.example"},
 		{"", ""},
 	} {
 		got := URL(row.raw)
@@ -101,5 +113,33 @@ func TestErrorHidesTheURLAndACauseThatRepeatsIt(t *testing.T) {
 	}
 	if err := errors.New("no URL here"); Error(err) != err {
 		t.Fatal("an error holding no *url.Error must come back as it is")
+	}
+}
+
+// leakyTimeout is a net timeout whose text repeats the URL's user name, so Error withholds it.
+type leakyTimeout struct{}
+
+func (leakyTimeout) Error() string   { return "dial tokuser9f3@127.0.0.1:1: i/o timeout" }
+func (leakyTimeout) Timeout() bool   { return true }
+func (leakyTimeout) Temporary() bool { return true }
+
+// TestErrorKeepsATimeoutItWithholds: (*url.Error).Timeout and Temporary ask the error it wraps
+// directly, so a cause Error withholds still answers them, and a caller still tells a broker
+// that did not answer in time from one it could not reach.
+func TestErrorKeepsATimeoutItWithholds(t *testing.T) {
+	ue := &url.Error{Op: "Get", URL: "http://tokuser9f3@127.0.0.1:1", Err: leakyTimeout{}}
+	got := Error(ue)
+	if strings.Contains(got.Error(), "tokuser9f3") {
+		t.Fatalf("Error = %q still holds the user name", got)
+	}
+	if _, ok := ue.Err.(withheld); !ok {
+		t.Fatalf("the cause %T was not withheld", ue.Err)
+	}
+	if !ue.Timeout() || !ue.Temporary() {
+		t.Fatalf("Timeout() = %v, Temporary() = %v; want both true through the withheld cause", ue.Timeout(), ue.Temporary())
+	}
+	plain := &url.Error{Op: "parse", URL: "http://tokuser9f3:hunter2pw%zz@x", Err: errors.New("invalid URL escape")}
+	if Error(plain); plain.Timeout() || plain.Temporary() {
+		t.Fatal("a withheld cause that is no timeout must not read as one")
 	}
 }

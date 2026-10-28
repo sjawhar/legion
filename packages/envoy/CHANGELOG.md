@@ -264,8 +264,10 @@
   broker …` trailer: the broker refused nothing. A local helper refusal or dead helper socket names
   that socket instead, since no broker was asked.
 - No output of `agent-secrets`, `agent-secrets-helper` or `agent-secrets-devrelay` prints a
-  credential the broker's URL carries: the user name and password before its `@`, and any query
-  or fragment, print as `xxxxx` (`internal/redact`) in every message that names the URL - a broker
+  credential the broker's URL carries: everything before the URL's last `@`, and any query or
+  fragment, print as `xxxxx` (`internal/redact`) in every message that names the URL, so a token
+  holding a `/`, `?` or `#`, a password that begins with digits, and a mistyped `http:/` or
+  `https//` hide whole too - a broker
   that could not be reached, the secret forms' refusal of a plain-http broker, the helper's
   `listening` log line, and every error the helper's broker calls make (a machine login, an
   enrollment, a renewal, a refresh or a revoke, which `agent-secrets machine login`, `register
@@ -274,9 +276,12 @@
   install`'s refusal of a URL a unit line would need escaped, and Dispatch's two boot errors about
   `DISPATCH_AGENT_SECRETS_URL`. `agent-secrets-devrelay --broker` no longer takes
   `AGENT_SECRETS_URL` as its flag default, which its usage text printed whole; it reads the
-  variable after parsing. A URL the client cannot build a request from says `the
+  variable after parsing. `agent-secrets-helper install` writes its unit `0600`, not `0644`, since
+  the unit's `Environment=` line holds the URL, and narrows a unit an older install left `0644`.
+  A URL the client cannot build a request from says `the
   broker's address is not a valid URL` and nothing of the parser's own text, which quoted a bad
-  escape in a password. Before, net/http masked a password alone and printed the user name and
+  escape in a password; a timeout whose text is withheld still reads as `did not answer in time`.
+  Before, net/http masked a password alone and printed the user name and
   query, and the message about an unreachable broker printed the whole URL, twice since the entry
   above.
 - The `ask.opened` or `ask.answered` Dispatch's settlement appends when an edit restores a decision

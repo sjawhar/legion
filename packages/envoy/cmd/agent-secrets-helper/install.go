@@ -110,6 +110,9 @@ WantedBy=default.target
 		if err := writeFileAtomic(path, unit); err != nil {
 			return err
 		}
+	} else if err := os.Chmod(path, 0o600); err != nil {
+		// A unit an older install wrote 0644 holds the same URL, credential included.
+		return err
 	}
 	if changed || !active {
 		if err := systemctl("daemon-reload"); err != nil {
@@ -191,7 +194,9 @@ func writeFileAtomic(path string, data []byte) error {
 		tmp.Close()
 		return err
 	}
-	if err := tmp.Chmod(0o644); err != nil {
+	// 0600: the unit's Environment= line holds AGENT_SECRETS_URL, and with it any credential
+	// that URL carries.
+	if err := tmp.Chmod(0o600); err != nil {
 		tmp.Close()
 		return err
 	}

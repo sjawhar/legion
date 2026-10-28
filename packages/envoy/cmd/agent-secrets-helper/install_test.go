@@ -138,8 +138,8 @@ func TestInstallWritesTheUnitForThisBinary(t *testing.T) {
 			t.Errorf("unit lacks %q:\n%s", want, unit)
 		}
 	}
-	if fi, _ := os.Stat(r.unit); fi.Mode().Perm() != 0o644 {
-		t.Errorf("unit mode %v, want 0644", fi.Mode().Perm())
+	if fi, _ := os.Stat(r.unit); fi.Mode().Perm() != 0o600 {
+		t.Errorf("unit mode %v, want 0600: it holds AGENT_SECRETS_URL", fi.Mode().Perm())
 	}
 	calls := r.systemctlCalls(t)
 	if strings.Join(calls, ";") != "--user daemon-reload;--user enable --now agent-secrets-helper.service" {
@@ -241,6 +241,29 @@ func TestInstallIsANoOpWhenNothingChanged(t *testing.T) {
 	after, _ := os.Stat(r.unit)
 	if !after.ModTime().Equal(before.ModTime()) || !os.SameFile(before, after) {
 		t.Error("the unchanged unit was rewritten")
+	}
+	if calls := r.systemctlCalls(t); calls != nil {
+		t.Fatalf("systemctl ran on an unchanged unit: %q", calls)
+	}
+}
+
+// TestInstallNarrowsAnUnchangedUnitAnOlderInstallLeftReadable: a unit an older install wrote
+// 0644 holds the same broker URL; a re-run with nothing changed leaves it 0600 and runs nothing.
+func TestInstallNarrowsAnUnchangedUnitAnOlderInstallLeftReadable(t *testing.T) {
+	r := newInstallRig(t)
+	if err := r.run("--url", "https://secrets.example"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(r.unit, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(r.calls)
+	r.fakeHelper(t, nil)
+	if err := r.run("--url", "https://secrets.example"); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(r.unit); fi.Mode().Perm() != 0o600 {
+		t.Errorf("unit mode %v, want 0600", fi.Mode().Perm())
 	}
 	if calls := r.systemctlCalls(t); calls != nil {
 		t.Fatalf("systemctl ran on an unchanged unit: %q", calls)

@@ -181,11 +181,15 @@ func TestNoFormPrintsACredentialTheBrokerURLCarries(t *testing.T) {
 		{"a scheme-less URL", "tokuser9f3:hunter2pw@127.0.0.1:1", []string{"self"}, "GET xxxxx@127.0.0.1:1/v1/enrollments/self"},
 		{"a plain-http broker on the network, secret list", "http://tokuser9f3:hunter2pw@example.internal", []string{"secret", "list"}, `"http://xxxxx@example.internal" must be https`},
 		{"a token in the query", "http://127.0.0.1:1/?token=hunter2pw", []string{"self"}, "http://127.0.0.1:1/?xxxxx"},
+		{"one slash after the scheme", "http:/tokuser9f3:hunter2pw@127.0.0.1:1", []string{"self"}, "http:/xxxxx@127.0.0.1:1/v1/enrollments/self"},
+		{"no colon after the scheme", "http//tokuser9f3:hunter2pw@127.0.0.1:1", []string{"self"}, "xxxxx@127.0.0.1:1"},
+		{"a token holding a slash", "http://AbCtok9f3/dEfgh+ij=@127.0.0.1:1", []string{"self"}, "http://xxxxx@127.0.0.1:1"},
+		{"a password beginning with digits", "http://tokuser9f3:1234/hunter2pw@127.0.0.1:1", []string{"self"}, "http://xxxxx@127.0.0.1:1"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			stdout, stderr, _ := runAgentSecrets(t, binary, row.base, keyDir, nil, row.args...)
 			output := stdout + stderr
-			for _, secret := range []string{"tokuser9f3", "hunter2pw", "%zz"} {
+			for _, secret := range []string{"tokuser9f3", "hunter2pw", "%zz", "AbCtok9f3", "dEfgh", "1234/"} {
 				if strings.Contains(output, secret) {
 					t.Fatalf("output names %q: stdout %q, stderr %q", secret, stdout, stderr)
 				}

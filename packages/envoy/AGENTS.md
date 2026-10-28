@@ -2682,10 +2682,13 @@ one line on stderr, with `store` on each row under `--json`. No line names a sec
 grant's release carries names and values alone, and a session holds no sign-in of its own to the
 store. No output of `agent-secrets`, `agent-secrets-helper` (`internal/broker/helper`'s broker
 calls included) or `agent-secrets-devrelay` prints a user name, password, query or fragment the
-broker's URL carries: a message names that URL through `internal/redact`'s `URL`, which masks each
-as `xxxxx`, and an error net/http or net/url makes passes through its `Error`, which redacts the
-URL it names and withholds a cause that could repeat a credential (`not a valid URL` for one
-that did not parse).
+broker's URL carries: a message names that URL through `internal/redact`'s `URL`, which masks as
+`xxxxx` everything after the scheme up to the URL's last `@` (whatever it holds, so a token with a
+`/`, `?` or `#`, a password beginning with digits, or a mistyped `http:/` or `https//` hides whole)
+and any query or fragment, and an error net/http or net/url makes passes through its `Error`, which
+redacts the URL it names and withholds a cause that could repeat a credential (`not a valid URL`
+for one that did not parse; a withheld timeout still answers `Timeout()`). `agent-secrets-helper
+install` writes its unit `0600`, since its `Environment=` line holds the URL.
 `--json` on `request`, `status`, `self`, `whoami`, `machine list` and `grant list` is the broker's
 body verbatim as before, and makes no settings call. The other secrets CLI a box may hold,
 `secrets`, is secretsd, shipped from `sjawhar/forward` (the old `sjawhar/secretsd` repository is

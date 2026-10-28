@@ -365,6 +365,41 @@ func TestResolveBootConfigRejectsAgentSecretsURLWithPathOrBadScheme(t *testing.T
 	}
 }
 
+// Both DISPATCH_AGENT_SECRETS_URL refusals name the URL with its user name, password and query
+// redacted: a shape refusal (a path) and the dev sign-in's refusal of a remote broker.
+func TestResolveBootConfigRefusesAgentSecretsURLWithoutNamingItsCredential(t *testing.T) {
+	shape := map[string]string{
+		"DATABASE_URL":                              "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":                      "agent-token",
+		"DISPATCH_IDENTITY":                         "header:X-Dispatch-User",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED":          "1",
+		"DISPATCH_AGENT_SECRETS_URL":                "https://tokuser9f3:hunter2pw@broker.example.com/v1?token=qtok77",
+		"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": "/var/run/secrets/broker/token",
+	}
+	remote := devSignInEnvironment(map[string]string{
+		"DISPATCH_AGENT_SECRETS_URL":                "https://tokuser9f3:hunter2pw@broker.example.com?token=qtok77",
+		"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": "/var/run/secrets/broker/token",
+	})
+	for name, row := range map[string]struct {
+		env  settingValues
+		want string
+	}{
+		"a path":          {envGetter(shape), `DISPATCH_AGENT_SECRETS_URL="https://xxxxx@broker.example.com/v1?xxxxx"`},
+		"a remote broker": {remote, `DISPATCH_AGENT_SECRETS_URL="https://xxxxx@broker.example.com?xxxxx"`},
+	} {
+		_, err := resolveBootConfig(row.env)
+		if err == nil || !strings.Contains(err.Error(), row.want) {
+			t.Errorf("%s: err = %v, want a refusal naming %s", name, err, row.want)
+			continue
+		}
+		for _, secret := range []string{"tokuser9f3", "hunter2pw", "qtok77"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("%s: refusal %q names %q", name, err, secret)
+			}
+		}
+	}
+}
+
 // A broker URL with no token file must refuse to boot rather than construct a client that
 // authenticates with an empty bearer.
 func TestResolveBootConfigRequiresTheAccountTokenFileWhenAgentSecretsURLSet(t *testing.T) {
