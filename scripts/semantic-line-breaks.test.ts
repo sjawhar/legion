@@ -535,3 +535,20 @@ test("no rule reads a leading byte order mark as part of line 1", async () => {
   expect(stdout).toBe("");
   expect(exitCode).toBe(0);
 });
+
+test("--write refuses a file that starts with two byte order marks, leaving it as it is", async () => {
+  // GitHub reads the second mark as text on line 1; trim() and micromark would drop it.
+  const text = "\uFEFF\uFEFF| a | b |\n|---|---|\n| 1 | 2 |\n2. item\n";
+  const path = await markdownFile(text);
+  const result = Bun.spawnSync(["bun", SCRIPT, "--write", path], { cwd: REPO_ROOT });
+  expect(result.stderr.toString()).toContain(`${path}: refusing to write: line 1 holds`);
+  expect(result.exitCode).toBe(2);
+  expect(await readFile(path, "utf8")).toBe(text);
+});
+
+test("--write adds no byte order mark to a file whose first character shares its first byte", async () => {
+  // U+FF01 is EF BC 81 in UTF-8.
+  const result = await written("\uFF01Some words. More words.\n");
+  expect(result.text).toBe("\uFF01Some words.\nMore words.\n");
+  expect(result.exitCode).toBe(0);
+});
