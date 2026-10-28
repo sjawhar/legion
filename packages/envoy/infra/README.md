@@ -1264,12 +1264,13 @@ stop: `<N>-publish-failure` (a JetStream publish that did not complete), `<N>-we
 delivery NATS can never take, answered 422), `<N>-stream-subject-dropped` (a start that dropped
 another deployment's overlapping stream subject), `<N>-durable-refused` (a start that refused its
 durable consumer) and `<N>-subscribe-exhausted` (a listener holding its machine's delivery lease
-that has waited 135 s or more for a durable another subscriber holds push-bound, usually a build
-from before the lease still running). Each description names `logGroupName` as the log to read,
-and assumes the wiring of the deployment the alarms were written for: that GitHub deliveries come
-from Dispatch's GitHub App (`legion-envoy`), whose redelivery sweep retries them, and that Slack
-retries an event three times. A listener fed otherwise pages the same way, with descriptions that
-overstate what is retried.
+that has gone 135 s or more without receiving from its durable: another subscriber holds it
+push-bound, usually a build from before the lease still running, or its reads, writes or
+subscribes of the durable fail, and it gives the lease up). Each description names
+`logGroupName` as the log to read, and assumes the wiring of the deployment the alarms were
+written for: that GitHub deliveries come from Dispatch's GitHub App (`legion-envoy`), whose
+redelivery sweep retries them, and that Slack retries an event three times. A listener fed
+otherwise pages the same way, with descriptions that overstate what is retried.
 
 Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn` and
 `internalUrl`, `http://<cloudMapServiceName>.<cloudMapNamespaceName>:9020`.

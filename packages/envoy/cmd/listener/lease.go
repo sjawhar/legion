@@ -300,16 +300,19 @@ type lease struct {
 	logger   *logging.Logger
 	changes  chan struct{}
 	// renewals asks the running loop for a renewal now rather than at its next turn
-	// (SetReceiving).
+	// (SetReceiving), or to give the lease up (GiveUp).
 	renewals chan struct{}
 
 	// The loop's own state, read and written only by step (and by Release once the loop ended):
 	// the revision a standby is timing and when it first saw it, whether the holder's lapse has
-	// been signalled, and whether a streak of failed bucket calls has been logged.
+	// been signalled, whether a streak of failed bucket calls has been logged, and the revision
+	// of the record this process last released on giving the lease up and when (GiveUp).
 	seenRev        uint64
 	seenAt         time.Time
 	lapseSignalled bool
 	failing        bool
+	givenUpRev     uint64
+	givenUpAt      time.Time
 
 	mu             sync.Mutex
 	held           bool
@@ -327,8 +330,10 @@ type lease struct {
 	staleBinding bool
 	unsettled    bool
 	receiving    bool
-	stop         context.CancelFunc
-	done         chan struct{}
+	// giveUpTerm is the term GiveUp asked the loop to give up.
+	giveUpTerm uint64
+	stop       context.CancelFunc
+	done       chan struct{}
 }
 
 // newLease makes machineID's lease over kv for this process, instance, with timing cfg and now
@@ -471,6 +476,27 @@ func (l *lease) SetReceiving(term uint64) {
 	}
 }
 
+// GiveUp has the running loop release term's record, as Release does, and go on as a standby, so
+// another pod takes the lease at its next poll: the receive loop gives the lease up when it cannot
+// prepare or subscribe to the durable (durableReceiver.abandon). The loop does not take back the
+// record it released for two standby polls, time for every other running standby to read and
+// take it; a pod that runs alone takes it back after that and tries again. A term that is no
+// longer current, or no longer held, changes nothing.
+func (l *lease) GiveUp(term uint64) {
+	l.mu.Lock()
+	set := l.held && l.term == term
+	if set {
+		l.giveUpTerm = term
+	}
+	l.mu.Unlock()
+	if set {
+		select {
+		case l.renewals <- struct{}{}:
+		default:
+		}
+	}
+}
+
 // Successor reads the record and reports whether another process has taken it since this one
 // released it (it names another boot and is not released, or cannot be read) and whether that
 // holder's subscription is up (receiving). A pod that stopped gracefully reads it once its own
@@ -525,19 +551,29 @@ func (l *lease) Release(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+	_, err := l.letGo()
+	return err
+}
+
+// letGo ends this process's hold and, when it held the record, marks the record released at its
+// revision, no longer receiving, keeping service_since, stale_binding, unsettled and former_boots
+// as they stand. It returns the released record's revision, or zero when it wrote none: it did
+// not hold the record, another pod had already taken it (no error), or the write failed (its
+// error).
+func (l *lease) letGo() (uint64, error) {
 	l.mu.Lock()
 	held, rev, record := l.held, l.rev, l.record
 	record.StaleBinding, record.Unsettled, record.Receiving = l.staleBinding, l.unsettled, false
 	l.held, l.validUntil = false, time.Time{}
 	l.mu.Unlock()
 	if !held {
-		return nil
+		return 0, nil
 	}
 	defer l.signal()
 	record.Released = true
 	value, err := record.encode()
 	if err != nil {
-		return fmt.Errorf("encode the released lease record: %w", err)
+		return 0, fmt.Errorf("encode the released lease record: %w", err)
 	}
 	next, err := l.kv.Update(l.key, value, rev)
 	switch {
@@ -546,11 +582,11 @@ func (l *lease) Release(ctx context.Context) error {
 		l.rev, l.record = next, record
 		l.mu.Unlock()
 		l.logger.Info("listener lease released", slog.String("lease", l.key), slog.Uint64("revision", next))
-		return nil
+		return next, nil
 	case errors.Is(err, nats.ErrKeyExists):
-		return nil
+		return 0, nil
 	default:
-		return fmt.Errorf("mark lease %s released: %w", l.key, err)
+		return 0, fmt.Errorf("mark lease %s released: %w", l.key, err)
 	}
 }
 
@@ -562,16 +598,33 @@ func (l *lease) signal() {
 	}
 }
 
-// step does one round of the lease, renewing it as the holder or reading and maybe taking it as
-// a standby, and returns how long to wait before the next.
+// step does one round of the lease, renewing it as the holder, giving it up when GiveUp asked for
+// the current term, or reading and maybe taking it as a standby, and returns how long to wait
+// before the next.
 func (l *lease) step() time.Duration {
 	l.mu.Lock()
-	held := l.held
+	held, givingUp := l.held, l.held && l.giveUpTerm == l.term
 	l.mu.Unlock()
-	if held {
+	switch {
+	case givingUp:
+		return l.giveUp()
+	case held:
 		return l.renew()
 	}
 	return l.poll()
+}
+
+// giveUp releases the record as letGo does and leaves the loop a standby that does not take that
+// released revision back for two standby polls (GiveUp). A record the release could not mark is
+// taken, by this process too, once it expires.
+func (l *lease) giveUp() time.Duration {
+	rev, err := l.letGo()
+	if err != nil {
+		l.logger.Warn("listener lease not released; a standby takes it once it expires", slog.String("error", err.Error()))
+	}
+	l.seenRev, l.lapseSignalled = 0, false
+	l.givenUpRev, l.givenUpAt = rev, l.now()
+	return l.cfg.standbyPoll
 }
 
 // renew rewrites the holder's record at the revision it last wrote. A renewal that lands counts
@@ -678,7 +731,8 @@ func (l *lease) ownRevision() (uint64, bool, error) {
 
 // poll reads the record as a standby and takes it when it is absent (Create), released (Update
 // at its revision, at once) or unchanged for a full ttl since this process first saw its
-// revision (Update at that revision).
+// revision (Update at that revision). The released revision this process wrote on giving the
+// lease up it takes only two standby polls after that (GiveUp), so another standby takes it first.
 func (l *lease) poll() time.Duration {
 	entry, err := l.kv.Get(l.key)
 	seen := l.now()
@@ -709,6 +763,8 @@ func (l *lease) poll() time.Duration {
 	l.record = record
 	l.mu.Unlock()
 	switch {
+	case record.Released && entry.Revision() == l.givenUpRev && seen.Sub(l.givenUpAt) < 2*l.cfg.standbyPoll:
+		return l.cfg.standbyPoll
 	case record.Released:
 		return l.acquire(entry, record, leaseTakenReleased)
 	case entry.Revision() != l.seenRev:

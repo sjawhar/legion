@@ -66,21 +66,23 @@ const pushFailedDeferrals = 1
 
 // unplaceableDeferralExpiry is how long a slot in unplaceableDeferrals lasts after the deferral
 // that took it, the longest a deferred message can legitimately stay pending before a delivery of
-// it reaches this listener's handler again and gives the slot back. It is the sum of three waits:
-//   - unplaceableRetryDelay (5 s), the NAK delay the deferral asks for: the stream redelivers no
-//     sooner;
-//   - consumerAckWait (durable.go, 60 s): retryAfter's NAK is fire-and-forget, and one lost on
-//     the wire leaves the message pending until the AckWait of the delivery that was deferred
-//     runs out, which began before the slot was taken, so it ends inside this term;
-//   - a margin of one more consumerAckWait for the redelivery to wait in this listener's client
-//     buffer behind the deliveries ahead of it before its handler runs the release. A handler that
-//     is further behind than that has let the stream redeliver the message again in the meantime.
+// it reaches this listener's handler again and gives the slot back. That is two waits:
+//   - the durable's: unplaceableRetryDelay (5 s), the NAK delay the deferral asks for, or, when
+//     retryAfter's fire-and-forget NAK is lost on the wire, consumerAckWait (durable.go, 6 s)
+//     counted from the delivery that was deferred, which began before the slot was taken;
+//   - this pod's: the redelivery waits in the receive loop's local queue (receive.go), kept alive
+//     by InProgress so the durable never redelivers it meanwhile, behind the prompt in hand, up to
+//     promptRequestLimit (30 s), or behind a settle hold after a take-over (7 s at most), before
+//     the handler runs it and releases its slot.
 //
-// 125 s in all. A slot older than that belongs to a message that is not coming back here - the
-// stream dropped or purged it, or its redelivery reached another subscriber - and take reclaims
-// it. TestUnplaceableRetryWindowFitsTheBoundsItDependsOn pins that it exceeds the first two
-// terms, so a message that is still legitimately pending never has its slot reclaimed early.
-const unplaceableDeferralExpiry = unplaceableRetryDelay + consumerAckWait + consumerAckWait
+// Those come to under a minute; 125 s leaves more than as much again for prompts queued ahead of
+// the redelivery. It is a figure of its own, not a sum of consumerAckWait, since the ack wait
+// bounds nothing a message waits in the local queue. A slot older than that belongs to a message
+// that is not coming back here - the stream dropped or purged it, or its redelivery reached
+// another subscriber - and take reclaims it. TestUnplaceableRetryWindowFitsTheBoundsItDependsOn
+// pins that it exceeds the two waits, so a message that is still legitimately pending never has
+// its slot reclaimed early.
+const unplaceableDeferralExpiry = 125 * time.Second
 
 // unplaceableDeferrals is the set of agent deliveries this listener holds deferred right now,
 // keyed on each message's stream sequence (nats.MsgMetadata.Sequence.Stream), and the budget

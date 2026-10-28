@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os/exec"
 	"reflect"
@@ -1151,14 +1152,19 @@ func TestSortByStreamSequenceKeepsAnUnreadableMessageInPlace(t *testing.T) {
 
 // durableAlarms counts the ERROR records of the take-over alarm in a rig's log.
 func durableAlarms(logs *cmdtest.LockedBuffer) int {
-	count := 0
+	return len(durableAlarmRecords(logs))
+}
+
+// durableAlarmRecords are the ERROR records of the take-over alarm in a rig's log.
+func durableAlarmRecords(logs *cmdtest.LockedBuffer) []map[string]any {
+	var records []map[string]any
 	for line := range strings.SplitSeq(logs.String(), "\n") {
 		var record map[string]any
 		if json.Unmarshal([]byte(line), &record) == nil && record["msg"] == durableTakeoverAlarmLine && record["level"] == "ERROR" {
-			count++
+			records = append(records, record)
 		}
 	}
-	return count
+	return records
 }
 
 // During the first roll onto the lease, the durable is push-bound by a build from before it
@@ -1207,6 +1213,163 @@ func TestAPreLeaseBindingIsWaitedOutAndAlarmedOn(t *testing.T) {
 	if err != nil || !info.Created.Equal(before.Created) || info.Config.FilterSubject != consumerFilterAll || info.Config.AckWait != consumerAckWait {
 		t.Fatalf("the durable once the new pod receives: %+v %v, want the same durable under the consumer policy", info, err)
 	}
+}
+
+// consumerInfoDeniedNATS runs a NATS server with JetStream and two users, and returns a URL for
+// each: granted holds every permission, and denied every one but reading a consumer of the stream
+// (CONSUMER.INFO), so a pod whose bus client connects as denied cannot read its durable while its
+// lease renews on a granted connection. NATS answers a request it denies with nothing, so each
+// read waits out the JetStream wait (10 s) before it fails.
+func consumerInfoDeniedNATS(t *testing.T) (granted, denied string) {
+	t.Helper()
+	config := fmt.Sprintf(`jetstream {}
+authorization {
+  users = [
+    { user: granted, password: granted },
+    { user: denied, password: denied, permissions: { publish: { allow: [">"], deny: [%q] } } }
+  ]
+}
+`, "$JS.API.CONSUMER.INFO."+bus.Stream+".*")
+	_, uri := testnats.StartConfig(t, config, []string{"-js"}, false)
+	return strings.Replace(uri, "nats://", "nats://granted:granted@", 1), strings.Replace(uri, "nats://", "nats://denied:denied@", 1)
+}
+
+// A lease holder that cannot prepare its durable (here it may not read it) says so in /healthz,
+// 200 degraded with the reason, and once its failures have lasted the alarm bound, timed from the
+// start of the first, logs the alarm line at ERROR with that reason and gives the lease up: the
+// other pod takes it at its next poll and delivers what was published meanwhile, and the stuck pod,
+// a standby again, does not take it back from a pod that receives. Before, the holder retried
+// forever and renewed its lease, so no standby ever tried, /healthz answered 200 healthy and no
+// alarm fired.
+func TestAHolderThatCannotPrepareItsDurableAlarmsAndGivesTheLeaseUp(t *testing.T) {
+	granted, denied := consumerInfoDeniedNATS(t)
+	const machineID = "box-stuck"
+	// The bound is past one failed read, so /healthz is read between the first failure and the
+	// give-up.
+	timing := testReceiveTiming()
+	timing.alarmAfter = 15 * time.Second
+	stuckHandle, stuckReceived := recordingHandler()
+	stuck := newReceiverRigVia(t, denied, granted, machineID, "pod-stuck", stuckHandle, timing, testLeaseTiming())
+	stuck.lease.Start(context.Background())
+	stuck.receiver.Start()
+	stuck.awaitState(t, receivePreparing, 10*time.Second)
+	handle, received := recordingHandler()
+	standby := startReceiverRig(t, granted, machineID, "pod-b", handle, testReceiveTiming(), testLeaseTiming())
+	waitFor(t, 5*time.Second, "pod-b to read pod-stuck's lease", func() bool {
+		return standby.lease.Status().ActiveInstance == "pod-stuck"
+	})
+	publishDurable(t, standby.client, "while the holder is stuck")
+
+	get := healthzFor(t, stuck.client, stuck.receiver)
+	var code int
+	var body map[string]any
+	waitFor(t, 15*time.Second, "pod-stuck's /healthz to report its failing durable", func() bool {
+		code, body = get()
+		return body["status"] != "healthy"
+	})
+	if code != http.StatusOK || body["status"] != "degraded" || body["role"] != "standby" || body["receive"] != receivePreparing.String() ||
+		!strings.Contains(fmt.Sprint(body["error"]), "read the durable consumer") {
+		t.Fatalf("pod-stuck's /healthz while its durable read fails = %d %v, want 200 degraded, role standby, receive %q and an error naming the failed read",
+			code, body, receivePreparing.String())
+	}
+	if durableAlarms(stuck.logs) != 0 {
+		t.Fatal("pod-stuck alarmed before its failures lasted the alarm bound")
+	}
+
+	message := awaitReceived(t, received, 30*time.Second, "pod-b once pod-stuck gave the lease up")
+	if message.data != "while the holder is stuck" {
+		t.Fatalf("pod-b received %q", message.data)
+	}
+	alarms := durableAlarmRecords(stuck.logs)
+	if len(alarms) != 1 || !strings.Contains(fmt.Sprint(alarms[0]["reason"]), "read the durable consumer") {
+		t.Fatalf("pod-stuck's alarms: %v, want one at ERROR whose reason names the failed read", alarms)
+	}
+	if waited, _ := alarms[0]["waited_ms"].(float64); time.Duration(waited)*time.Millisecond < timing.alarmAfter {
+		t.Fatalf("pod-stuck alarmed after %v ms of failures, want the %s bound", alarms[0]["waited_ms"], timing.alarmAfter)
+	}
+	// pod-stuck polls every 50 ms as a standby: a second is twenty chances to take the lease back.
+	time.Sleep(time.Second)
+	if stuck.lease.Holding() || !standby.lease.Holding() {
+		t.Fatalf("after the give-up: pod-stuck holding %v, pod-b holding %v; want pod-b alone", stuck.lease.Holding(), standby.lease.Holding())
+	}
+	if code, body := get(); code != http.StatusOK || body["status"] != "healthy" || body["role"] != "standby" || body["active_instance"] != "pod-b" {
+		t.Fatalf("pod-stuck's /healthz after the give-up = %d %v, want 200 healthy, a standby naming pod-b", code, body)
+	}
+	noneReceived(t, stuckReceived, time.Millisecond, "pod-stuck")
+}
+
+// A pod that cannot prepare its durable and has no other pod to give the lease to tries again: a
+// sole lease holder gives the lease up at the alarm bound and takes it back once no other pod has,
+// and a listener without a lease, the machine's one deliverer, keeps retrying and answers /healthz
+// 503 unhealthy past the bound, so its runtime counts it unready, as the bounded subscribe that
+// exited did.
+func TestAPodThatCannotPrepareItsDurableAloneTriesAgain(t *testing.T) {
+	granted, denied := consumerInfoDeniedNATS(t)
+	timing := testReceiveTiming()
+	timing.alarmAfter, timing.alarmEvery = 5*time.Second, time.Millisecond
+	t.Run("sole holder", func(t *testing.T) {
+		t.Parallel()
+		handle, _ := recordingHandler()
+		rig := newReceiverRigVia(t, denied, granted, "box-stuck-alone", "pod-a", handle, timing, testLeaseTiming())
+		rig.lease.Start(context.Background())
+		rig.receiver.Start()
+		waitFor(t, 20*time.Second, "pod-a to give its lease up and take it again", func() bool {
+			status := rig.lease.Status()
+			return status.Term >= 2 && status.Holding
+		})
+		if alarms := durableAlarmRecords(rig.logs); len(alarms) != 1 || !strings.Contains(fmt.Sprint(alarms[0]["reason"]), "read the durable consumer") {
+			t.Fatalf("pod-a's alarms: %v, want one at ERROR whose reason names the failed read", alarms)
+		}
+		if status := rig.lease.Status(); status.How != leaseTakenReleased {
+			t.Fatalf("pod-a's second term: %+v, want taken from the record it released", status)
+		}
+	})
+	t.Run("without a lease", func(t *testing.T) {
+		t.Parallel()
+		client, err := bus.ConnectOwningStream([]string{denied}, bus.WithReplicas(1), bus.WithName("receive-test without a lease"))
+		if err != nil {
+			t.Fatalf("connect: %v", err)
+		}
+		logs := &cmdtest.LockedBuffer{}
+		handle, _ := recordingHandler()
+		receiver := newDurableReceiver(durableReceiverOptions{
+			client:   client,
+			consumer: bus.ListenerDurable("box-stuck-unleased"),
+			handle:   handle,
+			refused:  func(err error) { t.Errorf("refused the durable: %v", err) },
+			logger:   logging.NewWithWriter("box-stuck-unleased", logs),
+			timing:   timing,
+		})
+		receiver.Start()
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			receiver.Stop(ctx)
+			client.Close()
+			if t.Failed() {
+				t.Logf("log:\n%s", logs.String())
+			}
+		})
+		get := healthzFor(t, client, receiver)
+		var code int
+		var body map[string]any
+		waitFor(t, 15*time.Second, "/healthz to report the failing durable", func() bool {
+			code, body = get()
+			return body["status"] != "healthy"
+		})
+		if code != http.StatusServiceUnavailable || body["status"] != "unhealthy" || body["receive"] != receivePreparing.String() ||
+			!strings.Contains(fmt.Sprint(body["error"]), "read the durable consumer") {
+			t.Fatalf("/healthz once the durable read has failed past the bound = %d %v, want 503 unhealthy, receive %q and an error naming the failed read",
+				code, body, receivePreparing.String())
+		}
+		waitFor(t, time.Second, "the alarm", func() bool { return durableAlarms(logs) > 0 })
+		if alarms := durableAlarmRecords(logs); len(alarms) != 1 || !strings.Contains(fmt.Sprint(alarms[0]["reason"]), "read the durable consumer") {
+			t.Fatalf("alarms: %v, want one at ERROR whose reason names the failed read", alarms)
+		}
+		if state := receiver.report().State; state != receivePreparing {
+			t.Fatalf("the receive loop is %s, want it still preparing the durable", state)
+		}
+	})
 }
 
 // Every durable an earlier listener created filters on its build's stream subjects. The holder

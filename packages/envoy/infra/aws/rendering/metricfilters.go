@@ -123,22 +123,25 @@ var ListenerLogSignals = []LogSignal{
 	{
 		// A lease holder that has waited durableTakeoverAlarmAfter (135 s) for its durable, which
 		// another subscriber holds push-bound, logged again every durableTakeoverAlarmEvery (5 min)
-		// while that lasts (cmd/listener/receive.go). The alarm and metric keep the names of the
-		// start-time bind exhaustion this line replaced, so no resource is replaced.
+		// while that lasts, or whose reads, writes or subscribes of the durable have failed for as
+		// long, which then gives the lease up (cmd/listener/receive.go). The alarm and metric keep
+		// the names of the start-time bind exhaustion this line replaced, so no resource is
+		// replaced.
 		alarm:  "subscribe-exhausted",
 		metric: "SubscribesExhausted",
 		filters: []struct{ name, pattern string }{
 			{"subscribe-exhausted-filter", `{ $.level = "ERROR" && $.msg = "lease holder cannot deliver from the durable" }`},
 		},
-		description: "An Envoy listener holding its machine's delivery lease has waited 135 s or more to " +
-			"receive from its durable consumer, which another subscriber holds push-bound (`lease holder " +
-			"cannot deliver from the durable`); it logs the line again every 5 min while that lasts and " +
-			"never exits for it, and until the binding ends nothing on the machine's durable reaches its " +
-			"sessions. The other subscriber is usually a listener build from before the delivery lease " +
-			"still running (a roll onto this build whose old task has not stopped). Read the line's " +
-			"`consumer` and `waited_ms` in %s, find the binding with `nats consumer info " +
-			"ENVOY_NOTIFICATIONS listener-<machine id>` (push_bound) and stop the process holding it; " +
-			"the holder subscribes within a second of the binding's end.",
+		description: "An Envoy listener holding its machine's delivery lease has gone 135 s or more without " +
+			"receiving from its durable consumer (`lease holder cannot deliver from the durable`), so " +
+			"nothing on the machine's durable reaches its sessions; read the line's `consumer`, `reason` " +
+			"and `waited_ms` in %s. Reason `another subscriber holds the durable's push binding`: usually " +
+			"a listener build from before the delivery lease still running; the holder repeats the line " +
+			"every 5 min and never exits, so find the binding with `nats consumer info " +
+			"ENVOY_NOTIFICATIONS listener-<machine id>` (push_bound) and stop its process. Any other " +
+			"reason is a failed read, create, update or subscribe of the durable (a JetStream that does " +
+			"not answer, a grant refusing the consumer API): the holder gives the lease up to another " +
+			"task, and takes it back when none has, logging the line for each stuck term.",
 	},
 }
 

@@ -38,14 +38,20 @@ func TestHealthzReportsARecreatedDurableUnhealthy(t *testing.T) {
 }
 
 // setupUnboundDurableFixture is the pod a recreated durable is tested against: machineID's lease
-// holder receiving the durable into handle, both registries open with their caches ready, and the
-// listenerDeps /healthz reads. It returns the rig and a get() that serves one /healthz request,
-// which is every piece the tests in this file share.
+// holder receiving the durable into handle, and a get() that serves one /healthz request over it
+// (healthzFor), which is every piece the tests in this file share.
 func setupUnboundDurableFixture(t *testing.T, machineID string, handle durableHandler) (*receiverRig, func() (int, map[string]any)) {
 	t.Helper()
 	rig := startReceiverRig(t, testnats.URL(t), machineID, "pod-a", handle, testReceiveTiming(), testLeaseTiming())
 	rig.awaitState(t, receiveActive, 10*time.Second)
-	client := rig.client
+	return rig, healthzFor(t, rig.client, rig.receiver)
+}
+
+// healthzFor opens both registries over client with their caches ready, subscribes its role lane
+// and returns a get() that serves one /healthz request over them and receiver, as main's
+// listenerDeps would.
+func healthzFor(t *testing.T, client *bus.Client, receiver *durableReceiver) func() (int, map[string]any) {
+	t.Helper()
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("open interest registry: %v", err)
@@ -66,8 +72,8 @@ func setupUnboundDurableFixture(t *testing.T, machineID string, handle durableHa
 	}
 	subscribeRoleLane(t, client)
 	state := &atomic.Pointer[listenerDeps]{}
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, receiver: rig.receiver})
-	return rig, func() (int, map[string]any) { return serveHealthz(state) }
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, receiver: receiver})
+	return func() (int, map[string]any) { return serveHealthz(state) }
 }
 
 // startUnboundDurableMonitor runs the self-health monitor over the rig's durable the way the

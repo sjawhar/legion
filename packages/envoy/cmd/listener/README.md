@@ -105,6 +105,19 @@ wait only once the pod holding it has died or lost the lease.
   and to a lingering binding alike, but one that went to such a binding alone, or that a dead pod
   before the stopping one still held, comes back one ack wait later, and the next pod's hold waits
   for it.
+- **A holder that cannot use the durable.** A holder whose reads, creations, policy corrections or
+  subscribes of the durable fail retries every second (`durableBindPoll`) and times the failures
+  from the start of the first since its term began or an attempt last succeeded. Once they have
+  lasted 135 s (`durableTakeoverAlarmAfter`) it logs `lease holder cannot deliver from the durable`
+  at ERROR, with the failure as `reason` and `waited_ms`, which the AWS `subscribe-exhausted` alarm
+  matches, and gives the lease up: it releases the record, keeping `unsettled` as its term left it
+  and setting `stale_binding` when its term would have settled for an ack wait, so the next holder
+  settles as this one would have, and a standby takes the record at its next poll. The pod goes
+  back to standby and does not take back the record it released for two standby polls (1 s), so
+  every other standby has its chance first; a pod that runs alone takes it back after that and
+  tries again, alarming again at the end of each stuck term. A listener without a lease has no one
+  to give it to: it keeps retrying and logs the line again every 5 min
+  (`durableTakeoverAlarmEvery`).
 
 The lines to read are `listener lease acquired` (with `from`: `absent`, `released` or `expired`,
 and `settle`, `stale_binding` and `handed_back`), `listener lease term must settle; receiving at
@@ -114,7 +127,10 @@ delivering the held messages in stream order` (with `outcome` `settled` or `cap`
 `messages` and `ack_pending`), `durable receiving` (with `lease`, `waited_ms` and `settle`),
 `handed the durable's messages back to the next holder` (with `handed_back`, `lingered_ms`,
 `linger_end` `receiving holder seen`, `not taken` or `timeout`, `renaked_repeats` and
-`dropped_repeats`), `listener lease lost: another listener holds it` and `listener lease released`.
+`dropped_repeats`), `durable consumer read failed; retrying` and `durable subscribe failed;
+retrying` (with `error`), `lease holder cannot deliver from the durable` (ERROR, with `reason` and
+`waited_ms`), `giving the listener lease up: this pod cannot deliver from the durable`, `listener
+lease lost: another listener holds it` and `listener lease released`.
 
 ### Graceful stop order
 
@@ -146,8 +162,8 @@ answered by then makes the answer `503 {"status":"unhealthy"}`.
 | `503 {"status":"starting"}` | Until the pod can serve: NATS connected, the webhook and `/v1` gates open over warm caches, the receive loop started and, with an OIDC issuer configured, its discovery succeeded. A NATS or issuer that does not answer keeps the pod here, up and retrying; it never exits for that. |
 | `200 {"status":"healthy","role":"active",…}` | The pod receives the durable. The body carries the durable's lag, `num_pending` and `num_ack_pending`. |
 | `200 {"status":"healthy","role":"standby",…}` | The pod is ready and does not deliver. `active_instance` names the holder when the lease record names one; `receive` says what a pod that holds the lease but does not receive yet waits for (`preparing the durable`, or `waiting for another subscriber's push binding to end`). |
-| `200 {"status":"degraded",…}` | A transient KV failure the monitor and the NATS reconnect retry, or, on the active pod, a durable whose lag could not be read. |
-| `503 {"status":"unhealthy",…}` | A NATS flush failed (`nats unavailable`), the role lane's subscription is not valid (`role subscription inactive`), the live topics lane is disconnected or refused (`live subscription inactive`), a cache watcher stopped; on the active pod also its subscription is not valid, the durable is gone, or the durable delivers to another subject than its subscription's (`not bound to this listener's subscription`, which a durable deleted and created again under it leaves). |
+| `200 {"status":"degraded",…}` | A transient KV failure the monitor and the NATS reconnect retry, or, on the active pod, a durable whose lag could not be read. Also a pod holding the lease (or running without one) whose reads, creations, corrections or subscribes of the durable fail: `role` `standby`, `receive` what it was doing, `error` `durable consumer unavailable: <failure>` and `receive_failing_ms` how long it has failed. |
+| `503 {"status":"unhealthy",…}` | A NATS flush failed (`nats unavailable`), the role lane's subscription is not valid (`role subscription inactive`), the live topics lane is disconnected or refused (`live subscription inactive`), a cache watcher stopped; on the active pod also its subscription is not valid, the durable is gone, or the durable delivers to another subject than its subscription's (`not bound to this listener's subscription`, which a durable deleted and created again under it leaves). Also the failing durable above once it has failed for 135 s: a lease holder gives the lease up then and answers as a standby, so only a listener without a lease, which keeps retrying, stays unready. |
 
 Every healthy answer also carries the body fields it always did (`live_topics`, `ci_cache`, the
 session registry's fields). A standby is ready: route traffic to it. A pod answers `503 starting`

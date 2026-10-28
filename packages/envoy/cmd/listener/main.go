@@ -381,8 +381,13 @@ type healthAnswer struct {
 // its subscription is inactive, the durable consumer is gone, or the durable consumer is "not bound
 // to this listener's subscription" because it was recreated server-side and now delivers
 // elsewhere; and 200 "degraded" for a transient KV failure the self-health monitor and the NATS
-// reconnect retry, or an active pod's durable lag that could not be read. A listener that mounts
-// no GitHub webhook route keeps no CI cache, and its answer carries "ci_cache": "not_applicable".
+// reconnect retry, or an active pod's durable lag that could not be read. A pod that holds the
+// lease, or runs without one, and fails to read, create, correct or subscribe to the durable
+// answers 200 "degraded" with the failure in "error" and how long it has failed in
+// "receive_failing_ms", and 503 "unhealthy" once that has lasted the alarm bound
+// (durableTakeoverAlarmAfter): a holder gives the lease up then and is a standby again, so only a
+// listener without a lease, which keeps retrying, stays there. A listener that mounts no GitHub
+// webhook route keeps no CI cache, and its answer carries "ci_cache": "not_applicable".
 // "live_topics" says whether the live topics lane is "subscribed" or, with
 // ENVOY_SUBSCRIBE_ALL_TOPICS off, "not_applicable"; with it on, a live client that is not
 // connected or holds no valid subscription is 503 "live subscription inactive", since every topic
@@ -469,6 +474,14 @@ func listenerHealth(ctx context.Context, d *listenerDeps, verifier *apiVerifier)
 		}
 		if report.State != receiveStandby {
 			response["receive"] = report.State.String()
+		}
+		if report.Failing > 0 {
+			response["error"] = "durable consumer unavailable: " + report.FailingReason
+			response["receive_failing_ms"] = report.Failing.Milliseconds()
+			if report.Stuck {
+				return unhealthy(response)
+			}
+			response["status"] = "degraded"
 		}
 		return healthAnswer{http.StatusOK, response}
 	}
@@ -826,6 +839,11 @@ func openDeliveryLease(urls []string, replicas int, machineID, instance string, 
 	}
 }
 
+// promptRequestLimit is the longest one prompt to a session may take (session.Deliverer's
+// RequestLimit): the delivery ledger's take-over age and the unplaceable deferrals' expiry
+// (unplaceableDeferralExpiry) count on it.
+const promptRequestLimit = 30 * time.Second
+
 // ledgerTakeoverMargin is how much longer than the longest prompt (session.Deliverer.RequestLimit)
 // a pod waits on another pod's unresolved delivery attempt before it takes the attempt over: the
 // other pod may still be prompting until then, and after it, that pod died without resolving it.
@@ -1130,7 +1148,7 @@ func main() {
 		MachineID:    cfg.MachineID,
 		HostBridge:   os.Getenv("ENVOY_HOST_BRIDGE"),
 		PodHost:      podHostname,
-		RequestLimit: 30 * time.Second,
+		RequestLimit: promptRequestLimit,
 	}
 
 	ledger := newDeliveryLedger(deliveryLease, cfg.MachineID, deliver.RequestLimit)

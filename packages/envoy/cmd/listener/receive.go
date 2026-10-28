@@ -47,6 +47,15 @@ import (
 // alarm matches, and again every durableTakeoverAlarmEvery; it never exits for this, since a
 // restart would wait the same.
 //
+// A holder that cannot read, create, correct or subscribe to the durable retries every
+// durableBindPoll and times its failures from the start of the first since the term began or an
+// attempt last succeeded (durableReceiver.failed). Once they have lasted durableTakeoverAlarmAfter
+// it logs durableTakeoverAlarmLine at ERROR with the failure as its reason and gives the lease up
+// (lease.GiveUp), so a standby takes it at its next poll and tries in its place; this pod goes back
+// to standby and takes the lease again, after two standby polls, only when no other pod has. A
+// listener without a lease has no one to give it to: it keeps retrying and logs the line again
+// every durableTakeoverAlarmEvery.
+//
 // The holder sends InProgress every inProgressEvery for every message it has received and not
 // settled, queued or in hand, so none waits out the ack wait while this pod is alive. On a
 // shutdown the message in hand gets inflightGrace to finish before its handling context is
@@ -198,6 +207,12 @@ type receiveReport struct {
 	// is the lease's status otherwise.
 	NoLease bool
 	Lease   leaseStatus
+	// Failing is how long the term has failed to read, create, correct or subscribe to the
+	// durable (durableReceiver.failed), zero while it is not failing; FailingReason is the latest
+	// failure, and Stuck says the failures have lasted the alarm bound (alarmAfter).
+	Failing       time.Duration
+	FailingReason string
+	Stuck         bool
 }
 
 // durableReceiverOptions is what a durableReceiver is made of.
@@ -244,6 +259,12 @@ type durableReceiver struct {
 	term  *receiveTerm
 	stop  context.CancelFunc
 	done  chan struct{}
+	// failingSince is when the first of the term's failed attempts on the durable began, zero
+	// while there is none since the term began or an attempt last succeeded; failingReason is the
+	// latest failure, and failAlarmed when its alarm was last logged (durableReceiver.failed).
+	failingSince  time.Time
+	failingReason string
+	failAlarmed   time.Time
 }
 
 func newDurableReceiver(options durableReceiverOptions) *durableReceiver {
@@ -327,6 +348,11 @@ func (r *durableReceiver) report() receiveReport {
 		report.Subject = t.subject
 		report.SubscriptionValid = t.sub != nil && t.sub.IsValid() && t.conn == r.conn
 	}
+	if !r.failingSince.IsZero() {
+		report.Failing = time.Since(r.failingSince)
+		report.FailingReason = r.failingReason
+		report.Stuck = report.Failing >= r.timing.alarmAfter
+	}
 	r.mu.Unlock()
 	if r.lease != nil {
 		report.Lease = r.lease.Status()
@@ -400,7 +426,8 @@ type settleHold struct {
 // once, beside any binding, and holds what it receives until every outstanding message is in hand
 // (receiveTerm.settle), for settleCap at most, or handBackSettleCap after a graceful hand-back
 // (leaseStatus.HandedBack), then delivers that in stream order. ctx is the receive loop's own,
-// whose end is a shutdown. It reports whether the durable was refused.
+// whose end is a shutdown. It reports whether the durable was refused. A term whose reads,
+// writes or subscribes of the durable fail for alarmAfter gives the lease up (abandon).
 //
 // Before it subscribes it records stale_binding in the lease: set when it subscribes beside a
 // binding it did not wait out, cleared when it finds the durable not push-bound.
@@ -410,13 +437,15 @@ type settleHold struct {
 // filter is not its own ("subject does not match consumer").
 func (r *durableReceiver) serve(ctx, termCtx context.Context, status leaseStatus) bool {
 	defer r.setState(receiveStandby)
+	defer r.succeeded()
 	start := time.Now()
+	settle := status.Settle && !(r.awaitedBinding && status.How == leaseTakenExpired)
 	r.setState(receivePreparing)
 	info, err := r.prepare(termCtx, false)
 	if err != nil {
-		return r.refuse(err)
+		return r.abandon(err, status, settle)
 	}
-	settle := status.Settle && !(r.awaitedBinding && status.How == leaseTakenExpired)
+	r.succeeded()
 	var hold settleHold
 	if settle {
 		hold = settleHold{limit: r.timing.settleCap, ackWait: true}
@@ -431,15 +460,16 @@ func (r *durableReceiver) serve(ctx, termCtx context.Context, status leaseStatus
 		}
 		if info.PushBound {
 			if err = r.awaitUnbound(termCtx); err != nil {
-				return r.refuse(err)
+				return r.abandon(err, status, settle)
 			}
 		}
 	}
 	r.setState(receivePreparing)
 	beside := false
 	for {
+		attempt := time.Now()
 		if info, err = r.prepare(termCtx, true); err != nil {
-			return r.refuse(err)
+			return r.abandon(err, status, settle)
 		}
 		switch {
 		case r.lease == nil:
@@ -455,9 +485,13 @@ func (r *durableReceiver) serve(ctx, termCtx context.Context, status leaseStatus
 		err := r.begin(info.Config.DeliverSubject, hold, status.Term)
 		if err == nil {
 			r.awaitedBinding = false
+			r.succeeded()
 			break
 		}
 		r.logger.Warn("durable subscribe failed; retrying", slog.String("consumer", r.consumer), slog.String("error", err.Error()))
+		if r.failed(attempt, fmt.Errorf("subscribe to the durable's deliver subject: %w", err)) {
+			return r.abandon(errDurableStuck, status, settle)
+		}
 		if waitUnlessDone(termCtx, r.timing.bindPoll) != nil {
 			return false
 		}
@@ -492,8 +526,29 @@ func (r *durableReceiver) serve(ctx, termCtx context.Context, status leaseStatus
 	}
 }
 
-// refuse reports a refused durable, the one error prepare returns besides its context's end, and
-// whether it was one.
+// errDurableStuck is what prepare returns once a holder's failures on the durable have lasted
+// alarmAfter (durableReceiver.failed): the term gives the lease up (abandon).
+var errDurableStuck = errors.New("the lease holder could not prepare the durable within the alarm bound")
+
+// abandon ends a term that stopped, with err, before it received. A holder stuck on the durable
+// (errDurableStuck) gives the lease up (lease.GiveUp), so a standby takes it at its next poll and
+// tries in its place. It releases the record with unsettled as the term left it, so a term that
+// had to settle hands that on, and with stale_binding when that settle (settle) would have waited
+// out an ack wait: the hold never began, and the next holder's must wait as long. A refused
+// durable is reported (refuse). It reports whether the durable was refused.
+func (r *durableReceiver) abandon(err error, status leaseStatus, settle bool) bool {
+	if !errors.Is(err, errDurableStuck) {
+		return r.refuse(err)
+	}
+	if settle && !status.HandedBack {
+		r.lease.SetStaleBinding(status.Term, true)
+	}
+	r.logger.Warn("giving the listener lease up: this pod cannot deliver from the durable", slog.String("consumer", r.consumer))
+	r.lease.GiveUp(status.Term)
+	return false
+}
+
+// refuse reports a refused durable (errListenerDurableRefused) and whether err was one.
 func (r *durableReceiver) refuse(err error) bool {
 	if !errors.Is(err, errListenerDurableRefused) {
 		return false
@@ -504,15 +559,58 @@ func (r *durableReceiver) refuse(err error) bool {
 	return true
 }
 
+// failed records an attempt on the durable that began at attempt and failed with err. The
+// failures are timed from the start of the first of them since the term began or an attempt last
+// succeeded (succeeded), as awaitUnbound times its wait: once they have lasted alarmAfter it logs
+// durableTakeoverAlarmLine at ERROR with err as its reason, and again every alarmEvery while they
+// last. It reports whether the term gives the lease up for them: a holder does once they have
+// lasted alarmAfter; a listener without a lease, the machine's one deliverer, never does.
+func (r *durableReceiver) failed(attempt time.Time, err error) bool {
+	now := time.Now()
+	r.mu.Lock()
+	if r.failingSince.IsZero() {
+		r.failingSince = attempt
+	}
+	r.failingReason = err.Error()
+	failing := now.Sub(r.failingSince)
+	alarm := failing >= r.timing.alarmAfter && (r.failAlarmed.IsZero() || now.Sub(r.failAlarmed) >= r.timing.alarmEvery)
+	if alarm {
+		r.failAlarmed = now
+	}
+	r.mu.Unlock()
+	if alarm {
+		r.logger.Error(durableTakeoverAlarmLine,
+			slog.String("consumer", r.consumer),
+			slog.String("reason", err.Error()),
+			slog.Int64("waited_ms", failing.Milliseconds()),
+		)
+	}
+	return r.lease != nil && failing >= r.timing.alarmAfter
+}
+
+// succeeded ends the failures failed times.
+func (r *durableReceiver) succeeded() {
+	r.mu.Lock()
+	r.failingSince, r.failingReason, r.failAlarmed = time.Time{}, "", time.Time{}
+	r.mu.Unlock()
+}
+
 // prepare reads the durable, creating it when it is missing and, when correct is set, correcting
 // its policy when it has drifted (correctListenerDurable), retrying every bindPoll until it
-// answers, and records its deliver subject in the lease. It returns a refusal
-// (errListenerDurableRefused) or ctx's error.
+// answers, and records its deliver subject in the lease. Each failure counts toward the term's
+// alarm bound (failed). It returns a refusal (errListenerDurableRefused), errDurableStuck once a
+// holder's failures have lasted that bound, or ctx's error.
 func (r *durableReceiver) prepare(ctx context.Context, correct bool) (*nats.ConsumerInfo, error) {
 	failing := false
 	for {
+		attempt := time.Now()
+		step := "read"
 		info, err := listenerDurable(ctx, r.client, r.consumer)
 		if err == nil && (correct || info == nil) {
+			step = "correct the policy of"
+			if info == nil {
+				step = "create"
+			}
 			info, err = correctListenerDurable(ctx, r.client, r.consumer, info)
 		}
 		if err == nil {
@@ -530,9 +628,13 @@ func (r *durableReceiver) prepare(ctx context.Context, correct bool) (*nats.Cons
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		err = fmt.Errorf("%s the durable consumer: %w", step, err)
 		if !failing {
 			failing = true
 			r.logger.Warn("durable consumer read failed; retrying", slog.String("consumer", r.consumer), slog.String("error", err.Error()))
+		}
+		if r.failed(attempt, err) {
+			return nil, errDurableStuck
 		}
 		if err := waitUnlessDone(ctx, r.timing.bindPoll); err != nil {
 			return nil, err
@@ -542,7 +644,8 @@ func (r *durableReceiver) prepare(ctx context.Context, correct bool) (*nats.Cons
 
 // awaitUnbound waits, polling the durable every bindPoll without writing it, until no subscriber
 // holds its push binding. It logs durableTakeoverAlarmLine at ERROR once it has waited alarmAfter,
-// and again every alarmEvery, and never gives up: only ctx's end or a refusal ends it.
+// and again every alarmEvery, and never gives up for the binding: only ctx's end, a refusal or
+// reads that fail for alarmAfter (prepare) end it.
 func (r *durableReceiver) awaitUnbound(ctx context.Context) error {
 	r.setState(receiveAwaitingBinding)
 	r.awaitedBinding = true
@@ -558,6 +661,7 @@ func (r *durableReceiver) awaitUnbound(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		r.succeeded()
 		waited := time.Since(start)
 		if !info.PushBound {
 			r.logger.Info("durable push binding ended", slog.String("consumer", r.consumer), slog.Int64("waited_ms", waited.Milliseconds()))

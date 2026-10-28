@@ -34,7 +34,11 @@ body: |-
     takes an absent record, or a released one with neither flag, and finds the durable push-bound
     by a listener build from before the lease waits for that binding to end and subscribes within
     a second of it; past 135 s it logs `lease holder cannot deliver from the durable` at ERROR,
-    again every 5 minutes, and never exits for it.
+    again every 5 minutes, and never exits for it. A holder whose reads, writes or subscribes of
+    the durable fail for 135 s logs the same line at ERROR with the failure as `reason` and gives
+    the lease up to a standby, taking it back two standby polls later when no other pod has;
+    `/healthz` answers 200 `degraded` while such failures last, naming the failure, and 503
+    `unhealthy` past 135 s on a listener without a lease, which keeps retrying.
     `packages/envoy/cmd/listener/README.md` describes the run model.
 time: 2026-10-28T10:24:27.185064233Z
 custom:

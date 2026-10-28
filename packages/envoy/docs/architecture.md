@@ -264,8 +264,10 @@ keyed on each message's JetStream stream
 sequence, so only that message's next delivery gives its slot back; a redelivery this listener
 never deferred (another branch's NAK, an expired ack wait) frees nothing. A slot whose message
 never comes back here (the stream dropped or purged it, or its redelivery reached another
-subscriber) expires 125 s after the deferral that took it, the 5 s delay plus two 60 s ack waits,
-the longest a deferred message can legitimately stay pending, so such slots cannot hold the budget
+subscriber) expires 125 s after the deferral that took it: the 5 s delay (or a 6 s ack wait after a
+lost NAK), then the redelivery's wait in the pod's local queue behind a 30 s prompt or a settle
+hold, with margin. That is the longest a deferred message can legitimately stay pending, so such
+slots cannot hold the budget
 for longer than that. Each deferral logs
 `listener agent delivery deferred` with `reason`, `attempt` and `window_deferrals`, the deferrals
 that message's cause is allowed (1 for `push_failed`); only the give-up counts
