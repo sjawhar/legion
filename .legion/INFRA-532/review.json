@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-532",
+  "completed": "2026-10-28T19:08:15Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "ef163c719146",
+  "critical": 0,
+  "important": 2,
+  "minor": 0,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/margin/useMarginSheet.ts",
+      "description": "Architect's condition 3 (focusMark lands whether or not the diagram has drawn) is met for the #b- block link and VersionView only. The live document's comment/ask link (/issues/<KEY>/spec?comment=<id>) focuses its quote once (useMarginSheet.ts:577, guarded by focusedRouteMark) and nothing re-runs it after a late diagram draws. Reviewer scratch row (R8's held worker and document, live document, chromium, never committed): anchoring off, quote y=657 before the draw and y=10668 after, toBeInViewport 'viewport ratio 0'; anchoring on, quote held at y=657. The PR's own R7/R8 hold the page to the anchoring-off case. The fix belongs where both route-driven and card-driven focus calls go (ProofDocument's bridge, ProofDocument.tsx:439-442) or in the route effect, plus a row on the live document."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/refs/mermaid-diagrams.ts",
+      "description": "An editor request the renderer never answers (requestMermaidDrawing returns noop while failed, :364; fail() clears waiting draws, :226) leaves the view's previous diagram in place above the edited source, with no status (mermaid-code-block-view.ts:163-169 never reaches show). A worker restart after a 5 s refusal or a cancelled in-flight draw that fails to load (a tab left open across a redeploy) gets there. Condition 4 says the block shows its source with no worker, and the view's doc (:33-34), MermaidDrawer's doc (mermaid-svg.ts:52-53) and proof-editor/AGENTS.md say the same; R9 covers only a worker that never started. Found by the thermonuclear deep review (Minor there); raised because a drawing that does not match its source hides the renderer failure."
+    }
+  ],
+  "cleanupFastFollow": "mermaid e2e/view cleanup: false comment at e2e/mermaid.e2e.ts:843 (the comment row no longer stalls its worker), largeFlowchart and the responsiveness sampling loop duplicated in the comment row, blockId copied from block-references.e2e.ts, the view's request counter beside the drawer's cancel guarantee, the unused MermaidDrawer/MermaidDrawing re-export from lib.ts.",
+  "thermonuclear": {
+    "head": "ef163c719146",
+    "deepReview": "No Medium/High. Minor: stale diagram after renderer failure (raised above), reader-acted rule untested by any permanent row, disposed refocus resolver kept in settledWaiters until the queue empties. Security rows answered: untrusted-input sanitized before caching, agent-def edit matches lib.ts/lib.css hunks.",
+    "codeQuality": "Cleanup-only findings, no correctness bug."
+  },
+  "ci": "At code head ef163c71 (newest pull_request run head; compare to 44c80b52 handoffsOnly true, 2 files): lint, typecheck, pr-title success; test in_progress at 19:05Z. Not an approval round, so not waited on."
+}
