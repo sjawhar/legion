@@ -100,19 +100,23 @@ func (s *Service) recordEditNotice(ctx context.Context, tx pgx.Tx, artifactID st
 	if latest == nil || latest.Kind != "user" || !slices.Contains(editors, latest.ID) {
 		slog.Info("dispatch: a version names no latest editor among the people it lists, so its edit notice names nobody new",
 			"artifact", artifactID, "version", version, "editors", editors, "latest", latest)
-		if _, err := tx.Exec(ctx, holdEditNotice, artifactID, version, editorsJSON, s.editNoticeQuiet); err != nil {
-			return fmt.Errorf("hold edit notice: %w", err)
-		}
-		return nil
+		return write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, holdEditNotice, artifactID, version, editorsJSON, s.editNoticeQuiet); err != nil {
+				return fmt.Errorf("hold edit notice: %w", err)
+			}
+			return nil
+		})
 	}
 	lastJSON, err := json.Marshal(*latest)
 	if err != nil {
 		return fmt.Errorf("encode edit notice last editor: %w", err)
 	}
-	if _, err := tx.Exec(ctx, openEditNotice, artifactID, version, editorsJSON, lastJSON, s.editNoticeQuiet); err != nil {
-		return fmt.Errorf("open edit notice: %w", err)
-	}
-	return nil
+	return write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, openEditNotice, artifactID, version, editorsJSON, lastJSON, s.editNoticeQuiet); err != nil {
+			return fmt.Errorf("open edit notice: %w", err)
+		}
+		return nil
+	})
 }
 
 // editNoticeLease names the lease one sweep runs under, editNoticeInterval the sweep's period and
@@ -127,17 +131,27 @@ const (
 )
 
 // dueEditNotices lists the documents whose quiet window has ended, oldest first. It is read with no
-// lock: each id is claimed on its own, under its owner's lock, by dueEditNotice.
+// lock: each id is read again and claimed on its own, under its owner's lock, by dueEditNotice and
+// claimEditNotice.
 const dueEditNotices = `
 	select artifact_id::text from document_edit_notices
 	where due_at <= now() order by due_at limit $1`
 
-// dueEditNotice claims one due notice by deleting it. A settlement that moved the window on since
-// the unlocked read leaves it not due, and another process's sweep that sent it leaves no row: in
-// both the delete returns nothing and this sweep sends nothing.
+// dueEditNotice reads one due notice under its document owner's lock, which every writer of the
+// row holds - the version writers (recordEditNotice) and the sweep - so the notice it reads is the
+// one the claim deletes. A settlement that moved the window on since the unlocked read leaves it not
+// due, and another process's sweep that sent it leaves no row: in both it reads nothing and this
+// sweep sends nothing. It writes nothing, so the sweep does its document work on the notice before
+// its transaction holds a transaction id.
 const dueEditNotice = `
+	select from_version, to_version, editors, last_editor from document_edit_notices
+	where artifact_id = $1 and due_at <= now()`
+
+// claimEditNotice claims the due notice dueEditNotice read by deleting it, the sweep's first
+// write; what it returns is checked against what was read.
+const claimEditNotice = `
 	delete from document_edit_notices where artifact_id = $1 and due_at <= now()
-	returning from_version, to_version, editors, last_editor`
+	returning from_version, to_version`
 
 // RunEditNotices sends each document's edit notice once its quiet window ends: one
 // artifact.human_edited event, which reaches the sessions the document credits and its issue's
@@ -200,10 +214,13 @@ func (s *Service) sendDueEditNotices(ctx context.Context) (int, error) {
 
 // sendEditNotice claims artifactID's due notice and appends its artifact.human_edited event in one
 // transaction, then publishes the event once it commits, and reports whether it sent one. It takes
-// the locks in the settlement's order: the document owner's (lockArtifactOwner), then the notice
-// row, which the settlement writes after its version (recordEditNotice), then the events' own
-// (events.Broker.Append, which takes the owner's lock again and the commit-order lock). No
-// statement here locks `for update`.
+// the document owner's lock (lockArtifactOwner), under which it reads the notice, both versions it
+// names, tells a server-state-only change from a person's edit and cuts the diff, all before its
+// first write; then it claims the notice (claimEditNotice) and appends the event
+// (events.Broker.Append, which takes the owner's lock again, the owner's row and the commit-order
+// lock) back to back, so the transaction holds a transaction id only for those and the commit. The
+// claim still decides: a notice it does not delete as read is not sent. No statement here locks
+// `for update`.
 //
 // A document deleted since the unlocked read has taken its notice with it (on delete cascade), and
 // one whose issue has closed takes no more edits: either way nothing is sent, and a closed issue's
@@ -228,10 +245,32 @@ func (s *Service) sendEditNotice(ctx context.Context, artifactID string) (bool, 
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("claim edit notice: %w", err)
+		return false, fmt.Errorf("read due edit notice: %w", err)
+	}
+	// claim deletes the notice read above, and reports false when the row is no longer the one
+	// read, which no writer holding the owner's lock leaves, so nothing is sent for it.
+	claim := func() (bool, error) {
+		var from, to int
+		err := tx.QueryRow(ctx, claimEditNotice, artifactID).Scan(&from, &to)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("claim edit notice: %w", err)
+		}
+		return from == payload.FromVersion && to == payload.ToVersion, nil
+	}
+	// drop claims the notice and sends nothing: a closed issue's, or a change only the server's
+	// own attributes made.
+	drop := func() (bool, error) {
+		claimed, err := claim()
+		if err != nil || !claimed {
+			return false, err
+		}
+		return false, tx.Commit(ctx)
 	}
 	if !open {
-		return false, tx.Commit(ctx)
+		return drop()
 	}
 	if err := json.Unmarshal(editors, &payload.Editors); err != nil {
 		return false, fmt.Errorf("decode edit notice editors: %w", err)
@@ -253,7 +292,7 @@ func (s *Service) sendEditNotice(ctx context.Context, artifactID string) (bool, 
 			// An answer, a resolve or a retraction wrote only the server's own attributes of a
 			// typed block, as the person who made it: that change reaches the spec's writers as
 			// its own ask event, so the window goes with no notice, as a closed issue's does.
-			return false, tx.Commit(ctx)
+			return drop()
 		}
 		payload.Diff, payload.DiffTruncated = text.UnifiedDiffCut(before, after, editNoticeDiffBytes)
 	}
@@ -262,6 +301,10 @@ func (s *Service) sendEditNotice(ctx context.Context, artifactID string) (bool, 
 	event := model.Event{IssueKey: owner.IssueKey, Type: "artifact.human_edited", Actor: actor, Payload: payload}
 	if owner.IssueKey == nil {
 		event.ArtifactID = &artifactID
+	}
+	claimed, err := claim()
+	if err != nil || !claimed {
+		return false, err
 	}
 	appended, err := s.events.Append(ctx, tx, event)
 	if err != nil {

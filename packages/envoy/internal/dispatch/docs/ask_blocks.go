@@ -16,7 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
-	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 type askBlock struct {
@@ -166,10 +166,19 @@ func (r *settlementReconciliation) nameVersion(
 		}
 	}
 	for _, ask := range r.retracted {
-		retracted, err := WriteAskResolution(ctx, tx, ask, "retracted", fmt.Sprintf("%s %d", SettlementRetractionReason, version), SettlementActor)
+		retracted, encoded, err := askResolution(ask, "retracted", fmt.Sprintf("%s %d", SettlementRetractionReason, version), SettlementActor)
 		if err != nil {
 			return fmt.Errorf("retract deleted ask block: %w", err)
 		}
+		if err := write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+			if err := writeAskResolution(ctx, tx, ask.ID, encoded); err != nil {
+				return fmt.Errorf("retract deleted ask block: %w", err)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		recordAskBlock(ctx, tx, artifactID, retracted)
 		r.events = append(r.events, documentAskEvent(
 			owner, artifactID, "ask.resolved", SettlementActor, model.NewAskEventPayload(retracted, model.ReferenceChanges{}),
 		))
@@ -293,8 +302,11 @@ func (s *Service) reconcileAskBlocks(
 			if err != nil {
 				return settlementReconciliation{}, err
 			}
-			changes, err := refs.ReplaceCounted(ctx, tx, "ask", ask.ID, ask.Question, s.serverURL)
+			changes, index, err := planReplaceCounted(ctx, tx, "ask", ask.ID, text.Extract(ask.Question, s.serverURL), nil, nil)
 			if err != nil {
+				return settlementReconciliation{}, fmt.Errorf("index new ask block: %w", err)
+			}
+			if err := write(ctx, tx, index); err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index new ask block: %w", err)
 			}
 			reconciled.events = append(reconciled.events, documentAskEvent(
@@ -311,6 +323,7 @@ func (s *Service) reconcileAskBlocks(
 				return settlementReconciliation{}, err
 			}
 			ask = restored
+			recordAskBlock(ctx, tx, artifactID, ask)
 			eventType := "ask.opened"
 			if ask.State == "answered" {
 				eventType = "ask.answered"
@@ -342,22 +355,34 @@ func (s *Service) reconcileAskBlocks(
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("encode reconciled ask options: %w", err)
 			}
-			var editedAt time.Time
-			if err := tx.QueryRow(ctx, `
-				update asks
-				set question = $2, options = $3, multiple = $4, urgency = $5, edited_at = now()
-				where id = $1
-				returning edited_at
-			`, ask.ID, block.question, options, block.multiple, block.urgency).Scan(&editedAt); err != nil {
-				return settlementReconciliation{}, fmt.Errorf("update reconciled ask: %w", err)
+			editedAt, err := transactionNow(ctx, tx)
+			if err != nil {
+				return settlementReconciliation{}, err
+			}
+			id := ask.ID
+			if err := write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+				if _, err := tx.Exec(ctx, `
+					update asks
+					set question = $2, options = $3, multiple = $4, urgency = $5, edited_at = $6
+					where id = $1
+				`, id, block.question, options, block.multiple, block.urgency, editedAt); err != nil {
+					return fmt.Errorf("update reconciled ask: %w", err)
+				}
+				return nil
+			}); err != nil {
+				return settlementReconciliation{}, err
 			}
 			ask.Question = block.question
 			ask.Options = block.options
 			ask.Multiple = block.multiple
 			ask.Urgency = block.urgency
 			ask.EditedAt = askTimestamp(&editedAt)
-			changes, err := refs.ReplaceCounted(ctx, tx, "ask", ask.ID, ask.Question, s.serverURL)
+			recordAskBlock(ctx, tx, artifactID, ask)
+			changes, index, err := planReplaceCounted(ctx, tx, "ask", ask.ID, text.Extract(ask.Question, s.serverURL), nil, nil)
 			if err != nil {
+				return settlementReconciliation{}, fmt.Errorf("index reconciled ask: %w", err)
+			}
+			if err := write(ctx, tx, index); err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index reconciled ask: %w", err)
 			}
 			reconciled.events = append(reconciled.events, documentAskEvent(
@@ -653,15 +678,15 @@ func parseAskBlock(node *pmdoc.Node) (askBlock, error) {
 	return askBlock{node: node, id: blockID, question: question, options: options, multiple: multiple, urgency: urgency}, nil
 }
 
-// loadAskBlocks reads and locks every ask anchored to a block of this document. `for no key
-// update` by the rule at lockDocumentRoom: settlement holds these rows across the room lock, and
-// nothing deletes an ask or writes a key column - reconciliation here and the ask routes update
-// question, options, multiple, urgency, edited_at, state, answer and resolution, and `asks.id` is
-// the key.
+// loadAskBlocks reads every ask anchored to a block of this document, as the transaction's queued
+// writes leave them (recordAskBlock). It takes no row lock: its caller holds the document owner's
+// lock, which every writer of a block ask takes first - settlement's reconciliation, the ask
+// routes' answers, edits and resolutions, a version's approval carry - so the rows hold still
+// until the caller's transaction ends.
 func loadAskBlocks(ctx context.Context, tx pgx.Tx, artifactID string) (map[string]model.Ask, error) {
 	rows, err := tx.Query(ctx, `
 		select `+AskColumns+`
-		from asks a where a.block_artifact_id = $1 and a.block_id is not null for no key update
+		from asks a where a.block_artifact_id = $1 and a.block_id is not null
 	`, artifactID)
 	if err != nil {
 		return nil, fmt.Errorf("load ask blocks: %w", err)
@@ -681,9 +706,35 @@ func loadAskBlocks(ctx context.Context, tx pgx.Tx, artifactID string) (map[strin
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate ask blocks: %w", err)
 	}
+	if ledger := queueFor(ctx, tx); ledger != nil {
+		for blockID, ask := range ledger.askBlocks[artifactID] {
+			asks[blockID] = ask
+		}
+	}
 	return asks, nil
 }
 
+// recordAskBlock records ask, a block ask of artifactID whose row the caller has queued a write of,
+// as the row will stand, so a later read of the document's block asks in the same transaction
+// (loadAskBlocks: the version write's approval carry) reads it so.
+func recordAskBlock(ctx context.Context, tx pgx.Tx, artifactID string, ask model.Ask) {
+	ledger := queueFor(ctx, tx)
+	if ledger == nil || ask.BlockID == nil {
+		return
+	}
+	if ledger.askBlocks == nil {
+		ledger.askBlocks = make(map[string]map[string]model.Ask)
+	}
+	if ledger.askBlocks[artifactID] == nil {
+		ledger.askBlocks[artifactID] = make(map[string]model.Ask)
+	}
+	ledger.askBlocks[artifactID][*ask.BlockID] = ask
+}
+
+// createAskBlock opens the ask of block, a new ask block of artifactID: its id and its created_at,
+// the transaction's now() its column's default would give it, are taken where it is called, and its
+// insert and its author's follow go through write, so the ask it returns is the row as the insert
+// leaves it before the insert has run.
 func createAskBlock(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -705,14 +756,22 @@ func createAskBlock(
 		ownerArtifactID = new(artifactID)
 	}
 	var ask model.Ask
-	if err := tx.QueryRow(ctx, `
-		insert into asks (issue_key, artifact_id, block_id, block_artifact_id, author, question, options, multiple, urgency, kind)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'question')
-		returning id::text, created_at
-	`, owner.IssueKey, ownerArtifactID, block.id, artifactID, authorJSON, block.question, options, block.multiple, block.urgency).Scan(&ask.ID, &ask.CreatedAt); err != nil {
-		return model.Ask{}, fmt.Errorf("create ask block row: %w", err)
+	if err := tx.QueryRow(ctx, `select gen_random_uuid()::text`).Scan(&ask.ID); err != nil {
+		return model.Ask{}, fmt.Errorf("mint ask block id: %w", err)
 	}
-	if err := asks.FollowAuthor(ctx, tx, ask.ID, author); err != nil {
+	if ask.CreatedAt, err = transactionNow(ctx, tx); err != nil {
+		return model.Ask{}, err
+	}
+	id, createdAt := ask.ID, ask.CreatedAt
+	if err := write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			insert into asks (id, issue_key, artifact_id, block_id, block_artifact_id, author, question, options, multiple, urgency, kind, created_at)
+			values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'question', $11)
+		`, id, owner.IssueKey, ownerArtifactID, block.id, artifactID, authorJSON, block.question, options, block.multiple, block.urgency, createdAt); err != nil {
+			return fmt.Errorf("create ask block row: %w", err)
+		}
+		return asks.FollowAuthor(ctx, tx, id, author)
+	}); err != nil {
 		return model.Ask{}, err
 	}
 	ask.IssueKey = owner.IssueKey
@@ -726,9 +785,13 @@ func createAskBlock(
 	ask.Urgency = block.urgency
 	ask.State = "open"
 	ask.Kind = "question"
+	recordAskBlock(ctx, tx, artifactID, ask)
 	return ask, nil
 }
 
+// restoreRetractedAsk gives ask, whose block came back after settlement retracted it, the state it
+// had before the retraction, read from its events where it is called; the update goes through
+// write.
 func restoreRetractedAsk(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.Ask, error) {
 	var payload []byte
 	if err := tx.QueryRow(ctx, `
@@ -753,8 +816,14 @@ func restoreRetractedAsk(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.A
 		}
 		answer = encoded
 	}
-	if _, err := tx.Exec(ctx, `update asks set state = $2, answer = $3, resolution = null where id = $1`, ask.ID, prior.State, answer); err != nil {
-		return model.Ask{}, fmt.Errorf("restore retracted ask: %w", err)
+	id := ask.ID
+	if err := write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `update asks set state = $2, answer = $3, resolution = null where id = $1`, id, prior.State, answer); err != nil {
+			return fmt.Errorf("restore retracted ask: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return model.Ask{}, err
 	}
 	ask.State = prior.State
 	ask.Answer = prior.Answer

@@ -71,17 +71,35 @@ func ScanAsk(row pgx.Row, extra ...any) (model.Ask, error) {
 // stands. It is the one place that says what resolving an ask stores; each caller writes a block
 // ask's own state and appends the ask.resolved event its path owns.
 func WriteAskResolution(ctx context.Context, tx pgx.Tx, ask model.Ask, kind, reason string, actor model.Actor) (model.Ask, error) {
+	resolved, encoded, err := askResolution(ask, kind, reason, actor)
+	if err != nil {
+		return model.Ask{}, err
+	}
+	if err := writeAskResolution(ctx, tx, ask.ID, encoded); err != nil {
+		return model.Ask{}, err
+	}
+	return resolved, nil
+}
+
+// askResolution is ask as WriteAskResolution leaves it, with the resolution as the row stores it,
+// decided before anything is written so a writer that queues the update knows the row it leaves.
+func askResolution(ask model.Ask, kind, reason string, actor model.Actor) (model.Ask, []byte, error) {
 	resolution := model.AskResolution{Kind: kind, Reason: reason, Actor: actor, At: time.Now().UTC()}
 	encoded, err := json.Marshal(resolution)
 	if err != nil {
-		return model.Ask{}, fmt.Errorf("encode ask resolution: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `update asks set state = 'resolved', resolution = $2 where id = $1`, ask.ID, encoded); err != nil {
-		return model.Ask{}, fmt.Errorf("write ask resolution: %w", err)
+		return model.Ask{}, nil, fmt.Errorf("encode ask resolution: %w", err)
 	}
 	ask.State = "resolved"
 	ask.Resolution = &resolution
-	return ask, nil
+	return ask, encoded, nil
+}
+
+// writeAskResolution writes a resolution askResolution encoded onto ask id's row.
+func writeAskResolution(ctx context.Context, tx pgx.Tx, id string, encoded []byte) error {
+	if _, err := tx.Exec(ctx, `update asks set state = 'resolved', resolution = $2 where id = $1`, id, encoded); err != nil {
+		return fmt.Errorf("write ask resolution: %w", err)
+	}
+	return nil
 }
 
 // askTimestamp formats a nullable ask timestamp as the wire's RFC 3339 UTC text, nil for nil.

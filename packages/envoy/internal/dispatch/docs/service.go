@@ -153,10 +153,10 @@ type Service struct {
 	// its version is rendered from, and before it renders it. Nil outside tests; tests use it to
 	// edit the room while the version renders.
 	afterSettleVersionRead func(room string)
-	// afterSettleVersionWrite runs once a settlement that is writing a version has written it
-	// (writeVersionTx) and deleted the pending authors it lists, and before the settlement appends
-	// that version's own event. Nil outside tests; tests return an error from it to force the
-	// settlement to abandon after its version write, before its commit.
+	// afterSettleVersionWrite runs once a settlement that is writing a version has queued it
+	// (writeVersionTx) and the delete of the pending authors it lists, and before it queues that
+	// version's own event; the write phase has not run. Nil outside tests; tests return an error from
+	// it to force the settlement to abandon after its version write, before its commit.
 	afterSettleVersionWrite func(room string) error
 	// beforeObserveUpdate runs in a room's update observer, which ygo runs once the update's
 	// transaction has released the document, before the observer drains the room's update log -
@@ -1316,6 +1316,11 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		return
 	}
 	defer tx.Rollback(ctx)
+	// Settlement decides everything before it writes anything: every write below goes through
+	// write and queues on this ledger, and the queue runs back to back right before the commit, so
+	// the transaction holds a transaction id only for those statements, not while it renders the
+	// document, walks its anchors or carries an approval.
+	ledger.writer = tx
 	owner, open, err := lockArtifactOwner(ctx, tx, room)
 	if err != nil {
 		retry(err)
@@ -1526,6 +1531,10 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		// lock this transaction holds until then, so nothing reads the cursor in between; a
 		// rollback here fails the room, which reloads the document (abandon).
 		advanceRoomCursor(cursor, repaired)
+		if err := ledger.runQueue(ctx); err != nil {
+			abandon(err)
+			return
+		}
 		if err := tx.Commit(ctx); err != nil {
 			abandon(fmt.Errorf("commit superseded document identity update: %w", err))
 			return
@@ -1575,7 +1584,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			return
 		}
 		advanceRoomCursor(cursor, repaired)
-		snapshotCursor, err = currentUpdateCursor(ctx, tx, room)
+		snapshotCursor, err = transactionHead(ctx, tx, room)
 		if err != nil {
 			abandon(err)
 			return
@@ -1623,25 +1632,32 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	}
 	s.unlockState(room, state)
 
-	published := make([]model.Event, 0, len(reconciliation.events)+1)
 	// Each event that carries a reconciled source's text stamps that source's new mention edges
 	// with the event that introduced them: the version event for the document itself, and each
 	// ask's own opened/edited event. writeVersionTx reconciled the edges earlier in this
-	// transaction, so stamping runs after the append and never touches sequence allocation.
+	// transaction, so stamping runs after the append and never touches sequence allocation. The
+	// appends and stamps are one step of the write phase; what it appends joins the ledger's events,
+	// after those the version write appended, which the settlement publishes once it commits.
+	sink := eventSink(ctx)
 	appendEvents := func(events []model.Event) error {
-		for _, planned := range events {
-			appended, appendErr := s.events.Append(ctx, tx, planned)
-			if appendErr != nil {
-				return appendErr
-			}
-			if sourceKind, sourceID, ok := referenceSource(planned, room); ok {
-				if err := refs.Stamp(ctx, tx, sourceKind, sourceID, appended.ID); err != nil {
-					return err
-				}
-			}
-			published = append(published, appended)
+		if len(events) == 0 {
+			return nil
 		}
-		return nil
+		return write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+			for _, planned := range events {
+				appended, appendErr := s.events.Append(ctx, tx, planned)
+				if appendErr != nil {
+					return appendErr
+				}
+				if sourceKind, sourceID, ok := referenceSource(planned, room); ok {
+					if err := refs.Stamp(ctx, tx, sourceKind, sourceID, appended.ID); err != nil {
+						return err
+					}
+				}
+				sink(appended)
+			}
+			return nil
+		})
 	}
 	// Settlement writes a version only when the document now reads differently from the latest
 	// one. Indexing an ask block writes an `asks` row and an `ask.opened` event over words the
@@ -1705,7 +1721,6 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			abandon(err)
 			return
 		}
-		published = append(published, ledger.events...)
 		// A document body cites nodes whose rows carry a backlink count, so the version event
 		// names what this settle moved exactly as a message or comment write does.
 		versionEvent := model.Event{
@@ -1726,6 +1741,12 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		abandon(err)
 		return
 	}
+	// The write phase: every statement this settlement decided on, in the order it made them.
+	if err := ledger.runQueue(ctx); err != nil {
+		abandon(err)
+		return
+	}
+	published := ledger.events
 	// The commit marks the in-flight credits the version listed consumed before it releases the
 	// room's state (commitConsuming); a settlement that writes no version takes out none.
 	committed := authorCapture{state: state}
@@ -2031,6 +2052,16 @@ func currentUpdateCursor(ctx context.Context, q Queryer, artifactID string) (int
 		return 0, fmt.Errorf("read document update cursor: %w", err)
 	}
 	return cursor, nil
+}
+
+// transactionHead is the version artifactID's stored history stands at for tx (currentUpdateCursor),
+// counting the writes tx's ledger has queued to it and not yet run: a transaction that queued one
+// holds the document's lock and knows the head they leave (pendingRoom), and reads nothing.
+func transactionHead(ctx context.Context, tx pgx.Tx, artifactID string) (int64, error) {
+	if pending := pendingRoomOf(ctx, tx, artifactID); pending != nil {
+		return pending.head, nil
+	}
+	return currentUpdateCursor(ctx, tx, artifactID)
 }
 
 func (s *Service) lockSettlementCursor(ctx context.Context, tx pgx.Tx, room string) error {

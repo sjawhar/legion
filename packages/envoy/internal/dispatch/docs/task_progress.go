@@ -27,19 +27,23 @@ func RecordTaskProgress(ctx context.Context, tx pgx.Tx, artifactID string, tree 
 }
 
 // recordTaskProgress writes progress onto the issue owning artifactID, when that artifact is its
-// primary document, naming the document's latest version, which the caller has written already.
+// primary document, naming the document's latest version, which the caller has written already:
+// the statement goes through write, so a joined transaction runs it in its write phase, after the
+// version's insert, and its subquery reads the version there.
 func recordTaskProgress(
 	ctx context.Context, tx pgx.Tx, artifactID string, progress pmdoc.TaskProgress,
 ) error {
-	if _, err := tx.Exec(ctx, `
-		update issues i
-		set tasks_done = $2, tasks_total = $3,
-		    tasks_version = (select coalesce(max(number), 0) from artifact_versions where artifact_id = $1)
-		where i.key = (select issue_key from artifacts where id = $1 and is_primary)
-	`, artifactID, progress.Done, progress.Total); err != nil {
-		return fmt.Errorf("record issue task progress: %w", err)
-	}
-	return nil
+	return write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			update issues i
+			set tasks_done = $2, tasks_total = $3,
+			    tasks_version = (select coalesce(max(number), 0) from artifact_versions where artifact_id = $1)
+			where i.key = (select issue_key from artifacts where id = $1 and is_primary)
+		`, artifactID, progress.Done, progress.Total); err != nil {
+			return fmt.Errorf("record issue task progress: %w", err)
+		}
+		return nil
+	})
 }
 
 // RecordTaskProgressMarkdown is RecordTaskProgress for a caller that holds the canonical markdown
@@ -241,33 +245,38 @@ func (s *Service) reconcileTaskProgressBatch(
 	if err := rows.Err(); err != nil {
 		return 0, false, fmt.Errorf("read drifted issue task counts: %w", err)
 	}
-	for _, issue := range batch {
-		var progress pmdoc.TaskProgress
-		if issue.markdown != "" {
-			// The markdown is read for its task items alone, so a spec the Proof schema refuses
-			// elsewhere (a table row wider than its header) is still counted, and only markdown
-			// the reader cannot read at all is counted as none.
-			counted, err := pmdoc.CountTasksMarkdown(issue.markdown)
-			if err != nil {
-				slog.Warn("dispatch: issue task progress reconciliation cannot read the spec; counting none",
-					"issue", issue.key, "error", err)
-			} else {
-				progress = counted
-			}
+	// Every count is taken before the first write, so the transaction holds a transaction id only
+	// for the updates and the commit, not while it parses the specs.
+	progress := make([]pmdoc.TaskProgress, len(batch))
+	for index, issue := range batch {
+		if issue.markdown == "" {
+			continue
 		}
-		if _, err := tx.Exec(ctx, `
-			update issues set tasks_done = $2, tasks_total = $3, tasks_version = $4 where key = $1
-		`, issue.key, progress.Done, progress.Total, issue.version); err != nil {
-			return 0, false, fmt.Errorf("record issue %s task progress: %w", issue.key, err)
+		// The markdown is read for its task items alone, so a spec the Proof schema refuses
+		// elsewhere (a table row wider than its header) is still counted, and only markdown the
+		// reader cannot read at all is counted as none.
+		counted, err := pmdoc.CountTasksMarkdown(issue.markdown)
+		if err != nil {
+			slog.Warn("dispatch: issue task progress reconciliation cannot read the spec; counting none",
+				"issue", issue.key, "error", err)
+			continue
 		}
+		progress[index] = counted
 	}
 	// Drift past this batch - rows the limit left, or rows another writer holds - is still there
-	// once it commits; the pass asks again. Read before the commit so the rows this batch wrote are
-	// not counted as drift.
+	// once it commits; the pass asks again. The batch's own rows are left out, so the read comes
+	// before its writes and says the same as after them.
 	if err := tx.QueryRow(ctx, `
 		select exists(select 1 from issues i where `+taskProgressDrift+` and i.key <> all($1::text[]))
 	`, keysOf(batch, func(issue drifted) string { return issue.key })).Scan(&remaining); err != nil {
 		return 0, false, fmt.Errorf("check remaining task count drift: %w", err)
+	}
+	for index, issue := range batch {
+		if _, err := tx.Exec(ctx, `
+			update issues set tasks_done = $2, tasks_total = $3, tasks_version = $4 where key = $1
+		`, issue.key, progress[index].Done, progress[index].Total, issue.version); err != nil {
+			return 0, false, fmt.Errorf("record issue %s task progress: %w", issue.key, err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		if errors.Is(err, context.Canceled) {

@@ -281,7 +281,10 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 // includes the versions this transaction has appended itself, which are in no room until it
 // publishes, so the room's cursor is read with them folded in (liveWrite.withOwnAppends);
 // without that every operation after a transaction's first append would judge its own room
-// behind. A document whose room kept no cursor is not judged behind: nothing says it is.
+// behind. Those appends are queued for the transaction's write phase, so the table does not hold
+// them yet: the head is the one they leave, which the ledger knows (transactionHead), each pending
+// append's version being the head read under the document lock plus its place in the queue. A
+// document whose room kept no cursor is not judged behind: nothing says it is.
 //
 // A difference the first read sees is not the answer, for the reason the stale-room evictor reads
 // twice as well (documentChanged): every durable writer of this process advances the room's
@@ -311,7 +314,7 @@ func (s *Service) roomBehindHead(ctx context.Context, write *liveWrite, live *cr
 	if cursor == nil || !joined {
 		return false, nil
 	}
-	head, err := currentUpdateCursor(ctx, tx, write.artifactID)
+	head, err := transactionHead(ctx, tx, write.artifactID)
 	if err != nil {
 		return false, err
 	}
@@ -321,7 +324,7 @@ func (s *Service) roomBehindHead(ctx context.Context, write *liveWrite, live *cr
 	if err := lockDocumentRoom(ctx, tx, write.artifactID); err != nil {
 		return false, err
 	}
-	if head, err = currentUpdateCursor(ctx, tx, write.artifactID); err != nil {
+	if head, err = transactionHead(ctx, tx, write.artifactID); err != nil {
 		return false, err
 	}
 	return write.withOwnAppends(cursor.heldThrough()) != head, nil

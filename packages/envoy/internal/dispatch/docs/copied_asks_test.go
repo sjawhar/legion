@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -1186,12 +1188,14 @@ func answerSource(ctx context.Context, service *Service, original string, source
 }
 
 // closeSource answers source, the ask of blockID on original, with answer, or resolves it when
-// answer is nil, in its route's order (closeAskTx, the answer's WriteBlock, the resolve's Apply):
-// the source's owner lock and its read of the ask row, then SettleCopiesOf, which takes the
-// project's copy lock and marks the copies owed, then the source's block, the ask row and the
-// ask.answered or ask.resolved event, and commits. between, when set, runs right after
-// SettleCopiesOf, while the transaction holds the copy lock and the copies' pending rows. It
-// returns its error rather than failing the test, so it can run off the test's goroutine.
+// answer is nil, in its route's order (closeAskTx, the answer's WriteBlock, the resolve's Apply)
+// and its two phases: the source's owner lock and its read of the ask row, then SettleCopiesOf,
+// which takes the project's copy lock and queues the copies' pending rows, then the source's
+// block, the ask row and the ask.answered or ask.resolved event, queued as a route joined to the
+// ledger queues its own writes, and commits: the write phase writes the copies' pending rows first.
+// between, when set, runs in the write phase right after those rows, while the transaction holds
+// the copy lock and the copies' pending rows. It returns its error rather than failing the test,
+// so it can run off the test's goroutine.
 func closeSource(ctx context.Context, service *Service, original, blockID string, source model.Ask, answer *model.AskAnswer, between func()) error {
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	tx, err := service.store.Pool.Begin(ctx)
@@ -1213,7 +1217,12 @@ func closeSource(ctx context.Context, service *Service, original, blockID string
 		return fmt.Errorf("mark the copies owed: %w", err)
 	}
 	if between != nil {
-		between()
+		if err := ledger.Queue(func(context.Context, pgx.Tx) error {
+			between()
+			return nil
+		}); err != nil {
+			return fmt.Errorf("queue the hook: %w", err)
+		}
 	}
 	eventType, attributes := "ask.resolved", map[string]any{"state": "resolved"}
 	if answer != nil {
@@ -1229,19 +1238,24 @@ func closeSource(ctx context.Context, service *Service, original, blockID string
 	if err := service.SetBlockAttributes(closing, original, blockID, attributes, alice); err != nil {
 		return fmt.Errorf("write the source's block: %w", err)
 	}
-	if answer != nil {
-		encoded, _ := json.Marshal(answer)
-		if _, err := tx.Exec(ctx, `update asks set state = 'answered', answer = $2 where id = $1`, source.ID, encoded); err != nil {
-			return fmt.Errorf("answer the source ask: %w", err)
+	if err := ledger.Queue(func(ctx context.Context, tx pgx.Tx) error {
+		if answer != nil {
+			encoded, _ := json.Marshal(answer)
+			if _, err := tx.Exec(ctx, `update asks set state = 'answered', answer = $2 where id = $1`, source.ID, encoded); err != nil {
+				return fmt.Errorf("answer the source ask: %w", err)
+			}
+			source.State, source.Answer = "answered", answer
+		} else if source, err = WriteAskResolution(ctx, tx, source, "resolved", "Waived.", alice); err != nil {
+			return fmt.Errorf("resolve the source ask: %w", err)
 		}
-		source.State, source.Answer = "answered", answer
-	} else if source, err = WriteAskResolution(ctx, tx, source, "resolved", "Waived.", alice); err != nil {
-		return fmt.Errorf("resolve the source ask: %w", err)
-	}
-	if _, err := service.events.Append(ctx, tx, documentAskEvent(
-		owner, original, eventType, alice, model.NewAskEventPayload(source, model.ReferenceChanges{}),
-	)); err != nil {
-		return fmt.Errorf("append the source's %s event: %w", eventType, err)
+		if _, err := service.events.Append(ctx, tx, documentAskEvent(
+			owner, original, eventType, alice, model.NewAskEventPayload(source, model.ReferenceChanges{}),
+		)); err != nil {
+			return fmt.Errorf("append the source's %s event: %w", eventType, err)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("queue the source's close: %w", err)
 	}
 	if err := ledger.Commit(ctx); err != nil {
 		return fmt.Errorf("commit closing the source: %w", err)

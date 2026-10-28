@@ -69,35 +69,116 @@ func ReplaceCountedRefs(
 // longer mentioned are deleted, new ones inserted with insertedAt as created_at (nil: now()), and
 // an edge that persists keeps its created_at and source_seq. It returns the targets whose inbound
 // edges moved — deleted or inserted, oldest state first — so ReplaceCountedRefs can resolve the
-// ones whose readers carry a batched backlink count.
+// ones whose readers carry a batched backlink count. It is PlanReplace and Apply back to back.
 func replaceRefs(ctx context.Context, tx pgx.Tx, fromKind, fromID string, found []text.Ref, insertedAt *time.Time) ([]Target, error) {
+	replacement, err := PlanReplace(ctx, tx, fromKind, fromID, found, insertedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := replacement.Apply(ctx, tx); err != nil {
+		return nil, err
+	}
+	return replacement.Changed(), nil
+}
+
+// Replacement is one source's references reconciled with found, the references its text now
+// cites, as replaceRefs reconciles them. It is planned against the edges the source holds
+// (PlanReplace, PlanReplaceFrom), so the targets it moves are known before anything is written,
+// and written by Apply, which runs its statements and nothing else: a writer that decides
+// everything first and writes last plans in its read phase and applies in its write phase.
+type Replacement struct {
+	fromKind, fromID string
+	kinds, ids       []string
+	insertedAt       *time.Time
+	changed          []Target
+	held             []Target
+}
+
+// PlanReplace plans the reconciliation of fromKind/fromID's references with found against the
+// edges q holds for the source (HeldTargets).
+func PlanReplace(ctx context.Context, q Queryer, fromKind, fromID string, found []text.Ref, insertedAt *time.Time) (Replacement, error) {
+	held, err := HeldTargets(ctx, q, fromKind, fromID)
+	if err != nil {
+		return Replacement{}, err
+	}
+	return PlanReplaceFrom(held, fromKind, fromID, found, insertedAt), nil
+}
+
+// HeldTargets is the targets of the edges q holds for one source, read with the predicate the
+// reconciling delete visits them by.
+func HeldTargets(ctx context.Context, q Queryer, fromKind, fromID string) ([]Target, error) {
+	held, err := scanTargets(q.Query(ctx, `
+		select to_kind, to_id from refs where from_kind = $1 and from_id = $2
+	`, fromKind, fromID))
+	if err != nil {
+		return nil, fmt.Errorf("read references: %w", err)
+	}
+	return held, nil
+}
+
+// PlanReplaceFrom plans the reconciliation against held, the targets the source holds: those a
+// caller read (HeldTargets), or the Held of its own earlier replacement of the source that is not
+// written yet. The targets it moves are the held ones found no longer names, in held's order, then
+// those found names that held lacks, in found's order: what the delete and the insert return.
+func PlanReplaceFrom(held []Target, fromKind, fromID string, found []text.Ref, insertedAt *time.Time) Replacement {
 	kinds, ids := refTargets(found)
-	changed, err := scanTargets(tx.Query(ctx, `
+	cited := make(map[Target]struct{}, len(kinds))
+	after := make([]Target, len(kinds))
+	for index := range kinds {
+		after[index] = Target{Kind: kinds[index], ID: ids[index]}
+		cited[after[index]] = struct{}{}
+	}
+	stored := make(map[Target]struct{}, len(held))
+	changed := []Target{}
+	for _, target := range held {
+		stored[target] = struct{}{}
+		if _, kept := cited[target]; !kept {
+			changed = append(changed, target)
+		}
+	}
+	for _, target := range after {
+		if _, kept := stored[target]; !kept {
+			changed = append(changed, target)
+		}
+	}
+	return Replacement{fromKind: fromKind, fromID: fromID, kinds: kinds, ids: ids, insertedAt: insertedAt, changed: changed, held: after}
+}
+
+// Changed is the targets whose inbound edges the replacement moves (PlanReplaceFrom).
+func (r Replacement) Changed() []Target {
+	return r.changed
+}
+
+// Held is the targets the source holds once the replacement is written.
+func (r Replacement) Held() []Target {
+	return r.held
+}
+
+// Apply writes the replacement: it deletes the edges found no longer names and inserts the new
+// ones. A surviving edge keeps its created_at and source_seq.
+func (r Replacement) Apply(ctx context.Context, q Execer) error {
+	if _, err := q.Exec(ctx, `
 		delete from refs
 		where from_kind = $1 and from_id = $2
 		  and not exists (
 		    select 1 from unnest($3::text[], $4::text[]) as target(kind, id)
 		    where target.kind = refs.to_kind and target.id = refs.to_id
 		  )
-		returning to_kind, to_id
-	`, fromKind, fromID, kinds, ids))
-	if err != nil {
-		return nil, fmt.Errorf("clear references: %w", err)
+	`, r.fromKind, r.fromID, r.kinds, r.ids); err != nil {
+		return fmt.Errorf("clear references: %w", err)
 	}
-	if len(kinds) == 0 {
-		return changed, nil
+	if len(r.kinds) == 0 {
+		return nil
 	}
-	added, err := scanTargets(tx.Query(ctx, `
+	if _, err := q.Exec(ctx, `
 		insert into refs (from_kind, from_id, to_kind, to_id, created_at)
 		select $1, $2, target.kind, target.id, coalesce($5::timestamptz, now())
 		from unnest($3::text[], $4::text[]) as target(kind, id)
 		on conflict (from_kind, from_id, to_kind, to_id) do nothing
-		returning to_kind, to_id
-	`, fromKind, fromID, kinds, ids, insertedAt))
-	if err != nil {
-		return nil, fmt.Errorf("write reference: %w", err)
+	`, r.fromKind, r.fromID, r.kinds, r.ids, r.insertedAt); err != nil {
+		return fmt.Errorf("write reference: %w", err)
 	}
-	return append(changed, added...), nil
+	return nil
 }
 
 func scanTargets(rows pgx.Rows, err error) ([]Target, error) {

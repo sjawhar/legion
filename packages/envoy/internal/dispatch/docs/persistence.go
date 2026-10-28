@@ -204,21 +204,20 @@ func lockDocumentRoom(ctx context.Context, tx pgx.Tx, room string) error {
 	return nil
 }
 
+// appendUpdateTxClass appends update to room's stored history in tx. Its read half - the document
+// lock, an interrupted prune's checkpoint, the head and the gate (lockedHead,
+// refuseRoomBehindHead) - and the credit's take run where it is called, so the document lock is
+// held from the point the append is made, as it always was, and the credit is taken under it; its
+// writes - the insert, the pending settlement and the pending authors - go through write, so a
+// transaction whose writes are queued runs them in its write phase, in this order, and any other
+// runs them at once.
 func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if err := lockDocumentRoom(ctx, tx, room); err != nil {
+	latest, pending, err := p.lockedHead(ctx, tx, room)
+	if err != nil {
 		return 0, err
-	}
-	if err := p.recoverPruneTx(ctx, tx, room); err != nil {
-		return 0, err
-	}
-	var latest int64
-	if err := tx.QueryRow(ctx, `
-		select coalesce(max(version), 0) from doc_updates where artifact_id = $1
-	`, room).Scan(&latest); err != nil {
-		return 0, fmt.Errorf("read latest document update: %w", err)
 	}
 	// The gate: the document this update was made on must stand at the head. Two envoy-dispatch
 	// processes serve one database, and an append of the other process's room is not in this
@@ -239,13 +238,23 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	// notifyDocumentChanged's doc comment, which still carries a rebuild's. The room is passed
 	// twice because its two parameters are different types: doc_updates.artifact_id is a uuid,
 	// and pg_notify takes text.
-	if _, err := tx.Exec(ctx, `
-		with appended as (
-			insert into doc_updates (artifact_id, version, update, content_changed) values ($1, $2, $3, $4)
-		)
-		select pg_notify('`+documentChangedChannel+`', $5)
-	`, room, int64(version), update, contentChanged, room); err != nil {
-		return 0, fmt.Errorf("append document update: %w", err)
+	if err := write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			with appended as (
+				insert into doc_updates (artifact_id, version, update, content_changed) values ($1, $2, $3, $4)
+			)
+			select pg_notify('`+documentChangedChannel+`', $5)
+		`, room, int64(version), update, contentChanged, room); err != nil {
+			return fmt.Errorf("append document update: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	if pending != nil {
+		pending.head = int64(version)
+		pending.appended++
+		pending.changed = pending.changed || contentChanged
 	}
 	authors, lastActor, include := credit.take()
 	// An edit credited to authors names its latest edit source, none included when no one
@@ -268,15 +277,68 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	return version, nil
 }
 
+// lockedHead takes room's document lock (lockDocumentRoom) and reads under it the version room's
+// stored history stands at in tx: the greatest stored update, once an interrupted prune is
+// finished (recoverPruneTx). Where tx's writes are queued (queueFor) that recovery is queued too,
+// so the head is read past the rows it will delete, and the ledger records the history's state
+// (pendingRoom), which it returns. A transaction that has queued a write to room's history
+// already holds the lock and knows the head its queued writes leave, so it reads nothing again.
+func (p *PgVersioned) lockedHead(ctx context.Context, tx pgx.Tx, room string) (int64, *pendingRoom, error) {
+	ledger := queueFor(ctx, tx)
+	if ledger != nil {
+		if pending := ledger.rooms[room]; pending != nil {
+			return pending.head, pending, nil
+		}
+	}
+	if err := lockDocumentRoom(ctx, tx, room); err != nil {
+		return 0, nil, err
+	}
+	ceiling, recovering, err := p.recoverPruneTx(ctx, tx, room)
+	if err != nil {
+		return 0, nil, err
+	}
+	var latest int64
+	if err := tx.QueryRow(ctx, `
+		select coalesce(max(version), 0) from doc_updates
+		where artifact_id = $1 and ($2::bigint is null or version <= $2)
+	`, room, ceilingOf(ceiling, recovering)).Scan(&latest); err != nil {
+		return 0, nil, fmt.Errorf("read latest document update: %w", err)
+	}
+	if ledger == nil {
+		return latest, nil, nil
+	}
+	pending := &pendingRoom{head: latest}
+	if recovering {
+		pending.recovered = &ceiling
+	}
+	if ledger.rooms == nil {
+		ledger.rooms = make(map[string]*pendingRoom)
+	}
+	ledger.rooms[room] = pending
+	return latest, pending, nil
+}
+
+// ceilingOf is an interrupted prune's ceiling as a statement's argument: nil when none is being
+// recovered, so the statement reads every stored update.
+func ceilingOf(ceiling int64, recovering bool) *int64 {
+	if !recovering {
+		return nil
+	}
+	return &ceiling
+}
+
 // clearSettlementPending deletes the document's pending settlement inside the settlement
 // transaction that has read every update, so it commits only with that settlement's writes. The
 // settlement holds the document's advisory lock from before it reads the update cursor until it
-// commits, so no update it has not read can be appended meanwhile.
+// commits, so no update it has not read can be appended meanwhile. The delete goes through write,
+// so it runs in the settlement's write phase, in its place among the settlement's other writes.
 func clearSettlementPending(ctx context.Context, tx pgx.Tx, room string) error {
-	if _, err := tx.Exec(ctx, `delete from doc_settlements_pending where artifact_id = $1`, room); err != nil {
-		return fmt.Errorf("clear the document's pending settlement: %w", err)
-	}
-	return nil
+	return write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `delete from doc_settlements_pending where artifact_id = $1`, room); err != nil {
+			return fmt.Errorf("clear the document's pending settlement: %w", err)
+		}
+		return nil
+	})
 }
 
 // settlementPending reports whether room owes a settlement. Shutdown's drain uses this to skip
@@ -396,7 +458,7 @@ func (p *PgVersioned) CaptureSnapshot(ctx context.Context, room, name string, st
 		if err := lockDocumentRoom(ctx, tx, room); err != nil {
 			return err
 		}
-		if err := p.recoverPruneTx(ctx, tx, room); err != nil {
+		if _, _, err := p.recoverPruneTx(ctx, tx, room); err != nil {
 			return err
 		}
 		version, err = p.head(ctx, tx, room)
@@ -509,7 +571,7 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 		if err := lockDocumentRoom(ctx, tx, room); err != nil {
 			return err
 		}
-		if err := p.recoverPruneTx(ctx, tx, room); err != nil {
+		if _, _, err := p.recoverPruneTx(ctx, tx, room); err != nil {
 			return err
 		}
 		var coveredCursor int64
@@ -585,45 +647,70 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 
 // RebuildTx replaces a room's durable history with one fresh update at the next version, inside
 // tx, which holds the room's lock until it ends. Its caller has already proved that ygo cannot load
-// the old merged history; this method never makes that destructive decision itself.
+// the old merged history; this method never makes that destructive decision itself. What the
+// rebuild removes is counted under the lock, before its deletes, which go through write with the
+// seed's insert, so a joined transaction runs them in its write phase.
 func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error) {
 	if err := validateUpdate(seed); err != nil {
 		return RebuildReport{}, wrapUnlessTooLarge(itemCapError(seed, err), "validate rebuilt document seed")
 	}
-	if err := lockDocumentRoom(ctx, tx, room); err != nil {
-		return RebuildReport{}, err
-	}
-	if err := p.recoverPruneTx(ctx, tx, room); err != nil {
-		return RebuildReport{}, err
-	}
-	head, err := p.head(ctx, tx, room)
+	head, pending, err := p.lockedHead(ctx, tx, room)
 	if err != nil {
 		return RebuildReport{}, err
 	}
-	var report RebuildReport
-	for _, deletion := range []struct {
-		query string
-		count *int64
-	}{
-		{`delete from doc_updates where artifact_id = $1`, &report.RemovedUpdates},
-		{`delete from doc_checkpoints where artifact_id = $1`, &report.RemovedCheckpoints},
-		{`delete from doc_snapshots where artifact_id = $1`, &report.RemovedSnapshots},
-	} {
-		result, err := tx.Exec(ctx, deletion.query, room)
-		if err != nil {
-			return RebuildReport{}, fmt.Errorf("delete rebuilt document data: %w", err)
-		}
-		*deletion.count = result.RowsAffected()
-	}
-	report.Head = int64(head) + 1
-	if _, err := tx.Exec(ctx, `
-		insert into doc_updates (artifact_id, version, update, content_changed)
-		values ($1, $2, $3, true)
-	`, room, report.Head, seed); err != nil {
-		return RebuildReport{}, fmt.Errorf("seed rebuilt document: %w", err)
-	}
-	if err := notifyDocumentChanged(ctx, tx, room); err != nil {
+	report, err := rebuildRemoves(ctx, tx, room, pending)
+	if err != nil {
 		return RebuildReport{}, err
+	}
+	report.Head = head + 1
+	if err := write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+		for _, deletion := range []string{
+			`delete from doc_updates where artifact_id = $1`,
+			`delete from doc_checkpoints where artifact_id = $1`,
+			`delete from doc_snapshots where artifact_id = $1`,
+		} {
+			if _, err := tx.Exec(ctx, deletion, room); err != nil {
+				return fmt.Errorf("delete rebuilt document data: %w", err)
+			}
+		}
+		if _, err := tx.Exec(ctx, `
+			insert into doc_updates (artifact_id, version, update, content_changed)
+			values ($1, $2, $3, true)
+		`, room, report.Head, seed); err != nil {
+			return fmt.Errorf("seed rebuilt document: %w", err)
+		}
+		return notifyDocumentChanged(ctx, tx, room)
+	}); err != nil {
+		return RebuildReport{}, err
+	}
+	if pending != nil {
+		*pending = pendingRoom{head: report.Head, rebuilt: true, appended: 1, changed: true}
+	}
+	return report, nil
+}
+
+// rebuildRemoves counts what a rebuild of room deletes from its stored history: its updates, as
+// the transaction's queued writes leave them (pending), and its snapshots. Its checkpoint, if one
+// stood, is an interrupted prune's, whose recovery (lockedHead) deletes it before the rebuild's
+// own delete reaches it, so the rebuild removes none.
+func rebuildRemoves(ctx context.Context, tx pgx.Tx, room string, pending *pendingRoom) (RebuildReport, error) {
+	var report RebuildReport
+	var ceiling *int64
+	if pending != nil {
+		ceiling = pending.recovered
+	}
+	if err := tx.QueryRow(ctx, `
+		select
+			(select count(*) from doc_updates where artifact_id = $1 and ($2::bigint is null or version <= $2)),
+			(select count(*) from doc_snapshots where artifact_id = $1)
+	`, room, ceiling).Scan(&report.RemovedUpdates, &report.RemovedSnapshots); err != nil {
+		return RebuildReport{}, fmt.Errorf("count rebuilt document data: %w", err)
+	}
+	if pending != nil {
+		if pending.rebuilt {
+			report.RemovedUpdates, report.RemovedSnapshots = 0, 0
+		}
+		report.RemovedUpdates += pending.appended
 	}
 	return report, nil
 }
@@ -674,26 +761,33 @@ func (p *PgVersioned) head(ctx context.Context, q Queryer, room string) (persist
 }
 
 // recoverPruneTx finishes a prune a crash interrupted: it deletes the updates past the checkpoint's
-// ceiling and the checkpoint. Its caller holds the room's document lock (lockDocumentRoom), which
-// every writer of a doc_checkpoints row holds too - PruneAfter and Delete through withRoomLock's
-// session lock on the same key, RebuildTx and this through the transaction lock - so the checkpoint
-// is read with no row lock and cannot move before the deletes.
-func (p *PgVersioned) recoverPruneTx(ctx context.Context, tx pgx.Tx, room string) error {
+// ceiling and the checkpoint, through write, and returns the ceiling and whether there was one.
+// Its caller holds the room's document lock (lockDocumentRoom), which every writer of a
+// doc_checkpoints row holds too - PruneAfter and Delete through withRoomLock's session lock on the
+// same key, RebuildTx and this through the transaction lock - so the checkpoint is read with no
+// row lock and cannot move before the deletes; a transaction whose deletes are queued reads the
+// history past the rows they delete (lockedHead).
+func (p *PgVersioned) recoverPruneTx(ctx context.Context, tx pgx.Tx, room string) (int64, bool, error) {
 	var ceiling int64
 	err := tx.QueryRow(ctx, `select ceiling from doc_checkpoints where artifact_id = $1`, room).Scan(&ceiling)
 	if err == pgx.ErrNoRows {
-		return nil
+		return 0, false, nil
 	}
 	if err != nil {
-		return fmt.Errorf("read document prune checkpoint: %w", err)
+		return 0, false, fmt.Errorf("read document prune checkpoint: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `delete from doc_updates where artifact_id = $1 and version > $2`, room, ceiling); err != nil {
-		return fmt.Errorf("recover pruned document updates: %w", err)
+	if err := write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `delete from doc_updates where artifact_id = $1 and version > $2`, room, ceiling); err != nil {
+			return fmt.Errorf("recover pruned document updates: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `delete from doc_checkpoints where artifact_id = $1`, room); err != nil {
+			return fmt.Errorf("clear recovered document checkpoint: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return 0, false, err
 	}
-	if _, err := tx.Exec(ctx, `delete from doc_checkpoints where artifact_id = $1`, room); err != nil {
-		return fmt.Errorf("clear recovered document checkpoint: %w", err)
-	}
-	return nil
+	return ceiling, true, nil
 }
 
 // compactIfIdleKey marks a context whose compaction skips a room whose lock another holder has

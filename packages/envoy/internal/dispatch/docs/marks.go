@@ -443,9 +443,19 @@ type anchoredMark struct {
 	id       string
 	markType string
 	anchor   model.Anchor
+	// pending is the row's registration on the transaction's ledger (RegisterPendingAnchor), nil
+	// for a row read as the table stores it.
+	pending *PendingAnchor
 }
 
+// openAnchoredMarks lists artifactID's open anchors - each open ask's and unresolved comment's -
+// as the transaction sees them: the rows source holds, with the anchored rows the transaction has
+// queued writes of and registered (RegisterPendingAnchor) merged in as they will stand. A stored
+// row so registered is read as registered, in its place, or left out once closed; a registered
+// row the table does not list follows the stored rows of its table, in the order it was
+// registered.
 func (s *Service) openAnchoredMarks(ctx context.Context, source Queryer, artifactID string) ([]anchoredMark, error) {
+	pending := pendingAnchorsOf(ctx, artifactID)
 	var marks []anchoredMark
 	for _, target := range []struct {
 		table string
@@ -462,6 +472,7 @@ func (s *Service) openAnchoredMarks(ctx context.Context, source Queryer, artifac
 		if err != nil {
 			return nil, fmt.Errorf("list %s anchors: %w", target.table, err)
 		}
+		listed := make(map[string]struct{})
 		for rows.Next() {
 			var mark anchoredMark
 			var encoded []byte
@@ -475,6 +486,13 @@ func (s *Service) openAnchoredMarks(ctx context.Context, source Queryer, artifac
 				return nil, fmt.Errorf("decode %s anchor: %w", target.table, err)
 			}
 			mark.markType = typeFromRow
+			listed[mark.id] = struct{}{}
+			if row := pendingAnchor(pending, mark.id); row != nil {
+				if !row.Open {
+					continue
+				}
+				mark = anchoredMark{id: row.ID, markType: string(row.Kind), anchor: row.Anchor, pending: row}
+			}
 			marks = append(marks, mark)
 		}
 		if err := rows.Err(); err != nil {
@@ -482,8 +500,32 @@ func (s *Service) openAnchoredMarks(ctx context.Context, source Queryer, artifac
 			return nil, fmt.Errorf("list %s anchors: %w", target.table, err)
 		}
 		rows.Close()
+		for _, row := range pending {
+			if _, stored := listed[row.ID]; stored || !row.Open || anchorTable(string(row.Kind)) != target.table {
+				continue
+			}
+			marks = append(marks, anchoredMark{id: row.ID, markType: string(row.Kind), anchor: row.Anchor, pending: row})
+		}
 	}
 	return marks, nil
+}
+
+// pendingAnchor is the registration of row id among pending, nil when it has none.
+func pendingAnchor(pending []*PendingAnchor, id string) *PendingAnchor {
+	for _, row := range pending {
+		if row.ID == id {
+			return row
+		}
+	}
+	return nil
+}
+
+// anchorTable is the table whose rows carry a mark of markType.
+func anchorTable(markType string) string {
+	if markType == string(MarkComment) || markType == string(MarkSuggestion) {
+		return "comments"
+	}
+	return "asks"
 }
 
 func commentMarkType(table string) string {
@@ -493,14 +535,26 @@ func commentMarkType(table string) string {
 	return `'dispatchAsk'`
 }
 
-// refreshAnchors updates each open anchor from its current tree mark. Each
-// persisted change appends the affected row's own full refresh event in this
-// transaction; callers publish the collected committed events afterward.
+// refreshAnchors updates each open anchor from its current tree mark. Each persisted change
+// appends the affected row's own full refresh event in this transaction; callers publish the
+// collected committed events afterward. The anchors' read, the tree walk and the events' reads run
+// where it is called; every anchor's update and event append are one step (write), in anchor
+// order, so a transaction whose writes are queued runs them in its write phase. INFRA-605 batches
+// the statements inside that one step. Where the step is queued, the ledger records each refreshed
+// anchor (RegisterPendingAnchor), so a later refresh in the same transaction reads the anchor this
+// one leaves.
 func (s *Service) refreshAnchors(ctx context.Context, tx pgx.Tx, artifactID string, tree *pmdoc.Node, actor model.Actor) error {
 	anchors, err := s.openAnchoredMarks(ctx, tx, artifactID)
 	if err != nil {
 		return err
 	}
+	type refresh struct {
+		table, id string
+		anchor    model.Anchor
+		event     func() (model.Event, error)
+	}
+	var refreshes []refresh
+	ledger := queueFor(ctx, tx)
 	skippedMarkID, skipping := ctx.Value(skippedAnchorRefreshKey{}).(string)
 	for _, mark := range anchors {
 		if skipping && mark.anchor.MarkID == skippedMarkID {
@@ -516,57 +570,89 @@ func (s *Service) refreshAnchors(ctx context.Context, tx pgx.Tx, artifactID stri
 		if refreshed == mark.anchor {
 			continue
 		}
-		table := "asks"
-		if mark.markType == string(MarkComment) || mark.markType == string(MarkSuggestion) {
-			table = "comments"
-		}
-		// Only the two fields this refresh owns are written. The row was read before the
-		// events and lookups below, so writing the whole anchor column back would erase what
-		// another writer - the one-time block-id backfill - put in it in between (LEGION-149).
-		if _, err := tx.Exec(ctx, fmt.Sprintf(`
-			update %s
-			set anchor = jsonb_set(
-				jsonb_set(anchor, '{quote}', to_jsonb($2::text)),
-				'{orphaned}', to_jsonb($3::boolean))
-			where id = $1
-		`, table), mark.id, refreshed.Quote, refreshed.Orphaned); err != nil {
-			return fmt.Errorf("update %s anchor: %w", table, err)
-		}
-		event, err := s.anchorRefreshEvent(ctx, tx, mark, actor)
+		event, err := s.anchorRefreshEvent(ctx, tx, mark, refreshed, actor)
 		if err != nil {
 			return err
 		}
-		event, err = s.events.Append(ctx, tx, event)
-		if err != nil {
-			return fmt.Errorf("append anchor refresh event: %w", err)
+		refreshes = append(refreshes, refresh{table: anchorTable(mark.markType), id: mark.id, anchor: refreshed, event: event})
+		if ledger != nil {
+			row := PendingAnchor{ID: mark.id, Kind: MarkKind(mark.markType), Anchor: refreshed, Open: true}
+			if mark.pending != nil {
+				row.Event = mark.pending.Event
+			}
+			ledger.RegisterPendingAnchor(row)
 		}
-		collectEvent(ctx, event)
 	}
-	return nil
+	if len(refreshes) == 0 {
+		return nil
+	}
+	sink := eventSink(ctx)
+	return write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+		for _, refresh := range refreshes {
+			// Only the two fields this refresh owns are written. The row was read before the
+			// events and lookups, so writing the whole anchor column back would erase what
+			// another writer - the one-time block-id backfill - put in it in between (LEGION-149).
+			if _, err := tx.Exec(ctx, fmt.Sprintf(`
+				update %s
+				set anchor = jsonb_set(
+					jsonb_set(anchor, '{quote}', to_jsonb($2::text)),
+					'{orphaned}', to_jsonb($3::boolean))
+				where id = $1
+			`, refresh.table), refresh.id, refresh.anchor.Quote, refresh.anchor.Orphaned); err != nil {
+				return fmt.Errorf("update %s anchor: %w", refresh.table, err)
+			}
+			event, err := refresh.event()
+			if err != nil {
+				return err
+			}
+			appended, err := s.events.Append(ctx, tx, event)
+			if err != nil {
+				return fmt.Errorf("append anchor refresh event: %w", err)
+			}
+			sink(appended)
+		}
+		return nil
+	})
 }
 
-func (s *Service) anchorRefreshEvent(ctx context.Context, tx pgx.Tx, mark anchoredMark, actor model.Actor) (model.Event, error) {
+// anchorRefreshEvent is the anchor-refresh event of mark's row once its anchor is refreshed: the
+// row as its update leaves it, with the quote and orphaned flag the update writes. A row the
+// transaction registered with an event of its own (PendingAnchor.Event) builds it when the write
+// phase reaches it; any other is read now, where the refresh is worked out, and given the two
+// fields the update writes, which is the row the update leaves.
+func (s *Service) anchorRefreshEvent(ctx context.Context, tx pgx.Tx, mark anchoredMark, refreshed model.Anchor, actor model.Actor) (func() (model.Event, error), error) {
+	if mark.pending != nil && mark.pending.Event != nil {
+		build := mark.pending.Event
+		return func() (model.Event, error) { return build(refreshed) }, nil
+	}
+	var event model.Event
 	if mark.markType == string(MarkAsk) {
 		ask, err := loadAnchorRefreshedAsk(ctx, tx, mark.id)
 		if err != nil {
-			return model.Event{}, err
+			return nil, err
+		}
+		if ask.Anchor != nil {
+			ask.Anchor.Quote, ask.Anchor.Orphaned = refreshed.Quote, refreshed.Orphaned
 		}
 		// Re-anchoring moves the mark, never the question text, so it cites nothing new.
-		return model.Event{
+		event = model.Event{
 			IssueKey: ask.IssueKey, ArtifactID: ask.ArtifactID,
 			Type:    "ask.anchor_refreshed",
 			Actor:   actor,
 			Payload: model.NewAskEventPayload(ask, model.ReferenceChanges{}),
-		}, nil
+		}
+	} else {
+		payload, err := loadAnchorRefreshedCommentPayload(ctx, tx, mark.id)
+		if err != nil {
+			return nil, err
+		}
+		payload.Comment.Anchor.Quote, payload.Comment.Anchor.Orphaned = refreshed.Quote, refreshed.Orphaned
+		event = model.Event{
+			IssueKey: payload.IssueKey, ArtifactID: payload.ArtifactID,
+			Type: "comment.anchor_refreshed", Actor: actor, Payload: payload,
+		}
 	}
-	payload, err := loadAnchorRefreshedCommentPayload(ctx, tx, mark.id)
-	if err != nil {
-		return model.Event{}, err
-	}
-	return model.Event{
-		IssueKey: payload.IssueKey, ArtifactID: payload.ArtifactID,
-		Type: "comment.anchor_refreshed", Actor: actor, Payload: payload,
-	}, nil
+	return func() (model.Event, error) { return event, nil }, nil
 }
 
 func loadAnchorRefreshedAsk(ctx context.Context, tx pgx.Tx, id string) (model.Ask, error) {

@@ -279,6 +279,11 @@ func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocume
 //
 // A pair the index inserts takes the version's created_at, and the source_seq of the event that
 // recorded the version (stampVersionEvent).
+//
+// The transaction reads, extracts and plans the whole index before its first write (queueWrites),
+// so it holds a transaction id only for the index's statements and the commit. Its re-read of the
+// owed row takes no row lock: every writer of document_block_versions - a version's own index, the
+// trigger a version insert fires, this backfill - holds the document owner's lock, taken above.
 func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) (indexed, liveAhead bool, err error) {
 	if document.version == 0 {
 		return false, false, nil
@@ -301,7 +306,8 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 		return false, false, err
 	}
 	defer tx.Rollback(ctx)
-	owner, _, err := lockArtifactOwner(ctx, tx, document.id)
+	queued, ledger := queueWrites(ctx, tx)
+	owner, _, err := lockArtifactOwner(queued, tx, document.id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, false, nil
 	}
@@ -312,7 +318,7 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 	var stored string
 	var versionAt time.Time
 	var owed, pending bool
-	err = tx.QueryRow(ctx, `
+	err = tx.QueryRow(queued, `
 		select v.number, v.markdown, v.created_at, b.version is null,
 		       exists (select 1 from doc_settlements_pending p where p.artifact_id = b.artifact_id)
 		from document_block_versions b
@@ -322,7 +328,6 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 			order by number desc limit 1
 		) v on true
 		where b.artifact_id = $1
-		for no key update of b
 	`, document.id).Scan(&version, &stored, &versionAt, &owed, &pending)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, false, nil
@@ -339,10 +344,13 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 	case pending && markdown != stored:
 		return false, true, nil
 	}
-	if _, err := s.indexRenderedVersion(ctx, tx, document.id, version, versionAt, markdown, blocks); err != nil {
+	if _, err := s.indexRenderedVersion(queued, tx, document.id, version, versionAt, markdown, blocks); err != nil {
 		return false, false, err
 	}
-	if err := stampVersionEvent(ctx, tx, owner, document.id, version, versionAt); err != nil {
+	if err := stampVersionEvent(queued, tx, owner, document.id, version, versionAt); err != nil {
+		return false, false, err
+	}
+	if err := ledger.runQueue(ctx); err != nil {
 		return false, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -358,7 +366,7 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 // this is that stamp for a version a build without the block index wrote. It stamps only what the
 // re-index inserted - the block pairs it created at this version, and the document's references
 // it dated versionAt - so an edge rebuild-refs inserted keeps no source_seq. With no such event
-// the edges keep none.
+// the edges keep none. The event is read where it is called; the stamps go through write.
 func stampVersionEvent(ctx context.Context, tx pgx.Tx, owner artifactOwner, artifactID string, version int, versionAt time.Time) error {
 	var eventID int64
 	err := tx.QueryRow(ctx, `
@@ -377,17 +385,19 @@ func stampVersionEvent(ctx context.Context, tx pgx.Tx, owner artifactOwner, arti
 	if err != nil {
 		return fmt.Errorf("read the event that recorded version %d of %s: %w", version, artifactID, err)
 	}
-	if _, err := tx.Exec(ctx, `
-		update block_refs set source_seq = $3
-		where artifact_id = $1 and created_version = $2 and source_seq is null
-	`, artifactID, version, eventID); err != nil {
-		return fmt.Errorf("stamp the block mentions of version %d of %s: %w", version, artifactID, err)
-	}
-	if _, err := tx.Exec(ctx, `
-		update refs set source_seq = $3
-		where from_kind = 'artifact' and from_id = $1 and source_seq is null and created_at = $2
-	`, artifactID, versionAt, eventID); err != nil {
-		return fmt.Errorf("stamp the references of version %d of %s: %w", version, artifactID, err)
-	}
-	return nil
+	return write(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			update block_refs set source_seq = $3
+			where artifact_id = $1 and created_version = $2 and source_seq is null
+		`, artifactID, version, eventID); err != nil {
+			return fmt.Errorf("stamp the block mentions of version %d of %s: %w", version, artifactID, err)
+		}
+		if _, err := tx.Exec(ctx, `
+			update refs set source_seq = $3
+			where from_kind = 'artifact' and from_id = $1 and source_seq is null and created_at = $2
+		`, artifactID, versionAt, eventID); err != nil {
+			return fmt.Errorf("stamp the references of version %d of %s: %w", version, artifactID, err)
+		}
+		return nil
+	})
 }

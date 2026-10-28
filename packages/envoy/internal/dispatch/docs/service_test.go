@@ -3094,8 +3094,12 @@ func TestAWarmedReadSurvivesItsRoomsEviction(t *testing.T) {
 			if err != nil {
 				t.Fatalf("name a version of a room evicted once warm: %v", err)
 			}
+			// The version's insert is a write, which the transaction's write phase runs at Commit.
+			if err := ledger.Commit(ctx); err != nil {
+				t.Fatalf("commit the named version: %v", err)
+			}
 			var markdown string
-			if err := tx.QueryRow(ctx, `select markdown from artifact_versions where artifact_id = $1 and number = $2`, artifactID, result.Version.Number).Scan(&markdown); err != nil {
+			if err := service.store.Pool.QueryRow(ctx, `select markdown from artifact_versions where artifact_id = $1 and number = $2`, artifactID, result.Version.Number).Scan(&markdown); err != nil {
 				t.Fatal(err)
 			}
 			if markdown != "The quick brown fox\n" {
