@@ -1,6 +1,6 @@
 --- a/scripts/e2e/README.md
 +++ b/scripts/e2e/README.md
-@@ -718,10 +718,7 @@
+@@ -718,10 +718,7 @@ It proves `worker_backends` on the tmux runtime: a real Go daemon whose `legion.
  The checks:
  
  - `claude-implementer-registers`: the implementer's claim registers its Claude Code transcript, `<state>/claude/<claim token>/projects/<cwd>/<session id>.jsonl`, as its session file and the session id as its session;

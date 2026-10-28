@@ -1,6 +1,6 @@
 --- a/scripts/e2e/README.md
 +++ b/scripts/e2e/README.md
-@@ -949,40 +949,25 @@
+@@ -949,40 +949,25 @@ Each item below names an input and its default, then what it means.
  
    the worker image under test, by digest: a `worker-image.yaml` run on the branch under test
  

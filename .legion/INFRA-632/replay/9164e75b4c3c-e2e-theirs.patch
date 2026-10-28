@@ -1,6 +1,6 @@
 --- a/scripts/e2e/README.md
 +++ b/scripts/e2e/README.md
-@@ -522,7 +522,7 @@
+@@ -522,7 +522,7 @@ The shim routes `gh` to that App only from the operator's own Oh My Pi session,
  a plain shell's `gh`, a tmux window's included, is the user's own login, a Legion pane's is one of Legion's Apps, and a personal `GH_TOKEN` in the environment makes any session's `gh` that token's owner.
  `prerequisites` refuses to start, before the run's first write to GitHub, unless `gh` acts as `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh)).
  The daemon resolves the two role App keys itself through `private_key_command`, both agent tier, and `prerequisites` first runs [`read_app_logins`](#libworkflowsh), which runs the same two commands once, in `lib/app-logins.ts`, to prove each key is its id's App (GitHub's `GET /app` must answer that id and the role's write permission) and read each App's bot login, the login every check that names an App compares with, before the run's first write anywhere.

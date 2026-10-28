@@ -1,6 +1,6 @@
 --- a/docs/kubernetes.md
 +++ b/docs/kubernetes.md
-@@ -783,13 +783,10 @@
+@@ -783,13 +783,10 @@ the notice is in the stored session before the task arrives, the task's first mo
  With the plugin before the re-send, the `length` case's stored branch had lost it; with the plugin before the id, so did the case of a second recreation.
  A `task` subagent is never told.
  

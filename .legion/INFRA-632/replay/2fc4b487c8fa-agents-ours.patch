@@ -1,6 +1,6 @@
 --- a/AGENTS.md
 +++ b/AGENTS.md
-@@ -142,9 +142,10 @@
+@@ -142,9 +142,10 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
  
  - `legion claude-bridge -- <claude argv…>`
  

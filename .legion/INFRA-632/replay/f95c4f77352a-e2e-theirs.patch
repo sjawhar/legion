@@ -1,6 +1,6 @@
 --- a/scripts/e2e/README.md
 +++ b/scripts/e2e/README.md
-@@ -139,8 +139,8 @@
+@@ -139,8 +139,8 @@ Each item below names a script, then what it proves.
  
  - `merged-root-waits.sh`
  

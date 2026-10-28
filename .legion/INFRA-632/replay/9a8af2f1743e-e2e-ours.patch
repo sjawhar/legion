@@ -1,6 +1,6 @@
 --- a/scripts/e2e/README.md
 +++ b/scripts/e2e/README.md
-@@ -111,6 +111,14 @@
+@@ -111,6 +111,14 @@ Each item below names a script, then what it proves.
    A session on the released pi-envoy shows the restart notice.
    A switch is stored under the person who sent it
  
@@ -15,7 +15,7 @@
  - `claude-backend-tmux.sh`
  
    `worker_backends` on tmux: an implementer the daemon runs on Claude Code (`legion claude-bridge -- claude -p`) registers its Claude Code transcript as its session, takes its phase, completes it through the `legion` MCP tool's `handoff_complete` with a pushed `.legion/<issue>/` handoff commit, and, its pane killed, relaunches with `claude --resume` into the same session id, its earlier turns unchanged on disk and in its context.
-@@ -2693,6 +2701,111 @@
+@@ -2693,6 +2701,111 @@ Each item below names a check, then what it holds.
    `bob` sends a switch with `X-Dispatch-User: bob`, the header's own body (`/model <id>` as a steer).
    Dispatch stores it as `bob`'s, the session answers it, and `alice`'s held-open page shows `bob` beside it in the thread
  

@@ -1,6 +1,6 @@
 --- a/docs/kubernetes.md
 +++ b/docs/kubernetes.md
-@@ -3481,10 +3481,10 @@
+@@ -3464,10 +3464,10 @@ What it may wait on instead is the predecessor's claim being *reaped*
  — which is a different mechanism with different events, and which [The disk dies with its pod](#the-disk-dies-with-its-pod) covers.
  
  Under gVisor the container cgroup changes nothing inside the sandbox:

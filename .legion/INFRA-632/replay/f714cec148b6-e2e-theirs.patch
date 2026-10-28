@@ -1,6 +1,6 @@
 --- a/scripts/e2e/README.md
 +++ b/scripts/e2e/README.md
-@@ -1165,26 +1165,6 @@
+@@ -1165,26 +1165,6 @@ Each item below names a check, then what it does and what it requires.
    the container's PID 1 is its `legion launcher`) has the operator's `PI_CONFIG_FILES` alone;
    the overlay is mode `444`; and the image's `omp config get`, run under the agent's environment in a repository whose `.omp/config.yml` sets both, reads `compaction.remoteEndpoint` as the repository set it and `bash.autoBackground.enabled` as `false`, and with an operator overlay setting the endpoint named after the agent's overlays reads the operator's endpoint
  

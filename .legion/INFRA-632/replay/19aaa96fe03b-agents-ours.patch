@@ -1,6 +1,6 @@
 --- a/AGENTS.md
 +++ b/AGENTS.md
-@@ -610,7 +610,7 @@
+@@ -610,7 +610,7 @@ a wake while a look is open is kept for the next look);
  a defect with a clear fix goes to the controller, which gives it to the running tree whose code it is and files a Legion root only when none does, and one that needs a decision is a `dispatch ask` on the controller's report issue whose reference goes to the controller;
  either names the issue, the pull request, the merge commit, what was driven and what failed, and the `Production:` line names the message or the ask.
  Each look is bounded at 2 hours and the check at `production_check_hours` (336 by default), whose wake is the last look.

@@ -1,6 +1,6 @@
 --- a/scripts/e2e/README.md
 +++ b/scripts/e2e/README.md
-@@ -3010,6 +3010,51 @@
+@@ -3010,6 +3010,51 @@ The store, the runtime's sweep and launch, Agent Sandbox's controller, its foreg
  `controller_sweep_kind_test.go`, untagged, builds the proof's `legion.yaml` through the loader and its runtime through boot's factory and `sandbox.New` on every `go test`, so a contract change that refuses either fails CI, not the next live run.
  `CONTROLLER_SWEEP_EVIDENCE_DIR` (default a fresh `/tmp` directory, kept and printed) keeps the transcript and, on a failure, what the cluster held.
  

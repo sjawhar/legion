@@ -1,6 +1,6 @@
 --- a/scripts/e2e/README.md
 +++ b/scripts/e2e/README.md
-@@ -2205,7 +2205,7 @@
+@@ -2205,7 +2205,7 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
    `awaiting_merge` → `done` within 900 s (the daemon log's `workflow: phase changed … from=awaiting_merge to=done trigger=pull_request_merged` and, once, `workflow: a merged root closes once its last child left the workflow`;
    Dispatch `done` within 120 s), the production check opens on the merge commit at its first look, woken by the merge (`check_opened_on`:
    `looks: 1`, `lookOpen: true`, `lastWake.kind: merge`), and the close hands the implementer that look in the still-live pod.

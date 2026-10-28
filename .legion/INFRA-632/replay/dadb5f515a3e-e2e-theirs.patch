@@ -1,6 +1,6 @@
 --- a/scripts/e2e/README.md
 +++ b/scripts/e2e/README.md
-@@ -2185,7 +2185,7 @@
+@@ -2185,7 +2185,7 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
  - `children-at-the-merge`
  
    the driver files children 3 and 4 under tree 1 and sets each todo, with no `legion` label;
@@ -9,7 +9,7 @@
    They are filed after every checkpoint that judges each live claim of tree 1 (the restart and both address moves), and once child 1 is released and child 2 parked, so they raise no peak the room check sizes;
    they run beside the root, no more of tree 1's pods at once than `issue-independence`'s
  
-@@ -2198,8 +2198,7 @@
+@@ -2198,8 +2198,7 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
    the daemon records it (`legion state`: the root's `pullRequest.state` `merged` while its phase stays `awaiting_merge`) and logs `workflow: a merged root's close waits for the rest of its tree` with `waitingFor` naming both children in order;
    its architect gets one `pr-merged` notice naming the pull request and both;
    the admission slot is still the root's, no production check is open, the Dispatch board still reads `retro`, no `workflow: tree lingers` line names tree 1, and no claim of tree 1 is suspended.
@@ -19,7 +19,7 @@
    child 3's park leaves the root in `awaiting_merge`, and child 4's
    — the last member of the tree to leave — closes it, as the merge of a finished tree's root does.
    `awaiting_merge` → `done` within 900 s (the daemon log's `workflow: phase changed … from=awaiting_merge to=done trigger=pull_request_merged` and, once, `workflow: a merged root closes once its last child left the workflow`;
-@@ -2208,8 +2207,8 @@
+@@ -2208,8 +2207,8 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
    The proof sends it nothing there: the issue is closed, and a closed issue takes no Dispatch write (409 `ISSUE_CLOSED`), so the fixture's instructions say a check task waits for no targeted message and acts on the daemon's task as written
    — this proof has no production and no deploy role, so the implementer leaves `Production: pending deploy of <merge commit>` on the pull request and reports `pending` (`check_look_reported`, within 600 s of the look's start:
    `looks: 1, lookOpen: false`, the check still open); the smoke main's cleanup (`clean_smoke_main`) runs while it works.
@@ -30,7 +30,7 @@
    `legion claims list --json` then shows all six claims `suspended` (`claim_states_are`).
    The close suspends every role of tree 1, architect to merger, within 1800 s, since the daemon's suspension of a role in a turn waits for that turn to end, and a wait that runs out names each role still unsuspended with whether its suspension is held for a turn;
    tree 1's events carry its architect's `issue.claimed`, and done leaves its root issue unclaimed.
-@@ -2221,18 +2220,17 @@
+@@ -2221,18 +2220,17 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
  
    the check's bound (`production_check_hours: 0.25`, 15 minutes after the close) wakes its last look:
    `last_look_started` reads `looks: 2`, `lookOpen: true`, `lastWake.kind: bound`, `last: true` (or the check already closed by an implementer that reported it first) within 900 s of the checkpoint's start (what remains of the 15 minutes after `done`;
@@ -52,7 +52,7 @@
    then every node any pod of tree 1 ran on (read from the pod watch:
    the root's, the children's, the replacements the fence and the stream move made, the pod the production check's last look brought back) is released
    — the node is gone after the pool's consolidation, or, when another pod keeps it, Pending or Running, the node stays carrying no pod of tree 1:
-@@ -2240,31 +2238,28 @@
+@@ -2240,31 +2238,28 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
    a pod of tree 1, or of the run with no tree label other than the cache, holds the wait, one that has Succeeded or Failed counts for nothing, and a pod with no project label is no Legion pod (`node_pods_judged`, lib's `node-released.test.ts`).
    The note says which it saw where, and a timeout lists what the node still held with each pod's project and tree label.
    The linger's expiry is read from the daemon's `workflow: tree lingers … until` line for tree 1:

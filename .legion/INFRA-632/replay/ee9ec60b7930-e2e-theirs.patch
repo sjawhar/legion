@@ -1,6 +1,6 @@
 --- a/scripts/e2e/README.md
 +++ b/scripts/e2e/README.md
-@@ -137,6 +137,13 @@
+@@ -137,6 +137,13 @@ Each item below names a script, then what it proves.
    — through a PersistentVolumeClaim (read-only by default) and as an `nfs` export with `read_only: false` — reads the server's seed file through the claim, is refused a write there, and writes a file through the export that the server then holds;
    `legion start --check-config` refuses a volume naming two sources, and `legion probe-boot` mounts both shares and refuses a missing claim, a missing export and a server that never answers, each naming the volume and its share, and an image digest the registry does not have, naming the image
  
@@ -14,7 +14,7 @@
  - `merged-root-waits.sh`
  
    the daemon keeps a tree's order at the close, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own:
-@@ -3040,6 +3047,52 @@
+@@ -3040,6 +3047,52 @@ The loader, the runtime, the image probe, Agent Sandbox's pod, gVisor, the node'
  `share_volumes_kind_test.go`, untagged, builds all four files through the loader and each runtime through `sandboxOptions` and `sandbox.New` on every `go test`.
  `SHARE_VOLUMES_EVIDENCE_DIR` (default a fresh `/tmp` directory, kept and printed) keeps the transcript, the four `legion.yaml` files and the missing-image copy of the `shares` one, the issue pod's manifest and each `probe-boot`'s output.
  

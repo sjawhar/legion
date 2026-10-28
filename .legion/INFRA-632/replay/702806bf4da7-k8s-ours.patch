@@ -1,6 +1,6 @@
 --- a/docs/kubernetes.md
 +++ b/docs/kubernetes.md
-@@ -3482,9 +3482,7 @@
+@@ -3465,9 +3465,7 @@ What it may wait on instead is the predecessor's claim being *reaped*
  
  Under gVisor the container cgroup changes nothing inside the sandbox:
  `runsc` sizes the sandbox from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu limits⌉)

@@ -1,6 +1,6 @@
 --- a/AGENTS.md
 +++ b/AGENTS.md
-@@ -602,7 +602,7 @@
+@@ -602,7 +602,7 @@ The architect does nothing after the merge.
  The implementer — the agent that developed the change
  — gets a task whose first line is `Production check of <KEY>: <title>.`, reaches the deploy as the deployment instructions say (the merge commit published to the deploy role, no reply awaited), reads whether production carries the merge, and reports with `handoff_complete` and a `verdict`, no commit:
  `pass` once it drove the changed path in production and wrote the pull request's `Production:` line (naming the merge commit and what woke the look);

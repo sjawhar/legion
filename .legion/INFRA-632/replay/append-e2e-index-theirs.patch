@@ -1,6 +1,6 @@
 --- a/scripts/e2e/README.md
 +++ b/scripts/e2e/README.md
-@@ -126,6 +126,10 @@
+@@ -126,6 +126,10 @@ Each item below names a script, then what it proves.
    on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` giving the issue pod `issue: {memory: 32Gi, memory_request: 8Gi}` is admitted, scheduled and recorded `Burstable`, its `roles` container carrying exactly that request and limit, while one from a file with no `resources` block stays `Guaranteed`;
    `legion start --check-config` names the Burstable issue pod and refuses a request past its limit or that is no quantity, naming the key
  

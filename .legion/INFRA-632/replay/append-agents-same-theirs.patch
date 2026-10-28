@@ -1,6 +1,6 @@
 --- a/AGENTS.md
 +++ b/AGENTS.md
-@@ -91,6 +91,10 @@
+@@ -91,6 +91,10 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
  
    Check daemon status
  

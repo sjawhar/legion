@@ -1,6 +1,6 @@
 --- a/docs/kubernetes.md
 +++ b/docs/kubernetes.md
-@@ -310,16 +310,6 @@
+@@ -310,16 +310,6 @@ It then checks every image-site row of the capability table (`packages/daemon/in
  
  - `flock`
  

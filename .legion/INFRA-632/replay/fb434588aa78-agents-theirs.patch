@@ -1,6 +1,6 @@
 --- a/AGENTS.md
 +++ b/AGENTS.md
-@@ -632,10 +632,6 @@
+@@ -632,10 +632,6 @@ a clear defect is fixed, not asked about).
  A finding that needs a person's authority, taste or risk appetite is a Dispatch ask, and a person decides whether it needs an issue (`skills/legion-worker/references/findings.md`).
  A root in `todo` without the label is never admitted, and a root in `triage` without it never wakes the controller.
  A child needs none: it runs under its tree's architect once its root is admitted, and its architect's `release_children` records it in the tree even when Dispatch already showed it `todo`.

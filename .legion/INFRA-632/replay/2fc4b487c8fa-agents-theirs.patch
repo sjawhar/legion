@@ -1,6 +1,6 @@
 --- a/AGENTS.md
 +++ b/AGENTS.md
-@@ -146,7 +146,7 @@
+@@ -146,7 +146,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
    the daemon builds the argv, `claude -p --input-format stream-json --output-format stream-json …` with `--session-id <new id>` on a fresh launch or `--resume <id>` on a relaunch):
    turns the daemon's prompt, abort, get_state and negotiate_protocol frames into Claude Code's stream-json and its results into agent_start/agent_end, seeds a fresh session with `/rename` so its transcript exists before registration, sends pi-legion's phase-stall follow-up, takes Envoy deliveries as user turns from the unix socket it exports as LEGION_CLAUDE_INBOX, and exits with Claude Code's status
  
@@ -9,7 +9,7 @@
  
    Kubernetes runtime; daemon-spawned.
    The multi-role form is PID 1 of an issue pod's one `roles` container (`--roles-dir /var/run/legion/roles` and one `--role` per workflow role):
-@@ -155,11 +155,6 @@
+@@ -155,11 +155,6 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
    The single-role form is PID 1 of the one `controller` container of the project controller's own pod under `controller: daemon`.
    Either form authenticates to the worker stream with each role's own launcher token, bound to the pod's uid (POD_UID by default), reports the child it runs after every connection, and starts or stops that role's `legion worker-shim` process group on the daemon's command;
    each generation's boot token and launch credentials arrive in the start command and are written owner-only and exclusively into a fresh `g<generation>` directory of the role's private directory (anything already there removed without being followed) and removed when the generation ends;

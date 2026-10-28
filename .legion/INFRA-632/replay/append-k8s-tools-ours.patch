@@ -1,6 +1,6 @@
 --- a/docs/kubernetes.md
 +++ b/docs/kubernetes.md
-@@ -290,6 +290,8 @@
+@@ -290,6 +290,8 @@ It then checks every image-site row of the capability table (`packages/daemon/in
  
  - `gcc`
  

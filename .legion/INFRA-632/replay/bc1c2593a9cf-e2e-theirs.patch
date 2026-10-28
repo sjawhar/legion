@@ -1,6 +1,6 @@
 --- a/scripts/e2e/README.md
 +++ b/scripts/e2e/README.md
-@@ -984,12 +984,6 @@
+@@ -984,12 +984,6 @@ Each item below names an input and its default, then what it means.
    a port the scratch session database listens on, reachable everywhere the worker-stream port is (under `aws-private-ip`, one the devbox's security group admits from the Legion nodes;
    under `bridge`, forwarded through the same tunnel); refused when it is not a number, is the worker stream's port, or is taken
  

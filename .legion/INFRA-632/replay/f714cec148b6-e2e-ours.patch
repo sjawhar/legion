@@ -1,6 +1,6 @@
 --- a/scripts/e2e/README.md
 +++ b/scripts/e2e/README.md
-@@ -1154,11 +1154,10 @@
+@@ -1154,11 +1154,10 @@ Each item below names a check, then what it does and what it requires.
  - `pod-baseline`
  
    the stub agent the root's shim started (read from `/proc/<pid>/environ`) has `PI_CONFIG_FILES` = the pod baseline's turn-scoping overlay on the state volume, then the operator's;

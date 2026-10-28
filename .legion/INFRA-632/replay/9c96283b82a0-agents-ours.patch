@@ -1,6 +1,6 @@
 --- a/AGENTS.md
 +++ b/AGENTS.md
-@@ -517,7 +517,7 @@
+@@ -517,7 +517,7 @@ Each item below names a task and where its code is, then notes on it.
    An open pull request that added an entry under the old `## [Unreleased]` heading (now `## Before changelog fragments`) moves the entry into a fragment the next time it merges main
  
  - **Deploys come only from main** — everything a deployment runs is built from a commit on `main`:

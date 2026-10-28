@@ -1,6 +1,6 @@
 --- a/scripts/e2e/README.md
 +++ b/scripts/e2e/README.md
-@@ -147,6 +147,16 @@
+@@ -147,6 +147,16 @@ Each item below names a script, then what it proves.
    a pull request GitHub reports opened from the waiting root's branch leaves the merged one the root waits on recorded;
    and the child's own merge closes it and the root behind it, with the tree suspended, the slot freed and the root's production check open on the root's merged pull request
  

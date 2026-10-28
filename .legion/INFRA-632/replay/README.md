@@ -9,7 +9,7 @@ TMPDIR=/some/scratch bash .legion/INFRA-632/replay/run.sh [repo root]
 ```
 
 The repo root defaults to the checkout holding the script.
-`run.sh` reads the three files from commit `94850c01741e` (`REPLAY_BASE` overrides it), this pull request's head commit of the three guides, and commits them as the base of a throwaway repository under `${TMPDIR:-/tmp}/replay-$$`.
+`run.sh` reads the three files from commit `6b75da30384d` (`REPLAY_BASE` overrides it), this pull request's regeneration of main `a409c128`'s three guides, and commits them as the base of a throwaway repository under `${TMPDIR:-/tmp}/replay-$$`.
 It checks each patch with `git apply --check`, applies it on a branch of its own, and runs `bun scripts/semantic-line-breaks.ts` on every file the patch changes, so each patched file is proved to keep the layout.
 Then it merges each pair.
 For each pair it prints a classification line, computed from the two patches' hunks, then one line: merge, file, class, expected, observed, PASS or FAIL.
@@ -38,7 +38,9 @@ So a new item added directly after an item the other side edits merges clean (`9
 
 ## How each side was ported
 
-Each patch applies to the head file, commit `94850c01741e`, and only to it; "the head" below means that commit.
+Each patch applies to the head file, commit `6b75da30384d`, and only to it; "the head" below means that commit.
+The patches were first written against commit `94850c01741e` (the regeneration of main `690c0136`) and moved to `6b75da30384d` by applying each one there and taking `git diff` again, which changes only their line numbers; the control `e0ab76dcd45f` was ported again by hand, since its sentences were inside a raw HTML block that the earlier regeneration kept as written.
+The line numbers in the table and the pair notes below are those of commit `94850c01741e`; `run.sh` prints each pair's lines at the current base.
 A patch carries the side's sentence-level change of the pair's layout-caused hunks, one sentence per line, and nothing else of the side.
 A SAME-SENTENCE hunk of a mixed merge is left out.
 

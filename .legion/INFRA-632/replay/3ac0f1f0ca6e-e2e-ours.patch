@@ -1,6 +1,6 @@
 --- a/scripts/e2e/README.md
 +++ b/scripts/e2e/README.md
-@@ -760,7 +760,7 @@
+@@ -760,7 +760,7 @@ The daemon is started with the real `gh`, `jj`, `tmux` and `bun` that `mise whic
  the run's own `HOME` hides mise's global config from the box's shims, where a pane's `jj` shim hands the call back to itself, exit 127), so all four must be pinned in mise.
  `LEGION_CLAUDE_PATH` is set to the `claude` on the operator's `PATH`, `LEGION_BUN_PATH` to that real `bun`, and `LEGION_CLAUDE_PLUGIN_DIR` to the run's own copy of the claude-envoy plugin, which it builds from this checkout into its work directory (`packages/claude-envoy/scripts/build.ts --out`), with `dist/envoy-channel.js` and `legion/` fresh.
  Legion's role Apps resolve as Stage 3's do:
@@ -9,7 +9,7 @@
  its first read waits for a person's grant), and `prerequisites` proves each key is its id's App ([`read_app_logins`](#libworkflowsh)) before the run's first write.
  The proof human is the devbox's ordinary `gh` acting as `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh)), so the run starts from the operator's own Oh My Pi session.
  The `EXIT` trap stops every process and container, copies every Oh My Pi session and Claude Code transcript into the evidence directory's `transcripts/`, closes any pull request of the run's project, and deletes the issue's branch on the smoke repository.
-@@ -4141,16 +4141,17 @@
+@@ -4141,16 +4141,17 @@ Each App is an id and a secret-store key name, which two optional operator input
  | input | what it names |
  | :--- | :--- |
  | `LEGION_E2E_IMPLEMENT_APP_ID`, `LEGION_E2E_REVIEW_APP_ID` | the App's numeric id |

@@ -1,6 +1,6 @@
 --- a/AGENTS.md
 +++ b/AGENTS.md
-@@ -494,7 +494,7 @@
+@@ -494,7 +494,7 @@ Each item below names a task and where its code is, then notes on it.
  - **Tests** — co-located `__tests__/` dirs, Bun test runner (`bun:test`)
  
  - **Release jobs keep credentials away from dependency code**

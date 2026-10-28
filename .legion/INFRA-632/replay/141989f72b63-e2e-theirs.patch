@@ -1,6 +1,6 @@
 --- a/scripts/e2e/README.md
 +++ b/scripts/e2e/README.md
-@@ -1467,6 +1467,23 @@
+@@ -1467,6 +1467,23 @@ What the run had to learn about GKE (`LEGION_E2E_RUNTIME_IDENTITY_KIND=kubernete
  
  - **This cluster's `autopilot-default-resources-mutator` admission webhook adjusts the bridge pod's cpu on create**, and bringing up the fresh Node-Auto-Provisioned node it needs can take close to the original 120s `Ready` wait budget; raised to 240s.
  

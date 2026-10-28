@@ -1,6 +1,6 @@
 --- a/scripts/e2e/README.md
 +++ b/scripts/e2e/README.md
-@@ -723,6 +723,10 @@
+@@ -723,6 +723,10 @@ The checks:
    no other word of the command line counts, the pane's system prompt (past 64 KB, with newlines) included, and no pipe can end early on it.
    A failure prints the claude's ancestry.
  

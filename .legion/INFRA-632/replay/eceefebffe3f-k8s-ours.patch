@@ -1,6 +1,6 @@
 --- a/docs/kubernetes.md
 +++ b/docs/kubernetes.md
-@@ -649,7 +649,7 @@
+@@ -649,7 +649,7 @@ Nothing in either plugin reads the two variables, and neither needs any other ch
  
  ### Selecting the store
  

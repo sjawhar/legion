@@ -1,6 +1,6 @@
 --- a/docs/kubernetes.md
 +++ b/docs/kubernetes.md
-@@ -1919,6 +1919,17 @@
+@@ -1920,6 +1920,17 @@ A volume may also be an existing network share: [Network shares](#network-shares
  the Hawk model gateway, keyed by a projected ServiceAccount token, with a `models.yml`, a settings overlay, and the pod that mounts them;
  the operator keeps their own copies of the two files in a directory of their own ([Operator configuration](#operator-configuration)), and the Stage 4a and 4b proofs run on the example, each with its own copy of its ConfigMap.
  

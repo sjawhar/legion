@@ -5,8 +5,8 @@
 #   bash .legion/INFRA-632/replay/run.sh [repo root]
 #
 # The repo root defaults to the checkout this script sits in (three directories above it). The
-# three files are read from its git history at REPLAY_BASE (default 94850c01, this pull request's
-# head commit of the three guides, which the patches were written against), committed as the base
+# three files are read from its git history at REPLAY_BASE (default 6b75da30, this pull request's
+# regeneration of main a409c128's three guides, which the patches apply to), committed as the base
 # of a throwaway repository under ${TMPDIR:-/tmp}/replay-$$ (set TMPDIR to keep it off /tmp), and
 # each patch beside this script is checked with `git apply --check` and applied on a branch of its
 # own from that base, where every file it changes must pass `bun scripts/semantic-line-breaks.ts`.
@@ -18,7 +18,7 @@ set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 root=$(cd -- "${1:-$here/../../..}" && pwd)
-pin=${REPLAY_BASE:-94850c01741e627df6663bce5a0e390aa0fa00da}
+pin=${REPLAY_BASE:-6b75da30384d98265811c5d48b3f6d824ce1dff9}
 agents=AGENTS.md
 e2e=scripts/e2e/README.md
 k8s=docs/kubernetes.md

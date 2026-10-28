@@ -1,6 +1,6 @@
 --- a/AGENTS.md
 +++ b/AGENTS.md
-@@ -302,11 +302,10 @@
+@@ -302,11 +302,10 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
    `STAGE3_PRODUCTION_ENVOY_URL=http://<host>.<tailnet>.ts.net:9020` instead of the default http://127.0.0.1:9020, for a devbox with no standing local port-forward to the production Envoy listener's API;
    the four `LEGION_E2E_*_APP_*` inputs name another deployment's two role Apps, this deployment's own by default, and the live proofs that drive the real Apps (this one, stage3-4b13b-acceptance.sh, claude-backend-tmux.sh, stage4b-sandbox-tree.sh, and stage4a-sandbox-runtime.sh for the implement App alone) prove each key is its id's App against GitHub's GET /app, with the write permission its role needs, before the run's first write (scripts/e2e/README.md, "lib/github-apps.sh")
  

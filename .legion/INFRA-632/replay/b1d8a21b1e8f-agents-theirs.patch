@@ -1,6 +1,6 @@
 --- a/AGENTS.md
 +++ b/AGENTS.md
-@@ -13,7 +13,7 @@
+@@ -13,7 +13,7 @@ Add a new item next to the item it belongs with, never at the end of a list unle
  Legion's issue lifecycle lives entirely on native Dispatch (triage → done); the daemon never creates, reads, or writes a GitHub issue.
  It derives role and gate state from Dispatch issue events plus GitHub PR/CI artifacts, records root-process session locators, and publishes only the verdict changes each role needs.
  The daemon (`packages/daemon`, Go) runs every root architect and phase worker as a headless `omp --mode rpc` process bridged through `legion worker-shim`:
@@ -9,7 +9,7 @@
  `scripts/e2e/stage4a-sandbox-runtime.sh` is that runtime's live proof).
  Under `runtime: tmux`, a phase worker whose role `legion.yaml`'s `worker_backends` puts on `claude` runs Claude Code in Oh My Pi's place:
  the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's Oh My Pi RPC frames on one side and Claude Code's stream-json on the other (`packages/daemon/internal/claudebridge`), with `packages/claude-envoy` as the pane's MCP server and plugins.
-@@ -146,15 +146,11 @@
+@@ -146,15 +146,11 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
    the daemon builds the argv, `claude -p --input-format stream-json --output-format stream-json …` with `--session-id <new id>` on a fresh launch or `--resume <id>` on a relaunch):
    turns the daemon's prompt, abort, get_state and negotiate_protocol frames into Claude Code's stream-json and its results into agent_start/agent_end, seeds a fresh session with `/rename` so its transcript exists before registration, sends pi-legion's phase-stall follow-up, takes Envoy deliveries as user turns from the unix socket it exports as LEGION_CLAUDE_INBOX, and exits with Claude Code's status
  
@@ -29,7 +29,7 @@
    the three session flags name the Cloud SQL database every generation keeps its Oh My Pi session in
    — the instance's connection name, the database in it, and the IAM login the pod signs in as
    — and the runtime passes them only under `runtime.kubernetes.session_store: cloudsql-iam` (none under the other stores, and a database named in part is refused before the launcher connects):
-@@ -289,16 +285,13 @@
+@@ -289,16 +285,13 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
  
    Stage 2's live proof, devbox only: real Oh My Pi panes with the branch's two plugins (pi-envoy and pi-legion) under the Go daemon's private tmux server, against a real Envoy listener and NATS
    — register, role claim, delivery once, resume, suspend, the registration deadline, re-adoption across a restart, the orphan sweep, the gate's refusal of pi-legion without pi-envoy;
@@ -47,7 +47,7 @@
    `STAGE3_PRODUCTION_ENVOY_URL=http://<host>.<tailnet>.ts.net:9020` instead of the default http://127.0.0.1:9020, for a devbox with no standing local port-forward to the production Envoy listener's API;
    the four `LEGION_E2E_*_APP_*` inputs name another deployment's two role Apps, this deployment's own by default, and the live proofs that drive the real Apps (this one, stage3-4b13b-acceptance.sh, claude-backend-tmux.sh, stage4b-sandbox-tree.sh, and stage4a-sandbox-runtime.sh for the implement App alone) prove each key is its id's App against GitHub's GET /app, with the write permission its role needs, before the run's first write (scripts/e2e/README.md, "lib/github-apps.sh")
  
-@@ -308,7 +301,7 @@
+@@ -308,7 +301,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
    an implementer `worker_backends` puts on claude registers its transcript, completes its phase through the `legion` MCP tool's handoff_complete with a pushed handoff commit, and resumes the same Claude Code session after its pane is killed;
    LEGION_E2E_MODEL_ROUTE=key-file `LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file>` instead, for a devbox with no Hawk gateway, where that one key file serves the Claude Code pane too (scripts/e2e/README.md)
  

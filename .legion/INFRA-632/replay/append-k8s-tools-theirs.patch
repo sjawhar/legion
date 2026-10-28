@@ -1,6 +1,6 @@
 --- a/docs/kubernetes.md
 +++ b/docs/kubernetes.md
-@@ -306,6 +306,8 @@
+@@ -306,6 +306,8 @@ It then checks every image-site row of the capability table (`packages/daemon/in
  
  - `jq`
  

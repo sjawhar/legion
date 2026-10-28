@@ -1,6 +1,6 @@
 --- a/scripts/e2e/README.md
 +++ b/scripts/e2e/README.md
-@@ -147,6 +147,16 @@
+@@ -147,6 +147,16 @@ Each item below names a script, then what it proves.
    a pull request GitHub reports opened from the waiting root's branch leaves the merged one the root waits on recorded;
    and the child's own merge closes it and the root behind it, with the tree suspended, the slot freed and the root's production check open on the root's merged pull request
  
@@ -17,7 +17,7 @@
  - `dispatch-claimant-delivery.sh`
  
    Dispatch's outbox delivers a person's answer, comment or untargeted message on an issue a session has claimed to that session's own `notifications.agent.<session>`, driven over HTTP through the real `envoy-dispatch` against a loopback PostgreSQL the caller names and a NATS of the run's own:
-@@ -3085,6 +3095,58 @@
+@@ -3085,6 +3095,58 @@ The records that put the tree at each step are seeded through the store, as ever
  The configuration load, the store and its migrations, the HTTP API, the claim supervision, `openWorkflow`, the JetStream consumers and the outbox lanes are the real ones.
  `MERGED_ROOT_WAITS_EVIDENCE_DIR` (default a fresh directory under `TMPDIR`, kept and printed) keeps the transcript, the `nats-server`'s log and the daemon's own, which the driver writes through `LEGION_E2E_DAEMON_LOG`.
  

@@ -1,6 +1,6 @@
 --- a/AGENTS.md
 +++ b/AGENTS.md
-@@ -606,9 +606,7 @@
+@@ -606,9 +606,7 @@ The implementer — the agent that developed the change
  when the project's `projects.<KEY>.deploys` names the repository's deploy workflow and step, at each completed run of that workflow on the default branch whose step succeeded after the merge, once per such job, read from GitHub as the implement App on the run's `workflow_run` webhook through Envoy, the task naming `the deploy workflow's run: <repo> <workflow> run <id> attempt <n>, job <job name>: <step> succeeded at <time>`, and never for a pull-request run, a skipped or failed step, or a step that finished before the merge;
  or, for `sjawhar/legion`, on a Legion daemon's boot on a build containing the merge or Dispatch's announcement that every server process serves a build containing the merge;
  a wake while a look is open is kept for the next look);
