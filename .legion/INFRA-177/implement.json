@@ -2,15 +2,15 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-177",
-  "completed": "2026-10-28T16:00:05Z",
+  "completed": "2026-10-28T17:29:45Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2354",
   "proof": [
     {
       "criterion": "A9 / round 2: under the records' daemon the import does not push a held, merging or awaiting_merge branch, and re-reads the phase before each removal",
       "surface": "legion handoffs import (handoffimport.Run) against the GitHub REST and Dispatch stand-ins",
       "command": "cd packages/daemon && go test -count=1 -p 1 ./internal/handoffimport/",
-      "observed": "package ok at e99901ae",
-      "headSha": "e99901ae5857f15f52c095429967636c7cd841e0",
+      "observed": "package ok at 3f65b850",
+      "headSha": "3f65b850a148039e07982234a67d2af9273174e8",
       "negativeControl": "with 4dbcd232's handoffimport.go: the held branch LEG-2 moved (c0005 -> c0021) and TestThePhaseIsReadAgainBeforeTheRemoval failed; with the merging guard removed, the merging branch LEG-3 was moved"
     },
     {
@@ -25,8 +25,8 @@
       "criterion": "A6: a 40 KB handoff writes and reads back; two writes give versions 1 and 2",
       "surface": "the real `dispatch` CLI against the real Dispatch server, in scripts/e2e/handoff-records.sh",
       "command": "source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_m9?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh",
-      "observed": "all checks ok at e99901ae, PASS in 58s (evidence /legion/scratch/tmp/legion-e2e-handoff-records-evidence.UjcuRi2J)",
-      "headSha": "e99901ae5857f15f52c095429967636c7cd841e0",
+      "observed": "all checks ok at 3f65b850 (contract 42), PASS in 66s (evidence /legion/scratch/tmp/legion-e2e-handoff-records-evidence.aY3rdmv3)",
+      "headSha": "3f65b850a148039e07982234a67d2af9273174e8",
       "negativeControl": "a 262145-byte body: the CLI refuses it before sending, and a raw POST is answered 413 CAP_EXCEEDED"
     },
     {
@@ -57,8 +57,8 @@
       "criterion": "A1: a handoff shows in Conversation as one entry with its fields",
       "surface": "the Dispatch dashboard in Chromium against the real Go server (packages/dispatch/e2e/handoffs.e2e.ts)",
       "command": "bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/dispatch_e2e?sslmode=disable' e2e/handoffs.e2e.ts (runs bun e2e/run.ts -- bunx playwright test …)",
-      "observed": "2 passed at e99901ae",
-      "headSha": "e99901ae5857f15f52c095429967636c7cd841e0",
+      "observed": "2 passed at 3f65b850 (the handoff refresh now in event-refresh.ts)",
+      "headSha": "3f65b850a148039e07982234a67d2af9273174e8",
       "negativeControl": "the build of 8a4d97bf (the Activity commit, before the Conversation change): the Conversation test fails (Expected 2, Received 0 cards) and the Activity test passes"
     },
     {
@@ -111,7 +111,7 @@
     "Pod-only failures, which also fail on main in this pod: Docker testcontainers tests; TestTmuxBootRewritesEveryOlderClonesCredentialHelper; TestATerminalAttempt* (gVisor); the two launcher resume tests; TestNewRefusesLaunchersItCannotRun; the pi-legion judge-omp rig tests; claude-envoy's queryTmux timing flake; and, since main 448a4100, scripts/e2e/merged-root-waits.sh and the 8 check_wake_test.go wake tests. Those two clone acme/widgets from GitHub; filed by the controller as dispatch://INFRA-623.",
     "The harness's shared legion_test and dispatch_test databases were recreated after the renumbering. A database migrated by an earlier head holds the old numbers, so use a fresh one.",
     "Since main #2229 the Dispatch browser suite runs through e2e/run.ts (held ports); /legion/harness/dispatch-e2e.sh does that now.",
-    "Numbers at e99901ae: contract 41, daemon migration 0062_handoff_records, Dispatch migration 0136_handoffs; fresh databases legion_m9/dispatch_m9 exist. Since main #2423 the PR must not change packages/claude-envoy/dist or legion; check with bun run verify-build."
+    "Numbers at 3f65b850: contract 42 (main took 41), daemon migration 0062_handoff_records, Dispatch migration 0136_handoffs. The PR must not change packages/claude-envoy/dist or legion (main #2423)."
   ],
   "deviations": [
     "Spec departures 1-6 as the plan lists, accepted by the INFRA-138 architect (dispatch://INFRA-177/comment/e88a7bb0-a734-4f85-9108-d72280951be6).",
@@ -122,9 +122,11 @@
     "Main's #2287 (an approval stands across handoff-only commits) extended the machinery this issue removes. In the merge, its classification and carry code, its approval-carry pass and its fixtures were dropped. Kept: its CI flag change, and its round-ends-on-the-approved-head case as an adapted test."
   ],
   "openQuestions": [],
-  "round": 10,
+  "round": 11,
   "mergeRound": [
-    "Review round 7's one finding is fixed in abdef8d9: packages/claude-envoy/.changes/unreleased/pr2354-Changed-20261028-103904.yaml no longer says dist/ and legion/ were regenerated or to install with a legion built from the same commit. It now says main's Rebuild Claude Envoy plugin workflow builds them from this commit's source after the merge, that until then the committed contract-40 build is refused at registration by a contract-41 daemon, and to install from main once the rebuild commit is there. changie batch --dry-run renders it; no Dispatch key. Thread PRRT_kwDORFy7ds6xNFYH answered and resolved.",
-    "abdef8d9 differs from code head e99901ae only by that fragment (jj diff --from e99901ae --to abdef8d9 lists .legion/ files and the fragment), so the proofs at e99901ae stand for it. gh: #2354 MERGEABLE at abdef8d9."
+    "Approved at 4e30df54; GitHub reported #2354 CONFLICTING. Forward merge 3f65b850 with main 53f39ba0 (7 commits).",
+    "Main took DaemonAPIVersion 41 (#2300, the controller start command): this PR's handoff-record contract is now 42 (version.go with main's 41 note kept, both legion.daemonApiVersion pins, fixtures/daemon-api/version.json, docs/kubernetes.md, pi-legion/AGENTS.md, the pr2354 fragments). Daemon migration 0062 and Dispatch 0136 unchanged.",
+    "This PR's own code changed only by that renumber and by moving the Dispatch web handoff.recorded refresh rule from api/sse.ts into main's new api/event-refresh.ts (#2324), same behaviour, pinned in main's new sse.test.ts style. Route-count test 145 (main 141 + 4). claude-envoy/dist and legion equal main's.",
+    "gh: #2354 MERGEABLE at 3f65b850. Fingerprint ec24fe14… → 66ef5deb… (changed), posted on the PR."
   ]
 }
