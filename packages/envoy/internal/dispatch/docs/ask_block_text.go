@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -9,6 +10,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/provider/websocket"
 
@@ -63,8 +65,14 @@ func (s *Service) SetAskBlockText(
 	edit AskBlockEdit,
 	actor model.Actor,
 ) (AskBlockText, error) {
+	// The ask row is read before the live document, so its options are the ones the caller's
+	// row holds: an options edit of a two-list ask must not delete a list the row never held.
+	rowLabels, err := s.askRowLabels(ctx, artifactID, blockID)
+	if err != nil {
+		return AskBlockText{}, err
+	}
 	var stored *AskBlockText
-	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
+	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		tree, err := startTree(current, doc)
 		if err != nil {
 			return err
@@ -75,7 +83,7 @@ func (s *Service) SetAskBlockText(
 		}
 		// The content rule is decided once, before the edit is built: askBlockChildren then
 		// yields the question's paragraphs and at most one list, which keeps the rule.
-		if err := refuseAskContentEdit(block.node, edit); err != nil {
+		if err := refuseAskContentEdit(block, rowLabels, edit); err != nil {
 			return err
 		}
 		want := AskBlockText{
@@ -486,7 +494,32 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 	return normalized
 }
 
-// refuseAskContentEdit refuses edit of ask, an ask block breaking its content rule
+// askRowLabels is the option labels of the ask row anchored to blockID of artifactID, trimmed as
+// normalizeAskOptions trims them; none when no row is anchored there.
+func (s *Service) askRowLabels(ctx context.Context, artifactID, blockID string) ([]string, error) {
+	var encoded []byte
+	err := s.queryFrom(ctx).QueryRow(ctx, `
+		select a.options from asks a
+		where a.block_artifact_id = $1 and block_id_key(a.block_id) = block_id_key($2) and a.block_id = $2
+	`, artifactID, blockID).Scan(&encoded)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read ask row options: %w", err)
+	}
+	var options []model.AskOption
+	if err := json.Unmarshal(encoded, &options); err != nil {
+		return nil, fmt.Errorf("decode ask row options: %w", err)
+	}
+	labels := make([]string, 0, len(options))
+	for _, option := range normalizeAskOptions(options) {
+		labels = append(labels, option.Label)
+	}
+	return labels, nil
+}
+
+// refuseAskContentEdit refuses edit of block, an ask block breaking its content rule
 // (pmdoc.AskContentError), which settlement marks `invalid` (readAskBlockStrictly). askBlockOf
 // reads such an ask leniently, joining every paragraph into its question and every list into its
 // options, where the browser's card reads its question from the first child and its options from
@@ -496,26 +529,67 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 // body would move that block's text into the question or delete it, and the caller, reading the
 // row, cannot know it is there. A document edit moves or deletes it. An ask holding only
 // paragraphs and then two or more lists is refused unless the edit sends options, which rebuilds
-// them as one list and so repairs the ask.
-func refuseAskContentEdit(ask *pmdoc.Node, edit AskBlockEdit) error {
-	broken := pmdoc.AskContentError(ask)
+// them as one list and so repairs the ask. Settlement keeps such an ask's row (rowLabels) as it
+// was before the break, so a caller building options from the row would delete the options a
+// collaborator's list added: the edit is refused unless its options keep, by label, every option
+// the block holds and the row does not.
+func refuseAskContentEdit(block askBlock, rowLabels []string, edit AskBlockEdit) error {
+	broken := pmdoc.AskContentError(block.node)
 	if broken == nil {
 		return nil
 	}
-	if after, found := textAfterOptions(ask); found {
+	if after, found := textAfterOptions(block.node); found {
 		return &ErrAskBlockUnrepresentable{
 			Field: "block",
 			Reason: broken.Error() + "; the ask-edit route will not move " + after +
 				" into the question nor delete it: move it above the options or delete it with a document edit (dispatch doc-edit), then edit the ask",
 		}
 	}
-	if edit.Options != nil {
+	protected := []string{}
+	for _, option := range normalizeAskOptions(block.options) {
+		if !slices.Contains(rowLabels, option.Label) && !slices.Contains(protected, option.Label) {
+			protected = append(protected, option.Label)
+		}
+	}
+	if edit.Options == nil {
+		reason := broken.Error() + "; send options to rebuild the options as one list"
+		if len(protected) > 0 {
+			reason += ", keeping " + quotedLabels(protected) + ", which the decision holds but its ask does not"
+		}
+		return &ErrAskBlockUnrepresentable{Field: "block", Reason: reason}
+	}
+	sent := []string{}
+	for _, option := range normalizeAskOptions(*edit.Options) {
+		sent = append(sent, option.Label)
+	}
+	missing := slices.DeleteFunc(protected, func(label string) bool { return slices.Contains(sent, label) })
+	if len(missing) == 0 {
 		return nil
 	}
 	return &ErrAskBlockUnrepresentable{
-		Field:  "block",
-		Reason: broken.Error() + "; send options to rebuild the options as one list",
+		Field: "block",
+		Reason: broken.Error() + "; the edit leaves out " + quotedLabels(missing) +
+			", which the decision holds but its ask does not: send them with the options to rebuild one list",
 	}
+}
+
+// quotedRunes is how much of a block's text a refusal quotes before cutting it short.
+const quotedRunes = 80
+
+// quotedLabels quotes labels, cut short once together they run past quotedRunes.
+func quotedLabels(labels []string) string {
+	parts := make([]string, 0, len(labels))
+	room := quotedRunes
+	for _, label := range labels {
+		text := []rune(label)
+		if len(text) > room {
+			parts = append(parts, fmt.Sprintf("%q", strings.TrimRight(string(text[:room]), " ")+"…"))
+			break
+		}
+		room -= len(text)
+		parts = append(parts, fmt.Sprintf("%q", label))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // textAfterOptions names the blocks ask holds after its first bullet list that are not lists -
@@ -542,10 +616,9 @@ func textAfterOptions(ask *pmdoc.Node) (string, bool) {
 	if len(parts) == 0 {
 		return "the empty paragraph after the options", true
 	}
-	const quoted = 80
 	text := []rune(strings.Join(parts, " "))
-	if len(text) > quoted {
-		return fmt.Sprintf("%q", strings.TrimRight(string(text[:quoted]), " ")+"…"), true
+	if len(text) > quotedRunes {
+		return fmt.Sprintf("%q", strings.TrimRight(string(text[:quotedRunes]), " ")+"…"), true
 	}
 	return fmt.Sprintf("%q", string(text)), true
 }

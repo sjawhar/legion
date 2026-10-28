@@ -686,6 +686,77 @@ func TestSetAskBlockTextRepairsATwoListAskWhenSentEveryOptionItHolds(t *testing.
 	}
 }
 
+// A two-list ask keeps its row as it was before the second list came: the row holds Ship and
+// Hold, the block holds those and a second list with Defer. A caller building options from the
+// row would delete Defer, which a collaborator wrote and the row never held, so an edit sending
+// options that leave out an option only the block holds is refused, quoting it, and writes
+// nothing. Sending every such option rebuilds the lists as one, which repairs the ask.
+func TestSetAskBlockTextRefusesOptionsDeletingAListTheAskRowNeverHeld(t *testing.T) {
+	seedTwoLists := func(t *testing.T) (*Service, string) {
+		t.Helper()
+		service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+		editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, "- Defer: Wait a week\n")))
+		settleCurrentGeneration(t, service, artifactID)
+		assertShipAskRow(t, service, artifactID, "ask-lists")
+		return service, artifactID
+	}
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	ship := model.AskOption{Label: "Ship", Description: "Release it"}
+	hold := model.AskOption{Label: "Hold", Description: "Wait for review"}
+
+	for name, options := range map[string][]model.AskOption{
+		"the row's options":            {ship, hold},
+		"the row's options and a new":  {ship, hold, {Label: "Later"}},
+		"no options":                   {},
+		"a new option and none it had": {{Label: "Later"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			service, artifactID := seedTwoLists(t)
+			before := liveTree(t, service, artifactID)
+			err := joinedWrite(service, func(ctx context.Context) error {
+				_, err := service.SetAskBlockText(ctx, artifactID, "ask-lists", AskBlockEdit{Options: &options}, alice)
+				return err
+			})
+			var unrepresentable *ErrAskBlockUnrepresentable
+			if !errors.As(err, &unrepresentable) || unrepresentable.Field != "block" ||
+				!strings.Contains(err.Error(), "paragraph+ bullet_list?") ||
+				!strings.Contains(err.Error(), `the edit leaves out "Defer", which the decision holds but its ask does not`) {
+				t.Fatalf("%s sent to a two-list ask: err = %v, want ErrAskBlockUnrepresentable quoting Defer", name, err)
+			}
+			if after := liveTree(t, service, artifactID); !after.EqualWithBlockIDs(before) {
+				t.Fatalf("the refused edit changed the block")
+			}
+			assertShipAskRow(t, service, artifactID, "ask-lists")
+		})
+	}
+
+	service, artifactID := seedTwoLists(t)
+
+	// An edit sending no options is refused as before, and its hint names Defer.
+	err := joinedWrite(service, func(ctx context.Context) error {
+		_, err := service.SetAskBlockText(ctx, artifactID, "ask-lists", AskBlockEdit{Urgency: new("high")}, alice)
+		return err
+	})
+	if err == nil || !strings.Contains(err.Error(), "send options to rebuild the options as one list") || !strings.Contains(err.Error(), `"Defer"`) {
+		t.Fatalf("urgency edit of a two-list ask: err = %v, want the refusal naming Defer", err)
+	}
+
+	// Descriptions may change: the decision is judged by label.
+	sent := []model.AskOption{ship, hold, {Label: "Defer", Description: "Wait a month"}}
+	err = joinedWrite(service, func(ctx context.Context) error {
+		_, err := service.SetAskBlockText(ctx, artifactID, "ask-lists", AskBlockEdit{Options: &sent}, alice)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("edit sending every option only the block holds: %v", err)
+	}
+	if lists := countChildren(firstAsk(liveTree(t, service, artifactID)), "bullet_list"); lists != 1 {
+		t.Fatalf("repaired ask holds %d bullet lists, want 1", lists)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", sent)
+}
+
 // A decided ask given a second list is marked invalid and keeps its decided row; once the second
 // list is gone, settlement clears invalid and the block carries its decided wording again.
 func TestSettlementMarksADecidedAskWithASecondBulletListInvalid(t *testing.T) {
