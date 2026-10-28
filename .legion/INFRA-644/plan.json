@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-644",
+  "completed": "2026-10-28T19:03:05Z",
+  "plan": "dispatch://INFRA-644/artifact/plan-md",
+  "summary": "DR-02: the replica learns which top-level blocks each update touched through two upstream-parity ygo fork accessors (Transaction.ChangedTypes, Parent on every shared type), renders only those blocks in their whole-render context and splices them, with guards G0-G8 and today's whole render as the fallback; ask ids from the ask-holding blocks only. W13: start(base) takes the load's rendering through a weak pointer (no resident memory); the base encode and decode stay. Three #2453 review cleanups. One pull request with a gate per part; W13 leaves it and is written up on INFRA-512 if its gate fails.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: proof, pull-request body and simplify-pass rules; references/tools.md for Postgres 17, pprof and the load test's runners",
+      "ce-simplify-code: the simplify pass the pull-request body records",
+      "dispatch: uploading the ygo patch as an INFRA-644 artifact, and the INFRA-512 write-up if W13's gate fails",
+      "envoy: the tag request to the ygo releasing session 01a16640-8259-71ed-bb68-1e4927b77a01 and the note to INFRA-514's architect"
+    ],
+    "test": [
+      "legion-worker: the tester re-runs A1-A5 and one run per side of A6's 1x step, recording proofs in its format"
+    ],
+    "review": [
+      "legion-worker: merge gate; checks A6/A7's gates were written before the head runs and that S2's decision is recorded before approval"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "One pull request is held to two gates; the replay cannot see DR-02 and may only show its added cost.", "answer": "One pull request, a gate per part: DR-02 on the editor load test (A6), W13 on the replay (A7); the replay's 3+3 also requires observe's share not to rise. If W13 fails, its code leaves the pull request and is written up on INFRA-512 (task 9); DR-02 and cleanups do not wait."},
+      {"finding": "DR-02's measurement, metric and expected gain were undefined; the draft's profile arithmetic was wrong (read is 51% of renderDocumentForUpdate, not 43%).", "answer": "A6 fixes the pprof command (observe cum line), normalises per acknowledged update and per unit of work, writes E = 0.9 x base observe share and the gate (share falls by >= E/2) before the head runs; plan section 1 corrected to 13.43 of 26.10 s."},
+      {"finding": "W13's gain depends on an unknown weak-pointer hit rate; the 2.2% predates INFRA-643; the changed functions must include the layout cost added to the load.", "answer": "A7: a counter run first gives h; G = start share x 0.55 x h written before the head runs; the gated share is start + onLoadDocument."},
+      {"finding": "Exactness holes: outside-schema documents, types without a resolvable parent, list-marker chain through empty paragraphs, the document-level blank-empty-code flag, the renderer reading its own buffer, footnote labels as resident maps.", "answer": "G0 requires markdown != nil (outside-schema keeps today's WARN and changed=true); G1 falls back when a parent chain cannot be resolved; G5 forbids lists and empty-paragraph status changes; G7 checks both flags; block k renders on a buffer pre-filled with markdown[:start(k)]; labels are re-derived from flagged blocks, none kept."},
+      {"finding": "A Yjs-wide ask walk on every changed keystroke allocates in proportion to the document.", "answer": "Ask ids are the union of askBlockIDs over reads of only the blocks the layout flags as holding an ask (D2), equal to the whole walk because the doc node is never an ask."},
+      {"finding": "The departures need decisions before merge, not notes.", "answer": "S1-S3 go to the architect in the completion report; S2 is named as the Behaviour clause's decision for Sami before merge."},
+      {"finding": "The ygo release base and order are unsettled; sami.5-7 change core crdt files; a tag on sami.7 would carry other trees' changes onto main.", "answer": "D1: patch on the newest tag; this pull request lands after #2444 (which pins sami.7) and never carries sami.5-7 by itself; else the architect decides with INFRA-514's architect. The fork contract test checks every changed top-level child is reached. The no-fork routes ruled out are listed."},
+      {"finding": "DR-02's base build and the threshold for 'far less than once per keystroke' are open; the editor workload is the best case.", "answer": "A6 names both sides (fork point and head, each merged with the same legion/INFRA-605 commit, same conflict resolution attached, same ygo but the patch); counter threshold whole renders <= 5% of browser updates; A2 asserts observerRendered <= Enter presses + block inserts/deletes + 1 on a typing script with Enter."},
+      {"finding": "Hidden requirements: exact renderPaths assertions in render_reuse_test.go, re-registering the observer per start, AGENTS.md text, the changie fragment, telling INFRA-514's architect at READY.", "answer": "D3 keeps observerRendered's meaning and adds counters with the sum updated; OnAfterTransaction registered in every start; task 8 lists AGENTS.md:323-330, 546-606, 788-822 and the changie fragment; section 6 gives the READY note to the merger."},
+      {"finding": "#2445 may change the load render that W13 relies on.", "answer": "Read #2445's diff: a cold socket's load reuses its admission's tree (roomLoad.takeLoaded) and skips the hook's render; D4 and section 6 require #2445 to carry markdown and layout on roomLoad after this merges."},
+      {"finding": "Unverified claims: timings, sami.5-7 tags, #2444's pin, #2445's tree.go edits, the releasing session's liveness.", "answer": "Verified: the planner's benchmark ran on LINUX-129 (numbers in section 1); gh api lists tags sami.5-7; #2444's diff pins sami.7; #2445's diff adds recordVerdict in tree.go; liveness is checked with envoy_sessions at request time (D1)."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "Title: the observer catches up without encoding the whole document.",
+      "plan": "The ygo UpdateLog base encode stays; the catch-up skips the read and render by taking the load's rendering through a weak pointer.",
+      "evidence": "On LINUX-129 the encode is 46 ms of a 446 ms catch-up (decode 179, read+render 221). Removing it needs a second fork API for a caller-supplied base plus the load's own state bytes, which only INFRA-593's #2444 puts in the load hook (y/update_log.go:139-150).",
+      "outcome": {"kind": "changed", "summary": ["The observer catches up without rendering the document again when the load's rendering is still alive; the base encode stays."]}
+    },
+    {
+      "spec": "Behaviour: the fix adds no memory the server keeps resident; a fix that cannot keep both goes to the architect before it merges, as a decision for Sami.",
+      "plan": "Each replica keeps a layout of 5 bytes per top-level block (end offset and two flags) beside the markdown it already keeps.",
+      "evidence": "A block's old byte range in the markdown cannot be found without it. LINUX-129: 422 blocks, about 2.1 KB against 390 KB of markdown (~0.5%). No label set, ask set or tree is kept; the load's rendering is held weakly.",
+      "outcome": {"kind": "changed", "acceptance": ["Behaviour: adds 5 bytes per top-level block per resident replica, and nothing else resident."]}
+    },
+    {
+      "spec": "The spec names no change outside sjawhar/legion.",
+      "plan": "Adds two accessors to the sjawhar/ygo fork, released by the fork maintainer session through the format-patch route, and orders this pull request after INFRA-593's #2444.",
+      "evidence": "ygo v1.51.3-sami.4 exports no way to learn which nested types a transaction changed (y/transaction.go:20, y/yxml.go:388 and 649, y/abstract_type.go:229); a whole-tree read per keystroke would keep 51% of the cost (INFRA-605 run 1x-after-1: ReadForRendering 13.43 of 26.10 s).",
+      "outcome": {"kind": "changed", "scope": "Adds a sjawhar/ygo fork change and a dependency on its signed tag; this pull request merges after #2444."}
+    }
+  ]
+}
