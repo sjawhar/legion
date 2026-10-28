@@ -198,17 +198,37 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if opensEarly && openEventStream(w, flusher, true) != nil {
-		return
+	opened := false
+	if opensEarly {
+		if openEventStream(w, flusher, true) != nil {
+			return
+		}
+		opened = true
 	}
 	subscribing, stopSubscribing := context.WithCancel(reads)
 	defer stopSubscribing()
-	// ready delivers the subscription once and is then set to nil, which no select receives
-	// from; subscription is nil, and so never ready, until then. A nil ready therefore also says
-	// the stream has opened, whether early or once the subscription arrived.
+	// ready delivers a subscription once and is then set to nil, which no select receives from;
+	// subscription is nil, and so never ready, until then.
 	ready := s.awaitEventSubscription(subscribing)
 	var subscription <-chan model.Event
 	var floor int64
+	// replaced is a subscription a cold connection took from a relay whose cursor still names a
+	// position in a log that was reset: its published stands above the log's newest id, which in a
+	// log whose ids only grow it never does. The relay ends every subscription once its reset check
+	// runs (resetCursor), and the connection, which has sent nothing yet, then subscribes again on
+	// the cursor it moved to. Opened at the stale published instead, it would drop the new log's
+	// ids up to it, and then end at the relay's reset, which sends the browser through a reconnect
+	// and the whole refresh a reconnect owes, for a connection the page had only just opened.
+	//
+	// The relay's new cursor is no start point for that connection: it is taken under a horizon
+	// proven after the reset, so an event of the new log that commits after the request, while
+	// that proof is awaited, can stand at or below it. So the connection starts at replacedFrom,
+	// read when it found the relay on the replaced log: the id before the first one missing from
+	// the new log, whose ids restart at 1, which is every event committed then and none still
+	// open. It is replayed from there to the relay's new cursor, and so may be sent events of the
+	// new log that committed just before its request.
+	var replaced <-chan model.Event
+	replacedFrom := int64(-1)
 
 	heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
 	defer heartbeat.Stop()
@@ -225,30 +245,56 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		case subscribed := <-ready:
 			ready = nil
 			if subscribed.err != nil {
-				if !opensEarly {
+				if !opened {
 					s.writeHandlerError(w, subscribed.err)
 				}
 				return
 			}
-			// Deferred inside the loop, but ready delivers only once, so it is deferred once.
+			// Deferred inside the loop: ready delivers once per subscription, and a cold
+			// connection takes another only after a reset ended the one before (replaced).
 			defer subscribed.cancel()
 			published := subscribed.published
+			// The log's newest id as it stands now, after the subscription began, which costs
+			// each connection one more round trip. A published above it is a relay whose reset
+			// check has not yet run.
+			head, err := s.eventLogHead(r.Context())
+			if err != nil {
+				if !opened {
+					s.writeHandlerError(w, err)
+				}
+				return
+			}
+			relayOnReplacedLog := published > head
 			if opensEarly {
-				// Clamped against the log's newest id as it stands now, after the subscription
-				// began, which costs a resuming connection one more round trip. A since above it
-				// is a reset this connection's early open already let the browser refresh before,
-				// so the stream ends rather than start at published.
-				head, err := s.eventLogHead(r.Context())
-				if err != nil || since > head {
+				// A since above the head is a reset this connection's early open already let the
+				// browser refresh before, and a relay on a replaced log would drop the new log's
+				// ids up to its published, so either way the stream ends rather than go on.
+				if since > head || relayOnReplacedLog {
 					return
 				}
 			} else {
+				if relayOnReplacedLog {
+					if replacedFrom < 0 {
+						if replacedFrom, err = s.eventLogUnbrokenThrough(r.Context()); err != nil {
+							s.writeHandlerError(w, err)
+							return
+						}
+					}
+					replaced = subscribed.events
+					signal(s.eventRelay.wake)
+					continue
+				}
 				// A cold client asked for no backlog, and a clamped one's since is of a log this
-				// one replaced: both start at published, the handover this connection holds.
+				// one replaced: both start at published, the handover this connection holds, or
+				// at replacedFrom when this connection first found the relay on a replaced log.
 				since = published
+				if replacedFrom >= 0 {
+					since = min(replacedFrom, published)
+				}
 				if openEventStream(w, flusher, false) != nil {
 					return
 				}
+				opened = true
 			}
 			if s.replayEvents(r.Context(), w, flusher, since, published) != nil {
 				return
@@ -281,11 +327,18 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			flusher.Flush()
+		case _, open := <-replaced:
+			// Whatever the relay publishes before its reset check is a position in the old log,
+			// so it is dropped; the close is its reset ending this subscription.
+			if open {
+				continue
+			}
+			replaced = nil
+			ready = s.awaitEventSubscription(subscribing)
 		case <-heartbeat.C:
 			// The caller is resolved again on every beat, so a stream outlives its session (a
 			// logout, a membership the sign-in issuer no longer confirms) by one beat at most,
 			// and a connection that has not opened yet is refused rather than opened later.
-			opened := opensEarly || ready == nil
 			if _, _, err := s.optionalActor(heartbeatRequest(r)); err != nil {
 				if !opened {
 					s.writeHandlerError(w, err)
@@ -383,6 +436,22 @@ func (s *server) awaitEventSubscription(ctx context.Context) <-chan eventSubscri
 		}
 	}()
 	return ready
+}
+
+// eventLogUnbrokenThrough is the id before the first one missing from the event log counted up
+// from 1, or its newest id when none is missing: every id at or below it is a committed event.
+// It reads the whole log, so streamEvents asks it only of a log that was reset beneath the relay,
+// whose ids restart at 1 (`truncate events restart identity`) and which is as short as the time
+// since that reset.
+func (s *server) eventLogUnbrokenThrough(ctx context.Context) (int64, error) {
+	var through int64
+	err := s.deps.Store.Pool.QueryRow(ctx, `
+		select coalesce(
+			(select min(n) - 1 from (select id, row_number() over (order by id) as n from events) numbered where id <> n),
+			(select max(id) from events),
+			0)
+	`).Scan(&through)
+	return through, err
 }
 
 // eventLogHead is the event log's newest committed id, 0 for an empty log. It is no cursor: ids

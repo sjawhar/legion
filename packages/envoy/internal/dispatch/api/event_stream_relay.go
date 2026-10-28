@@ -178,13 +178,13 @@ func (r *eventStreamRelay) subscribe(ctx context.Context) (<-chan model.Event, f
 	return subscription, cancel, r.cursor, nil
 }
 
-// start reads the first cursor and runs the relay's two goroutines, once. The first cursor is the
-// last event at or below the first horizon proven safe after the call (awaitEventCursor), so it
-// covers every event committed before the first connection subscribed and stands on a row whose
-// created_at the reset check can compare.
+// start reads the first cursor and runs the relay's two goroutines, once. The first cursor stands
+// on a row whose created_at the reset check can compare, and is the first connection's start
+// point (subscribe), so it must leave nothing that commits after that connection's request at or
+// below it (firstRelayCursor).
 //
-// That read waits for a safe observation, which an open write anywhere on the instance can hold
-// back, so it runs outside mu: the caller running it marks starting, and every other caller
+// That read can wait for a safe observation, which an open write anywhere on the instance can
+// hold back, so it runs outside mu: the caller running it marks starting, and every other caller
 // waits on starting (or its own ctx) rather than on mu or a spin. A read that fails, ctx's end
 // included, leaves the relay unstarted, and the next caller runs the read again.
 //
@@ -214,7 +214,7 @@ func (r *eventStreamRelay) start(ctx context.Context) error {
 		r.starting = starting
 		r.mu.Unlock()
 
-		_, cursor, cursorAt, err := r.server.awaitEventCursor(ctx)
+		cursor, cursorAt, err := r.server.firstRelayCursor(ctx)
 
 		r.mu.Lock()
 		r.starting = nil
@@ -249,6 +249,25 @@ func (r *eventStreamRelay) start(ctx context.Context) error {
 		go func() { defer r.running.Done(); r.run(r.lifetime) }()
 		return nil
 	}
+}
+
+// firstRelayCursor is the relay's first cursor: the last event at or below the horizon already
+// proven when the relay starts (Horizon.Proven), every event at or below which was final before
+// the first connection's request, so an event that commits while the start runs stands above the
+// cursor and is published to that connection. The connection may be sent a few events that
+// committed just before its request, the ones above the last proof, which a cold client's own
+// reads may already show. The delivery hub proves a horizon at boot, and every reader of the log
+// proves more, so one is proven by the time a page connects. When none is yet, or a Reset has
+// just forgotten it, the cursor is the last event at or below the first horizon proven after the
+// call (awaitEventCursor): that is at or above everything committed before the request, but an
+// event that commits while that proof is awaited, as long as any transaction open on the instance
+// holds it back, can fall at or below it and reach no connection the start served.
+func (s *server) firstRelayCursor(ctx context.Context) (int64, time.Time, error) {
+	if proven := s.horizon().Proven(); proven > 0 {
+		return lastEventThrough(ctx, s.deps.Store.Pool, proven)
+	}
+	_, id, at, err := s.awaitEventCursor(ctx)
+	return id, at, err
 }
 
 // awaitEventCursor waits for a horizon proven safe by an observation taken during the call

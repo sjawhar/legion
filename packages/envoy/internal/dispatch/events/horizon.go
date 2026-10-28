@@ -284,6 +284,18 @@ func (h *Horizon) Pending() bool {
 	return h.newest > h.safe
 }
 
+// Proven returns H as already proven, running no observation: 0 before any observation has been
+// proven safe, and again after a Reset. The proof that set it ran before the call, so every event
+// at or below the id it returns was final before the call too. Safe and Await answer an
+// observation taken during the call, so an id at or below theirs may have committed during it; a
+// reader that must miss nothing committed after the call, and may be sent some of what committed
+// just before it, starts at or below Proven instead.
+func (h *Horizon) Proven() int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.safe
+}
+
 // Reset forgets every observation and H; called when a reader detects a reset event log.
 func (h *Horizon) Reset() {
 	h.mu.Lock()

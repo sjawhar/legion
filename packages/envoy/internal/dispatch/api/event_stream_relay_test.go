@@ -111,8 +111,9 @@ func TestOutOfOrderCommitsOnAnotherProcessReachAnOpenStreamInIDOrder(t *testing.
 // and the reader is on process B. Without Horizon.Reset, B's horizon stands at the old log's head,
 // above every new id, so its relay takes the new log's b for its cursor at once while a is open,
 // and a connection opened after that reset is never sent a when it commits, though it is sent the
-// event after it. With the horizon forgotten, the relay's new cursor waits for a to end, and a
-// connection opened meanwhile, on the old cursor, is ended with the rest.
+// event after it. With the horizon forgotten, the relay's new cursor waits for a to end. A
+// connection made meanwhile finds the relay still on the old cursor, so it opens only once the
+// relay has reset, and is sent a, which committed after its request, below that new cursor.
 func TestEventLogResetClearsTheRelaysHorizon(t *testing.T) {
 	first, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, first, "TEST", "Issue", "A spec")
@@ -147,7 +148,18 @@ func TestEventLogResetClearsTheRelaysHorizon(t *testing.T) {
 	}
 	// Time for B's relay to hear the refill's commit and find the reset.
 	time.Sleep(500 * time.Millisecond)
-	meanwhile := openStream()
+	// That connection opens only once the relay's reset, which waits for a, has run, so it is
+	// made on a goroutine of its own, and a commits once it has had time to subscribe.
+	type answer struct {
+		response *http.Response
+		err      error
+	}
+	answered := make(chan answer, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(sseRequest(t, second.URL+"/api/v1/events", func(*http.Request) {}))
+		answered <- answer{response, err}
+	}()
+	time.Sleep(300 * time.Millisecond)
 	commitLow()
 	rename("Renamed after the reset")
 
@@ -165,16 +177,30 @@ func TestEventLogResetClearsTheRelaysHorizon(t *testing.T) {
 			t.Fatal("the stream open across the reset was never ended")
 		}
 	}
-	// The connection opened while a was open is ended, or sent a: never left open past it.
+	// The connection made while a was open is sent a first.
+	var opened answer
 	select {
-	case frame, more := <-meanwhile:
-		if more {
-			if id := sseFrameID(t, frame); id != low {
-				t.Fatalf("the connection opened after the reset was sent event %d but not %d, which committed after it opened", id, low)
-			}
+	case opened = <-answered:
+	case <-time.After(sseFrameWait):
+		t.Fatalf("the connection made while %d was open did not open within %s", low, sseFrameWait)
+	}
+	if opened.err != nil {
+		t.Fatalf("open the connection made while %d was open: %v", low, opened.err)
+	}
+	t.Cleanup(func() { opened.response.Body.Close() })
+	if opened.response.StatusCode != http.StatusOK {
+		t.Fatalf("SSE status = %d, want 200", opened.response.StatusCode)
+	}
+	select {
+	case frame, more := <-sseFrames(t, bufio.NewScanner(opened.response.Body)):
+		if !more {
+			t.Fatalf("the connection made while %d was open ended before it was sent it", low)
+		}
+		if id := sseFrameID(t, frame); id != low {
+			t.Fatalf("the connection made while %d was open was sent event %d first, want %d, which committed after its request", low, id, low)
 		}
 	case <-time.After(sseFrameWait):
-		t.Fatalf("the connection opened after the reset was neither ended nor sent event %d, which committed after it opened", low)
+		t.Fatalf("the connection made while %d was open was not sent it, though it committed after its request", low)
 	}
 
 	// And a connection opened now is served the new log.

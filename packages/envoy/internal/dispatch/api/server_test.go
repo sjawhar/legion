@@ -13,6 +13,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -2539,10 +2540,12 @@ func TestSSECappedCatchupDeliversACommitDuringPagingExactlyOnce(t *testing.T) {
 
 // TestSSEColdStartSendsNoBacklogAndDeliversTheNextCommit: a cold connection (no since= and no
 // Last-Event-ID) starts at the relay's published cursor, which it reads with its subscription
-// inside this one handler. A relay this connection starts takes its first cursor under a horizon
-// proven after the call, at or above everything committed before it, so the connection is sent
-// nothing already committed, which is the backlog it asked not to get, and everything committing
-// after it, which the relay publishes into its subscription. A client that read its head through a
+// inside this one handler. A relay this connection starts in a process where no horizon is proven
+// yet takes its first cursor under one proven after the call, at or above everything committed
+// before it, so the connection is sent nothing already committed, which is the backlog it asked
+// not to get, and everything committing after it, which the relay publishes into its
+// subscription. (With a horizon already proven, the relay starts on it, and the connection may be
+// sent the few events above it that committed just before the request: firstRelayCursor.) A client that read its head through a
 // separate request first would lose an event committing between that request and this one:
 // invisible to the catch-up (id <= since) and dropped by the live loop.
 func TestSSEColdStartSendsNoBacklogAndDeliversTheNextCommit(t *testing.T) {
@@ -2886,6 +2889,120 @@ func TestSSEStreamOpenedEarlyEndsWhenTheLogIsResetWhileItSubscribes(t *testing.T
 			t.Fatalf("the stream was still open %s after the horizon was released, though the log was reset below its since while it subscribed", sseFrameWait)
 		}
 	}
+}
+
+// TestSSEColdConnectionOnARelayStillOnAReplacedLogOpensOnItsNewCursor: a cold connection takes
+// its start point from the relay's published cursor. After the log is reset (e2e/seed.ts
+// truncates it between browser scenarios) the relay keeps the old log's cursor until its reset
+// check has run, which waits for a horizon proven after the reset, so a connection can subscribe
+// in between onto a published id above the new log's newest. Opened there, it would drop the new
+// log's events up to that id, and then the relay's reset would end it, sending the browser through
+// a reconnect and the whole refresh a reconnect owes. So it waits for that reset, subscribes again
+// and opens on the relay's new cursor, and the next event reaches it on the same connection.
+func TestSSEColdConnectionOnARelayStillOnAReplacedLogOpensOnItsNewCursor(t *testing.T) {
+	const hold = 2 * time.Second
+	handler, database, _ := newTestServer(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond})
+	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+	rename := func(title string) {
+		t.Helper()
+		if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+			"title": title,
+		}, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("rename issue to %q: status=%d body=%s", title, response.Code, response.Body.String())
+		}
+	}
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	// The first connection starts the relay; once it has published an event to it, the relay's
+	// cursor stands on the old log's newest id and its start-up read is behind it.
+	first := sseLines(t, openSSEResponse(t, sseRequest(t, httpServer.URL+"/api/v1/events", func(*http.Request) {}), sseFrameWait).Body)
+	awaitSSELine(t, first, ": open", sseFrameWait, "the first connection's open comment")
+	rename("Renamed before the reset")
+	old := eventHead(t, database)
+	awaitSSELine(t, first, fmt.Sprintf("id: %d", old), sseFrameWait, "the old log's newest event, on the first connection")
+
+	// The reset's first event wakes the relay's reset check, which then waits on the held horizon.
+	release := holdClusterTransactionID(t, hold)
+	if _, err := database.Pool.Exec(t.Context(), `truncate events restart identity cascade`); err != nil {
+		t.Fatalf("reset the event log: %v", err)
+	}
+	rename("Renamed after the reset")
+	if head := eventHead(t, database); head >= old {
+		t.Fatalf("the new log's head %d is not below the old log's %d: the relay's cursor would not stand above it, so this test proves nothing", head, old)
+	}
+
+	second := sseLines(t, openSSEResponse(t, sseRequest(t, httpServer.URL+"/api/v1/events", func(*http.Request) {}), hold+sseFrameWait).Body)
+	awaitSSELine(t, second, ": open", sseFrameWait, "the open comment of a connection made while the relay stood on the replaced log")
+	release()
+	rename("Renamed once the relay has reset")
+	live := fmt.Sprintf("id: %d", eventHead(t, database))
+	awaitSSELine(t, second, live, sseFrameWait, "the event committed after the relay's reset, on the same connection")
+}
+
+// TestSSEColdConnectionThatStartsTheRelayIsSentAnEventCommittedWhileItStarts: the first
+// connection of a process starts the relay, whose first cursor is that connection's start point.
+// With a horizon already proven (here by a since read of the references graph, in production by
+// the delivery hub at boot) the relay starts on it at once, below every event that commits after
+// the request. A first cursor taken under a horizon proven after the request instead waits, while
+// an event above the proven horizon is unproven, for every transaction open on the instance, and
+// an event that commits during that wait falls at or below it and never reaches the connection.
+func TestSSEColdConnectionThatStartsTheRelayIsSentAnEventCommittedWhileItStarts(t *testing.T) {
+	const hold = 2 * time.Second
+	handler, database, _ := newTestServer(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond})
+	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+	// A since read answers a mention only once the horizon is proven past its event, so the
+	// mention's answer is the proof this test starts from.
+	other := createInteractionIssue(t, handler, "OTHER", "Other issue", "A spec")
+	if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+other.Key+"/messages", map[string]any{
+		"body": "See dispatch://" + issue.Key, "actor": sessionActor(),
+	}); response.Code != http.StatusCreated {
+		t.Fatalf("create the mentioning message: status=%d body=%s", response.Code, response.Body.String())
+	}
+	awaitGraphEdges(t, handler, url.Values{"to": {"dispatch://" + issue.Key}, "since": {"0"}, "kind": {"mentions"}}, 1)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	holdClusterTransactionID(t, hold)
+	// An event committed before the request but above the proven horizon, which the hold keeps
+	// from being proven: a first cursor awaited after the request must wait for the hold to end.
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+		"title": "Renamed before the request",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("rename issue before the request: status=%d body=%s", response.Code, response.Body.String())
+	}
+	type answer struct {
+		response *http.Response
+		err      error
+	}
+	answered := make(chan answer, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(sseRequest(t, httpServer.URL+"/api/v1/events", func(*http.Request) {}))
+		answered <- answer{response, err}
+	}()
+	// Time for the request to reach its handler and start the relay.
+	time.Sleep(300 * time.Millisecond)
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+		"title": "Renamed while the relay starts",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("rename issue: status=%d body=%s", response.Code, response.Body.String())
+	}
+	committed := fmt.Sprintf("id: %d", eventHead(t, database))
+
+	var opened answer
+	select {
+	case opened = <-answered:
+	case <-time.After(hold + sseFrameWait):
+		t.Fatalf("the stream did not open within %s", hold+sseFrameWait)
+	}
+	if opened.err != nil {
+		t.Fatalf("open SSE stream: %v", opened.err)
+	}
+	t.Cleanup(func() { opened.response.Body.Close() })
+	if opened.response.StatusCode != http.StatusOK {
+		t.Fatalf("SSE status = %d, want 200", opened.response.StatusCode)
+	}
+	awaitSSELine(t, sseLines(t, opened.response.Body), committed, hold+sseFrameWait, "the event committed while the relay started")
 }
 
 // TestShutdownEndsAStreamWaitingOnTheHorizon: http.Server.Shutdown waits for every handler, and an

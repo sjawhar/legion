@@ -28,6 +28,9 @@ body: |-
     pod's Postgres budget (`dispatchConnectionsPerPod` 88). Deploy the first release with this change
     at one replica, which recreates the pod, and raise the count afterwards: during a roll above one,
     an old pod's live readers can skip an event a new pod commits out of id order.
+    A live event stream with no `since` starts at the relay's published cursor, whose first value in a
+    process is the last event at or below the horizon already proven, so it may be sent a few events
+    that committed just before it connected and is sent every event that commits after.
 time: 2026-10-28T12:47:35.880566588Z
 custom:
     Issue: pr2392
