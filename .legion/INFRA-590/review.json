@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-590",
+  "completed": "2026-10-28T19:33:00Z",
+  "round": 4,
+  "reviewedCodeHead": "bf30591dd483da80b3cb0e3965416537535329c2",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 2,
+  "fingerprint": "738b118668f9a0f1cd055e8a67ec3abd036f6a727e1436e7238bda715f241bb8 at 7797bc61 (last APPROVE) -> 6bcc8281f279876e0f134e4403c42d9087742e2c74e1d5d70702d5861bd7fa3c at bf30591d: changed (the merge ports main's #2366 into the batch model), so a new round.",
+  "ci": "Required set (lint, typecheck, test, pr-title) queued at CI head bf30591d when read; compare bf30591d...44d6c901 is handoffs only. A request for changes does not wait on CI.",
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at bf30591d over the merge's port of #2366.",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/outbox/batch.go:400", "description": "A failed comment-recipient or primary-author query (lookups.go:228-237, failRecipients) leaves the event with a list cut short at that step (publisher.go:722-727), and planChains holds the owner's later events only on keys in an earlier event's list, so a later event of the same issue reaches a thread or document session (e.g. a comment.resolved through rootCommentAuthor) before the failed reply, which reaches it on retry: per-(owner, destination) order broken through a failed publish and its retry. Before the merge every lookup failure failed the batch."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/outbox/lookups.go:222", "description": "loadDocumentSessionAuthors failing (documentCreditsSQL's jsonb_array_elements refusing a non-array credit list, #2366's breakDocumentCredits case) fails the whole batch; the event is never recorded, stays the lowest fresh id, and every later batch fails on it, so the outbox publishes nothing until the row is repaired. Main's #2366 rule backs off only that event."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/outbox/publisher.go:625", "description": "Not-due events' ids enter the batch's wanted sets, so one event backed off on a broken thread or issue row fails every reply of every batch that reads its owner's window, where on main it fails only when due again."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/outbox/publisher.go:641", "description": "No test pins resolveLost: TestAStoppingBatchReleasesTheEventsWhoseRecipientQueryFailed seeds fresh events whose unsent owner-topic sends release them anyway, so replacing resolveLost with false still passes; a case whose earlier destinations are already in published_destinations would pin it."}
+  ],
+  "verifiedCorrect": [
+    "commentRecipientsQuery, primaryDocumentAuthorsQuery, documentCreditsSQL and sessionCreditSQL match main word for word; step order owner topic, route, claimant, primary authors, author routes, followers, previous claimant matches main's publishDestinations.",
+    "suppressed_authors: no writer or reader remains; an old-build row is suppressed by mentions[].session_id, a superset, so no session the old build suppressed is reached.",
+    "#2366's tests keep their expected session lists; checkSessionRecipients asserts recorded order and exact set equality.",
+    "Migrations 0135 (main), 0136, 0137 (branch); TestDispatchConnectionsPerPodIsTheServers passes at 88."
+  ]
+}
