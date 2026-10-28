@@ -313,4 +313,32 @@ check "fails" "$(is "$status" 1)"
 check "names the tags" "$(contains "$out" 'it builds with -tags (none), the Run with probe')"
 check "and the mode" "$(contains "$out" 'its go command is a test run, the Run a build run')"
 
+echo "case: GOFLAGS set in front of a claimed go command compiles a file outside the job's filter"
+root=$(fixture inline-goflags)
+cat > "$root/mod/cmd/app/probe_test.go" <<'GO'
+//go:build probe
+
+package main
+
+import _ "example.com/m/other"
+GO
+replace "$root/.github/workflows/ci.yaml" "run: go test ./cmd/app ./lib" "run: GOFLAGS=-tags=probe go test ./cmd/app ./lib"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the file that closure reads outside the filter" "$(contains "$out" 'other')"
+
+echo "case: GOFLAGS in a claimed go command's step env compiles a file outside the job's filter"
+root=$(fixture env-goflags)
+cat > "$root/mod/cmd/app/probe_test.go" <<'GO'
+//go:build probe
+
+package main
+
+import _ "example.com/m/other"
+GO
+replace "$root/.github/workflows/ci.yaml" "        working-directory: mod" $'        working-directory: mod\n        env:\n          GOFLAGS: -tags=probe'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the file that closure reads outside the filter" "$(contains "$out" 'other')"
+
 summary "check-ci-filters.sh holds each filter to its job's Go closure, its rules and its table"
