@@ -2,37 +2,33 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-562",
-  "completed": "2026-10-27T15:17:30Z",
-  "round": 2,
-  "reviewedHead": "5fb0c8be6caa3e70a0e9904202fddfb286ee5f52",
-  "codeHead": "58fd08bf4d64d7a37fe5b4d06a25914f8654833f",
+  "completed": "2026-10-28T10:22:24Z",
+  "round": 3,
+  "scope": "Narrowed by the INFRA-63 architect at the review-round cap: (1) the take-over window is settable, so the api tests run near their old times; (2) the two AGENTS.md items; (3) the forward merge of main. Read envoy-go at the new code head before approving.",
+  "reviewedHead": "3eaf2bbd04215f0476dfbfe0ceec9591e4246b63",
+  "codeHead": "14d17e590631156655f22a9e4645528a52a4330e",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 1,
-  "minor": 2,
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title, all completed success at code head 58fd08bf (compare to 5fb0c8be: handoffsOnly true, 2 files). The envoy lanes (envoy-go, envoy-go-race, dispatch-multiprocess) were still queued at 15:17Z. At the previous code head 125a3bfb, envoy-go FAILED: internal/dispatch/api hit go test's 10-minute default ('panic: test timed out after 10m0s', FAIL ... 600.169s, job 122182845579). The tester's CI line omitted that lane.",
-  "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at 5fb0c8be (round-1 fixes hold on the creating, resume and Retry paths; two Minor doc gaps)",
-    "codeQuality": "Verdict: APPROVE at 5fb0c8be (structural suggestion: insert a decided sessionless attempt 1 as failed at commit; minor cleanups)"
+  "important": 2,
+  "minor": 0,
+  "scopeResults": {
+    "takeoverWindow": "Fixed in 14d17e59. Deps.ListenerTakeoverWindow: zero keeps 12 s, and neither routes.BuildAppContext nor cmd/dispatch sets it (grep: only server.go and server_test.go). The api test rig defaults to 750 ms; the tests that prove the window pass listenerTakeoverWindow. Measured in the pod with `go test -json -count=1 -timeout 60m ./internal/dispatch/api/`, merge base 2df3353c (git archive, GOWORK=off) against the head on one Postgres 17. Base 1525.8 s, head 1635.8 s. The tests round 2 named are back at main's times: TestTargetedMessagePrefixesUnavailableListenerErrors 6.59 -> 2.71 s, TestMentionRetrySelectsOneTargetAndReresolvesIt 1.03 -> 1.01 s, TestReplyOnFailedAttemptRecordsTheAnswer 0.84 -> 0.93 s. The PR's 24 new tests add 53.4 s; the rest of the 110 s is load noise in unrelated document tests. This pod ran about 3x slower than CI.",
+    "agentsMd": "Both fixed in 14d17e59: AGENTS.md 1360-1367 states that the guarantee is attempt 1's, and 1374-1381 names both cases that re-resolve on a decided comment.",
+    "forwardMerge": "3ddf76a4 (main at 2df3353c) is correct. main.go's conflict keeps one testHookDuration (main.go:1089). The migrations are renumbered 0135-0138 above main's 0134, with the in-file names and code comments updated (delivery.go, issue_route_status.go, ratelimit.go). leasePoolSize stays 11 for 11 callers: 9 single Exclusive sites plus the delivery intake's two durables. main's component_facts write sits inside the importer's xmin compare-and-set transaction. go vet ./internal/dispatch/... ./cmd/dispatch/ is clean."
   },
-  "roundOneThreads": "All eight round-1 threads were fixed (01548af0, e7a19587, 58fd08bf). Each one is answered on its thread.",
-  "censusRecheck": "Re-ran the census's five searches at the head (redeliver-webhooks; GITHUB_UPSTREAM|GITHUB_RATE_LIMITED plus the api/github/rest callers; FRAME_INPUT|_test/publish; envoy listener; ENVOY_UNAVAILABLE in dispatch, envoy-client, pi-envoy and contracts). The census lists every hit outside .legion/. I accept its rollout lines: 1 refuses at once, because without the database the command would obey no shared rate limit; 2, 4 and 5 change an answer that was already an error, not a refusal of a caller's input; 3 is test-only.",
-  "measurement": "internal/dispatch/api in the pod at the head: `go test -json -count=1 -timeout 60m ./internal/dispatch/api/`. 1089.7 s in total. Sixteen tests that exist on main took about 214 s together. The same sixteen at the merge base 2e8c68cd took 13 s (`git archive` of packages/envoy into $TMPDIR, GOWORK=off). Each now waits the full 12 s listenerTakeoverWindow; TestTargetedMessagePrefixesUnavailableListenerErrors takes 34 s against 5.7 s. On CI, main's api package took 462.6 s in a passing envoy-go run (job 122133381891), so about 200 s more passes the 600 s default, as 125a3bfb's run did. The local run also failed TestALoneRunnerMakesAPassOnEveryTick (suggestion_outcomes_lease_test.go, which this PR does not touch; 9 of 10 one-second ticks under load). That is the timing flake INFRA-523 tracks, not this change.",
+  "ci": "Required set (lint, typecheck, test, pr-title) green at code head 14d17e59; test was green on its rerun, after a daemon-package timeout in TestAnIssueDeployedEventWakesTheCheck (packages/daemon imports no package this PR changes). envoy-go is RED twice at 14d17e59: job 122346244223 and its rerun 122741917532 both end with 'panic: test timed out after 10m0s', FAIL internal/dispatch/api 600.08 s, while running the package's last test, TestALoneRunnerMakesAPassOnEveryTick. Main's api package in envoy-go took 410-572 s, and failed once at 600 s at a17efe77; main's 582cb2a2 'isolate API tests from Postgres contention' is not in this branch. The compare from 14d17e59 to the head touches only .legion/ (2 files).",
+  "mergeState": "GitHub reports the PR CONFLICTING (mergeStateStatus DIRTY) against main@origin, which moved past 2df3353c. Files both sides touch: packages/envoy/{AGENTS.md,CHANGELOG.md}, cmd/dispatch/main.go, packages/envoy-client/src/dispatch-execute.ts. main's #2419 makes changelog entries fragment files.",
+  "threads": "Round-2 threads PRRT_kwDORFy7ds6wwEDH, PRRT_kwDORFy7ds6wwEDW, PRRT_kwDORFy7ds6wwEDh were fixed in 14d17e59 and resolved by the implementer; this round answers each and accepts all three.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/envoy_resolve.go:178",
-      "description": "listenerTakeoverWindow is a const, so every existing api test whose send meets 'no live session', a refused connection or a 503 now sleeps the full 12 s. Sixteen tests that exist on main went from 13 s to about 214 s together, and the package now runs past go test's 10-minute default on CI: envoy-go failed with 'panic: test timed out after 10m0s' at code head 125a3bfb. Make the window a variable that a test can set short, as DeliveryResumeInterval and the route-roster TTL already are, and keep 12 s only in the tests that prove the window itself. Show internal/dispatch/api back near main's time, and envoy-go green on CI."
+      "file": "PR #2387 (merge state)",
+      "description": "GitHub reports the PR CONFLICTING with main. Merge main forward. Under #2419, the PR's CHANGELOG.md entries move into fragment files. The merge also brings main's 582cb2a2, which isolates the API tests from Postgres contention."
     },
     {
-      "severity": "minor",
-      "file": "packages/envoy/AGENTS.md:1371",
-      "description": "The sentence says only a comment that does not record mentions_decide_routes resolves an unpinned row again. The code also re-resolves on a decided comment for attempts after the first, and for an attempt-1 row that recorded neither a session nor an error (comment_delivery.go:439-440,478-490). The doc comment at comment_delivery.go:413-421 says this correctly; make AGENTS.md match it."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/AGENTS.md:1355",
-      "description": "Say that the protection covers attempt 1 only. A person's Retry after attempt 1 has settled opens attempt 2, which resolves afresh and can reach a route holder the route already reached. That is the same as on main, and it is the person's explicit resend, but the paragraph reads as if a mention always reaches the route holder once."
+      "severity": "important",
+      "file": "CI envoy-go at 14d17e59",
+      "description": "envoy-go, the only lane that runs internal/dispatch/api, timed out twice at this code head (600 s, at the package's last test). The architect made a green envoy-go at the new code head a condition of approval. After the forward merge, show envoy-go green. If it is still over 600 s, cut the time the PR's new api tests add (about 53 s of 1636 s in the pod), for example the 10 s TEST_HOOK_TIMEOUT wait in TestATestHookNamesTheProcessThatNeverAcknowledged."
     }
   ]
 }
