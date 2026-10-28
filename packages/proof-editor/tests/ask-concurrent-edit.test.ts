@@ -112,11 +112,14 @@ function yBulletList(template: Y.XmlElement, text: string, ids: boolean): Y.XmlE
   return copy(template, copy(item, copy(paragraph, new Y.XmlText(text))));
 }
 
-/** A collaborator appends a second option list, `Option B`, to the ask, and the editor receives it. */
-function peerAppendsList(ydoc: Y.Doc, ids: boolean): void {
+/**
+ * A collaborator appends a second option list, one option reading `text` (`Option B` unless
+ * given), to the ask, and the editor receives it.
+ */
+function peerAppendsList(ydoc: Y.Doc, ids: boolean, text = "Option B"): void {
   const peer = peerOf(ydoc);
   const ask = requireYAsk(peer);
-  ask.insert(ask.length, [yBulletList(childElement(ask, 1), "Option B", ids)]);
+  ask.insert(ask.length, [yBulletList(childElement(ask, 1), text, ids)]);
   deliver(peer, ydoc);
 }
 
@@ -523,6 +526,34 @@ test("a replace read back from the DOM that drops a list the selection never tou
       expect(view.state.doc).toBe(before.doc);
       expect(updates).toBe(0);
       expectTwoListAsk(view, ydoc);
+    },
+    { blockSchema }
+  );
+});
+
+test("a replace read back from the DOM that drops a list whose text another block of a two-list ask holds is refused", async () => {
+  await withMarksEditor(
+    ASK_DOC,
+    ({ view, ydoc }) => {
+      // The second list reads `After`, as the first list's last option does, which the replace keeps.
+      peerAppendsList(ydoc, true, "After");
+      const tr = readBackReplace(view);
+      expect(blocks(requireAsk(tr.doc))).toEqual([
+        ["paragraph", "Whichxion A"],
+        ["bullet_list", "After"],
+      ]);
+      const before = view.state;
+      let updates = 0;
+      ydoc.on("update", () => updates++);
+      expect(() => view.dispatch(tr)).not.toThrow();
+      expect(view.state.doc).toBe(before.doc);
+      expect(updates).toBe(0);
+      expect(blocks(requireAsk(view.state.doc))).toEqual([
+        ["paragraph", "Which one?"],
+        ["bullet_list", "Option AAfter"],
+        ["bullet_list", "After"],
+      ]);
+      expect(yAskChildren(ydoc)).toEqual(["paragraph", "bullet_list", "bullet_list"]);
     },
     { blockSchema }
   );

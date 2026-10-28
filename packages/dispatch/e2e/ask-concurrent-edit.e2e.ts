@@ -397,3 +397,32 @@ for (const [command, value] of [
     });
   });
 }
+
+// The read-back must not drop the second list when another block holds its text: here the first
+// list's second option reads the second list's option followed by " later".
+test(`document.execCommand("insertText") over a selection from the question into the first list of an ask holding two lists keeps a second list whose text another option holds`, async ({
+  browser,
+}) => {
+  await withTwoLists(browser, async ({ alicePage, artifactId, first, pages, second }) => {
+    const later = `${second} later`;
+    await placeCaret(alicePage, "after", first, optionList(alicePage, 0));
+    await alicePage.keyboard.press("Enter");
+    await alicePage.keyboard.type(later);
+    await expect(optionList(alicePage, 0).getByRole("listitem")).toContainText([first, later]);
+    await selectTextIn(alicePage, askContent(alicePage), "one?Opt");
+    await alicePage.evaluate(() => document.execCommand("insertText", false, "x"));
+    for (const page of pages) {
+      // Bob's cursor label can sit in the second list, so its item is matched, not compared.
+      const items = optionList(page, 1).getByRole("listitem");
+      await expect(items).toHaveCount(1);
+      await expect(items).toContainText(second);
+      await expect(items).not.toContainText("later");
+      await expect(askBlock(page)).toHaveAttribute("data-dispatch-ask-malformed", "true");
+    }
+    // The serializer marks the second of two adjacent lists with `*`, so the two do not merge.
+    await expect
+      .poll(async () => (await getArtifactText(artifactId)).markdown.split("\n"))
+      .toContain(`* ${second}`);
+    return ["Which ", first.slice("Opt".length), later, second];
+  });
+});

@@ -199,7 +199,9 @@ export const brokenAskInputGuards: EditorProps = {
 /**
  * Whether `tr` drops, from the ask at `askPos` in `state.doc` that its content rule refuses, a
  * child block that lies wholly outside the selection: every step of `tr` replaces a range inside
- * the ask's content, the block's opening is deleted, and its text is not in the ask `tr` leaves.
+ * the ask's content, and the mapping deletes a character of the block's text. Deleting only node
+ * boundaries, as a Backspace joining the block to the one before it or a node's attributes being
+ * set does, keeps every character and does not drop it.
  */
 function dropsUnselectedAskBlock(tr: Transaction, state: EditorState, askPos: number): boolean {
   const ask = state.doc.nodeAt(askPos);
@@ -216,17 +218,20 @@ function dropsUnselectedAskBlock(tr: Transaction, state: EditorState, askPos: nu
     contentFrom = map.map(contentFrom, -1);
     contentTo = map.map(contentTo, 1);
   }
-  const kept = tr.doc.nodeAt(tr.mapping.map(askPos));
-  if (kept === null || kept.type !== ask.type) return false;
-  const keptText = kept.textBetween(0, kept.content.size, "\n");
   const { from, to } = state.selection;
   let dropped = false;
   ask.forEach((block, offset) => {
     const start = askPos + 1 + offset;
-    const end = start + block.nodeSize;
-    if (dropped || (end > from && start < to)) return;
-    if (!tr.mapping.mapResult(start, 1).deletedAfter) return;
-    dropped = !keptText.includes(block.textBetween(0, block.content.size, "\n"));
+    if (dropped || (start + block.nodeSize > from && start < to)) return;
+    block.descendants((node, pos) => {
+      if (dropped || !node.isText) return !dropped;
+      // `deletedAfter` at a position: the character just after it is deleted.
+      const textStart = start + 1 + pos;
+      for (let at = textStart; at < textStart + node.nodeSize && !dropped; at++) {
+        dropped = tr.mapping.mapResult(at, 1).deletedAfter;
+      }
+      return false;
+    });
   });
   return dropped;
 }
@@ -246,8 +251,10 @@ function dropsUnselectedAskBlock(tr: Transaction, state: EditorState, askPos: nu
  *
  * Only transactions every step of which replaces a range inside one such ask's content are read:
  * edits elsewhere, whole-document replacements and the shared document's own changes
- * (y-prosemirror's sync, undo and redo among them) are not. An edit that keeps an unselected
- * block's text (typing, Backspace joining the lists, a block id set on a node) applies.
+ * (y-prosemirror's sync, undo and redo among them) are not. Whether a block is kept is read from
+ * the transaction's mapping, not from the text it leaves, so a block whose text another block
+ * also holds is still seen as dropped. An edit that deletes none of an unselected block's
+ * content (typing, Backspace joining the lists, a block id set on a node) applies.
  */
 export const keepUnselectedAskBlocks = $prose(
   () =>
