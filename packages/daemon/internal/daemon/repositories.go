@@ -306,7 +306,7 @@ func checkMapping(ctx context.Context, client dispatch.Client, mappings []dispat
 		installed []bool
 		failed    []error
 		// webhookGap is why Dispatch's GitHub App is not known to be installed on it, "" when it is.
-		webhookGap *string
+		webhookGap string
 	}
 	var entries []mapped
 	for _, mapping := range mappings {
@@ -315,11 +315,11 @@ func checkMapping(ctx context.Context, client dispatch.Client, mappings []dispat
 		}
 		repo, err := ghrepo.Parse("the repository Dispatch maps to "+project, mapping.Repo)
 		entries = append(entries, mapped{mapping: mapping, repo: repo, parse: err,
-			installed: make([]bool, len(appauth.Roles)), failed: make([]error, len(appauth.Roles)), webhookGap: new(string)})
+			installed: make([]bool, len(appauth.Roles)), failed: make([]error, len(appauth.Roles))})
 	}
 	var group errgroup.Group
 	group.SetLimit(mappingReads)
-	for _, m := range entries {
+	for i, m := range entries {
 		if m.parse != nil {
 			continue
 		}
@@ -334,7 +334,7 @@ func checkMapping(ctx context.Context, client dispatch.Client, mappings []dispat
 		group.Go(func() error {
 			read, cancel := context.WithTimeout(ctx, installReadAttempt)
 			defer cancel()
-			*m.webhookGap = checkWebhookApp(read, client, m.repo)
+			entries[i].webhookGap = checkWebhookApp(read, client, m.repo)
 			return nil
 		})
 	}
@@ -343,14 +343,12 @@ func checkMapping(ctx context.Context, client dispatch.Client, mappings []dispat
 		return nil, nil, nil, fmt.Errorf("check the GitHub Apps' installations: %w", err)
 	}
 	var gaps []webhookAppGap
-	for _, m := range entries {
-		if *m.webhookGap != "" {
-			gaps = append(gaps, webhookAppGap{Repo: m.mapping.Repo, Reason: *m.webhookGap})
-		}
-	}
 	var accepted []mappedRepository
 	var refused []refusedRepository
 	for _, m := range entries {
+		if m.webhookGap != "" {
+			gaps = append(gaps, webhookAppGap{Repo: m.mapping.Repo, Reason: m.webhookGap})
+		}
 		if m.parse != nil {
 			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: m.parse.Error()})
 			continue

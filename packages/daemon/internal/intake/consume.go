@@ -137,7 +137,7 @@ func OpenConsumers(ctx context.Context, js jetstream.JetStream, pool *pgxpool.Po
 		return nil, fmt.Errorf("open %s: %w", notificationStream, err)
 	}
 
-	dispatch, err := openConsumer(ctx, stream, pool, spec, jetstream.ConsumerConfig{
+	dispatch, err := openConsumer(ctx, stream, pool, spec.Logger, jetstream.ConsumerConfig{
 		Durable:        dispatchConsumerName(spec.Project),
 		FilterSubjects: []string{"notifications.dispatch.issue.>", mappingSubject(spec.Project)},
 		AckPolicy:      jetstream.AckExplicitPolicy,
@@ -146,7 +146,7 @@ func OpenConsumers(ctx context.Context, js jetstream.JetStream, pool *pgxpool.Po
 	if err != nil {
 		return nil, fmt.Errorf("open the Dispatch durable consumer: %w", err)
 	}
-	server, err := openConsumer(ctx, stream, pool, spec, jetstream.ConsumerConfig{
+	server, err := openConsumer(ctx, stream, pool, spec.Logger, jetstream.ConsumerConfig{
 		Durable:       dispatchServerConsumerName(spec.Project),
 		FilterSubject: serverStartedSubject,
 		AckPolicy:     jetstream.AckExplicitPolicy,
@@ -155,7 +155,7 @@ func OpenConsumers(ctx context.Context, js jetstream.JetStream, pool *pgxpool.Po
 	if err != nil {
 		return nil, fmt.Errorf("open the Dispatch server durable consumer: %w", err)
 	}
-	github, err := openConsumer(ctx, stream, pool, spec, githubConsumerConfig(spec, spec.Repositories))
+	github, err := openConsumer(ctx, stream, pool, spec.Logger, githubConsumerConfig(spec, spec.Repositories))
 	if err != nil {
 		return nil, fmt.Errorf("open the GitHub durable consumer: %w", err)
 	}
@@ -189,7 +189,7 @@ func (c *Consumers) SetRepositories(ctx context.Context, repositories []ghrepo.R
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	github, err := openConsumer(ctx, c.stream, c.pool, c.spec, githubConsumerConfig(c.spec, repositories))
+	github, err := openConsumer(ctx, c.stream, c.pool, c.spec.Logger, githubConsumerConfig(c.spec, repositories))
 	if err != nil {
 		return fmt.Errorf("update the GitHub durable consumer's repositories: %w", err)
 	}
@@ -212,10 +212,10 @@ func (c *Consumers) repositories() []ghrepo.Repository {
 // than the stream's first message (the stream keeps 72 hours) is logged as an error too, since the
 // messages between were lost: the pass heals their pull requests. A consumer with no position
 // starts at the next message.
-func openConsumer(ctx context.Context, stream jetstream.Stream, pool *pgxpool.Pool, spec ConsumerSpec, config jetstream.ConsumerConfig) (jetstream.Consumer, error) {
+func openConsumer(ctx context.Context, stream jetstream.Stream, pool *pgxpool.Pool, logger *slog.Logger, config jetstream.ConsumerConfig) (jetstream.Consumer, error) {
 	existing, err := stream.Consumer(ctx, config.Durable)
 	if errors.Is(err, jetstream.ErrConsumerNotFound) {
-		return createConsumer(ctx, stream, pool, spec, config)
+		return createConsumer(ctx, stream, pool, logger, config)
 	}
 	if err != nil {
 		return nil, err
@@ -227,7 +227,7 @@ func openConsumer(ctx context.Context, stream jetstream.Stream, pool *pgxpool.Po
 
 // createConsumer creates the missing durable consumer config names, at its stored position when
 // pool keeps one and at the next message otherwise (openConsumer).
-func createConsumer(ctx context.Context, stream jetstream.Stream, pool *pgxpool.Pool, spec ConsumerSpec, config jetstream.ConsumerConfig) (jetstream.Consumer, error) {
+func createConsumer(ctx context.Context, stream jetstream.Stream, pool *pgxpool.Pool, logger *slog.Logger, config jetstream.ConsumerConfig) (jetstream.Consumer, error) {
 	start, stored, err := storedStreamTime(ctx, pool, config.Durable)
 	if err != nil {
 		return nil, err
@@ -245,12 +245,12 @@ func createConsumer(ctx context.Context, stream jetstream.Stream, pool *pgxpool.
 	if err != nil {
 		return nil, err
 	}
-	spec.Logger.Info("intake: a missing durable consumer is created at the last message it applied",
+	logger.Info("intake: a missing durable consumer is created at the last message it applied",
 		"consumer", config.Durable, "start", start.UTC().Format(time.RFC3339Nano))
 	// The stored time keeps microseconds; the stream's, nanoseconds. A start at the stream's first
 	// message itself is not before it.
 	if first := info.State.FirstTime; start.Before(first.Truncate(time.Microsecond)) {
-		spec.Logger.Error("intake: a missing durable consumer's last applied message is older than the stream's first message; any event published between was lost, and the pass heals their pull requests",
+		logger.Error("intake: a missing durable consumer's last applied message is older than the stream's first message; any event published between was lost, and the pass heals their pull requests",
 			"consumer", config.Durable, "start", start.UTC().Format(time.RFC3339Nano), "stream_first", first.UTC().Format(time.RFC3339Nano))
 	}
 	return consumer, nil
@@ -356,7 +356,8 @@ func (p *consumerProgress) lastHandled() time.Time {
 // Lag is the lag of the Dispatch, Dispatch-server and GitHub durable consumers, in that order
 // (ConsumerLag), read fresh from JetStream within consumerLagBound: per consumer one CONSUMER.INFO
 // and, while messages wait, one STREAM.MSG.GET per filter subject for the first message at or after
-// the sequence above its ack floor on that subject, the smallest sequence's time being the oldest.
+// the sequence above its ack floor on that subject, the smallest sequence's time being the oldest;
+// a message at that sequence ends the reads, since no filter can give an older one.
 // Each consumer's info is read through a handle of its own, as DispatchPosition reads, so nothing
 // races Run's. A read that fails or runs out of the bound is that consumer's Unavailable; Lag
 // itself never fails, so the state that shows it is still served.
@@ -403,7 +404,8 @@ func (c *Consumers) lagOf(ctx context.Context, progress *consumerProgress) Consu
 
 // oldestWaiting is the stream time of the first message after info's ack floor on any of its
 // consumer's filter subjects, or zero when the stream holds none (the stream's MaxAge removed it
-// since the info was read).
+// since the info was read). A message at the sequence right after the ack floor is the oldest any
+// filter can give, so the filters after it are not read.
 func (c *Consumers) oldestWaiting(ctx context.Context, info *jetstream.ConsumerInfo) (time.Time, error) {
 	filters := slices.Clone(info.Config.FilterSubjects)
 	if info.Config.FilterSubject != "" {
@@ -420,6 +422,9 @@ func (c *Consumers) oldestWaiting(ctx context.Context, info *jetstream.ConsumerI
 		}
 		if oldest == nil || message.Sequence < oldest.Sequence {
 			oldest = message
+		}
+		if oldest.Sequence == info.AckFloor.Stream+1 {
+			break
 		}
 	}
 	if oldest == nil {
@@ -441,13 +446,13 @@ func (c *Consumers) Run(ctx context.Context, handlers ...Handler) error {
 	c.mu.Unlock()
 	group, consumeContext := errgroup.WithContext(ctx)
 	group.Go(func() error {
-		return consumeConsumer(consumeContext, dispatch, c.progress.dispatch, c.spec, c.repositories, c.pool, handlers)
+		return c.consumeConsumer(consumeContext, dispatch, c.progress.dispatch, handlers)
 	})
 	group.Go(func() error {
-		return consumeConsumer(consumeContext, c.server, c.progress.server, c.spec, c.repositories, c.pool, handlers)
+		return c.consumeConsumer(consumeContext, c.server, c.progress.server, handlers)
 	})
 	group.Go(func() error {
-		return consumeConsumer(consumeContext, github, c.progress.github, c.spec, c.repositories, c.pool, handlers)
+		return c.consumeConsumer(consumeContext, github, c.progress.github, handlers)
 	})
 	return group.Wait()
 }
@@ -461,12 +466,12 @@ func (c *Consumers) Run(ctx context.Context, handlers ...Handler) error {
 // fact lock again before it is found already processed. One message in flight costs one pull
 // request per message and leaves the window to the message's own work. Each message handled is
 // recorded in progress at spec.Now.
-func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, progress *consumerProgress, spec ConsumerSpec, repositories func() []ghrepo.Repository, pool *pgxpool.Pool, handlers []Handler) error {
-	lag := &lagWatch{consumer: consumer.CachedInfo().Name, logger: spec.Logger, now: time.Now}
+func (c *Consumers) consumeConsumer(ctx context.Context, consumer jetstream.Consumer, progress *consumerProgress, handlers []Handler) error {
+	lag := &lagWatch{consumer: consumer.CachedInfo().Name, logger: c.spec.Logger, now: time.Now}
 	consuming, err := consumer.Consume(func(message jetstream.Msg) {
 		lag.observe(message)
-		if consumeMessage(ctx, message, spec, repositories(), pool, handlers) {
-			progress.handle(spec.Now())
+		if consumeMessage(ctx, message, c.spec, c.repositories(), c.pool, handlers) {
+			progress.handle(c.spec.Now())
 		}
 	}, jetstream.PullMaxMessages(1))
 	if err != nil {

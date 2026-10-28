@@ -236,37 +236,40 @@ func (s *Postgres) UnnamedIssues(ctx context.Context, tx pgx.Tx, project string)
 }
 
 func (s *Postgres) HandedOffWithoutOpenPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]HandedOff, error) {
-	issues, err := s.issuesWhere(ctx, tx, "project = $1 and github_repo <> '' and phase = '"+string(phase.Implementing)+"'"+
-		" and key in (select issue from phases where role = '"+string(claim.RoleImplementer)+"' and handoff_commit <> '')"+
-		" and key not in (select issue from pull_requests where state = '"+string(PullRequestOpen)+"')",
-		project, "in implementing with a recorded handoff and no open pull request")
-	if err != nil || len(issues) == 0 {
-		return nil, err
-	}
-	keys := make([]string, len(issues))
-	for i, issue := range issues {
-		keys[i] = issue.Key
-	}
-	rows, err := tx.Query(ctx, "select issue, handoff_commit from phases where role = $1 and issue = any($2::text[])", string(claim.RoleImplementer), keys)
+	const what = "in implementing with a recorded handoff and no open pull request"
+	rows, err := tx.Query(ctx, "select "+issueColumns+", implementer.handoff_commit from issues"+
+		" join (select issue, handoff_commit from phases where role = '"+string(claim.RoleImplementer)+"' and handoff_commit <> '')"+
+		" implementer (implementer_issue, handoff_commit) on implementer.implementer_issue = issues.key"+
+		" where project = $1 and github_repo <> '' and phase = '"+string(phase.Implementing)+"'"+
+		" and key not in (select issue from pull_requests where state = '"+string(PullRequestOpen)+"')"+
+		" order by key", project)
 	if err != nil {
-		return nil, fmt.Errorf("read the handoff commits of the issues of %s in implementing with no open pull request: %w", project, err)
+		return nil, fmt.Errorf("list the issues of %s %s: %w", project, what, err)
 	}
-	commits, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) ([2]string, error) {
-		var pair [2]string
-		return pair, row.Scan(&pair[0], &pair[1])
-	})
-	if err != nil {
-		return nil, fmt.Errorf("read the handoff commits of the issues of %s in implementing with no open pull request: %w", project, err)
+	defer rows.Close()
+	var handedOff []HandedOff
+	for rows.Next() {
+		var commit string
+		issue, err := scanIssue(scanThen{row: rows, after: []any{&commit}})
+		if err != nil {
+			return nil, fmt.Errorf("list the issues of %s %s: %w", project, what, err)
+		}
+		handedOff = append(handedOff, HandedOff{Issue: *issue, Commit: commit})
 	}
-	commitOf := make(map[string]string, len(commits))
-	for _, pair := range commits {
-		commitOf[pair[0]] = pair[1]
-	}
-	handedOff := make([]HandedOff, len(issues))
-	for i, issue := range issues {
-		handedOff[i] = HandedOff{Issue: issue, Commit: commitOf[issue.Key]}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the issues of %s %s: %w", project, what, err)
 	}
 	return handedOff, nil
+}
+
+// scanThen is row with after scanned from the columns that follow the ones a Scan names.
+type scanThen struct {
+	row   scanner
+	after []any
+}
+
+func (s scanThen) Scan(dest ...any) error {
+	return s.row.Scan(append(dest, s.after...)...)
 }
 
 // issuesWhere is every record of project the condition selects, by key; what names them in an

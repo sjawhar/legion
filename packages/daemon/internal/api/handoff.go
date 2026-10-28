@@ -253,27 +253,29 @@ func (s *server) implementationPullRequest(w http.ResponseWriter, r *http.Reques
 		return false
 	}
 	branch := claim.IssueBranch(issue.Key)
-	unreadable := func(err error) bool {
+	logUnread := func(err error) {
 		attributes := []any{"issue", issue.Key, "repo", issue.GitHubRepo, "branch", branch, "error", err}
 		var answer *githubrest.Answer
 		if errors.As(err, &answer) {
 			attributes = append(attributes, "status", answer.Status)
 		}
 		s.log.Warn("api: read the open pull request on a completing implementer's branch; the completion is applied unread, and the required-checks pass records the pull request it finds", attributes...)
-		return true
 	}
 	repository, err := ghrepo.Parse("the GitHub repository of "+issue.Key, issue.GitHubRepo)
 	if err != nil {
-		return unreadable(err)
+		logUnread(err)
+		return true
 	}
 	lease, err := s.tokens.Token(ctx, appauth.Implement, repository.Owner())
 	if err != nil {
-		return unreadable(fmt.Errorf("mint the implement App token for %s: %w", repository.Owner(), err))
+		logUnread(fmt.Errorf("mint the implement App token for %s: %w", repository.Owner(), err))
+		return true
 	}
 	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(s.githubAPI, repository)}
 	pull, found, err := github.OpenPullRequestOn(ctx, repository.Owner(), branch)
 	if err != nil {
-		return unreadable(err)
+		logUnread(err)
+		return true
 	}
 	if !found {
 		message := fmt.Sprintf("no open pull request on %s %s; nothing was recorded. Open the pull request and complete again.", issue.GitHubRepo, branch)
@@ -420,8 +422,9 @@ func (s *server) readyRecord(ctx context.Context, issue string) (*record.PullReq
 // snapshot: the issue record, its tree's generation (the root's) and whether the tree lingers, its
 // review round — the implementer's count of returns to implementing, which tells each implementing,
 // testing, and reviewing pass from the last — and the commit the implementer last reported for a
-// file-backed phase (record.PhaseRow.LastHandoff), its pull request record, nil while none is
-// recorded, and its production check, nil while none was ever opened.
+// file-backed phase (record.PhaseRow.LastHandoff), its pull request record while it is implementing
+// (the one phase the route reads it in), nil in any other phase or while none is recorded, and its
+// production check, nil while none was ever opened.
 type completionPosition struct {
 	issue          *record.Issue
 	treeGeneration uint64
@@ -463,9 +466,11 @@ func (s *server) handoffPosition(ctx context.Context, key string) (completionPos
 			round, lastHandoff = row.Rounds, row.LastHandoff
 		}
 	}
-	pr, err := s.records.PullRequest(ctx, tx, key)
-	if err != nil {
-		return completionPosition{}, err
+	var pr *record.PullRequest
+	if issue.Phase == phase.Implementing {
+		if pr, err = s.records.PullRequest(ctx, tx, key); err != nil {
+			return completionPosition{}, err
+		}
 	}
 	check, err := s.records.ProductionCheck(ctx, tx, key)
 	if err != nil {

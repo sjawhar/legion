@@ -1,3 +1,4 @@
+import { utf8Bytes } from "./dispatch-text-rules";
 import { sha256Hex } from "./sha256";
 
 export const AGENT_TOPIC_PREFIX = "notifications.agent." as const;
@@ -192,16 +193,6 @@ export type GithubPushRefType = "branch" | "tag";
  */
 export const SUBJECT_MAX_BYTES = 4032;
 
-/** The bytes of a string in UTF-8, a lone surrogate counted as the 3-byte U+FFFD it encodes as. */
-function utf8Length(value: string): number {
-  let bytes = 0;
-  for (const char of value) {
-    const code = char.codePointAt(0) as number;
-    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
-  }
-  return bytes;
-}
-
 export type GithubPushSubject<
   Owner extends string = string,
   Repo extends string = string,
@@ -238,14 +229,14 @@ export function githubPushSubject(
 ) {
   const prefix = `${githubRepositoryPrefix(owner, repo)}.push.${refType}.`;
   const segment = sanitizeSubjectSegment(refName);
-  if (utf8Length(prefix) + utf8Length(segment) <= SUBJECT_MAX_BYTES) {
+  if (utf8Bytes(prefix) + utf8Bytes(segment) <= SUBJECT_MAX_BYTES) {
     return prefix + segment;
   }
   const suffix = `~${sha256Hex(new TextEncoder().encode(refName)).slice(0, 16)}`;
-  let room = SUBJECT_MAX_BYTES - utf8Length(prefix) - suffix.length;
+  let room = SUBJECT_MAX_BYTES - utf8Bytes(prefix) - suffix.length;
   let kept = "";
   for (const char of segment) {
-    const size = utf8Length(char);
+    const size = utf8Bytes(char);
     if (size > room) {
       break;
     }

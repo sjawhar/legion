@@ -1,6 +1,7 @@
 package testpg
 
 import (
+	"bytes"
 	"io"
 	"net"
 	"net/url"
@@ -99,7 +100,7 @@ func (p *delayedProxy) relayDelayed(client, server net.Conn) {
 		for {
 			n, err := client.Read(buffer)
 			if n > 0 {
-				chunks <- chunk{data: append([]byte(nil), buffer[:n]...), due: time.Now().Add(p.delay)}
+				chunks <- chunk{data: bytes.Clone(buffer[:n]), due: time.Now().Add(p.delay)}
 			}
 			if err != nil {
 				return

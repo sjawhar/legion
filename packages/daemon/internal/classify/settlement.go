@@ -98,42 +98,28 @@ func ClassifySettlement(pr record.PullRequest, in SettlementCandidate) Settlemen
 // check or leaves out a check pr has a run of, since it knows nothing pr does not; and a duplicate
 // when it has the same run of every check pr has, and of no other.
 func classifyWithPass(pr record.PullRequest, in SettlementCandidate) SettlementClassification {
-	higher, lower, uncovered := compareByName(pr.CheckRuns, in.CheckRuns)
-	switch {
-	case higher:
+	switch order := CompareAttemptSets(pr.CheckRuns, in.CheckRuns); {
+	case order == AttemptSetNewer || order == AttemptSetMixed:
 		return SettlementNewer
-	case lower || uncovered:
+	case order == AttemptSetOlder || uncovered(pr.CheckRuns, in.CheckRuns):
 		return SettlementStale
 	default:
 		return SettlementDuplicate
 	}
 }
 
-// compareByName compares incoming with stored check by check: higher is whether incoming has a
-// higher run of a check than stored, or a run of a check stored has none of; lower whether it has a
-// lower one; uncovered whether stored has a run of a check incoming does not report.
-func compareByName(stored, incoming []record.AttemptRun) (higher, lower, uncovered bool) {
-	known := make(map[string]int64, len(stored))
-	for _, run := range stored {
-		known[run.Name] = run.ID
-	}
+// uncovered says whether stored has a run of a check incoming does not report.
+func uncovered(stored, incoming []record.AttemptRun) bool {
 	reported := make(map[string]bool, len(incoming))
 	for _, run := range incoming {
 		reported[run.Name] = true
-		storedID, found := known[run.Name]
-		switch {
-		case !found || run.ID > storedID:
-			higher = true
-		case run.ID < storedID:
-			lower = true
+	}
+	for _, run := range stored {
+		if !reported[run.Name] {
+			return true
 		}
 	}
-	for name := range known {
-		if !reported[name] {
-			uncovered = true
-		}
-	}
-	return higher, lower, uncovered
+	return false
 }
 
 // adoptsFence says whether in, a duplicate of pr's recorded settlement (ClassifySettlement), is the
@@ -187,11 +173,13 @@ func mergeWithPass(pr record.PullRequest, in SettlementCandidate) record.PullReq
 		}
 		return names
 	}
-	_, lower, uncovered := compareByName(pr.CheckRuns, in.CheckRuns)
+	order := CompareAttemptSets(pr.CheckRuns, in.CheckRuns)
+	lower := order == AttemptSetOlder || order == AttemptSetMixed
+	covered := !uncovered(pr.CheckRuns, in.CheckRuns)
 	pr.Failing, pr.Cancelled = outcome(in.Failing, pr.Failing), outcome(in.Cancelled, pr.Cancelled)
 	pr.CheckRuns = mergeAttemptSets(pr.CheckRuns, in.CheckRuns)
 	switch {
-	case in.Generation != PassGeneration && !lower && !uncovered:
+	case in.Generation != PassGeneration && !lower && covered:
 		pr.Generation, pr.Snapshot = in.Generation, in.Snapshot
 	case in.Generation == PassGeneration:
 		pr.Generation, pr.Snapshot = PassGeneration, in.Snapshot
