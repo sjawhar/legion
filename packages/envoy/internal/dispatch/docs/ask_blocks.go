@@ -14,6 +14,7 @@ import (
 	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -180,9 +181,11 @@ func (r *settlementReconciliation) nameVersion(
 		if err != nil {
 			return fmt.Errorf("retract deleted ask block: %w", err)
 		}
-		r.events = append(r.events, documentAskEvent(
-			owner, artifactID, "ask.resolved", SettlementActor, model.NewAskEventPayload(retracted, model.ReferenceChanges{}),
-		))
+		payload, err := events.AskEventPayload(ctx, tx, retracted, model.ReferenceChanges{})
+		if err != nil {
+			return err
+		}
+		r.events = append(r.events, documentAskEvent(owner, artifactID, "ask.resolved", SettlementActor, payload))
 	}
 	return nil
 }
@@ -311,9 +314,11 @@ func (s *Service) reconcileAskBlocks(
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index new ask block: %w", err)
 			}
-			reconciled.events = append(reconciled.events, documentAskEvent(
-				owner, artifactID, "ask.opened", blockActor, model.NewAskEventPayload(ask, changes),
-			))
+			payload, err := events.AskEventPayload(ctx, tx, ask, changes)
+			if err != nil {
+				return settlementReconciliation{}, err
+			}
+			reconciled.events = append(reconciled.events, documentAskEvent(owner, artifactID, "ask.opened", blockActor, payload))
 			reconciled.repairAsk(block.node, block.id, ask, "", nil)
 			continue
 		}
@@ -330,7 +335,10 @@ func (s *Service) reconcileAskBlocks(
 			if ask.State == "answered" {
 				eventType = "ask.answered"
 			}
-			payload := model.NewAskEventPayload(ask, model.ReferenceChanges{})
+			payload, err := events.AskEventPayload(ctx, tx, ask, model.ReferenceChanges{})
+			if err != nil {
+				return settlementReconciliation{}, err
+			}
 			payload.Restored = true
 			reconciled.events = append(reconciled.events, documentAskEvent(owner, artifactID, eventType, actor, payload))
 		}
@@ -371,7 +379,7 @@ func (s *Service) reconcileAskBlocks(
 			ask.Multiple = block.multiple
 			ask.Urgency = block.urgency
 			ask.EditedAt = askTimestamp(&editedAt)
-			changes, err := refs.ReplaceCounted(ctx, tx, "ask", ask.ID, ask.Question, s.serverURL)
+			changes, err := refs.ReplaceCountedEdit(ctx, tx, "ask", ask.ID, previous.Question, ask.Question, s.serverURL)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index reconciled ask: %w", err)
 			}

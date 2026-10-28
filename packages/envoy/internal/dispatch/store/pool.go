@@ -292,21 +292,22 @@ func (p *Pool) Dedicated(ctx context.Context, applicationName string) (*pgx.Conn
 // (duty.Exclusive). One connection per caller that can be inside Exclusive at the same moment is
 // the whole requirement, and it is a caller and not a lease that needs one: Exclusive takes its
 // connection before it learns whether the lease is held, so a pass that skips because the other
-// process holds the lease holds a connection for that round trip too. Twelve names are leased -
+// process holds the lease holds a connection for that round trip too. Thirteen names are leased -
 // the document compaction, the suggestion-outcome sweep, the reference-excerpt reconciliation, the
 // block-index reconciliation, the GitHub webhook redelivery sweep, the architecture import, the
 // delivery reconcile, the edit-notice sweep, the document settlement resumption
 // (docs.RunSettlementResumption), the repair of closed and reopened issues' asks
-// (api.RunIssueAskRepair) and one per delivery durable for the consumers'
-// reconciliation (delivery.consumerLease, a name each for delivery-events and delivery-jobs) -
-// taken by twelve callers, since each delivery intake takes its own durable's name from a bind
-// poll of its own, so twelve callers can be inside Exclusive at once. Twelve connections are
-// exactly those twelve: the headroom is zero, not one, and the next leased loop added here makes
-// a thirteenth caller that waits for a connection rather than failing, for as long as the longest
-// pass then holding one. They cannot come from the shared pool: a lease is held for the whole
-// pass, which is minutes for the compaction, and the shared pool's sharedPoolSize connections are
-// what every request reads through.
-const leasePoolSize = 12
+// (api.RunIssueAskRepair), one per delivery durable for the consumers' reconciliation
+// (delivery.consumerLease, a name each for delivery-events and delivery-jobs) and the server
+// process registry's prune (processes.RunPrune) - taken by thirteen callers, since each delivery
+// intake takes its own durable's name from a bind poll of its own, so thirteen callers can be
+// inside Exclusive at once. Thirteen connections are exactly those thirteen: the headroom is zero,
+// not one, and the next leased loop added here makes a fourteenth caller that waits for a
+// connection rather than failing, for as long as the longest pass then holding one. They cannot
+// come from the shared pool: a lease is held for the whole pass, which is minutes for the
+// compaction, and the shared pool's sharedPoolSize connections are what every request reads
+// through.
+const leasePoolSize = 13
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
 // only one process runs each pass (duty.Exclusive). The lease is a session-level advisory lock, so
@@ -323,6 +324,11 @@ func (p *Pool) Leases() (*pgxpool.Pool, error) {
 // statement, so one connection is every connection it can use.
 const outboxPoolSize = 1
 
+// registryPoolSize bounds the pool the registry of live server processes stamps this process's row
+// through: processes.Register opens it from this pool's configuration with MaxConns 1, outside the
+// pools above, so it is counted here rather than by a method of Pool.
+const registryPoolSize = 1
+
 // permanentListeners is how many connections the listener pool dials and hands off for the life
 // of the process: the delivery hub's and the event stream relay's listeners (Listener), and the
 // document rooms' two (Dedicated): the shared listener hub that room sync registers on, and the
@@ -330,9 +336,9 @@ const outboxPoolSize = 1
 const permanentListeners = 4
 
 // ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres:
-// every pool's size, and one connection per permanent listener, which the listener pool dials and
-// hands off rather than holds.
-const ConnectionsPerProcess = sharedPoolSize + roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + permanentListeners
+// every pool's size, the registry's own pool (processes.Register) among them, and one connection
+// per permanent listener, which the listener pool dials and hands off rather than holds.
+const ConnectionsPerProcess = sharedPoolSize + roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + registryPoolSize + permanentListeners
 
 // Outbox is the pool the events outbox claims, reads and records events through, and reads the
 // followers and authors a publish routes to. Under load the API's requests queue for the shared

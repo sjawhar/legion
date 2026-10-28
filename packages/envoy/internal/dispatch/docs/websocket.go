@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -117,10 +118,15 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 // from a room behind the head with its history intact - it lands at the head, and the instance's
 // cursor folds it in once catch-up fills the gap (appendUpdate) - and refuses it only when the
 // room's stored history was replaced under it, or when the document's issue is closed and the room
-// took the update later than closeMargin after the close. An update the room took before the close
-// and whose append reaches the gate after it - queued behind the room's earlier appends, waiting on
-// the document's lock behind a settlement or a compaction, or handed here by the close of the room
-// itself (setRoomIssueOpen) - is stored, and settled once the issue reopens.
+// took the update later than closeMargin after the close. A history a compaction folded past the
+// room's cursor is no replacement for the update when it still holds every item the update builds
+// on (storedHistoryHolds): it is stored, and the room, which cannot catch up to that history, is
+// closed and reloaded by its catch-up. An update the room took before the close and whose append
+// reaches the gate after it - queued behind the room's earlier appends, waiting on the document's
+// lock behind a settlement or a compaction, or handed here by the close of the room itself
+// (setRoomIssueOpen) - is stored, and settled once the issue reopens, a compaction's fold of the
+// history meanwhile included: a room closing for its issue takes in no catch-up while its close
+// waits for this append (holdOpen).
 // A replaced history fails the room, as any failed append does: the room reloads from the store,
 // which is the close-and-reload a replaced history needs (plan D3.3), and the browser resends the
 // update to the reloaded room. A refused update on a closed issue is dropped and closes the room
@@ -259,7 +265,10 @@ func refuseOutsideSchema(w http.ResponseWriter, r *http.Request, room string, ca
 // opens sockets through a load balancer can record which process each one reached (plan D10).
 const ProcessHeader = "X-Dispatch-Process"
 
-// ServeHTTP serves the Hocuspocus-framed document websocket endpoint.
+// ServeHTTP serves the Hocuspocus-framed document websocket endpoint. A caller that does not
+// resolve is refused 401, except a person whose lapsed confirmation the sign-in issuer could not
+// renew (identity.ErrSignInUnavailable), who is still signed in and is refused 503
+// SIGNIN_UNAVAILABLE as every other route refuses them (identity.WriteError).
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.hostname != "" {
 		w.Header().Set(ProcessHeader, s.hostname)
@@ -270,6 +279,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		room = path.Base(r.URL.Path)
 	}
 	if _, err := s.requestActor(r); err != nil {
+		if errors.Is(err, identity.ErrSignInUnavailable) {
+			identity.WriteError(w, err)
+			return
+		}
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

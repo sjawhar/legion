@@ -22,7 +22,7 @@ import (
 const dispatchType = "envoy-infra:gcp:Dispatch"
 
 const (
-	defaultDispatchDatabaseVersion = "POSTGRES_16"
+	defaultDispatchDatabaseVersion = "POSTGRES_18"
 	// defaultDispatchDatabaseTier is the Cloud SQL tier when databaseTier is unset: 4 vCPU and
 	// 15 GB. During a roll, every app pod that holds connections (the replicas, the surge pod and
 	// pods still terminating, for up to their grace period) times dispatchConnectionsPerPod must
@@ -94,7 +94,7 @@ const (
 // counted pools and its permanent listeners. The listener's and the front door's pods open none.
 // TestDispatchConnectionsPerPodIsTheServers fails when a counted pool's size changes and this
 // does not.
-const dispatchConnectionsPerPod = 86
+const dispatchConnectionsPerPod = 88
 
 // Autopilot's bounds for the app pod's total request, the general-purpose compute class's for a pod
 // with pod anti-affinity, which every Dispatch pod carries, or with the safe-to-evict annotation,

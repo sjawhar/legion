@@ -1,4 +1,4 @@
--- 0136: the author of an ask block no settlement has indexed yet outlives a room and a process.
+-- 0137: the author of an ask block no settlement has indexed yet outlives a room and a process.
 -- A settlement indexes a new ask block with the author of the write that introduced
 -- it, and until this table only the room that saw that write knew who it was, so a settlement on
 -- another envoy-dispatch process, or on the process that resumed the document after the writer's

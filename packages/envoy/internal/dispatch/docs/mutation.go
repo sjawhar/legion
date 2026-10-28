@@ -619,30 +619,48 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 }
 
 // documentBlocks renders tree once into its canonical markdown and the blocks whose byte ranges
-// index into it, each with its token and, for a table, the blocks it holds and its rows.
+// index into it, each with its token and, for a table, the blocks it holds and its rows. It leaves
+// out the document's token, which none of its callers reads.
 func documentBlocks(tree *pmdoc.Node) (string, []model.ArtifactBlock, error) {
 	rows, err := pmdoc.TableRows(tree)
 	if err != nil {
 		return "", nil, documentSchemaError(err)
 	}
-	return renderedBlocks(tree, rows)
+	rendered, err := renderedBlocks(tree, rows)
+	if err != nil {
+		return "", nil, err
+	}
+	return rendered.markdown, rendered.blocks, nil
 }
 
-// renderedBlocks is documentBlocks with each table's rows already listed (pmdoc.TableRows). A
-// table block carries the rows of the table its id addresses: where two tables carry one id, the
-// first in document order, the one an edit naming that id changes.
-func renderedBlocks(tree *pmdoc.Node, rows map[string][]pmdoc.TableRow) (string, []model.ArtifactBlock, error) {
+// renderedDocument is a tree rendered (renderedBlocks): its canonical markdown, its blocks, and
+// its document token beside the error that refused that token. A tree holding a value no token can
+// encode outside every block still renders, so the document token's error is the caller's to
+// weigh rather than the rendering's.
+type renderedDocument struct {
+	markdown string
+	blocks   []model.ArtifactBlock
+	token    string
+	tokenErr error
+}
+
+// renderedBlocks is documentBlocks with each table's rows already listed (pmdoc.TableRows), and the
+// document's token, from the same one encoding of the tree as its blocks' tokens (documentTokens).
+// A table block carries the rows of the table its id addresses: where two tables carry one id, the
+// first in document order, the one an edit naming that id changes. Its error is a block token's or
+// the rendering's, never the document token's, which is tokenErr.
+func renderedBlocks(tree *pmdoc.Node, rows map[string][]pmdoc.TableRow) (renderedDocument, error) {
 	tableDescendants, err := pmdoc.TableDescendantIDs(tree)
 	if err != nil {
-		return "", nil, documentSchemaError(err)
+		return renderedDocument{}, documentSchemaError(err)
 	}
-	tokens, err := blockTokens(tree)
-	if err != nil {
-		return "", nil, documentSchemaError(err)
+	tokens := documentTokens(tree)
+	if tokens.blocksErr != nil {
+		return renderedDocument{}, documentSchemaError(tokens.blocksErr)
 	}
 	markdown, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
 	if err != nil {
-		return "", nil, documentSchemaError(err)
+		return renderedDocument{}, documentSchemaError(err)
 	}
 	tables := make(map[string]*model.BlockTable, len(rows))
 	blocks := make([]model.ArtifactBlock, len(offsets))
@@ -652,7 +670,7 @@ func renderedBlocks(tree *pmdoc.Node, rows map[string][]pmdoc.TableRow) (string,
 			Type:          offset.Type,
 			From:          offset.From,
 			To:            offset.To,
-			Token:         tokens[offset.ID],
+			Token:         tokens.blocks[offset.ID],
 			DescendantIDs: tableDescendants[offset.ID],
 		}
 		if offset.Type != "table" {
@@ -665,7 +683,7 @@ func renderedBlocks(tree *pmdoc.Node, rows map[string][]pmdoc.TableRow) (string,
 		}
 		blocks[index].Table = table
 	}
-	return markdown, blocks, nil
+	return renderedDocument{markdown: markdown, blocks: blocks, token: tokens.document, tokenErr: tokens.documentErr}, nil
 }
 
 // blockTable is a table's rows as the API carries them.
@@ -790,7 +808,7 @@ const conditionalEditQueueLockNamespace int32 = 0x51554555
 const conditionalEditReleaseTimeout = 5 * time.Second
 
 // The statements of the document's queue across processes (doc_conditional_edit_queue, migration
-// 0137). The admission's sum counts the members' rows other than this process's own, whose count
+// 0138). The admission's sum counts the members' rows other than this process's own, whose count
 // it holds in memory, and deletes the rows of processes that are no members: one that died, or
 // whose room-sync connection is down, counts for nothing until it is a member again, and writes
 // its row back with its next admission.

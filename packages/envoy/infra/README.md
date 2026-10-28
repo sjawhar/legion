@@ -137,7 +137,7 @@ the listener may dial the proxy, and the app alone may dial the listener.
 | VPC, subnetwork, router and Cloud NAT | Private Autopilot nodes can pull images and reach the tailnet control plane without public node addresses. |
 | Private services access range and connection | Cloud SQL receives a private IP on the component's VPC. |
 | Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. |
-| Cloud SQL instance, database, user and generated password | PostgreSQL 16, private IP only, automated backups and point-in-time recovery. |
+| Cloud SQL instance, database, user and generated password | PostgreSQL 18 by default (`databaseVersion`), private IP only, automated backups and point-in-time recovery. |
 | Kubernetes namespace (not with `existingNamespace`), ServiceAccount `<hostname>`, Secrets, ConfigMap and SecretProviderClass | The app's and the listener's account, which Workload Identity lets mount the NATS seed; the generated application secrets (`<hostname>-dispatch`), the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the front door's auth key (`<hostname>-tailnet-auth-key`, one key `TS_AUTHKEY`), the Serve configuration (ConfigMap `<hostname>-serve`, rendered from the resolved `tailnetService`), and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key). |
 | ServiceAccount `<hostname>-tailnet`, Role and RoleBinding `<hostname>-tailnet-tls` | The front door's pods run as an account of their own, which the Role lets `get` and `patch` the one Secret `<hostname>-tailnet-tls` and nothing else (no `create`, since the component creates it, and no `update`, since the pods send merge patches), so neither the app nor the listener, nor the account `serviceAccountSubject` names, can write the certificate. The pod does not automount the account's token: only `cert-publish`, which calls the API server, mounts it, so the tailnet-facing `tailscale` and `advertiser` containers hold no credential for the Secret. |
 | Secret `<hostname>-tailnet-tls` | The Tailscale Service's certificate, its key and the ACME account key (keys `tls.crt`, `tls.key` and `acme-account.key.pem`), which the front door's pods publish and seed from ([The front door](#the-front-door)). The component declares it with no data and ignores its contents, so a later preview never plans to undo what the pods wrote, and no pod template carries its checksum, so a renewed certificate rolls no pod. |
@@ -151,7 +151,7 @@ The required plain inputs are `region`, `hostname`, `tailnetDnsName`, `tags`, th
 digest-pinned images, `signInClientId`, and `signInDomain`. `tailnetAuthKey`, `tailnetService`,
 `natsUrl`, `natsSeedSecret`, and `signInClientSecret` are Pulumi inputs and may come from another
 resource or stack. `tailnetAuthKey` and `signInClientSecret` are secrets. `databaseVersion`
-defaults to `POSTGRES_16`, `databaseTier` to `db-custom-4-15360`, `namespace` to `dispatch`, and
+defaults to `POSTGRES_18`, `databaseTier` to `db-custom-4-15360`, `namespace` to `dispatch`, and
 `deletionProtection` to `true`; it sets both Pulumi's own guard and the Cloud SQL instance's
 `deletionProtectionEnabled`, which refuses a delete from the API or the console too, and the
 `dispatch` database's `deletionPolicy` `PREVENT` (otherwise `DELETE`), which keeps an instance
@@ -165,6 +165,18 @@ front door's certificate Secret included: first remove the Namespace from the st
 for a cluster that already exists: on a first apply the component creates the cluster, so no other
 program can have made the namespace yet. `allowedNamespaces`, empty by default, each a DNS label,
 names the in-cluster namespaces the NetworkPolicy admits on port 8766.
+
+`databaseVersion` defaults to `POSTGRES_18`; envoy-infra v2.9.1 and every release before this
+change defaulted to `POSTGRES_16`. A stack that leaves `databaseVersion` unset is upgraded in place
+from its current major version to PostgreSQL 18 at its first `pulumi up` after its `envoy-infra`
+pin moves to a release that carries this default: the first `envoy-infra-v*` tag cut from a `main`
+commit that contains sjawhar/legion#2364. That is a Cloud SQL major-version upgrade: Cloud SQL
+makes the instance unavailable while it performs the upgrade, so Dispatch is down for that time,
+and the upgrade cannot be reversed in place. Cloud SQL makes a pre-upgrade backup immediately
+before it starts, and the way back to the earlier version is restoring that backup to a new
+instance running it ([Upgrade the database major version
+in-place](https://cloud.google.com/sql/docs/postgres/upgrade-major-db-version-inplace)). To keep
+PostgreSQL 16, set `databaseVersion: POSTGRES_16` before moving the pin.
 
 `tailnetService`, required, is the Tailscale Service the front door's pods host, as Tailscale's
 API names it. It must resolve to `svc:<hostname>`, the name the certificate and the URL carry, and
@@ -306,13 +318,13 @@ among them, and at its Deployment's replica count it refuses every voluntary evi
 replica with a budget of 1, every drain of that pod's node waits: `kubectl drain` waits with no
 limit (until its own `--timeout`, if one is given), and a GKE upgrade waits up to an hour (below).
 Each keeps Kubernetes' default `unhealthyPodEvictionPolicy`, `IfHealthyBudget`, so it holds a pod
-that is not ready too while the budget is not met: `envoy-dispatch` and `envoy-listener` report
-not ready whenever NATS or Postgres is briefly out of reach (a front-door pod's own eviction in
-the same drain is one way), and evicting one then would turn that into a cold restart. A
-front-door pod is ready only while it hosts the Service ([The front door](#the-front-door)), so
-the front door's budget counts only pods that serve. A drain of a pod that stays broken waits the
-longer for it: GKE respects a budget for up to an hour while it drains a node for an upgrade and
-then evicts anyway
+that is not ready too while the budget is not met: `envoy-dispatch` reports not ready whenever
+Postgres is briefly out of reach (a Cloud SQL failover, the proxy sidecar restarting) and
+`envoy-listener` whenever NATS is (a front-door pod's own eviction in the same drain is one way),
+and evicting one then would turn that into a cold restart. A front-door pod is ready only while it
+hosts the Service ([The front door](#the-front-door)), so the front door's budget counts only pods
+that serve. A drain of a pod that stays broken waits the longer for it: GKE respects a budget for
+up to an hour while it drains a node for an upgrade and then evicts anyway
 ([Autopilot cluster upgrades](https://cloud.google.com/kubernetes-engine/docs/concepts/cluster-upgrades-autopilot)).
 A budget never slows its Deployment's own rollouts, which Kubernetes does not run through the
 eviction API. Delete every budget made by hand over the component's pods (`kubectl -n <namespace>
@@ -535,7 +547,7 @@ the process does not answer at all. `envoy-dispatch`'s and `envoy-listener`'s ru
 9020), with a 9-second timeout. `/livez` reads nothing: `envoy-dispatch` answers it `204`, and
 `envoy-listener`, which has no such route, answers it `404` from its router, outside the `/v1`
 routes its bearer guards. Without `-f`, curl exits 0 whatever the status, so any answer passes:
-unlike `/healthz`, which reads Postgres and NATS on every call, the probe neither fails during a
+unlike `/healthz`, which reads Postgres (`envoy-dispatch`) or NATS (`envoy-listener`) on every call, the probe neither fails during a
 dependency outage nor waits on a slow hub, so neither restarts every pod. Liveness asks every 10
 seconds, and three missed answers in a row restart the container.
 Startup asks the same question for longer before liveness takes over: 30 minutes for
@@ -557,19 +569,20 @@ no traffic, their loops log a failure and try again, and `cert-publish` exits on
 cannot recover from, a certificate cache it cannot read.
 
 Readiness is the other question. `envoy-dispatch` is ready while `curl -fsS` of its `/healthz`
-succeeds (every 10 seconds, three failures), which reads Postgres and NATS. `envoy-listener` is
-ready while `curl -fsS` of its `/healthz` succeeds every 5 seconds, two failures in a row taking
-it out; that endpoint answers within 5 seconds, so the probe allows 6. A front-door pod is ready
-while it hosts the Service ([The front door](#the-front-door)). The app and the listener reach
-NATS only through the front door's SOCKS5 proxy, so with no front-door pod ready both fail
-readiness within their probes' windows (30 seconds for the app, 10 for the listener) and leave
-their Services, and the in-cluster `allowedNamespaces` consumers lose the app for that time as
-well. It heals itself once a front-door pod is ready again, since `internal/bus` reconnects
-without limit (`MaxReconnect = -1`) and no liveness probe reads NATS. One case does not: a
-front-door pod whose advertiser spent all 6 certificate orders waits unready for ever while its
-liveness probe passes, so if every front-door pod reaches that state the SOCKS5 Service has no
-endpoint until someone deletes those pods (`kubectl -n <namespace> delete pod -l
-app=<hostname>-tailnet`), whose replacements start over.
+succeeds (every 10 seconds, three failures), which Postgres alone decides: the server serves while
+NATS is down. `envoy-listener` is ready while `curl -fsS` of its `/healthz` succeeds every 5
+seconds, two failures in a row taking it out; that endpoint answers within 5 seconds, so the probe
+allows 6. A front-door pod is ready while it hosts the Service ([The front door](#the-front-door)).
+The app and the listener reach NATS only through the front door's SOCKS5 proxy, so with no
+front-door pod ready the listener fails readiness within its probe's window (10 seconds) and
+leaves its Service, while the app stays ready, and the in-cluster `allowedNamespaces` consumers
+keep it, with its NATS traffic paused (no outbox publish, no delivery intake) until it reconnects
+through the proxy and the outbox catches up. It heals itself once a front-door pod is ready again,
+since `internal/bus` reconnects without limit (`MaxReconnect = -1`) and no liveness probe reads
+NATS. One case does not: a front-door pod whose advertiser spent all 6 certificate orders waits
+unready for ever while its liveness probe passes, so if every front-door pod reaches that state the
+SOCKS5 Service has no endpoint until someone deletes those pods (`kubectl -n <namespace> delete pod
+-l app=<hostname>-tailnet`), whose replacements start over.
 
 A stopping app or listener pod keeps serving for five seconds after it is told to stop, which is
 the window its removal from routing has to propagate, and is what its pre-stop wait (`sleep 5`)
@@ -609,6 +622,20 @@ the two Deployments roll in the same update, and until both have, a call from th
 listener pod on the other token is refused. `DISPATCH_AGENT_TOKEN` is also the `agentToken`
 output, so a consumer that hands it to its agents passes them the new value too.
 `<hostname>-tailnet-tls` carries no checksum: a renewed certificate rolls no pod.
+
+`DISPATCH_SIGNING_KEY` is the exception to that rotation by a roll. The component writes one random
+key (the `RandomPassword` `<hostname>-signing-key`), and Dispatch refuses to start a server whose
+keys a running server does not share, so a new value, which rolls the app, signs everyone out at
+one replica, and above one stalls the roll: the first new pod, holding only the new key, is
+refused beside the old pods, which hold only the old one, and crash-loops while they keep serving.
+The three steps of
+[Changing the session key](https://sjawhar.github.io/legion/dispatch/running-dispatch/#changing-the-session-key)
+change the key without signing anyone out, but they need the Secret to hold two keys at once, which
+the component does not express, and the next `up` reverts a hand edit of the Secret. A rotation
+through the component therefore signs everyone out, and is applied at one replica: set `replicas`
+to 1, so the app updates with `Recreate`, replace the key (`pulumi up --replace` with the
+`<hostname>-signing-key` resource's URN), which rolls the app onto the new key, and then restore
+`replicas`.
 
 The projected tokens need no restart either: the kubelet rewrites them in place, and Dispatch
 reads the broker token on every call and the keyless Azure form's token on every exchange with

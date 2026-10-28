@@ -23,7 +23,7 @@ DATABASE_URL=${1:-postgres://dispatch:s%40cret-canary@db.test:5432/dispatch?sslm
 DISPATCH_SERVER_URL=http://browser.test:8766
 EOF
   printf '112\n' >"$schema"
-  rm -f "$schema.up" "$schema.running"
+  rm -f "$schema.up" "$schema.running" "$schema.candidate"
   touch "$schema.running"
   : >"$log"
   : >"$argv"
@@ -85,12 +85,13 @@ case "$1" in
         ;;
       *" up "*)
         if [[ "${ENVOY_IMAGE_TAG:-}" == new-image ]]; then
-          touch "$AUTODEPLOY_TEST_SCHEMA.up"
+          touch "$AUTODEPLOY_TEST_SCHEMA.up" "$AUTODEPLOY_TEST_SCHEMA.candidate"
           if [[ -n "${AUTODEPLOY_TEST_MIGRATE_TO:-}" ]]; then
             printf '%s\n' "$AUTODEPLOY_TEST_MIGRATE_TO" >"$AUTODEPLOY_TEST_SCHEMA"
           fi
         else
           held_migration_commits
+          rm -f "$AUTODEPLOY_TEST_SCHEMA.candidate"
         fi
         touch "$AUTODEPLOY_TEST_SCHEMA.running"
         ;;
@@ -116,13 +117,26 @@ case "$1" in
     ;;
 esac
 EOF
+# curl answers /healthz 200 with NATS connected, but for new-image with
+# AUTODEPLOY_TEST_CANDIDATE_NATS set, which it reports as `nats`.
 cat >"$bin/curl" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
+  *"/healthz"*)
+    nats=true
+    if [[ -e "$AUTODEPLOY_TEST_SCHEMA.candidate" ]]; then
+      nats="${AUTODEPLOY_TEST_CANDIDATE_NATS:-true}"
+    fi
+    printf '{"ok":true,"db":true,"nats":%s}' "$nats"
+    ;;
   *"/auth/start"*)
     printf 'https://github.com/login/oauth/authorize?redirect_uri=http%%3A%%2F%%2Fwrong.test%%3A8766%%2Fauth%%2Fcallback'
     ;;
 esac
+EOF
+# The health check's three-second waits pass at once, so a check that never passes fails in no time.
+cat >"$bin/sleep" <<'EOF'
+#!/usr/bin/env bash
 EOF
 # The fake libpq, which splits a URL as libpq does rather than as the deployer does: the
 # credentials run to the first @ before the first /, a raw ? included, and a query key or value is
@@ -189,7 +203,7 @@ source "$AUTODEPLOY_TEST_TOOLS/libpq.sh"
 connection_password pg_dump "$@" || exit 1
 printf 'backup'
 EOF
-chmod +x "$bin/jj" "$bin/docker" "$bin/curl" "$tools/psql" "$tools/pg_dump"
+chmod +x "$bin/jj" "$bin/docker" "$bin/curl" "$bin/sleep" "$tools/psql" "$tools/pg_dump"
 
 deploy_once() {
   PATH="$bin:$PATH" AUTODEPLOY_TEST_LOG="$log" AUTODEPLOY_TEST_ARGV="$argv" AUTODEPLOY_TEST_SCHEMA="$schema" \
@@ -240,6 +254,25 @@ fi
 # Each client container runs under an init that passes on a signal, so `timeout` ends it.
 if [[ $(grep -c '^docker run ' "$argv") -ne 3 || $(grep -c '^docker run --init ' "$argv") -ne 3 ]]; then
   fail 'deployer ran a database client container without --init, which a timeout could not stop'
+fi
+
+# A new image that serves with its NATS connection failing (`nats` false) fails the health check
+# and is rolled back, as when Dispatch exited at boot without NATS; one with NATS turned off
+# (`nats` null) passes it and goes on to the origin check.
+fresh_env
+if output=$(AUTODEPLOY_TEST_CANDIDATE_NATS=false deploy_once); then
+  fail 'deployer kept an image whose NATS connection failed'
+fi
+if [[ "$output" != *"did not answer 200 with NATS connected"*"rolling back to old-image"* ]] ||
+  [[ "$output" == *"OAuth redirect_uri"* ]] || [[ $(<"$compose/.env") != *"ENVOY_IMAGE_TAG=old-image"* ]]; then
+  fail 'deployer did not roll back an image whose /healthz reported nats false'
+fi
+fresh_env
+if output=$(AUTODEPLOY_TEST_CANDIDATE_NATS=null deploy_once); then
+  fail 'deployer did not fail after the origin check rejected the deployment with NATS turned off'
+fi
+if [[ "$output" != *"OAuth redirect_uri"*"rolling back to old-image"* ]] || [[ "$output" == *"NATS connected"* ]]; then
+  fail 'deployer did not pass the health check of an image with NATS turned off (nats null)'
 fi
 
 # A deploy whose image moved the schema before it failed refuses to start the previous image

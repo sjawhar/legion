@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -439,7 +440,29 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		eventType = "issue.closed"
 	}
 	after.LastSeq++
-	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event(eventType, actor, model.NewIssueEventPayload(after, model.ReferenceChanges{})))
+	// What the write changed, the issue's ancestors, and, for a status move, whose Replies count
+	// it can move, all read in this transaction. A retitle keeps the issue's child_of and
+	// blocked_by edges but moves the excerpt they show, so it names their targets; a blocked_by
+	// change moves the count of each blocker it added or removed, so it names those.
+	changedFields := issueChangedFields(before, after)
+	edgeChanges, err := issueEdgeChanges(r.Context(), tx, before, after, slices.Contains(changedFields, "title"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	payload, err := newIssueEventPayload(r.Context(), tx, after, edgeChanges, changedFields)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if statusChanged {
+		payload.ThreadLogins, err = issueThreadLogins(r.Context(), tx, key, slices.Contains(changedFields, "closed_at"))
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event(eventType, actor, payload))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -496,7 +519,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A change of closed_at reaches the document rooms of every process, this one's included, from
-	// the commit itself: migration 0135's trigger notifies, and each process closes its rooms of
+	// the commit itself: migration 0136's trigger notifies, and each process closes its rooms of
 	// the issue's documents so their browsers reconnect with the scope the issue now allows.
 	s.publish(events...)
 	if closing {
