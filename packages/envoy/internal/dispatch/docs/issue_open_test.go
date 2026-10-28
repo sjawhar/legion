@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -18,7 +20,7 @@ import (
 )
 
 // Closing or reopening an issue changes every process's rooms of its documents (plan
-// D5). The trigger migration 0135 puts on issues.closed_at notifies dispatch_issue_open_changed
+// D5). The trigger migration 0136 puts on issues.closed_at notifies dispatch_issue_open_changed
 // from the transaction that wrote it, whichever process wrote it; each process's room sync reads
 // the issue and closes its rooms of the issue's documents (issueOpenChanged), so their browsers
 // reconnect with the scope the issue now allows, which ygo fixes when a browser connects. A
@@ -213,6 +215,96 @@ func TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenItsAppendReachesTheGateA
 		t.Fatalf("the keystroke alice typed while the issue was open was dropped by its close: the store holds %q", stored)
 	}
 	connectWithScope(t, serverA.URL, artifactID, "alice", "readonly", "typed before the close\n")
+}
+
+// A browser's update whose append waits for the document's lock - behind a settlement, a
+// compaction or another process's write - can find, once it has the lock, a stored history its
+// room no longer holds a prefix of: another process wrote the document past the room's cursor, and
+// a compaction folded every row into that write's (another process's room retiring on the issue's
+// close compacts as it exits). A room closing for its issue takes in no catch-up meanwhile (its
+// close holds the room's gate, holdOpen), and the catch-up of any other room reports the history
+// replaced. The fold keeps every item the update builds on, so the update is stored
+// (storedHistoryHolds). Refused as a replaced history, it failed the room and was dropped, and its
+// browser's resend reached a room that is read-only once the issue closed: the keystroke was lost.
+// Here a transaction holds the document's lock while alice types, so her append waits on it; the
+// issue closes, and the close queues on the lock behind the append (it records the room's latest
+// edit source first, setRoomIssueOpen); the transaction writes the document and folds its history
+// before it lets go.
+func TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenACompactionFoldedTheHistoryItsRoomHeld(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	taskA, serverA := newTestServiceInstance(t, database)
+	taskB, _ := newTestServiceInstance(t, storetest.SecondProcess(t, database))
+	seedServiceText(t, taskA, artifactID, "before")
+	waitForLandedAppends(t, taskA, artifactID)
+	runRoomSync(t, newRoomSync(taskA))
+	var failed atomic.Bool
+	taskA.beforeFailedEviction = func(string) { failed.Store(true) }
+	alice := connectWithScope(t, serverA.URL, artifactID, "alice", "read-write", "before\n")
+	waitForLandedAppends(t, taskA, artifactID)
+	head := storedHead(t, database, artifactID)
+
+	holder, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the transaction that holds the document's lock: %v", err)
+	}
+	defer holder.Rollback(ctx)
+	if err := lockDocumentRoom(ctx, holder, artifactID); err != nil {
+		t.Fatalf("hold the document's lock: %v", err)
+	}
+	typeOver(t, alice, "before", "typed before the close")
+	if waiting := storetest.WaitForLockWaiters(t, holder, 1, roomWait(t)); waiting < 1 {
+		t.Fatal("alice's append never came to wait on the document's lock")
+	}
+	writeIssueClosed(t, taskB.store, "DOC-1", true)
+	if waiting := storetest.WaitForLockWaiters(t, holder, 2, roomWait(t)); waiting < 2 {
+		t.Fatal("task A's close of its room never came to wait on the document's lock behind alice's append")
+	}
+
+	// Another process's write past the room's cursor, then the fold Compact makes of it with
+	// compactKeep: one row, the head, holding the state of every row through it.
+	stored, err := documentThrough(ctx, holder, artifactID, persistence.Version(head))
+	if err != nil {
+		t.Fatalf("read the stored document: %v", err)
+	}
+	before := stored.StateVector()
+	written := stored.GetMap("written-by-task-b")
+	stored.Transact(func(txn *crdt.Transaction) {
+		written.Set(txn, "key", "value")
+	})
+	writtenAt := head + 1
+	if _, err := holder.Exec(ctx, `insert into doc_updates (artifact_id, version, update, content_changed) values ($1, $2, $3, false)`,
+		artifactID, writtenAt, crdt.EncodeStateAsUpdateV1(stored, before)); err != nil {
+		t.Fatalf("write the document as task B: %v", err)
+	}
+	state, err := stateThrough(ctx, holder, artifactID, persistence.Version(writtenAt))
+	if err != nil {
+		t.Fatalf("fold the document's history: %v", err)
+	}
+	if _, err := holder.Exec(ctx, `update doc_updates set update = $3 where artifact_id = $1 and version = $2`, artifactID, writtenAt, state); err != nil {
+		t.Fatalf("fold the document's history into task B's write: %v", err)
+	}
+	if _, err := holder.Exec(ctx, `delete from doc_updates where artifact_id = $1 and version < $2`, artifactID, writtenAt); err != nil {
+		t.Fatalf("delete the folded rows: %v", err)
+	}
+	if taskA.srv.GetDoc(artifactID) == nil {
+		t.Fatal("task A's room closed before its append reached the store, so nothing here is tested")
+	}
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatalf("release the document's lock: %v", err)
+	}
+
+	requireEnds(t, alice, "closing the issue left alice's browser on task A connected")
+	waitFor(t, roomWait(t), "task A's room to finish closing", func() bool {
+		return taskA.srv.GetDoc(artifactID) == nil
+	})
+	if stored := storedMarkdown(t, database, artifactID); !strings.Contains(stored, "typed before the close") {
+		t.Fatalf("the keystroke alice typed while the issue was open was dropped: the store holds %q", stored)
+	}
+	if failed.Load() {
+		t.Fatal("the keystroke's append failed task A's room")
+	}
 }
 
 // The notification may not reach a process in time: its listener can be redialing for up to thirty

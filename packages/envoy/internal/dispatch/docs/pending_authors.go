@@ -461,8 +461,10 @@ const (
 	// appendBrowser is a raw client delta (servicePersistenceAdapter.StoreUpdateContext): a Yjs
 	// update commutes with whatever landed since, so it is admitted from a room that is behind
 	// with its history intact, at the head, and its room's cursor folds it in once catch-up fills
-	// the gap. A replaced history refuses it, and so does a closed issue (ErrIssueClosed), unless
-	// the room's observer took the update before the close took effect (observedBeforeClose).
+	// the gap. A replaced history refuses it unless that history still holds every item it builds
+	// on (storedHistoryHolds, a compaction's fold), and so does a closed issue (ErrIssueClosed),
+	// unless the room's observer took the update before the close took effect
+	// (observedBeforeClose).
 	appendBrowser appendKind = iota
 	// appendDerived is an update computed from the room's content - settlement's repair append
 	// (settleRoomWithin), a live write's fork (applyLive through the transaction's liveWrite),
@@ -591,14 +593,51 @@ func (g *appendGate) head() (int64, error) {
 }
 
 // gateAppend is the gate for a caller that batches nothing: queueAppendGate's read as a batch of
-// one statement on tx, and its decision.
-func gateAppend(ctx context.Context, tx pgx.Tx, room string, through int64, kind appendKind, observed time.Time) (int64, error) {
+// one statement on tx, and its decision for update. A browser's update refused for a replaced
+// history above its room's cursor is admitted at the head after all when that history still holds
+// every item the update builds on (storedHistoryHolds): a compaction folded the rows the room held
+// into a later one, keeping their items, which is no replacement for a delta that commutes. The
+// room cannot catch up to such a history and is closed and reloaded (catchUpReplaced) as before;
+// refused, its update was dropped with it, and a browser whose issue closed meanwhile reconnects
+// read-only and cannot send it again.
+func gateAppend(ctx context.Context, tx pgx.Tx, room string, through int64, kind appendKind, observed time.Time, update []byte) (int64, error) {
 	batch := &pgx.Batch{}
 	gate := queueAppendGate(batch, room, through, kind, observed)
 	if err := tx.SendBatch(ctx, batch).Close(); err != nil && gate.err == nil {
 		return 0, fmt.Errorf("read the document's head for the append gate: %w", err)
 	}
-	return gate.head()
+	latest, err := gate.head()
+	if errors.Is(err, ErrRoomBehindHead) && gate.kind == appendBrowser && gate.latest > gate.through {
+		holds, holdsErr := storedHistoryHolds(ctx, tx, room, gate.latest, update)
+		if holdsErr != nil {
+			return 0, holdsErr
+		}
+		if holds {
+			return gate.latest, nil
+		}
+	}
+	return latest, err
+}
+
+// storedHistoryHolds reports whether room's stored history through head holds every item update
+// builds on: applied to the document that history decodes into (documentThrough), update parks
+// nothing, neither an item whose origin or predecessor is missing nor a delete of an item the
+// history lacks. A compaction's fold keeps every item it folds, so it holds what a room's update
+// was made on; a rebuild's seed is a document of other items, which a room's update parks on. A
+// history that already parks something answers false, as does an update it cannot apply.
+func storedHistoryHolds(ctx context.Context, tx pgx.Tx, room string, head int64, update []byte) (bool, error) {
+	doc, err := documentThrough(ctx, tx, room, persistence.Version(head))
+	if err != nil || doc == nil {
+		return false, err
+	}
+	if parked := doc.PendingStats(); parked.Items > 0 || parked.DeleteRanges > 0 {
+		return false, nil
+	}
+	if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
+		return false, nil
+	}
+	parked := doc.PendingStats()
+	return parked.Items == 0 && parked.DeleteRanges == 0, nil
 }
 
 // historyReplaced is whether the stored history under a room instance holding every version
