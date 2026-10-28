@@ -13,7 +13,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"weak"
 
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
@@ -68,10 +67,16 @@ func newProcessPair(t *testing.T) processPair {
 // fails the room. A browser's provider reconnects and resends there, and so does this.
 func (pair processPair) leaveTaskABehind(t *testing.T, connection uint64, peer model.Actor, markdown string) {
 	t.Helper()
+	pair.leaveTaskABehindWith(t, connection, peer, appendBlocks(t, markdown))
+}
+
+// leaveTaskABehindWith is leaveTaskABehind for a browser edit other than an appended block.
+func (pair processPair) leaveTaskABehindWith(t *testing.T, connection uint64, peer model.Actor, edit func(*pmdoc.Node) *pmdoc.Node) {
+	t.Helper()
 	if err := pair.taskA.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
 		t.Fatalf("load task A's room: %v", err)
 	}
-	editAsBrowserPeer(t, pair.taskB, pair.artifactID, connection, peer, appendBlocks(t, markdown))
+	editAsBrowserPeer(t, pair.taskB, pair.artifactID, connection, peer, edit)
 	waitForLandedAppends(t, pair.taskB, pair.artifactID)
 	if behind := roomBehind(t, pair.taskA, pair.artifactID); !behind {
 		t.Fatal("task A's room stands at the head after task B's edit, so nothing here is tested")
@@ -1518,7 +1523,11 @@ type recordedClass struct {
 	found  bool
 }
 
-func recordClasses(service *Service) *recordedClasses {
+// recordClasses installs the recorder on service and reloads artifactID's room, which a seed may
+// have loaded before the recorder was there, so the room it returns is read.
+func recordClasses(t *testing.T, service *Service, artifactID string) (*recordedClasses, *crdt.Doc) {
+	t.Helper()
+	ctx := context.Background()
 	recorded := &recordedClasses{}
 	load := service.srv.OnLoadDocument
 	service.srv.OnLoadDocument = func(ctx context.Context, room string, doc *crdt.Doc) error {
@@ -1542,7 +1551,13 @@ func recordClasses(service *Service) *recordedClasses {
 		})
 		return nil
 	}
-	return recorded
+	if err := service.Evict(ctx, artifactID); err != nil {
+		t.Fatalf("evict the room loaded before the recorder: %v", err)
+	}
+	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatalf("load the recorded room: %v", err)
+	}
+	return recorded, service.srv.GetDoc(artifactID)
 }
 
 // latest is the class the room recorded for the latest update it applied with an origin matches
@@ -1580,11 +1595,8 @@ func replicaRendering(t *testing.T, service *Service, artifactID string) (kept, 
 	if fresh, _, err = renderDocumentForUpdate(copied); err != nil {
 		t.Fatalf("render the room's document: %v", err)
 	}
-	listed, ok := service.replicas.Load(weak.Make(live))
-	if !ok {
-		t.Fatal("the resident room lists no rendered replica")
-	}
-	replica := listed.(weak.Pointer[renderedReplica]).Value()
+	_, listed := listedReplica(t, service, artifactID)
+	replica := listed.Value()
 	if replica == nil {
 		t.Fatal("the resident room's rendered replica is gone")
 	}
@@ -1614,23 +1626,10 @@ func replicaRendering(t *testing.T, service *Service, artifactID string) (kept, 
 // browser update against the stale rendering: a browser's margin note alone would count as a
 // content change, credited to that browser's person and settled as their edit.
 func TestAMarginWriteFromAColdForkIsRenderedByTheRoomItIsPublishedInto(t *testing.T) {
-	ctx := context.Background()
 	pair := newProcessPair(t)
-	classes := recordClasses(pair.taskA)
-	// The seed left task A a room loaded before recordClasses was installed.
-	if err := pair.taskA.Evict(ctx, pair.artifactID); err != nil {
-		t.Fatalf("evict the room task A seeded: %v", err)
-	}
-	if err := pair.taskA.warmLiveDocument(ctx, pair.artifactID); err != nil {
-		t.Fatalf("load task A's room: %v", err)
-	}
-	room := pair.taskA.srv.GetDoc(pair.artifactID)
+	classes, room := recordClasses(t, pair.taskA, pair.artifactID)
 	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
-	editAsBrowserPeer(t, pair.taskB, pair.artifactID, 1, bob, withoutTopLevelBlock("Second."))
-	waitForLandedAppends(t, pair.taskB, pair.artifactID)
-	if behind := roomBehind(t, pair.taskA, pair.artifactID); !behind {
-		t.Fatal("task A's room stands at the head after task B's deletion, so nothing here is tested")
-	}
+	pair.leaveTaskABehindWith(t, 1, bob, withoutTopLevelBlock("Second."))
 	// An ask author for a block the document does not hold: the ask-block observer forgets it
 	// whenever it is handed a tree, and only then.
 	const goneAsk = "ask-block-the-document-does-not-hold"
@@ -1700,6 +1699,64 @@ func TestAMarginWriteFromAColdForkIsRenderedByTheRoomItIsPublishedInto(t *testin
 	}
 	if class := classes.latest(t, "the browser's margin note", func(origin any) bool { return origin == "peer" }); class.contentChanged {
 		t.Error("the room recorded a browser's margin note as a content change: it measured the note against a rendering it kept from before the margin write's publish")
+	}
+}
+
+// A margin write a transaction makes after its own text edit, on a fork warm-built from the room,
+// is published into that room right after the edit, and only the margin write's publish may keep
+// the rendering the replica has. The fork holds the edit's deletion of "Second.", so the margin
+// write's update carries that deletion too, but the edit's own update has already brought it into
+// the room, so the margin update changes no text there (liveWriteOrigin.marginOnly). The edit's
+// publish is a content change the observer has to render: one that kept the rendering for it too -
+// a tag on every update of a warm-forked transaction rather than on its margin writes - would
+// record the edit as no change and keep "Second." in the rendering every later browser update is
+// measured against.
+func TestAMarginWriteFromAWarmForkKeepsTheRenderingOfTheRoomItWasForkedFrom(t *testing.T) {
+	pair := newProcessPair(t)
+	classes, room := recordClasses(t, pair.taskA, pair.artifactID)
+	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
+	var cold bool
+	if err := joinedWrite(pair.taskA, func(ctx context.Context) error {
+		if _, err := pair.taskA.ReplaceText(ctx, pair.artifactID, "First.\n", alice); err != nil {
+			return err
+		}
+		if err := pair.taskA.ProjectMark(ctx, pair.artifactID, "comment-on-task-a", MarkRecord{
+			Kind: "comment", By: "user:alice-on-task-a", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "a reply",
+		}, alice); err != nil {
+			return err
+		}
+		cold = joinedLiveWrite(ctx, pair.artifactID).cold
+		return nil
+	}); err != nil {
+		t.Fatalf("a text edit and a margin write in one transaction: %v", err)
+	}
+	if cold {
+		t.Fatal("the transaction forked the stored document rather than task A's room, so nothing here is tested")
+	}
+	if pair.taskA.srv.GetDoc(pair.artifactID) != room {
+		t.Fatal("task A's room was replaced, so the publishes did not reach the room the fork was built from")
+	}
+
+	kept, fresh := replicaRendering(t, pair.taskA, pair.artifactID)
+	if strings.Contains(fresh, "Second.") {
+		t.Fatalf("the room after the publishes = %q, want the text edit's deletion of \"Second.\"", fresh)
+	}
+	if kept != fresh {
+		t.Errorf("the replica keeps the rendering %q, want the room's %q", kept, fresh)
+	}
+	margin := classes.latest(t, "the margin write's publish", func(origin any) bool {
+		published, ok := origin.(*liveWriteOrigin)
+		return ok && published.marginOnly
+	})
+	if margin.contentChanged {
+		t.Error("the room recorded the margin write's publish as a content change")
+	}
+	edit := classes.latest(t, "the text edit's publish", func(origin any) bool {
+		published, ok := origin.(*liveWriteOrigin)
+		return ok && !published.marginOnly
+	})
+	if !edit.contentChanged {
+		t.Error("the room recorded the text edit's publish, which deleted \"Second.\", as no content change")
 	}
 }
 

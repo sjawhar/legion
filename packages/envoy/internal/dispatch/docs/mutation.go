@@ -57,12 +57,11 @@ func recoverMutation(room string, err *error) {
 // (openLiveOperation), change its fork (change) and record what it leaves (recordLiveOperation),
 // so the refusals both meet run in one order, and the append and the record exist once.
 type liveOperation struct {
-	artifactID string
-	tx         pgx.Tx
-	write      *liveWrite
-	fork       *crdt.Doc
-	updates    [][]byte
-	recorded   bool
+	tx       pgx.Tx
+	write    *liveWrite
+	fork     *crdt.Doc
+	updates  [][]byte
+	recorded bool
 }
 
 // openLiveOperation opens an operation on artifactID's document inside the transaction the
@@ -87,7 +86,7 @@ func (s *Service) openLiveOperation(ctx context.Context, artifactID string) (liv
 	if err != nil {
 		return liveOperation{}, err
 	}
-	return liveOperation{artifactID: artifactID, tx: tx, write: write, fork: fork}, nil
+	return liveOperation{tx: tx, write: write, fork: fork}, nil
 }
 
 // abandon, deferred once the operation is open, undoes what an operation that changed the fork but
@@ -117,7 +116,7 @@ func (op *liveOperation) change(mutate func() error) (*marginWatch, error) {
 	})
 	margin, stopMargin := watchMargin(op.fork)
 	err := func() (err error) {
-		defer recoverMutation(op.artifactID, &err)
+		defer recoverMutation(op.write.artifactID, &err)
 		return mutate()
 	}()
 	stopMargin()
@@ -147,7 +146,7 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 	if err != nil {
 		return err
 	}
-	version, err := s.persistence.AppendUpdateTx(ctx, op.tx, op.artifactID, update, contentChanged)
+	version, err := s.persistence.AppendUpdateTx(ctx, op.tx, op.write.artifactID, update, contentChanged)
 	if err != nil {
 		return fmt.Errorf("append transactional live document update: %w", err)
 	}
@@ -160,7 +159,7 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 		// The 503 this becomes is the only other trace of a room that stays failed, so the
 		// refusal names the room and the cause here too (see awaitRoomRecovery).
 		slog.Warn("dispatch: refuse a joined write on a failed document room",
-			"room", op.artifactID, "error", err)
+			"room", op.write.artifactID, "error", err)
 		return err
 	}
 	// The rendering is the document as the transaction now sees it, so a version it writes later
@@ -168,7 +167,7 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 	// (captureLiveTextAndAuthors), and a later margin write records it again (applyMargin).
 	// forkLive drops both the moment the fork moves.
 	op.write.tree, op.write.markdown, op.write.offsets = rendered.tree, rendered.markdown, rendered.offsets
-	if _, err := s.writeVersionTx(ctx, op.tx, op.artifactID, rendered, actor, nil); err != nil {
+	if _, err := s.writeVersionTx(ctx, op.tx, op.write.artifactID, rendered, actor, nil); err != nil {
 		return fmt.Errorf("refresh transactional document anchors: %w", err)
 	}
 	op.write.anchorsTree = rendered.tree
@@ -182,17 +181,18 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 // applyLive runs mutate against artifactID's live document inside the transaction the context's
 // ledger joined, and credits actor with the content it changes. Every document write a caller
 // makes runs here - an upload's, an edit's, an accepted or rejected suggestion's, an ask's text
-// and its answer, a comment's anchor - but a comment's or suggestion's margin record, whose write
-// runs in applyMargin. The two open their operation and record it through the same steps
-// (openLiveOperation, recordLiveOperation), so two rules hold for each write by structure rather
+// and its answer, a comment's anchor - except a comment's or suggestion's margin record, which
+// runs in applyMargin. Both open and record their operation through the same steps
+// (openLiveOperation, recordLiveOperation), so two rules hold for every write by structure rather
 // than by its caller remembering them:
 //
 //   - It refuses a context Join did not return (errUnjoined), as SeedText and the version writes
 //     do: an unjoined write would reach no transaction to be weighed and appended in.
 //   - It weighs what the write leaves, and refuses one that would grow the document past what one
-//     upload may hold - here every measure refuseGrowth takes, for a margin record the margin
-//     bound, the one of them that applies to it - or that leaves a live state ygo could not decode
-//     (refuseUndecodable), before anything is appended.
+//     upload may hold (refuseGrowth) or that leaves a live state ygo could not decode
+//     (refuseUndecodable), before anything is appended. applyLive takes every measure of the
+//     growth weigh; a margin record, which leaves the rendering and the anchor marks as they
+//     were, is weighed by the margin bound alone (applyMargin).
 //
 // It writes the transaction's fork of the room (see liveWrite), appends the update inside the
 // transaction, and leaves the room and the credit to its ledger's Commit, so a transaction that

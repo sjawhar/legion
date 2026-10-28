@@ -135,13 +135,9 @@ func corruptDocument(t *testing.T, database *store.Store, deps Deps, artifactID 
 // createAnchoredComment comments on the document's "before" and returns the comment.
 func createAnchoredComment(t *testing.T, handler http.Handler, issueKey, artifactID, body string) model.Comment {
 	t.Helper()
-	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issueKey+"/comments", map[string]any{
+	return createThreadComment(t, handler, issueKey, map[string]any{
 		"body": body, "anchor": map[string]any{"artifact": artifactID, "quote": "before"},
 	}, "alice")
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create anchored comment %q: status=%d body=%s", body, created.Code, created.Body.String())
-	}
-	return decodeBody[model.Comment](t, created)
 }
 
 // A stored tree outside the schema is the document's own state, so every route that starts from

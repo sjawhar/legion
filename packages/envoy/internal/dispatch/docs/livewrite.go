@@ -84,9 +84,11 @@ type liveWrite struct {
 	// out of step.
 	marginRooms []weak.Pointer[crdt.Doc]
 	// tree and markdown are the document as this transaction's latest operation left it,
-	// rendered once by that operation (applyLive) for the version its transaction may write, and
-	// offsets each identified block's byte range in markdown from that same render.
-	// forkLive drops them whenever the fork they describe moves.
+	// rendered once for the version its transaction may write - by applyLive, or by a margin
+	// write (applyMargin) that found none kept - and offsets each identified block's byte range
+	// in markdown from that same render. A later margin write, which leaves the fragment they
+	// describe as it was, reuses them rather than rendering again. forkLive drops them whenever
+	// the fork they describe moves.
 	tree     *pmdoc.Node
 	markdown string
 	offsets  []pmdoc.BlockOffset
@@ -110,13 +112,14 @@ type liveWrite struct {
 	// commit the same way (Ledger.creditRooms, roomState.registerCarriedAskAuthors) rather than
 	// written into the room's own bookkeeping as soon as the stamp runs: a write refused after the
 	// stamp but before commit (growth, a later validation failure) must not leave the room
-	// holding a trace of it. applyLive's own defer clears all three maps whenever its one
-	// operation changed the fork but was never recorded - the same guard that drops the fork's
-	// rendering - so a growth-refused edit's own stamp never reaches Ledger.creditRooms. That defer
-	// runs per applyLive call, so it does not distinguish this call's own stamp from an earlier,
-	// already-recorded call's on the same liveWrite; no production caller invokes ApplyOps or
-	// ReplaceText more than once per Join (every api/ call site joins once per request), so two
-	// calls never share one liveWrite today, and a future one that did would need its own guard.
+	// holding a trace of it. liveOperation.abandon, which applyLive and applyMargin both defer,
+	// clears all three maps whenever its one operation changed the fork but was never recorded -
+	// the same guard that drops the fork's rendering - so a growth-refused edit's own stamp never
+	// reaches Ledger.creditRooms. It runs per operation, so it does not distinguish this
+	// operation's own stamp from an earlier, already-recorded one's on the same liveWrite; no
+	// production caller invokes ApplyOps or ReplaceText more than once per Join (every api/ call
+	// site joins once per request), so two calls never share one liveWrite today, and a future
+	// one that did would need its own guard.
 	credits    map[string]model.Actor
 	creditedBy map[string]persistence.Version
 	actor      *model.Actor
@@ -767,12 +770,9 @@ func (s *Service) publishLiveUpdate(room string, update []byte, version persiste
 			// would be refused everything until it reloaded.
 			advanceRoomCursor(&instance.cursor, version)
 		}
-		// Tagged against the document the update is applied to, which Apply hands here, rather
-		// than the one the room held when the publish began: a room replaced or reloaded in
-		// between is another document, which can lack deletes the fork held, and its observer
-		// renders the update as it renders any other.
-		forked := marginRoom.Value()
-		origin.marginOnly = forked != nil && forked == doc
+		// Tagged against the document Apply hands here, not the one the room held when the
+		// publish began (liveWriteOrigin.marginOnly).
+		origin.marginOnly = marginRoom.Value() == doc
 		return crdt.ApplyUpdateV1(doc, update, origin)
 	})
 	if err != nil {

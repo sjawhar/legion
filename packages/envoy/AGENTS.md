@@ -330,7 +330,13 @@ An update that changes only what no rendering carries therefore versions no docu
 a margin projection, the attributes a reader's browser editor derives on its own - each heading's
 `id` when it opens the document, and each ordered list item's `label` and `listType` on the first
 keyboard caret move or edit - or a comment's, suggestion's or ask's anchor mark, wherever it splits
-the text it covers. Routes that write a version on request do so whatever changed, so each can write
+the text it covers. A margin record changes the marks map alone, never the text, so its
+transactional write (`applyMargin`) records `false` without rendering the document again, and the
+room's update observer keeps its rendering for the publish of one whose fork was built from that
+same room (`liveWriteOrigin.marginOnly`). One forked from the store (`coldFork`) can carry deletes
+the room never took, since ygo encodes an update with its document's whole delete set, so its
+publish is rendered as any other update is.
+Routes that write a version on request do so whatever changed, so each can write
 a version whose markdown equals the previous one's and stale an approval pinned to it: an upload to
 an existing document (`POST /api/v1/issues/{key}/artifacts`,
 `POST /api/v1/projects/{key}/artifacts`) always inserts one; `POST /artifacts/{id}/versions` and
@@ -357,12 +363,17 @@ the rendering carries causes no version and cannot stale an approval.
 A handler joins its document operations to its transaction with `Docs.Join`, which returns the
 transaction's ledger (`docs/ledger.go`), the only way to give a document operation a transaction:
 every document write takes its transaction from the ledger and refuses a context that was not
-joined (`errUnjoined`): `SeedText`, a rebuild (`RebuildDocument`), the version writes, and every
+joined (`errUnjoined`): `SeedText`, a rebuild (`RebuildDocument`), the version writes, every
 write that runs through `applyLive` (`docs/mutation.go`) - an upload's replacement, an edit batch,
 an accepted or rejected suggestion, an ask's edited text and its answer or resolution, a comment's
-anchor mark and its margin record - each of which `applyLive` also weighs by what it leaves
-(`docs/growth.go`). An answer the document has no room for is left out of its block, which records
-who answered and when, and kept on its ask. The server writes outside `applyLive` are a rebuild,
+anchor mark - and a comment's or suggestion's margin record, which runs through `applyMargin` on
+the same steps that open and record an `applyLive` write (`openLiveOperation`,
+`recordLiveOperation`). `applyLive` weighs each of its writes by what it leaves
+(`docs/growth.go`); a margin record leaves the rendering and the anchor marks as they were, so
+`applyMargin` weighs it by the margin bound alone and reuses the rendering the transaction's last
+operation kept (`liveWrite.tree`) rather than reading and rendering the document again. An answer
+the document has no room for is left out of its block, which records who answered and when, and
+kept on its ask. The server writes outside `applyLive` and `applyMargin` are a rebuild,
 settlement's repairs, the block-id backfill and the sweep of unrecorded marks. Of those, a rebuild
 and settlement's repairs carry caller text. A rebuild's supplied markdown is weighed as a new
 document's rendering is (`SeedText`), and its latest version, the server's own text, is restored
