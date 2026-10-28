@@ -1090,16 +1090,17 @@ test("a credential request seeded after the Inbox loads appears, and counts, wit
   }
 });
 
-// With nothing waiting, "Nothing needs you" stays on screen through a window focus, which refetches
-// what has gone stale (the clock moves past the 30 s `staleTime` first, and the credential list's
-// own poll comes due on the way), through a dropped live socket, whose resume Dispatch replays in
-// full (`replay_complete`), so it refreshes nothing, and through leaving the Inbox and coming back.
-// Every credential-list call after the page's first is held, so a refetch of that list, had one put
-// it back to loading, would take the empty state off the screen for as long as the hold lasts. A
-// Dispatch with no secrets broker answers the list `null` and is asked again only after a gap in
-// the socket, over the held answer, so the held second call leaves the empty state on screen; with
-// the fake broker the list keeps its empty answer on screen while a refetch runs. Neither page may
-// log a failed request.
+// With nothing waiting, "Nothing needs you" stays on screen through a window focus, through a gap
+// in the live socket that refreshes every query, and through leaving the Inbox and coming back. The
+// gap is one whose replay cannot cover it: the socket drops (1012) and the page's resume is
+// rewritten on its way to Dispatch to an id above the log's head, as after a reset log, so
+// Dispatch starts the feed at its head with `replay_complete: false` and the page refreshes every
+// query it holds. Every credential-list call after the page's first is held, so a refetch of that
+// list, had one put it back to loading, would take the empty state off the screen for as long as
+// the hold lasts. A Dispatch with no secrets broker answers the list `null` and is asked again only
+// after such a gap, over the held answer, so the held second call leaves the empty state on screen;
+// with the fake broker the list keeps its empty answer on screen while the refresh refetches it.
+// Neither page may log a failed request.
 test("Nothing needs you stays on screen through a focus and a return to the Inbox", async ({
   browser,
 }) => {
@@ -1119,10 +1120,48 @@ test("Nothing needs you stays on screen through a focus and a return to the Inbo
       if (credentialCalls > 1) await held.promise;
       await route.continue();
     });
+    // Every live socket reaches Dispatch; once `forceGap` is set, the event feed's resume on a
+    // socket opened after it names an id far above the log's head.
+    let forceGap = false;
+    let opens = 0;
+    await page.routeWebSocket(/\/ws\/live$/u, (route) => {
+      opens += 1;
+      const rewrite = forceGap && opens > 1;
+      const server = route.connectToServer();
+      route.onMessage((message) => {
+        const frame = JSON.parse(String(message)) as {
+          readonly type?: string;
+          readonly view?: { readonly kind?: string };
+          readonly resume?: { readonly since?: string };
+        };
+        if (
+          rewrite &&
+          frame.type === "subscribe" &&
+          frame.view?.kind === "events" &&
+          frame.resume?.since !== undefined
+        ) {
+          server.send(JSON.stringify({ ...frame, resume: { since: "999999999999" } }));
+          return;
+        }
+        server.send(message);
+      });
+    });
+    // Each `replay_complete` an events_start carried to the page.
+    const starts: boolean[] = [];
+    page.on("websocket", (socket) => {
+      if (new URL(socket.url()).pathname !== "/ws/live") return;
+      socket.on("framereceived", ({ payload }) => {
+        const frame = JSON.parse(String(payload)) as {
+          readonly type?: string;
+          readonly replay_complete?: boolean;
+        };
+        if (frame.type === "events_start") starts.push(frame.replay_complete === true);
+      });
+    });
     const empty = page.getByText("Nothing needs you");
-    await page.clock.install();
     await page.goto("/");
     await expect(empty).toBeVisible();
+    await expect.poll(() => starts).toEqual([true]);
     expect(credentialCalls).toBe(1);
     await page.evaluate(() => {
       const record = window as Window & { emptyStateGone?: number };
@@ -1134,24 +1173,21 @@ test("Nothing needs you stays on screen through a focus and a return to the Inbo
       }).observe(document.body, { characterData: true, childList: true, subtree: true });
     });
 
-    // The focus refetches the inbox list once it has gone stale; once that has answered, every
-    // refetch the focus started is on the wire.
-    const refreshed = page.waitForResponse(
-      (response) => new URL(response.url()).pathname === "/api/v1/inbox"
-    );
-    await page.clock.fastForward(31_000);
     await page.evaluate(() =>
       document.dispatchEvent(new Event("visibilitychange", { bubbles: true }))
     );
-    await refreshed;
-    // Dispatch restarting drops the socket (1012); the page reopens it at once and resumes the
-    // event feed, which Dispatch replays in full.
-    const resumed = page.waitForEvent(
-      "websocket",
-      (socket) => new URL(socket.url()).pathname === "/ws/live"
+    // The gap's whole-cache refresh refetches the inbox list; once that has answered, and the held
+    // credential list has been asked again, every refetch the gap started is on the wire.
+    const refreshed = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/v1/inbox"
     );
+    forceGap = true;
     await disconnectLiveSockets();
-    await resumed;
+    // The first start resumed from the sign-in check's head, which the log holds; the one after
+    // the gap resumed above the head, so Dispatch could not replay what the page missed.
+    await expect.poll(() => starts).toEqual([true, false]);
+    await refreshed;
+    await expect.poll(() => credentialCalls).toBeGreaterThanOrEqual(2);
     await page.evaluate(() => {
       const frames = Promise.withResolvers<void>();
       requestAnimationFrame(() => requestAnimationFrame(() => frames.resolve()));
