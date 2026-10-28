@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { LOCAL_ENVOY_NOTICE } from "@legion/pi-shared/interface";
+import { type EnvoyPluginInterface, LOCAL_ENVOY_NOTICE } from "@legion/pi-shared/interface";
 import type { SessionContext } from "@legion/pi-shared/pi-types";
 
 import {
@@ -7,6 +7,7 @@ import {
   CardWake,
   type CardWakeContext,
   STARTUP_CARD_CAP_MS,
+  STARTUP_TURN_CAP_MS,
   unreadCards,
 } from "./card-wake";
 
@@ -29,6 +30,8 @@ const interrupted = { stopReason: "aborted", errorMessage: "Interrupted by user"
 const steer = { deliverAs: "steer", triggerTurn: true } as const;
 const aside = { deliverAs: "aside", triggerTurn: true } as const;
 const followUp = { deliverAs: "followUp", triggerTurn: false } as const;
+/** The session the harness's cards go into, which `isOwnSession` answers for. */
+const OWN_SESSION = "ses_own";
 
 /**
  * A `CardWake` on a host whose branch the test writes and whose managed timer it runs (`fire`),
@@ -39,7 +42,9 @@ const followUp = { deliverAs: "followUp", triggerTurn: false } as const;
  * records, persisted in order; `reply` is an assistant message ending a step. `reportsIdle: false`
  * is a host context without `isIdle`; `mode` is the context's `mode` (RPC unless named, `null` for
  * a context without one). The wake starts in its startup phase, and `endStartup` ends it with a
- * startup card a run read.
+ * startup card a run read. The cards go into `OWN_SESSION`; `markUnsent` and `markSent` set the
+ * start-turn mark the wake reads (empty until a test sets it) to name a session, `OWN_SESSION`
+ * unless told, with its start unsent or sent at a time, and `startTurn` runs the start turn.
  */
 function harness(
   options: {
@@ -50,11 +55,14 @@ function harness(
   let clock = 1_000;
   let idle = false;
   const sent: Sent[] = [];
+  let mark: EnvoyPluginInterface["startupTurn"];
   const wake = new CardWake({
     now: () => clock,
     sendMessage: (message, sendOptions) => {
       sent.push({ message, options: sendOptions });
     },
+    startupTurn: () => mark,
+    isOwnSession: (session) => session === OWN_SESSION,
   });
   const branch: unknown[] = [];
   const timers: (() => void | Promise<void>)[] = [];
@@ -109,6 +117,8 @@ function harness(
     advance: (ms: number) => {
       clock += ms;
     },
+    /** The harness's clock now. */
+    clock: () => clock,
     branch,
     card,
     context,
@@ -145,8 +155,34 @@ function harness(
     event: (idleThere: boolean) => {
       const was = idle;
       idle = idleThere;
-      wake.seenIdle(context);
+      wake.noteIfIdle(context);
       idle = was;
+    },
+    /** The start-turn mark names `session` with its start due and unsent, as the operator's
+     *  controller's `session_start` marks it. */
+    markUnsent: (session = OWN_SESSION) => {
+      mark = { session, sentAt: undefined };
+    },
+    /** The start-turn mark names `session` with its start sent at `sentAt`, as the start command
+     *  and the daemon's controller at its ready mark it. */
+    markSent: (sentAt: number, session = OWN_SESSION) => {
+      mark = { session, sentAt };
+    },
+    /** The start-turn mark is cleared, as the session's first `agent_start` clears it. */
+    clearMark: () => {
+      mark = undefined;
+    },
+    /** The start turn runs: its `agent_start` clears the mark, as the Legion entry does, the start
+     *  message and the model's reply land in the branch, and its `agent_end` comes on an idle
+     *  host. */
+    startTurn: () => {
+      idle = false;
+      wake.agentStart();
+      mark = undefined;
+      message({ role: "user", content: "start" });
+      message(reply());
+      idle = true;
+      wake.agentEnd(context);
     },
   };
 }
@@ -601,6 +637,183 @@ describe("in the startup phase", () => {
   });
 });
 
+// The Legion controller's start message must be its session's first turn, ahead of any card. The
+// Legion entry names that session in the start-turn mark until the start turn's `agent_start`:
+// the operator's controller in a terminal from its `session_start` with the start unsent, sent
+// once `/legion-controller-start` sends it, and the daemon's in RPC mode sent right before the
+// daemon writes the prompt.
+describe("while the start-turn mark names the session", () => {
+  const oneCard = "1 Envoy message above arrived with no turn to read it: read it and act on it.";
+  const twoCards =
+    "2 Envoy messages above arrived with no turn to read them: read them and act on them.";
+
+  test("sends a terminal's idle card as a follow-up that starts no turn while the start is unsent, and wakes for none, checking again at the cap", async () => {
+    const host = harness({ mode: "tui" });
+    host.markUnsent();
+    host.setIdle(true);
+    const card = host.card("terminal-startup");
+    expect(card.delivery).toEqual({
+      ...followUp,
+      details: { envoyCard: expect.any(String), wake: "startup" },
+    });
+
+    host.message(card.message);
+    await host.fire();
+    expect(host.sent).toEqual([]);
+    // No event tells the wake the start was sent, so it reads the mark again at the cap.
+    expect(host.delays.at(-1)).toBe(STARTUP_TURN_CAP_MS);
+    host.advance(STARTUP_TURN_CAP_MS);
+    await host.fire();
+    expect(host.sent).toEqual([]);
+    expect(host.delays.at(-1)).toBe(STARTUP_TURN_CAP_MS);
+    // The phase holds: a second idle card is a startup card too.
+    expect(host.card("terminal-startup-two").delivery).toMatchObject(followUp);
+  });
+
+  test("wakes once after the start turn's agent_end for every startup card, though the start turn's reply follows them", async () => {
+    const host = harness({ mode: "tui" });
+    host.markUnsent();
+    host.setIdle(true);
+    const cards = [host.card("owed-one"), host.card("owed-two", true)];
+    for (const card of cards) host.message(card.message);
+    await host.fire();
+    expect(host.sent).toEqual([]);
+
+    // `/legion-controller-start` sends the start and marks it sent.
+    host.markSent(host.clock());
+    host.startTurn();
+    await host.fire();
+    expect(host.sent).toEqual([wakeMessage(twoCards)]);
+    expect(host.card("after-start-turn").delivery).toMatchObject(steer);
+  });
+
+  // The operator typed a turn before the start command ran: its `agent_start` clears the unsent
+  // mark, and that run's `agent_end` sends the one wake.
+  test("sends no wake until a run's agent_start clears the unsent mark, then wakes at that run's agent_end", async () => {
+    const host = harness({ mode: "tui" });
+    host.markUnsent();
+    host.setIdle(true);
+    host.message(host.card("unsent-then-run").message);
+    await host.fire();
+    host.advance(STARTUP_TURN_CAP_MS);
+    await host.fire();
+    expect(host.sent).toEqual([]);
+
+    host.setIdle(false);
+    host.run();
+    host.clearMark();
+    await host.fire();
+    expect(host.sent).toEqual([]);
+    host.message({ role: "user", content: "typed first" });
+    host.message(host.reply());
+    host.setIdle(true);
+    host.end();
+    await host.fire();
+    expect(host.sent).toEqual([wakeMessage(oneCard)]);
+  });
+
+  test("owes the wake to a startup card seen while the mark held, when the start turn starts before any check", async () => {
+    const host = harness();
+    host.markSent(host.clock());
+    host.setIdle(true);
+    host.message(host.card("rpc-owed").message);
+    // The daemon's start prompt starts its turn before the check the card armed runs.
+    host.setIdle(false);
+    host.run();
+    host.clearMark();
+    await host.fire();
+    expect(host.sent).toEqual([]);
+
+    host.message({ role: "user", content: "start" });
+    host.message(host.reply());
+    host.setIdle(true);
+    host.end();
+    await host.fire();
+    expect(host.sent).toEqual([wakeMessage(oneCard)]);
+  });
+
+  test("holds the wake until the cap once the start was sent, then wakes: a start the host failed", async () => {
+    const host = harness();
+    host.markSent(host.clock() - 10_000);
+    host.setIdle(true);
+    host.message(host.card("sent-mark").message);
+    await host.fire();
+    expect(host.sent).toEqual([]);
+    expect(host.delays.at(-1)).toBe(STARTUP_TURN_CAP_MS - 10_000);
+
+    host.advance(STARTUP_TURN_CAP_MS - 10_000);
+    await host.fire();
+    expect(host.sent).toEqual([wakeMessage(oneCard)]);
+  });
+
+  test("caps a start sent while the wake checked an unsent mark at the send's own time", async () => {
+    const host = harness({ mode: "tui" });
+    host.markUnsent();
+    host.setIdle(true);
+    host.message(host.card("sent-later").message);
+    await host.fire();
+    host.advance(5_000);
+    host.markSent(host.clock());
+    host.advance(STARTUP_TURN_CAP_MS - 5_000);
+    await host.fire();
+    expect(host.sent).toEqual([]);
+    expect(host.delays.at(-1)).toBe(5_000);
+
+    host.advance(5_000);
+    await host.fire();
+    expect(host.sent).toEqual([wakeMessage(oneCard)]);
+  });
+
+  test("ignores a mark whose start was sent the cap ago or more", async () => {
+    const rpc = harness();
+    rpc.markSent(rpc.clock() - STARTUP_TURN_CAP_MS);
+    rpc.setIdle(true);
+    rpc.message(rpc.card("stale-mark").message);
+    await rpc.fire();
+    expect(rpc.sent).toEqual([wakeMessage(oneCard)]);
+
+    const terminal = harness({ mode: "tui" });
+    terminal.markSent(terminal.clock() - STARTUP_TURN_CAP_MS);
+    terminal.setIdle(true);
+    expect(terminal.card("stale-mark-terminal").delivery).toMatchObject(steer);
+  });
+
+  test("ignores a mark that names another session, unsent or sent", async () => {
+    const rpcUnsent = harness();
+    rpcUnsent.markUnsent("ses_task_subagent");
+    rpcUnsent.setIdle(true);
+    rpcUnsent.message(rpcUnsent.card("other-session-unsent").message);
+    await rpcUnsent.fire();
+    expect(rpcUnsent.sent).toEqual([wakeMessage(oneCard)]);
+
+    const rpcSent = harness();
+    rpcSent.markSent(rpcSent.clock(), "ses_task_subagent");
+    rpcSent.setIdle(true);
+    rpcSent.message(rpcSent.card("other-session-sent").message);
+    await rpcSent.fire();
+    expect(rpcSent.sent).toEqual([wakeMessage(oneCard)]);
+
+    const terminal = harness({ mode: "tui" });
+    terminal.markUnsent("ses_task_subagent");
+    terminal.setIdle(true);
+    expect(terminal.card("other-session-terminal").delivery).toMatchObject(steer);
+  });
+
+  test("drops the cards it owes when the session goes", async () => {
+    const host = harness({ mode: "tui" });
+    host.markUnsent();
+    host.setIdle(true);
+    host.message(host.card("owed-then-cancelled").message);
+    await host.fire();
+
+    host.wake.cancel();
+    host.markSent(host.clock());
+    host.startTurn();
+    await host.fire();
+    expect(host.sent).toEqual([]);
+  });
+});
+
 // While the host sets up a prompt (busy, before its run's `agent_start`: the usage preflight,
 // `before_agent_start` handlers, pi-envoy's own open-asks read) an interrupt leaves no sign an
 // extension sees: no loop runs, so no aborted assistant message comes. The host still folds the
@@ -648,15 +861,18 @@ describe("a card sent while the host sets up a prompt", () => {
   // `session_switch` or `session_compact` after it (~10209-10227). A run the host drops with
   // neither (a switch or a compaction that fails after its abort) is over by the next prompt sent
   // from idle, whose `input` event finds the host idle. The extension tells the wake of each such
-  // event (`seenIdle`), and a host idle there has no run, whatever the switch's reason.
-  for (const name of [
-    "a switch to a new session",
-    "a switch to a resumed session",
-    "a fork",
-    "a manual compaction",
-    "a prompt typed after a run the host dropped unseen",
-  ]) {
-    test(`gets no wake when sent after ${name} found the host idle`, async () => {
+  // event (`noteIfIdle`), and a host idle there has no run, whatever the switch's reason. Each row
+  // is one event, run on a host of its own.
+  test("gets no wake when sent after an event that found the host idle", async () => {
+    const events = [
+      "a switch to a new session",
+      "a switch to a resumed session",
+      "a fork",
+      "a manual compaction",
+      "a prompt typed after a run the host dropped unseen",
+    ];
+    const wakes: Record<string, number> = {};
+    for (const name of events) {
       const host = harness();
       await host.endStartup();
       host.run();
@@ -664,10 +880,11 @@ describe("a card sent while the host sets up a prompt", () => {
       const card = host.card("after-drop");
       host.fold(card);
       await host.fire();
+      wakes[name] = host.sent.length;
+    }
 
-      expect(host.sent).toEqual([]);
-    });
-  }
+    expect(wakes).toEqual(Object.fromEntries(events.map((name) => [name, 0])));
+  });
 
   // A host seen idle has no run, whichever event it gave no extension.
   test("gets no wake when sent after a card found the host idle", async () => {
@@ -704,29 +921,31 @@ describe("a card sent while the host sets up a prompt", () => {
   // its post-run maintenance), and a steer typed into a running turn finds it busy too: the run
   // goes on, and its cards keep their wake. A compaction between a run's steps hands its
   // `session_compact` and its `auto_compaction_end` to extensions detached, so the end can reach
-  // the wake first.
-  for (const [name, during] of [
-    ["a fork", (event) => event(false)],
-    ["a steer typed into the run", (event) => event(false)],
-    [
-      "an automatic compaction",
-      (event, wake) => {
-        event(false);
-        wake.autoCompactionEnd({ aborted: false });
-      },
-    ],
-    [
-      "an automatic compaction whose end arrives first",
-      (event, wake) => {
-        wake.autoCompactionEnd({ aborted: false });
-        event(false);
-      },
-    ],
-  ] as const satisfies readonly (readonly [
-    string,
-    (event: (idle: boolean) => void, wake: CardWake) => void,
-  ])[]) {
-    test(`leaves a card sent in a run after ${name} its wake`, async () => {
+  // the wake first. Each row is one event, run on a host of its own.
+  test("leaves a card sent in a run its wake after an event that found the host busy", async () => {
+    const events = [
+      ["a fork", (event) => event(false)],
+      ["a steer typed into the run", (event) => event(false)],
+      [
+        "an automatic compaction",
+        (event, wake) => {
+          event(false);
+          wake.autoCompactionEnd({ aborted: false });
+        },
+      ],
+      [
+        "an automatic compaction whose end arrives first",
+        (event, wake) => {
+          wake.autoCompactionEnd({ aborted: false });
+          event(false);
+        },
+      ],
+    ] as const satisfies readonly (readonly [
+      string,
+      (event: (idle: boolean) => void, wake: CardWake) => void,
+    ])[];
+    const wakes: Record<string, number> = {};
+    for (const [name, during] of events) {
       const host = harness();
       await host.endStartup();
       host.run();
@@ -736,10 +955,11 @@ describe("a card sent while the host sets up a prompt", () => {
       host.fold(card);
       host.end();
       await host.fire();
+      wakes[name] = host.sent.length;
+    }
 
-      expect(host.sent).toHaveLength(1);
-    });
-  }
+    expect(wakes).toEqual(Object.fromEntries(events.map(([name]) => [name, 1])));
+  });
 
   // A card that lands in a run's post-run maintenance or auto-compaction (after its last step,
   // before the extension's `agent_end`) is that run's, and a fold under an earlier interrupt's

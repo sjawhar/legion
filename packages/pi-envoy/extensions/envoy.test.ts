@@ -10610,6 +10610,27 @@ console.log(JSON.stringify(args));
       expect(sends[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
     });
 
+    // The Legion entry names its controller's session in the start-turn mark from its
+    // `session_start` until the start turn runs (`../src/card-wake`): an idle card there, in any
+    // mode, is a follow-up that starts no turn, so the start message keeps the first turn. A mark
+    // naming another session (a `task` subagent's) changes nothing.
+    test("sends a card that reaches an idle session the start-turn mark names as a follow-up that starts no turn, and leaves it a steer under another session's mark", async () => {
+      const { agent, delivered, sends } = await bootDirectSession("idle-card-start-turn", {
+        idle: () => true,
+      });
+      const iface = envoyPluginInterface();
+
+      iface.startupTurn = { session: "ses_delivery", sentAt: undefined };
+      agent.push(forwardedRoleEnvelope("legion-controller", "early card", "start-turn-card"));
+      await delivered(1);
+      expect(sends[0]?.options).toEqual({ deliverAs: "followUp", triggerTurn: false });
+
+      iface.startupTurn = { session: "ses_task_subagent", sentAt: undefined };
+      agent.push(forwardedRoleEnvelope("legion-controller", "other mark", "other-mark-card"));
+      await delivered(2);
+      expect(sends[1]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+    });
+
     // Only Dispatch's 200 makes a turn: whatever it refuses, and whatever keeps it from answering,
     // keeps the card, and the session posts nothing and injects nothing.
     for (const [name, answer] of [

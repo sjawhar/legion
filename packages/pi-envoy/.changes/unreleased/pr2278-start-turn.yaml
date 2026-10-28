@@ -1,0 +1,13 @@
+kind: Fixed
+body: |-
+  The Legion controller's start message is its session's first turn, ahead of any Envoy card that
+  arrived while the session started. A card that reached the operator's controller in a terminal
+  before `/legion-controller-start` ran started its own turn ahead of the start message, and in RPC
+  mode a startup card's wake could fire once the host was idle after its startup, before the
+  daemon's start prompt arrived. While the plugin interface's `startupTurn` names the session (the
+  start due and not sent yet, or sent under 30 s ago), a card that finds it idle goes as a
+  follow-up that starts no turn, in any mode, and the startup wake waits for the start turn: once
+  that turn ends, one wake starts a turn for every card that arrived meanwhile, counted even though
+  the start turn's reply follows them. A mark naming another session, or one whose start was sent
+  30 s ago or more, changes nothing. Plugin interface version 5, which pi-envoy reads; install it
+  with the `@sjawhar/pi-legion` released beside it.

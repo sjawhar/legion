@@ -1112,17 +1112,22 @@ export default function envoyExtension(pi: PiApi): void {
   pi.on("input", async (event, context) => {
     // An input that finds the host idle is a prompt sent from idle: any run, one the host dropped
     // with no `agent_end` included, is over (`../src/card-wake`).
-    cardWake.seenIdle(context);
+    cardWake.noteIfIdle(context);
     if (event.source !== "extension") return undefined;
     const images = typedPictures.handOver(event.text);
     return images === undefined ? undefined : { images: [...(event.images ?? []), ...images] };
   });
 
   // How a card that starts a turn goes, and the wake for one the host folds into the context with
-  // no turn (`../src/card-wake`). A card the host's dispose flushes at shutdown wakes nothing.
+  // no turn (`../src/card-wake`). A card the host's dispose flushes at shutdown wakes nothing. The
+  // start-turn mark the Legion entry keeps, as published at this build's interface version, holds
+  // the startup phase while it names the session open here (`sessionOpen`: this instance's own and
+  // the host's live one), never a `task` subagent's.
   const cardWake = new CardWake({
     now: () => Date.now(),
     sendMessage: (message, options) => pi.sendMessage(message, options),
+    startupTurn: () => publishedInterface?.startupTurn,
+    isOwnSession: (session) => sessionOpen(session),
   });
 
   // A card's message: its `details` name the frame (`replayLedgerIdentity`), which the host keeps
@@ -2080,7 +2085,7 @@ export default function envoyExtension(pi: PiApi): void {
   });
   // The host asks whether any extension handles `session_before_compact`, which turns its
   // background compaction off, but never these two: handling them changes nothing it does.
-  pi.on("session_compact", async (_event, context) => cardWake.seenIdle(context));
+  pi.on("session_compact", async (_event, context) => cardWake.noteIfIdle(context));
   pi.on("auto_compaction_end", async (event) => cardWake.autoCompactionEnd(event));
   pi.on("auto_retry_end", async (event) => cardWake.autoRetryEnd(event));
 
@@ -3258,7 +3263,7 @@ export default function envoyExtension(pi: PiApi): void {
     await rebind(reason, context);
   };
   pi.on("session_switch", (event, context) => {
-    cardWake.seenIdle(context);
+    cardWake.noteIfIdle(context);
     return rebindDispatch(event.reason, context);
   });
   pi.on("session_branch", (_event, context) => rebindDispatch(undefined, context));
