@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -167,15 +168,26 @@ func (e *ErrPreconditionFailed) Error() string {
 	return "document edit precondition failed: " + strings.Join(reasons, ", ")
 }
 
-// nodeToken hashes a canonical semantic Proof representation, including inline
-// marks but excluding stable block identity and server-owned typed attributes. The
-// representation is hashed as it is encoded (pmdoc.WriteTokenJSON), never held whole.
+// nodeToken hashes a canonical semantic Proof representation, including inline marks but excluding
+// stable block identity and server-owned typed attributes: the SHA-256 of pmdoc.AppendTokenJSON's
+// encoding.
 func nodeToken(node *pmdoc.Node) (string, error) {
-	hash := sha256.New()
-	if err := node.WriteTokenJSON(hash); err != nil {
+	encoded, err := node.TokenJSON()
+	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("sha256:%x", hash.Sum(nil)), nil
+	return tokenHash(encoded), nil
+}
+
+// tokenHash is the token of an encoded token representation: "sha256:" and the lowercase hex of
+// its SHA-256.
+func tokenHash(encoded []byte) string {
+	const prefix = "sha256:"
+	sum := sha256.Sum256(encoded)
+	var buf [len(prefix) + 2*sha256.Size]byte
+	copy(buf[:], prefix)
+	hex.Encode(buf[len(prefix):], sum[:])
+	return string(buf[:])
 }
 
 func blockTokens(tree *pmdoc.Node) (map[string]string, error) {
