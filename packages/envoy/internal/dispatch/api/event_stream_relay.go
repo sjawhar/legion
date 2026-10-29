@@ -254,12 +254,10 @@ func (r *eventStreamRelay) start(ctx context.Context) error {
 // firstRelayCursor is the relay's first cursor, which is the first connection's start point, so
 // no event that commits after that connection's request may stand at or below it. It reads the
 // log as it stands at the start, in one statement: its newest id and every gap among its ids above
-// the horizon already proven (Horizon.Proven, 0 on a process where no reader has proven one, which
-// is every process at boot, since the delivery hub runs nothing before its first subscriber). An
-// event that commits after that read stands above the newest id, or in one of those gaps: an id it
-// drew before the read, while its transaction was still open. A gap can also be an id whose
-// transaction rolled back. Below the proven horizon every id was final before the read, so no gap
-// there can fill.
+// a floor at or below which no event can still be open (firstRelayFloor). An event that commits
+// after that read stands above the newest id, or in one of those gaps: an id it drew before the
+// read, while its transaction was still open. A gap can also be an id whose transaction rolled
+// back. Below the floor no gap can fill.
 //
 // It then waits for a horizon proven after the read (Horizon.Await), past which every id at or
 // below that newest one is final, and reads which of the gaps have filled since: those are events
@@ -270,12 +268,16 @@ func (r *eventStreamRelay) start(ctx context.Context) error {
 //
 // The wait is the start's, as before: as long as any transaction open on the instance holds the
 // horizon back, with the connection not yet open (streamEvents). The gap read covers the ids above
-// the proven horizon, so on a process where none is proven it reads every id of the log, once, at
-// the relay's first start. An event that commits between the first connection's request and this
-// read, a round trip apart, counts as committed before it.
+// the floor, which are the ids written since a recent mark, however long the log. An event that
+// commits between the first connection's request and this read, a round trip apart, counts as
+// committed before it.
 func (s *server) firstRelayCursor(ctx context.Context) (int64, time.Time, error) {
 	pool := s.deps.Store.Pool
-	newest, gaps, err := eventLogGapsAbove(ctx, pool, s.horizon().Proven())
+	floor, err := s.firstRelayFloor(ctx)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	newest, gaps, err := eventLogGapsAbove(ctx, pool, floor)
 	if err != nil {
 		return 0, time.Time{}, err
 	}
@@ -295,32 +297,91 @@ func (s *server) firstRelayCursor(ctx context.Context) (int64, time.Time, error)
 	return lastEventThrough(ctx, pool, through)
 }
 
+// firstRelayFloor is the id the first start reads the log's gaps above (firstRelayCursor): one at
+// or below which no event can still be open, so no gap there can fill (Horizon.WriterFloor). Its
+// candidates are a mark taken now and the server's boot mark (takeBootMark), each good while every
+// transaction holding an id in Dispatch's own database got it after the mark: a mark taken now is,
+// unless a write was already open, and the boot mark is, unless one has been open since boot.
+// The floor is then the newest such mark's id, so the read covers only the ids written since it,
+// whatever the size of the log. With neither good, it is the horizon already proven, 0 on a
+// process where none is, and the read covers the whole log; that is logged, once per start.
+//
+// Neither mark waits on a transaction: each is one statement, and a transaction open elsewhere on
+// the instance (another database's, which holds the safe horizon back) is no writer of this log
+// and disqualifies neither.
+func (s *server) firstRelayFloor(ctx context.Context) (int64, error) {
+	horizon := s.horizon()
+	marks := make([]events.Mark, 0, 2)
+	if now, err := horizon.Mark(ctx); err == nil {
+		marks = append(marks, now)
+	} else if ctx.Err() != nil {
+		return 0, err
+	}
+	if s.bootMark != nil {
+		select {
+		case <-s.bootMark:
+			marks = append(marks, s.bootMarkValue)
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
+	floor, ok, err := horizon.WriterFloor(ctx, marks...)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		slog.Warn("dispatch: the live event stream's first start reads every event id above the proven horizon: a transaction in this database has held a transaction id since before the server's boot mark",
+			"above", floor)
+	}
+	return floor, nil
+}
+
+// takeBootMark takes the server's boot mark (bootMark) on a goroutine of its own, so register,
+// which must not touch the Store, returns at once. It is one statement that waits on no
+// transaction, and a mark that fails leaves the boot mark zero, which no start uses.
+func (s *server) takeBootMark() {
+	if s.deps.Store == nil {
+		return
+	}
+	s.bootMark = make(chan struct{})
+	go func() {
+		defer close(s.bootMark)
+		mark, err := s.horizon().Mark(s.lifetime())
+		if err != nil {
+			if s.lifetime().Err() == nil {
+				slog.Warn("dispatch: could not take the event log's boot mark; the live event stream's first start falls back to a mark of its own", "error", err)
+			}
+			return
+		}
+		s.bootMarkValue = mark
+	}()
+}
+
 // eventLogGaps are runs of ids missing from the event log, from[i] through to[i].
 type eventLogGaps struct {
 	from, to []int64
 }
 
 // eventLogGapsAbove reads, in one statement and so one snapshot, the event log's newest id and
-// every run of ids missing from it above floor and below that newest id. It reads every id above
-// floor, in id order, through the primary key. A floor above the newest id is a horizon of a log
-// that was reset since it was proven, which says nothing of the new one, so the read starts at 0.
+// every run of ids missing from it above floor and below that newest id. It reads the ids above
+// floor, in id order, through the primary key, and so as many as were written since floor. A
+// floor above the newest id is a horizon of a log that was reset since it was proven, which says
+// nothing of the new one, so the read is made again from 0.
 func eventLogGapsAbove(ctx context.Context, q queryer, floor int64) (int64, eventLogGaps, error) {
 	var newest int64
 	var gaps eventLogGaps
 	err := q.QueryRow(ctx, `
-		with head as (
-			select coalesce(max(id), 0) as newest from events
-		), bound as (
-			select newest, case when $1 > newest then 0 else $1 end as floor from head
-		), ids as (
-			select e.id, coalesce(lag(e.id) over (order by e.id), bound.floor) as prev
-			from events e, bound where e.id > bound.floor
+		with ids as (
+			select id, coalesce(lag(id) over (order by id), $1) as prev from events where id > $1
 		)
-		select (select newest from bound),
+		select (select coalesce(max(id), 0) from events),
 			coalesce(array_agg(prev + 1 order by id) filter (where id > prev + 1), '{}'),
 			coalesce(array_agg(id - 1 order by id) filter (where id > prev + 1), '{}')
 		from ids
 	`, floor).Scan(&newest, &gaps.from, &gaps.to)
+	if err == nil && floor > newest {
+		return eventLogGapsAbove(ctx, q, 0)
+	}
 	return newest, gaps, err
 }
 

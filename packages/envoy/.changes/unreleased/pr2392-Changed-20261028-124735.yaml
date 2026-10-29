@@ -31,8 +31,8 @@ body: |-
     A live event stream with no `since` starts at the relay's published cursor. The relay's first
     cursor in a process is the log's newest id when it starts, or below the lowest id that drew its
     place before then and committed while the start waited, so the stream is sent every event that
-    commits after it connected. The first start reads every id of the log above the horizon already
-    proven, which on a newly started process is the whole log, once.
+    commits after it connected. The first start reads only the ids written since a mark the process
+    takes at boot or at the start, so its cost follows recent writes, not the size of the log.
 time: 2026-10-28T12:47:35.880566588Z
 custom:
     Issue: pr2392

@@ -291,6 +291,11 @@ type server struct {
 	// register, which must not touch the Store.
 	horizonOnce  sync.Once
 	eventHorizon *events.Horizon
+	// bootMark is the event log mark the server takes when it is registered (takeBootMark), which
+	// the relay's first start bounds its read of the log by: closed once taken, with the mark in
+	// bootMarkValue, zero when it failed or the server has no Store.
+	bootMark      chan struct{}
+	bootMarkValue events.Mark
 	// warnedUnmatchedRuns holds a warnedProductionRun for each deploy run productionApplies has
 	// warned holds no production job or no configured apply step, so a read that judges a run again
 	// does not warn about it again. Nothing evicts an entry: the map holds one per configured job
@@ -359,10 +364,12 @@ func (s *server) waitBackground() {
 // relay a test waits out before its database closes. It is also called with a zero Deps, as
 // TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound does, so it must stay cheap and
 // must not dial or read the nil Store: whatever reaches the database or the network starts
-// later, from a handler or the relay's first subscriber.
+// later, from a handler or the relay's first subscriber, or on a goroutine of its own, as the
+// event log's boot mark does (takeBootMark), for a server that has a Store.
 func register(mux *http.ServeMux, deps Deps) *server {
 	s := &server{deps: deps, rosters: rosterCache{ttl: routeRosterTTL, silenceTTL: routeRosterSilenceTTL}}
 	s.eventRelay = newEventStreamRelay(s, s.lifetime())
+	s.takeBootMark()
 	if deps.Lifetime != nil {
 		s.deliveryHub = newDeliveryHub(s, deps.Lifetime, deliveryHubClock{})
 	}

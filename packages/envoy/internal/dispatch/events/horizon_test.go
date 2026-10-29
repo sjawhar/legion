@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -738,4 +739,78 @@ func (r *gatedResults) Close() error {
 	close(r.db.observed)
 	<-r.db.release
 	return err
+}
+
+// WriterFloor bounds the ids a writer can still hold open by the newest mark older than every
+// transaction id held in this database: a writer that took its id after a mark drew its event ids
+// after it, so above the mark's Newest. A write open since before the newer mark leaves only the
+// older one, and once it ends the newer one counts again; with no mark older than it, the floor
+// is H alone.
+func TestWriterFloorTakesTheNewestMarkOlderThanEveryWriterInThisDatabase(t *testing.T) {
+	database := storetest.Open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	horizon := NewHorizon(database.Pool)
+
+	first := commitHorizonEvent(ctx, t, database)
+	older, err := horizon.Mark(ctx)
+	if err != nil || older.Newest != first {
+		t.Fatalf("older mark = %+v, %v; want newest %d", older, err, first)
+	}
+	writer, _ := openEventWriter(ctx, t, database)
+	second := commitHorizonEvent(ctx, t, database)
+	newer, err := horizon.Mark(ctx)
+	if err != nil || newer.Newest != second {
+		t.Fatalf("newer mark = %+v, %v; want newest %d", newer, err, second)
+	}
+
+	if floor, ok, err := horizon.WriterFloor(ctx, newer, older); err != nil || !ok || floor != first {
+		t.Fatalf("WriterFloor with a write open since before the newer mark = %d, %t, %v; want the older mark's %d", floor, ok, err, first)
+	}
+	if floor, ok, err := horizon.WriterFloor(ctx, newer); err != nil || ok || floor != 0 {
+		t.Fatalf("WriterFloor with only a mark newer than an open write = %d, %t, %v; want H (0), not ok", floor, ok, err)
+	}
+	if err := writer.Rollback(ctx); err != nil {
+		t.Fatalf("end the open write: %v", err)
+	}
+	if floor, ok, err := horizon.WriterFloor(ctx, newer, older); err != nil || !ok || floor != second {
+		t.Fatalf("WriterFloor once the write ended = %d, %t, %v; want the newer mark's %d", floor, ok, err, second)
+	}
+}
+
+// Only a transaction in Dispatch's own database can write its event log, so one holding a
+// transaction id in another database on the instance, which holds H back, leaves every mark good.
+func TestWriterFloorIgnoresATransactionInAnotherDatabase(t *testing.T) {
+	database := storetest.Open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	horizon := NewHorizon(database.Pool)
+
+	config, err := pgx.ParseConfig(os.Getenv(storetest.DatabaseURLEnv))
+	if err != nil {
+		t.Fatalf("parse %s: %v", storetest.DatabaseURLEnv, err)
+	}
+	config.Database = "postgres"
+	conn, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("connect to the cluster's postgres database: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
+	elsewhere, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the other database's transaction: %v", err)
+	}
+	t.Cleanup(func() { _ = elsewhere.Rollback(context.Background()) })
+	if _, err := elsewhere.Exec(ctx, `select pg_current_xact_id()`); err != nil {
+		t.Fatalf("take the other database's transaction id: %v", err)
+	}
+
+	newest := commitHorizonEvent(ctx, t, database)
+	mark, err := horizon.Mark(ctx)
+	if err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	if floor, ok, err := horizon.WriterFloor(ctx, mark); err != nil || !ok || floor != newest {
+		t.Fatalf("WriterFloor with a transaction open in another database = %d, %t, %v; want the mark's %d", floor, ok, err, newest)
+	}
 }

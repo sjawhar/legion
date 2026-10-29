@@ -296,6 +296,83 @@ func (h *Horizon) Proven() int64 {
 	return h.safe
 }
 
+// Mark is one observation of the event log that a reader keeps for itself: Newest, the newest id
+// its snapshot saw, and Xid, the transaction id the observation took after that snapshot.
+type Mark struct {
+	Newest int64
+	Xid    uint64
+}
+
+// Mark takes one observation now and answers it, without recording it among the observations H is
+// proven from, and without waiting on any transaction. It consumes one transaction id.
+//
+// A mark bounds the ids a writer can still hold open (WriterFloor): a transaction whose own id
+// came after Xid drew every event id it holds after the mark's snapshot, by the writer invariant,
+// and so above Newest.
+func (h *Horizon) Mark(ctx context.Context) (Mark, error) {
+	observation, _, err := h.take(ctx)
+	if err != nil {
+		return Mark{}, err
+	}
+	return Mark{Newest: observation.newest, Xid: observation.xid}, nil
+}
+
+// oldestEventWriterSQL answers the oldest transaction id held in this database, by a backend
+// (its granted ExclusiveLock on its own id) or by a prepared transaction, widened to the 64-bit
+// id that marks carry, or null when none is held. Only a transaction in this database can write
+// the event log, so a transaction elsewhere on the instance, which holds the safe horizon back,
+// is not one: that is what lets WriterFloor answer at once where the horizon waits. pg_locks
+// shows every backend's locks to every role, which pg_stat_activity's backend_xid does not.
+// pg_locks gives the 32-bit id; it is widened against the snapshot's xmax, which no running id
+// is more than 2^31 from.
+const oldestEventWriterSQL = `
+	with next as (
+		select pg_snapshot_xmax(pg_current_snapshot())::text::numeric as nx
+	), held as (
+		select l.transactionid::text::numeric as x
+		from pg_locks l join pg_stat_activity a on a.pid = l.pid
+		where l.locktype = 'transactionid' and l.granted and l.mode = 'ExclusiveLock'
+			and a.datname = current_database() and l.pid <> pg_backend_pid()
+		union all
+		select transaction::text::numeric from pg_prepared_xacts where database = current_database()
+	)
+	select min(x + 4294967296 * (floor(nx / 4294967296)
+		+ case
+			when x - mod(nx, 4294967296) > 2147483648 then -1
+			when mod(nx, 4294967296) - x > 2147483648 then 1
+			else 0
+		end))::text
+	from held, next
+`
+
+// WriterFloor answers the highest id at or below which no event can still be open, read from the
+// marks given, the newest first, and from H: the Newest of the first mark older than every
+// transaction id held in this database now, or H when no mark is, so H is the floor too when no
+// mark is given. A transaction holding an event id that is not yet final holds its own
+// transaction id in this database, either now, and so above that mark's Xid, or from after this
+// read, and so above it too: either way every event id it holds stands above that mark's Newest.
+// ok is false when no mark qualified, so the floor is H alone.
+func (h *Horizon) WriterFloor(ctx context.Context, marks ...Mark) (floor int64, ok bool, err error) {
+	var oldestText *string
+	if err := h.db.QueryRow(ctx, oldestEventWriterSQL).Scan(&oldestText); err != nil {
+		return 0, false, fmt.Errorf("read the oldest transaction that can write the event log: %w", err)
+	}
+	var oldest uint64
+	if oldestText != nil {
+		if oldest, err = strconv.ParseUint(*oldestText, 10, 64); err != nil {
+			return 0, false, fmt.Errorf("read the oldest transaction that can write the event log: parse %q: %w", *oldestText, err)
+		}
+	}
+	floor = h.Proven()
+	for _, mark := range marks {
+		if mark.Xid == 0 || (oldestText != nil && oldest <= mark.Xid) {
+			continue
+		}
+		return max(floor, mark.Newest), true, nil
+	}
+	return floor, false, nil
+}
+
 // Reset forgets every observation and H; called when a reader detects a reset event log.
 func (h *Horizon) Reset() {
 	h.mu.Lock()
