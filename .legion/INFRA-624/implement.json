@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-624",
-  "completed": "2026-10-29T09:53:00Z",
+  "completed": "2026-10-29T12:50:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2433",
   "proof": [
+    {
+      "criterion": "Review round 10 (architect's scope cut): a refused ask edit whose repair would need the decision holding it changed (empty question, decided, another author) names no delete and no ask edit, says the decision is repaired in the document editor or once its holder reads, and no refusal sends a caller to edit another decision first",
+      "surface": "Go document service against Postgres 17 (ICU) in the issue pod, through SetAskBlockText and ApplyOps",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55433/postgres go test ./internal/dispatch/docs/ ./internal/dispatch/api/ -count=1 -run 'AskBlock|SetAsk|EditAsk|AskEdit|Invalid|Settlement|Idempot' -timeout 50m -v",
+      "observed": "ok docs 276.7s, ok api 68.8s. 1364 bodies: 892 followed to valid, 350 no-delete, 0 failing. 780 bodies holding a decision: 715 broken, 348 followed to valid, 765 naming no delete and saying why. Rows 'the decision holding it has no question' and 'is decided and broken too' assert the refusal word for word, with nothing written.",
+      "headSha": "ea3cfcb04e830c3c4cf5b4b54dd0c5b9d00df562",
+      "negativeControl": "With d3e0a98a's ask_block_text.go, TestSetAskBlockTextRefusalOfNestedDecisionsNamesOnlyWhatBreaksTheRule fails, and the 780-body test fails with 155 refusals that send the caller to another decision first (service_test.go:1236)."
+    },
     {
       "criterion": "Review round 9: when a decision nested in an option breaks, the refusal names one combined doc-edit that repairs both and doc-edit accepts, and names only the decision that breaks the content rule; every body of up to four children whose alphabet adds an option holding a decision (valid or broken) follows its refusals to a valid end or names no delete and says why",
       "surface": "Go document service against Postgres, the real code path (refusal, ApplyOps of the named ids, ask edit, settlement); plus the browser suite in Chromium and the multiprocess SIGTERM test",
@@ -108,7 +116,12 @@
     "round 6: merge of main (a7b7fe96); proof-editor src/ask-content.ts (dropsUnselectedAskBlock by deleted characters), tests; docs/ask_block_text.go (askRowLabels, protected labels in refuseAskContentEdit), service_test.go; AGENTS.md files; pr2433 fragments",
     "round 7: proof-editor src/ask-content.ts (deletedBefore over leaf units, history transactions pass), tests; docs/ask_block_text.go (askRowOptions, items compared whole, repeated-label refusal, quotedItems), service_test.go; AGENTS.md files; Changed fragment",
     "round 8: docs/ask_block_text.go (repeated-label path, textBeyondItems), service_test.go; proof-editor src/ask-content.ts (nodesBetween over the block), tests; AGENTS.md files; Changed fragment",
-    "round 10: merge of main (635805f8, with main's docstest -> crafted one-line compile fix in pmdoc/reanchor_test.go); docs/ask_block_text.go (refuseAskContentEdit refuses every edit of a broken ask; rebuild, repeated-label and protected-option rules removed), service_test.go (rebuild tests removed or folded, new follow and data-only tests); packages/envoy/AGENTS.md; Changed fragment"
+    "round 10: merge of main (635805f8, with main's docstest -> crafted one-line compile fix in pmdoc/reanchor_test.go); docs/ask_block_text.go (refuseAskContentEdit refuses every edit of a broken ask; rebuild, repeated-label and protected-option rules removed), service_test.go (rebuild tests removed or folded, new follow and data-only tests); packages/envoy/AGENTS.md; Changed fragment",
+    "packages/envoy/internal/dispatch/docs/ask_block_text.go",
+    "packages/envoy/internal/dispatch/docs/service_test.go",
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/.changes/unreleased/pr2433-Changed-20261028-105352.yaml",
+    "packages/proof-editor/AGENTS.md"
   ],
   "trickyParts": [
     "Which of the two crossed option lists comes first is decided by the two editors' Yjs client ids, so the browser test reads the second list from the page before Backspace; Backspace at the start of the first list lifts its item into the question (a valid ask with one option), which made the first version of the test flaky (2 of 3 runs).",
@@ -125,8 +138,9 @@
     "Round 9: the tester's red test TestSetAskBlockTextNewItemContentRefusalNamesADocumentEditThatApplies (82346586) was replaced by the tester's rewrite TestSetAskBlockTextNewItemContentRefusalNamesStepsThatApply, as the INFRA-138 architect approved (21:06Z). No doc-edit op nests the deleted words back under an option; they come back as its description, which the reason says.",
     "Round 10: per the architect's design change, the two-list rebuild, the repeated-label rule and the protected-option rule are removed; their tests are removed (TestSetAskBlockTextRefusesAnEditLeavingASecondBulletList, TestSetAskBlockTextRepairsATwoListAskWhenSentEveryOptionItHolds, TestSetAskBlockTextRefusesOptionsDeletingAListTheAskRowNeverHeld, ...DroppingTheDescription..., ...RevertingADescription...) or folded into TestSetAskBlockTextRefusesEveryEditOfAnAskBreakingItsContentRule (repeated label, rich item, paragraph after the list), and the tester's TestSetAskBlockTextNewItemContentRefusalNamesStepsThatApply is replaced by TestSetAskBlockTextRefusalOfABrokenAskNamesAPathThatApplies.",
     "Round 13: CI red at 57b9f2f1 was required `test`, failing in .github/scripts/changelog-fold.test.sh (main's breakage after main's 2026-10-29 fold, fixed on main by #2487). Merged main forward at 608e4e9f; no code change.",
-    "Round 14: Dispatch keys this branch added (INFRA-624, 11 mentions in comments, test headers, AGENTS.md and two learning notes) are replaced by sjawhar/legion#2433, per the controller's ruling; keys already on main stay for dispatch://INFRA-472."
+    "Round 14: Dispatch keys this branch added (INFRA-624, 11 mentions in comments, test headers, AGENTS.md and two learning notes) are replaced by sjawhar/legion#2433, per the controller's ruling; keys already on main stay for dispatch://INFRA-472.",
+    "Round 15: the INFRA-138 architect cut round 10's items 1-3 to removing the 'edit ask block X first' path; a refusal blocked by its holder names no delete and no ask edit."
   ],
   "openQuestions": [],
-  "round": 14
+  "round": 15
 }
