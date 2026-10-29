@@ -175,7 +175,7 @@ func TestResolveBootConfigRefusesSignInSettingsItCannotUse(t *testing.T) {
 
 // A setting a release removed is refused, never silently ignored.
 func TestResolveBootConfigRefusesRemovedSettings(t *testing.T) {
-	for _, name := range []string{"DISPATCH_ALLOWED_LOGINS", "DISPATCH_APP_CLIENT_SECRET", "COHERE_API_KEY", "DISPATCH_AGENT_SECRETS_TOKEN", "DISPATCH_AGENT_SECRETS_TOKEN_FILE"} {
+	for _, name := range []string{"DISPATCH_ALLOWED_LOGINS", "DISPATCH_APP_CLIENT_SECRET", "COHERE_API_KEY", "DISPATCH_AGENT_SECRETS_TOKEN", "DISPATCH_AGENT_SECRETS_TOKEN_FILE", "DISPATCH_ASSET_STORE_BUCKET"} {
 		_, err := resolveBootConfig(envGetter(signInEnvironment(map[string]string{name: "value"})))
 		if err == nil || !strings.Contains(err.Error(), name+" is no longer read") {
 			t.Errorf("%s set: err = %v, want a refusal naming it", name, err)
@@ -653,6 +653,37 @@ func TestHealthzReportsAnUnstampedCommitAsNull(t *testing.T) {
 	for _, field := range []string{"commit", "fleet_commit", "schema_version"} {
 		if value, found := health[field]; !found || value != nil {
 			t.Fatalf("healthz %s = %#v (present %t), want null", field, value, found)
+		}
+	}
+}
+
+// /healthz says this build judges a write's Idempotency-Key (INFRA-258), which the agents' client
+// reads before it retries a write under its key: an earlier Dispatch ignores the header and would
+// run the retry again. It is the binary's fact, so a probe that answers 503 - its database down,
+// closed or never configured - carries it in its body as a 200 does: a client that reads the body
+// whatever the status resends a write its outage refused.
+func TestHealthzReportsThatWritesTakeIdempotencyKeys(t *testing.T) {
+	closed := storetest.Open(t)
+	closed.Pool.Close()
+	for name, probe := range map[string]struct {
+		database *store.Store
+		status   int
+	}{
+		"a database":        {storetest.Open(t), http.StatusOK},
+		"a closed database": {closed, http.StatusServiceUnavailable},
+		"no database":       {nil, http.StatusServiceUnavailable},
+	} {
+		response := httptest.NewRecorder()
+		dispatchHandler(http.NewServeMux(), probe.database, nil, nil, "", nil, issuers{}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		if response.Code != probe.status {
+			t.Errorf("healthz with %s: status %d, want %d", name, response.Code, probe.status)
+		}
+		var health map[string]any
+		if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+			t.Fatalf("decode health response: %v", err)
+		}
+		if health["idempotency_keys"] != true {
+			t.Errorf("healthz with %s: idempotency_keys = %#v, want true", name, health["idempotency_keys"])
 		}
 	}
 }

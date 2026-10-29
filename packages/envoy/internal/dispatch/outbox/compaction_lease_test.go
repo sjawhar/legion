@@ -52,7 +52,7 @@ func TestTheCompactionTickWhoseLeaseIsHeldElsewhereCompactsNothing(t *testing.T)
 	taken, release := make(chan struct{}), make(chan struct{})
 	held := make(chan bool, 1)
 	go func() {
-		held <- duty.Exclusive(ctx, leases, documentCompactionLease, 0, func(context.Context) {
+		held <- duty.Exclusive(ctx, leases, documentCompactionLease, time.Time{}, 0, func(context.Context) {
 			close(taken)
 			<-release
 		})
@@ -63,7 +63,7 @@ func TestTheCompactionTickWhoseLeaseIsHeldElsewhereCompactsNothing(t *testing.T)
 		t.Fatal("the other caller never took the document-compaction lease")
 	}
 
-	compactDocuments(ctx, deps)
+	compactTick(ctx, deps)
 	if got := compacting.compactions.Load(); got != 0 {
 		t.Fatalf("the tick compacted %d times under a lease held elsewhere; want none", got)
 	}
@@ -73,8 +73,16 @@ func TestTheCompactionTickWhoseLeaseIsHeldElsewhereCompactsNothing(t *testing.T)
 	}
 
 	// The lease is the pass's, not the process's: the tick after it is given back compacts.
-	compactDocuments(ctx, deps)
+	compactTick(ctx, deps)
 	if got := compacting.compactions.Load(); got != 1 {
 		t.Fatalf("the tick compacted %d times with the lease free; want once", got)
 	}
+}
+
+// compactTick is one tick of compactDaily's loop, due now: the compaction under
+// documentCompactionLease and its period, as duty.RunLeased runs it.
+func compactTick(ctx context.Context, deps Deps) {
+	duty.Exclusive(ctx, deps.Leases, documentCompactionLease, time.Now(), compactInterval, func(ctx context.Context) {
+		compactDocuments(ctx, deps)
+	})
 }

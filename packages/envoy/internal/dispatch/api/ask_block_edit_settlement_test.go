@@ -116,7 +116,7 @@ func awaitSettledVersion(t *testing.T, published <-chan model.Event, artifactID 
 		select {
 		case event, ok := <-published:
 			if !ok {
-				t.Fatalf("the event stream closed before version %d of %s was published", number, artifactID)
+				t.Fatalf("the broker's subscription closed before version %d of %s was published", number, artifactID)
 			}
 			if event.Type != "artifact.version" {
 				continue

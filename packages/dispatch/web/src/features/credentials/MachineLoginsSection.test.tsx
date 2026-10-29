@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { api } from "../../api/client";
 import type { CredentialGrant, MachineLogin } from "../../api/types";
 import { GrantsSection } from "./GrantsSection";
@@ -83,7 +83,9 @@ test("an expired login whose sessions still run is listed and marked so, and Rev
     expect(section.getAllByText("expired, sessions still running")).toHaveLength(1);
 
     fireEvent.click(within(staleRow).getByRole("button", { name: "Revoke" }));
-    await waitFor(() => expect(revokeMachineLogin).toHaveBeenCalledWith("cred-stale"));
+    await waitFor(() =>
+      expect(revokeMachineLogin).toHaveBeenCalledWith("cred-stale", keyedAttempt)
+    );
     await waitFor(() => expect(section.queryByText("expired, sessions still running")).toBeNull());
     expect(section.getByText("devbox.example.com")).toBeDefined();
   } finally {
@@ -134,7 +136,9 @@ test("revoking a machine login refreshes Live grants", async () => {
     const section = within(screen.getByRole("region", { name: "Machine logins" }));
 
     fireEvent.click(await section.findByRole("button", { name: "Revoke" }));
-    await waitFor(() => expect(revokeMachineLogin).toHaveBeenCalledWith("cred-devbox"));
+    await waitFor(() =>
+      expect(revokeMachineLogin).toHaveBeenCalledWith("cred-devbox", keyedAttempt)
+    );
     expect(await liveGrants.findByText("No live grants.")).toBeDefined();
     expect(liveGrants.queryByText("WORKER_TOKEN")).toBeNull();
   } finally {
@@ -177,7 +181,9 @@ test("the machine-login page lists the viewer's machine logins, and Revoke ends 
 
     confirm.mockReturnValue(true);
     fireEvent.click(within(devboxRow as HTMLElement).getByRole("button", { name: "Revoke" }));
-    await waitFor(() => expect(revokeMachineLogin).toHaveBeenCalledWith("cred-devbox"));
+    await waitFor(() =>
+      expect(revokeMachineLogin).toHaveBeenCalledWith("cred-devbox", keyedAttempt)
+    );
     await waitFor(() => expect(section.queryByText("devbox.example.com")).toBeNull());
     expect(section.getByText("laptop.example.com")).toBeDefined();
     expect(revokeMachineLogin).toHaveBeenCalledTimes(1);
@@ -216,7 +222,9 @@ test("a service's login someone else approved is listed by its service and its a
         "Revoke the machine login for legion-daemon on cluster.example.com? Every session it started, its worker pods included, ends at once.",
       ],
     ]);
-    await waitFor(() => expect(revokeMachineLogin).toHaveBeenCalledWith("cred-daemon"));
+    await waitFor(() =>
+      expect(revokeMachineLogin).toHaveBeenCalledWith("cred-daemon", keyedAttempt)
+    );
     await waitFor(() =>
       expect(section.queryByText("legion-daemon on cluster.example.com")).toBeNull()
     );
@@ -327,7 +335,7 @@ test("two logins of one service on one host are told apart by their credential i
     expect(within(daemonRow).getByText("bob@example.com")).toBeDefined();
 
     fireEvent.click(within(copyRow).getByRole("button", { name: "Revoke" }));
-    await waitFor(() => expect(revokeMachineLogin).toHaveBeenCalledWith("cred-copy"));
+    await waitFor(() => expect(revokeMachineLogin).toHaveBeenCalledWith("cred-copy", keyedAttempt));
     await waitFor(() => expect(section.queryByText("cred-copy")).toBeNull());
     expect(section.getByText("cred-daemon")).toBeDefined();
     expect(revokeMachineLogin).toHaveBeenCalledTimes(1);

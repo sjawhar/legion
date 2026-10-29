@@ -118,7 +118,7 @@ func newRig(t *testing.T) *rig {
 			t.Errorf("shut down the document service: %v", err)
 		}
 	})
-	people := store.NewPgPeopleStore(database.Pool, "signing-key", nil)
+	people := store.NewPgPeopleStore(database.Pool, auth.SingleSigningKey("signing-key"), nil)
 	if err := people.Record(context.Background(), "alice"); err != nil {
 		t.Fatalf("record alice: %v", err)
 	}
@@ -134,13 +134,15 @@ func newRig(t *testing.T) *rig {
 		EnvoyURL:    listener.URL,
 		Docs:        documents,
 		Events:      broker,
-		Lifetime:    t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(api.Register(mux, deps))
+	// t.Context, the server's lifetime, is cancelled before cleanups run, so Wait returns once the
+	// keyed handlers, detached deliveries, sockets and relay it started have ended, before the
+	// database closes under them.
+	t.Cleanup(api.Register(mux, t.Context(), deps).Wait)
 	return &rig{handler: mux, database: database, broker: broker, documents: documents, sent: &recorder{topics: map[string][]string{}}}
 }
 

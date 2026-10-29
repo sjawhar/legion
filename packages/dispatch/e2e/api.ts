@@ -46,9 +46,11 @@ import type {
   UserAgentStateInput,
   UserAgentStates,
   UserIssueState,
+  UserState,
   Version,
 } from "../web/src/api/types";
 import { harnessPorts } from "./harness-ports";
+import { type DispatchProcess, pinnedTo } from "./harness-processes";
 
 // The harness server's port, which e2e/run.ts exports from the server's report before anything
 // imports this module (e2e/harness-ports.ts).
@@ -67,9 +69,15 @@ const seedActor: Actor = { kind: "session", id: "e2e-seed" };
 interface ApiOptions {
   actor?: Actor;
   as?: "agent" | "user";
+  /** The `Idempotency-Key` header the write carries, naming one intent: a repeat under it is
+   *  answered what the first was answered. None when absent, which Dispatch handles unkeyed. */
+  idempotencyKey?: string;
   login?: string;
   /** The bearer an `as: "agent"` call sends; the shared `e2eAgentToken` when absent. */
   token?: string;
+  /** In two-process mode, the process the round-robin proxy sends the call to; absent, whichever
+   *  takes its turn (e2e/round-robin-proxy.ts). */
+  process?: DispatchProcess;
 }
 
 /** The name of the session cookie the server issues at sign-in, dev or GitHub. */
@@ -79,6 +87,14 @@ export const sessionCookieName = "dsession";
  *  sign-in with a 302 that sets the session cookie. */
 export function devSignInPath(login: string): string {
   return `/auth/_dev/signin?login=${encodeURIComponent(login)}`;
+}
+
+/** The `name=value` of the session cookie `response` sets, or undefined when it sets none. */
+export function sessionCookieFrom(response: Response): string | undefined {
+  return response.headers
+    .getSetCookie()
+    .find((header) => header.startsWith(`${sessionCookieName}=`))
+    ?.split(";")[0];
 }
 
 export function devSignInError(login: string, status: number, responseText: string): Error {
@@ -99,10 +115,7 @@ function sessionCookie(login: string): Promise<string> {
   }
   const cookie = fetch(new URL(devSignInPath(login), baseUrl), { redirect: "manual" }).then(
     async (response) => {
-      const value = response.headers
-        .getSetCookie()
-        .find((header) => header.startsWith(`${sessionCookieName}=`))
-        ?.split(";")[0];
+      const value = sessionCookieFrom(response);
       if (response.status !== 302 || value === undefined) {
         throw devSignInError(login, response.status, await response.text());
       }
@@ -150,6 +163,10 @@ async function request<T>(
   } else {
     Object.assign(headers, await userHeaders(options.login));
   }
+  if (options.idempotencyKey !== undefined) {
+    headers["Idempotency-Key"] = options.idempotencyKey;
+  }
+  if (options.process !== undefined) Object.assign(headers, pinnedTo(options.process));
 
   const response = await fetch(new URL(path, baseUrl), {
     body: payload === undefined ? undefined : JSON.stringify(payload),
@@ -654,6 +671,7 @@ export function createMessage(
   );
 }
 
+/** Sends one message to a session as a human; `options.idempotencyKey` keys it. */
 export function createAgentMessage(
   sessionID: string,
   input: CreateAgentMessageInput,
@@ -667,18 +685,13 @@ export function createAgentMessage(
   );
 }
 
-/** Sends one broadcast as a human. Every send carries an `idempotency_key`; this mints one unless
- *  the caller names its own, as a row that replays a request the page made does. */
+/** Sends one broadcast as a human; `options.idempotencyKey` keys it, as a row that repeats a
+ *  request the page made does. */
 export function createBroadcast(
-  input: Omit<CreateBroadcastInput, "idempotency_key"> & { readonly idempotency_key?: string },
+  input: CreateBroadcastInput,
   options: ApiOptions = {}
 ): Promise<BroadcastCreated> {
-  return request<BroadcastCreated>(
-    "/api/v1/broadcasts",
-    "POST",
-    { ...input, idempotency_key: input.idempotency_key ?? crypto.randomUUID() },
-    options
-  );
+  return request<BroadcastCreated>("/api/v1/broadcasts", "POST", input, options);
 }
 
 export function listBroadcasts(options: ApiOptions = {}): Promise<BroadcastSummary[]> {
@@ -787,15 +800,33 @@ export function putIssueState(
   );
 }
 
+/** `login`'s own state on every issue, `GET /api/v1/me/state`: each issue's pin and its pinned
+ *  items (`dismissed`), as the page reads them. */
+export function getMyState(login = "alice"): Promise<UserState> {
+  return request<UserState>("/api/v1/me/state", "GET", undefined, { login });
+}
+
 /**
- * Forces every open SSE connection on the server closed, as if it had restarted.
+ * Forces every open live socket on the server closed, as if it had restarted.
  * Test-only endpoint (mounted when DISPATCH_TEST_HOOKS=1, see run-server.sh) that
- * proves the client's reconnect-from-lastId path without seeding thousands of
- * events to trip the real replay cap.
+ * proves the page resumes every subscription after an unplanned gap.
  */
-export function disconnectAllStreams(options: ApiOptions = {}): Promise<{ ok: boolean }> {
+export function disconnectLiveSockets(options: ApiOptions = {}): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(
-    "/api/v1/events/_test/disconnect",
+    "/api/v1/live/_test/disconnect",
+    "POST",
+    {},
+    {
+      as: "agent",
+      ...options,
+    }
+  );
+}
+
+/** Forces every open live socket closed with 4001, as its bounded age does. */
+export function rotateLiveSockets(options: ApiOptions = {}): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    "/api/v1/live/_test/rotate",
     "POST",
     {},
     {
@@ -820,6 +851,29 @@ export function quiesceDocuments(options: ApiOptions = {}): Promise<{ ok: boolea
       as: "agent",
       ...options,
     }
+  );
+}
+
+/**
+ * Makes every keyed `method` request to `path` (the exact request path) take `delayMs` longer on
+ * the server: once Dispatch has claimed its key, the run waits that long on the handler's own
+ * context before the handler runs, so a write Dispatch is slow to finish is slow server-side
+ * rather than held in the browser; a context that ends during the wait answers
+ * `503 SLOW_WRITE_CUT_OFF` and the handler never runs. Each call replaces the delay for that
+ * method and path, and `delayMs` 0 removes it. Test-only endpoint (mounted when
+ * DISPATCH_TEST_HOOKS=1, see run-server.sh), called as a person: its body takes no `actor`.
+ */
+export function slowWrites(
+  method: "PATCH" | "POST",
+  path: string,
+  delayMs: number,
+  options: ApiOptions = {}
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    "/api/v1/writes/_test/slow",
+    "POST",
+    { delay_ms: delayMs, method, path },
+    options
   );
 }
 
@@ -949,10 +1003,10 @@ export function publishAgentStreamFrame(
   );
 }
 
-/** Ends every open viewer stream for a session, as a connection lost on the way to the browser
- *  does. The live stream carries no cursor, so the browser's reconnect asks the session for its
- *  replay again and rebuilds its whole transcript from it: this is how a test gets a second
- *  replay into a page that is already open, which a published frame alone cannot do. */
+/** Ends every open agent viewer for a session. The page resubscribes its dropped view on the live
+ * socket, which asks the session for its replay again and rebuilds the transcript: this is how a
+ * test gets a second replay into a page that is already open, which a published frame alone
+ * cannot do. */
 export function dropAgentStreamViewers(
   sessionID: string,
   options: ApiOptions = {}
