@@ -30,6 +30,7 @@ import (
 	"time"
 
 	gws "github.com/gorilla/websocket"
+	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cmdtest"
@@ -46,6 +47,7 @@ import (
 	"github.com/sjawhar/envoy/internal/githubappjwt"
 	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
+	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/sjawhar/envoy/internal/testsocks5"
 )
 
@@ -303,8 +305,8 @@ func routerFor(t *testing.T, boot bootConfig, built routes.AppContextOptions) ht
 	if err != nil {
 		t.Fatalf("build the router: %v", err)
 	}
-	handler, waitDelivery := routes.New(appCtx)
-	t.Cleanup(waitDelivery)
+	handler, background := routes.New(appCtx)
+	t.Cleanup(background.Wait)
 	return handler
 }
 
@@ -385,14 +387,15 @@ func signInPool(t *testing.T, clientID, clientSecret string) *oidctest.Issuer {
 }
 
 // signInRouter is the router main serves for boot over people, with the sign-in pool's code flow
-// main builds from boot's DISPATCH_SIGNIN_* settings (signInFlow).
+// main builds from boot's DISPATCH_SIGNIN_* settings (signInFlow), and a store of its own, whose
+// event log's head GET /auth/whoami answers.
 func signInRouter(t *testing.T, boot bootConfig, people auth.PeopleStore) http.Handler {
 	t.Helper()
 	flow := signInFlow(boot)
 	if flow == nil {
 		t.Fatalf("boot configures no sign-in pool: %+v", boot)
 	}
-	return routerFor(t, boot, routes.AppContextOptions{SignIn: flow, People: people})
+	return routerFor(t, boot, routes.AppContextOptions{SignIn: flow, People: people, Store: storetest.Open(t)})
 }
 
 // startSignIn answers GET /auth/start from handler: the redirect to the pool's authorization
@@ -604,7 +607,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				request := httptest.NewRequest(http.MethodGet, "/auth/whoami", nil)
 				request.Header.Set("X-Dispatch-User", "Alice@Example.com")
 				response := httptest.NewRecorder()
-				routerFor(t, header, routes.AppContextOptions{People: peopleStore(t)}).ServeHTTP(response, request)
+				routerFor(t, header, routes.AppContextOptions{People: peopleStore(t), Store: storetest.Open(t)}).ServeHTTP(response, request)
 				if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"login":"alice@example.com"`) {
 					t.Errorf("DISPATCH_IDENTITY=header:X-Dispatch-User: GET /auth/whoami answered %d %s, want alice@example.com", response.Code, response.Body.String())
 				}
@@ -896,6 +899,87 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					t.Errorf("ENVOY_NATS_SOCKS5_PROXY=%s: the proxy received %+v, want every request for 127.0.0.1:1 as an IPv4 address (type 1)", proxy.Addr, got)
 					break
 				}
+			}
+		},
+		"ENVOY_NATS_REPLICAS": func(t *testing.T) {
+			if boot := resolveWith(t, nil); boot.NATSReplicas != 1 {
+				t.Errorf("unset: NATSReplicas = %d, want 1", boot.NATSReplicas)
+			}
+			if boot := resolveWith(t, map[string]string{"ENVOY_NATS_REPLICAS": " 3 "}); boot.NATSReplicas != 3 {
+				t.Errorf("NATSReplicas = %d, want 3", boot.NATSReplicas)
+			}
+			for _, value := range []string{"0", "-1", "6", "x"} {
+				refusedWith(t, map[string]string{"ENVOY_NATS_REPLICAS": value}, fmt.Sprintf("invalid ENVOY_NATS_REPLICAS %q", value))
+			}
+			// Its three readers, on a single server, which refuses a create at more than one copy
+			// and names the setting: the stream main's publisher reconciles
+			// (dispatchStreamOptions) on its first connection, in the background, so the refusal
+			// reaches the reconnect hook's logged error (startDispatchStream), the webhook
+			// sweeper's bucket (webhookSweeper's Open) and the bucket redeliver-webhooks opens.
+			// stream_replicas_test.go raises the same on a cluster.
+			_, url := testnats.Start(t)
+			three := map[string]string{"ENVOY_NATS_REPLICAS": "3"}
+			if _, err := startDispatchStream(t, []string{url}, three); err == nil || !strings.Contains(err.Error(), "ENVOY_NATS_REPLICAS=3: ") {
+				t.Errorf("the stream at ENVOY_NATS_REPLICAS=3 on one server: logged %v, want the server's refusal naming the setting", err)
+			}
+			conn := testnats.Connect(t, url)
+			t.Cleanup(conn.Close)
+			js, err := conn.JetStream()
+			if err != nil {
+				t.Fatalf("open JetStream: %v", err)
+			}
+			if info, err := js.StreamInfo(bus.Stream); !errors.Is(err, natsgo.ErrStreamNotFound) {
+				t.Errorf("after the refused start at ENVOY_NATS_REPLICAS=3 the stream is %+v (%v), want none created", info, err)
+			}
+			client, err := startDispatchStream(t, []string{url}, nil)
+			if err != nil {
+				t.Fatalf("connect the publisher at the default: %v", err)
+			}
+			key, pemText := githubapptest.Key(t)
+			app := &auth.AppConfig{ClientID: replicasTestClientID, PEM: pemText}
+			sweeper, err := webhookSweeper(client, app, "", resolveWith(t, three).NATSReplicas)
+			if err != nil {
+				t.Fatalf("build the webhook sweeper: %v", err)
+			}
+			if _, err := sweeper.Open(); err == nil || !strings.Contains(err.Error(), "ENVOY_NATS_REPLICAS=3: ") {
+				t.Errorf("the redelivery bucket at ENVOY_NATS_REPLICAS=3 on one server: err = %v, want the server's refusal naming the setting", err)
+			}
+			github := githubapptest.NewWebhook(t, &key.PublicKey, replicasTestClientID, nil)
+			for value, want := range map[string]string{"3": "ENVOY_NATS_REPLICAS=3: ", "6": `invalid ENVOY_NATS_REPLICAS "6"`} {
+				var stdout, stderr bytes.Buffer
+				code := runSubcommand(context.Background(), []string{"redeliver-webhooks", "--since", "1h", "--dry-run"}, envGetter(map[string]string{
+					"NATS_URLS":                url,
+					"XDG_CONFIG_HOME":          t.TempDir(),
+					"DISPATCH_APP_CLIENT_ID":   replicasTestClientID,
+					"DISPATCH_APP_PEM_B64":     pemText,
+					"DISPATCH_GITHUB_API_BASE": github.URL(),
+					"ENVOY_NATS_REPLICAS":      value,
+				}), &stdout, &stderr)
+				if code != 1 || !strings.Contains(stdout.String(), want) {
+					t.Errorf("redeliver-webhooks with ENVOY_NATS_REPLICAS=%s on one server: exit %d, stdout %q; want 1 and %q", value, code, stdout.String(), want)
+				}
+			}
+		},
+		"ENVOY_STREAM_MAX_BYTES": func(t *testing.T) {
+			if boot := resolveWith(t, nil); boot.StreamMaxBytes != 0 {
+				t.Errorf("unset: StreamMaxBytes = %d, want 0, no limit set", boot.StreamMaxBytes)
+			}
+			if boot := resolveWith(t, map[string]string{"ENVOY_STREAM_MAX_BYTES": " 1048576 "}); boot.StreamMaxBytes != 1<<20 {
+				t.Errorf("StreamMaxBytes = %d, want %d", boot.StreamMaxBytes, 1<<20)
+			}
+			for _, value := range []string{"0", "-5", "x"} {
+				refusedWith(t, map[string]string{"ENVOY_STREAM_MAX_BYTES": value}, fmt.Sprintf("invalid ENVOY_STREAM_MAX_BYTES %q", value))
+			}
+			// Its reader: the stream main's publisher creates (dispatchStreamOptions) holds the
+			// limit and refuses new messages once full.
+			_, url := testnats.Start(t)
+			client, err := startDispatchStream(t, []string{url}, map[string]string{"ENVOY_STREAM_MAX_BYTES": "1048576"})
+			if err != nil {
+				t.Fatalf("start the stream with ENVOY_STREAM_MAX_BYTES=1048576: %v", err)
+			}
+			info, err := client.JS().StreamInfo(bus.Stream)
+			if err != nil || info.Config.MaxBytes != 1<<20 || info.Config.Discard != natsgo.DiscardNew {
+				t.Errorf("stream = %+v, %v; want a byte limit of %d discarding new", info, err, 1<<20)
 			}
 		},
 		"NATS_NKEY_SEED": func(t *testing.T) {
@@ -1534,15 +1618,18 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "true"}); boot.TestHooksEnabled {
 				t.Error("DISPATCH_TEST_HOOKS=true: hooks on, want only 1 to mount them")
 			}
-			// The routes the flag mounts: the e2e harness's hook that drops every open event stream.
+			// The routes the flag mounts: the e2e harness's hooks that close every open live socket, as
+			// a restart (1012) or the socket's age (4001) does.
 			t.Run("router", func(t *testing.T) {
-				for value, want := range map[string]int{"1": http.StatusOK, "": http.StatusNotFound} {
-					request := signedIn(t, httptest.NewRequest(http.MethodPost, "/api/v1/events/_test/disconnect", nil), "alice")
-					request.Header.Set("Sec-Fetch-Site", "same-origin")
-					response := httptest.NewRecorder()
-					routerFor(t, resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": value}), routes.AppContextOptions{}).ServeHTTP(response, request)
-					if response.Code != want {
-						t.Errorf("DISPATCH_TEST_HOOKS=%q: POST /api/v1/events/_test/disconnect answered %d %s, want %d", value, response.Code, response.Body.String(), want)
+				for _, hook := range []string{"/api/v1/live/_test/disconnect", "/api/v1/live/_test/rotate"} {
+					for value, want := range map[string]int{"1": http.StatusOK, "": http.StatusNotFound} {
+						request := signedIn(t, httptest.NewRequest(http.MethodPost, hook, nil), "alice")
+						request.Header.Set("Sec-Fetch-Site", "same-origin")
+						response := httptest.NewRecorder()
+						routerFor(t, resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": value}), routes.AppContextOptions{}).ServeHTTP(response, request)
+						if response.Code != want {
+							t.Errorf("DISPATCH_TEST_HOOKS=%q: POST %s answered %d %s, want %d", value, hook, response.Code, response.Body.String(), want)
+						}
 					}
 				}
 			})

@@ -38,9 +38,7 @@ import type {
   OpenAsk,
   OpenAsksResponse,
   Project,
-  Suggestions,
   WriteAdvice,
-  WriteSuggestion,
 } from "@legion/contracts";
 import {
   ASK_QUESTION_MAX,
@@ -78,6 +76,8 @@ import {
   DispatchClient,
   DispatchGatewayError,
   DispatchServiceError,
+  DispatchWriteLandedError,
+  type DispatchWriteRetry,
   type GraphReferencesQuery,
   type IssueReadOptions,
 } from "./dispatch-http";
@@ -120,6 +120,7 @@ import {
 import { ownerSubscribeLine } from "./dispatch-subscribe";
 import { messageFor } from "./errors";
 import { humanEditHead } from "./human-edit";
+import { decisionBlockLines, relatedCheckLines } from "./related-check";
 import { pageSummaryText, searchAnswer } from "./search-answer";
 import { formatZodIssues, ToolInputError } from "./tool-input-errors";
 
@@ -169,6 +170,8 @@ export interface ExecuteDispatchToolInput {
   readonly signal?: AbortSignal;
   readonly env?: ExecutorEnvironment;
   readonly fetchImpl?: typeof fetch;
+  /** How each write asks Dispatch again under its key (`DISPATCH_WRITE_RETRY` unless set). */
+  readonly writeRetry?: DispatchWriteRetry;
   readonly exec?: ExecFn;
   /** The topics the session's Envoy subscriptions hold, or null when they cannot be read (Envoy
    *  off, or no answer from its listener); called only by a write that would name its owner as
@@ -336,37 +339,15 @@ function renderAdvice(
   return lines;
 }
 
-// renderSuggestions turns LEGION-550's write-time feedback into lines dispatch_issue and
-// dispatch_ask append to their result: the related items first, then any past decision,
-// so the agent sees both without a second search. Nothing here ever changes whether the write
-// already succeeded; a missing search says why instead of listing anything.
-function renderSuggestions(suggestions: Suggestions | undefined, configUrl: string): string[] {
-  if (suggestions === undefined) return [];
-  if (suggestions.missing !== undefined) {
-    return [`Related-item search was skipped: ${suggestions.missing}.`];
+/** The advice lines a write prints after its related-item check, or one line saying why they
+ *  could not be shown: the write already succeeded, and an exception here must not cost the
+ *  reader the line naming what was written or what the check found. */
+async function otherAdviceLines(render: () => string[] | Promise<string[]>): Promise<string[]> {
+  try {
+    return await render();
+  } catch (error) {
+    return [`Other advice could not be shown: ${messageFor(error)}`];
   }
-  const lines: string[] = [];
-  if (suggestions.related.length > 0) {
-    lines.push("Possibly related, found by search:");
-    for (const item of suggestions.related) {
-      lines.push(`- ${suggestionLabel(item)} → ${new URL(item.href, configUrl).toString()}`);
-    }
-  }
-  if (suggestions.decision !== undefined) {
-    const item = suggestions.decision;
-    const when = item.answered_at === undefined ? "" : ` on ${item.answered_at}`;
-    lines.push(
-      `A past decision may already answer this: ${suggestionLabel(item)}, answered by ${item.answered_by}${when} → ${new URL(item.href, configUrl).toString()}`
-    );
-  }
-  return lines;
-}
-
-function suggestionLabel(item: WriteSuggestion): string {
-  if (item.owner.kind === "issue") {
-    return `${item.owner.key} [${item.owner.status}] ${item.owner.title}`;
-  }
-  return `${item.owner.name} (${item.owner.project}/${item.owner.slug})`;
 }
 
 function documentResultDetails(artifact: Artifact): Record<string, unknown> {
@@ -447,6 +428,7 @@ const issueFreeTools: Readonly<Record<string, true>> = {
   dispatch_resolve_comment: true,
   dispatch_follow: true,
   dispatch_search: true,
+  dispatch_related: true,
   dispatch_issues: true,
   dispatch_project: true,
   dispatch_projects: true,
@@ -1851,7 +1833,7 @@ function repositoryFieldsWarnings(issue: {
  *  without the field: it did not save the repository, and that must not pass as a success. The
  *  error says what the server did do, so the agent does not repeat the rest of the write. */
 function refuseUnsavedRepository(
-  verb: "created" | "updated",
+  verb: "created" | "updated" | "already holds",
   issue: { readonly key: string; readonly repo?: string | null },
   repo: string | undefined
 ): void {
@@ -2750,8 +2732,10 @@ function dispatchAnswered(error: unknown, status: number): error is DispatchServ
 /**
  * Whether a write that failed with `error` may have taken effect anyway. Only an answer sent
  * before the write could apply proves it did not: Dispatch's own refusal (a 4xx), or a gateway's
- * answer that never reached Dispatch (`mayHaveReachedDispatch`). Dispatch's own 5xx can come after
- * it committed, and a timeout or a transport error says nothing either way.
+ * answer that never reached Dispatch (`mayHaveReachedDispatch`), which the client throws as such
+ * only when no earlier attempt of the write may have reached Dispatch either. Dispatch's own 5xx
+ * can come after it committed, and a timeout, a transport error or a `DispatchWriteUnsettledError`
+ * (an earlier attempt may have reached Dispatch) says nothing either way.
  */
 function writeMayHaveLanded(error: unknown): boolean {
   if (error instanceof DispatchGatewayError) return error.mayHaveReachedDispatch;
@@ -2900,7 +2884,7 @@ export async function executeDispatchTool(
   // A factory, not one instance: the constructor starts the request deadline, and the main
   // path resolves the origin (a subprocess) before it needs a client.
   const dispatchClient = (): DispatchClient =>
-    new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
+    new DispatchClient(configUrl, configToken, fetchImpl, input.signal, input.writeRetry);
   if (input.tool === "dispatch_open_asks") {
     const client = dispatchClient();
     const project = optionalString(ownerArguments.args, "project");
@@ -2978,12 +2962,30 @@ export async function executeDispatchTool(
     return owner;
   };
   // The text a call posts with its pictures, each uploaded first to the owner the address names.
+  // An upload is a step before the call's own write, so one that landed without its answer leaves
+  // the call undone: it fails, rather than reading as the call's landing.
   const postWithPictures = (
     text: string,
     limit: PictureTextLimit,
     owner: string,
     upload: (upload: CreateArtifactInput) => Promise<ArtifactUploadResponse>
-  ): Promise<string> => textWithPictures(input.tool, text, pictures, limit, owner, upload, actor);
+  ): Promise<string> =>
+    textWithPictures(
+      input.tool,
+      text,
+      pictures,
+      limit,
+      owner,
+      (picture) =>
+        upload(picture).catch((error: unknown) => {
+          if (!(error instanceof DispatchWriteLandedError)) throw error;
+          throw new Error(
+            `${error.message} That was a picture uploaded before this call's own write, so nothing else was written: run the call again, which uploads it as its next version.`,
+            { cause: error }
+          );
+        }),
+      actor
+    );
   // An ask or comment uploads to the project of the project document it is on, else to its issue.
   const writePictures = (
     resolved: ResolvedArtifact | undefined,
@@ -3034,19 +3036,20 @@ export async function executeDispatchTool(
           ...(Array.isArray(labels) ? { labels: labels as string[] } : {}),
           actor,
         });
-        refuseUnsavedRepository("created", created, repo);
-        const componentGuidance = await architectureGuidance(
-          client,
-          created.project,
-          created.components
-        );
-        const adviceLines = [
-          ...renderAdvice(input.tool, created.key, created.advice, {
-            isPrimarySpec: spec !== undefined,
-          }),
-          ...(componentGuidance === undefined ? [] : [componentGuidance]),
-          ...renderSuggestions(created.advice?.suggestions, linkBase),
-        ];
+        refuseUnsavedRepository(created.created ? "created" : "already holds", created, repo);
+        const adviceLines = await otherAdviceLines(async () => {
+          const componentGuidance = await architectureGuidance(
+            client,
+            created.project,
+            created.components
+          );
+          return [
+            ...renderAdvice(input.tool, created.key, created.advice, {
+              isPrimarySpec: spec !== undefined,
+            }),
+            ...(componentGuidance === undefined ? [] : [componentGuidance]),
+          ];
+        });
         const href = new URL(`/issues/${encodeURIComponent(created.key)}`, linkBase).toString();
         // Dispatch picks the assignee when the call names none (the creating person, the personal
         // token's owner, the parent's, or the project's default), so the line says whom it
@@ -3057,9 +3060,22 @@ export async function executeDispatchTool(
             : created.assignee === null
               ? "; unassigned"
               : `; assigned to ${created.assignee}`;
+        const suffixes = `${assigned}${await notSubscribed(issueTopic(created.key), input.subscriptions)}`;
+        // Dispatch answers an `external` reference it already holds with that issue and nothing
+        // new, so no related-item check was made and "search before you rely on this being new"
+        // does not apply: the first line says so instead.
         return {
           text: [
-            `Created ${created.key}: ${created.title} → ${href}${assigned}${await notSubscribed(issueTopic(created.key), input.subscriptions)}`,
+            created.created
+              ? `Created ${created.key}: ${created.title} → ${href}${suffixes}`
+              : `Dispatch already holds ${created.key}: ${created.title} → ${href}; nothing was created${suffixes}`,
+            ...(created.created
+              ? relatedCheckLines(created.advice?.suggestions, {
+                  project: created.project,
+                  text: title,
+                  configUrl: linkBase,
+                })
+              : []),
             ...adviceLines,
           ].join("\n"),
           details: {
@@ -3119,6 +3135,12 @@ export async function executeDispatchTool(
             ref: dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id),
           };
         } catch (error) {
+          if (error instanceof DispatchWriteLandedError) {
+            throw new Error(
+              `${error.message} That was the closing reason, so the close was not sent: read the issue's messages for it, then close with a reason that points at it, since retrying this call posts its reason again.`,
+              { cause: error }
+            );
+          }
           // The close's PATCH below follows the same rule: only an answer sent before the reason
           // could be stored proves it was not posted.
           const told = writeMayHaveLanded(error)
@@ -3167,6 +3189,9 @@ export async function executeDispatchTool(
           actor,
         });
       } catch (error) {
+        // The update is this call's own last write: one that landed without its answer is the
+        // call's landing, which the caller reports as done.
+        if (error instanceof DispatchWriteLandedError) throw error;
         // A URL links exactly one issue. A server from before EXTERNAL_LINK_TAKEN answers the
         // unique-index violation with 500 INTERNAL, which names nothing; say what it means. A
         // gateway's 500 page is not that answer, and gets no such reading.
@@ -3318,6 +3343,27 @@ export async function executeDispatchTool(
         ...(offset === undefined ? {} : { offset }),
       });
       return searchAnswer(search, query, offset, linkBase);
+    }
+    case "dispatch_related": {
+      const project = stringArg(args, "project");
+      const title = optionalString(args, "title");
+      const text = optionalString(args, "text");
+      const excludeIssue = optionalString(args, "exclude_issue");
+      const keywordsOnly = optionalBoolean(args, "keywords_only");
+      const suggestions = await client.related(project, {
+        ...(title === undefined ? {} : { title }),
+        ...(text === undefined ? {} : { text }),
+        ...(excludeIssue === undefined ? {} : { exclude_issue: excludeIssue }),
+        ...(keywordsOnly === undefined ? {} : { keywords_only: keywordsOnly }),
+      });
+      return {
+        text: relatedCheckLines(suggestions, {
+          project,
+          text: [title, text].filter((part) => part !== undefined).join("\n"),
+          configUrl: linkBase,
+        }).join("\n"),
+        details: { project, suggestions },
+      };
     }
     case "dispatch_issues": {
       const project = stringArg(args, "project");
@@ -3544,14 +3590,21 @@ export async function executeDispatchTool(
           : resolved === undefined
             ? issueTopic(issue())
             : documentTopic(resolved.artifact);
-      const adviceLines = [
-        // Suggestions first: renderAdvice's cadence line must stay the result's last line.
-        ...renderSuggestions(ask.advice?.suggestions, linkBase),
-        ...renderAdvice(input.tool, askOwner.label, ask.advice, {}),
-      ];
+      // The check's form sits right under the line naming the ask; renderAdvice's cadence line
+      // must stay the result's last line.
+      const checkLines = relatedCheckLines(ask.advice?.suggestions, {
+        project: resolved?.artifact.project ?? (ask.issue_key ?? "").replace(/-[0-9]+$/, ""),
+        text: stringArg(args, "question"),
+        configUrl: linkBase,
+      });
+      const adviceLines = await otherAdviceLines(() =>
+        renderAdvice(input.tool, askOwner.label, ask.advice, {})
+      );
       return {
         text: [
-          `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}\n${await followsAsk(askOwner, input.subscriptions)}`,
+          `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}`,
+          ...checkLines,
+          await followsAsk(askOwner, input.subscriptions),
           ...adviceLines,
         ].join("\n"),
         details: {
@@ -3831,11 +3884,26 @@ export async function executeDispatchTool(
             ? "; could not confirm this edit survived, because the live document is being reloaded or holds a tree too deep to read — re-read it"
             : `; ${versionText} carries text the live document no longer has: a concurrent change removed what ${lostOps.length === 1 ? "operation" : "operations"} ${lostOps.join(", ")} wrote — re-read the document`;
       const applied = `${head}${unchangedText}${lostText}`;
-      const adviceLines = renderAdvice(
-        input.tool,
-        resolvedTopic(resolved).label,
-        edited.advice,
-        {}
+      // An older server names no block, so the one not-made line it gets takes its search words
+      // from the first ask block this edit's own markdown opens (its question comes first), else
+      // from the document's issue title; a retype on a project document has neither, and the
+      // line asks for the words instead.
+      const editAskText =
+        ops
+          .map(
+            (operation) =>
+              /^:{3,}ask\{.*\n([\s\S]*)/mu.exec(operation.markdown ?? operation.with ?? "")?.[1]
+          )
+          .find((text) => text !== undefined) ??
+        resolved.issue?.title ??
+        "";
+      const checkLines = decisionBlockLines(edited.advice, {
+        project: resolved.artifact.project,
+        text: editAskText,
+        configUrl: linkBase,
+      });
+      const adviceLines = await otherAdviceLines(() =>
+        renderAdvice(input.tool, resolvedTopic(resolved).label, edited.advice, {})
       );
       // The token of the document this edit produced, rendered as dispatch_doc_read renders it:
       // the next guarded edit passes it as `precondition.document` with no read in between. A
@@ -3844,6 +3912,7 @@ export async function executeDispatchTool(
       return {
         text: [
           `${applied}${await notSubscribed(resolvedTopic(resolved), input.subscriptions)}`,
+          ...checkLines,
           ...tokenTrailer,
           ...adviceLines,
         ].join("\n"),

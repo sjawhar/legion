@@ -63,13 +63,11 @@ func blockRefusal(node ast.Node, source []byte, firstLine int) error {
 		if current.Lines().Len() <= 1 {
 			return nil
 		}
-		switch current.PreviousSibling().(type) {
+		switch heldOpenBy(current).(type) {
 		case *ast.List:
 			return refuse("an indented code block right after a list, which the browser editor's parser splits after its first line")
 		case *ast.Blockquote:
-			if !current.HasBlankPreviousLines() {
-				return refuse("an indented code block right after a quote, which the browser editor's parser splits after its first line")
-			}
+			return refuse("an indented code block right after a quote, which the browser editor's parser splits after its first line")
 		}
 	case *ast.HTMLBlock:
 		// Proof's doc accepts blocks only, while html is an inline atom.

@@ -1,6 +1,6 @@
 // Command loadgen is the Dispatch load-test harness: it seeds a local stack through Dispatch's
-// API, runs one load step (sessions on NATS, an event generator, a request generator, SSE
-// streams, samplers and profiles) and renders the tables of one or more steps. stack.sh,
+// API, runs one load step (sessions on NATS, an event generator, a request generator, dashboard
+// live sockets, samplers and profiles) and renders the tables of one or more steps. stack.sh,
 // run-step.sh and run-series.sh drive it; every endpoint and token comes from the stack's
 // stack.json (guard.go).
 package main

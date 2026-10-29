@@ -12,6 +12,8 @@ import {
 import type { ReactNode } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerIssuePatches } from "../../__tests__/send-answers";
 import { ApiError, api } from "../../api/client";
 import type { Issue, IssueSummary, UserState } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
@@ -230,16 +232,20 @@ test("a failed move rolls the board back, refetches it and tells the truth about
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const queryKey = ["issues", "project", "CORE"] as const;
   queryClient.setQueryData(queryKey, issues);
-  const patchIssue = spyOn(api, "patchIssue").mockRejectedValue(
+  const patchIssue = answerIssuePatches().mockRejectedValue(
     new ApiError(400, { code: "RANK_INPUT", error: "rank neighbors are not ordered" })
   );
   const hook = renderMoves(queryClient);
   try {
     await act(() => hook.result.current.moveCard("CORE-1", "todo", 1));
-    expect(patchIssue).toHaveBeenCalledWith("CORE-1", {
-      rank: { after: "CORE-2" },
-      status: "todo",
-    });
+    expect(patchIssue).toHaveBeenCalledWith(
+      "CORE-1",
+      {
+        rank: { after: "CORE-2" },
+        status: "todo",
+      },
+      keyedAttempt
+    );
     expect(hook.result.current.error).toBe(staleBoardMessage);
     expect(queryClient.getQueryData<IssueSummary[]>(queryKey)).toEqual(issues);
     expect(queryClient.getQueryState(queryKey)?.isInvalidated).toBe(true);
@@ -253,7 +259,7 @@ test("any other failure shows the server's message and still refetches", async (
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const queryKey = ["issues", "project", "CORE"] as const;
   queryClient.setQueryData(queryKey, issues);
-  const patchIssue = spyOn(api, "patchIssue").mockRejectedValue(
+  const patchIssue = answerIssuePatches().mockRejectedValue(
     new ApiError(403, { code: "FORBIDDEN", error: "not your project" })
   );
   const hook = renderMoves(queryClient);
@@ -272,7 +278,7 @@ test("two rapid moves on one board run one after the other, the second from the 
   const queryKey = ["issues", "project", "CORE"] as const;
   queryClient.setQueryData(queryKey, issues);
   const settle: Array<(issue: Issue) => void> = [];
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(
+  const patchIssue = answerIssuePatches().mockImplementation(
     () =>
       new Promise<Issue>((resolve) => {
         settle.push(resolve);
@@ -297,6 +303,7 @@ test("two rapid moves on one board run one after the other, the second from the 
     expect(patchIssue.mock.calls[0]).toEqual([
       "CORE-1",
       { rank: { after: "CORE-2" }, status: "todo" },
+      keyedAttempt,
     ]);
     await act(async () => {
       settle[0]?.(patched);
@@ -307,6 +314,7 @@ test("two rapid moves on one board run one after the other, the second from the 
     expect(patchIssue.mock.calls[1]).toEqual([
       "CORE-3",
       { rank: { before: "CORE-2" }, status: "todo" },
+      keyedAttempt,
     ]);
     await act(async () => {
       settle[1]?.({ ...patched, key: "CORE-3" });
@@ -330,7 +338,7 @@ const keyboardIssues: IssueSummary[] = [
 /** A PATCH that never answers: the board stays as the move placed it, so a test reads the
  *  optimistic placement rather than the seed the mocked refetch would hand back. */
 function patchInFlight() {
-  return spyOn(api, "patchIssue").mockImplementation(() => new Promise<Issue>(() => {}));
+  return answerIssuePatches().mockImplementation(() => new Promise<Issue>(() => {}));
 }
 
 test("Shift+J moves the focused card down through moveCard, announces the new position and keeps focus on it; Shift+K at the top does nothing", async () => {
@@ -351,9 +359,13 @@ test("Shift+J moves the focused card down through moveCard, announces the new po
     await act(async () => {
       fireEvent.keyDown(alpha, { key: "J", shiftKey: true });
     });
-    expect(patchIssue).toHaveBeenCalledWith("CORE-1", {
-      rank: { after: "CORE-2", before: "CORE-3" },
-    });
+    expect(patchIssue).toHaveBeenCalledWith(
+      "CORE-1",
+      {
+        rank: { after: "CORE-2", before: "CORE-3" },
+      },
+      keyedAttempt
+    );
     expect(status.textContent).toBe("CORE-1 → Todo, position 2 of 3");
     const todo = within(board).getByRole("region", { name: "Todo" });
     await waitFor(() =>
@@ -386,10 +398,14 @@ test("Shift+L moves the focused card to the top of the next status and focus fol
     await act(async () => {
       fireEvent.keyDown(bravo, { key: "L", shiftKey: true });
     });
-    expect(patchIssue).toHaveBeenCalledWith("CORE-2", {
-      rank: { before: "CORE-4" },
-      status: "in_progress",
-    });
+    expect(patchIssue).toHaveBeenCalledWith(
+      "CORE-2",
+      {
+        rank: { before: "CORE-4" },
+        status: "in_progress",
+      },
+      keyedAttempt
+    );
     expect(within(board).getByRole("status", { name: "Board announcements" }).textContent).toBe(
       "CORE-2 → In progress, position 1 of 2"
     );
@@ -481,7 +497,11 @@ test("within a lane, Shift+L moves a card to the next status in the same lane wi
       fireEvent.keyDown(p0Card, { key: "L", shiftKey: true });
     });
     // Same lane, so only status and rank move - priority is not part of this PATCH.
-    expect(patchIssue).toHaveBeenCalledWith("CORE-1", { rank: {}, status: "in_progress" });
+    expect(patchIssue).toHaveBeenCalledWith(
+      "CORE-1",
+      { rank: {}, status: "in_progress" },
+      keyedAttempt
+    );
     const movedInProgress = within(p0Lane).getByRole("region", { name: "In progress" });
     await waitFor(() =>
       expect(within(movedInProgress).getByRole("article", { name: "CORE-1 P0 card" })).toBeDefined()
@@ -562,7 +582,7 @@ test("a board refetch already on the wire when a card moves is dropped: the card
 
 test("a board refetch asked for while a move is unanswered waits for the answer, then reads the moved board", async () => {
   const answer = Promise.withResolvers<Issue>();
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(() => answer.promise);
+  const patchIssue = answerIssuePatches().mockImplementation(() => answer.promise);
   const { cleanup, listIssues, queryClient } = renderBoard({}, undefined, keyboardIssues);
   try {
     const board = await screen.findByRole("region", { name: "Project board" });
@@ -672,7 +692,7 @@ test("Enter and o open the focused card once, p focuses its priority select, Esc
 });
 
 test("Space on a focused card lifts nothing, and the card's instructions name the registry keys, not dnd-kit's grammar", async () => {
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue(patched);
+  const patchIssue = answerIssuePatches().mockResolvedValue(patched);
   const { cleanup } = renderBoard({}, undefined, keyboardIssues);
   try {
     const board = await screen.findByRole("region", { name: "Project board" });
@@ -724,7 +744,7 @@ test("the strip's search hides board cards, counts the visible column, and drags
     await act(async () => {
       fireEvent.keyDown(alpha, { key: "J", shiftKey: true });
     });
-    expect(patchIssue).toHaveBeenCalledWith("CORE-1", { rank: { after: "CORE-3" } });
+    expect(patchIssue).toHaveBeenCalledWith("CORE-1", { rank: { after: "CORE-3" } }, keyedAttempt);
     expect(within(board).getByRole("status", { name: "Board announcements" }).textContent).toBe(
       "CORE-1 → Todo, position 2 of 2"
     );
@@ -785,13 +805,17 @@ test("a labelled move writes the rendered list, names its neighbours, and refetc
   // The server answers the labelled query without the unlabelled card.
   queryClient.setQueryData(labelledKey, [alpha, charlie, delta]);
   queryClient.setQueryData(baseKey, [alpha, bravo, charlie, delta]);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue(patched);
+  const patchIssue = answerIssuePatches().mockResolvedValue(patched);
   const hook = renderMoves(queryClient, labels);
   try {
     await act(() => hook.result.current.moveCard("CORE-4", "todo", 1));
-    expect(patchIssue).toHaveBeenCalledWith("CORE-4", {
-      rank: { after: "CORE-1", before: "CORE-3" },
-    });
+    expect(patchIssue).toHaveBeenCalledWith(
+      "CORE-4",
+      {
+        rank: { after: "CORE-1", before: "CORE-3" },
+      },
+      keyedAttempt
+    );
     expect(
       queryClient.getQueryData<IssueSummary[]>(labelledKey)?.map((entry) => entry.key)
     ).toEqual(["CORE-1", "CORE-4", "CORE-3"]);

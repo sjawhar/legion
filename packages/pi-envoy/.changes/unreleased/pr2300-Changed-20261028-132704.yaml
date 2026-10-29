@@ -1,9 +1,0 @@
-kind: Changed
-body: |-
-    Plugin interface version 4: the interface carries `startupTurn`, the session whose
-    first turn a start that runs after Oh My Pi's startup owns and when that start was sent, which
-    `@sjawhar/pi-legion` sets for its controller's start message and clears at that session's first
-    run or shutdown. Install it with the `@sjawhar/pi-legion` released beside it.
-time: 2026-10-28T13:27:04.26639036Z
-custom:
-    Issue: pr2300

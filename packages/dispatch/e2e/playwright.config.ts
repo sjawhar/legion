@@ -159,22 +159,28 @@ export default defineConfig({
           // each engine's chunk cancellation and the margin hold's frame and scroll order,
           // IndexedDB-backed document recovery must run in the engines people use, and a body's Mermaid
           // diagram draws through each engine's SVG parser, shadow DOM and the ELK layout running in it.
-          // So those specs also run in WebKit.
+          // So those specs also run in WebKit. So does the one-socket invariant (`live-socket`): a tab
+          // holds one live socket in every engine, and WebKit is the one iOS Safari uses for every
+          // subscription its row opens. The keyed write path (`keyed-writes`, `keyed-send`) runs here and
+          // in Firefox too: each engine has its own way of failing a request, aborting one, keeping a
+          // tab's storage across a reload and asking before it unloads, and a write must land once
+          // through all of them.
           {
             name: "webkit",
             testMatch:
-              /(collab-cursor|deep-links|keyboard-agents-picker|keyboard-session-pickers|mermaid|offline-edits)\.e2e\.ts/,
+              /(collab-cursor|deep-links|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits)\.e2e\.ts/,
             use: { ...devices["Desktop Safari"] },
           },
           // The live view's phone layout (its keyboard cap, gutter and scroll locks), its model
           // pill's ellipsis (the two engines lay out a flex child's min-width differently), the
-          // header's model and thinking pickers on a phone, and what the Conversation's floating pills
-          // cover on a phone, also run in WebKit, the engine iOS Safari uses; only those rows, since
-          // the rest of each spec is engine-agnostic.
+          // header's model and thinking pickers on a phone, what the Conversation's floating pills
+          // cover on a phone, and the one-socket invariant also run in WebKit, the engine iOS Safari
+          // uses; only those rows, since the rest of each spec is engine-agnostic.
           {
             name: "webkit-iphone",
-            testMatch: /(agent-view|agent-view-settings|phone-conversation|delivery-live)\.e2e\.ts/,
-            grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name|on a phone the delivery page|the header shows the session's reported model/,
+            testMatch:
+              /(agent-view|agent-view-settings|phone-conversation|delivery-live|live-socket)\.e2e\.ts/,
+            grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name|on a phone the delivery page|the header shows the session's reported model|a tab holds one live socket for every live view/,
             use: { ...devices["iPhone 13"] },
           },
           // Firefox's native editing mishandles text typed over what follows a block's last line break,
@@ -182,11 +188,13 @@ export default defineConfig({
           // select dispatch, offline document recovery owns browser storage, a click on a link
           // inside the editor meets the engine's focus rule (Firefox focuses the editing host, not the
           // link), and a body's Mermaid diagram draws through the engine's SVG parser, shadow DOM and
-          // the ELK layout running in it. Those specs, and the whole deep-links spec, run in Firefox too.
+          // the ELK layout running in it. Those specs, the whole deep-links spec, the one-socket
+          // invariant (`live-socket`, which holds in every engine) and the keyed write path run in
+          // Firefox too.
           {
             name: "firefox",
             testMatch:
-              /(code-line-replace|deep-links|keyboard-agents-picker|keyboard-session-pickers|mermaid|offline-edits|picture-link-click)\.e2e\.ts/,
+              /(code-line-replace|deep-links|keyboard-agents-picker|keyboard-session-pickers|keyed-send|keyed-writes|live-socket|mermaid|offline-edits|picture-link-click)\.e2e\.ts/,
             use: { ...devices["Desktop Firefox"] },
           },
 
@@ -199,6 +207,20 @@ export default defineConfig({
           {
             name: "chromium-plain-http",
             testMatch: plainHttpSpecs,
+            use: {
+              ...devices["Desktop Chrome"],
+              baseURL: plainHttpOrigin,
+              launchOptions: { args: [`--host-resolver-rules=MAP ${plainHttpHost} 127.0.0.1`] },
+            },
+          },
+          // The keyed write path's sign-out rows on that same plain-HTTP origin, which is no secure
+          // context, so the browser has no `navigator.locks`: there a tab holds the person's writes for
+          // another tab's sign-out on the lease that tab renews (`SIGN_OUT_RENEW_MS`,
+          // `SIGN_OUT_LEASE_MS`), which a secure context never reaches.
+          {
+            name: "chromium-plain-http-sign-out",
+            testMatch: /keyed-writes\.e2e\.ts/,
+            grep: /a sign-out/,
             use: {
               ...devices["Desktop Chrome"],
               baseURL: plainHttpOrigin,

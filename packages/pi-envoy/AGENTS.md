@@ -173,8 +173,14 @@ transcript entry (`envoy-dispatch-handled-attempt`, `{message_id, attempt}`), re
 entry of the session file (`sessionManager.getEntries()`) on each restore, and a frame naming a
 recorded attempt is a card with no accept call. So a replay, a frame forged inside the minute for
 a Send that arrived as a card, and one forged after a restart are each a card, while a person's
-retry, a new attempt, can still be their turn. Every refusal, error and timeout (10 s), a Dispatch
-configuration that no longer resolves included, keeps the card and posts nothing.
+retry, a new attempt, can still be their turn. The accept is keyed like every Dispatch write: it
+carries one `Idempotency-Key` and asks again under it after a transport failure, a 5xx, a 408, a
+429 or a `409 KEY_IN_FLIGHT` inside its 10 s bound (at 0, 1, 3 and 7 s), so an accept whose 200
+was lost becomes the person's turn on the replay rather than a card, against a Dispatch that runs
+the keyed layer, which the client proves by Dispatch's own echo of the key or by its `/healthz`
+(`packages/envoy-client/README.md`); against an older one it is a single attempt, then the card.
+Every refusal, every error and the timeout (10 s), a Dispatch configuration that no longer
+resolves included, keeps the card and posts nothing.
 
 On a host with `pi.sendUserInput` (our Oh My Pi fork, can1357/oh-my-pi#14323) the body runs as if
 typed at the session's terminal (`runTypedInput`), with the Dispatch message id as the host's `tag`
@@ -276,7 +282,7 @@ its `seq` beats the one it applied, and a page held open while the session is re
 `--resume` holds the earlier process's numbers, so every later process must count above them.
 
 The record's limit: it keys on the attempt a frame names, so a forger who reads `message.created`
-(every authenticated caller's event stream carries it, and Dispatch publishes it before its own
+(every authenticated caller's event feed carries it, and Dispatch publishes it before its own
 frame goes out) and names the attempt first spends it. If the accept answers 200, the person's
 stored body is the turn, and Dispatch's frame then arrives as a duplicate card when the forger used
 a key of its own, or is dropped by the session's dedupe when it used Dispatch's own idempotency key
@@ -291,22 +297,28 @@ Role claims are routed by the listener: this extension receives a receipt-backed
 direct agent subject instead of subscribing to a role subject itself. The agent pump replies the
 moment the envelope is decoded — before the inbox update, any Dispatch call, or the session
 injection — so the listener's two-second receipt window measures decoding, not the host's turn: a
-claimed-but-deaf holder still becomes a `delivery_failed` exception, and a busy one does not
-(LEGION-101). The receipt goes only to a role-lane frame — one whose envelope `topic` is not the
-direct subject, the shape the listener forwards to the holder. Every other frame carrying a reply
-inbox on the direct subject (a Dispatch author route, a peer `envoy_send`) is a JetStream publish
-whose inbox belongs to the server's PubAck; an empty receipt there fails the publisher with
+claimed-but-deaf holder still misses the receipt, and a busy one does not (LEGION-101). The
+listener's publish route (`POST /v1/messages/publish`) forwards the message again after a miss
+until its four-second window ends, then answers the sender 504 `receipt_timeout`; the role lane (a
+role topic published straight onto NATS) forwards once and reports a miss as a `receipt_timeout`
+exception. The same route forwards an ad-hoc topic's message to each self-subscribed session
+registered on the topic, so such a frame waits for this receipt too, and a session that misses it
+is named in the sender's 504. The receipt goes only to a forwarded frame — one whose envelope
+`topic` is not the direct subject, the shape the listener forwards. Every other frame carrying a
+reply inbox on the direct subject (a Dispatch author route, a peer `envoy_send`) is a JetStream
+publish whose inbox belongs to the server's PubAck; an empty receipt there fails the publisher with
 `nats: invalid jetstream publish response`. A frame that cannot be decoded is still never
 acknowledged, and a receipt that fails to publish is logged while delivery continues. Nor is a
 frame on the agent subject of a session the host has replaced (a `/new` or resume) that arrives
 once the host has moved its session manager but before a pass closes that subject: it is logged and
-left undelivered (`replacedSessionTopic`), as on the closed subject, so a role lane counts a failed
-delivery and the daemon re-sends to the role's holder. Any other such frame stays in the
-notification stream instead of being lost: when that session id is resumed within the stream's
-72 hours, its first sweep shows it ("Missed messages" below). A fork's or branch's parent's frames
-still arrive, and so do notices on a subject the replaced session's role holds, which are
-addressed to the role until a pass ends it: the controller claims its role again for the session
-its pane is left on when the switch's event runs, and a wake dropped there would be lost.
+left undelivered (`replacedSessionTopic`), as on the closed subject, so the forward draws no
+receipt: the publish route forwards again to the role's holder it resolves then, and a role lane
+counts a failed delivery and the daemon re-sends to the role's holder. Any other such frame stays
+in the notification stream instead of being lost: when that session id is resumed within the
+stream's 72 hours, its first sweep shows it ("Missed messages" below). A fork's or branch's
+parent's frames still arrive, and so do notices on a subject the replaced session's role holds,
+which are addressed to the role until a pass ends it: the controller claims its role again for the
+session its pane is left on when the switch's event runs, and a wake dropped there would be lost.
 
 Every registration (`registerSession`, at the first and on every heartbeat) names the plugin the
 session runs: `plugin` `@sjawhar/pi-envoy` and `plugin_version` the `version` of this package's
@@ -415,8 +427,10 @@ up to 6 minutes.
 What is replayed: the frames the stream keeps on the agent subject and on the topics the session
 follows (the issue topics, and any other topic the deployed stream captures). What is not: role
 messages, which stay live only (a frame whose dedupe key starts `envoy.role.forward.` or whose
-topic is a role lane is passed over); team and other ad-hoc topics, which the stream does not keep
-(the listener answers them `not_retained`) and which stay live only; anything published before
+topic is a role lane is passed over); team and other ad-hoc topics on their own subjects, which the
+stream does not keep (the listener answers them `not_retained`), except the copy the listener's
+publish route forwards to the agent subject of a session registered on the topic, which the stream
+keeps there and a sweep of that subject replays like any of its frames; anything published before
 the session followed the subject; and anything older than the stream's 72 hours. A replayed frame
 (`showReplayed`) is rendered by `renderInbound` and shown as an `envoy-message` card, sent as a live
 card is (`CardWake`, above: an aside with `triggerTurn` while a turn runs, a steer with

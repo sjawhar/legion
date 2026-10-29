@@ -31,7 +31,7 @@ import (
 // between agent boxes keeps its id but is absent from the listener for minutes. The read does not
 // try to tell that gap from a vacancy with a last-seen time, because the listener offers none
 // that a read may take: GET /v1/roles/{role} reports a lapsed holder's last_seen only by
-// releasing the expired claim as it answers (cmd/listener resolveLiveRoleHolder), so a read
+// releasing the expired claim as it answers (cmd/listener resolveRoleHolder), so a read
 // would mutate role state and the next read would see "unclaimed" with no last_seen, and the
 // last-seen memory behind it is the answering listener's own process cache, not the shared
 // registry. The owner audit (skills/legion-controller/references/backlog-stewardship.md) and

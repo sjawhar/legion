@@ -147,7 +147,7 @@ func TestTablesMarkAStepWithStepFailedJSONInEveryTable(t *testing.T) {
 	}
 	md := renderTables([]stepData{st})
 	const label = "killed (failed: restart, sampler_gap)"
-	for _, title := range []string{"Events, delivery and requests", "Write latency by kind", "Resources", "Commit-order lock", "Delivery from sending, and SSE frames", "Ungranted locks", "Transaction ids"} {
+	for _, title := range []string{"Events, delivery and requests", "Write latency by kind", "Resources", "Commit-order lock", "Delivery from sending, and live socket frames", "Ungranted locks", "Transaction ids"} {
 		if c := rowCells(section(md, title), "killed"); c == nil || c[0] != label {
 			t.Errorf("section %q: the row is %q, want the label %q", title, c, label)
 		}
