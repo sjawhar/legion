@@ -2,9 +2,25 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-520",
-  "completed": "2026-10-28T21:03:36Z",
+  "completed": "2026-10-29T02:17:01Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2316",
   "proof": [
+    {
+      "criterion": "Review at bbda9d75: the pull request merges with main, #2476's Postgres 16 removal and #2278's pi-envoy NATS service are in ci.yaml, and the filter check passes",
+      "surface": "GitHub mergeability and the local checks on the merged tree (main a09a2f25)",
+      "command": "gh pr view 2316 -R sjawhar/legion --json mergeable,mergeStateStatus; .github/scripts/check-ci-filters.sh; actionlint ci.yaml",
+      "observed": "MERGEABLE/BLOCKED at af395f91. daemon-go-postgres-16, dispatch-go-postgres-16 and broker-go-postgres-16 are gone with their filters, outputs, ci-ok entries and gates; pi-envoy has the NATS service and LEGION_TEST_NATS_URL. check-ci-filters.sh exit 0, 23 gates 0 uncovered at f78f383e. actionlint 0; image-trigger, action-pins, private-names, bun-version, release-credentials checks 0. Fingerprint comment 6486045024.",
+      "headSha": "f78f383ede8272f2f42930b2972e3a14ea9631b9",
+      "negativeControl": "Before adding them, check-ci-filters.sh exited 1 with 7 problems naming packages/envoy/internal/dispatch/docs/crafted/crafted.go (test, docs, dispatch, dispatch-browser-multiprocess, envoy-infra-go) and packages/envoy/internal/logtest/logtest.go (dispatch-memory, dispatch-multiprocess), imports main added."
+    },
+    {
+      "criterion": "The review's Fast-follow: changes sets docs' output false on a push, and NOT_ON_PUSH leaves ci.yaml, ci-ok.sh and EVENT_LISTS with its test cases",
+      "surface": "ci-ok.sh and check-ci-filters.sh test suites",
+      "command": "bash .github/scripts/ci-ok.test.sh; bash .github/scripts/check-ci-filters.test.sh",
+      "observed": "ci-ok.test.sh 40 passed, 0 failed (the push case: docs' output false, docs skipped, passes with 'docs: skipped (not selected: needs.changes.outputs.docs is false)'); check-ci-filters.test.sh 127 passed, 0 failed (its two NOT_ON_PUSH cases removed with the list).",
+      "headSha": "f78f383ede8272f2f42930b2972e3a14ea9631b9",
+      "negativeControl": "The rewritten ci-ok.test.sh against ci-ok.sh before the change: 12 passed, 28 failed (the old script refuses to run without NOT_ON_PUSH)."
+    },
     {
       "criterion": "Review at 48b844e1: the pull request merges with main, and main's changes to the deleted envoy-and-contracts.yaml are carried into ci.yaml so the filter check passes",
       "surface": "GitHub mergeability and the local checks on the merged tree (main c24ea568)",
