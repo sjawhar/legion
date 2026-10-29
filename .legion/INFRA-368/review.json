@@ -2,28 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-368",
-  "completed": "2026-10-29T12:35:31Z",
-  "round": 7,
+  "completed": "2026-10-29T13:37:19Z",
+  "round": 8,
   "decision": "changes_requested",
-  "reviewedHead": "the handoff commit this file is pushed in (child of 8f2ebc8fc8b8b95566e63da5fbf4a7e065fa574b)",
-  "codeHead": "21ec46b965d6",
-  "fingerprint": "9fc3a91d: dbc2c851484e8348... → 8f2ebc8f: a132daa7729807c8...; it changed, so this is a new round. The merge b82265fc brings in main 88840d35 (#2449, a live socket and keyed writes) and renumbers this PR's migrations to 0139-0141.",
+  "reviewedHead": "the handoff commit this file is pushed in (child of 7a14b1f742f0d5f46439c31c6882a577cc39acc9)",
+  "codeHead": "8c404ede30a6",
   "critical": 0,
-  "important": 2,
+  "important": 1,
   "minor": 0,
+  "round7Findings": "Item 2 is fixed. recoveredMessage now calls hydrateMessageReplyBlocks (messages.go:127), and it serves both replayIssueMessage and replayAgentMessage. message_reply_block_repeat_test.go covers both routes; the tester saw reply_block null at 21ec46b9 and b2 at the head. No other recovered*/replay* path skips the hydration: replayComment goes through hydrateCommentSideTables. Item 1 is fixed for one reload only (below). The duplicated default save is folded into saveCommentEdit.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/dispatch/web/src/features/conversation/held-sends.ts:253-258",
-      "description": "A reloaded comment edit's Retry gets 422 KEY_REUSED. The first save sends {body, blocks, base_revision} under key K, and sendAttempt builds that body once. After a reload past KEPT_SEND_RESUME_MS, the write reads as refused with SendInterruptedError, and `restore` rebuilds the edit with `blocks: undefined`. A Retry with an unchanged draft goes under the same key K (requestFor → retriesUnderItsKey, since SendInterruptedError is a SendStoppedError), but HeldSends.send builds a fresh sendAttempt whose PATCH has no blocks or base_revision. The server judges a key by the body's digest (request_keys.go) and answers 422 KEY_REUSED, even when the first save landed. On main the restored edit sent the same {body}, so this came with the merge. Fix: keep the press-time carried ids in KeptComposerSend.edit and send them on restore, or make a Retry under its own key reuse the kept wire request. Add a reload-then-Retry edit case to held-sends.test.ts."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/messages.go:119",
-      "description": "A replayed keyed message write answers reply_block null. recoveredMessage reads the message with loadMessage (scanMessage only) and never calls hydrateMessageReplyBlocks. replayIssueMessage and replayAgentMessage answer from it, and writeRefreshed keeps only advice and ask_waiting_on from the stored answer. So a repeat of a committed keyed POST /api/v1/issues/{key}/messages or /agents/{session_id}/messages, for a reply that names a block, says it answers the whole message. That breaks the PR's rule that every message a route returns carries reply_block. Comments are fine: replayComment goes through hydrateCommentSideTables. Fix: hydrateMessageReplyBlocks in recoveredMessage, plus a replay test for a reply that names a block."
+      "file": "packages/dispatch/web/src/features/conversation/held-sends.ts:273-283",
+      "description": "A kept edit's press-time block ids are dropped from storage on the first reload, so a second reload brings back 422 KEY_REUSED. `keep` recomputes the ids with carriedIds(request), which reads edit.blocks. `restoredEdit` sets blocks: undefined and holds the ids only in its save closure. Writes.#update re-keeps the detail through kind.keep on every update, including #resume (write-store.ts:717, 733, 982-983). So the restored write is saved back as {id} alone. A Retry after a second reload, or a Retry that a reload interrupts, goes under the same key (SendInterruptedError → retriesUnderItsKey) with {body} only, and the server answers 422 KEY_REUSED. Both thermonuclear agents reproduced this with scratch probes. The new test reloads only once. The `followed ?? carried` fallback at :258 shows the same split: sendAttempt passes carriedIds(sent), which is always undefined for a restored edit. Fix: keep the ids as data that both keep and sendAttempt read, for example a `carried` field on SentRequest.edit worked out once at the press, which keep writes and restore reads back. Add a two-reload (or reload-interrupts-Retry) test."
     }
   ],
-  "mergeAudit": "The other checks of the merge hold. event-refresh's commentBlockReads and appendRepliedBlock are byte-identical and run under /ws/live (event-feed.ts), and their tests moved intact to event-feed.test.ts. Migrations run 0137 and 0138 (main), then 0139-0141. 0139's graph_edges is 0121's view plus six arms. The test constants are 138/139, and the route pin is 142. The envoy-client census lists commentBlocks and messageBlocks. dist/ and legion/ equal main's. 21ec46b9 changes only the waits, to the /ws/live pattern main's own e2e files use.",
-  "ci": "The CI head is c89fcafd (the implement handoff, which carries no skip-checks line). The compare to 8f2ebc8f is handoffs only. At 12:35Z every check had succeeded except `dispatch`, which was still in progress: lint, typecheck, test, pr-title, both builds, contracts, envoy-client, envoy-go, envoy-go-race, dispatch-memory, the multiprocess jobs, pi-*, and envoy-*. The request for changes does not wait on CI.",
-  "thermonuclear": "deep-review: `Verdict: CHANGES at 8f2ebc8f`, the two findings above, both of which I verified in the code. code-quality: `Verdict: CHANGES at 8f2ebc8f`, one structural item: held-sends.ts:256-257 duplicates MentionComposer's default save. It is not requested, since it changes no behaviour. The fix for finding 1 touches the same lines, so the implementer may fold it in."
+  "ci": "The CI head is 0fbea003; the compare to 7a14b1f7 is handoffs only. At 13:35Z changes, pi-legion, pi-shared and pr-title had passed, typecheck was skipped, lint, test and worker-image/build were running, and the rest were queued. GitHub now reports the PR CONFLICTING with main. By the controller's ruling it is not merged again: it is held at its approved head for INFRA-520's merge queue. The request for changes does not wait on CI.",
+  "thermonuclear": "deep-review: `Verdict: CHANGES at 7a14b1f7`, H1 (the finding above, confirmed in write-store.ts #update), plus two minors: a misleading comment about records from the older build, and the PR body's loadMessage table omitting recoveredMessage. code-quality: `Verdict: CHANGES at 7a14b1f7`, the same split, with the remedy of keeping `carried` as data."
 }
