@@ -2,22 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-590",
-  "completed": "2026-10-29T16:05:00Z",
-  "round": 9,
-  "reviewedCodeHead": "f970c3865f00840593f8781b5126a7a9ed1e74dc",
-  "reviewerProseCommit": "3ccaed9abec36e095fb1050dc726140cb83d49be (comments only in packages/envoy/internal/bus/async.go: the requestReplies count, and the timer case's claim that no write is left in flight)",
-  "decision": "changes_requested",
+  "completed": "2026-10-29T18:55:00Z",
+  "round": 10,
+  "reviewedCodeHead": "24d206a67ed534782b501e9a3f399b5b8f640d4f",
+  "reviewerProseCommit": "2887a59f03d56446c8eb1bc0c57ecbf128d32484 (comments and docs only: the pr2370 solutions note says RequestCoreTo's MsgId is its caller's choice, the publish-route test's comment says the stream keeps one copy and no durable delivers it, the changelog fragment names the role lane's forward)",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "ci": "GitHub reports the pull request CONFLICTING (mergeable_state dirty) against main, which has moved past fe3153923 with #2370, #2505, #2479 and others touching packages/envoy. GitHub starts no pull_request workflow for a conflicting head, so the code head 3ccaed9a has no CI run (0 runs 4 minutes after the push, while other branches' runs were created), and f970c386's outbox suites were still queued or in progress.",
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at f970c386; both approve with no correctness finding.",
-  "threads": "Round-8 thread PRRT_kwDORFy7ds6xnMRE accepted (reply 4414758060).",
-  "keyFindings": [
-    {"severity": "important", "file": "PR #2395 (mergeability)", "description": "The head conflicts with main, so no pull_request CI runs on it and the base branch cannot merge it; a forward merge of main is needed, then the tester, then a new review round per the fingerprint."}
+  "fingerprint": "de32e06739c472425a57a76c4e4c3cead84d3c98e3415e173d3240f65909c4c3 at c7795484 -> 7949491123eb0c4061516b90f237e74f628343f5c3e3e25c94bd0aadd87081e5 at 24d206a6: changed (forward merge of main's #2370 and #2505), so a new round.",
+  "ci": "Approval waits for the required set and envoy-go, envoy-go-race, dispatch, dispatch-memory and dispatch-multiprocess green at 2887a59f; main's known red close-withdraws-asks.e2e.ts:126.",
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at 24d206a6 over merge 5ea3ce58 and test commit 24d206a6; both approve with no finding.",
+  "keyFindings": [],
+  "notes": [
+    "The publish route's topic forward MsgId (confirmed.go:453) has no test: replacing it with \"\" leaves PublishRoute/Durable/Topic/Confirm tests green; main's behaviour is kept, and stored forward copies are delivered to no one."
   ],
   "verifiedCorrect": [
-    "Round-8 finding closed: window.request resends once without Nats-Msg-Id on a sequence-0 duplicate under AcceptStreamAck with a MsgId, under the deadline and connection checks, never after the timeout is taken; every outcome settles safely in the outbox.",
-    "TestAForwardRequestTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom fails with the resend disabled and with the deadline check removed (go test -overlay)."
+    "Main's #2370 resolver over roles.ResolveHolder keeps every typed failure, log line, metric and exception; roles.Fresh is main's freshness rule; main's tests change only in signatures.",
+    "The publish route passes the MsgId main's RequestCoreTo stamped itself; the role lane keeps this PR's conditional rule.",
+    "bus: one ForwardMsgID, #2505's c.stop() guards kept, async.go byte for byte the branch's.",
+    "TestPublishRouteStoresOneCopyOfARoleMessageItForwardsTwice fails with the route's MsgId dropped."
   ]
 }
