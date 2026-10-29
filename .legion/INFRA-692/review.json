@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-692",
+  "completed": "2026-10-29T13:15:00Z",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 2,
+  "reviewedCodeHead": "d86f193e25049d5a580cfc1b63a59dd0e9f807dc",
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection: none. CI head d86f193e (newest pull_request run): lint, typecheck, test, pr-title completed success. compare d86f193e...35ec2186: handoffsOnly true, 2 files. Non-required `dispatch` job red only on e2e/close-withdraws-asks.e2e.ts:126 (1 failed, 1217 passed), the failure other trees report on main (INFRA-520, INFRA-607; product fix routed as #2491).",
+  "thermonuclear": "deep-review at d86f193e: no findings (readUnsharedText checked line for line against ygo v1.51.3-sami.4 YText.ToDelta, unsafe offset, unshared fold document, every refusal and error class, EncodeTokenJSON callers). code-quality at d86f193e: 1 important + 3 minor; adjudicated below.",
+  "keyFindings": [
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/edits.go", "description": "encodedTokens' comment said checkEditPrecondition holds a tree nothing has validated; its trees come from treeOf/ReadInTransaction, which validate. Fixed by the reviewer (prose) in 19b9e489."},
+    {"severity": "minor", "file": "packages/envoy/.changes/unreleased/pr2479-Changed-20261028-210129.yaml", "description": "'Live /blocks reads validate once instead of four times' omits the held tree's own read validation; reworded to the blocks build's count. Fixed by the reviewer (prose) in 19b9e489; PR body Change bullet reworded too."},
+    {"severity": "not a defect", "file": "packages/envoy/internal/dispatch/pmdoc/valid_document.go", "description": "Quality pass's 'important': zero ValidDocument nil branches are dead error paths. Plan gap-analysis answer fixes the zero value's refusal as design; without it a zero value would answer empty maps silently. Kept."},
+    {"severity": "not a defect", "file": "packages/envoy/internal/dispatch/docs/read_cache.go", "description": "foldLoaded's renderErr is read only by the corpus and weight tests; it lets those tests run the fold's own code and tell a render refusal apart. Kept."},
+    {"severity": "not a defect", "file": "packages/envoy/internal/dispatch/api/schema_repair_test.go", "description": "appendStringEmbed vs base's appendTextEmbed: different text targeted and embed value; the base helper is untouched by this PR. Kept."}
+  ]
+}
