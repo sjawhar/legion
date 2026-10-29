@@ -2523,46 +2523,6 @@
 
 ### Fixed
 
-- Dispatch's subscribers list shows a subscriber whose session is no longer live with its session's
-  last heartbeat again, not its interest row's `updated_at`, which can be up to 5 minutes earlier
-  since the listener rewrites an unchanged row only that often (sjawhar/legion#2377). The
-  listener's `GET /v1/interests/` and `GET /v1/interests/<session_id>` rows now carry `last_seen`,
-  the session's last heartbeat as its session cache knows it, omitted when unknown, and the
-  listener keeps a dead session's last heartbeat until the interest reaper's grace has passed
-  (`store.InterestReapGrace` + `store.InterestRefreshAge` after the session left the cache,
-  `session.WithLastSeenRetention`), so every row the reaper still holds can carry it. Dispatch
-  falls back to the row's `updated_at` when the listener sends no `last_seen` (it restarted since
-  the session died, or predates the field).
-- A listener's NATS reconnect, and a self-health rebuild of a cache watcher, no longer read the
-  interest, role claim, session and CI buckets again in full. Each `Rewatch` now resumes after the
-  last revision its cache applied and delivers only what was written since, and its
-  `<cache> cache warm-up` line says `outcome: "resumed"`, with `entries` and `delete_markers`
-  counting what was written since. A listener start still reads every bucket in full, and so does
-  a rewatch onto a recreated bucket, after a scan that did not complete, or onto a stream whose
-  last sequence is below the last revision applied, and so does the role claim watcher's rescan of
-  a scan that timed out. A resumed watch makes its cache complete (`kvwatch.Watcher.Complete`) at
-  its own end-of-scan marker, as a full scan does. A resume sees what a full read of the same
-  bucket saw: a delete marker purged, or a value `MaxAge` expired, while the watcher was away
-  leaves nothing to deliver either way.
-- Session-cache reads no longer queue behind one another, and an interest reaper pass no longer
-  holds up subscribes. Every read of a listener's session cache (`GET /v1/sessions`, a delivery's
-  liveness check, the `envoy_active_sessions` gauge) took the cache's exclusive lock and walked
-  every cached session to remove the expired ones, and the interest reaper checked each session's
-  liveness while holding the interest registry's lock, so each subscribe waited out the whole
-  pass. Reads now take a shared lock and change nothing; an expired session leaves the cache at
-  its deadline, on a timer, and `last_seen` answers the same before and after. The reaper checks
-  liveness with no interest lock held, re-checks each candidate and deletes it only at the
-  revision it checked, so an interest written during the pass is kept. Each `reaper cycle` line
-  now carries `elapsed_ms`.
-- A heartbeat that adds no topic no longer rewrites the session's unchanged interest row:
-  `POST /v1/interests/subscribe` writes it once the row is 5 minutes old
-  (`store.InterestRefreshAge`), and until then answers with the stored row, `updated_at`
-  included. A changed row is still written at once. KV writes per 90-second heartbeat fall from
-  two to about one and a quarter. The session row is still written on every heartbeat, since its
-  bucket's `MaxAge` is the liveness clock. Run this build only once every listener on the
-  `envoy_interests` bucket reaps at the grace window plus `store.InterestRefreshAge` (the release
-  of sjawhar/legion#2374): an older listener reaps at 10 minutes after the row's last write, and
-  could delete a paused session's interests 5 minutes after its last heartbeat.
 - An ask hit's search excerpt, in `GET /api/v1/search` and in the write-time suggestions, is cut
   from the text its search vector indexes - the question, the options' labels and descriptions,
   the answer's text and the options it chose - where it was cut from the question, the options'

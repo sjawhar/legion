@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -550,12 +551,12 @@ func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 // answer. That is safe: it writes the record the caller's retry writes again, it rides the
 // connection ahead of any write this listener sends on it later, so it cannot undo one, and
 // against another listener's write it is last-writer-wins, as every Put already is.
-//
 // A heartbeat re-sends the same topics every 90 seconds, so UpsertWithin returns the current row
-// without writing when the merge changes nothing but UpdatedAt and the row is younger than
-// InterestRefreshAge. An unchanged row is thus rewritten once per InterestRefreshAge, its UpdatedAt
-// lags the session's last heartbeat by less than that, and Reap adds InterestRefreshAge to its grace
-// window, so that lag never shortens a paused session's grace. A changed row is written, and so is
+// without writing when writing merged would store the bytes the bucket holds, apart from
+// UpdatedAt, and the row is younger than InterestRefreshAge. An unchanged row is thus rewritten
+// once per InterestRefreshAge, its UpdatedAt lags the session's last heartbeat by less than that,
+// and Reap adds InterestRefreshAge to its grace window (InterestReapAllowance), so that lag never
+// shortens a paused session's grace. A changed row is written, and so is
 // a record it cannot decode; any other failed read refuses the write (mergeForUpsert). The session
 // row (session.SessionRegistry.Put) is written on every heartbeat: its bucket's MaxAge is the
 // liveness clock, and NATS connect notices ($SYS) are not available to replace it.
@@ -566,12 +567,25 @@ func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []str
 	if err != nil {
 		return Interest{}, err
 	}
-	if getErr == nil && sameStoredInterest(cur, merged) && now-cur.UpdatedAt < InterestRefreshAge.Milliseconds() {
-		return cur, nil
-	}
 	buf, err := json.Marshal(merged)
 	if err != nil {
 		return Interest{}, err
+	}
+	if getErr == nil && now-cur.UpdatedAt < InterestRefreshAge.Milliseconds() {
+		// What the skip really asks is whether this write would store what the bucket already
+		// holds, so it compares the two encodings rather than the fields one by one: a field
+		// added to Interest, and the difference between a null and an empty topic list, are then
+		// covered by the encoding itself. The current row is stamped with merged's UpdatedAt,
+		// the one field a write of an unchanged row would move.
+		unchanged := cur
+		unchanged.UpdatedAt = merged.UpdatedAt
+		stored, err := json.Marshal(unchanged)
+		if err != nil {
+			return Interest{}, err
+		}
+		if bytes.Equal(buf, stored) {
+			return cur, nil
+		}
 	}
 	revision, err := r.putInterest(ctx, merged.SessionID, buf)
 	if err != nil {
@@ -588,18 +602,6 @@ func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []str
 		)
 	}
 	return merged, nil
-}
-
-// sameStoredInterest reports whether writing merged would store the row cur holds, apart from
-// UpdatedAt: the same session, machine, directory and topics in the same order. A topic list
-// stored as null (nil) differs from one stored as [] (empty), since the two encode differently,
-// so a null row is written once and then compares equal.
-func sameStoredInterest(cur, merged Interest) bool {
-	return cur.SessionID == merged.SessionID &&
-		cur.MachineID == merged.MachineID &&
-		cur.Dir == merged.Dir &&
-		(cur.Topics == nil) == (merged.Topics == nil) &&
-		slices.Equal(cur.Topics, merged.Topics)
 }
 
 // mergeForUpsert computes the Interest to persist by reconciling the requested
@@ -1136,6 +1138,15 @@ const (
 	InterestRefreshAge = 5 * time.Minute
 )
 
+// InterestReapAllowance is the age past which Reap deletes a dead session's interest: grace, the
+// window the row's session is given after its last write, plus InterestRefreshAge, the most that
+// write may lag the session's last heartbeat. A row exactly that old is kept. The listener gives
+// the same allowance to the last-seen record its session cache keeps
+// (session.WithLastSeenRetention), so every row the reaper can still hold has one.
+func InterestReapAllowance(grace time.Duration) time.Duration {
+	return grace + InterestRefreshAge
+}
+
 // reapCandidate is one cached interest past the allowance as Reap's snapshot saw it.
 type reapCandidate struct {
 	sessionID string
@@ -1159,7 +1170,7 @@ type reapCandidate struct {
 // sequence (10071, nats.ErrKeyExists), and the candidate counts as skipped.
 func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (int, error) {
 	now := r.now().UnixMilli()
-	allowanceMs := graceWindow.Milliseconds() + InterestRefreshAge.Milliseconds()
+	allowanceMs := InterestReapAllowance(graceWindow).Milliseconds()
 
 	r.mu.RLock()
 	var candidates []reapCandidate

@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -19,9 +20,11 @@ import (
 // M identical POST /v1/interests/subscribe calls (same topics, dir and listener machine every
 // time) through the listener's real /v1 routes on a real nats-server, and the test reads how far
 // the interest and session buckets' streams moved over the M-1 heartbeats after each session's
-// first registration. It logs both rates. It asserts only that each heartbeat writes the session
-// row once, which a heartbeat always does; the interest rate is logged, not asserted, since an
-// unchanged interest need not be written on every heartbeat.
+// first registration. It logs both rates and asserts both: the session row is written once per
+// heartbeat, which a heartbeat always does, and the interest row not at all, since every
+// heartbeat here lands well inside store.InterestRefreshAge of the registration that wrote the
+// row. A regression of the skip on the route path (subscribeHandler through
+// store.Registry.UpsertWithin) fails this test, where it was only logged.
 func TestHeartbeatKVWritesPerHeartbeat(t *testing.T) {
 	const (
 		sessionCount = 20
@@ -82,5 +85,9 @@ func TestHeartbeatKVWritesPerHeartbeat(t *testing.T) {
 	t.Logf("interest writes/heartbeat=%.2f session writes/heartbeat=%.2f total=%.2f", interestRate, sessionRate, interestRate+sessionRate)
 	if sessionWrites != uint64(counted) {
 		t.Fatalf("session bucket took %d writes over %v heartbeats, want one per heartbeat", sessionWrites, counted)
+	}
+	if interestWrites != 0 {
+		t.Fatalf("interest bucket took %d writes over %v identical heartbeats, want none: each one is inside store.InterestRefreshAge (%v) of the row's first write",
+			interestWrites, counted, store.InterestRefreshAge)
 	}
 }

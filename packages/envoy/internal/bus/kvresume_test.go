@@ -2,6 +2,7 @@ package bus_test
 
 import (
 	"errors"
+	"runtime"
 	"testing"
 	"time"
 
@@ -205,5 +206,77 @@ func TestAResumeFromRevisionZeroIsRefused(t *testing.T) {
 	if watcher, err := kv.WatchAllFrom(conn, 0); err == nil {
 		_ = watcher.Stop()
 		t.Fatal("WatchAllFrom(0) opened a watch")
+	}
+}
+
+// goroutineSlack is how far the goroutine count may sit above its baseline with nothing left
+// behind: the runtime's own workers, and the goroutines another test of this package still winds
+// down or starts on a reconnect, move it a little. It is far below the one goroutine per watch a
+// watch context nothing cancels leaves.
+const goroutineSlack = 10
+
+// settledGoroutines is the goroutine count once it has held still, or the last one read within a
+// few seconds: a baseline read while goroutines are still starting or ending moves under the test.
+func settledGoroutines() int {
+	count := runtime.NumGoroutine()
+	for deadline, same := time.Now().Add(5*time.Second), 0; same < 5 && time.Now().Before(deadline); {
+		time.Sleep(50 * time.Millisecond)
+		if next := runtime.NumGoroutine(); next == count {
+			same++
+		} else {
+			count, same = next, 0
+		}
+	}
+	return count
+}
+
+// Resumed watches leave no goroutine behind when their connection closes. nats.go parks one on
+// the watch's context for its subscription (js.go:2053) and cancels that context only in
+// Unsubscribe, which a closed connection refuses (nats.go:5063-5065), and a watch that ended on
+// its own is never stopped by kvwatch either; so without the watcher's own cancel
+// (resumedWatcher.forward) every resumed watch of a closed connection would hold one goroutine,
+// and its subscription, for the life of the process.
+func TestResumedWatchesLeaveNoGoroutineBehindWhenTheirConnectionCloses(t *testing.T) {
+	const watchers = 40
+	conn, kv := resumeBucket(t)
+	if _, err := kv.Put("key", []byte("1")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	baseline := settledGoroutines()
+	drained := make([]chan struct{}, watchers)
+	for i := range drained {
+		watcher, err := kv.WatchAllFrom(conn, 1)
+		if err != nil {
+			t.Fatalf("WatchAllFrom %d: %v", i, err)
+		}
+		done := make(chan struct{})
+		drained[i] = done
+		// Each watch is read, as a cache watcher reads one: an unread watcher blocks its forward
+		// on the unbuffered updates and never reaches its end.
+		go func() {
+			defer close(done)
+			for range watcher.Updates() {
+			}
+		}()
+	}
+
+	conn.Close()
+	for i, done := range drained {
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("watch %d did not end within 10 s of the connection closing", i)
+		}
+	}
+	// The cancel wakes nats.go's goroutine, which unsubscribes and returns, so the count falls
+	// back over the moments after the last watch ended rather than at it.
+	count := runtime.NumGoroutine()
+	for deadline := time.Now().Add(10 * time.Second); count > baseline+goroutineSlack && time.Now().Before(deadline); {
+		time.Sleep(20 * time.Millisecond)
+		count = runtime.NumGoroutine()
+	}
+	if count > baseline+goroutineSlack {
+		t.Fatalf("%d goroutines after %d resumed watches ended, want at most %d (baseline %d): one stays behind for each watch whose context nothing cancels",
+			count, watchers, baseline+goroutineSlack, baseline)
 	}
 }

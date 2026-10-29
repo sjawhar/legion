@@ -65,6 +65,12 @@ type Watcher struct {
 	// time.AfterFunc unless WithAfterFunc replaced it, so a test fires that wait itself.
 	after AfterFunc
 
+	// openResumed arms the watcher a resuming watch installs, bus.KeyValue.WatchAllFrom unless a
+	// test replaced it (WithResumeOpener, export_test.go), so a test drives a resume that fails to
+	// start or one whose watcher it feeds itself. A failure here is no failure of the watch: it
+	// falls back to the full read (watch).
+	openResumed func(kv bus.KeyValue, conn *nats.Conn, from uint64) (nats.KeyWatcher, error)
+
 	mu sync.RWMutex
 	// kv is the handle the store reads and writes through: first, until a watch moves it together
 	// with the watcher, so the store writes through the connection its cache reads.
@@ -157,14 +163,15 @@ func WithRescan() Option {
 // keys.
 func New(name string, kv bus.KeyValue, apply func(nats.KeyValueEntry), reset func(), options ...Option) *Watcher {
 	w := &Watcher{
-		name:   name,
-		bucket: kv.Bucket(),
-		apply:  apply,
-		reset:  reset,
-		ready:  make(chan struct{}),
-		first:  kv,
-		kv:     kv,
-		after:  func(d time.Duration, f func()) Timer { return time.AfterFunc(d, f) },
+		name:        name,
+		bucket:      kv.Bucket(),
+		apply:       apply,
+		reset:       reset,
+		ready:       make(chan struct{}),
+		first:       kv,
+		kv:          kv,
+		after:       func(d time.Duration, f func()) Timer { return time.AfterFunc(d, f) },
+		openResumed: openResumedWatch,
 	}
 	for _, option := range options {
 		option(w)
@@ -478,7 +485,9 @@ func (w *Watcher) watchDone() {
 // A watch with a connection (Rewatch's) resumes on it after the last revision applied when
 // resumeFrom allows; one without (Start's, and a rescan's, which repeats a scan that did not
 // complete) reads in full. A resuming watch that finds at its switch that the cache was emptied
-// after it read where to resume discards its watcher and reads in full.
+// after it read where to resume discards its watcher and reads in full, and so does one whose
+// resuming watcher cannot be created at all, which it logs at WARN: the repair is what the watch
+// is for, so a resume that fails costs the full read rather than the cache.
 func (w *Watcher) watch(kv bus.KeyValue, conn *nats.Conn, replacing uint64) error {
 	w.mu.Lock()
 	stopped := w.stopped
@@ -506,9 +515,22 @@ func (w *Watcher) watch(kv bus.KeyValue, conn *nats.Conn, replacing uint64) erro
 	// cacheRevisions, store/kv.go's, cistore's), so a revision applied twice changes nothing.
 	from, resets := w.resumeFrom(conn, state)
 	for {
-		watcher, err := open(kv, conn, from)
+		watcher, err := w.open(kv, conn, from)
 		if err != nil {
-			return err
+			if from == 0 {
+				return err
+			}
+			// The resume could not be created: its consumer create is held to the legacy
+			// JetStream context's 5 s, under the 10 s this watch's own requests get, so a server
+			// slow enough answers the full read and not this one. The repair is what matters, so
+			// the watch reads the bucket in full instead of failing, which costs main's path
+			// rather than a cache left frozen. One WARN names the cache and the error; the full
+			// read's own warm-up line follows.
+			w.logger().Warn(w.name+" watcher could not resume; the bucket is read in full",
+				slog.String("bucket", w.bucket),
+				slog.String("error", err.Error()))
+			from = 0
+			continue
 		}
 		w.applyMu.Lock()
 		w.mu.Lock()
@@ -641,11 +663,17 @@ func (w *Watcher) resumeFrom(conn *nats.Conn, state bus.StreamState) (from, rese
 }
 
 // open arms the watcher a watch installs: a full WatchAll when from is 0, and otherwise one on conn
-// that resumes at revision from (bus.KeyValue.WatchAllFrom).
-func open(kv bus.KeyValue, conn *nats.Conn, from uint64) (nats.KeyWatcher, error) {
+// that resumes at revision from (openResumed).
+func (w *Watcher) open(kv bus.KeyValue, conn *nats.Conn, from uint64) (nats.KeyWatcher, error) {
 	if from == 0 {
 		return kv.WatchAll()
 	}
+	return w.openResumed(kv, conn, from)
+}
+
+// openResumedWatch is the resuming watcher a watch installs: bus.KeyValue.WatchAllFrom, the one
+// openResumed holds outside a test.
+func openResumedWatch(kv bus.KeyValue, conn *nats.Conn, from uint64) (nats.KeyWatcher, error) {
 	return kv.WatchAllFrom(conn, from)
 }
 
@@ -673,7 +701,13 @@ func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64, started ti
 				// watcher that later ends after a timed-out scan records "<name> watcher stopped"
 				// instead of the timeout -- a non-nil error either way. Nor does it complete the
 				// generation (scanEnded), so the next Rewatch reads the bucket in full again.
-				timedOut := idleTimeout(watcher) != nil
+				//
+				// A resumed watch has no idle timer, so nothing on its Error channel is one: what
+				// is there is the end the watch is about to reach (bus's resumedWatcher puts the
+				// cause there and closes its updates), and reading it here would call a live
+				// resume timed out, leave its generation incomplete and take the cause away from
+				// the end that follows. So only a full scan asks.
+				timedOut := !resumed && idleTimeout(watcher) != nil
 				if current {
 					w.logWarmUp(scan, time.Since(started), timedOut, resumed)
 					w.scanEnded(generation, timedOut)

@@ -11,8 +11,10 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-// resumeOpenWait bounds the stream lookup WatchAllFrom makes before it creates its watcher, the
-// wait kvwatch's Rewatch gives every JetStream request it makes (nats.MaxWait(10 * time.Second)).
+// resumeOpenWait bounds the js.KeyValue lookup WatchAllFrom makes before it creates its watcher,
+// the one call of the resume that takes a deadline of its own (the watch's context carries none,
+// WatchAllFrom says why). It is the wait kvwatch's Rewatch gives every JetStream request it makes
+// (nats.MaxWait(10 * time.Second)).
 const resumeOpenWait = 10 * time.Second
 
 // WatchAllFrom watches every key of kv's bucket on conn from revision on, rather than from each
@@ -47,14 +49,24 @@ func (kv KeyValue) WatchAllFrom(conn *nats.Conn, revision uint64) (nats.KeyWatch
 	if err != nil {
 		return nil, err
 	}
-	// The watcher's context bounds only its consumer's create request: nats.go gives a context with
-	// no deadline the JetStream context's own wait, and keeps nothing of it once the consumer exists.
-	watchCtx := context.Background()
+	// The watch's context carries no deadline. nats.go keeps it for the subscription's whole life
+	// and unsubscribes the subscription once it is done (js.go:2053-2057), so a deadline would end
+	// the watch at it rather than bound its create. The create itself waits the legacy JetStream
+	// context's default 5 s (jsm.go:1791-1796, js.go:299), under the 10 s the full WatchAll's own
+	// JetStream context gives it; a create that does not answer within that fails the resume, and
+	// kvwatch's watch then reads the bucket in full instead (its open).
+	//
+	// It is cancellable so that nothing of it outlives the watch: nats.go parks a goroutine on
+	// this context for the subscription (js.go:2053), and cancels it only in Unsubscribe
+	// (nats.go:5210-5220), which a closed connection refuses (nats.go:5063-5065). The watcher
+	// cancels the context itself once the inner updates close (forward).
+	watchCtx, cancelWatch := context.WithCancel(context.Background())
 	watcher, err := handle.WatchAll(watchCtx, jetstream.ResumeFromRevision(revision))
 	if err != nil {
+		cancelWatch()
 		return nil, err
 	}
-	return newResumedWatcher(watchCtx, conn, bucket, watcher), nil
+	return newResumedWatcher(watchCtx, cancelWatch, conn, bucket, watcher), nil
 }
 
 // resumedWatcher is a jetstream.KeyWatcher behind the legacy nats.KeyWatcher interface, so a cache
@@ -68,6 +80,7 @@ func (kv KeyValue) WatchAllFrom(conn *nats.Conn, revision uint64) (nats.KeyWatch
 // stopped on purpose ends with Error closed and empty.
 type resumedWatcher struct {
 	ctx     context.Context
+	cancel  context.CancelFunc
 	conn    *nats.Conn
 	bucket  string
 	inner   jetstream.KeyWatcher
@@ -77,10 +90,11 @@ type resumedWatcher struct {
 }
 
 // newResumedWatcher wraps inner, the watcher of bucket on conn that ctx created, and starts handing
-// on its entries.
-func newResumedWatcher(ctx context.Context, conn *nats.Conn, bucket string, inner jetstream.KeyWatcher) *resumedWatcher {
+// on its entries. cancel is ctx's, which forward calls once the watch has ended.
+func newResumedWatcher(ctx context.Context, cancel context.CancelFunc, conn *nats.Conn, bucket string, inner jetstream.KeyWatcher) *resumedWatcher {
 	w := &resumedWatcher{
 		ctx:     ctx,
+		cancel:  cancel,
 		conn:    conn,
 		bucket:  bucket,
 		inner:   inner,
@@ -91,10 +105,17 @@ func newResumedWatcher(ctx context.Context, conn *nats.Conn, bucket string, inne
 	return w
 }
 
-// forward hands on inner's entries until nats.go closes its updates, then leaves the end's cause on
-// Error unless Stop ended it, and closes Error and then Updates, so the cause is there to read by
-// the time Updates reads as closed. Updates is unbuffered: inner's own 256-entry buffer is the one
-// bound, and nats.go blocks its delivery on it as it does the legacy watcher's.
+// forward hands on inner's entries until nats.go closes its updates, then cancels the watch's
+// context, leaves the end's cause on Error unless Stop ended it, and closes Error and then
+// Updates, so the cause is there to read by the time Updates reads as closed. Updates is
+// unbuffered: inner's own 256-entry buffer is the one bound, and nats.go blocks its delivery on it
+// as it does the legacy watcher's.
+//
+// The cancel is what ends the goroutine nats.go parks on that context for the subscription
+// (js.go:2053): nats.go cancels it only in Unsubscribe, which a closed connection refuses, so
+// without this one goroutine would stay behind for every resumed watch whose connection closed.
+// The subscription is over by then, so the Unsubscribe the cancel wakes has nothing left to end,
+// and a cancel after Stop (which unsubscribed already) is harmless too.
 func (w *resumedWatcher) forward() {
 	defer close(w.updates)
 	for entry := range w.inner.Updates() {
@@ -104,6 +125,7 @@ func (w *resumedWatcher) forward() {
 		}
 		w.updates <- resumedEntry{entry}
 	}
+	w.cancel()
 	if !w.stopped.Load() {
 		w.errs <- w.endCause()
 	}
@@ -123,7 +145,7 @@ func (w *resumedWatcher) endCause() error {
 // nats.go could not recreate its ordered consumer, or its subscription was removed some other way.
 var errResumedWatchEnded = errors.New("its subscription closed")
 
-// Context is the context the watch was created with.
+// Context is the context the watch was created with, which forward cancels once the watch ends.
 func (w *resumedWatcher) Context() context.Context { return w.ctx }
 
 // Updates delivers each entry and the nil marker, and closes when the watch ends.

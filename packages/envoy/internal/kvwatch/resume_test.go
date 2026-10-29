@@ -1,6 +1,7 @@
 package kvwatch_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -305,4 +306,115 @@ func TestAResumedWatcherWhoseConnectionClosesRecordsItsEnd(t *testing.T) {
 		t.Fatalf("recorded %v, want the closed connection", err)
 	}
 	eventually(t, "the stop's WARN", func() bool { return len(matching(records(), "WARN", "test cache watcher stopped")) == 1 })
+}
+
+// A Rewatch whose resuming watcher cannot be created repairs the watch all the same: the same
+// watch falls back to the full read, logs one WARN naming the cache and the error, and leaves the
+// cache equal to the bucket with no error recorded. The resume's consumer create is held to the
+// legacy JetStream context's 5 s, under the 10 s the full read's own requests get, so a server
+// slow enough to fail the one can still answer the other, where a failed Rewatch would leave the
+// cache frozen behind a stopped watcher.
+func TestARewatchWhoseResumeCannotBeCreatedReadsTheBucketInFull(t *testing.T) {
+	conn, kv := bucket(t, testnats.URL(t))
+	putKeys(t, kv, "a", "b", "c")
+	logger, records := jsonLogger(t)
+	into := newMirror()
+	w := kvwatch.New("test cache", kv, into.apply, into.reset, kvwatch.WithLogger(logger),
+		kvwatch.WithResumeOpener(func(bus.KeyValue, *natsgo.Conn, uint64) (natsgo.KeyWatcher, error) {
+			// What a create the server does not answer within its wait leaves behind.
+			return nil, fmt.Errorf("resume a watch of KV bucket %s: %w", kv.Bucket(), natsgo.ErrTimeout)
+		}))
+	t.Cleanup(w.Stop)
+	w.Start()
+	requireWarmUp(t, records, 1, "completed", 3, 0)
+	putKeys(t, kv, "d")
+	eventually(t, "the first watcher's delivery", func() bool { return into.appliedCount() == 4 })
+
+	if err := w.Rewatch(conn); err != nil {
+		t.Fatalf("rewatch: %v", err)
+	}
+	requireWarmUp(t, records, 2, "completed", 4, 0)
+	if warned := matching(records(), "WARN", "test cache watcher could not resume; the bucket is read in full"); len(warned) != 1 {
+		t.Fatalf("the failed resume logged %d WARN lines, want exactly one", len(warned))
+	}
+	if values, resets := into.snapshot(); !maps.Equal(values, bucketValues(t, kv)) || resets != 0 {
+		t.Fatalf("cache %v after %d resets, want the bucket %v and no reset", values, resets, bucketValues(t, kv))
+	}
+	if err := w.Err(); err != nil {
+		t.Fatalf("the repaired watcher recorded %v, want none", err)
+	}
+}
+
+// endedWatcher is a resumed watch whose connection closes just after its end-of-scan marker: the
+// cause of the end is on Error by the time the marker is read, which is how bus's resumedWatcher
+// leaves it (its forward puts the cause there, closes Error, then closes Updates). It delivers
+// the marker and then ends when the test says so.
+type endedWatcher struct {
+	updates chan natsgo.KeyValueEntry
+	errs    chan error
+	ending  chan struct{}
+	once    sync.Once
+}
+
+func newEndedWatcher(cause error) *endedWatcher {
+	w := &endedWatcher{
+		updates: make(chan natsgo.KeyValueEntry),
+		errs:    make(chan error, 1),
+		ending:  make(chan struct{}),
+	}
+	w.errs <- cause
+	go func() {
+		w.updates <- nil
+		<-w.ending
+		close(w.errs)
+		close(w.updates)
+	}()
+	return w
+}
+
+// end closes the watch, as the connection closing does.
+func (w *endedWatcher) end() { w.once.Do(func() { close(w.ending) }) }
+
+func (w *endedWatcher) Context() context.Context             { return context.Background() }
+func (w *endedWatcher) Updates() <-chan natsgo.KeyValueEntry { return w.updates }
+func (w *endedWatcher) Error() <-chan error                  { return w.errs }
+func (w *endedWatcher) Stop() error                          { w.end(); return nil }
+
+// A resumed watch has no idle timer, so a cause waiting on its Error channel at its marker is the
+// end it is about to reach, never a scan nats.go gave up on. The warm-up line says it resumed, at
+// INFO; the generation is complete, so the next Rewatch may resume after it; and the end records
+// the closed connection rather than "<name> watcher stopped", which reading the cause here would
+// have taken away from it.
+func TestAResumedWatchThatEndsAtItsMarkerIsNotTimedOut(t *testing.T) {
+	conn, kv := bucket(t, testnats.URL(t))
+	putKeys(t, kv, "a")
+	logger, records := jsonLogger(t)
+	into := newMirror()
+	ended := newEndedWatcher(fmt.Errorf("watch of KV bucket %s ended: %w", kv.Bucket(), natsgo.ErrConnectionClosed))
+	t.Cleanup(ended.end)
+	w := kvwatch.New("test cache", kv, into.apply, into.reset, kvwatch.WithLogger(logger),
+		kvwatch.WithResumeOpener(func(bus.KeyValue, *natsgo.Conn, uint64) (natsgo.KeyWatcher, error) {
+			return ended, nil
+		}))
+	t.Cleanup(w.Stop)
+	w.Start()
+	requireWarmUp(t, records, 1, "completed", 1, 0)
+
+	if err := w.Rewatch(conn); err != nil {
+		t.Fatalf("rewatch: %v", err)
+	}
+	requireWarmUp(t, records, 2, "resumed", 0, 0)
+	if warned := matching(records(), "WARN", "test cache cache warm-up"); len(warned) != 0 {
+		t.Fatalf("the resumed watch logged %d warm-up WARN lines, want none: %v", len(warned), warned)
+	}
+	eventually(t, "the resumed generation's completeness", func() bool {
+		_, complete := w.Complete()
+		return complete
+	})
+
+	ended.end()
+	eventually(t, "the resumed watcher's recorded end", func() bool { return w.Err() != nil })
+	if err := w.Err(); !errors.Is(err, natsgo.ErrConnectionClosed) {
+		t.Fatalf("recorded %v, want the closed connection", err)
+	}
 }

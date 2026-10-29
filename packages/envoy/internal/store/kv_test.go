@@ -1140,38 +1140,6 @@ func TestUpsertWritesARowStoredWithNullTopicsOnce(t *testing.T) {
 	}
 }
 
-// Upsert skips a write only when the merged row would store what the current one holds apart from
-// UpdatedAt: a different session, machine, directory, topic, topic order, or a null topic list
-// where the merge has an empty one, each makes the row changed. Upsert keeps the stored machine
-// and directory over a request's (mergeForUpsert), so the stored fields are what is compared.
-func TestUpsertComparesEveryStoredFieldButUpdatedAt(t *testing.T) {
-	cur := Interest{SessionID: "ses_x", MachineID: "m1", Dir: "/work", Topics: []string{"topic.a", "topic.b"}, UpdatedAt: 1}
-	same := cur
-	same.Topics = []string{"topic.a", "topic.b"}
-	same.UpdatedAt = 2
-	if !sameStoredInterest(cur, same) {
-		t.Fatalf("rows differing only in UpdatedAt compare changed: %+v, %+v", cur, same)
-	}
-	empty := Interest{SessionID: "ses_x", Topics: []string{}}
-	if !sameStoredInterest(empty, Interest{SessionID: "ses_x", Topics: []string{}}) {
-		t.Fatal("two empty topic lists compare changed")
-	}
-	for name, merged := range map[string]Interest{
-		"session":     {SessionID: "ses_y", MachineID: "m1", Dir: "/work", Topics: []string{"topic.a", "topic.b"}},
-		"machine":     {SessionID: "ses_x", MachineID: "m2", Dir: "/work", Topics: []string{"topic.a", "topic.b"}},
-		"directory":   {SessionID: "ses_x", MachineID: "m1", Dir: "/elsewhere", Topics: []string{"topic.a", "topic.b"}},
-		"topic added": {SessionID: "ses_x", MachineID: "m1", Dir: "/work", Topics: []string{"topic.a", "topic.b", "topic.c"}},
-		"topic order": {SessionID: "ses_x", MachineID: "m1", Dir: "/work", Topics: []string{"topic.b", "topic.a"}},
-	} {
-		if sameStoredInterest(cur, merged) {
-			t.Errorf("%s: %+v compares unchanged from %+v", name, merged, cur)
-		}
-	}
-	if sameStoredInterest(Interest{SessionID: "ses_x"}, empty) {
-		t.Error("a null topic list compares unchanged from an empty one")
-	}
-}
-
 func TestRemove_ColdCacheReadsFromKV(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
