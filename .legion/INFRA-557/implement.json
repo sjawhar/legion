@@ -2,36 +2,34 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-557",
-  "completed": "2026-10-29T00:02:00Z",
-  "round": "forward merge after review round 1",
+  "completed": "2026-10-29T00:45:00Z",
+  "round": "lint fix after the forward merge",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2404",
-  "codeHead": "6ee80831f50a14efe4e22f531466409ecc13688b",
+  "codeHead": "75ad248670bd7b5b1a100e9e5976e21407ee7257",
+  "answersTest": "332a2c57b5f31c978d9bcc206d80bc2809b49701",
   "proof": [
     {
-      "criterion": "The head merges into main so CI can run (PR no longer conflicting)",
-      "surface": "GitHub pull request #2404",
-      "command": "gh api repos/sjawhar/legion/pulls/2404 --jq '{mergeable,mergeable_state}'",
-      "observed": "{\"mergeable\":true,\"mergeable_state\":\"blocked\"} after merge commit 6ee80831 (main 571f729b) was pushed. Fingerprints: https://github.com/sjawhar/legion/pull/2404#issuecomment-6483454966",
-      "headSha": "6ee80831f50a14efe4e22f531466409ecc13688b",
-      "negativeControl": "at d19302d3 GitHub gave mergeable_state dirty; git merge-tree against main 571f729b conflicted in packages/envoy/docs/architecture.md and packages/envoy/internal/session/registry.go (tester)"
+      "criterion": "CI's required lint check passes: Biome's whole-tree check reports no error",
+      "surface": "the repository's lint lane command (pr-and-main.yaml: `bunx biome check .`) on the working tree, Biome 2.4.11 as bun.lock pins",
+      "command": "cd $LEGION_WORKSPACE && bunx biome check .",
+      "observed": "Checked 1240 files in 33s. No fixes applied. Found 1 warning. Found 5 infos. exit 0 (no errors); the generated grant fixtures stay byte-equal to testnats.EncodeGrant's output",
+      "headSha": "75ad248670bd7b5b1a100e9e5976e21407ee7257",
+      "negativeControl": "at 6ee80831 CI's lint failed (https://github.com/sjawhar/legion/actions/runs/40787900265/job/123165594270): Biome reformats packages/envoy/internal/testnats/testdata/listener-permissions.json"
     },
     {
-      "criterion": "Every behaviour of the change holds after the merge",
-      "surface": "real cmd/listener binaries per row, each pod a NATS user holding exactly the rendered core.ListenerPermissions grant, in-process nats-server, relays that cut, freeze or slow links",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; untagged go test -count=1 -timeout 20m (four Postgres-backed TestDispatch* skipped) ./cmd/listener/",
-      "observed": "26 rows PASS, ok 532.418s; untagged ok 627.851s; internal/session ok",
-      "headSha": "6ee80831f50a14efe4e22f531466409ecc13688b",
-      "negativeControl": "review round 1 fail-first runs and base 819dc283 rows: https://github.com/sjawhar/legion/pull/2404#issuecomment-6483359326"
+      "criterion": "Every behaviour of the change holds at the code head (75ad2486 changes only biome.json above 6ee80831)",
+      "surface": "real cmd/listener binaries per row under the rendered grant, in-process nats-server",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener (at 6ee80831)",
+      "observed": "26 rows PASS, ok 532.418s; untagged listener suite ok 627.851s",
+      "headSha": "75ad248670bd7b5b1a100e9e5976e21407ee7257",
+      "negativeControl": "review round 1 fail-first runs: https://github.com/sjawhar/legion/pull/2404#issuecomment-6483359326"
     }
   ],
   "filesChanged": [
-    "merge of main 571f729b: packages/envoy/internal/session/registry.go (main's Plugin and PluginVersion beside AcceptedHost and the unknown-key handling), packages/envoy/docs/architecture.md (both bucket lines)",
-    "packages/envoy/internal/dispatch/pmdoc/reanchor_test.go: docstest -> crafted import, as #2481 does, while #2481 is open"
+    "biome.json: files.includes excludes packages/envoy/internal/testnats/testdata, as it already excludes the pmdoc and text testdata"
   ],
   "trickyParts": [],
-  "deviations": [
-    "pmdoc compiles again; its differential.ts and linearity tests still fail in this pod, as in round 1 (environment, not this change)."
-  ],
+  "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": []
 }
