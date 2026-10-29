@@ -173,8 +173,11 @@ func withoutUnchanged(current askBlock, edit AskBlockEdit) AskBlockEdit {
 // askBlockChildren is the block's children after edit: the parts it names rebuilt, the parts it
 // does not left exactly as they are. A rebuilt part is the children the markdown pipeline
 // produces, not hand-built nodes, so a bullet list carries the list attributes every other
-// document write gives it. The text the edit writes is caller text, so it is weighed on budget,
-// the write's, before it is rendered and as it is parsed back (parsedBlockBody).
+// document write gives it. An options edit writes only the lines it sends: each option is paired
+// with the list item already holding it (editedOptionList), since an ask row shows nothing of
+// what a person wrote under an option and rebuilding the list would delete it unseen. The text
+// the edit writes is caller text, so it is weighed on budget, the write's, before it is rendered
+// and as it is parsed back (parsedBlockBody).
 func askBlockChildren(current askBlock, edit AskBlockEdit, budget *pmdoc.WriteBudget) ([]*pmdoc.Node, error) {
 	paragraphs := []*pmdoc.Node{}
 	var list *pmdoc.Node
@@ -215,31 +218,11 @@ func askBlockChildren(current askBlock, edit AskBlockEdit, budget *pmdoc.WriteBu
 	}
 
 	if edit.Options != nil {
-		options := normalizeAskOptions(*edit.Options)
-		list = nil
-		if len(options) > 0 {
-			texts := make([]string, 0, 2*len(options))
-			for _, option := range options {
-				texts = append(texts, option.Label, option.Description)
-			}
-			if err := budget.RefusePlainText(texts...); err != nil {
-				return nil, err
-			}
-			rebuilt, refusal, err := parsedBlockBody([]*pmdoc.Node{optionList(options)}, budget)
-			if err != nil {
-				return nil, err
-			}
-			if refusal != "" {
-				return nil, &ErrAskBlockUnrepresentable{Field: "options", Reason: refusal}
-			}
-			if len(rebuilt) != 1 || rebuilt[0].Type != "bullet_list" {
-				return nil, &ErrAskBlockUnrepresentable{
-					Field:  "options",
-					Reason: "the options do not read back as one bullet list",
-				}
-			}
-			list = rebuilt[0]
+		rebuilt, err := editedOptionList(list, normalizeAskOptions(*edit.Options), budget)
+		if err != nil {
+			return nil, err
 		}
+		list = rebuilt
 	}
 
 	children := append([]*pmdoc.Node{}, paragraphs...)
@@ -252,10 +235,12 @@ func askBlockChildren(current askBlock, edit AskBlockEdit, budget *pmdoc.WriteBu
 // parsedBlockBody is what the document's own markdown pipeline makes of nodes, which hold text as
 // a caller wrote it: rendering escapes the text so it reads back literally, and parsing supplies
 // the attributes and block ids a hand-built node has no business inventing. The rendering is parsed
-// on budget, the caller write's, which has weighed the text already (pmdoc.WriteBudget.
-// RefusePlainText). refusal is why the text cannot be held, when the renderer or the parser
-// refuses it (ErrDocSchema, pmdoc.ErrSchema); any other error - a refusal of its size, or a panic
-// (pmdoc.ErrPanic), which is pmdoc's bug rather than a reason - is err.
+// on budget: the caller write's, which has weighed its text already (pmdoc.WriteBudget.
+// RefusePlainText), or, where the nodes carry content the document already holds and the caller
+// never wrote, one of its own (editedOptionList). refusal is why the text cannot be held, when
+// the renderer or the parser refuses it (ErrDocSchema, pmdoc.ErrSchema); any other error - a
+// refusal of its size, or a panic (pmdoc.ErrPanic), which is pmdoc's bug rather than a reason -
+// is err.
 func parsedBlockBody(nodes []*pmdoc.Node, budget *pmdoc.WriteBudget) (parsed []*pmdoc.Node, refusal string, err error) {
 	markdown, err := renderTree(&pmdoc.Node{Type: "doc", Children: nodes})
 	if err != nil && !errors.Is(err, ErrDocSchema) {
@@ -425,21 +410,240 @@ func questionParagraphs(question string) []*pmdoc.Node {
 	return paragraphs
 }
 
-// optionList renders options as the bullet list parseAskBlock reads back: one item per option,
-// written `Label: Description`, or a bare `Label` when it has no description.
-func optionList(options []model.AskOption) *pmdoc.Node {
-	items := make([]*pmdoc.Node, 0, len(options))
+// editedOptionList is the block's bullet list after an options edit, or nil where the edit sends
+// no option and the block keeps no list. Each sent option is paired with the item already
+// holding it (mergeAskOptions), the merged items are rendered and parsed as any other document
+// write is (parsedBlockBody), so the list and its items carry the attributes that parse gives,
+// spread included, and the identity the markdown cannot carry is put back afterwards
+// (restoreOptionItems). list is the block's own list, nil where it holds none and every option
+// is new.
+func editedOptionList(list *pmdoc.Node, options []model.AskOption, budget *pmdoc.WriteBudget) (*pmdoc.Node, error) {
+	merged, err := mergeAskOptions(list, options)
+	if err != nil {
+		return nil, err
+	}
+	if len(merged) == 0 {
+		return nil, nil
+	}
+	texts := make([]string, 0, 2*len(options))
 	for _, option := range options {
-		line := option.Label
-		if option.Description != "" {
-			line += ": " + option.Description
+		texts = append(texts, option.Label, option.Description)
+	}
+	if err := budget.RefusePlainText(texts...); err != nil {
+		return nil, err
+	}
+	written := &pmdoc.Node{Type: "bullet_list", Children: make([]*pmdoc.Node, 0, len(merged))}
+	if list != nil {
+		written.Attrs = list.Attrs
+	}
+	for _, option := range merged {
+		written.Children = append(written.Children, option.written)
+	}
+	// The merged list carries what the document already holds under an option as well as the
+	// lines the caller sent, and that content is not the caller's text. Parsing it on the write's
+	// own budget refuses an edit of one option's line for the size of another option's sub-list:
+	// a preserved sub-list weighing 62,042 elements, under the 65,536 one write may make, was
+	// refused on a budget a 5,000-element question had charged first, and read with no refusal on
+	// a budget of its own. So the caller's label and description text is weighed on their budget
+	// above (RefusePlainText) and the merged rendering is parsed on a budget of its own.
+	rebuilt, refusal, err := parsedBlockBody([]*pmdoc.Node{written}, pmdoc.NewWriteBudget())
+	if err != nil {
+		return nil, err
+	}
+	if refusal != "" {
+		return nil, &ErrAskBlockUnrepresentable{Field: "options", Reason: refusal}
+	}
+	if len(rebuilt) != 1 || rebuilt[0].Type != "bullet_list" {
+		return nil, &ErrAskBlockUnrepresentable{
+			Field:  "options",
+			Reason: "the options do not read back as one bullet list",
 		}
-		items = append(items, &pmdoc.Node{
-			Type:     "list_item",
-			Children: []*pmdoc.Node{{Type: "paragraph", Children: inlineWithHardBreaks(line)}},
+	}
+	return restoreOptionItems(rebuilt[0], list, merged)
+}
+
+// mergedOption is one item of the list an options edit writes: the node the merged markdown
+// writes for it, and the item the sent option was paired with, which carries the identity and
+// the nodes that rendering cannot (restoreOptionItems). held is nil for an option no item held.
+type mergedOption struct {
+	written *pmdoc.Node
+	held    *pmdoc.Node
+	// whole reports that the held item already says what the edit sends, so the result is that
+	// item itself and not what the parse made of its rendering.
+	whole bool
+}
+
+// mergeAskOptions pairs each sent option, in the order sent, with the first item of list holding
+// its label that no earlier option took, reading an item as parseAskBlock reads it
+// (optionOfItem). A pair that says the same thing keeps its item whole, a pair whose description
+// changed has the item's line rewritten above everything else the item holds, and an option no
+// item holds is a new item. An item no option took is dropped only where it holds nothing but
+// its plain line; otherwise the whole edit is refused (refuseDroppedOptionItem), which is what a
+// removal, a rename and an edit sending no option at all come to.
+func mergeAskOptions(list *pmdoc.Node, options []model.AskOption) ([]mergedOption, error) {
+	var items []*pmdoc.Node
+	if list != nil {
+		items = list.Children
+	}
+	held := make([]model.AskOption, len(items))
+	for index, item := range items {
+		held[index] = optionOfItem(item)
+	}
+	taken := make([]bool, len(items))
+	merged := make([]mergedOption, 0, len(options))
+	for _, option := range options {
+		match := -1
+		for index := range items {
+			if !taken[index] && held[index].Label == option.Label {
+				match = index
+				break
+			}
+		}
+		if match < 0 {
+			merged = append(merged, mergedOption{written: optionItem(option)})
+			continue
+		}
+		taken[match] = true
+		item := items[match]
+		if held[match].Description == option.Description {
+			merged = append(merged, mergedOption{written: item, held: item, whole: true})
+			continue
+		}
+		merged = append(merged, mergedOption{
+			written: withChildren(item, append([]*pmdoc.Node{optionParagraph(option)}, itemContent(item)...)),
+			held:    item,
 		})
 	}
-	return &pmdoc.Node{Type: "bullet_list", Children: items}
+	for index, item := range items {
+		if taken[index] || holdsOnlyItsOptionLine(item, held[index]) {
+			continue
+		}
+		return nil, refuseDroppedOptionItem(list, item, held[index])
+	}
+	return merged, nil
+}
+
+// restoreOptionItems gives parsed, the bullet list the merged markdown read back as, the identity
+// its markdown does not carry: list's own block id, since it is the same list and the anchors
+// inside it must survive; for an option the edit left alone, the very node the document holds;
+// and for one it rewrote, that item's own attributes and the nodes under its line, with the
+// parsed paragraph of the new line above them. A new item keeps what the parse gave it.
+func restoreOptionItems(parsed, list *pmdoc.Node, merged []mergedOption) (*pmdoc.Node, error) {
+	if len(parsed.Children) != len(merged) {
+		return nil, &ErrAskBlockUnrepresentable{
+			Field:  "options",
+			Reason: fmt.Sprintf("the options read back as %d items, not the %d sent", len(parsed.Children), len(merged)),
+		}
+	}
+	for index, option := range merged {
+		switch {
+		case option.held == nil:
+		case option.whole:
+			parsed.Children[index] = option.held
+		default:
+			line := parsed.Children[index].Children
+			if len(line) == 0 || line[0].Type != "paragraph" {
+				return nil, &ErrAskBlockUnrepresentable{
+					Field:  "options",
+					Reason: fmt.Sprintf("option %d does not read back as a plain line", index+1),
+				}
+			}
+			parsed.Children[index] = withChildren(option.held, append([]*pmdoc.Node{line[0]}, itemContent(option.held)...))
+		}
+	}
+	if list != nil {
+		if id, _ := list.Attrs[pmdoc.BlockIDAttr].(string); id != "" {
+			parsed.Attrs[pmdoc.BlockIDAttr] = id
+		}
+	}
+	return parsed, nil
+}
+
+// refuseDroppedOptionItem refuses the whole options edit, writing nothing, because it drops item,
+// the list item of option, which holds more than the line the option writes. An ask row shows
+// nothing of what a person wrote under an option, so the caller sending the edit cannot see what
+// dropping it deletes: the refusal quotes the item whole, its nested content and all, as the
+// markdown of a document holding one bullet list holding it alone, so every word of it can be
+// restored, and the item is quoted as data (strconv.Quote), never written into the reason raw.
+func refuseDroppedOptionItem(list, item *pmdoc.Node, option model.AskOption) error {
+	markdown, err := pmdoc.Render(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{
+		{Type: "bullet_list", Attrs: list.Attrs, Children: []*pmdoc.Node{item}},
+	}})
+	if err != nil {
+		return fmt.Errorf("render the list item of a dropped option: %w", err)
+	}
+	return &ErrAskBlockUnrepresentable{
+		Field: "options",
+		Reason: fmt.Sprintf("the edit drops the option %s, whose list item holds more than its plain line, "+
+			"and the ask-edit route does not delete what a person wrote under an option; its item reads %s; "+
+			"send that option back with this edit, or remove what the item holds with a document edit first "+
+			"(dispatch doc-edit, deleting a block by its id)",
+			strconv.Quote(option.Label), strconv.Quote(strings.TrimSpace(markdown))),
+	}
+}
+
+// optionOfItem is the option parseAskBlock reads in a list item: the text of its first block, cut
+// at the first ": " into a label and a description, both trimmed, and no description where the
+// text holds no ": ".
+func optionOfItem(item *pmdoc.Node) model.AskOption {
+	if len(item.Children) == 0 {
+		return model.AskOption{}
+	}
+	label, description, found := strings.Cut(strings.TrimSpace(pmdoc.TextContent(item.Children[0])), ": ")
+	if !found {
+		description = ""
+	}
+	return model.AskOption{Label: strings.TrimSpace(label), Description: strings.TrimSpace(description)}
+}
+
+// itemContent is what a list item holds under its line: every block after the first, which a
+// rewrite of that line keeps and a drop would delete.
+func itemContent(item *pmdoc.Node) []*pmdoc.Node {
+	if len(item.Children) == 0 {
+		return nil
+	}
+	return item.Children[1:]
+}
+
+// holdsOnlyItsOptionLine reports whether item holds nothing a rebuilt list would not write again:
+// one paragraph, of text and hard breaks carrying no mark, reading the line option writes
+// (optionLine). An item holding a sub-list, a second paragraph, a link's address, bold or code
+// holds more, and dropping it would delete what a person wrote.
+func holdsOnlyItsOptionLine(item *pmdoc.Node, option model.AskOption) bool {
+	if len(item.Children) != 1 || item.Children[0].Type != "paragraph" || !plainInline(item.Children[0]) {
+		return false
+	}
+	return strings.TrimSpace(pmdoc.TextContent(item.Children[0])) == optionLine(option)
+}
+
+// plainInline reports whether every inline node under node is a text or hardbreak node carrying
+// no mark, which is all inlineWithHardBreaks writes.
+func plainInline(node *pmdoc.Node) bool {
+	for _, child := range node.Children {
+		if child.Type != "text" && child.Type != "hardbreak" || len(child.Marks) > 0 || !plainInline(child) {
+			return false
+		}
+	}
+	return true
+}
+
+// optionLine is the plain line parseAskBlock reads an option back from: `Label: Description`, or
+// a bare `Label` where it has no description.
+func optionLine(option model.AskOption) string {
+	if option.Description == "" {
+		return option.Label
+	}
+	return option.Label + ": " + option.Description
+}
+
+// optionParagraph is the paragraph an option's list item opens with, holding its line alone.
+func optionParagraph(option model.AskOption) *pmdoc.Node {
+	return &pmdoc.Node{Type: "paragraph", Children: inlineWithHardBreaks(optionLine(option))}
+}
+
+// optionItem is the list item an option no list item holds is written as.
+func optionItem(option model.AskOption) *pmdoc.Node {
+	return &pmdoc.Node{Type: "list_item", Children: []*pmdoc.Node{optionParagraph(option)}}
 }
 
 // inlineWithHardBreaks carries a single newline as the hardbreak node nodeText reads back as
