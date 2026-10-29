@@ -1469,35 +1469,86 @@ const applyHeapBound = heapAboveTheReserve / 3
 // applies of browsers' updates under unweighedApplyHeapBytes, one for each browser's read loop at
 // most, the measurer's parse of a rendering, up to about 130 MiB for a mebibyte of the heaviest
 // shape (pmdoc/elements.go:31-37), and the collector, which needs headroom under the Go memory
-// limit to free garbage before it reaches it and is held to this much of it by the ratio of
-// garbage to live heap the server boots with (CollectorGCPercent). An apply estimated past
+// limit to free garbage before it reaches it and, once the budget is full, is held to this much of
+// it by the ratio the budget's charge gives it (CollectorRatio). An apply estimated past
 // applyHeapBound, which runs alone, may reach into it too, up to applyTooHeavyBytes.
 const heapSlackBytes = heapAboveTheReserve / 3
 
-// CollectorGCPercent is the garbage the collector is given, as a percentage of the live heap, which
-// the server sets at boot (debug.SetGCPercent, cmd/dispatch/main.go:159-178): heapSlackBytes of
-// what the pod holds at rest when the budget is full - the budget's charges, the cold reads' cache
-// and the pressure reserve - 100 x 393,705,335 / (2,147,483,648 + 268,435,456 + 268,435,456) = 14
-// per cent, so that the garbage waiting to be freed stays inside the slack this arithmetic names
-// for it instead of filling every byte the Go memory limit leaves.
+// CollectorRatioFloor is the least garbage the collector is given, as a percentage of the live
+// heap: what a full room budget leaves it, 100 x heapSlackBytes 393,705,335 / (roomBudgetBytes
+// 2,147,483,648 + documentReadBudget 268,435,456 + pressureReserveBytes 268,435,456) = 14 per
+// cent. It is CollectorRatio at roomBudgetBytes, and the least CollectorRatio answers.
+const CollectorRatioFloor = 100 * heapSlackBytes / (roomBudgetBytes + documentReadBudget + pressureReserveBytes)
+
+// CollectorRatio is the garbage the collector may hold, as a percentage of the live heap, at a
+// room budget whose rooms and admissions are charged charged bytes: the headroom this file's own
+// arithmetic leaves for garbage at that charge, over what the pod holds live at rest at it. The
+// budget hands it to the runtime whenever the integer changes (roomBudget.followChargeLocked,
+// room_budget.go:1083-1104), so a server with room to spare collects at the runtime's own ratio
+// and one whose budget is full at the floor.
 //
-// It is what makes that slack real. The collector's default is 100 per cent, which lets the heap
-// grow to twice what is live before a collection; past half the Go memory limit the limit is the
-// smaller of the two, so with a full budget the heap goal is the limit itself and the collector
-// keeps every byte of garbage the limit allows - the budget's unused room, both heap bounds and
-// this slack together. The pod's resident memory then parks just under the limit whatever the
-// design's sum is, and the burst the bounds do allow on top of it is what the container is killed
-// for. Measured on 2026-10-29 with the real-process drive of the worst case the bounds allow
-// (cmd/dispatch, TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory, three steps:
-// the budget filled, the cold reads' cache filled, the heaviest handoffs applying beside full copy
-// bounds), the server's peak resident memory by step: at the default 100 per cent 2,677, 3,601 and
-// 4,302 MiB in one run and 2,743, 3,581 and 4,424 MiB in another, both past the pod's 4,096 MiB,
-// with the collector's own trace showing a heap goal pinned at the limit (GODEBUG=gctrace=1,
-// 3,398 to 3,413 MiB) and a live heap of 2,344 to 2,859 MiB under it; at this ratio 2,260, 2,715
-// and 3,606 MiB, 490 MiB under the pod, and the keystrokes a person typed through both heavy steps
-// answered in a 99th percentile of 131 ms. The collector's share of that run's CPU was 31 per cent
-// against 14, and the drive took 580 s against 352 s.
-const CollectorGCPercent = 100 * heapSlackBytes / (roomBudgetBytes + documentReadBudget + pressureReserveBytes)
+// Every term of it is one the lines above name. The Go memory limit holds the budget's charges,
+// the cold reads' cache, the pressure reserve, and what heapAboveTheReserve splits three ways -
+// the two transient bounds and this slack: goMemoryLimitBytes = roomBudgetBytes +
+// documentReadBudget + pressureReserveBytes + applyHeapBound + copyHeapBound + heapSlackBytes,
+// since copyHeapBound is what the other two leave of heapAboveTheReserve (copy_heap.go:59). At a
+// charge of c the pod holds c + documentReadBudget + pressureReserveBytes live at rest, and what
+// the limit leaves for garbage with both bounds held whole is
+//
+//	goMemoryLimitBytes - applyHeapBound - copyHeapBound - (c + documentReadBudget + pressureReserveBytes)
+//	  = heapSlackBytes + roomBudgetBytes - c
+//
+// every byte the budget has not charged being a byte of garbage the limit can hold besides. So
+// the ratio is 100 x (heapSlackBytes + roomBudgetBytes - c) / (c + documentReadBudget +
+// pressureReserveBytes), and the collector's garbage, the live heap it is a ratio of and both
+// bounds together never pass the limit at any charge. An empty budget makes that 473 per cent,
+// clamped to the runtime's own 100, which it stays at while the charges leave room for a whole
+// GOGC=100 cycle - up to (heapSlackBytes + roomBudgetBytes - documentReadBudget -
+// pressureReserveBytes) / 2 = 1,002,159,035 bytes, 956 MiB of the 2 GiB budget - and falls from
+// there to CollectorRatioFloor, 14, at a full budget (91 at 1 GiB charged, 43 at 1.5 GiB). Past
+// the limit it stays at the floor: what the charges pass the limit by comes out of the pressure
+// reserve, which this counts as live already.
+//
+// It is what makes that slack real, and only where nothing else leaves the collector room. The
+// collector's default of 100 per cent lets the heap grow to twice what is live before a
+// collection; past half the Go memory limit the limit is the smaller of the two, so with a full
+// budget the heap goal is the limit itself and the collector keeps every byte of garbage the
+// limit allows - the budget's unused room, both heap bounds and this slack together. The pod's
+// resident memory then parks just under the limit whatever the design's sum is, and the burst the
+// bounds do allow on top of it is what the container is killed for. Measured on 2026-10-29 with
+// the real-process drive of the worst case the bounds allow (cmd/dispatch,
+// TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory, three steps: the budget
+// filled, the cold reads' cache filled, the heaviest handoffs applying beside full copy bounds),
+// the server's peak resident memory by step: at the default 100 per cent 2,677, 3,601 and 4,302
+// MiB in one run and 2,743, 3,581 and 4,424 MiB in another, both past the pod's 4,096 MiB, with
+// the collector's own trace showing a heap goal pinned at the limit (GODEBUG=gctrace=1, 3,398 to
+// 3,413 MiB) and a live heap of 2,344 to 2,859 MiB under it; with the floor set at boot for every
+// charge 2,260, 2,715 and 3,606 MiB, 490 MiB under the pod, and the keystrokes a person typed
+// through both heavy steps answered in a 99th percentile of 131 ms; following the charge, which
+// set 91, 57, 32 and 15 per cent as that drive's rooms filled the budget, 2,372 to 2,501, 3,258
+// to 3,322 and 3,917 to 4,018 MiB over four runs, 78 MiB under the pod at the worst of them,
+// and a 99th percentile of 110 to 181 ms.
+//
+// Following the charge peaks higher than the floor does because resident memory is a high-water
+// mark: the steps that fill the budget and the cache run at the looser ratio their charge asks
+// for, and the memory the runtime took for that garbage is still mapped when the heaviest step
+// collects at 15 per cent. What it is held to at every charge is the arithmetic above - the
+// garbage, the live heap it is a ratio of and both bounds inside the Go memory limit - which is
+// what the floor alone held a full budget to.
+//
+// Paying the floor only where the charge asks for it is what keeps its cost off the servers whose
+// rooms are light. The floor took 31 per cent of that drive's CPU for the collector against 14 at
+// the default, and set at boot whatever the charge it took the over-charge typing drive
+// (TestTheRoomBudgetDoesNotOverchargeTypingAndPasting), whose eight rooms charge 436,576,256
+// bytes and whose slack is therefore free, from 503 s to 2,072 s, after which its sweep closed
+// seven of its eight rooms inside the wait an admission gives those closes rather than all eight.
+// At that charge this answers 100, the collector's own, which the drive measured 485, 503 and
+// 717 s at, the last of the three beside five other containers on the sandbox.
+func CollectorRatio(charged int64) int {
+	garbage := heapSlackBytes + roomBudgetBytes - charged
+	live := charged + documentReadBudget + pressureReserveBytes
+	return int(min(max(100*garbage/live, CollectorRatioFloor), 100))
+}
 
 // applyTooHeavyBytes is the estimate (peerWeighing.applyHeap) past which the hook refuses an
 // update as too heavy to apply (errApplyTooHeavy): all of heapAboveTheReserve, 1,181,116,006

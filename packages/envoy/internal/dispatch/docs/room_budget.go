@@ -304,6 +304,16 @@ type roomBudget struct {
 	full atomic.Bool
 	// stored holds the counts admissions made of the stored versions (storedRoomReservation).
 	stored storedCounts
+	// setGCPercent gives the collector a ratio of garbage to live heap, the runtime's
+	// debug.SetGCPercent as the boot injects it (Deps.SetGCPercent), and answers the ratio it
+	// replaced: the budget calls it with the ratio its charge leaves (followChargeLocked). Nil in
+	// every budget but a booted server's, and in a server whose GOGC the environment set, which is
+	// the runtime's own to keep; such a budget sets no ratio and follows none.
+	setGCPercent func(percent int) (previous int)
+	// gcPercent is the ratio the budget last gave the collector, an empty budget's to begin with
+	// (CollectorRatio of nothing charged), which is the runtime's own default and what a server
+	// with no GOGC boots at.
+	gcPercent int
 }
 
 // budgetedRoom is what the budget holds for one document: charges, the instances of its room ygo
@@ -1052,7 +1062,11 @@ func (b *roomBudget) setLimit(limit int64) {
 // refuses growth to can now grow; over it, with full down, a sweep is started, since a charge has
 // just passed the limit. With full up a change does not sweep: the last sweep found nothing to
 // close, and what can change that is a room becoming closable, which starts a sweep of its own
-// (unlockState). The admissions waiting on the budget are woken to weigh it again (await).
+// (unlockState). The admissions waiting on the budget are woken to weigh it again (await), and
+// the collector is given the ratio the charges now leave it (followChargeLocked). Every change to
+// what the budget charges ends here - an admission's reservation, a load, a count's re-base, a
+// structure part's growth, a release, a retirement - so no charge moves without the collector
+// hearing of it.
 func (b *roomBudget) unlock() {
 	if b.used <= b.limit {
 		b.full.Store(false)
@@ -1062,7 +1076,32 @@ func (b *roomBudget) unlock() {
 	if b.waiting > 0 {
 		b.wakeLocked()
 	}
+	b.followChargeLocked()
 	b.mu.Unlock()
+}
+
+// followChargeLocked gives the collector the ratio the charges now leave it (CollectorRatio),
+// where the integer has moved since the last one: a server with room to spare collects at the
+// runtime's own 100 per cent, and one whose budget is full at the floor the slack names, so the
+// garbage waiting to be freed never passes what the Go memory limit leaves above the live heap
+// and both heap bounds. Its caller holds mu, and every keystroke's charge comes through here
+// (grew, unlock): a charge that leaves the integer where it was costs one division, one
+// comparison and nothing allocated, and the integer moves about once in every seven mebibytes of
+// charge, less often near a full budget. The ratio is set under mu so that two charges landing at
+// once cannot leave the collector at the earlier one's ratio. A budget with no setter - every one
+// but a booted server's, and a server whose GOGC the environment set - follows nothing.
+func (b *roomBudget) followChargeLocked() {
+	if b.setGCPercent == nil {
+		return
+	}
+	percent := CollectorRatio(b.used)
+	if percent == b.gcPercent {
+		return
+	}
+	previous := b.setGCPercent(percent)
+	b.gcPercent = percent
+	slog.Info("dispatch: the collector's ratio followed the room budget's charge",
+		"gc_percent", percent, "previous_gc_percent", previous, "charged", b.used, "limit", b.limit)
 }
 
 // wakeLocked wakes every admission waiting on the budget (await). Its caller holds mu.
@@ -1290,10 +1329,11 @@ func (s *Service) storedRoomReservation(ctx context.Context, room string) (int64
 // time: fifty browsers opening fifty documents of a mebibyte at once, their rooms loading beside
 // the counts, were refused in two minutes while the counts took one turn at a time, and in 16.1
 // to 20.5 s once each count held a grant instead, the last of the thirty-nine admitted answered
-// at 1m12s to 1m23s against 1m49s before; with the collector since held to the budget's slack
-// (CollectorGCPercent) that burst refused eleven in 37.7 s and admitted the last at 2m48s, the
-// decodes of those rooms' loads most of it, which ask for six times the bound's time the counts
-// do (TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays). The grant is covered inside the
+// at 1m12s to 1m23s against 1m49s before; with the collector since following what the budget
+// charges (CollectorRatio, 96 per cent as that burst began and 16 at the full budget) it refused
+// eleven in 25.1 to 26.7 s and admitted the last at 1m55s to 2m16s, the decodes of those rooms'
+// loads most of it, which ask for six times the bound's time the counts do
+// (TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays). The grant is covered inside the
 // transaction the count already holds, so no holder of the bound waits for a pooled connection
 // (copyHeaps).
 //

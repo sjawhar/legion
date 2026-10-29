@@ -135,6 +135,117 @@ func TestTheRoomBudgetChargesARoomItsCountItsUncountedContentAndItsStructure(t *
 	}
 }
 
+// The collector's ratio is what the room budget's charge leaves it (CollectorRatio): the headroom
+// the Go memory limit leaves for garbage at that charge, over what the pod holds live at rest at
+// it. An empty budget leaves the collector the runtime's own 100 per cent, which it keeps while
+// the charges still leave room for a whole cycle of it; from the first charge past that point the
+// ratio falls, never rises, down to the floor the slack names at a full budget (CollectorRatioFloor,
+// 14), and charges into the pressure reserve past the limit stay at the floor. At every charge
+// within the budget the live heap, the garbage the ratio allows it and both heap bounds held
+// whole together stay within the Go memory limit, which is the arithmetic the ratio comes from.
+func TestTheCollectorsRatioFollowsWhatTheRoomBudgetCharges(t *testing.T) {
+	// The last charge whose garbage at the runtime's own ratio still fits what the limit leaves
+	// above the live heap and both bounds, 1,002,159,035 bytes.
+	const wholeCycleFits = (heapSlackBytes + roomBudgetBytes - documentReadBudget - pressureReserveBytes) / 2
+	if CollectorRatioFloor != 14 {
+		t.Errorf("a full budget leaves the collector %d per cent, want the 14 the drives measured", CollectorRatioFloor)
+	}
+	for _, row := range []struct {
+		charged int64
+		want    int
+		what    string
+	}{
+		{0, 100, "an empty budget leaves the collector the runtime's own ratio"},
+		{wholeCycleFits, 100, "the last charge that leaves room for a whole cycle is still the runtime's own"},
+		{wholeCycleFits + 1, 99, "the first charge past it is under the runtime's own"},
+		{1 << 30, 91, "a gibibyte charged"},
+		{3 << 29, 43, "a gibibyte and a half charged"},
+		{roomBudgetBytes, CollectorRatioFloor, "a full budget leaves the floor"},
+		{roomBudgetBytes + pressureReserveBytes, CollectorRatioFloor, "charges into the pressure reserve stay at the floor"},
+	} {
+		if got := CollectorRatio(row.charged); got != row.want {
+			t.Errorf("%s: the ratio at %d bytes charged is %d, want %d", row.what, row.charged, got, row.want)
+		}
+	}
+	last := 101
+	for charged := int64(0); charged <= roomBudgetBytes+pressureReserveBytes; charged += 1 << 20 {
+		ratio := CollectorRatio(charged)
+		if ratio > last || ratio < CollectorRatioFloor || ratio > 100 {
+			t.Fatalf("the ratio at %d bytes charged is %d, want no more than the %d before it and within [%d, 100]",
+				charged, ratio, last, CollectorRatioFloor)
+		}
+		last = ratio
+		// Past the limit the ratio is held at the floor, where the charges pass the limit by what
+		// the live heap already counts as the pressure reserve, so the sum holds within it alone.
+		live := charged + documentReadBudget + pressureReserveBytes
+		held := live + live*int64(ratio)/100 + applyHeapBound + copyHeapBound
+		if charged <= roomBudgetBytes && held > goMemoryLimitBytes {
+			t.Fatalf("at %d bytes charged the live heap, the %d per cent of garbage it is allowed and both bounds come to %d bytes, past the %d-byte Go memory limit",
+				charged, ratio, held, int64(goMemoryLimitBytes))
+		}
+	}
+}
+
+// The budget gives the collector a ratio whenever what it charges moves the integer, and only
+// then. Every change to the charges ends in unlock, which follows them (followChargeLocked), so an
+// admission's reservation, a load, a count's re-base, the structure part's growth, a release and a
+// retirement each weigh the ratio again, while a change too small to move the integer sets
+// nothing. A budget with no setter - every budget but a booted server's, and a server whose GOGC
+// the environment set - sets nothing at all.
+func TestTheRoomBudgetSetsTheCollectorsRatioOnlyWhenItChanges(t *testing.T) {
+	var set []int
+	budget := &roomBudget{limit: roomBudgetBytes, gcPercent: CollectorRatio(0)}
+	budget.setGCPercent = func(percent int) int {
+		set = append(set, percent)
+		return 100
+	}
+	ratio, calls := CollectorRatio(0), 0
+	step := func(what string, change func()) {
+		t.Helper()
+		change()
+		want := CollectorRatio(budget.used)
+		if want != ratio {
+			ratio, calls = want, calls+1
+		}
+		if len(set) != calls || budget.gcPercent != want || (calls > 0 && set[calls-1] != want) {
+			t.Fatalf("%s: with %d bytes charged the budget set %v, want %d of them, the last %d per cent",
+				what, budget.used, set, calls, want)
+		}
+	}
+
+	var charge *roomCharge
+	var reservation *roomReservation
+	step("a load that leaves the slack free", func() {
+		charge = budget.load("light", copyHeap(10_000, 1_000, 0))
+	})
+	if calls != 0 {
+		t.Fatalf("a room of %d bytes moved the collector's ratio to %v, want the runtime's own left alone", budget.used, set)
+	}
+	step("an admission reserving a gibibyte", func() {
+		var err error
+		if reservation, err = budget.reserve(context.Background(), time.Time{}, "heavy", 1<<30); err != nil {
+			t.Fatalf("the reservation was refused: %v", err)
+		}
+	})
+	step("a structure part too small to move the integer", func() { charge.grew(1) })
+	step("a count re-basing the room on a million structs", func() {
+		charge.measured(copyHeap(10_000, 1_000, 1_000_000), 0)
+	})
+	step("the structure part growing by a hundred mebibytes", func() { charge.grew(100 << 20) })
+	step("the room retired", func() { budget.retire("light") })
+	step("the reservation released", func() { budget.release(reservation) })
+	if calls != 5 || set[calls-1] != 100 {
+		t.Fatalf("the budget set %v across the charges, want one for each of the five changes of the integer, ending at the runtime's own 100", set)
+	}
+
+	// A budget with no setter follows the same charges and sets nothing.
+	quiet := &roomBudget{limit: roomBudgetBytes, gcPercent: CollectorRatio(0)}
+	quiet.load("heavy", roomBudgetBytes)
+	if quiet.gcPercent != CollectorRatio(0) {
+		t.Fatalf("a budget with no setter followed its charge to %d per cent, want the %d it started at", quiet.gcPercent, CollectorRatio(0))
+	}
+}
+
 // A room's charge follows its renderings through the measurer: a count that lands replaces the
 // counted part and clears the content the room had added when the counted rendering was
 // published, never the content added since, and a rendering whose bytes are published without a

@@ -866,27 +866,29 @@ func TestTheGoMemoryLimitIsNinetyPercentOfTheContainers(t *testing.T) {
 	}
 }
 
-// The boot path gives the collector the garbage the room budget's arithmetic leaves above it, as a
-// ratio of the live heap (docs.CollectorGCPercent), so that the garbage waiting to be freed stays
-// inside that slack rather than inside every byte the memory limit leaves, and the boot line names
-// the ratio it set and the one it replaced. A GOGC in the environment, which the runtime read
-// before main ran, is left as it is, and the line says so.
-func TestTheCollectorsRatioIsTheRoomBudgetsSlack(t *testing.T) {
+// The boot sets no collector ratio of its own: an empty room budget leaves the collector the
+// runtime's own, and from its first charge on the budget gives it the ratio that charge leaves
+// (docs.CollectorRatio, roomBudget.followChargeLocked) through the setter the boot hands the
+// document service. The line the boot logs names the ratio an empty budget leaves and the one a
+// full budget leaves. A GOGC in the environment, which the runtime read before main ran, is left
+// as it is: no setter is handed over, so nothing the budget charges moves it, and the line says
+// so.
+func TestTheCollectorsRatioIsTheRoomBudgetsToSet(t *testing.T) {
 	previous := debug.SetGCPercent(100)
 	t.Cleanup(func() { debug.SetGCPercent(previous) })
 	for _, row := range []struct {
-		name    string
-		gogc    string
-		percent int
-		line    map[string]any
+		name   string
+		gogc   string
+		setter bool
+		line   map[string]any
 	}{
-		{"no GOGC in the environment", "", docs.CollectorGCPercent, map[string]any{
-			"level": "INFO", "msg": "dispatch: collector ratio set from the room budget's slack",
-			"gc_percent": float64(docs.CollectorGCPercent), "previous_gc_percent": float64(100),
+		{"no GOGC in the environment", "", true, map[string]any{
+			"level": "INFO", "msg": "dispatch: collector ratio follows the room budget's charge",
+			"gc_percent": float64(docs.CollectorRatio(0)), "gc_percent_at_a_full_room_budget": float64(docs.CollectorRatioFloor),
 		}},
-		{"a GOGC in the environment", "50", 100, map[string]any{
-			"level": "INFO", "msg": "dispatch: collector ratio taken from GOGC; the room budget's was not set",
-			"gogc": "50", "room_budget_gc_percent": float64(docs.CollectorGCPercent),
+		{"a GOGC in the environment", "50", false, map[string]any{
+			"level": "INFO", "msg": "dispatch: collector ratio taken from GOGC; the room budget's charge does not set it",
+			"gogc": "50", "gc_percent_at_a_full_room_budget": float64(docs.CollectorRatioFloor),
 		}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -903,10 +905,22 @@ func TestTheCollectorsRatioIsTheRoomBudgetsSlack(t *testing.T) {
 			slog.SetDefault(slog.New(slog.NewJSONHandler(&logged, nil)))
 			t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
-			setGCPercent()
+			setter := collectorRatioSetter()
 
-			if got := debug.SetGCPercent(row.percent); got != row.percent {
-				t.Errorf("gc percent %d, want %d", got, row.percent)
+			if handed := setter != nil; handed != row.setter {
+				t.Errorf("the boot handed the room budget a setter: %t, want %t", handed, row.setter)
+			}
+			// Whichever it answered, the boot itself left the collector where the runtime had it.
+			if got := debug.SetGCPercent(100); got != 100 {
+				t.Errorf("the boot left the collector at %d per cent, want the runtime's own 100", got)
+			}
+			if setter != nil {
+				if was := setter(docs.CollectorRatioFloor); was != 100 {
+					t.Errorf("the budget's setter replaced %d per cent, want 100", was)
+				}
+				if got := debug.SetGCPercent(100); got != docs.CollectorRatioFloor {
+					t.Errorf("the budget's setter left the collector at %d per cent, want %d", got, docs.CollectorRatioFloor)
+				}
 			}
 			lines := strings.Split(strings.TrimSpace(logged.String()), "\n")
 			if len(lines) != 1 {

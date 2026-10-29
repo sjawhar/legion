@@ -156,32 +156,39 @@ func setGoMemoryLimit(provider memlimit.Provider) {
 	}
 }
 
-// setGCPercent gives the collector the garbage the room budget's arithmetic leaves it, as a ratio
-// of the live heap (docs.CollectorGCPercent, internal/dispatch/docs/peer_update.go:1477-1500): the
-// slack that arithmetic names above the budget, the cold reads' cache and the pressure reserve, of
-// what those hold at rest, 14 per cent. The memory limit alone does not hold the collector to it:
-// at the runtime's default of 100 per cent the heap goal is twice the live heap, which past half
-// the limit is the limit itself, so a server whose budget is full keeps every byte of garbage the
-// limit allows and the pod's resident memory parks under the limit, where the burst the heap
-// bounds do allow takes it past the container's own limit and Kubernetes kills it. GOGC stays the
-// runtime's own variable, as GOMEMLIMIT does (setGoMemoryLimit): a GOGC in the environment, which
-// the runtime has already read, is left as it is. It logs one line naming the ratio it set, or the
-// one it left.
-func setGCPercent() {
+// collectorRatioSetter is how the collector's ratio is set from here on: the runtime's own
+// debug.SetGCPercent, for the room budget to call with the ratio its charge leaves the collector
+// (docs.CollectorRatio, internal/dispatch/docs/peer_update.go:1483-1550, which the budget follows
+// in roomBudget.followChargeLocked), or nil where a GOGC in the environment, which the runtime
+// has already read, is to be left as it is, as GOMEMLIMIT is (setGoMemoryLimit). Nothing is set
+// here: an empty budget's ratio is the runtime's own default, which a server with no GOGC boots
+// at, and the budget sets the first ratio its charges lower it to.
+//
+// The memory limit alone does not hold the collector to the slack the budget's arithmetic leaves
+// above the charges: at the runtime's default of 100 per cent the heap goal is twice the live
+// heap, which past half the limit is the limit itself, so a server whose budget is full keeps
+// every byte of garbage the limit allows and the pod's resident memory parks under the limit,
+// where the burst the heap bounds do allow takes it past the container's own limit and Kubernetes
+// kills it. It logs one line naming the ratios the budget will hold the collector between, or the
+// GOGC it left.
+func collectorRatioSetter() func(percent int) (previous int) {
 	if gogc, set := os.LookupEnv("GOGC"); set {
-		slog.Info("dispatch: collector ratio taken from GOGC; the room budget's was not set", "gogc", gogc,
-			"room_budget_gc_percent", docs.CollectorGCPercent)
-		return
+		slog.Info("dispatch: collector ratio taken from GOGC; the room budget's charge does not set it",
+			"gogc", gogc, "gc_percent_at_a_full_room_budget", docs.CollectorRatioFloor)
+		return nil
 	}
-	slog.Info("dispatch: collector ratio set from the room budget's slack",
-		"gc_percent", docs.CollectorGCPercent, "previous_gc_percent", debug.SetGCPercent(docs.CollectorGCPercent))
+	slog.Info("dispatch: collector ratio follows the room budget's charge",
+		"gc_percent", docs.CollectorRatio(0), "gc_percent_at_a_full_room_budget", docs.CollectorRatioFloor)
+	return debug.SetGCPercent
 }
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	// First, before the server allocates anything the collector would have to catch up on.
+	// First, before the server allocates anything the collector would have to catch up on. The
+	// collector's own ratio is the room budget's from here on, through the setter this hands the
+	// document service below.
 	setGoMemoryLimit(memlimit.FromCgroup)
-	setGCPercent()
+	collectorRatio := collectorRatioSetter()
 	env := processSettings()
 	if len(os.Args) > 1 {
 		os.Exit(runSubcommand(context.Background(), os.Args[1:], env, os.Stdout, os.Stderr))
@@ -326,11 +333,12 @@ func main() {
 
 	broker := events.NewBroker()
 	documentService := newDocumentService(boot, docs.Deps{
-		Store:     database,
-		Events:    broker,
-		Identity:  requestIdentity,
-		ServerURL: serverURL,
-		Settle:    boot.SettleDelay,
+		Store:        database,
+		Events:       broker,
+		Identity:     requestIdentity,
+		ServerURL:    serverURL,
+		Settle:       boot.SettleDelay,
+		SetGCPercent: collectorRatio,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 	// The seed appends events, so it runs after restoreDecidedWordings, which takes the copy lock:
