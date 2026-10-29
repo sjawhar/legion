@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-520",
-  "completed": "2026-10-29T09:02:38Z",
+  "completed": "2026-10-29T09:47:46Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2316",
   "proof": [
+    {
+      "criterion": "Review at 029b5024: the pull request merges with main 5443d99b, #2186's new worker image inputs reach ci.yaml's worker_image filter, and both trigger checks pass",
+      "surface": "GitHub mergeability and the local checks on the merged tree",
+      "command": "gh pr view 2316 -R sjawhar/legion --json mergeable,mergeStateStatus; .github/scripts/check-image-trigger-paths.sh; .github/scripts/check-ci-filters.sh",
+      "observed": "MERGEABLE/BLOCKED at 0dc57a01. check-image-trigger-paths.sh: every image trigger covers every input its build reads (5 image builds). check-ci-filters.sh exit 0, 23 gates 0 uncovered. worker-image.yaml keeps no pull_request trigger and takes #2186's comment; bridge_test.go is main's (#2186 removed the branch's renamed line). actionlint 0; action-pins, private-names, bun-version, release-credentials checks 0; tests: check-ci-filters 127/0, ci-ok 40/0, image-trigger 991/0. Fingerprint comment 6493400874.",
+      "headSha": "0dc57a01ebfa132e386ccabe9fabbf1db68d7584",
+      "negativeControl": "Before the filter gained them, check-image-trigger-paths.sh exited 1 naming .bun-version (worker.Dockerfile:225) and packages/claude-envoy (worker.Dockerfile:226, 135 files) as built into the image but not covered; check-ci-filters.sh exited 1 naming daemon/internal/claudelaunch (docs) and envoy/internal/bus/bustest (dispatch-memory, dispatch-multiprocess)."
+    },
     {
       "criterion": "Review at 4fcff042: the pull request merges with main 88840d35, and #2449's edit to the deleted envoy-and-contracts.yaml is carried so the filter check passes",
       "surface": "GitHub mergeability and the local checks on the merged tree",
