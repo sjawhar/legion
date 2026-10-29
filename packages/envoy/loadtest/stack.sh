@@ -10,7 +10,8 @@
 #                           LOADTEST_DISPATCH_COMMIT=<rev> envoy-dispatch alone is built from that
 #                           commit instead (a rev that names no commit is refused before any build).
 #   stack.sh start          start Postgres, the proxy, NATS and the listener (one already running is
-#                           kept); refuses a port another process holds, naming it.
+#                           kept); refuses a port another process holds, naming it when this PID
+#                           namespace can see it.
 #   stack.sh seed [--force] seed through Dispatch (18 to 27 min on 2 vCPU), drain the outbox, vacuum,
 #                           install the commit-time trigger, write seed.meta.json and keep the result as
 #                           the template database dispatch_seed. --force drops an existing seed first.
@@ -22,7 +23,8 @@
 #                           refused without one), and before Dispatch starts, `loadgen replay-checksum
 #                           -db dispatch` into $LOADTEST_ROOT/replay/last-reset.json.
 #   stack.sh stop [NAME...] stop dispatch, listener, nats, proxy and postgres (or the named ones).
-#   stack.sh status         each process: pid, alive, port.
+#   stack.sh status         the stack's ports and the stack.json that records them; each process:
+#                           pid, alive, port.
 #   stack.sh build-info     print this checkout's commit and whether its tree has uncommitted changes
 #                           ("<commit> <true|false>"; run-step.sh records them in meta.json).
 #   stack.sh loadgen ARGS   run $LOADTEST_ROOT/bin/loadgen under the stack's environment, from the
@@ -69,10 +71,13 @@
 # patch_sha256, dispatch_pprof_overlay, dispatch_binary_sha256, go_version, newest_migration.
 #
 # Environment: LOADTEST_ROOT (default ${TMPDIR:-/tmp}/dispatch-loadtest); LOADTEST_SRC (default: the
-# checkout holding this script); ports LOADTEST_PG_PORT (15432), LOADTEST_PROXY_PORT (15433),
-# LOADTEST_NATS_PORT (14222), LOADTEST_NATS_MONITOR_PORT (18222), LOADTEST_LISTENER_PORT (19120),
-# LOADTEST_DISPATCH_PORT (18777), LOADTEST_PPROF_PORT (16061), read by setup into stack.json;
-# LOADTEST_PROXY_RTT (1ms); LOADTEST_PG_DIRECT=1 starts Dispatch on Postgres without the proxy;
+# checkout holding this script); the ports, which follow LOADTEST_ROOT (common.sh: the root's block
+# k of the path's sha256 gives postgres 15000+10k, proxy 15001+10k, nats 15002+10k, nats_monitor
+# 15003+10k, listener 15004+10k, dispatch 15005+10k, pprof 15006+10k), so two roots on one machine
+# never meet; LOADTEST_PG_PORT, LOADTEST_PROXY_PORT, LOADTEST_NATS_PORT, LOADTEST_NATS_MONITOR_PORT,
+# LOADTEST_LISTENER_PORT, LOADTEST_DISPATCH_PORT and LOADTEST_PPROF_PORT each override their own
+# port, read by setup into stack.json (`stack.sh status` prints them); LOADTEST_PROXY_RTT (1ms);
+# LOADTEST_PG_DIRECT=1 starts Dispatch on Postgres without the proxy;
 # LOADTEST_DISPATCH_COMMIT (setup, above); LOADTEST_GOMAXPROCS, Dispatch's GOMAXPROCS (default: nproc).
 #
 # Every stack process starts under `env -i` with an explicit environment, so this shell's
@@ -122,17 +127,8 @@ DISPATCH_BINARIES=("$BIN/envoy-dispatch" "$BIN/dispatch-seed" "$BIN/dispatch-see
 # Processes in stop order, and in start order (dispatch is started by seed and reset).
 PROCESSES=(dispatch listener nats proxy postgres)
 START_ORDER=(postgres proxy nats listener dispatch)
-# The stack.json port keys in their order, each one's environment variable and its default.
-PORT_KEYS=(postgres proxy nats nats_monitor listener dispatch pprof)
-declare -A PORT_VAR=(
-  [postgres]=LOADTEST_PG_PORT [proxy]=LOADTEST_PROXY_PORT [nats]=LOADTEST_NATS_PORT
-  [nats_monitor]=LOADTEST_NATS_MONITOR_PORT [listener]=LOADTEST_LISTENER_PORT
-  [dispatch]=LOADTEST_DISPATCH_PORT [pprof]=LOADTEST_PPROF_PORT
-)
-declare -A PORT_DEFAULT=(
-  [postgres]=15432 [proxy]=15433 [nats]=14222 [nats_monitor]=18222 [listener]=19120
-  [dispatch]=18777 [pprof]=16061
-)
+# The stack.json port keys (PORT_KEYS), each one's environment variable (PORT_VAR) and the default
+# ports of this root, which follow LOADTEST_ROOT, are common.sh's (stack_ports).
 
 # base_env is every stack process's environment: a PATH and a HOME and XDG directories of the
 # stack's own, nothing inherited.
@@ -195,16 +191,16 @@ set_pid() { stack_set '.pids[$n] = $p' --arg n "$1" --argjson p "$2"; }
 
 random_hex() { od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'; }
 
-# write_stack_json writes stack.json on the first setup, and rewrites its ports from the environment
-# on a later one, keeping the name, tokens and pids; it refuses to move a port while the stack runs.
+# write_stack_json writes stack.json on the first setup, with this root's ports (stack_ports: the
+# defaults that follow LOADTEST_ROOT, each one overridden by its LOADTEST_*_PORT). A later setup
+# keeps the ports the file records and moves only those whose variable this environment sets, so a
+# rerun with no port variable set keeps the stack's ports; it refuses to move a port while the
+# stack runs. The name, tokens and pids are kept.
 write_stack_json() {
-  local ports k var args=()
-  for k in "${PORT_KEYS[@]}"; do
-    var=${PORT_VAR[$k]}
-    args+=(--argjson "$k" "${!var:-${PORT_DEFAULT[$k]}}")
-  done
-  ports=$(jq -n "${args[@]}" '$ARGS.named')
+  local ports k p var args=()
   if [ ! -f "$STACK" ]; then
+    while read -r k p; do args+=(--argjson "$k" "$p"); done < <(stack_ports "$ROOT")
+    ports=$(jq -n "${args[@]}" '$ARGS.named')
     (
       umask 077
       jq -n --arg name "loadtest-$(random_hex 4)" --arg root "$ROOT" \
@@ -212,16 +208,22 @@ write_stack_json() {
         '{name: $name, root: $root, dispatch_token: $dt, listener_token: $lt, ports: $ports,
           pids: {postgres: 0, proxy: 0, nats: 0, listener: 0, dispatch: 0}, pg_direct: false}' >"$STACK"
     )
-    note "wrote $STACK (stack $(stack_name))"
+    note "wrote $STACK (stack $(stack_name), ports $(jq -c .ports "$STACK"))"
     return
   fi
+  local -A recorded=()
+  while read -r k p; do recorded[$k]=$p; done < <(jq -r '(.ports // {}) | to_entries[] | "\(.key) \(.value)"' "$STACK")
+  while read -r k p; do
+    var=${PORT_VAR[$k]}
+    args+=(--argjson "$k" "${!var:-${recorded[$k]:-$p}}")
+  done < <(stack_ports "$ROOT")
+  ports=$(jq -n "${args[@]}" '$ARGS.named')
   if [ "$(jq -c .ports "$STACK")" != "$(jq -c . <<<"$ports")" ]; then
-    local p
-    for p in "${PROCESSES[@]}"; do
-      running "$p" && die "the ports in the environment differ from $STACK while $p is running; stack.sh stop first"
+    for k in "${PROCESSES[@]}"; do
+      running "$k" && die "the port variables in the environment move ports of $STACK while $k is running; stack.sh stop first"
     done
     stack_set '.ports = $ports' --argjson ports "$ports"
-    note "ports in $STACK updated from the environment"
+    note "ports in $STACK updated from the environment: $(jq -c . <<<"$ports")"
   fi
   stack_set '.root = $root' --arg root "$ROOT"
 }
@@ -330,13 +332,45 @@ stop_one() {
   set_pid "$name" 0
 }
 
-# check_port NAME PORT_KEY: refuse a port some other process holds.
+# port_holder PORT: "pid N (command)" of each process of this PID namespace that holds a socket
+# listening on PORT, joined with ", ". It reads the listening sockets' inodes from /proc/net/tcp
+# and /proc/net/tcp6 and looks for them among the descriptors in /proc/<pid>/fd. A listener of
+# another PID namespace (another Legion role of this pod, which shares the network namespace) has
+# its socket in /proc/net/tcp and no process here, so the result is empty.
+port_holder() {
+  local hex want=" " file inode dir fd target cmd out=""
+  printf -v hex '%04X' "$1"
+  for file in /proc/net/tcp /proc/net/tcp6; do
+    [ -r "$file" ] || continue
+    while read -r _ local_address _ state _ _ _ _ _ inode _; do
+      [ "$state" = 0A ] && [ "${local_address##*:}" = "$hex" ] && want+="$inode "
+    done <"$file"
+  done
+  [ "$want" = " " ] && return 0
+  for dir in /proc/[0-9]*; do
+    for fd in "$dir"/fd/*; do
+      target=$(readlink -- "$fd" 2>/dev/null) || continue
+      [[ $target == socket:\[*\] ]] || continue
+      inode=${target#socket:\[}
+      [[ $want == *" ${inode%\]} "* ]] || continue
+      cmd=$(tr '\0' ' ' <"$dir/cmdline" 2>/dev/null) || continue
+      out+="${out:+, }pid ${dir#/proc/} (${cmd% })"
+      break
+    done
+  done
+  [ -z "$out" ] || printf '%s\n' "$out"
+}
+
+# check_port NAME PORT_KEY: refuse a port another process holds, naming it when this PID namespace
+# can see it, and saying that it cannot when it cannot.
 check_port() {
-  local name=$1 key=$2 p
+  local name=$1 key=$2 p holders
   p=$(port "$key")
-  if port_open "$p"; then
-    die "port $p ($key, for $name) is already in use by a process that is not this stack's; free it or set ${PORT_VAR[$key]} and rerun stack.sh setup"
-  fi
+  port_open "$p" || return 0
+  holders=$(port_holder "$p")
+  [ -n "$holders" ] &&
+    die "port $p ($key, for $name) is already in use by $holders, which is not this stack's; stop it or set ${PORT_VAR[$key]} and rerun stack.sh setup"
+  die "port $p ($key, for $name) is already in use, and no process of this PID namespace holds it: another Legion role of this pod, or another PID namespace, may hold it, in the network namespace they share. Stop that stack from the role that started it, or run this one on a LOADTEST_ROOT of its own (the default ports follow the root), or set ${PORT_VAR[$key]} and rerun stack.sh setup"
 }
 
 ports_of() {
@@ -1425,9 +1459,11 @@ cmd_stop() {
   done
 }
 
+# cmd_status prints the stack's ports, which follow LOADTEST_ROOT, and the file that records them,
+# so two roots' stacks are told apart by their ports.
 cmd_status() {
   need_stack
-  printf 'stack %s, root %s\n' "$(stack_name)" "$ROOT"
+  printf 'stack %s, root %s\nports     %s (%s)\n' "$(stack_name)" "$ROOT" "$(jq -c .ports "$STACK")" "$STACK"
   local p k pid state
   for p in "${START_ORDER[@]}"; do
     if pid=$(pid_of "$p"); then state="running pid $pid"; else state=stopped; fi

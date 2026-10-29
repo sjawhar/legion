@@ -90,24 +90,32 @@ same step before and after its change, and compares the two rows.
 | --- | --- | --- |
 | `LOADTEST_ROOT` | `${TMPDIR:-/tmp}/dispatch-loadtest` | The directory that holds all the stack's state, binaries and step output. On a Legion pod, `$TMPDIR` is `/legion/scratch/tmp`, the issue's volume. |
 | `LOADTEST_SRC` | The checkout that holds the script | The checkout that `stack.sh setup` builds `envoy-dispatch`, `envoy-listener` and `loadgen` from. |
-| `LOADTEST_PG_PORT` | `15432` | The Postgres port. |
-| `LOADTEST_PROXY_PORT` | `15433` | The latency proxy port. |
-| `LOADTEST_NATS_PORT` | `14222` | The NATS client port. |
-| `LOADTEST_NATS_MONITOR_PORT` | `18222` | The NATS monitoring port (`/varz`). |
-| `LOADTEST_LISTENER_PORT` | `19120` | The Envoy listener port. |
-| `LOADTEST_DISPATCH_PORT` | `18777` | The Dispatch HTTP port. |
-| `LOADTEST_PPROF_PORT` | `16061` | The Dispatch pprof port (`DISPATCH_PPROF_PORT`). |
+| `LOADTEST_PG_PORT` | `15000 + 10k` | The Postgres port. |
+| `LOADTEST_PROXY_PORT` | `15001 + 10k` | The latency proxy port. |
+| `LOADTEST_NATS_PORT` | `15002 + 10k` | The NATS client port. |
+| `LOADTEST_NATS_MONITOR_PORT` | `15003 + 10k` | The NATS monitoring port (`/varz`). |
+| `LOADTEST_LISTENER_PORT` | `15004 + 10k` | The Envoy listener port. |
+| `LOADTEST_DISPATCH_PORT` | `15005 + 10k` | The Dispatch HTTP port. |
+| `LOADTEST_PPROF_PORT` | `15006 + 10k` | The Dispatch pprof port (`DISPATCH_PPROF_PORT`). |
 | `LOADTEST_PROXY_RTT` | `1ms` | The round trip that the proxy adds, as a Go duration. Read when the proxy starts. |
 | `LOADTEST_PG_DIRECT` | unset (`1` for a `--replay` step) | `1` connects Dispatch to Postgres directly, without the proxy. Read when Dispatch starts, so set it on `run-step.sh`. `stack.json` and `meta.json` record it as `pg_direct`. |
 | `LOADTEST_DISPATCH_COMMIT` | unset | `stack.sh setup` builds `envoy-dispatch` alone from that commit (`run-step.sh --replay --dispatch-commit`). |
 | `LOADTEST_GOMAXPROCS` | nproc | Dispatch's `GOMAXPROCS` (`run-step.sh --replay --gomaxprocs`). |
 | `DISPATCH_URL`, `DISPATCH_TOKEN_FILE` | unset | Read by `stack.sh replay-get` alone, in its own shell, to download the replay's parts. |
 
-Every process listens on `127.0.0.1`. `stack.sh setup` writes the ports into
-`$LOADTEST_ROOT/stack.json`. Each `setup` reads the port variables again, and `run-step.sh` and
-`run-series.sh` call `setup` each time. Thus keep the same `LOADTEST_*_PORT` values in the
-environment of every command. `setup` refuses to change a port while a stack process runs.
-`start` refuses a port that another process holds, and names the variable that moves it.
+Every process listens on `127.0.0.1`. The default ports follow `LOADTEST_ROOT`: the root's block
+`k` is the first 8 hex digits of the sha256 of its physical path, modulo 200, and each port is
+`15000 + 10k` plus the offset above, so every port lies between 15000 and 16996, no two ports of a
+root meet, and no two roots meet. Two Legion roles of one pod, each with its own `LOADTEST_ROOT`,
+therefore run a stack each with no port variable set. Each `LOADTEST_*_PORT` overrides its own
+port.
+
+`stack.sh setup` writes the ports into `$LOADTEST_ROOT/stack.json`, and `stack.sh status` prints
+them with the path of that file. A later `setup` keeps the ports the file records and moves only
+those whose variable the environment sets, and it refuses to move a port while a stack process
+runs. `start` refuses a port that another process holds: it names the process when this PID
+namespace can see it, and says that it cannot see one when another Legion role of the pod, in its
+own PID namespace, holds the port.
 
 Every stack process starts under `env -i` with an explicit environment. The `DISPATCH_URL`,
 `ENVOY_URL`, `ENVOY_NATS_URL`, `AWS_*`, `HOME` and `XDG_*` of your shell never reach the stack or
@@ -279,7 +287,7 @@ series directory.
 | Command | What it does |
 | --- | --- |
 | `stack.sh setup` | Builds `envoy-dispatch`, `envoy-listener` and `loadgen` into `$LOADTEST_ROOT/bin`. Installs `nats-server` at the version that `packages/envoy/go.mod` pins, with `go install`. Installs Postgres with pgvector from the `pgserver` wheel. Runs `initdb`. Writes `stack.json`. Each run does it again, incrementally. |
-| `stack.sh start` | Starts Postgres, the proxy, NATS and the listener. It keeps a process that already runs. It refuses a port that another process holds, and names it. Dispatch starts only in `seed` and `reset`. |
+| `stack.sh start` | Starts Postgres, the proxy, NATS and the listener. It keeps a process that already runs. It refuses a port that another process holds, and names that process when this PID namespace can see it. Dispatch starts only in `seed` and `reset`. |
 | `stack.sh seed [--force]` | Makes the seed template `dispatch_seed` (The seed, below). It does nothing when `dispatch_seed` and `seed.meta.json` exist. `--force` drops the old seed and seeds again. |
 | `stack.sh reset [LOG]` | Resets the stack to the seed and starts Dispatch, with its log in `LOG` (default `$LOADTEST_ROOT/logs/dispatch.log`). `run-step.sh` does this before each step. |
 | `stack.sh reset --replay [LOG]` | The same from this build's prepared replay template (The replay, below), refused without one; before Dispatch starts, `loadgen replay-checksum -db dispatch` into `$LOADTEST_ROOT/replay/last-reset.json`. |
@@ -287,7 +295,7 @@ series directory.
 | `stack.sh replay-get [--manifest FILE] [--from-dir DIR]` | Gets, verifies and unpacks the manifest's bundle, and restores its seed dump into the template `dispatch_replay_seed` (The replay, below). |
 | `stack.sh replay-prepare` | Makes this build's replay template `dispatch_replay_<key>` from `dispatch_replay_seed` (The replay, below). |
 | `stack.sh stop [NAME...]` | Stops `dispatch`, `listener`, `nats`, `proxy` and `postgres`, or only the named ones. |
-| `stack.sh status` | Prints each process's pid and ports, and the seed's migration, build commit and counts. |
+| `stack.sh status` | Prints this root's ports and the `stack.json` that records them, each process's pid and ports, and the seed's migration, build commit and counts. |
 | `stack.sh build-info` | Prints the checkout's commit and `true` or `false` for uncommitted changes in its tree, as `<commit> <dirty>`. `run-step.sh` records them in `meta.json`. |
 | `stack.sh loadgen ARGS...` | Runs `$LOADTEST_ROOT/bin/loadgen` with the stack's environment, from the root. `run-step.sh` and `run-series.sh` call `loadgen` this way. |
 
