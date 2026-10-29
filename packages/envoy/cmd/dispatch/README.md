@@ -984,9 +984,9 @@ record, the rule the runner applies them by (a database without that table recor
 everything is pending). For each it prints the tables the migration locks above ACCESS SHARE
 (`pgmigrate.CensusTables`), with each table's total size, its row count and the sessions holding
 locks on it; the transactions open longer than a minute anywhere in the database, and those whose
-age it cannot see (another role's without `pg_read_all_stats`, or any with `track_activities`
-off), which it tells from a session in no transaction by the virtual transaction id every
-transaction locks; and the count the migration's own census answers. Postgres reads
+age it cannot see (another role's without `pg_read_all_stats`, any with `track_activities` off, or
+a WAL sender's), which it tells from a session in no transaction by the virtual transaction id
+every transaction locks; and the count the migration's own census answers. Postgres reads
 `pg_stat_activity` once per transaction and serves that copy until the transaction ends, while
 `pg_locks` is read anew each time, so before each read of lock holders and of long transactions
 the census discards that copy (`pg_stat_clear_snapshot()`), and it measures a transaction's age at
@@ -1045,11 +1045,18 @@ census like every later one. It refuses:
   `pg_stat_activity` shows another role's `xact_start` and `state` only to a superuser, a member of
   that role or a member of `pg_read_all_stats`, so without that grant every holder of another role
   (an operator's session, a dump) refuses, since the census cannot tell it is young, and the
-  refusal names the grant; granting the census's role `pg_read_all_stats` lets it read the age, and
-  then it judges such a holder as it judges one of its own role. A holder of the census's own role it always sees,
-  and the refusal never names the grant for one. A session with `track_activities` off shows its
-  state as `disabled` and no `xact_start` to every role, so it refuses too, and the refusal says
-  so;
+  refusal names the grant; granting the census's role `pg_read_all_stats` lets it read the age of
+  a holder of another role, and then it judges such a holder as it judges one of its own role, and
+  the refusal never names the grant for a holder of the census's own role. A session with
+  `track_activities` off shows its state as `disabled` and no `xact_start` to every role, so it
+  refuses too, and the refusal says so. Postgres never shows a WAL sender's `xact_start`, to any
+  role, and a `replication=database` connection runs SQL, so it can hold a lock in a transaction
+  of any age: a holder that shows no `xact_start` and a state other than `idle` refuses, of the
+  census's own role too, and the refusal names its state. Only an `idle` holder with no
+  `xact_start` passes: `pg_stat_activity` read it between transactions, in the query that read its
+  lock, so the transaction holding that lock began or ended within that query. A session caught at
+  a statement's start or end reads `active` with no `xact_start` and refuses too, spuriously and
+  only at that instant, so the census taken again passes it;
 - an autovacuum worker holding a lock on a touched table, only when Postgres will not cancel it for
   the migration. Postgres cancels an autovacuum that holds a lock another session waits for once
   that session has waited `deadlock_timeout`, so an autovacuum passes at any age, with the grant or

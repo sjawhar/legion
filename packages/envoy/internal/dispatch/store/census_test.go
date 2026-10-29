@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
 	"github.com/sjawhar/envoy/internal/pgmigrate/pgmigratetest"
@@ -501,6 +502,60 @@ func TestCensusRefusesALockHolderWhoseAgeItCannotSee(t *testing.T) {
 	}
 	if slices.ContainsFunc(report.LongTransactions, isHolder) {
 		t.Errorf("a young holder listed with the long transactions once the census could read its age: %v", report.LongTransactions)
+	}
+}
+
+// A WAL sender holding a lock on a touched table in a transaction older than the bound refuses,
+// though it is of the census's own role and its state is visible: Postgres never records a WAL
+// sender's transaction start, to any role, and a replication=database connection runs SQL, so
+// the census cannot rule out the long transaction it exists to catch. It is listed with the long
+// transactions, and nothing names it as in no transaction. A replication=database connection
+// needs a role with REPLICATION and a server with max_wal_senders above 0 (the default is 10),
+// not wal_level=logical, which only logical decoding needs.
+func TestCensusRefusesAWALSenderHoldingALockInATransaction(t *testing.T) {
+	ctx := context.Background()
+	store, url := migratedToOne(t)
+	config := store.Pool.Config().ConnConfig.Config.Copy()
+	if config.RuntimeParams == nil {
+		config.RuntimeParams = map[string]string{}
+	}
+	config.RuntimeParams["replication"] = "database"
+	sender, err := pgconn.ConnectConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open a replication=database connection: %v", err)
+	}
+	t.Cleanup(func() { sender.Close(context.Background()) })
+	// A WAL sender takes only the simple query protocol.
+	if _, err := sender.Exec(ctx, "begin; lock table things in access share mode").ReadAll(); err != nil {
+		t.Fatal(err)
+	}
+	senderPID := sender.PID()
+	var backendType, state string
+	var noStart bool
+	if err := store.Pool.QueryRow(ctx, "select backend_type, state, xact_start is null from pg_stat_activity where pid = $1", senderPID).Scan(&backendType, &state, &noStart); err != nil {
+		t.Fatal(err)
+	}
+	if backendType != "walsender" || state != "idle in transaction" || !noStart {
+		t.Fatalf("the holder reads as backend_type %q, state %q, xact_start null %v; want a walsender idle in transaction with no xact_start", backendType, state, noStart)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	report, err := census(ctx, url, withCheck("select 0"), pgmigrate.CensusOptions{LongTransaction: time.Second})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	pid := "pid " + strconv.FormatUint(uint64(senderPID), 10)
+	got := refusals(report)
+	if len(got) != 1 || !strings.Contains(got[0], pid) || !strings.Contains(got[0], "Postgres records no transaction start for it though its state is idle in transaction (it records none for a WAL sender, to any role), so the census cannot rule out a transaction older than 1s") {
+		t.Errorf("refusals = %v, want one naming %s as a holder whose transaction start Postgres records none of:\n%s", got, pid, reportText(report))
+	}
+	if len(got) == 1 && !strings.Contains(got[0], "diagnosis of "+pid+", read when refused: state idle in transaction, xact_start none") {
+		t.Errorf("refusal lacks the WAL sender's diagnosis:\n%s", got[0])
+	}
+	if !slices.ContainsFunc(report.LongTransactions, func(s pgmigrate.Session) bool { return s.PID == senderPID }) {
+		t.Errorf("long transactions = %v, want the WAL sender whose age the census cannot see:\n%s", report.LongTransactions, reportText(report))
+	}
+	if out := reportText(report); strings.Contains(out, "idle in transaction, in no transaction when read") {
+		t.Errorf("the report names the WAL sender as in no transaction:\n%s", out)
 	}
 }
 

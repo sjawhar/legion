@@ -174,12 +174,14 @@ type LockWait struct {
 // redacted (holderDiagnosis). XactAge is how long its transaction had been open when it was read,
 // to the microsecond Postgres keeps, nil when it was in no transaction or the census cannot see
 // its transaction: pg_stat_activity shows another role's xact_start, and its state, only to a
-// superuser, a member of that role or a member of pg_read_all_stats, and records neither for a
-// session with track_activities off (untrackedState). The census refuses a lock holder whose age
-// it cannot see, so a deployment that grants the census's role pg_read_all_stats lets it read the
-// age of a holder of another role instead; a holder of the census's own role it always sees.
-// Autovacuum is an autovacuum worker, which the census tells apart however much Postgres hides
-// (lockHolders).
+// superuser, a member of that role or a member of pg_read_all_stats, records neither for a
+// session with track_activities off (untrackedState), and never records a WAL sender's
+// xact_start, to any role, though a replication=database connection runs SQL in transactions.
+// The census takes only an idle session (idleState) that shows none for one in no transaction,
+// and refuses any other lock holder whose age it cannot see, so a deployment that grants the
+// census's role pg_read_all_stats lets it read the age of a holder of another role instead; a
+// holder of the census's own role it sees, unless it is a WAL sender. Autovacuum is an autovacuum
+// worker, which the census tells apart however much Postgres hides (lockHolders).
 type Session struct {
 	PID         uint32         `json:"pid"`
 	User        string         `json:"user"`
@@ -193,6 +195,11 @@ type Session struct {
 // when the census's role may see that session: Postgres then records neither its activity text nor
 // its transaction's start.
 const untrackedState = "disabled"
+
+// idleState is the state pg_stat_activity shows for a session waiting for its client outside a
+// transaction, the one state in which the census takes a session that shows no transaction start
+// for one in no transaction (holderRefusal says why).
+const idleState = "idle"
 
 // String is the session as every message names it, saying which fields Postgres hid.
 func (s Session) String() string {
@@ -208,7 +215,7 @@ func (s Session) String() string {
 	switch {
 	case s.XactAge != nil:
 		age = "transaction open " + s.XactAge.String()
-	case state != "" && state != untrackedState:
+	case state == idleState:
 		age = "in no transaction when read"
 	}
 	if state == "" {

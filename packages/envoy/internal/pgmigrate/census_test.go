@@ -194,18 +194,22 @@ func TestReportOfAFreshDatabaseIsOneLine(t *testing.T) {
 
 // A session of another role shows its pid, role and application, and Postgres hides its state
 // and transaction age from a role without pg_read_all_stats; the report says each is hidden
-// rather than printing an empty field. A session whose state is visible and that shows no
-// transaction start was in no transaction, and says so rather than that its age is hidden. An
-// autovacuum worker shows no role, and says what it is. A transaction's age is printed as Postgres
-// measured it, to the microsecond, never rounded.
+// rather than printing an empty field. A session that is idle and shows no transaction start was
+// in no transaction, and says so rather than that its age is hidden; one whose state says it is in
+// a transaction or running and that shows none (a WAL sender, whose transaction start Postgres
+// never records) has an age the census cannot see, and says that. An autovacuum worker shows no
+// role, and says what it is. A transaction's age is printed as Postgres measured it, to the
+// microsecond, never rounded.
 func TestSessionStringSaysWhatPostgresHides(t *testing.T) {
 	age := 59*time.Second + 500123*time.Microsecond
 	for session, want := range map[Session]string{
-		{PID: 79, User: "other"}:                       `pid 79 (user other, application "", state not visible, transaction age not visible)`,
-		{PID: 464}:                                     `pid 464 (user not visible, application "", state not visible, transaction age not visible)`,
-		{PID: 798, Autovacuum: true}:                   `pid 798 (autovacuum worker, application "", state not visible, transaction age not visible)`,
-		{PID: 85, User: "dispatch", State: "idle"}:     `pid 85 (user dispatch, application "", idle, in no transaction when read)`,
-		{PID: 82, User: "dispatch", State: "disabled"}: `pid 82 (user dispatch, application "", disabled, transaction age not visible)`,
+		{PID: 79, User: "other"}:                                                 `pid 79 (user other, application "", state not visible, transaction age not visible)`,
+		{PID: 464}:                                                               `pid 464 (user not visible, application "", state not visible, transaction age not visible)`,
+		{PID: 798, Autovacuum: true}:                                             `pid 798 (autovacuum worker, application "", state not visible, transaction age not visible)`,
+		{PID: 85, User: "dispatch", State: "idle"}:                               `pid 85 (user dispatch, application "", idle, in no transaction when read)`,
+		{PID: 82, User: "dispatch", State: "disabled"}:                           `pid 82 (user dispatch, application "", disabled, transaction age not visible)`,
+		{PID: 86, User: "dispatch", State: "idle in transaction"}:                `pid 86 (user dispatch, application "", idle in transaction, transaction age not visible)`,
+		{PID: 87, User: "dispatch", State: "active"}:                             `pid 87 (user dispatch, application "", active, transaction age not visible)`,
 		{PID: 80, User: "dispatch", State: "idle in transaction", XactAge: &age}: `pid 80 (user dispatch, application "", idle in transaction, transaction open 59.500123s)`,
 	} {
 		if got := session.String(); got != want {
@@ -250,14 +254,18 @@ func TestAHolderRefusesOnlyWhatWouldHoldTheMigrationPastItsLockTimeout(t *testin
 		// Only a holder of another role has its state and age hidden, and only then is the grant
 		// named as what lets the census read the age.
 		"a session whose age Postgres hides": {holder: lockHolder{Session: Session{PID: 79, User: "other"}}, cancellation: true, want: "Postgres hides its transaction's age from the census's role, which is not the session's role, so the census cannot rule out a transaction older than 1m0s; granting the census's role pg_read_all_stats lets the census read the age"},
-		// A holder whose state the census sees, between transactions when pg_stat_activity was read
-		// in the query that read pg_locks, holds a transaction younger than that query.
+		// A holder whose state the census sees, idle when pg_stat_activity was read in the query
+		// that read pg_locks, was between transactions, so it holds one younger than that query.
 		"a session of a visible role between transactions": {holder: lockHolder{Session: Session{PID: 85, User: "dispatch", State: "idle"}}, cancellation: true},
-		"a session Postgres does not track":                {holder: lockHolder{Session: Session{PID: 82, User: "dispatch", State: "disabled"}}, cancellation: true, want: "Postgres records no transaction start for it with track_activities off, so the census cannot rule out a transaction older than 1m0s"},
-		"an old transaction":                               {holder: lockHolder{Session: Session{PID: 80, User: "dispatch", XactAge: &old}}, cancellation: true, want: "has held a lock on things for 2h0m0s, longer than 1m0s"},
-		"a young transaction":                              {holder: lockHolder{Session: Session{PID: 81, User: "dispatch", XactAge: &young}}, cancellation: true},
-		"a transaction half a second short of the bound":   {holder: lockHolder{Session: Session{PID: 83, User: "dispatch", XactAge: &short}}, cancellation: true},
-		"a transaction half a second past the bound":       {holder: lockHolder{Session: Session{PID: 84, User: "dispatch", XactAge: &past}}, cancellation: true, want: "transaction open 1m0.5s) has held a lock on things for 1m0.5s, longer than 1m0s"},
+		// One whose state says it is in a transaction, or running, yet shows no transaction start
+		// is not: Postgres records none for a WAL sender, to any role.
+		"a session in a transaction with no transaction start": {holder: lockHolder{Session: Session{PID: 86, User: "dispatch", State: "idle in transaction"}}, cancellation: true, want: "pid 86 (user dispatch, application \"\", idle in transaction, transaction age not visible) holds a lock on things, and Postgres records no transaction start for it though its state is idle in transaction (it records none for a WAL sender, to any role), so the census cannot rule out a transaction older than 1m0s"},
+		"a running session with no transaction start":          {holder: lockHolder{Session: Session{PID: 87, User: "dispatch", State: "active"}}, cancellation: true, want: "Postgres records no transaction start for it though its state is active"},
+		"a session Postgres does not track":                    {holder: lockHolder{Session: Session{PID: 82, User: "dispatch", State: "disabled"}}, cancellation: true, want: "Postgres records no transaction start for it with track_activities off, so the census cannot rule out a transaction older than 1m0s"},
+		"an old transaction":                                   {holder: lockHolder{Session: Session{PID: 80, User: "dispatch", XactAge: &old}}, cancellation: true, want: "has held a lock on things for 2h0m0s, longer than 1m0s"},
+		"a young transaction":                                  {holder: lockHolder{Session: Session{PID: 81, User: "dispatch", XactAge: &young}}, cancellation: true},
+		"a transaction half a second short of the bound":       {holder: lockHolder{Session: Session{PID: 83, User: "dispatch", XactAge: &short}}, cancellation: true},
+		"a transaction half a second past the bound":           {holder: lockHolder{Session: Session{PID: 84, User: "dispatch", XactAge: &past}}, cancellation: true, want: "transaction open 1m0.5s) has held a lock on things for 1m0.5s, longer than 1m0s"},
 	} {
 		got := holderRefusal(tc.holder, "things", tc.pastFreezeAge, lockBound{setting: "500ms", cancelsAutovacuum: tc.cancellation}, time.Minute)
 		if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
