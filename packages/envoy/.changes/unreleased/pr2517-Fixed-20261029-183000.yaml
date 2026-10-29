@@ -1,0 +1,5 @@
+kind: Fixed
+body: The listener no longer answers `GET /v1/sessions` or `GET /v1/registry/<session_id>` with `envoy: the message bus did not answer` while the bus is healthy. Its startup gate waited for the role claim watcher's readiness, which a first scan nats.go's idle timer ended also releases, while the view those routes read refuses every read until that scan has delivered each claim. The gate now waits for that view to be complete (`kvwatch.Watcher.WaitComplete`, `store.Registry.WaitForCacheReady`), and a startup that can complete no scan still serves, fail open, with the warn it had before. The refusal's 503, its `Retry-After: 1` and its body are unchanged.
+time: 2026-10-29T18:30:00.000000000Z
+custom:
+    Issue: pr2517
