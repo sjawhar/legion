@@ -469,25 +469,25 @@ for (const variant of ["full", "compact"] as const) {
       expect(time?.getAttribute("datetime")).toBe("2026-10-05T14:30:00Z");
       expect(time?.getAttribute("title")).toBe("2026-10-05T14:30:00Z");
       expect(card.getByText("Approve spec.md (version 12)?")).toBeTruthy();
-      expect(card.queryByTestId("version-diff")).toBeNull();
+      expect(card.queryByTestId("change-view")).toBeNull();
       expect(getArtifactVersion).not.toHaveBeenCalled();
 
       const show = card.getByRole("button", { name: "Show diff" });
       expect(show.getAttribute("aria-expanded")).toBe("false");
       fireEvent.click(show);
-      const diff = await card.findByTestId("version-diff");
+      const diff = await card.findByTestId("change-view");
       expect(getArtifactVersion.mock.calls).toEqual([
         ["artifact-1", 11],
         ["artifact-1", 12],
       ]);
-      expect(diff.querySelector("del")?.textContent).toBe("Before\n");
-      expect(diff.querySelector("ins")?.textContent).toBe("After\n");
+      expect(diff.querySelector("del")?.textContent).toBe("Before");
+      expect(diff.querySelector("ins")?.textContent).toBe("After");
       expect(card.queryByRole("button", { name: "Show diff" })).toBeNull();
 
       const hide = card.getByRole("button", { name: "Hide diff" });
       expect(hide.getAttribute("aria-expanded")).toBe("true");
       fireEvent.click(hide);
-      expect(card.queryByTestId("version-diff")).toBeNull();
+      expect(card.queryByTestId("change-view")).toBeNull();
       expect(card.getByRole("button", { name: "Show diff" })).toBeTruthy();
     } finally {
       view.unmount();
@@ -520,7 +520,7 @@ test("the diff cuts every decision block, so answers alone leave nothing changed
   const card = within(view.container);
   try {
     fireEvent.click(card.getByRole("button", { name: "Show diff" }));
-    const diff = await card.findByTestId("version-diff");
+    const diff = await card.findByTestId("change-view");
     expect(diff.querySelector("ins, del")).toBeNull();
     expect(diff.textContent).toContain("The platform team asked for a rollback path.");
     expect(diff.textContent).not.toContain("ask{");
@@ -540,11 +540,11 @@ test("the diff keeps a paragraph changed beside the decision blocks", async () =
   const card = within(view.container);
   try {
     fireEvent.click(card.getByRole("button", { name: "Show diff" }));
-    const diff = await card.findByTestId("version-diff");
-    expect(diff.querySelector("del")?.textContent).toBe("The service ships behind a flag.\n");
-    expect(diff.querySelector("ins")?.textContent).toBe(
-      "The service ships behind a flag and a canary.\n"
-    );
+    const diff = await card.findByTestId("change-view");
+    const changed = diff.querySelector('[data-change="changed"]');
+    expect(changed?.querySelector("ins")?.textContent).toBe(" and a canary");
+    expect(changed?.querySelector("del")).toBeNull();
+    expect(changed?.textContent).toBe("The service ships behind a flag and a canary.");
     expect(diff.textContent).not.toContain("ask{");
   } finally {
     view.unmount();

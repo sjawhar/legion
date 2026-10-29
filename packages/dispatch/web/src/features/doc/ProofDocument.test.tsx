@@ -389,9 +389,9 @@ test("ProofDocument compares a selected version with the current settled text wh
   try {
     await sync();
     await waitFor(() => {
-      const diff = within(view.container).getByTestId("version-diff");
-      expect(diff.querySelector("del")?.textContent).toContain("SQLite");
-      expect(diff.querySelector("ins")?.textContent).toContain("Postgres");
+      const diff = within(view.container).getByTestId("change-view");
+      expect(diff.querySelector("del")?.textContent).toBe("SQLite");
+      expect(diff.querySelector("ins")?.textContent).toBe("Postgres");
     });
   } finally {
     view.unmount();

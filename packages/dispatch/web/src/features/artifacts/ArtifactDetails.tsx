@@ -14,7 +14,7 @@ import {
   textMutedOnSurfaceMuted,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { VersionDiff } from "../doc/VersionDiff";
+import { ChangeView } from "../doc/ChangeView";
 import { ReferencedBy } from "../refs/ReferencedBy";
 import { buildDispatchReference, documentRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
@@ -204,7 +204,7 @@ export function ArtifactDetails({ artifact }: { artifact: Artifact }): ReactNode
                 beforeContent.isError || afterContent.isError ? (
                   <p className={`text-sm ${dangerText}`}>Could not load versions to compare.</p>
                 ) : isText(beforeContent.data) && isText(afterContent.data) ? (
-                  <VersionDiff
+                  <ChangeView
                     after={afterContent.data.markdown}
                     before={beforeContent.data.markdown}
                   />
