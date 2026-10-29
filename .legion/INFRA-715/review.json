@@ -2,41 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-715",
-  "completed": "2026-10-29T16:55:00Z",
-  "round": 4,
+  "completed": "2026-10-29T18:35:00Z",
+  "round": 5,
   "decision": "changes_requested",
-  "reviewedCodeHead": "090ae14dd225",
+  "reviewedCodeHead": "e0629eed524f",
   "critical": 0,
-  "important": 1,
-  "minor": 4,
+  "important": 0,
+  "minor": 6,
   "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/docs/mutation.go",
-      "description": "When every occurrence refuses the mark, mutation.go:646-655 reports the refusal of the last occurrence NearestFirst lists, the farthest one. The deep review's probe: an ask's quote copied to the front matter (nearest) and to a code block (farther) got the 400 'would land in a code block'; an uploader who removes the code block is refused again for the front matter. Report the first (nearest) refusal, the one Find would have anchored at, or name every refused place; add a test."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/find.go",
-      "description": "QuoteFinder.FindDiscardingMiss (find.go:164-170) and find's describeMiss flag have no production caller left; ReplaceText was the only one. Delete both, drop their reanchor_test.go cases, and point AGENTS.md:2415, the pr2447 solutions note and the NearestFirst doc comment at NearestFirst."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/find.go",
-      "description": "The nearest-then-earlier rule exists twice: NearestFirst's comparator (find.go:188-193) and find's near loop (find.go:247-257). Write one comparator; find's near branch becomes slices.MinFunc with it, so 'Find with near returns NearestFirst's first' holds by construction."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/find_test.go",
-      "description": "The tie assertion at find_test.go:1006 runs only when the gap between the first two matches is even, and the fixture's gap is 11, so it never runs. Use a fixture with an exact tie and assert it every time."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/.changes/unreleased/INFRA-715-upload-ask-into-code-block.yaml",
-      "description": "The changelog said any copy into a code block keeps the anchor on the original; for a comment or suggestion a code block carries the mark. Fixed by the reviewer (prose only), scoped to where the anchor cannot stand."
-    }
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/mutation.go", "description": "mutation.go:720 dedupes places by Place() text, so a quote left in two separate code blocks is named 'a code block … move that text out of it'. That contradicts the 'one pass over the markdown resolves it' claim in the reanchorError doc and in AGENTS.md:79-80. Count per place ('two code blocks'), fix the placeList example (a heading never refuses), and update the test 'one place its quote stands in twice'."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/upload_anchors_test.go", "description": "No test tells nearest order from document order: in the two-place case the front matter is both nearest and first. Add a case with the anchor late and a code block nearer than the front matter, expecting 'a code block and the front matter'."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/find_test.go", "description": "find_test.go:1019 checks errors.Is(err, ErrTargetNotFound), which a full *ErrQuoteNotFound also passes; assert err == ErrTargetNotFound so the cheap miss stays pinned."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/find.go", "description": "Find (find.go:160-161) is now a pass-through to find, its only caller; move the body into Find."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/mutation.go", "description": "mutation.go:649-664 re-tests `refused` after the loop to learn why it stopped; decide each outcome in the loop (labelled continue on the reanchors loop), leaving only the all-refused return after it."},
+    {"severity": "minor", "file": "docs/solutions/envoy/reuse-work-across-one-writes-calls-with-a-per-call-object-that-prepares-after-its-checks-not-a-version-keyed-cache-pr2447.md", "description": "Cited find.go:111 and :1040, both stale. Fixed by the reviewer (prose only): it now names the symbols. PR body 'Look at first' named refusedReanchor; fixed by the reviewer to reanchorError."}
   ],
-  "accepted": "Round-3 findings fixed in 090ae14d: the copy case re-anchors at the nearest allowed occurrence (deep review: deleting the skip loop fails both copy tests), reanchorError is one decision returning a plain ErrDocSchema for server faults (removing that branch fails its test), and Place() owns the wording. The forward merge 84001a00 is correct: a three-way merge reproduces it, and the README row is main's with the PR's sentence appended. Not a defect: extracting the occurrence loop from ReplaceText (readability; the behaviour is tested).",
-  "ci": "CI run 40911247197 at code head 090ae14d was queued at 16:24Z; the PR is MERGEABLE again. My prose push starts a new run. A change request does not wait on CI.",
-  "thermonuclear": "Run once at 090ae14d: deep review approve with three minors (farthest place named, vacuous tie test, changelog breadth); code quality: dead FindDiscardingMiss, duplicated comparator, loop structure, vacuous tie test. The reviewer raised 'farthest place named' to important: the message sends the uploader to a second refusal."
+  "accepted": "Round-4 findings fixed in e0629eed: the 400 names every distinct place nearest first; one comparator nearerFirst; FindDiscardingMiss and describeMiss deleted with no reference left in code or docs; the tie test always runs. NearestFirst sorts a fresh slice each call (no cache mutated), SortFunc is total on From, and MinFunc keeps Find's choice. Threads PRRT_kwDORFy7ds6xqDFj, PRRT_kwDORFy7ds6xqDFu, PRRT_kwDORFy7ds6xqDF1 accepted.",
+  "ci": "CI run 40921473832 at code head e0629eed (handoffsOnly to 3eeeb2a4): at 18:30Z changes and lint success, test and worker-image in progress, envoy-go, envoy-go-race, dispatch, dispatch-memory, dispatch-multiprocess and the rest still queued. A change request does not wait on CI.",
+  "thermonuclear": "Run once at e0629eed: deep review approve (four minors and a PR-body item, probes through go test -overlay); code quality: pass-through Find, the loop's post-hoc checks."
 }
