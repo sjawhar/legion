@@ -137,7 +137,7 @@ const bytesOfHeapAByteAtTheDensest = 1_058
 // adds to it: the price of the structure part of a room's charge (roomCharge), which a count of the
 // rendering cannot see. One update of 500,000 GC structs, a million bytes, keeps 64,645,200 bytes
 // of heap in its room with the rendering unchanged (plan.md, departure 4), where the rendering's
-// count prices nothing for it. Measured on 2026-10-26
+// count prices nothing for it. Measured on 2026-10-29
 // (TestTheRoomBudgetsPricePerStructHoldsEveryKind), what one copy keeps for each struct, in frames
 // of 20,000 of one kind: a GC run 129 bytes, a deleted item 130, a string 146, an Any value 162, a
 // format 170, a JSON value 178, an XML hook 354, an array, a map, a text, an XML fragment or an XML
@@ -148,13 +148,37 @@ const bytesOfHeapAByteAtTheDensest = 1_058
 // (peerWeighing) does not decide which kind of a browser's frame is the expensive one; that test
 // fails once any kind keeps more than this, or once the largest falls under 0.8 of it.
 //
-// What integrating a struct splits is charged at the same price (splitsAStructCanCause, two for
-// each struct, and for each delete range one for each of its two ends its apply can leave split,
-// deletedRuns.splitEnds): a split adds one item. Measured the same way
-// (TestTheRoomBudgetsSplitMarginHoldsWhatSplitsAdd), a one-character insert splitting a run keeps
-// 339 bytes with its split, and a delete range splitting a run at both ends keeps 307, about 154
-// bytes a split.
+// What a struct's integration splits is charged at bytesOfHeapASplit, not at this price: a split
+// allocates an item, and the content it divides stays where it is.
 const bytesOfHeapAStruct = 620
+
+// bytesOfHeapASplit is the heap one copy of a document holds for each item a struct's integration
+// or a delete range's apply splits off (splitsAStructCanCause, two for each new struct, and for
+// each delete range one for each of its two ends its apply can leave split,
+// deletedRuns.splitEnds). A split allocates one item, and what it does with the content it divides
+// follows that content's kind rather than the kind of struct the split lands in: a string's text
+// and a deleted length are divided where they stand, the text as a slice of the bytes the item
+// already held (sjawhar/ygo v1.51.3-sami.7, crdt/content.go:52-70, :81-85, :114-120); a run of Any
+// or JSON values is divided into a slice of its own, sixteen bytes an interface header for each
+// value past the split (:170-174, :188-192), which the content price of the struct that carried
+// the run covered when the hook admitted it, 120 bytes for each of its bytes against 16 for each
+// of its values (bytesOfHeapAByteOfValues). So a split is priced from the item, not from
+// bytesOfHeapAStruct, the heaviest kind's price. Measured on 2026-10-29
+// (TestTheRoomBudgetsSplitMarginHoldsWhatSplitsAdd) in frames of 20,000 splits of one shape: a
+// delete range splitting a run at both ends keeps 307.2 bytes, 153.6 a split, and a one-character
+// insert splitting a run keeps 338.8 bytes with its split, 191.3 of that beyond the 145.5 its
+// string struct keeps alone (TestTheRoomBudgetsPricePerStructHoldsEveryKind). Charged at the next
+// fifty bytes past the larger; that test fails once a split keeps more than this, or once the
+// range's falls under 0.7 of it.
+//
+// Typing is what the difference is for. A keystroke adds one struct and can split one item, and
+// charged at the heaviest kind's price its two splits came to 1,240 bytes a copy against the 338.8
+// the insert and its split keep together: the room budget charged a mebibyte of prose typed with
+// 2,000 keystrokes and ten pastes of 4 KiB a structure part of 7,657,120 bytes, which took its
+// charge to 1.179 times the 52,421,760 bytes of heap it held, past the 1.176 a priced shape may be
+// charged; at this price the same room is charged 1.116 times its heap
+// (TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor, measured on 2026-10-29).
+const bytesOfHeapASplit = 200
 
 // bytesOfHeapAByteOfText is the heap one copy of a document holds for each byte of text a
 // browser's update carries as content no rendering prices (peerWeighing.walkedStruct): a string,
@@ -188,23 +212,23 @@ const earlyCountCharge = 16 << 20
 // pressureReserveBytes is how far past the budget's limit the charges of the delete-only updates
 // admitted while the budget is full may take it (refusedUnderPressure): 256 MiB. A delete that cuts
 // the middle of an item splits it and adds structs, so unbounded deletes would grow the heap while
-// nothing can be closed. A delete range is charged a struct at both copies, 1,240 bytes, for each
-// of its ends its apply can leave split (deletedRuns.splitEnds), two at most, where a split keeps
+// nothing can be closed. A delete range is charged a split at both copies, 800 bytes, for each of
+// its ends its apply can leave split (deletedRuns.splitEnds), two at most, where a split keeps
 // about 154 bytes in each copy (TestTheRoomBudgetsSplitMarginHoldsWhatSplitsAdd), so deletes that
-// fill the reserve hold about a quarter of it, 67 MB, in the heap.
+// fill the reserve hold about three quarters of it, 206 MB, in the heap.
 //
 // It is set from what A4 (cmd/dispatch, TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks) asks a
 // full server to take, measured on its shapes
 // (TestTheRoomBudgetsPressureReserveHoldsWhatAFullServerIsAskedToTake), and not left at the 64 MiB
 // the plan proposed. What raises full is a sweep that finds the charges past the limit with
 // nothing to close, and the update that took them past was admitted whole: one of A4's rounds of
-// 2,048 headings is a structure part of 68,067,328 bytes and a count of 7,700,480 more, 75,767,808
-// past the limit at most once its early count lands, more than 64 MiB by itself, and a second
-// grower's round can be admitted before the sweep raises full. Its hundred shrinking updates -
-// four cuts of fifty bytes from one browser's copy, each sent to twenty-five rooms, each carrying
-// the cuts before it, of which only its own range is new to the room (deletedRuns) - charge
-// 248,000 bytes. Three crossing rounds and the shrinks come to 227,551,424 bytes, inside the
-// reserve with 40 MB to spare.
+// 2,048 headings is a structure part of 47,423,488 bytes and a count of 7,700,480 more, 55,123,968
+// past the limit at most once its early count lands, close to the whole of 64 MiB by itself, and a
+// second grower's round can be admitted before the sweep raises full. Its hundred shrinking
+// updates - four cuts of fifty bytes from one browser's copy, each sent to twenty-five rooms, each
+// carrying the cuts before it, of which only its own range is new to the room (deletedRuns) -
+// charge 80,000 bytes. Three crossing rounds and the shrinks come to 165,451,904 bytes, inside the
+// reserve with 103 MB to spare.
 const pressureReserveBytes = 256 << 20
 
 // admissionFlushAllowance is what an admission that finds the budget short waits for its sweep
@@ -304,11 +328,11 @@ type budgetedRoom struct {
 //     count re-bases it: it clears the bytes added up to the rendering it measured, never those
 //     added since. A whole-state handoff of a document the room already holds adds nothing here.
 //   - the structure part: what each update the room integrates adds that a count of the rendering
-//     cannot see (peerWeighing.structureHeap) - each new struct with the splits its integration
-//     can cause, the splits each delete range can leave at its ends, none at an end the room
-//     already held deleted (deletedRuns.splitEnds), all at bytesOfHeapAStruct, and the content no
-//     rendering prices at its kind's heap a byte - at both copies. A browser's update is charged
-//     it by the peer hook that admitted it (grew); every other transaction - an API write's
+//     cannot see (peerWeighing.structureHeap) - each new struct at bytesOfHeapAStruct, the splits
+//     its integration can cause and the splits each delete range can leave at its ends, none at an
+//     end the room already held deleted (deletedRuns.splitEnds), at bytesOfHeapASplit, and the
+//     content no rendering prices at its kind's heap a byte - at both copies. A browser's update is
+//     charged it by the peer hook that admitted it (grew); every other transaction - an API write's
 //     publish, an injected update, settlement's repair, any of the server's own writes - by the
 //     update observer whose drain of the room's update log hands it over (wrote), at the same
 //     prices, as each of their scans counts toward the room's scan total (roomScans.observed). The

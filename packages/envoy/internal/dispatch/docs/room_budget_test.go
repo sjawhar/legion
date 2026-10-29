@@ -218,23 +218,23 @@ func TestTheMeasurersCountClearsOnlyTheContentAddedUpToTheRenderingItMeasured(t 
 //
 // What browsers add is charged beside the count. A 4 KiB paste not yet counted is its content at
 // the densest price at both copies, 4,096 x 1,058 x 2 = 8,667,136 bytes, so rooms each holding one
-// admit thirty-four. 2,000 keystrokes, each one struct with its two splits at bytesOfHeapAStruct
-// and its content, a character and its length, as text at bytesOfHeapAByteOfText (typed text reads
-// as unrendered to the walk, unrenderedContentHeap), at both copies, (3 x 620 + 2 x 2) x 2 = 3,728
-// bytes, are a structure part of 7,456,000 bytes, which no count clears, so rooms each typed into
-// that much admit thirty-four as well; a delete range the room did not hold deleted is two splits,
-// 2 x 620 x 2 = 2,480 bytes, and one it held deleted already nothing (deletedRuns). One frame of
-// 500,000 GC structs (plan.md, departure 4: 64,645,200 bytes kept in one copy, the rendering
-// unchanged) is a structure part of 500,000 x 3 x 620 x 2 = 1,860,000,000 bytes, so two such rooms
-// take the whole budget. A document at the decode cap is priced at its 1,048,576 structs whatever
-// it renders (bytesOfHeapAStructHeld), 1,048,576 x 170 x 2 = 356,515,840 bytes: the long-edited
-// document's 53 elements and the agent-rewritten document's 65,536 alike, so the budget admits six
-// of either, where their elements would have admitted over forty thousand of the first. A
-// paragraph of a mebibyte typed in one transaction loads as 11 structs making 9 elements, 4,230
-// bytes a copy at the element price, and is priced at its rendered bytes instead
-// (bytesOfHeapARenderedByte), 1,048,576 x 12 x 2 = 25,165,824 bytes, so the budget admits
-// eighty-five; the same price leaves the other shapes where their elements or structs put them, a
-// mebibyte of prose at 12,582,912 bytes a copy against its elements' 27,072,000, and the
+// admit thirty-four. 2,000 keystrokes, each one struct at bytesOfHeapAStruct with its two splits at
+// bytesOfHeapASplit and its content, a character and its length, as text at bytesOfHeapAByteOfText
+// (typed text reads as unrendered to the walk, unrenderedContentHeap), at both copies,
+// (620 + 2 x 200 + 2 x 2) x 2 = 2,048 bytes, are a structure part of 4,096,000 bytes, which no
+// count clears, so rooms each typed into that much admit thirty-six; a delete range the room did
+// not hold deleted is two splits, 2 x 200 x 2 = 800 bytes, and one it held deleted already nothing
+// (deletedRuns). One frame of 500,000 GC structs (plan.md, departure 4: 64,645,200 bytes kept in
+// one copy, the rendering unchanged) is a structure part of 500,000 x (620 + 2 x 200) x 2 =
+// 1,020,000,000 bytes, so two such rooms take the whole budget. A document at the decode cap is
+// priced at its 1,048,576 structs whatever it renders (bytesOfHeapAStructHeld), 1,048,576 x 170 x
+// 2 = 356,515,840 bytes: the long-edited document's 53 elements and the agent-rewritten document's
+// 65,536 alike, so the budget admits six of either, where their elements would have admitted over
+// forty thousand of the first. A paragraph of a mebibyte typed in one transaction loads as 11
+// structs making 9 elements, 4,230 bytes a copy at the element price, and is priced at its rendered
+// bytes instead (bytesOfHeapARenderedByte), 1,048,576 x 12 x 2 = 25,165,824 bytes, so the budget
+// admits eighty-five; the same price leaves the other shapes where their elements or structs put
+// them, a mebibyte of prose at 12,582,912 bytes a copy against its elements' 27,072,000, and the
 // agent-rewritten document at 12,582,900 against its structs' 178,257,920. There is no ceiling on
 // one room: a mebibyte of the densest rendering, which goldmark stops counting and which is priced
 // from its bytes (bytesOfHeapAByteAtTheDensest), is more than the whole budget at both copies, so
@@ -250,8 +250,8 @@ func TestTheRoomBudgetsArithmetic(t *testing.T) {
 	}{
 		{"a room of a mebibyte of prose", prose, 0, 0, 54_144_000, 39},
 		{"a mebibyte of prose with a 4 KiB paste not yet counted", prose, 4 << 10, 0, 62_811_136, 34},
-		{"a mebibyte of prose typed into with 2,000 keystrokes", prose, 0, 2_000 * ((1+splitsAStructCanCause)*bytesOfHeapAStruct + 2*bytesOfHeapAByteOfText) * roomCopies, 61_600_000, 34},
-		{"a mebibyte of prose given a frame of 500,000 GC structs", prose, 0, 500_000 * (1 + splitsAStructCanCause) * bytesOfHeapAStruct * roomCopies, 1_914_144_000, 2},
+		{"a mebibyte of prose typed into with 2,000 keystrokes", prose, 0, 2_000 * (bytesOfHeapAStruct + splitsAStructCanCause*bytesOfHeapASplit + 2*bytesOfHeapAByteOfText) * roomCopies, 58_240_000, 36},
+		{"a mebibyte of prose given a frame of 500,000 GC structs", prose, 0, 500_000 * (bytesOfHeapAStruct + splitsAStructCanCause*bytesOfHeapASplit) * roomCopies, 1_074_144_000, 2},
 		{"the long-edited document typed on until the decode cap", copyHeap(5_314, 53, maxUpdateItems), 0, 0, 356_515_840, 6},
 		{"an agent's whole rewrites until the decode cap refused one", copyHeap(1_048_575, 65_536, maxUpdateItems), 0, 0, 356_515_840, 6},
 		{"a paragraph of a mebibyte typed in one transaction", copyHeap(pmdoc.MaxDocumentBytes, 9, 11), 0, 0, 25_165_824, 85},

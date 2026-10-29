@@ -38,11 +38,11 @@ func chargeParts(charge *roomCharge) (structure, content, measuredAt, weight int
 	return charge.structure, charge.content, charge.measuredAt, charge.weight
 }
 
-// Each update the hook admits adds to its room's structure part every new struct with the two
-// splits its integration can cause, the splits its delete ranges can leave at their ends
-// (deletedRuns.splitEnds), all at bytesOfHeapAStruct, and the content of its new structs no
-// rendering prices at its kind's heap a byte, at both copies. A whole-state handoff of the
-// document the room holds adds nothing, nor does an update the walk refuses, which is never
+// Each update the hook admits adds to its room's structure part every new struct at
+// bytesOfHeapAStruct, the two splits its integration can cause and the splits its delete ranges can
+// leave at their ends (deletedRuns.splitEnds) at bytesOfHeapASplit, and the content of its new
+// structs no rendering prices at its kind's heap a byte, at both copies. A whole-state handoff of
+// the document the room holds adds nothing, nor does an update the walk refuses, which is never
 // applied. A count of the room's rendering re-bases its counted part and leaves the structure
 // part as it was.
 func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount(t *testing.T) {
@@ -62,7 +62,7 @@ func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount
 		t.Fatalf("a handoff of the document the room holds grew its structure part by %d bytes, want nothing", grew)
 	}
 	const gcStructs = 1_000
-	if grew, want := admit("a frame of GC structs", gcFrameFrom(77, gcStructs)), int64(gcStructs*(1+splitsAStructCanCause)*bytesOfHeapAStruct*roomCopies); grew != want {
+	if grew, want := admit("a frame of GC structs", gcFrameFrom(77, gcStructs)), int64(gcStructs*(bytesOfHeapAStruct+splitsAStructCanCause*bytesOfHeapASplit)*roomCopies); grew != want {
 		t.Fatalf("a frame of %d GC structs grew the structure part by %d bytes, want %d", gcStructs, grew, want)
 	}
 	// Margin entries render nowhere, so their keys are charged as text and their Any values at the
@@ -78,14 +78,14 @@ func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount
 	}
 	want := int64(0)
 	for _, entry := range walked.structs {
-		want += int64((1+splitsAStructCanCause)*bytesOfHeapAStruct + len(entry.key)*bytesOfHeapAByteOfText + len(entry.content)*bytesOfHeapAByteOfValues)
+		want += int64(bytesOfHeapAStruct + splitsAStructCanCause*bytesOfHeapASplit + len(entry.key)*bytesOfHeapAByteOfText + len(entry.content)*bytesOfHeapAByteOfValues)
 	}
 	if grew := admit("margin entries", entries); grew != want*roomCopies {
 		t.Fatalf("ten margin entries grew the structure part by %d bytes, want %d", grew, want*roomCopies)
 	}
 	// Five ranges of a client the room holds nothing of, none touching the next: each can split at
 	// both ends, but for the first's start, the client's first clock, where its first item starts.
-	if grew, want := admit("delete ranges", deleteRangesFrom(78, 5)), int64((5*splitsAStructCanCause-1)*bytesOfHeapAStruct*roomCopies); grew != want {
+	if grew, want := admit("delete ranges", deleteRangesFrom(78, 5)), int64((5*splitsAStructCanCause-1)*bytesOfHeapASplit*roomCopies); grew != want {
 		t.Fatalf("five delete ranges grew the structure part by %d bytes, want %d", grew, want)
 	}
 	if grew := admit("the same delete ranges again", deleteRangesFrom(78, 5)); grew != 0 {
@@ -159,14 +159,14 @@ func TestTheRoomBudgetChargesADeleteRangeOnlyOnce(t *testing.T) {
 	if struck.structs != 1 || struck.deletes == 0 {
 		t.Fatalf("the keystroke carries %d new structs and %d delete ranges, want one struct beside the room's delete set", struck.structs, struck.deletes)
 	}
-	if grew, want := admit("a keystroke carrying the room's delete set", keystroke), int64(((1+splitsAStructCanCause)*bytesOfHeapAStruct+struck.content)*roomCopies); grew != want {
+	if grew, want := admit("a keystroke carrying the room's delete set", keystroke), int64((bytesOfHeapAStruct+splitsAStructCanCause*bytesOfHeapASplit+struck.content)*roomCopies); grew != want {
 		t.Fatalf("a keystroke carrying %d delete ranges the room holds grew the structure part by %d bytes, want its one struct's %d", struck.deletes, grew, want)
 	}
 
 	// The keystroke's character is at index 0, then the 2,000 characters left between the deleted
 	// ones; the paragraph's last 999 characters, none deleted, follow.
 	deletion := peerDeletingAt(t, room, 2_501, 1)
-	if grew, want := admit("a new deletion", deletion), int64(splitsAStructCanCause*bytesOfHeapAStruct*roomCopies); grew != want {
+	if grew, want := admit("a new deletion", deletion), int64(splitsAStructCanCause*bytesOfHeapASplit*roomCopies); grew != want {
 		t.Fatalf("a deletion of one character grew the structure part by %d bytes, want one range's two splits, %d", grew, want)
 	}
 	if grew := admit("the same deletion again", deletion); grew != 0 {
@@ -244,7 +244,7 @@ func TestTheRoomBudgetChargesATransactionsAddedContentNotItsDeleteSet(t *testing
 	_, _, _, after := chargeParts(charge)
 	added := uncounted() - typed
 	// The keystroke's struct, its splits and its content, a character and its length, as text.
-	structure := int64(((1+splitsAStructCanCause)*bytesOfHeapAStruct + 2*bytesOfHeapAByteOfText) * roomCopies)
+	structure := int64((bytesOfHeapAStruct + splitsAStructCanCause*bytesOfHeapASplit + 2*bytesOfHeapAByteOfText) * roomCopies)
 	if keystroke < 2_000 || added != 2 || after-before != 2*bytesOfHeapAByteAtTheDensest*roomCopies+structure {
 		t.Fatalf("a keystroke's %d-byte update added %d bytes of content and %d of charge, want a frame carrying the 2,000 deleted runs that adds its 2 bytes of content and one struct, %d of charge",
 			keystroke, added, after-before, 2*bytesOfHeapAByteAtTheDensest*roomCopies+structure)
@@ -300,7 +300,7 @@ func TestTheRoomBudgetChargesEveryServerWritesStructureAndRefusesNone(t *testing
 	// struck is one struct with its two splits and its content, a string of characters and its
 	// length, as text.
 	struck := func(characters int) int64 {
-		return int64(((1+splitsAStructCanCause)*bytesOfHeapAStruct + (characters+1)*bytesOfHeapAByteOfText) * roomCopies)
+		return int64((bytesOfHeapAStruct + splitsAStructCanCause*bytesOfHeapASplit + (characters+1)*bytesOfHeapAByteOfText) * roomCopies)
 	}
 
 	// A browser's keystroke, through the hook into the room the observer drains.
@@ -337,7 +337,7 @@ func TestTheRoomBudgetChargesEveryServerWritesStructureAndRefusesNone(t *testing
 	if grew, want := write("type three characters", inText(func(text *crdt.YXmlText, txn *crdt.Transaction) { text.Insert(txn, 0, "abc", nil) })), struck(3); grew != want {
 		t.Fatalf("three characters the server typed grew the structure part by %d bytes, want their one struct's %d", grew, want)
 	}
-	if grew, want := write("delete one character", inText(func(text *crdt.YXmlText, txn *crdt.Transaction) { text.Delete(txn, 8, 1) })), int64(splitsAStructCanCause*bytesOfHeapAStruct*roomCopies); grew != want {
+	if grew, want := write("delete one character", inText(func(text *crdt.YXmlText, txn *crdt.Transaction) { text.Delete(txn, 8, 1) })), int64(splitsAStructCanCause*bytesOfHeapASplit*roomCopies); grew != want {
 		t.Fatalf("a character the server deleted grew the structure part by %d bytes, want its range's two splits, %d", grew, want)
 	}
 	if grew := write("hand the room its own state", func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
@@ -352,7 +352,7 @@ func TestTheRoomBudgetChargesEveryServerWritesStructureAndRefusesNone(t *testing
 	if _, err := joinedApplyOps(service, room, []model.EditOp{{Op: "replace", Find: "ordinary", With: "plain"}}, agent, nil); err != nil {
 		t.Fatalf("an API write on a full budget: %v", err)
 	}
-	if grew, least := structure()-before, int64((1+splitsAStructCanCause)*bytesOfHeapAStruct*roomCopies); grew < least {
+	if grew, least := structure()-before, int64((bytesOfHeapAStruct+splitsAStructCanCause*bytesOfHeapASplit)*roomCopies); grew < least {
 		t.Fatalf("an API write's publish grew the structure part by %d bytes, want at least its new struct's %d", grew, least)
 	}
 	if text := renderedLive(t, service, room); !strings.Contains(text, "plain prose") {
@@ -821,7 +821,7 @@ func TestTheRoomBudgetAdmitsDeletesUnderPressureWithinTheReserveAndRefusesThemPa
 		t.Fatal(err)
 	}
 	structure := weighed.structureHeap()
-	if weighed.inserted != 0 || structure != int64(weighed.deletes*splitsAStructCanCause*bytesOfHeapAStruct*roomCopies) || structure == 0 {
+	if weighed.inserted != 0 || structure != int64(weighed.deletes*splitsAStructCanCause*bytesOfHeapASplit*roomCopies) || structure == 0 {
 		t.Fatalf("the deletion inserts %d and is charged %d bytes for %d delete ranges, want a delete-only update charged two splits a range", weighed.inserted, structure, weighed.deletes)
 	}
 	if err, called := weighInto(service, room, deletion); err != nil || !called {
@@ -934,7 +934,7 @@ func TestTheRoomBudgetsPressureReserveHoldsWhatAFullServerIsAskedToTake(t *testi
 		}
 	}
 	perRoom, _, _, _ := chargeParts(charge)
-	if want := int64(cuts * splitsAStructCanCause * bytesOfHeapAStruct * roomCopies); perRoom != want {
+	if want := int64(cuts * splitsAStructCanCause * bytesOfHeapASplit * roomCopies); perRoom != want {
 		t.Fatalf("four cuts, each carrying the cuts before it, grew a room's structure part by %d bytes, want each cut's own range alone, %d", perRoom, want)
 	}
 	shrinks := shrunk * perRoom

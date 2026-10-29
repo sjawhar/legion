@@ -669,14 +669,14 @@ func (w *peerWeighing) addition() roomCount {
 
 // structureHeap is what the walked update adds to its room that a count of the rendering cannot
 // see, at both copies (roomCopies), which the room budget charges to the room's structure part
-// (roomCharge): each new struct with the splits its integration can cause, and the splits its
-// delete ranges can leave (splits), at bytesOfHeapAStruct, and the content of its new structs that
-// no rendering prices (content). A whole-state handoff of a document the room already holds adds
-// no struct and carries no delete range the room is not known to hold deleted, and is charged
-// nothing.
+// (roomCharge): each new struct at bytesOfHeapAStruct, the splits its integration can cause and
+// the splits its delete ranges can leave (splits) at bytesOfHeapASplit, which a split keeps where
+// the kind the split divides does not, and the content of its new structs that no rendering prices
+// (content). A whole-state handoff of a document the room already holds adds no struct and carries
+// no delete range the room is not known to hold deleted, and is charged nothing.
 func (w *peerWeighing) structureHeap() int64 {
-	structs := w.structs*(1+splitsAStructCanCause) + w.splits
-	return int64((structs*bytesOfHeapAStruct + w.content) * roomCopies)
+	splits := w.structs*splitsAStructCanCause + w.splits
+	return int64((w.structs*bytesOfHeapAStruct + splits*bytesOfHeapASplit + w.content) * roomCopies)
 }
 
 // unrenderedContentHeap is the heap one copy of a room keeps for walked's content that no count of

@@ -43,7 +43,7 @@ const (
 	podGoMemoryLimit = 3_865_470_566
 
 	// These mirror constants of internal/dispatch/docs, which this package cannot read:
-	// roomBudgetBytes (room_budget.go:42), bytesOfHeapAnElement (:56), roomCopies (:571),
+	// roomBudgetBytes (room_budget.go:42), bytesOfHeapAnElement (:56), roomCopies (:594),
 	// maxPeerInsertAtTheBound (peer_update.go:110), maxPeerByteCreep (:115) and maxMessageBytes
 	// (:227). No drive takes a mirror on trust. The server names its budget and what each refused
 	// document needs in the line it logs for a refusal (refuseOverRoomBudget), and the budget
@@ -81,10 +81,11 @@ const (
 	// bytesOfHeapAStructHeldForTest mirrors bytesOfHeapAStructHeld
 	// (internal/dispatch/docs/room_budget.go:80), the heap one copy of a room holds for each struct
 	// of its state, measured (TestAResidentRoomsHeapPerStructOfItsState); bytesOfHeapAStructForTest
-	// mirrors bytesOfHeapAStruct (:158), what the structure part charges each struct an update adds
-	// and each split it can cause, splitsAStructCanCauseForTest splitsAStructCanCause
+	// mirrors bytesOfHeapAStruct (:154), what the structure part charges each struct an update adds,
+	// bytesOfHeapASplitForTest bytesOfHeapASplit (:181), what it charges each split that struct can
+	// cause, splitsAStructCanCauseForTest splitsAStructCanCause
 	// (peer_update.go:652), and bytesOfHeapAByteOfTextForTest bytesOfHeapAByteOfText
-	// (room_budget.go:167), what it charges each byte of text an update's struct carries as the
+	// (room_budget.go:190), what it charges each byte of text an update's struct carries as the
 	// walk reads it, its length prefix included (unrenderedContentHeap, peer_update.go:697-713).
 	// TestARoomFedOnlyByAPIWritesIsChargedTheStructsTheyAdd weighs a room's growth against them; a
 	// wrong mirror moves only how much growth it asks for, and its log line prints each figure
@@ -92,11 +93,12 @@ const (
 	// typed room's structure part from them, and fails once the budget charges a room more.
 	bytesOfHeapAStructHeldForTest = 170
 	bytesOfHeapAStructForTest     = 620
+	bytesOfHeapASplitForTest      = 200
 	splitsAStructCanCauseForTest  = 2
 	bytesOfHeapAByteOfTextForTest = 2
 
 	// pressureReserveBytesForTest mirrors pressureReserveBytes
-	// (internal/dispatch/docs/room_budget.go:209), how far past its limit the deletes admitted while
+	// (internal/dispatch/docs/room_budget.go:232), how far past its limit the deletes admitted while
 	// the budget is full may take its charges. TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks
 	// fails unless the charges its shrinks leave are within it; a wrong mirror moves only that
 	// check, beside which it logs the server's own figures.
@@ -104,9 +106,9 @@ const (
 
 	// bytesOfHeapAByteAtTheDensestForTest mirrors bytesOfHeapAByteAtTheDensest
 	// (internal/dispatch/docs/room_budget.go:135), what a room is charged at each copy for a byte of
-	// content its transactions add until its next count. With bytesOfHeapAStructForTest and
-	// splitsAStructCanCauseForTest it prices the most a keystroke adds to its room's charge
-	// (keystrokeChargeForTest), from which
+	// content its transactions add until its next count. With bytesOfHeapAStructForTest,
+	// bytesOfHeapASplitForTest and splitsAStructCanCauseForTest it prices the most a keystroke adds
+	// to its room's charge (keystrokeChargeForTest), from which
 	// TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory leaves the room its person
 	// types in what all of their keystrokes could add, so no keystroke is refused for the budget; a
 	// wrong mirror moves only that room, beside which it logs the budget's arithmetic.
@@ -114,7 +116,7 @@ const (
 	// keystrokeChargeForTest is the most one keystroke, a one-character insert, adds to its room's
 	// charge: its struct and the two splits it can cause in the structure part, and its byte of
 	// content at the densest price at both copies, none of it re-based by a count.
-	keystrokeChargeForTest = bytesOfHeapAStructForTest*(1+splitsAStructCanCauseForTest) + bytesOfHeapAByteAtTheDensestForTest*roomCopiesForTest
+	keystrokeChargeForTest = bytesOfHeapAStructForTest + splitsAStructCanCauseForTest*bytesOfHeapASplitForTest + bytesOfHeapAByteAtTheDensestForTest*roomCopiesForTest
 )
 
 // One browser's update is bounded by bytes, over a real document socket of a real server
@@ -830,7 +832,7 @@ func TestTheHeaviestHandoffTheBoundsAllowIsNotClosedForSize(t *testing.T) {
 // The room budget refuses the browser its own arithmetic says it has no room for: documents of a
 // mebibyte of prose, each edited once, opened until one is refused with 4503 and DOC_BUSY, under the
 // Go limit a 4 GiB pod gives the server. A room is charged at both copies from its admission
-// (roomCopies, internal/dispatch/docs/room_budget.go:571), and an admission reserves the heaviest of
+// (roomCopies, internal/dispatch/docs/room_budget.go:594), and an admission reserves the heaviest of
 // its stored version's elements, its stored history's structs and its rendered bytes at their
 // prices (copyHeap, storedRoomReservation), which for prose is its elements. So the refusals begin
 // within one room of the budget divided by that reservation, computed here from the server's
@@ -1161,19 +1163,20 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 //
 // The arithmetic is the server's prices, mirrored. A typed room is charged its count - the
 // heaviest of its elements', rendered bytes' and structs' prices at both copies (copyHeap,
-// internal/dispatch/docs/room_budget.go:592-602), for prose its elements' - beside its structure
-// part (roomCharge, :295-339): each update's struct with the two splits its integration can cause
-// at bytesOfHeapAStruct, and its text as the walk reads it, its length prefix included, at
-// bytesOfHeapAByteOfText, both at both copies (peerWeighing.structureHeap,
-// peer_update.go:677-680): 3,728 bytes a keystroke and 20,112 for the paste, 765,712 a room. An
+// internal/dispatch/docs/room_budget.go:615-625), for prose its elements' - beside its structure
+// part (roomCharge, :318-362): each update's struct at bytesOfHeapAStruct with the two splits its
+// integration can cause at bytesOfHeapASplit, and its text as the walk reads it, its length prefix
+// included, at bytesOfHeapAByteOfText, all at both copies (peerWeighing.structureHeap,
+// peer_update.go:677-680): 2,048 bytes a keystroke and 18,432 for the paste, 428,032 a room. An
 // admission reserves the stored version's count, which is what the room's load charges until its
 // browser types. Rooms are typed into two at a time, the server's two processors' worth, each pair
 // admitted one after the other before either types, so the second of a pair is admitted beside the
 // first's load alone; the arithmetic follows the drive room by room.
 //
-// The structure part charges a struct as one of its own with both its splits, where ygo merges a
-// run of typed characters back into one item, so it charges typing far past what typing adds; what
-// bounds that over-charge is TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor
+// The structure part charges a struct as one of its own with both the splits its integration can
+// cause, where ygo merges a run of typed characters back into one item and a keystroke splits one
+// item at most, so it charges typing past what typing adds; what bounds that over-charge is
+// TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor
 // (internal/dispatch/docs), which weighs a room typed with ten times these keystrokes and ten
 // pastes against the heap it holds. This drive has the real server charge what those prices say,
 // no more, room by room. Its profile is a tenth of that one because each update costs the server a
@@ -1186,9 +1189,9 @@ func TestTheRoomBudgetDoesNotOverchargeTypingAndPasting(t *testing.T) {
 	memory.env = append(memory.env, "GOMEMLIMIT="+strconv.Itoa(podGoMemoryLimit))
 	fleet := memory.mebibyteFleet(t, func(int64) int { return rooms + 1 })
 	updates := typedAndPasted(t, fleet.state, keystrokes, runs, pasteBytes)
-	withSplits := int64(bytesOfHeapAStructForTest * (1 + splitsAStructCanCauseForTest))
-	keystroke := (withSplits + encodedTextBytes(1)*bytesOfHeapAByteOfTextForTest) * roomCopiesForTest
-	paste := (withSplits + encodedTextBytes(pasteBytes)*bytesOfHeapAByteOfTextForTest) * roomCopiesForTest
+	struck := int64(bytesOfHeapAStructForTest + splitsAStructCanCauseForTest*bytesOfHeapASplitForTest)
+	keystroke := (struck + encodedTextBytes(1)*bytesOfHeapAByteOfTextForTest) * roomCopiesForTest
+	paste := (struck + encodedTextBytes(pasteBytes)*bytesOfHeapAByteOfTextForTest) * roomCopiesForTest
 	bound := keystrokes*keystroke + paste
 	typing := newBrowserDocument(t, fleet.state)
 	for _, update := range updates {
@@ -1608,7 +1611,7 @@ func TestTheRoomBudgetFollowsGrowingRoomsAndClosesTheGoneOnesFirst(t *testing.T)
 // document never gains it; so is one that adds elements and leaves the document no larger in bytes,
 // which a test of bytes would let through; and a hundred updates that shrink documents are applied
 // and stored, their deletes' charges keeping the budget within the pressure reserve past its limit
-// (pressureReserveBytes, internal/dispatch/docs/room_budget.go:209), as the line the server logs
+// (pressureReserveBytes, internal/dispatch/docs/room_budget.go:232), as the line the server logs
 // for the next browser's refusal reads. Meanwhile an API write to a document no room holds is taken,
 // and the unrecorded-mark sweep writes, in a room a browser holds and in one no room held when the
 // budget filled: each such room the server's own work opened over the budget is closed once its
@@ -1964,7 +1967,7 @@ func TestARoomFedOnlyByAPIWritesIsChargedTheStructsTheyAdd(t *testing.T) {
 	added := structs() - structsBefore
 	grew := after - before
 	byStructs := added * bytesOfHeapAStructHeldForTest
-	byStructure := int64(writes * (1 + splitsAStructCanCauseForTest) * bytesOfHeapAStructForTest * roomCopiesForTest)
+	byStructure := int64(writes * (bytesOfHeapAStructForTest + splitsAStructCanCauseForTest*bytesOfHeapASplitForTest) * roomCopiesForTest)
 	t.Logf("%d API writes added %d structs to the stored state (%d -> %d); the room was charged %d bytes before them and %d after, %d more, against %d for the structs at %d bytes each and %d for a struct each in the structure part",
 		writes, added, structsBefore, structsBefore+added, before, after, grew, byStructs, bytesOfHeapAStructHeldForTest, byStructure)
 	if added < writes {
@@ -1993,14 +1996,14 @@ const gcFloodClient = 5_000_000
 // the budget admits, each held by a socket that sends nothing, and through a second socket sends
 // each room updates of GC structs just under the byte bound until one is refused. A GC run renders
 // nothing, so no count of the room's rendering prices it; what charges it is the structure part
-// (roomCharge, internal/dispatch/docs/room_budget.go), each struct with the splits its integration
-// can cause at bytesOfHeapAStruct, at both copies. Each room takes them until its struct total
-// refuses one with 4413 and DOC_TOO_LARGE or the budget, filled by the structure part with nothing
-// it can close, refuses one with 4503 and DOC_BUSY; and the next room's browser is refused 4503 at
-// admission. The line the server logs for that refusal names what the open rooms are charged
-// (budgetRefusalLine), which must exceed what their admissions reserved by at least the structure
-// price of every struct the rooms took. The server's peak resident memory, read from /proc, stays
-// under the pod's.
+// (roomCharge, internal/dispatch/docs/room_budget.go), each struct at bytesOfHeapAStruct with the
+// splits its integration can cause at bytesOfHeapASplit, at both copies. Each room takes them until
+// its struct total refuses one with 4413 and DOC_TOO_LARGE or the budget, filled by the structure
+// part with nothing it can close, refuses one with 4503 and DOC_BUSY; and the next room's browser
+// is refused 4503 at admission. The line the server logs for that refusal names what the open rooms
+// are charged (budgetRefusalLine), which must exceed what their admissions reserved by at least the
+// structure price of every struct the rooms took. The server's peak resident memory, read from
+// /proc, stays under the pod's.
 //
 // The struct total counts each struct of an update with its two splits against the decode cap,
 // and confirms a refusal by the exact count of the structs the room holds (countRoomStructs,
@@ -2028,7 +2031,7 @@ func TestABrowserThatIsNotTheEditorIsChargedWhatItAdds(t *testing.T) {
 			t.Fatalf("an update of %d GC structs is %d bytes beside a %d-byte rendering, want just under the %d-byte bound", structs, len(frames[index]), small.rendered, pmdoc.MaxDocumentBytes)
 		}
 	}
-	perStruct := int64(bytesOfHeapAStructForTest * split * roomCopiesForTest)
+	perStruct := int64((bytesOfHeapAStructForTest + splitsAStructCanCauseForTest*bytesOfHeapASplitForTest) * roomCopiesForTest)
 	takes := 1 + (maxUpdateItemsForTest-int(small.structs)-split*structs)/structs
 	t.Logf("each update is %d bytes of %d GC structs, charged %d bytes in the structure part at %d a struct; a room's struct total takes %d of them, the %d-byte budget the structure of %d",
 		len(frames[0]), structs, int64(structs)*perStruct, perStruct, takes, roomBudgetBytesForTest, roomBudgetBytesForTest/(int64(structs)*perStruct))
@@ -2319,7 +2322,7 @@ const (
 	maxUpdateItemsForTest = 1 << 20
 	// bytesOfHeapARenderedByteForTest mirrors bytesOfHeapARenderedByte
 	// (internal/dispatch/docs/room_budget.go:105), the third price of a copy beside its elements
-	// and its structs (copyHeap, :592-602), from which storedShape computes what an admission
+	// and its structs (copyHeap, :615-625), from which storedShape computes what an admission
 	// reserves; the struct-dense drives fail unless the server's refusals name that reservation.
 	bytesOfHeapARenderedByteForTest = 12
 	// applyHeapBoundForTest mirrors applyHeapBound (internal/dispatch/docs/peer_update.go:1465)
@@ -3235,7 +3238,7 @@ func (h *memoryHarness) settled(t *testing.T, artifactID string) bool {
 }
 
 // serverOpenedCloseLine is the line the server logs as it closes a room its own work opened over the
-// budget, once nothing holds it (closeIfOpenedOverBudget, internal/dispatch/docs/room_budget.go:1596-1621).
+// budget, once nothing holds it (closeIfOpenedOverBudget, internal/dispatch/docs/room_budget.go:1619-1644).
 var serverOpenedCloseLine = regexp.MustCompile(`msg="dispatch: the room budget closed a document the server opened over it" room=(\S+) charged_before=\d+ charged=\d+ limit=\d+`)
 
 // requireClosedOnceSettled fails the test unless the room of artifactID, which the server's own work
@@ -3424,7 +3427,7 @@ func requirePodGoMemoryLimit(t *testing.T, server *memoryServer) {
 }
 
 // budgetRefusalLine is the reason the room budget gives a refused browser, as the server logs it
-// (errRoomBudgetFull, internal/dispatch/docs/room_budget.go:637-674).
+// (errRoomBudgetFull, internal/dispatch/docs/room_budget.go:660-697).
 var budgetRefusalLine = regexp.MustCompile(`the open documents fill their memory budget: (\d+) of (\d+) bytes are charged(?:, and this document needs (\d+))?`)
 
 // budgetRefusal is one refusal the server logged: what its rooms were charged, its budget, and
@@ -3466,7 +3469,7 @@ func requireBudgetRefusals(t *testing.T, server *memoryServer, reserved int64) [
 }
 
 // budgetCloseLine is the line the room budget's sweep logs for each unused room it closes, in the
-// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1551-1584).
+// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1574-1607).
 var budgetCloseLine = regexp.MustCompile(`msg="dispatch: the room budget closed an unused document" room=(\S+) charged_before=(\d+) charged=(\d+) limit=(\d+) making_room_for=(\d+)`)
 
 // budgetClose is one close the server logged: the room, what the budget charged before and after
@@ -3511,10 +3514,10 @@ func closesOf(t *testing.T, server *memoryServer, rooms []string, want int) []bu
 
 // storedShape is a stored document a struct-dense drive copies (cloneDocuments), and what an
 // admission to a copy of it reserves, computed here as the server computes it
-// (storedRoomReservation, internal/dispatch/docs/room_budget.go:1232-1306): the structs of its
+// (storedRoomReservation, internal/dispatch/docs/room_budget.go:1255-1329): the structs of its
 // stored history, each stored update walked as a room's own state is (docs.StateStructsForTest),
 // and its latest version's markdown, counted and measured in bytes, priced at the heaviest of a
-// struct's, an element's and a rendered byte's price (copyHeap, :592-602), at both copies.
+// struct's, an element's and a rendered byte's price (copyHeap, :615-625), at both copies.
 type storedShape struct {
 	name       string
 	id         string

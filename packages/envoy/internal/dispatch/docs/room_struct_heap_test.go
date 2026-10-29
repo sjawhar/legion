@@ -16,7 +16,7 @@ import (
 
 // What a browser's update adds to its room beyond what the rendering's count prices is charged to
 // the room's structure part (roomCharge, peerWeighing.structureHeap): each new struct at
-// bytesOfHeapAStruct, the splits integration can cause at the same price, and the content no
+// bytesOfHeapAStruct, the splits integration can cause at bytesOfHeapASplit, and the content no
 // rendering prices at its kind's heap a byte. These tests pin each price the way
 // TestAResidentRoomsHeapPerByteOfItsMarkdown pins bytesOfHeapAnElement: they measure what one copy
 // of a room keeps for frames ygo applies into it (heldByUpdates), and fail once a price leaves what
@@ -203,18 +203,19 @@ func TestTheRoomBudgetsPricePerStructHoldsEveryKind(t *testing.T) {
 	}
 }
 
-// What integration splits is charged at bytesOfHeapAStruct a split, splitsAStructCanCause of them
-// for each new struct and for each delete range (peerWeighing.added). A one-character insert whose
-// origins fall inside the room's string splits it, and keeps no more than a struct and its splits
-// are charged; a delete range inside the string splits it at both ends, and keeps no more than its
-// two splits are charged. A split itself, what such a delete range keeps for each of its two,
-// keeps no more than a struct's price and at least a fifth of it: past that the margin charges
-// splits so far past what they cost that it is to be measured again.
+// What integration splits is charged at bytesOfHeapASplit a split, splitsAStructCanCause of them
+// for each new struct and for each delete range (peerWeighing.structureHeap). A one-character
+// insert whose origins fall inside the room's string splits it, and keeps no more than a struct and
+// its splits are charged; a delete range inside the string splits it at both ends, and keeps no
+// more than its two splits are charged. A split itself, what such a delete range keeps for each of
+// its two, keeps no more than the split price and at least 0.7 of it: under that the price charges
+// splits far past what they cost, which is what took a typed room past the heap it holds before the
+// price was its own (bytesOfHeapASplit); over it, a split costs the room more than it is charged.
 func TestTheRoomBudgetsSplitMarginHoldsWhatSplitsAdd(t *testing.T) {
 	if !measuredAlone(t) {
 		return
 	}
-	const n, least = 20_000, 0.2
+	const n, least = 20_000, 0.7
 	text := fragmentItems(1, structString, func(f v1Frame) v1Frame { return f.str(strings.Repeat("a", 2*n)) })
 	holdingText := func() *crdt.Doc {
 		doc := newDocumentCopy()
@@ -233,16 +234,16 @@ func TestTheRoomBudgetsSplitMarginHoldsWhatSplitsAdd(t *testing.T) {
 	held := heldByUpdates(t, []measuredUpdate{{holdingText, inserts}, {holdingText, ranges}})
 	perInsert, perRange := float64(held[0])/n, float64(held[1])/n
 	perSplit := perRange / splitsAStructCanCause
-	t.Logf("an insert splitting the room's string keeps %.1f bytes, a delete range splitting it at both ends %.1f, %.1f a split, %.2f of bytesOfHeapAStruct",
-		perInsert, perRange, perSplit, perSplit/bytesOfHeapAStruct)
-	if charged := float64((1 + splitsAStructCanCause) * bytesOfHeapAStruct); perInsert > charged {
+	t.Logf("an insert splitting the room's string keeps %.1f bytes, a delete range splitting it at both ends %.1f, %.1f a split, %.2f of bytesOfHeapASplit",
+		perInsert, perRange, perSplit, perSplit/bytesOfHeapASplit)
+	if charged := float64(bytesOfHeapAStruct + splitsAStructCanCause*bytesOfHeapASplit); perInsert > charged {
 		t.Errorf("an insert splitting the room's string keeps %.1f bytes, past the %.0f a struct and its splits are charged", perInsert, charged)
 	}
-	if charged := float64(splitsAStructCanCause * bytesOfHeapAStruct); perRange > charged {
+	if charged := float64(splitsAStructCanCause * bytesOfHeapASplit); perRange > charged {
 		t.Errorf("a delete range splitting the room's string keeps %.1f bytes, past the %.0f its splits are charged", perRange, charged)
 	}
-	if perSplit > bytesOfHeapAStruct || perSplit < least*bytesOfHeapAStruct {
-		t.Errorf("a split keeps %.1f bytes of heap, want %.0f to %d", perSplit, least*bytesOfHeapAStruct, bytesOfHeapAStruct)
+	if perSplit > bytesOfHeapASplit || perSplit < least*bytesOfHeapASplit {
+		t.Errorf("a split keeps %.1f bytes of heap, want %.0f to %d", perSplit, least*bytesOfHeapASplit, bytesOfHeapASplit)
 	}
 }
 

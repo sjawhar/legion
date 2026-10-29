@@ -200,11 +200,12 @@ const typedRoomHeapMeasurement = "DISPATCH_MEASURE_TYPED_ROOM_HEAP"
 
 // A room typed into is charged no less than the heap it holds, and no more than the factor the
 // other shapes' prices may run past theirs. The structure part charges every struct a browser's
-// update adds as one of its own with both its splits at the heaviest kind's price
-// (bytesOfHeapAStruct), where ygo merges a run of typed characters back into one item (roomCharge),
-// so it charges typing far past what typing adds; this weighs whether that leaves the room's whole
-// charge within what the heap tests let a priced shape be charged. Those tests hold a copy of a
-// shape to no less than 0.85 of the price that prices it: the element price
+// update adds as one of its own at the heaviest kind's price (bytesOfHeapAStruct) with both the
+// splits its integration can cause (bytesOfHeapASplit), where ygo merges a run of typed characters
+// back into one item and a keystroke splits one item at most (roomCharge), so it charges typing
+// past what typing adds; this weighs whether that leaves the room's whole charge within what the
+// heap tests let a priced shape be charged. Those tests hold a copy of a shape to no less than 0.85
+// of the price that prices it: the element price
 // (TestAResidentRoomsHeapPerByteOfItsMarkdown, leastPerElement) and the struct price of the
 // struct-dense shapes (TestAResidentRoomsHeapPerStructOfItsState, dense). So a priced shape may be
 // charged up to 1/0.85, 1.18 times its heap, and that is the factor here: the room's charge is at
@@ -226,12 +227,21 @@ const typedRoomHeapMeasurement = "DISPATCH_MEASURE_TYPED_ROOM_HEAP"
 // three, since each build is the 2,010 updates' run; the readings of a room's heap agree to the
 // byte from one build to the next in a process of its own (heldByUpdates), and this one is
 // measured in one (measuredAlone). The structure part is checked against the prices too: each
-// update's struct with its splits at bytesOfHeapAStruct and its text at bytesOfHeapAByteOfText,
-// as the walk reads the text, its length prefix included (updateStruct.content) - two bytes for a
-// keystroke, 4,098 for a paste - at both copies, and nothing for the delete set each update
-// carries, which the room holds.
+// update's struct at bytesOfHeapAStruct with its splits at bytesOfHeapASplit and its text at
+// bytesOfHeapAByteOfText, as the walk reads the text, its length prefix included
+// (updateStruct.content) - two bytes for a keystroke, 4,098 for a paste - at both copies, and
+// nothing for the delete set each update carries, which the room holds.
 //
-// Measured on 2026-10-29: TYPED_ROOM_NUMBERS.
+// Measured on 2026-10-29, in a process of its own that peaked at 227 MiB resident: a mebibyte of
+// prose, 1,048,359 bytes of markdown making 57,600 elements, loaded and given its 2,010 updates in
+// 10 m 46 s. The typed room renders 1,091,319 bytes, still 57,600 elements, from 79,720 structs,
+// and holds 52,347,472 bytes of heap at both copies, where the same state read and not typed into
+// reads 53,654,544 - the read room's replica keeps no rendering, and its reading is the least of
+// three builds against this room's one. It is charged 58,424,320 bytes: its count's 54,144,000
+// beside a structure part of 4,280,320, which is what its updates are priced at, 1.116 times the
+// heap it holds. At the price the structure part charged a split before bytesOfHeapASplit, the
+// heaviest kind's, the same room was charged 61,801,120 bytes, 1.179 times its heap, which is what
+// that price was measured again for.
 func TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor(t *testing.T) {
 	const keystrokes, runs, pastes, pasteBytes, leastHeldOfCharge = 2_000, 100, 10, 4 << 10, 0.85
 	if os.Getenv(typedRoomHeapMeasurement) == "" {
@@ -244,8 +254,8 @@ func TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor(t *testing
 	updates := typedAndPastedUpdates(t, state, keystrokes, runs, pastes, pasteBytes)
 	// The walk prices a string's content as encoded: its bytes after a varuint of their length.
 	encoded := func(bytes int) int64 { return int64(bytes + len(binary.AppendUvarint(nil, uint64(bytes)))) }
-	keystroke := ((1+splitsAStructCanCause)*bytesOfHeapAStruct + encoded(1)*bytesOfHeapAByteOfText) * roomCopies
-	paste := ((1+splitsAStructCanCause)*bytesOfHeapAStruct + encoded(pasteBytes)*bytesOfHeapAByteOfText) * roomCopies
+	keystroke := (bytesOfHeapAStruct + splitsAStructCanCause*bytesOfHeapASplit + encoded(1)*bytesOfHeapAByteOfText) * roomCopies
+	paste := (bytesOfHeapAStruct + splitsAStructCanCause*bytesOfHeapASplit + encoded(pasteBytes)*bytesOfHeapAByteOfText) * roomCopies
 	priced := keystrokes*keystroke + pastes*paste
 
 	// The loaded room, untyped, weighed as the heap test weighs it; its first build is the

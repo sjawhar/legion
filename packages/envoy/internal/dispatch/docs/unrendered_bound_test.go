@@ -173,9 +173,17 @@ func TestTheUnrenderedTotalALoadCountsIsTheWalkOfTheRoomsEncodedState(t *testing
 	rendering := headings(1)
 	replica.publishSize(&rendering)
 	service.measurer.waitIdle()
+	// The room is held across the count, as it is while a room is resident: the total holds the
+	// live document weakly (structTotal.live, peer_update.go:978) and nothing here holds it but
+	// this frame - the service lists a room's replica under the document weakly too
+	// (listResident, tree.go:685) - so a room collected between the publication and the count
+	// leaves recountLive nothing to re-base on, and the total stays the load's count plus the
+	// hook's admission, stale.
+	runtime.KeepAlive(room)
 	want += marginRecordUnrendered("c-2", "the server's record")
-	if running, stale := replica.structs.runningUnrendered(); running != want || stale {
-		t.Fatalf("after the measurer's count the total is %d (stale %t), want the room's %d", running, stale, want)
+	if running, stale := replica.structs.runningUnrendered(); running != want || stale || countRoom(room).unrendered != want {
+		t.Fatalf("after the measurer's count the total is %d (stale %t) and the room counts %d, want the room's %d",
+			running, stale, countRoom(room).unrendered, want)
 	}
 	runtime.KeepAlive(replica)
 }
