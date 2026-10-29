@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-531",
-  "completed": "2026-10-29T00:30:00Z",
+  "completed": "2026-10-29T02:26:00Z",
   "proof": [
     {
       "criterion": "A1/A2/A3 (web addresses and emails): each listed row is a link in a document written through the API, with the engine's href (mailto: for emails), as in a comment; the stored spec holds no `\\:`",
       "surface": "Dispatch's browser suite: the real Go server built from the workspace, the production SPA bundle, Postgres 17 + pgvector, Chromium; the issue's conversation and its live Document editor",
       "command": "cd packages/dispatch && DATABASE_URL='postgres://postgres@127.0.0.1:5433/dispatch_infra531?sslmode=disable' bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/address-links.e2e.ts (wrapped by $TMPDIR/infra531-e2e/run-e2e.sh)",
       "observed": "3 passed (12.5s). Evidence: https://github.com/sjawhar/legion/pull/2373#issuecomment-6483618503",
-      "headSha": "5d887d3027df2bad503a2be3157cc4c4ada602fb",
+      "headSha": "b80be2083a4b268dbef3ecd9e59ddad536bbae0e",
       "negativeControl": "Same spec at the tests-only commit 3f6d78916cd8: test 1 fails on the first document link assertion (link 'http://lower.test' not found, row text present); test 2 fails at createIssue with 400 INVALID_MARKDOWN"
     },
     {
@@ -17,7 +17,7 @@
       "surface": "the Dispatch API on the same server (POST /api/v1/issues with the row as spec, then the stored markdown)",
       "command": "throwaway Playwright spec: createIssue({spec: row}) then getArtifactText for &lt;javascript:alert(1);'a@b.cc'>, &lt;mailto:x;a@b.cc>, &lt;javascript:void(a@b.cc)>, [x](https://a.b/?q=a&#10;b), [x](a&#12;b); and Set \\<input value=me@x.cc> in the form., Use \\<a href=https://x.cc/> here., x &lt;!-- see x;https://a.bc/ --> y, x &lt;?php x;a@b.cc ?> y, x &lt;!-- a@b.cc --> y; and Set \\<!doctype x;a@b.cc> now, Set \\<!x;a@b.cc> now, \\<!x;a@b.cc>, \\<a b=\\u0001;a@b.cc>; and the block-start rows \\<span title=a=b;a@b.cc>, \\<a href=x?a=1&b=me@x.cc>, \\<a b=x=*y*>, one per HTML block kind, and quote and list-item variants",
       "observed": "stored as \\<javascript:alert(1);'[a@b.cc](mailto:a@b.cc)'>, \\<mailto:x;[a@b.cc](mailto:a@b.cc)>, \\<javascript:void([a@b.cc](mailto:a@b.cc))>, [x](https://a.b/?q=a&#10;b), [x](a&#12;b); Set \\<input value=[me@x.cc](mailto:me@x.cc)> in the form., Use \\<a href=[https://x.cc/>](https://x.cc/>) here., x \\<!-- see x;https://a.bc/ --> y, x \\<?php x;[a@b.cc](mailto:a@b.cc) ?> y, x \\<!-- [a@b.cc](mailto:a@b.cc) --> y; Set \\<!doctype x;[a@b.cc](mailto:a@b.cc)> now, Set \\<!x;[a@b.cc](mailto:a@b.cc)> now, \\<!x;[a@b.cc](mailto:a@b.cc)>, \\<a b=\\u0001;[a@b.cc](mailto:a@b.cc)>; each block-start row stored with \\< (e.g. \\<span title=a=b;[a@b.cc](mailto:a@b.cc)>, > \\<span title=…, - \\<span title=…)",
-      "headSha": "5d887d3027df2bad503a2be3157cc4c4ada602fb",
+      "headSha": "b80be2083a4b268dbef3ecd9e59ddad536bbae0e",
       "negativeControl": "At a60f8177 the first three and the line-feed destination were refused (the rendering read back as one autolink to javascript:… / a broken link), and [x](a&#12;b) was stored with a raw form feed; the new read-back rows failed there and pass now; at 634c3824 the five raw-HTML rows were refused (e.g. written Set <input value=[me@x.cc](mailto:me@x.cc)> …, read back as `Set  in the form.`), red in TestALinkReadFromABareAddressAfterPunctuationIsWrittenBack, green at the head; at 3ff56757 the four declaration/control-character rows were written raw and the engine read an html node or no document (red in TestALinkReadFromABareAddressAfterPunctuationIsWrittenBack), green at the head; at 28ae264d six block-start rows were written raw and the engine read no document (red in TestALinkReadFromABareAddressAfterPunctuationIsWrittenBack), green at the head"
     },
     {
@@ -25,21 +25,22 @@
       "surface": "ParseForWrite, the function every API write runs",
       "command": "throwaway timing of ParseForWrite on paragraphs that fail every spelling at 64 and 256 KiB, best of 3, at main 690c0136, a60f8177 and the head; TestRenderReadsEachWritingBackUnderAReaderOnce; TestBareURLShapesParseAndRenderLinearly",
       "observed": "At 634c3824 (search unchanged by the merge, which adds main's skip of provably identical parses): the reviewer's paragraph 93 ms at 64 KiB and 108 ms at 256 KiB against main's 186 and 630 ms; paragraphs failing every spelling 0.8x to about 2.4x main; some paragraphs that need no spelling search on main cost 3.5x to 8.3x main at 64 KiB (reviewer's round-2 measure, e.g. 49 ms against 407 ms for `a\\_b@c.dd\\.@y.zz …`), from the extra read-back reasons this change adds; every shape grows linearly and the growth tests pass",
-      "headSha": "5d887d3027df2bad503a2be3157cc4c4ada602fb",
+      "headSha": "b80be2083a4b268dbef3ecd9e59ddad536bbae0e",
       "negativeControl": "Before e0b8910b, TestRenderReadsEachWritingBackUnderAReaderOnce fails: 574 read-backs of 128 writings under a reader, 127 of them read more than once"
     },
     {
       "criterion": "No regression across the URL corpus, and the refactors change no output",
       "surface": "gen/differential.sh over 10,086 generated documents against main, Go read back by Go and the engine",
       "command": "cd packages/envoy/internal/dispatch/pmdoc && bash $TMPDIR/infra531/differential-mainfix.sh --base main --corpus $TMPDIR/infra531/urls --out $TMPDIR/infra531/diff15 (gen/differential.sh plus main's reanchor_test.go import fixed, since main 1767c9af's own pmdoc tests do not compile, #2481); cmp of head.jsonl against diff14 (28ae264d)",
-      "observed": "10,101 documents: regressions 0, engine-tree regressions 0, head panics 0, other gates unchanged; head output byte-identical to 28ae264d's; full pmdoc suite ok 328.2s; htmlBlockStart matched micromark html-flow on 200,000 random lines; rebase re-check 7fd13b50 → 5d887d30 (merge of main d4cbcfe6 on the real conflict in linear_test.go): product-code fingerprint unchanged (bdf92ff4 at both), only test files changed; full pmdoc suite ok 710.5s at 5d887d30",
-      "headSha": "5d887d3027df2bad503a2be3157cc4c4ada602fb",
+      "observed": "at b80be208: full pmdoc suite (-p 1) ok 706.5s; a synthetic quadratic now fails growthVerdict (256x the 1ms against at most 64); TestBareURLShapesParseAndRenderLinearly passes with main's measure alone; URL differential against main a09a2f25: regressions 0, engine-tree regressions 0, head panics 0, head output byte-identical to diff15; the checkbox rows were red with the fix reverted ('- [ ] <!-- todo later' written as '- [ ] \\\\<!-- todo later') and green after",
+      "headSha": "b80be2083a4b268dbef3ecd9e59ddad536bbae0e",
       "negativeControl": "main still differs from the engine in the documents the round-1 evidence lists; the full pmdoc suite (go test ./internal/dispatch/pmdoc/, ok 310.5s) holds the red rows above"
     }
   ],
   "filesChanged": [
-    "pmdoc/linear_test.go: merge with main's #2396 (readsAndWritesLinearly times through cpuTimeOf(again(…)))",
-    "pmdoc/typed_nesting_test.go: main's broken compile at d4cbcfe6 adapted to cpuTimeOf(again(…)), as #2481 does"
+    "pmdoc/linear_test.go: growthVerdict and its test identical to main's (no CPU-clock floor; cputest.Measure alone)",
+    "pmdoc/render.go, render_inline.go: renderer.checkboxEnd; a `<` on a task item's checkbox line is not first on its line, so it gets no HTML-block escape",
+    "pmdoc/render_readback_test.go: five byte-for-byte rows after a checkbox, two continuation rows that stay escaped"
   ],
   "trickyParts": [
     "The `<` escape is decided after the run is written: one extra writing of the run only where its first writing already reads as an autolink at a text `<`, so runs that read back keep their bytes.",
