@@ -55,8 +55,25 @@ const (
 
 const (
 	// relayReceiptWait is how long the oldest frame a session has not answered may wait before the
-	// relay takes the session for unreachable and pauses until its next registration.
+	// relay takes the session for unreachable and pauses (relayPaused).
 	relayReceiptWait = 3 * time.Second
+	// relayPauseFirst and relayPauseMax bound the backoff after which a paused relay restarts at
+	// the ack floor on its own, unless the session registers first; it doubles from the first to
+	// the max and starts at the first again once the session answers a frame. A session that
+	// answers late is most often alive and busy (on the 2-CPU load-test box, at 40 events/s to
+	// 1,000 sessions, 60 sessions answered a frame more than 3 s after it was sent), so the first
+	// restart comes 2 s after the pause, about 5 s after the frame that went unanswered, where a
+	// relay waiting for the next registration waited up to a 90 s heartbeat. Each restart resends
+	// everything from the ack floor, so restarts of a silent session are at least the receipt wait
+	// plus the backoff apart, 5 s at first, and a slow session is not handed its backlog again
+	// before it had longer to answer than the receipt wait gave it. 30 s, the cap of the retry
+	// after a failed call (relayRetryMax), relays to a session that comes back within about 33 s
+	// of its return (a receipt wait, then the backoff), about a third of a heartbeat, while a
+	// session that never answers costs one restart and one resend of what it has in flight about
+	// every 33 s: 1,000 such sessions make about 30 restarts a second, an eighth of the 250 the
+	// load-test box's server sustained (relayRestartLimit).
+	relayPauseFirst = 2 * time.Second
+	relayPauseMax   = 30 * time.Second
 	// relayNakDelay is how long the server waits to deliver a message a session refused (nak).
 	relayNakDelay = time.Second
 	// relayRetryFirst and relayRetryMax bound the wait before a relay whose consumer call or pull
@@ -96,7 +113,7 @@ type relayEvent uint8
 const (
 	// relayCheck: the session's entry changed; start or stop its relay to match it.
 	relayCheck relayEvent = 0
-	// relayResume: the session registered; a relay that paused starts again.
+	// relayResume: the session registered; a relay that paused starts again at once.
 	relayResume relayEvent = 1 << iota
 	// relayRestart: the session registered with a new epoch; its relay restarts at the ack floor.
 	relayRestart
@@ -107,11 +124,16 @@ const (
 type relayOutcome uint8
 
 const (
-	// relayEnded: the relay was stopped, or paused until the session registers again.
+	// relayEnded: the relay was stopped, or paused until the session registers again (it has no
+	// consumer, or the grant does not carry session consumers).
 	relayEnded relayOutcome = iota
 	// relayRetry: a consumer call or the pull failed; the relay restarts at the ack floor after a
 	// wait while it is still this listener's.
 	relayRetry
+	// relayPaused: the session answered no frame within relayReceiptWait; the relay restarts at
+	// the ack floor after a backoff (relayPauseFirst to relayPauseMax), or at once when the
+	// session registers meanwhile, while it is still this listener's.
+	relayPaused
 )
 
 // sessionRelays relays the session consumers this listener owns (sessionRelays.wanted): one relay
@@ -173,9 +195,14 @@ type sessionRelays struct {
 	// frames maps the token of every frame awaiting done or nak to it.
 	frames    map[string]*relayFrame
 	nextToken atomic.Uint64
+
+	// pauseFirst and pauseMax are relayPauseFirst and relayPauseMax; a test sets shorter ones
+	// before setOwned(true).
+	pauseFirst, pauseMax time.Duration
 }
 
-// relayRun is one start of a session's relay: it runs until it is stopped, replaced, or pauses.
+// relayRun is one start of a session's relay: it runs until it is stopped, replaced, or pauses
+// until the session registers again.
 type relayRun struct {
 	sessionID   string
 	servingPort bool
@@ -194,9 +221,16 @@ type relayRun struct {
 	// sessionRelays.framesMu.
 	outstanding map[string]*relayFrame
 	unanswered  []*relayFrame
+	// heard is set when the session answers any of the run's frames, and cleared by the relay
+	// as it takes it, so a pause after it starts a new episode (sessionRelays.relay).
+	heard atomic.Bool
+	// resume hears the session's registrations (sessionRelays.apply), which cut short the
+	// backoff of a paused relay.
+	resume chan struct{}
 }
 
-// ended reports whether the run's goroutine has returned: it was stopped, or it paused.
+// ended reports whether the run's goroutine has returned: it was stopped, or it paused until the
+// session registers again.
 func (r *relayRun) ended() bool {
 	select {
 	case <-r.done:
@@ -235,6 +269,8 @@ func startSessionRelays(delivery *sessionDelivery, sessions *session.SessionRegi
 		relays:      map[string]*relayRun{},
 		restarts:    make(chan struct{}, relayRestartLimit),
 		frames:      map[string]*relayFrame{},
+		pauseFirst:  relayPauseFirst,
+		pauseMax:    relayPauseMax,
 	}
 	if err := delivery.consumers.SubscribeReplies(inbox+".>", m.onReply); err != nil {
 		return nil, err
@@ -372,7 +408,8 @@ func (m *sessionRelays) loop() {
 // apply makes sessionID's relay match its entry and event: started when the session is this
 // listener's to relay, stopped when it is not, resumed after a pause when it registered (or, for a
 // serving port, when its entry changed: such a session may register through a listener other than
-// its owner), and restarted at the ack floor on a new epoch.
+// its owner), and restarted at the ack floor on a new epoch. A registration also cuts short the
+// backoff of a relay paused for want of an answer (relayRun.resume).
 func (m *sessionRelays) apply(sessionID string, event relayEvent) {
 	want, servingPort := m.wanted(sessionID)
 	run := m.relays[sessionID]
@@ -396,6 +433,11 @@ func (m *sessionRelays) apply(sessionID string, event relayEvent) {
 	case event&relayRestart != 0 && run.restarted.Load():
 		run.cancel()
 		m.start(sessionID, servingPort, run.done)
+	case event&relayResume != 0:
+		select {
+		case run.resume <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -457,7 +499,7 @@ func (m *sessionRelays) listConsumers() map[string]*jetstream.ConsumerInfo {
 // started by the burst of gaining the durable binding takes the session's listed consumer.
 func (m *sessionRelays) start(sessionID string, servingPort bool, previous <-chan struct{}) {
 	ctx, cancel := context.WithCancel(m.ctx)
-	run := &relayRun{sessionID: sessionID, servingPort: servingPort, cancel: cancel, done: make(chan struct{}), listed: m.listed[sessionID]}
+	run := &relayRun{sessionID: sessionID, servingPort: servingPort, cancel: cancel, done: make(chan struct{}), listed: m.listed[sessionID], resume: make(chan struct{}, 1)}
 	delete(m.listed, sessionID)
 	m.relays[sessionID] = run
 	m.runs.Go(func() {
@@ -471,11 +513,15 @@ func (m *sessionRelays) start(sessionID string, servingPort bool, previous <-cha
 	})
 }
 
-// relay runs one session's relay until it is stopped or pauses, restarting at the ack floor after a
-// failed call or pull, with a wait that doubles from relayRetryFirst to relayRetryMax, while the
-// session is still this listener's.
+// relay runs one session's relay until it is stopped or pauses until the session registers again,
+// while the session is still this listener's. It restarts at the ack floor after a failed call or
+// pull, with a wait that doubles from relayRetryFirst to relayRetryMax, and after a pause for want
+// of an answer (relayPaused), with a backoff that doubles from pauseFirst to pauseMax, cut short by
+// the session's registration. One pause episode, from a pause to the session's next answer to any
+// frame, which sets the backoff back to pauseFirst, is logged once.
 func (m *sessionRelays) relay(ctx context.Context, run *relayRun) {
 	retry := relayRetryFirst
+	var pause time.Duration // the next pause's backoff; 0 outside a pause episode
 	for {
 		var outcome relayOutcome
 		if run.servingPort {
@@ -483,13 +529,51 @@ func (m *sessionRelays) relay(ctx context.Context, run *relayRun) {
 		} else {
 			outcome = m.relayNATS(ctx, run)
 		}
-		if outcome == relayEnded || waitUnlessDone(ctx, retry) != nil {
-			return
+		if run.heard.Swap(false) {
+			pause = 0
 		}
-		retry = min(retry*2, relayRetryMax)
+		switch outcome {
+		case relayEnded:
+			return
+		case relayPaused:
+			if pause == 0 {
+				pause = m.pauseFirst
+				m.logger.Info("session relay paused: the session answered no frame within the receipt wait; it restarts at the ack floor after a backoff, or at once when the session registers",
+					slog.String("session_id", run.sessionID), slog.String("receipt_wait", relayReceiptWait.String()), slog.String("backoff", pause.String()))
+			}
+			// A registration heard before the pause does not cut its backoff short.
+			select {
+			case <-run.resume:
+			default:
+			}
+			if !awaitResume(ctx, run, pause) {
+				return
+			}
+			pause = min(pause*2, m.pauseMax)
+		default:
+			if waitUnlessDone(ctx, retry) != nil {
+				return
+			}
+			retry = min(retry*2, relayRetryMax)
+		}
 		if want, servingPort := m.wanted(run.sessionID); !want || servingPort != run.servingPort {
 			return
 		}
+	}
+}
+
+// awaitResume waits out a paused relay's backoff, or until the session registers
+// (relayRun.resume), and reports whether the relay is still running.
+func awaitResume(ctx context.Context, run *relayRun, backoff time.Duration) bool {
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-run.resume:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -578,9 +662,10 @@ func (m *sessionRelays) restartFailed(ctx context.Context, sessionID string, err
 
 // relayNATS restarts a NATS session's consumer at its ack floor and publishes each message it pulls
 // as a frame on the session's relay subject, in stream order, with up to the consumer's
-// MaxAckPending in flight. It pauses, sending nothing more, once the oldest frame the session has
-// not answered has waited relayReceiptWait: the frames in flight are left to their ack wait or the
-// next restart, which the session's next registration makes.
+// MaxAckPending in flight. It pauses (relayPaused), sending nothing more, once the oldest frame the
+// session has not answered has waited relayReceiptWait: the frames in flight are left to their ack
+// wait or the next restart, which the relay makes after its backoff or at the session's next
+// registration (sessionRelays.relay).
 func (m *sessionRelays) relayNATS(ctx context.Context, run *relayRun) relayOutcome {
 	sessionID := run.sessionID
 	start, pull, outcome := m.restart(ctx, run)
@@ -599,9 +684,7 @@ func (m *sessionRelays) relayNATS(ctx context.Context, run *relayRun) relayOutco
 		cancelNext := context.CancelFunc(func() {})
 		if deadline, waiting := m.receiptDeadline(run); waiting {
 			if !time.Now().Before(deadline) {
-				m.logger.Info("session relay paused: the session answered no frame within the receipt wait; it resumes at the session's next registration",
-					slog.String("session_id", sessionID), slog.String("receipt_wait", relayReceiptWait.String()))
-				return relayEnded
+				return relayPaused
 			}
 			next, cancelNext = context.WithDeadline(ctx, deadline)
 		}
@@ -687,7 +770,8 @@ func (m *sessionRelays) forget(run *relayRun) {
 
 // onReply hears a session's reply to a frame: received marks the frame answered, progress restarts
 // its ack wait, done acks it and nak has the server deliver it again after relayNakDelay; done and
-// nak end the frame. A reply to a token no frame awaits, or with any other body, is ignored.
+// nak end the frame. Any of them ends a pause episode (relayRun.heard). A reply to a token no frame
+// awaits, or with any other body, is ignored.
 func (m *sessionRelays) onReply(msg *nats.Msg) {
 	token, ok := strings.CutPrefix(msg.Subject, m.replyPrefix)
 	if !ok {
@@ -711,6 +795,7 @@ func (m *sessionRelays) onReply(msg *nats.Msg) {
 		m.framesMu.Unlock()
 		return
 	}
+	frame.run.heard.Store(true)
 	m.framesMu.Unlock()
 	var err error
 	switch reply {

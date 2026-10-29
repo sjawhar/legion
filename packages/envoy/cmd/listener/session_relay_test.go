@@ -32,6 +32,13 @@ type relayRig struct {
 
 func newRelayRig(t *testing.T) *relayRig {
 	t.Helper()
+	return newRelayRigPausing(t, relayPauseFirst, relayPauseMax)
+}
+
+// newRelayRigPausing is newRelayRig with a paused relay's backoff doubling from pauseFirst to
+// pauseMax.
+func newRelayRigPausing(t *testing.T, pauseFirst, pauseMax time.Duration) *relayRig {
+	t.Helper()
 	url := testnats.URL(t)
 	client, err := bus.ConnectOwningStream([]string{url}, bus.WithReplicas(1))
 	if err != nil {
@@ -48,6 +55,7 @@ func newRelayRig(t *testing.T) *relayRig {
 		defer cancel()
 		relays.stop(ctx)
 	})
+	relays.pauseFirst, relays.pauseMax = pauseFirst, pauseMax
 	relays.setOwned(true)
 	return &relayRig{sessionConsumerRig: rig, url: url}
 }
@@ -362,12 +370,78 @@ func TestSessionConsumerHeldFrameDoesNotDelayLaterReceiptsAndSurvivesARestart(t 
 	}
 }
 
-// A session that stops answering is taken for unreachable: within the receipt wait of the oldest
-// frame it has not answered the relay sends nothing more, and it logs that once. The session's next
-// registration resumes it from the ack floor: the unanswered frame and the one stored during the
-// pause arrive, in stream order.
-func TestSessionConsumerUnreachableSessionPausesUntilItRegisters(t *testing.T) {
-	rig := newRelayRig(t)
+// pauseLogged counts the relay's log lines for a pause of a session that answered no frame.
+func (rig *relayRig) pauseLogged() int {
+	return strings.Count(rig.harness.logs.String(), "session relay paused: the session answered no frame")
+}
+
+// requireWaited fails the test unless to came at least atLeast and less than under after from,
+// allowing 100 ms for a frame's trip to the session, which from was taken after.
+func requireWaited(t *testing.T, what string, from, to time.Time, atLeast, under time.Duration) {
+	t.Helper()
+	if waited := to.Sub(from); waited < atLeast-100*time.Millisecond || waited >= under {
+		t.Fatalf("%s came %s after the frame before it, want at least %s and under %s", what, waited, atLeast, under)
+	}
+}
+
+// A session that stops answering is taken for unreachable: once the oldest frame it has not
+// answered waited the receipt wait, the relay sends nothing more until its backoff ends, then
+// restarts at the ack floor and sends that frame and the ones after it again, and the backoff
+// doubles while the session stays silent. Once the session answers again it receives every frame,
+// once and in stream order, with no registration, and a later silence starts again from the first
+// backoff. Each episode of silence is logged once.
+func TestSessionConsumerSilentSessionPausesAndResumesWithoutARegistration(t *testing.T) {
+	const pauseFirst, pauseMax = 500 * time.Millisecond, 2 * time.Second
+	rig := newRelayRigPausing(t, pauseFirst, pauseMax)
+	const sessionID = "ses_silent"
+	agent := contracts.AgentSubject(sessionID)
+	standIn := startSessionStandIn(t, rig.url, sessionID, answerDone)
+	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1"))
+	e0, _ := rig.storeEvent(t, agent)
+	requireFrames(t, standIn.collect(t, 1, 5*time.Second), e0)
+
+	standIn.silent.Store(true)
+	e1, _ := rig.storeEvent(t, agent)
+	unanswered := standIn.collect(t, 1, 5*time.Second)[0]
+	requireFrames(t, []relayedFrame{unanswered}, e1)
+	// Stored once the relay paused, e2 waits for its restart, which sends e1 first again.
+	time.Sleep(time.Until(unanswered.arrived.Add(relayReceiptWait + 150*time.Millisecond)))
+	e2, e2Seq := rig.storeEvent(t, agent)
+	firstRestart := standIn.collect(t, 2, 5*time.Second)
+	requireFrames(t, firstRestart, e1, e2)
+	requireWaited(t, "the first restart", unanswered.arrived, firstRestart[0].arrived, relayReceiptWait+pauseFirst, relayReceiptWait+2*pauseFirst)
+
+	// Nothing arrives until the next restart, after the doubled backoff, whose frames the session
+	// answers.
+	standIn.silent.Store(false)
+	resumed := standIn.collect(t, 2, 10*time.Second)
+	requireFrames(t, resumed, e1, e2)
+	requireWaited(t, "the second restart", firstRestart[0].arrived, resumed[0].arrived, relayReceiptWait+2*pauseFirst, relayReceiptWait+4*pauseFirst)
+	awaitAcked(t, rig.consumers, sessionID, e2Seq)
+	if lines := rig.pauseLogged(); lines != 1 {
+		t.Fatalf("one episode of silence was logged %d times, want once:\n%s", lines, rig.harness.logs.String())
+	}
+
+	// The session answered, so its next silence waits the first backoff, not the doubled one.
+	standIn.silent.Store(true)
+	e3, e3Seq := rig.storeEvent(t, agent)
+	unanswered = standIn.collect(t, 1, 5*time.Second)[0]
+	requireFrames(t, []relayedFrame{unanswered}, e3)
+	standIn.silent.Store(false)
+	again := standIn.collect(t, 1, 10*time.Second)
+	requireFrames(t, again, e3)
+	requireWaited(t, "the restart after a new silence", unanswered.arrived, again[0].arrived, relayReceiptWait+pauseFirst, relayReceiptWait+2*pauseFirst)
+	awaitAcked(t, rig.consumers, sessionID, e3Seq)
+	standIn.none(t, time.Second)
+	if lines := rig.pauseLogged(); lines != 2 {
+		t.Fatalf("two episodes of silence were logged %d times, want twice:\n%s", lines, rig.harness.logs.String())
+	}
+}
+
+// A paused relay restarts at once when the session registers, long before its backoff ends: the
+// unanswered frame and the one stored during the pause arrive, in stream order.
+func TestSessionConsumerSilentSessionResumesAtOnceWhenItRegisters(t *testing.T) {
+	rig := newRelayRigPausing(t, time.Minute, time.Minute)
 	const sessionID = "ses_unreachable"
 	agent := contracts.AgentSubject(sessionID)
 	standIn := startSessionStandIn(t, rig.url, sessionID, answerDone)
@@ -382,13 +456,13 @@ func TestSessionConsumerUnreachableSessionPausesUntilItRegisters(t *testing.T) {
 	time.Sleep(time.Until(unanswered.arrived.Add(relayReceiptWait + 500*time.Millisecond)))
 	e2, _ := rig.storeEvent(t, agent)
 	standIn.none(t, 1500*time.Millisecond)
-	if lines := strings.Count(rig.harness.logs.String(), "session relay paused: the session answered no frame"); lines != 1 {
+	if lines := rig.pauseLogged(); lines != 1 {
 		t.Fatalf("the pause was logged %d times, want once:\n%s", lines, rig.harness.logs.String())
 	}
 
 	standIn.silent.Store(false)
 	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1"))
-	requireFrames(t, standIn.collect(t, 2, 5*time.Second), e1, e2)
+	requireFrames(t, standIn.collect(t, 2, 2*time.Second), e1, e2)
 	standIn.none(t, time.Second)
 }
 

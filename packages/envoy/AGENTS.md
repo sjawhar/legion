@@ -2537,8 +2537,15 @@ listener's NATS user manages the consumer: it creates, reads, pulls, acknowledge
   `progress` every 20 s while it holds the frame unwritten (`InProgress`); `done` once it wrote,
   skipped or refused the frame (`Ack`, which also counts as `received`); `nak` when it cannot take
   it (`NakWithDelay` of 1 s). Up to `MaxAckPending` frames are in flight. When the oldest
-  unanswered frame gets no reply within 3 s, the relay pauses: it sends nothing more, leaves the
-  frames in flight to their ack wait, and starts again at the session's next registration.
+  unanswered frame gets no reply within 3 s, the relay pauses: it sends nothing more and leaves the
+  frames in flight to their ack wait. It restarts at the ack floor after a backoff, 2 s doubling to
+  30 s (`relayPauseFirst`, `relayPauseMax`) and back to 2 s once the session answers any frame, or
+  at once at the session's next registration, whichever comes first, while the listener owns the
+  session; it logs `session relay paused` once per episode of silence, not per restart. A session
+  that answers late is most often alive and busy (60 of 1,000 sessions at 40 events/s on the 2-CPU
+  load-test box), so it resumes about 5 s after the frame it left unanswered rather than at a
+  heartbeat up to 90 s later; one that never answers costs a restart and a resend of what it has in
+  flight about every 33 s.
 - **Relay to a serving port:** the owner pushes each message to the port (`prompt_async`,
   `session.Deliverer.Push`), one at a time in stream order, and acks it on the port's 204. Any
   other answer, a transport error or a timeout keeps the message at the head, in progress, and
