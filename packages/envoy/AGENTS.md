@@ -1932,7 +1932,9 @@ both drop.
 A whitespace-only line inside fenced code whose opening fence stands past its container's content
 is an empty line of the code when it holds fewer columns past that content than the fence does:
 that parser takes up to the fence's indentation from each line, and goldmark kept the whole line,
-so `  ~~~\n \nx` holds the code `\nx` (`fenceClosure`).
+so `  ~~~\n \nx` holds the code `\nx`; a last line of the document with no line feed holding
+nothing past the fence's indentation is no line of the code, so `  ~~~\nx\n ` holds `x`
+(`fenceClosure`).
 A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as
 the browser editor's parser reads it (`taskList`): followed by a space or a tab and then more text on
 the line, or by a line ending the paragraph continues past, and it takes only the one character
@@ -2031,8 +2033,9 @@ table), or a quote no container opens right after, and keeps it before a quote, 
 definition, as that parser reads it (`blankTaker`). Indented code keeps the whitespace-only lines
 after it that hold four or more columns past where its container's content starts (a list item
 measured from its content, a footnote definition from its own start), and the shorter blank lines
-between them, as that parser reads it, so they are its text, less one final line ending, and space
-nothing (`codeColumns`, `holdCodeLines`). A list item decides by what follows its list only
+between them, as that parser reads it, so they are its text, less one final line ending (a last
+line with no line feed has none of its own, so `    code\n    \n    ` holds `code\n`), and space
+nothing (`codeColumns`, `holdCodeLines`, `codeBlockText`). A list item decides by what follows its list only
 inside its own quote or typed block; past one, that container's rule decides, so a typed block's
 fence keeps the line and a quote's end judges it by what opens right after. The renderer writes each spacing so that it reads back
 (`blanksAfterList`, `writesBlankAfterItem`): no blank line before a block that opens on the line after
