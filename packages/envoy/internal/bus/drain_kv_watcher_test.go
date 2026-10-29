@@ -37,7 +37,7 @@ func TestADrainEndsTheKVWatchersBeforeTheConnection(t *testing.T) {
 			_, uri := testnats.Start(t)
 			logs := captureBusLogs(t)
 
-			client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
+			client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1), bus.WithName(t.Name()))
 			if err != nil {
 				t.Fatalf("connect: %v", err)
 			}
@@ -157,10 +157,18 @@ func consumerNames(js natsgo.JetStreamContext, stream string) []string {
 	return names
 }
 
-// warnOrErrorRecords is every WARN or ERROR record logged so far, each as its level and message,
-// with the error for an async error report.
+// warnOrErrorRecords is every WARN or ERROR record the client under test logged so far, each as
+// its level and message, with the error for an async error report. The client under test is the
+// one connected with bus.WithName(t.Name()), and its records are told by that name: the capture
+// (captureBusLogs) is the process's default logger, so every client of every test running in this
+// binary writes into it, and a record naming another client is dropped. Without that, a client an
+// earlier test left connected to a cluster it has stopped fails this test with its reconnect
+// warning. A record naming no client is kept, since the records these tests require are a
+// watcher's and a reconcile's, which name none; a client started without a name of its own still
+// passes that way.
 func warnOrErrorRecords(t *testing.T, logs *busLogs) []string {
 	t.Helper()
+	name := t.Name()
 	var records []string
 	for _, line := range logs.lines() {
 		if line == "" {
@@ -170,11 +178,15 @@ func warnOrErrorRecords(t *testing.T, logs *busLogs) []string {
 			Level string `json:"level"`
 			Msg   string `json:"msg"`
 			Error string `json:"error"`
+			Name  string `json:"name"`
 		}
 		if err := json.Unmarshal([]byte(line), &record); err != nil {
 			t.Fatalf("decode the log record %q: %v", line, err)
 		}
 		if record.Level != "WARN" && record.Level != "ERROR" {
+			continue
+		}
+		if record.Name != "" && record.Name != name {
 			continue
 		}
 		if record.Msg == "envoy nats async error" {

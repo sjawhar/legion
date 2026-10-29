@@ -85,7 +85,7 @@ func TestADrainHookLosingTheConnectionWarns(t *testing.T) {
 			_, uri := testnats.Start(t)
 			proxy := startRelayProxy(t, uri)
 			logs := captureBusLogs(t)
-			client, err := bus.ConnectOwningStream([]string{proxy.url()}, bus.WithReplicas(1))
+			client, err := bus.ConnectOwningStream([]string{proxy.url()}, bus.WithReplicas(1), bus.WithName(t.Name()))
 			if err != nil {
 				t.Fatalf("connect: %v", err)
 			}
@@ -211,7 +211,7 @@ func TestADeliveryKeepsTenSecondsOfTheListenersDrain(t *testing.T) {
 func TestAStuckDeliveryStillEndsTheKVWatchers(t *testing.T) {
 	_, uri := testnats.Start(t)
 	logs := captureBusLogs(t)
-	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1), bus.WithName(t.Name()))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
