@@ -1494,7 +1494,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       # Astro runs on Node.js (22.12 or newer).
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
       # docs/site/scripts/build-binaries.sh builds the Go binaries the reference generators run, and
@@ -1545,7 +1545,7 @@ jobs:
       # What each failed shot's page showed, and the harness's process logs: a hang leaves the
       # Dispatch server's goroutines at the end of dispatch.log.
       - if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: docs-failed-shots-${{ github.run_attempt }}
           path: |
@@ -1614,7 +1614,7 @@ jobs:
           bun pm pack --destination ../../out/pr-artifacts
           tar tzf ../../out/pr-artifacts/*.tgz | grep -x package/dist/THIRD_PARTY_NOTICES
         working-directory: packages/envoy-plugin
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: opencode-legion-envoy-plugin-pr
           path: out/pr-artifacts/*.tgz
@@ -1733,7 +1733,7 @@ jobs:
             fi
           done
         working-directory: packages/pi-envoy
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pi-envoy-pr
           path: out/pr-artifacts/*.tgz
@@ -1815,7 +1815,7 @@ jobs:
             fi
           done
         working-directory: packages/pi-legion
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pi-legion-pr
           path: out/pr-artifacts/*.tgz
@@ -1940,7 +1940,7 @@ jobs:
         env:
           DISPATCH_E2E_FILE_STORE_ENDPOINT: http://127.0.0.1:18333
           DISPATCH_E2E_FILE_STORE_BUCKET: dispatch-e2e-files
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: dispatch-e2e-test-results-${{ github.run_attempt }}
@@ -2019,7 +2019,7 @@ jobs:
         # step before built the dashboard; B serves A's build, which this spec does not tell apart.
         run: DISPATCH_E2E_PROCESSES=2 DISPATCH_E2E_SIGNIN=oidc bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts
         working-directory: packages/dispatch
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: dispatch-browser-multiprocess-test-results-${{ github.run_attempt }}
@@ -2056,7 +2056,7 @@ jobs:
       - name: Pack Claude Envoy plugin
         run: bun pm pack --destination ../../out/pr-artifacts
         working-directory: packages/claude-envoy
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: claude-envoy-pr
           path: out/pr-artifacts/*.tgz
@@ -2180,7 +2180,7 @@ jobs:
             tar tzvf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz"
           done
         working-directory: packages/envoy
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: legion-envoy-binaries-pr
           path: |
@@ -2617,7 +2617,7 @@ jobs:
       - name: Local end-to-end acceptance
         run: bash scripts/e2e-local.sh
         working-directory: packages/envoy
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: envoy-e2e-local-evidence-${{ github.run_attempt }}
