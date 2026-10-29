@@ -2064,9 +2064,13 @@ record, every Sandbox, its uid, its annotations and its tree label. In this orde
    last migration (`0053_issue_taken_back.up.sql`, which this rollback leaves applied with
    `0052_dispatch_issues.up.sql`). The
    SQL changes only these locators and that row, so Oh My Pi's session tables, wherever they are,
-   keep every turn taken under this release. The `54` in the `delete` is the number of the
+   keep every turn taken under this release. The `54` in the `delete` is the version of the
    migration that renames the container, `0054_issue_pod_roles_container.up.sql`; where that file
-   carries another number in the release you roll back from, use that number.
+   carries another version in the release you roll back from, use that version. A migration
+   written after the numbered series takes the UTC moment it was created as its version, the
+   14 digits its file name begins with (`20261030120000_<slug>.up.sql` records
+   `version = 20261030120000`), so reversing one deletes that 14-digit value and not a small
+   number.
 4. **Return every one-container issue Sandbox to the earlier layout's template.** With
    `<namespace>` and `<project>` as in [Upgrading a deployment with running
    trees](#upgrading-a-deployment-with-running-trees) step 4, each patch suspends the Sandbox, which
