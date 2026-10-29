@@ -2,25 +2,35 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-549",
-  "completed": "2026-10-28T15:29:30Z",
-  "round": 6,
-  "reviewedCodeHead": "e105aef3e044",
-  "decision": "approved",
+  "completed": "2026-10-29T16:43:00Z",
+  "round": 7,
+  "reviewedCodeHead": "4c0da574bf8a",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
-  "minor": 1,
-  "threads": "All ten review threads carry my answer and are resolved; PRRT_kwDORFy7ds6xKae8 and PRRT_kwDORFy7ds6xLgkd accepted as fixed in e105aef3e044 (a restart keeps its ports), PRRT_kwDORFy7ds6xKafG fixed in 16234e5e20b8 (250m floor).",
+  "important": 1,
+  "minor": 2,
+  "rebaseCheck": "Last review APPROVE at d945b51c. Fingerprint against main: d945b51c 956c3757..., 71646ee4 e99f1ccb... (changed). The PR-own diff (91d30dea..d945b51c vs 30ecdcd4..4c0da574) differs only by main's workflow rename (envoy-and-contracts.yaml to ci.yaml) and an architecture-doc sentence; every Go file byte-identical. Still a changed fingerprint, so a new round with the thermonuclear pair.",
   "keyFindings": [
     {
+      "severity": "important",
+      "file": ".github/scripts/ci_job_reads.py",
+      "description": "main's check-ci-filters.sh (via ci_job_reads.py:616-617) still pins the envoy-infra-go natslive step as `go test -tags natslive ./core/ ./seed/`, while the PR's step (ci.yaml:2299) runs `go test -timeout 30m -tags natslive ./core/ ./seed/ ./gcp/`. Reproduced: check-ci-filters.sh exits 1 with 2 problems, so ci-filters fails and ci-ok, which main requires, fails with it. Fix: update the Run to the step's text with packages ./core/ ./seed/ ./gcp/ (a scratch copy with that change passes: 24 gates, 0 uncovered)."
+    },
+    {
       "severity": "minor",
-      "file": "packages/envoy/infra/gcp/clusteredhub_live_test.go",
-      "description": "Cleanup, not a defect: loopbackPorts.mu (:486) guards a draw only the test goroutine makes. Fast-follow, with podPriorityClass's duplicate of newDispatchDisruption's rule."
+      "file": "packages/envoy/infra/core/listener_env.go",
+      "description": "MaxNATSReplicas = 5 (:57-59, :176-177) duplicates bus.MaxReplicas, the bound bus.ParseNATSReplicas enforces and aws/rendering/listener.go:98-99 uses; core already imports bus. Use bus.MaxReplicas."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/infra/core/nats_auth_live_test.go",
+      "description": "Its comment at :18 still names the old natslive command (`go test -tags natslive ./core/ ./seed/`) of the step this PR changes."
     }
   ],
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at e105aef3 (first := s.proc == nil true only on a first start; no stale port consumer; comments accurate; no finding).",
-    "codeQuality": "Verdict: APPROVE at e105aef3 (no finding; loopbackPorts.mu still present, cleanup only)."
+    "deepReview": "Verdict: CHANGES at 4c0da574 (High: stale ci_job_reads.py pin fails ci-filters and ci-ok; minors: stale PR body CI line, nats_auth_live_test.go comment, MaxNATSReplicas duplicate). Merge resolution sound; main invalidates nothing in the hub (helpers, listener env, healthz, durableBindDeadline, INFRA-557 still in progress, sizing constants match #2362).",
+    "codeQuality": "Verdict: CHANGES at 4c0da574 (the same ci_job_reads.py pin; MaxNATSReplicas duplicate, cleanup)."
   },
-  "ci": "legion/INFRA-546 requires no check and is not protected. At e105aef3 every pull_request run is queued or pending. Compare e105aef3...f7094da7 handoffsOnly true, 2 files. Known outside this PR: TestDispatchConnectionsPerPodIsTheServers (83 vs 84) fails at the base and on main, reported to the architect.",
-  "verifiedLocally": "At e105aef3: gofmt clean on gcp, go vet -tags pulumilive,natslive ./gcp/ ok, go test -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' ./gcp/ ok (36.7 s). Round 5's unit runs at 16234e5e cover the unchanged product code."
+  "ci": "Base is now main (required: lint, typecheck, test, pr-title; ci-ok aggregates the CI jobs). At 4c0da574 the CI run is queued (changes passed; ci-filters and the rest queued). Compare 4c0da574...71646ee4 handoffsOnly true, 2 files. ci-filters will fail on finding 1.",
+  "verifiedLocally": "At 4c0da574: gofmt clean, go vet -tags pulumilive,natslive ./... ok, go test ./... ok in every package (two mkfs.ext4 data-disk tests skipped; TestDispatchConnectionsPerPodIsTheServers passes, main has 87 on both sides), go test -tags natslive -run TestClusteredNatsHub ./gcp/ ok (68.2 s); check-ci-filters.sh (pyyaml 6.0.2 via uv) exits 1 with the two problems above."
 }
