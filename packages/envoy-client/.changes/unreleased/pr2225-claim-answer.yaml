@@ -1,6 +1,0 @@
-kind: Changed
-body: |-
-  `dispatch claim`'s answer says what the claim now delivers: `A person's answers, comments and
-  messages on <KEY> now reach you directly.`, after the status advice and before the note that the
-  session is not subscribed to the issue, which still names the subscription every other event on
-  it needs.

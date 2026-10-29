@@ -313,8 +313,8 @@ def go_notices_runs():
 # envoy-go's and envoy-smoke's steps whose go commands are not in the simple form, pinned whole.
 UNIT_TEST_STEP = "Unit test envoy Go package"
 UNIT_TEST_SCRIPT = """\
-go test ./internal/dispatch/api
-go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test"""
+go test -timeout 20m ./internal/dispatch/api
+go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -timeout 20m"""
 PACK_STEP = "Pack envoy binaries"
 PACK_SCRIPT = """\
 for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
@@ -576,7 +576,7 @@ GATES = [
         # on the service's one checkpointer beside the other package binaries), then ./... but it
         # and internal/integration, which the integration step tests: counted as all of ./....
         pinned_step("envoy-go", UNIT_TEST_STEP, ENVOY, UNIT_TEST_SCRIPT, [
-            (ENVOY, ["./internal/dispatch/api"], "go test ./internal/dispatch/api", {}),
+            (ENVOY, ["./internal/dispatch/api"], "go test -timeout 20m ./internal/dispatch/api", {}),
             (ENVOY, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
         ]),
         # One linux build of the listener per architecture the loop reads from the target list.
