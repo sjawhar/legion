@@ -194,8 +194,8 @@ stop timeout, which Dispatch's task definition leaves unset, `stop_grace_period`
 `deploy/compose/dispatch.compose.yml`, and the pod `infra`'s `gcp:Dispatch` renders, whose
 `terminationGracePeriodSeconds` is this value plus its five-second pre-stop wait, which the
 kubelet spends inside the same period - `cmd/dispatch/pod_grace_period_test.go` fails when the
-pod's budget stops covering it). Every open event stream ends at the signal through
-`api.Deps.Lifetime`, so HTTP shutdown waits only for the requests in flight, and it waits for them
+pod's budget stops covering it). Every open event stream ends at the signal through the lifetime
+`api.Register` takes, so HTTP shutdown waits only for the requests in flight, and it waits for them
 first, with no deadline of its own. The document service starts when they are done, or 11 s after
 the signal with some still running (`httpDrainBeforeDocuments`, `dispatch: settle documents with
 requests still in flight`), and gets `documentShutdownTimeout`, 5 s more than its drain budget

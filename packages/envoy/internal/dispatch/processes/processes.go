@@ -429,29 +429,19 @@ func (r *Registration) Deregister(ctx context.Context) error {
 
 // RunPrune deletes, every PruneInterval until ctx ends, the rows whose heartbeat is older than
 // PruneAge by the database's clock: what processes that died without deregistering left behind.
-// Each pass runs under pruneLease (duty.Exclusive), so one process prunes per period however many
-// serve the database.
+// Each pass runs under pruneLease, so one process prunes per period however many serve the
+// database. The ticks are duty.RunLeased's, a ticker's: the first one interval after the call,
+// then one each interval; the first tick a pass overran comes at once with the moment it was due,
+// and only the ones after it are dropped.
 func RunPrune(ctx context.Context, pool *store.Pool, leases duty.Leases) {
-	interval := PruneInterval
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			duty.Exclusive(ctx, leases, pruneLease, interval, func(ctx context.Context) {
-				pruned, err := prune(ctx, pool)
-				if err != nil {
-					slog.Warn("dispatch: prune the server process registry", "error", err)
-					return
-				}
-				if pruned > 0 {
-					slog.Info("dispatch: pruned server processes gone without deregistering", "rows", pruned)
-				}
-			})
+	duty.RunLeased(ctx, leases, pruneLease, PruneInterval, duty.TickAfterInterval, func(ctx context.Context) {
+		pruned, err := prune(ctx, pool)
+		if err != nil {
+			slog.Warn("dispatch: prune the server process registry", "error", err)
+		} else if pruned > 0 {
+			slog.Info("dispatch: pruned server processes gone without deregistering", "rows", pruned)
 		}
-	}
+	})
 }
 
 // prune is one pass of RunPrune.
