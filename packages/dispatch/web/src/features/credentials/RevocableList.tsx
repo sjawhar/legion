@@ -1,7 +1,7 @@
-import { type UseQueryResult, useMutation } from "@tanstack/react-query";
+import type { UseQueryResult } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
-import { apiErrorMessage } from "../../api/client";
+import { apiErrorMessage, type WriteBounds } from "../../api/client";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
@@ -19,6 +19,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { settingsTableWrapper } from "../settings/classes";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 /** One column of a `RevocableList`: its header, and what a row shows under it. The first column
  *  names the row. */
@@ -62,15 +63,19 @@ export function RevocableList<Row>({
   noun: string;
   onRevoked: () => void;
   query: UseQueryResult<readonly Row[]>;
-  revoke: (row: Row) => Promise<void>;
+  /** One attempt of `row`'s revoke, under the write's key. */
+  revoke: (row: Row, bounds: WriteBounds) => Promise<void>;
   revokeError: string;
   rowKey: (row: Row) => string;
 }): ReactNode {
   const submitGuard = useSubmitGuard();
-  const mutation = useMutation({
-    mutationFn: revoke,
+  // The list shows a refused revoke itself, under the table.
+  const mutation = useKeyedWrite({
+    inline: true,
+    label: (row: Row) => `${heading}: revoke ${rowKey(row)}`,
     onSettled: () => submitGuard.release(),
     onSuccess: onRevoked,
+    write: revoke,
   });
   const press = (row: Row) => {
     if (confirm === undefined || window.confirm(confirm(row))) {

@@ -139,7 +139,10 @@ func newRig(t *testing.T) *rig {
 		t.Fatalf("API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(api.Register(mux, t.Context(), deps))
+	// t.Context, the server's lifetime, is cancelled before cleanups run, so Wait returns once the
+	// keyed handlers, detached deliveries, sockets and relay it started have ended, before the
+	// database closes under them.
+	t.Cleanup(api.Register(mux, t.Context(), deps).Wait)
 	return &rig{handler: mux, database: database, broker: broker, documents: documents, sent: &recorder{topics: map[string][]string{}}}
 }
 

@@ -10,12 +10,12 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// beforeItemBlocks is the last migration before comment and message blocks: 0137_item_blocks
-// through 0139_messages_item_blocks_trigger apply after it. itemBlockTables is 0137, which creates
-// the tables 0138 and 0139 attach their triggers to and seed.
+// beforeItemBlocks is the last migration before comment and message blocks: 0139_item_blocks
+// through 0141_messages_item_blocks_trigger apply after it. itemBlockTables is 0139, which creates
+// the tables 0140 and 0141 attach their triggers to and seed.
 const (
-	beforeItemBlocks = 136
-	itemBlockTables  = 137
+	beforeItemBlocks = 138
+	itemBlockTables  = 139
 )
 
 // itemBlockState is a comment's or message's row of its block state table.
@@ -161,7 +161,7 @@ func TestAnOlderBuildsWriteLeavesTheItemOwed(t *testing.T) {
 }
 
 // Every comment and message stored before the item block index is owed one by the migrations: a
-// comment or message written before 0137, and one written after 0137 and before the trigger that
+// comment or message written before 0139, and one written after 0139 and before the trigger that
 // owes its kind (an older build's write during the migrations), each gets an owed state row.
 func TestTheItemBlockMigrationsOweEveryStoredItem(t *testing.T) {
 	ctx := context.Background()
@@ -192,11 +192,11 @@ func TestTheItemBlockMigrationsOweEveryStoredItem(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 	for _, item := range []struct{ what, kind, id string }{
-		{"a comment stored before 0137", "comment", olderComment},
-		{"a comment written between 0137 and its trigger", "comment", racedComment},
-		{"a message stored before 0137", "message", olderMessage},
-		{"a direct message stored before 0137", "message", olderDirect},
-		{"a message written between 0137 and its trigger", "message", racedMessage},
+		{"a comment stored before 0139", "comment", olderComment},
+		{"a comment written between 0139 and its trigger", "comment", racedComment},
+		{"a message stored before 0139", "message", olderMessage},
+		{"a direct message stored before 0139", "message", olderDirect},
+		{"a message written between 0139 and its trigger", "message", racedMessage},
 	} {
 		if state := assertItemOwed(t, store, item.what, item.kind, item.id); item.kind == "comment" && (state.revision != 0 || state.nextBlock != 1) {
 			t.Errorf("%s: revision %d, next_block %d; want 0 and 1", item.what, state.revision, state.nextBlock)

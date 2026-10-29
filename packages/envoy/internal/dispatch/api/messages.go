@@ -70,6 +70,9 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, withAdvice(message, advice))
 }
 
+// createAgentMessage is POST /api/v1/agents/{session_id}/messages: a person's send to one session.
+// A send under an Idempotency-Key commits its message as the key's recovery point, and a repeat is
+// answered from it (replayAgentMessage).
 func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
@@ -102,6 +105,124 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, message)
 }
 
+// messageRecovery is the recovery point a keyed message write commits with its message
+// (bindRequestKeyRecovery): the message, and the mode it was sent in, empty for a message that
+// targets nobody.
+type messageRecovery struct {
+	MessageID string `json:"message_id"`
+	Delivery  string `json:"delivery"`
+}
+
+// recoveredMessage is the message a keyed write committed, read once sendHeldMessageOn has put a
+// targeted one on its way, with its deliveries as they stand. It is read from the database before
+// the listener is, so a repeat never fails because the listener is down.
+func (s *server) recoveredMessage(ctx context.Context, point messageRecovery) (model.Message, error) {
+	message, err := s.loadMessage(ctx, s.deps.Store.Pool, "", point.MessageID)
+	if err != nil {
+		return model.Message{}, err
+	}
+	if message.Target != nil {
+		if err := s.sendHeldMessageOn(ctx, message, point.Delivery); err != nil {
+			return model.Message{}, err
+		}
+	}
+	deliveries, err := s.loadMessageDeliveries(ctx, s.deps.Store.Pool, []string{message.ID})
+	if err != nil {
+		return model.Message{}, err
+	}
+	message.Deliveries = deliveries[message.ID]
+	return message, nil
+}
+
+// replayAgentMessage answers a repeat of a keyed single-session send whose message committed: the
+// message as GET /api/v1/agents/{session_id}/messages reads it (recoveredMessage), under the send's
+// own 201.
+func (s *server) replayAgentMessage(w http.ResponseWriter, r *http.Request, point messageRecovery, _ []byte) {
+	message, err := s.recoveredMessage(r.Context(), point)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusCreated, message)
+}
+
+// replayIssueMessage answers a repeat of a keyed issue message whose message committed: the
+// message as it stands (recoveredMessage), a targeted one's owed delivery made first, in the first
+// answer's shape - its advice kept - under the post's own 201.
+func (s *server) replayIssueMessage(w http.ResponseWriter, r *http.Request, point messageRecovery, stored []byte) {
+	message, err := s.recoveredMessage(r.Context(), point)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	s.writeRefreshed(w, stored, message)
+}
+
+// sendHeldMessageOn makes sure a keyed send's message is on its way before its repeat is answered,
+// in the mode it was sent in, as its author's send: the attempt it owes (owedMessageAttempts) is
+// sent bound to its number (deliverMessageResuming), so of two senders that both find it owed, one
+// sends and the other finds the attempt taken and sends nothing. A pending attempt whose claim is
+// live is in flight and left to its sender, and an attempt that settled owes nothing. The send
+// runs on past the request, as the original's does, and a listener it cannot reach is recorded on
+// the attempt, never returned.
+func (s *server) sendHeldMessageOn(ctx context.Context, message model.Message, delivery string) error {
+	owed, err := s.owedMessageAttempts(ctx, []string{message.ID})
+	attempt := owed[message.ID]
+	if err != nil || attempt == 0 {
+		return err
+	}
+	sending := context.WithoutCancel(ctx)
+	if _, err := s.deliverMessageResuming(sending, message, delivery, nil, message.Author, nil, attempt); err != nil &&
+		!errors.Is(err, errAttemptNotPending) {
+		return err
+	}
+	return nil
+}
+
+// owedMessageAttempts is the attempt each of the targeted messages owes, keyed by message id, with
+// a message that owes nothing absent: the first attempt of a message with no attempt at all - its
+// process died between the commit and the send, or its own sender is between them right now - or
+// the message's latest attempt when it is pending and its claim has lapsed, which Postgres judges
+// against the claimed_at it wrote (claimLapsed). A pending attempt whose claim is live is in
+// flight and left to its sender, and a latest attempt that settled owes nothing: an earlier
+// pending one a later retry from the agent card overtook is that retry's to answer. A keyed send's
+// repeat (sendHeldMessageOn) and a broadcast's (sendOwedBroadcastRecipients) both ask it.
+func (s *server) owedMessageAttempts(ctx context.Context, messageIDs []string) (map[string]int, error) {
+	owed := make(map[string]int, len(messageIDs))
+	if len(messageIDs) == 0 {
+		return owed, nil
+	}
+	rows, err := s.deps.Store.Pool.Query(ctx, `
+		select m.id::text, coalesce(latest.attempt, 1), coalesce(latest.owed, true)
+		from unnest($1::uuid[]) as m(id)
+		left join lateral (
+			select attempt, state = 'pending' and `+claimLapsed+` as owed
+			from message_deliveries where message_id = m.id
+			order by attempt desc
+			limit 1
+		) latest on true
+	`, messageIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var messageID string
+		var attempt int
+		var stranded bool
+		if err := rows.Scan(&messageID, &attempt, &stranded); err != nil {
+			return nil, err
+		}
+		if stranded {
+			owed[messageID] = attempt
+		}
+	}
+	return owed, rows.Err()
+}
+
+// createStoredMessage writes one message in a single transaction, with it the keyed request's
+// recovery point (bindRequestKeyRecovery), so a repeat under the key is answered with this message
+// however this request ends, then sends a targeted message's first attempt.
 func (s *server) createStoredMessage(
 	ctx context.Context,
 	issueKey *string,
@@ -173,6 +294,12 @@ func (s *server) createStoredMessage(
 	if err != nil {
 		return model.Message{}, nil, err
 	}
+	// The recovery point right after its message and before the event append: a repeat that took
+	// the key over meanwhile refuses it here, and this transaction rolls back before it takes the
+	// events' global lock.
+	if err := bindRequestKeyRecovery(ctx, tx, messageRecovery{MessageID: message.ID, Delivery: delivery}); err != nil {
+		return model.Message{}, nil, err
+	}
 	if block != nil {
 		if err := hydrateMessageReplyBlocks(ctx, tx, &message); err != nil {
 			return model.Message{}, nil, err
@@ -211,11 +338,27 @@ func (s *server) createStoredMessage(
 	}
 	s.publish(event)
 	if message.Target != nil {
-		attempt, err := s.deliverMessage(ctx, message, delivery, input.Urgency, actor, &thread)
-		if err != nil {
+		// The delivery runs on past the request: a page that gives up on a send, or retries it
+		// under its key, never cuts off a frame in flight or strands its attempt pending. Nor does
+		// a deploy: http.Server.Shutdown waits for this handler, so the send finishes inside the
+		// drain, and the listener client's receipt timeout bounds it there.
+		sending := context.WithoutCancel(ctx)
+		// Bound to the message's first attempt: a repeat of a keyed send that found this message
+		// committed with no attempt yet may open it first (sendHeldMessageOn), and then this send
+		// sends nothing and answers with the attempt that repeat opened.
+		attempt, err := s.deliverMessageResuming(sending, message, delivery, input.Urgency, actor, &thread, 1)
+		switch {
+		case errors.Is(err, errAttemptNotPending):
+			deliveries, err := s.loadMessageDeliveries(sending, s.deps.Store.Pool, []string{message.ID})
+			if err != nil {
+				return model.Message{}, nil, err
+			}
+			message.Deliveries = deliveries[message.ID]
+		case err != nil:
 			return model.Message{}, nil, err
+		default:
+			message.Deliveries = []model.MessageDelivery{attempt}
 		}
-		message.Deliveries = []model.MessageDelivery{attempt}
 	}
 	return message, advice, nil
 }
@@ -494,7 +637,8 @@ func (s *server) getMessage(w http.ResponseWriter, r *http.Request) {
 // is in (the root targets it, or it authored a reply). The session is the caller's own claim,
 // like `actor`, so this keeps a session from reading another session's direct conversation by
 // mistake; it is not an authorization boundary. Direct-conversation text also reaches every
-// authenticated caller through GET /api/v1/events; nothing in Dispatch restricts it by session.
+// authenticated caller through that caller's events view on GET /ws/live; nothing in Dispatch
+// restricts it by session.
 func (s *server) getMessageThread(w http.ResponseWriter, r *http.Request) {
 	read, ok := s.readableMessageThread(w, r)
 	if !ok {

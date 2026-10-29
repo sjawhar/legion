@@ -2,6 +2,7 @@ import { type QueryClient, type QueryStatus, queryOptions, useQuery } from "@tan
 
 import { ApiError, api, artifactVersionPath } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
+import { issueQuery } from "../../api/queries";
 import type {
   Artifact,
   ArtifactText,
@@ -84,14 +85,6 @@ export const documentSummaryQuery = (project: string | undefined, slug: string |
     queryFn: () => api.getProjectDocumentSummary(project ?? "", slug ?? ""),
     staleTime: Number.POSITIVE_INFINITY,
     refetchOnWindowFocus: refetchFailedOnFocus,
-  });
-
-/** The full issue, under the key the issue page reads it by. Of the reference surfaces only the
- *  hover card's issue view reads it (priority, labels, open asks, spec), while it is shown. */
-export const issueQuery = (key: string | undefined) =>
-  queryOptions({
-    queryKey: ["issue", key],
-    queryFn: () => api.getIssue(key ?? ""),
   });
 
 /** One issue message and its replies, as the Conversation's landing, a reference and the hover

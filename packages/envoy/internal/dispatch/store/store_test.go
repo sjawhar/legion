@@ -146,6 +146,40 @@ func TestOpenRefusesAConnectionStringThatSetsThePoolSize(t *testing.T) {
 	t.Cleanup(store.Pool.Close)
 }
 
+// Dispatch's timestamps are UTC whatever zone the host runs in, because a time.Time marshals
+// JSON in the zone it carries and every reader that compares a timestamp as a string reads that
+// zone: a Pacific host answered "2026-10-01T17:00:01.12-07:00" where a UTC one answered
+// "2026-10-02T00:00:01.12Z" for the same instant. pgx otherwise hands back a timestamptz in
+// time.Local, which is never time.UTC - not even under TZ=UTC, where it is a location of its own
+// named "UTC" - so this holds the connection to the zone rather than to the host's.
+func TestScannedTimestampsCarryUTCWhateverTheHostZone(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	// Both wire formats: the pool's own (binary, the statement cache's) and the text one a
+	// simple-protocol query answers, each with a scan plan of its own in pgx.
+	for name, args := range map[string][]any{
+		"binary": nil,
+		"text":   {pgx.QueryExecModeSimpleProtocol},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var scanned, stored time.Time
+			if err := store.Pool.QueryRow(ctx,
+				`select now(), '2026-10-02T00:00:01.12Z'::timestamptz`, args...,
+			).Scan(&scanned, &stored); err != nil {
+				t.Fatalf("read a timestamptz: %v", err)
+			}
+			if scanned.Location() != time.UTC || stored.Location() != time.UTC {
+				t.Fatalf("scanned in %s and %s, want both in %s",
+					scanned.Location(), stored.Location(), time.UTC)
+			}
+			// What the server writes into JSON, which is what a client compares.
+			if written := stored.Format(time.RFC3339Nano); written != "2026-10-02T00:00:01.12Z" {
+				t.Fatalf("the stored instant reads back as %q, want 2026-10-02T00:00:01.12Z", written)
+			}
+		})
+	}
+}
+
 func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)

@@ -78,6 +78,8 @@ import {
   DispatchClient,
   DispatchGatewayError,
   DispatchServiceError,
+  DispatchWriteLandedError,
+  type DispatchWriteRetry,
   type GraphReferencesQuery,
   type IssueReadOptions,
 } from "./dispatch-http";
@@ -169,6 +171,8 @@ export interface ExecuteDispatchToolInput {
   readonly signal?: AbortSignal;
   readonly env?: ExecutorEnvironment;
   readonly fetchImpl?: typeof fetch;
+  /** How each write asks Dispatch again under its key (`DISPATCH_WRITE_RETRY` unless set). */
+  readonly writeRetry?: DispatchWriteRetry;
   readonly exec?: ExecFn;
   /** The topics the session's Envoy subscriptions hold, or null when they cannot be read (Envoy
    *  off, or no answer from its listener); called only by a write that would name its owner as
@@ -2885,8 +2889,10 @@ function dispatchAnswered(error: unknown, status: number): error is DispatchServ
 /**
  * Whether a write that failed with `error` may have taken effect anyway. Only an answer sent
  * before the write could apply proves it did not: Dispatch's own refusal (a 4xx), or a gateway's
- * answer that never reached Dispatch (`mayHaveReachedDispatch`). Dispatch's own 5xx can come after
- * it committed, and a timeout or a transport error says nothing either way.
+ * answer that never reached Dispatch (`mayHaveReachedDispatch`), which the client throws as such
+ * only when no earlier attempt of the write may have reached Dispatch either. Dispatch's own 5xx
+ * can come after it committed, and a timeout, a transport error or a `DispatchWriteUnsettledError`
+ * (an earlier attempt may have reached Dispatch) says nothing either way.
  */
 function writeMayHaveLanded(error: unknown): boolean {
   if (error instanceof DispatchGatewayError) return error.mayHaveReachedDispatch;
@@ -3035,7 +3041,7 @@ export async function executeDispatchTool(
   // A factory, not one instance: the constructor starts the request deadline, and the main
   // path resolves the origin (a subprocess) before it needs a client.
   const dispatchClient = (): DispatchClient =>
-    new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
+    new DispatchClient(configUrl, configToken, fetchImpl, input.signal, input.writeRetry);
   if (input.tool === "dispatch_open_asks") {
     const client = dispatchClient();
     const project = optionalString(ownerArguments.args, "project");
@@ -3113,12 +3119,30 @@ export async function executeDispatchTool(
     return owner;
   };
   // The text a call posts with its pictures, each uploaded first to the owner the address names.
+  // An upload is a step before the call's own write, so one that landed without its answer leaves
+  // the call undone: it fails, rather than reading as the call's landing.
   const postWithPictures = (
     text: string,
     limit: PictureTextLimit,
     owner: string,
     upload: (upload: CreateArtifactInput) => Promise<ArtifactUploadResponse>
-  ): Promise<string> => textWithPictures(input.tool, text, pictures, limit, owner, upload, actor);
+  ): Promise<string> =>
+    textWithPictures(
+      input.tool,
+      text,
+      pictures,
+      limit,
+      owner,
+      (picture) =>
+        upload(picture).catch((error: unknown) => {
+          if (!(error instanceof DispatchWriteLandedError)) throw error;
+          throw new Error(
+            `${error.message} That was a picture uploaded before this call's own write, so nothing else was written: run the call again, which uploads it as its next version.`,
+            { cause: error }
+          );
+        }),
+      actor
+    );
   // An ask or comment uploads to the project of the project document it is on, else to its issue.
   const writePictures = (
     resolved: ResolvedArtifact | undefined,
@@ -3254,6 +3278,12 @@ export async function executeDispatchTool(
             ref: dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id),
           };
         } catch (error) {
+          if (error instanceof DispatchWriteLandedError) {
+            throw new Error(
+              `${error.message} That was the closing reason, so the close was not sent: read the issue's messages for it, then close with a reason that points at it, since retrying this call posts its reason again.`,
+              { cause: error }
+            );
+          }
           // The close's PATCH below follows the same rule: only an answer sent before the reason
           // could be stored proves it was not posted.
           const told = writeMayHaveLanded(error)
@@ -3302,6 +3332,9 @@ export async function executeDispatchTool(
           actor,
         });
       } catch (error) {
+        // The update is this call's own last write: one that landed without its answer is the
+        // call's landing, which the caller reports as done.
+        if (error instanceof DispatchWriteLandedError) throw error;
         // A URL links exactly one issue. A server from before EXTERNAL_LINK_TAKEN answers the
         // unique-index violation with 500 INTERNAL, which names nothing; say what it means. A
         // gateway's 500 page is not that answer, and gets no such reading.

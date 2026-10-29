@@ -63,7 +63,7 @@ type BlockIndexTick struct {
 // rebuild-refs marks - every comment, ask and issue message whose text holds `#b-`, owed an
 // index with the block grammar (block_grammar_owed, migrations 0123-0126), which a build older
 // than the block grammar indexes without, and every comment and message owed a block index of its
-// own blocks (comment_block_state and message_block_state owed_at, set by migrations 0138-0139's
+// own blocks (comment_block_state and message_block_state owed_at, set by migrations 0140-0141's
 // triggers on every write and by rebuild-refs), which a build older than item blocks leaves owed.
 // One tick per lease, at start, then every blockIndexStep while a batch is full and every
 // BlockIndexReconcileInterval once none is, until ctx ends.

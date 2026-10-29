@@ -29,10 +29,10 @@ import type {
 } from "./types";
 
 /**
- * Which cached reads one stream event can change, and nothing else: `eventRefreshTargets` is the
- * whole of it, and `api/query-refresh.ts` decides when each read is fetched. Query keys are the
+ * Which cached reads one event of the feed can change, and nothing else: `eventRefreshTargets` is
+ * the whole of it, and `api/query-refresh.ts` decides when each read is fetched. Query keys are the
  * literal arrays their readers use (the reference reads' builders live in
- * `features/refs/reference-target.ts`; `__tests__/sse.test.ts` holds the two in step).
+ * `features/refs/reference-target.ts`; `__tests__/event-feed.test.ts` holds the two in step).
  *
  * The server says what a write moved where a rule needs it: `changed` and `ancestors` on
  * `issue.created|updated|closed`, `thread_logins` on the writes that can move someone's Replies
@@ -659,7 +659,7 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     // state's own read always (its `seq` moved), the pinned list only for a pin. Of these the Inbox
     // reads only a snooze, its row's `snoozed_until`, from which its Later band, its banner and the
     // Needs-you badge are all counted: every Inbox read, since the event names no ask (every
-    // signed-in stream carries it). An event without `changed` predates snooze events.
+    // signed-in feed carries it). An event without `changed` predates snooze events.
     if (!isViewer(payloadString(event, "login"), viewer)) {
       return [];
     }
@@ -1018,7 +1018,7 @@ function askThreadsOn(issue: string): RefreshTarget {
 }
 
 /**
- * The reads one stream event can change, each a query key (a prefix unless `exact`) and, where
+ * The reads one event of the feed can change, each a query key (a prefix unless `exact`) and, where
  * only some of a family's reads can have moved, a test of the read's data. `signedInLogin` is the
  * viewer's: the per-viewer events and the Replies rule read it.
  */
