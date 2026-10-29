@@ -65,8 +65,8 @@ const codegraphEmptyLockGrace = 5 * time.Second
 // nextCodegraphStep lets a live CodeGraph lock veto a repair but not an `init`: an uninitialized
 // workspace has no `codegraph.lock` to read, so two processes that both find it uninitialized would
 // both run `init`. codegraphLockHeldByLiveProcess judges liveness by PID, which another
-// container's PID namespace makes meaningless; it stays as it is for the one-process case. The
-// contenders are the six role containers of one issue pod, which share the issue's workspace and
+// role's PID namespace makes meaningless; it stays as it is for the one-process case. The
+// contenders are the six roles of one issue pod, which share the issue's workspace and
 // each warm it once their Oh My Pi starts (`legion worker-shim --warm-codegraph`); no other pod
 // mounts the issue's volume. The lease is a file judged by its existence and mtime on that
 // volume: an exclusive create its holder keeps fresh,

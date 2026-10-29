@@ -21,7 +21,9 @@ import path from "node:path";
 //     its DATABASE_URL names;
 //   - seed.ts: records the Dispatch that each seed reached, and writes the fixture;
 //   - tmux: runs the pane's command at once;
-//   - mise: the agent, which records the Dispatch variables of its environment.
+//   - mise: answers `mise where <pin>` with a pin whose bin/omp is the agent, which records the
+//     Dispatch variables of its environment, and runs `mise x <pin> -- <command>` as the command
+//     (a run names its pin's omp by path).
 // Each run must get a database of its own, a server of its own and a DISPATCH_URL of its own, and
 // must stop its server when it ends.
 setDefaultTimeout(120_000);
@@ -42,7 +44,7 @@ const co = path.join(scratch, "checkout");
 const rig = path.join(co, "packages/pi-legion/scripts/skill-scenarios/rig.sh");
 mkdirSync(path.dirname(rig), { recursive: true });
 copyFileSync(path.join(import.meta.dir, "rig.sh"), rig);
-for (const lib of ["rig.sh", "free-port.sh"]) {
+for (const lib of ["rig.sh", "port-file.sh", "held-port.py"]) {
   mkdirSync(path.join(co, "scripts/e2e/lib"), { recursive: true });
   copyFileSync(path.join(root, "scripts/e2e/lib", lib), path.join(co, "scripts/e2e/lib", lib));
 }
@@ -50,30 +52,30 @@ const stub = path.join(scratch, "stub");
 mkdirSync(stub);
 put(
   path.join(co, "packages/dispatch/e2e/run-server.sh"),
-  [
-    "#!/usr/bin/env bash",
-    'printf \'%s %s %s\\n\' "$$" "$DISPATCH_E2E_PORT" "$DATABASE_URL" >>"$STUB_DIR/servers.log"',
-    'exec bun "$STUB_DIR/server.ts"',
-    "",
-  ].join("\n"),
+  ["#!/usr/bin/env bash", 'exec bun "$STUB_DIR/server.ts"', ""].join("\n"),
   0o755
 );
-// A port another process took first ends the stub as it ends the Go server, with "address already
-// in use", which start_dispatch answers by picking another port.
+// No DISPATCH_E2E_PORT: the server takes a port of the kernel's choosing and reports it as the Go
+// server does (`msg="dispatch: listening" addr=127.0.0.1:<port>`), which start_dispatch reads from
+// the run's own log.
 put(
   path.join(stub, "server.ts"),
   [
+    'import { appendFileSync } from "node:fs";',
+    'import path from "node:path";',
     'const database = new URL(process.env.DATABASE_URL ?? "").pathname.slice(1);',
-    "try {",
-    "  Bun.serve({",
-    '    hostname: "127.0.0.1",',
-    "    port: Number(process.env.DISPATCH_E2E_PORT),",
-    "    fetch: () => Response.json({ database }),",
-    "  });",
-    "} catch {",
-    '  console.error("listen: bind: address already in use");',
-    "  process.exit(1);",
-    "}",
+    "const server = Bun.serve({",
+    '  hostname: "127.0.0.1",',
+    "  port: 0,",
+    "  fetch: () => Response.json({ database }),",
+    "});",
+    "appendFileSync(",
+    '  path.join(process.env.STUB_DIR ?? "", "servers.log"),',
+    // `\${…}` keeps each placeholder literal here: the stub writes them into server.ts, where
+    // Bun expands them when it runs.
+    `  \`\${process.pid} \${server.port} \${process.env.DATABASE_URL}\\n\``,
+    ");",
+    `console.log(\`msg="dispatch: listening" addr=127.0.0.1:\${server.port}\`);`,
     "",
   ].join("\n")
 );
@@ -129,6 +131,17 @@ put(
 );
 put(
   path.join(bin, "mise"),
+  [
+    "#!/usr/bin/env bash",
+    `if [ "$1" = where ]; then echo ${JSON.stringify(path.join(bin, "pin"))}; exit 0; fi`,
+    'while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done',
+    'shift && exec "$@"',
+    "",
+  ].join("\n"),
+  0o755
+);
+put(
+  path.join(bin, "pin", "bin", "omp"),
   [
     "#!/usr/bin/env bash",
     'env | grep "^DISPATCH_" | sort >"$SKILL_SCENARIO_RUN/agent-env.txt"',

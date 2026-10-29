@@ -1059,9 +1059,10 @@ func TestSecretDeleteThenRestoreRereads(t *testing.T) {
 	if want := aws.ToTime(held.DeletedDate).Add(recoveryWindowDays * 24 * time.Hour); !deadline.Equal(want) {
 		t.Fatalf("DeletionDate = %s, want DeletedDate plus 30*24h = %s", deadline, want)
 	}
-	want := "broker: DOOMED_KEY is deleted (restorable until " + formatTime(sent.outputs[0].DeletionDate) + ")"
-	if !strings.Contains(stdout, want) {
-		t.Fatalf("delete stdout %q must contain %q", stdout, want)
+	want := "broker: DOOMED_KEY is deleted in "
+	wantUntil := "(restorable until " + formatTime(sent.outputs[0].DeletionDate) + ")"
+	if !strings.Contains(stdout, want) || !strings.Contains(stdout, wantUntil) {
+		t.Fatalf("delete stdout %q must contain %q and %q", stdout, want, wantUntil)
 	}
 	stdout, stderr, code = runSecret("restore", "DOOMED_KEY")
 	if code != 0 {
@@ -1121,7 +1122,7 @@ func TestSecretWriteExitsOneWhenTheBrokerRefuses(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit %d, stderr %q; want 1", code, stderr)
 	}
-	if !strings.Contains(stderr, "no-current-value") || !strings.Contains(stdout, "broker: refusing REFUSED_KEY (reason=no-current-value)") {
+	if !strings.Contains(stderr, "no-current-value") || !strings.Contains(stdout, "broker: refusing REFUSED_KEY from ") || !strings.Contains(stdout, "(reason=no-current-value)") {
 		t.Fatalf("stdout %q stderr %q must name the broker's reason", stdout, stderr)
 	}
 	if v := valueOf(t, local, "REFUSED_KEY"); v != "v2" {
@@ -1143,7 +1144,7 @@ func TestSecretWriteExitsOneWhenTheBrokerCannotBeAsked(t *testing.T) {
 	useAWS(t, local, testAccount, adaSignIn)
 	useStdin(t, "v2")
 	_, stderr, code := runSecret("set", "SET_KEY")
-	if code != 1 || !strings.Contains(stderr, "the write to the secret store stands") || !strings.Contains(stderr, "RATE_LIMITED") {
+	if code != 1 || !strings.Contains(stderr, "the write to AWS Secrets Manager account ") || !strings.Contains(stderr, "stands, but the broker at ") || !strings.Contains(stderr, "RATE_LIMITED") {
 		t.Fatalf("exit %d, stderr %q; want 1 saying the write stands and naming the refusal", code, stderr)
 	}
 	if v := valueOf(t, local, "SET_KEY"); v != "v2" {

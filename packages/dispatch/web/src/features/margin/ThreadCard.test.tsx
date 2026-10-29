@@ -17,6 +17,8 @@ import {
   type IntersectionControl,
   installIntersectionObserver,
 } from "../../__tests__/intersection-observer";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerThreadReads } from "../../__tests__/send-answers";
 import { api } from "../../api/client";
 import type { Comment } from "../../api/types";
 import { seedUnread } from "../replies/replies-fixture";
@@ -154,10 +156,14 @@ test("an expanded comment thread renders flat replies and posts an inline reply 
     fireEvent.keyDown(screen.getByLabelText("Reply"), { ctrlKey: true, key: "Enter" });
 
     await waitFor(() =>
-      expect(createComment).toHaveBeenCalledWith("CORE-1", {
-        body: "Second reply",
-        reply_to: root.id,
-      })
+      expect(createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "Second reply",
+          reply_to: root.id,
+        },
+        keyedAttempt
+      )
     );
     expect(composer.querySelector("blockquote")).toBeNull();
   } finally {
@@ -200,6 +206,48 @@ test("a resolved comment thread names its resolver and exposes Reopen", () => {
   }
 });
 
+// An agent's comment and an agent's resolution name it through `AgentName`: a link to its live
+// conversation, with the service attribution as text after it. Following that link is not a
+// click on the card, so it does not select the thread.
+test("an agent author and resolver link to their live conversations", () => {
+  const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
+  const onSelect = jest.fn();
+  const agent = {
+    id: "legion-worker-session",
+    kind: "session" as const,
+    origin: { session_title: "Implementer" },
+    service: "system:serviceaccount:legion:legion-worker",
+  };
+  const agentRoot = comment("root-1", "Root comment", "2026-09-10T00:00:00Z", {
+    author: agent,
+    resolved: true,
+    resolved_at: "2026-09-10T00:02:00Z",
+    resolved_by: agent,
+  });
+  const view = renderCard(
+    thread({ replies: [], resolved: true, root: { comment: agentRoot, kind: "comment" } }),
+    { onSelect }
+  );
+  try {
+    const card = screen.getByTestId(`margin-comment-${root.id}`);
+    expect(card.textContent).toContain("Implementer (as legion/legion-worker) ·");
+    expect(card.textContent).toContain("Resolved by Implementer (as legion/legion-worker) ·");
+    // The author, the resolver, and the thread composer's `Replying to <root author>`.
+    expect(card.textContent).toContain("Replying to Implementer (as legion/legion-worker)");
+    const names = within(card).getAllByRole("link", { name: "Implementer" });
+    expect(names.map((name) => name.getAttribute("href"))).toEqual([
+      "/agents/legion-worker-session/live",
+      "/agents/legion-worker-session/live",
+      "/agents/legion-worker-session/live",
+    ]);
+    fireEvent.click(names[0] as HTMLElement);
+    expect(onSelect).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    listAgents.mockRestore();
+  }
+});
+
 test("the author can edit a comment and an edited comment carries its marker", async () => {
   const onEdit = spyOn({ call: async () => undefined }, "call");
   const view = renderCard(undefined, { onEdit: onEdit });
@@ -216,7 +264,7 @@ test("the author can edit a comment and an edited comment carries its marker", a
     expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
     fireEvent.change(screen.getByLabelText("Edit comment"), { target: { value: "Updated root" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(onEdit).toHaveBeenCalledWith(root.id, "Updated root"));
+    await waitFor(() => expect(onEdit).toHaveBeenCalledWith(root.id, "Updated root", keyedAttempt));
 
     view.rerender(
       <QueryClientProvider client={new QueryClient()}>
@@ -434,10 +482,14 @@ test("a document-owned comment thread posts its inline reply to the artifact rou
     fireEvent.change(reply, { target: { value: "Document reply" } });
     fireEvent.keyDown(reply, { ctrlKey: true, key: "Enter" });
     await waitFor(() =>
-      expect(createArtifactComment).toHaveBeenCalledWith("artifact-1", {
-        body: "Document reply",
-        reply_to: documentRoot.id,
-      })
+      expect(createArtifactComment).toHaveBeenCalledWith(
+        "artifact-1",
+        {
+          body: "Document reply",
+          reply_to: documentRoot.id,
+        },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -530,7 +582,7 @@ afterEach(() => {
 function renderUnreadCard(expanded: boolean) {
   jest.useFakeTimers();
   const screen = installIntersectionObserver();
-  const mark = spyOn(api, "markThreadRead").mockResolvedValue(undefined);
+  const mark = answerThreadReads().mockResolvedValue(undefined);
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
@@ -567,7 +619,9 @@ test("an expanded thread is marked read once its newest reply has been on screen
     // The watched element is the newest reply's own, not the card around the whole thread.
     expect(card.screen.observed()).toEqual([newest]);
     await dwellOn(newest, card.screen);
-    expect(card.mark.mock.calls).toEqual([[root.id, reply.created_at]]);
+    expect(card.mark.mock.calls).toEqual([
+      [root.id, { read_through: reply.created_at }, keyedAttempt],
+    ]);
   } finally {
     card.cleanup();
   }

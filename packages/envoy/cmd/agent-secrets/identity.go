@@ -55,6 +55,10 @@ const (
 	// the proof matches no broker route and is worthless if it ever leaked; identity discards it
 	// unread.
 	identityProbeURL = "agent-secrets:identity"
+	// brokerURLVar is the one variable every form takes the broker's address from. A refusal
+	// that could not reach the broker names it, so a session that inherited a stale address
+	// reads a stale address rather than a broker that is down.
+	brokerURLVar = "AGENT_SECRETS_URL"
 )
 
 // keyDir is AGENT_SECRETS_KEY_DIR, else the default $XDG_RUNTIME_DIR/agent-secrets — the
@@ -64,6 +68,12 @@ func keyDir() string {
 		return dir
 	}
 	return filepath.Dir(helper.DefaultSocket(os.Getenv))
+}
+
+// brokerBaseURL is the broker's address as brokerURLVar gives it, without a trailing slash, and
+// empty when the variable is unset: the one place every form reads it.
+func brokerBaseURL() string {
+	return strings.TrimSuffix(os.Getenv(brokerURLVar), "/")
 }
 
 // helperSocket is AGENT_SECRETS_HELPER_SOCK, else the helper's default socket; named reports

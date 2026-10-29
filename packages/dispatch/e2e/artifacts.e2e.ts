@@ -55,7 +55,9 @@ function postAsPage(page: Page, path: string, data?: object) {
   return page.request.post(path, { data, headers: { Origin: dashboardOrigin } });
 }
 
-test("artifacts upload, version, references, and phone layout", async ({ page }, testInfo) => {
+test("artifacts upload, version, references, and phone layout @phone", async ({
+  page,
+}, testInfo) => {
   const sockets = countDocumentSockets(page);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
@@ -189,7 +191,9 @@ test("artifacts upload, version, references, and phone layout", async ({ page },
   }
 });
 
-test("the artifacts tab filter narrows rows by name and kind", async ({ page }, testInfo) => {
+test("the artifacts tab filter narrows rows by name and kind @phone", async ({
+  page,
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Artifact filtering" });
   await page.goto(`/issues/${issue.key}`);
@@ -217,7 +221,7 @@ test("the artifacts tab filter narrows rows by name and kind", async ({ page }, 
   await expect(page.getByTestId("artifact-notes-md")).toBeVisible();
 });
 
-test("an uploaded document is linked from the Activity tab and counted on its own tab", async ({
+test("an uploaded document is linked from the Activity tab and counted on its own tab @phone", async ({
   page,
 }, testInfo) => {
   await createProject({ key: "OPS", name: "Ops" });
@@ -232,7 +236,7 @@ test("an uploaded document is linked from the Activity tab and counted on its ow
     name,
   });
 
-  // The live event stream refreshes the issue and its tabs: no reload.
+  // The live event feed refreshes the issue and its tabs: no reload.
   await expect(page.getByRole("tab", { exact: true, name: "Artifacts (2)" })).toBeVisible();
   const tablist = page.getByRole("tablist", { name: "Issue detail" });
   const tabs = tablist.getByRole("tab");
@@ -298,7 +302,7 @@ test("an uploaded document is linked from the Activity tab and counted on its ow
   await expect(page.getByTestId("artifact-header")).toContainText(name);
 });
 
-test("the Artifacts badge counts the rows the tab lists, and a row's details are not truncated", async ({
+test("the Artifacts badge counts the rows the tab lists, and a row's details are not truncated @phone", async ({
   page,
 }) => {
   await createProject({ key: "OPS", name: "Ops" });
@@ -358,7 +362,7 @@ test("an out-of-schema document names its repair and uploads replacement markdow
 // the text it read on the first visit. The second admission reads the text afresh and shows the
 // repair; connecting on the cached text would open a socket into a tree outside the schema. The
 // count is this document's sockets alone: the issue's own spec holds a socket of its own.
-test("an out-of-schema document does not reconnect from cached text", async ({
+test("an out-of-schema document does not reconnect from cached text @phone", async ({
   page,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -469,9 +473,14 @@ test("an edit typed while the socket was down survives a text refetch the server
       status: 503,
     });
   });
-  // A tab that becomes visible reopens the event stream, which refreshes every query the page
-  // holds, the document's text among them; the app retries a 5xx twice before it fails the read.
-  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  // A comment anchored in the document names it, so its event refreshes the document's reads, its
+  // text among them; the app retries a 5xx twice before it fails the read. A drop of the page's
+  // live socket would not: Dispatch replays every event the page missed (`replay_complete`), so a
+  // gap that replay covers refreshes nothing.
+  await createComment(issue.key, {
+    anchor: { artifact: upload.artifact.slug, quote: "before" },
+    body: "On the text.",
+  });
   await expect.poll(() => refused).toBeGreaterThanOrEqual(3);
   // The third answer fails the read; nothing on a page that keeps its editor marks that moment, so
   // the page is given a moment to render the failure before what it shows is read.

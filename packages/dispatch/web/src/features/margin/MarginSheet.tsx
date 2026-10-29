@@ -1,5 +1,6 @@
 import { type ReactNode, type RefObject, useRef } from "react";
 
+import type { WriteBounds } from "../../api/client";
 import type { Artifact, Ask, Event } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import {
@@ -41,7 +42,7 @@ export interface MarginSheetModel {
     closeComposer: (composer: MarginComposer) => void;
     onAction: (id: string, action: MarginItemAction) => void;
     onComposerKindChange: (kind: ComposerKind) => string | undefined;
-    onEdit: (id: string, body: string) => Promise<unknown>;
+    onEdit: (id: string, body: string, bounds: WriteBounds) => Promise<unknown>;
     onRetryAction: () => void;
     onUnpin: (eventId: number) => void;
     onUnpinConversation: (id: string) => void;
@@ -74,8 +75,8 @@ export interface MarginSheetModel {
     pinnedConversations: PinnedConversationCard[];
     pinnedIds: string[];
     resolvedThreads: Thread[];
-    /** Retracted asks hidden behind the same toggle as resolved threads. */
-    retractedAskCount: number;
+    /** Retracted and withdrawn asks hidden behind the same toggle as resolved threads. */
+    foldedAskCount: number;
     threads: Thread[];
     viewerLogin: string;
     visibleArtifact: Artifact | undefined;
@@ -150,7 +151,7 @@ export function MarginSheet({
       needsYou,
       onSelectCard,
       resolvedThreads,
-      retractedAskCount,
+      foldedAskCount,
       threads,
       viewerLogin,
       visibleArtifact,
@@ -373,7 +374,7 @@ export function MarginSheet({
               onToggleThread={actions.onToggleThread}
               pendingActionIds={pendingActionIds}
               resolvedThreads={resolvedThreads}
-              retractedAskCount={retractedAskCount}
+              foldedAskCount={foldedAskCount}
               selectedItemId={selection.selectedItemId}
               showResolved={selection.showResolved}
               threads={threads}

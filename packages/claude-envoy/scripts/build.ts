@@ -1,19 +1,24 @@
 // Bundle the plugin's executables into self-contained files the Claude Code
-// plugin cache can run: the cache holds the git tree with no node_modules, so
-// every dependency (workspace packages included) is inlined here and `dist/`
-// is committed, with `THIRD_PARTY_NOTICES` beside the bundles holding the
-// license of every third-party package they inline. `--check` rebuilds into a
-// scratch directory and fails when the result differs from the committed
-// files; CI runs it on the Bun version pinned in the repo-root `.bun-version`,
-// because bundler output depends on the exact Bun build (LEGION-568).
+// plugin cache can run: the cache holds main's git tree with no node_modules,
+// so every dependency (workspace packages included) is inlined here, with
+// `THIRD_PARTY_NOTICES` beside the bundles holding the license of every
+// third-party package they inline. The same build generates `legion/`, the
+// Legion plugin a Claude Code pane loads beside this one (`buildLegionPlugin`).
 //
-// The same run generates `legion/`, the Legion plugin a Claude Code pane loads
-// beside this one (`buildLegionPlugin`), and `--check` holds it to a fresh
-// generation too.
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
+// `dist/` and `legion/` stay tracked on main, written only by main's Rebuild
+// Claude Envoy plugin workflow after each merge, from a checked `--out` build
+// (scripts/verify-build.sh); a pull request never commits them, and no mode
+// writes them. Every mode builds only on the Bun the repo-root `.bun-version`
+// pins, because bundler output depends on the exact Bun build (LEGION-568):
+//   --check      build into a scratch directory and fail when the tracked files
+//                differ from it;
+//   --out <dir>  make <dir>, a new or empty directory outside the repository, a
+//                runnable copy of the plugin built from this tree.
+import { cp, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { thirdPartyNotices } from "../../../scripts/third-party-notices"
+import { PHASE_HOOK_TOOL_NAME } from "../src/legion-phase-hook"
 
 const packageRoot = resolve(import.meta.dir, "..")
 const repoRoot = resolve(packageRoot, "..", "..")
@@ -93,11 +98,64 @@ export function claudeAgent(file: string, source: string): string {
   return `---\n${lines.join("\n")}\n---\n${source.slice(match[0].length)}`
 }
 
+/** The phase reminder's hook entries (INFRA-220): the events Claude Code fires at a phase
+ *  worker, each an `mcp_tool` hook on the pane's own Legion MCP server, which `claude` registers
+ *  as the bare name `legion` (packages/daemon/internal/runtime/tmux/claude.go), and on the tool
+ *  `legion_phase_hook` that server offers (packages/claude-envoy/src/legion-phase-hook.ts).
+ *  Claude Code substitutes each `${…}` as a string, which the endpoint parses.
+ *
+ *  They belong to the Legion plugin alone, never to `hooks/hooks.json`: `@sjawhar/claude-envoy`
+ *  is also installed as a plain Claude Code plugin, where `--mcp-config` registers no `legion`
+ *  server and every one of these would be a hook error on every turn. A Legion pane loads both
+ *  plugin directories, so its worker still gets them. */
+// biome-ignore-start lint/suspicious/noTemplateCurlyInString: Claude Code substitutes each `${…}`
+// into the hook's input before it calls the tool; they are its syntax, not this file's.
+const LEGION_HOOKS: readonly {
+  readonly event: string
+  readonly input: Readonly<Record<string, string>>
+  readonly timeout: number
+}[] = [
+  {
+    event: "Stop",
+    input: {
+      event: "Stop",
+      lastAssistantMessage: "${last_assistant_message}",
+      stopHookActive: "${stop_hook_active}",
+    },
+    // The `Stop` answer waits on the reminder's record check, which bounds its own daemon read at
+    // 5 s (RECORD_READ_BOUND_MS, packages/pi-shared/src/phase-reminder.ts); the others answer from
+    // memory and the state file alone.
+    timeout: 30,
+  },
+  {
+    event: "StopFailure",
+    input: { event: "StopFailure", lastAssistantMessage: "${last_assistant_message}" },
+    timeout: 10,
+  },
+  {
+    event: "PostToolUse",
+    input: { event: "PostToolUse", toolName: "${tool_name}", agentId: "${agent_id}" },
+    timeout: 10,
+  },
+  {
+    event: "PostToolUseFailure",
+    input: { event: "PostToolUseFailure", toolName: "${tool_name}", agentId: "${agent_id}" },
+    timeout: 10,
+  },
+  {
+    event: "UserPromptSubmit",
+    input: { event: "UserPromptSubmit", prompt: "${prompt}" },
+    timeout: 10,
+  },
+]
+// biome-ignore-end lint/suspicious/noTemplateCurlyInString: the hook inputs end here.
+
 /** `legion/`, the Legion plugin a Claude Code pane loads with `--plugin-dir` beside this one
  *  (packages/daemon/internal/runtime/tmux/claude.go): its manifest, named `legion`, so Claude Code
  *  names its skills and agents `legion:<name>`; the skills pi-legion ships, staged by the one script
- *  that partitions them (scripts/pi-plugin-prepack.sh --stage-skills); and pi-legion's task agents
- *  in Claude Code's format (`claudeAgent`). Generated, never edited by hand. */
+ *  that partitions them (scripts/pi-plugin-prepack.sh --stage-skills); pi-legion's task agents
+ *  in Claude Code's format (`claudeAgent`); and the phase reminder's hooks (`LEGION_HOOKS`).
+ *  Generated, never edited by hand. */
 export async function buildLegionPlugin(outdir: string): Promise<void> {
   await mkdir(join(outdir, ".claude-plugin"), { recursive: true })
   await writeFile(
@@ -128,6 +186,36 @@ export async function buildLegionPlugin(outdir: string): Promise<void> {
     const source = await readFile(join(agents, name), "utf8")
     await writeFile(join(outdir, "agents", name), claudeAgent(name, source))
   }
+  await mkdir(join(outdir, "hooks"))
+  await writeFile(
+    join(outdir, "hooks", "hooks.json"),
+    `${JSON.stringify(
+      {
+        description:
+          "Legion: tell a phase worker whose turn ends with its phase still open, through the legion_phase_hook tool on the pane's own Legion MCP server.",
+        hooks: Object.fromEntries(
+          LEGION_HOOKS.map(({ event, input, timeout }) => [
+            event,
+            [
+              {
+                hooks: [
+                  {
+                    type: "mcp_tool",
+                    server: "legion",
+                    tool: PHASE_HOOK_TOOL_NAME,
+                    input,
+                    timeout,
+                  },
+                ],
+              },
+            ],
+          ]),
+        ),
+      },
+      null,
+      2,
+    )}\n`,
+  )
 }
 
 /** Each file under `fresh` or `committed` that is missing from the other or differs in bytes,
@@ -158,7 +246,7 @@ async function treeDifferences(fresh: string, committed: string): Promise<string
 }
 
 /** The files of the committed `legion/` a fresh generation would change. */
-export async function legionPluginDifferences(committed: string): Promise<string[]> {
+async function legionPluginDifferences(committed: string): Promise<string[]> {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-check-legion-"))
   try {
     await buildLegionPlugin(scratch)
@@ -189,8 +277,24 @@ export function assertPinnedBun(running: string, pinned: string): void {
   )
 }
 
+/** The bundles and their notices, built into `outdir`. Bun writes each inlined module's path into
+ *  the bundle relative to the working directory (`// ../envoy-client/bin/dispatch.ts` from the
+ *  package, `// packages/envoy-client/...` from the repository root), so the build runs from the
+ *  package root whatever the caller's directory: main's committed bytes and every check of them
+ *  then agree. */
 export async function buildBundles(outdir: string): Promise<void> {
   assertPinnedBun(Bun.version, pinnedBunVersion)
+  const target = resolve(outdir)
+  const callerDirectory = process.cwd()
+  process.chdir(packageRoot)
+  try {
+    await bundleFromPackageRoot(target)
+  } finally {
+    process.chdir(callerDirectory)
+  }
+}
+
+async function bundleFromPackageRoot(outdir: string): Promise<void> {
   const result = await Bun.build({
     entrypoints: Object.values(BUNDLE_ENTRYPOINTS).map((entry) => join(packageRoot, entry)),
     outdir,
@@ -221,7 +325,7 @@ export async function buildBundles(outdir: string): Promise<void> {
   if (!result.metafile) throw new Error("Bun.build returned no metafile")
   await writeFile(
     join(outdir, "THIRD_PARTY_NOTICES"),
-    await thirdPartyNotices(Object.keys(result.metafile.inputs), process.cwd()),
+    await thirdPartyNotices(Object.keys(result.metafile.inputs), packageRoot),
   )
 }
 
@@ -235,32 +339,113 @@ async function checkBundles(distDirectory: string): Promise<string[]> {
   }
 }
 
+/** What `--out` copies from the package beside the built `dist/` and `legion/`: the plugin's
+ *  manifests, its MCP and hook configuration, and the shim and skills they reach. */
+const PLUGIN_SOURCES = [
+  ".claude-plugin",
+  ".mcp.json",
+  ".omp-plugin",
+  "bin",
+  "hooks",
+  "package.json",
+  "skills",
+] as const
+
+/** `path`, absolute, with the symlinks of its deepest existing ancestor resolved and the missing
+ *  rest joined on, so a directory `--out` has yet to create compares like one that exists. */
+async function resolvedPath(path: string): Promise<string> {
+  let existing = resolve(path)
+  const missing: string[] = []
+  for (;;) {
+    try {
+      return join(await realpath(existing), ...missing)
+    } catch (error) {
+      const parent = dirname(existing)
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || parent === existing) throw error
+      missing.unshift(basename(existing))
+      existing = parent
+    }
+  }
+}
+
+/** Why `--out` may not write `out`, or null when it may: inside the repository its files would be
+ *  ones a pull request could commit, and an existing file there would be mixed with the build. */
+async function outRefusal(out: string): Promise<string | null> {
+  const [target, root] = await Promise.all([resolvedPath(out), realpath(repoRoot)])
+  const fromRoot = relative(root, target)
+  if (fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot)) {
+    return `${out} is inside the repository (${root}); a pull request never commits a build`
+  }
+  try {
+    if ((await readdir(target)).length > 0) return `${out} exists and is not empty`
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === "ENOTDIR") return `${out} exists and is not a directory`
+    if (code !== "ENOENT") throw error
+  }
+  return null
+}
+
+/** `out` as a runnable plugin directory: the package's plugin files, with each `skills/<name>`
+ *  link to the repository's skill copied as the files it points at (file modes kept, so
+ *  `bin/dispatch` stays executable), then a fresh `dist/` and `legion/`. */
+async function buildOut(out: string): Promise<void> {
+  await mkdir(out, { recursive: true })
+  for (const source of PLUGIN_SOURCES) {
+    await cp(join(packageRoot, source), join(out, source), { recursive: true, dereference: true })
+  }
+  await buildBundles(join(out, "dist"))
+  await buildLegionPlugin(join(out, "legion"))
+}
+
+const USAGE =
+  "usage: bun scripts/build.ts --check | --out <dir>. The tracked dist/ and legion/ are written " +
+  "only by main's Rebuild Claude Envoy plugin workflow, and a pull request never commits them."
+
+type Mode = { readonly kind: "check" } | { readonly kind: "out"; readonly dir: string }
+
+/** The one mode `args` names, or null for none, more than one, an unknown argument, or `--out`
+ *  with no directory after it. */
+function parseMode(args: readonly string[]): Mode | null {
+  const [first, second, ...rest] = args
+  if (rest.length > 0) return null
+  if (second === undefined) {
+    if (first === "--check") return { kind: "check" }
+    return null
+  }
+  if (first === "--out" && !second.startsWith("--")) return { kind: "out", dir: second }
+  return null
+}
+
 if (import.meta.main) {
-  // Checked before anything else touches the filesystem: --check's scratch build and a plain
-  // build's `rm` of the committed dist/ both cost real work or a real deletion for a build this
-  // process was always going to refuse.
+  // Checked before anything else touches the filesystem: --check's scratch build and --out's copy
+  // cost real work for a build this process was always going to refuse.
   assertPinnedBun(Bun.version, pinnedBunVersion)
+  const mode = parseMode(process.argv.slice(2))
   const distDirectory = join(packageRoot, "dist")
   const legionDirectory = join(packageRoot, "legion")
-  if (process.argv.includes("--check")) {
+  if (mode === null) {
+    process.stderr.write(`${USAGE}\n`)
+    process.exit(2)
+  } else if (mode.kind === "check") {
     const stale = [
       ...(await checkBundles(distDirectory)).map((file) => `dist/${file}`),
       ...(await legionPluginDifferences(legionDirectory)).map((file) => `legion/${file}`),
     ]
     if (stale.length > 0) {
       process.stderr.write(
-        `generated files are stale (${stale.join(", ")}); run \`bun run build\` on Bun ${pinnedBunVersion} and commit the result\n`,
+        `generated files are stale (${stale.join(", ")}); main's Rebuild Claude Envoy plugin workflow commits a fresh build after each merge, and a pull request never commits these files\n`,
       )
       process.exit(1)
     }
     process.stdout.write("dist/ and legion/ match a fresh build\n")
   } else {
-    await rm(distDirectory, { recursive: true, force: true })
-    await buildBundles(distDirectory)
-    await rm(legionDirectory, { recursive: true, force: true })
-    await buildLegionPlugin(legionDirectory)
-    process.stdout.write(
-      `built ${Object.keys(BUNDLE_ENTRYPOINTS).join(", ")} into dist/ and the Legion plugin into legion/\n`,
-    )
+    const refusal = await outRefusal(mode.dir)
+    if (refusal !== null) {
+      process.stderr.write(`refusing --out: ${refusal}\n`)
+      process.exit(1)
+    }
+    await buildOut(mode.dir)
+    process.stdout.write(`built the Claude Envoy plugin into ${resolve(mode.dir)}\n`)
   }
 }

@@ -1,40 +1,44 @@
 // AskGate: before a root session's scoped Dispatch write executes, one model call judges it
-// against AskGate's charter (rules.md) and answers `allow` or `revise`, and a call that opens a
-// new ask for a person also gets the rules check (`rules-check.ts`, below). `askgate.ts` is the
-// entry that binds Oh My Pi's completion call and buildSessionContext; the new asks a call opens
-// are read in `new-asks.ts` and the text both checks share is in `text.ts`; everything else lives
-// here so the tests drive it through a fake `pi`, a fake `ctx` and stubs.
+// against AskGate's rules (rules.md) and answers `allow` or `revise`. `askgate.ts` is the entry
+// that binds Oh My Pi's completion call and buildSessionContext; everything else lives here so the
+// tests drive it through a fake `pi`, a fake `ctx` and stubs.
 //
 // What this is not: AskGate reviews the writes of a cooperating agent, and it is no sandbox. A
-// process running as the same user defeats it. It can replace a snapshot's bytes between the
-// review and the open (the snapshot is 0600 in a 0700 directory, which keeps out other users, not
-// this one), turn the gate off in its own envoy.json, point the session at another envoy.json
+// process running as the same user defeats it. It can remove the record or a marker, turn the
+// gate off in its own envoy.json, or point the session at another envoy.json
 // through OMP_PROFILE, PI_CODING_AGENT_DIR, ENVOY_CONFIG_FILE, XDG_CONFIG_HOME or HOME in the
-// launching shell (the variables `envoyConfigPath` reads, in that order), or
-// call Dispatch's HTTP API and send no command at all. Every check here is for a write an agent
-// meant to send; none of them is weakened, and none is added for an attacker of that kind.
+// launching shell (the variables `envoyConfigPath` reads, in that order). Every check here is for
+// a write an agent meant to send; none of them is weakened, and none is added for an attacker of
+// that kind.
 //
-// What the scan does not catch, and is not made to: an alias or a shell function defined in the
-// call or left in the persistent shell; a brace or a glob as the program word (`{,dispatch}`,
-// `dispatc?`); a script another tool writes that the call then runs; a copy or a link of the CLI
-// under another name; a command the call builds at run time, whose words its text does not hold;
-// text nested deeper than NESTED_DEPTH; and any other program that reaches Dispatch's HTTP API.
-// A cooperating agent writes none of these. Precision comes first: the gate must not refuse a
-// call that holds no Dispatch write, since a false refusal in block mode stops real work.
+// Enforcement is the `dispatch` CLI's, not a scan of the call's text. The gate reads one form, the
+// literal grammar below, and refuses no call by reading any other: a call in another form runs as
+// written. For each literal call it lets run it mints one single-use marker
+// (`@legion/envoy-client/askgate-marker`), keyed by the argv the CLI will receive and, behind a
+// review or a deliberate pass, bound to the digest of the dry run's arguments and to the sha256 of
+// each file the argv names, as the gate read it for the review. The CLI posts a
+// gated write in a session whose record a live Oh My Pi process keeps (envoy.ts writes it) only
+// when it consumes such a marker, so a write sent in any other form, from a pipe, a script,
+// `python3 -c`, an eval cell's process or anything else, is refused when it runs. The CLI's check
+// does not cover a direct HTTP request to Dispatch, an older or a different CLI, or a same-user
+// process that removes the record or a marker, acts as another session id or state directory, or
+// otherwise goes around the CLI. Precision comes first: the gate must not refuse a call that holds
+// no Dispatch write, since a false refusal in block mode stops real work.
 //
 // Scope: eight calls on the command line and six of them as devices, each recorded under one tool
 // name (dispatch_ask, …).
 //   - A `bash` call whose whole command is the literal grammar of one `dispatch` call
 //     (`dispatchCommandHead`): `[cd <literal path> && ] dispatch <subcommand> <literal words…>
-//     [2>&1] [<<'DELIM' … DELIM]`. The program is `dispatch` by name or by a literal path. Every
-//     word is literal: outside quotes it holds only letters, digits and `._/+@%:,=-` (so no `$`,
-//     `{`, `}`, backtick, glob character, `~` or backslash), and inside double quotes no `$`,
-//     backtick or backslash. The one here-document has a quoted delimiter (`'EOF'` or `"EOF"`)
-//     and opens on the command's first line, before or after the one `2>&1`. A shell comment may
-//     end that line only when it holds override flags alone (`# --advisor-rebuttal '<line>'`, the
-//     form a rebutted command is handed back in), read as those overrides. Nothing else: no
-//     assignment, other statement, pipe, `;`, `||`, `&`, other redirect, other comment or line
-//     continuation.
+//     [2>&1] [<<'DELIM'] [| head|tail [-n N]]`, the here-document's body on the lines after its
+//     opener's line. The program is `dispatch` by name or by a literal path. Every word is
+//     literal: outside quotes it holds only letters, digits and `._/+@%:,=-` (so no `$`, `{`,
+//     `}`, backtick, glob character, `~` or backslash), inside single quotes anything, and inside
+//     double quotes no `$`, backtick or backslash; a quoted word may run over several lines. A
+//     backslash at the end of a line continues the command, as bash reads it. The one
+//     here-document has a quoted delimiter (`'EOF'` or `"EOF"`), before or after the one `2>&1`.
+//     The one pipe stage is `head` or `tail`, alone or with `-n N`, `-nN` or `-N`, which reads the
+//     output after the CLI has its words. Nothing else: no assignment, other statement, other
+//     pipe, `;`, `||`, `&`, other redirect or comment.
 //     The subcommand is `ask`, `message`, `edit-ask`, `comment`, `doc-edit`, `request-approval` (its
 //     `summary` is what the person approves), `issue` with `--spec` or `--spec-file`, or
 //     `artifact` unless its literal `--name` and literal `--path` both show it is no markdown
@@ -42,19 +46,21 @@
 //     prints, and an upload that is no markdown document runs with no entry. The gate learns
 //     the exact arguments by running that command with `--dry-run` after the command name, in the
 //     call's working directory (then its `cd`, as the call will) and environment, its
-//     here-document still on stdin and without its `2>&1`, under a 10 s limit, and reviews the
-//     JSON it prints. A dry-run that fails, times out or prints no JSON object is recorded as
-//     `error` and the call runs (the CLI refuses arguments it cannot parse, before it sends
-//     anything). A `dispatch` command with `--dry-run` or `--help` sends nothing and is not
+//     here-document still on stdin and without its `2>&1` and its pipe stage, under a 10 s limit,
+//     and reviews the JSON it prints. A dry-run that fails, times out or prints no JSON object
+//     is recorded as `error` and the call runs (the CLI refuses arguments it cannot parse,
+//     before it sends anything). A `dispatch` command with `--dry-run` or `--help` sends nothing and is not
 //     reviewed. An upload given with `--path` prints the path, not the text. Every file whose
-//     text the write posts, that path and each `--<field>-file`, is copied
-//     into a private snapshot the gate owns before the model is asked. The gate reviews the
-//     snapshot's bytes as `content` and rewrites the call to post the snapshot, so the bytes that
-//     post are the bytes reviewed. An `--image` file is no part of that: the model reads its path
-//     and not its bytes, and the gate takes no snapshot of it, since the CLI names the upload
-//     after the file it opens when it sends (`localPicture`, the basename of the resolved path),
-//     which a snapshot would rename. It reads a regular file alone: a missing file, a directory, a
-//     device, a FIFO and `/dev/stdin` are refused as `unreadable` before any read.
+//     text the write posts, that path and each `--<field>-file`, is read in place before the
+//     model is asked, and the call runs as written. The model reviews those bytes (an upload's
+//     as `content`), and the marker binds the sha256 of each file in argv order. The CLI reads
+//     each file again before it posts and refuses one whose bytes changed since the review (a
+//     call earlier in the same message can change it: Oh My Pi runs every `tool_call` hook of a
+//     message before any call of it runs), and an upload sends the bytes the CLI read for that
+//     check. An `--image` file is no part of that: the model reads its path and not its bytes.
+//     It reads a regular file alone: a missing file, a directory, a device, a FIFO and
+//     `/dev/stdin` are refused as `unreadable` before any read, with the advice to send the
+//     call again in a later message when an earlier call of the same message writes the file.
 //     The arguments are cut at 64 KiB as one JSON block, so the document gets less than 64 KiB of
 //     it. A relative path resolves where the CLI resolves it, against its
 //     `process.cwd()`, the physical directory the command runs in after its own `cd`: bash names
@@ -75,51 +81,23 @@
 //     `unreadable`, since a failed lookup is no proof that the write would fail. An upload is
 //     judged against failure 10 alone (askgate-upload.md), since a plan or a report is long by
 //     nature.
-//   - A `bash` call that holds a scoped `dispatch` write in any other form — after another
-//     command, with an expansion, a redirect or a pipe, sent to the background, beside a second
-//     reviewed write, or calling `dispatch` by a path the shell expands (`$HOME/…/dispatch`) or
-//     by a name with a backslash in it (`d\ispatch`) — or a scoped subcommand run by a program an
-//     expansion names (`$D comment …`, `"${D}" ask …`, `$(command -v dispatch) …`), or a
-//     `dispatch`, or a program an expansion names, whose subcommand an expansion names
-//     (`dispatch $SUB …`, `"$D" "$S" …`), is `unreadable`. So is an `issue` or an `artifact` that
-//     holds a word only bash resolves (`$F`, a glob, a brace), since that word may be its
-//     `--spec` or its markdown name. So is a write in text another command runs: a shell's `-c`
-//     operand (`$'…'` decoded), `eval`'s arguments, a here-document, a here-string or a pipe a
-//     shell reads (`… | bash`, with `printf` and `echo -e` escapes decoded and an unquoted
-//     here-document's backslashes removed), each read with its quotes removed as that command
-//     removes them. Only text a shell runs is read that way: in any other text (a quoted word,
-//     a here-document `cat` writes, a Makefile line) the scan looks for `dispatch` as the
-//     program word alone, so `echo "$a $b"`, `msg="$x $y $z"` and `perl -pe 's/(\w+) (\w+)/$2
-//     $1/'` hold no write. A program word of unknown subcommand (`dispatch` before a glob, a
-//     brace or an expansion) is a write only where a runner runs it: the runner table (`xargs`,
-//     `sudo`, `env`, `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `command`, `exec`, `time`)
-//     and `find -exec`/`-execdir`, each prefix's own options read as its parser reads them, so
-//     `grep -rn dispatch packages/*/src`, `grep -l dispatch "$f"` and `rg dispatch src | head`
-//     hold none. The CLI is also `bun <path>/dispatch.js` and any path whose last segment is
-//     `dispatch` or `dispatch.js`. An `eval` call is read too (`evalDispatchWrite`): a cell that
-//     starts the CLI as a process of its own — a JS or Python spawn, exec, `subprocess` or `os`
-//     call with an argv array or a shell string, or the Bun shell — sends with no `bash` call to
-//     read, so it is unreadable; a cell that only names `dispatch` in text, or calls the bash
-//     tool, is not. In `block` mode the call is refused before anything
-//     in it runs; in `warn` mode it runs and the same explanation comes back as additional
-//     context, with the entry's decision `allow`. The explanation states the literal grammar and
-//     tells the agent to send that `dispatch` command on its own; when the word that runs it or
-//     names its subcommand is what AskGate cannot read, it names the characters in it
-//     (`unreadableDispatchWrite`, a scan aware of quotes, backslashes, here-documents and command
-//     substitutions, for a scoped write at a command position, then of each word, `eval`
-//     argument list and here-document body as a script of its own, NESTED_DEPTH levels deep, then
-//     of the call's own text for a write another command would run). The
-//     entry reads `unreadable`; it never counts toward the halt. A halt, or a session the gate
-//     would skip (a primary on another provider), lets it run; a session with no model role
-//     refuses it in both modes, as a gate that did not load does: neither can review anything,
-//     and a gate that cannot review is no off switch. A call that holds no Dispatch write is
-//     never refused: every rule above asks first whether a gated write could post.
+//   - Any other call is not the gate's: a `bash` call in any other form, or an `eval` call, runs
+//     with no entry and no marker, and the CLI refuses a gated write it sends. The gate records
+//     the mode in its marker store at each main-agent `bash` or `eval` call (the CLI reads it:
+//     `warn` lets an unmarked write post with a warning), and envoy.ts records an `unmarked`
+//     entry for each such write the CLI logged. When such a call's text holds a `dispatch` word
+//     and a gated write subcommand, the gate finds the first cause that puts it outside the
+//     grammar (`nonLiteralCause`) and, when the call's result holds the CLI's refusal of a write
+//     with no marker, appends a note that names the cause and the literal form (`causeNote`).
 //   - `write xd://<device>` calls, seen on the nested `tool_call` event the device wrapper emits
 //     with `toolName = <device>` and the validated arguments, for dispatch_ask, dispatch_message,
 //     dispatch_edit_ask, dispatch_comment, dispatch_doc_edit, and dispatch_issue when its
 //     arguments carry `spec`. Only sessions started before the `dispatch` CLI still have them.
+//     They never reach the CLI, so they take no marker.
 // Top-level sessions only (`ctx.agent.kind === "main"`); the factory is rebound in every
-// subagent, which this check keeps out.
+// subagent, which this check keeps out of review. A task subagent shares its parent's session id,
+// so its literal `dispatch` write gets an argv-only marker with no review and no entry, as before
+// the CLI asked for one.
 //
 // The switch is not here: the session's envoy.json turns AskGate off (`askgate.enabled`, read in
 // envoy.ts), and with it off nothing is bound. The mode, read for each gated call: OMP_ASKGATE when
@@ -134,45 +112,28 @@
 // an eval cell makes through the tool bridge, would otherwise drop the note. Each entry
 // records the mode it ran under as `verdictMode`.
 //
-// Deadline: OMP_ASKGATE_TIMEOUT_MS, or 90 s, clamped under the runner's own ceiling for a
-// tool_call handler (extensionHandlers.toolCallTimeoutMs, 30 s unless configured) by 10 s, the
-// stops the handler still pays once that deadline passes — the aborted call's usage report and
-// the entry (5 s) and the decision record (5 s) — and raced from handler entry. A ceiling that
-// leaves under 10 s, and an OMP_ASKGATE_TIMEOUT_MS that is no positive integer, throw when the
-// gate binds: the entry then refuses each write the gate would review (`loadFailureGate`), since
-// only `askgate.enabled: false` turns AskGate off. A deadline under 30 s binds, and logs one
-// warning that names the ceiling, the deadline and the key to raise: at the default ceiling the
-// deadline is 20 s, which a review of a long session often exceeds, and a review that times out
-// lets the write post.
+// Deadline: OMP_ASKGATE_TIMEOUT_MS, or 90 s, clamped 5 s under the runner's own ceiling for a
+// tool_call handler (extensionHandlers.toolCallTimeoutMs, 30 s unless configured) and raced from
+// handler entry. A ceiling that leaves under 10 s, and an OMP_ASKGATE_TIMEOUT_MS that is no
+// positive integer, throw when the gate binds: the entry then refuses each write the gate would
+// review (`loadFailureGate`), since only `askgate.enabled: false` turns AskGate off. A deadline
+// under 30 s binds, and logs one warning that names the ceiling, the deadline and the key to raise:
+// at the default ceiling the deadline is 25 s, which a review of a long session often exceeds, and a
+// review that times out lets the write post.
 //
 // Per gated call, in order:
 //   - rebuttal: the agent put `"advisor_rebuttal": "<one line>"` in the device JSON, or
 //     `--advisor-rebuttal '<one line>'` among a `dispatch` command's flags. The key is stripped
 //     on the outer `write` event (before the device validates its arguments), the flag from the
-//     `bash` command whatever the gate decides (the CLI would refuse it) and put back as a shell
-//     comment at the end of the command's first line, so the agent's record of its call still
-//     shows it; that command sent again reads the comment as the same override and comes back
-//     the same. The call runs unasked, and the agent is told the override as it sent it and that
-//     its rebuttal was recorded. A device's record lacks the field, and its note says AskGate
-//     removed it.
-//     At most 64 unspent device rebuttals are remembered.
+//     `bash` command whatever the gate decides (the CLI would refuse it), and the call runs
+//     unasked; the agent is told its rebuttal was recorded and removed before sending. At most
+//     64 unspent device rebuttals are remembered.
 //   - halted: three consecutive failures to reach a verdict (no model, timeout, every model of the
 //     chain erroring, no parsable answer) stop the gate for the session, with one UI notice. The
 //     halt, the count, the breaker and the rebuttals reset on session_switch and session_branch.
-//   - breaker: two refusals of one thing on one target (the device plus its issue/ask/artifact/
-//     project values) send the third attempt at it unasked, and say so; the second refusal
-//     already warns that it will. A thing is each new ask a call opens, or the call as a whole
-//     when it opens none; an upload is each ask block of its document and the upload itself (its
-//     name and text), never the call as a whole (`callKeys`). A refusal counts only things of the
-//     call it refused (`refusalThings`): a rules refusal the asks it refused, a charter refusal
-//     each thing of any other call, and of an upload the asks the rules check judged, or the
-//     upload itself where it judged none; none counts an ask block an upload's stored version
-//     already holds. A call trips when one of its own things has been refused twice, so the pass
-//     goes to the thing that was refused and nothing else, and the call a warning names, sent
-//     again, trips: an ask refused once, or never, on a target whose other ask was refused twice
-//     is reviewed as usual. Only a refusal counts: a warn-mode charter revise sends the call, so
-//     it never advances the breaker, while a rules match refuses in either mode and always does.
-//     An allow, a rebuttal or a trip resets the target, every thing on it.
+//   - breaker: two revises on one target (the device plus its issue/ask/artifact/project
+//     values) send the third attempt unasked, and say so; the second revise already warns that
+//     it will. An allow, a rebuttal or a trip resets the target.
 //   - no-model-role / skipped: neither `@askgate` (modelRoles.askgate) nor `@default` resolves, or
 //     the session's primary model is on another provider than the gate's. Nothing is rendered or
 //     sent. With no model role the call is refused in both modes, naming the roles to set; it never
@@ -187,37 +148,8 @@
 //     newest 256 KiB of its context (the fork's buildSessionContext), every piece XML-escaped
 //     inside its own block, then the call. The last line of the answer must be
 //     {"decision":"allow"} or {"decision":"revise","reason":"…"}. The reason reaches the agent
-//     verbatim but for a tag-opening `<` (see `agentFacing`), capped at 2 KiB, and is recorded
+//     verbatim but for a tag-opening `<` (see `agentFacing`), capped at 8 KiB, and is recorded
 //     as `deliveredReason`.
-//   - rules: a call that opens a new ask for a person gets a second model call beside the charter
-//     call, on the same chain, deadline, transcript and stop, which judges only those asks and
-//     only against two rules (rule-check.md): an ask whose own recommendation is to change
-//     nothing, and an ask for the person's hands where the agent did not try the access it has.
-//     A new ask (`new-asks.ts`) is a `dispatch ask`, each `:::ask{` opener a `dispatch doc-edit`
-//     insert, a `dispatch issue` spec or a markdown `dispatch artifact` upload writes, and each
-//     block a doc-edit retypes into an ask. For a retype the gate reads the block's own text from
-//     Dispatch, and for an upload the ids the version it replaces already holds, so a re-upload
-//     judges only the asks it adds. A retype whose read fails sets `ruleTextMissing` and is judged
-//     without its text; an upload whose read fails judges only the openers that carry no id, which
-//     no stored version can hold, and sets `ruleAsksPartial` for the openers it left out, so a
-//     re-upload of an unchanged document is never refused for an ask block it already held. When
-//     every opener of that upload carries an id, no model call is made: `ruleOutcome` reads
-//     `unjudged` with `ruleAsksPartial`, the charter decides alone, and the call is recorded.
-//     The system prompt is rule-check-system.md and rule-check.md, and the request
-//     (rule-check-request.md) carries the same escaped system prompt and transcript, then every
-//     new ask in an `<ask>` tag of its own, each given an equal share of a 32 KiB list and at most
-//     8 KiB, a clipped ask keeping its start and its end (`ruleAsksCut`). When the answer names an
-//     ask that matches `no_change` or `untried_access`, AskGate refuses the call in every mode,
-//     naming each matching ask and putting the charter's revise reason after the rules reason. A
-//     rules call that fails, times out or gives no verdict changes nothing; three of those in a
-//     row write one line to the host's plain log, show one UI notice where there is a UI, and add
-//     the same note to that call's own result. A rules verdict, a session_switch or a
-//     session_branch resets that count. The rules reason never feeds the charter request, and
-//     only the charter call moves the halt count. The entry adds `rule`, `ruleAsk`, `ruleQuote`,
-//     `ruleOutcome`, `ruleError`, `ruleModel`, `ruleLatencyMs`, `ruleTextMissing`, `ruleAsksCut`
-//     and `ruleAsksPartial`, and its `usage` and `promptBytes` sum both calls. The two calls run
-//     side by side, so `charterLatencyMs` and `ruleLatencyMs` say what each cost of the gate's
-//     whole `latencyMs`.
 // Every outcome other than an unscoped or subagent call appends one `advisor-gate` entry
 // (pi.appendEntry, never sent to the model) with the deadline it raced and every attempt's
 // usage, the aborted one included. That record is what lets a write out unreviewed: when the
@@ -233,42 +165,23 @@
 // before the session is sealed. No verdict is not permission: block mode refuses either, warn mode
 // lets it go, and neither counts toward the halt. OMP_ASKGATE_DUMP names a file each gate's system
 // and user prompts are appended to, owner-only and never through a symlink.
-// A gated call whose rules check ran is also published to Dispatch (`decision-record.ts`): the
-// entry below reaches only this machine's disk, and the session that counts the rule decisions
-// over a fortnight holds a Dispatch token and nothing else. That write carries no ask text and no
-// quote, takes its own 5 s stop, never changes the decision, and leaves `recordError` on the entry
-// when it fails.
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+import {
+  bytesDigest,
+  type FileDigest,
+  type FileOperand,
+  fileOperands,
+  gatedWrite,
+  mintMarker,
+  operandPath,
+  uploadIsDocument,
+} from "@legion/envoy-client/askgate-marker";
 import requestTemplate from "./askgate-request.md" with { type: "text" };
 import systemTemplate from "./askgate-system.md" with { type: "text" };
 import uploadRule from "./askgate-upload.md" with { type: "text" };
-import { createDecisionRecorder, RECORD_TIMEOUT_MS } from "./decision-record";
-import { type NewAsk, newAsks } from "./new-asks";
-import ruleCheckRules from "./rule-check.md" with { type: "text" };
-import ruleCheckSystem from "./rule-check-system.md" with { type: "text" };
 import rules from "./rules.md" with { type: "text" };
-import {
-  type DispatchSession,
-  matchLines,
-  type RuleName,
-  type RuleOutcome,
-  type RulesCheck,
-  renderRuleRefusal,
-  runRulesCheck,
-} from "./rules-check";
-import {
-  agentFacing,
-  byteLength,
-  clipBytes,
-  escaped,
-  escapeXml,
-  GATE_REASON_MAX_BYTES,
-  lastLineJson,
-  renderTemplate,
-} from "./text";
 
 const SCOPED_DEVICES = [
   "dispatch_ask",
@@ -298,8 +211,6 @@ const SPEC_FLAGS = ["--spec", "--spec-file"];
  * a file's type from its path. The gate also reviews an upload whose `--name` ends in `.md`.
  */
 const UPLOAD_COMMAND = "artifact";
-const MARKDOWN_NAME = /\.md$/i;
-const MARKDOWN_PATH = /\.(md|markdown)$/i;
 /** The upload flags whose text is the document itself. */
 const INLINE_FLAGS = ["--content", "--content-file"];
 /** The upload flags that read the name or the path from a file, which only the dry run resolves. */
@@ -311,13 +222,11 @@ const REBUTTAL_KEY = "advisor_rebuttal";
 const REBUTTAL_FLAG = "--advisor-rebuttal";
 export const DRY_RUN_TIMEOUT_MS = 10_000;
 const GATE_TIMEOUT_MS = 90_000;
-const ABORT_GRACE_MS = 2_000;
 // The runner refuses a tool_call handler that outlives extensionHandlers.toolCallTimeoutMs, so the
-// gate's deadline stays this far under it: the stops the handler pays after its deadline, 5 s of
-// room for the aborted call to report its usage (ABORT_GRACE_MS) and for the entry, then the
-// decision record `handleCall` awaits (RECORD_TIMEOUT_MS). Below MIN_DEADLINE_MS a verdict is
-// hopeless and the gate does not bind.
-const CEILING_MARGIN_MS = 5_000 + RECORD_TIMEOUT_MS;
+// gate's deadline stays this far under it: room for the aborted call to report its usage
+// (ABORT_GRACE_MS) and for the record. Below MIN_DEADLINE_MS a verdict is hopeless and the gate does not bind.
+const CEILING_MARGIN_MS = 5_000;
+const ABORT_GRACE_MS = 2_000;
 const MIN_DEADLINE_MS = 10_000;
 // A deadline under WARN_DEADLINE_MS binds with one warning at bind: a review of a long session often
 // takes longer, and a review that times out lets the write post. The warning names
@@ -326,18 +235,9 @@ const WARN_DEADLINE_MS = 30_000;
 const RECOMMENDED_CEILING_MS = 120_000;
 // The runner gives a session_shutdown handler 2 s (SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS) and then seals
 // the session, dropping any later entry: gates abandoned there get a shorter grace, and the handler
-// waits at most SHUTDOWN_WAIT_MS for their records. A decision record (`decision-record.ts`) still
-// in flight then, or started after, is cut SHUTDOWN_RECORD_MARGIN_MS before that wait runs out, so
-// the entry it precedes is appended while the handler still holds the session.
+// waits at most SHUTDOWN_WAIT_MS for their records.
 const SHUTDOWN_GRACE_MS = 1_000;
 const SHUTDOWN_WAIT_MS = 1_500;
-const SHUTDOWN_RECORD_MARGIN_MS = 250;
-/** The entry's `recordError` when the session's shutdown cut its decision record short. */
-const RECORD_SHUT_DOWN = "the session shut down before Dispatch answered the record";
-// What bounds the snapshots the gate keeps: a backgrounded call's snapshot stays until the session
-// shuts down, and a session the host kills leaves its own behind, so each gated call that takes a
-// snapshot first removes every snapshot directory older than this.
-const SNAPSHOT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 /**
  * The outcomes of a call the gate let through without a verdict, the gate's own failure or a stop
  * it took: no review stands behind the bytes, so the command the agent wrote runs as written.
@@ -351,10 +251,14 @@ const UNREVIEWED_OUTCOMES: ReadonlyArray<GateEntry["outcome"]> = [
 ];
 export const GATE_CONTEXT_MAX_BYTES = 256 * 1024;
 const GATE_ARGS_MAX_BYTES = 64 * 1024;
+// A revise reason carries a rewritten ask question of up to ASK_QUESTION_MAX (2,000) UTF-16 units,
+// up to about 6,000 UTF-8 bytes, with the failure names and quoted words on top. The cap holds a
+// full-length rewrite whole: a clip falls at its end, where the options and recommendation sit.
+const GATE_REASON_MAX_BYTES = 8 * 1024;
+// The output of a `dispatch` run the gate quotes in a failure.
+const GATE_PRINTED_MAX_BYTES = 2 * 1024;
 const GATE_BREAKER_REVISES = 2;
 const GATE_HALT_AFTER_FAILURES = 3;
-/** Rules calls in a row without a rules verdict that bring the session's one notice and log line. */
-const RULE_NOTICE_AFTER_FAILURES = 3;
 export const ADVISOR_GATE_ENTRY_TYPE = "advisor-gate";
 /**
  * The model roles the gate asks, in order: `askgate` when it is configured, else `default`, so a
@@ -371,7 +275,8 @@ const MODES = ["warn", "block"] as const;
 /** The custom entry type the experiments extension records a session's arms under. */
 const EXPERIMENTS_ENTRY_TYPE = "experiments";
 const XD_PATH = /^xd:\/\/([a-z_]+)$/;
-// Room kept for the transcript window's elision line.
+// Room kept for a clip marker (` … [elided N bytes]`, at most 32 bytes) and the window's elision line.
+const CLIP_MARKER_BYTES = 32;
 const WINDOW_MARKER_BYTES = 64;
 const SEPARATOR = "\n\n";
 
@@ -384,30 +289,17 @@ export type Usage = {
   cacheWrite: number;
   cost: number;
 };
-/** Both model calls' spend on one entry; undefined when neither was billed. */
-function addUsage(a: Usage | undefined, b: Usage | undefined): { usage: Usage } | undefined {
-  if (a === undefined) return b === undefined ? undefined : { usage: b };
-  if (b === undefined) return { usage: a };
-  return {
-    usage: {
-      input: a.input + b.input,
-      output: a.output + b.output,
-      cacheRead: a.cacheRead + b.cacheRead,
-      cacheWrite: a.cacheWrite + b.cacheWrite,
-      cost: a.cost + b.cost,
-    },
-  };
-}
 export interface GateEntry {
   advisor: "AskGate";
   tool: string;
   path: string;
   toolCallId: string;
   /**
-   * `revise`: the gate did not pass the call as sent (a revise verdict, or in block mode a call given up
-   * without a verdict, or in any mode a command it cannot read, a gate that did not load, or a new
-   * ask a rule matched). A call was refused exactly when this is `revise` and `verdictMode` is
-   * `block`, or `outcome` is `unreadable`, `no-model-role` or `load-failed`, or `rule` is set.
+   * `revise`: the call was not passed as sent (a revise verdict; in block mode a call given up
+   * without a verdict, a literal call whose file the gate could not read, or a gated write the
+   * CLI found no marker for, `unmarked`; in any mode no model role or a gate that did not load). A
+   * call was refused exactly when this is `revise` and either `verdictMode` is `block` or
+   * `outcome` is `no-model-role` or `load-failed`.
    */
   decision: "allow" | "revise";
   outcome:
@@ -423,24 +315,18 @@ export interface GateEntry {
     | "abandoned"
     | "shutdown"
     | "unreadable"
-    | "load-failed";
+    | "load-failed"
+    | "unmarked";
   verdictMode: Mode;
   reason?: string;
   rebuttal?: string;
-  /** On a revise: the reason exactly as the agent received it (the one agent-facing transform's output), the rules reason first when a rule matched. */
+  /** On a revise: the reason exactly as the agent received it (the one agent-facing transform's output). */
   deliveredReason?: string;
   /** The answer's tail when it held no verdict. */
   raw?: string;
   latencyMs: number;
-  /**
-   * The revises the gate answered on this call's target, the warn-mode ones included, since the
-   * breaker last reset it (an allow, a rebuttal or a trip there), this call included when it is one.
-   */
   revisesForKey: number;
   argsDigest: string;
-  /** The call's breaker target in readable form: the tool, then each of the issue, ask, artifact, project and reply it names. */
-  target?: string;
-  /** Bytes of every prompt sent: the charter call's and, for a call that opens a new ask, the rules call's. */
   promptBytes?: number;
   /**
    * On every entry that asked the model: the call's arguments exactly as the model saw them (JSON,
@@ -453,39 +339,8 @@ export interface GateEntry {
   failedModels?: Array<{ model: string; error: string }>;
   /** The deadline this call raced: OMP_ASKGATE_TIMEOUT_MS or 90 s, clamped under the runner's handler ceiling. */
   deadlineMs?: number;
-  /** Every attempt's spend of both calls, the aborted one included. */
+  /** Every attempt's spend, the aborted one included. */
   usage?: Usage;
-  /** The rule the first new ask that matched broke. Set exactly when the rules check refused the call. */
-  rule?: RuleName;
-  /** That ask's number in the rules request, from 1. */
-  ruleAsk?: number;
-  /** The words of that ask the rules call quoted. */
-  ruleQuote?: string;
-  /**
-   * How the rules check ended, on each call that opens a new ask and reached the model call, and
-   * `unjudged` on an upload whose read failed with every opener carrying an id: no model call.
-   */
-  ruleOutcome?: RuleOutcome;
-  /** The provider's error text, `timeout` or `no-verdict`, on a rules call that gave no verdict. */
-  ruleError?: string;
-  /** `provider/id` that answered the rules call (or, with no answer, the last one asked). */
-  ruleModel?: string;
-  /** The rules check's own time, its document read included. */
-  ruleLatencyMs?: number;
-  /** The charter call's own time, on the clock `ruleLatencyMs` uses, so the two concurrent calls' shares of `latencyMs` can be told apart. */
-  charterLatencyMs?: number;
-  /** An ask's text could not be read, so the rules call judged that ask without it. */
-  ruleTextMissing?: true;
-  /** New asks the rules request clipped to their share of its bounds; it lists every one. */
-  ruleAsksCut?: number;
-  /**
-   * An upload whose stored version the gate could not read: the rules call judged only the
-   * openers that carry no id, the ones no stored version can already hold, or, with
-   * `ruleOutcome` `unjudged`, none of them.
-   */
-  ruleAsksPartial?: true;
-  /** Why this decision reached no Dispatch decision record (`decision-record.ts`); the call itself was unaffected. */
-  recordError?: string;
 }
 /** A model as the gate passes it around: the fork's full Model, of which the core reads only these. */
 export type GateModel = { provider: string; id: string };
@@ -515,14 +370,8 @@ interface Deps {
   env: Record<string, string | undefined>;
   home: string;
   now: () => number;
-  /** Where the gate's bind-time warning and its notice for an ignored OMP_ASKGATE go besides the session's UI: the host's logger. */
+  /** Where the gate's notices and its bind-time warning go besides the session's UI: the host's logger. */
   logger: { warn(message: string): void };
-  /**
-   * The host's plain log, for a warning a gated call raises while the session runs (the rules
-   * check failing three times in a row). `logger`'s warnings are shown again at each later session
-   * start, which a warning about one session's calls must not be.
-   */
-  runtimeLogger: { warn(message: string): void };
   /** The session's envoy.json, whose `askgate.enabled` is the switch: named in the notice for an OMP_ASKGATE the gate ignores. */
   configFile: string;
   /** Appends to a file; serves OMP_ASKGATE_DUMP. */
@@ -541,11 +390,17 @@ interface Deps {
   /** Runs a `dispatch` command's --dry-run script under bash; `spawnDryRun` in the entry. */
   dryRun: (script: string, opts: DryRunOptions) => Promise<DryRunResult>;
   /**
-   * The session's Dispatch as the directory a call runs in configures it, every request ending with
-   * that call's stop; undefined when the session has no Dispatch configuration. The rules check
-   * reads a retyped block's text and an upload's current ask ids through it.
+   * This process's AskGate marker store (`@legion/envoy-client/askgate-marker`): the directory
+   * the session's record names, where the gate mints a marker for each literal call it lets run,
+   * and where the CLI consumes the marker.
    */
-  dispatchClient: (directory: string, signal: AbortSignal) => DispatchSession | undefined;
+  markerStore: string;
+  /**
+   * Records the check mode of the session the process is bound to now, into that session's own
+   * record, for the CLI. Keyed to the session, not the process, so a switch to a session in the
+   * other arm never changes a session's mode (`setRecordMode` in the entry).
+   */
+  recordCheckMode: (mode: Mode) => void;
 }
 // Handlers of any event shape register here (`never` parameters accept every typed handler), so the
 // fork's ExtensionAPI is assignable to it.
@@ -588,6 +443,7 @@ export type Message = { role: string } & Record<string, unknown>;
 /** The module's one object guard: transcript and entry data are untyped JSON. */
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+const byteLength = (text: string) => Buffer.byteLength(text, "utf8");
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /** OMP_ASKGATE as a mode: `warn` or `block`, else undefined, which leaves the mode to the session. */
@@ -596,18 +452,36 @@ export function parseMode(raw: string | undefined): Mode | undefined {
   return (MODES as readonly (string | undefined)[]).includes(value) ? (value as Mode) : undefined;
 }
 
-/**
- * The mode the session's latest `experiments` entry sets: `warn` when its `askgate_block` arm is
- * off, else `block` (no such entry, or one that carries no arm, included).
- */
-export function sessionMode(entries: readonly unknown[]): Mode {
+/** The `on` value of the session's latest `experiments` entry's `askgate_block` arm, if it has one. */
+function blockArm(entries: readonly unknown[]): boolean | undefined {
   const latest = entries.findLast(
     (entry) =>
       isRecord(entry) && entry.type === "custom" && entry.customType === EXPERIMENTS_ENTRY_TYPE
   );
   const features = isRecord(latest) && isRecord(latest.data) ? latest.data.features : undefined;
   const arm = isRecord(features) ? features.askgate_block : undefined;
-  return isRecord(arm) && arm.on === false ? "warn" : "block";
+  return isRecord(arm) && typeof arm.on === "boolean" ? arm.on : undefined;
+}
+
+/**
+ * The mode of a model's revise verdict that the session's latest `experiments` entry sets: `warn`
+ * when its `askgate_block` arm is off, else `block` (no such entry, or one that carries no arm,
+ * included). This is the verdict's default; the CLI's marker checks have their own (`checkMode`).
+ */
+export function sessionMode(entries: readonly unknown[]): Mode {
+  return blockArm(entries) === false ? "warn" : "block";
+}
+
+/**
+ * The mode of the checks a call's marker carries: no matching marker, a file changed after the
+ * review, a file absent at review. `block` only when the session chose block explicitly
+ * (OMP_ASKGATE=block, or with OMP_ASKGATE not a mode, its latest `experiments` entry's arm on);
+ * else `warn`, which posts with a warning and an entry the report counts. The gate records it in
+ * its store, where the CLI reads it.
+ */
+export function checkMode(envMode: Mode | undefined, entries: readonly unknown[]): Mode {
+  if (envMode !== undefined) return envMode;
+  return blockArm(entries) === true ? "block" : "warn";
 }
 
 function parseTimeout(raw: string | undefined): number {
@@ -623,140 +497,304 @@ export function scopedDevice(toolName: string, input: Input): boolean {
   );
 }
 
-// Where a `dispatch` command's own text ends: `headLine`, `literalWords` and their helpers below
-// start from the rules `@legion/pi-shared/shell-command` applies (`dispatchCommandHead` there,
-// which the Envoy entry uses to tell a dispatch-only call), and differ from them on purpose: the
-// gate reads only the literal grammar of one call, a literal path to `dispatch` and the two
-// wrappers below included, and must read exactly the text the command sends, while the plugin's
-// rule only has to tell a dispatch-only call from work. So the two are separate, and a change to
-// one is checked against the other. A conservative character scan, not a shell parser: whatever it
-// cannot reason about is no `dispatch` command. Whitespace is bash's blanks, space and tab, never
-// JavaScript's `\s`, which also takes a no-break space that bash reads as part of a word.
-
-/** The one here-document a command's first line may end with, opened with a delimiter in single
- * or double quotes so the shell expands nothing in its body. The second group is `-` for `<<-`,
- * the only form under which bash strips leading tabs from the delimiter line. The third and fourth
- * are the delimiter, in single or in double quotes. The fifth is a `2>&1` after the opener, which
- * bash applies to the command as it would before it. */
-const HEREDOC_OPENING =
-  /^(.*?)[ \t]*<<(-?)[ \t]*(?:'([A-Za-z_][A-Za-z0-9_]*)'|"([A-Za-z_][A-Za-z0-9_]*)")([ \t]+2>&1)?[ \t]*$/d;
-
-/** A line of nothing but blanks, which bash runs as no command. */
-const BLANK_LINE = /^[ \t]*$/;
+// Where a `dispatch` command's own text ends: `shellTokens` and `dispatchCommandHead` below start
+// from the rules `@legion/pi-shared/shell-command` applies (`dispatchCommandHead` there, which the
+// Envoy entry uses to tell a dispatch-only call), and differ from them on purpose: the gate reads
+// only the literal grammar of one call, a literal path to `dispatch` and the wrappers below
+// included, and must read exactly the words the command sends, while the plugin's rule only has to
+// tell a dispatch-only call from work. So the two are separate, and a change to one is checked
+// against the other. A conservative scan, not a shell parser: whatever it cannot reason about is
+// no literal `dispatch` command. Whitespace is bash's blanks, space and tab, never JavaScript's
+// `\s`, which also takes a no-break space that bash reads as part of a word.
 
 /** Inside double quotes bash still expands `$` and backticks and interprets `\`. */
 const REFUSED_DOUBLE_QUOTED = "$`\\";
 
-/** A command's first line, without its here-document opener, its override comment and its blanks,
- * and where that text starts in the command, when the command is that one line, optionally fed one
- * quoted here-document on stdin; undefined for any other command. `stderr` is where a `2>&1` after
- * the opener starts and ends in the command; `comment` is the override comment (`overrideComment`)
- * that ends the first line: where it starts, with the blanks before it, and ends in the command,
- * and its words. */
-function headLine(command: string):
-  | {
-      text: string;
-      at: number;
-      heredoc?: true;
-      stderr?: [number, number];
-      comment?: { span: [number, number]; words: Word[] };
-    }
-  | undefined {
-  if (hasControlCharacter(command)) return undefined;
-  // Blank lines before the head and after the command's last line run as no command, so they are
-  // dropped whole. No other line is trimmed: bash ends a here-document only at a line that is
-  // exactly its delimiter (with leading tabs stripped under `<<-`), whatever blanks the line
-  // carries before or after it.
-  const all = command.split("\n");
-  const first = all.findIndex((line) => !BLANK_LINE.test(line));
-  if (first === -1) return undefined;
-  const last = all.findLastIndex((line) => !BLANK_LINE.test(line));
-  const lines = all.slice(first, last + 1);
-  const lineAt = all.slice(0, first).reduce((sum, line) => sum + line.length + 1, 0);
-  const firstLine = lines[0] ?? "";
-  const found = overrideComment(firstLine);
-  if (found === null) return undefined;
-  const comment =
-    found === undefined
-      ? undefined
-      : {
-          span: [lineAt + found.start, lineAt + firstLine.length] as [number, number],
-          words: found.words,
-        };
-  let head = found === undefined ? firstLine : firstLine.slice(0, found.start);
-  let stderr: [number, number] | undefined;
-  let heredoc = false;
-  if (lines.length > 1) {
-    heredoc = true;
-    const opening = HEREDOC_OPENING.exec(head);
-    if (opening === null) return undefined;
-    const stripTabs = opening[2] === "-";
-    const delimiter = opening[3] ?? opening[4];
-    const end = lines.findIndex(
-      (line, index) => index > 0 && (stripTabs ? line.replace(/^\t+/, "") : line) === delimiter
-    );
-    // The first line equal to the delimiter ends the here-document in the shell, so it must be
-    // the last line: anything after it would run as a command.
-    if (end !== lines.length - 1) return undefined;
-    head = opening[1] ?? "";
-    const redirect = opening.indices?.[5];
-    if (redirect) stderr = [lineAt + redirect[0], lineAt + redirect[1]];
+/** Characters that end an unquoted word: bash's blanks, a newline and its operator characters. */
+const WORD_END = " \t\n|&;()<>";
+
+/** An operator bash reads between commands, longest first. A newline is one too (`"\n"`). */
+const OPERATORS = ["&&", "||", ";;", "|&", ";", "&", "|", "(", ")"];
+
+/** A redirect at the start of a word: an optional descriptor number, then the operator. */
+const REDIRECT = /^(\d*)(&>>|&>|<<<|<<-|<<|<>|<&|>&|>>|>\||<|>)/;
+
+/** A here-document delimiter in single or double quotes, so the shell expands nothing in its body. */
+const QUOTED_DELIMITER = /^(?:'[A-Za-z_][A-Za-z0-9_]*'|"[A-Za-z_][A-Za-z0-9_]*")$/;
+
+/** Characters bash expands in an unquoted word: a parameter, a command, a tilde, a glob. A brace
+ * expands only with a comma or `..` in it, so `{` is unread but named no expansion. */
+const EXPANDING = "$`~*?[";
+
+/**
+ * A word as bash reads it: its text, its value with quotes and line continuations removed, each
+ * character AskGate does not take as literal (`unread`), the first expansion in it, and the first
+ * line of a double-quoted part over several lines that holds `$`, a backtick or `\`.
+ */
+type WordToken = {
+  kind: "word";
+  start: number;
+  end: number;
+  raw: string;
+  value: string;
+  unread: string[];
+  expansion?: string;
+  linesExpansion?: string;
+};
+type HeredocToken = {
+  kind: "heredoc";
+  start: number;
+  end: number;
+  delimiter: string;
+  strip: boolean;
+  /** The delimiter is one name in single or double quotes. */
+  literal: boolean;
+  /** The body ended at a line that is the delimiter. */
+  closed: boolean;
+  bodyStart?: number;
+};
+type ShellToken =
+  | WordToken
+  | HeredocToken
+  | { kind: "op"; op: string; start: number; end: number }
+  | { kind: "redirect"; fd: string; op: string; target?: string; start: number; end: number }
+  | { kind: "comment"; start: number; end: number };
+
+/** Where a `$(…)`, `${…}` or backtick expansion that starts at `from` ends, quotes and nesting
+ * followed roughly: a mistake here can only move a cause, since any `$` or backtick is unread. */
+function expansionEnd(text: string, from: number): number {
+  if (text[from] === "`") {
+    let index = from + 1;
+    while (index < text.length && text[index] !== "`") index += text[index] === "\\" ? 2 : 1;
+    return Math.min(index + 1, text.length);
   }
-  const leading = /^[ \t]*/.exec(head)?.[0].length ?? 0;
+  const open = text[from + 1];
+  if (open === "(" || open === "{") {
+    const close = open === "(" ? ")" : "}";
+    let depth = 0;
+    for (let index = from + 1; index < text.length; index++) {
+      const char = text[index];
+      if (char === "\\") index++;
+      else if (char === "'") {
+        const end = text.indexOf("'", index + 1);
+        index = end === -1 ? text.length : end;
+      } else if (char === '"') {
+        index++;
+        while (index < text.length && text[index] !== '"') index += text[index] === "\\" ? 2 : 1;
+      } else if (char === open) depth++;
+      else if (char === close && --depth === 0) return index + 1;
+    }
+    return text.length;
+  }
+  if (open === "'") {
+    let index = from + 2;
+    while (index < text.length && text[index] !== "'") index += text[index] === "\\" ? 2 : 1;
+    return Math.min(index + 1, text.length);
+  }
+  const name = /^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9#?$!@*-])/.exec(text.slice(from + 1));
+  return from + 1 + (name?.[0].length ?? 0);
+}
+
+/** The word at `from`, read as bash reads it, up to an unquoted blank, newline or operator. */
+function readWord(text: string, from: number): WordToken {
+  let value = "";
+  const unread: string[] = [];
+  let expansion: string | undefined;
+  let linesExpansion: string | undefined;
+  const expand = (start: number, end: number) => {
+    expansion ??= text.slice(start, end);
+  };
+  let index = from;
+  while (index < text.length) {
+    const char = text[index];
+    if (WORD_END.includes(char)) break;
+    if (char === "\\") {
+      // A line continuation: bash removes the backslash and the newline.
+      if (text[index + 1] === "\n") {
+        index += 2;
+        continue;
+      }
+      unread.push(char);
+      value += text[index + 1] ?? "";
+      index += 2;
+    } else if (char === "'") {
+      const end = text.indexOf("'", index + 1);
+      if (end === -1) {
+        unread.push(char);
+        value += text.slice(index + 1);
+        index = text.length;
+      } else {
+        value += text.slice(index + 1, end);
+        index = end + 1;
+      }
+    } else if (char === '"') {
+      const start = index;
+      let refused = false;
+      index++;
+      while (index < text.length && text[index] !== '"') {
+        const inner = text[index];
+        if (REFUSED_DOUBLE_QUOTED.includes(inner)) {
+          unread.push(inner);
+          refused = true;
+          if (inner === "\\") {
+            index += 2;
+            continue;
+          }
+          const end = expansionEnd(text, index);
+          expand(index, end);
+          index = end;
+          continue;
+        }
+        value += inner;
+        index++;
+      }
+      if (index >= text.length) unread.push(char);
+      const part = text.slice(start, index);
+      if (refused && part.includes("\n")) linesExpansion ??= part.split("\n")[0];
+      index++;
+    } else if (char === "$" || char === "`") {
+      unread.push(char);
+      const end = Math.max(expansionEnd(text, index), index + 1);
+      expand(index, end);
+      value += text.slice(index, end);
+      index = end;
+    } else {
+      if (!LITERAL_UNQUOTED.test(char)) {
+        unread.push(char);
+        if (EXPANDING.includes(char)) expand(index, index + 1);
+      }
+      value += char;
+      index++;
+    }
+  }
+  const end = Math.min(index, text.length);
   return {
-    text: head.replace(/^[ \t]+|[ \t]+$/g, ""),
-    at: lineAt + leading,
-    ...(heredoc ? { heredoc: true as const } : {}),
-    ...(stderr ? { stderr } : {}),
-    ...(comment ? { comment } : {}),
+    kind: "word",
+    start: from,
+    end,
+    raw: text.slice(from, end),
+    value,
+    unread,
+    ...(expansion === undefined ? {} : { expansion }),
+    ...(linesExpansion === undefined ? {} : { linesExpansion }),
   };
 }
 
+/** Reads the body of `doc` from `from`, the start of the line after its opener's line: the body
+ * ends at the first line that is exactly the delimiter (leading tabs stripped under `<<-`). */
+function readBody(text: string, from: number, doc: HeredocToken): number {
+  doc.bodyStart = from;
+  for (let start = from; start < text.length; ) {
+    const newline = text.indexOf("\n", start);
+    const end = newline === -1 ? text.length : newline;
+    const line = text.slice(start, end);
+    if ((doc.strip ? line.replace(/^\t+/, "") : line) === doc.delimiter) {
+      doc.closed = true;
+      return newline === -1 ? text.length : newline + 1;
+    }
+    start = end + 1;
+  }
+  return text.length;
+}
+
 /**
- * The comment that ends a command's first line when it holds override flags alone, the form
- * `keepOverrideVisible` hands a rebutted command back in (`# --advisor-rebuttal '<line>'`), so the
- * gate reads its own output again as the rebuttal it carries. Bash reads a `#` that starts a word
- * (at the line's start or after an unquoted blank, outside quotes) and the rest of the line as a
- * comment; a `#` inside a word or inside quotes is none. Its words must be literal, and each one
- * part of an override `splitRebuttal` takes. Returns where the comment starts, with the blanks
- * before it, and its words; undefined for a line with no comment, which the literal grammar reads
- * as it does any line, and for a backslash before a `#`, an escape the grammar refuses; null for
- * any other comment, which is no form the gate reads.
+ * A bash command as the shell splits it: words, operators (a newline among them), redirects with
+ * their target, here-document openers with their body read after the line that opens them, and
+ * comments. A line continuation (backslash, newline) outside single quotes is removed, as bash
+ * removes it before it reads words.
  */
-function overrideComment(line: string): { start: number; words: Word[] } | null | undefined {
-  let quote: '"' | "'" | undefined;
-  for (let index = 0; index < line.length; index++) {
-    const char = line[index];
-    if (quote !== undefined) {
-      if (char === quote) quote = undefined;
-      else if (char === "\\" && quote === '"') return undefined;
+function shellTokens(text: string): ShellToken[] {
+  const tokens: ShellToken[] = [];
+  const pending: HeredocToken[] = [];
+  let at = 0;
+  while (at < text.length) {
+    const char = text[at];
+    if (char === " " || char === "\t") {
+      at++;
       continue;
     }
-    if (char === "\\") return undefined;
-    if (char === "'" || char === '"') quote = char;
-    else if (char === "#" && (index === 0 || line[index - 1] === " " || line[index - 1] === "\t")) {
-      const text = line.slice(index + 1);
-      if (!literalWords(text)) return null;
-      const words = headWords(text);
-      if (words.length === 0 || splitRebuttal(words).removed.size !== words.length) return null;
-      return { start: line.slice(0, index).replace(/[ \t]+$/, "").length, words };
+    if (char === "\\" && text[at + 1] === "\n") {
+      at += 2;
+      continue;
     }
+    if (char === "\n") {
+      tokens.push({ kind: "op", op: "\n", start: at, end: at + 1 });
+      at++;
+      for (const doc of pending.splice(0)) at = readBody(text, at, doc);
+      continue;
+    }
+    if (char === "#") {
+      const newline = text.indexOf("\n", at);
+      const end = newline === -1 ? text.length : newline;
+      tokens.push({ kind: "comment", start: at, end });
+      at = end;
+      continue;
+    }
+    const redirect = REDIRECT.exec(text.slice(at));
+    if (redirect !== null) {
+      const [whole, fd, op] = redirect;
+      let next = at + whole.length;
+      while (text[next] === " " || text[next] === "\t") next++;
+      const target =
+        next < text.length && !WORD_END.includes(text[next]) ? readWord(text, next) : undefined;
+      const end = target?.end ?? at + whole.length;
+      if (op === "<<" || op === "<<-") {
+        const doc: HeredocToken = {
+          kind: "heredoc",
+          start: at,
+          end,
+          delimiter: target?.value ?? "",
+          strip: op === "<<-",
+          literal: fd === "" && target !== undefined && QUOTED_DELIMITER.test(target.raw),
+          closed: false,
+        };
+        tokens.push(doc);
+        pending.push(doc);
+      } else
+        tokens.push({
+          kind: "redirect",
+          fd,
+          op,
+          ...(target === undefined ? {} : { target: target.raw }),
+          start: at,
+          end,
+        });
+      at = end;
+      continue;
+    }
+    const op = OPERATORS.find((candidate) => text.startsWith(candidate, at));
+    if (op !== undefined) {
+      tokens.push({ kind: "op", op, start: at, end: at + op.length });
+      at += op.length;
+      continue;
+    }
+    const word = readWord(text, at);
+    tokens.push(word);
+    at = Math.max(word.end, at + 1);
   }
-  return undefined;
+  return tokens;
+}
+
+/** A line of a pipe stage after the write that AskGate takes: `head` or `tail`, alone or with a
+ * line count (`-n N`, `-nN` or `-N`), every word plain. */
+function headOrTail(words: readonly WordToken[]): boolean {
+  const [program, ...options] = words.map((word) => (word.raw === word.value ? word.raw : ""));
+  if (program !== "head" && program !== "tail") return false;
+  const count = /^[0-9]+$/;
+  if (options.length === 0) return true;
+  if (options.length === 1) return /^-n?[0-9]+$/.test(options[0]);
+  return options.length === 2 && options[0] === "-n" && count.test(options[1]);
 }
 
 // AskGate's own additions to those rules: the program may be a literal path to `dispatch` as well
-// as the bare name, which is all the plugin's rule takes, and the two wrappers agents put around a
+// as the bare name, which is all the plugin's rule takes, and the wrappers agents put around a
 // `dispatch` command that change neither its words nor what it sends: one leading `cd <path> && `,
-// whose path is one word the shell does not expand, and one trailing `2>&1`.
+// whose path is one word the shell does not expand, one `2>&1`, and one trailing `| head` or
+// `| tail` stage, which reads the CLI's output after the CLI has its words.
 
 /** Characters an unquoted literal word (every word of the literal grammar) may hold: none the shell
  * expands (`~`, globs, braces, `$`), interprets (`\`) or reads as an operator. */
 const LITERAL_UNQUOTED = /^[A-Za-z0-9._/+@%:,=-]$/;
-
-/** The characters that start an expansion, unquoted or in double quotes: a program word holding
- * one names a program AskGate cannot know. */
-const EXPANSIONS = "$`";
 
 /** Whether a program word's value names the Dispatch CLI: its last path segment is `dispatch`,
  * or `dispatch.js`, the bundle the plugin's `bin/dispatch` runs with bun. */
@@ -809,75 +847,100 @@ function scanWord(text: string, from: number): { end: number; value: string; unr
   return { end: Math.min(index, text.length), value, unread };
 }
 
-/** The end of the one-word path after a leading `cd ` at `from`, or undefined when the word is
- * empty, an option, unterminated, or holds anything the shell would expand or treat specially. */
-function cdPathEnd(text: string, from: number): number | undefined {
-  const path = scanWord(text, from);
-  return path.unread.length === 0 && path.value !== "" && !path.value.startsWith("-")
-    ? path.end
-    : undefined;
-}
-
-/** A `2>&1` after the `dispatch` command's words, with the blanks before it. */
-const STDERR_TO_STDOUT = /[ \t]+2>&1$/;
-
-/** A `dispatch` command in a `bash` command, bare or in the two wrappers above: its head, where the
- * head starts, where a leading `cd` path ends (to silence `cd` in the dry-run), where the head's
- * line ends, past a trailing `2>&1`, and where a `2>&1` after a here-document opener lies (both
- * `2>&1` forms are left out of the dry-run, whose stdout must be the CLI's JSON). `leadingCd` is
- * that `cd`'s path when the `cd` opens the whole call, which is where Oh My Pi's bash tool looks
- * for one to take as the call's directory (`extractLeadingCdTarget` at the pin). `comment` is the
- * override comment that ends the first line (`overrideComment`), after everything else on it. */
+/** The `dispatch` command of a `bash` call in the literal grammar: its words (the program first)
+ * with where each starts and ends in the call, where the first starts and the last ends, where a
+ * leading `cd` path ends (to silence `cd` in the dry-run), and the spans the dry-run leaves out:
+ * a `2>&1` and a `| head` or `| tail` stage, each with the blanks before it, since the dry-run's
+ * stdout must be the CLI's JSON alone. `leadingCd` is that `cd`'s path when the `cd` opens the
+ * whole call, which is where Oh My Pi's bash tool looks for one to take as the call's directory
+ * (`extractLeadingCdTarget` at the pin). */
 interface DispatchHead {
-  head: string;
+  words: Word[];
   at: number;
+  end: number;
   cdEnd?: number;
   leadingCd?: string;
-  end: number;
-  stderr?: [number, number];
+  drop: Array<[number, number]>;
   heredoc?: true;
-  comment?: { span: [number, number]; words: Word[] };
 }
 
+const isWord = (token: ShellToken | undefined): token is WordToken => token?.kind === "word";
+const isOp = (token: ShellToken | undefined, op: string): boolean =>
+  token?.kind === "op" && token.op === op;
+
 function dispatchCommandHead(command: string): DispatchHead | undefined {
-  const line = headLine(command);
-  if (line === undefined) return undefined;
-  let text = line.text;
-  let offset = 0;
+  if (hasControlCharacter(command)) return undefined;
+  const tokens = shellTokens(command);
+  let index = 0;
+  while (isOp(tokens[index], "\n")) index++;
   let cdEnd: number | undefined;
   let leadingCd: string | undefined;
-  const cd = /^cd[ \t]+/.exec(text);
-  if (cd !== null) {
-    const pathEnd = cdPathEnd(text, cd[0].length);
-    const and = pathEnd === undefined ? null : /^[ \t]*&&[ \t]*/.exec(text.slice(pathEnd));
-    if (pathEnd === undefined || and === null) return undefined;
-    cdEnd = line.at + pathEnd;
-    if (line.at === 0) leadingCd = scanWord(text, cd[0].length).value;
-    offset = pathEnd + and[0].length;
-    text = text.slice(offset);
+  const cd = tokens[index];
+  if (isWord(cd) && cd.raw === "cd") {
+    const path = tokens[index + 1];
+    if (
+      !isWord(path) ||
+      path.unread.length > 0 ||
+      path.value === "" ||
+      path.value.startsWith("-") ||
+      !isOp(tokens[index + 2], "&&")
+    )
+      return undefined;
+    cdEnd = path.end;
+    if (cd.start === 0) leadingCd = path.value;
+    index += 3;
   }
-  const suffix = STDERR_TO_STDOUT.exec(text);
-  const head = suffix === null ? text : text.slice(0, suffix.index);
   // One `dispatch` command, called by name, by a literal path ending in it or by `bun` and the
   // bundle's literal path, that is no assignment, whose every word the shell takes as written.
-  const program = scanWord(head, 0);
+  const words: WordToken[] = [];
+  for (let token = tokens[index]; isWord(token); token = tokens[++index]) words.push(token);
   if (
-    program.unread.length > 0 ||
-    ASSIGNMENT.test(head) ||
-    !literalWords(head) ||
-    cliProgramLength(headWords(head)) === 0
+    words.length === 0 ||
+    words.some((word) => word.unread.length > 0) ||
+    ASSIGNMENT.test(words[0].raw) ||
+    cliProgramLength(words) === 0
   )
     return undefined;
-  const at = line.at + offset;
+  // After its words: at most one `2>&1` and one here-document with a quoted delimiter, in either
+  // order, then at most one `| head` or `| tail` stage, then the end of the line.
+  const drop: Array<[number, number]> = [];
+  let stderr = false;
+  let heredoc: HeredocToken | undefined;
+  for (let token = tokens[index]; token !== undefined; token = tokens[++index]) {
+    const before = tokens[index - 1]?.end ?? 0;
+    if (
+      token.kind === "redirect" &&
+      token.fd === "2" &&
+      token.op === ">&" &&
+      token.target === "1"
+    ) {
+      if (stderr) return undefined;
+      stderr = true;
+      drop.push([before, token.end]);
+    } else if (token.kind === "heredoc") {
+      if (heredoc !== undefined || !token.literal) return undefined;
+      heredoc = token;
+    } else break;
+  }
+  if (isOp(tokens[index], "|")) {
+    const before = tokens[index - 1]?.end ?? 0;
+    const stage: WordToken[] = [];
+    for (let token = tokens[++index]; isWord(token); token = tokens[++index]) stage.push(token);
+    if (!headOrTail(stage)) return undefined;
+    drop.push([before, stage[stage.length - 1].end]);
+  }
+  // Nothing else runs: only newlines (blank lines) are left, the here-document's body included.
+  if (tokens.slice(index).some((token) => !isOp(token, "\n"))) return undefined;
+  if (heredoc !== undefined && !heredoc.closed) return undefined;
+  const last = words[words.length - 1];
   return {
-    head,
-    at,
+    words: words.map(({ raw, value, start, end }) => ({ raw, value, start, end })),
+    at: words[0].start,
+    end: last.end,
     ...(cdEnd === undefined ? {} : { cdEnd }),
     ...(leadingCd === undefined ? {} : { leadingCd }),
-    end: at + text.length,
-    ...(line.heredoc ? { heredoc: true as const } : {}),
-    ...(line.stderr ? { stderr: line.stderr } : {}),
-    ...(line.comment ? { comment: line.comment } : {}),
+    drop,
+    ...(heredoc === undefined ? {} : { heredoc: true as const }),
   };
 }
 
@@ -891,23 +954,8 @@ function hasControlCharacter(text: string): boolean {
   return false;
 }
 
-/** Whether every blank-separated word of `text` is literal (`scanWord`): single quotes make every
- * character literal, and an unterminated quote is refused. */
-function literalWords(text: string): boolean {
-  for (let at = 0; at < text.length; ) {
-    if (text[at] === " " || text[at] === "\t") {
-      at++;
-      continue;
-    }
-    const word = scanWord(text, at);
-    if (word.unread.length > 0) return false;
-    at = word.end;
-  }
-  return true;
-}
-
-/** A word as written and with its quotes removed; `hereString` marks the word after `<<<`. */
-type Word = { raw: string; value: string; start?: number; end?: number; hereString?: true };
+/** A word as written and with its quotes removed. */
+type Word = { raw: string; value: string; start?: number; end?: number };
 
 /**
  * Whether `name` with `flags` is a write the gate reviews: a scoped command, with no flag under
@@ -925,29 +973,9 @@ function reviewedWrite(name: string, flags: readonly Word[]): boolean {
 const flagName = (flag: Word) => flag.value.split("=", 1)[0];
 
 /**
- * The characters that leave a word's value to bash alone: an expansion, a glob or a brace. A
- * backslash or a quote is not one: bash removes it, and the scan removes it the same way.
- */
-const UNRESOLVED = "$`*?[{";
-const unresolvedCharacters = (word: Word): string[] =>
-  [...new Set(scanWord(word.raw, 0).unread)].filter((char) => UNRESOLVED.includes(char));
-
-/**
- * `reviewedWrite` for a call AskGate cannot read, where a word only bash can resolve is no proof
- * that a conditional write is out of scope: on `issue` it may be `--spec`, and on `artifact` it may
- * be inline text or a markdown name or path (`F='--spec=x'; dispatch issue … $F`). The literal
- * grammar keeps `reviewedWrite`: none of its words is unresolved.
- */
-function mayBeReviewedWrite(name: string, flags: readonly Word[]): boolean {
-  if (reviewedWrite(name, flags)) return true;
-  if (name !== SPEC_ONLY_COMMAND && name !== UPLOAD_COMMAND) return false;
-  if (flags.some((flag) => NO_SEND_FLAGS.includes(flag.value))) return false;
-  return flags.some((flag) => unresolvedCharacters(flag).length > 0);
-}
-
-/**
  * Whether an upload's words leave it possibly a markdown document: inline text, a name or path read
- * from a file, or a name or path that is not literal (an expansion, a glob), or that is markdown's.
+ * from a file, or a name or path that is not literal (an expansion, a glob), or whose literal value
+ * makes one by the CLI's own predicate (`uploadIsDocument`, which trims the name as Dispatch does).
  * Only an upload whose literal name and literal path are both no markdown's is not one. An upload
  * with no `--name` or no `--path` and no inline text is one the CLI refuses before it sends.
  */
@@ -970,62 +998,10 @@ function uploadMayBeDocument(flags: readonly Word[]): boolean {
   const file = flagValue("--path");
   if (named === undefined || file === undefined) return false;
   return (
-    !named.literal ||
-    !file.literal ||
-    MARKDOWN_NAME.test(named.value) ||
-    MARKDOWN_PATH.test(file.value)
+    !named.literal || !file.literal || uploadIsDocument({ name: named.value, path: file.value })
   );
 }
 
-/** Whether an upload's arguments, as its dry run prints them, make a markdown document. */
-function uploadIsDocument(args: Input): boolean {
-  return (
-    typeof args.content === "string" ||
-    (typeof args.name === "string" && MARKDOWN_NAME.test(args.name)) ||
-    (typeof args.path === "string" && MARKDOWN_PATH.test(args.path))
-  );
-}
-
-/** A head's words as bash splits them at unquoted blanks, each as written and with its quotes
- * removed. Only for a head `dispatchCommandHead` accepted, which holds no escape or expansion. */
-function headWords(head: string): Word[] {
-  const words: Word[] = [];
-  let word: Word | undefined;
-  let quote: string | undefined;
-  for (let index = 0; index < head.length; index++) {
-    const char = head[index];
-    if (quote === undefined && (char === " " || char === "\t")) {
-      if (word) {
-        word.end = index;
-        words.push(word);
-      }
-      word = undefined;
-      continue;
-    }
-    word ??= { raw: "", value: "", start: index };
-    word.raw += char;
-    if (quote === undefined && (char === "'" || char === '"')) quote = char;
-    else if (char === quote) quote = undefined;
-    else word.value += char;
-  }
-  if (word) {
-    word.end = head.length;
-    words.push(word);
-  }
-  return words;
-}
-
-/**
- * One file the command asks Dispatch to read. `span` names the complete shell word whose source
- * becomes the owned snapshot: the value word for `--field-file path`, or the whole flag for
- * `--field-file=path`.
- */
-interface FileInput {
-  flag: string;
-  source: string;
-  span: [number, number];
-  equals: boolean;
-}
 type UnsafeFile = { flag: string; path: string; reason: string };
 
 /** A scoped `dispatch` command and every file whose bytes it would make Dispatch read. */
@@ -1034,9 +1010,10 @@ export interface ScopedCommand {
   label: string;
   command: string;
   dryRunScript: string;
-  rebuttal?: Rebuttal;
+  rebuttal?: string;
   readsFile: boolean;
-  fileInputs: readonly FileInput[];
+  /** Each file the CLI will read (`fileOperands`, the list its own check reads), in argv order. */
+  fileInputs: readonly FileOperand[];
   /** A `--field-file -` needs the call's quoted here-document. */
   stdinFileFlag?: string;
   /** `--path-file` chooses another path after the gate has no way to bind it. */
@@ -1060,133 +1037,80 @@ export interface ScopedCommand {
 }
 
 /**
- * An override the agent sent: the line the entry records, and the override as the agent wrote it.
- * The gate keeps the override out of what the call hands its program, and the surface decides what
- * the agent reads back: a command's flags go back as one shell comment at the end of its first line
- * (`keepOverrideVisible`), so dispatch never sees them and the agent's record of the call still
- * shows them; a device's field is removed before the call runs, so the record lacks it. The
- * acknowledgement quotes `sent` either way, so the agent sees what it sent and where it went.
- */
-type Rebuttal = { line: string; sent: string };
-
-/**
  * An override among a write's flags: `--advisor-rebuttal <line>` or `--advisor-rebuttal=<line>`; a
  * value that starts with `--` is the next flag, as the CLI reads it. A blank line is no override.
- * `removed` holds the indexes of the words it took. Every override is removed and every one is
- * kept: `sent` is each one's words as written (one space between flag and value), in order, and
- * `line` each one's line, joined with "; ", so a call that carries the flag twice loses neither
- * from the agent's record of it, the acknowledgement or the entry.
+ * `removed` holds the indexes of the words it took.
  */
-function splitRebuttal(flags: readonly Word[]): { rebuttal?: Rebuttal; removed: Set<number> } {
-  const lines: string[] = [];
-  const sent: string[] = [];
+function splitRebuttal(flags: readonly Word[]): { rebuttal?: string; removed: Set<number> } {
+  let rebuttal: string | undefined;
   const removed = new Set<number>();
   for (let index = 0; index < flags.length; index++) {
-    const { value, raw } = flags[index];
-    const next = flags[index + 1];
-    const spaced = value === REBUTTAL_FLAG && next !== undefined && !next.value.startsWith("--");
-    const line = spaced
-      ? next.value
-      : value.startsWith(`${REBUTTAL_FLAG}=`)
-        ? value.slice(REBUTTAL_FLAG.length + 1)
-        : undefined;
+    const { value } = flags[index];
+    const next = flags[index + 1]?.value;
+    const line =
+      value === REBUTTAL_FLAG && next !== undefined && !next.startsWith("--")
+        ? next
+        : value.startsWith(`${REBUTTAL_FLAG}=`)
+          ? value.slice(REBUTTAL_FLAG.length + 1)
+          : undefined;
     if (line === undefined || !line.trim()) continue;
-    lines.push(line.trim());
-    sent.push(spaced ? `${raw} ${next.raw}` : raw);
+    rebuttal = line.trim();
     removed.add(index);
-    if (spaced) removed.add(++index);
+    if (value === REBUTTAL_FLAG) removed.add(++index);
   }
-  return {
-    ...(lines.length === 0 ? {} : { rebuttal: { line: lines.join("; "), sent: sent.join(" ") } }),
-    removed,
-  };
+  return { ...(rebuttal === undefined ? {} : { rebuttal }), removed };
 }
 
 /**
- * Every file operand the CLI will open after the gate returns. `--path-file` is different: its
- * contents choose another path, which would be a new open outside this proof and is refused.
+ * Every file operand the CLI will open after the gate returns: `fileOperands`, the one list the
+ * gate and the CLI read. `--path-file` is different: its contents choose another path, which would
+ * be a new open outside this proof and is refused.
  */
 function fileInputs(
   flags: readonly Word[],
   upload: boolean
-): { inputs: FileInput[]; stdinFileFlag?: string; unsafeFile?: UnsafeFile } {
-  const inputs: FileInput[] = [];
+): { inputs: FileOperand[]; stdinFileFlag?: string; unsafeFile?: UnsafeFile } {
+  const values = flags.map((word) => word.value);
   let stdinFileFlag: string | undefined;
-  for (let index = 0; index < flags.length; index++) {
-    const word = flags[index];
-    const eq = word.value.indexOf("=");
-    const flag = eq === -1 ? word.value : word.value.slice(0, eq);
-    if (upload && flag === "--path-file") {
-      const source = eq === -1 ? flags[index + 1]?.value : word.value.slice(eq + 1);
+  for (let index = 0; index < values.length; index++) {
+    const word = values[index] as string;
+    const eq = word.indexOf("=");
+    const flag = eq === -1 ? word : word.slice(0, eq);
+    const source = eq === -1 ? values[index + 1] : word.slice(eq + 1);
+    if (upload && flag === "--path-file")
       return {
-        inputs,
+        inputs: [],
         ...(stdinFileFlag === undefined ? {} : { stdinFileFlag }),
         unsafeFile: {
           flag,
           path: source ?? "",
-          reason: "is an indirect path that AskGate cannot capture before Dispatch opens it",
+          reason: "is an indirect path that AskGate cannot read before Dispatch opens it",
         },
       };
-    }
     const named = flag.startsWith("--") && flag.endsWith("-file");
-    const artifactPath = upload && flag === "--path";
-    if (!named && !artifactPath) continue;
-    const sourceWord =
-      eq === -1
-        ? flags[index + 1]
-        : {
-            raw: word.raw.slice(word.raw.indexOf("=") + 1),
-            value: word.value.slice(eq + 1),
-            start: word.start === undefined ? undefined : word.start,
-            end: word.end,
-          };
-    if (sourceWord === undefined) continue;
-    const source = sourceWord.value;
-    if (source === "-") {
-      stdinFileFlag ??= flag;
-      continue;
-    }
-    const span =
-      eq === -1
-        ? sourceWord.start === undefined || sourceWord.end === undefined
-          ? undefined
-          : ([sourceWord.start, sourceWord.end] as [number, number])
-        : word.start === undefined || word.end === undefined
-          ? undefined
-          : ([word.start, word.end] as [number, number]);
-    if (span === undefined) continue;
-    inputs.push({ flag, source, span, equals: eq !== -1 });
+    if (source === "-" && (named || (upload && flag === "--path"))) stdinFileFlag ??= flag;
   }
-  return { inputs, ...(stdinFileFlag === undefined ? {} : { stdinFileFlag }) };
+  return {
+    inputs: fileOperands([upload ? UPLOAD_COMMAND : "", ...values]),
+    ...(stdinFileFlag === undefined ? {} : { stdinFileFlag }),
+  };
 }
 
 /**
  * The `bash` command as a scoped `dispatch` call, or undefined for any other command. Only the
  * literal grammar of one call is read (`dispatchCommandHead`). A call in any other form is no
- * scoped call; the gate then refuses it when `unreadableDispatchWrite` finds a write in it. The
- * override comment that ends a call's first line is read as overrides after the call's own flags,
- * and is left out of `command`, as an override flag is: the gate puts every override back as one
- * comment (`keepOverrideVisible`), so a rebutted command it handed back, sent again, carries the
- * same rebuttal and comes back the same.
+ * scoped call: it runs, and the CLI refuses a gated write in it, which carries no marker.
  */
 export function scopedCommand(command: unknown): ScopedCommand | undefined {
   if (typeof command !== "string") return undefined;
   const found = dispatchCommandHead(command);
   if (found === undefined) return undefined;
-  const { head, at, cdEnd, leadingCd, end, heredoc, stderr, comment } = found;
-  // Every position `found` names lies before the comment, so it holds in the text without it.
-  const text =
-    comment === undefined
-      ? command
-      : `${command.slice(0, comment.span[0])}${command.slice(comment.span[1])}`;
-  const all = headWords(head);
+  const { words: all, at, cdEnd, leadingCd, end, heredoc, drop } = found;
   const lead = cliProgramLength(all);
   const program = all.slice(0, lead);
   const [name, ...flags] = all.slice(lead);
   if (name === undefined || !reviewedWrite(name.value, flags)) return undefined;
-  // Each comment word is part of an override (`overrideComment`), and none is the value of a flag
-  // before it, since each override starts with `--`: `removed` takes them all.
-  const { rebuttal, removed } = splitRebuttal([...flags, ...(comment?.words ?? [])]);
+  const { rebuttal, removed } = splitRebuttal(flags);
   const kept = flags.filter((_, index) => !removed.has(index));
   const words = [...program, name, ...kept];
   const positioned: Word[] = [];
@@ -1209,21 +1133,28 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
       : undefined);
   // The command runs as written, its wrappers included. The dry-run keeps the `cd`, with its output
   // silenced (bash prints the directory when CDPATH found it), so it runs where the command will;
-  // it drops the `2>&1`, before or after a here-document opener, so the CLI's JSON is all its
-  // stdout holds.
+  // it drops the `2>&1`, before or after a here-document opener, and a `| head` or `| tail` stage,
+  // so the CLI's JSON is all its stdout holds. `--dry-run` goes after the kept words, not between
+  // the subcommand and them: the CLI takes a bare issue key only as the subcommand's first
+  // argument, so a `--dry-run` there made `dispatch comment ACME-1 …` fail its dry run, which the
+  // gate lets through as an error. The parser never takes a `--` word as a flag's value, so last
+  // is safe for every command.
   const before =
     cdEnd === undefined
-      ? text.slice(0, at)
-      : `${text.slice(0, cdEnd)} >/dev/null${text.slice(cdEnd, at)}`;
-  const after =
-    stderr === undefined
-      ? text.slice(end)
-      : `${text.slice(end, stderr[0])}${text.slice(stderr[1])}`;
+      ? command.slice(0, at)
+      : `${command.slice(0, cdEnd)} >/dev/null${command.slice(cdEnd, at)}`;
+  let after = "";
+  let from = end;
+  for (const [start, stop] of drop) {
+    after += command.slice(from, start);
+    from = stop;
+  }
+  after += command.slice(from);
   return {
     tool: `dispatch_${name.value.replaceAll("-", "_")}`,
     label: `dispatch ${name.value}`,
-    command: `${text.slice(0, at)}${commandHead}${text.slice(at + head.length)}`,
-    dryRunScript: `${before}${[...program.map((word) => word.raw), name.raw, "--dry-run", ...kept.map((word) => word.raw)].join(" ")}${after}`,
+    command: `${command.slice(0, at)}${commandHead}${command.slice(end)}`,
+    dryRunScript: `${before}${[...program.map((word) => word.raw), name.raw, ...kept.map((word) => word.raw), "--dry-run"].join(" ")}${after}`,
     ...(rebuttal === undefined ? {} : { rebuttal }),
     readsFile: files.inputs.length > 0,
     fileInputs: files.inputs,
@@ -1234,908 +1165,215 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
     ...(leadingCd !== undefined && /^\/+$/.test(leadingCd)
       ? { cdToSessionDirectory: true as const }
       : {}),
-    dirScript: cdEnd === undefined ? "pwd -P" : `${text.slice(0, cdEnd)} >/dev/null && pwd -P`,
+    dirScript: cdEnd === undefined ? "pwd -P" : `${command.slice(0, cdEnd)} >/dev/null && pwd -P`,
   };
 }
 
-/**
- * Words that may stand before a command's name without being it: assignments are matched apart. A
- * set, not a record: `then` as an object key would make the table a thenable.
- */
-const COMMAND_PREFIXES: ReadonlySet<string> = new Set([
-  "!",
-  "{",
-  "then",
-  "do",
-  "else",
-  "elif",
-  "if",
-  "while",
-  "until",
-  "time",
-  "command",
-  "exec",
-  "nohup",
-  "env",
-  "timeout",
-]);
-/** The prefixes that are programs of their own, also called by a path (`/usr/bin/env`). Each runs
- * the command its arguments name. */
-const PROGRAM_PREFIXES: Record<string, true> = {
-  env: true,
-  nohup: true,
-  timeout: true,
-  time: true,
-  sudo: true,
-  nice: true,
-  stdbuf: true,
-  setsid: true,
-  xargs: true,
-};
-/**
- * How a prefix that runs the command after it reads its own options, as its parser (getopt, or
- * bash's for a builtin) reads them: up to `--`, which it consumes, or the first word that is no
- * option. `values` are the short options that take a value (the rest of the word, else the next
- * word), `optional` the short options whose value is only the rest of the word (`xargs -i`), and
- * `longValues` the long ones (after `=`, else the next word). An option in `runsNothing`
- * makes the prefix run nothing (`command -v` only prints), `split` names the options whose value
- * holds the command's own words (`env -S`), `dash` lets a lone `-` be an option (`env -`, as
- * `env -i`), and `operands` counts the words after the options that are not the command
- * (`timeout`'s duration). Every other word that starts with `-` there is an option with no value.
- */
-interface PrefixOptions {
-  values?: string;
-  optional?: string;
-  longValues?: readonly string[];
-  runsNothing?: string;
-  split?: readonly string[];
-  dash?: true;
-  operands?: number;
-}
-const PREFIX_OPTIONS: Record<string, PrefixOptions> = {
-  command: { runsNothing: "vV" },
-  exec: { values: "a" },
-  nohup: {},
-  time: { values: "fo", longValues: ["--format", "--output"] },
-  env: {
-    values: "uCSa",
-    longValues: ["--unset", "--chdir", "--split-string", "--argv0"],
-    split: ["-S", "--split-string"],
-    dash: true,
-  },
-  timeout: { values: "sk", longValues: ["--signal", "--kill-after"], operands: 1 },
-  sudo: {
-    values: "CDghprRtTuU",
-    longValues: [
-      "--close-from",
-      "--chdir",
-      "--group",
-      "--host",
-      "--prompt",
-      "--chroot",
-      "--role",
-      "--type",
-      "--command-timeout",
-      "--user",
-      "--other-user",
-    ],
-    runsNothing: "eKlvV",
-  },
-  nice: { values: "n", longValues: ["--adjustment"] },
-  stdbuf: { values: "ioe", longValues: ["--input", "--output", "--error"] },
-  setsid: {},
-  xargs: {
-    values: "adEILnPs",
-    optional: "eil",
-    longValues: [
-      "--arg-file",
-      "--delimiter",
-      "--max-args",
-      "--max-procs",
-      "--max-chars",
-      "--process-slot-var",
-    ],
-  },
-};
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 /**
- * Where the command a simple command runs starts, past its assignments and prefixes and each
- * prefix's options; undefined when a prefix runs nothing. `words` comes back with the words an
- * `env -S` value splits into put where the command starts. `bun` before the CLI bundle's path is
- * a prefix too. `xargs` is set when xargs runs the command, with its replacement strings (`-I`,
- * `-i`, `--replace`): xargs puts the words it reads in their place, or after the command's words.
+ * The argument vector the Dispatch CLI receives from a `bash` command in the literal grammar: the
+ * words after the program, with their quotes removed, as `Bun.argv.slice(2)` holds them. A marker
+ * is keyed by it. Undefined for any other command.
  */
-function commandStart(
-  segment: readonly Word[]
-): { words: Word[]; at: number; xargs?: string[] } | undefined {
-  let words = [...segment];
-  let at = 0;
-  let xargs: string[] | undefined;
-  while (at < words.length) {
-    const prefix = words[at];
-    if (ASSIGNMENT.test(prefix.raw)) {
-      at++;
-      continue;
-    }
-    const base = prefix.value.split("/").at(-1) ?? "";
-    if (base === "bun" && words[at + 1]?.value.split("/").at(-1) === "dispatch.js") {
-      at++;
-      break;
-    }
-    const name = COMMAND_PREFIXES.has(prefix.value)
-      ? prefix.value
-      : Object.hasOwn(PROGRAM_PREFIXES, base)
-        ? base
-        : undefined;
-    if (name === undefined) break;
-    at++;
-    if (name === "xargs") xargs ??= [];
-    if (!Object.hasOwn(PREFIX_OPTIONS, name)) continue;
-    const options = PREFIX_OPTIONS[name];
-    const split: Word[] = [];
-    while (at < words.length) {
-      const word = words[at].value;
-      if (word === "--") {
-        at++;
-        break;
-      }
-      if (!word.startsWith("-") || (word === "-" && !options.dash)) break;
-      at++;
-      let flag = word;
-      let value: string | undefined;
-      if (word.startsWith("--")) {
-        const eq = word.indexOf("=");
-        if (eq !== -1) {
-          flag = word.slice(0, eq);
-          value = word.slice(eq + 1);
-        } else if (options.longValues?.includes(word)) value = words[at++]?.value;
-      } else {
-        for (let index = 1; index < word.length; index++) {
-          const char = word[index];
-          if (options.runsNothing?.includes(char)) return undefined;
-          const optional = options.optional?.includes(char) === true;
-          if (!optional && !options.values?.includes(char)) continue;
-          flag = `-${char}`;
-          value =
-            index + 1 < word.length
-              ? word.slice(index + 1)
-              : optional
-                ? undefined
-                : words[at++]?.value;
-          break;
-        }
-      }
-      if (value !== undefined && options.split?.includes(flag))
-        split.push(...commandWords(value).flat());
-      if (name === "xargs" && ["-I", "-i", "--replace"].includes(flag)) xargs?.push(value ?? "{}");
-    }
-    at += options.operands ?? 0;
-    words = [...words.slice(0, at), ...split, ...words.slice(at)];
-  }
-  return { words, at, ...(xargs === undefined ? {} : { xargs }) };
+export function commandArgv(command: unknown): string[] | undefined {
+  if (typeof command !== "string") return undefined;
+  const found = dispatchCommandHead(command);
+  if (found === undefined) return undefined;
+  return found.words.slice(cliProgramLength(found.words)).map((word) => word.value);
 }
 
-/** An open subshell, or an open command substitution with the command and word it sits in, which
- * go on at its end. */
-type Open =
-  | { kind: "(" }
-  | {
-      kind: "$(" | "`";
-      words: Word[];
-      start: number;
-      value: string;
-      quote: '"' | undefined;
-      pipeFrom: Word[] | undefined;
-    };
+/** What puts a `bash` call that runs a gated write outside the literal grammar, as the note on its
+ * refusal names it, in the order `nonLiteralCause` looks for them. */
+export type NonLiteralCause =
+  | "lines-expansion"
+  | "expansion"
+  | "wrapper"
+  | "pipe"
+  | "commands"
+  | "assignment"
+  | "redirect"
+  | "other";
 
-/** A here-document's body and the command whose input it is. The body of an unquoted delimiter
- * has the backslashes bash removes there removed: before `$`, a backtick, a backslash and a
- * newline. */
-interface Body {
-  text: string;
-  words: Word[];
-}
-/** What `commandWords` finds beside the commands: each here-document body, and for each command
- * whose standard input is a pipe, the command that writes into it. */
-interface CommandScan {
-  bodies: Body[];
-  pipes: Map<Word[], Word[]>;
-}
+/** A `dispatch` word: the name, a path that ends in it, or the bundle `dispatch.js`. */
+const DISPATCH_WORD = /(^|[\s;&|(`'"=])(?:[^\s;&|()<>`'"]*\/)?dispatch(?:\.js)?(?=$|[\s;&|)`'"])/;
+const GATED_SUBCOMMAND = new RegExp(`(?:^|[\\s'"])(?:${SCOPED_COMMANDS.join("|")})(?=$|[\\s'"])`);
+/** The operators that join or end commands, which the literal grammar has none of but its own. */
+const SEPARATORS: Record<string, true> = {
+  "\n": true,
+  ";": true,
+  "&&": true,
+  "||": true,
+  "&": true,
+  "|": true,
+  "|&": true,
+  ";;": true,
+  "(": true,
+  ")": true,
+};
+const separates = (token: ShellToken | undefined): boolean =>
+  token?.kind === "op" && SEPARATORS[token.op] === true;
+const isPipe = (token: ShellToken | undefined) => isOp(token, "|") || isOp(token, "|&");
 
-/** The escapes `$'…'`, `printf` and `echo -e` decode, by the letter after the backslash. */
-const NAMED_ESCAPES: Record<string, string> = {
-  a: "\x07",
-  b: "\b",
-  e: "\x1b",
-  E: "\x1b",
-  f: "\f",
-  n: "\n",
-  r: "\r",
-  t: "\t",
-  v: "\v",
-  "\\": "\\",
-  "'": "'",
-  '"': '"',
-  "?": "?",
+/** Text from the call, on one line and cut, to name in a note. */
+const snippet = (text: string) => {
+  const line = text.replace(/\s+/g, " ").replaceAll("`", "'").trim();
+  return line.length > 60 ? `${line.slice(0, 59)}…` : line;
 };
 
-/** `text` with the backslash escapes of `$'…'`, `printf` and `echo -e` decoded: the named ones,
- * `\xHH`, `\uHHHH`, `\UHHHHHHHH` and octal `\NNN` or `\0NNN`. Any other backslash stays. */
-function decodeEscapes(text: string): string {
-  return text.replace(
-    /\\(?:x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|0?([0-7]{1,3})|(.))/gs,
-    (match, hex?: string, short?: string, long?: string, octal?: string, char?: string) => {
-      const code = hex ?? short ?? long;
-      if (code !== undefined) {
-        const point = Number.parseInt(code, 16);
-        return point > 0x10ffff ? match : String.fromCodePoint(point);
-      }
-      if (octal !== undefined) return String.fromCharCode(Number.parseInt(octal, 8) & 0xff);
-      return (char !== undefined && NAMED_ESCAPES[char]) || match;
-    }
+/**
+ * Why a `bash` call whose text holds a `dispatch` word and a gated write subcommand is outside the
+ * literal grammar, with the call's own text that shows it; undefined for a call in the grammar or
+ * one with no such words. A note only: the gate refuses nothing for it. Looked for in this order: a
+ * double-quoted value over lines with an expansion in it, an expansion in a value, a program that
+ * runs the write (`xargs`, `bash -c`, `eval`, `env`, `timeout`, …), a pipe stage other than one
+ * trailing `head` or `tail`, another command (`;`, `&&`, `||`, `&`, a new line), an assignment, a
+ * redirect, and anything else.
+ */
+export function nonLiteralCause(
+  command: unknown
+): { cause: NonLiteralCause; detail: string } | undefined {
+  if (typeof command !== "string") return undefined;
+  const found = DISPATCH_WORD.exec(command);
+  if (found === null || !GATED_SUBCOMMAND.test(command)) return undefined;
+  if (dispatchCommandHead(command) !== undefined) return undefined;
+  const position = found.index + found[1].length;
+  const tokens = shellTokens(command);
+  // The first and the last token of the simple command that holds the token at `at`.
+  const bounds = (at: number): [number, number] => {
+    let first = at;
+    while (first > 0 && !separates(tokens[first - 1])) first--;
+    let last = at;
+    while (last + 1 < tokens.length && !separates(tokens[last + 1])) last++;
+    return [first, last];
+  };
+  // The program of the simple command that holds the token at `at`, which runs the write.
+  const runner = (at: number): { cause: NonLiteralCause; detail: string } => {
+    const [first] = bounds(at);
+    const program = tokens
+      .slice(first, at + 1)
+      .find((token): token is WordToken => isWord(token) && !ASSIGNMENT.test(token.raw));
+    return program === undefined
+      ? { cause: "other", detail: snippet(command) }
+      : { cause: "wrapper", detail: snippet(program.raw) };
+  };
+  const at = tokens.findIndex(
+    (token) => token.kind !== "op" && token.start <= position && position < token.end
   );
+  if (at === -1) {
+    // Inside a here-document's body: the program it feeds runs the write.
+    const doc = tokens.findLastIndex(
+      (token) => token.kind === "heredoc" && (token.bodyStart ?? Infinity) <= position
+    );
+    return doc === -1 ? { cause: "other", detail: snippet(command) } : runner(doc);
+  }
+  const word = tokens[at];
+  if (word.kind === "comment") return { cause: "other", detail: "#" };
+  // A variable set to the program, which an expansion later runs.
+  if (isWord(word) && ASSIGNMENT.test(word.raw) && !namesCli(word.value))
+    return { cause: "assignment", detail: `${word.raw.split("=", 1)[0]}=` };
+  // Inside a quoted string or an expansion: the program that reads it runs the write.
+  if (!isWord(word) || !namesCli(word.value)) return runner(at);
+  // The simple command of the write, and a leading `cd <path> &&` the literal grammar allows.
+  const [first, last] = bounds(at);
+  const own = tokens.slice(first, last + 1);
+  let lead = 0;
+  while (isOp(tokens[lead], "\n")) lead++;
+  const cdWord = tokens[lead];
+  const cdPath = tokens[lead + 1];
+  const cd =
+    first === lead + 3 &&
+    isWord(cdWord) &&
+    cdWord.raw === "cd" &&
+    isWord(cdPath) &&
+    isOp(tokens[lead + 2], "&&")
+      ? cdPath
+      : undefined;
+  const values = [...(cd === undefined ? [] : [cd]), ...own.filter(isWord)];
+  const lines = values.find((token) => token.linesExpansion !== undefined);
+  if (lines?.linesExpansion !== undefined)
+    return { cause: "lines-expansion", detail: snippet(lines.linesExpansion) };
+  const expanded = values.find((token) => token.expansion !== undefined);
+  if (expanded?.expansion !== undefined)
+    return { cause: "expansion", detail: snippet(expanded.expansion) };
+  const prefix = tokens.slice(first, at).filter(isWord);
+  const wrapper = prefix.find((token) => !ASSIGNMENT.test(token.raw));
+  if (wrapper !== undefined) return { cause: "wrapper", detail: snippet(wrapper.raw) };
+  // A pipe into the write, or a stage after it that is not one trailing `head` or `tail`.
+  if (isPipe(tokens[first - 1])) return { ...runner(first - 2), cause: "pipe" };
+  let allowedPipe: number | undefined;
+  if (isPipe(tokens[last + 1])) {
+    const stage: WordToken[] = [];
+    let next = last + 2;
+    for (let token = tokens[next]; isWord(token); token = tokens[++next]) stage.push(token);
+    if (!isOp(tokens[last + 1], "|") || !headOrTail(stage))
+      return { cause: "pipe", detail: snippet(stage.map((token) => token.raw).join(" ") || "|") };
+    // A `head` or `tail` stage the grammar takes, with a further stage after it.
+    if (isPipe(tokens[next])) return { ...runner(next + 1), cause: "pipe" };
+    allowedPipe = last + 1;
+  }
+  // Another command in the call: any operator but the leading `cd`'s `&&`, an allowed trailing
+  // pipe, and the new lines before the first command or after the last.
+  const other = tokens.find(
+    (token, index) =>
+      token.kind === "op" &&
+      !(cd !== undefined && index === lead + 2) &&
+      index !== allowedPipe &&
+      (token.op !== "\n" ||
+        (tokens.slice(index + 1).some((later) => !isOp(later, "\n")) &&
+          tokens.slice(0, index).some((earlier) => !isOp(earlier, "\n"))))
+  );
+  if (other?.kind === "op")
+    return { cause: "commands", detail: other.op === "\n" ? "a new line" : other.op };
+  const assignment = prefix.find((token) => ASSIGNMENT.test(token.raw));
+  if (assignment !== undefined)
+    return { cause: "assignment", detail: snippet(assignment.raw.split("=", 1)[0] + "=") };
+  let stderr = 0;
+  let docs = 0;
+  for (const token of own) {
+    if (token.kind === "redirect") {
+      if (token.fd === "2" && token.op === ">&" && token.target === "1" && stderr++ === 0) continue;
+      return { cause: "redirect", detail: snippet(command.slice(token.start, token.end)) };
+    }
+    if (token.kind === "heredoc") {
+      if (token.literal && docs++ === 0) continue;
+      return { cause: "redirect", detail: snippet(command.slice(token.start, token.end)) };
+    }
+  }
+  if (tokens.some((token) => token.kind === "comment")) return { cause: "other", detail: "#" };
+  const unread = values.find((token) => token.unread.length > 0);
+  return { cause: "other", detail: snippet(unread?.raw ?? command.slice(own[0]?.start ?? 0)) };
 }
 
-/** The ANSI-C quoted text `$'…'` whose body starts at `from`: its value as bash decodes it, and
- * the index of its closing quote (the text's length when it has none). */
-function ansiC(text: string, from: number): { value: string; end: number } {
-  let end = from;
-  while (end < text.length && text[end] !== "'") end += text[end] === "\\" ? 2 : 1;
-  end = Math.min(end, text.length);
-  return { value: decodeEscapes(text.slice(from, end)), end };
+/** What the CLI prints when it refuses, or in warn mode posts, a gated write that has no marker. */
+const UNMARKED_WRITE =
+  /AskGate is on for this session(?: in warn mode)?, and this call carries no AskGate marker/;
+
+/** The note a refused write gets: the cause the gate found in the call, and how to send it. */
+export function causeNote({ cause, detail }: { cause: NonLiteralCause; detail: string }): string {
+  const fix: Record<NonLiteralCause, string> = {
+    "lines-expansion": `A double-quoted value on more than one line holds \`$\`, a backtick or \`\\\` (\`${detail}\`), and the shell changes it. Put the text in a here-document with a quoted delimiter: \`--<field>-file - <<'EOF'\`, the text on the lines after it, and \`EOF\` on the last line.`,
+    expansion: `The value \`${detail}\` is an expansion: the shell changes it before the CLI gets it. Write the value as literal text. For text that holds \`$\` or a backtick, use single quotes or a here-document with a quoted delimiter (\`--<field>-file - <<'EOF'\`).`,
+    wrapper: `\`${detail}\` runs the write, so AskGate cannot read the words that the CLI gets. Make \`dispatch\` the first word of the bash call.`,
+    pipe: `The write is in a pipeline with \`${detail}\`. Send the write in a bash call of its own, and do the other step in a different call.`,
+    commands: `The bash call has more than one command (${detail === "a new line" ? detail : `\`${detail}\``}). Send the write in a bash call of its own.`,
+    assignment: `The call sets a variable (\`${detail}\`). Remove the assignment, and write the value into the command.`,
+    redirect: `The call has the redirect \`${detail}\`. Remove it. To send text from a file, use \`--<field>-file <path>\`.`,
+    other: `AskGate does not read \`${detail}\`. Write each word as plain text or in quotes.`,
+  };
+  return `AskGate note: the dispatch CLI found no AskGate marker for this write, because the call is not in the literal form that AskGate reads. ${fix[cause]} Then send it as \`dispatch <command> <words…>\`, in a bash call of its own; the CLI's message above gives the full literal form.`;
 }
 
 /**
- * The words of each simple command in a `bash` command, each as written and with its quotes
- * removed, as far as a character scan can tell them apart: a new command starts at an unquoted
- * newline, `;`, `&`, `|`, `(` or `)` (a `&` inside `2>&1` or `&>` is a redirect, not a separator).
- * A command substitution, `$(…)` or backticks, quoted or not, holds commands of its own and is part
- * of the word it sits in, which goes on after it. Single and double quotes and backslashes are
- * honoured, a comment runs to the line's end, and a here-document body is skipped, so text a
- * command only writes (`cat > f <<EOF … EOF`, `echo "dispatch ask"`) is never a command. Not a
- * shell parser: a `)` in a `case` pattern ends a substitution early.
+ * A literal `dispatch` write whose file the gate cannot read: the tool, the command's name, and
+ * the flag, the path and why. `inMessage`: the file was missing or not safe to read when the gate
+ * ran, which a call earlier in the same message can explain, since the gate reads every call of a
+ * message before any of them runs.
  */
-function commandWords(command: string, scan?: CommandScan): Word[][] {
-  const segments: Word[][] = [];
-  const pending: Array<{ delimiter: string; stripTabs: boolean; quoted: boolean; words: Word[] }> =
-    [];
-  const open: Open[] = [];
-  let words: Word[] = [];
-  /** The word being read: where it starts in `command`, and its value so far; undefined between words. */
-  let start = 0;
-  let value: string | undefined;
-  let quote: '"' | "'" | undefined;
-  /** The command before an unquoted `|`, whose output the next command reads. */
-  let pipeFrom: Word[] | undefined;
-  /** The next word is a here-string, after `<<<`. */
-  let hereString = false;
-  const add = (at: number, text: string) => {
-    if (value === undefined) {
-      start = at;
-      value = "";
-    }
-    value += text;
-  };
-  const endWord = (at: number) => {
-    if (value !== undefined) {
-      words.push({
-        raw: command.slice(start, at),
-        value,
-        ...(hereString ? { hereString: true as const } : {}),
-      });
-      hereString = false;
-    }
-    value = undefined;
-  };
-  const endSegment = (at: number, piped = false) => {
-    endWord(at);
-    if (words.length > 0) {
-      segments.push(words);
-      if (pipeFrom !== undefined) scan?.pipes.set(words, pipeFrom);
-      pipeFrom = piped ? words : undefined;
-    }
-    words = [];
-  };
-  /** A command substitution opens at `at`: the command and word it sits in wait for its end. */
-  const openSubstitution = (kind: "$(" | "`", at: number) => {
-    add(at, "");
-    open.push({
-      kind,
-      words,
-      start,
-      value: value ?? "",
-      quote: quote === '"' ? quote : undefined,
-      pipeFrom,
-    });
-    words = [];
-    value = undefined;
-    quote = undefined;
-    pipeFrom = undefined;
-  };
-  /** The innermost command substitution, `outer`, ends at `at`: its last command ends and the word around it goes on. */
-  const closeSubstitution = (at: number, outer: Exclude<Open, { kind: "(" }>) => {
-    endSegment(at);
-    open.pop();
-    ({ words, start, value, quote, pipeFrom } = outer);
-  };
-  /** Past the bodies of the here-documents opened on the line that ended just before `from`; each
-   * body goes to the scan when the caller asks for it. */
-  const skipBodies = (from: number): number => {
-    let at = from;
-    for (const { delimiter, stripTabs, quoted, words: owner } of pending.splice(0)) {
-      const body = at;
-      let bodyEnd = command.length;
-      while (at < command.length) {
-        const lineStart = at;
-        const end = command.indexOf("\n", at);
-        const line = command.slice(at, end === -1 ? command.length : end);
-        at = end === -1 ? command.length : end + 1;
-        if ((stripTabs ? line.replace(/^\t+/, "") : line) === delimiter) {
-          bodyEnd = lineStart;
-          break;
-        }
-      }
-      const text = command.slice(body, bodyEnd);
-      scan?.bodies.push({
-        text: quoted
-          ? text
-          : text.replace(/\\([$`\\\n])/g, (_, char: string) => (char === "\n" ? "" : char)),
-        words: owner,
-      });
-    }
-    return at;
-  };
-  for (let i = 0; i < command.length; i++) {
-    const c = command[i];
-    const top = open.at(-1);
-    if (quote === "'") {
-      if (c === "'") quote = undefined;
-      else value += c;
-      continue;
-    }
-    if (quote === '"') {
-      if (c === '"') quote = undefined;
-      else if (c === "\\" && '$`"\\\n'.includes(command[i + 1] ?? "")) {
-        if (command[i + 1] !== "\n") value += command[i + 1];
-        i++;
-      } else if (c === "$" && command[i + 1] === "(") {
-        openSubstitution("$(", i);
-        i++;
-      } else if (c === "`") openSubstitution("`", i);
-      else value += c;
-      continue;
-    }
-    if (c === "\\") {
-      if (command[i + 1] !== "\n") add(i, command[i + 1] ?? "");
-      i++;
-    } else if (c === "$" && command[i + 1] === "'") {
-      // ANSI-C quoting: bash decodes the escapes, so the word's value holds what they stand for.
-      const quoted = ansiC(command, i + 2);
-      add(i, quoted.value);
-      i = quoted.end;
-    } else if (c === "'" || c === '"') {
-      add(i, "");
-      quote = c;
-    } else if (c === "#" && value === undefined) {
-      const end = command.indexOf("\n", i);
-      i = (end === -1 ? command.length : end) - 1;
-    } else if (c === "\n") {
-      endSegment(i);
-      i = skipBodies(i + 1) - 1;
-    } else if (c === " " || c === "\t") {
-      endWord(i);
-    } else if (c === "<" && command[i + 1] === "<" && command[i + 2] === "<") {
-      // A here-string: the next word is the command's standard input.
-      endWord(i);
-      i += 2;
-      hereString = true;
-    } else if (c === "<" && command[i + 1] === "<") {
-      // A here-document opener: its delimiter, quotes removed, ends the body that starts on the next line.
-      endWord(i);
-      i += 2;
-      const stripTabs = command[i] === "-";
-      if (stripTabs) i++;
-      while (command[i] === " " || command[i] === "\t") i++;
-      let delimiter = "";
-      let quoted = false;
-      for (; i < command.length && !" \t\n;&|<>()".includes(command[i]); i++)
-        if (command[i] === "'" || command[i] === '"' || command[i] === "\\") quoted = true;
-        else delimiter += command[i];
-      pending.push({ delimiter, stripTabs, quoted, words });
-      i--;
-    } else if (c === "$" && command[i + 1] === "(") {
-      openSubstitution("$(", i);
-      i++;
-    } else if (c === "`") {
-      if (top?.kind === "`") closeSubstitution(i, top);
-      else openSubstitution("`", i);
-    } else if (c === ")" && top?.kind === "$(") {
-      closeSubstitution(i, top);
-    } else if (
-      c === "&" &&
-      (command[i - 1] === ">" || command[i - 1] === "<" || command[i + 1] === ">")
-    ) {
-      endWord(i);
-    } else if (c === "(") {
-      endSegment(i);
-      open.push({ kind: "(" });
-    } else if (c === ")") {
-      if (top?.kind === "(") open.pop();
-      endSegment(i);
-    } else if (";&|".includes(c)) {
-      endSegment(i, c === "|" && command[i + 1] !== "|" && command[i - 1] !== "|");
-    } else if (c === "<" || c === ">") {
-      endWord(i);
-    } else {
-      add(i, c);
-    }
-  }
-  endSegment(command.length);
-  return segments;
-}
-
-/** A scoped `dispatch` write the gate cannot review: the tool it calls, the command's name and
- * which word AskGate could not read, with the characters in it AskGate does not take as literal. */
 export interface UnreadableCommand {
   tool: string;
   label: string;
-  /** The word that runs the write is not literal: whether it calls `dispatch` by name or by path. */
-  program?: { namesDispatch: boolean; unread: string[] };
-  /** The word after `dispatch` is not literal, so the subcommand it names is unknown; `from` names
-   * the runner that puts the subcommand there when the call runs (`xargs`). */
-  subcommand?: { unread: string[]; from?: string };
-  /** The write is in the call's text, where another command (`bash -c`, `eval`, a function) runs it. */
-  wrapped?: true;
-  /** A file the call would make Dispatch read cannot be captured safely. */
-  file?: { flag: string; path: string; reason: string };
-  /** The write is a process an eval cell starts, which AskGate does not read. */
-  cell?: true;
-}
-
-/**
- * `dispatch`, or the CLI bundle `dispatch.js`, by name or by a path ending in it, with a gated
- * write subcommand after it. The pattern is applied to the whole command's text, quotes and
- * here-document bodies included: the text a `bash -c '…'`, `sh -c`, `eval`, `xargs`, a function
- * or a variable would run is one word to the shell, so no scan of the call's own commands finds
- * the write inside it.
- */
-const DISPATCH_IN_TEXT = new RegExp(
-  `(?:^|[^A-Za-z0-9_.-])(?:[^\\s'";|&<>()]*/)?dispatch(?:\\.js)?[ \\t]+(${SCOPED_COMMANDS.join("|")})(?![A-Za-z0-9_-])`,
-  "g"
-);
-
-/**
- * A gated write in the command's own text, with the flags that follow it to the end of its line,
- * which say whether it would send anything (`--dry-run`, `--help`, an `issue` with no spec, an
- * upload that is no markdown document).
- */
-function textDispatchWrite(command: string): FoundWrite | undefined {
-  for (const match of command.matchAll(DISPATCH_IN_TEXT)) {
-    const name = match[1];
-    const from = (match.index ?? 0) + match[0].length;
-    const lineEnd = command.indexOf("\n", from);
-    const flags = commandWords(command.slice(from, lineEnd === -1 ? command.length : lineEnd))[0];
-    if (!mayBeReviewedWrite(name, flags ?? [])) continue;
-    return writeNamed(name);
-  }
-  return undefined;
-}
-
-/** The tool and the label of the `dispatch` write `name` names. */
-const writeNamed = (name: string): FoundWrite => ({
-  tool: `dispatch_${name.replaceAll("-", "_")}`,
-  label: `dispatch ${name}`,
-});
-
-/**
- * How many levels of text inside text the scan reads: a word that `bash -c` runs, inside a word
- * that `eval` runs, and so on. Past it, only the text pattern above applies.
- */
-const NESTED_DEPTH = 4;
-
-/** The write without the field that says where it sits: a nested write is always `wrapped`. */
-type FoundWrite = Omit<UnreadableCommand, "wrapped">;
-
-/**
- * A scoped `dispatch` write in a `bash` command AskGate does not read. In order: a write at a
- * command's position (after any assignments and prefixes such as `env -u HOME --`, `timeout -s
- * KILL 30`, `sudo -u me` or `xargs -I %`, each prefix's options and its `--` read as its own
- * parser reads them: `commandStart`), or a scoped subcommand run by a program an expansion names
- * (`$D comment …`, `$(command -v dispatch) ask …`), which may be `dispatch`; then a write in text
- * another command would run (`nestedWrite`, then `textDispatchWrite`); then a `dispatch` whose own
- * subcommand an expansion or `xargs` supplies (`dispatch $SUB …`, `xargs dispatch`), which may be
- * a write. One carrying `--dry-run` or `--help`, or a `dispatch issue` without
- * `--spec`/`--spec-file`, sends nothing for review and is not one. Only for a command
- * `scopedCommand` could not read.
- */
-export function unreadableDispatchWrite(command: unknown): UnreadableCommand | undefined {
-  // No prefilter on the raw text: bash removes a backslash or empty quotes inside a word
-  // (`d\ispatch`, `di""spatch`), so a write need not hold `dispatch` as written. `commandWords`
-  // removes them as bash does and names the program.
-  if (typeof command !== "string") return undefined;
-  return findWrite(command, 0, true);
-}
-
-/** A write of a subcommand AskGate cannot know. */
-const UNKNOWN_WRITE = { tool: "dispatch_unknown", label: "dispatch" } as const;
-
-/**
- * The write the simple command `segment` runs, or the write of unknown subcommand it may run.
- * `runs` says whether a shell runs the text the command is in: only then may a program an
- * expansion names be `dispatch`, and only then is a subcommand `xargs` supplies one. In text no
- * shell runs (a quoted word, a here-document `cat` writes) only `dispatch` as the program counts.
- */
-function segmentWrite(
-  segment: readonly Word[],
-  runs: boolean
-): { write?: UnreadableCommand; unknown?: UnreadableCommand } | undefined {
-  const start = commandStart(segment);
-  if (start === undefined) return undefined;
-  const [program, name, ...flags] = start.words.slice(start.at);
-  if (program === undefined) return undefined;
-  const named = namesCli(program.value);
-  const unread = [...new Set(scanWord(program.raw, 0).unread)];
-  const expansions = unread.filter((char) => EXPANSIONS.includes(char));
-  if (!named && !(runs && expansions.length > 0)) return undefined;
-  // A write xargs runs is in the call's text, where another command runs it.
-  const wrapped = start.xargs === undefined ? {} : { wrapped: true as const };
-  if (name === undefined || !mayBeReviewedWrite(name.value, flags)) {
-    // `dispatch $SUB …`, or `$D $SUB …`, may be any subcommand, a write among them.
-    const subcommand = name === undefined ? [] : unresolvedCharacters(name);
-    if (subcommand.length > 0)
-      return {
-        unknown: {
-          ...UNKNOWN_WRITE,
-          subcommand: { unread: subcommand },
-          ...(named ? {} : { program: { namesDispatch: false, unread: expansions } }),
-          ...wrapped,
-        },
-      };
-    // `xargs dispatch`, `xargs -I % dispatch % …`: xargs puts the words it reads after the
-    // command's words, or in place of its replacement string.
-    if (
-      named &&
-      runs &&
-      start.xargs !== undefined &&
-      (name === undefined || start.xargs.includes(name.value))
-    )
-      return {
-        unknown: { ...UNKNOWN_WRITE, subcommand: { unread: [], from: "xargs" }, ...wrapped },
-      };
-    return undefined;
-  }
-  const found = writeNamed(name.value);
-  return {
-    write: {
-      ...found,
-      ...(unread.length === 0
-        ? {}
-        : { program: { namesDispatch: named, unread: named ? unread : expansions } }),
-      ...wrapped,
-    },
-  };
-}
-
-function findWrite(command: string, depth: number, runs: boolean): UnreadableCommand | undefined {
-  const scan: CommandScan = { bodies: [], pipes: new Map() };
-  const segments = commandWords(command, scan);
-  let unknownSubcommand: UnreadableCommand | undefined;
-  for (const segment of segments) {
-    const found = segmentWrite(segment, runs);
-    if (found?.write !== undefined) return found.write;
-    unknownSubcommand ??= found?.unknown;
-  }
-  const wrapped = nestedWrite(segments, scan, depth, runs) ?? textDispatchWrite(command);
-  return wrapped === undefined ? unknownSubcommand : { ...wrapped, wrapped: true as const };
-}
-
-/** The words of `find` after which it runs a command of its own, up to `;` or `+`. */
-const FIND_EXEC = ["-exec", "-execdir", "-ok", "-okdir"];
-
-/**
- * A write in text another command would run, read with the same quote-aware scan, never only by
- * the text pattern: quotes and backslashes the inner shell removes (`bash -c 'dispatch "comment"
- * …'`) hide a write from that pattern. `dispatch` before a literal write as any word of a command
- * is a write some runner may run; the words after `find`'s `-exec` are a command of their own.
- * Each text `nestedScripts` names is read as a script of its own, down to NESTED_DEPTH levels.
- */
-function nestedWrite(
-  segments: readonly Word[][],
-  scan: CommandScan,
-  depth: number,
-  runs: boolean
-): FoundWrite | undefined {
-  let unknownSubcommand: FoundWrite | undefined;
-  for (const words of segments)
-    for (const [index, word] of words.entries()) {
-      const name = words[index + 1];
-      if (
-        namesCli(word.value) &&
-        name !== undefined &&
-        mayBeReviewedWrite(name.value, words.slice(index + 2))
-      )
-        return writeNamed(name.value);
-      if (FIND_EXEC.includes(word.value)) {
-        const end = words.findIndex(
-          (next, at) => at > index && (next.value === ";" || next.value === "+")
-        );
-        const found = segmentWrite(words.slice(index + 1, end === -1 ? undefined : end), runs);
-        if (found?.write !== undefined) {
-          const { wrapped: _, ...write } = found.write;
-          return write;
-        }
-        unknownSubcommand ??= found?.unknown;
-      }
-    }
-  if (depth >= NESTED_DEPTH) return unknownSubcommand;
-  for (const script of nestedScripts(segments, scan)) {
-    const found = findWrite(script.text, depth + 1, runs && script.runs);
-    if (found === undefined) continue;
-    const { wrapped: _, ...write } = found;
-    return write;
-  }
-  return unknownSubcommand;
-}
-
-/** The shells whose `-c` operand, here-document, here-string or piped input is a script they run. */
-const SHELLS = ["bash", "sh", "zsh", "dash", "ksh"];
-
-/** What a shell whose options start at `from` runs: its `-c` operand, else its standard input
- * when no script file is named or `-s` is set. */
-function shellScript(words: readonly Word[], from: number): { operand?: Word; stdin: boolean } {
-  let command = false;
-  let stdin = false;
-  for (let at = from; at < words.length; at++) {
-    const value = words[at].value;
-    if (value === "--")
-      return command
-        ? { operand: words[at + 1], stdin: false }
-        : { stdin: stdin || at + 1 >= words.length };
-    if (/^[-+][A-Za-z]+$/.test(value)) {
-      if (value[0] === "-" && value.includes("c")) command = true;
-      if (value.includes("s")) stdin = true;
-      // `-o pipefail`, `-O extglob`: the option's value is the next word.
-      if (/[oO]$/.test(value)) at++;
-      continue;
-    }
-    if (value === "--rcfile" || value === "--init-file") {
-      at++;
-      continue;
-    }
-    if (value.startsWith("--")) continue;
-    return command ? { operand: words[at], stdin: false } : { stdin };
-  }
-  return { stdin: !command };
-}
-
-/**
- * The texts inside a command that a shell may read, each with whether a shell runs it. A shell
- * runs `eval`'s arguments joined as `eval` joins them, a shell's `-c` operand, and the
- * here-document, here-string or pipe a shell reads as its script (the text piped in with the
- * escapes of `printf` and `echo -e` decoded). Every other quoted word and here-document body is
- * only text, which the scan reads for `dispatch` as a program alone.
- */
-function nestedScripts(
-  segments: readonly Word[][],
-  scan: CommandScan
-): Array<{ text: string; runs: boolean }> {
-  const scripts: Array<{ text: string; runs: boolean }> = [];
-  /** The commands whose standard input a shell runs: a shell reading its script there, and the
-   * command piped into it. */
-  const fed = new Set<readonly Word[]>();
-  for (const words of segments) {
-    const start = commandStart(words);
-    const program = start?.words[start.at];
-    let operand: Word | undefined;
-    let shell = false;
-    if (start !== undefined && program !== undefined) {
-      if (program.value === "eval")
-        scripts.push({
-          text: start.words
-            .slice(start.at + 1)
-            .map((arg) => arg.value)
-            .join(" "),
-          runs: true,
-        });
-      if (SHELLS.includes(program.value.split("/").at(-1) ?? "")) {
-        shell = true;
-        const script = shellScript(start.words, start.at + 1);
-        operand = script.operand;
-        const from = script.stdin ? scan.pipes.get(words) : undefined;
-        if (script.stdin) fed.add(words);
-        if (from !== undefined) {
-          fed.add(from);
-          const fromStart = commandStart(from);
-          const args =
-            fromStart === undefined ? [...from] : fromStart.words.slice(fromStart.at + 1);
-          // `echo -e …`, `printf -- …`: the options are not text the shell reads.
-          while (args[0]?.value.startsWith("-")) args.shift();
-          scripts.push({ text: decodeEscapes(args.map((arg) => arg.value).join(" ")), runs: true });
-        }
-      }
-    }
-    // A word bash takes as written splits into the same words again: nothing new to read.
-    for (const word of words)
-      if (word.value !== word.raw)
-        scripts.push({
-          text: word.value,
-          runs: word === operand || (shell && word.hereString === true),
-        });
-  }
-  for (const body of scan.bodies) scripts.push({ text: body.text, runs: fed.has(body.words) });
-  return scripts;
-}
-
-/** A string literal of an eval cell's code: its value with its escapes decoded (an interpolation
- * becomes `$X`), whether it interpolates, and where it ends. */
-interface CodeString {
-  value: string;
-  expansion: boolean;
-  end: number;
-}
-
-/** The string literal at `at` in `code`, JavaScript's or Python's (with a prefix such as `f` or
- * `r`, triple-quoted or not), or undefined when none starts there. */
-function codeString(code: string, at: number): CodeString | undefined {
-  const opening = /^([rRbBuUfF]{0,2})("""|'''|"|'|`)/.exec(code.slice(at));
-  if (opening === null) return undefined;
-  const prefix = opening[1].toLowerCase();
-  const quote = opening[2];
-  let index = at + opening[0].length;
-  let text = "";
-  while (index < code.length && !code.startsWith(quote, index)) {
-    // A backslash takes the next character with it, so an escaped quote ends nothing.
-    const length = code[index] === "\\" ? 2 : 1;
-    text += code.slice(index, index + length);
-    index += length;
-  }
-  let value = prefix.includes("r") ? text : decodeEscapes(text);
-  let expansion = false;
-  if (quote === "`" && value.includes("${")) expansion = true;
-  if (prefix.includes("f")) {
-    const replaced = value.replace(/\{[^{}]*\}/g, "$X");
-    expansion = replaced !== value;
-    value = replaced;
-  }
-  return { value, expansion, end: Math.min(index + quote.length, code.length) };
-}
-
-const skipBlank = (code: string, at: number): number => {
-  let index = at;
-  while (index < code.length && /\s/.test(code[index])) index++;
-  return index;
-};
-
-/** The elements of the array literal whose `[` is at `at`: each string literal, or undefined for
- * any other expression. */
-function codeArray(code: string, at: number): Array<CodeString | undefined> {
-  const items: Array<CodeString | undefined> = [];
-  let index = at + 1;
-  while (items.length < 256) {
-    index = skipBlank(code, index);
-    if (index >= code.length || code[index] === "]") break;
-    const literal = codeString(code, index);
-    const next = literal === undefined ? index : skipBlank(code, literal.end);
-    if (literal !== undefined && (code[next] === "," || code[next] === "]")) {
-      items.push(literal);
-      index = next;
-    } else {
-      items.push(undefined);
-      // Past the expression, to the `,` or `]` at its own depth.
-      let depth = 0;
-      while (index < code.length) {
-        const char = code[index];
-        const inner = codeString(code, index);
-        if (inner !== undefined && /["'`]/.test(char)) {
-          index = inner.end;
-          continue;
-        }
-        if (depth === 0 && (char === "," || char === "]")) break;
-        if ("([{".includes(char)) depth++;
-        else if (")]}".includes(char)) depth--;
-        index++;
-      }
-    }
-    if (code[index] === ",") index++;
-  }
-  return items;
-}
-
-/** The write an argument vector runs, when its program is the Dispatch CLI. */
-function argvWrite(items: ReadonlyArray<CodeString | undefined>): FoundWrite | undefined {
-  const words: Word[] = items.map((item) =>
-    item === undefined || item.expansion
-      ? { raw: "$X", value: item?.value ?? "$X" }
-      : { raw: `'${item.value.replaceAll("'", "")}'`, value: item.value }
-  );
-  const lead = cliProgramLength(words);
-  if (lead === 0) return undefined;
-  const [name, ...flags] = words.slice(lead);
-  if (name === undefined) return undefined;
-  if (mayBeReviewedWrite(name.value, flags)) return writeNamed(name.value);
-  const subcommand = unresolvedCharacters(name);
-  return subcommand.length > 0
-    ? { ...UNKNOWN_WRITE, subcommand: { unread: subcommand } }
-    : undefined;
-}
-
-/** The calls of an eval cell that start a process: Node's and Bun's spawn and exec functions, and
- * Python's `subprocess` and `os` ones. The bridge's `tool.bash` is none: the gate reviews that
- * `bash` call on its own. */
-const PROCESS_CALL =
-  /\b(?:spawnSync|spawn|execSync|exec|execFileSync|execFile|execaSync|execa|system|popen|run|call|check_call|check_output|Popen|getoutput|getstatusoutput)\s*\(/g;
-/** Bun's shell, `` $`…` ``. */
-const BUN_SHELL = /\$`/g;
-
-/** A write a shell string runs: only `dispatch` as its program counts (`segmentWrite`). */
-function shellStringWrite(text: string): FoundWrite | undefined {
-  const found = findWrite(text, 0, false);
-  if (found === undefined) return undefined;
-  const { wrapped: _, ...write } = found;
-  return write;
-}
-
-/** The Dispatch write one cell's code starts as a process, or the write of unknown subcommand it
- * may start. */
-function cellWrite(code: string): FoundWrite | undefined {
-  let unknown: FoundWrite | undefined;
-  const writes: Array<FoundWrite | undefined> = [];
-  for (const match of code.matchAll(PROCESS_CALL)) {
-    let at = skipBlank(code, (match.index ?? 0) + match[0].length);
-    // `Bun.spawn({ cmd: [...] })`.
-    const field = /^\{\s*cmd\s*:\s*/.exec(code.slice(at));
-    if (field !== null) at += field[0].length;
-    if (code[at] === "[") {
-      writes.push(argvWrite(codeArray(code, at)));
-      continue;
-    }
-    const literal = codeString(code, at);
-    if (literal === undefined) continue;
-    const next = skipBlank(code, literal.end);
-    const array = code[next] === "," ? skipBlank(code, next + 1) : -1;
-    if (array !== -1 && code[array] === "[")
-      // `spawnSync("dispatch", ["comment", …])`.
-      writes.push(argvWrite([literal, ...codeArray(code, array)]));
-    // `"dispatch " + sub`: what follows the `+` is an expansion.
-    else writes.push(shellStringWrite(`${literal.value}${code[next] === "+" ? "$X" : ""}`));
-  }
-  for (const match of code.matchAll(BUN_SHELL)) {
-    const literal = codeString(code, (match.index ?? 0) + 1);
-    if (literal !== undefined) writes.push(shellStringWrite(literal.value));
-  }
-  for (const write of writes) {
-    if (write === undefined) continue;
-    if (write.tool !== UNKNOWN_WRITE.tool) return write;
-    unknown ??= write;
-  }
-  return unknown;
-}
-
-/**
- * A Dispatch write an `eval` call's code starts as a process of its own (`Bun.spawnSync`,
- * `child_process`, `subprocess`, `os.system`): `dispatch` or its bundle as the program of an
- * argument vector or a shell string, before a gated write subcommand or an expansion. Such a
- * process sends with no `bash` call for AskGate to read, so the call is unreadable. A cell that
- * only names `dispatch` in text, or calls the bash tool, is none. Each cell is read when the input
- * holds several.
- */
-export function evalDispatchWrite(input: Input): UnreadableCommand | undefined {
-  const cells = Array.isArray(input.cells) ? (input.cells as unknown[]) : [];
-  const codes = [
-    input.code,
-    ...cells.map((cell) =>
-      typeof cell === "object" && cell !== null ? (cell as Input).code : undefined
-    ),
-  ].filter((code): code is string => typeof code === "string");
-  let unknown: FoundWrite | undefined;
-  for (const code of codes) {
-    const found = cellWrite(code);
-    if (found === undefined) continue;
-    if (found.tool !== UNKNOWN_WRITE.tool) return { ...found, cell: true };
-    unknown ??= found;
-  }
-  return unknown === undefined ? undefined : { ...unknown, cell: true };
+  file: { flag: string; path: string; reason: string; inMessage?: true };
 }
 
 /** Runs `script` under bash in a process group of its own, which is killed at the limit or on the signal. */
@@ -2175,38 +1413,6 @@ export async function spawnDryRun(
     clearTimeout(timer);
     signal?.removeEventListener("abort", kill);
   }
-}
-
-interface CapturedFile {
-  input: FileInput;
-  path: string;
-}
-interface SnapshotSet {
-  directory: string;
-  files: CapturedFile[];
-}
-
-/** The one shell quoting transform for absolute snapshot paths inserted into a command. */
-function quoteSnapshotPath(value: string): string {
-  const escaped = value.replaceAll("'", "'\\''");
-  return `'${escaped}'`;
-}
-
-/** Rewrites only the operands Dispatch opens, leaving every other command word byte-for-byte intact. */
-function commandWithSnapshots(command: string, files: readonly CapturedFile[]): string {
-  let cursor = 0;
-  let out = "";
-  for (const captured of [...files].sort(
-    (left, right) => left.input.span[0] - right.input.span[0]
-  )) {
-    const [from, to] = captured.input.span;
-    if (from < cursor) throw new Error("AskGate found overlapping file operands");
-    out += command.slice(cursor, from);
-    const snapshot = quoteSnapshotPath(captured.path);
-    out += captured.input.equals ? `${captured.input.flag}=${snapshot}` : snapshot;
-    cursor = to;
-  }
-  return out + command.slice(cursor);
 }
 
 /**
@@ -2264,7 +1470,7 @@ function resolveForOpen(source: string): string {
 }
 
 /**
- * Copies one source into an exclusive owner-only snapshot, reading only a regular file. The source
+ * The bytes of one file the CLI will read, read in place and only from a regular file. The source
  * is resolved as the kernel resolves it (`resolveForOpen`), which refuses a descriptor path
  * whatever names it; the open is `O_NOFOLLOW`, which guards the last path component only, so a
  * link put in the file's place after that walk is refused and never followed (a directory on the
@@ -2272,69 +1478,16 @@ function resolveForOpen(source: string): string {
  * same user); and `O_NONBLOCK` with an `fstat` on the open descriptor refuses a FIFO, a
  * device, a directory or anything else swapped in, before the first read.
  */
-function captureSnapshot(source: string, directory: string, index: number): string {
-  const opened = resolveForOpen(source);
-  const target = path.join(directory, `${index}${path.extname(opened)}`);
+function readReviewedFile(source: string): Buffer {
   const input = fs.openSync(
-    opened,
+    resolveForOpen(source),
     fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW
   );
-  let output: number | undefined;
-  let complete = false;
   try {
     if (!fs.fstatSync(input).isFile()) throw new Error("is not a regular file AskGate can read");
-    output = fs.openSync(
-      target,
-      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
-      0o600
-    );
-    fs.fchmodSync(output, 0o600);
-    const buffer = Buffer.allocUnsafe(64 * 1024);
-    for (;;) {
-      const read = fs.readSync(input, buffer);
-      if (read === 0) break;
-      for (let written = 0; written < read; )
-        written += fs.writeSync(output, buffer, written, read - written);
-    }
-    complete = true;
-    return target;
+    return fs.readFileSync(input);
   } finally {
-    if (output !== undefined) fs.closeSync(output);
     fs.closeSync(input);
-    if (!complete) fs.rmSync(target, { force: true });
-  }
-}
-
-function removeSnapshots(snapshot: SnapshotSet): void {
-  for (const captured of snapshot.files) fs.rmSync(captured.path, { force: true });
-  fs.rmSync(snapshot.directory, { recursive: true, force: true });
-}
-
-/** A snapshot directory of this gate: `askgate-` and the six characters `mkdtemp` adds. */
-const SNAPSHOT_DIRECTORY = /^askgate-[A-Za-z0-9]{6}$/;
-
-/**
- * Removes the gate's own snapshot directories under `root` that are older than
- * SNAPSHOT_MAX_AGE_MS, at each call that takes one. A backgrounded call's snapshot is kept until
- * the session shuts down, and a session the host kills leaves its own behind, so this is what
- * bounds the files the gate owns. Each directory is 0700 and holds only the gate's own copies.
- */
-function sweepSnapshots(root: string, now: number): void {
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(root, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory() || !SNAPSHOT_DIRECTORY.test(entry.name)) continue;
-    const directory = path.join(root, entry.name);
-    try {
-      if (now - fs.statSync(directory).mtimeMs <= SNAPSHOT_MAX_AGE_MS) continue;
-      fs.rmSync(directory, { recursive: true, force: true });
-    } catch {
-      // Another session swept it first, or it is not this user's to remove.
-    }
   }
 }
 
@@ -2346,26 +1499,14 @@ function sweepSnapshots(root: string, now: number): void {
 function startedInBackground(details: unknown): boolean {
   return isRecord(details) && isRecord(details.async) && details.async.state === "running";
 }
-
-/**
- * The call's target: its tool and each of the issue, ask, artifact, project and reply its arguments
- * name. The parts are a JSON array, never joined on a separator: a value is the agent's argument and
- * can hold any character, so a joined key would let one target forge another and give it the
- * refusals counted on the forgery. `targetLabel` is the same parts joined with spaces, which the
- * entry records and a reader joins calls on.
- */
 function breakerKey(toolName: string, input: Input): string {
-  const parts = [toolName];
-  for (const k of BREAKER_KEYS) if (input[k] !== undefined) parts.push(`${k}=${String(input[k])}`);
-  return JSON.stringify(parts);
+  let key = toolName;
+  for (const k of BREAKER_KEYS) if (input[k] !== undefined) key += `\u0000${k}=${String(input[k])}`;
+  return key;
 }
-const targetLabel = (key: string) => (JSON.parse(key) as string[]).join(" ");
 
-/**
- * Splits a top-level REBUTTAL_KEY off a device's JSON arguments, its `sent` the key and the value
- * as the agent gave it; anything else comes back unchanged.
- */
-function extractRebuttal(content: string): { rebuttal?: Rebuttal; content: string } {
+/** Splits a top-level REBUTTAL_KEY off a device's JSON arguments; anything else comes back unchanged. */
+function extractRebuttal(content: string): { rebuttal?: string; content: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
@@ -2375,10 +1516,19 @@ function extractRebuttal(content: string): { rebuttal?: Rebuttal; content: strin
   if (!isRecord(parsed) || !(REBUTTAL_KEY in parsed)) return { content };
   const { [REBUTTAL_KEY]: value, ...rest } = parsed;
   if (typeof value !== "string" || !value.trim()) return { content };
-  return {
-    rebuttal: { line: value.trim(), sent: `"${REBUTTAL_KEY}": ${JSON.stringify(value)}` },
-    content: JSON.stringify(rest),
-  };
+  return { rebuttal: value.trim(), content: JSON.stringify(rest) };
+}
+
+/** `text` cut to at most `max` UTF-8 bytes, marker included. */
+function clipBytes(text: string, max: number): string {
+  const size = byteLength(text);
+  if (size <= max) return text;
+  // A cut inside a multi-byte character decodes to U+FFFD; drop it.
+  const head = Buffer.from(text, "utf8")
+    .subarray(0, Math.max(0, max - CLIP_MARKER_BYTES))
+    .toString("utf8")
+    .replace(/\uFFFD$/, "");
+  return `${head} … [elided ${size - byteLength(head)} bytes]`;
 }
 
 function renderArgs(input: Input): string {
@@ -2397,6 +1547,11 @@ function textOf(content: unknown): string {
   }
   return parts.join("\n");
 }
+
+const escapeXml = (text: string) =>
+  text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+/** Untrusted text escaped, then cut to `max` bytes: no transcript text can close or open a tag. */
+const escaped = (text: string, max = Number.POSITIVE_INFINITY) => clipBytes(escapeXml(text), max);
 
 function renderAssistant(content: unknown): string {
   const parts: string[] = [];
@@ -2485,167 +1640,53 @@ export function renderTranscript(messages: readonly Message[], capBytes: number)
 export function parseVerdict(
   text: string
 ): { decision: "allow" | "revise"; reason?: string } | undefined {
-  const parsed = lastLineJson(text);
-  if (parsed === undefined) return undefined;
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  while (lines.length > 0 && lines[lines.length - 1].startsWith("```")) lines.pop();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(lines.at(-1) ?? "");
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(parsed)) return undefined;
   if (parsed.decision === "allow") return { decision: "allow" };
   if (parsed.decision === "revise" && typeof parsed.reason === "string" && parsed.reason.trim())
     return { decision: "revise", reason: parsed.reason.trim() };
   return undefined;
 }
 
-/**
- * How the breaker tells one new ask of a call from another: a block's `#id` and its opening, the
- * first words that name it in a refusal. The id keeps two blocks of one write that start alike
- * apart; an ask without one is its opening alone, so an agent that rewords only an ask's tail
- * resends the same thing and its loop still ends. A retype carries no text of its own in this
- * scan — only the rules check reads the block from Dispatch — so the block it names stands for it.
- * The parts are a JSON array, never joined on a separator: an opening is agent text and can hold
- * any character, so a joined key would let an ask without an id forge another ask's identity and
- * give that ask the refusals counted on the forgery.
- */
-const askIdentity = (ask: NewAsk): string =>
-  ask.kind === "retype"
-    ? JSON.stringify(["retype", ask.id ?? null])
-    : JSON.stringify(["ask", ask.id ?? null, ask.opening]);
-
-/** The breaker's name for a call that opens no new ask: the call as a whole. No ask identity is empty. */
-const WHOLE_CALL = "";
-
-/**
- * What a call is to the breaker on its target, read from the call's own arguments before any
- * check runs: the one key set both what a resend trips on (`Breaker.tripped`) and what a refusal
- * counts (`refusalThings`) are taken from. A call that is not an upload is each new ask it opens,
- * or the call as a whole when it opens none, so a call opening no ask counts its own refusals,
- * whatever asks were refused there before it.
- *
- * An upload is each ask block its document holds, the ones its stored version already holds
- * included, since no check has run to tell them apart, and last its upload key: the document's
- * name as Dispatch stores it (trimmed) and a digest of the text its scan reads, the snapshot's
- * bytes for a `--path` upload. Only the same upload sent again yields that key, never another
- * document on the same issue (the breaker's target names no document) and never a call that is
- * not an upload. An upload is never the call as a whole, which every other upload on the issue
- * opening no ask would share.
- */
-const callKeys = (toolName: string, input: Input): string[] => {
-  const asks = newAsks(toolName, input);
-  if (toolName !== "dispatch_artifact")
-    return asks.length === 0 ? [WHOLE_CALL] : asks.map(askIdentity);
-  const content =
-    typeof input.content === "string"
-      ? createHash("sha256").update(input.content).digest("hex")
-      : null;
-  const name = typeof input.name === "string" ? input.name.trim() : null;
-  return [...asks.map(askIdentity), JSON.stringify(["upload", name, content])];
-};
-
-/**
- * The things one refusal counts on its target: always some of the refused call's own keys
- * (`callKeys`), so the warning a refusal gives is true by construction. A refusal warns that the
- * same call sent again goes out unreviewed only when a thing it counted reaches the breaker's
- * count, and that resend's keys hold every such thing, so it trips. Nothing is counted that the
- * call's keys lack.
- *
- * A rules refusal counts the asks it matched, each numbered on the list the check judged, which for
- * an upload already leaves out the blocks its stored version holds. A charter refusal of any other
- * call counts every key of it, its scan holding only asks it opens. A charter refusal of an upload
- * never counts a block its stored version holds, since its keys carry every block of the document
- * and counting the stored ones would make every later upload of that document trip on a block no
- * check read, sending its own new asks out unreviewed. It counts the asks the rules check judged,
- * the ones its read found new or, its read failed, the openers with no id; where the check judged
- * none (it did not run, its stored version holding every opener, or it judged nothing), it counts
- * the upload key alone, so only that upload sent again unchanged ever trips on it.
- */
-const refusalThings = (
-  toolName: string,
-  keys: readonly string[],
-  ruled: RulesCheck | undefined
-): string[] => {
-  const counted =
-    ruled !== undefined && ruled.matches.length > 0
-      ? ruled.matches.map((match) => askIdentity(ruled.judged[match.ask - 1]))
-      : toolName !== "dispatch_artifact"
-        ? keys
-        : ruled !== undefined && ruled.judged.length > 0
-          ? ruled.judged.map(askIdentity)
-          : keys.slice(-1);
-  return counted.filter((thing) => keys.includes(thing));
-};
-
-/**
- * What the gate has said on one target since the breaker last reset it. `refusals` counts, per
- * thing (`callKeys`), the calls the gate did not send; `revises` counts every revise,
- * the warn-mode charter ones that sent the call included; `charter` keeps the charter's reasons.
- */
-type Held = { refusals: Map<string, number>; revises: number; charter: string[] };
-
-/**
- * The breaker: a loop of refusals of one thing on one target ends on the third attempt, which goes
- * out unreviewed. It counts refusals, since a warn-mode revise sends the call and leaves no loop.
- *
- * A call trips when one of its own keys (`callKeys`) has been refused GATE_BREAKER_REVISES times,
- * and the refusal that brings a thing to that count warns of it. A refusal counts only keys of the
- * call it refused (`refusalThings`), so the warning and the pass are about the same thing, and the
- * call that warning names, sent again, trips. A call with several keys trips on any one of them: a
- * pass that needed every ask refused would never end a loop on one ask of several that the rules
- * check keeps refusing.
- *
- * The reset stays per target while the count is per thing: an allow, a rebuttal or a trip sends a
- * call on the target, which ends every loop there, so each thing on it starts again from zero.
- * Clearing more than the call's own things only ever costs a review, never gives a pass. A halted
- * gate sends calls before the breaker sees them, so a halt neither counts nor resets anything; a
- * session_switch or session_branch clears the halt and the breaker together.
- */
+/** Revise reasons per target since its last allowed call. */
 class Breaker {
-  readonly #held = new Map<string, Held>();
-  /**
-   * Records one revise on a target: the charter's reason when it gave one, and the things it
-   * refused, none for a revise that sent the call. Returns whether a thing it refused has now
-   * been refused GATE_BREAKER_REVISES times, so this refusal must warn that the same call again
-   * goes out unreviewed.
-   *
-   * One refusal moves each thing once, however often it is named: both callers can name a thing
-   * twice (two asks of one call that share an identity, or two rules matches on them), and a
-   * count moved twice would warn on a first refusal and pass the next send unreviewed.
-   */
-  revised(key: string, refused: readonly string[], charter?: string): boolean {
-    let held = this.#held.get(key);
-    if (held === undefined) {
-      held = { refusals: new Map(), revises: 0, charter: [] };
-      this.#held.set(key, held);
-    }
-    held.revises++;
-    if (charter !== undefined) held.charter.push(charter);
-    let tripsNext = false;
-    for (const thing of new Set(refused)) {
-      const count = (held.refusals.get(thing) ?? 0) + 1;
-      held.refusals.set(thing, count);
-      if (count >= GATE_BREAKER_REVISES) tripsNext = true;
-    }
-    return tripsNext;
+  readonly #reasons = new Map<string, string[]>();
+  revised(key: string, reason: string): void {
+    const reasons = this.#reasons.get(key) ?? [];
+    reasons.push(reason);
+    this.#reasons.set(key, reasons);
   }
-  /**
-   * Whether one of a call's things has been refused often enough on its target to send it
-   * unreviewed. The things are asked for only where the target holds a refusal.
-   */
-  tripped(key: string, things: () => readonly string[]): boolean {
-    const refusals = this.#held.get(key)?.refusals;
-    if (refusals === undefined || refusals.size === 0) return false;
-    return things().some((thing) => (refusals.get(thing) ?? 0) >= GATE_BREAKER_REVISES);
+  tripped(key: string): boolean {
+    return this.reasons(key).length >= GATE_BREAKER_REVISES;
   }
   reset(key: string): void {
-    this.#held.delete(key);
+    this.#reasons.delete(key);
   }
   clear(): void {
-    this.#held.clear();
+    this.#reasons.clear();
   }
-  /** How many times the gate answered revise on this target since its reset, the warn-mode ones included. */
-  revises(key: string): number {
-    return this.#held.get(key)?.revises ?? 0;
+  reasons(key: string): readonly string[] {
+    return this.#reasons.get(key) ?? [];
   }
-  /** The charter's own reasons. They alone feed the charter request, so a rules reason never reads as one the charter gave. */
-  charterReasons(key: string): readonly string[] {
-    return this.#held.get(key)?.charter ?? [];
-  }
+}
+
+/** `{{name}}` placeholders replaced in one pass, values pasted verbatim (never re-scanned, never read as `$` patterns); a placeholder with no value throws. */
+export function renderTemplate(template: string, values: Record<string, string>): string {
+  return template.replace(/\{\{(\w+)\}\}/g, (_, name: string) => {
+    if (!Object.hasOwn(values, name))
+      throw new Error(`AskGate prompt template names {{${name}}}, which has no value`);
+    return values[name];
+  });
 }
 
 /**
@@ -2678,30 +1719,36 @@ function renderRequest(
   });
 }
 
-// What the agent reads after each gated call: silence only for an allow or a fail-open, since a
-// pass it cannot see is indistinguishable from a gate that broke. The breaker counts the refusals
-// of one thing on a target, the call or one of its new asks, not every revise there, so the
-// warning and the pass speak of this call's refusals and never of the target's count.
-const SECOND_REVISE =
-  "This is the second refusal of this call on its target: a third unchanged resend is sent without review and recorded.";
 /**
- * How the agent overrides a revise on each surface: a key in the device JSON, or a flag on the
- * command. `how` completes a charter revise; `again` completes the rules refusal's "send the call
- * again with"; `fate` completes both refusals' "an override is always sent and recorded, and",
- * saying what becomes of the override on that surface; `note` follows either refusal.
+ * The one transform for text handed to the agent (a model's reason, the agent's own rebuttal): verbatim,
+ * except that a `<` which could start a tag (before a letter, `/`, `!` or `?`) becomes `&lt;`, then capped
+ * at 8 KiB (GATE_REASON_MAX_BYTES). The two defects are disjoint. A frame closed or a harness tag opened needs a tag-opening `<`,
+ * and this rule stops it. Full escaping also turned `&&`, `->` and a `> ` quote line into entities, so a fix
+ * sent back verbatim posted `&gt;` and a check for the quote failed; those now pass through unchanged. Text
+ * rendered into the gate's own prompt is escaped in full instead (`escaped`). Nothing between here and
+ * delivery decodes entities: warn joins the text into a developer message as-is, block's Error message
+ * becomes the tool result as-is.
  */
-type Override = { how: string; what: string; again: string; fate: string; note?: string };
+const agentFacing = (text: string) =>
+  clipBytes(text.replace(/<(?=[A-Za-z/!?])/g, "&lt;"), GATE_REASON_MAX_BYTES);
+// What the agent reads after each gated call: silence only for an allow or a fail-open, since a
+// pass it cannot see is indistinguishable from a gate that broke.
+// The breaker keys on the target alone (`breakerKey`: the tool and its issue, ask, artifact, project
+// or reply), not on the text, so after the second revise the next write to that target goes out
+// unreviewed whether or not its text changed.
+const SECOND_REVISE =
+  "This is the second revise on this target: the next write to it, changed or not, is sent without review and recorded.";
+/** How the agent overrides a revise on each surface: a key in the device JSON, or a flag on the command. */
+type Override = { name: string; how: string; what: string; note?: string };
 const DEVICE_OVERRIDE: Override = {
+  name: REBUTTAL_KEY,
   how: `"${REBUTTAL_KEY}": "<one line>" added to the JSON`,
   what: "field",
-  again: `\`"${REBUTTAL_KEY}": "<one line>"\` in its JSON`,
-  fate: "the field is removed before the call runs",
 };
 const COMMAND_OVERRIDE: Override = {
+  name: REBUTTAL_FLAG,
   how: `${REBUTTAL_FLAG} '<one line>' added to its flags`,
   what: "flag",
-  again: `\`${REBUTTAL_FLAG} '<one line>'\``,
-  fate: "the flag is kept as a shell comment at the end of the command's first line, so dispatch never sees it",
 };
 /** Oh My Pi runs the tool_call hooks of a whole batch before any call of it, so the dry run reads a
  * named file before a sibling call of the same batch changes it. */
@@ -2717,7 +1764,7 @@ const FILE_OVERRIDE: Override = {
 const DRY_RUN_RAN =
   "To read this call AskGate ran the command it names with `--dry-run`, which sends nothing; the write itself was not sent.";
 const renderRevise = (reason: string, second: boolean, override: Override) =>
-  `AskGate did not send this call.\n${agentFacing(reason)}\nSend the corrected call, or resend this one unchanged with ${override.how} to override; an override is always sent and recorded, and ${override.fate}.${override.what === "flag" ? `\n${DRY_RUN_RAN}` : ""}${override.note ? `\n${override.note}` : ""}${second ? `\n${SECOND_REVISE}` : ""}`;
+  `AskGate did not send this call.\n${agentFacing(reason)}\nSend the corrected call, or resend this one unchanged with ${override.how} to override; an override is always sent and recorded, and the ${override.what} is removed before sending.${override.what === "flag" ? `\n${DRY_RUN_RAN}` : ""}${override.note ? `\n${override.note}` : ""}${second ? `\n${SECOND_REVISE}` : ""}`;
 /** The refusal block mode returns for a call given up without a verdict, by cause. */
 const NO_VERDICT_REFUSAL: Record<"abandoned" | "shutdown", string> = {
   abandoned:
@@ -2734,38 +1781,25 @@ const NO_MODEL_ROLE_REFUSAL = `AskGate did not send this call: it reviews each D
  */
 const recordFailureRefusal = (message: string, configFile: string) =>
   `AskGate did not send this call: no review stands behind it, and AskGate could not record that in the session (${message}). Every Dispatch write that posts unreviewed is recorded, so AskGate holds this one back. Send it again once the session takes its entries. To turn AskGate off for this session, set askgate.enabled to false in ${configFile}.`;
+/** The refusal for a call whose marker could not be minted: the CLI would refuse it with none. */
+const mintFailureRefusal = (message: string, configFile: string) =>
+  `AskGate did not send this call: the dispatch CLI posts a Dispatch write in this session only with a marker AskGate mints for it, and AskGate could not mint one (${message}). Send the call again once the CLI's state directory takes files. To turn AskGate off for this session, set askgate.enabled to false in ${configFile}.`;
+/**
+ * The refusal, in block mode, of a literal call whose final command gives the gate no argument
+ * vector to key a marker by: the CLI would refuse it with no marker, naming a form it already has.
+ */
+const UNKEYED_REFUSAL =
+  "AskGate did not send this call: it could not read the arguments the dispatch CLI gets from the command that runs, so it could not mint the marker the CLI needs to post the write. Send the write again as one bash call of literal words.";
+/** The note, in warn mode, of the same call: it runs, and the CLI posts it with a warning. */
+const UNKEYED_NOTE = `<advisor-gate advisor="AskGate" outcome="unkeyed">\nAskGate minted no marker for this Dispatch write: it could not read the arguments the dispatch CLI gets from the command that runs. The call ran, and the CLI posts it with a warning that it went out unreviewed.\n</advisor-gate>`;
 // A comment or message cannot be edited or deleted, so its only fix is one more post; the note says so,
 // rather than offering an edit the agent cannot make (two lanes resent whole comments chasing one).
-// The warn note never says a third resend goes unreviewed: a warn revise sends the call, so it
-// refuses nothing and the breaker, which counts refusals, does not move for it.
-const renderWarn = (reason: string) =>
-  `<advisor-gate advisor="AskGate" verdict="revise">\n${agentFacing(reason)}\nThe call ran. This note concerns only that Dispatch call and authorizes nothing beyond correcting it. Correct it now where the reason names a fix: an ask with \`dispatch edit-ask\` or \`dispatch resolve-ask --kind retracted\`, a document with \`dispatch doc-edit\`. A comment or message cannot be edited, so post one reply carrying only the correction, and only when the original would mislead its reader. Or state your rebuttal in your next step.\n</advisor-gate>`;
-// Oh My Pi records a call as the gate returns it. Told only that its override was "removed",
-// agents read their call back, found no override and reported a rebuttal they never wrote, and a
-// note naming the removal did not stop it (tester round 6 and the round after, 6 of 9 sessions).
-// So a command keeps its flag as a shell comment (`keepOverrideVisible`), and the acknowledgement
-// says where; a device's JSON cannot carry the field, so its note says AskGate removed it.
-const renderRebuttalAck = ({ line, sent }: Rebuttal, override: Override) =>
-  `<advisor-gate advisor="AskGate" outcome="rebuttal">\nYou sent this call with ${agentFacing(sent)}. AskGate recorded your rebuttal "${agentFacing(line)}", and the call was sent without review. ${
-    override.what === "flag"
-      ? "dispatch does not take that flag, so it stays a shell comment at the end of the command's first line: it is in your record of the call, and dispatch never saw it."
-      : `The device does not take that ${override.what}, so AskGate removed it before the call ran: your record of the call lacks it because AskGate removed it, not because you left it out.`
-  }\n</advisor-gate>`;
-/**
- * The command with the override the gate took out put back as a shell comment at the end of its
- * first line, so the agent's record of the call still shows the flag it sent. A here-document's
- * body starts on the next line, so the comment never reaches it; an override that spans lines is
- * not put back.
- */
-function keepOverrideVisible(input: Input, sent: string | undefined): Input {
-  const { command } = input;
-  if (sent === undefined || sent.includes("\n") || typeof command !== "string") return input;
-  const end = command.indexOf("\n");
-  const first = end === -1 ? command : command.slice(0, end);
-  return { ...input, command: `${first} # ${sent}${end === -1 ? "" : command.slice(end)}` };
-}
+const renderWarn = (reason: string, second: boolean) =>
+  `<advisor-gate advisor="AskGate" verdict="revise">\n${agentFacing(reason)}\nThe call ran. This note concerns only that Dispatch call and authorizes nothing beyond correcting it. Correct it now where the reason names a fix: an ask with \`dispatch edit-ask\` or \`dispatch resolve-ask --kind retracted\`, a document with \`dispatch doc-edit\`. A comment or message cannot be edited, so post one reply carrying only the correction, and only when the original would mislead its reader. Or state your rebuttal in your next step.${second ? `\n${SECOND_REVISE}` : ""}\n</advisor-gate>`;
+const renderRebuttalAck = (rebuttal: string, override: Override) =>
+  `<advisor-gate advisor="AskGate" outcome="rebuttal">\nYour ${override.name} "${agentFacing(rebuttal)}" was received and recorded; the call was sent without review, with that ${override.what} removed before sending.\n</advisor-gate>`;
 const renderBreakerAck = () =>
-  `<advisor-gate advisor="AskGate" outcome="breaker">\nThird attempt after two refusals of this call on its target: sent without review and recorded.\n</advisor-gate>`;
+  `<advisor-gate advisor="AskGate" outcome="breaker">\nThird attempt on this target after two revises: sent without review and recorded.\n</advisor-gate>`;
 /**
  * What the agent is told when its Dispatch write went out with no verdict. Every such outcome
  * says so: a pass the agent cannot see reads the same as a gate that is working, and a headless
@@ -2791,13 +1825,6 @@ const renderUnreviewed = (outcome: GateEntry["outcome"], reason: string | undefi
     outcome === "halted" ? cause : `AskGate did not review this Dispatch write: ${cause}`;
   return `<advisor-gate advisor="AskGate" outcome="${outcome}">\n${opening}${why}. The call ran unreviewed.\n</advisor-gate>`;
 };
-/** Characters for a reason, each in code; a backtick, which inline code cannot hold, is named. */
-function characters(chars: readonly string[]): string {
-  const named = chars.map((char) => (char === "`" ? "a backtick" : `\`${char}\``));
-  return named.length < 2
-    ? (named[0] ?? "")
-    : `${named.slice(0, -1).join(", ")} and ${named.at(-1)}`;
-}
 /**
  * The flags a refused file's text can go through instead: a `--<field>-file` reads `-` as stdin and
  * any other path as a file. An upload's `--path` (and `--path-file`, which names it) is a path the
@@ -2809,77 +1836,43 @@ function resendFlags(flag: string): { stdin: string; regular: string } {
     return { stdin: "--content-file", regular: "`--path` or `--content-file`" };
   return { stdin: flag, regular: `\`${flag}\`` };
 }
-/** The one form AskGate reads, as the refusal states it to the agent. */
-const LITERAL_GRAMMAR =
-  "AskGate reads one form only: one `dispatch` call alone, with at most one `cd <path> &&` before it, one `2>&1` after it, and one here-document opened with a quoted delimiter (`<<'EOF'`). Every word is literal: no `$`, backtick, `~`, `*`, `?`, `[`, `{`, `}` or backslash. Nothing else is in the call: no second command, no pipe, no `;`, `&&`, `||` or `&`, no assignment and no other redirect.";
 /**
- * What a scoped `dispatch` write inside a command the gate cannot read tells the agent. In `block`
- * mode nothing in the call ran, and this is the call's refusal. In `warn` mode the call ran with
- * no review, and this is its note: the same explanation of why AskGate could not read it and of
- * the form it reads, so the next write goes in that form.
+ * What a literal `dispatch` write whose file the gate cannot read tells the agent. In `block`
+ * mode the write was not sent, and this is the call's refusal. In `warn` mode the call ran with no
+ * review, and this is its note. A file missing or not safe to read when the gate ran
+ * (`inMessage`) can be one a call earlier in the same message writes: Oh My Pi runs the gate for
+ * every call of a message before any of them runs, so the text says to send the call again in a
+ * later message.
  */
-function renderUnreadable(
-  { label, program, subcommand, wrapped, file, cell }: UnreadableCommand,
-  mode: Mode
-): string {
+function renderUnreadable({ file }: UnreadableCommand, mode: Mode): string {
   const ran = mode === "warn";
-  const note = (body: string) =>
-    ran ? `<advisor-gate advisor="AskGate" outcome="unreadable">\n${body}\n</advisor-gate>` : body;
-  const ending = ran ? "The call ran unreviewed." : "Nothing in the call ran.";
-  if (file !== undefined) {
-    const { stdin, regular } = resendFlags(file.flag);
-    // The file refusals come after AskGate read the call: to find where a relative operand
-    // resolves it ran the command's own `cd` and `pwd -P`, and for an upload the command with
-    // `--dry-run`. Neither sends anything, and nothing else in the call ran, so the claim here
-    // says that and not "nothing ran".
-    const read = ran
-      ? "The call ran unreviewed."
-      : "The write was not sent. To read the call AskGate ran the command's own `cd` and `pwd -P`, and the command with `--dry-run`, which send nothing; nothing else in the call ran.";
-    return note(
-      `AskGate ${ran ? "did not review" : "did not send"} this call: \`${file.flag}\` names ${JSON.stringify(file.path)}, which ${file.reason}. AskGate reads and posts only a regular file it captured before review. Send the text with \`${stdin} -\` and a quoted here-document (\`<<'EOF'\`), or name a regular file with ${regular}. ${read}`
-    );
-  }
-  // `$D $S …`: neither the program nor its subcommand is known, so either may be a write.
-  const unknownProgram =
-    subcommand !== undefined && program !== undefined && !program.namesDispatch;
-  const opening =
-    subcommand === undefined
-      ? `AskGate ${ran ? "did not review" : "did not run"} this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and in this call AskGate cannot know the text it would send.`
-      : subcommand.from !== undefined
-        ? `AskGate ${ran ? "did not review" : "did not run"} this call: the word after \`dispatch\` comes from \`${subcommand.from}\` when the call runs, so AskGate cannot tell which subcommand would run, and AskGate reviews each Dispatch write before it is sent.`
-        : unknownProgram
-          ? `AskGate ${ran ? "did not review" : "did not run"} this call: its program's name and the word after it hold ${characters([...new Set([...program.unread, ...subcommand.unread])])}, so AskGate cannot tell which program or subcommand would run, and either may be \`dispatch\` and a write AskGate reviews before it is sent.`
-          : `AskGate ${ran ? "did not review" : "did not run"} this call: the word after \`dispatch\` holds ${characters(subcommand.unread)}, so AskGate cannot tell which subcommand would run, and AskGate reviews each Dispatch write before it is sent.`;
-  // A write in the call's text is named as such first: a resend of it in the same wrapper is
-  // refused again, whatever its program word holds.
-  const why =
-    cell === true
-      ? " Here an eval cell starts `dispatch` as a process of its own, and AskGate does not read what that process sends."
-      : wrapped === true
-        ? ` Here \`${label}\` is in this call's text, where another command (\`bash -c\`, \`sh -c\`, \`eval\`, \`xargs\`, a function or a variable) can run it.`
-        : program !== undefined && !unknownProgram
-          ? program.namesDispatch
-            ? ` Here the word that calls \`dispatch\` holds ${characters(program.unread)}, which AskGate does not take as literal.`
-            : ` Here its program's name holds ${characters(program.unread)}, so AskGate cannot tell which program would run.`
-          : "";
-  const resend =
-    cell === true
-      ? ` Send the \`dispatch\` command as one \`bash\` call on its own, not from an eval cell.`
-      : subcommand === undefined
-        ? ` ${ran ? "Send the next one" : `Run any other commands it held in a call of their own first, then send that \`${label}\` again`} on its own${program === undefined ? "" : ", calling `dispatch` by name"}.`
-        : ` Send the \`dispatch\` command again${unknownProgram ? ", calling `dispatch` by name," : ""} with its subcommand written out.`;
-  return note(
-    `${opening} ${LITERAL_GRAMMAR}${why} ${ending}${resend} Text it posts from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.${wrapped === true ? ` If \`${label}\` here is text and no Dispatch write (a search pattern, a message, a file's content), keep it out of the command line: put that text in a file and name the file.` : ""}`
-  );
+  const { stdin, regular } = resendFlags(file.flag);
+  // The file refusals come after AskGate read the call: to find where a relative operand resolves
+  // it ran the command's own `cd` and `pwd -P`, and for some calls the command with `--dry-run`.
+  // Neither sends anything, and nothing else in the call ran, so the claim here says that and not
+  // "nothing ran".
+  const read = ran
+    ? "The call ran unreviewed."
+    : "The write was not sent. To read the call AskGate ran at most the command's own `cd` and `pwd -P`, and the command with `--dry-run`, which send nothing; nothing else in the call ran.";
+  const later = file.inMessage
+    ? " AskGate reads each file a write posts before any call of the same message runs. If a call earlier in this message writes or changes the file, send this call again in a later message. Else send"
+    : " AskGate reads and posts only a regular file. Send";
+  const body = `AskGate ${ran ? "did not review" : "did not send"} this call: \`${file.flag}\` names ${JSON.stringify(file.path)}, which ${file.reason}.${later} the text with \`${stdin} -\` and a quoted here-document (\`<<'EOF'\`), or name a regular file with ${regular}. ${read}`;
+  return ran
+    ? `<advisor-gate advisor="AskGate" outcome="unreadable">\n${body}\n</advisor-gate>`
+    : body;
 }
 
 /**
  * The gate of a session where AskGate did not load: a host module that did not import, an
  * OMP_ASKGATE_TIMEOUT_MS that is no positive integer, or a handler ceiling too short for a
- * verdict. Only `askgate.enabled: false` turns AskGate off, so none is an off switch: each call of
- * the main agent the gate would review (`scopedCommand`, `unreadableDispatchWrite`, `scopedDevice`,
- * an upload counted as the gate counts it) is refused in both modes, naming the error and the
- * switch, and recorded as `load-failed`. Every other call runs.
+ * verdict. Only `askgate.enabled: false` turns AskGate off, so none is an off switch: each literal
+ * write of the main agent the gate would review (`scopedCommand`, `scopedDevice`) is refused in
+ * both modes, naming the error and the switch, and recorded as `load-failed`. It mints no marker
+ * and records no mode, so every other gated write of a process that acts as the session, a
+ * subagent's included, meets the CLI's marker check: refused where the session chose block
+ * (`OMP_ASKGATE=block`, which `bindDispatchSession` writes beside the record), and at the warn
+ * default posted with a warning and an `unmarked` entry. Every other call runs.
  */
 export function loadFailureGate(
   error: unknown,
@@ -2893,11 +1886,7 @@ export function loadFailureGate(
     if (ctx.agent.kind !== "main") return undefined;
     let found: { tool: string; path: string } | undefined;
     if (event.toolName === "bash") {
-      const write =
-        scopedCommand(event.input.command) ?? unreadableDispatchWrite(event.input.command);
-      if (write !== undefined) found = { tool: write.tool, path: write.label };
-    } else if (event.toolName === "eval") {
-      const write = evalDispatchWrite(event.input);
+      const write = scopedCommand(event.input.command);
       if (write !== undefined) found = { tool: write.tool, path: write.label };
     } else if (scopedDevice(event.toolName, event.input))
       found = { tool: event.toolName, path: `xd://${event.toolName}` };
@@ -2942,7 +1931,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         `extensionHandlers.toolCallTimeoutMs is ${ceiling} ms, which leaves no room for a verdict (it needs at least ${MIN_DEADLINE_MS + CEILING_MARGIN_MS} ms)`
       );
     // A short deadline is no off switch: the gate binds, and says once how to give it more time. The
-    // ceiling is read again on each call (`decide`); this is the deadline the session starts with.
+    // ceiling is read again on each call (`askModel`); this is the deadline the session starts with.
     const deadlineAtBind = Math.min(timeoutMs, ceiling - CEILING_MARGIN_MS);
     if (deadlineAtBind < WARN_DEADLINE_MS) {
       const raise = [
@@ -2966,28 +1955,17 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     // The system role holds only the gate's own text and its rules; the agent's system prompt and
     // transcript are data about the agent under review, escaped into the user message.
     const system = `${systemTemplate.trim()}\n\n${rules.trim()}`;
-    // The rules call's system role holds its own frame and the two rules, nothing of the charter's.
-    const ruleSystem = `${ruleCheckSystem.trim()}\n\n${ruleCheckRules.trim()}`;
+    const dumpPath = deps.env.OMP_ASKGATE_DUMP;
     // The fork binds this factory once per process and keeps the binding across /new, /resume
     // and a branch switch, so the per-session state below resets on session_switch and
     // session_branch: a halt, a count, revise reasons or a rebuttal never outlive their session.
-    const rebuttals = new Map<string, Rebuttal>();
+    const rebuttals = new Map<string, string>();
     const breaker = new Breaker();
-    const dumpPath = deps.env.OMP_ASKGATE_DUMP;
-    // Keyed by session id and not reset with the state below: a session the process returns to
-    // appends to the decision document it already uploaded.
-    const recordDecision = createDecisionRecorder(deps);
     let failures = 0;
-    /** Rules calls in a row that ended without a rules verdict. */
-    let ruleFailures = 0;
     let halted = false;
     // Set once the session starts shutting down (only dispose emits session_shutdown): a scoped call
     // that reaches the gate after that asks no model and takes the shutdown branch at once.
     let closing = false;
-    /** Once the session is shutting down, when (`deps.now()`) every decision record must have ended. */
-    let recordDeadline: number | undefined;
-    /** The stop of each decision record in flight, which shutdown cuts at `recordDeadline`. */
-    const recordStops = new Set<AbortController>();
     // A gate still waiting when its tool's execution ends was abandoned: the runner gave up on the
     // handler (a user abort, or its ceiling) and the call already went its way. Cancel the model call.
     // An eval-bridged write never shows its own id on a loop tool_execution_end, so a run the user
@@ -2997,62 +1975,26 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     // makes after it finished, from its own timer or thread, never reaches a gate: both eval bridges
     // refuse a call from a finished cell ("Run no longer active", "No active Python tool bridge
     // session").
-    /** Why a waiting gate was given up: its own deadline, the user or the runner ending its call or run, or the session shutting down. */
-    type Cause = "timeout" | "abandoned" | "shutdown";
-    /** Why a waiting gate was given up by something other than its own deadline. */
-    type Abandon = (cause: Exclude<Cause, "timeout">, graceMs?: number) => void;
-    /** Each waiting gated call's one stop, by its tool call id. */
+    /** Why a waiting gate was given up: the user or the runner ended its call or run, or the session shut down. */
+    type Abandon = (cause: "abandoned" | "shutdown", graceMs?: number) => void;
     const inflight = new Map<string, Abandon>();
     /**
-     * Everything one gated call waits on — its dry run, its document read, the charter call and the
-     * rules call — shares one signal, one `inflight` entry and one deadline, so its tool's end, a
-     * stopped run or a shutdown stops all of it at once. The first cause wins.
+     * The markers minted for each call (`mintFor`), by tool call id: each goes once its call ends,
+     * is refused, or the session shuts down. A marker the CLI consumed is gone already, and its
+     * release is a no-op.
      */
-    type Stop = {
-      readonly signal: AbortSignal;
-      readonly stopped: Promise<Cause>;
-      cause?: Cause;
-      graceMs: number;
-      /** Starts the call's deadline, once the model calls are about to go out. */
-      arm(ms: number): void;
-      /** Ends the call: its timer, its entry in `inflight`, and anything of it still running. */
-      close(): void;
+    const markers = new Map<string, string>();
+    const releaseMarker = (toolCallId: string) => {
+      const file = markers.get(toolCallId);
+      if (file === undefined) return;
+      markers.delete(toolCallId);
+      fs.rmSync(file, { force: true });
     };
-    const openStop = (toolCallId: string): Stop => {
-      const controller = new AbortController();
-      const { promise: stopped, resolve } = Promise.withResolvers<Cause>();
-      let timer: Timer | undefined;
-      const stopWith = (cause: Cause, graceMs = ABORT_GRACE_MS) => {
-        if (handle.cause !== undefined) return;
-        handle.cause = cause;
-        handle.graceMs = graceMs;
-        resolve(cause);
-        controller.abort();
-      };
-      const handle: Stop = {
-        signal: controller.signal,
-        stopped,
-        graceMs: ABORT_GRACE_MS,
-        arm: (ms) => {
-          timer = setTimeout(() => stopWith("timeout"), ms);
-        },
-        close: () => {
-          clearTimeout(timer);
-          if (inflight.get(toolCallId) === stopWith) inflight.delete(toolCallId);
-          // Nothing reads an answer after the decision: a call still in flight is abandoned.
-          controller.abort();
-        },
-      };
-      inflight.set(toolCallId, stopWith);
-      return handle;
-    };
-    const snapshots = new Map<string, SnapshotSet>();
-    const releaseSnapshots = (toolCallId: string) => {
-      const snapshot = snapshots.get(toolCallId);
-      if (snapshot === undefined) return;
-      snapshots.delete(toolCallId);
-      removeSnapshots(snapshot);
-    };
+    // The gate records the current session's check mode on each main-agent bash or eval call, into
+    // that session's own record (`recordCheckMode`). No per-binding cache: one binding serves every
+    // session the process switches to, and a cache keyed on the mode alone would keep the previous
+    // session's value after a switch to a session in the other arm.
+    const recordMode = (mode: Mode) => deps.recordCheckMode(mode);
     /**
      * What each gated call is owed back: the note of a write that went out unreviewed, a warn
      * mode revise, a rebuttal or a breaker trip, by tool call id. The `tool_call` result's
@@ -3073,34 +2015,60 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       return { content: [...(event.content ?? []), { type: "text", text: notice }] };
     };
     /**
+     * The cause each `bash` call outside the literal grammar that runs a gated write has, as the
+     * note its result gets (`causeNote`), by tool call id. The gate refuses nothing for it: the
+     * CLI refuses such a write, and cannot see the shell text that put it outside the grammar.
+     * So the note goes on the call's result only when that result holds the CLI's refusal (or
+     * warn mode's warning) of a write with no marker. At most NOTICE_CAP are kept.
+     */
+    const causes = new Map<string, string>();
+    const rememberCause = (toolCallId: string, command: unknown) => {
+      try {
+        const found = nonLiteralCause(command);
+        if (found === undefined) return;
+        causes.set(toolCallId, causeNote(found));
+        if (causes.size > NOTICE_CAP) causes.delete(causes.keys().next().value as string);
+      } catch {
+        // The note is help, not a check: a call it cannot read runs as it would without it.
+      }
+    };
+    const deliverCause = (event: ToolResultEvent, result: ToolResultResult): ToolResultResult => {
+      const note = causes.get(event.toolCallId);
+      if (note === undefined) return result;
+      causes.delete(event.toolCallId);
+      const content = result?.content ?? [...(event.content ?? [])];
+      const output = content.map((block) => (typeof block.text === "string" ? block.text : ""));
+      if (!UNMARKED_WRITE.test(output.join("\n"))) return result;
+      return { content: [...content, { type: "text", text: note }] };
+    };
+    /**
      * The session changed, so nothing of the one before it stands: its halt, its count, its
-     * revise reasons, its unspent rebuttals and the notes its calls are owed. Its snapshots stay:
-     * a call whose own result has not come, or a job still in the background, may not have read
-     * its snapshot yet, and a write whose snapshot is gone fails without posting. Each goes on its
-     * own call's end event below, or at shutdown.
+     * revise reasons, its unspent rebuttals and the notes its calls are owed. Its markers stay: a
+     * call whose own result has not come, or a job still in the background, may not have run its
+     * CLI yet. Each goes on its own call's end event below, or at shutdown.
      */
     const reset = () => {
       rebuttals.clear();
       breaker.clear();
       notices.clear();
+      causes.clear();
       failures = 0;
-      ruleFailures = 0;
       halted = false;
     };
     pi.on("session_switch", reset);
     pi.on("session_branch", reset);
-    // A snapshot goes only once the command that reads it has run, whichever session is current
+    // A marker goes only once the command that consumes it has run, whichever session is current
     // then. A result that reports a backgrounded job's start comes before the shell runs it
-    // (`startedInBackground`), and nothing later names that call's id, so its snapshot is kept
-    // until `session_shutdown`; a new gated call sweeps whatever is older than SNAPSHOT_MAX_AGE_MS.
+    // (`startedInBackground`), and nothing later names that call's id, so its marker is kept until
+    // `session_shutdown`; each mint sweeps the markers older than MARKER_MAX_AGE_MS.
     pi.on("tool_execution_end", (event: { toolCallId: string; result?: unknown }) => {
       inflight.get(event.toolCallId)?.("abandoned");
       if (isRecord(event.result) && startedInBackground(event.result.details)) return;
-      releaseSnapshots(event.toolCallId);
+      releaseMarker(event.toolCallId);
     });
     pi.on("tool_result", (event: ToolResultEvent): ToolResultResult => {
-      if (!startedInBackground(event.details)) releaseSnapshots(event.toolCallId);
-      return deliverNotice(event);
+      if (!startedInBackground(event.details)) releaseMarker(event.toolCallId);
+      return deliverCause(event, deliverNotice(event));
     });
     pi.on("agent_end", (event: { messages?: readonly Message[]; willContinue?: boolean }) => {
       if (event.willContinue) return;
@@ -3114,18 +2082,13 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     const handling = new Set<Promise<ToolCallResult>>();
     pi.on("session_shutdown", async () => {
       closing = true;
-      const recordMs = SHUTDOWN_WAIT_MS - SHUTDOWN_RECORD_MARGIN_MS;
-      recordDeadline = deps.now() + recordMs;
-      const cut = setTimeout(() => {
-        for (const stop of recordStops) stop.abort(RECORD_SHUT_DOWN);
-      }, recordMs);
       for (const abandon of inflight.values()) abandon("shutdown", SHUTDOWN_GRACE_MS);
-      for (const toolCallId of snapshots.keys()) releaseSnapshots(toolCallId);
       const { promise: waited, resolve: stopWaiting } = Promise.withResolvers<void>();
       const timer = setTimeout(stopWaiting, SHUTDOWN_WAIT_MS);
       await Promise.race([Promise.allSettled([...handling]), waited]);
       clearTimeout(timer);
-      clearTimeout(cut);
+      // After the wait, so a call that settled during it leaves no marker behind.
+      for (const toolCallId of markers.keys()) releaseMarker(toolCallId);
     });
 
     /** A call without a verdict counts toward the halt; a verdict resets the count; anything else leaves it. */
@@ -3140,25 +2103,6 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           `AskGate paused for this session after ${failures} consecutive calls without a verdict; Dispatch writes now go out unchecked.`,
           "warning"
         );
-    };
-
-    /**
-     * A rules verdict resets the count of rules calls in a row without one. The call that brings the
-     * count to three writes one log line, which is the record in a session whose UI no reader sees,
-     * shows the notice where there is a UI, and returns it as a note for that call's own result.
-     * The line goes to the host's plain log (`runtimeLogger`), never to `logger`, whose warnings the
-     * entry shows again at every later session start.
-     */
-    const settleRules = (outcome: RuleOutcome | undefined, ctx: GateCtx): string | undefined => {
-      if (outcome === "match" || outcome === "none") ruleFailures = 0;
-      if (outcome !== "error" && outcome !== "timeout" && outcome !== "no-verdict")
-        return undefined;
-      ruleFailures++;
-      if (ruleFailures !== RULE_NOTICE_AFTER_FAILURES) return undefined;
-      const notice = `AskGate's rule check failed ${ruleFailures} times in a row, so the new asks of those ${ruleFailures} calls were not checked against the two rules. The check still runs on each new ask, and refuses a match again as soon as it answers.`;
-      deps.runtimeLogger.warn(notice);
-      if (ctx.hasUI) ctx.ui.notify(notice, "warning");
-      return `<advisor-gate advisor="AskGate">\n${notice}\n</advisor-gate>`;
     };
 
     /** The outer `write xd://<device>` event: strip a rebuttal before the device validates its arguments. */
@@ -3234,10 +2178,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       effect: "none",
     };
     /**
-     * A call the gate cannot read: a judgment on one call's form, not a gate that failed. `block`
-     * mode refuses it before anything in it runs, so the agent sends the write in a form AskGate
-     * reads; `warn` mode runs it and hands the same explanation back as context, with the entry
-     * recording `unreadable` and `allow`. Neither counts toward the halt.
+     * A literal call whose file the gate cannot read: a judgment on one call's file, not a gate
+     * that failed. `block` mode refuses it before it sends, so the agent sends the text in a form
+     * AskGate reads; `warn` mode runs it and hands the same explanation back as context, with the
+     * entry recording `unreadable` and `allow`. Neither counts toward the halt.
      */
     const unreadableCall = (found: UnreadableCommand, mode: Mode): Decision =>
       mode === "block"
@@ -3260,40 +2204,61 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       return undefined;
     };
 
-    /** What one model walk answered: the answer, the fields every entry that reached the model records, and the walk's own time. */
-    type Called = Pick<GateEntry, "promptBytes" | "model" | "failedModels" | "usage">;
-    type Walked = { answer: Answer; called: Called; elapsedMs: number };
+    /** What one model walk answered: the answer, and the fields every entry that reached the model records. */
+    type Called = Pick<
+      GateEntry,
+      "promptBytes" | "model" | "deadlineMs" | "failedModels" | "usage" | "reviewedText"
+    >;
+    type Asked =
+      | { kind: "no-model-role" }
+      | { kind: "skipped"; reason: string }
+      | { kind: "asked"; answer: Answer; called: Called };
     /**
-     * One call to the gate's model: appends its prompts to OMP_ASKGATE_DUMP under `label`, then walks
-     * `chain` under the call's one stop, which its deadline is armed on. The charter check and the
-     * rules check each make one of these, on the same chain and the same stop, so a session is asked
-     * on one provider and both calls end together. `user` is rendered here, once the gate knows it
-     * will ask.
+     * One review by the gate's model: resolves the role, skips a session whose primary is on another
+     * provider, appends both prompts to OMP_ASKGATE_DUMP, and walks the role's chain on the primary's
+     * provider under the call's deadline (raced from `started`). `user` is rendered only once the
+     * model is known, so a skipped session reads nothing of its transcript. Every check of a Dispatch
+     * write that asks the model goes through here.
      */
-    const walk = async (
+    const askModel = async (
       ctx: GateCtx,
-      call: { toolCallId: string; stop: Stop },
-      prompt: { system: string; user: () => string; label: string },
-      chain: readonly GateModel[]
-    ): Promise<Walked> => {
-      // Timed from here, so a walk's own share of the gate's latency covers its render as well as its call.
-      const began = deps.now();
+      call: { toolCallId: string; started: number },
+      prompt: { system: string; user: () => string; reviewedText: string }
+    ): Promise<Asked> => {
+      const resolved = resolveRole(ctx);
+      if (resolved === undefined) return { kind: "no-model-role" };
+      const { role, model } = resolved;
+      // A session routed off the gate's provider keeps its transcript there: nothing is rendered or sent.
+      if (ctx.model?.provider !== model.provider)
+        return { kind: "skipped", reason: `primary on ${ctx.model?.provider ?? "no model"}` };
       const user = prompt.user();
       const promptBytes = byteLength(prompt.system) + byteLength(user);
       if (dumpPath)
         deps.appendFile(
           dumpPath,
-          `===== AskGate ${call.toolCallId}${prompt.label} system =====\n${prompt.system}\n===== AskGate ${call.toolCallId}${prompt.label} user =====\n${user}\n\n`
+          `===== AskGate ${call.toolCallId} system =====\n${prompt.system}\n===== AskGate ${call.toolCallId} user =====\n${user}\n\n`
         );
+      // Raced from handler entry, so the render above counts against the runner's ceiling too.
+      const deadlineMs = Math.min(timeoutMs, deps.handlerCeilingMs() - CEILING_MARGIN_MS);
       const sessionId = ctx.sessionManager.getSessionId();
+      // A model that answers with an error hands the request to the next one in the role's chain, inside
+      // the same deadline. Only models on the primary's provider are asked: the transcript stays there.
+      const chain = [
+        model,
+        ...deps.fallbackModels(ctx, model, role).filter((next) => next.provider === model.provider),
+      ];
       const failedModels: Array<{ model: string; error: string }> = [];
       const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
       let billed = false;
       let answer: Answer = { kind: "error", reason: "no model asked" };
-      let asked = chain[0];
+      let asked = model;
       for (const next of chain) {
         asked = next;
-        answer = await ask({ ctx, model: next, system: prompt.system, user, sessionId }, call.stop);
+        answer = await ask(
+          { ctx, model: next, system: prompt.system, user, sessionId },
+          call.toolCallId,
+          Math.max(0, deadlineMs - (deps.now() - call.started))
+        );
         if (answer.usage) {
           billed = true;
           for (const k of Object.keys(usage) as Array<keyof Usage>) usage[k] += answer.usage[k];
@@ -3301,16 +2266,17 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         if (answer.kind !== "error" || next === chain.at(-1)) break;
         failedModels.push({ model: `${next.provider}/${next.id}`, error: answer.reason });
       }
-
       return {
+        kind: "asked",
         answer,
         called: {
           promptBytes,
+          reviewedText: prompt.reviewedText,
           model: `${asked.provider}/${asked.id}`,
+          deadlineMs,
           ...(failedModels.length > 0 ? { failedModels } : {}),
           ...(billed ? { usage } : {}),
         },
-        elapsedMs: deps.now() - began,
       };
     };
 
@@ -3320,36 +2286,24 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       started: number,
       base: Base,
       key: string,
-      rebuttal: Rebuttal | undefined,
+      rebuttal: string | undefined,
       override: Override,
-      stop: Stop,
-      directory: () => Promise<string | undefined>,
       upload = false
     ): Promise<Decision> => {
       // Before any path that lets the write out: a session with no model role refuses in both
       // modes, and a rebuttal, a halt, a breaker trip or a shutdown is no exception, since none
       // of them is a review and the gate cannot review anything at all here.
-      const resolved = resolveRole(ctx);
-      if (resolved === undefined) return noModelRole;
+      if (resolveRole(ctx) === undefined) return noModelRole;
       if (rebuttal !== undefined) {
         breaker.reset(key);
         return {
-          fields: { decision: "allow", outcome: "rebuttal", rebuttal: rebuttal.line },
+          fields: { decision: "allow", outcome: "rebuttal", rebuttal },
           result: { additionalContext: renderRebuttalAck(rebuttal, override) },
           effect: "none",
         };
       }
       if (halted) return pass("halted");
-      // The call's breaker keys, read from its own arguments as the rules check reads its asks:
-      // a parse of the arguments, which costs no model call and no Dispatch read. Only the
-      // breaker needs them, so they are read where it asks, and never for a target it holds
-      // nothing on. A refusal counts some of these same keys, so a call it warns of trips here.
-      let keys: string[] | undefined;
-      const thisCallKeys = () => (keys ??= callKeys(event.toolName, event.input));
-      // A tripped breaker sends the call unasked only where one of its own keys was refused
-      // enough times here. Any other call on the same target is something the gate has refused
-      // too few times or never, so the review runs and every count stays where it is.
-      if (breaker.tripped(key, thisCallKeys)) {
+      if (breaker.tripped(key)) {
         breaker.reset(key);
         return {
           fields: { decision: "allow", outcome: "breaker" },
@@ -3359,185 +2313,44 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       }
 
       if (closing) return givenUp(base.verdictMode, "shutdown");
-      const { role, model } = resolved;
-      // A session routed off the gate's provider keeps its transcript there: nothing is rendered or sent.
-      if (ctx.model?.provider !== model.provider)
-        return pass("skipped", { reason: `primary on ${ctx.model?.provider ?? "no model"}` });
-      // Raced from handler entry, so each render of this call counts against the runner's ceiling too.
-      const deadlineMs = Math.min(timeoutMs, deps.handlerCeilingMs() - CEILING_MARGIN_MS);
-      stop.arm(Math.max(0, deadlineMs - (deps.now() - started)));
-      // A model that answers with an error hands the request to the next one in the role's chain, inside
-      // the same deadline. Only models on the primary's provider are asked: the transcript stays there.
-      const chain = [
-        model,
-        ...deps.fallbackModels(ctx, model, role).filter((next) => next.provider === model.provider),
-      ];
-      // Both calls read one rendering of the agent under review, the newer of them reusing it.
-      let rendered: { primarySystemPrompt: string; transcript: string } | undefined;
-      const agentContext = () =>
-        (rendered ??= {
-          primarySystemPrompt: ctx.getSystemPrompt().join("\n\n"),
-          transcript: renderTranscript(deps.contextMessages(ctx), GATE_CONTEXT_MAX_BYTES),
-        });
       // The arguments as the model sees them, cut at GATE_ARGS_MAX_BYTES, also go in the entry, so a
       // later read of the review has the text the model judged, not the command or a mutable file.
       const args = renderArgs(event.input);
-      const call = { toolCallId: event.toolCallId, stop };
-      // The charter call starts first (its request is rendered and sent before this returns); a call
-      // that opens a new ask also gets the rules call, beside it on the same chain, deadline and stop.
-      const charterRun = walk(
+      const reviewed = await askModel(
         ctx,
-        call,
+        { toolCallId: event.toolCallId, started },
         {
           system,
-          label: "",
-          user: () => {
-            const { primarySystemPrompt, transcript } = agentContext();
-            return renderRequest(
-              primarySystemPrompt,
-              transcript,
+          reviewedText: args,
+          user: () =>
+            renderRequest(
+              ctx.getSystemPrompt().join("\n\n"),
+              renderTranscript(deps.contextMessages(ctx), GATE_CONTEXT_MAX_BYTES),
               base.path,
               args,
-              breaker.charterReasons(key),
+              breaker.reasons(key),
               upload
-            );
-          },
-        },
-        chain
-      );
-      const rulesRun = runRulesCheck(
-        {
-          now: deps.now,
-          env: deps.env,
-          dispatchClient: deps.dispatchClient,
-          walk: (prompt) => walk(ctx, call, prompt, chain),
-        },
-        {
-          toolName: event.toolName,
-          tool: base.path,
-          input: event.input,
-          directory,
-          system: ruleSystem,
-          context: agentContext,
-          signal: stop.signal,
+            ),
         }
       );
-      const [charter, ruled] = await Promise.all([charterRun, rulesRun]);
-      const called: Partial<GateEntry> = {
-        ...charter.called,
-        deadlineMs,
-        reviewedText: args,
-        charterLatencyMs: charter.elapsedMs,
-        // Both calls' prompts and spend are the gated call's own.
-        promptBytes: (charter.called.promptBytes ?? 0) + (ruled?.promptBytes ?? 0),
-        ...(addUsage(charter.called.usage, ruled?.usage) ?? {}),
-        ...(ruled === undefined
-          ? {}
-          : {
-              ruleOutcome: ruled.outcome,
-              ruleLatencyMs: ruled.latencyMs,
-              ...(ruled.model === undefined ? {} : { ruleModel: ruled.model }),
-              ...(ruled.error === undefined ? {} : { ruleError: ruled.error }),
-              ...(ruled.textMissing ? { ruleTextMissing: true as const } : {}),
-              ...(ruled.asksCut > 0 ? { ruleAsksCut: ruled.asksCut } : {}),
-              ...(ruled.asksPartial ? { ruleAsksPartial: true as const } : {}),
-            }),
-      };
-      const { answer } = charter;
-      const verdict = answer.kind === "answer" ? parseVerdict(answer.text) : undefined;
-      const matches = ruled?.matches ?? [];
-      if (ruled !== undefined && matches.length > 0) {
-        // A rule matched: refused in every mode, the charter's revise reason after the rules reason. The
-        // charter's own outcome stays on the record and alone moves the halt count. The rules reason is
-        // never kept for the breaker, so it never feeds the charter request.
-        const rulesReason = [
-          ...matchLines(matches, ruled.names),
-          ...(ruled.reason === "" ? [] : [ruled.reason]),
-        ].join("\n");
-        const charterReason = verdict?.decision === "revise" ? verdict.reason : undefined;
-        // The refusal is the rules check's in either mode, so it counts on the asks that check
-        // refused, and a charter revise beside it adds its reason only: a rules refusal counts the
-        // same in warn and block mode.
-        const tripsNext = breaker.revised(
-          key,
-          refusalThings(event.toolName, thisCallKeys(), ruled),
-          charterReason
-        );
-        const delivered = [
-          agentFacing(rulesReason),
-          ...(charterReason === undefined
-            ? []
-            : [agentFacing(`AskGate's charter check also answered revise: ${charterReason}`)]),
-        ].join("\n");
-        const outcome =
-          answer.kind !== "answer" ? answer.kind : verdict === undefined ? "no-verdict" : "verdict";
-        const charterFields =
-          answer.kind === "error"
-            ? { reason: answer.reason }
-            : answer.kind === "answer" && verdict === undefined
-              ? { raw: answer.text.slice(-2000) }
-              : charterReason === undefined
-                ? {}
-                : { reason: charterReason };
-        const [first] = matches;
-        return {
-          fields: {
-            decision: "revise",
-            outcome,
-            ...charterFields,
-            deliveredReason: delivered,
-            revisesForKey: base.revisesForKey + 1,
-            rule: first.rule,
-            ruleAsk: first.ask,
-            ruleQuote: first.quote,
-            ...called,
-          },
-          result: {
-            block: true,
-            reason: renderRuleRefusal(
-              delivered,
-              matches.map((match) => match.rule),
-              tripsNext,
-              override,
-              SECOND_REVISE
-            ),
-          },
-          effect:
-            outcome === "verdict"
-              ? "verdict"
-              : outcome === "abandoned" || outcome === "shutdown"
-                ? "none"
-                : "failure",
-        };
-      }
-      // No rule matched, or the rules check ended without a verdict: the charter decides, as it did
-      // before there was one.
+      if (reviewed.kind === "no-model-role") return noModelRole;
+      if (reviewed.kind === "skipped") return pass("skipped", { reason: reviewed.reason });
+      const { answer, called } = reviewed;
       if (answer.kind === "error")
         return pass("error", { reason: answer.reason, ...called }, "failure");
       if (answer.kind !== "answer")
         return answer.kind === "timeout"
           ? pass("timeout", called, "failure")
           : givenUp(base.verdictMode, answer.kind, called);
+      const verdict = parseVerdict(answer.text);
       if (!verdict)
         return pass("no-verdict", { raw: answer.text.slice(-2000), ...called }, "failure");
       if (verdict.decision === "allow" || verdict.reason === undefined) {
-        // The charter passed the call, but its new asks were never judged: no verdict is not
-        // permission, so block mode refuses it as it refuses any call given up (E5).
-        if (ruled?.outcome === "abandoned" || ruled?.outcome === "shutdown")
-          return givenUp(base.verdictMode, ruled.outcome, called);
         breaker.reset(key);
         return pass("verdict", called, "verdict");
       }
-      // A warn-mode revise sends the call as the agent wrote it: it refused nothing, so it is no
-      // loop to break and no count of refusals moves. Its reason is kept all the same, since the
-      // next charter request on this target carries the reasons already given. A block-mode one
-      // refuses the call, which counts on each of its things.
-      const refused = base.verdictMode === "block";
-      const tripsNext = breaker.revised(
-        key,
-        refused ? refusalThings(event.toolName, thisCallKeys(), ruled) : [],
-        verdict.reason
-      );
+      breaker.revised(key, verdict.reason);
+      const second = breaker.reasons(key).length === GATE_BREAKER_REVISES;
       return {
         fields: {
           decision: "revise",
@@ -3547,58 +2360,75 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           revisesForKey: base.revisesForKey + 1,
           ...called,
         },
-        result: refused
-          ? { block: true, reason: renderRevise(verdict.reason, tripsNext, override) }
-          : { additionalContext: renderWarn(verdict.reason) },
+        result:
+          base.verdictMode === "block"
+            ? { block: true, reason: renderRevise(verdict.reason, second, override) }
+            : { additionalContext: renderWarn(verdict.reason, second) },
         effect: "verdict",
       };
     };
 
-    /** One model call of a gated call, raced against that call's one stop: its deadline, its tool's end, a stopped run or the shutdown. */
+    /** The model call raced against the deadline and against its tool ending without it. */
     type Answer =
       | { kind: "answer"; text: string; usage?: Usage }
       | { kind: "error"; reason: string; usage?: Usage }
       | { kind: "timeout" | "abandoned" | "shutdown"; usage?: Usage };
-    const ask = async (req: Omit<CompleteRequest, "signal">, stop: Stop): Promise<Answer> => {
+    const ask = async (
+      req: Omit<CompleteRequest, "signal">,
+      toolCallId: string,
+      remainingMs: number
+    ): Promise<Answer> => {
+      const controller = new AbortController();
+      const { promise: stopped, resolve: stop } = Promise.withResolvers<
+        "timeout" | "abandoned" | "shutdown"
+      >();
+      const timer = setTimeout(() => stop("timeout"), remainingMs);
+      let graceMs = ABORT_GRACE_MS;
+      inflight.set(toolCallId, (cause, grace = ABORT_GRACE_MS) => {
+        graceMs = grace;
+        stop(cause);
+      });
       try {
-        const call = deps.complete({ ...req, signal: stop.signal });
+        const call = deps.complete({ ...req, signal: controller.signal });
         // Promise.race subscribes to the completion, so a late rejection is handled.
-        const first = await Promise.race([call, stop.stopped]);
+        const first = await Promise.race([call, stopped]);
         if (typeof first !== "string") {
           return first.error !== undefined
             ? { kind: "error", reason: first.error, usage: first.usage }
             : { kind: "answer", text: first.text, usage: first.usage };
         }
-        // The stop aborted the request, which was billed for what it sent; give it a moment to report that.
+        controller.abort();
+        // The aborted request was billed for what it sent; give it a moment to report that.
         const { promise: grace, resolve: graceOver } = Promise.withResolvers<undefined>();
-        const graceTimer = setTimeout(graceOver, stop.graceMs);
+        const graceTimer = setTimeout(graceOver, graceMs);
         const settled = await Promise.race([call.catch(() => undefined), grace]);
         clearTimeout(graceTimer);
         return { kind: first, usage: settled?.usage };
       } catch (error) {
         return { kind: "error", reason: messageOf(error) };
+      } finally {
+        clearTimeout(timer);
+        inflight.delete(toolCallId);
       }
     };
 
     /**
-     * A scoped command's arguments as the CLI's own --dry-run prints them, with the directory it
-     * runs in, or why there are none, or `unscoped`: an upload whose resolved name and path make no
-     * markdown document. `command` is the command that runs once a file operand names its
-     * snapshot. `directory` is the physical directory the command runs in, read once, when a read
-     * first needs it, and undefined when it cannot be told.
+     * A scoped command's arguments as the CLI's own --dry-run prints them (`args`), what the model
+     * reviews (`review`: those arguments, and an upload's `--path` text as `content`), and each
+     * file the argv names with the digest of the bytes the gate read; or why there are none; or
+     * `unscoped`: an upload whose resolved name and path make no markdown document.
      */
     type DryRun =
-      | { args: Input; directory: () => Promise<string | undefined>; command?: string }
-      | { failure: string; command?: string }
+      | { args: Input; review: Input; files: FileDigest[] }
+      | { failure: string }
       | { unreadable: UnreadableCommand }
-      | { cause: Cause; command?: string }
-      | { unscoped: true; command?: string };
+      | { cause: "abandoned" | "shutdown" }
+      | { unscoped: true };
     const readArgs = async (
       scoped: ScopedCommand,
       input: Input,
       ctx: GateCtx,
-      toolCallId: string,
-      stop: Stop
+      toolCallId: string
     ): Promise<DryRun> => {
       // The bash tool's own resolution: `~` is home, a bare `/` is the session's directory, and a
       // relative path resolves against it.
@@ -3612,63 +2442,48 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       // CDPATH search. So the dry run runs without it, and its `cd` reaches the directory the
       // command reaches.
       const { CDPATH: _cdpath, ...env } = deps.env;
-      /** Runs one script as the dry run runs: in `cwd`, under the limit, stopped with the call. */
+      /** Runs one script as the dry run runs: in `cwd`, under the limit, abandoned with the call. */
       const runScript = async (
         script: string
-      ): Promise<{ run: DryRunResult } | { cause: Cause }> => {
-        // Stopped like a waiting model call: the run's stop or the session's shutdown kills it.
-        const run = await deps.dryRun(script, {
-          cwd,
-          env,
-          timeoutMs: DRY_RUN_TIMEOUT_MS,
-          signal: stop.signal,
+      ): Promise<{ run: DryRunResult } | { cause: "abandoned" | "shutdown" }> => {
+        // Abandoned like a waiting model call: the run's stop or the session's shutdown kills it.
+        const controller = new AbortController();
+        let cause: "abandoned" | "shutdown" | undefined;
+        inflight.set(toolCallId, (given) => {
+          cause = given;
+          controller.abort();
         });
-        return stop.cause === undefined ? { run } : { cause: stop.cause };
+        try {
+          const run = await deps.dryRun(script, {
+            cwd,
+            env,
+            timeoutMs: DRY_RUN_TIMEOUT_MS,
+            signal: controller.signal,
+          });
+          return cause === undefined ? { run } : { cause };
+        } finally {
+          inflight.delete(toolCallId);
+        }
       };
       /** The script's stdout, or why it gave none: a stop, the limit, or an exit other than 0. */
-      type Ran = { stdout: string; stderr: string } | { failure: string } | { cause: Cause };
-      const stdoutOf = async (script: string, what: string): Promise<Ran> => {
+      const stdoutOf = async (
+        script: string,
+        what: string
+      ): Promise<
+        | { stdout: string; stderr: string }
+        | { failure: string }
+        | { cause: "abandoned" | "shutdown" }
+      > => {
         const ran = await runScript(script);
         if ("cause" in ran) return ran;
         const { run } = ran;
         if (run.timedOut)
           return { failure: `${what} did not finish within ${DRY_RUN_TIMEOUT_MS} ms` };
         if (run.exitCode !== 0) {
-          const printed = clipBytes((run.stdout || run.stderr).trim(), GATE_REASON_MAX_BYTES);
+          const printed = clipBytes((run.stdout || run.stderr).trim(), GATE_PRINTED_MAX_BYTES);
           return { failure: `${what} exited ${run.exitCode ?? "on a signal"}: ${printed}` };
         }
         return { stdout: run.stdout, stderr: run.stderr };
-      };
-      // Where the command runs is the CLI's process.cwd(): the physical directory after the
-      // command's own `cd`, which bash names (the `cd`, then `pwd -P`, run as the dry run runs), so
-      // the gate asks bash for it rather than guessing. A relative file operand resolves there, and
-      // the rules check reads a document as that directory's Dispatch configuration names it; the
-      // script runs once, and only for a read that needs it. A call with no `cd`, or with a leading
-      // `cd /` and no directory of its own (`cdToSessionDirectory`), runs in the tool's directory.
-      const hostDirectory = scoped.cdToSessionDirectory === true && raw === undefined;
-      const probes = scoped.changesDirectory === true && !hostDirectory;
-      let reached: Promise<Ran> | undefined;
-      const reach = () => {
-        reached ??= stdoutOf(scoped.dirScript, `${scoped.label}'s directory`);
-        return reached;
-      };
-      // `pwd` ends its line with a newline; nothing else is trimmed, since a directory's name may end
-      // in a blank.
-      const withoutNewline = (stdout: string) =>
-        stdout.endsWith("\n") ? stdout.slice(0, -1) : stdout;
-      const commandDirectory = async (): Promise<string | undefined> => {
-        if (!probes) {
-          try {
-            // A child shell's process.cwd() is physical even when the tool's cwd used a symlink.
-            return fs.realpathSync(cwd);
-          } catch {
-            return undefined;
-          }
-        }
-        const ran = await reach();
-        if (!("stdout" in ran)) return undefined;
-        const reachedDirectory = withoutNewline(ran.stdout);
-        return path.isAbsolute(reachedDirectory) ? reachedDirectory : undefined;
       };
       if (scoped.unsafeFile !== undefined)
         return {
@@ -3679,9 +2494,12 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           },
         };
 
-      let executionCommand = scoped.command;
+      // Each file the argv names, read here in place, as the CLI will open it: the model reviews
+      // these bytes, and the marker binds their digests, which the CLI checks before it posts.
+      const files: FileDigest[] = [];
+      let uploadText: string | undefined;
       if (scoped.fileInputs.length > 0) {
-        const relativeFile = scoped.fileInputs.find((file) => !path.isAbsolute(file.source));
+        const relativeFile = scoped.fileInputs.find((file) => !path.isAbsolute(file.operand));
         let base = cwd;
         if (relativeFile !== undefined) {
           try {
@@ -3694,7 +2512,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                 label: scoped.label,
                 file: {
                   flag: relativeFile.flag,
-                  path: relativeFile.source,
+                  path: relativeFile.operand,
                   reason: `could not resolve the tool directory: ${messageOf(error)}`,
                 },
               },
@@ -3702,11 +2520,12 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           }
         }
         // A leading `cd /` in a call that names no directory runs in the session's own directory
-        // (`cdToSessionDirectory`), which `base` already is; any other `cd` is the probe's, which
-        // `commandDirectory` reads again without running it twice.
-        const firstRelative = probes ? relativeFile : undefined;
+        // (`cdToSessionDirectory`), which `base` already is; any other `cd` is the probe's.
+        const hostDirectory = scoped.cdToSessionDirectory === true && raw === undefined;
+        const firstRelative =
+          scoped.changesDirectory === true && !hostDirectory ? relativeFile : undefined;
         if (firstRelative !== undefined) {
-          const reached = await reach();
+          const reached = await stdoutOf(scoped.dirScript, `${scoped.label}'s directory`);
           if ("cause" in reached) return reached;
           if (!("stdout" in reached))
             return {
@@ -3715,12 +2534,12 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                 label: scoped.label,
                 file: {
                   flag: firstRelative.flag,
-                  path: firstRelative.source,
+                  path: firstRelative.operand,
                   reason: `could not determine the command directory: ${reached.failure}`,
                 },
               },
             };
-          base = withoutNewline(reached.stdout);
+          base = reached.stdout.endsWith("\n") ? reached.stdout.slice(0, -1) : reached.stdout;
           if (!path.isAbsolute(base))
             return {
               unreadable: {
@@ -3728,30 +2547,17 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                 label: scoped.label,
                 file: {
                   flag: firstRelative.flag,
-                  path: firstRelative.source,
+                  path: firstRelative.operand,
                   reason: "could not determine an absolute command directory",
                 },
               },
             };
         }
 
-        /**
-         * The path the CLI opens for one operand. A `--*-file` goes to `readFileSync`, which
-         * hands the whole string to the kernel: a `..` after a symbolic link leaves the link's
-         * target, so a relative operand is joined to the physical directory and never normalized
-         * (`path.resolve` would collapse that `..` first and name another file). An upload's
-         * `--path` is `resolvePath(cwd, path)` in the CLI itself (dispatch-execute.ts), which
-         * removes a `..` first, an absolute operand's too, so it keeps that resolution.
-         */
-        const opened = (file: FileInput): string =>
-          file.flag === "--path"
-            ? path.resolve(base, file.source)
-            : path.isAbsolute(file.source)
-              ? file.source
-              : `${base}/${file.source}`;
         // Refused by name, before any `stat`: such a path resolves in whichever process opens it.
         const descriptor = scoped.fileInputs.find(
-          (file) => PROCESS_FD_PATH.test(file.source) || PROCESS_FD_PATH.test(opened(file))
+          (file) =>
+            PROCESS_FD_PATH.test(file.operand) || PROCESS_FD_PATH.test(operandPath(base, file))
         );
         if (descriptor !== undefined)
           return {
@@ -3760,67 +2566,41 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               label: scoped.label,
               file: {
                 flag: descriptor.flag,
-                path: descriptor.source,
+                path: descriptor.operand,
                 reason:
                   "names a file descriptor of the process that opens it, which here is Oh My Pi's own and not the command's shell",
+                inMessage: true,
               },
             },
           };
-
-        const root = path.resolve(os.tmpdir());
-        sweepSnapshots(root, deps.now());
-        const directory = fs.mkdtempSync(path.join(root, "askgate-"));
-        fs.chmodSync(directory, 0o700);
-        const snapshot: SnapshotSet = { directory, files: [] };
-        let current = scoped.fileInputs[0];
-        let source = current.source;
-        try {
-          for (const inputFile of scoped.fileInputs) {
-            current = inputFile;
-            source = inputFile.source;
-            const resolved = opened(inputFile);
-            snapshot.files.push({
-              input: inputFile,
-              path: captureSnapshot(resolved, directory, snapshot.files.length),
-            });
+        for (const file of scoped.fileInputs) {
+          let bytes: Buffer;
+          try {
+            bytes = readReviewedFile(operandPath(base, file));
+          } catch (error) {
+            return {
+              unreadable: {
+                tool: scoped.tool,
+                label: scoped.label,
+                file: {
+                  flag: file.flag,
+                  path: file.operand,
+                  reason:
+                    (error as NodeJS.ErrnoException).code === "ENOENT"
+                      ? "does not exist"
+                      : `could not be read: ${messageOf(error)}`,
+                  inMessage: true,
+                },
+              },
+            };
           }
-          snapshots.set(toolCallId, snapshot);
-          executionCommand = commandWithSnapshots(scoped.command, snapshot.files);
-        } catch (error) {
-          removeSnapshots(snapshot);
-          return {
-            unreadable: {
-              tool: scoped.tool,
-              label: scoped.label,
-              file: {
-                flag: current.flag,
-                path: source,
-                reason:
-                  (error as NodeJS.ErrnoException).code === "ENOENT"
-                    ? "does not exist"
-                    : `could not be captured: ${messageOf(error)}`,
-              },
-            },
-          };
+          files.push({ ...file, sha256: bytesDigest(bytes) });
+          if (file.flag === "--path") uploadText = bytes.toString("utf8");
         }
       }
 
-      const execution = executionCommand === scoped.command ? {} : { command: executionCommand };
-      const reviewed = execution.command === undefined ? scoped : scopedCommand(execution.command);
-      if (reviewed === undefined)
-        return {
-          unreadable: {
-            tool: scoped.tool,
-            label: scoped.label,
-            file: {
-              flag: scoped.fileInputs[0]?.flag ?? "--file",
-              path: "",
-              reason: "could not rewrite to the snapshot AskGate captured",
-            },
-          },
-        };
-      const dry = await stdoutOf(reviewed.dryRunScript, `${scoped.label} --dry-run`);
-      if (!("stdout" in dry)) return { ...dry, ...execution };
+      const dry = await stdoutOf(scoped.dryRunScript, `${scoped.label} --dry-run`);
+      if (!("stdout" in dry)) return dry;
       let args: Input | undefined;
       try {
         const parsed: unknown = JSON.parse(dry.stdout);
@@ -3829,58 +2609,25 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         // Not JSON: reported below.
       }
       if (args === undefined) {
-        const printed = clipBytes((dry.stdout || dry.stderr).trim(), GATE_REASON_MAX_BYTES);
-        return {
-          failure: `${scoped.label} --dry-run printed no JSON object: ${printed}`,
-          ...execution,
-        };
+        const printed = clipBytes((dry.stdout || dry.stderr).trim(), GATE_PRINTED_MAX_BYTES);
+        return { failure: `${scoped.label} --dry-run printed no JSON object: ${printed}` };
       }
-      if (scoped.upload) {
-        // The name and the path as the CLI sends them: Dispatch trims the name it stores.
-        const resolved = {
-          ...args,
-          ...(typeof args.name === "string" ? { name: args.name.trim() } : {}),
-        };
-        if (!uploadIsDocument(resolved)) return { unscoped: true, ...execution };
-      }
-      // The artifact dry run prints its snapshot path rather than its body. Read only the owned
-      // snapshot here, so the model sees the exact bytes the rewritten command will post.
+      // The CLI's own predicate, over the arguments it will parse: an upload that is no markdown
+      // document is no gated write, and needs neither a review nor a marker.
+      if (!gatedWrite(scoped.tool, args)) return { unscoped: true };
+      // An upload's dry run prints its `--path`, not its text: the model reviews the bytes the
+      // gate read from that path, which the marker binds and the CLI uploads.
       if (!scoped.upload || typeof args.path !== "string" || args.content !== undefined)
-        return { args, directory: commandDirectory, ...execution };
-      const snapshot = snapshots
-        .get(toolCallId)
-        ?.files.find((file) => file.input.flag === "--path");
-      if (snapshot === undefined)
+        return { args, review: args, files };
+      if (uploadText === undefined)
         return {
           unreadable: {
             tool: scoped.tool,
             label: scoped.label,
-            file: {
-              flag: "--path",
-              path: args.path,
-              reason: "was not captured before review",
-            },
+            file: { flag: "--path", path: args.path, reason: "was not read before review" },
           },
         };
-      try {
-        return {
-          args: { ...args, content: fs.readFileSync(snapshot.path, "utf8") },
-          directory: commandDirectory,
-          ...execution,
-        };
-      } catch (error) {
-        return {
-          unreadable: {
-            tool: scoped.tool,
-            label: scoped.label,
-            file: {
-              flag: "--path",
-              path: snapshot.path,
-              reason: `could not read its captured snapshot: ${messageOf(error)}`,
-            },
-          },
-        };
-      }
+      return { args, review: { ...args, content: uploadText }, files };
     };
 
     /** The fields every entry of a call carries; a gated call fills in its target's revise count and the digest. */
@@ -3894,111 +2641,127 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       argsDigest: "",
     });
 
+    /**
+     * Mints the marker the CLI consumes for a literal call that will run: keyed by the argument
+     * vector of the command that runs, the final one the gate returns, bound to the dry run's
+     * arguments and the digests of the files the gate read when a review or a deliberate pass
+     * stands behind them (`bound`), argv-only otherwise. Undefined when it was minted; else the
+     * refusal of a mint that failed, since the CLI would refuse the call anyway. A command whose
+     * argument vector the gate cannot read gets no marker: `block` mode refuses it, and `warn`
+     * mode lets it run with a note, as the CLI then posts it with a warning.
+     */
+    const mintFor = (
+      toolCallId: string,
+      command: unknown,
+      bound: { args: Input; files: readonly FileDigest[] } | null,
+      outcome: string,
+      mode: Mode = envMode ?? "warn"
+    ): ToolCallResult => {
+      const argv = commandArgv(command);
+      if (argv === undefined)
+        return mode === "block"
+          ? { block: true, reason: UNKEYED_REFUSAL }
+          : { additionalContext: UNKEYED_NOTE };
+      try {
+        markers.set(
+          toolCallId,
+          mintMarker(
+            deps.markerStore,
+            { argv, args: bound?.args ?? null, files: bound?.files ?? [], toolCallId, outcome },
+            deps.now()
+          )
+        );
+        return undefined;
+      } catch (error) {
+        return { block: true, reason: mintFailureRefusal(messageOf(error), deps.configFile) };
+      }
+    };
+
     const handleCall = async (event: ToolCallEvent, ctx: GateCtx): Promise<ToolCallResult> => {
       const started = deps.now();
       let base: Base | undefined;
       let decision: Decision;
-      // A `dispatch` command with its override flag removed, which runs whatever the gate decides,
-      // and, once a file operand is rewritten, the command that names the snapshot.
-      let withoutRebuttal: Input | undefined;
+      // A `dispatch` command with its override flag removed, which runs whatever the gate decides.
       let revised: Input | undefined;
-      // The override as the agent wrote it, put back as a comment on the command that runs.
-      let rebuttalSent: string | undefined;
+      // What the call's dry run printed and the digests of the files the gate read, which a
+      // marker for the command it ran binds.
+      let dryRun: { args: Input; files: readonly FileDigest[] } | undefined;
       // OMP_ASKGATE when it is a mode; else this session's latest experiments entry, read per call
       // because one binding serves every session the process switches to.
       let mode: Mode = envMode ?? "block";
+      // The mode of the checks the CLI makes on this call's marker, and of a file the gate could not
+      // read: block only when the session chose it (`checkMode`).
+      let checks: Mode = envMode ?? "warn";
       try {
-        if (ctx.agent.kind !== "main") return undefined;
+        if (event.toolName === "bash") rememberCause(event.toolCallId, event.input.command);
+        // A task subagent's literal write is neither reviewed nor recorded, as before the CLI
+        // checked markers; it shares its parent's session, so it gets an argv-only marker.
+        if (ctx.agent.kind !== "main")
+          return event.toolName === "bash" && scopedCommand(event.input.command) !== undefined
+            ? mintFor(event.toolCallId, event.input.command, null, "subagent")
+            : undefined;
         if (event.toolName === "write") return stripRebuttal(event);
-        if (envMode === undefined) mode = sessionMode(ctx.sessionManager.getEntries());
-        // An eval cell holds no `dispatch` command AskGate reads; one that starts the CLI as a
-        // process is unreadable as a `bash` call is.
+        if (envMode === undefined) {
+          const entries = ctx.sessionManager.getEntries();
+          mode = sessionMode(entries);
+          checks = checkMode(envMode, entries);
+        }
+        // The CLI reads the check mode from the store: every shell or cell could run it.
         if (event.toolName === "bash" || event.toolName === "eval") {
-          const scoped = event.toolName === "bash" ? scopedCommand(event.input.command) : undefined;
-          if (scoped === undefined) {
-            const unreadable =
-              event.toolName === "bash"
-                ? unreadableDispatchWrite(event.input.command)
-                : evalDispatchWrite(event.input);
-            if (unreadable === undefined) return undefined;
-            // A judgment on one call's form: block mode refuses it before anything in it runs, and
-            // warn mode runs it and hands the reason back (`unreadableCall`). A session with no
-            // model role refuses it first, as it would refuse the resend; a halt, or a session
-            // whose primary is off the gate's provider, lets it run as the resend would.
-            base = { ...identity(event, mode), tool: unreadable.tool, path: unreadable.label };
-            const resolved = resolveRole(ctx);
-            if (resolved === undefined) decision = noModelRole;
-            else if (halted) decision = pass("halted");
-            else if (ctx.model?.provider !== resolved.model.provider)
-              decision = pass("skipped", {
-                reason: `primary on ${ctx.model?.provider ?? "no model"}`,
-              });
-            else decision = unreadableCall(unreadable, mode);
-          } else {
-            if (scoped.rebuttal !== undefined) {
-              withoutRebuttal = { ...event.input, command: scoped.command };
-              revised = withoutRebuttal;
-              rebuttalSent = scoped.rebuttal.sent;
+          try {
+            recordMode(checks);
+          } catch {
+            // A store that takes no mode leaves the CLI's default, warn.
+          }
+        }
+        // Only a `bash` call in the literal grammar is read. Any other call runs, and the CLI
+        // refuses a gated write in it, which carries no marker.
+        if (event.toolName === "bash") {
+          const scoped = scopedCommand(event.input.command);
+          if (scoped === undefined) return undefined;
+          if (scoped.rebuttal !== undefined) {
+            revised = { ...event.input, command: scoped.command };
+          }
+          base = { ...identity(event, mode), tool: scoped.tool, path: scoped.label };
+          // Before the dry run and before any path that lets the write out: with no model role
+          // the gate can review nothing, and every one of those paths would otherwise allow.
+          if (resolveRole(ctx) === undefined) decision = noModelRole;
+          else {
+            const run = await readArgs(scoped, event.input, ctx, event.toolCallId);
+            // An upload its dry run shows is no markdown document passes as an ungated call
+            // does, with no entry and no marker, which the CLI needs for no such upload; an
+            // override flag on it is still removed, since the CLI would refuse it.
+            if ("unscoped" in run) return revised === undefined ? undefined : { input: revised };
+            if ("cause" in run) decision = givenUp(mode, run.cause);
+            else if ("unreadable" in run) {
+              if (halted) decision = pass("halted");
+              else if (ctx.model?.provider !== resolveRole(ctx)?.model.provider)
+                decision = pass("skipped", {
+                  reason: `primary on ${ctx.model?.provider ?? "no model"}`,
+                });
+              else decision = unreadableCall(run.unreadable, checks);
             }
-            base = { ...identity(event, mode), tool: scoped.tool, path: scoped.label };
-            // Before the dry run and before any path that lets the write out: with no model role
-            // the gate can review nothing, and every one of those paths would otherwise allow.
-            if (resolveRole(ctx) === undefined) decision = noModelRole;
+            // The CLI refuses arguments it cannot parse before it sends anything, so the
+            // command runs.
+            else if ("failure" in run) decision = pass("error", { reason: run.failure });
             else {
-              // One stop for everything this call waits on: its dry run, its document read and
-              // both model calls.
-              const stop = openStop(event.toolCallId);
-              try {
-                const run = await readArgs(scoped, event.input, ctx, event.toolCallId, stop);
-                if ("command" in run && run.command !== undefined)
-                  revised = { ...event.input, command: run.command };
-                // An upload its dry run shows is no markdown document passes as an unscoped call
-                // does, with no entry; an override flag on it is still removed, since the CLI
-                // would refuse it.
-                if ("unscoped" in run)
-                  return revised === undefined
-                    ? undefined
-                    : { input: keepOverrideVisible(revised, rebuttalSent) };
-                if ("cause" in run)
-                  decision =
-                    run.cause === "timeout"
-                      ? pass("timeout", {}, "failure")
-                      : givenUp(mode, run.cause);
-                else if ("unreadable" in run) {
-                  if (halted) decision = pass("halted");
-                  else if (ctx.model?.provider !== resolveRole(ctx)?.model.provider)
-                    decision = pass("skipped", {
-                      reason: `primary on ${ctx.model?.provider ?? "no model"}`,
-                    });
-                  else decision = unreadableCall(run.unreadable, mode);
-                }
-                // The CLI refuses arguments it cannot parse before it sends anything, so the
-                // command runs.
-                else if ("failure" in run) decision = pass("error", { reason: run.failure });
-                else {
-                  const key = breakerKey(scoped.tool, run.args);
-                  base = {
-                    ...base,
-                    revisesForKey: breaker.revises(key),
-                    argsDigest: createHash("sha256").update(JSON.stringify(run.args)).digest("hex"),
-                    target: targetLabel(key),
-                  };
-                  decision = await decide(
-                    { toolName: scoped.tool, toolCallId: event.toolCallId, input: run.args },
-                    ctx,
-                    started,
-                    base,
-                    key,
-                    scoped.rebuttal,
-                    scoped.readsFile ? FILE_OVERRIDE : COMMAND_OVERRIDE,
-                    stop,
-                    run.directory,
-                    scoped.upload === true
-                  );
-                }
-              } finally {
-                stop.close();
-              }
+              dryRun = { args: run.args, files: run.files };
+              const key = breakerKey(scoped.tool, run.review);
+              base = {
+                ...base,
+                revisesForKey: breaker.reasons(key).length,
+                argsDigest: createHash("sha256").update(JSON.stringify(run.review)).digest("hex"),
+              };
+              decision = await decide(
+                { toolName: scoped.tool, toolCallId: event.toolCallId, input: run.review },
+                ctx,
+                started,
+                base,
+                key,
+                scoped.rebuttal,
+                scoped.readsFile ? FILE_OVERRIDE : COMMAND_OVERRIDE,
+                scoped.upload === true
+              );
             }
           }
         } else {
@@ -4009,33 +2772,15 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           const key = breakerKey(event.toolName, event.input);
           base = {
             ...identity(event, mode),
-            revisesForKey: breaker.revises(key),
+            revisesForKey: breaker.reasons(key).length,
             argsDigest: createHash("sha256").update(JSON.stringify(event.input)).digest("hex"),
-            target: targetLabel(key),
           };
-          const stop = openStop(event.toolCallId);
-          try {
-            // A device call runs in the session's own directory; it has no `cd` of its own.
-            decision = await decide(
-              event,
-              ctx,
-              started,
-              base,
-              key,
-              rebuttal,
-              DEVICE_OVERRIDE,
-              stop,
-              async () => ctx.cwd
-            );
-          } finally {
-            stop.close();
-          }
+          decision = await decide(event, ctx, started, base, key, rebuttal, DEVICE_OVERRIDE);
         }
       } catch (error) {
         // Fail open: the runner turns a thrown handler into a refusal. A throw here is the
         // gate's own (the dump, the render, the dry-run's spawn), not a missing
-        // verdict, so it does not count toward the halt. The snapshot stays until the call ends,
-        // since the command may still name it.
+        // verdict, so it does not count toward the halt.
         decision = pass("error", { reason: messageOf(error) });
       }
       // Settled once and recorded once, each on its own, so neither failing can repeat the other.
@@ -4044,22 +2789,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       } catch {
         // The halt notice is best effort.
       }
-      let rulesNotice: string | undefined;
-      try {
-        rulesNotice = settleRules(decision.fields.ruleOutcome, ctx);
-      } catch {
-        // The rules notice is best effort too.
-      }
-      // A refused call runs nothing, so it keeps neither a snapshot nor a rewritten command: a
-      // rules refusal is the agent's own command refused, whatever the charter's outcome was.
-      if (decision.result?.block) {
-        releaseSnapshots(event.toolCallId);
-        revised = undefined;
-      }
-      // No verdict came back, so nothing proves the snapshot's bytes are the reviewed bytes, and a
-      // gate that failed must break no valid write: the agent's own command runs instead of the
-      // one naming a snapshot it never saw (its override flag still removed, which the CLI needs).
-      else if (UNREVIEWED_OUTCOMES.includes(decision.fields.outcome)) revised = withoutRebuttal;
+      if (decision.result?.block) revised = undefined;
       // The first gated call says once that the OMP_ASKGATE it ignored is not the switch.
       if (ignoredModeNotice !== undefined) {
         const notice = ignoredModeNotice;
@@ -4071,47 +2801,11 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           // The notice is best effort; the logger has it.
         }
       }
-      const entry: GateEntry = {
-        ...(base ?? identity(event, mode)),
-        ...decision.fields,
-        latencyMs: deps.now() - started,
-      };
-      // The entry below reaches only this machine's disk, so a rules decision also goes to
-      // Dispatch, where a session with no access to this machine counts it (`decision-record.ts`).
-      // The gated call's own stop is closed by now, so the write gets a stop of its own; whatever
-      // it costs or loses, the decision above and the call's result stand. Once the session is
-      // shutting down, that stop comes by `recordDeadline`, so the entry still lands in the session.
-      let recordError: string | undefined;
-      const recordStop = new AbortController();
-      const recordMs =
-        recordDeadline === undefined
-          ? RECORD_TIMEOUT_MS
-          : Math.max(0, Math.min(RECORD_TIMEOUT_MS, recordDeadline - deps.now()));
-      const recordTimer = setTimeout(
-        () => recordStop.abort(recordMs < RECORD_TIMEOUT_MS ? RECORD_SHUT_DOWN : undefined),
-        recordMs
-      );
-      recordStops.add(recordStop);
-      try {
-        recordError = await recordDecision({
-          entry,
-          sessionId: ctx.sessionManager.getSessionId(),
-          directory: ctx.cwd,
-          signal: recordStop.signal,
-        });
-      } catch (error) {
-        recordError = messageOf(error);
-      } finally {
-        clearTimeout(recordTimer);
-        recordStops.delete(recordStop);
-      }
-      // A record the shutdown cut short says so, not that it ran to its own stop.
-      if (recordError !== undefined && recordStop.signal.reason === RECORD_SHUT_DOWN)
-        recordError = RECORD_SHUT_DOWN;
       try {
         pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, {
-          ...entry,
-          ...(recordError === undefined ? {} : { recordError }),
+          ...(base ?? identity(event, mode)),
+          ...decision.fields,
+          latencyMs: deps.now() - started,
         } satisfies GateEntry);
       } catch (error) {
         // A write no review stands behind posts only when the record of that is written: the
@@ -4119,7 +2813,6 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         // refuses the call, in both modes. A write the model allowed was reviewed, and still
         // posts; a call already refused keeps its own refusal.
         if (decision.fields.decision === "allow" && decision.fields.outcome !== "verdict") {
-          releaseSnapshots(event.toolCallId);
           notices.delete(event.toolCallId);
           return {
             block: true,
@@ -4127,15 +2820,38 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           };
         }
       }
+      // The marker the CLI needs to post a literal write that will run, minted once its record is
+      // written (a write whose record failed is refused above). A review, or a pass the gate took
+      // over the dry run's arguments (a rebuttal, a breaker trip, a halt, another provider), binds
+      // those arguments and the files' digests; a call no verdict stands behind is argv-only.
+      if (event.toolName === "bash" && base !== undefined && !decision.result?.block) {
+        const { outcome } = decision.fields;
+        const bound =
+          dryRun !== undefined && !UNREVIEWED_OUTCOMES.includes(outcome) ? dryRun : null;
+        const minted = mintFor(
+          event.toolCallId,
+          (revised ?? event.input).command,
+          bound,
+          outcome,
+          checks
+        );
+        if (minted?.block) {
+          notices.delete(event.toolCallId);
+          return minted;
+        }
+        if (minted?.additionalContext !== undefined)
+          decision.result = {
+            ...decision.result,
+            additionalContext: [decision.result?.additionalContext, minted.additionalContext]
+              .filter((note) => note !== undefined)
+              .join("\n"),
+          };
+      }
       // The same note goes on the call's own result (`deliverNotice`), which every caller reads:
       // a call an eval cell made has no loop sink for `additionalContext`, and a note the agent
-      // never sees reads like a gate that is working. The rules notice rides there too, on this
-      // call alone, never on the session-start notices a later session would repeat.
-      const owed = [decision.result?.additionalContext, rulesNotice].filter(
-        (note): note is string => note !== undefined
-      );
-      if (owed.length > 0) rememberNotice(event.toolCallId, owed.join("\n"));
-      if (revised !== undefined) revised = keepOverrideVisible(revised, rebuttalSent);
+      // never sees reads like a gate that is working.
+      if (decision.result?.additionalContext !== undefined)
+        rememberNotice(event.toolCallId, decision.result.additionalContext);
       return revised === undefined ? decision.result : { ...decision.result, input: revised };
     };
 

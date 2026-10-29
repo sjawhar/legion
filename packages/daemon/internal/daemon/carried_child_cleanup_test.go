@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -30,19 +31,18 @@ import (
 // At the old root's linger expiry the new tree's hold on a carried child's role and the old tree's
 // close come due together: the hold's deadline suspends the role, its session kept, and the old
 // tree's cleanup, which no longer waits on a claim that runs nothing and whose issue has moved,
-// reaches the runtime before the new tree's start does. The cleanup hands the child's Sandbox over
-// to the child's own tree instead of deleting it: the same Sandbox and the volume it owns, relabelled
-// and Suspended. The orphan sweep keeps it, and the new tree's start then resumes the role's session
-// in that Sandbox, on that volume, expecting the volume to hold it. Which of the cleanup and the
-// start comes first decides nothing.
-func TestAnOldTreesCleanupBeforeTheNewTreesStartHandsTheCarriedChildsSandboxOver(t *testing.T) {
+// reaches the runtime before the new tree's start does. The cleanup deletes the child's Sandbox
+// with the rest of the tree's — there is no disk to carry, since an issue pod's disk went with
+// that pod — and the new tree's start then creates a Sandbox of the child's own and resumes the
+// role's session, which the store holds, in a pod of its own.
+func TestAnOldTreesCleanupBeforeTheNewTreesStartDeletesTheCarriedChildsSandbox(t *testing.T) {
 	f := newCarriedCleanup(t, true)
 	ctx, st, api, logs, childKey, childSandbox, implementer := f.ctx, f.st, f.api, f.logs, f.childKey, f.childSandbox, f.implementer
 	f.cleanupAndSweep()
 
 	// Then the new tree's start of the implementer. The fixture runs no controller, so the launch
-	// writes its pod template and Running patch into the Sandbox it found, then ends at its wait for
-	// a pod, which suspends the Sandbox again; what it wrote is what the assertions read.
+	// creates the Sandbox, writes its pod template and Running patch into it, then ends at its wait
+	// for a pod; what it wrote is what the assertions read.
 	clock := time.Now()
 	runner := &outbox{pool: f.pool, records: f.records, project: "legion", dispatchProject: "LEGION", supervisor: f.sup, trees: st, tokens: outboxTokens{},
 		stateDir: t.TempDir(), githubAPI: newBranchGitHub(t, nil, branchExists).url,
@@ -54,49 +54,54 @@ func TestAnOldTreesCleanupBeforeTheNewTreesStartHandsTheCarriedChildsSandboxOver
 	if err := runner.RunOnce(ctx); err != nil {
 		t.Fatalf("the new tree's start: %v", err)
 	}
-	if slices.Contains(api.created, childSandbox) || api.uid(childSandbox) != "sandbox-uid-child" || !api.pvc(childSandbox) {
-		t.Fatalf("the new tree's start created %v and left Sandbox uid %q (pvc %t); want sandbox-uid-child kept with its volume",
-			api.created, api.uid(childSandbox), api.pvc(childSandbox))
+	if !slices.Contains(api.created, childSandbox) || api.uid(childSandbox) == "" || api.uid(childSandbox) == "sandbox-uid-child" {
+		t.Fatalf("the new tree's start created %v and left Sandbox uid %q; want a Sandbox of its own in place of the deleted one",
+			api.created, api.uid(childSandbox))
 	}
 	if got := api.label(childSandbox, "legion.dev/tree"); got != childKey {
 		t.Fatalf("the carried child's Sandbox after the new tree's start is under tree %q, want %s", got, childKey)
 	}
-	if env := api.initEnv(childSandbox); !slices.Contains(env, "LEGION_EXPECT_ISSUE_VOLUME") {
-		t.Fatalf("the implementer's resume wrote no pod template into the kept Sandbox expecting its volume to hold the session (init env %v)", env)
+	if env := api.initEnv(childSandbox); !slices.Contains(env, "PATH") {
+		t.Fatalf("the implementer's resume wrote no pod template into the Sandbox it created (init env %v)", env)
 	}
 	if !strings.Contains(logs.String(), "wait for its new pod") {
-		t.Fatalf("the implementer's resume did not reach its wait for a new pod of the kept Sandbox:\n%s", logs.String())
+		t.Fatalf("the implementer's resume did not reach its wait for a new pod:\n%s", logs.String())
 	}
 	stored, err := st.Claims(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range stored {
-		if c.Token == implementer.Token && (c.Tree != childKey || c.SessionFile != implementer.SessionFile || c.WorkspaceLost) {
-			t.Fatalf("the implementer after the new tree's start = %+v; want it in %s with its session file and no loss", c, childKey)
+		if c.Token == implementer.Token && (c.Tree != childKey || c.SessionFile != implementer.SessionFile) {
+			t.Fatalf("the implementer after the new tree's start = %+v; want it in %s with its session file", c, childKey)
 		}
-	}
-	if strings.Contains(logs.String(), "volume was lost") {
-		t.Fatalf("the carried child's resume reported a lost volume:\n%s", logs.String())
 	}
 }
 
-// A carried child the old tree's cleanup handed its Sandbox to before admission opened its tree
-// keeps that Sandbox while it waits in admission's line: the orphan sweep, reading the real store,
-// leaves it. Once the child leaves the line (a person sets it to backlog) it can no longer be
-// admitted into that tree, so the Sandbox belongs nowhere and the sweep deletes it with its volume,
+// A carried child whose own tree's launch has created a Sandbox for it keeps that Sandbox while
+// it waits in admission's line, though no lifecycle of its tree is open yet: the orphan sweep,
+// reading the real store, leaves it (Store.IssueSandboxHome), since a pod of the child's may
+// already be running in it. Once the child leaves the line (a person sets it to backlog) it can
+// no longer be admitted into that tree, so the Sandbox belongs nowhere and the sweep deletes it,
 // fenced and logged, as every other orphan is.
-func TestTheSweepDeletesACarriedChildsHandedOverSandboxOnceItLeavesTheLine(t *testing.T) {
+func TestTheSweepDeletesACarriedChildsOwnSandboxOnceItLeavesTheLine(t *testing.T) {
 	f := newCarriedCleanup(t, false)
 	f.cleanupAndSweep()
+	f.launchedChildSandbox("sandbox-uid-child-own")
+	if err := f.newRuntime().ReconcileOrphans(f.ctx, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.api.uid(f.childSandbox); got != "sandbox-uid-child-own" {
+		t.Fatalf("the Sandbox of the child waiting in the line = %q, want the one its own tree's launch created", got)
+	}
 	child := f.child
 	child.Status, child.DispatchStatus = "backlog", "backlog"
 	putOutboxIssue(t, f.pool, f.records, child)
 	if err := f.newRuntime().ReconcileOrphans(f.ctx, nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, deleted := f.api.deleted(f.childSandbox); !deleted || f.api.pvc(f.childSandbox) {
-		t.Fatalf("the carried child's Sandbox after it left the line: deleted %t, pvc %t; want it deleted with its volume", deleted, f.api.pvc(f.childSandbox))
+	if got := f.api.mode(f.childSandbox); got != "deleted" {
+		t.Fatalf("the carried child's Sandbox after it left the line = %s, want it deleted", got)
 	}
 	if !strings.Contains(f.logs.String(), "deleted an orphaned sandbox") {
 		t.Fatalf("the sweep logged no delete of the carried child's Sandbox:\n%s", f.logs.String())
@@ -177,8 +182,9 @@ func newCarriedCleanup(t *testing.T, opened bool) *carriedCleanup {
 		rt, err := sandbox.New(runtimeCtx, &rest.Config{Host: server.URL}, sandbox.Options{
 			Namespace: "legion", Project: "legion", Store: st, Image: "ghcr.io/example/worker@sha256:" + strings.Repeat("a", 64),
 			StorageClass: "standard", IssueVolume: resource.MustParse("1Gi"), StreamURL: "tcp://127.0.0.1:13371", Resources: defaultReservations(t),
-			Tools:       sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
-			BootTimeout: 300 * time.Millisecond, RegistrationIntervals: 3, BusyBackoff: time.Millisecond, TerminationGrace: 100 * time.Millisecond, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
+			SessionStore: ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"},
+			Tools:        sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
+			BootTimeout:  300 * time.Millisecond, RegistrationIntervals: 3, BusyBackoff: time.Millisecond, TerminationGrace: 100 * time.Millisecond, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
 			Tokens: issueProvisionTokens{}, GitHubCredential: appauth.GitHubCredential(outboxTokens{}, legionOwner), Conns: fake.NewConns(), Log: logger,
 			RepositoryCache: defaultRepositoryCache(t), Mapped: noRepositories,
 		})
@@ -195,7 +201,6 @@ func newCarriedCleanup(t *testing.T, opened bool) *carriedCleanup {
 	sup := newSupervisor(runtimeCtx, st, "legion", t.TempDir(), logger)
 	sup.deps = supervise.Deps{
 		Runtime: rt, Conns: fake.NewConns(), Store: st, Specs: issueLaunchSpecs{prompt: prompt}, Clock: stillClock{}, Log: logger,
-		VolumeLost:     sup.volumeLost,
 		Limits:         supervise.Limits{LaunchFailures: 1, PromptFailures: 2, PromptRetires: 2},
 		Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
 		PluginContract: 24,
@@ -219,37 +224,40 @@ func newCarriedCleanup(t *testing.T, opened bool) *carriedCleanup {
 		child: child, implementer: implementer}
 }
 
-// cleanupAndSweep runs the old tree's cleanup, which reaches the runtime before the new tree's start
-// does, then the orphan sweep on a runtime that lists the Sandboxes as the cleanup left them: the
-// old root's Sandbox is deleted with its volume, and the carried child's is handed over to the
-// child's own tree and kept by the sweep's rule, with its volume.
+// cleanupAndSweep runs the old tree's cleanup, which reaches the runtime before the new tree's
+// start does, then the orphan sweep on a runtime that lists the Sandboxes as the cleanup left
+// them: the old root's Sandbox and the carried child's are both deleted, with everything each
+// owned, and the sweep finds nothing of the tree left to judge.
 func (f *carriedCleanup) cleanupAndSweep() {
-	t, api, childSandbox := f.t, f.api, f.childSandbox
+	t, api := f.t, f.api
 	t.Helper()
 	if err := f.st.CleanupReservedTree(f.ctx, "legion", f.rootKey, f.lifecycle.Epoch, f.rt); err != nil {
 		t.Fatalf("the old tree's cleanup: %v", err)
 	}
-	if got := api.mode(f.rootSandbox); got != "deleted" || api.pvc(f.rootSandbox) {
-		t.Fatalf("the old root's Sandbox after the cleanup = %s (pvc %t), want it deleted with its volume", got, api.pvc(f.rootSandbox))
-	}
-	if _, deleted := api.deleted(childSandbox); deleted || api.uid(childSandbox) != "sandbox-uid-child" || !api.pvc(childSandbox) ||
-		api.label(childSandbox, "legion.dev/tree") != f.childKey || api.mode(childSandbox) != "Suspended" {
-		t.Fatalf("the carried child's Sandbox after the old tree's cleanup = %s, uid %q, tree %q, pvc %t, deleted %t; want sandbox-uid-child handed over to %s, Suspended, with its volume",
-			api.mode(childSandbox), api.uid(childSandbox), api.label(childSandbox, "legion.dev/tree"), api.pvc(childSandbox), deleted, f.childKey)
+	for _, name := range []string{f.rootSandbox, f.childSandbox} {
+		if got := api.mode(name); got != "deleted" || api.disk(name) {
+			t.Fatalf("Sandbox %s after the cleanup = %s (disk %t), want it deleted with its pod and that pod's disk", name, got, api.disk(name))
+		}
 	}
 	if live, err := f.st.TreeLive(f.ctx, "legion", f.rootKey); err != nil || live {
 		t.Fatalf("the old tree after its cleanup is live = %t, %v; want its cleanup confirmed", live, err)
 	}
-	if !strings.Contains(f.logs.String(), "handed a carried issue's sandbox over to its new tree") {
-		t.Fatalf("the cleanup logged no hand-over:\n%s", f.logs.String())
-	}
 	if err := f.newRuntime().ReconcileOrphans(f.ctx, nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, deleted := api.deleted(childSandbox); deleted || api.uid(childSandbox) != "sandbox-uid-child" || !api.pvc(childSandbox) {
-		t.Fatal("the orphan sweep after the cleanup deleted the carried child's Sandbox")
+	if strings.Contains(f.logs.String(), "orphaned sandbox") {
+		t.Fatalf("the orphan sweep found something of the cleaned-up tree to act on:\n%s", f.logs.String())
 	}
-	if strings.Contains(f.logs.String(), "orphaned sandbox") || strings.Contains(f.logs.String(), "written since its delete was decided") {
-		t.Fatalf("the orphan sweep decided to delete the handed-over Sandbox:\n%s", f.logs.String())
-	}
+}
+
+// launchedChildSandbox puts the Sandbox the child's own tree's launch creates into the API, under
+// the child's tree, as this runtime makes one for an issue: the launch itself needs a controller
+// to finish, which the fixture has none of, and what the sweep judges is the Sandbox the API
+// holds.
+func (f *carriedCleanup) launchedChildSandbox(uid string) {
+	f.t.Helper()
+	s := issueSandbox(f.childSandbox, uid, f.childKey, f.childKey)
+	f.api.mu.Lock()
+	defer f.api.mu.Unlock()
+	f.api.objects[f.childSandbox] = s
 }

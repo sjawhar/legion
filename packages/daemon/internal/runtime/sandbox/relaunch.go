@@ -54,7 +54,8 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // authenticated launcher. An existing healthy pod is never suspended or reinitialized when another
 // role starts or one role recovers. A pod is not healthy when it cannot run the role as a pod
 // created now would: it holds, for one of its roles, something fixed for its life that a pod created
-// now is not handed (movedInPod, the rule evaluate reads such a role StaleAddress by): its
+// now is not handed (movedInPod, the rule evaluate reads such a role StaleAddress by): it
+// runs the layout before one container, one launcher container per role (movedLayout), its
 // launchers dial a stream other than the one a pod created now is handed, and they never redial, or
 // it lacks the agent-secrets volumes a role that enrolls now is started against; or a container of
 // it runs an image other than the one this runtime launches every container with (imageDrift) —
@@ -89,7 +90,14 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // reason — a suspended Sandbox, a lost launcher binding, a failed init, a moved address — comes up
 // on the configured image, which the boot gate holds to the daemon's contract, so its copies are
 // already right; carrying the install onto a fresh pod would be installing over a pair already
-// current. l.spec.Plugins is cleared in that case before launcherCommand builds its argv.
+// current. l.spec.Plugins is cleared in that case before launcherCommand builds its argv. A pod
+// whose issue Sandbox is still of the release before the pod-owned disk — owning the `issue`
+// volume claim template that pod mounts — is replaced too, and its Sandbox with it: that field is
+// immutable in the CRD, so deleting the Sandbox at the issue's next launch and creating one of the
+// current shape is the only way to the pod-owned disk (replaceSupersededSandbox), which carries
+// the name the suspension wrote onto the Sandbox it creates, and keeps it in the runtime's hands
+// while the issue has no Sandbox at all (stranded), so the roles that replacement ended are read as
+// displaced rather than dead, in the gap between the delete and the create too.
 func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	ctx = launching(ctx)
 	l, err := r.prepare(spec)
@@ -116,7 +124,8 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	live := s.mode() != modeSuspended && ownedBy(pod, s.UID) && !terminal(pod) && initExit == nil
 	_, drifted := imageDrift(pod, r.image)
 	installing := l.spec.Plugins != nil
-	replace := !live || (drifted && !installing) ||
+	migrate := supersededDisk(s, l)
+	replace := !live || (drifted && !installing) || migrate ||
 		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 })
 	if !replace {
 		bound, err := r.launcherBound(bounded, s, pod, &l)
@@ -133,9 +142,14 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	if replace {
 		switch {
 		case live:
-			if err := r.suspendDisplacing(bounded, s, pod.UID); err != nil {
+			suspended, err := r.suspendDisplacing(bounded, s, pod.UID)
+			if err != nil {
 				return fail("suspend its sandbox", err)
 			}
+			// The patch's own copy, which carries the annotation naming the replaced pod: a
+			// migrating launch reads it from here onto the Sandbox it creates
+			// (replaceSupersededSandbox).
+			s = suspended
 		case s.mode() != modeSuspended:
 			if err := r.setMode(bounded, s, modeSuspended); err != nil {
 				return fail("suspend its sandbox", err)
@@ -144,6 +158,11 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		old, err := r.awaitPodGone(bounded, s)
 		if err != nil {
 			return fail("wait out its previous pod", err)
+		}
+		if migrate {
+			if s, err = r.replaceSupersededSandbox(bounded, l, s); err != nil {
+				return fail("replace its sandbox of the previous disk shape", err)
+			}
 		}
 		if err := l.kind.provision(bounded, r, &l, s); err != nil {
 			return runtime.Locator{}, fmt.Errorf("launch %s: %w", spec.Claim, boundRanOut(ctx, bounded, r.launchBound, err))
@@ -178,8 +197,10 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	starting, cancel := context.WithDeadline(bounded, deadline.Add(r.terminationGrace))
 	defer cancel()
 	if ended {
-		// A real failed init proves no role could start. Return its recorded pod so supervision
-		// observes Gone (and WorkspaceLost), rather than charging an unrelated launcher timeout.
+		// The pod this launch waited on has ended — gone, replaced, terminal, or its init container
+		// failed — so no role could start in it. Return its recorded pod: the supervisor's next
+		// probe reads that pod's own end, which says what happened, rather than this launch being
+		// charged a launcher timeout that end explains.
 		r.join(loc)
 		return loc, nil
 	}
@@ -241,9 +262,14 @@ func boundRanOut(parent, bounded context.Context, bound time.Duration, err error
 // ensureSandbox's Get, its Create or relabel patch and that relabel's store read, and for a Sandbox
 // being deleted the wait's last Get, past its deadline, and the Get and Create after it (6); the
 // suspension patch (1); awaitPodGone's confirming Get, which may begin just before its deadline
-// (1); provision's retained-sessions store read, its token mint and its Secret upsert's Get,
-// Delete and Create (5), and its repository cache's ensure (cacheEnsureCalls); the Running patch
-// (1); the stop of an earlier generation (1); the address record patch (1); the Start frame (1).
+// (1); provision's token mint and its Secret upsert's Get, Delete and Create (4), and its
+// repository cache's ensure (cacheEnsureCalls); the Running patch (1); the stop of an earlier
+// generation (1); the address record patch (1); the Start frame (1) — 16, the cache's ensure apart.
+// A try replacing a Sandbox of the superseded disk shape spends one call more, and so sets the
+// count at 17: its deleteStoredSandbox Get, the fenced Delete, awaitSandboxDeleted's confirming
+// Get and the Create (4) against the 3 of the 6 above that ensureSandbox's wait for a Sandbox
+// being deleted spends, which that try never takes — a Sandbox it waited out is gone, and the one
+// it creates in its place already owns no claim template (replaceSupersededSandbox).
 // Per launcher role of the pod (relaunchRoleCalls, claim.Roles for an issue pod, the most any pod
 // has): launcherBound's Secret Get (1); writeLauncherSecrets' credential mint and its upsert's Get,
 // Delete and Create (4); bindLauncherSecrets' Get and Update, and both again on a conflict (4).
@@ -399,17 +425,21 @@ func (r *Runtime) suspendFailedLaunch(ctx context.Context, token claim.Token, s 
 // A Sandbox fits a launch when it carries the tree label the launch's pod carries, none for the
 // controller's pod. It is made for an issue, whose key, so its Sandbox's name, outlives a move to
 // another tree: a child of a closed tree re-admitted as a root of its own finds the Sandbox its old
-// tree left, labelled with that tree and owning the volume that holds the issue's clone, workspace
-// and its roles' sessions. Such a Sandbox is relabelled for this launch's tree and kept, volume and
-// sessions with it, once no stored claim of the issue in another tree may still run a process
-// there (Store.IssueRunsElsewhere); the Running patch rewrites its pod template, labels included,
-// before any pod runs. One its old tree left Running — the old tree's close suspended every role
-// of it, but the issue's suspension never ran, since the issue had moved — is suspended in the
-// same patch, so the relaunch waits its pod out. One a claim of the old tree may still run in is a
-// refusal, since replacing it would end that claim. Nothing here deletes a Sandbox, and none
-// without a volume of its own reaches here: every Sandbox this runtime makes carries the issue
-// claim template (sandboxManifest), and the boot census refuses one of the tree-volume layout
-// before any launch (treeVolumeLayout).
+// tree left, labelled with that tree. Such a Sandbox is relabelled for this launch's tree and
+// kept, once no stored claim of the issue in another tree may still run a process there
+// (Store.IssueRunsElsewhere); the Running patch rewrites its pod template, labels included, before
+// any pod runs. None of the old tree's work comes with it: an issue pod's disk is the pod's own
+// ephemeral volume (issuePod.disk), which went with that pod, so the relabelled Sandbox's
+// first pod brings a disk of its own and provisions the issue's workspace afresh. One its old tree
+// left Running — the old tree's close suspended every role of it, but the issue's suspension never
+// ran, since the issue had moved — is suspended in the same patch, so the relaunch waits its pod
+// out. One a claim of the old tree may still run in is a refusal, since replacing it would end that
+// claim. An issue Sandbox of the release before the pod-owned disk reaches here and is returned as
+// it is, still owning the `issue` claim template: the boot census lets that one shape through by
+// name rather than refusing the daemon (treeVolumeLayout), and the relaunch replaces it, Sandbox
+// and claim together, once its pod is gone (replaceSupersededSandbox). Nothing here deletes a
+// Sandbox. One it creates carries the name of the pod a replacement whose own Create failed left
+// stranded (createSandbox), so the roles that replacement ended are read as displaced from it.
 func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error) {
 	deadline := time.Now().Add(r.bootTimeout)
 	// refused is the relabel the API server refused as invalid, and refusedAt the resourceVersion its
@@ -421,18 +451,14 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 	for {
 		u, err := r.sandboxClient().Get(ctx, l.name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
-			manifest, err := encodeSandbox(r.sandboxManifest(l))
-			if err != nil {
-				return nil, err
-			}
-			createdObject, err := r.sandboxClient().Create(ctx, manifest, metav1.CreateOptions{})
+			created, err := r.createSandbox(ctx, l)
 			if apierrors.IsAlreadyExists(err) && time.Now().Before(deadline) {
 				continue
 			}
 			if err != nil {
 				return nil, err
 			}
-			return decodeSandbox(createdObject)
+			return created, nil
 		}
 		if err != nil {
 			return nil, err
@@ -469,7 +495,7 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 				}
 				ops = append(ops, jsonPatchOp{Op: "add", Path: "/spec/operatingMode", Value: modeSuspended})
 			}
-			r.log.Info("sandbox runtime: relabelling a sandbox for its issue's new tree, keeping its volume",
+			r.log.Info("sandbox runtime: relabelling a sandbox for its issue's new tree, keeping the Sandbox",
 				"sandbox", l.name, "uid", s.UID, "tree", s.Labels[labelTree], "for", tree, "operatingMode", s.mode())
 			relabelled, err := r.patch(ctx, s, ops...)
 			if apierrors.IsInvalid(err) && time.Now().Before(deadline) {
@@ -497,6 +523,119 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 			return nil, err
 		}
 	}
+}
+
+// supersededDisk reports whether s is an issue Sandbox of the release before the pod-owned disk:
+// one still owning a volume claim template, where the Sandbox this runtime now makes for an issue
+// owns none and its pod carries its disk as a generic ephemeral volume of its own
+// (issuePod.disk, sandboxManifest). The launch's kind is this Sandbox's: ensureSandbox finds
+// it by the claim's own name, and an issue's labels are what podKindOf reads an issue pod's kind
+// from. The project controller's Sandbox owns that template by design — the working root its
+// launcher runs in outlives its pods, so the claim holding it must — and is never replaced for
+// this reason.
+func supersededDisk(s *sandbox, l launch) bool {
+	_, issue := l.kind.(issuePod)
+	return issue && len(s.Spec.VolumeClaimTemplates) > 0
+}
+
+// replaceSupersededSandbox deletes the issue Sandbox s, which still owns the claim template of the
+// release before the pod-owned disk, and creates one of the shape this runtime makes now in its
+// place (sandboxManifest: Suspended, owning no template), which it returns for the rest of the
+// launch to run against. spec.volumeClaimTemplates is immutable in the CRD, so no patch takes that
+// template away and delete-and-create is the only way to the new shape; the launch holds the pod's
+// launch turn and has already waited the Sandbox's pod out, so no process of the issue is running
+// while its Sandbox is away. The delete is the foreground one every Sandbox delete is
+// (deleteSandbox), so garbage collection reaps the claim the old Sandbox owned — the issue's whole
+// workspace, which the next pod provisions afresh — and the role Secrets it owned with it, before
+// the Sandbox is gone. That is why this runs before provision and writeLauncherSecrets rather than
+// after: the provisioning Secret and every role Secret of this launch are written against the new
+// Sandbox and owned by it, where ones written first would be reaped with the old one.
+//
+// The one piece of the predecessor's metadata that travels is the pod it names as displaced
+// (displacedAnnotation): the five roles of the pod this launch just replaced are read as ended by
+// the daemon rather than dead only while their Sandbox names that pod (observe's names), and
+// migrate is true for every issue Sandbox of the previous release, so the cutover launch of every
+// running issue comes through here. Once the foreground delete's garbage collection is done and
+// the object is gone, no Sandbox of the name exists to name it until the create lands, and the
+// observer, which takes no launch turn, reads a sibling role's end in that gap as readily as after
+// it — a gap of a confirming read and a create when all goes well, and one a failed Create holds
+// open until the issue's next launch makes the Sandbox again. So the name is put in the runtime's
+// own keeping (stranded) before the delete is sent — the Sandbox carries it until it is gone, so no
+// instant is uncovered — and createSandbox sets it on the Sandbox it creates and drops it once the
+// API server holds that one. It is taken from s, not from this launch's suspension alone: a
+// launch that suspended the pod and failed before the delete left the name on the Sandbox, and the
+// next launch, finding the pod already gone, replaces that Sandbox without suspending anything.
+// A daemon that restarts inside the gap has neither, and reads those roles' ends as deaths.
+func (r *Runtime) replaceSupersededSandbox(ctx context.Context, l launch, s *sandbox) (*sandbox, error) {
+	r.log.Info("sandbox runtime: replacing the issue's sandbox of the disk shape before the pod-owned disk, reaping the volume claim it owns",
+		"sandbox", l.name, "uid", s.UID, "claim", IssueClaimName(l.spec.Claim), "issue", l.spec.Issue)
+	if named := s.Annotations[displacedAnnotation]; named != "" {
+		r.strand(l.name, named)
+	}
+	if err := r.deleteStoredSandbox(ctx, l.name); err != nil {
+		return nil, err
+	}
+	created, err := r.createSandbox(ctx, l)
+	if err != nil {
+		return nil, fmt.Errorf("create sandbox %s: %w", l.name, err)
+	}
+	return created, nil
+}
+
+// createSandbox creates l's Sandbox as sandboxManifest makes it, naming on it the pod held for its
+// name as displaced (stranded), and drops that record once the API server holds a Sandbox of the
+// name: from then the object answers, where a restarted daemon reads it too, and the record would
+// only outlive the gap it was kept for. A Create answered AlreadyExists drops it as well — a resend
+// of one the server applied, under the launch turn nothing else of this daemon creates the name —
+// since evaluate never reads the record while a Sandbox exists, and one kept past that would be set
+// on whatever Sandbox the name is next created as, after an issue's close and re-admission, naming
+// a pod that Sandbox never ran. Any other failure keeps it: the name may still hold no Sandbox, and
+// the roles the replacement ended are read as displaced until one exists. sandboxManifest carries
+// no annotations of its own, so this sets the one key rather than the manifest threading it.
+func (r *Runtime) createSandbox(ctx context.Context, l launch) (*sandbox, error) {
+	manifest := r.sandboxManifest(l)
+	held, _ := r.strandedPod(l.name)
+	if held != "" {
+		manifest.Annotations = map[string]string{displacedAnnotation: held}
+	}
+	object, err := encodeSandbox(manifest)
+	if err != nil {
+		return nil, err
+	}
+	created, err := r.sandboxClient().Create(ctx, object, metav1.CreateOptions{})
+	if held != "" && (err == nil || apierrors.IsAlreadyExists(err)) {
+		r.unstrand(l.name)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return decodeSandbox(created)
+}
+
+// strand keeps uid as the pod the Sandbox name names as displaced while that Sandbox is away
+// (stranded), moving the record's generation (strandedGen).
+func (r *Runtime) strand(name, uid string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stranded[name] = uid
+	r.strandedGen++
+}
+
+// strandedPod is the pod kept for the Sandbox name as displaced (stranded), "" when none is,
+// beside the record's generation as of that read (strandedGen).
+func (r *Runtime) strandedPod(name string) (string, uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stranded[name], r.strandedGen
+}
+
+// unstrand drops what is kept for the Sandbox name (stranded), moving the record's generation
+// (strandedGen).
+func (r *Runtime) unstrand(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.stranded, name)
+	r.strandedGen++
 }
 
 // awaitPodGone waits, bounded by the boot timeout, until no pod the Sandbox owns holds its name —
@@ -553,16 +692,20 @@ func (r *Runtime) awaitNewPod(ctx context.Context, s *sandbox, old map[types.UID
 		return true, nil
 	})
 	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		return nil, fmt.Errorf("%w; %s", err, r.waitedOut(s))
+		return nil, fmt.Errorf("%w; %s", err, r.waitedOut(ctx, s))
 	}
 	return found, err
 }
 
 // waitedOut is what the daemon's own stores say about a launch that ran out of time: the Sandbox's
 // Ready condition, where the controller reports why it made no pod, and the pod's phase where one
-// exists and the wait was for something else. A timeout that says only how long it waited sends an
-// operator to the cluster for a condition the daemon was already holding.
-func (r *Runtime) waitedOut(s *sandbox) string {
+// exists and the wait was for something else. A pod still Pending carries its events too, as an
+// unschedulable pod's verdict does (observe's evaluate): a pod whose disk the kubelet cannot
+// provision — one waiting behind a predecessor's claim the garbage collector has not reaped —
+// reports nothing but Pending, and the FailedBinding event is the whole of the reason. A timeout
+// that says only how long it waited sends an operator to the cluster for a condition the daemon
+// was already holding.
+func (r *Runtime) waitedOut(ctx context.Context, s *sandbox) string {
 	stored, err := r.storedSandbox(s.Name)
 	switch {
 	case err != nil:
@@ -574,10 +717,15 @@ func (r *Runtime) waitedOut(s *sandbox) string {
 	if ready := stored.condition(conditionReady); ready != nil {
 		detail += fmt.Sprintf("; Ready=%s %s: %s", ready.Status, ready.Reason, ready.Message)
 	}
-	if pod := r.storedPod(s.Name); ownedBy(pod, s.UID) {
-		return detail + fmt.Sprintf("; its pod %s is %s", pod.UID, phaseOf(pod))
+	pod := r.storedPod(s.Name)
+	if !ownedBy(pod, s.UID) {
+		return detail + "; it has no pod"
 	}
-	return detail + "; it has no pod"
+	detail += fmt.Sprintf("; its pod %s is %s", pod.UID, phaseOf(pod))
+	if pod.Status.Phase == corev1.PodPending {
+		detail += fmt.Sprintf("; events: %s", r.events(ctx, pod))
+	}
+	return detail
 }
 
 // writeLauncherSecrets makes, for each launcher role of the pod (l.roles), a role-private Secret
@@ -781,17 +929,22 @@ const displacedAnnotation = "legion.dev/displaced-pod"
 // or neither, so a refused suspension names no pod, and a merge patch sets the one annotation key
 // whatever other annotations the Sandbox carries, or none. It carries s's uid, which the API server
 // refuses to change on a live object, so a Sandbox deleted and recreated in between is never
-// written: the fence recordAddresses keeps.
-func (r *Runtime) suspendDisplacing(ctx context.Context, s *sandbox, uid types.UID) error {
+// written: the fence recordAddresses keeps. It returns the Sandbox as the patch left it, the one
+// copy that carries the name: a migrating launch reads it from there onto the Sandbox it creates
+// in its place (replaceSupersededSandbox).
+func (r *Runtime) suspendDisplacing(ctx context.Context, s *sandbox, uid types.UID) (*sandbox, error) {
 	body, err := json.Marshal(map[string]any{
 		"metadata": map[string]any{"uid": string(s.UID), "annotations": map[string]string{displacedAnnotation: string(uid)}},
 		"spec":     map[string]any{"operatingMode": modeSuspended},
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = r.sandboxClient().Patch(ctx, s.Name, types.MergePatchType, body, metav1.PatchOptions{})
-	return err
+	patched, err := r.sandboxClient().Patch(ctx, s.Name, types.MergePatchType, body, metav1.PatchOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return decodeSandbox(patched)
 }
 
 // patch applies ops to the Sandbox read as s, as one JSON patch whose first operation tests s's

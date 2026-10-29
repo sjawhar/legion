@@ -12,6 +12,16 @@ declare module "@oh-my-pi/pi-coding-agent" {
       readonly sessionManager: { getSessionId(): string };
       readonly slashCommands?: readonly { readonly name: string; readonly description: string }[];
       readonly promptTemplates?: readonly { readonly name: string; readonly description: string }[];
+      /** The current model; undefined when the session has none selected. */
+      readonly model?: { readonly provider: string; readonly id: string };
+      /** The configured thinking level `/effort` reports; undefined when the model's default
+       *  applies. */
+      configuredThinkingLevel?(): string | undefined;
+      /** Every model the session can switch to, in the host's order. */
+      getAvailableModels?(): readonly { readonly provider: string; readonly id: string }[];
+      /** The effort selectors `/effort` offers for the current model; empty when it has no
+       *  adjustable thinking. */
+      getAvailableEffortSelectors?(): readonly string[];
     } | null;
     readonly sessionFile: string | null;
   }

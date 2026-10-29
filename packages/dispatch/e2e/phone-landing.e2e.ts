@@ -126,7 +126,7 @@ test.beforeEach(async () => {
 // while one of them is still pending: a newest message known from the messages read before the
 // asks read answers otherwise lands the reader at the top of the page, the newest message under
 // the docked composer, and the asks answering later changes nothing that brings them back.
-test("on a phone, the Conversation opens with its newest message in view whichever read answers last", async ({
+test("on a phone, the Conversation opens with its newest message in view whichever read answers last @phone", async ({
   browser,
 }) => {
   test.setTimeout(240_000);
@@ -208,15 +208,14 @@ test("on a phone, the Conversation opens with its newest message in view whichev
 // INFRA-303's second path: a read that fails shows "Could not load the conversation." in the
 // list's place, and the first placement must not be spent on that text either. When a later
 // refetch brings the list without changing which conversation is newest, nothing else would
-// bring the reader to it. The refetch here is the event stream's, not TanStack Query's own
-// refetch on focus (its focusManager listens on `window`, and the `visibilitychange` this row
-// dispatches on `document` does not bubble there): `useEventStream` in `web/src/api/sse.ts`
-// listens for `visibilitychange` on `document`, `handleVisibilityChange` calls `forceReconnect`,
-// and the reopened stream's `onOpen` calls `refreshEverything()`, whose flush invalidates every
-// query, the errored asks read among them. The row depends on that path: if `visibilitychange`
-// stops reopening the stream, or the whole-cache refresh throttle (`WHOLE_CACHE_REFRESH_MS`)
-// stops letting a connection's first refresh through at once, this row stops seeing a refetch.
-test("on a phone, a Conversation whose read failed opens on its newest message once a refetch brings the list", async ({
+// bring the reader to it. The refetch here is TanStack Query's own refetch on focus: the
+// `visibilitychange` this row dispatches on `document` bubbles to `window`, where its focusManager
+// listens, and a read in error holds no data, so it is stale and is fetched again (`main.tsx` sets
+// `refetchOnWindowFocus`). The live socket's gap no longer brings it: a drop of the tab's socket
+// resumes the event feed, which Dispatch replays in full (`replay_complete` on `events_start`), so
+// the page refreshes nothing for that gap (`api/event-feed.ts`). The row depends on the focus
+// path: if a focus stops refetching a read in error, this row stops seeing a refetch.
+test("on a phone, a Conversation whose read failed opens on its newest message once a refetch brings the list @phone", async ({
   browser,
 }) => {
   const { issue, newest } = await seedConversation("Landing after a failed read");
@@ -250,7 +249,9 @@ test("on a phone, a Conversation whose read failed opens on its newest message o
     const answered = page.waitForResponse(
       (response) => asksRead(new URL(response.url())) && response.status() === 200
     );
-    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await page.evaluate(() =>
+      document.dispatchEvent(new Event("visibilitychange", { bubbles: true }))
+    );
     await answered;
     const newestCard = newestTurn(page, newest.id);
     await settle(newestCard, "after the refetch");
@@ -265,7 +266,7 @@ test("on a phone, a Conversation whose read failed opens on its newest message o
 // the newest conversation. Returning to a tab they had scrolled still restores that scroll;
 // `doc.e2e.ts` 'tab round-trips keep one document connection, the typed text, and the
 // Conversation scroll position' holds that.
-test("on a phone, a reader who leaves the Conversation while it loads lands on its newest message when they come back", async ({
+test("on a phone, a reader who leaves the Conversation while it loads lands on its newest message when they come back @phone", async ({
   browser,
 }) => {
   const { issue, newest } = await seedConversation("Leaving while it loads");

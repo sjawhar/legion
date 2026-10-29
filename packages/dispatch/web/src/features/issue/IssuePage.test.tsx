@@ -5,6 +5,8 @@ import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerIssuePatches } from "../../__tests__/send-answers";
 import { ApiError, api } from "../../api/client";
 import type {
   Agent,
@@ -100,6 +102,21 @@ function subscriber(sessionId: string, title: string, live = true): Subscriber {
     session_id: sessionId,
     title,
     topics: [],
+  };
+}
+
+function listedAgent(sessionId: string, title: string): Agent {
+  return {
+    capabilities: [],
+    dir: "/workspaces/legion",
+    host: "example-host-devbox",
+    last_activity: null,
+    last_seen: 1_700_000_000_000,
+    machine_id: "example-host-devbox",
+    open_asks: 0,
+    roles: [],
+    session_id: sessionId,
+    title,
   };
 }
 
@@ -214,10 +231,13 @@ async function openSubscribedAgents(count: number) {
   return screen.findByRole("region", { name: "Subscribed agents" });
 }
 
-async function expectCreator(label: string): Promise<void> {
+async function expectCreator(label: string): Promise<HTMLElement> {
   const rail = await screen.findByTestId("issue-metadata-rail");
-  const creator = await within(rail).findByText(label);
+  // `AgentName` draws the name; the span around it carries the whole label as its `title`.
+  const creator = await within(rail).findByTitle(label);
+  expect(creator.textContent).toBe(label);
   expect(creator.parentElement?.textContent).toBe(`Opened by:${label}`);
+  return creator;
 }
 
 test("IssuePage shows a session creator's live title and personal-token owner", async () => {
@@ -252,7 +272,13 @@ test("IssuePage shows a session creator's live title and personal-token owner", 
   const view = renderIssuePage();
 
   try {
-    await expectCreator("chief of staff (for sami)");
+    const creator = await expectCreator("chief of staff (for sami)");
+    expect(within(creator).getByRole("link", { name: "chief of staff" }).getAttribute("href")).toBe(
+      "/agents/creator-session/live"
+    );
+    expect(creator.querySelector("[data-agent-name]")?.getAttribute("data-agent-state")).toBe(
+      "running"
+    );
   } finally {
     view.unmount();
     restore();
@@ -264,7 +290,8 @@ test("IssuePage shows a human creator by login", async () => {
   const view = renderIssuePage();
 
   try {
-    await expectCreator("alice");
+    const creator = await expectCreator("alice");
+    expect(within(creator).queryByRole("link")).toBeNull();
   } finally {
     view.unmount();
     restore();
@@ -347,26 +374,39 @@ test("IssuePage omits creator metadata when an issue response omits it", async (
   }
 });
 
-test("IssuePage shows subscribed agents with a live indicator and their title", async () => {
+test("IssuePage shows subscribed agents with their title and their running state from the agent registry", async () => {
   const restore = stubIssuePage(
     issue,
     [],
     [
       subscriber("0123456789abcdef", "Planner (live)", true),
-      subscriber("fedcba9876543210", "Historical (offline)", false),
-    ]
+      // The subscribers endpoint's own `live` is a second snapshot of the listener; the chip
+      // shows the registry's state, as every agent on the page does.
+      subscriber("fedcba9876543210", "Historical (offline)", true),
+    ],
+    undefined,
+    [listedAgent("0123456789abcdef", "Planner (live)")]
   );
   const view = renderIssuePage();
 
   try {
     const subscribed = await openSubscribedAgents(2);
     expect(within(subscribed).getAllByRole("listitem")).toHaveLength(2);
-    expect(within(subscribed).getByText("Planner (live)").getAttribute("title")).toBe(
-      "0123456789abcdef"
+    const planner = within(subscribed).getByRole("link", { name: "Planner (live)" });
+    expect(planner.getAttribute("href")).toBe("/agents/0123456789abcdef/live");
+    expect(planner.closest("[title]")?.getAttribute("title")).toBe("0123456789abcdef");
+    expect(within(subscribed).getByRole("link", { name: "Historical (offline)" })).toBeDefined();
+    const states = () =>
+      [...subscribed.querySelectorAll("[data-agent-name]")].map((agent) => [
+        agent.getAttribute("data-agent-name"),
+        agent.getAttribute("data-agent-state"),
+      ]);
+    await waitFor(() =>
+      expect(states()).toEqual([
+        ["0123456789abcdef", "running"],
+        ["fedcba9876543210", "not-running"],
+      ])
     );
-    expect(within(subscribed).getByText("Historical (offline)")).toBeDefined();
-    expect(within(subscribed).getAllByTitle("Live")).toHaveLength(1);
-    expect(within(subscribed).getAllByTitle("Not live")).toHaveLength(1);
   } finally {
     view.unmount();
     restore();
@@ -409,7 +449,7 @@ test("IssuePage shortens a subscriber id when its title is blank", async () => {
   try {
     const subscribed = await openSubscribedAgents(1);
     const label = within(subscribed).getByText("session:01234567…");
-    expect(label.getAttribute("title")).toBe("0123456789abcdef");
+    expect(label.closest("[title]")?.getAttribute("title")).toBe("0123456789abcdef");
   } finally {
     view.unmount();
     restore();
@@ -468,7 +508,7 @@ test("IssuePage creates a label from the multi-select and saves the final draft 
     { ...labeledIssue, open_asks: 0 },
     { ...issue, key: "CORE-2", labels: ["frontend"], open_asks: 0 },
   ]);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({
+  const patchIssue = answerIssuePatches().mockResolvedValue({
     ...labeledIssue,
     labels: ["bug", "urgent"],
   });
@@ -486,7 +526,7 @@ test("IssuePage creates a label from the multi-select and saves the final draft 
     fireEvent.click(screen.getByRole("button", { name: "Edit labels" }));
 
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { labels: ["bug", "urgent"] })
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { labels: ["bug", "urgent"] }, keyedAttempt)
     );
     expect(patchIssue).toHaveBeenCalledTimes(1);
   } finally {
@@ -503,7 +543,7 @@ test("IssuePage does not save after a label is toggled off and back on", async (
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([
     { ...labeledIssue, open_asks: 0 },
   ]);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue(labeledIssue);
+  const patchIssue = answerIssuePatches().mockResolvedValue(labeledIssue);
   const view = renderIssuePage();
 
   try {
@@ -535,7 +575,7 @@ test("IssuePage returns focus to the label trigger when Escape closes an unchang
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([
     { ...labeledIssue, open_asks: 0 },
   ]);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue(labeledIssue);
+  const patchIssue = answerIssuePatches().mockResolvedValue(labeledIssue);
   const view = renderIssuePage();
 
   try {
@@ -626,24 +666,123 @@ test("IssuePage cancels an unsubscribe confirmation without calling the mutation
   }
 });
 
+const prTitleOnPullRequest = { check_suite_id: 10, event: "pull_request", name: "PR Title" };
+
 for (const fixture of [
   {
-    checkRuns: [{ conclusion: "success", status: "completed" }],
+    checkRuns: [{ check_suite: { id: 10 }, conclusion: "success", status: "completed" }],
     checks: "success",
+    name: "success checks",
+    workflowRuns: [prTitleOnPullRequest],
   },
   {
-    checkRuns: [{ conclusion: "failure", status: "completed" }],
+    checkRuns: [{ check_suite: { id: 10 }, conclusion: "failure", status: "completed" }],
     checks: "failure",
+    name: "failure checks",
+    workflowRuns: [prTitleOnPullRequest],
   },
   {
-    checkRuns: [{ conclusion: null, status: "in_progress" }],
+    checkRuns: [{ check_suite: { id: 10 }, conclusion: null, status: "in_progress" }],
     checks: "pending",
+    name: "pending checks",
+    workflowRuns: [prTitleOnPullRequest],
+  },
+  // A run a newer run of the same check, workflow and event replaced does not count, as GitHub's
+  // merge reads it.
+  {
+    checkRuns: [
+      { check_suite: { id: 10 }, conclusion: "cancelled", id: 1, status: "completed" },
+      { check_suite: { id: 11 }, conclusion: "success", id: 3, status: "completed" },
+      { check_suite: { id: 12 }, conclusion: "success", id: 2, name: "lint", status: "completed" },
+    ],
+    checks: "success",
+    name: "a cancelled check its newer run passed",
+    workflowRuns: [
+      prTitleOnPullRequest,
+      { ...prTitleOnPullRequest, check_suite_id: 11 },
+      { check_suite_id: 12, event: "pull_request", name: "CI" },
+    ],
+  },
+  // A failed run of one event still blocks beside a passing run of the same check on another.
+  {
+    checkRuns: [
+      { check_suite: { id: 10 }, conclusion: "failure", id: 1, status: "completed" },
+      { check_suite: { id: 11 }, conclusion: "success", id: 2, status: "completed" },
+    ],
+    checks: "failure",
+    name: "a check failed for one event and passed for another",
+    workflowRuns: [
+      prTitleOnPullRequest,
+      { ...prTitleOnPullRequest, check_suite_id: 11, event: "pull_request_review" },
+    ],
+  },
+  // GitHub leaves a run whose event it does not evaluate out of a pull request's checks (an inline
+  // review comment's run on sjawhar/legion#2234 and #2059): its failure or wait does not count.
+  {
+    checkRuns: [
+      { check_suite: { id: 10 }, conclusion: "success", id: 1, status: "completed" },
+      { check_suite: { id: 11 }, conclusion: "failure", id: 2, status: "completed" },
+      { check_suite: { id: 12 }, conclusion: null, id: 3, status: "queued" },
+    ],
+    checks: "success",
+    name: "a failed and a waiting check of an event GitHub does not evaluate",
+    workflowRuns: [
+      prTitleOnPullRequest,
+      { ...prTitleOnPullRequest, check_suite_id: 11, event: "pull_request_review_comment" },
+      { ...prTitleOnPullRequest, check_suite_id: 12, event: "workflow_dispatch" },
+    ],
+  },
+  // A check run no workflow run made (an external App's) is its name and App: the App's newer run
+  // replaces its older one.
+  {
+    checkRuns: [
+      {
+        app: { id: 50 },
+        check_suite: { id: 20 },
+        conclusion: "failure",
+        id: 1,
+        status: "completed",
+      },
+      {
+        app: { id: 50 },
+        check_suite: { id: 21 },
+        conclusion: "success",
+        id: 2,
+        status: "completed",
+      },
+    ],
+    checks: "success",
+    name: "an external App's failed check its newer run passed",
+    workflowRuns: [prTitleOnPullRequest],
+  },
+  // The same check name from two Apps is two checks: one App's failure still blocks.
+  {
+    checkRuns: [
+      {
+        app: { id: 50 },
+        check_suite: { id: 20 },
+        conclusion: "failure",
+        id: 1,
+        status: "completed",
+      },
+      {
+        app: { id: 51 },
+        check_suite: { id: 21 },
+        conclusion: "success",
+        id: 2,
+        status: "completed",
+      },
+    ],
+    checks: "failure",
+    name: "one check name failed for one external App and passed for another",
+    workflowRuns: [prTitleOnPullRequest],
   },
 ]) {
-  test(`IssuePage renders a merged pull request with ${fixture.checks} checks`, async () => {
+  test(`IssuePage renders a merged pull request with ${fixture.name}`, async () => {
     const restore = stubIssuePage(
       issueWithExternalLink("https://github.com/owner/repository/pull/7")
     );
+    const checkRuns = fixture.checkRuns.map((run) => ({ id: 1, name: "pr-title", ...run }));
     const githubRest = spyOn(api, "githubRest").mockImplementation(async (path) => {
       if (path === "repos/owner/repository/pulls/7") {
         return new Response(
@@ -656,8 +795,13 @@ for (const fixture of [
           { headers: { "Content-Type": "application/json" } }
         );
       }
-      if (path === "repos/owner/repository/commits/abcdef/check-runs") {
-        return new Response(JSON.stringify({ check_runs: fixture.checkRuns }), {
+      if (path === "repos/owner/repository/commits/abcdef/check-runs?per_page=100&page=1") {
+        return new Response(JSON.stringify({ check_runs: checkRuns }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (path === "repos/owner/repository/actions/runs?head_sha=abcdef&per_page=100&page=1") {
+        return new Response(JSON.stringify({ workflow_runs: fixture.workflowRuns }), {
           headers: { "Content-Type": "application/json" },
         });
       }
@@ -670,7 +814,7 @@ for (const fixture of [
     try {
       await screen.findByText("Merge native Dispatch");
       expect(screen.getByText("merged")).toBeDefined();
-      expect(screen.getByText(`checks: ${fixture.checks}`)).toBeDefined();
+      expect(await screen.findByText(`checks: ${fixture.checks}`)).toBeDefined();
     } finally {
       view.unmount();
       githubRest.mockRestore();
@@ -758,7 +902,16 @@ test("IssuePage opens the Spec tab and leaves open asks out of the main column",
       ...openIssueAsk,
       priority: issue.priority,
       snoozed_until: null,
-      thread: { answers: [], edits: [], followers: [], replies: [] },
+      thread: {
+        answers: [],
+        claimant: null,
+        edits: [],
+        followers: [],
+        replies: [],
+        route: null,
+        route_status: null,
+        route_holder: null,
+      },
     },
   ]);
   const view = renderIssuePage("/issues/CORE-1");
@@ -1576,6 +1729,37 @@ test("IssuePage fills and marks the issue pin when it is pinned", async () => {
     restore();
   }
 });
+
+test("IssuePage's pin refreshes the sidebar's pinned list once the pin is saved", async () => {
+  const restore = stubIssuePage(issue);
+  const saved = { dismissed: [], last_read_seq: 0, pinned: true, seq: 1 };
+  const putIssueState = spyOn(api, "putIssueState").mockResolvedValue(saved);
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  // The sidebar's read of the pinned issues, as it is cached beside the page.
+  queryClient.setQueryData(["issues", "pinned"], []);
+  const view = renderIssuePage("/issues/CORE-1/conversation", undefined, undefined, queryClient);
+
+  try {
+    await within(view.container).findByRole("heading", { level: 1, name: issue.title });
+    expect(queryClient.getQueryState(["issues", "pinned"])?.isInvalidated).toBe(false);
+    fireEvent.click(within(view.container).getByRole("button", { name: "Pin issue" }));
+    await waitFor(() =>
+      expect(queryClient.getQueryState(["issues", "pinned"])?.isInvalidated).toBe(true)
+    );
+    // The pin is a keyed write of the page's store, so its bounds name the key it goes under.
+    expect(putIssueState).toHaveBeenCalledWith(
+      "CORE-1",
+      { pinned: true },
+      expect.objectContaining({ key: expect.any(String) })
+    );
+  } finally {
+    view.unmount();
+    putIssueState.mockRestore();
+    restore();
+  }
+});
 test("IssuePage keeps an unrequested draft approval passive", async () => {
   const restore = stubIssuePage({
     ...issue,
@@ -1639,7 +1823,7 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
   });
   const closeSave = Promise.withResolvers<IssueDetails>();
   const reopenSave = Promise.withResolvers<IssueDetails>();
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(async (_key, input) => {
+  const patchIssue = answerIssuePatches().mockImplementation(async (_key, input) => {
     if (input.status === "done") return closeSave.promise;
     if (input.status === "backlog") return reopenSave.promise;
     throw new Error(`Unexpected issue update: ${JSON.stringify(input)}`);
@@ -1651,7 +1835,9 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
     expect([...openStatus.options].map((option) => option.value)).not.toContain("done");
 
     fireEvent.click(screen.getByRole("button", { name: "Close issue" }));
-    await waitFor(() => expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "done" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "done" }, keyedAttempt)
+    );
     // While the write is in flight the control is disabled: no second close can be queued.
     expect(
       (screen.getByRole("button", { name: "Close issue" }) as HTMLButtonElement).disabled
@@ -1668,7 +1854,7 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Reopen issue" }));
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" })
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" }, keyedAttempt)
     );
     expect(
       (screen.getByRole("button", { name: "Reopen issue" }) as HTMLButtonElement).disabled
@@ -1691,7 +1877,7 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
 
 test("IssuePage lets a human move a Todo issue to In progress", async () => {
   const restore = stubIssuePage(issue);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({
+  const patchIssue = answerIssuePatches().mockResolvedValue({
     ...issue,
     status: "in_progress",
   });
@@ -1715,7 +1901,7 @@ test("IssuePage lets a human move a Todo issue to In progress", async () => {
 
     fireEvent.change(status, { target: { value: "in_progress" } });
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "in_progress" })
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "in_progress" }, keyedAttempt)
     );
   } finally {
     view.unmount();

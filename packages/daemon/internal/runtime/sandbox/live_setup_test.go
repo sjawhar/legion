@@ -15,7 +15,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/stream"
@@ -32,7 +31,7 @@ func (r *liveRig) checkSetupRan() error {
 }
 
 // checkSetupRecord proves c's current setup ran before its current stub agent. awaitRunning calls
-// it after every successful launch or resume, so the proof covers every role container the rig
+// it after every successful launch or resume, so the proof covers every role the rig
 // starts, including each separately provisioned issue pod, instead of only the root architect.
 func (r *liveRig) checkSetupRecord(c *liveClaim) error {
 	out, err := r.exec(c, "cat", "--", c.marker)
@@ -100,15 +99,15 @@ func (r *liveRig) checkSetupRecord(c *liveClaim) error {
 	if err != nil {
 		return err
 	}
-	wantUID, workingDir, err := roleContainerSettings(pod, c.role)
+	wantUID, workingDir, err := rolesContainerSettings(pod)
 	if err != nil {
 		return err
 	}
 	if setup.uid != wantUID || uid != wantUID {
-		return fmt.Errorf("setup uid %q and agent uid %q, want pod %s RunAsUser %q", setup.uid, uid, c.role, wantUID)
+		return fmt.Errorf("setup uid %q and agent uid %q, want pod %s's RunAsUser %q", setup.uid, uid, pod.Name, wantUID)
 	}
 	if workingDir != cwd {
-		return fmt.Errorf("the %s container WorkingDir is %q, want the agent cwd %q", c.role, workingDir, cwd)
+		return fmt.Errorf("the %s container's WorkingDir is %q, want the agent cwd %q", runtime.IssuePodContainer, workingDir, cwd)
 	}
 	note("operator", "%s setup marker before its agent marker: cwd %s; uid %s; git ls-remote from the fresh %s succeeded with the role's helper and was refused without it; setup parent pid %s became the agent", c.name, setup.cwd, setup.uid, setup.gitFrom, setup.ppid)
 	return nil
@@ -196,15 +195,16 @@ func (r *liveRig) checkSetupNegative() error {
 	}
 	note("runtime", "failing setup's shim registered generation %d, then %s — %s", reg.gen, last.Kind, oneLine(last.Detail))
 
-	line := "legion setup: runtime.kubernetes.setup exited 7; not starting Oh My Pi"
-	log, err := r.kubectl("logs", name, "-c", string(c.role))
+	// The roles container's log carries every role's lines, each prefixed with its role.
+	line := string(c.role) + ": legion setup: runtime.kubernetes.setup exited 7; not starting Oh My Pi"
+	log, err := r.kubectl("logs", name, "-c", runtime.IssuePodContainer)
 	if err != nil {
 		return err
 	}
 	if !strings.Contains(log, line) {
-		return fmt.Errorf("%s container log lacks %q: %s", c.role, line, strings.TrimSpace(log))
+		return fmt.Errorf("the %s container's log lacks %q: %s", runtime.IssuePodContainer, line, strings.TrimSpace(log))
 	}
-	note("operator", "logs %s -c %s: %s", name, c.role, line)
+	note("operator", "logs %s -c %s: %s", name, runtime.IssuePodContainer, line)
 
 	lines, err := r.markerLines(c)
 	if err != nil {
@@ -218,28 +218,26 @@ func (r *liveRig) checkSetupNegative() error {
 	if _, err := r.kubectl("delete", "sandbox", name, "--wait=true", "--timeout=5m"); err != nil {
 		return err
 	}
-	if _, err := r.kubectl("delete", "pvc", IssueClaimName(c.token), "--ignore-not-found", "--wait=true", "--timeout=5m"); err != nil {
+	if err := r.awaitDiskGone(c); err != nil {
 		return err
-	}
-	if pvcs, err := r.issuePVCs(c.issue); err != nil || len(pvcs) != 0 {
-		return fmt.Errorf("setup-negative PVCs after Sandbox deletion: %v (%v)", pvcs, err)
 	}
 	cleaned = true
 	c.loc, c.last, c.state = nil, nil, stateReleased
-	note("operator", "deleted throwaway Sandbox %s and its PVC", name)
+	note("operator", "deleted throwaway Sandbox %s; its pod's own disk %s went with its pod", name, issueDiskName(c.token))
 	return nil
 }
 
-func roleContainerSettings(pod *corev1.Pod, role claim.Role) (uid, workingDir string, err error) {
+// rolesContainerSettings are the user and working directory of an issue pod's one container, which
+// every role's agent runs as and starts in.
+func rolesContainerSettings(pod *corev1.Pod) (uid, workingDir string, err error) {
 	var container *corev1.Container
 	for i := range pod.Spec.Containers {
-		if pod.Spec.Containers[i].Name == string(role) {
+		if pod.Spec.Containers[i].Name == runtime.IssuePodContainer {
 			container = &pod.Spec.Containers[i]
-			break
 		}
 	}
 	if container == nil {
-		return "", "", fmt.Errorf("pod %s has no %s container", pod.Name, role)
+		return "", "", fmt.Errorf("pod %s has no %s container", pod.Name, runtime.IssuePodContainer)
 	}
 	var user *int64
 	if pod.Spec.SecurityContext != nil {
@@ -249,7 +247,7 @@ func roleContainerSettings(pod *corev1.Pod, role claim.Role) (uid, workingDir st
 		user = container.SecurityContext.RunAsUser
 	}
 	if user == nil {
-		return "", "", fmt.Errorf("pod %s's %s container has no RunAsUser", pod.Name, role)
+		return "", "", fmt.Errorf("pod %s's %s container has no RunAsUser", pod.Name, runtime.IssuePodContainer)
 	}
 	return strconv.FormatInt(*user, 10), container.WorkingDir, nil
 }

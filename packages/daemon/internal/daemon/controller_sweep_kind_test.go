@@ -70,6 +70,8 @@ runtime:
     storage_class: standard
     kubeconfig: %[6]s
     context: %[7]s
+    session_store: postgres
+    session_dsn_secret: SESSION_DSN
 `, controllerSweepKindProject, dsn, filepath.Join(dir, "state"), streamHost, image, kubeconfig, kubeContext)
 	path := filepath.Join(dir, "legion.yaml")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {

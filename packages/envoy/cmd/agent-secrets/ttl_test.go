@@ -158,7 +158,8 @@ func TestTTLReachesTheSignedRequestObject(t *testing.T) {
 			if exit != 0 || len(revoked) != 0 || len(cancelled) != 0 {
 				t.Fatalf("exit %d, revoked %v, cancelled %v (stdout %q, stderr %q); want exit 0 ending nothing", exit, revoked, cancelled, stdout, stderr)
 			}
-			want := "request_id: req-ttl_granted\nstate: granted\n"
+			// This broker serves no settings, so the source names the broker alone (source.go).
+			want := "request_id: req-ttl_granted\nstate: granted\nsource: " + brokerSource(b.srv.URL).String() + "\n"
 			if tc.args[0] != "request" {
 				want = "ran value-of-TTL_GRANTED\n"
 			}

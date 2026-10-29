@@ -31,7 +31,7 @@ transcript_to "$evidence/transcript.log"
 . "$root/scripts/e2e/lib/kind-sandbox.sh"
 
 # The store's image: the pinned Postgres the repository's CI tests against.
-pg_image=mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+pg_image=mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
 
 cluster=legion-controller-sweep-$$
 work=$(mktemp -d "/tmp/legion-e2e-controller-sweep.$$.XXXXXXXX")
@@ -48,7 +48,7 @@ fail() { echo "FAIL $check: $*" >&2; exit 1; }
 
 cleanup() {
   local status=$?
-  docker rm -f "$driver" "$pg" >/dev/null 2>&1 || true
+  docker rm -f -v "$driver" "$pg" >/dev/null 2>&1 || true
   kind_sandbox_teardown "$status" "$evidence"
   rm -rf "$work"
   if [ "$status" -eq 0 ]; then
@@ -65,7 +65,7 @@ trap cleanup EXIT
 # network's gateway. It reads the cluster through kind's internal kubeconfig, whose server is the
 # node's address on that network, and the store by the Postgres container's name there.
 drive() {
-  docker run --rm --name "$driver" --network kind --user "$(id -u):$(id -g)" \
+  docker run --rm --name "$driver" --cpus 2 --memory 2g --network kind --user "$(id -u):$(id -g)" \
     -v "$work:$work" -e HOME=/tmp \
     -e LEGION_E2E_KUBECONFIG="$work/kubeconfig-internal" -e LEGION_E2E_KUBE_CONTEXT="$kind_context" \
     -e LEGION_E2E_IMAGE="$image" -e LEGION_E2E_WORK="$work" -e LEGION_E2E_EXPECT="$1" \
@@ -126,7 +126,7 @@ kind_sandbox_internal_kubeconfig "$work/kubeconfig-internal"
 pass
 
 begin store
-docker run -d --name "$pg" --network kind --tmpfs /var/lib/postgresql/data -e POSTGRES_PASSWORD=p "$pg_image" >/dev/null
+docker run -d --name "$pg" --cpus 2 --memory 2g --network kind --tmpfs /var/lib/postgresql -e POSTGRES_PASSWORD=p "$pg_image" >/dev/null
 for _ in $(seq 1 60); do
   docker exec "$pg" pg_isready -h 127.0.0.1 -p 5432 -U postgres >/dev/null 2>&1 && break
   sleep 1

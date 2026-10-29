@@ -2,14 +2,15 @@
 # Tests for `check-plugin-names.sh`: a clean tree passes; a line or a path naming the pre-split
 # plugin @sjawhar/pi-legion-envoy fails, naming the file and line; a file git has not been told
 # about counts; each class of the allowlist passes through one representative, and a path that
-# merely begins like an allowlisted directory does not; and the real repository passes.
+# merely begins like an allowlisted directory, or a changelog fragment of a package whose
+# changelog is not allowlisted, does not; and the real repository passes.
 #
 # Each case builds a miniature git repository under a temporary directory and symlinks the real
 # script into it, so the script under test is the file CI runs: it resolves its root from its own
 # path, which the symlink puts at the fixture root.
 #
 # Run from anywhere: .github/scripts/check-plugin-names.test.sh
-# CI runs it in the Tests workflow (pr-and-main.yaml, job test).
+# CI runs it in ci.yaml's test job.
 set -euo pipefail
 shopt -s inherit_errexit
 
@@ -129,9 +130,13 @@ representatives=(
   docs/solutions/legion/a-record.md
   docs/superpowers/specs/a-spec.md
   packages/pi-envoy/CHANGELOG.md
+  packages/pi-envoy/.changes/unreleased/INFRA-1-rename.yaml
   packages/pi-legion/CHANGELOG.md
+  packages/pi-legion/.changes/unreleased/INFRA-1-split.yaml
   packages/claude-envoy/CHANGELOG.md
+  packages/claude-envoy/.changes/unreleased/INFRA-1-note.yaml
   packages/envoy/CHANGELOG.md
+  packages/envoy/.changes/unreleased/INFRA-1-note.yaml
   packages/contracts/src/dispatch-api.ts
   packages/contracts/AGENTS.md
   packages/envoy/internal/dispatch/model/model.go
@@ -166,6 +171,15 @@ git -C "$root" add docs
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names it" "$(contains "$out" 'docs/plans-archive/old.md:1:')"
+
+echo "case: a changelog fragment of a package whose changelog is not allowlisted is not allowed"
+root=$(fixture fragment-not-allowed)
+mkdir -p "$root/packages/contracts/.changes/unreleased"
+printf 'body: %s\n' "$old_package" > "$root/packages/contracts/.changes/unreleased/x.yaml"
+git -C "$root" add packages
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names it" "$(contains "$out" 'packages/contracts/.changes/unreleased/x.yaml:1:')"
 
 echo "case: an allowlisted file beside a hit does not hide the hit"
 root=$(fixture mixed)

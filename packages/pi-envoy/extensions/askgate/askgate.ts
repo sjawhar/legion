@@ -17,10 +17,8 @@
 // model only.
 import * as fs from "node:fs";
 import * as os from "node:os";
-import { activeDispatchSettings } from "@legion/envoy-client/dispatch-config";
-import { dispatchServerUrls } from "@legion/envoy-client/dispatch-execute";
-import { DispatchClient } from "@legion/envoy-client/dispatch-http";
-import { sessionDispatchSettings } from "@legion/envoy-client/session-settings";
+import { selfOwner, setRecordMode } from "@legion/envoy-client/askgate-marker";
+import { sessionDirectory, sessionStateRoot } from "@legion/envoy-client/dispatch-session-state";
 import type { PiApi, PiEventContract } from "@legion/pi-shared/pi-types";
 import type { ApiKeyResolver, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import type { ModelLookupRegistry } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -42,20 +40,12 @@ import {
   type ToolCallResult,
   type Usage,
 } from "./askgate-core";
-import type { DispatchSession } from "./rules-check";
 
 /** What the entry hands the gate from its own extension: where the switch lives, and where notices go. */
 export interface AskGateHost {
-  /**
-   * The session's envoy.json, found and read once by the extension that loads the gate: its path is
-   * named in the notice for an OMP_ASKGATE the gate ignores, and its Dispatch section is what the
-   * gate's own reads of a document go through.
-   */
-  readonly configFile: { readonly path: string; readonly error: null };
-  /** Where the gate's bind-time warning goes: the host shows it again at each session start. */
+  /** The session's envoy.json, named in the notice for an OMP_ASKGATE the gate ignores. */
+  readonly configFile: string;
   readonly logger: { warn(message: string): void };
-  /** The host's plain log, for a warning one session's gated calls raise while it runs. */
-  readonly runtimeLogger: { warn(message: string): void };
 }
 
 // The core passes the host's objects through untyped: ctx is the ExtensionContext, whose
@@ -101,11 +91,7 @@ export function registerAskGate(pi: PiApi, host: AskGateHost): Promise<void> {
   const gate: Promise<ToolCallHandler> = loading.then(
     (handler) => handler,
     (error: unknown) => {
-      const refuse = loadFailureGate(
-        error,
-        { env: process.env, configFile: host.configFile.path },
-        pi
-      );
+      const refuse = loadFailureGate(error, { env: process.env, configFile: host.configFile }, pi);
       return async (event, ctx) => refuse(event, ctx);
     }
   );
@@ -221,7 +207,11 @@ async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandle
               sessionId,
               reasoning: GATE_EFFORT,
               cacheRetention: "none",
-              maxTokens: 1200,
+              // Adaptive thinking spends this budget too: a revise that rewrote a 1,450-character
+              // question used 1,106 output tokens, thinking included. An answer cut off holds no
+              // verdict and the write posts unreviewed, so this leaves room for a full
+              // 2,000-character rewrite (ASK_QUESTION_MAX).
+              maxTokens: 4096,
               temperature: 0,
               signal,
               onAttempt,
@@ -248,23 +238,6 @@ async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandle
       return { text: "", error: error instanceof Error ? error.message : String(error), usage };
     }
   };
-  /**
-   * The session's Dispatch as the directory the gated command runs in configures it (a checkout's
-   * own `.envoy/envoy.json` names its own server), with the gated call's stop as the signal of
-   * every request, so a stopped run ends the read. `timedDispatchClient` in envoy.ts builds the
-   * session's own client the same way, with a timeout in place of the stop.
-   */
-  const dispatchClient = (directory: string, signal: AbortSignal): DispatchSession | undefined => {
-    const config = activeDispatchSettings(
-      sessionDispatchSettings(host.configFile, process.env, { cwd: directory }).dispatch
-    );
-    return config === null
-      ? undefined
-      : {
-          client: new DispatchClient(config.url, config.token, fetch, signal),
-          serverUrls: dispatchServerUrls(config),
-        };
-  };
 
   // The core binds to a `pi` that keeps its tool_call handler, which the one registered above
   // runs, and passes every other event, and appendEntry, to the real `pi`. The core names its
@@ -277,14 +250,15 @@ async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandle
     },
     appendEntry: (customType, data) => pi.appendEntry(customType, data),
   };
+  // This process as the owner of each session's record (`selfOwner`): its marker store, and the
+  // owner file setRecordMode rewrites with the current session's mode.
+  const self = selfOwner(sessionStateRoot(process.env));
   createAskGate({
     env: process.env,
     home: os.homedir(),
     now: Date.now,
     logger: host.logger,
-    runtimeLogger: host.runtimeLogger,
-    configFile: host.configFile.path,
-    dispatchClient,
+    configFile: host.configFile,
     // The dump holds the primary system prompt and transcript: owner-only, like the session files.
     appendFile: appendDump,
     complete,
@@ -297,6 +271,16 @@ async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandle
         : EXTENSION_HANDLER_TIMEOUT_MS;
     },
     dryRun: spawnDryRun,
+    // The store envoy.ts names in the session's record: the CLI state root's, for this process.
+    markerStore: self.store,
+    // Records the check mode into the record of the session this process is bound to now, which
+    // envoy.ts named in DISPATCH_SESSION_ID. Keyed to the session, so a switch never changes
+    // another session's mode; a process with no bound session (none to check) records nothing.
+    recordCheckMode: (mode) => {
+      const id = process.env.DISPATCH_SESSION_ID;
+      if (id === undefined || id === "") return;
+      setRecordMode(sessionDirectory(process.env, id), self, mode);
+    },
     contextMessages: (ctx) => {
       const { sessionManager } = ctx as unknown as Ctx;
       return buildSessionContext([...sessionManager.getEntries()], sessionManager.getLeafId())

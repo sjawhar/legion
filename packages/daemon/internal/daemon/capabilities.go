@@ -20,12 +20,12 @@ import (
 )
 
 // Deployment is the deployment's capabilities as the configuration alone states them
-// (capabilities.Deployment): the decisions, the runtime, whether a broker is configured, the roles
-// whose pods reserve no CPU and memory (config.RoleResources.Reserved) and the roles that request
-// less cpu or memory than their limit (config.RoleResources.Burstable) — every workflow role, and
-// the controller's when the daemon launches it. What boot learns (the broker login, the probe,
-// model fallback) is the supervision's to add (supervision.deployment); `legion start
-// --check-config` reports from this alone.
+// (capabilities.Deployment): the decisions, the runtime, whether a broker is configured, the pods
+// that reserve no CPU and memory (config.Reservation.Reserved) and the pods that request less cpu
+// or memory than their limit (config.Reservation.Burstable) — the issue pod, and the controller's
+// pod when the daemon launches it. What boot learns (the broker login, the probe, model fallback)
+// is the supervision's to add (supervision.deployment); `legion start --check-config` reports from
+// this alone.
 func Deployment(cfg config.Config) capabilities.Deployment {
 	d := capabilities.Deployment{Decided: cfg.Capabilities.Decided, Runtime: cfg.Runtime.Name}
 	k := cfg.Runtime.Kubernetes
@@ -33,17 +33,17 @@ func Deployment(cfg config.Config) capabilities.Deployment {
 		return d
 	}
 	d.AgentSecrets = k.AgentSecrets != nil
-	roles := claim.Roles
-	if cfg.ControllerLaunch == config.ControllerLaunchDaemon {
-		roles = append(slices.Clone(roles), claim.RoleController)
-	}
-	for _, role := range roles {
-		switch reservation := k.Resources[role]; {
+	measure := func(pod capabilities.Pod, reservation config.Reservation) {
+		switch {
 		case !reservation.Reserved():
-			d.RolesWithoutResources = append(d.RolesWithoutResources, role)
+			d.UnreservedPods = append(d.UnreservedPods, pod)
 		case reservation.Burstable():
-			d.BurstableRoles = append(d.BurstableRoles, role)
+			d.BurstablePods = append(d.BurstablePods, pod)
 		}
+	}
+	measure(capabilities.PodIssue, k.Resources.Issue)
+	if cfg.ControllerLaunch == config.ControllerLaunchDaemon {
+		measure(capabilities.PodController, k.Resources.Controller)
 	}
 	return d
 }

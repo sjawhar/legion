@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
@@ -10,6 +10,7 @@ import { ArtifactBlobView, ArtifactHeader } from "../artifacts/ArtifactHeader";
 import { ArtifactQueryStates } from "../artifacts/ArtifactQueryStates";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 import { SubscribedAgents } from "../issue/SubscribedAgents";
+import { useAgentText } from "../refs/AgentName";
 import { ReferencedBy } from "../refs/ReferencedBy";
 import {
   buildDispatchReference,
@@ -19,6 +20,7 @@ import {
 } from "../refs/routes";
 import { firstHighlightTerm } from "../search/search-model";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { useProjectArtifact } from "./useProjectArtifact";
 
 export function DocumentPage(): ReactNode {
@@ -46,12 +48,15 @@ export function DocumentPage(): ReactNode {
       return api.getArtifactSubscribers(artifact.data.id);
     },
   });
-  const unsubscribe = useMutation({
-    mutationFn: (sessionId: string) => {
+  const agentText = useAgentText();
+  const unsubscribe = useKeyedWrite({
+    label: (sessionId: string) =>
+      `${agentText.sessionText(sessionId, subscribers.data?.find((row) => row.session_id === sessionId)?.title)} unsubscribed from this document`,
+    write: (sessionId: string, bounds) => {
       if (artifact.data === undefined) {
         throw new Error("Document unsubscribe requires an artifact.");
       }
-      return api.unsubscribeArtifactSession(artifact.data.id, sessionId);
+      return api.unsubscribeArtifactSession(artifact.data.id, sessionId, bounds);
     },
     onSuccess: () => {
       if (artifact.data !== undefined) {

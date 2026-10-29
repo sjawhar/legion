@@ -53,7 +53,7 @@ const died = (t: number, incarnation: string, c = claim): Line => ({
   claim: c,
   incarnation,
   observed: "gone",
-  detail: "role container implementer terminated (Completed, exit code 0)",
+  detail: `pod pod-a (uid uid-a) role implementer reports generation ${incarnation.split("/")[1]} exited (code -1, signal killed)`,
 });
 const inTurn = (t: number): Line => ({
   time: at(t),

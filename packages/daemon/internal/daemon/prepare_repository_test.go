@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -35,12 +36,12 @@ func TestARecordedIssuesEventIsPreparedFromItsRecord(t *testing.T) {
 
 	reopen := intake.DispatchIssue{Key: "LEGION-301", Seq: 2, Status: "todo", HandedOver: true, ResolvedRepo: "zeta/tools"}
 	got, err := w.prepareRepository(ctx, reopen)
-	if err != nil || got != reopen {
+	if err != nil || !reflect.DeepEqual(got, reopen) {
 		t.Fatalf("prepareRepository of a reopen resolving elsewhere = %#v, %v; want the event as it is, applied", got, err)
 	}
 	retained := intake.DispatchIssue{Key: "LEGION-301", Seq: 3, Status: "todo", HandedOver: true, ResolvedRepoMissing: true}
 	got, err = w.prepareRepository(ctx, retained)
-	if want := (intake.DispatchIssue{Key: "LEGION-301", Seq: 3, Status: "todo", HandedOver: true, ResolvedRepo: "acme/widgets"}); err != nil || got != want {
+	if want := (intake.DispatchIssue{Key: "LEGION-301", Seq: 3, Status: "todo", HandedOver: true, ResolvedRepo: "acme/widgets"}); err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("prepareRepository of a retained event = %#v, %v; want %#v", got, err, want)
 	}
 	if reads := client.readCount(); reads != 0 {

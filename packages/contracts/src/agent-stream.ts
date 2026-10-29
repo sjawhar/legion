@@ -140,9 +140,55 @@ export function isTypableCommandName(name: string): boolean {
 }
 
 /**
- * One frame. `seq` is the session's own monotonic counter: frames for one message arrive in any
- * order the host's concurrent handlers produce them, so a viewer applies a frame only when its
- * `seq` beats the one it already holds for that id.
+ * The model and thinking level the session runs now, as its own `/model` and `/effort` report them
+ * (INFRA-195): the whole state each time it changes, kept in every replay just before the
+ * `commands` frame. A person switches either by sending `/model <provider/id>` or `/effort <level>`,
+ * which the session runs as typed input; this frame only shows the result.
+ */
+export interface AgentStreamSettingsReported {
+  readonly v: typeof AGENT_STREAM_PROTOCOL;
+  readonly kind: "settings";
+  readonly seq: number;
+  readonly reported: true;
+  /** The current model as `provider/id`, exactly as the host names it; absent when the session has
+   *  no model selected. */
+  readonly model?: string;
+  /** Every model the session lists as available to it, each `provider/id`, in the host's
+   *  `getAvailableModels()` order. Never cut and never truncated: a pick sends the exact id. */
+  readonly models: readonly string[];
+  /**
+   * Null when the current model has no adjustable thinking (the host offers no effort selector).
+   * `level` is the configured level `/effort` reports, null when the model's default applies;
+   * `levels` are the selectors `/effort` offers for the current model, in the host's order.
+   */
+  readonly thinking: {
+    readonly level: string | null;
+    readonly levels: readonly string[];
+  } | null;
+}
+
+/**
+ * A session whose plugin can report its settings but cannot read them from its host: the host has
+ * no `AgentRegistry` export, lists no live session under this id, or lacks one of the getters.
+ * A session that sends no `settings` frame at all runs a plugin older than the frame.
+ */
+export interface AgentStreamSettingsUnreported {
+  readonly v: typeof AGENT_STREAM_PROTOCOL;
+  readonly kind: "settings";
+  readonly seq: number;
+  readonly reported: false;
+}
+
+export type AgentStreamSettings = AgentStreamSettingsReported | AgentStreamSettingsUnreported;
+
+/**
+ * One frame. `seq` is the session's own monotonic counter, monotonic across the session's
+ * processes too: a session relaunched with `--resume` numbers its frames above every frame the
+ * earlier process sent, so a page held open across the relaunch keeps applying them. The publisher
+ * seeds it from its clock (milliseconds × 1,000), so that holds while a process averages under
+ * 1,000 frames a millisecond and the clock does not run back across a relaunch. Frames for one
+ * message arrive in any order the host's concurrent handlers produce them, so a viewer applies a
+ * frame only when its `seq` beats the one it already holds for that id.
  */
 export type AgentStreamFrame =
   | {
@@ -157,6 +203,8 @@ export type AgentStreamFrame =
       readonly seq: number;
       readonly result: AgentStreamToolResult;
     }
+  /** The session's model and thinking level; see `AgentStreamSettings`. */
+  | AgentStreamSettings
   /**
    * The slash commands the session takes from Dispatch, the whole list each time it changes, and
    * the last frame of a replay. A host without `sendUserInput` sends none, and a viewer then offers

@@ -520,7 +520,9 @@ func TestGCPSecretCreateShowSetRetagDeleteRestoreLifecycle(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("create: exit %d, stderr %q", code, stderr)
 	}
-	if !strings.Contains(stdout, "created SCRATCH_TEST (owner=ada@example.com, tier=agent)") {
+	// Each line names the store it wrote to, so an answer of this CLI's is never read as
+	// another secrets CLI's (source.go).
+	if !strings.Contains(stdout, "created SCRATCH_TEST in GCP Secret Manager project ") || !strings.Contains(stdout, "(owner=ada@example.com, tier=agent)") {
 		t.Fatalf("create stdout: %q", stdout)
 	}
 
@@ -545,7 +547,7 @@ func TestGCPSecretCreateShowSetRetagDeleteRestoreLifecycle(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("retag: exit %d, stderr %q", code, stderr)
 	}
-	if !strings.Contains(stdout, "retagged SCRATCH_TEST (owner=ada@example.com, tier=human)") {
+	if !strings.Contains(stdout, "retagged SCRATCH_TEST in GCP Secret Manager project ") || !strings.Contains(stdout, "(owner=ada@example.com, tier=human)") {
 		t.Fatalf("retag stdout: %q", stdout)
 	}
 
@@ -553,7 +555,7 @@ func TestGCPSecretCreateShowSetRetagDeleteRestoreLifecycle(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("delete: exit %d, stderr %q", code, stderr)
 	}
-	if !strings.Contains(stdout, "deleted SCRATCH_TEST") {
+	if !strings.Contains(stdout, "deleted SCRATCH_TEST in GCP Secret Manager project ") {
 		t.Fatalf("delete stdout: %q", stdout)
 	}
 

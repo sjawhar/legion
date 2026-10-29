@@ -22,7 +22,7 @@ import {
 import { ApprovalChip } from "../doc/ApprovalChip";
 import { ConnectionDot } from "../doc/ConnectionDot";
 import type { DocumentToolbar } from "../doc/ProofDocument";
-import { shortSessionId } from "../refs/actor";
+import { AgentName } from "../refs/AgentName";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import {
   buildIssuePath,
@@ -107,12 +107,18 @@ export function ArtifactHeader({
       >
         <div className="min-w-0">
           {agentSession !== undefined ? (
-            <Link
-              to="/agents"
-              className={`inline-flex min-h-11 items-center text-sm font-semibold ${linkText} ${linkHoverText}`}
+            // The agent whose conversation owns the artifact, by its current name, linked to that
+            // conversation. A long title wraps rather than widening the header.
+            <p
+              className={`flex min-h-11 min-w-0 flex-wrap items-center gap-x-1 text-sm font-semibold ${textSecondaryOnSurface}`}
             >
-              Agent {shortSessionId(agentSession)}
-            </Link>
+              Agent
+              <AgentName
+                className="min-w-0 break-words"
+                sessionId={agentSession}
+                storedTitle={undefined}
+              />
+            </p>
           ) : artifact.issue_key === null ? (
             <Link
               to={buildProjectPath({ kind: "documents", project: artifact.project })}

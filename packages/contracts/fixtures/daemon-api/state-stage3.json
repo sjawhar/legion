@@ -13,7 +13,8 @@
     ],
     "waiting": [
       "LEGION-209"
-    ]
+    ],
+    "blocked": []
   },
   "issues": {
     "LEGION-208": {
@@ -84,6 +85,7 @@
     "capabilities": {
       "decided": {}
     },
-    "worker_backends": {}
+    "worker_backends": {},
+    "role_config_files": {}
   }
 }

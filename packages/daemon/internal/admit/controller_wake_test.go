@@ -174,3 +174,62 @@ func TestTheTickAloneCarriesTheOpenCapabilities(t *testing.T) {
 		}
 	})
 }
+
+// The tick is the turn that posts the day's report, so it alone tells the controller what Legion
+// is waiting to start behind a Dispatch issue nobody has finished: the roots promotion skips and
+// the children the workflow holds at `admitted`, by issue key, with what each waits on. The wait
+// is the controller's to name in the report and nobody else's: a todo wake and a slot-free wake
+// carry none, and a tick with nothing blocked carries none either.
+func TestTheTickAloneCarriesWhatLegionWaitsOn(t *testing.T) {
+	t.Run("a tick names them, a todo wake does not", func(t *testing.T) {
+		pool := migratedPool(t)
+		admission := quiet(t, 2)
+		registerController(t, pool)
+		seedSlotted(t, pool, "LEGION-208", "A")
+		seedWaiting(t, pool, "LEGION-211", "B")
+		// A child of the running tree, held at admitted behind an issue still in progress.
+		putIssue(t, pool, record.Issue{
+			Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+			Project: testProject, Title: "LEGION-209", Tree: "LEGION-208", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "C",
+		})
+		seedMirror(t, pool, "LEGION-209", "todo", "LEGION-300")
+		seedMirror(t, pool, "LEGION-211", "todo", "LEGION-301")
+		seedMirror(t, pool, "LEGION-300", "in_progress")
+
+		apply(t, pool, admission, "todo-1", unlabelledTodo("LEGION-1"), engineStub{})
+		tick(t, pool, admission, "tick-1")
+
+		// LEGION-301 has no mirror row of its own, which is no finished issue: the wait stands.
+		assertControllerNotices(t, pool, []effect{
+			{kind: record.OutboxKindControllerNotice, issue: "LEGION-1", payload: record.ControllerNotice{Kind: record.TodoNotice}},
+			{kind: record.OutboxKindControllerNotice, issue: testProject, payload: record.ControllerNotice{Kind: record.TickNotice, Blocked: []record.BlockedIssue{
+				{Issue: "LEGION-209", BlockedBy: []string{"LEGION-300"}},
+				{Issue: "LEGION-211", BlockedBy: []string{"LEGION-301"}},
+			}}},
+		})
+	})
+	t.Run("a slot-free wake does not", func(t *testing.T) {
+		pool := migratedPool(t)
+		admission := quiet(t, 2)
+		registerController(t, pool)
+		seedSlotted(t, pool, "LEGION-208", "A")
+		seedWaiting(t, pool, "LEGION-211", "B")
+		seedMirror(t, pool, "LEGION-211", "todo", "LEGION-301")
+
+		apply(t, pool, admission, "phase-done", intake.DispatchIssue{Key: "LEGION-208", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "in_progress", Title: "LEGION-208", Rank: "A", HandedOver: handed}, engineStub{store: record.NewStore(), done: "LEGION-208"})
+
+		assertControllerNotices(t, pool, []effect{
+			{kind: record.OutboxKindControllerNotice, issue: "LEGION-208", payload: record.ControllerNotice{Kind: record.SlotFreeNotice}},
+		})
+	})
+	t.Run("nothing blocked", func(t *testing.T) {
+		pool := migratedPool(t)
+		admission := quiet(t, 1)
+		registerController(t, pool)
+		seedSlotted(t, pool, "LEGION-208", "A")
+
+		tick(t, pool, admission, "tick-1")
+
+		assertControllerNotices(t, pool, []effect{{kind: record.OutboxKindControllerNotice, issue: testProject, payload: record.ControllerNotice{Kind: record.TickNotice}}})
+	})
+}

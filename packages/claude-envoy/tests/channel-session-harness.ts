@@ -10,9 +10,15 @@ import { mkdtemp } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { sessionConfigFile } from "@legion/envoy-client/session-settings"
-import type { EnvoyClient, Interest } from "@legion/envoy-client/transport"
+import type {
+  EnvoyClient,
+  Interest,
+  ReplayInput,
+  ReplayResult,
+} from "@legion/envoy-client/transport"
 import type {
   ChannelBrokerMessage,
+  ChannelConnectionStatus,
   ChannelForwarderConnection,
   ChannelTopicSubscription,
 } from "../src/channel-forwarder"
@@ -38,6 +44,8 @@ export class FakeNats implements ChannelForwarderConnection {
   readonly unsubscribed: string[] = []
   readonly subscriptions = new Map<string, Queue>()
   closed = false
+  private readonly statuses: ChannelConnectionStatus[] = []
+  private statusWaiter: PromiseWithResolvers<void> | undefined
 
   constructor(readonly calls: string[] = []) {}
 
@@ -89,18 +97,41 @@ export class FakeNats implements ChannelForwarderConnection {
   }
 
   drain(): Promise<void> {
-    this.closed = true
-    return Promise.resolve()
+    return this.close()
   }
 
   close(): Promise<void> {
     this.closed = true
+    this.statusWaiter?.resolve()
     return Promise.resolve()
   }
 
+  /** nats.js reports a status event: `reconnect`, say. */
+  emitStatus(type: string): void {
+    this.statuses.push({ type })
+    this.statusWaiter?.resolve()
+  }
+
+  async *status(): AsyncIterable<ChannelConnectionStatus> {
+    while (!this.closed) {
+      const next = this.statuses.shift()
+      if (next !== undefined) {
+        yield next
+        continue
+      }
+      this.statusWaiter = Promise.withResolvers<void>()
+      await this.statusWaiter.promise
+    }
+  }
+
   emit(subject: string, raw: string, reply?: string): void {
-    const queue = this.subscriptions.get(subject)
-    if (queue === undefined) throw new Error(`no subscription for ${subject}`)
+    this.emitOn(subject, subject, raw, reply)
+  }
+
+  /** A message published on `subject` reaches the subscription `pattern`, which matches it. */
+  emitOn(pattern: string, subject: string, raw: string, reply?: string): void {
+    const queue = this.subscriptions.get(pattern)
+    if (queue === undefined) throw new Error(`no subscription for ${pattern}`)
     const message = {
       subject,
       data: new TextEncoder().encode(raw),
@@ -130,8 +161,27 @@ export class FakeNotifier implements ChannelNotifier {
 
 export type FakeClient = Pick<
   EnvoyClient,
-  "subscribe" | "unsubscribe" | "unregisterSession" | "setRole" | "getRole" | "getInterest"
+  | "subscribe"
+  | "unsubscribe"
+  | "unregisterSession"
+  | "setRole"
+  | "getRole"
+  | "getInterest"
+  | "replay"
 >
+
+/** A listener whose stream holds nothing: every subject answers no message, its cursor at 0. */
+export async function emptyReplay(input: ReplayInput): Promise<ReplayResult> {
+  return {
+    stream: { created: "2026-10-20T00:00:00Z", first_seq: 1, last_seq: 0 },
+    subjects: input.subjects.map(({ subject }) => ({
+      subject,
+      messages: [],
+      next_after: 0,
+      more: false,
+    })),
+  }
+}
 
 export function settled(): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>()
@@ -140,15 +190,97 @@ export function settled(): Promise<void> {
 }
 
 /**
- * Polls `condition` every 5 ms until it holds; fails naming `what` after 5 s.
+ * Polls `condition` every 5 ms until it holds; fails after 5 s naming `what`, followed by what
+ * `state` reports at that moment (an `observedClient`'s `describe`, the test's own fakes).
  * Real time on purpose: the awaited conditions are filesystem writes the
- * server's own heartbeat performs, which no fake clock can advance.
+ * server's own heartbeat performs, which no fake clock can advance. The
+ * deadline is read from the monotonic clock, which `setSystemTime` leaves alone.
+ *
+ * The package's `test` script gives each test 60 s (`--timeout=60000`), above the longest chain of
+ * waits one test makes: a wait that succeeds can take up to its 5 s, so a stuck wait names its step
+ * only once every wait before it has had its time. The longest is eleven, counting the waits of
+ * `boot` and `reconnect` (envoy-channel-replay.test.ts, "a stored frame the channel never takes is
+ * named in one notice…"): 11 × 5 s, and 5 s more covers startup and shutdown. A test that chains
+ * more raises it. Under bun's default of 5 s its own timeout fired first, and a stuck wait never
+ * said which step it was.
  */
-export async function waitFor(condition: () => Promise<boolean>, what: string): Promise<void> {
-  const deadline = Date.now() + 5_000
+export async function waitFor(
+  condition: () => Promise<boolean>,
+  what: string,
+  state?: () => string,
+): Promise<void> {
+  const deadline = performance.now() + 5_000
   while (!(await condition())) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+    if (performance.now() > deadline) {
+      throw new Error(`timed out waiting for ${what}${state === undefined ? "" : ` (${state()})`}`)
+    }
     await Bun.sleep(5)
+  }
+}
+
+/**
+ * `client` with a record of what the session asked of it, for a `waitFor` that times out to
+ * report: how each role claim ended, the holder the last `getRole` answered, the calls still
+ * awaited, and when the last registration began. The server keeps whether a heartbeat tick is in
+ * flight to itself; from here a tick shows as its calls, since every tick starts by registering,
+ * so a call still awaited is the tick stuck on it, and none awaited with no registration for
+ * many heartbeats is a tick stuck between calls, or no tick starting at all.
+ */
+export function observedClient(client: FakeClient): {
+  readonly client: FakeClient
+  describe(): string
+} {
+  const claims: string[] = []
+  let answeredHolder: string | undefined
+  const awaited = new Set<{ readonly call: string; readonly at: number }>()
+  let lastRegistration: number | undefined
+  const observe = async <T>(call: string, run: () => Promise<T>): Promise<T> => {
+    const entry = { call, at: Date.now() }
+    awaited.add(entry)
+    try {
+      return await run()
+    } finally {
+      awaited.delete(entry)
+    }
+  }
+  return {
+    client: {
+      subscribe: (input) => {
+        lastRegistration = Date.now()
+        return observe(`subscribe ${input.sessionID}`, () => client.subscribe(input))
+      },
+      unsubscribe: (input) =>
+        observe(`unsubscribe ${input.sessionID}`, () => client.unsubscribe(input)),
+      unregisterSession: (sessionID) =>
+        observe(`unregister ${sessionID}`, () => client.unregisterSession(sessionID)),
+      setRole: (input) =>
+        observe(`setRole ${input.sessionID} ${input.role}`, async () => {
+          try {
+            const result = await client.setRole(input)
+            claims.push(result.claimed ? "claimed" : "refused")
+            return result
+          } catch (error) {
+            claims.push(`threw ${error instanceof Error ? error.message : String(error)}`)
+            throw error
+          }
+        }),
+      getRole: (role) =>
+        observe(`getRole ${role}`, async () => {
+          const info = await client.getRole(role)
+          answeredHolder = info.holder
+          return info
+        }),
+      getInterest: (sessionID) =>
+        observe(`getInterest ${sessionID}`, () => client.getInterest(sessionID)),
+      replay: (...args) => observe("replay", () => client.replay(...args)),
+    },
+    describe: () =>
+      [
+        `claims [${claims.join(", ")}]`,
+        `getRole last answered ${answeredHolder === undefined ? "never" : `holder "${answeredHolder}"`}`,
+        `calls awaited [${[...awaited].map(({ call, at }) => `${call} for ${Date.now() - at} ms`).join(", ")}]`,
+        `last registration ${lastRegistration === undefined ? "never" : `${Date.now() - lastRegistration} ms ago`}`,
+      ].join("; "),
   }
 }
 
@@ -165,7 +297,7 @@ export function noInterest(): Interest {
   }
 }
 
-/** A client that records every call it sees, in order, into `calls`. */
+/** A client that records every call it sees, in order, into `calls`; its stream holds nothing. */
 export function recordingClient(calls: string[], overrides: Partial<FakeClient> = {}): FakeClient {
   return {
     subscribe: async (input) => {
@@ -193,6 +325,7 @@ export function recordingClient(calls: string[], overrides: Partial<FakeClient> 
         topics: [`notifications.agent.${sessionID}`],
       }
     },
+    replay: emptyReplay,
     ...overrides,
   }
 }
@@ -213,6 +346,7 @@ export function sessionOptions(
     heartbeatMs: 60_000,
     configFile: sessionConfigFile("claude", process.env),
     stateDirectory,
+    pluginVersion: "source",
     ...extra,
   }
 }

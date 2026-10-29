@@ -31,24 +31,24 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
-// The provisioning token is the implement App's installation token, and every agent of a tree can
-// write the tree volume. These tests run a pod's init containers exactly as the manifest states
-// them, on this machine, and plant on the tree volume what a tree agent can plant there for the
-// next pod of the tree: nothing planted may ever run where the provisioning Secret is readable.
+// The provisioning token is the implement App's installation token, and every agent of an issue can
+// write the issue's disk, its pod's own generic ephemeral volume. These tests run a pod's init
+// containers exactly as the manifest states them, on this machine, and plant on that disk what an
+// agent of the issue can plant there: nothing planted may ever run where the provisioning Secret is
+// readable, and nothing planted outlives the pod whose disk it is on.
 //
-// What the boundary protects is identity, not a repository-write token kept off the tree volume:
-// an implement-role container now holds the implement App's token — the same lease as the
-// provisioning token — read-only in its own gh volume (GHConfigDir), and a review-role container
-// the review App's. What the fetch container's boundary still keeps is that no review-role
-// container ever holds the implement App's token, which is what lets the reviewer's approval count
-// and the daemon's fix-attempt counting read a push's App from the App that made it. A plant that
-// a tree agent's own git triggers after provisioning runs under that agent's role: its clone's
+// What the boundary protects is identity, not a repository-write token kept off the issue's disk:
+// an implement role now holds the implement App's token — the same lease as the
+// provisioning token — read-only in its own gh directory (GHConfigDir), and a review role the
+// review App's. What the fetch container's boundary still keeps is that no review role ever holds
+// the implement App's token, which is what lets the daemon's fix-attempt counting read a push's App
+// from the App that made it. A plant that
+// an agent's own git triggers after provisioning runs under that agent's role: its clone's
 // helper is `legion git-credential` (workspace.GitHubCredentialHelper), which answers from the gh
 // files of the process running it (its LEGION_GH_OWNERS_DIR and GH_CONFIG_DIR), and here, with
 // none, answers nothing (exit 1).
@@ -120,15 +120,16 @@ case "$1" in
 esac
 `
 
-// initRig runs pods' init containers against one tree volume, reaching "github.com" through the
-// cluster's egress proxy: a stand-in that serves boundaryRepo over git's smart HTTP to a request
-// that authenticates as x-access-token with canaryToken.
+// initRig runs pods' init containers, reaching "github.com" through the cluster's egress proxy: a
+// stand-in that serves boundaryRepo over git's smart HTTP to a request that authenticates as
+// x-access-token with canaryToken.
 type initRig struct {
 	t *testing.T
 	r *Runtime
-	// root holds everything the rig makes; pods holds each running pod's volumes and container
-	// filesystems, sink what planted code recorded, and pattern the canary a probe looks for (off
-	// every volume, so no planted file carries it).
+	// root holds everything the rig makes; pods holds each pod's volumes and container
+	// filesystems (rigPod), tree is the directory a claim a Sandbox owns maps to, shared by every
+	// pod that mounts the claim and outliving them all, sink is what planted code recorded, and
+	// pattern the canary a probe looks for (off every volume, so no planted file carries it).
 	root, pods, tree, sink, pattern string
 	// bin is ahead of the system's directories on every container's PATH: the defeated git and jj.
 	bin    string
@@ -142,6 +143,20 @@ type initRig struct {
 	pod     int
 	// host is the server a plant named, when it named one.
 	host *recordingHost
+}
+
+// rigPod is a pod the rig has started (start) and not yet deleted (delete). Its disk, the volume
+// mounted as issueVolume, is the one volume the pod's agents write: a directory of the pod's own
+// under dir when the manifest makes it a generic ephemeral volume, as it does an issue pod's
+// (issuePod.disk), which the pod keeps across a restart and loses when it is deleted; the
+// rig's tree when the manifest makes it a claim a Sandbox owns.
+type rigPod struct {
+	spec corev1.PodSpec
+	dir  string
+	disk string
+	// inherited is what the disk held when the pod started, before its first init container ran:
+	// nothing, for a pod whose disk is its own.
+	inherited []string
 }
 
 func newInitRig(t *testing.T, legion string) *initRig {
@@ -189,17 +204,18 @@ func newInitRig(t *testing.T, legion string) *initRig {
 	return rig
 }
 
-// clone and workspace are where provisioning puts the shared clone and an issue's workspace.
-func (rig *initRig) clone() string {
-	return filepath.Join(rig.tree, "repos", "github.com", "sjawhar", "legion-smoke")
+// clone and workspace are where provisioning puts the issue's clone and an issue's workspace on the
+// pod's disk.
+func (pod *rigPod) clone() string {
+	return filepath.Join(pod.disk, "repos", "github.com", "sjawhar", "legion-smoke")
 }
 
-func (rig *initRig) workspace(issue string) string {
-	return filepath.Join(rig.tree, "workspaces", "sjawhar", "legion-smoke", strings.ToLower(issue))
+func (pod *rigPod) workspace(issue string) string {
+	return filepath.Join(pod.disk, "workspaces", "sjawhar", "legion-smoke", strings.ToLower(issue))
 }
 
 // probe is a shell command a planted program runs: it appends what it is, and the first copy of
-// the canary it can read on any volume of the running pod or on the tree volume, to the sink.
+// the canary it can read on any volume of any pod or on the tree, to the sink.
 func (rig *initRig) probe(what string) string {
 	return fmt.Sprintf(`printf '%%s read=[%%s]\n' %s "$(grep -rhoFf %s %s %s 2>/dev/null | head -n 1)" >> %s`,
 		shellprefix.Literal(what), shellprefix.Literal(rig.pattern), shellprefix.Literal(rig.pods), shellprefix.Literal(rig.tree), shellprefix.Literal(rig.sink))
@@ -239,19 +255,47 @@ func (rig *initRig) launch(spec runtime.SpawnSpec) corev1.PodSpec {
 	return rig.r.podTemplate(l).Spec
 }
 
-// run executes the pod's init containers in order, as the kubelet does: each volume a directory —
-// the tree volume the rig's, every other one the pod's own, gone with the pod — and each container
-// a process of the Go legion built from this commit, with the manifest's argv, environment, and
-// working directory, every pod path in them moved to the directory of the volume mounted there.
-// While a container runs, every volume it does not mount, and every other container's filesystem,
-// is unreadable; a read-only mount is not writable. The first container that fails ends the pod.
-func (rig *initRig) run(pod corev1.PodSpec) error {
+// start creates a pod of spec and runs its init containers (initialize). The rig starts an issue's
+// next pod only once it has deleted the issue's previous one, as the runtime does.
+func (rig *initRig) start(spec corev1.PodSpec) (*rigPod, error) {
 	rig.t.Helper()
 	rig.pod++
-	podDir := filepath.Join(rig.pods, fmt.Sprintf("pod-%d", rig.pod))
-	defer func() { _ = os.RemoveAll(podDir) }()
+	pod := &rigPod{spec: spec, dir: filepath.Join(rig.pods, fmt.Sprintf("pod-%d", rig.pod))}
+	return pod, rig.initialize(pod)
+}
+
+// restart runs the pod's init containers again on what the pod keeps, as the kubelet does when it
+// recreates a running pod's sandbox: the pod's own ephemeral volume, whose claim the Pod owns,
+// survives that with whatever its agents wrote on it, and every other volume is made afresh. It is
+// the one way provisioning meets a disk an agent of the issue has written — a retained clone and a
+// workspace that exists — so a test of provisioning against a planted disk opts into it by name.
+func (rig *initRig) restart(pod *rigPod) error {
+	rig.t.Helper()
+	return rig.initialize(pod)
+}
+
+// delete removes the pod, and with it every volume of its own, its disk included when the disk is
+// its own; a claim a Sandbox owns, the tree, stays.
+func (rig *initRig) delete(pod *rigPod) {
+	rig.t.Helper()
+	if err := os.RemoveAll(pod.dir); err != nil {
+		rig.t.Fatal(err)
+	}
+}
+
+// initialize executes the pod's init containers in order, as the kubelet does: each volume a
+// directory — a claim a Sandbox owns the rig's tree, every pod's that mounts it and outliving them
+// all; the pod's generic ephemeral volume a directory of the pod's own, which it keeps until it is
+// deleted; every other volume a directory made for this run of the init containers and removed
+// when they end, since no agent mounts one — and each container a process of the Go legion built
+// from this commit, with the manifest's argv, environment, and working directory, every pod path
+// in them moved to the directory of the volume mounted there.
+// While a container runs, every volume it does not mount, and every other container's filesystem,
+// is unreadable; a read-only mount is not writable. The first container that fails ends the run.
+func (rig *initRig) initialize(pod *rigPod) error {
+	rig.t.Helper()
 	// The rig models the Secret routes the manifest uses; any other would carry the token past it.
-	for _, volume := range pod.Volumes {
+	for _, volume := range pod.spec.Volumes {
 		if volume.Projected != nil && slices.ContainsFunc(volume.Projected.Sources, func(source corev1.VolumeProjection) bool { return source.Secret != nil }) {
 			rig.t.Fatalf("volume %s projects a Secret, which the rig does not model", volume.Name)
 		}
@@ -259,7 +303,7 @@ func (rig *initRig) run(pod corev1.PodSpec) error {
 			rig.t.Fatalf("volume %s mounts every key of Secret %s, which the rig does not model", volume.Name, volume.Secret.SecretName)
 		}
 	}
-	for _, c := range slices.Concat(pod.InitContainers, pod.Containers) {
+	for _, c := range slices.Concat(pod.spec.InitContainers, pod.spec.Containers) {
 		for _, v := range c.Env {
 			if v.ValueFrom != nil && v.ValueFrom.SecretKeyRef != nil {
 				rig.t.Fatalf("%s reads %s from a Secret, which the rig does not model", c.Name, v.Name)
@@ -269,13 +313,30 @@ func (rig *initRig) run(pod corev1.PodSpec) error {
 			rig.t.Fatalf("%s takes its environment from a Secret, which the rig does not model", c.Name)
 		}
 	}
+	scratch := []string{filepath.Join(pod.dir, "containers")}
+	defer func() {
+		for _, dir := range scratch {
+			_ = os.RemoveAll(dir)
+		}
+	}()
 	volumes := map[string]string{}
-	for _, volume := range pod.Volumes {
-		dir := filepath.Join(podDir, "volumes", volume.Name)
-		if volume.PersistentVolumeClaim != nil {
+	for _, volume := range pod.spec.Volumes {
+		dir := filepath.Join(pod.dir, "volumes", volume.Name)
+		switch {
+		case volume.PersistentVolumeClaim != nil:
+			// A claim a Sandbox owns outlives every pod, and every pod that mounts it shares it.
 			dir = rig.tree
-		} else if err := os.MkdirAll(dir, 0o700); err != nil {
-			return err
+		case volume.Ephemeral != nil:
+			// A generic ephemeral volume is the pod's own: the kubelet creates it with the pod and
+			// deletes it with the pod (INFRA-80), so no other pod, the issue's next included, sees
+			// it, and a restart of the pod finds it as the pod left it.
+		default:
+			scratch = append(scratch, dir)
+		}
+		if dir != rig.tree {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				return err
+			}
 		}
 		if volume.Secret != nil {
 			for _, item := range volume.Secret.Items {
@@ -297,8 +358,18 @@ func (rig *initRig) run(pod corev1.PodSpec) error {
 		}
 		volumes[volume.Name] = dir
 	}
-	for _, c := range pod.InitContainers {
-		if err := rig.runContainer(podDir, volumes, c); err != nil {
+	if pod.disk == "" {
+		pod.disk = volumes[issueVolume]
+		entries, err := os.ReadDir(pod.disk)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			pod.inherited = append(pod.inherited, entry.Name())
+		}
+	}
+	for _, c := range pod.spec.InitContainers {
+		if err := rig.runContainer(pod.dir, volumes, c); err != nil {
 			return err
 		}
 		if c.Name == fetchContainer {
@@ -489,11 +560,11 @@ func (rig *initRig) holdsNoCanary(what, dir string) {
 	}
 }
 
-// plantWorkspaceConfig writes a legacy .jj/workspace-config.toml into a working copy on the tree
-// volume: jj migrates such a file into the configuration it reads while the workspace has no
+// plantWorkspaceConfig writes a legacy .jj/workspace-config.toml into a working copy on a pod's
+// disk: jj migrates such a file into the configuration it reads while the workspace has no
 // workspace-config-id. Provisioning's runner removes it before any jj command of its own reads it
 // (internal/workspace, disarmLegacyConfig), so a vector planting one plants it again before its
-// live check: the tree agent's own command then shows the plant is configuration jj obeys.
+// live check: the agent's own command then shows the plant is configuration jj obeys.
 func plantWorkspaceConfig(t *testing.T, dir, toml string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, ".jj", "workspace-config.toml"), []byte(toml), 0o644); err != nil {
@@ -514,16 +585,16 @@ func (rig *initRig) plantFilter(dir, what string) {
 	}
 }
 
-// plantGit names, in the clone's legacy workspace config, a git that runs probe("git") before
-// the real one.
-func (rig *initRig) plantGit() {
+// plantGit names, in the legacy workspace config of the clone at clone, a git that runs
+// probe("git") before the real one.
+func (rig *initRig) plantGit(clone string) {
 	rig.t.Helper()
 	git, err := exec.LookPath("git")
 	if err != nil {
 		rig.t.Fatal(err)
 	}
 	planted := rig.script("git", "exec "+shellprefix.Literal(git)+` "$@"`)
-	plantWorkspaceConfig(rig.t, rig.clone(), "[git]\nexecutable-path = '"+planted+"'\n")
+	plantWorkspaceConfig(rig.t, clone, "[git]\nexecutable-path = '"+planted+"'\n")
 }
 
 // gitHooks is every hook githooks(5) names.
@@ -550,12 +621,24 @@ func (rig *initRig) plantHooks(dir string, hooks ...string) {
 	}
 }
 
-// A tree agent can plant each of these on the tree volume for the next pod of its tree (the Stage
-// 4b plan's Task 4b.6b; #1286's reviews). The next pod provisions with them in place: whatever
-// runs, nothing it runs reads the provisioning token, no host the tree named receives it, and no
-// file on the tree volume holds it. Each plant is shown live afterwards, by a tree agent's own
-// command triggering it, so its absence from provisioning is the boundary's doing.
-func TestNothingTheTreePlantsReadsTheProvisioningToken(t *testing.T) {
+// An agent of an issue can plant each of these on its pod's disk (the Stage 4b plan's Task 4b.6b;
+// #1286's reviews), and two provisionings follow it, one with the plant in reach and one without:
+//
+//   - The pod's restart (restart): the kubelet runs the pod's init containers again on the disk its
+//     agents left, so provisioning takes the retained-disk paths — the clone kept as it stands
+//     (ensureRepoClone), the workspace brought up to date (update-stale) or added again where it is
+//     gone — with the plant in place. Whatever runs, nothing it runs reads the provisioning token,
+//     no host the plant named receives it, and no file on the disk holds it.
+//   - The issue's next pod, once the first is deleted: its disk is its own (issuePod.disk),
+//     so it starts empty and provisions afresh, and nothing of the plant reaches it — none of the
+//     first pod's files are on its disk, nothing planted runs, and no host the plant named hears
+//     from it. On a disk that outlived the first pod, as a claim a Sandbox owns does, the next pod
+//     would start on the first's files instead.
+//
+// Between the two, each plant is shown live on the first pod's disk, by an agent's own command
+// there triggering it: so its harmlessness on the restart is the boundary's doing, and its absence
+// from the next pod is the fresh disk's.
+func TestWhatAnIssuePlantsNeitherReadsTheProvisioningTokenNorOutlivesItsPod(t *testing.T) {
 	legion := filepath.Join(t.TempDir(), "legion")
 	if output, err := exec.Command("go", "build", "-o", legion, "github.com/sjawhar/legion/daemon/cmd/legion").CombinedOutput(); err != nil {
 		t.Fatalf("build the Go legion: %v\n%s", err, output)
@@ -568,83 +651,108 @@ func TestNothingTheTreePlantsReadsTheProvisioningToken(t *testing.T) {
 
 	type vector struct {
 		name string
-		// sameIssue is a second pod on the first pod's issue, whose workspace therefore exists
-		// (update-stale); otherwise it is another issue's, whose workspace is added.
-		sameIssue bool
-		plant     func(rig *initRig)
-		// live triggers the plant as a tree agent's command would.
-		live func(rig *initRig)
+		// plant is what an agent of the issue writes on its pod's disk.
+		plant func(rig *initRig, pod *rigPod)
+		// live triggers the plant on that pod's disk as an agent's own command would.
+		live func(rig *initRig, pod *rigPod)
 	}
 	vectors := []vector{
+		// Every hook git names, in the clone's own hooks directory. The restart's git meets them
+		// in the retained clone; the next pod's clone is a new one, with none of them.
 		{
-			name:  "hooks in .git/hooks",
-			plant: func(rig *initRig) { rig.plantHooks(filepath.Join(rig.clone(), ".git", "hooks"), gitHooks...) },
-			live:  func(rig *initRig) { rig.git(rig.clone(), "update-ref", "refs/legion/live", "HEAD") },
+			name: "hooks in .git/hooks",
+			plant: func(rig *initRig, pod *rigPod) {
+				rig.plantHooks(filepath.Join(pod.clone(), ".git", "hooks"), gitHooks...)
+			},
+			live: func(rig *initRig, pod *rigPod) { rig.git(pod.clone(), "update-ref", "refs/legion/live", "HEAD") },
 		},
+		// Hooks off the disk, which the clone's configuration names. The restart's git reads that
+		// configuration in the retained clone; the next pod's clone names no hooks, so hooks still
+		// on the host never run for it.
 		{
 			name: "hooks under core.hooksPath",
-			plant: func(rig *initRig) {
+			plant: func(rig *initRig, pod *rigPod) {
 				hooks := filepath.Join(rig.root, "planted-hooks")
 				rig.plantHooks(hooks, gitHooks...)
-				rig.git(rig.clone(), "config", "core.hooksPath", hooks)
+				rig.git(pod.clone(), "config", "core.hooksPath", hooks)
 			},
-			live: func(rig *initRig) { rig.git(rig.clone(), "update-ref", "refs/legion/live", "HEAD") },
+			live: func(rig *initRig, pod *rigPod) { rig.git(pod.clone(), "update-ref", "refs/legion/live", "HEAD") },
 		},
+		// A git of the agent's, named in the clone's legacy workspace config. The restart's jj meets
+		// the file in the retained clone; the next pod's clone has none.
 		{
 			name:  "git.executable-path in the clone's legacy workspace config",
-			plant: func(rig *initRig) { rig.plantGit() },
-			live: func(rig *initRig) {
-				rig.plantGit()
-				rig.jj(rig.clone(), "git", "fetch", "-R", rig.clone())
+			plant: func(rig *initRig, pod *rigPod) { rig.plantGit(pod.clone()) },
+			live: func(rig *initRig, pod *rigPod) {
+				rig.plantGit(pod.clone())
+				rig.jj(pod.clone(), "git", "fetch", "-R", pod.clone())
 			},
 		},
+		// A clean filter of the agent's, in the clone's legacy workspace config, and a changed file
+		// it filters. The restart's jj meets both in the retained clone; the next pod's has neither.
 		{
 			name:  "a working-copy filter in the clone",
-			plant: func(rig *initRig) { rig.plantFilter(rig.clone(), "clone filter") },
-			live: func(rig *initRig) {
-				rig.plantFilter(rig.clone(), "clone filter")
-				rig.jj(rig.clone(), "status", "-R", rig.clone())
+			plant: func(rig *initRig, pod *rigPod) { rig.plantFilter(pod.clone(), "clone filter") },
+			live: func(rig *initRig, pod *rigPod) {
+				rig.plantFilter(pod.clone(), "clone filter")
+				rig.jj(pod.clone(), "status", "-R", pod.clone())
 			},
 		},
+		// The repository's URL rewritten to a command of the agent's. The restart's git reads the
+		// rewrite in the retained clone; the next pod's clone has none.
 		{
 			name: "url.<ext::command>.insteadOf",
-			plant: func(rig *initRig) {
+			plant: func(rig *initRig, pod *rigPod) {
 				command := rig.script("ext", "exit 1")
-				rig.git(rig.clone(), "config", "protocol.ext.allow", "always")
-				rig.git(rig.clone(), "config", "url.ext::"+command+" %S.insteadOf", "https://github.com/"+boundaryRepo)
+				rig.git(pod.clone(), "config", "protocol.ext.allow", "always")
+				rig.git(pod.clone(), "config", "url.ext::"+command+" %S.insteadOf", "https://github.com/"+boundaryRepo)
 			},
-			live: func(rig *initRig) { rig.git(rig.clone(), "ls-remote", "origin") },
+			live: func(rig *initRig, pod *rigPod) { rig.git(pod.clone(), "ls-remote", "origin") },
 		},
+		// The clone's origin moved to a host of the agent's. The host never receives the token
+		// from the restart, and hears nothing at all from the next pod, whose origin is GitHub.
 		{
 			name: "a remote on another host, answered by any-host credentials",
-			plant: func(rig *initRig) {
+			plant: func(rig *initRig, pod *rigPod) {
 				rig.host = newRecordingHost(rig.t, false)
-				rig.git(rig.clone(), "remote", "set-url", "origin", rig.host.server.URL+"/"+boundaryRepo)
-				rig.git(rig.clone(), "config", "http.sslVerify", "false")
+				rig.git(pod.clone(), "remote", "set-url", "origin", rig.host.server.URL+"/"+boundaryRepo)
+				rig.git(pod.clone(), "config", "http.sslVerify", "false")
 			},
-			live: func(rig *initRig) { rig.git(rig.clone(), "ls-remote", "origin") },
+			live: func(rig *initRig, pod *rigPod) { rig.git(pod.clone(), "ls-remote", "origin") },
 		},
+		// A proxy of the agent's in the clone's configuration. It never receives the token from
+		// the restart, and hears nothing at all from the next pod, whose clone names no proxy.
 		{
 			name: "an http.proxy that terminates TLS, with sslVerify off",
-			plant: func(rig *initRig) {
+			plant: func(rig *initRig, pod *rigPod) {
 				rig.host = newRecordingHost(rig.t, true)
-				rig.git(rig.clone(), "config", "http.proxy", rig.host.server.URL)
-				rig.git(rig.clone(), "config", "http.sslVerify", "false")
+				rig.git(pod.clone(), "config", "http.proxy", rig.host.server.URL)
+				rig.git(pod.clone(), "config", "http.sslVerify", "false")
 			},
-			live: func(rig *initRig) { rig.git(rig.clone(), "ls-remote", "origin") },
+			live: func(rig *initRig, pod *rigPod) { rig.git(pod.clone(), "ls-remote", "origin") },
 		},
+		// post-index-change in the clone's hooks, and the issue's workspace removed, as its agent
+		// can: the restart finds the retained clone and no workspace, so its jj workspace add runs
+		// with the hook in place. The next pod adds its workspace to a new clone with no such hook.
 		{
-			name:  "post-index-change, which jj workspace add runs",
-			plant: func(rig *initRig) { rig.plantHooks(filepath.Join(rig.clone(), ".git", "hooks"), "post-index-change") },
-			live:  func(rig *initRig) { rig.git(rig.clone(), "read-tree", "HEAD") },
+			name: "post-index-change, which jj workspace add runs on a restart that finds no workspace",
+			plant: func(rig *initRig, pod *rigPod) {
+				rig.plantHooks(filepath.Join(pod.clone(), ".git", "hooks"), "post-index-change")
+				if err := os.RemoveAll(pod.workspace(testTree)); err != nil {
+					rig.t.Fatal(err)
+				}
+			},
+			live: func(rig *initRig, pod *rigPod) { rig.git(pod.clone(), "read-tree", "HEAD") },
 		},
+		// A clean filter in the issue workspace's own legacy config. The restart finds the
+		// workspace, so its update-stale meets the filter; the issue's next pod finds no workspace
+		// at all and adds one afresh, so the first pod's workspace never reaches it.
 		{
-			name:      "a working-copy filter in the issue workspace's legacy config, which update-stale runs",
-			sameIssue: true,
-			plant:     func(rig *initRig) { rig.plantFilter(rig.workspace(testTree), "workspace filter") },
-			live: func(rig *initRig) {
-				rig.plantFilter(rig.workspace(testTree), "workspace filter")
-				rig.jj(rig.workspace(testTree), "status")
+			name:  "a working-copy filter in the issue workspace's legacy config, which a restart's update-stale runs",
+			plant: func(rig *initRig, pod *rigPod) { rig.plantFilter(pod.workspace(testTree), "workspace filter") },
+			live: func(rig *initRig, pod *rigPod) {
+				rig.plantFilter(pod.workspace(testTree), "workspace filter")
+				rig.jj(pod.workspace(testTree), "status")
 			},
 		},
 	}
@@ -652,52 +760,72 @@ func TestNothingTheTreePlantsReadsTheProvisioningToken(t *testing.T) {
 		t.Run(v.name, func(t *testing.T) {
 			t.Parallel()
 			rig := newInitRig(t, legion)
-			if err := rig.run(rig.launch(rootSpec(t))); err != nil {
-				t.Fatalf("the tree's first pod: %v", err)
+			first, err := rig.start(rig.launch(rootSpec(t)))
+			if err != nil {
+				t.Fatalf("the issue's first pod: %v", err)
 			}
 			if rig.github.authorized() == 0 {
 				t.Fatal("the first pod provisioned without presenting the provisioning token to github.com")
 			}
-			v.plant(rig)
-			second := workerSpec(t)
-			if !v.sameIssue {
-				token, err := claim.NewToken(testProject, "LEGION-209", claim.RoleImplementer)
-				if err != nil {
-					t.Fatal(err)
-				}
-				second = testSpec(t, token, claim.RoleImplementer, "LEGION-209")
-			}
-			if err := rig.run(rig.launch(second)); err != nil {
-				t.Logf("the second pod, with the plant in place: %v", err)
-			}
+			v.plant(rig, first)
 
+			// The first pod restarted, on its own disk with the plant in place.
+			if err := rig.restart(first); err != nil {
+				t.Logf("the first pod's restart, with the plant in place: %v", err)
+			}
 			holdsToken := func(text string) bool {
 				return slices.ContainsFunc(canaryForms, func(form string) bool { return strings.Contains(text, form) })
 			}
 			for _, line := range rig.sunk() {
 				if holdsToken(line) {
-					t.Errorf("planted code read the provisioning token: %s", line)
+					t.Errorf("on the pod's restart, planted code read the provisioning token: %s", line)
 				}
 			}
-			// A server a plant named must never receive the token; its live check is that it received
-			// anything at all.
+			// A server a plant named must never receive the token; its live check is that it
+			// receives anything at all.
 			if rig.host != nil {
 				for _, credential := range rig.host.credentials() {
 					if holdsToken(credential) {
-						t.Errorf("the host the tree named received the provisioning token: %s", credential)
+						t.Errorf("on the pod's restart, the host the plant named received the provisioning token: %s", credential)
 					}
 				}
 			}
-			rig.holdsNoCanary("the tree volume", rig.tree)
+			rig.holdsNoCanary("the first pod's disk", first.disk)
 
-			v.live(rig)
+			// The plant is live on the disk it was planted on: an agent's own command there runs it.
+			ran, reached := len(rig.sunk()), 0
 			if rig.host != nil {
-				if rig.host.requests() == 0 {
-					t.Fatal("the host the tree named received nothing, even from a tree agent's own command: the plant is not live")
-				}
-			} else if len(rig.sunk()) == 0 {
-				t.Fatal("the plant never ran, even for a tree agent's own command: it is not live")
+				reached = rig.host.requests()
 			}
+			v.live(rig, first)
+			if rig.host != nil {
+				if rig.host.requests() == reached {
+					t.Fatal("the host the plant named received nothing from an agent's own command on the first pod's disk: the plant is not live")
+				}
+			} else if len(rig.sunk()) == ran {
+				t.Fatal("the plant never ran for an agent's own command on the first pod's disk: it is not live")
+			}
+
+			// The issue's next pod, once the first is gone, on a disk of its own.
+			ran = len(rig.sunk())
+			if rig.host != nil {
+				reached = rig.host.requests()
+			}
+			rig.delete(first)
+			next, err := rig.start(rig.launch(workerSpec(t)))
+			if err != nil {
+				t.Errorf("the issue's next pod, on a fresh disk: %v", err)
+			}
+			if len(next.inherited) != 0 {
+				t.Errorf("the issue's next pod started on a disk holding %v, which its first pod wrote: an issue pod's disk is its own", next.inherited)
+			}
+			if sunk := rig.sunk(); len(sunk) != ran {
+				t.Errorf("planted code ran in the issue's next pod, which no file of its first pod's disk reaches: %q", sunk[ran:])
+			}
+			if rig.host != nil && rig.host.requests() != reached {
+				t.Errorf("the host the first pod's plant named heard from the issue's next pod (%d requests)", rig.host.requests()-reached)
+			}
+			rig.holdsNoCanary("the next pod's disk", next.disk)
 		})
 	}
 }

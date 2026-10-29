@@ -30,12 +30,9 @@ afterEach(async () => {
   for (const step of cleanup.splice(0).reverse()) await step();
 });
 
-/** The system prompt of a request the charter check sends: its own frame heads it. */
+/** The system prompt of a request the gate sends: its own text heads it. */
 const isGateRequest = (request: Request): boolean =>
   JSON.stringify(request.body.system ?? "").includes("You are AskGate.");
-/** The rules check's own frame, which a `dispatch ask` brings beside the charter call. */
-const isRuleRequest = (request: Request): boolean =>
-  JSON.stringify(request.body.system ?? "").includes("You are AskGate's rule check.");
 
 /** The scripted bash call: a `dispatch ask` by the stand-in's literal path, which the gate reads. */
 const ask = (dispatch: string) =>
@@ -44,44 +41,67 @@ const ask = (dispatch: string) =>
 /** One tool call of the scripted model turn. */
 type Block = { type: "tool_use"; name: string; input: Record<string, unknown> };
 
+/** The real `dispatch` CLI's entry, which a case runs from source through a shim. */
+const CLI_ENTRY = path.join(
+  import.meta.dir,
+  "..",
+  "..",
+  "..",
+  "envoy-client",
+  "bin",
+  "dispatch.ts"
+);
+/** Where the fake Dispatch takes a `dispatch ask` for DSP-1. */
+const ASKS = "/api/v1/issues/DSP-1/asks";
+
 /**
- * One real session: a stand-in `dispatch` on disk, a stand-in model that answers `gateAnswer` to
- * every charter request, no match to every rules request, and `firstTurn(dispatch)` to the
- * session's first turn, then one prompt run to its end. Gives back every request the stand-in took
- * and where the session file landed.
+ * One real session: a `dispatch` on disk, a stand-in model that answers `gateAnswer` to every gate
+ * request and `firstTurn(dispatch)` to the session's first turn, then one prompt run to its end.
+ * The `dispatch` is a stand-in whose --dry-run prints the arguments and whose send prints that it
+ * sent, or, with `cli: "real"`, a shim that runs the real CLI from source against the fake Dispatch
+ * the stand-in serves, which records each ask it takes. `envoyJson` is the session's envoy.json and
+ * `config` lines are added to the profile's config.yml. `files` are written into the root, beside
+ * `bin/`, before the session starts, and `dispatchUrl` names another fake Dispatch. Gives back every
+ * request the stand-in took and where the session file landed.
  */
 async function runSession(options: {
   gateAnswer: string;
   firstTurn: (dispatch: string) => Block;
+  cli?: "standin" | "real";
+  envoyJson?: string;
+  config?: readonly string[];
+  files?: Readonly<Record<string, string>>;
+  dispatchUrl?: string;
+  /** OMP_ASKGATE for the session: unset leaves the defaults, block for a verdict, warn for checks. */
+  mode?: "warn" | "block";
 }): Promise<{ requests: Request[]; sessions: string }> {
   if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
   const { root, home, workspace, sessions } = await ompRoot(omp, "askgate-omp-", cleanup);
 
-  // A stand-in `dispatch`, called by its literal path: its --dry-run prints the arguments, as the
-  // real CLI does, and a send prints that it sent, so the test needs no built CLI and no Dispatch.
+  // The `dispatch` the session calls by its literal path.
   const dispatch = path.join(root, "bin", "dispatch");
   await mkdir(path.dirname(dispatch));
   await writeFile(
     dispatch,
-    [
-      "#!/bin/sh",
-      'case " $* " in',
-      '  *" --dry-run "*) printf \'{"issue":"DSP-1","question":"Ship the release today?"}\\n\' ;;',
-      "  *) echo 'stand-in dispatch: sent' ;;",
-      "esac",
-      "",
-    ].join("\n")
+    options.cli === "real"
+      ? `#!/bin/sh\nexec "${process.execPath}" "${CLI_ENTRY}" "$@"\n`
+      : [
+          "#!/bin/sh",
+          'case " $* " in',
+          '  *" --dry-run "*) printf \'{"issue":"DSP-1","question":"Ship the release today?"}\\n\' ;;',
+          "  *) echo 'stand-in dispatch: sent' ;;",
+          "esac",
+          "",
+        ].join("\n")
   );
   await chmod(dispatch, 0o755);
+  await writeFile(path.join(root, "envoy.json"), options.envoyJson ?? "{}\n");
+  for (const [name, text] of Object.entries(options.files ?? {}))
+    await writeFile(path.join(root, name), text);
 
   let turns = 0;
   const { requests, base } = serveStandin(cleanup, (url, body) => {
     if (url.pathname === "/anthropic/v1/messages") {
-      if (isRuleRequest({ path: url.pathname, body }))
-        return new Response(
-          messageStream([{ type: "text", text: '{"matches": [], "reason": ""}' }], "rules"),
-          { headers: { "content-type": "text/event-stream" } }
-        );
       if (isGateRequest({ path: url.pathname, body }))
         return new Response(messageStream([{ type: "text", text: options.gateAnswer }], "gate"), {
           headers: { "content-type": "text/event-stream" },
@@ -96,6 +116,15 @@ async function runSession(options: {
     if (url.pathname.startsWith("/anthropic/")) return Response.json({ data: [] });
     // An unavailable open-asks read arms no run-end self-check.
     if (url.pathname === "/api/v1/asks/open") return new Response("unavailable", { status: 503 });
+    // The fake Dispatch takes an ask.
+    if (url.pathname === ASKS)
+      return Response.json({
+        id: "ask-1",
+        issue_key: "DSP-1",
+        question: body.question,
+        urgency: "med",
+        advice: { issue_status: "in_progress", session_writes_since_human: 0, your_open_asks: [] },
+      });
     // The Envoy listener: registration and any read answer with an interest.
     return Response.json({
       session_id: typeof body.session_id === "string" ? body.session_id : "",
@@ -104,7 +133,7 @@ async function runSession(options: {
       topics: [],
     });
   });
-  await writeStandinProfile(home, base);
+  await writeStandinProfile(home, base, options.config ?? []);
 
   let settled = Promise.withResolvers<void>();
   const rpc = spawnRpc(
@@ -116,9 +145,10 @@ async function runSession(options: {
       sessions,
       env: {
         ENVOY_URL: base,
-        DISPATCH_URL: base,
+        DISPATCH_URL: options.dispatchUrl ?? base,
         DISPATCH_TOKEN: "askgate-token",
         ENVOY_CONFIG_FILE: path.join(root, "envoy.json"),
+        ...(options.mode === undefined ? {} : { OMP_ASKGATE: options.mode }),
       },
       onFrame: (frame) => {
         if (
@@ -176,15 +206,6 @@ test.skipIf(omp === undefined && !onActions)(
     );
     expect(gate).toHaveLength(1);
     expect(JSON.stringify(gate[0]?.body.messages)).toContain("Ship the release today?");
-    // The `dispatch ask` opens a new ask, so the rules check asks the model beside the charter check.
-    const rules = requests.filter(
-      (request) => request.path === "/anthropic/v1/messages" && isRuleRequest(request)
-    );
-    expect(rules).toHaveLength(1);
-    // The request body is JSON, so the listed ask is looked for as JSON escapes it.
-    expect(JSON.stringify(rules[0]?.body.messages)).toContain(
-      JSON.stringify('<ask n="1" kind="ask">\nShip the release today?\n</ask>').slice(1, -1)
-    );
 
     expect(await gateEntries(sessions)).toMatchObject([
       {
@@ -192,9 +213,6 @@ test.skipIf(omp === undefined && !onActions)(
         outcome: "verdict",
         decision: "allow",
         model: "standin/standin-model",
-        ruleOutcome: "none",
-        ruleModel: "standin/standin-model",
-        target: "dispatch_ask issue=DSP-1",
       },
     ]);
   },
@@ -226,10 +244,7 @@ for (const [language, code] of [
       });
 
       const main = requests.filter(
-        (request) =>
-          request.path === "/anthropic/v1/messages" &&
-          !isGateRequest(request) &&
-          !isRuleRequest(request)
+        (request) => request.path === "/anthropic/v1/messages" && !isGateRequest(request)
       );
       expect(main.length).toBeGreaterThanOrEqual(2);
       const next = JSON.stringify(main.at(-1)?.body.messages);
@@ -243,3 +258,189 @@ for (const [language, code] of [
     },
     180_000
   );
+
+// AskGate's enforcement at the CLI, on the real binary with the real CLI and a fake Dispatch: the
+// gate reviews a literal call, mints its marker, and the CLI consumes it and posts once. Every
+// other form reaches the CLI with no marker and is refused before it sends, which the CLI logs and
+// pi-envoy records as an `unmarked` entry. With the switch off nothing asks any form for a marker.
+const REFUSED = "dispatch ask was not called: AskGate is on for this session";
+/** The ask's argument vector as a JS or Python list literal, the CLI called by its path. */
+const askArgv = (dispatch: string) =>
+  JSON.stringify([dispatch, "ask", "--issue", "DSP-1", "--question", "Ship the release today?"]);
+const asksPosted = (requests: readonly Request[]) =>
+  requests.filter((request) => request.path === ASKS).length;
+/** The messages of the last turn of the conversation, which hold the call's result. */
+const lastTurn = (requests: readonly Request[]) =>
+  JSON.stringify(
+    requests
+      .filter((request) => request.path === "/anthropic/v1/messages" && !isGateRequest(request))
+      .at(-1)?.body.messages
+  );
+const PYTHON_PASSTHROUGH = ["eval:", "  envPassthrough:", "    prefixes: [DISPATCH_, ENVOY_]"];
+
+test.skipIf(omp === undefined && !onActions)(
+  "the real CLI: a literal dispatch ask is reviewed, carries its marker and posts once",
+  async () => {
+    const { requests, sessions } = await runSession({
+      cli: "real",
+      gateAnswer: '{"decision":"allow"}',
+      firstTurn: (dispatch) => ({
+        type: "tool_use",
+        name: "bash",
+        input: { command: ask(dispatch) },
+      }),
+    });
+    expect(asksPosted(requests)).toBe(1);
+    expect(lastTurn(requests)).not.toContain(REFUSED);
+    expect(await gateEntries(sessions)).toMatchObject([
+      { tool: "dispatch_ask", outcome: "verdict", decision: "allow" },
+    ]);
+  },
+  180_000
+);
+
+// The review of the marker design at cf3f1e021, C1: the gate bound an upload's marker to its own
+// review input, so the CLI refused every reviewed markdown upload by `--path`. The fake Dispatch
+// here takes the upload's form and records the file's bytes.
+test.skipIf(omp === undefined && !onActions)(
+  "the real CLI: a markdown upload by --path is reviewed, carries its marker and posts its bytes once",
+  async () => {
+    const brief = "# Brief\n\nShip the release today.\n";
+    const uploads: string[] = [];
+    const fake = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const route = new URL(request.url).pathname;
+        if (request.method === "POST" && route === "/api/v1/issues/DSP-1/artifacts") {
+          const file = (await request.formData()).get("file");
+          uploads.push(file instanceof Blob ? await file.text() : "");
+          return Response.json({
+            artifact: { id: "artifact-1", issue_key: "DSP-1", name: "brief.md", slug: "brief-md" },
+            version: { number: 1 },
+          });
+        }
+        // An unavailable open-asks read arms no run-end self-check.
+        return new Response("unavailable", { status: 503 });
+      },
+    });
+    cleanup.push(() => fake.stop(true));
+    const { requests, sessions } = await runSession({
+      cli: "real",
+      gateAnswer: '{"decision":"allow"}',
+      dispatchUrl: `http://127.0.0.1:${fake.port}`,
+      files: { "brief.md": brief },
+      firstTurn: (dispatch) => ({
+        type: "tool_use",
+        name: "bash",
+        input: {
+          command: `${dispatch} artifact --issue DSP-1 --name brief.md --path ${path.join(path.dirname(path.dirname(dispatch)), "brief.md")}`,
+        },
+      }),
+    });
+    expect(uploads).toEqual([brief]);
+    expect(lastTurn(requests)).not.toContain("was not called");
+    expect(await gateEntries(sessions)).toMatchObject([
+      { tool: "dispatch_artifact", outcome: "verdict", decision: "allow" },
+    ]);
+  },
+  180_000
+);
+
+for (const [form, firstTurn, config] of [
+  [
+    "python3 -c under bash",
+    (dispatch: string): Block => ({
+      type: "tool_use",
+      name: "bash",
+      input: { command: `python3 -c 'import subprocess; subprocess.run(${askArgv(dispatch)})'` },
+    }),
+    [],
+  ],
+  [
+    "a Python eval cell's subprocess.run",
+    (dispatch: string): Block => ({
+      type: "tool_use",
+      name: "eval",
+      input: {
+        language: "py",
+        code: `import subprocess\nr = subprocess.run(${askArgv(dispatch)}, capture_output=True, text=True)\nprint(r.stdout)`,
+      },
+    }),
+    PYTHON_PASSTHROUGH,
+  ],
+  [
+    "a JS eval cell's Bun.spawnSync",
+    (dispatch: string): Block => ({
+      type: "tool_use",
+      name: "eval",
+      input: {
+        language: "js",
+        code: `const r = Bun.spawnSync(${askArgv(dispatch)});\nreturn new TextDecoder().decode(r.stdout);`,
+      },
+    }),
+    [],
+  ],
+] as const)
+  test.skipIf(omp === undefined && !onActions)(
+    `the real CLI refuses a gated write from ${form}, which carries no marker, once the session chose block`,
+    async () => {
+      const { requests, sessions } = await runSession({
+        cli: "real",
+        gateAnswer: '{"decision":"allow"}',
+        firstTurn,
+        config,
+        mode: "block",
+      });
+      expect(asksPosted(requests)).toBe(0);
+      expect(lastTurn(requests)).toContain(REFUSED);
+      // The gate read no call; the CLI's refusal is recorded from its ledger.
+      expect(await gateEntries(sessions)).toMatchObject([
+        { tool: "dispatch_ask", outcome: "unmarked", decision: "revise", verdictMode: "block" },
+      ]);
+    },
+    180_000
+  );
+
+// The CLI's checks default to warn: in a session that chose no mode, a gated write with no marker
+// posts with its warning, and pi-envoy records an `unmarked` entry for the report.
+test.skipIf(omp === undefined && !onActions)(
+  "the real CLI posts a gated write with no marker, with its warning, when the session chose no mode",
+  async () => {
+    const { requests, sessions } = await runSession({
+      cli: "real",
+      gateAnswer: '{"decision":"allow"}',
+      firstTurn: (dispatch) => ({
+        type: "tool_use",
+        name: "bash",
+        input: { command: `python3 -c 'import subprocess; subprocess.run(${askArgv(dispatch)})'` },
+      }),
+    });
+    expect(asksPosted(requests)).toBe(1);
+    expect(lastTurn(requests)).not.toContain(REFUSED);
+    expect(lastTurn(requests)).toContain("AskGate is on for this session in warn mode");
+    expect(await gateEntries(sessions)).toMatchObject([
+      { tool: "dispatch_ask", outcome: "unmarked", decision: "allow", verdictMode: "warn" },
+    ]);
+  },
+  180_000
+);
+
+test.skipIf(omp === undefined && !onActions)(
+  "with askgate.enabled false no record is written, and python3 -c under bash posts once",
+  async () => {
+    const { requests, sessions } = await runSession({
+      cli: "real",
+      envoyJson: `${JSON.stringify({ askgate: { enabled: false } })}\n`,
+      gateAnswer: '{"decision":"allow"}',
+      firstTurn: (dispatch) => ({
+        type: "tool_use",
+        name: "bash",
+        input: { command: `python3 -c 'import subprocess; subprocess.run(${askArgv(dispatch)})'` },
+      }),
+    });
+    expect(asksPosted(requests)).toBe(1);
+    expect(lastTurn(requests)).not.toContain(REFUSED);
+    expect(await gateEntries(sessions)).toEqual([]);
+  },
+  180_000
+);

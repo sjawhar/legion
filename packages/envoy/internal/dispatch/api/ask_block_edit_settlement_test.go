@@ -116,7 +116,7 @@ func awaitSettledVersion(t *testing.T, published <-chan model.Event, artifactID 
 		select {
 		case event, ok := <-published:
 			if !ok {
-				t.Fatalf("the event stream closed before version %d of %s was published", number, artifactID)
+				t.Fatalf("the broker's subscription closed before version %d of %s was published", number, artifactID)
 			}
 			if event.Type != "artifact.version" {
 				continue
@@ -163,6 +163,7 @@ type askEvent struct {
 		Question   string               `json:"question"`
 		State      string               `json:"state"`
 		Resolution *model.AskResolution `json:"resolution"`
+		Restored   bool                 `json:"restored"`
 	} `json:"payload"`
 }
 
@@ -611,6 +612,15 @@ func TestBlockRemovedFromTheDocumentRetractsAsTheSystemActorAndUndoRestores(t *t
 
 	if back := readBlockAsk(t, handler, askID); back.State != "open" {
 		t.Fatalf("undoing the deletion did not bring the ask back: state=%q", back.State)
+	}
+	var opened []bool
+	for _, event := range issueAskEvents(t, handler, issue.Key) {
+		if event.Type == "ask.opened" && event.Payload.ID == askID {
+			opened = append(opened, event.Payload.Restored)
+		}
+	}
+	if len(opened) != 2 || opened[0] || !opened[1] {
+		t.Fatalf("ask.opened restored flags = %v, want the opening unmarked and the restoration marked", opened)
 	}
 }
 
