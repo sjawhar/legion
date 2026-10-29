@@ -2,65 +2,50 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-720",
-  "completed": "2026-10-29T22:45:00Z",
-  "scope": "Review round 1 items (1) refs/search parent for an anchor that cannot cast and (2) the decode cost (INFRA-512 architect 17:11Z), the castable byte-identical comparison, and the spec v25 merge rule (approved 17:57Z; architect 18:00Z: 3+3 alternating replay runs and a real-LINUX-issue API comparison).",
-  "rulesApplied": "Spec v25. The plan's old A3 rule was also evaluated and gives the same result (pass).",
+  "completed": "2026-10-29T23:58:00Z",
+  "scope": "Forward-merge round: head 36c4b6d8 (code d5e71a0a, merged with main 08c2e8ad). The unchanged-diff fingerprint changed only by the 0141 -> 0142 renumber. By the INFRA-512 architect's ruling (23:26Z) the spec v25 CPU result carries from round 7, and this round re-ran the rest on the real surface against main 08c2e8ad.",
+  "rulesApplied": "Spec v25. The 'not slower' result carries from round 7 at c9c5430b by the architect's ruling: alternating 3+3 runs, median head 305.3 <= max base 317.0 CPU-s.",
+  "fingerprint": {
+    "before": {"head": "c9c5430bdf33000898011fcbf5d9e141eddd4ede", "sha256": "8868f24b4057488e12bfd4ea6495918ab52fa72d83cd622c4578de2809ff680f"},
+    "after": {"head": "d5e71a0a5ce1935912e8be86c1101c87f10e2bf4", "sha256": "7eeb1e8b6a742bc3b8a48ca9c9d41eb63d8a9f27620c5c7d8620c349b6a01526"},
+    "verdict": "changed only by the renumber: `sed s/0141/0142/g` over the old diff input equals the new diff input byte for byte"
+  },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Item 1: I drove head c9c5430b myself over 10 stored anchor shapes. Refs and search both name the block document for all 8 shapes that cannot cast. Item 2: my own decode benchmark (main json.Unmarshal vs head DecodeAnchor) gives ~ p=0.210, 96 B and 2 allocs on both, which agrees with the implementer's ~ p=0.105. I listed every stored-anchor decode site; all use DecodeAnchor."
+    "how": "I drove the merged head myself. A database migrated to 0141 by main 08c2e8ad, holding 10 stored anchor shapes, gives census 0; head boots 141 -> 142 with WARN count=9 and serves every route, matching the implementer's merge-round proof (its count=8 was over 9 shapes)."
   },
-  "failures": [
-    {
-      "criterion": "The head merges into main with migrations in sequence (GitHub mergeable, CI on the merge ref)",
-      "evidence": "`gh pr view 2483 --repo sjawhar/legion --json headRefOid,mergeable,mergeStateStatus` -> 29b61d12, CONFLICTING, DIRTY. `git merge-tree --write-tree 08c2e8adcf55 29b61d1293f6` -> CONFLICT (content) in packages/envoy/cmd/dispatch/README.md. main 08c2e8ad holds packages/envoy/internal/dispatch/store/migrations/0141_drop_broadcast_idempotency_keys.{up,census}.sql, which collides with this branch's 0141_asks_anchor_artifact_id. main moved during this round's runs (18:11-22:34Z). No red test: this is a merge-state failure. Every behaviour and performance check at c9c5430b passed (proof below), so after a forward merge that only renumbers, the next round compares fingerprints and runs the bare gates."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "Spec v25 'not slower': the median of three head runs uses no more whole-process CPU-seconds than the highest of three base runs",
-      "surface": "INFRA-639's LINUX replay (client 4b756a26) on /legion/scratch/tmp/infra720/lt-root, Dispatch main 30ecdcd4 vs head c9c5430b, alternating in one session on one pod",
-      "command": "run-step.sh i720r7-<side>-<n> --replay --rate 0.05 --uploads 0.25 --gomaxprocs 2 --rng-seed 720 --dispatch-commit <rev>, order base-1 head-1 base-2 head-2 base-3 head-3 (starts 18:14:18, 19:03:39, 19:46:08, 20:28:56, 21:11:49, 21:54:23Z); TABLES.md Dispatch CPU s; go tool pprof -focus sweepUnrecordedMarks",
-      "observed": "base 310.4 / 317.0 / 316.0 CPU-s, head 318.2 / 286.5 / 305.3: median head 305.3 <= max base 317.0 (base spread 6.6); no run saturated, 144/144 writes and 0 failures each; sweepUnrecordedMarks share base 0.040/0.023/0.042%, head 0.023/0.043/0.030% (old A3: median head 0.030% <= max base 0.042%)",
-      "headSha": "c9c5430bdf33000898011fcbf5d9e141eddd4ede",
-      "negativeControl": "the rule fails only when the head median exceeds the highest base run; base 30ecdcd4 on the same seed and pod, alternating, is the control; each meta.json names its commit and rng_seed 720"
-    },
-    {
-      "criterion": "Spec v25 'correct' for a read: main's and head's API answers for real LINUX issues are identical",
-      "surface": "the replay seed seeded.dump restored on Postgres 17.11, booted by main until repaired and fully block-indexed, then cloned so main and head serve the same rows and ids",
-      "command": "linux-capture.sh against main on linux7 and against head on the clone linux7h: per LINUX issue with asks, /issues/{key}/asks, ?thread=1 and /events; per ask, /asks/{id}, /references?from=…, /search?q=<first three words>&project=LINUX; jq -S; diff -r",
-      "observed": "159 responses per side (12 issues, 41 asks, 162 events, 90 ask search hits), all 200, all byte-identical except search's took_ms timing field",
-      "headSha": "c9c5430bdf33000898011fcbf5d9e141eddd4ede",
-      "negativeControl": "diff -r reports each search's took_ms, which proves the comparison sees a one-field difference"
-    },
-    {
-      "criterion": "Review item 1: an ask whose anchor does not cast belongs to its block document in refs, the same document search links",
-      "surface": "live head c9c5430b on a database migrated by main, holding 10 stored artifact_id shapes beside block_artifact_id",
-      "command": "/legion/scratch/tmp/t720r6/capture.sh (list, single read, events, search href, references?from= node parent per ask)",
-      "observed": "for not-a-uuid, trailing \\n, \"\", \"5\", leading space, number 5, null and {\"id\":1}: refs parent dispatch://ACME-1/artifact/t720-b-md and search href /issues/ACME-1/artifacts/t720-b-md, list/single/events no document; upper case and braced resolve t720-a-md everywhere; every route 200",
-      "headSha": "c9c5430bdf33000898011fcbf5d9e141eddd4ede",
-      "negativeControl": "round-6 head 3a3a08ab on the same data: refs parent dispatch://ACME-1 (the issue) for the 7 shapes that are not null; main: 500"
-    },
-    {
-      "criterion": "Review item 2: a stored anchor's decode costs no more than main's, and a JSON-number artifact_id answers 200 on every route",
-      "surface": "decode benchmark binaries built from main 30ecdcd4 and head c9c5430b; live head server",
-      "command": "BenchmarkZZStoredAnchorDecode x10 alternating, benchstat golang.org/x/perf@v0.0.0-20261009192801-be2c69fb417e; number-routes.sh over three asks with artifact_id stored as 7, 7 and 9",
-      "observed": "2.280µs ± 5% -> 2.444µs ± 14%, ~ (p=0.210 n=10), 96 B and 2 allocs both. Every reader and writer route 200: answer, reword, reply 201, snooze 200 / unsnooze 204, resolve, document edit. Stored values unchanged (7, 7, 9). Decode sites: docs/marks.go:473, :657, :801, docs/ask_row.go:39, docs/anchor_blocks.go:66, api/comment_queries.go:219, all DecodeAnchor",
-      "headSha": "c9c5430bdf33000898011fcbf5d9e141eddd4ede",
-      "negativeControl": "main 30ecdcd4: single read and references of a number anchor 500 'decode ask anchor: json: cannot unmarshal number …'"
+      "criterion": "The merged migration sequence boots over every stored anchor spelling, the census refuses nothing, and the readers answer as the fix requires",
+      "surface": "live local Dispatch, Postgres 17.11, NATS; database migrated to 0141 by main 08c2e8ad; asks created through main's API, then 10 anchor artifact_id shapes stored by SQL beside block_artifact_id (canonical, not-a-uuid, upper case, braced, trailing \\n, \"\", \"5\", leading space, number 5, null, {\"id\":1}), plus three asks with artifact_id 7",
+      "command": "envoy-dispatch census (head); boot dispatch-head on r8; /legion/scratch/tmp/t720r8/capture.sh; /legion/scratch/tmp/t720r8/number-routes.sh",
+      "observed": "census 0142_asks_anchor_artifact_id: 0, ok, exit 0; boot 141 -> 142, WARN count=9; every route 200. Canonical, upper case and braced resolve t720-a-md (list, single, events, refs parent). The 8 shapes that cannot cast resolve to no document, with refs parent and search href both t720-b-md. The number asks answer 200 on every read and write (answer, reword, reply 201, snooze 200 / unsnooze 204, resolve, document edit), and their stored values are unchanged",
+      "headSha": "d5e71a0a5ce1935912e8be86c1101c87f10e2bf4",
+      "negativeControl": "main 08c2e8ad on the same data: ask list, events and search 500; single read and references 500 for the 7 shapes that cannot cast"
     },
     {
       "criterion": "Castable anchors: head answers exactly as main does",
-      "surface": "castable-only copy (canonical both-column, control, upper case, braced), main and head",
-      "command": "capture issue asks, events, search?q=shape, 4 single reads, 4 references; jq -S; cmp",
-      "observed": "all 11 responses byte-identical between main 30ecdcd4 and head c9c5430b",
-      "headSha": "c9c5430bdf33000898011fcbf5d9e141eddd4ede",
+      "surface": "a copy holding only the anchors that cast (canonical both-column, control, upper case, braced)",
+      "command": "/legion/scratch/tmp/t720r8/snap.sh main | head; cmp of 11 jq -S responses (issue asks, events, search?q=shape, 4 single reads, 4 references)",
+      "observed": "all 11 responses byte-identical between main 08c2e8ad and head d5e71a0a",
+      "headSha": "d5e71a0a5ce1935912e8be86c1101c87f10e2bf4",
       "negativeControl": "round-4 head 1f4f79e7 gave anchor_artifact null for upper case and braced (red tests 1b43d81b)"
+    },
+    {
+      "criterion": "Spec v25 'correct' for a read: main's and head's API answers for real LINUX issues are identical",
+      "surface": "INFRA-639's replay seed (dispatch_replay_seed, pg_dump into Postgres 17.11), booted by main until repaired and fully block-indexed, then cloned so main and head serve the same rows and ids",
+      "command": "/legion/scratch/tmp/t720r7/linux-capture.sh against main on linux8 and head on the clone linux8h; per LINUX issue with asks, asks, asks?thread=1, events; per ask, single read, references, search; jq -S; cmp ignoring search's took_ms",
+      "observed": "270 responses per side (14 issues, 76 asks of which 1 anchored, 1,031 events, 250 ask search hits), all 200, all byte-identical except took_ms in 67 search responses",
+      "headSha": "d5e71a0a5ce1935912e8be86c1101c87f10e2bf4",
+      "negativeControl": "a plain cmp reports the took_ms difference in 67 search files, which proves the comparison detects a one-field change"
     }
   ],
   "notes": [
-    "CI at c9c5430b: envoy-go-race is red (internal/dispatch/docs hit the 30 m -race timeout with 'deadline leaves …s' failures; the same lane failed at 12:4x-12:5x on INFRA-514/594/728/593/645/719 and passed on this branch at 12:13Z), and ci-ok is red with it. envoy-go, dispatch, dispatch-multiprocess, dispatch-browser-multiprocess, dispatch-memory, lint, test, docs and envoy-smoke are green.",
-    "Outside this round's items: `envoy-dispatch backfill-anchor-blocks` stops at the first anchor with no block_id whose artifact_id names no document. On head: 'invalid room name' for a number, 22P02 for not-a-uuid. On main: decode for a number, and 22P02 for not-a-uuid. The string case is unchanged by this pull request.",
-    "Stack: I ran stack.sh stop on the loadtest root after the runs and told the implementer. Evidence: dispatch://INFRA-720/artifact/infra720-r7-tester-evidence-tgz."
+    "Merge state: GitHub MERGEABLE (BLOCKED on review and checks). git merge-tree against the current main de546ed2 merges cleanly; main's newest migration is still 0141_drop_broadcast_idempotency_keys.",
+    "CI at d5e71a0a at my reading: changes and pr-title green, every other lane queued.",
+    "Round 7 used INFRA-512's seeded.dump for the real-LINUX comparison (12 issues, 41 asks); this round used the replay seed the architect named, INFRA-639's dispatch_replay_seed (14 issues, 76 asks).",
+    "I started and stopped the loadtest root's stack only to pg_dump dispatch_replay_seed; it is stopped again. My scratch databases are dropped."
   ]
 }
