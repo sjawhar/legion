@@ -89,6 +89,7 @@ import {
   requestFor,
   type SaveCommentEdit,
   type SentRequest,
+  saveCommentEdit,
   survivingMentions,
   unedited,
 } from "./send-request";
@@ -897,10 +898,7 @@ export function MentionComposer({
         : {
             blocks: followedBlocks.current,
             id: edit.id,
-            save:
-              saveEdit ??
-              ((id, text, carried, bounds) =>
-                api.editComment(id, { body: text, ...carried }, bounds)),
+            save: saveEdit ?? saveCommentEdit,
           },
     kind,
     owner,

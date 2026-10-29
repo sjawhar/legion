@@ -39,6 +39,11 @@ export type SaveCommentEdit = (
   bounds: WriteBounds
 ) => Promise<unknown>;
 
+/** The save of an edit whose host gave the composer none, and the one a send restored after a
+ *  reload saves through (`held-sends.ts`): the comment's new body with the ids it carries. */
+export const saveCommentEdit: SaveCommentEdit = (id, body, carried, bounds) =>
+  api.editComment(id, { body, ...carried }, bounds);
+
 /**
  * A send, whole, as it stood when Send started it: where it goes (the owner, the reply it answers,
  * its kind and anchor), what it carries (the draft and an ask's fields), and, for an edit, which
@@ -292,6 +297,19 @@ function attempt(
     : api.createArtifactComment(owner.artifactId, input, bounds);
 }
 
+/** The block ids `sent`'s save carries, for an edit whose editor followed its comment's blocks:
+ *  the revision the blocks route answered, and where each carried id starts in the body the save
+ *  sends. None for a send that is no edit, one whose blocks route never answered, and one whose
+ *  spans are no longer offsets into that body, where the server matches blocks by their text.
+ *  The one place they are worked out, so a send kept across a reload carries exactly what its
+ *  first attempt did (`held-sends.ts`) and Dispatch reads one body under that send's key. */
+export function carriedIds(sent: SentRequest): CarriedBlockIds | undefined {
+  const followed = sent.edit?.blocks;
+  if (followed === undefined) return undefined;
+  const carried = carriedBlocks(followed.spans, followed.value, sent.draft.body.trim());
+  return carried === undefined ? undefined : { base_revision: followed.revision, blocks: carried };
+}
+
 /**
  * One attempt of a `SentRequest`, built from that value alone, so no later render's props or state
  * can reach the request it makes, whichever surface made it and whenever the store makes it again
@@ -304,13 +322,7 @@ export function sendAttempt(sent: SentRequest): (bounds: WriteBounds) => Promise
   const { edit, kind, owner, replyTo } = sent;
   if (edit !== undefined) {
     const body = sent.draft.body.trim();
-    const followed = edit.blocks;
-    const carried =
-      followed === undefined ? undefined : carriedBlocks(followed.spans, followed.value, body);
-    const ids =
-      followed === undefined || carried === undefined
-        ? undefined
-        : { base_revision: followed.revision, blocks: carried };
+    const ids = carriedIds(sent);
     return (bounds) => edit.save(edit.id, body, ids, bounds);
   }
   if (owner.kind === "session") {

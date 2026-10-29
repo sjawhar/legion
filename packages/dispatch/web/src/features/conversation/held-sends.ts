@@ -24,7 +24,14 @@ import {
   writesOf,
 } from "../writes/write-store";
 import type { ReplyTarget } from "./composer-model";
-import { type SentDraft, type SentRequest, sendAttempt } from "./send-request";
+import {
+  type CarriedBlockIds,
+  carriedIds,
+  type SentDraft,
+  type SentRequest,
+  saveCommentEdit,
+  sendAttempt,
+} from "./send-request";
 
 /** A held send's draft as its composer restores it: the text, its accepted mentions and a
  *  suggestion's replacement, and an ask's fields. */
@@ -43,12 +50,17 @@ export interface ComposerSend {
   readonly draft: HeldDraft;
 }
 
-/** A composer's send as it is kept across a reload: an edit by the comment it saves, since the
- *  host that gave the page its save is gone with the page. */
+/** A comment edit as a send keeps it across a reload: which comment it saves, and the ids its
+ *  press carried (`carriedIds`), since the host that gave the page its save and the blocks the
+ *  editor followed are both gone with the page. A record the build before this one kept holds
+ *  the comment's id alone, and restores carrying no ids, as that build's save did. */
+type KeptEdit = string | { readonly carried?: CarriedBlockIds; readonly id: string };
+
+/** A composer's send as it is kept across a reload: an edit by what it saves, not how. */
 interface KeptComposerSend {
   readonly draft: HeldDraft;
   readonly mutationKey: readonly string[];
-  readonly request: Omit<SentRequest, "edit"> & { readonly edit: string | null };
+  readonly request: Omit<SentRequest, "edit"> & { readonly edit: KeptEdit | null };
 }
 
 /**
@@ -164,6 +176,19 @@ const keptActor = shape.either(
   shape.record({ id: shape.string, kind: shape.oneOf("system") })
 ) satisfies Shape<Actor>;
 
+/** The ids a kept edit carries, as `carriedIds` worked them out at the press. */
+const keptCarried = shape.record({
+  base_revision: shape.number,
+  blocks: shape.array(shape.record({ from: shape.number, id: shape.string })),
+}) satisfies Shape<CarriedBlockIds>;
+
+/** A kept edit: the comment it saves with the ids its press carried, or, from the build before
+ *  those ids were kept, that comment's id alone. */
+const keptEdit = shape.either(
+  shape.string,
+  shape.record({ carried: shape.optional(keptCarried), id: shape.string })
+) satisfies Shape<KeptEdit>;
+
 const keptComposerSend = shape.record({
   draft: shape.record({ ask: keptAsk, draft: keptDraft }),
   mutationKey: shape.array(shape.string),
@@ -173,7 +198,7 @@ const keptComposerSend = shape.record({
     ),
     ask: keptAsk,
     draft: keptDraft,
-    edit: shape.nullable(shape.string),
+    edit: shape.nullable(keptEdit),
     kind: shape.oneOf("ask", "comment", "suggestion"),
     owner: shape.either(
       shape.record({ issueKey: shape.string, kind: shape.oneOf("issue") }),
@@ -221,6 +246,20 @@ function hold(client: QueryClient, mutationKey: MutationKey, answer: () => Promi
     .catch(() => {});
 }
 
+/** A kept edit as the send it belongs to saves it again: it follows no blocks - the editor that
+ *  followed them is gone with the page - and saves through the default save, carrying the ids
+ *  its press carried, so a Retry under the send's own key sends the very body Dispatch judged
+ *  under that key. A record from the build before those ids were kept carries none, and the
+ *  server matches its blocks by their text, as it did for that build's first attempt. */
+function restoredEdit(edit: KeptEdit): NonNullable<SentRequest["edit"]> {
+  const carried = typeof edit === "string" ? undefined : edit.carried;
+  return {
+    blocks: undefined,
+    id: typeof edit === "string" ? edit : edit.id,
+    save: (id, body, followed, bounds) => saveCommentEdit(id, body, followed ?? carried, bounds),
+  };
+}
+
 /**
  * A composer's send, one write of the store per press (`Writes`), kept across a reload with its
  * name, its request and its draft. A send to one session is ordered on that session
@@ -231,32 +270,24 @@ function hold(client: QueryClient, mutationKey: MutationKey, answer: () => Promi
  * deadline.
  */
 export const composerSend = defineWriteKind<ComposerSend, KeptComposerSend>({
-  keep: ({ draft, mutationKey, request: { edit, ...request } }) => ({
-    draft,
-    mutationKey,
-    request: { ...request, edit: edit?.id ?? null },
-  }),
+  keep: ({ draft, mutationKey, request }) => {
+    const { edit, ...kept } = request;
+    return {
+      draft,
+      mutationKey,
+      request: {
+        ...kept,
+        edit: edit === undefined ? null : { carried: carriedIds(request), id: edit.id },
+      },
+    };
+  },
   kept: keptComposerSend,
   landed: (client, write) => refreshAfter(client, write.detail.request),
   name: "composer",
   restore: ({ draft, mutationKey, request: { edit, ...request } }) => ({
     draft,
     mutationKey,
-    request: {
-      ...request,
-      // The host that gave the page its save is gone with it, and so are the blocks the editor
-      // followed: an edit saves as the composer's own default save does, carrying no block ids,
-      // and the server matches its blocks by their text.
-      edit:
-        edit === null
-          ? undefined
-          : {
-              blocks: undefined,
-              id: edit,
-              save: (id, body, carried, bounds) =>
-                api.editComment(id, { body, ...carried }, bounds),
-            },
-    },
+    request: { ...request, edit: edit === null ? undefined : restoredEdit(edit) },
   }),
   resume: ({ request }, wire) =>
     wire === null ? sendAttempt(request) : (bounds) => api.send(wire, bounds),
