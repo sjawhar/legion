@@ -38,7 +38,7 @@
 # keeps main's bundle copies fresh.
 #
 # Run from anywhere: .github/scripts/check-body-embed-limit.sh
-# CI runs it in the lint job of pr-and-main.yaml, and its tests in that workflow's test job.
+# CI runs it in ci.yaml's lint job, and its tests in ci.yaml's test job.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."

@@ -3,4 +3,4 @@ title: Envoy
 parent: legion
 paths: [packages/envoy]
 ---
-The Go-based event transport: webhook ingress, NATS routing and delivery, the native Dispatch server, and the MCP bridge. Dispatch's database is PostgreSQL 18 with pgvector: `envoy-infra`'s `gcp:Dispatch` defaults a new instance to `POSTGRES_18`, and `internal/testpg`, `scripts/dev-postgres.sh` and `deploy/compose/dispatch.acceptance.compose.yml` pin one pgvector-on-18 image by digest.
+The Go-based event transport: webhook ingress, NATS routing and delivery, the native Dispatch server, and the MCP bridge. Dispatch's database is PostgreSQL 18 with pgvector: `envoy-infra`'s `gcp:Dispatch` defaults a new instance to `POSTGRES_18`, and `internal/testpg`, `scripts/dev-postgres.sh` and `deploy/compose/dispatch.acceptance.compose.yml` pin one pgvector-on-18 image by digest. Dispatch packages no child component claims sit here directly, among them the embedding queue (`internal/dispatch/embedqueue`) that keeps meaning search's vectors current, an issue's from its title and its spec.

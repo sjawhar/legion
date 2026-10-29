@@ -1,5 +1,178 @@
 # Changelog
 
+## [22.2.0] - 2026-10-29
+
+### Added
+
+- Dispatch tells whoever files an issue, an ask or a decision block what it already holds on the
+  same subject. After an issue create, an ask (on an issue or a project document) or a
+  document edit that adds decision blocks commits, the related-item check searches the project by
+  the text's rarest words (at most 25, each scored by its count in the text times its BM25 idf
+  over the project's items, with too-common words, numbers and hashes dropped, and the keyword
+  arms ranked by idf-weighted coordination of those words) and, where an embedder is configured,
+  by meaning, and the response waits for it at most 5 s. `advice.suggestions` now always says what
+  it did: `outcome` `found`, `none` or `not_made` (with the reason in `missing`), `search`
+  `meaning_and_keywords` or `keywords_only` (with `search_note` saying why), `search_query` for a
+  reader's own `dispatch search`, `related` (each ask item with `ask`, its state, latest answer,
+  who gave it, when and the options chosen; no item carries `ask`, and there is no `decision`,
+  when the asks' states could not be read) and `decision`; a forced issue create also lists the
+  titles it forced past in `title_matches`. A document edit's advice gains
+  `decision_block_checks`, `{block_id, question, suggestions}` for each block it added in
+  document order, the first five checked together under the one 5 s bound and the rest answered
+  as not made. `GET /api/v1/projects/{key}/related` (title and text at most 1,000 characters
+  together) and `POST` (a spec-length text) run the same check and write nothing.
+  `GET /api/v1/related-checks?project=&source_kind=&from=&to=` counts the recorded checks by
+  source, outcome, search mode and reason, with p50, p95, maximum and over-300 ms counts of their
+  keyword and total times. Migration `0139_related_checks` adds `related_checks` (one row per check
+  of a write) and `search_term_stats` / `search_term_totals`, the word statistics the new
+  term-statistics refresh (`api.RunSearchTermStatsRefresh`, lease `search-term-stats`, so the
+  lease pool holds 13 connections) rebuilds for every project at boot and every 10 minutes.
+  Migration `0140_issue_embedding_spec` makes an issue's meaning-search text its title and its
+  spec, re-queued on a spec edit; the coverage pass re-embeds existing issues once an embedder
+  runs. Both censuses answer `0`.
+
+### Changed
+
+- A write's related items no longer come from LEGION-550's 300 ms keyword step
+  (`writeSuggestionTimeout`, removed): an issue create, an ask or a document edit adding decision
+  blocks can now take up to 5 s longer, the related-item check's bound, and a check that runs out
+  of time says it was not made instead of looking like one that found nothing. The
+  route descriptions of `POST /api/v1/issues`, `POST /api/v1/issues/{key}/asks` and
+  `POST /api/v1/artifacts/{id}/asks` say so.
+  A Dispatch server process now opens up to 87 database connections, one more for the
+  term-statistics refresh's lease, and envoy-infra's `gcp:Dispatch` sizes an app pod by that count.
+
+## [22.1.0] - 2026-10-29
+
+### Changed
+
+- `ENVOY_NOTIFICATIONS` and every key-value bucket Envoy opens (`envoy_interests`, `envoy_roles`,
+  `envoy_sessions`, `envoy_ci_state`, `envoy_webhook_redelivery`) now hold the deployment's
+  replica count, `ENVOY_NATS_REPLICAS`: a whole number from 1 to 5, default 1. A start creates the
+  stream or a bucket at that count and raises one it finds with fewer copies; the keeper (below)
+  raises it again after a concurrent start lowered it. The copies stay at the setting only when
+  every program of a deployment carries the same value: a clustered deployment sets it in every
+  envoy-listener and in the Dispatch server. Lowering copies is an operator step that needs every
+  program's setting lowered first, or the keeper raises it back
+  (`nats stream edit <stream> --replicas=<n>`). The listener reads it in `config.Load`, and now
+  refuses 0, a negative number, more than 5 and a non-integer at load, naming the variable, where
+  it took any integer. Dispatch's server reads it from a new settings table row, where it created
+  the stream and its redelivery bucket with a single replica, and so does
+  `envoy-dispatch redeliver-webhooks`. More than 1 needs a clustered NATS: a single server
+  (nats-server v2.15.1 included) refuses both a create and a raise above 1, and the listener's start
+  then stops with an error naming `ENVOY_NATS_REPLICAS=<n>` (Dispatch's server, which connects in
+  the background, serves on and logs `envoy nats reconnect hook failed` with that error); a refused bucket raise names the bucket
+  too, as `raise KV_envoy_interests: ENVOY_NATS_REPLICAS=3: context deadline exceeded` (a grant
+  without `$JS.API.STREAM.UPDATE.KV_<bucket>` shows as that timeout after 10 seconds). A cluster
+  with one of three servers stopped creates a new stream at 3 copies, one offline peer assigned,
+  and the start succeeds on nats-server v2.15.1; v2.10.29 refuses that create.
+- `ENVOY_STREAM_MAX_BYTES`, new, read by the listener and by Dispatch's server (a new settings
+  table row): a positive whole number of bytes, the stream's byte limit. A full stream refuses a
+  new publish (`DiscardNew`, now set on every start and switching a deployed `DiscardOld` stream)
+  and keeps every stored message, which leaves only by age, so the stream still holds every
+  message it took for its whole 72-hour duplicate window and the limit drops none; size the limit
+  above the stream's 72-hour volume. The refused publish's sender gets
+  `bus.ErrStreamFull` (`stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded`, the
+  server's error 10077 kept inside), which is not a `bus.ErrRefused` and so is retried: the webhook
+  listener answers GitHub 503 and Dispatch's redelivery sweep has GitHub redeliver it, Dispatch's
+  outbox retries the event on its backoff, the CI store settles again on a later tick, and
+  `/v1/messages/send` and `/v1/messages/publish` answer `503` with `Retry-After: 1` and the body
+  `envoy: the message bus refused the message because its stream is full: …`, their request record's
+  outcome `stream_full` rather than `bus_unavailable`, since the bus answered. Unset, the stream is
+  created with no byte limit and a start keeps a deployed limit. Neither a start nor the keeper
+  (below) ever lowers a deployed limit, as for the copies: each raises a smaller limit, or none, to
+  its setting and keeps a larger one, so an operator's raise of a full stream
+  (`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>`) stands, and programs with different
+  limits do not fight over the stream: the largest stands. A concurrent start can still put back
+  the smaller limit it read over another's (below) until that program's keeper raises it again.
+  Lowering or removing a limit is an operator step that needs every program's setting lowered or
+  removed first (`--max-bytes=<n>`, or `--max-bytes=-1` for none). 0, a negative number or a
+  non-integer is refused at load naming the variable, and a limit above what the server can
+  reserve is refused at create or update: the listener's start then stops with an error naming
+  `ENVOY_STREAM_MAX_BYTES=<n>`, and Dispatch's server, which connects in the background, serves on
+  and logs `envoy nats reconnect hook failed` with that error at each retry.
+- A JetStream publish the server acknowledges as a duplicate with no sequence (`bus.ErrNotStored`,
+  `stream ENVOY_NOTIFICATIONS acknowledged a duplicate of a message it does not hold`) is now sent
+  once more without its `Nats-Msg-Id`, through `Publish`, `PublishReportingDuplicate` and a
+  window's send, where it was taken as published. A clustered nats-server (v2.10.29 among them)
+  records a publish's `Nats-Msg-Id` at sequence 0 before it stores the message and keeps that
+  record on the stream's leader for the 72-hour duplicate window, a purge notwithstanding, when a
+  full stream refuses it, so every retry under the id (a GitHub redelivery, a Dispatch outbox
+  retry) was acknowledged `{"seq":0,"duplicate":true}` though the stream never stored the message.
+  The send without the id is stored as soon as the stream has room, with no leader step-down, and
+  the publish succeeds; while the stream is still full it is refused too, and the publish fails
+  with an error wrapping `bus.ErrNotStored` and the send's own error (`stream ENVOY_NOTIFICATIONS
+  acknowledged a duplicate of a message it does not hold, and its publish without its id failed:
+  stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded`), which is not a
+  `bus.ErrRefused` and is retried as `bus.ErrStreamFull` is: the webhook listener answers 503, the
+  outbox backs off, the send routes answer the full stream's `503` when the second publish was
+  refused as full. The stream drops no repeat of a message sent
+  without its id: a retry of a message still being stored, also acknowledged a duplicate with no
+  sequence, stores a second copy, and once a refused message is stored, every later publish under
+  its id stores another while the leader keeps the record, so the stream's consumers see each copy.
+- Every update of `ENVOY_NOTIFICATIONS` a start sends now starts from the deployed configuration
+  and changes only what Envoy owns: the subjects (reconciled as before), the 72-hour age and
+  duplicate window, the replicas (the deployed count or the setting, whichever is more), the byte
+  limit (the deployed one or the setting, whichever is more; the setting on a stream with none, the
+  deployed one when unset) and `DiscardNew`. Every other deployed field
+  (`MaxMsgsPerSubject`, `MaxMsgSize`, placement, compression and the rest) is kept beside the
+  metadata, `envoy_stream_id` included, where an update that changed subjects, age or window wrote
+  this binary's configuration over them, its replica count scaling a replicated stream down to the
+  starting program's count, which for Dispatch's server was always 1. A start that finds the
+  stream as it should be sends no update.
+- The listener and Dispatch's server, the programs that own `ENVOY_NOTIFICATIONS`, now keep it
+  while they run. JetStream's stream update has no compare-and-swap, so a start with other or no
+  settings, or another subject list, that reads the stream before another start's write and writes
+  after it puts the old subjects, copies, byte limit and metadata back. Every 30 seconds each
+  program's keeper reads the stream again and puts back copies below its `ENVOY_NATS_REPLICAS`, a
+  byte limit below its `ENVOY_STREAM_MAX_BYTES` or none (when set), a missing `envoy_stream_id`, the
+  72-hour age and duplicate window and `DiscardNew` (compiled into every release alike, logged as
+  `discard DiscardOld -> DiscardNew` when it puts it back), and adds
+  back each subject its binary compiles that the stream lacks, unless it overlaps a subject the
+  stream carries or captures a role lane, logging the WARN line
+  `envoy nats keeper restored the stream` with, for example,
+  `restored="replicas 1 -> 3, max_bytes -1 -> 2000000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
+  It only adds subjects: it removes and replaces none, so two releases with different subject
+  lists do not switch the stream back and forth, and each release's keeper adds back its own
+  subject that a concurrent write dropped. A stream that still carries role-lane subjects it
+  leaves to a start, which moves them off: when that stream needs anything, it sends nothing and
+  logs that it could not restore it. It also raises
+  the buckets its program opens (the listener's `envoy_interests`, `envoy_roles`,
+  `envoy_sessions` and `envoy_ci_state`, Dispatch's `envoy_webhook_redelivery`) back to
+  `ENVOY_NATS_REPLICAS`, logging `envoy nats keeper raised a bucket` with `replicas="1 -> 3"`. A
+  failed pass logs `envoy nats keeper could not restore the stream` or
+  `envoy nats keeper could not raise a bucket` and the next period tries again; it never stops
+  the program. With mixed settings during a rollout the stream can sit below the setting for up
+  to one period after the last start.
+- envoy-infra: `ListenerPermissions`, and through it `HostPermissions` and `DispatchPermissions`,
+  gains `$JS.API.STREAM.UPDATE.KV_<bucket>` for each bucket the listener opens, and
+  `DispatchPermissions` the same for the webhook redelivery bucket: the update a start, and the
+  keeper every 30 seconds after it, sends to raise a bucket's copies. `gcp:NatsHub` renders it
+  into the users it derives from those sets, so moving a hub with a `listener`, a `machineId` user
+  or a `dispatchMachineId` user to this release replaces its VM once. A hub must hold the new
+  grant (`gcp:NatsHub` moved to this release, or the subject added to a hand-written grant such as
+  an `aws:NatsService` `authorization`) before a program with `ENVOY_NATS_REPLICAS` above a
+  bucket's copies starts, or that raise times out after 10 seconds and the start stops naming the
+  bucket and the setting: `raise KV_envoy_interests: ENVOY_NATS_REPLICAS=3: context deadline
+  exceeded`.
+- envoy-infra: `aws:WebhookListener` refuses a `natsReplicas` above 5, and
+  `envoy-infra render webhook-listener-env` a `--nats-replicas` above 5, since the listener
+  refuses more at load.
+
+## [21.1.2] - 2026-10-29
+
+### Fixed
+
+- A Mermaid diagram in a Dispatch document no longer restyles the rest of the page, and no reader's
+  browser fetches Google Fonts or any address in the diagram's markup for it; the document draws it
+  with the same stricter sanitizer, in its own shadow root and off the page's main thread, as
+  comments do, so a large diagram no longer freezes the tab while it draws or on each edit. A
+  document diagram that takes longer than 5 seconds to draw shows `Unable to render Mermaid
+  diagram: it did not finish within 5 seconds` above its source, and an edited diagram redraws once
+  typing pauses.
+- Reopening an issue closes its document rooms on the server process that reopened it, as closing it does, so a page whose socket was admitted read-only while the issue was closed reconnects and is admitted writable, instead of staying read-only until the person reloads.
+- A closed issue's document no longer says "Reload to edit.", which a reload cannot make true; the dashboard shows that line only for a read-only admission that came while the issue was open, while the issue is open and the document's socket is connected.
+
 ## [21.1.1] - 2026-10-29
 
 ### Fixed

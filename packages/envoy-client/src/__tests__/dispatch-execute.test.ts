@@ -95,8 +95,12 @@ function executeAsk(args: Record<string, unknown>, fetchImpl: typeof fetch) {
 const architectureComponentsGuidance =
   'Project LEGION has an architecture model, but this issue is not linked to any of its current components. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
 
-const createdIssueLine =
-  "Created LEGION-216: Architecture work → http://dispatch.test/issues/LEGION-216";
+/** A new issue's result as these fixtures' server answers it: the created line, then the
+ *  not-made form a server that sends no related-item check result gets. */
+const createdIssueLines = [
+  "Created LEGION-216: Architecture work → http://dispatch.test/issues/LEGION-216",
+  "No related-item check was made: the server sent no check result. Search before you rely on this being new: dispatch search --project LEGION --query 'Architecture work'",
+].join("\n");
 
 const architectureSourceUnavailableGuidance =
   'Could not check whether project LEGION has an architecture model: architecture source network error. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
@@ -162,12 +166,15 @@ async function createIssueWithComponents(
     const target = new URL(String(url));
     requests.push(`${init?.method ?? "GET"} ${target.pathname}`);
     if (target.pathname === "/api/v1/issues") {
-      return response({
-        key: "LEGION-216",
-        title: "Architecture work",
-        project: "LEGION",
-        components,
-      });
+      return response(
+        {
+          key: "LEGION-216",
+          title: "Architecture work",
+          project: "LEGION",
+          components,
+        },
+        201
+      );
     }
     if (target.pathname === "/api/v1/projects/LEGION/architecture-sources") {
       if (source.startsWith("older-")) {
@@ -273,6 +280,7 @@ describe("executeDispatchTool", () => {
     expect(result.details).not.toHaveProperty("topic");
     expect(result.text).toBe(
       `Asked ask-1 on DSP-41 (urgency med): ${releaseQuestion}\n` +
+        "No related-item check was made: the server sent no check result. Search before you rely on this being new: dispatch search --project DSP --query 'release ready should'\n" +
         "You follow this ask: its answer and replies reach you directly."
     );
   });
@@ -2925,12 +2933,15 @@ describe("executeDispatchTool", () => {
         return noSources();
       }
       requests.push({ body: JSON.parse(String(init?.body)) });
-      return response({
-        key: "LEGION-13",
-        title: "New global search work",
-        project: "LEGION",
-        components: issueComponents("inherit", []),
-      });
+      return response(
+        {
+          key: "LEGION-13",
+          title: "New global search work",
+          project: "LEGION",
+          components: issueComponents("inherit", []),
+        },
+        201
+      );
     };
 
     const result = await executeDispatchTool({
@@ -2945,7 +2956,8 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe(
-      "Created LEGION-13: New global search work → http://dispatch.test/issues/LEGION-13"
+      "Created LEGION-13: New global search work → http://dispatch.test/issues/LEGION-13\n" +
+        "No related-item check was made: the server sent no check result. Search before you rely on this being new: dispatch search --project LEGION --query 'global search work'"
     );
     expect(result.details).toEqual({ issue: "LEGION-13" });
     expect(followedAsk(result.details)).toBeNull();
@@ -2964,13 +2976,16 @@ describe("executeDispatchTool", () => {
       if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-sources") {
         return noSources();
       }
-      return response({
-        key: "LEGION-13",
-        title: "New global search work",
-        project: "LEGION",
-        assignee,
-        components: issueComponents("inherit", []),
-      });
+      return response(
+        {
+          key: "LEGION-13",
+          title: "New global search work",
+          project: "LEGION",
+          assignee,
+          components: issueComponents("inherit", []),
+        },
+        201
+      );
     };
 
     const result = await executeDispatchTool({
@@ -2989,7 +3004,8 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe(
-      `Created LEGION-13: New global search work → https://dispatch.example.org/issues/LEGION-13${said}`
+      `Created LEGION-13: New global search work → https://dispatch.example.org/issues/LEGION-13${said}\n` +
+        "No related-item check was made: the server sent no check result. Search before you rely on this being new: dispatch search --project LEGION --query 'global search work'"
     );
   });
 
@@ -3002,7 +3018,7 @@ describe("executeDispatchTool", () => {
       source
     );
 
-    expect(result.text).toBe([createdIssueLine, architectureComponentsGuidance].join("\n"));
+    expect(result.text).toBe([createdIssueLines, architectureComponentsGuidance].join("\n"));
     expect(requests).toEqual([
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-sources",
@@ -3016,12 +3032,15 @@ describe("executeDispatchTool", () => {
       requests.push(`${init?.method ?? "GET"} ${target.pathname}`);
       if (target.pathname === "/api/v1/issues") {
         expect(JSON.parse(String(init?.body))).toMatchObject({ project: " LEGION " });
-        return response({
-          key: "LEGION-216",
-          title: "Architecture work",
-          project: "LEGION",
-          components: issueComponents("inherit", []),
-        });
+        return response(
+          {
+            key: "LEGION-216",
+            title: "Architecture work",
+            project: "LEGION",
+            components: issueComponents("inherit", []),
+          },
+          201
+        );
       }
       if (target.pathname === "/api/v1/projects/LEGION/architecture-sources") {
         return response([architectureSource("LEGION")]);
@@ -3057,12 +3076,15 @@ describe("executeDispatchTool", () => {
           project: "",
           external: "owner/repo#42",
         });
-        return response({
-          key: "LEGION-216",
-          title: "Architecture work",
-          project: "LEGION",
-          components: issueComponents("inherit", []),
-        });
+        return response(
+          {
+            key: "LEGION-216",
+            title: "Architecture work",
+            project: "LEGION",
+            components: issueComponents("inherit", []),
+          },
+          201
+        );
       }
       if (target.pathname === "/api/v1/projects/LEGION/architecture-sources") {
         return response([architectureSource("LEGION")]);
@@ -3094,7 +3116,7 @@ describe("executeDispatchTool", () => {
       "none"
     );
 
-    expect(result.text).toBe(createdIssueLine);
+    expect(result.text).toBe(createdIssueLines);
     expect(requests).toEqual([
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-sources",
@@ -3109,7 +3131,7 @@ describe("executeDispatchTool", () => {
 
     expect(result.text).toBe(
       [
-        createdIssueLine,
+        createdIssueLines,
         'Could not check whether project LEGION has an architecture model: not found. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.',
       ].join("\n")
     );
@@ -3130,7 +3152,7 @@ describe("executeDispatchTool", () => {
       source
     );
 
-    expect(result.text).toBe(createdIssueLine);
+    expect(result.text).toBe(createdIssueLines);
     expect(requests).toEqual([
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-sources",
@@ -3144,7 +3166,7 @@ describe("executeDispatchTool", () => {
       "older-one"
     );
 
-    expect(result.text).toBe([createdIssueLine, architectureComponentsGuidance].join("\n"));
+    expect(result.text).toBe([createdIssueLines, architectureComponentsGuidance].join("\n"));
     expect(requests).toEqual([
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-sources",
@@ -3157,7 +3179,7 @@ describe("executeDispatchTool", () => {
       issueComponents("explicit", ["web"], [], null, "LEGION-200")
     );
 
-    expect(result.text).toBe(createdIssueLine);
+    expect(result.text).toBe(createdIssueLines);
     expect(requests).toEqual(["POST /api/v1/issues"]);
   });
 
@@ -3166,7 +3188,7 @@ describe("executeDispatchTool", () => {
       issueComponents("none", [], [], "hiring, not code")
     );
 
-    expect(result.text).toBe(createdIssueLine);
+    expect(result.text).toBe(createdIssueLines);
     expect(requests).toEqual(["POST /api/v1/issues"]);
   });
 
@@ -3175,7 +3197,7 @@ describe("executeDispatchTool", () => {
       issueComponents("explicit", [], ["legacy-ui"])
     );
 
-    expect(result.text).toBe([createdIssueLine, architectureComponentsGuidance].join("\n"));
+    expect(result.text).toBe([createdIssueLines, architectureComponentsGuidance].join("\n"));
     expect(requests).toEqual([
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-sources",
@@ -3188,7 +3210,7 @@ describe("executeDispatchTool", () => {
       "fails"
     );
 
-    expect(result.text).toBe([createdIssueLine, architectureSourceUnavailableGuidance].join("\n"));
+    expect(result.text).toBe([createdIssueLines, architectureSourceUnavailableGuidance].join("\n"));
     expect(requests).toEqual([
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-sources",
@@ -3200,7 +3222,7 @@ describe("executeDispatchTool", () => {
       issueComponents("explicit", ["web"])
     );
 
-    expect(result.text).toBe(createdIssueLine);
+    expect(result.text).toBe(createdIssueLines);
     expect(requests).toEqual(["POST /api/v1/issues"]);
   });
 
@@ -3419,7 +3441,7 @@ describe("executeDispatchTool", () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const pathname = new URL(String(url)).pathname;
       if (pathname === "/api/v1/projects/LEGION/architecture-sources") return noSources();
-      return response(olderIssue);
+      return response(olderIssue, pathname === "/api/v1/issues" ? 201 : 200);
     };
     const run = (tool: string, args: Record<string, unknown>) =>
       executeDispatchTool({
@@ -8304,12 +8326,15 @@ describe("executeDispatchTool", () => {
       requests.push(request);
       const target = new URL(request.url);
       if (target.pathname === "/api/v1/issues") {
-        return response({
-          key: "TEST-1",
-          title: "External issue",
-          project: "TEST",
-          components: issueComponents("inherit", []),
-        });
+        return response(
+          {
+            key: "TEST-1",
+            title: "External issue",
+            project: "TEST",
+            components: issueComponents("inherit", []),
+          },
+          201
+        );
       }
       if (target.pathname === "/api/v1/projects/TEST/architecture-sources") {
         return noSources();

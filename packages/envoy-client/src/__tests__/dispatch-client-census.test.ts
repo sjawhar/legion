@@ -34,6 +34,7 @@ const CALLS: Record<ClientMethod, (client: DispatchClient) => Promise<unknown>> 
   getAgentArtifact: (client) => client.getAgentArtifact("session-1", "notes"),
   getIssueArtifact: (client) => client.getIssueArtifact("DSP-1", "notes"),
   search: (client) => client.search("notes"),
+  related: (client) => client.related("DSP", { title: "A title", text: "Some text." }),
   getIssue: (client) => client.getIssue("DSP-1"),
   updateIssue: (client) => client.updateIssue("DSP-1", { status: "testing", actor }),
   claimIssue: (client) => client.claimIssue("DSP-1", { actor }),

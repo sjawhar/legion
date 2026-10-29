@@ -1177,22 +1177,31 @@ func lockTables(t *testing.T, database *store.Store, mode string, tables ...stri
 // holds - which is the only way two processes' passes are made to overlap on purpose rather than
 // by luck.
 //
-// Four of the nine leases are observable inside a window a test can wait out:
-// reference-excerpts, block-index and webhook-redelivery, whose first pass is immediate, and
-// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other five
-// are not, and this row says so rather than pretending: document-compaction's interval is 24 h;
-// issue-ask-repair's first leased pass is one IssueAskRepairInterval (10 min) in, the boot's
-// repair taking no lease; architecture-import's and delivery-reconcile's first pass is jittered
-// uniformly over SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether
-// their passes ever overlap is a coin toss no test should turn into a flake; and edit-notices'
-// period is five seconds, so this window holds many of its periods, each served once
-// (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce holds what its lease is for).
+// Five of the eleven leases are observable inside a window a test can wait out:
+// reference-excerpts, block-index, search-term-stats and webhook-redelivery, whose first pass is
+// immediate, and suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in.
+// The other six are not, and this row says so rather than pretending: document-compaction's
+// interval is 24 h; issue-ask-repair's first leased pass is one IssueAskRepairInterval (10 min) in,
+// the boot's repair taking no lease; architecture-import's and delivery-reconcile's first pass is
+// jittered uniformly over SyncInterval/ReconcileInterval (5 min) and each process draws its own,
+// so whether their passes ever overlap is a coin toss no test should turn into a flake;
+// edit-notices' period is five seconds, so this window holds many of its periods, each served once
+// (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce holds what its lease is for); and
+// server-processes' prune is one delete on server_processes, the table every process's heartbeat
+// writes every five seconds, so a lock that held the prune would hold the registry itself.
 func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
 	fake := startGitHubFake(t)
+	// The term-statistics refresh writes nothing for a database with no project, so one exists
+	// before either process starts.
+	if _, err := pair.database.Pool.Exec(context.Background(), `insert into projects (key, name) values ('LEASE', 'Lease')`); err != nil {
+		t.Fatalf("create the project the term-statistics refresh rebuilds: %v", err)
+	}
 	// refs is where the reference-excerpt reconciliation's first statement writes
-	// (refs.MarkStaleExcerpts), write_suggestions where the suggestion-outcome sweep's does.
-	gate := lockTables(t, pair.database, "exclusive", "refs", "write_suggestions")
+	// (refs.MarkStaleExcerpts), write_suggestions where the suggestion-outcome sweep's does, and
+	// search_term_totals where the term-statistics refresh's first write for a project goes (its
+	// first statement only reads projects, which an exclusive lock does not hold).
+	gate := lockTables(t, pair.database, "exclusive", "refs", "write_suggestions", "search_term_totals")
 	// The block-index reconciliation's first statements read document_block_versions and
 	// block_grammar_owed, which only access exclusive mode holds back. They are held in a gate of
 	// their own, released as soon as the other process has found the lease held: that pass's
@@ -1209,6 +1218,10 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	waitForLease(t, pair, leaseSkipped, "reference-excerpts", 60*time.Second)
 	if ran := countLease(pair.a, leaseRan, "reference-excerpts") + countLease(pair.b, leaseRan, "reference-excerpts"); ran != 0 {
 		t.Errorf("a reference-excerpt pass reported running %d times while the one holding the lease is still inside the refs lock", ran)
+	}
+	waitForLease(t, pair, leaseSkipped, "search-term-stats", 60*time.Second)
+	if ran := countLease(pair.a, leaseRan, "search-term-stats") + countLease(pair.b, leaseRan, "search-term-stats"); ran != 0 {
+		t.Errorf("a term-statistics pass reported running %d times while the one holding the lease is still inside the search_term_totals lock", ran)
 	}
 
 	if waiting := storetest.WaitForLockWaiters(t, blockGate, 1, 60*time.Second); waiting < 1 {
@@ -1240,8 +1253,10 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	}
 	waitForLease(t, pair, leaseRan, "reference-excerpts", 60*time.Second)
 	waitForLease(t, pair, leaseRan, "suggestion-outcomes", 60*time.Second)
+	waitForLease(t, pair, leaseRan, "search-term-stats", 60*time.Second)
 	requireLeasedOnce(t, pair, "reference-excerpts")
 	requireLeasedOnce(t, pair, "suggestion-outcomes")
+	requireLeasedOnce(t, pair, "search-term-stats")
 	for _, unobserved := range []struct{ lease, why string }{
 		{"document-compaction", "its interval is 24 h, so no pass is due inside any window a test can wait out"},
 		{"issue-ask-repair", "its first leased pass is one IssueAskRepairInterval (10 min) after each process started"},
