@@ -49,8 +49,8 @@ That note says to add the packages that gain goroutines. Three points it does no
   own `-timeout` is 30 minutes, so the new step's `-timeout 30m` could never fire. 81c75d73 set
   `timeout-minutes: 75` for a worst case of 66: about 1 minute of setup, 30 for the first step, up
   to 5 for the second step's race compile, and 30 for the second step. The lane is now one job per
-  package group - `envoy-go-race` (`./internal/dispatch/docs/`), `envoy-go-race-pmdoc`,
-  `envoy-go-race-api`, `envoy-go-race-bus` (delivery, the Dispatch store and the bus) and
-  `envoy-go-race-listener` (the listener, the registry store and kvwatch) - each with one
-  `-race -timeout 30m` step, so the sum each limit covers is 36 and each job's `timeout-minutes`
-  is 45.
+  package group, each with one `-race` step of its own: `envoy-go-race` (delivery, the Dispatch
+  store, the bus, the listener, the registry store and kvwatch) and `envoy-go-race-api` at
+  `-timeout 30m` with `timeout-minutes: 45`, and `envoy-go-race-pmdoc` at `-timeout 40m` with
+  `timeout-minutes: 50`, because that package measured 1023.519 s on a runner of its own and 1210 s
+  while it contended. The document service has a race job of its own beside them.

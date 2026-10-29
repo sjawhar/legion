@@ -618,14 +618,15 @@ GATES = [
     ) + setup_go("envoy-infra-go", f"{INFRA}/go.mod") + CI_SELF),
 
     gate("envoy_go_race", "envoy-go-race", runs=[
-        step_run("envoy-go-race", "Race-test the document service",
-                 "go test -race -timeout 30m ./internal/dispatch/docs/",
-                 ENVOY, ["./internal/dispatch/docs/"], race=True),
+        step_run("envoy-go-race", "Race-test delivery, the store, the bus, the listener, the registry store and kvwatch",
+                 "go test -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/kvwatch/...",
+                 ENVOY, ["./internal/dispatch/delivery/...", "./internal/dispatch/store/...", "./internal/bus/",
+                         "./cmd/listener/", "./internal/store/", "./internal/kvwatch/..."], race=True),
     ], reads=setup_go("envoy-go-race", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("envoy_go_race_pmdoc", "envoy-go-race-pmdoc", runs=[
         step_run("envoy-go-race-pmdoc", "Race-test pmdoc",
-                 "go test -race -timeout 30m ./internal/dispatch/pmdoc/...",
+                 "go test -race -timeout 40m ./internal/dispatch/pmdoc/...",
                  ENVOY, ["./internal/dispatch/pmdoc/..."], race=True),
     ], reads=reads(
         (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/envoy/internal/dispatch/pmdoc/gen/decode.ts:16, differential.ts:21, edit-blocks.ts:21"),
@@ -637,18 +638,6 @@ GATES = [
                  "go test -race -timeout 30m ./internal/dispatch/api/",
                  ENVOY, ["./internal/dispatch/api/"], race=True),
     ], reads=setup_go("envoy-go-race-api", f"{ENVOY}/go.mod") + CI_SELF),
-
-    gate("envoy_go_race_bus", "envoy-go-race-bus", runs=[
-        step_run("envoy-go-race-bus", "Race-test delivery, the store and the bus",
-                 "go test -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/",
-                 ENVOY, ["./internal/dispatch/delivery/...", "./internal/dispatch/store/...", "./internal/bus/"], race=True),
-    ], reads=setup_go("envoy-go-race-bus", f"{ENVOY}/go.mod") + CI_SELF),
-
-    gate("envoy_go_race_listener", "envoy-go-race-listener", runs=[
-        step_run("envoy-go-race-listener", "Race-test the listener, the registry store and kvwatch",
-                 "go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/kvwatch/...", ENVOY,
-                 ["./cmd/listener/", "./internal/store/", "./internal/kvwatch/..."], race=True),
-    ], reads=setup_go("envoy-go-race-listener", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("dispatch_memory", "dispatch-memory", runs=[
         step_run("dispatch-memory", "Memory tests of the Dispatch server", "go test -tags memory -count=1 -timeout 60m -v ./cmd/dispatch",
