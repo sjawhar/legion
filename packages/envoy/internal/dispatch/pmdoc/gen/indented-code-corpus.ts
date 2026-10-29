@@ -9,13 +9,15 @@
 // in a quote, a footnote definition, a quote in a footnote definition, a footnote definition in a
 // quote, a typed block at top level, in an item and in a quote, a typed block in a quote in a
 // typed block and a quote in a typed block in a quote, on the marker line of an item, after a
-// typed block holding a blank line in an item, right after a list it is outside of (`100. a`,
-// `-\ta`, `10) a`) or right after a quote ending in a heading, a rule or a fence. The code is a
+// typed block holding a blank line in an item, a typed block (a callout or an ask) indented in a
+// quote or an item, right after a list it is outside of (`100. a`, `-\ta`, `10) a`) or right
+// after a quote ending in a heading, a rule or a fence. The code is a
 // first line four to eight columns past its container, up to three more lines of code or of
 // whitespace, and one to four lines of whitespace - spaces and tabs, up to ten columns, after the
 // container's markers or none of them. After it come zero to two empty lines and then the end of
 // the document, a paragraph, an indented or lazy line, the next item, a quoted line or item or a
-// fence, or a line inside the container; a typed block's closing `:::` follows last. Pieces are
+// fence, or a line inside the container; a typed block's closing `:::` follows last. A document
+// ending in the code's whitespace-only lines has no final line feed one time in three. Pieces are
 // picked with the high bits of a linear congruential generator, since its low bits cycle with
 // period 16. The same arguments write the same file.
 import { writeFileSync } from "node:fs";
@@ -52,6 +54,7 @@ type Container = {
 };
 
 const callout = ':::callout{kind="note" title="T"}';
+const ask = ':::ask{#ask-1 urgency="high" multiple="false" state="open"}';
 const containers: readonly Container[] = [
   {
     kind: "top",
@@ -239,6 +242,25 @@ const containers: readonly Container[] = [
     nexts: ["> - b", ">   z"],
   },
   {
+    kind: "typed-indented-in-quote",
+    leads: [[`>   ${callout}`], [`>   ${ask}`]],
+    first: ">   ",
+    prefix: ">   ",
+    holds: [">", "> ", ">   "],
+    nexts: ["", ">   y"],
+  },
+  {
+    kind: "typed-indented-in-item",
+    leads: [
+      ["- a", "", `    ${callout}`],
+      ["- a", "", `    ${ask}`],
+    ],
+    first: "    ",
+    prefix: "    ",
+    holds: ["", "  ", "    "],
+    nexts: ["", "    y", "- b"],
+  },
+  {
     kind: "item-after-typed-blank",
     leads: [
       ["- a", `  ${callout}`, "  x", "", "  y", "  :::"],
@@ -297,7 +319,9 @@ const markdownIn = (container: Container): string => {
   const next = pick(container.close ? container.nexts : [...nexts, ...container.nexts]);
   if (next) lines.push(next);
   if (container.close) lines.push(...container.close);
-  return `${lines.join("\n")}\n`;
+  // A document ending in its whitespace-only lines ends, one time in three, with no line feed.
+  const ending = container.close || next ? "\n" : pick(["\n", "\n", ""]);
+  return `${lines.join("\n")}${ending}`;
 };
 
 const seen = new Set<string>();
