@@ -159,6 +159,18 @@ func (s *server) relatedAllowance() time.Duration {
 	return cmp.Or(s.suggestionTimeout, relatedCheckAllowance)
 }
 
+// relatedBounds is the context a check's work runs under and the allowance it ends at: ctx
+// bounded by relatedAllowance, ending with errRelatedAllowanceEnded as its cause so that a check
+// whose context is done can tell its own deadline from the request that ran it going away
+// (runRelatedCheck's callerGone). Every site that bounds a check uses it, so a decision block's
+// per-check context inherits the edit's allowance with that same cause. The caller cancels, and
+// names the allowance in what it answers.
+func (s *server) relatedBounds(ctx context.Context) (context.Context, context.CancelFunc, time.Duration) {
+	allowance := s.relatedAllowance()
+	bounded, cancel := context.WithTimeoutCause(ctx, allowance, errRelatedAllowanceEnded)
+	return bounded, cancel, allowance
+}
+
 // relatedCheckNotRun answers, and records unless input.record is false, a check its route decided
 // not to make (reason and text say why), so that write's result still says no check was made.
 func (s *server) relatedCheckNotRun(ctx context.Context, input relatedInput, reason, text string) *model.Suggestions {
@@ -191,11 +203,11 @@ func withSuggestions(payload any, advice *writeAdvice, suggestions *model.Sugges
 // decisionBlockChecks runs the related-item check for each decision block a document edit added,
 // once the edit has committed, so a block whose question restates a decision already made or work
 // already filed is answered with it while the writer is still at the document. The first
-// decisionBlockCheckLimit blocks are checked at once, all under one relatedAllowance, so an edit
-// waits on its checks no longer than an issue create waits on its one; each block past them
-// answers as not made, and all of those are recorded in one round trip. A block's source is the
-// document's issue, or the project document itself when it has no issue, left out of its results
-// as an ask's owner is. Nil when the edit added no block.
+// decisionBlockCheckLimit blocks are checked at once, all under one allowance (relatedBounds), so
+// an edit waits on its checks no longer than an issue create waits on its one; each block past
+// them answers as not made, and all of those are recorded in one round trip. A block's source is
+// the document's issue, or the project document itself when it has no issue, left out of its
+// results as an ask's owner is. Nil when the edit added no block.
 //
 // Each check reads and records under a connection mark of its own (store.ForConcurrentRead): on
 // the request's one mark, one check's open cursor would have the pool refuse the others' reads
@@ -206,7 +218,7 @@ func (s *server) decisionBlockChecks(
 	if len(blocks) == 0 {
 		return nil
 	}
-	bounded, cancel := context.WithTimeoutCause(ctx, s.relatedAllowance(), errRelatedAllowanceEnded)
+	bounded, cancel, _ := s.relatedBounds(ctx)
 	defer cancel()
 	checks := make([]decisionBlockCheck, len(blocks))
 	var overflow []relatedCheckRecord
@@ -369,8 +381,7 @@ func (s *server) relatedCheck(ctx context.Context, input relatedInput) *model.Su
 func (s *server) runRelatedCheck(
 	ctx context.Context, input relatedInput, started time.Time,
 ) (*model.Suggestions, relatedRecord) {
-	allowance := s.relatedAllowance()
-	bounded, cancel := context.WithTimeoutCause(ctx, allowance, errRelatedAllowanceEnded)
+	bounded, cancel, allowance := s.relatedBounds(ctx)
 	defer cancel()
 	record := relatedRecord{project: input.project, terms: []string{}}
 	suggestions := &model.Suggestions{Related: []model.WriteSuggestion{}}
@@ -518,7 +529,7 @@ func (s *server) runRelatedCheck(
 	// A meaning stage cut short by the request going away did not time out, and nobody waits on
 	// the keyword stage's answer.
 	if callerGone() {
-		return ended(timedOut)
+		return notMade(relatedReasonCancelled, relatedCancelledMissing)
 	}
 	if answered {
 		suggestions.Search = relatedMeaningAndKeywords
