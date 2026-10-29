@@ -94,7 +94,7 @@ func TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering(t *testing.
 	}{
 		{"/v1/sessions", sessionsHandler(registry, sessions)},
 		{"/v1/registry/" + unreadable, sessionEntryHandler(state)},
-		{"/v1/interests/" + unreadable, adminInterestsHandler(registry)},
+		{"/v1/interests/" + unreadable, adminInterestsHandler(registry, sessions)},
 	} {
 		t.Run(route.path, func(t *testing.T) {
 			recorder := get(route.handler, route.path)

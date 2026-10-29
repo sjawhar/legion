@@ -169,10 +169,14 @@ export async function refuseBroadcasts(page: Page): Promise<{ allow: () => void 
   };
 }
 
+/** A persisted interest row to seed, served by the fake listener as given. `updated_at` is the
+ *  row's own last write; `last_seen` is the session's last heartbeat as the listener still knows
+ *  it, absent when the listener has lost it. */
 export interface FakeInterest {
   session_id: string;
   topics: string[];
   updated_at?: number;
+  last_seen?: number;
 }
 
 export async function setInterests(rows: FakeInterest[]): Promise<void> {

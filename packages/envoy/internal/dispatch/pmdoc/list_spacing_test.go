@@ -212,7 +212,8 @@ func TestCorpusErrorsOfItemSpreadReadOtherwiseAreRefused(t *testing.T) {
 // A list inside a footnote definition inside a typed block, with a blank line in its first item, is
 // one the browser editor reads with that item spread, as it reads the same definition outside any
 // typed block. A document write either refuses it or reads the item spread, so the blank line the
-// writer put there is kept; storing the item tight drops it, which main avoided by refusing every
+// writer put there is kept; storing the item tight drops it, which the writer before
+// sjawhar/legion#2403 avoided by refusing every
 // footnote definition in a typed block (INFRA-581).
 func TestAListInADefinitionInATypedBlockIsReadSpreadAsTheBrowserReadsItOrRefused(t *testing.T) {
 	for _, markdown := range []string{
