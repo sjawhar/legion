@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-546",
+  "completed": "2026-10-29T08:41:00Z",
+  "round": 11,
+  "headSha": "fd88692b0d37f6850037efd84c8542945b6ff101",
+  "codeHeadSha": "cf2e84f13dfb48276cdc77bc504bbaba8c68bea7",
+  "fingerprint": {
+    "oldHead": "8ec4e36436849c6f1161ced249de0486361c0be9",
+    "newHead": "fd88692b0d37f6850037efd84c8542945b6ff101",
+    "result": "794bd1d9f07bcb43 -> 06dde7f97b1d6b6c: changed only in the .dispatch/architecture/envoy-listener.md summary line (main #2331's plugin sentence added beside this PR's)",
+    "decision": "full round: main moved cmd/dispatch/main.go and internal/dispatch/outbox/publisher.go under this PR's paths"
+  },
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran `bash /legion/scratch/tmp/p546b/proof.sh /legion/workspaces/sjawhar/legion/infra-546` at fd88692b: P1-P5 and every standalone refusal reproduced."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "On the tree merged with main, a full ENVOY_NOTIFICATIONS refuses new messages: send and publish answer a retryable 503 naming the full stream (stream_full), the GitHub webhook answers 503, nothing stored is dropped, and a send succeeds once an operator makes room",
+      "surface": "Real envoy-listener (ENVOY_STREAM_MAX_BYTES=20000, ENVOY_WEBHOOKS=github) on a standalone nats-server v2.15.1, driven with curl",
+      "command": "bash /legion/scratch/tmp/t546/tS.sh (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6492004176)",
+      "observed": "publish and send: 503, Retry-After: 1, 'envoy: the message bus refused the message because its stream is full: stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded', outcome stream_full; webhook 503; stream 15 msgs, first_seq 1, discard new; send 503 before the raise, 200 after.",
+      "headSha": "fd88692b0d37f6850037efd84c8542945b6ff101",
+      "negativeControl": "NATS server stopped under the running listener -> send 503 'envoy: the message bus did not answer: bus: waiting for NATS to reconnect: context deadline exceeded', outcome bus_unavailable"
+    },
+    {
+      "criterion": "On the merged tree (main's reworked outbox), a refused GitHub delivery and refused Dispatch outbox events on a full clustered stream are stored once there is room, with no step-down, once each",
+      "surface": "Real envoy-listener on three nats-server v2.10.29 processes and three v2.15.1 processes; real envoy-dispatch (Postgres 17) on the v2.10.29 cluster",
+      "command": "bash /legion/scratch/tmp/t546/tX.sh <v2.10.29 | v2.15.1>; bash /legion/scratch/tmp/t546/tZ.sh (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6492004176)",
+      "observed": "Both servers: d1 503 while full and on redelivery; after the raise the redelivery -> 200 and stored 15 -> 16 with no step-down; d2 twice stored once (17). Outbox: project.created and issue.created refused ('is full', then 'does not hold, and its publish without its id failed: ... is full'), retried, stored once each 15 s after the raise (15 -> 17).",
+      "headSha": "fd88692b0d37f6850037efd84c8542945b6ff101",
+      "negativeControl": "GitHub webhook with a bad signature -> 401"
+    },
+    {
+      "criterion": "On the merged tree, Dispatch's keeper runs only after its background first-connection reconcile and restores what an operator lowered; copies, limit, DiscardNew and envoy_stream_id hold across starts and the mixed-settings race",
+      "surface": "Real envoy-dispatch and envoy-listener on three nats-server v2.15.1 processes and a standalone v2.15.1",
+      "command": "bash /legion/scratch/tmp/t546/tD2.sh; bash /legion/scratch/tmp/t546/race.sh <workspace> 4 40; bash /legion/scratch/tmp/p546b/proof.sh <workspace> (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6492004176)",
+      "observed": "Dispatch booted with NATS down: 0 keeper lines in 35 s; cluster up: 3 / 2000000 / discard new / an id; operator lowering restored within 35 s ('replicas 1 -> 3, max_bytes -1 -> 2000000, discard DiscardOld -> DiscardNew'); SIGTERM 72 ms. race.sh 12/12 PASS, 6 listener-keeper restores, no 'could not restore' from Dispatch. proof.sh P1-P5 reproduced.",
+      "headSha": "fd88692b0d37f6850037efd84c8542945b6ff101",
+      "negativeControl": "Dispatch with ENVOY_NATS_REPLICAS=3 on a standalone v2.15.1 -> 'reconnect hook failed ... ENVOY_NATS_REPLICAS=3: nats: replicas > 1 not supported in non-clustered mode', no keeper started; listener with the same -> exit 1 naming the setting"
+    }
+  ],
+  "observations": [
+    "The scratch volume was recreated; the harness was rebuilt at /legion/scratch/tmp/t546.",
+    "CI at cf2e84f1 (the merge), read 2026-10-29T08:39Z: lint, typecheck, build, changes, envoy-infra-go, envoy-smoke, envoy-e2e-local, envoy-session-stall and the Dispatch multiprocess lanes success; test, envoy-go, envoy-go-race, dispatch, dispatch-memory in progress. Read as in progress, not waited for."
+  ]
+}
