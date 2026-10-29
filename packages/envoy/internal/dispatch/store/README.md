@@ -1,9 +1,9 @@
 # Dispatch store
 
 `migrations/` holds every `<version>_<name>.up.sql` boot applies in version order, with the
-`<version>_<name>.census.sql` each one declares for the pre-deploy census. `<version>` is a
-number through 140, the sequence the set grew up with, each of whose files keeps the number it
-landed with, and for every migration added since the UTC moment its author created it,
+`<version>_<name>.census.sql` each one declares for the pre-deploy census. `<version>` is one of
+the numbers the set grew up with, each of whose files keeps the number it landed with, and for
+every migration added since the UTC moment its author created it,
 `YYYYMMDDHHMMSS` (`date -u +%Y%m%d%H%M%S`): two pull requests open at once cannot both claim one
 timestamp, while both would claim the next number. This file sits beside that directory rather
 than in it because the directory is embedded with `all:` and `pgmigrate.Load` refuses a set

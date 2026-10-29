@@ -108,7 +108,7 @@ func (s *Store) migrate(ctx context.Context, all []migrations.Migration) (int, e
 }
 
 // SchemaVersion is the highest migration version this database has recorded —
-// a number up to LastNumbered, or the 14-digit UTC timestamp of a migration
+// one of the numbered migrations, or the 14-digit UTC timestamp of a migration
 // added since — and 0 for a database no daemon has migrated yet.
 func (s *Store) SchemaVersion(ctx context.Context) (int, error) {
 	return schemaVersion(ctx, s.pool)

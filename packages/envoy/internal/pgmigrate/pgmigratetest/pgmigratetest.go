@@ -1,13 +1,13 @@
 // Package pgmigratetest holds the rules Envoy's migration sets are held to in tests: what a store
-// embeds is its whole migrations directory, the identifiers a set hands out are a store's numbered
-// ones and UTC timestamps past them (CheckIdentifiers; the broker's set is numbered throughout,
-// CheckNumberedOneToN), every migration from a store's chosen number declares a census, a census
-// names the new migrations whose objects it reads (CheckCensusNamesTheMigrationsItReads), and the
-// census's reading of which tables a migration touches is held to the set, both by name
-// (CheckTouchedTablesAreKnown) and against the locks each migration really takes
-// (CheckTouchedTablesAgainstLocks). It is an ordinary package rather than a _test.go file so
-// Dispatch's and the broker's store tests can both call it; Go shares no test-only code across
-// packages.
+// embeds is its whole migrations directory, the identifiers the broker's set hands out are
+// numbered throughout (CheckNumberedOneToN; a set whose identifiers are numbers and then UTC
+// timestamps, as Dispatch's is, is held to migrationid.Check), every migration from a store's
+// chosen number declares a census, a census names the new migrations whose objects it reads
+// (CheckCensusNamesTheMigrationsItReads), and the census's reading of which tables a migration
+// touches is held to the set, both by name (CheckTouchedTablesAreKnown) and against the locks
+// each migration really takes (CheckTouchedTablesAgainstLocks). It is an ordinary package rather
+// than a _test.go file so Dispatch's and the broker's store tests can both call it; Go shares no
+// test-only code across packages.
 package pgmigratetest
 
 import (
@@ -18,10 +18,7 @@ import (
 	"os"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
-	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -102,64 +99,6 @@ func CheckNumberedOneToN(fsys fs.FS, dir string) error {
 		}
 	}
 	return nil
-}
-
-// timestampLayout is how a version above a store's last numbered one reads as a UTC instant.
-const timestampLayout = "20060102150405"
-
-// CheckIdentifiers fails the test unless set hands its identifiers out the way the repository
-// requires: versions 1 through lastNumbered, the sequence the store grew up with, appear exactly
-// once each, and every other version is a 14-digit UTC timestamp, the moment its author created
-// the migration (date -u +%Y%m%d%H%M%S). It reads versions and file names alone, so it needs no
-// database, and it reports every file that breaks the rule rather than the first.
-//
-// pgmigrate.Load does not require this, since a runner does not depend on it: a set applies as
-// written whatever its versions are. The repository requires it because two branches open at once
-// cannot both take the next number without colliding: nothing conflicts in git, and the clash
-// shows only once one of them merges. A timestamp belongs to the moment it was created, so no two
-// authors take one identifier, and it sorts after every number, so a fresh database applies the
-// numbered migrations in their old order and the timestamped ones in the order they were written.
-// A migration merged below one a database already applied still runs exactly once: a runner applies
-// every version its table does not record, not only those above the highest.
-func CheckIdentifiers(t testing.TB, set []pgmigrate.Migration, lastNumbered int) {
-	t.Helper()
-	byVersion := make(map[int]string, len(set))
-	for _, migration := range set {
-		if other, taken := byVersion[migration.Version]; taken {
-			t.Errorf("migrations %s and %s share version %d: a runner records a migration by its version, so it would apply the first and skip the rest as already applied",
-				other, migration.Name, migration.Version)
-			continue
-		}
-		byVersion[migration.Version] = migration.Name
-	}
-	for version := 1; version <= lastNumbered; version++ {
-		if _, present := byVersion[version]; !present {
-			t.Errorf("migration %04d is missing: versions 1 through %d are the numbered migrations, each of which appears exactly once, and every file keeps the number it landed with",
-				version, lastNumbered)
-		}
-	}
-	for _, migration := range set {
-		if migration.Version < 1 {
-			t.Errorf("migration %s takes version %d: a version is a positive number", migration.Name, migration.Version)
-			continue
-		}
-		if migration.Version <= lastNumbered || isUTCTimestamp(migration.Version) {
-			continue
-		}
-		t.Errorf("migration %s takes version %d: %d is the last numbered migration, and every migration added since is named for the UTC moment it was created, 14 digits YYYYMMDDHHMMSS (date -u +%%Y%%m%%d%%H%%M%%S)",
-			migration.Name, migration.Version, lastNumbered)
-	}
-}
-
-// isUTCTimestamp answers whether version is 14 digits of a UTC instant that exists: a month 13 or
-// a 31st of April parses into neither, and anything shorter or longer is not a timestamp at all.
-func isUTCTimestamp(version int) bool {
-	digits := strconv.Itoa(version)
-	if len(digits) != len(timestampLayout) {
-		return false
-	}
-	stamp, err := time.ParseInLocation(timestampLayout, digits, time.UTC)
-	return err == nil && stamp.Format(timestampLayout) == digits
 }
 
 // CheckCensusDeclaredFrom reports an error unless every migration numbered from or above `from`

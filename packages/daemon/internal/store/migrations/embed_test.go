@@ -7,13 +7,17 @@ import (
 	"testing/fstest"
 )
 
+// craftedNumbered is how many numbered migrations a crafted set holds: enough for a gap to show,
+// and nothing about the set the daemon ships, whose numbers Load reads for itself.
+const craftedNumbered = 3
+
 // craftedSet is a set shaped like the embedded one — versions 1 through
-// LastNumbered, one file each — with the named extra files added. A test
+// craftedNumbered, one file each — with the named extra files added. A test
 // crafts the set it wants to see refused rather than adding a file to the
 // package the daemon ships.
 func craftedSet(extra ...string) fstest.MapFS {
 	fsys := fstest.MapFS{}
-	for version := 1; version <= LastNumbered; version++ {
+	for version := 1; version <= craftedNumbered; version++ {
 		fsys[fmt.Sprintf("%04d_numbered.up.sql", version)] = &fstest.MapFile{Data: []byte("select 1;\n")}
 	}
 	for _, name := range extra {
@@ -22,22 +26,15 @@ func craftedSet(extra ...string) fstest.MapFS {
 	return fsys
 }
 
+// The set the daemon ships keeps the identifier rule: Load holds every set to it, so reading the
+// embedded one is the test.
 func TestTheEmbeddedMigrationsKeepTheIdentifierRule(t *testing.T) {
 	all, err := All()
 	if err != nil {
-		t.Fatalf("read the embedded migrations: %v", err)
+		t.Fatalf("the embedded migrations were refused: %v", err)
 	}
-	if err := CheckIdentifiers(all); err != nil {
-		t.Fatalf("the embedded migrations break the identifier rule: %v", err)
-	}
-	highest := 0
-	for _, migration := range all {
-		if migration.Version > highest && migration.Version <= LastNumbered {
-			highest = migration.Version
-		}
-	}
-	if highest != LastNumbered {
-		t.Errorf("the highest numbered embedded migration is %d, want LastNumbered = %d", highest, LastNumbered)
+	if len(all) == 0 {
+		t.Fatal("no migration is embedded")
 	}
 }
 
@@ -57,7 +54,7 @@ func TestLoadRefusesTwoMigrationsSharingATimestamp(t *testing.T) {
 	}
 }
 
-func TestCheckIdentifiersRefusesASetThatBreaksTheRule(t *testing.T) {
+func TestLoadRefusesASetThatBreaksTheIdentifierRule(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		fsys  fstest.MapFS
@@ -67,15 +64,10 @@ func TestCheckIdentifiersRefusesASetThatBreaksTheRule(t *testing.T) {
 			name: "a numbered migration gone missing",
 			fsys: func() fstest.MapFS {
 				fsys := craftedSet()
-				delete(fsys, "0007_numbered.up.sql")
+				delete(fsys, "0002_numbered.up.sql")
 				return fsys
 			}(),
-			names: []string{"0007"},
-		},
-		{
-			name:  "a new migration taking the next number",
-			fsys:  craftedSet("0062_x.up.sql"),
-			names: []string{"0062_x.up.sql"},
+			names: []string{"0002"},
 		},
 		{
 			name:  "a timestamp of thirteen digits",
@@ -94,18 +86,14 @@ func TestCheckIdentifiersRefusesASetThatBreaksTheRule(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			all := parse(t, tc.fsys)
-			err := CheckIdentifiers(all)
+			_, err := Load(tc.fsys)
 			if err == nil {
-				t.Fatal("the set passed CheckIdentifiers, want a refusal")
+				t.Fatal("Load took a set that breaks the identifier rule, want a refusal")
 			}
 			for _, name := range tc.names {
 				if !strings.Contains(err.Error(), name) {
 					t.Errorf("refusal does not name %s: %v", name, err)
 				}
-			}
-			if _, err := Load(tc.fsys); err == nil {
-				t.Error("Load took the set CheckIdentifiers refuses")
 			}
 		})
 	}
@@ -116,29 +104,11 @@ func TestLoadTakesANumberedSetWithATimestampedMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load a set that keeps the rule: %v", err)
 	}
-	if len(all) != LastNumbered+1 {
-		t.Fatalf("loaded %d migrations, want %d", len(all), LastNumbered+1)
+	if len(all) != craftedNumbered+1 {
+		t.Fatalf("loaded %d migrations, want %d", len(all), craftedNumbered+1)
 	}
 	last := all[len(all)-1]
 	if last.Version != 20261030120000 || last.Name != "20261030120000_x.up.sql" {
 		t.Errorf("the last migration is %s at version %d, want the timestamped one last", last.Name, last.Version)
 	}
-	if err := CheckIdentifiers(all); err != nil {
-		t.Errorf("a set that keeps the rule was refused: %v", err)
-	}
-}
-
-// parse reads a crafted set the way Load does, without the rule Load applies,
-// so a test can hand CheckIdentifiers the very set whose refusal it is about.
-func parse(t *testing.T, fsys fstest.MapFS) []Migration {
-	t.Helper()
-	all := make([]Migration, 0, len(fsys))
-	for name := range fsys {
-		version, err := versionOf(name)
-		if err != nil {
-			t.Fatalf("version of %s: %v", name, err)
-		}
-		all = append(all, Migration{Version: version, Name: name})
-	}
-	return all
 }

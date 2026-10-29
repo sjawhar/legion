@@ -743,9 +743,9 @@ default. What no directive embeds, such as a symlink, a `.git` or a hidden name 
 refuse, never reaches the runner, so only the store's tests catch it
 (`pgmigrate/pgmigratetest.CheckEmbedsEveryFile` names each cause). Versions are applied by their
 number, not by file name, and the store's tests require every file on disk to be embedded
-(`TestEveryMigrationFileIsEmbedded`) and the identifiers to be 1 to 140 each taken once and a real
-UTC instant above that (`TestMigrationSetTakesNumbersThenTimestamps`,
-`pgmigratetest.CheckIdentifiers`), both reading file names alone.
+(`TestEveryMigrationFileIsEmbedded`) and the identifiers to be the numbered migrations 1 to as
+many of them as the set holds, each taken once, and a real UTC instant above them
+(`TestMigrationSetTakesNumbersThenTimestamps`, `migrationid.Check`), both reading file names alone.
 
 Every migration's lock waits are bounded at five seconds (`pgmigrate.LockTimeout`, which
 `pgmigrate.Exec` sets with `set_config(…, true)`, local to the one transaction the runner applies

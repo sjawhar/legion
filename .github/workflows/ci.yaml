@@ -200,6 +200,7 @@ jobs:
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/listenfd/*'
+              - 'packages/envoy/migrationid/*'
               - 'packages/envoy/testnatsimages/*'
             # The Dispatch server, `go list -deps ./cmd/dispatch` in packages/envoy (its embedded
             # migrations and pmdoc schema included): what the daemon's outbox test builds
@@ -318,6 +319,9 @@ jobs:
               - 'packages/daemon/internal/workflow/*'
               - 'packages/daemon/internal/workspace/*'
               - 'packages/envoy/listenfd/*'
+              # packages/envoy/migrationid is the identifier rule the daemon's embedded
+              # migrations are held to, in the envoy module so both sets keep one rule.
+              - 'packages/envoy/migrationid/*'
             # The listener's packages, `go list -deps ./cmd/listener` in packages/envoy.
             listener_command: &listener_command
               - 'packages/envoy/cmd/listener/*'
@@ -655,6 +659,8 @@ jobs:
               # packages/daemon/internal, and scripts/skill-scenarios/daemon-pane.ts:27 runs
               # daemon-pane.go inside the daemon module in workspace mode.
               - 'packages/daemon/internal/**'
+              # daemon-pane.go compiles the daemon module, which reaches that envoy package.
+              - 'packages/envoy/migrationid/*'
               - *go_workspace
               # The guides and docs the skills guard sweeps (src/skills-guard.test.ts:143-148).
               - 'AGENTS.md'

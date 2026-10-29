@@ -90,6 +90,25 @@ func appliedAt(t *testing.T, store *Store, stem string) time.Time {
 	return recordedAt
 }
 
+// databaseFromBeforeTheWidening gives the store's database the schema_migrations table
+// createVersionTable created before the versions became timestamps — version an integer — with
+// the numbered migration such a database had already applied recorded in it.
+func databaseFromBeforeTheWidening(t *testing.T, store *Store) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := store.Pool.Exec(ctx, `
+		create table schema_migrations (
+			version integer primary key,
+			applied_at timestamptz not null default now()
+		)
+	`); err != nil {
+		t.Fatalf("create the version table as it was: %v", err)
+	}
+	if _, err := store.Pool.Exec(ctx, "insert into schema_migrations (version) values ($1)", oooVersion(t, oooNumbered)); err != nil {
+		t.Fatalf("record the numbered migration that database already applied: %v", err)
+	}
+}
+
 // A migration that merges below one a database has already applied still runs, exactly once, at
 // the next boot: the runner applies every version schema_migrations does not record, not only
 // those above the highest it does. That is what lets two authors take timestamps and merge in
@@ -148,18 +167,7 @@ func TestMigrateAppliesBothTimestampedMigrationsOnceOnAFreshDatabase(t *testing.
 func TestMigrateWidensAnIntegerVersionColumnAndRecordsATimestamp(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
-	// The DDL createVersionTable had before this change, as a database from before it has.
-	if _, err := store.Pool.Exec(ctx, `
-		create table schema_migrations (
-			version integer primary key,
-			applied_at timestamptz not null default now()
-		)
-	`); err != nil {
-		t.Fatalf("create the version table as it was: %v", err)
-	}
-	if _, err := store.Pool.Exec(ctx, "insert into schema_migrations (version) values ($1)", oooVersion(t, oooNumbered)); err != nil {
-		t.Fatalf("record the numbered migration that database already applied: %v", err)
-	}
+	databaseFromBeforeTheWidening(t, store)
 
 	if err := store.migrate(ctx, oooSet(oooNumbered, oooT1)); err != nil {
 		t.Fatalf("migrate a database whose version column is an integer: %v", err)
@@ -216,17 +224,7 @@ func versionColumnType(t *testing.T, store *Store) string {
 func TestHealthyAnswersAcrossTheWideningOfTheVersionColumn(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
-	if _, err := store.Pool.Exec(ctx, `
-		create table schema_migrations (
-			version integer primary key,
-			applied_at timestamptz not null default now()
-		)
-	`); err != nil {
-		t.Fatalf("create the version table as it was: %v", err)
-	}
-	if _, err := store.Pool.Exec(ctx, "insert into schema_migrations (version) values ($1)", oooVersion(t, oooNumbered)); err != nil {
-		t.Fatalf("record the numbered migration that database already applied: %v", err)
-	}
+	databaseFromBeforeTheWidening(t, store)
 	if got, err := store.Pool.Healthy(ctx); err != nil || got != int(oooVersion(t, oooNumbered)) {
 		t.Fatalf("Healthy before the widening = %d, %v; want %d", got, err, oooVersion(t, oooNumbered))
 	}
@@ -254,17 +252,7 @@ func TestHealthyAnswersAcrossTheWideningOfTheVersionColumn(t *testing.T) {
 func TestMigrateWithNoTimestampedMigrationKeepsThePreviousReleasesHealthProbeAnswering(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
-	if _, err := store.Pool.Exec(ctx, `
-		create table schema_migrations (
-			version integer primary key,
-			applied_at timestamptz not null default now()
-		)
-	`); err != nil {
-		t.Fatalf("create the version table as it was: %v", err)
-	}
-	if _, err := store.Pool.Exec(ctx, "insert into schema_migrations (version) values ($1)", oooVersion(t, oooNumbered)); err != nil {
-		t.Fatalf("record the numbered migration that database already applied: %v", err)
-	}
+	databaseFromBeforeTheWidening(t, store)
 	// One connection of a separate pool, as the previous release's health probe holds one, with
 	// that release's read prepared on it.
 	separate, err := store.Pool.Rooms()

@@ -360,7 +360,7 @@ package api
 // collision note says. Other open branches may declare 39 too: whichever merges after another
 // takes the next free contract number, every site that names it included. A store migration is
 // not renumbered with it: one added after the numbered series takes the UTC moment it was
-// created as its version, 14 digits YYYYMMDDHHMMSS above migrations.LastNumbered, so two
+// created as its version, 14 digits YYYYMMDDHHMMSS, which sort above the numbered series, so two
 // branches open at once cannot claim one version and the file keeps the name it was written
 // with. A rollback that deletes the row a migration recorded, as the one in docs/kubernetes.md
 // does with `delete from schema_version where version = 54`, names that version, which for a

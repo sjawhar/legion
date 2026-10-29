@@ -20,6 +20,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
 	"github.com/sjawhar/envoy/internal/pgmigrate/pgmigratetest"
+	"github.com/sjawhar/envoy/migrationid"
 )
 
 func testDatabaseURL(t *testing.T) string {
@@ -348,21 +349,22 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 	assertRecordsEveryVersion(t, ctx, store)
 }
 
-// lastNumberedMigration is the highest version Dispatch's numbered migrations reached,
-// 0140_issue_embedding_spec.up.sql. Nothing is added at or below it again: every migration added
+// Dispatch's set hands its identifiers out the way the repository requires: its numbered
+// migrations are 1 to however many of them there are, each taken once, and every migration added
 // since is named for the UTC moment its author created it, so two pull requests open at once
-// cannot both claim one version.
-const lastNumberedMigration = 140
-
-// Dispatch's set hands its identifiers out the way the repository requires: 1 to
-// lastNumberedMigration each taken once, and a real UTC timestamp above it;
-// pgmigratetest.CheckIdentifiers says why.
+// cannot both claim one version; migrationid.Check says why.
 func TestMigrationSetTakesNumbersThenTimestamps(t *testing.T) {
 	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
 	if err != nil {
 		t.Fatal(err)
 	}
-	pgmigratetest.CheckIdentifiers(t, migrations, lastNumberedMigration)
+	versions := make(map[int]string, len(migrations))
+	for _, migration := range migrations {
+		versions[migration.Version] = migration.Name
+	}
+	if err := migrationid.Check(versions); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // Every file in Dispatch's migrations directory reaches the runner; pgmigratetest.CheckEmbedsEveryFile
