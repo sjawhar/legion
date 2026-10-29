@@ -4,9 +4,11 @@
 package main
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
 )
@@ -54,6 +56,10 @@ const (
 	outcomeDeliveryFailed requestOutcome = "delivery_failed"
 	outcomeNotConfirmed   requestOutcome = "not_confirmed"
 	outcomePublishFailed  requestOutcome = "publish_failed"
+	// outcomeStreamFull is a send or publish the stream refused because it holds its byte limit
+	// (bus.ErrStreamFull). It is not outcomeBusUnavailable: the bus answered, that the stream is
+	// full, so an operator reading the record looks at the stream's size, not for an outage.
+	outcomeStreamFull requestOutcome = "stream_full"
 )
 
 // requestRecord is this listener's record of one inbound send or publish, and the only way either
@@ -112,16 +118,19 @@ func (rec *requestRecord) refuseWith(w http.ResponseWriter, status int, outcome 
 // status it wrote implies: 413 is the caller's own oversized message, 400 the subject or key NATS
 // will not take however often it is sent, 403 the publish this listener's own grant denies, and
 // anything else the bus not answering. The status is read back from the write rather than
-// classified a second time here, so the pair cannot drift.
+// classified a second time here, so the pair cannot drift, with one exception: a full stream
+// (bus.ErrStreamFull) shares its 503 with the bus not answering, so the error tells it apart.
 func (rec *requestRecord) refuseBusUnavailable(w http.ResponseWriter, err error) {
 	status := writeBusUnavailable(w, err)
 	outcome := outcomeBusUnavailable
-	switch status {
-	case http.StatusRequestEntityTooLarge:
+	switch {
+	case errors.Is(err, bus.ErrStreamFull):
+		outcome = outcomeStreamFull
+	case status == http.StatusRequestEntityTooLarge:
 		outcome = outcomeTooLarge
-	case http.StatusBadRequest:
+	case status == http.StatusBadRequest:
 		outcome = outcomeInvalidRequest
-	case http.StatusForbidden:
+	case status == http.StatusForbidden:
 		outcome = outcomePublishDenied
 	}
 	rec.write(status, outcome)

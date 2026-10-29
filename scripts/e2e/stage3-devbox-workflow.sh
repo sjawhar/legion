@@ -492,7 +492,7 @@ rig_sessions_json() {
 # rig session authored, any event naming this rig's project key, and any rig session on the
 # production Envoy listener. The baseline event itself is the positive control that the replay ran.
 production_audit() {
-  local sessions header events envoy found=0
+  local sessions bearer events envoy found=0
   audited=1
   sessions=$(rig_sessions_json)
   printf '%s\n' "$sessions" >"$evidence/rig-sessions.json"
@@ -507,14 +507,21 @@ production_audit() {
     printf 'no user-level Dispatch configuration exists, so no production Dispatch fallback was possible\n'
     return "$found"
   fi
-  header=$(prod_header_file)
-  curl -sS -N --max-time 25 -H "@$header" "$prod_dispatch_url/api/v1/events?since=$((prod_baseline - 1))" \
-    >"$work/production-events.sse" 2>/dev/null || true
-  rm -f "$header"
-  events=$(sed -n 's/^data: //p' "$work/production-events.sse" | jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson baseline "$prod_baseline" '
+  bearer=$work/production-dispatch-bearer
+  (umask 077 && printf '%s\n' "$prod_token" >"$bearer")
+  # A refusal of the feed is printed on stderr; the replay's close, resubscribe and duplicate lines
+  # carry no event and are not counted, so an event a redial repeats counts once. The probe takes
+  # its cursor from Dispatch's own events_start, so a --since the server clamps to its head leaves
+  # the events after that head counted, not written off as duplicates.
+  bun "$root/scripts/e2e/lib/dispatch-live-events.ts" \
+    --url "$prod_dispatch_url" --bearer-file "$bearer" --since "$((prod_baseline - 1))" --timeout 25 \
+    >"$work/production-events.jsonl" || true
+  rm -f "$bearer"
+  events=$(jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson baseline "$prod_baseline" '
+    [.[] | .event | select(. != null)] |
     {control: any(.[]; .id == $baseline), count: length,
      rig: [.[] | select((.actor.id as $a | $ids | index($a)) or (tostring | contains($project)))
-       | {id, issue_key, type, actor: .actor.id, created_at}]}')
+       | {id, issue_key, type, actor: .actor.id, created_at}]}' "$work/production-events.jsonl")
   printf '%s\n' "$events" >"$evidence/production-dispatch-audit.json"
   if ! jq -e '.control' >/dev/null <<<"$events"; then
     printf 'production Dispatch replay did not return its baseline event %s\n' "$prod_baseline"
@@ -729,9 +736,9 @@ built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" "$work
 while IFS= read -r line; do note "$line"; done <<<"$built"
 docker ps >/dev/null
 # Docker assigns the containers' host ports when it binds them, so neither can lose a race.
-docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql/data \
+docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
   -e POSTGRES_USER=legion -e POSTGRES_PASSWORD="$(cat "$work/postgres-password")" -e POSTGRES_DB=dispatch \
-  -p "127.0.0.1::5432" pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a >/dev/null
+  -p "127.0.0.1::5432" mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 >/dev/null
 port_pg=$(docker port "$pg_container" 5432/tcp | sed -n '1s/.*://p')
 [ -n "$port_pg" ] || fail "docker assigned Postgres no host port"
 until_true 60 "Postgres to accept TCP connections" docker exec "$pg_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d dispatch

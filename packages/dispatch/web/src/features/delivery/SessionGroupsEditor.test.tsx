@@ -3,7 +3,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
-import { seedDeliveryReads } from "../../__tests__/delivery-live-harness";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { seedDeliveryReads } from "../../__tests__/live-socket-harness";
 import { ApiError, api } from "../../api/client";
 import type { Agent, DeliverySessionGroup } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
@@ -126,7 +127,10 @@ test("create: two selected sessions and a name become a group; the live views he
     });
     fireEvent.click(screen.getByRole("button", { name: "Create group" }));
     await waitFor(() =>
-      expect(create).toHaveBeenCalledWith({ name: "Release crew", sessions: ["s1", "s3"] })
+      expect(create).toHaveBeenCalledWith(
+        { name: "Release crew", sessions: ["s1", "s3"] },
+        keyedAttempt
+      )
     );
     await waitFor(() => expect(queryClient.getQueryState(reads.run)?.isInvalidated).toBe(true));
     expect(queryClient.getQueryState(reads.live)?.isInvalidated).toBe(false);
@@ -144,17 +148,23 @@ test("rename, add, remove and delete each write their one change", async () => {
     const group = screen.getByRole("group", { name: "Release crew" });
     fireEvent.change(within(group).getByLabelText("Name"), { target: { value: "Ship crew" } });
     fireEvent.click(within(group).getByRole("button", { name: "Rename" }));
-    await waitFor(() => expect(update).toHaveBeenLastCalledWith(crew.id, { name: "Ship crew" }));
+    await waitFor(() =>
+      expect(update).toHaveBeenLastCalledWith(crew.id, { name: "Ship crew" }, keyedAttempt)
+    );
 
     fireEvent.click(screen.getByRole("checkbox", { name: "Reviewer" }));
     fireEvent.click(within(group).getByRole("button", { name: "Add selected" }));
-    await waitFor(() => expect(update).toHaveBeenLastCalledWith(crew.id, { add: ["s3"] }));
+    await waitFor(() =>
+      expect(update).toHaveBeenLastCalledWith(crew.id, { add: ["s3"] }, keyedAttempt)
+    );
 
     fireEvent.click(within(group).getByRole("button", { name: "Remove Planner two" }));
-    await waitFor(() => expect(update).toHaveBeenLastCalledWith(crew.id, { remove: ["s2"] }));
+    await waitFor(() =>
+      expect(update).toHaveBeenLastCalledWith(crew.id, { remove: ["s2"] }, keyedAttempt)
+    );
 
     fireEvent.click(within(group).getByRole("button", { name: "Delete group" }));
-    await waitFor(() => expect(remove).toHaveBeenCalledWith(crew.id));
+    await waitFor(() => expect(remove).toHaveBeenCalledWith(crew.id, keyedAttempt));
   } finally {
     cleanup();
     update.mockRestore();
@@ -174,7 +184,9 @@ test("group actions are disabled while a save is pending", async () => {
     fireEvent.click(screen.getByRole("checkbox", { name: "Reviewer" }));
     fireEvent.change(within(group).getByLabelText("Name"), { target: { value: "Ship crew" } });
     fireEvent.click(within(group).getByRole("button", { name: "Rename" }));
-    await waitFor(() => expect(update).toHaveBeenCalledWith(crew.id, { name: "Ship crew" }));
+    await waitFor(() =>
+      expect(update).toHaveBeenCalledWith(crew.id, { name: "Ship crew" }, keyedAttempt)
+    );
 
     for (const name of ["Rename", "Add selected", "Remove Planner two", "Delete group"]) {
       expect((within(group).getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(
@@ -223,6 +235,39 @@ test("a refusal shows as the server wrote it", async () => {
         'session s2 is already in the group "Release crew"; remove it there first'
       )
     ).toBeDefined();
+  } finally {
+    cleanup();
+    create.mockRestore();
+  }
+});
+
+// Dispatch made the group and lost its answer (`409 KEY_COMMITTED`): a landing, not a refusal. The
+// name and the selection go, so a second press makes nothing, and the editor says what was made
+// instead of showing a refusal.
+test("a group made with its answer lost clears the form and says so, and a second press makes nothing", async () => {
+  const create = spyOn(api, "createDeliverySessionGroup").mockRejectedValue(
+    new ApiError(409, { code: "KEY_COMMITTED", error: "made; the answer was lost" })
+  );
+  const queryClient = renderEditor();
+  const reads = seedDeliveryReads(queryClient);
+  try {
+    fireEvent.click(screen.getByRole("checkbox", { name: "Planner one" }));
+    fireEvent.change(screen.getByLabelText("New group name"), { target: { value: "Crew" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create group" }));
+    const made = await screen.findByTestId("landed-without-answer");
+    expect(made.textContent).toBe(
+      "The group “Crew” was made, but Dispatch lost its answer, so it may take a moment to appear."
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect((screen.getByLabelText("New group name") as HTMLInputElement).value).toBe("");
+    expect(
+      (screen.getByRole("checkbox", { name: "Planner one" }) as HTMLInputElement).checked
+    ).toBe(false);
+    expect(
+      (screen.getByRole("button", { name: "Create group" }) as HTMLButtonElement).disabled
+    ).toBe(true);
+    await waitFor(() => expect(queryClient.getQueryState(reads.run)?.isInvalidated).toBe(true));
+    expect(create).toHaveBeenCalledTimes(1);
   } finally {
     cleanup();
     create.mockRestore();

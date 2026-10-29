@@ -1457,11 +1457,12 @@ func (r *outbox) checkBound(ctx context.Context, row record.OutboxRow) error {
 // (record.CheckCompare), read from GitHub as the implement App, the App that merged the check's
 // pull request. A check closed since, or whose last look has started, is compared with nothing,
 // and so is one a later merge replaced since the row was queued (NamedBy). A row carrying a deploy
-// run is checkDeployRun's from there. For a build — the commit a daemon boot or a Dispatch start
-// reported itself built from — the question is whether it contains the check's merge commit. A
-// check that recorded no merge commit (an upgrade-opened one, record.ProductionCheck.MergeSHA) has
-// it read from its pull request first and recorded (recordMergeCommit), so this compare and every
-// later one has it. GitHub's compare of the merge with the build answering `identical` or `ahead`
+// run is checkDeployRun's from there. For a build — the commit a daemon boot reported itself built
+// from, or Dispatch announced every server process serves (server.started) — the question is
+// whether it contains the check's merge commit. A check that recorded no merge commit (an
+// upgrade-opened one, record.ProductionCheck.MergeSHA) has it read from its pull request first and
+// recorded (recordMergeCommit), so this compare and every later one has it. GitHub's compare of
+// the merge with the build answering `identical` or `ahead`
 // says the merge is an ancestor of the build, so the build carries it: intake.CheckWake wakes the
 // look the row was queued for, once per check (record.ProductionCheck.ID), build and cause.
 // `behind` or `diverged` is a build without the merge, and a commit GitHub does not know (404) is

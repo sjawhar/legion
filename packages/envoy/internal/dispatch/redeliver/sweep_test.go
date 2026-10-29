@@ -3,6 +3,7 @@ package redeliver_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -98,7 +99,7 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatalf("JetStream: %v", err)
 	}
-	state, err := redeliver.OpenState(js)
+	state, err := redeliver.OpenState(js, 1)
 	if err != nil {
 		t.Fatalf("open redelivery state: %v", err)
 	}
@@ -116,7 +117,7 @@ func newHarness(t *testing.T) *harness {
 func (h *harness) sweeper() *redeliver.Sweeper {
 	return &redeliver.Sweeper{
 		GitHub: h.client,
-		State:  h.state,
+		Open:   func() (bus.KeyValue, error) { return h.state, nil },
 		Logger: slog.New(slog.NewTextHandler(h.logs, nil)),
 		Now:    h.clock.Now,
 	}
@@ -490,7 +491,7 @@ func TestASweepPausedBeforeItsRequestSendsNothingUnderANewLimit(t *testing.T) {
 
 	paused := &pausedClaim{KeyValue: h.state, entered: make(chan struct{}), release: make(chan struct{})}
 	second := h.sweeper()
-	second.State = bus.KeyValue{KeyValue: paused}
+	second.Open = func() (bus.KeyValue, error) { return bus.KeyValue{KeyValue: paused}, nil }
 	reports := make(chan redeliver.Report, 1)
 	go func() {
 		report, err := second.Sweep(context.Background(), redeliver.Options{})
@@ -716,5 +717,52 @@ func TestTheSweepSummaryCountsEveryOutcome(t *testing.T) {
 	}
 	if h.logs.count("webhook redelivery sweep", want...) != 1 {
 		t.Fatalf("summary line does not carry %v:\n%s", want, h.logs)
+	}
+}
+
+// A sweeper opens its state when it sweeps, as envoy-dispatch builds it for both the running loop
+// and the redeliver-webhooks command, and only once: the command calls Sweep directly, with no
+// loop ahead of it to open the bucket.
+func TestASweepOpensTheStateItWasBuiltWithout(t *testing.T) {
+	h := newHarness(t)
+	failed := h.fail("guid-a", http.StatusServiceUnavailable, time.Minute)
+	sweeper := h.sweeper()
+	opens := 0
+	sweeper.Open = func() (bus.KeyValue, error) {
+		opens++
+		return h.state, nil
+	}
+
+	report, err := sweeper.Sweep(context.Background(), redeliver.Options{Since: h.clock.Now().Add(-time.Hour)})
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if got := outcome(report, "guid-a"); got != redeliver.Redelivered {
+		t.Fatalf("outcome %q, want %q", got, redeliver.Redelivered)
+	}
+	if got, want := h.requests(), []int64{failed.ID}; !slices.Equal(got, want) {
+		t.Fatalf("redelivery requests %v, want %v", got, want)
+	}
+	if _, err := sweeper.Sweep(context.Background(), redeliver.Options{Since: h.clock.Now().Add(-time.Hour)}); err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	if opens != 1 {
+		t.Fatalf("the state was opened %d times over two sweeps, want once", opens)
+	}
+}
+
+// A sweep whose state cannot be opened returns the error and asks GitHub nothing.
+func TestASweepWhoseStateWillNotOpenFails(t *testing.T) {
+	h := newHarness(t)
+	h.fail("guid-a", http.StatusServiceUnavailable, time.Minute)
+	sweeper := h.sweeper()
+	refused := errors.New("NATS is not connected")
+	sweeper.Open = func() (bus.KeyValue, error) { return bus.KeyValue{}, refused }
+
+	if _, err := sweeper.Sweep(context.Background(), redeliver.Options{}); !errors.Is(err, refused) {
+		t.Fatalf("sweep error %v, want %v", err, refused)
+	}
+	if got := h.requests(); len(got) != 0 {
+		t.Fatalf("a sweep without its state requested %v", got)
 	}
 }

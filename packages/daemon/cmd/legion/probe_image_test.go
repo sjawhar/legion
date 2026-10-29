@@ -86,13 +86,14 @@ esac
 // thisBinarysContract is the daemon API contract this binary speaks, as a manifest writes it.
 var thisBinarysContract = strconv.Itoa(api.DaemonAPIVersion)
 
-// image is the worker image's two plugin roots, which every probe-image run is given, its bin of
+// image is the worker image's two plugin roots, which every probe-image run is given, the
+// claude-envoy root and Claude Code pin the Claude lane and the claude-code row check, its bin of
 // stubbed binaries, first on PATH, and its profile's plugin lock.
-type image struct{ legion, envoy, bin, lock string }
+type image struct{ legion, envoy, claude, pin, bin, lock string }
 
-// flags are the run's two root flags, then extra.
+// flags are the run's two root flags and its two Claude flags, then extra.
 func (i image) flags(extra ...string) []string {
-	return append([]string{"--plugin-root", i.legion, "--envoy-plugin-root", i.envoy}, extra...)
+	return append([]string{"--plugin-root", i.legion, "--envoy-plugin-root", i.envoy, "--claude-root", i.claude, "--claude-code-pin", i.pin}, extra...)
 }
 
 // without removes a stubbed binary from the image's PATH.
@@ -103,19 +104,29 @@ func (i image) without(t *testing.T, name string) {
 	}
 }
 
+// install writes an executable stub over one of the image's stubbed binaries.
+func (i image) install(t *testing.T, name, script string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(i.bin, name), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // inImage sets this process's environment to the worker image's: a HOME whose `legion` profile
 // links neither plugin (a pod names both as explicit extensions, and a linked one would load
-// twice) and whose plugin lock enables the CodeGraph plugin, the Legion manifest declaring
-// contract, LEGION_OMP_PATH set to omp, and a PATH that is one bin alone, stubbing every binary
-// the capability check's image rows look for — alone, not ahead of the process's PATH, since a
-// runner's own python3 behind the stubs would answer for one a test removed. The `sh` the probes
-// run their scripts with is linked into that bin from the one on the process's PATH.
+// twice) and whose plugin lock enables the CodeGraph plugin, the Legion manifest and the
+// claude-envoy manifest declaring contract, the Claude Code pin, LEGION_OMP_PATH set to omp, and a
+// PATH that is one bin alone, stubbing every binary the capability check's image rows look for —
+// alone, not ahead of the process's PATH, since a runner's own python3 behind the stubs would
+// answer for one a test removed. No `claude` is among them: the image carries none. The `sh` the
+// probes run their scripts with is linked into that bin from the one on the process's PATH.
 func inImage(t *testing.T, contract, omp string) image {
 	t.Helper()
 	home := t.TempDir()
 	roots := image{
-		legion: filepath.Join(home, "pi-legion"), envoy: filepath.Join(home, "pi-envoy"), bin: t.TempDir(),
-		lock: capabilitiestest.LockPath(home),
+		legion: filepath.Join(home, "pi-legion"), envoy: filepath.Join(home, "pi-envoy"),
+		claude: capabilitiestest.ClaudeRoot(t, contract), pin: capabilitiestest.ClaudeCodePin(t),
+		bin: t.TempDir(), lock: capabilitiestest.LockPath(home),
 	}
 	for _, plugin := range []struct{ root, manifest string }{
 		{roots.legion, `{"name":"@sjawhar/pi-legion","version":"1.57.0","legion":{"daemonApiVersion":` + contract + `}}`},
@@ -175,6 +186,13 @@ func TestProbeImageRefusesWhenTheRoleNamespaceCheckFails(t *testing.T) {
 	code, stdout, stderr := probeImage("--plugin-root", t.TempDir(), "--envoy-plugin-root", t.TempDir(), "--role-namespaces", file)
 	if code != 1 || !strings.Contains(stderr, "legion probe-image: role namespaces: make the probe's layout") || stdout != "" {
 		t.Errorf("probe-image with a failing role-namespace check = %d, stdout %q, stderr %q; want exit 1 naming the check", code, stdout, stderr)
+	}
+}
+
+func TestProbeImageRefusesANegativeProbeBudget(t *testing.T) {
+	code, stdout, stderr := probeImage("--plugin-root", t.TempDir(), "--envoy-plugin-root", t.TempDir(), "--probe-budget", "-1s")
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "--probe-budget must not be negative") {
+		t.Fatalf("probe-image with a negative budget = %d, stdout %q, stderr %q; want exit 1 naming --probe-budget", code, stdout, stderr)
 	}
 }
 
@@ -752,5 +770,140 @@ func TestProbeImageRefusesWithoutAnOmpOrAContract(t *testing.T) {
 		if code != 1 || stdout != "" || !strings.Contains(stderr, `--daemon-api-version must be a positive integer (got "`+value+`")`) {
 			t.Errorf("probe-image --daemon-api-version %q = %d %q %q, want exit 1 refusing the value", value, code, stdout, stderr)
 		}
+	}
+}
+
+// The Claude lane runs on every probe, on the claude-envoy root and the Claude Code pin it is given:
+// the root's built channel server and generated Legion plugin, its manifest held to the same
+// contract the Legion plugin is, and a pin a pod can install and verify. The image carries no
+// `claude` — the stubbed bin holds none — and the lane passes without one, the claude-code row
+// saying the same two facts with the npm and node a pod's install runs, and the OK line following.
+func TestProbeImageRunsTheClaudeLaneOnThePluginAndThePin(t *testing.T) {
+	omp := imageOmp(t)
+	img := inImage(t, thisBinarysContract, omp)
+	if _, err := os.Stat(filepath.Join(img.bin, "claude")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the stubbed image carries a claude (%v); the worker image carries none", err)
+	}
+
+	code, stdout, stderr := probeImage(img.flags()...)
+
+	okLine := "probe-image: OK (" + omp + ") session-storage=probed extensions=discovered agent-models=resolved" + capabilityMarks + thisBinarysContract + "\n"
+	if code != 0 || !strings.HasSuffix(stdout, okLine) {
+		t.Fatalf("probe-image = %d %q %q, want exit 0 and the OK line %q", code, stdout, stderr, okLine)
+	}
+	row := "probe-image: capability claude-code: " + capabilities.StatusPresent + " (" +
+		img.claude + " holds dist/envoy-channel.js and legion/.claude-plugin/plugin.json; " +
+		img.pin + " pins @anthropic-ai/claude-code " + capabilitiestest.ClaudeCodeVersion + " with the sha512 integrity of @anthropic-ai/claude-code-linux-x64; " +
+		"on PATH: " + filepath.Join(img.bin, "npm") + ", " + filepath.Join(img.bin, "node") + ")"
+	if !slices.Contains(tableLines(stdout), row) {
+		t.Errorf("table = %q, want the claude-code row %q", tableLines(stdout), row)
+	}
+}
+
+// Every way the image's claude-envoy root or Claude Code pin can be broken is refused before the
+// capability table, naming what to rebuild: a root missing either file a worker loads or holding a
+// directory in its place, a root whose manifest speaks another daemon API contract or cannot be
+// read at all — the same contract probe the Legion plugin's manifest gets — and a pin a pod could
+// not install from or could not verify what it installed against: either file absent, a lockfile
+// that is not JSON, a range rather than one version, a lockfile out of step with it, one that
+// locks no linux-x64 package, locks it at another version, or carries no sha512 integrity for it.
+func TestProbeImageRefusesABrokenClaudeRootOrPin(t *testing.T) {
+	pinned := `"@anthropic-ai/claude-code": "` + capabilitiestest.ClaudeCodeVersion + `"`
+	platform := `"node_modules/@anthropic-ai/claude-code-linux-x64": {
+      "version": "` + capabilitiestest.ClaudeCodeVersion + `"`
+	for name, testCase := range map[string]struct {
+		breakIt func(t *testing.T, img image)
+		want    string
+	}{
+		"no built channel server": {func(t *testing.T, img image) {
+			remove(t, filepath.Join(img.claude, "dist", "envoy-channel.js"))
+		}, "the claude-envoy root {{root}} holds no envoy-channel.js (stat {{root}}/dist/envoy-channel.js: no such file or directory): a worker on the `claude` backend loads it as Claude Code's plugin directory; build the worker image from this daemon's commit"},
+		"no generated Legion plugin": {func(t *testing.T, img image) {
+			remove(t, filepath.Join(img.claude, "legion", ".claude-plugin", "plugin.json"))
+		}, "holds no plugin.json"},
+		"a directory for the built channel server": {func(t *testing.T, img image) {
+			directoryFor(t, filepath.Join(img.claude, "dist", "envoy-channel.js"))
+		}, "holds no envoy-channel.js ({{root}}/dist/envoy-channel.js is not a regular file (mode d"},
+		"a directory for the generated Legion plugin": {func(t *testing.T, img image) {
+			directoryFor(t, filepath.Join(img.claude, "legion", ".claude-plugin", "plugin.json"))
+		}, "holds no plugin.json ({{root}}/legion/.claude-plugin/plugin.json is not a regular file (mode d"},
+		"another daemon API contract": {func(t *testing.T, img image) {
+			rewrite(t, filepath.Join(img.claude, "package.json"), `"daemonApiVersion":`+thisBinarysContract, `"daemonApiVersion":2`)
+		}, "claude-envoy at {{root}}/package.json (package 1.0.0) speaks daemon API contract 2; this daemon requires " + thisBinarysContract + ". Build the worker image from this daemon's commit."},
+		"no manifest at all": {func(t *testing.T, img image) {
+			remove(t, filepath.Join(img.claude, "package.json"))
+		}, "claude-envoy manifest at {{root}}/package.json could not be read"},
+		"no pin": {func(t *testing.T, img image) {
+			remove(t, filepath.Join(img.pin, "package.json"))
+		}, "the Claude Code pin cannot be read: open {{pin}}/package.json: no such file or directory: a pod on the `claude` backend installs Claude Code from that pin at launch and verifies what it installed against it, so none could start; build the worker image from this daemon's commit"},
+		"no lockfile": {func(t *testing.T, img image) {
+			remove(t, filepath.Join(img.pin, "package-lock.json"))
+		}, "the Claude Code pin cannot be read: open {{pin}}/package-lock.json"},
+		"a lockfile that is not JSON": {func(t *testing.T, img image) {
+			rewrite(t, filepath.Join(img.pin, "package-lock.json"), `"lockfileVersion": 3,`, `"lockfileVersion": 3,,`)
+		}, "the Claude Code pin {{pin}}/package-lock.json is not JSON"},
+		"a range for a pin": {func(t *testing.T, img image) {
+			rewrite(t, filepath.Join(img.pin, "package.json"), pinned, `"@anthropic-ai/claude-code": "^2.1.0"`)
+		}, `the Claude Code pin {{pin}}/package.json pins @anthropic-ai/claude-code at "^2.1.0", not an exact version`},
+		"a lockfile out of step with the pin": {func(t *testing.T, img image) {
+			rewrite(t, filepath.Join(img.pin, "package.json"), pinned, `"@anthropic-ai/claude-code": "2.1.311"`)
+		}, `the Claude Code lockfile {{pin}}/package-lock.json records @anthropic-ai/claude-code at "` + capabilitiestest.ClaudeCodeVersion + `" where {{pin}}/package.json pins 2.1.311`},
+		"no linux-x64 package locked": {func(t *testing.T, img image) {
+			rewrite(t, filepath.Join(img.pin, "package-lock.json"), "node_modules/@anthropic-ai/claude-code-linux-x64", "node_modules/@anthropic-ai/claude-code-linux-arm64")
+		}, "the Claude Code lockfile {{pin}}/package-lock.json locks no @anthropic-ai/claude-code-linux-x64"},
+		"the linux-x64 package at another version": {func(t *testing.T, img image) {
+			rewrite(t, filepath.Join(img.pin, "package-lock.json"), platform, `"node_modules/@anthropic-ai/claude-code-linux-x64": {
+      "version": "2.1.309"`)
+		}, `locks @anthropic-ai/claude-code-linux-x64 at "2.1.309", not the ` + capabilitiestest.ClaudeCodeVersion + ` {{pin}}/package.json pins`},
+		"no integrity for the linux-x64 package": {func(t *testing.T, img image) {
+			rewrite(t, filepath.Join(img.pin, "package-lock.json"), `"integrity": "sha512-CuzpJr`, `"integrity": "sha1-CuzpJr`)
+		}, "carries no sha512 integrity for @anthropic-ai/claude-code-linux-x64"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			img := inImage(t, thisBinarysContract, imageOmp(t))
+			testCase.breakIt(t, img)
+			want := strings.NewReplacer("{{root}}", img.claude, "{{pin}}", img.pin).Replace(testCase.want)
+
+			code, stdout, stderr := probeImage(img.flags()...)
+
+			if code != 1 || stdout != "" || !strings.Contains(stderr, want) {
+				t.Fatalf("probe-image over %s = %d %q %q, want exit 1 saying %q and no table", name, code, stdout, stderr, want)
+			}
+		})
+	}
+}
+
+// With neither Claude flag, as the daemon's probe Sandbox runs it, the lane checks the paths the
+// worker image carries the claude-envoy root and the Claude Code pin at; an empty flag names no
+// directory, and is a usage error naming both flags before any probe runs.
+func TestProbeImageChecksTheImagesClaudePathsUnlessToldOthers(t *testing.T) {
+	img := inImage(t, thisBinarysContract, imageOmp(t))
+
+	code, stdout, stderr := probeImage("--plugin-root", img.legion, "--envoy-plugin-root", img.envoy)
+
+	// The machine running the test may itself be a worker image, which carries the root and passes;
+	// either way the run names the image's root, in the row or in the refusal.
+	if !strings.Contains(stdout+stderr, "/opt/legion/claude-envoy") {
+		t.Errorf("probe-image with no Claude flag = %d %q %q, want it to have checked /opt/legion/claude-envoy", code, stdout, stderr)
+	}
+	for _, flag := range []string{"--claude-root", "--claude-code-pin"} {
+		seen := filepath.Join(t.TempDir(), "seen")
+		t.Setenv("LEGION_TEST_SEEN", seen)
+		code, stdout, stderr := probeImage(img.flags(flag, "")...)
+		if want := "legion probe-image: --claude-root and --claude-code-pin each name a directory"; code != 2 || stdout != "" || !strings.Contains(stderr, want) {
+			t.Errorf("probe-image %s '' = %d %q %q, want exit 2 saying %q", flag, code, stdout, stderr, want)
+		}
+		if _, err := os.Stat(seen); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("Oh My Pi ran before the refusal of %s '' (%v)", flag, err)
+		}
+	}
+}
+
+// directoryFor replaces the file at path with an empty directory of the same name.
+func directoryFor(t *testing.T, path string) {
+	t.Helper()
+	remove(t, path)
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
 	}
 }

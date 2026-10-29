@@ -250,7 +250,8 @@ tags are `sha-<the commit's first 12 hex digits>` for every build and `<legion v
 release. The package also currently holds `sha256-<image digest hex>` OCI referrer indexes from
 earlier proof runs; they hold attestations, not worker images, so inspecting one does not print a
 worker-image digest. A tag does not say which build published it, and a pull request's build publishes
-a `sha-` tag too. Every build except a pull request's carries a GitHub artifact attestation, and
+a `sha-` tag too. Every build except a pull request's, and a release build on `main` that links a
+plugin version which did not reach npm, carries a GitHub artifact attestation, and
 `docs/kubernetes.md` in the repository ("Pin by digest, never by tag") gives the `gh attestation
 verify` command that accepts an image only when `main` built it from the commit its tag names.
 
@@ -360,13 +361,19 @@ What each part is for:
 - **`worker_backends`** (optional) runs a role on Claude Code instead of Oh My Pi:
   `worker_backends: {implementer: claude}`. Each key is an issue role, each value `omp` (the
   default) or `claude`. Claude Code runs the phase workers (`planner`, `implementer`, `tester`,
-  `reviewer`, `merger`) and only under `runtime: tmux`, since the worker image carries no Claude
-  Code; the loader refuses `claude` for the architect and under Kubernetes, naming why, and refuses
-  any other value. The controller always runs on Oh My Pi. A tmux daemon running a Claude Code role
-  resolves `claude` from `LEGION_CLAUDE_PATH` (else `PATH`), the `bun` its MCP server runs on from
-  `LEGION_BUN_PATH` (else `PATH`), and a built `packages/claude-envoy` from
-  `LEGION_CLAUDE_PLUGIN_DIR`, and refuses to boot without any of them. The repository's
-  `docs/deployment.md` ("Phase workers on Claude Code") covers the rest.
+  `reviewer`, `merger`) under either runtime; the loader refuses `claude` for the architect, naming
+  why, and refuses any other value. The controller always runs on Oh My Pi. A tmux daemon running a
+  Claude Code role resolves `claude` from `LEGION_CLAUDE_PATH` (else `PATH`), the `bun` its MCP
+  server runs on from `LEGION_BUN_PATH` (else `PATH`), and a built `packages/claude-envoy` from
+  `LEGION_CLAUDE_PLUGIN_DIR`, and refuses to boot without any of them. A Kubernetes daemon
+  resolves none of the three: the worker image carries the plugin and the `bun` it runs on at
+  fixed paths, and Claude Code's pin but no Claude Code, whose licence grants no redistribution.
+  Such a role's pod installs the pinned Claude Code at every launch, verifies it against the pin,
+  and runs `legion claude-bridge -- claude -p …` with it in place of Oh My Pi; a fetch that fails
+  or does not verify fails that launch, and the pod needs to reach the npm registry. Give that
+  role its model route yourself, as you do Oh My Pi's: `ANTHROPIC_API_KEY` through `provider_keys`,
+  and `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL` in `runtime.kubernetes.pod.env`. The repository's
+  `docs/deployment.md` ("Phase workers on Claude Code") and `docs/kubernetes.md` cover the rest.
 - **`role_config_files`** (optional) gives one role Oh My Pi settings overlays no other role gets,
   for example a model fallback chain for the roles whose output a machine checks:
 
@@ -719,8 +726,9 @@ Closing the terminal leaves the project without one, and the daemon logs
 
   The `open production checks` line counts the closed issues whose production check is still
   open and names the oldest: its pull request, merge commit, which look it is on, what woke that
-  look (`merge`, `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build`
-  or `bound`) and when, and when the check's bound comes due (`none` when no check is open).
+  look (`merge`, `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start` (Dispatch's
+  announcement that every server process serves a build), `dispatch build` or `bound`) and when,
+  and when the check's bound comes due (`none` when no check is open).
 
   `--json` prints everything the daemon records: `admission` (`cap`, `active`, `waiting`), each
   issue under `issues` with its `phase`, `status`, `repo` and `defaultBranch`, `holdReason`,

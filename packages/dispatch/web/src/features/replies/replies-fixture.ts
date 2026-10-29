@@ -30,7 +30,11 @@ export function seedUnread(
   owner: RepliesOwner,
   threadIds: readonly string[]
 ): void {
-  queryClient.setQueryData(whoAmIQuery().queryKey, { kind: "user", login: "alice" });
+  queryClient.setQueryData(whoAmIQuery().queryKey, {
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   queryClient.setQueryData(myRepliesOwnerQuery(owner).queryKey, {
     limit: 200,
     offset: 0,

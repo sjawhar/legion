@@ -1,0 +1,14 @@
+kind: Added
+body: |-
+  The Legion worker image carries a build of this package from the image's own commit at
+  `/opt/legion/claude-envoy`, so a phase worker a deployment puts on Claude Code now runs under
+  `runtime: kubernetes` as well as tmux: in its issue pod's one `roles` container, in the role's
+  own namespaces, its command is
+  `legion claude-bridge -- claude -p …`, its one MCP server is that root's
+  `dist/envoy-channel.js` and its plugins are that root and its generated `legion/`. The copy is
+  root's and writable by no one else, as the image's two Oh My Pi plugins are, since every role of
+  the pod loads it from the one container's filesystem. No workflow releases this package, so the
+  image is a Kubernetes deployment's only source of it, and a plugin-contract change for such a role
+  is answered by a new image rather than by an install (`docs/kubernetes.md`).
+custom:
+  Issue: pr2186
