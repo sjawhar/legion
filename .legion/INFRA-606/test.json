@@ -2,55 +2,60 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-606",
-  "completed": "2026-10-29T01:45:00Z",
-  "round": 9,
-  "headTested": "2eda91938cc2",
-  "handoffHead": "83ba969958a2f519bafe90189b26409d3589c370",
-  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round9-tar-gz (RESULTS.md, scripts, restart summaries); all scripts: infra606-tester-scripts-tar-gz; earlier rounds: infra606-tester-evidence-tar-gz, infra606-tester-round2..8-tar-gz",
-  "ci": "On 2eda9193 when read: lint, typecheck, build, pr-title, changes green; test and the Postgres 16 daemon suite in progress; the envoy/dispatch lanes queued. Not waited for. Known reds on main, not this pull request's (controller, 00:56Z): packages/dispatch/e2e/close-withdraws-asks.e2e.ts:126 (INFRA-138's tree) and pmdoc's cpuTimeOf call in typed_nesting_test.go:23 (#2484).",
+  "completed": "2026-10-29T19:45:00Z",
+  "round": 10,
+  "headTested": "fd8e79810484",
+  "handoffHead": "6504addc02ccd30b4807e6875bcad6357f23c018",
+  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round10-tar-gz (RESULTS.md, the /ws/live client livep, scripts, restart summaries, keyed-head.log and keyed-main.log); earlier rounds: infra606-tester-evidence-tar-gz, infra606-tester-round2..9-tar-gz",
+  "ci": "On fd8e7981: lint, typecheck, test, pr-title, docs, build green; red: dispatch (keyed-send.e2e.ts:363 in all four browsers - the failure below; also iphone delivery.e2e.ts:289 brush layout), envoy-go (cmd/listener TestListenerFollowsTheInterestRegistryAcrossNATSRestarts: a session-registry KV reconnect hook error, code this branch does not change), envoy-go-race (docs, api TestCallerTextThatIsNotUTF8IsRefused on search_term_stats, pmdoc linear timing: package deadlines on the race runner, in code this branch does not change), pi-legion (a card-ordering test; the branch does not change pi-legion). Main 7c2effba passed envoy-go, envoy-go-race and pi-legion; its dispatch job was skipped.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Built Dispatch from the workspace (2eda9193), round 7's head (855a4bcb) and main (d4cbcfe6) and drove round 9's changes on the load-test stack: the per-destination fallback copy after a kill (listener up, down, after a landed send, NATS down), review finding 1 (a moved route and a failed Retry put nothing on the new route; round 7's build did), and criterion 5 on the committed harness (505 KB vs 119 MB replayed, CPU not lower). Every red test passes. The implementer adapted my TestAMentionClaimedByAKilledProcessStillReachesItsSessionWhenTheResendFails to count copies from comment_fallback_copies as well as event destinations; its assertion (exactly one copy) is unchanged, and the stack runs confirm one stored copy on the session's NATS subject, so I accept the change."
+    "how": "Rebuilt the load-test stack on the committed harness after the pod move and built Dispatch from the workspace (fd8e7981) and main (7c2effba). Drove round 10's surfaces on GET /ws/live with my own client (livep): the bounded events-view resume, an overflowed view's catch-up, reconnects, event-log reads, the delivery timeline; the fallback copy across kills and a 12-minute NATS outage (review round 3 finding 1); criterion 5 on --live, one run per side. Every red test passes; the implementer's edits to them replace the removed stranded pass with one resumeOwedDeliveries call and rename one test, with the assertions unchanged, which I accept."
   },
-  "failures": [],
-  "failed": 0,
+  "failures": [
+    {
+      "criterion": "The pull request breaks no repository test or live proof; every reader of the moved mention send (census entry 3) still holds.",
+      "evidence": "packages/dispatch/e2e/keyed-send.e2e.ts:363 'a comment whose @-mention is cut off mid-delivery by the page is delivered once @phone' (main's #2449) fails at fd8e7981 in CI job dispatch on chromium, iphone, webkit and firefox: 'Test timeout of 120000ms exceeded', page.waitForResponse for the Idempotency-Replayed answer (keyed-writes.ts:64, called at keyed-send.e2e.ts:375) never resolves. Reproduced locally: `cd packages/dispatch && DATABASE_URL=<scratch postgres> bun run e2e -- e2e/keyed-send.e2e.ts -g 'cut off mid-delivery' --project chromium` -> 1 failed. The same command in a copy of the workspace whose packages/envoy is main's 7c2effba (same web app) -> 1 passed in 22.7 s. The test's premise is that the mention's send runs inside the comment request (12 s slow write + 4 s listener send passes the page's 15 s cut-off, so the page repeats under its key and gets the replayed answer); this PR answers once the comment commits and sends after the response, so the page never repeats. The failing test is the red test; the census's reader search does not name it."
+    }
+  ],
+  "failed": 1,
   "proof": [
     {
-      "criterion": "A mention reaches each session exactly once through a Dispatch kill, also when its resend fails, when the killed process's send had landed, and when NATS is down; a failed mention's copy reaches only the session whose mention failed.",
-      "surface": "The load-test stack, a person's 8 comments on LGA-10 (routed to session:ses-a) mentioning ses-a/b/c; SIGKILL 0.3 s into stack.sh restart-dispatch's drain; ENVOY_NOTIFICATIONS read with $JS.API.STREAM.MSG.GET; comment_fallback_copies",
-      "command": "AS_PERSON=1 crash.sh r9person (listener up); STOP_LISTENER=1 AS_PERSON=1 crash.sh r9down (listener at 4 s, stopped after the restart); STOP_LISTENER=1 AS_PERSON=1 crash.sh r9landed (2 s); WATCH_EVENT=1 STOP_LISTENER=1 STOP_NATS=1 AS_PERSON=1 crash.sh r9nats, then NATS started",
-      "observed": "Every case: each session stores each comment exactly once. r9down: c1's copy is a comment_fallback_copies row (agent.ses-a, published, settled); comment.created keeps its first destinations. r9landed: the fallback row is published and the stream keeps one message for c1. r9nats: the row waits with attempt_count 0 while NATS is down, then publishes once.",
-      "headSha": "2eda91938cc2",
-      "negativeControl": "Round 6's head ab61c138, r6down (round 6): ses-a never received c1."
+      "criterion": "A reconnecting stream receives a bounded catch-up (or a signal to refetch once), never the whole backlog; an overflowed subscriber is caught up from the database instead of being closed.",
+      "surface": "GET /ws/live events view on the load-test stack, Dispatch built from the workspace",
+      "command": "livep events -since <H-256|H-257|H-10|H|H+5> and with no resume; 36 comments of 31 KB then -since H-34/H-33; resume.since -1/abc/1.5; ovf.sh 360 5000 15 (view paused 15 s, 4 KiB receive buffer); rflap.sh 60",
+      "observed": "H-256: 256 events, replay_complete true; H-257: none, false; 33 big events replayed, 34 none; H+5 and no resume: false. Bad resumes: INVALID_FRAME. Overflow: 360/360, no ended frame. 60 reconnects: 205/205 events, none duplicate or out of order, all complete.",
+      "headSha": "fd8e79810484",
+      "negativeControl": "Main 7c2effba: H-300 replays all 300 with replay_complete true; the paused view ends 'behind' after 316 with 44 missing."
     },
     {
-      "criterion": "A failed mention's fallback sends the comment to no new destination (review round 2, finding 1).",
-      "surface": "POST /api/v1/issues/LGA-12/comments as a person; PATCH /api/v1/issues/LGA-12 route; POST /api/v1/comments/{id}/deliveries (Retry); NATS subjects of the old and new route sessions",
-      "command": "moved.sh headb: route session:ses-ra, comment mentioning session:ses-rx (no live session, fails), route moved to session:ses-rb, Retry fails",
-      "observed": "Retry answers failed 'no live session ses-rx'; comment.created's destinations stay the issue topic and agent.ses-ra; no fallback row; ses-rb's subject holds nothing of the comment, ses-ra one copy.",
-      "headSha": "2eda91938cc2",
-      "negativeControl": "Round 7's build 855a4bcb, same run (moved-r7b): comment.created republished with agent.ses-rb added, and ses-rb stores the old comment."
+      "criterion": "The relay and the delivery hub do no event-log reads while nobody subscribes, and one read serves every subscriber of a commit.",
+      "surface": "The stack's Postgres with log_statement='all'; /ws/live events and timeline views",
+      "command": "hubflap.sh head and hubflap.sh base (idle; 30 s of flapping views; idle; 20 events views + a timeline view; idle)",
+      "observed": "Head event-log reads 0 / 21 (22 commits) / 0 / 16 (16 commits) / 0; goroutines back to 38. A shown issue's rename reaches the timeline view as a delta; an unshown one sends nothing.",
+      "headSha": "fd8e79810484",
+      "negativeControl": "Main: 0 / 636 / 6 / 33 / 9 - it reads during flapping and keeps reading after the last view."
     },
     {
-      "criterion": "Before and after on the committed load reproduction: a Dispatch restart at tonight's step with 50 open streams, measuring reconnect catch-up bytes, CPU in the minute after the restart, and comment-create latency with mentions.",
-      "surface": "packages/envoy/loadtest (INFRA-589's harness, merged as c24ea568, with this branch's restart scenario) on this pod",
-      "command": "measure9.sh: run-step.sh t606r9-{head,base} --events 4 --sessions 400 --requests 60 --sse 50 --sse-resume 1 --sse-stale 10 --restart-at 90s --mention-frac 0.2 --mentions 3 --envoy-rtt 200ms --rng-seed 1, LOADTEST_DISPATCH_SRC = workspace, then main d4cbcfe6",
-      "observed": "Head: 505,398 replayed bytes, stale streams 0 bytes and 60 refetch requests, 40/50 complete; mentioned comments answered in the 60 s after the restart 28 of 37; Dispatch CPU-s in that minute 26.73. Main: 119,293,701 bytes, each stale stream 11.9 MB, 50/50 complete, 0 refetches; 0 of 37 mentioned comments answered after the restart; 25.62 CPU-s.",
-      "headSha": "2eda91938cc2",
-      "negativeControl": "Main d4cbcfe6 is the control: every stale stream replays 11.9 MB."
+      "criterion": "Mention delivery is not lost and reaches each session once through a Dispatch kill, also through a NATS outage longer than the dead-letter threshold (review round 3 finding 1).",
+      "surface": "The stack, a person's 8 comments on LGA-10 (routed to session:ses-a) mentioning ses-a/b/c; SIGKILL 0.3 s into stack.sh restart-dispatch's drain; ENVOY_NOTIFICATIONS read with $JS.API.STREAM.MSG.GET; comment_fallback_copies",
+      "command": "AS_PERSON=1 crash.sh r10person (listener up); STOP_LISTENER=1 crash.sh r10down (4 s) and r10landed (2 s); STOP_LISTENER=1 STOP_NATS=1 crash.sh r10nats with 720 s of NATS down, then NATS started",
+      "observed": "Every case: each session stores each comment exactly once. r10down: 8 fallback rows published and settled. r10nats: 8 rows unsettled with attempt_count 0 through 12 minutes, then all 8 published once within 50 s of NATS returning.",
+      "headSha": "fd8e79810484",
+      "negativeControl": "Round 6's head ab61c138 (round 6): with the listener down after a kill, the claimed comment never reached the route session."
     },
     {
-      "criterion": "Mention delivery off the request path with one copy per session for silent and live listeners; no extra event on a stuck burst.",
-      "surface": "POST comments on the stack with Dispatch's ENVOY_URL direct or through 'loadgen proxy -rtt 30s'",
-      "command": "routecopy.sh and authorcopy.sh (silent and live); stuck.sh r9head 30",
-      "observed": "Routed issue and root-author reply: 1 copy each, silent or live. Stuck burst: comment.created=30, comment.delivery=30, 1 copy per comment.",
-      "headSha": "2eda91938cc2",
-      "negativeControl": "Round 3's head 12aada04 (round 3): 0 copies with a silent listener."
+      "criterion": "Before and after on the committed load reproduction: a Dispatch restart at tonight's step with 50 open live sockets.",
+      "surface": "packages/envoy/loadtest run-step.sh with --live 50 --live-resume 1 --live-stale 10 --restart-at 90s --mention-frac 0.2 --mentions 3 --envoy-rtt 200ms --rng-seed 1",
+      "command": "measure10.sh (head), basemeasure.sh (main 7c2effba, reseeded with its own build)",
+      "observed": "Replayed bytes 3,259,170 vs 125,170,034; stale sockets 953 B total with one refetch each vs 12.1 MB each and no refetch; Dispatch CPU-s in the minute after the restart 15.29 vs 17.10; mentioned comments answered after the restart 5/37 vs 0/37 (one run per side).",
+      "headSha": "fd8e79810484",
+      "negativeControl": "Main is the control: every stale socket replays about 12,600 events."
     }
   ],
   "observations": [
-    "Criterion 5's CPU expectation is not met: one run per side gives 26.7 vs 25.6 CPU-s, as the implementer's five per side (25.37 vs 24.84); the PR body records it as a risk. The other measures move as planned.",
-    "PR body line 56 (round 9's implementer E2E list) still names the stranded pass's index as migration 0136; the code, AGENTS.md and cmd/dispatch/README.md name 0137_comment_deliveries_pending and 0138_comment_fallback_copies.",
-    "The PR body is past 48,000 characters (50,320); later rounds should link their evidence rather than inline it."
+    "Agent view on /ws/live: a viewer paused 5 s receives 15 or 41 frames of 1 MiB in order, and one paused 20 s is closed by the socket (1006), on head and main alike. On /ws/live the bound a stalled page meets is #2449's socket queue (16 frames) and write timeout, not this PR's 8 MiB agent queue; the PR body and dispatch-agent-conversations.md should say so.",
+    "Browser (headless Chromium on the issue page, offline, then 300 or 5 comments, online): the new comment shows in both cases; going online refetches in both, so the browser does not show the difference the wire does.",
+    "The PR body is 52 KB; later rounds should link evidence."
   ]
 }
