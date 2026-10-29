@@ -489,7 +489,7 @@ func (b editBatch) outcome(applied int) (EditOutcome, error) {
 		Changed:        after != b.before,
 		Unchanged:      b.unchanged,
 		Token:          after,
-		AskBlocksAdded: addedAskBlocks(b.beforeTree, b.tree),
+		AddedAskBlocks: addedAskBlocks(b.beforeTree, b.tree),
 	}, nil
 }
 
