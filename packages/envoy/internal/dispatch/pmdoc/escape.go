@@ -893,11 +893,18 @@ func linkLabel(nodes []*Node, index int, link Mark) string {
 	return label.String()
 }
 
+// opensAngleConstruct reports whether char, the byte written right after a `<`, is one an
+// autolink or inline raw HTML can begin with: an ASCII letter or digit, `/`, `!` or `?`.
+// angleConstruct asks it of one node's text, rawHTMLScan.opensAt of the markdown a run wrote.
+func opensAngleConstruct(char byte) bool {
+	return isASCIIAlphaNumeric(char) || char == '/' || char == '!' || char == '?'
+}
+
 // angleConstruct reports whether the `<` at offset opens an autolink or HTML with a `>` later in
 // its own text; one a later node's markdown closes is judged once the run is written
 // (writeInlineRun).
 func angleConstruct(value string, offset int, scan *forwardScan) bool {
-	if offset+1 >= len(value) || !isASCIIAlphaNumeric(value[offset+1]) && value[offset+1] != '/' && value[offset+1] != '!' && value[offset+1] != '?' {
+	if offset+1 >= len(value) || !opensAngleConstruct(value[offset+1]) {
 		return false
 	}
 	return scan.indexFrom(offset+1, '>') >= 0

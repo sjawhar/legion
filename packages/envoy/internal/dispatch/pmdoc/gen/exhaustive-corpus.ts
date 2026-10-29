@@ -1,5 +1,5 @@
 // exhaustive-corpus.ts - every short string over a few characters, for the pmdoc differential
-// (differential.sh), the committed evidence for dispatch://INFRA-535.
+// (differential.sh), the committed evidence for sjawhar/legion#2458.
 //
 //   bun exhaustive-corpus.ts <out.jsonl> <max length> <alphabet...>
 //

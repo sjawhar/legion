@@ -826,10 +826,6 @@ func escapeImageSource(src string, escapePipes bool) string {
 // bare, a `<` opening it escaped.
 func escapeDestination(href string, escapePipes bool, ampersand string) string {
 	angle := strings.ContainsAny(href, " ()")
-	if !angle && !strings.ContainsAny(href, "\\&") && !strings.HasPrefix(href, "<") && !(escapePipes && strings.Contains(href, "|")) &&
-		!strings.ContainsFunc(href, asciiControl) {
-		return href
-	}
 	var written strings.Builder
 	written.Grow(len(href) + 4)
 	if angle {

@@ -1871,9 +1871,10 @@ under that parser's rules (`inlineMarkdown`, `editorRules`) and both readers Dis
 markdown under (`storedMarkdown`: `*`/`_` judged beside another `*` or `_` but not a `~`, `~` runs
 of either length paired, a run after any `~` refused, every run in one loop; `flankingMarkdown`:
 the same with flanking alone), and failing that under the first two, and failing that under
-that parser's alone (`inlineWithEscapes`), so wherever the bytes the writer before INFRA-534 wrote
-read back as that parser reads them they stay: the one rule is that the writer keeps the earliest
-spelling of the greatest read-back prefix depth under `readBackReaders` (`readBackDepth`). A text
+that parser's alone (`inlineWithEscapes`), so wherever the bytes the writer before
+sjawhar/legion#2360 wrote read back as that parser reads them they stay: the one rule is that the
+writer keeps the earliest spelling of the greatest read-back prefix depth under `readBackReaders`
+(`readBackDepth`). A text
 `!` written right before a link's `[` is written `\!`, since `![` opens an image (`openInlineMark`).
 A code block whose language holds a backtick is fenced with tildes, since a backtick fence's info
 string cannot hold one (`codeBlockFence`). Every order the writer opens marks in opens a code span's
