@@ -2,8 +2,24 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-720",
-  "completed": "2026-10-29T16:40:00Z",
+  "completed": "2026-10-29T18:05:00Z",
   "proof": [
+    {
+      "criterion": "Review round 1 item 1: an ask whose anchor does not cast belongs to its block document in the reference graph, the same document search links it to",
+      "surface": "the references route (GET /api/v1/references?to=dispatch://<issue>/ask/<id>) and the search route of the api package on real Postgres 17.11; refs package",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/fresh720?sslmode=disable go test ./internal/dispatch/api/ -run 'AnchorArtifactID|AnUpperCaseOrBraced|Search|DoesNotCast|Reference' -count=1; go test ./internal/dispatch/refs/ -count=1",
+      "observed": "ok: TestRefsAndSearchPutAnAskWhoseAnchorDoesNotCastOnItsBlockDocument (node parent and search href both the block document), TestAskNodeAnswersOverAnAnchorArtifactIDThatDoesNotCast (block document), the tester's spelling tests unmodified",
+      "headSha": "c9c5430bdf33000898011fcbf5d9e141eddd4ede",
+      "negativeControl": "refs/graph.go's document case reverted to `k.anchor->>'artifact_id' is not null`: 'ask node's parent = &model.NodeParent{Kind:\"issue\", ...}, want its ask block's document'"
+    },
+    {
+      "criterion": "Review round 1 item 2: a stored anchor's decode costs no more than main's, and task 5(a) re-run at the new head against main",
+      "surface": "benchmark binaries built from main 30ecdcd4 and head c9c5430b: one well-formed anchor decode (model), and recordedMarkRefs over all 1,157 documents of the synthetic replay copy (docs)",
+      "command": "10 alternating rounds each; benchstat golang.org/x/perf@v0.0.0-20261009192801-be2c69fb417e (dispatch://INFRA-720/artifact/infra720-r7-bench-tgz)",
+      "observed": "decode 2.232 us -> 2.340 us ~ (p=0.105), 96 B and 2 allocs both; recordedMarkRefs 965.4 ms -> 984.7 ms ~ (p=0.796), allocs ~ (p=0.853)",
+      "headSha": "c9c5430bdf33000898011fcbf5d9e141eddd4ede",
+      "negativeControl": "the reviewer's fast path inside an UnmarshalJSON method at 0d6079ef: decode 2.211 -> 3.340 us, +51% (p=0.002): any method costs an extra scan, so the method was replaced by model.DecodeAnchor"
+    },
     {
       "criterion": "Round 5 (tester fail: CONFLICTING with main): the head merges into main with migrations in sequence (0141 after main's 0139 and 0140), search.go keeps main's change with both ask arms on store.CastableUUID, and the merged sequence boots over the nine anchor spellings",
       "surface": "a real local Dispatch server built from the merge head, booted over the LINUX replay seed migrated to 0140 by main 30ecdcd4, holding nine asks opened through main's API on LINUX-344's spec and rewritten by SQL (block_artifact_id set) to anchor artifact_id: canonical, upper case, braces, trailing newline, '', '5', leading space, not-a-uuid, JSON number 5",
@@ -59,12 +75,15 @@
     "packages/envoy/cmd/dispatch/README.md",
     "packages/envoy/cmd/dispatch/main.go",
     "packages/envoy/internal/dispatch/api/ask_anchor_artifact_test.go",
-    "packages/envoy/internal/dispatch/api/ask_anchor_number_test.go",
+    "packages/envoy/internal/dispatch/api/ask_anchor_fixtures_test.go",
     "packages/envoy/internal/dispatch/api/ask_rows.go",
     "packages/envoy/internal/dispatch/api/asks.go",
+    "packages/envoy/internal/dispatch/api/comment_queries.go",
     "packages/envoy/internal/dispatch/api/events.go",
     "packages/envoy/internal/dispatch/api/search.go",
+    "packages/envoy/internal/dispatch/docs/anchor_blocks.go",
     "packages/envoy/internal/dispatch/docs/anchor_refreshed_ask_test.go",
+    "packages/envoy/internal/dispatch/docs/ask_row.go",
     "packages/envoy/internal/dispatch/docs/marks.go",
     "packages/envoy/internal/dispatch/docs/marks_test.go",
     "packages/envoy/internal/dispatch/docs/recorded_mark_refs_test.go",
@@ -92,7 +111,8 @@
     "Task 5(b) ran on INFRA-639's replay (b1367e2c) at F=0.15, minutes 19-35, on the INFRA-512 architect's instruction; base is 8a911ecc, the main commit the head was merged with; all six runs on one pod.",
     "Round 4 (narrowed by the INFRA-512 architect, Envoy 28bf3ef6, 15:13Z): only the reader guard switch to store.CastableUUID (pg_input_is_valid) and the non-string artifact_id decode; boot, index, census and sweep rows are settled, so the replay runs were not repeated. The A2/A3 entries above are round 3's at 1f4f79e7.",
     "On head, a single-ask read of an uncastable anchor answers 200 and logs WARN 'answer a comment or ask read without its anchor's block position' (DOC_SERVICE_UNAVAILABLE from the document stamp read of that id): the read degrades as it does for any document it cannot open.",
-    "Round 5: forward merge with main 30ecdcd4 (GitHub CONFLICTING: main took 0139_related_checks and 0140_issue_embedding_spec; search.go and README conflicted); migration renumbered 0141 with identical SQL; fingerprint 115bb0e9... -> 83332516..., changed only by the renumbering and main's searchKeywordLegs signature. A local Postgres that had applied this branch's earlier 0139 refuses 0141 (index exists); no deployment ever ran an unmerged number."
+    "Round 5: forward merge with main 30ecdcd4 (GitHub CONFLICTING: main took 0139_related_checks and 0140_issue_embedding_spec; search.go and README conflicted); migration renumbered 0141 with identical SQL; fingerprint 115bb0e9... -> 83332516..., changed only by the renumbering and main's searchKeywordLegs signature. A local Postgres that had applied this branch's earlier 0139 refuses 0141 (index exists); no deployment ever ran an unmerged number.",
+    "Review round 1 item 2: the reviewer and architect named a fast path in Anchor.UnmarshalJSON; measured, that method still cost +51% per well-formed decode, so the lenient read is model.DecodeAnchor called at each stored-anchor decode site, which meets the stated criterion (decode not measurably costlier than main's: ~ p=0.105)."
   ],
   "openQuestions": [
     "Comment-anchor casts (api/search.go comment arms, refs/graph.go:587, outbox/recipients.go:62) stay unguarded: comments_anchor_artifact (0032) casts every comment row, so no stored comment anchor fails. Approval casts are held by asks_approval_kind_check (0053), which requires a canonical uuid."
