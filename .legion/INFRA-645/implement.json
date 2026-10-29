@@ -11,7 +11,7 @@
       "command": "cd packages/envoy && go run github.com/miniscruff/changie@v1.26.0 new --kind Fixed --body <the same text> --custom Issue=pr2497; rm .changes/unreleased/INFRA-645-write-rendering-reuse.yaml; jj diff --stat -r f009ee1a",
       "observed": "f009ee1a deletes INFRA-645-write-rendering-reuse.yaml and adds pr2497-Fixed-20261029-134737.yaml, written by changie with the same kind and body text and custom Issue pr2497. No other path changes, and no file name or text in the fragment holds a Dispatch key.",
       "headSha": "f009ee1aaa2dd44813381870ef8d5b8ffd1da9b2",
-      "negativeControl": "Before the change, `ls packages/envoy/.changes/unreleased | grep INFRA-` matches the old file; at f009ee1a it matches nothing."
+      "negativeControl": "Before the change, `ls packages/envoy/.changes/unreleased | grep INFRA-645` matches the old file; at f009ee1a it matches nothing. The only other key-named fragment there, INFRA-532-document-mermaid-styles.yaml, comes from main and is not part of this pull request."
     },
     {
       "criterion": "The required checks and suites (A5): the docs package fits envoy-go-race's 30 m limit, adding at most 30 s over main's slowest run (the tester's failure)",
