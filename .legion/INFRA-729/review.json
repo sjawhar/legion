@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-729",
+  "completed": "2026-10-29T09:43:36Z",
+  "round": 2,
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "scope": "Since my approval at 8106eff1: retro's two docs/solutions learnings (renamed to ...-pr2486.md this round), retro's removal of .legion/INFRA-729/, and new implement/test handoffs. Nothing outside docs/solutions/ and .legion/INFRA-729/ changed since the code head 08cbb0a2.",
+  "ciRead": {
+    "required": ["lint", "typecheck", "test", "pr-title"],
+    "ciHead": "85fe82dc51ed0923cb2d425213f2902d80239c8d",
+    "result": "lint, typecheck, test, pr-title completed success at 85fe82dc (one superseded pr-title run cancelled, another success); dispatch-browser-multiprocess success again at 85fe82dc; compare 85fe82dc...f206643d handoffsOnly=true, 2 files"
+  },
+  "verified": [
+    "learning citations hold at the head: testpg.go:24 and stage1-skeleton.sh:152 carry postgres:16; the INFRA-583, INFRA-584 and pr2364 learnings each learning names exist",
+    "no review threads, no PR comments"
+  ],
+  "judged": [
+    "Citations of plan.json/test.json in the learnings point at handoffs that retro removes before the merge; not a defect: many learnings on main cite handoffs the same way, and the handoffs stay readable at the cited commits",
+    "related_issues block left out on the INFRA controller's ruling, as the architect relayed; not requested"
+  ],
+  "thermo": "not run: this round's diff is docs/solutions and handoffs only"
+}
