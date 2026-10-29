@@ -139,10 +139,14 @@ const legionClaimView = z.strictObject({
   pluginContract: z.number().int().nonnegative(),
 });
 
-/** `api.PhaseView` — one phase worker's claim, its committed handoff, and the rounds it has run. */
+/** `api.PhaseView` — one phase worker's claim, its committed handoff, and the two counts the phase
+ * carries: `pass`, the passes it has made through its stretch of the workflow, which every
+ * backward move counts one of, and `rounds`, the review rounds, which only a review that requested
+ * changes counts. */
 const legionPhaseView = z.strictObject({
   claim: legionClaimView,
   handoffCommit: nonEmptyString.optional(),
+  pass: z.number().int().nonnegative(),
   rounds: z.number().int().nonnegative(),
 });
 

@@ -242,6 +242,7 @@ func populatedState(t *testing.T) State {
 							},
 						},
 						HandoffCommit: "9f2c1d7a4b6e8c3f5a90d2e14b7c6f8a3d5e0b21",
+						Pass:          0,
 						Rounds:        0,
 					},
 					claim.RoleImplementer: {
@@ -267,7 +268,11 @@ func populatedState(t *testing.T) State {
 							},
 						},
 						HandoffCommit: "",
-						Rounds:        2,
+						// Three passes through the stretch, two of them ended by a review that
+						// requested changes: the third went back on something else, a tester's fail
+						// or a red, which the review rounds do not count.
+						Pass:   3,
+						Rounds: 2,
 					},
 				},
 				PullRequest: &PullRequestView{
@@ -298,7 +303,7 @@ func populatedState(t *testing.T) State {
 				DefaultBranch: "release/v7.1",
 				HoldReason:    "escalated",
 				Workers: map[claim.Role]PhaseView{
-					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_210", State: "failed"}, Rounds: 1},
+					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_210", State: "failed"}, Pass: 1, Rounds: 1},
 				},
 			},
 			// LEGION-212's architect asked a person a question and handed the turn back, which gave
@@ -329,7 +334,7 @@ func populatedState(t *testing.T) State {
 				Repo:          "acme/widgets",
 				DefaultBranch: "main",
 				Workers: map[claim.Role]PhaseView{
-					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_207", State: "working"}, HandoffCommit: "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40", Rounds: 1},
+					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_207", State: "working"}, HandoffCommit: "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40", Pass: 1, Rounds: 1},
 				},
 				PullRequest: &PullRequestView{
 					Repo:           "acme/widgets",

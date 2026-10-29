@@ -145,8 +145,8 @@ func TestARedVerdictSendsTheTreeBackToImplementing(t *testing.T) {
 					t.Fatalf("notices %v, want no checks-red", got)
 				}
 				assertOutboxCount(t, pool, "supervise", 0)
-				if rounds := implementerRounds(t, pool); rounds != 0 {
-					t.Fatalf("rounds = %d, want none counted: nothing went back", rounds)
+				if pass := implementerPass(t, pool); pass != 0 {
+					t.Fatalf("pass = %d, want none counted: nothing went back", pass)
 				}
 				if (pending != nil) != tc.readyPending {
 					t.Fatalf("the issue's pending READY version is %v, want it kept as seeded: nothing left merging", pending)
@@ -162,9 +162,9 @@ func TestARedVerdictSendsTheTreeBackToImplementing(t *testing.T) {
 			}
 			reason, noticePhase := checksRedNotice(t, pool)
 			want := "CI is red at head: python-cli-tests / test (pytest)"
-			rounds := implementerRounds(t, pool)
-			if !strings.Contains(task, want) || strings.Contains(task, "rename the widget") || !strings.Contains(reason, want) || noticePhase != tc.from || rounds != 1 {
-				t.Fatalf("task %q, notice %q in %q and rounds %d; want both to say %q and nothing of the reviewer's body, the notice in %s, and the round counted", task, reason, noticePhase, rounds, want, tc.from)
+			pass := implementerPass(t, pool)
+			if !strings.Contains(task, want) || strings.Contains(task, "rename the widget") || !strings.Contains(reason, want) || noticePhase != tc.from || pass != 1 {
+				t.Fatalf("task %q, notice %q in %q and pass %d; want both to say %q and nothing of the reviewer's body, the notice in %s, and the pass counted", task, reason, noticePhase, pass, want, tc.from)
 			}
 		})
 	}
@@ -365,8 +365,8 @@ func TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing(t *testing.T) 
 				if len(published) != 0 {
 					t.Fatalf("merge queue publishes %v, want none: the READY stands", published)
 				}
-				if rounds := implementerRounds(t, pool); rounds != 0 {
-					t.Fatalf("rounds = %d, want none counted: nothing went back", rounds)
+				if pass := implementerPass(t, pool); pass != 0 {
+					t.Fatalf("pass = %d, want none counted: nothing went back", pass)
 				}
 				return
 			}
@@ -379,8 +379,8 @@ func TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing(t *testing.T) 
 			if task := implementerTask(t, pool); !strings.Contains(task, want) || !strings.Contains(reason, want) || from != phase.AwaitingMerge || status != "in_progress" {
 				t.Fatalf("task %q, notice %q from %q, status %q; want both to say %q, from awaiting_merge, and the issue in_progress", task, reason, from, status, want)
 			}
-			if rounds := implementerRounds(t, pool); rounds != 1 {
-				t.Fatalf("rounds = %d, want the return to implementing counted", rounds)
+			if pass := implementerPass(t, pool); pass != 1 {
+				t.Fatalf("pass = %d, want the return to implementing counted", pass)
 			}
 			if len(published) != 1 || published[0].Role != "merge-queue" || !strings.Contains(published[0].Packet, "READY withdrawn") || !strings.Contains(published[0].Packet, want) {
 				t.Fatalf("merge queue publishes %v, want one to merge-queue withdrawing the READY and saying %q", published, want)
@@ -550,8 +550,8 @@ func TestAConflictingMergeabilityInAwaitingMergeSendsTheTreeBackToImplementing(t
 					t.Fatalf("merge queue publishes %v, want none: nothing moved", published)
 				}
 				assertOutboxCount(t, pool, "supervise", 0)
-				if rounds := implementerRounds(t, pool); rounds != 0 {
-					t.Fatalf("rounds = %d, want none counted: nothing went back", rounds)
+				if pass := implementerPass(t, pool); pass != 0 {
+					t.Fatalf("pass = %d, want none counted: nothing went back", pass)
 				}
 				return
 			}
@@ -564,8 +564,8 @@ func TestAConflictingMergeabilityInAwaitingMergeSendsTheTreeBackToImplementing(t
 			if task := implementerTask(t, pool); !strings.Contains(task, want) || !strings.Contains(reason, want) || from != phase.AwaitingMerge || status != "in_progress" {
 				t.Fatalf("task %q, notice %q from %q, status %q; want both to say %q, from awaiting_merge, and the issue in_progress", task, reason, from, status, want)
 			}
-			if rounds := implementerRounds(t, pool); rounds != 1 {
-				t.Fatalf("rounds = %d, want the return to implementing counted", rounds)
+			if pass := implementerPass(t, pool); pass != 1 {
+				t.Fatalf("pass = %d, want the return to implementing counted", pass)
 			}
 			if len(published) != 1 || published[0].Role != "merge-queue" || !strings.Contains(published[0].Packet, "READY withdrawn") || !strings.Contains(published[0].Packet, want) {
 				t.Fatalf("merge queue publishes %v, want one to merge-queue withdrawing the READY and saying %q", published, want)
@@ -695,8 +695,8 @@ func TestAnExhaustedFixAttemptCountHoldsEveryRedAtThatCount(t *testing.T) {
 				t.Fatalf("Dispatch messages %q, want the one max_fix_attempts message", posted)
 			}
 			assertOutboxCount(t, pool, "supervise", 0)
-			if rounds := implementerRounds(t, pool); rounds != 0 {
-				t.Fatalf("rounds = %d, want none: nothing went back", rounds)
+			if pass := implementerPass(t, pool); pass != 0 {
+				t.Fatalf("pass = %d, want none: nothing went back", pass)
 			}
 		})
 	}
@@ -740,8 +740,8 @@ func TestAnExhaustedFixAttemptCountStillTakesTheReviewersRequestForChanges(t *te
 			if got := issuePhase(t, pool); got != phase.Implementing {
 				t.Fatalf("after the round's second half the issue is in %s, want implementing: a request for changes is a decision the cap does not withhold", got)
 			}
-			if task, rounds := implementerTask(t, pool), implementerRounds(t, pool); !strings.Contains(task, "rename the widget") || rounds != 1 {
-				t.Fatalf("implementer task %q, rounds %d; want the reviewer's body and the round counted", task, rounds)
+			if task, pass, rounds := implementerTask(t, pool), implementerPass(t, pool), implementerRounds(t, pool); !strings.Contains(task, "rename the widget") || pass != 1 || rounds != 1 {
+				t.Fatalf("implementer task %q, pass %d, rounds %d; want the reviewer's body, the pass counted and the review round counted", task, pass, rounds)
 			}
 			if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "checks-red") || !containsNotice(got, "pr-blocked") {
 				t.Fatalf("notices %v, want the count's pr-blocked and no checks-red", got)
@@ -1476,8 +1476,8 @@ func TestACompletionOnARedThatSettledWhileImplementingSendsTheWorkBack(t *testin
 				if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "checks-red") {
 					t.Fatalf("notices %v, want no checks-red", got)
 				}
-				if rounds := implementerRounds(t, pool); rounds != 0 {
-					t.Fatalf("rounds = %d, want none: nothing went back", rounds)
+				if pass := implementerPass(t, pool); pass != 0 {
+					t.Fatalf("pass = %d, want none: nothing went back", pass)
 				}
 				return
 			}
@@ -1487,8 +1487,8 @@ func TestACompletionOnARedThatSettledWhileImplementingSendsTheWorkBack(t *testin
 			if !strings.Contains(task, want) || !strings.Contains(task, "Phase: implementing.") || !strings.Contains(reason, want) || from != phase.Testing {
 				t.Fatalf("implementer task %q, notice %q in %q; want both to say %q, the notice in testing", task, reason, from, want)
 			}
-			if rounds := implementerRounds(t, pool); rounds != 1 {
-				t.Fatalf("rounds = %d, want the return counted as one", rounds)
+			if pass := implementerPass(t, pool); pass != 1 {
+				t.Fatalf("pass = %d, want the return counted as one", pass)
 			}
 		})
 	}
@@ -1527,8 +1527,8 @@ func TestACompletionBeforeItsPushesWebhooksIsNotSentBackOnTheRedItFixed(t *testi
 			if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "checks-red") {
 				t.Fatalf("notices %v, want no checks-red", got)
 			}
-			if rounds := implementerRounds(t, pool); rounds != 0 {
-				t.Fatalf("rounds = %d, want none", rounds)
+			if pass := implementerPass(t, pool); pass != 0 {
+				t.Fatalf("pass = %d, want none", pass)
 			}
 		})
 	}
@@ -1583,8 +1583,8 @@ func TestALatePushOfTheRecordedHeadActsOnItsRed(t *testing.T) {
 			if got := issuePhase(t, pool); got != phase.Implementing {
 				t.Fatalf("after the late push the issue is in %s, want implementing: the red stands for the head and nothing else acts on it", got)
 			}
-			if rounds := implementerRounds(t, pool); rounds != 1 {
-				t.Fatalf("rounds = %d, want the return counted as one", rounds)
+			if pass := implementerPass(t, pool); pass != 1 {
+				t.Fatalf("pass = %d, want the return counted as one", pass)
 			}
 		})
 	}
@@ -1632,17 +1632,17 @@ func TestAWorkflowOnlyRedTheCompletionDefersIsSentBackByTheNextRead(t *testing.T
 			if got := issuePhase(t, pool); got != phase.Implementing {
 				t.Fatalf("the issue is in %s, want implementing: a red standing for the head handed on was acted on by nothing", got)
 			}
-			if rounds := implementerRounds(t, pool); rounds != 1 {
-				t.Fatalf("rounds = %d, want the return counted as one", rounds)
+			if pass := implementerPass(t, pool); pass != 1 {
+				t.Fatalf("pass = %d, want the return counted as one", pass)
 			}
 		})
 	}
 }
 
 // Checks can flap: red, then green on a re-run, then red again. Below the cap the first red sends
-// the work back, counting one round and starting the implementer once; the issue is then in
+// the work back, counting one pass and starting the implementer once; the issue is then in
 // implementing, where no CI verdict moves it, so the green and the second red open no second
-// round, deliver no second task and withdraw no READY twice.
+// pass, deliver no second task and withdraw no READY twice.
 func TestAFlappingVerdictBelowTheCapSendsTheWorkBackOnce(t *testing.T) {
 	const required = "pr-checks-result"
 	for _, tc := range []struct {
@@ -1671,8 +1671,8 @@ func TestAFlappingVerdictBelowTheCapSendsTheWorkBackOnce(t *testing.T) {
 					t.Fatalf("after verdict %d the issue is in %s, want implementing", attempt+1, got)
 				}
 			}
-			if rounds := implementerRounds(t, pool); rounds != 1 {
-				t.Fatalf("rounds = %d, want the one return counted", rounds)
+			if pass := implementerPass(t, pool); pass != 1 {
+				t.Fatalf("pass = %d, want the one return counted", pass)
 			}
 			assertOutboxCount(t, pool, "supervise", 1)
 			checksRed := 0

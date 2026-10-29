@@ -120,7 +120,7 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusConflict, "HANDOFF_STALE_GENERATION", staleCompletion(grant.Issue, issue.Generation, serving, machine.Claim().Pending))
 		return
 	}
-	treeGeneration, round := position.treeGeneration, position.round
+	treeGeneration, pass := position.treeGeneration, position.pass
 	// READY is held to the pull request's head on GitHub before the fact is applied: a refusal the
 	// workflow committed would be recorded as processed under this completion's key, which leaves
 	// the summary out, while a refusal here records nothing, and the corrected retry at the same
@@ -143,9 +143,9 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// One phase's completion is identified by where the issue stands — its generation, phase, and
-	// review round — with the role and what it reported: the commit, the verdict, and READY. A
-	// retried call for the same phase is the same fact; the next phase's completion at the same
-	// commit (the implementer's retro, standing on its implementing round's last push) is a
+	// pass through that phase — with the role and what it reported: the commit, the verdict, and
+	// READY. A retried call for the same phase is the same fact; the next phase's completion at the
+	// same commit (the implementer's retro, standing on its implementing pass's last push) is a
 	// different one, and so is a corrected report at the same commit (a merger's ready: true after
 	// READY_REQUIRED), since a refusal the workflow commits is recorded as processed. The position is
 	// read before the fact's own transaction: should the issue move in between, the engine re-reads
@@ -163,7 +163,7 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// by bumping only the root's, and restarts a child's worker in the phase it stood in, so a
 	// child's completion refused before (while the tree lingered, or while the old gate was closed)
 	// would otherwise take the new generation's key.
-	eventID := fmt.Sprintf("handoff:%s:%d:%d:%d:%s:%s:%d:%s:%s:%t", grant.Issue, treeGeneration, issue.Generation, serving, grant.Role, issue.Phase, round, req.Commit, req.Verdict, req.Ready)
+	eventID := fmt.Sprintf("handoff:%s:%d:%d:%d:%s:%s:%d:%s:%s:%t", grant.Issue, treeGeneration, issue.Generation, serving, grant.Role, issue.Phase, pass, req.Commit, req.Verdict, req.Ready)
 	result, err := intake.ApplyFact(r.Context(), s.pool, "api", eventID, intake.HandoffComplete{Generation: serving, Issue: grant.Issue, Role: grant.Role, Claim: grant.Claim,
 		Summary: req.Summary, Verdict: req.Verdict, Ready: req.Ready, Commit: req.Commit, MergeNote: answer.mergeNote,
 		RecordedHead: answer.recordedHead, RecordedHeadAt: answer.recordedHeadAt, HeadAt: answer.headAt}, s.handlers...)
@@ -173,8 +173,8 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	if result.Duplicate {
 		writeFailure(w, http.StatusConflict, "HANDOFF_ALREADY_RECORDED", fmt.Sprintf(
-			"the %s completion of phase %s (round %d) at commit %s was already received; this call changed nothing",
-			grant.Role, issue.Phase, round, req.Commit))
+			"the %s completion of phase %s (pass %d through it) at commit %s was already received; this call changed nothing",
+			grant.Role, issue.Phase, pass, req.Commit))
 		return
 	}
 	if result.Refusal != nil {
@@ -322,13 +322,13 @@ func (s *server) readyRecord(ctx context.Context, issue string) (*record.PullReq
 }
 
 // completionPosition is where issue key stands as the completion route reads it, in one repeatable-read
-// snapshot: the issue record, its tree's generation (the root's), its review round — the
-// implementer's count of returns to implementing, which tells each implementing, testing, and
-// reviewing pass from the last — and its production check, nil while none was ever opened.
+// snapshot: the issue record, its tree's generation (the root's), its pass — the implementer's
+// count of returns to an earlier phase, which tells each implementing, testing, and reviewing pass
+// from the last — and its production check, nil while none was ever opened.
 type completionPosition struct {
 	issue          *record.Issue
 	treeGeneration uint64
-	round          int
+	pass           int
 	check          *record.ProductionCheck
 }
 
@@ -357,15 +357,15 @@ func (s *server) handoffPosition(ctx context.Context, key string) (completionPos
 	if err != nil {
 		return completionPosition{}, err
 	}
-	round := 0
+	pass := 0
 	for _, row := range rows {
 		if row.Role == claim.RoleImplementer {
-			round = row.Rounds
+			pass = row.Pass
 		}
 	}
 	check, err := s.records.ProductionCheck(ctx, tx, key)
 	if err != nil {
 		return completionPosition{}, err
 	}
-	return completionPosition{issue: issue, treeGeneration: root.Generation, round: round, check: check}, tx.Commit(ctx)
+	return completionPosition{issue: issue, treeGeneration: root.Generation, pass: pass, check: check}, tx.Commit(ctx)
 }

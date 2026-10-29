@@ -677,6 +677,21 @@ func (e *Engine) settleRound(ctx context.Context, tx pgx.Tx, issue record.Issue,
 	return false, nil
 }
 
+// recordPass counts the implementer one more pass through the implementing, testing and reviewing
+// stretch, which every move back into an earlier phase opens. Nothing is bounded by it: it is the
+// counter the handoff completion key carries (api/handoff.go), and its whole job is to make a
+// completion at a commit an earlier pass reported a fact of its own.
+func (e *Engine) recordPass(ctx context.Context, tx pgx.Tx, issue string) error {
+	row, err := e.phaseRow(ctx, tx, issue, claim.RoleImplementer)
+	if err != nil {
+		return err
+	}
+	row.Pass++
+	return e.store.PutPhase(ctx, tx, row)
+}
+
+// recordRound counts the implementer one more review round, which only a review that requested
+// changes ends, and tells the architect once the rounds reach review_round_cap.
 func (e *Engine) recordRound(ctx context.Context, tx pgx.Tx, issue string) error {
 	row, err := e.phaseRow(ctx, tx, issue, claim.RoleImplementer)
 	if err != nil {

@@ -135,6 +135,7 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 			view.Workers[item.Role] = api.PhaseView{
 				Claim:         claimView,
 				HandoffCommit: item.HandoffCommit,
+				Pass:          item.Pass,
 				Rounds:        item.Rounds,
 			}
 		}

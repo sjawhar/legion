@@ -374,10 +374,13 @@ func CapabilityReportViewOf(report capabilities.Report) *CapabilityReportView {
 	return view
 }
 
-// PhaseView is one phase worker's claim, its committed handoff, and the rounds the phase has run.
+// PhaseView is one phase worker's claim, its committed handoff, and the two counts the phase
+// carries: the passes it has made through its stretch of the workflow, which every backward move
+// counts one of, and the review rounds, which only a review that requested changes counts.
 type PhaseView struct {
 	Claim         ClaimView `json:"claim"`
 	HandoffCommit string    `json:"handoffCommit,omitempty"`
+	Pass          int       `json:"pass"`
 	Rounds        int       `json:"rounds"`
 }
 

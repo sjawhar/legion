@@ -100,8 +100,8 @@ func TestSignOffInAcceptingStartsRetro(t *testing.T) {
 			t.Fatalf("the implementer's retro task %q does not carry %q", task, want)
 		}
 	}
-	if rounds := implementerRounds(t, pool); rounds != 0 {
-		t.Fatalf("acceptance counted the implementer %d rounds, want none", rounds)
+	if pass := implementerPass(t, pool); pass != 0 {
+		t.Fatalf("acceptance counted the implementer %d passes, want none: nothing went back", pass)
 	}
 }
 
@@ -124,9 +124,10 @@ func TestTheArchitectsCompletionInAcceptingIsRefused(t *testing.T) {
 }
 
 // The tree architect's send-back from accepting to implementing or testing is a backward move it
-// requests: that phase's role is started with the reason, and the implementer is counted a review
-// round, as a reviewer's request for changes counts one. The move writes no architect phase row.
-func TestTheArchitectsBackwardMoveFromAcceptingStartsThePhaseAndCountsARound(t *testing.T) {
+// requests: that phase's role is started with the reason, and the implementer is counted a pass,
+// as every move back into an earlier phase counts one. The review rounds are untouched, since no
+// review requested changes. The move writes no architect phase row.
+func TestTheArchitectsBackwardMoveFromAcceptingStartsThePhaseAndCountsAPass(t *testing.T) {
 	for _, tc := range []struct {
 		to     phase.Phase
 		role   claim.Role
@@ -154,8 +155,8 @@ func TestTheArchitectsBackwardMoveFromAcceptingStartsThePhaseAndCountsARound(t *
 			if started := superviseRequests(t, pool, "start"); len(started) != 1 || started["LEGION-208/"+string(tc.role)] != 1 {
 				t.Fatalf("starts = %v, want the %s once and nobody else", started, tc.role)
 			}
-			if rounds := implementerRounds(t, pool); rounds != 1 {
-				t.Fatalf("implementer rounds = %d, want the send-back counted as one", rounds)
+			if pass, rounds := implementerPass(t, pool), implementerRounds(t, pool); pass != 1 || rounds != 0 {
+				t.Fatalf("implementer pass = %d, rounds = %d; want the send-back counted as one pass and no review round", pass, rounds)
 			}
 			var rows int
 			if err := pool.QueryRow(context.Background(), "select count(*) from phases where issue = 'LEGION-208' and role = 'architect'").Scan(&rows); err != nil || rows != 0 {
@@ -176,8 +177,8 @@ func TestAPlannersBackwardMoveFromAcceptingIsRefused(t *testing.T) {
 		t.Fatalf("the planner's move = %+v, %v; want BACKWARD_REFUSED", result.Refusal, err)
 	}
 	assertPhase(t, pool, phase.Accepting)
-	if rounds := implementerRounds(t, pool); rounds != 0 {
-		t.Fatalf("implementer rounds = %d, want none", rounds)
+	if pass := implementerPass(t, pool); pass != 0 {
+		t.Fatalf("implementer pass = %d, want none", pass)
 	}
 	assertOutboxKinds(t, pool, []string{})
 }
@@ -198,8 +199,8 @@ func TestChecksRedInAcceptingSendsTheWorkBackWaitingOnNobody(t *testing.T) {
 	if from != phase.Accepting || !strings.Contains(reason, "CI is red at head") {
 		t.Fatalf("checks-red notice %q in %s, want the red told in accepting", reason, from)
 	}
-	if rounds := implementerRounds(t, pool); rounds != 1 {
-		t.Fatalf("implementer rounds = %d, want the red counted as one", rounds)
+	if pass := implementerPass(t, pool); pass != 1 {
+		t.Fatalf("implementer pass = %d, want the red counted as one", pass)
 	}
 }
 

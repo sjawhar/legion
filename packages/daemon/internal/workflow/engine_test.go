@@ -790,9 +790,9 @@ func fixtureStatus(current phase.Phase) string {
 
 // Every backward edge applies through intake, and the worker that asked for it is not stopped: its
 // assignment ends with the move, and the start of the phase it moved to delivers the next one.
-// Every move a backward row serves applies, and counts the implementer one round, as every move
-// back to an earlier phase does. A move onto accepting starts nobody: the tree's architect, whose
-// phase it is, is already live.
+// Every move a backward row serves applies, and counts the implementer one pass, as every move
+// back to an earlier phase does; the review rounds stand, since no review requested changes. A
+// move onto accepting starts nobody: the tree's architect, whose phase it is, is already live.
 func TestEveryBackwardEdgeAppliesThroughIntake(t *testing.T) {
 	for _, from := range []phase.Phase{phase.Implementing, phase.Testing, phase.Reviewing, phase.Accepting, phase.Retro, phase.Merging} {
 		for _, to := range requiredBackwardTargets(from) {
@@ -804,8 +804,8 @@ func TestEveryBackwardEdgeAppliesThroughIntake(t *testing.T) {
 				if _, err := intake.ApplyFact(context.Background(), pool, "api", string(from)+"-"+string(to), intake.BackwardMove{Issue: "LEGION-208", Requester: role, To: to, Reason: "correct"}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
 					t.Fatalf("ApplyFact backward: %v", err)
 				}
-				if got, rounds := issuePhase(t, pool), implementerRounds(t, pool); got != to || rounds != 1 {
-					t.Fatalf("phase = %q, rounds %d; want %q and one round", got, rounds, to)
+				if got, pass, rounds := issuePhase(t, pool), implementerPass(t, pool), implementerRounds(t, pool); got != to || pass != 1 || rounds != 0 {
+					t.Fatalf("phase = %q, pass %d, rounds %d; want %q, one pass and no review round", got, pass, rounds, to)
 				}
 				if suspended := superviseRequests(t, pool, "suspend"); len(suspended) != 0 {
 					t.Fatalf("the move back from %s to %s suspended %v, want the requesting %s left running", from, to, suspended, role)
@@ -853,8 +853,8 @@ func TestABackwardMoveNoRowServesIsRefused(t *testing.T) {
 			if err != nil || refusalCode(result) != "BACKWARD_REFUSED" {
 				t.Fatalf("the move = %+v, %v; want BACKWARD_REFUSED", result.Refusal, err)
 			}
-			if got, rounds := issuePhase(t, pool), implementerRounds(t, pool); got != tc.from || rounds != 0 {
-				t.Fatalf("phase = %q, rounds %d; want %q and no round", got, rounds, tc.from)
+			if got, pass := issuePhase(t, pool), implementerPass(t, pool); got != tc.from || pass != 0 {
+				t.Fatalf("phase = %q, pass %d; want %q and no pass", got, pass, tc.from)
 			}
 			assertOutboxKinds(t, pool, []string{})
 		})

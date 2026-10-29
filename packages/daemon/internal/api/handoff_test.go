@@ -948,13 +948,14 @@ func TestAStaleCompletionDoesNotTakeTheNewRunsKey(t *testing.T) {
 
 // A pull request waiting to be merged that starts conflicting with its base is sent back to the
 // implementer, which merges the base forward in the same run, with the same claim. The key the
-// route builds tells one implementing pass from the last by the round, so that conflict round has
-// to open a round of its own: otherwise a completion that pushed no new handoff reports the branch
-// head of the round before at the same round, takes that completion's key and is answered
-// HANDOFF_ALREADY_RECORDED, which tells the worker it was received when nothing moved. The workflow
-// sees it instead and refuses it naming the handoff the round must write, and the completion that
-// carries one moves the issue on to testing.
-func TestAConflictRoundsCompletionIsTheNewRoundsAndNotTheLastOnes(t *testing.T) {
+// route builds tells one implementing pass from the last by the pass count, so that conflict pass
+// has to open a pass of its own: otherwise a completion that pushed no new handoff reports the
+// branch head of the pass before at the same count, takes that completion's key and is answered
+// HANDOFF_ALREADY_RECORDED, which tells the worker it was received when nothing moved. The
+// workflow sees it instead and refuses it naming the handoff the pass must write, and the
+// completion that carries one moves the issue on to testing. The conflict is no review, so it
+// counts no review round; the pass it counts is the one the key is built on.
+func TestAConflictPassesCompletionIsTheNewPassesAndNotTheLastOnes(t *testing.T) {
 	github := newHandoffGitHub(t)
 	h := newHarness(t)
 	records := record.NewStore()
@@ -989,9 +990,9 @@ func TestAConflictRoundsCompletionIsTheNewRoundsAndNotTheLastOnes(t *testing.T) 
 		return got
 	}
 
-	// The first round's handoff is the pushed commit carrying it, which the tool found in the pane.
+	// The first pass's handoff is the pushed commit carrying it, which the tool found in the pane.
 	if recorder := complete("handoff-1"); recorder.Code != http.StatusOK || phaseNow() != phase.Testing {
-		t.Fatalf("the first round's completion = %d (%s), phase %s; want 200 and testing", recorder.Code, recorder.Body, phaseNow())
+		t.Fatalf("the first pass's completion = %d (%s), phase %s; want 200 and testing", recorder.Code, recorder.Body, phaseNow())
 	}
 	// Testing, review, retro and the merger's READY pass; the issue waits on a human's merge.
 	issue.Phase, issue.Status = phase.AwaitingMerge, "retro"
@@ -1004,23 +1005,23 @@ func TestAConflictRoundsCompletionIsTheNewRoundsAndNotTheLastOnes(t *testing.T) 
 	if got := phaseNow(); got != phase.Implementing {
 		t.Fatalf("after the conflicting read the issue is in %s, want implementing", got)
 	}
-	// The implementer takes the conflict round's task, a task of the run it already serves.
+	// The implementer takes the conflict pass's task, a task of the run it already serves.
 	machine, ok := h.supervisor.Machine(implementer.token)
 	if !ok {
 		t.Fatal("no machine for the implementer")
 	}
 	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: implementer.token}); err != nil {
-		t.Fatalf("end the first round's turn: %v", err)
+		t.Fatalf("end the first pass's turn: %v", err)
 	}
 	if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: implementer.token, Task: "merge main forward", ID: "outbox:conflict", Generation: 1}); err != nil {
-		t.Fatalf("deliver the conflict round's task: %v", err)
+		t.Fatalf("deliver the conflict pass's task: %v", err)
 	}
 	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: implementer.token, DeliveryID: "outbox:conflict"}); err != nil {
-		t.Fatalf("start the conflict round's turn: %v", err)
+		t.Fatalf("start the conflict pass's turn: %v", err)
 	}
 
 	// It merges main forward and completes without writing a new handoff: the carrying commit the
-	// tool finds is still the first round's.
+	// tool finds is still the first pass's.
 	stale := complete("handoff-1")
 	var failure Failure
 	decodeInto(t, stale, &failure)
@@ -1030,9 +1031,9 @@ func TestAConflictRoundsCompletionIsTheNewRoundsAndNotTheLastOnes(t *testing.T) 
 	if got := phaseNow(); got != phase.Implementing {
 		t.Fatalf("after the refused completion the issue is in %s, want implementing", got)
 	}
-	// With the conflict round's handoff written and committed, its completion moves the issue on.
+	// With the conflict pass's handoff written and committed, its completion moves the issue on.
 	if recorder := complete("handoff-2"); recorder.Code != http.StatusOK || phaseNow() != phase.Testing {
-		t.Fatalf("the conflict round's completion = %d (%s), phase %s; want 200 and testing", recorder.Code, recorder.Body, phaseNow())
+		t.Fatalf("the conflict pass's completion = %d (%s), phase %s; want 200 and testing", recorder.Code, recorder.Body, phaseNow())
 	}
 }
 

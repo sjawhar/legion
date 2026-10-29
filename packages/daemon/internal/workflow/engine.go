@@ -828,13 +828,21 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
 		return err
 	}
-	// Every move back to an earlier phase counts the implementer a round: the tester's fail, a
-	// review's request for changes, a worker's backward move, and the move the daemon makes on its
-	// own for a red CI verdict or a head that conflicts with its base. The round tells each pass
-	// through a phase from the last (api/handoff.go): a pass that counted none would give a
-	// completion reporting the last pass's carrying commit that pass's key, answered as already
-	// received instead of refused as a handoff not written anew.
+	// Two counters move here, and they count different things. Every move back to an earlier phase
+	// counts the implementer a pass: the tester's fail, a review's request for changes, a worker's
+	// backward move, and the move the daemon makes on its own for a red CI verdict or a head that
+	// conflicts with its base. The pass tells each pass through a phase from the last
+	// (api/handoff.go): a move that counted none would give a completion reporting the last pass's
+	// carrying commit that pass's key, answered as already received instead of refused as a handoff
+	// not written anew. The round is the review's alone — it counts the review rounds
+	// review_round_cap bounds, so only a review that requested changes moves it, and a send-back
+	// for anything else leaves it where it stands.
 	if movesBack(issue.Phase, row.To) {
+		if err := e.recordPass(ctx, tx, issue.Key); err != nil {
+			return err
+		}
+	}
+	if trigger == TriggerReviewRejected {
 		if err := e.recordRound(ctx, tx, issue.Key); err != nil {
 			return err
 		}

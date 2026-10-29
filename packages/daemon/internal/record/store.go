@@ -346,7 +346,7 @@ func scanIssue(row scanner) (*Issue, error) {
 }
 
 func (s *Postgres) Phases(ctx context.Context, tx pgx.Tx, issue string) ([]PhaseRow, error) {
-	rows, err := tx.Query(ctx, `select issue, role, claim, handoff_commit, rounds, verdict, summary, last_handoff, decision, completed_at, merge_note from phases
+	rows, err := tx.Query(ctx, `select issue, role, claim, handoff_commit, pass, rounds, verdict, summary, last_handoff, decision, completed_at, merge_note from phases
 		where issue = $1 order by role`, issue)
 	if err != nil {
 		return nil, fmt.Errorf("list phases for %s: %w", issue, err)
@@ -374,14 +374,14 @@ func (s *Postgres) PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) erro
 			return fmt.Errorf("put %s phase on %s: encode the review decision: %w", phase.Role, phase.Issue, err)
 		}
 	}
-	_, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, rounds, verdict, summary, last_handoff,
+	_, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, pass, rounds, verdict, summary, last_handoff,
 		decision, completed_at, merge_note)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		on conflict (issue, role) do update set claim = excluded.claim,
-		handoff_commit = excluded.handoff_commit, rounds = excluded.rounds, verdict = excluded.verdict,
+		handoff_commit = excluded.handoff_commit, pass = excluded.pass, rounds = excluded.rounds, verdict = excluded.verdict,
 		summary = excluded.summary, last_handoff = excluded.last_handoff, decision = excluded.decision,
 		completed_at = excluded.completed_at, merge_note = excluded.merge_note`,
-		phase.Issue, string(phase.Role), string(phase.Claim), phase.HandoffCommit, phase.Rounds, phase.Verdict, phase.Summary, phase.LastHandoff,
+		phase.Issue, string(phase.Role), string(phase.Claim), phase.HandoffCommit, phase.Pass, phase.Rounds, phase.Verdict, phase.Summary, phase.LastHandoff,
 		decision, phase.CompletedAt, phase.MergeNote,
 	)
 	if err != nil {
@@ -394,7 +394,7 @@ func scanPhase(row scanner) (PhaseRow, error) {
 	var phase PhaseRow
 	var role, token string
 	var decision []byte
-	if err := row.Scan(&phase.Issue, &role, &token, &phase.HandoffCommit, &phase.Rounds, &phase.Verdict, &phase.Summary, &phase.LastHandoff,
+	if err := row.Scan(&phase.Issue, &role, &token, &phase.HandoffCommit, &phase.Pass, &phase.Rounds, &phase.Verdict, &phase.Summary, &phase.LastHandoff,
 		&decision, &phase.CompletedAt, &phase.MergeNote); err != nil {
 		return PhaseRow{}, err
 	}
@@ -589,6 +589,11 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where, issues, key, describ
 			"head_run = null, planned_red = false, checked_head = '', failing = '[]'::jsonb, cancelled = '[]'::jsonb, " +
 			"check_runs = '[]'::jsonb where " + where,
 		"delete from design_gates where " + where,
+		// The review rounds go with the generation that ran them, since review_round_cap bounds the
+		// rounds of one run. The pass does not: it is what tells one pass through a phase from the
+		// last in the handoff completion key, and a new generation's completion at a commit the last
+		// one already reported has to be a fact of its own, which a pass put back to zero would not
+		// make it.
 		"update phases set handoff_commit = '', rounds = 0, verdict = '', summary = '', decision = null, merge_note = '' where " + where,
 		// A READY the gate refused waits on the merger's packet, which the statement above clears.
 		"update issues set ready_pending_version = null where " + issues,

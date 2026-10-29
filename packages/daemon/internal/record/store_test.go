@@ -387,7 +387,7 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		Required:  []string{},
 		Workflows: []RequiredWorkflow{{Path: ".github/workflows/review.yml", Result: "failure"}}, WorkflowsHead: "b1c2d3",
 	}
-	phase := PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "legion-208-implementer", HandoffCommit: "aabbcc", Rounds: 2, Verdict: "pass",
+	phase := PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "legion-208-implementer", HandoffCommit: "aabbcc", Pass: 3, Rounds: 2, Verdict: "pass",
 		MergeNote: "MANUAL_MERGE_REQUIRED: pull request #1243 matches a by_hand merge rule; do not auto-arm it"}
 	gate := DesignGate{Issue: issue.Key, ArtifactID: "artifact-208", LatestVersion: 7, ApprovedVersion: &approved}
 	slot := Slot{Issue: issue.Key, Index: 0, AdmittedAt: updatedAt}
@@ -847,6 +847,30 @@ func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.
 		if got.FixAttempts != 0 || got.BlockedAttempts != 0 || got.HeadCounted != "" || got.Run != nil || got.PlannedRed {
 			t.Fatalf("after ClearGeneration: fixAttempts=%d blockedAttempts=%d headCounted=%q run=%+v plannedRed=%v, want 0, 0, \"\", nil and false",
 				got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.Run, got.PlannedRed)
+		}
+	})
+}
+
+// A new generation's phase row keeps its pass and loses its rounds. The rounds are the last
+// generation's reviews, which review_round_cap bounds within one run; the pass is what tells one
+// pass through a phase from the last in the handoff completion key, so the new run's completion at
+// a commit the old run already reported has to take a key of its own.
+func TestClearGenerationKeepsThePassAndResetsTheRounds(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	issue := issueFixture("LEGION-286")
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issue))
+		must(t, records.PutPhase(ctx, tx, PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "legion-286-implementer",
+			HandoffCommit: "handoff-4", Pass: 4, Rounds: 2, Verdict: "pass"}))
+		must(t, records.ClearGeneration(ctx, tx, issue.Key))
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		phases, err := records.Phases(ctx, tx, issue.Key)
+		must(t, err)
+		if len(phases) != 1 || phases[0].Pass != 4 || phases[0].Rounds != 0 || phases[0].HandoffCommit != "" {
+			t.Fatalf("phases after ClearGeneration = %#v, want one row with pass 4, no rounds and no handoff", phases)
 		}
 	})
 }
@@ -1849,7 +1873,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 			"github_repo", "awaiting_ask", "awaiting_gate_version", "awaiting_artifact", "awaiting_answered_at", "awaiting_answered_by",
 			"awaiting_answered_detail", "awaiting_since_seq", "awaiting_since", "handout_seq", "declared_seq", "declared_at", "caught_up_seq",
 			"ancestry", "handed_over_from"},
-		"phases":            {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note"},
+		"phases":            {"issue", "role", "claim", "handoff_commit", "pass", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note"},
 		"pull_requests":     {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_moves", "head_counted", "head_run", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability", "merge_sha"},
 		"production_checks": {"issue", "project", "tree", "repo", "pr_number", "merge_sha", "opened_at", "bound_at", "looks", "look_open", "look_wake_at", "last_wake_kind", "last_wake_detail", "last_wake_at", "pending_cause_kind", "pending_cause_detail", "last", "closed_at", "outcome"},
 		"design_gates":      {"issue", "artifact_id", "latest_version", "approved_version", "approved_seq", "approved_at", "told_changes_version", "told_changes_reason", "told_changes_seq", "told_changes_at"},

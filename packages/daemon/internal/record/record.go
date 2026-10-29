@@ -308,8 +308,16 @@ type PhaseRow struct {
 	Role          claim.Role
 	Claim         claim.Token
 	HandoffCommit string
-	Rounds        int
-	Verdict       string
+	// Pass counts the moves the issue has made back into an earlier phase, each of which opens one
+	// more run of the implementing, testing and reviewing stretch. It tells one pass through a
+	// phase from the last, which is what the handoff completion key is built on (internal/api's
+	// handoffPosition), and so it is never reset while the record of the work stands: a completion
+	// at a commit an earlier pass already reported has to be a fact of its own.
+	Pass int
+	// Rounds counts the review rounds review_round_cap bounds: a round ends with a review that
+	// requested changes, and nothing else moves this count.
+	Rounds  int
+	Verdict string
 	// Summary is what the role reported with its completion. The merger's is its READY packet,
 	// which the daemon posts when the issue reaches awaiting_merge.
 	Summary string

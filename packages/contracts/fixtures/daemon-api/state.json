@@ -47,6 +47,7 @@
             "pluginContract": 0
           },
           "handoffCommit": "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40",
+          "pass": 1,
           "rounds": 1
         }
       },
@@ -128,6 +129,7 @@
             },
             "pluginContract": 0
           },
+          "pass": 3,
           "rounds": 2
         },
         "planner": {
@@ -149,6 +151,7 @@
             "pluginContract": 0
           },
           "handoffCommit": "9f2c1d7a4b6e8c3f5a90d2e14b7c6f8a3d5e0b21",
+          "pass": 0,
           "rounds": 0
         }
       },
@@ -186,6 +189,7 @@
             "state": "failed",
             "pluginContract": 0
           },
+          "pass": 1,
           "rounds": 1
         }
       }

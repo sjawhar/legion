@@ -41,7 +41,18 @@ func implementerTask(t *testing.T, pool *pgxpool.Pool) string {
 	return startTask(t, pool, claim.RoleImplementer)
 }
 
-// implementerRounds is the implementer's count of the issue's returns to implementing.
+// implementerPass is the implementer's count of the issue's moves back into an earlier phase.
+func implementerPass(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	var pass int
+	if err := pool.QueryRow(context.Background(), "select pass from phases where issue = 'LEGION-208' and role = 'implementer'").Scan(&pass); err != nil {
+		t.Fatalf("read the implementer's pass: %v", err)
+	}
+	return pass
+}
+
+// implementerRounds is the implementer's count of the review rounds a review ended by requesting
+// changes, which review_round_cap bounds.
 func implementerRounds(t *testing.T, pool *pgxpool.Pool) int {
 	t.Helper()
 	var rounds int
@@ -363,8 +374,8 @@ func TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing(t *tes
 	if published := mergeQueuePublishes(t, pool); len(published) != 0 {
 		t.Fatalf("merge queue publishes %v, want none: the READY stands", published)
 	}
-	if rounds := implementerRounds(t, pool); rounds != 0 {
-		t.Fatalf("rounds = %d, want none counted: nothing went back", rounds)
+	if pass := implementerPass(t, pool); pass != 0 {
+		t.Fatalf("pass = %d, want none counted: nothing went back", pass)
 	}
 }
 
