@@ -87,7 +87,8 @@ export function stepPhaseStall(state: PhaseStall, input: PhaseStallInput): Phase
  * sent in as the user's own turn is a user message as well, or for a `/skill:` the host's
  * `skill-prompt` custom message, which `extensions/legion.ts` tells apart before asking this
  * (`matchInjectedUserTurn`). Anything else (the host's own continuations, this check's follow-up
- * among them, the Envoy extension's own notices, tool results, the model's replies) is neither. */
+ * among them, the Envoy extension's own notices and its wake for cards the host folded with no
+ * turn, both carrying `LOCAL_ENVOY_NOTICE`, tool results, the model's replies) is neither. */
 export function inboundKind(message: unknown): "assignment" | "inbound-event" | undefined {
   if (typeof message !== "object" || message === null || !("role" in message)) return undefined;
   if (message.role === "user") return "assignment";

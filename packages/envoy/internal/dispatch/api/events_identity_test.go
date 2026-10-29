@@ -54,7 +54,7 @@ func TestEventStreamClosesOnceItsPersonNoLongerResolves(t *testing.T) {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, t.Context(), deps))
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 
@@ -111,7 +111,7 @@ func TestAgentStreamClosesOnceItsViewerNoLongerResolves(t *testing.T) {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, t.Context(), deps))
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 
@@ -289,7 +289,7 @@ func newDocumentSocketRig(t *testing.T, heartbeat time.Duration) *documentSocket
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, t.Context(), deps))
 	rig.sockets = &servedSockets{finished: make(map[string]chan struct{})}
 	rig.server = httptest.NewServer(rig.sockets.serve(mux.ServeHTTP))
 	t.Cleanup(rig.server.Close)

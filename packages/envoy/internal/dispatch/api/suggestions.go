@@ -869,7 +869,7 @@ func (s *server) recordRelatedChecks(ctx context.Context, rows ...relatedCheckRe
 	}
 	s.relatedRecordRetries.Go(func() {
 		defer s.relatedRecordRetrying.Add(-1)
-		ctx, cancel := context.WithTimeout(s.lifetime(), relatedRecordRetryTimeout)
+		ctx, cancel := context.WithTimeout(s.lifetime, relatedRecordRetryTimeout)
 		defer cancel()
 		if err := insert(ctx); err != nil {
 			slog.Warn("dispatch: related-item check not recorded", "rows", len(inserts), "error", err)

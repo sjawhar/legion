@@ -164,18 +164,12 @@ func refreshEverySearchTermStats(ctx context.Context, pool *store.Pool) {
 // RunSearchTermStatsRefresh rebuilds every project's term statistics, the related-item check's df
 // and N, at boot and then every interval, until ctx is done. Each pass runs under
 // searchTermStatsLease for one interval, so one process refreshes per interval however many serve
-// the database; leases is required, as it is of every leased loop.
+// the database; leases is required, as it is of every leased loop. The ticks are
+// duty.RunLeased's, a ticker's: the first at the moment the call starts, then one each interval.
 func RunSearchTermStatsRefresh(ctx context.Context, pool *store.Pool, interval time.Duration, leases duty.Leases) {
-	for {
-		duty.Exclusive(ctx, leases, searchTermStatsLease, interval, func(ctx context.Context) {
-			refreshEverySearchTermStats(ctx, pool)
-		})
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(interval):
-		}
-	}
+	duty.RunLeased(ctx, leases, searchTermStatsLease, interval, duty.TickAtStart, func(ctx context.Context) {
+		refreshEverySearchTermStats(ctx, pool)
+	})
 }
 
 // ensureSearchTermStats starts a refresh of project's statistics in the background, unless one
@@ -187,7 +181,7 @@ func RunSearchTermStatsRefresh(ctx context.Context, pool *store.Pool, interval t
 // the project anyway.
 func (s *server) ensureSearchTermStats(project string) <-chan singleflight.Result {
 	return s.termStats.DoChan(project, func() (any, error) {
-		ctx, cancel := context.WithTimeout(s.lifetime(), SearchTermStatsInterval)
+		ctx, cancel := context.WithTimeout(s.lifetime, SearchTermStatsInterval)
 		defer cancel()
 		started := time.Now()
 		items, err := refreshSearchTermStats(ctx, s.deps.Store.Pool, project)

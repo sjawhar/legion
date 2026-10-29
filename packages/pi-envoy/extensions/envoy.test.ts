@@ -109,6 +109,8 @@ type SessionContext = {
     readonly ensureOnDisk: () => Promise<void>;
   };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
+  /** The host's `ctx.isIdle()`: false while a turn runs. */
+  readonly isIdle?: () => boolean;
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
     readonly onTerminalInput: (handler: (input: unknown) => void) => () => void;
@@ -506,20 +508,26 @@ afterEach(async () => {
   hostBuiltins.length = 0;
 });
 
+/** A message the extension sent through `pi.sendMessage`, as `createPi()` records it. */
+type Delivery = {
+  readonly content: string;
+  readonly customType?: string;
+  readonly details?: unknown;
+  readonly display?: boolean;
+  readonly options: unknown;
+};
+
+/** An event handler the extension registered through `pi.on`. */
+type EventHandler = (event: unknown, context: SessionContext) => Promise<unknown>;
+
 function createPi(options: { readonly clipboardError?: Error; readonly zod?: typeof z } = {}) {
   clipboardState.error = options.clipboardError;
   const commands: RegisteredCommand[] = [];
   const tools: RegisteredTool[] = [];
-  const handlers = new Map<string, (event: unknown, context: SessionContext) => Promise<unknown>>();
+  const handlers = new Map<string, EventHandler>();
   const renderers = new Map<string, MessageRenderer>();
   const messages: string[] = [];
-  const deliveries: {
-    readonly content: string;
-    readonly customType?: string;
-    readonly details?: unknown;
-    readonly display?: boolean;
-    readonly options: unknown;
-  }[] = [];
+  const deliveries: Delivery[] = [];
   // User turns the extension started, in the order it sent them.
   const userMessages: { readonly content: string; readonly options: unknown }[] = [];
   // Persisted custom entries, in the shape a later `getBranch()` or `getEntries()` returns them.
@@ -822,8 +830,9 @@ function acceptResponse(
  * message call. `entries` are what the session's file already holds, as a restarted session reads
  * them, and `branch` its active branch (the entries by default); every entry the session appends
  * is read back with them. `delivered(n)` resolves once the session has taken `n` deliveries, cards
- * and user turns together, and `recordedWhenDelivered` says how many handled-attempt entries the
- * session had appended when each went out.
+ * and user turns together, `recordedWhenDelivered` says how many handled-attempt entries the
+ * session had appended when each went out, and `sends` holds each of them, in the order the host
+ * was handed them. `idle` is the host's `ctx.isIdle()`, which a context without it lacks.
  */
 async function bootDirectSession(
   query: string,
@@ -842,6 +851,7 @@ async function bootDirectSession(
     readonly sendUserInput?: (text: string, options: unknown) => Promise<UserInputResult>;
     /** The host's `pi.getCommands`. */
     readonly getCommands?: () => readonly HostSlashCommand[];
+    readonly idle?: () => boolean;
   } = {}
 ) {
   process.env.DISPATCH_URL = "http://dispatch.test";
@@ -899,6 +909,7 @@ async function bootDirectSession(
   const handledRecords = () =>
     fixture.entries.filter((entry) => entry.customType === "envoy-dispatch-handled-attempt").length;
   const inputs: { readonly text: string; readonly options: unknown }[] = [];
+  const sends: { readonly content: unknown; readonly options: unknown }[] = [];
   const taken = () => {
     const count = fixture.deliveries.length + fixture.userMessages.length + inputs.length;
     for (const waiter of waiters.splice(0)) {
@@ -913,11 +924,13 @@ async function bootDirectSession(
       options.beforeSend?.();
       recordedWhenDelivered.push(handledRecords());
       fixture.pi.sendMessage(message, sendOptions);
+      sends.push({ content: fixture.deliveries.at(-1)?.content, options: sendOptions });
       taken();
     },
     sendUserMessage: (content: string, sendOptions?: unknown) => {
       options.beforeSend?.();
       recordedWhenDelivered.push(handledRecords());
+      sends.push({ content, options: sendOptions });
       fixture.pi.sendUserMessage(content, sendOptions);
       taken();
     },
@@ -926,6 +939,7 @@ async function bootDirectSession(
         options.beforeSend?.();
         recordedWhenDelivered.push(handledRecords());
         inputs.push({ options: inputOptions, text });
+        sends.push({ content: text, options: inputOptions });
         taken();
         return run(text, inputOptions);
       },
@@ -936,6 +950,7 @@ async function bootDirectSession(
   const base = sessionContext("ses_delivery");
   const context: SessionContext = {
     ...base,
+    ...(options.idle !== undefined && { isIdle: options.idle }),
     sessionManager: {
       ...base.sessionManager,
       getBranch: () => options.branch ?? [...prior, ...fixture.entries],
@@ -968,6 +983,7 @@ async function bootDirectSession(
     recordedWhenDelivered,
     replied,
     replies,
+    sends,
   };
 }
 
@@ -10319,30 +10335,173 @@ console.log(JSON.stringify(args));
     ]);
   });
 
-  test("delivers targeted aside and steer frames through their requested primary-turn modes", async () => {
-    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
-    const { default: envoyExtension } = await import("./envoy.ts?targeted-modes");
-    const fixture = createPi();
-    const delivered = Promise.withResolvers<void>();
-    envoyExtension({
-      ...fixture.pi,
-      sendMessage: (message, options) => {
-        fixture.pi.sendMessage(message, options);
-        if (fixture.deliveries.length === 2) delivered.resolve();
-      },
+  test("delivers a targeted Steer card as an aside while a turn runs and an Aside always as one", async () => {
+    let idle = false;
+    const { agent, delivered, fixture } = await bootDirectSession("targeted-modes", {
+      idle: () => idle,
     });
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_delivery"));
-    const agent = natsState.controls.get("notifications.agent.ses_delivery");
-    if (agent === undefined) throw new Error("agent subject was not subscribed");
 
-    agent.push(targetedDispatchEnvelope("aside", "targeted-aside"));
-    agent.push(targetedDispatchEnvelope("steer", "targeted-steer"));
-    await delivered.promise;
+    agent.push(targetedDispatchEnvelope("aside", "targeted-aside-running"));
+    agent.push(targetedDispatchEnvelope("steer", "targeted-steer-running"));
+    await delivered(2);
+    idle = true;
+    agent.push(targetedDispatchEnvelope("aside", "targeted-aside-idle"));
+    agent.push(targetedDispatchEnvelope("steer", "targeted-steer-idle"));
+    await delivered(4);
 
     expect(fixture.deliveries.map((delivery) => delivery.options)).toEqual([
       { deliverAs: "aside", triggerTurn: true },
+      { deliverAs: "aside", triggerTurn: true },
+      { deliverAs: "aside", triggerTurn: true },
       { deliverAs: "steer", triggerTurn: true },
     ]);
+  });
+
+  // The wake for a card the host folds with no turn (`../src/card-wake.ts`, where its rules are
+  // tested) hears of runs, interrupts and the session's end only through this extension's own
+  // handlers. Each row starts a run, sends one card while the host is busy, folds it (its
+  // `message_end` with the host idle) and fires the row's host events, the send and the fold each
+  // before or after them; an event the row marks "idle" finds the host idle, and any other finds
+  // it busy until the fold. The check the fold arms waits on the host's timer until all of that is
+  // through, and the row says whether a wake follows.
+  describe("the wake for a folded card, through the extension's handlers", () => {
+    const busyCard = { deliverAs: "aside", triggerTurn: true };
+    const wake = { deliverAs: "nextTurn", triggerTurn: true };
+    type HostEvent = readonly [event: string, payload: unknown, host?: "idle"];
+    type FoldRow = readonly [
+      name: string,
+      events: readonly HostEvent[],
+      sendAt: "before" | "after",
+      foldAt: "before" | "after",
+      wakes: boolean,
+    ];
+    const rows: readonly FoldRow[] = [
+      ["no host event", [], "before", "before", true],
+      [
+        "an interrupted automatic compaction",
+        [["auto_compaction_end", { aborted: true }]],
+        "before",
+        "after",
+        false,
+      ],
+      [
+        "a retry an interrupt cancelled",
+        [["auto_retry_end", { success: false, finalError: "Retry cancelled" }]],
+        "before",
+        "after",
+        false,
+      ],
+      [
+        "an announced session switch",
+        [["session_before_switch", { reason: "resume" }]],
+        "before",
+        "before",
+        false,
+      ],
+      ["a session switch", [["session_switch", { reason: "resume" }]], "before", "before", false],
+      ["shutdown", [["session_shutdown", {}]], "before", "before", false],
+      // The host's dispose flushes the asides it still holds after shutdown.
+      ["shutdown", [["session_shutdown", {}]], "before", "after", false],
+      // The run is over, and a card sent while the host settles or sets the next prompt up gets
+      // none.
+      ["the run's end", [["agent_end", { messages: [] }]], "after", "after", false],
+      // A switch to a new session and a manual compaction abort the run with the agent
+      // disconnected, so no agent_end comes; the abort leaves the host idle at the event.
+      [
+        "a switch to a new session",
+        [["session_switch", { reason: "new" }, "idle"]],
+        "after",
+        "after",
+        false,
+      ],
+      ["a manual compaction", [["session_compact", {}, "idle"]], "after", "after", false],
+      // A prompt sent from idle: whatever run the host dropped unseen is over.
+      [
+        "a typed input on an idle host",
+        [["input", { text: "next", source: "rpc" }, "idle"]],
+        "after",
+        "after",
+        false,
+      ],
+      // These find the host busy with the run, which goes on, in whatever order an automatic
+      // compaction's events arrive.
+      ["a fork", [["session_switch", { reason: "fork" }]], "after", "after", true],
+      [
+        "an automatic compaction",
+        [
+          ["session_compact", {}],
+          ["auto_compaction_end", { aborted: false }],
+        ],
+        "after",
+        "after",
+        true,
+      ],
+      [
+        "an automatic compaction whose end arrives first",
+        [
+          ["auto_compaction_end", { aborted: false }],
+          ["session_compact", {}],
+        ],
+        "after",
+        "after",
+        true,
+      ],
+      [
+        "a typed input on a busy host",
+        [["input", { text: "steer", source: "rpc" }]],
+        "after",
+        "after",
+        true,
+      ],
+    ];
+    for (const [index, [name, events, sendAt, foldAt, wakes]] of rows.entries()) {
+      test(`${wakes ? "wakes" : "sends no wake"} for a card sent ${sendAt} and folded ${foldAt} ${name}`, async () => {
+        let idle = false;
+        const { context, delivered, fixture } = await bootDirectSession(`folded-card-${index}`, {
+          idle: () => idle,
+        });
+        const timers: (() => void | Promise<void>)[] = [];
+        const held: SessionContext = {
+          ...context,
+          setTimeout: (callback) => {
+            timers.push(callback);
+          },
+        };
+        const send = async (): Promise<void> => {
+          natsState.controls
+            .get("notifications.agent.ses_delivery")
+            ?.push(forwardedRoleEnvelope("legion-controller", "a card", `folded-card-${index}`));
+          await delivered(1);
+        };
+        const fold = async (): Promise<void> => {
+          const card = fixture.deliveries[0];
+          if (card === undefined) throw new Error("the card was not sent");
+          idle = true;
+          const { options: _options, ...record } = card;
+          await fixture.handlers.get("message_end")?.(
+            { message: { role: "custom", ...record } },
+            held
+          );
+        };
+
+        await fixture.handlers.get("agent_start")?.({}, context);
+        if (sendAt === "before") await send();
+        if (foldAt === "before") await fold();
+        for (const [event, payload, host] of events) {
+          const was = idle;
+          if (host === "idle") idle = true;
+          await fixture.handlers.get(event)?.(payload, context);
+          idle = was;
+        }
+        if (sendAt === "after") await send();
+        if (foldAt === "after") await fold();
+        for (const timer of timers.splice(0)) await timer();
+
+        expect(fixture.deliveries.map((delivery) => delivery.options)).toEqual(
+          wakes ? [busyCard, wake] : [busyCard]
+        );
+      });
+    }
   });
 
   // A person's Send or Aside from the Agents page is the user's own turn, as if typed at the
@@ -10413,6 +10572,80 @@ console.log(JSON.stringify(args));
         expect(fixture.userMessages).toEqual([{ content: DIRECT_MESSAGE_BODY, options }]);
       });
     }
+
+    // While a turn runs the host queues a steer, which is what a Send is (`sendUserInput` with no
+    // `deliverAs`), and drains that queue one message per turn, first in, first out; an aside it
+    // folds in at the next step instead. Cards that went as steers held a person's Send back one
+    // turn each, so the cards go as asides and the Send is the head of the steering queue.
+    test("is the head of the host's steering queue when cards arrived before it in a running turn", async () => {
+      const { agent, delivered, sends } = await bootDirectSession("direct-send-ahead-of-cards", {
+        accept: () => ({ accepted: true }),
+        idle: () => false,
+        sendUserInput: async () => ({ handled: "prompt" }),
+      });
+
+      for (const n of [1, 2, 3]) {
+        agent.push(forwardedRoleEnvelope("legion-controller", `notification ${n}`, `card-${n}`));
+      }
+      agent.push(directDispatchEnvelope("steer", "direct-send-ahead-of-cards"));
+      await delivered(4);
+
+      const deliverAs = (options: unknown): unknown =>
+        typeof options === "object" && options !== null && "deliverAs" in options
+          ? options.deliverAs
+          : undefined;
+      const queued = (mode: "aside" | "steer") =>
+        sends
+          .filter(({ options }) => (deliverAs(options) ?? "steer") === mode)
+          .map(({ content }) => String(content));
+      expect(queued("steer")).toEqual([DIRECT_MESSAGE_BODY]);
+      const asides = queued("aside");
+      expect(asides).toHaveLength(3);
+      for (const [index, card] of asides.entries()) {
+        expect(card).toContain(`notification ${index + 1}`);
+      }
+      expect(
+        sends.filter(({ options }) => deliverAs(options) === "aside").map(({ options }) => options)
+      ).toEqual(Array(3).fill({ deliverAs: "aside", triggerTurn: true }));
+    });
+
+    // An idle session has no steering queue to wait in. The host starts a turn for a steer with
+    // `triggerTurn` after an interrupt (an Esc, or the RPC `abort` a Legion daemon sends) and in
+    // plan mode too, where an idle aside folds into the context with no turn.
+    test("leaves a card that reaches an idle session a steer that starts a turn", async () => {
+      const { agent, delivered, sends } = await bootDirectSession("idle-card-starts-a-turn", {
+        idle: () => true,
+        sendUserInput: async () => ({ handled: "prompt" }),
+      });
+
+      agent.push(forwardedRoleEnvelope("legion-controller", "wake up", "idle-card"));
+      await delivered(1);
+
+      expect(sends).toHaveLength(1);
+      expect(String(sends[0]?.content)).toContain("wake up");
+      expect(sends[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+    });
+
+    // The Legion entry names its controller's session in the start-turn mark from its
+    // `session_start` until the start turn runs (`../src/card-wake`): an idle card there, in any
+    // mode, is a follow-up that starts no turn, so the start message keeps the first turn. A mark
+    // naming another session (a `task` subagent's) changes nothing.
+    test("sends a card that reaches an idle session the start-turn mark names as a follow-up that starts no turn, and leaves it a steer under another session's mark", async () => {
+      const { agent, delivered, sends } = await bootDirectSession("idle-card-start-turn", {
+        idle: () => true,
+      });
+      const iface = envoyPluginInterface();
+
+      iface.startupTurn = { session: "ses_delivery", sentAt: undefined };
+      agent.push(forwardedRoleEnvelope("legion-controller", "early card", "start-turn-card"));
+      await delivered(1);
+      expect(sends[0]?.options).toEqual({ deliverAs: "followUp", triggerTurn: false });
+
+      iface.startupTurn = { session: "ses_task_subagent", sentAt: undefined };
+      agent.push(forwardedRoleEnvelope("legion-controller", "other mark", "other-mark-card"));
+      await delivered(2);
+      expect(sends[1]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+    });
 
     // Only Dispatch's 200 makes a turn: whatever it refuses, and whatever keeps it from answering,
     // keeps the card, and the session posts nothing and injects nothing.
@@ -14234,21 +14467,17 @@ console.log(JSON.stringify(args));
     ).toHaveLength(1);
   });
 
-  test("inbound envoy messages deliver as steering so they interrupt an in-flight turn", async () => {
-    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
-    const { default: envoyExtension } = await import("./envoy.ts?deliver-as-steer");
-    const fixture = createPi();
+  // A context without `isIdle` cannot say no turn runs, and the wake for a folded card needs it, so
+  // its cards stay steers with `triggerTurn`: an aside there could fold into the context with no
+  // turn after an interrupt or in plan mode, where a steer starts one.
+  test("delivers an inbound card as a steer on a host that reports no idle state", async () => {
+    const { agent, delivered, fixture } = await bootDirectSession("deliver-as-steer");
 
-    envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_steer"));
-    const controls = natsState.controls.get("notifications.agent.ses_steer");
-    expect(controls).toBeDefined();
-
-    controls?.push(forwardedRoleEnvelope("legion-controller", "steer me mid-turn", "steer"));
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    agent.push(forwardedRoleEnvelope("legion-controller", "steer me in", "steer"));
+    await delivered(1);
 
     expect(fixture.deliveries.length).toBe(1);
-    expect(fixture.deliveries[0]?.content).toContain("steer me mid-turn");
+    expect(fixture.deliveries[0]?.content).toContain("steer me in");
     expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
   });
 
@@ -15193,7 +15422,8 @@ describe("messages missed while the subscription was down", () => {
 
       const [card] = session.cards("evt-own-iterator");
       expect(card?.content).toContain("while this session's connection was down");
-      expect(card?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+      // The host's turn streams, so the card goes as an aside (`../src/card-wake`).
+      expect(card?.options).toEqual({ deliverAs: "aside", triggerTurn: true });
       await session.stillOnce(session.agentSubject, frame, "evt-own-iterator");
     });
 

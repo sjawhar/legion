@@ -231,7 +231,9 @@ func TestSearchStaysNonDegradedWhileEmbedqueueIsThrottled(t *testing.T) {
 			}
 		}
 	}()
-	defer func() { <-done }()
+	// The drain runs until the searches below are done, then stops: waiting out bgCtx's own
+	// deadline would only idle the test.
+	defer func() { cancel(); <-done }()
 
 	// Give the background goroutine a moment to actually hit a throttle and start backing off
 	// (its very first call is unpaced, at RateLimitedEmbedder's own floor interval).
