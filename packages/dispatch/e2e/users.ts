@@ -1,4 +1,4 @@
-import type { Browser, BrowserContext, BrowserContextOptions } from "@playwright/test";
+import type { Browser, BrowserContext, BrowserContextOptions, Page } from "@playwright/test";
 
 import { devSignInError, devSignInPath } from "./api";
 
@@ -23,6 +23,19 @@ export async function asUser(
   const context = await browser.newContext(options);
   await signIn(context, login);
   return context;
+}
+
+/** Opens a page signed in as alice for `check`, and closes her context once it returns. */
+export async function withAlice(
+  browser: Browser,
+  check: (page: Page) => Promise<void>
+): Promise<void> {
+  const alice = await asUser(browser, "alice");
+  try {
+    await check(await alice.newPage());
+  } finally {
+    await alice.close();
+  }
 }
 
 /** `asUser` for the `chromium-plain-http` project: a context signed in as `login` by opening the
