@@ -2,46 +2,73 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-168",
-  "completed": "2026-10-26T13:37:00Z",
-  "round": 12,
-  "headSha": "2ac8abe5c966d5ef135fe49278857bcdcbd250fc",
-  "handoffHead": "6c383c1534c378ec4179ef8f12d1b1e6f6fc9fd7",
-  "kind": "tests-only round, scoped by the architect (13:25Z): confirm no code moved since round 11's pass at 632f8d02, run the bare gates, and confirm the three new tests fail under the reviewer's two mutants of callKeys and pass unmutated; no live re-drive unless the compare shows a code change.",
-  "provider": "No model was asked this round: the bare gates and the mutation runs are bun test, tsc and biome on this pod. Round 11's live evidence (anthropic/claude-opus-5-5, read from the runs' own turns) stands for the unchanged runtime.",
-  "compare": "gh api repos/sjawhar/legion/compare/632f8d02802731f85662e1f593b738e40759db71...2ac8abe5: modified .legion/INFRA-168/{implement,review,test}.json and packages/pi-envoy/extensions/askgate/askgate.test.ts (+64 -0), nothing else; askgate-core.ts byte-identical (cmp against a git archive of 2ac8abe5). The fingerprint moved only by the test lines: b103f749… at 632f8d02, 25b33d4c… at 6c383c15.",
+  "completed": "2026-10-29T19:52:00Z",
+  "round": 13,
+  "headSha": "9aed5df868124734e6579fc42e412bff0a97234e",
+  "handoffHead": "00c88b9fde6486e9f8212f953a492a8beadc3699",
+  "scope": "Full round after the port onto main's marker gate (generation 5, plan rev 11). The architect's brief (19:23Z): drive everything again; main question, whether the 10 s margin makes this branch post asks unreviewed that main would have reviewed at the default 30 s ceiling; if so, fail.",
+  "provider": "anthropic/claude-opus-5 served all 217 assistant turns of the 57 sessions, read from each session's own turns. 40 charter and 24 rules calls answered as anthropic/claude-opus-5; in 11 sessions a review call was refused by the provider ('Refusal (reasoning_extraction)') and fell back to anthropic/claude-opus-4-8 (11 charter, 4 rules). Those runs are infrastructure errors, excluded from every comparison.",
+  "fingerprint": "153f222953c9edcd… at 00c88b9f (changed from round 12's 25b33d4c…), computed with the skill's command: a full round.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's mutation check independently on a git archive copy of 2ac8abe5 under $TMPDIR/mut, mutating askgate-core.ts's callKeys upload return and restoring it (cmp against the workspace copy after): unmutated 3 pass; M1 (upload key dropped) 3 fail; M2 (content digest dropped) 2 fail."
+    "how": "Drove the implementer's G6 cases again on this branch at 9aed5df8 with the tester's own wording, its CLI first on PATH: A2 refusal with an empty marker store, the rebuttal and its resent commented form, A3, A4 both ways, the unmarked pipe in both modes with asksCarried 1 on Dispatch, and the Dispatch read-back. Its case-5 observation (charter timeout at 20,000 ms at the default ceiling) reproduced, and against main it is the failure below."
   },
-  "failed": 0,
-  "failures": [],
-  "proof": [
+  "failed": 1,
+  "failures": [
     {
-      "criterion": "No runtime code moved since round 11's live pass at 632f8d02.",
-      "surface": "GitHub's compare of the two heads, and a byte comparison of askgate-core.ts.",
-      "command": "gh api repos/sjawhar/legion/compare/632f8d02802731f85662e1f593b738e40759db71...2ac8abe5 --jq '.files[] | .status, .filename'; cmp $TMPDIR/mut/packages/pi-envoy/extensions/askgate/askgate-core.ts (git archive 2ac8abe5) packages/pi-envoy/extensions/askgate/askgate-core.ts",
-      "observed": "Four modified files: three under .legion/INFRA-168/ and askgate.test.ts (+64 -0). askgate-core.ts identical.",
-      "headSha": "2ac8abe5c966d5ef135fe49278857bcdcbd250fc",
-      "negativeControl": "The compare of round 11's own change, e25512a4 to 632f8d02, lists packages/pi-envoy/extensions/askgate/askgate-core.ts; this one does not."
-    },
-    {
-      "criterion": "The bare gates at the head: pi-envoy tests, tsc and lint.",
-      "surface": "The issue workspace at 6c383c15 (code head 2ac8abe5), this pod.",
-      "command": "cd packages/pi-envoy && bun test && bunx tsc --noEmit && bun run lint",
-      "observed": "1441 pass, 6 skip, 0 fail across 14 files (12017 expect calls); tsc exit 0; biome lint over extensions/ and src/ clean.",
-      "headSha": "2ac8abe5c966d5ef135fe49278857bcdcbd250fc",
-      "negativeControl": "See the mutation entry: the same suite, with callKeys mutated, fails."
-    },
-    {
-      "criterion": "The three new tests lock both parts of callKeys' upload key: each fails under the reviewer's mutants and passes unmutated.",
-      "surface": "A git archive copy of 2ac8abe5 under $TMPDIR/mut, with node_modules linked to the workspace's.",
-      "command": "bun test extensions/askgate/askgate.test.ts -t 'after two charter refusals of (an upload with no ask block|a re-upload)' unmutated; with askgate-core.ts:2538 replaced by M1 `return asks.length === 0 ? [WHOLE_CALL] : asks.map(askIdentity);`; with it replaced by M2 `return [...asks.map(askIdentity), JSON.stringify([\"upload\", name, null])];`; file restored after each.",
-      "observed": "Unmutated: 3 pass. M1: 3 fail (a different no-ask document; the same name with other text; a fully stored re-upload adding a new ask). M2: 2 fail (the same name with other text; the fully stored re-upload adding an ask); the different-document test passes, its key differing by name.",
-      "headSha": "2ac8abe5c966d5ef135fe49278857bcdcbd250fc",
-      "negativeControl": "M1 and M2 are the negative controls: each makes at least one new test fail."
+      "criterion": "The architect's main question for the round (19:23Z): at the default 30 s tool-call ceiling this change must not post asks unreviewed that main alone would have reviewed. Main's review deadline there is 25,000 ms (CEILING_MARGIN_MS 5,000); this branch's is 20,000 ms (CEILING_MARGIN_MS = 5,000 + RECORD_TIMEOUT_MS).",
+      "evidence": "Paired runs, block mode, default ceiling, 8 sessions at a time, branch 9aed5df8 vs main 15be33d1 (git archive under $TMPDIR/maintree, its own build and dispatch CLI), asks l2/l3/l4 (literal asks recommending a change) and c5 (the ask quoting the agent's own gh error), three reps each (runs L30-* under /legion/scratch/tmp/t7/runs, table from lat.py). Clean runs (no failedModels): branch 3 of 9 timed out at 20,000 ms, each ask posted unreviewed with outcome timeout and model anthropic/claude-opus-5 (L30-c5-branch-1 charterLatencyMs 19734, L30-l4-branch-1 19484, L30-l4-branch-3 19765); main 1 of 9 timed out at 25,000 ms and returned verdicts at 20,777 (L30-l4-main-2), 21,058 (L30-l4-main-1) and 22,849 ms (L30-c5-main-1), reviews the branch's deadline cuts. The case runs add four branch timeouts at 20 s, all clean: 13-c0-warn and 13-c0-block (the charter-only comment posted unreviewed), 13-c5-block (the ask posted unreviewed), 13-c3-warn (refused anyway by the rules check). Uncapped (toolCallTimeoutMs 120000, L120-*, clean): branch charter 10.6-26.8 s (20.6, 20.9, 26.8 above 20 s), main 11.0-18.1 s. Red test, commit e2e88a97: packages/pi-envoy/extensions/askgate/askgate.test.ts 'at the default 30 s ceiling the review keeps main's 25,000 ms deadline, so a review main finishes is not cut' — `cd packages/pi-envoy && bun test extensions/askgate/askgate.test.ts -t \"keeps main's 25,000 ms deadline\"` gives Expected >= 25000, Received 20000, 0 pass, 1 fail. The test 'the deadline sits under the runner's handler ceiling' (askgate.test.ts:1411) and the README/AGENTS lines that state 20,000 ms pin the current behaviour and change with the fix."
     }
   ],
-  "ci": "Read at 13:27Z, nothing re-run. At the head 6c383c15: Tests 40330177764, Legion Envoy and Contracts 40330177734, Docs 40330177766 and Worker Image 40330177896 queued; PR Title 40330253890 pending. At the previous head 9dc3c609, the same runtime code: Tests 40318098498 success, Docs 40318098504 success, Worker Image 40318098448 success, PR Title 40318944812 success; Legion Envoy and Contracts 40318098443 cancelled by the next push. MERGEABLE, BLOCKED.",
+  "proof": [
+    {
+      "criterion": "A2: a no-change ask is refused in warn and block and no marker is minted for it; the rebuttal opens and its recorded commented form is read back as the same rebuttal.",
+      "surface": "Nested headless Oh My Pi sessions on the branch build in this Legion pod, the branch's dispatch CLI first on PATH, production Dispatch, dispatch://INFRA-766.",
+      "command": "/legion/scratch/tmp/t7/run-case.sh 13-c1-<mode> and 13-c2-<mode> (env -u LEGION_* … PATH=<branch pi-envoy>/bin:$PATH LEGION_ISSUE=INFRA-766 OMP_SESSION_STORAGE=file OMP_ASKGATE=<mode> OMP_ASKGATE_RECORD_PROJECT=INFRA /opt/omp/bin/omp --extension <branch pi-envoy> -p …); the case-1 session then runs ls -la \"$(jq -r .store \"$DISPATCH_STATE_DIR\"/sessions/\"$DISPATCH_SESSION_ID\"/askgate/*.json)/markers\" and command -v dispatch.",
+      "observed": "c1 refused in both modes (rule no_change, ruleOutcome match); the markers directory empty right after; command -v dispatch printed the branch CLI. c2 opened in both (outcome rebuttal), and the recorded '… # --advisor-rebuttal '…'' command resent was recorded again as outcome rebuttal with the same line; all four asks retracted.",
+      "headSha": "9aed5df868124734e6579fc42e412bff0a97234e",
+      "negativeControl": "c2's rebuttal opened where c1's same ask was refused."
+    },
+    {
+      "criterion": "A3, A4 and the charter-only call.",
+      "surface": "The same.",
+      "command": "13-c3-*, 13-c4-*, 13-c5-*, 13-c0-* in warn and block.",
+      "observed": "c3 refused naming #log-retention (no_change) in both; c4 refused untried_access in both; c5 rules none in both, ask opened (the charter timed out, see the failure); c0 no rules call, posted (charter timed out at 20 s in both modes).",
+      "headSha": "9aed5df868124734e6579fc42e412bff0a97234e",
+      "negativeControl": "c5's tried read answered none where c4's untried read matched."
+    },
+    {
+      "criterion": "Repeated flags, the unmarked record, shutdown and an ended call.",
+      "surface": "The same; probe.py for the shutdown (omp --mode json -p, Dispatch unreachable, SIGTERM 1.5 s after toolcall_end) and the abort (omp --mode rpc-ui, warn, RPC abort 3 s after toolcall_end).",
+      "command": "13-r8-block; 13-u1-<mode> (echo x | dispatch ask …); python3 /legion/scratch/tmp/t7/probe.py shutdown 13-s-1; python3 probe.py abort 13-a-1; dispatch doc-read --project INFRA --artifact askgate-decisions-<session>-md.",
+      "observed": "r8: entry rebuttal 'first reason; third; reason; second reason', all three flags in the comment, ask opened at urgency low, retracted. u1: refused by the CLI in block, posted with its warning in warn (retracted); each session's document holds one record outcome unmarked, asksCarried 1, no ask text. Shutdown: session_exit then the advisor-gate entry (rebuttal, recordError 'the session shut down before Dispatch answered the record') before exit. Abort: entry outcome abandoned, mintSkipped 'call-ended'.",
+      "headSha": "9aed5df868124734e6579fc42e412bff0a97234e",
+      "negativeControl": "u1-block's refusal names the missing marker, so the CLI checks it; the shutdown entry's recordError shows the record was still in flight at SIGTERM."
+    },
+    {
+      "criterion": "The breaker invariant and A1's pin.",
+      "surface": "A git archive copy of 9aed5df8 under $TMPDIR/mut13, breaker.ts mutated and restored.",
+      "command": "bun test extensions/askgate/askgate.test.ts -t 'after two charter refusals of' unmutated, with callKeys' upload return replaced by M1 `return asks.length === 0 ? [WHOLE_CALL] : asks.map(askIdentity);` and by M2 `JSON.stringify([\"upload\", name, null])`; bun test … -t 'byte for byte'.",
+      "observed": "Unmutated 4 pass; M1 3 fail; M2 2 fail; restored (cmp). A1 pin 1 pass, MEASURED unedited.",
+      "headSha": "9aed5df868124734e6579fc42e412bff0a97234e",
+      "negativeControl": "M1 and M2."
+    },
+    {
+      "criterion": "A5: the runs counted through Dispatch alone, and the census.",
+      "surface": "Production Dispatch.",
+      "command": "bun packages/pi-envoy/scripts/askgate-report.ts --dispatch-project INFRA --since 2026-10-29T19:27:00Z; bun scripts/dispatch/ask-census.ts --project INFRA --from 2026-10-29T00:00:00Z --to <now> --json",
+      "observed": "267 documents, 0 unreadable, 33 sessions; 28 rules calls, 6 refusals (no_change 4, untried_access 2), 0 overrides, 0 rules errors; unmarked 1 refused in block and 1 posted in warn, asks carried 2; all pod. Census: 119 asks for the day.",
+      "headSha": "9aed5df868124734e6579fc42e412bff0a97234e",
+      "negativeControl": "28 rules calls equals the branch sessions' rules entries (20 latency runs, 8 case runs); the rebuttals had no refusal before them and count 0 overrides."
+    }
+  ],
+  "observations": [
+    "Load: the comparison ran 8 sessions at a time on the pod's shared model route, the case runs 15 at a time; the clean charter latencies on both trees reached 20-27 s under that load, which is the band the 5 s cut lands in.",
+    "The provider refused review calls with 'Refusal (reasoning_extraction)' in 11 of 57 sessions, on both trees, and the fallback to anthropic/claude-opus-4-8 then ran out of time or answered slowly. Not counted as evidence; it is not this change's.",
+    "I ran bun install for the build, which changed bun.lock in the working copy; that change was abandoned and is not pushed.",
+    "Every ask the runs opened is retracted (by the sessions); dispatch://INFRA-766 has no open ask."
+  ],
+  "ci": "Read at 19:43Z, nothing re-run: at 9aed5df8, CI run 40939085381 queued (its pi-envoy job, A1's pin, not started), PR Title 40939376195 queued, 40939085366 cancelled; no run on 00c88b9f.",
   "priorRounds": [
     {
       "round": 1,
@@ -118,6 +145,12 @@
       "fixture": "dispatch://INFRA-465",
       "verdict": "pass",
       "summary": "18 sessions, block mode, fixed tree vs 70bc570b: an unchanged re-upload and a partly judged upload trip the breaker exactly when warned, and a different no-ask upload after two refusals is reviewed; the breaker pass of a partly judged upload sends its unjudged ask out unread (71fe78cc). Full record in commit ce5fcf5d's test.json."
+    },
+    {
+      "round": 12,
+      "headSha": "2ac8abe5c966d5ef135fe49278857bcdcbd250fc",
+      "verdict": "pass",
+      "summary": "Tests-only: compare from 632f8d02 changed only askgate.test.ts; bare gates green; the three new tests failed under both callKeys mutants. Full record in commit de86dce3's test.json."
     }
   ]
 }
