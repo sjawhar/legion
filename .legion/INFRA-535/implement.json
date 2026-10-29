@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-535",
-  "completed": "2026-10-29T14:51:24Z",
+  "completed": "2026-10-29T18:01:26Z",
   "proof": [
+    {
+      "criterion": "Review round 2: one longestRun, one orderMarks and the 'main' comments renamed, with no output change; then main merged and the writer's guarantees still hold",
+      "surface": "pmdoc differential (Go Parse/ParseForWrite/Render against the headless browser engine) and the Dispatch browser suite (Playwright, chromium, real Go server and Postgres)",
+      "command": "differential.sh --base e20dacbb --head 7511136b, then cmp base.jsonl head.jsonl && cmp base-engine.jsonl head-engine.jsonl; differential.sh --base 2b427f93 --head 2e357b5b; go test ./internal/dispatch/pmdoc ./internal/dispatch/docs -count=1 -p 1 -skip Linear; bun run e2e -- e2e/strikethrough.e2e.ts e2e/task-items.e2e.ts e2e/emphasis-beside-a-tilde.e2e.ts e2e/writer-spelling.e2e.ts",
+      "observed": "cmp exits 0 over 435,612 documents (7511136b against e20dacbb). At the merged head 2e357b5b against main 2b427f93, over 435,640 documents: every GATE 0, refused by the writer 0, fixed 181. The go tests pass and the browser suite passes 20 of 20",
+      "headSha": "2e357b5b69436f6511f0076735f7179b08ff4729",
+      "negativeControl": "At e8804562 (before the fix), the same differential reads refused by the writer 304, and writer-spelling.e2e.ts fails at the write with 400 INVALID_MARKDOWN"
+    },
     {
       "criterion": "Review round 1: the strikethrough and task-item browser tests use the shared reading, thread and sign-in helpers, and every browser test this change runs still passes",
       "surface": "Dispatch browser suite (Playwright, chromium) against a real Go server and Postgres",
@@ -66,12 +74,14 @@
     "packages/dispatch/e2e/editor.ts",
     "packages/dispatch/e2e/users.ts",
     "packages/dispatch/e2e/strikethrough.e2e.ts",
-    "packages/dispatch/e2e/task-items.e2e.ts"
+    "packages/dispatch/e2e/task-items.e2e.ts",
+    "packages/envoy/internal/dispatch/pmdoc/{escape_test,linear_test,list_spacing_test,readback_test,render_readback_test,render_test,typed_splice_test}.go and render_scope.go (comments that said 'main' for a writer)"
   ],
   "trickyParts": [
     "The new spellings are last resorts. lastResorts is consulted only when no writing reaches depth 1 under inlineMarkdown. Letting them compete freely churned 1644 documents and lost 892 fixed points.",
     "The merge of sjawhar/legion#2373 had real conflicts. Main's search loop already picked the earliest writing of the greatest read-back depth, so the branch's rule folds into it. The branch's '\\!' before a link gave way to main's beforeLabel escape.",
-    "Playwright on main now runs only phone-tagged rows on iphone, so the browser suite shows 11 rows (chromium), not the 22 seen before the merge."
+    "Playwright on main now runs only phone-tagged rows on iphone, so the browser suite shows 11 rows (chromium), not the 22 seen before the merge.",
+    "orderMarks keeps codeInnermost inside keepingOpen, byReach and reopening: following is ordered with next as its active marks, and sharedOpenMarks reads that prefix, so moving codeInnermost to the end would change the order."
   ],
   "deviations": [
     "The plan's 'D-a churn and lost fixed points 0' does not hold against 452e4647, because main changed stored bytes between 452e4647 and b93381d3 (sjawhar/legion#2373 and others). The flagged documents give the same counts with head = main and 0 against main with head = this branch, so this branch adds none.",
