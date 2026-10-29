@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-651",
-  "completed": "2026-10-29T09:20:00Z",
+  "completed": "2026-10-29T12:30:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2469",
   "evidence": "dispatch://INFRA-651/artifact/infra651-measurements-tgz version 4 (sha256 235a9c6b3a85bdf11887976099ed126a5f014d347a8c0e8eada08872fe689ecb); round3/ holds this round's seed, identity and runs",
   "proof": [
@@ -101,6 +101,14 @@
       "observed": "full answers base vs head diff exit 0 (sha256 d75ea667..., 1,000 x 200, 310 with members, 370,203,810 bytes), refs-fetch files equal (f358366e...), versions=all == none, trimmed 1,000 of 1,000 equal after the cut with no shared ETag (48,602,860 bytes); Dispatch cores base 0.2218/0.2116/0.2206, head 0.1942/0.1911/0.1990: every head run below every base run -> merge; getIssueReferences 8.75% -> 1.70%; alloc under the route 1,131-1,217 MB -> 109-127 MB; 2,758/2,758 2xx and 210/210 references 2xx every run",
       "headSha": "4b1d777a140adde138613f2b25d3d95278f9a3bd",
       "negativeControl": "the round-1 controls hold for this unchanged server code (first-version lateral fails the trimmed compare on 305 of 310 issues); before d55525c5 the seed wrote no reference, so every closure was empty and the route did no member work"
+    },
+    {
+      "criterion": "CI lint green (CI red at 6b339c1e: Biome's formatter refused packages/envoy/loadtest/refs-sample-2026-10-27.json), with the seed's input data unchanged",
+      "surface": "the repository's lint lane (`bunx biome check .`, which CI's required lint job runs) and the load test's plan test",
+      "command": "bunx biome format --write packages/envoy/loadtest/refs-sample-2026-10-27.json; bunx biome check .; python3 json.load of the new file == json.loads of the file at 4b1d777a140a; cd packages/envoy && go test ./loadtest/ -count=1",
+      "observed": "biome check . : 'Checked 1288 files ... No fixes applied', no error; the file parses to the same 160 arrays (22,460 counts) as before; go test ./loadtest ok (TestMakeRefPlan still gives 1,000 targets, 19,471 versions, 310 cited issues)",
+      "headSha": "6db4537626e25dd107384409fde0af2b269488d6",
+      "negativeControl": "at 4b1d777a140a, `bunx biome check packages/envoy/loadtest/` fails: 'refs-sample-2026-10-27.json format × Formatter would have printed the following content'"
     }
   ],
   "filesChanged": [
@@ -141,7 +149,8 @@
     "Review round 1: the merge-rule runs were repeated at the fixed head on #2369's newest head 99a733790beb (base rebuilt from the same loadtest); round 1's runs are in runs-r1-3d988c68/.",
     "Task 8 done at d55525c5 after the forward merge b96ae4be (main 4e91eaa85984): refseed is loadgen seed-refs / refs-shape / refs-fetch, run by stack.sh seed right after loadgen seed.",
     "The forward merge drops packages/claude-envoy/dist from the diff: main now builds those bundles itself after each merge and a pull request never commits them (packages/claude-envoy/AGENTS.md:165); the merge's fingerprint changed only by those three files (PR comment 6492562896).",
-    "Measured seed time 2232 s (references 23 min), so the README and stack.sh estimates say 37 to 50 min and about 23 min, not the 53 to 62 / 35 min first written."
+    "Measured seed time 2232 s (references 23 min), so the README and stack.sh estimates say 37 to 50 min and about 23 min, not the 53 to 62 / 35 min first written.",
+    "CI lint round: the sample file is now Biome-formatted (one number per line inside each array); same data, so the seed and every measurement of round 3 stand."
   ],
   "openQuestions": []
 }
