@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-607",
+  "completed": "2026-10-29T17:44:41Z",
+  "testedHead": "934a4ae34251521f89a8c2638e6d94a430b6a193",
+  "codeHead": "a01bc6556a4951b1c75522ddfb56b5ca4a47a206",
+  "round": 9,
+  "scope": "Since round 7's verified code a56be739, the PR's own diff changed in three ways. (1) The suggestion sweep dropped its advisory lease and now serialises on the suggestion_outcome_cursor row. (2) Main's keyed-write sweep (#2449: Idempotency-Key deletion and owed-delivery resume) moved into a new leased once-a-minute timer, api.RunMaintenanceSweep, under the old lease name. (3) Forward merges of main (migrations now 0141-0147; leasePoolSize 13, so ConnectionsPerProcess is 88; main's duty.RunLeased and redeliver changes merged). intake.go, intake_delivery.go, keyed.go and the bus code are unchanged in the PR diff, so round 7's real-binary stop-path proof and the implementer's re-run at 4444ead7 stand. This round drives the new sweep shape on the real binary in config A, including a rolling deploy beside the fork-point build; the scratch harness with the fake GitHub App did not survive the pod move.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "On my own builds of a01bc655 (head) and its fork point 7c2effba (main), on a fresh Postgres 16 cluster with every statement logged, NATS 2.10.29 and the Envoy listener. Idle with two head processes for 10 minutes: 3.30 statements/s per process (implementer at 141face2: 3.42). There was no statement from the suggestion sweep, embedding, edit-notice, excerpt or task-progress loops. The maintenance sweep ran once a minute across both processes: 10 request_keys deletes, and 10 of each owed-delivery read. That is the implementer's 'request-key sweep 30 and owed-delivery resume 40' counted per statement. I did not re-run the stop path (no fake GitHub after the move); its code is unchanged in the PR diff since round 7."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "A rolling deploy from main keeps one keyed-write sweep per minute, and the head's suggestion sweep judges as main's full sweep does, its first pass on the database included",
+      "surface": "The fork-point build (7c2effba) seeding a fresh database at schema 140 through POST /api/v1/projects, /issues and /issues/{key}/comments. Then two head processes (a01bc655) started together beside it, migrating to 0147 with suggestion_outcome_cursor null. Then comments written through all three processes.",
+      "command": "start.sh main 0 t8; api.sh POST issues SUG-1..12 (30 suggestions) and comments; start.sh head 1 t8 & start.sh head 2 t8; more comments through 18877-18879; after 150 s psql -f mainrules.sql (main's three rules over the whole table in a rolled-back transaction) and diff with the live outcomes",
+      "observed": "Both heads ran their first cursor pass within 155 ms of each other (17:27:34.949 and 35.104) with no error. The cursor moved once, to the newest event id. The 30 live outcomes (21 judged: acted_on by citation, acted_on by direct update, overridden) are identical row for row to main's full-table rules on the same data. The suggestion-outcomes lease ran on the old build at :07 of each minute, and both heads logged 'leased pass skipped lease=suggestion-outcomes' at :34 of the same minutes, so there was one keyed-write sweep per minute across the three processes.",
+      "headSha": "a01bc6556a4951b1c75522ddfb56b5ca4a47a206",
+      "negativeControl": "ses-other's comment on SUG-5 resolved nothing. Suggestions whose actor wrote nothing after them stayed ignored in both the live table and main's rules."
+    },
+    {
+      "criterion": "Two processes woken by the same commits judge each suggestion once and agree with the full sweep, with no lease",
+      "surface": "Two head processes, 8 issues filed and 16 comments posted concurrently through both, alternating ports",
+      "command": "8 parallel POST /api/v1/issues (SUG-13..20, actors ses-z1..8) then 16 parallel comments; after 130 s diff live outcomes against mainrules.sql",
+      "observed": "Each wake reached both processes: the cursor `for update` was read 2-10 ms apart (17:41:54.423/.433, 17:42:54.417/.419, 17:43:54.419/.420), and each process's pass waited for the other's. All 48 outcomes (39 judged) are identical to main's rules. No suggestion was left unswept. cursor = max(events.id) = 45.",
+      "headSha": "a01bc6556a4951b1c75522ddfb56b5ca4a47a206",
+      "negativeControl": "The 9 suggestions whose actors wrote nothing after them stayed ignored, the same as under main's rules."
+    },
+    {
+      "criterion": "Every changed loop is silent at idle, and the maintenance sweep keeps main's once-a-minute cadence across processes",
+      "surface": "Two head processes, config A, statement log 17:31:21-17:41:28",
+      "command": "python3 /legion/scratch/tmp/t8/count.py <log> <window> t8 (dispatch://INFRA-607/artifact/idle-statements-round-9-txt)",
+      "observed": "3,965 statements, or 3.30/s per process. CPU was 0.0019 and 0.0018 cores. There was no statement on suggestion_outcome_cursor, write_suggestions, embeddings, document_edit_notices, refs or tasks_version. suggestion-outcomes lease: 20 attempts, and 10 passes (one delete from request_keys and one each of the four owed-delivery reads per minute). The rest is the named timers: heartbeat, outbox, block-index, settlement, registry prune and pings.",
+      "headSha": "a01bc6556a4951b1c75522ddfb56b5ca4a47a206",
+      "negativeControl": "Round 4's fork point d47dbf05 made 241 embedding-scan, 484 edit-notice and 30 suggestion-rule statements in the same kind of 10-minute window."
+    }
+  ],
+  "ci": "At 17:44Z, at a01bc655 (#2316's single router workflow): changes passed; dispatch, envoy-go, envoy-go-race, envoy-infra-go, the multiprocess jobs, dispatch-memory, envoy-e2e-local, envoy-smoke, envoy-session-stall, listener-server-change, lint, typecheck, test, docs and ci-filters were queued. I did not wait for them.",
+  "mainReds": [
+    "close-withdraws-asks.e2e.ts:126 is the only known main red (controller 01:51Z)."
+  ],
+  "notes": [
+    "Connections: store.ConnectionsPerProcess = 64+4+1+13+1+1+4 = 88 = infra/gcp dispatchConnectionsPerPod; main's fork point reads 87 with 3 listeners.",
+    "The renumbered migration references in code comments match the files (0141 embeddings_notify, 0143 refs, 0144 cursor, 0145 swept, 0146 settings); the lease-pool comment counts thirteen names.",
+    "Scratch /legion/scratch/tmp/t8 (builds, start.sh, mainrules.sql, count.py). The stack is stopped."
+  ]
+}
