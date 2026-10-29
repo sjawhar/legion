@@ -2,33 +2,40 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-557",
-  "completed": "2026-10-29T00:35:00Z",
-  "round": 6,
-  "testedHead": "6ee80831f50a14efe4e22f531466409ecc13688b",
-  "handoffHead": "5880a9e614d51c31812088303528ec55db1738ca",
-  "fullRound": "A full round of the merged head: the review-round fixes 28d478d5, 18779a03, 21a1dd2b and d19302d3 (none tested before), and the forward merge of main 571f729b (6ee80831).",
+  "completed": "2026-10-29T00:50:00Z",
+  "round": 7,
+  "testedHead": "75ad248670bd7b5b1a100e9e5976e21407ee7257",
+  "handoffHead": "8a7c7fe3148114d34ad93dd4616c3b8861c53c3d",
+  "scope": "Round 6 tested merged head 6ee80831 in full and failed only on the required lint check. `git diff --stat 6ee80831 75ad2486` shows the only change outside .legion/ is one line of biome.json (`!!packages/envoy/internal/testnats/testdata`). No listener code changed, so this round checks the fix and runs the smoke gate; round 6's real-surface results stand for the unchanged code.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener` at 6ee80831: all 26 rows PASS, ok 536.104s, every pod under the rendered grant. Ran TestTwoBuildsSkipOrDoubleNoMessage/a_build_from_before_the_lease against a pre-lease listener built from main 80cc97a6: PASS, 303 messages each once. Read mergeable_state blocked (no conflict) on GitHub."
+    "how": "The implementer's fix is one biome.json line. `bunx @biomejs/biome@2.4.11 check` on both grant fixtures answers 'These paths were provided but ignored' (diagnosis only; the lint lane is CI's). The implementer's multiprocess command passed all 26 rows at 6ee80831 in round 6; its code is unchanged since."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "CI green at the head: the required `lint` check (rulesets: lint, typecheck, test, pr-title)",
-      "evidence": "lint completed failure at 6ee80831: https://github.com/sjawhar/legion/actions/runs/40787900265/job/123165594270, failing step 'Check the whole tree with Biome'. main at the merge base 571f729b passes lint (run 40785262252). `bunx @biomejs/biome@2.4.11 check` on the JSON files this PR changes gives 'Found 1 error': packages/envoy/internal/testnats/testdata/listener-permissions.json format, where Biome wants the subscribe allow list on one line (`\"allow\": [\"_INBOX.>\", \"notifications.role.> envoy-listener-@MACHINE_ID@\"]`). The fixture must stay byte-equal to testnats.EncodeGrant (TestTheTestGrantFixturesAreTheRenderedGrants), so the fix is either to keep the fixtures out of biome.json's includes or to make EncodeGrant write Biome's format; that choice is the implementer's. The required lint job is itself the failing test, so no other red test is added."
+      "criterion": "Smoke gate at the new head: one deliverer, take-over under the rendered grant",
+      "surface": "two real cmd/listener processes built at 75ad2486, signed in with machine box-smoke's nkey under exactly the rendered ListenerPermissions grant (internal/testnats/testdata/listener-permissions.json), against a real nats-server 2.10.29 process; a port session on a local HTTP server; 40 sends through the standby with curl",
+      "command": "bash $TMPDIR/infra557-test/grant-smoke.sh $TMPDIR/infra557-test/listener-head7 g7-KILL KILL",
+      "observed": "active and standby at start; 0 sends refused; all 40 messages delivered in send order, the last 6.30 s after the SIGKILL; pod-b active afterwards; 0 permission lines in either pod's log; m15 (in flight at the kill) prompted twice with the same event id",
+      "headSha": "75ad248670bd7b5b1a100e9e5976e21407ee7257",
+      "negativeControl": "as machine box-other's NATS user: put lease.listener-box-smoke and delivery.listener-box-smoke.<hash>.ses_x refused with 'Permissions Violation for Publish to \"$KV.envoy_listener....\"'; put lease.listener-box-other accepted"
+    },
+    {
+      "criterion": "Round-6 failure: the PR's tree passes the Biome check that the required lint job runs",
+      "surface": "the repository's biome.json at 75ad2486",
+      "command": "bunx @biomejs/biome@2.4.11 check packages/envoy/internal/testnats/testdata/listener-permissions.json packages/envoy/internal/testnats/testdata/host-permissions.json",
+      "observed": "'These paths were provided but ignored' for both fixtures; the required lint check at 75ad2486 was queued when read, and CI settles it",
+      "headSha": "75ad248670bd7b5b1a100e9e5976e21407ee7257",
+      "negativeControl": "the same command at 6ee80831: 'listener-permissions.json format ... Found 1 error' (round 6), and lint completed failure there"
     }
   ],
-  "failed": 1,
-  "passedChecks": [
-    "Review critical finding (lease read-back under the grant), real surface: $TMPDIR/infra557-test/grant-smoke.sh runs two real listeners signed in with box-smoke's nkey under exactly listener-permissions.json against a real nats-server 2.10.29, with 40 sends through the standby. SIGKILL: 40 of 40 in send order, last 6.09 s after the signal. SIGTERM: 40 of 40 in send order, last 3.33 s. No permission error in either pod's log. Negative control: the 256345d7 binary under the same grant left both pods standby and delivered nothing; pod-a logged 'Permissions Violation for Publish to \"$JS.API.DIRECT.GET.KV_envoy_listener\"'.",
-    "Authorization boundary (per-machine envoy_listener write scope): as box-other's NATS user, put lease.listener-box-smoke and delivery.listener-box-smoke.<hash>.ses_x were both refused with 'Permissions Violation for Publish to \"$KV.envoy_listener....\"', and put lease.listener-box-other was accepted.",
-    "Review finding 4 (stuck holder), real surface: $TMPDIR/infra557-test/stuck-smoke.sh. pod-a's user lacks CONSUMER.INFO and CONSUMER.CREATE for the durable; it took the lease, and /healthz answered status degraded with 'durable consumer unavailable' and receive_failing_ms. At 142 s it logged ERROR 'lease holder cannot deliver from the durable' with its reason and released the lease. pod-b acquired it 0.45 s later, and the message sent at the start reached its session 132.5 s after the send.",
-    "Review finding 3 (settle hold with a NAK delay outstanding): TestTwoPodsGracefulStopWithARetryOutstandingDeliversWithin10s 4 of 4, slowest 3.3 s; TestTwoPodsSIGKILLWithARetryOutstandingHandsOverInOrderWithin15s 4 of 4, slowest 11.3 s",
-    "Throwaway rows from rounds 3-5, re-run under the grant: CI summary loop across a lease take-back (one pr.<n>.checks per PR, 0 for an in-progress run); SIGKILL mid-prompt (6.2 s, in order); two SIGKILLs mid-prompt; heavy-load graceful stop (2,646 in order); both pods stopped together; sole-pod restart (3,022); rollback to a pre-lease build; rolling update (365 within 10 s); graceful stop after a node loss",
-    "Two-build row against a pre-lease build of main: PASS"
+  "observations": [
+    "In the smoke run, the message in flight at the SIGKILL (m15) reached the session twice with the same event id. The killed pod's prompt landed before its ledger recorded the delivery, and the new holder took the former holder's attempt over at once. The spec allows a repeat with the same id; this is the architect's take-over rule (round 5 observation).",
+    "CI at 75ad2486 when read: lint, build, changes, test, typecheck and the Daemon Go suite queued. Not waited on."
   ],
-  "ciAtHead": "lint failure; typecheck, build, changes, pr-title and the Daemon Go suite success; test in progress; envoy-go, listener-multiprocess, dispatch and others queued (read 00:30Z, not waited on)",
   "notes": [
-    "Review finding 2 (own attempted record) is covered by unit tests in internal/dedupe and cmd/listener, which are CI's lanes. No real surface reaches a failed ledger Clear on demand.",
-    "Throwaway rows and scripts: $TMPDIR/infra557-test/tester_mp_test.go.r6keep, tester_ci_test.go.r6keep, grant-smoke.sh, stuck-smoke.sh, nkgen/. Not committed."
+    "Round 6's real-surface evidence (https://github.com/sjawhar/legion/pull/2404#issuecomment-6484392580) is for code identical to this head's, apart from biome.json."
   ]
 }
