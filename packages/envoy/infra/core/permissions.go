@@ -28,16 +28,6 @@ const (
 // inboxes matches every reply inbox nats.go makes.
 const inboxes = nats.InboxPrefix + ">"
 
-// listenerBuckets are the KV buckets a listener opens that its grant writes every key of, in the
-// order the grant lists them: the interest and role-claim buckets, the session registry and the
-// CI state bucket, which only a listener with the GitHub webhook route opens. The listener state
-// bucket, which holds the machine's delivery lease and the other state every listener pod of the
-// machine shares, follows them in the grant with its keys scoped (ListenerPermissions). A
-// listener whose grant lacks the listener state bucket does not exit: it logs an ERROR naming the
-// bucket and delivers without a lease, receiving from its durable only while no other subscriber
-// holds it.
-var listenerBuckets = []string{bus.InterestBucket, bus.RoleClaimBucket, bus.SessionBucket, bus.CIStateBucket}
-
 // ListenerPermissions is the grant envoy-listener needs as machine machineID, built from Envoy's own
 // names. Publish, in this order:
 //   - every notification topic (bus.NotificationTopicPrefix): the stream's subjects, the role
@@ -49,14 +39,17 @@ var listenerBuckets = []string{bus.InterestBucket, bus.RoleClaimBucket, bus.Sess
 //     account info. The stored-message get is the read /v1/replay makes to return the retained
 //     notifications a session missed while its subscription was down: it reads one stored message
 //     at a time and can create, change or delete nothing;
-//   - for each bucket of listenerBuckets in turn, the calls nats.go's KV makes: the bucket's stream
-//     info and create, direct and stream message gets, writes to its keys, its watchers' consumer
-//     create and delete, and their flow-control replies;
+//   - for each bucket of bus.ListenerBuckets in turn (the buckets the listener's keeper raises),
+//     the calls nats.go's KV makes and the raise a start sends (bucketPermissions): the bucket's
+//     stream info, create and update, direct and stream message gets, writes to its keys, its
+//     watchers' consumer create and delete, and their flow-control replies;
 //   - the same calls for the listener state bucket, whose writes are the machine's own keys
 //     alone: its delivery lease (bus.ListenerLeaseKey) and its delivery ledger
 //     (bus.ListenerLedgerPrefix), so one machine's user cannot take or clear another machine's
 //     lease or ledger, beside every session's last-seen record (bus.LastSeenPrefix), which is
-//     read across machines and so stays fleet-wide;
+//     read across machines and so stays fleet-wide. A listener whose grant lacks this bucket does
+//     not exit: it logs an ERROR naming the bucket and delivers without a lease, receiving from
+//     its durable only while no other subscriber holds it;
 //   - the purge of the interest bucket, which its delete-marker collection sends.
 //
 // Subscribe: reply inboxes, then the role lanes in the machine's queue group (bus.ListenerQueue).
@@ -73,7 +66,7 @@ func ListenerPermissions(machineID string) Permissions {
 		jsAck + bus.Stream + "." + durable + ".>",
 		jsAPI + "INFO",
 	}
-	for _, bucket := range listenerBuckets {
+	for _, bucket := range bus.ListenerBuckets() {
 		publish = append(publish, bucketPermissions(bucket)...)
 	}
 	publish = append(publish, bucketPermissions(bus.ListenerStateBucket,
@@ -96,8 +89,13 @@ func ListenerPermissions(machineID string) Permissions {
 }
 
 // bucketPermissions are the calls nats.go's KV makes on one bucket, in the order the grants list
-// them: ListenerPermissions lists them for each of listenerBuckets, DispatchPermissions for the
-// redelivery bucket. keys are the key patterns the writes may reach, every key when none is given.
+// them: ListenerPermissions lists them for each of bus.ListenerBuckets and for the listener state
+// bucket, DispatchPermissions for the redelivery bucket. keys are the key patterns the writes may
+// reach, every key when none is given. Beside them is the update of the bucket's stream: a start,
+// and the program's keeper every 30 seconds after it, raises a bucket found with fewer copies than
+// the deployment's replica count (bus.ReplicasEnvVar) with a stream update (bus.EnsureKeyValue,
+// bus.WithKeptBuckets). Without that grant the raise times out and the start stops naming the
+// bucket.
 func bucketPermissions(bucket string, keys ...string) []string {
 	stream := kvStream + bucket
 	if len(keys) == 0 {
@@ -106,6 +104,7 @@ func bucketPermissions(bucket string, keys ...string) []string {
 	rules := []string{
 		jsAPI + "STREAM.INFO." + stream,
 		jsAPI + "STREAM.CREATE." + stream,
+		jsAPI + "STREAM.UPDATE." + stream,
 		jsAPI + "DIRECT.GET." + stream + ".>",
 		jsAPI + "STREAM.MSG.GET." + stream,
 	}

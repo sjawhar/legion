@@ -499,9 +499,9 @@ func bindDurableConsumer(ctx context.Context, client *bus.Client, leases duty.Le
 		// No period (0): this is not a periodic loop but a step of every bind poll, and what
 		// keeps it from running on each of them is the throttle below, which is this process's
 		// own and deliberately so -- a durable each process binds for itself. So the lease is
-		// asked for mutual exclusion and nothing else.
+		// asked for mutual exclusion and nothing else, and no tick is due (the zero time).
 		reconciled := true
-		ran := duty.Exclusive(ctx, leases, consumerLease(wanted.Durable), 0, func(context.Context) {
+		ran := duty.Exclusive(ctx, leases, consumerLease(wanted.Durable), time.Time{}, 0, func(context.Context) {
 			reconciled = reconcileDurableConsumer(client.JS(), wanted)
 		})
 		if !reconciled {

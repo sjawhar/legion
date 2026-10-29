@@ -316,9 +316,9 @@ it and subscribes.
 The two-process and two-build tests start real listener binaries against one in-process NATS
 server, each behind a relay that can cut, freeze or delay its link. They carry the build tag
 `multiprocess`, and CI runs them in the `listener-multiprocess` job of
-`.github/workflows/envoy-and-contracts.yaml`, which runs only when a file its `listener_multiprocess`
-filter names changes (a change that makes these tests compile a new package or read a new file adds
-it to that filter):
+`.github/workflows/ci.yaml`, which runs only when a file its `listener_multiprocess` filter there
+names changes (a change that makes these tests compile a new package or read a new file adds it to
+that filter, which `.github/scripts/check-ci-filters.sh` holds them to):
 
 ```bash
 cd packages/envoy

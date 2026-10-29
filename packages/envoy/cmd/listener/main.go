@@ -53,6 +53,20 @@ type listenerDeps struct {
 	// podHostname is this pod's host name (listenerPodHostname), which the subscribe handler stamps
 	// on a port registration as session.SessionEntry.AcceptedHost; empty when it is unknown.
 	podHostname string
+	// delivery is the config main hands the delivery handlers (the role lane, the live lane and the
+	// durable), wired once, so the publish route forwards through its forwardRole, records each
+	// session it confirms in its delivery ledger (so no lane prompts or forwards that key to the
+	// session again, on this pod or any other of the machine), and writes each send's delivery line
+	// and delivery_status count through its logger and messagesDelivered, reading as the role lane's
+	// do, beside the route's own request record (request_record.go). The route never reads that
+	// ledger for its own dedupe answer, since the handlers also record a self-subscribed session
+	// whose push they skipped without hearing from it.
+	delivery *listenerDeliveryHandlerConfig
+	// confirmed is the publish route's own record of each (dedupe key, session) whose receipt arrived
+	// through the route, which only the route writes. A send skips a holder or recipient recorded
+	// there, so envoy-client's retry of a send does not forward again to one the first attempt
+	// confirmed, and no one is counted as confirming a message without having sent its receipt.
+	confirmed *dedupe.Cache
 }
 
 // kvCache is what the listener asks of each KV-backed cache it keeps.
@@ -722,12 +736,15 @@ func natsConnectionError(err error) bool {
 }
 
 // connectListener connects to NATS and reconciles the stream the listener owns
-// (bus.ConnectOwningStream), as instance. A NATS that cannot be reached (natsConnectionError) is
-// tried again every startRetry for as long as it takes, so a listener started before its NATS
-// waits for it rather than exiting. Any other failure ends the process after one ERROR naming it.
+// (bus.ConnectOwningStream), as instance, at the deployment's replica count and byte limit and
+// with the buckets it keeps (listenerStreamOptions). A NATS that cannot be reached
+// (natsConnectionError) is tried again every startRetry for as long as it takes, so a listener
+// started before its NATS waits for it rather than exiting. Any other failure ends the process
+// after one ERROR naming it.
 func connectListener(cfg config.Service, instance string, logger *logging.Logger) *bus.Client {
 	for {
-		client, err := bus.ConnectOwningStream(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas), bus.WithName("envoy-listener "+instance))
+		options := append(listenerStreamOptions(cfg), bus.WithName("envoy-listener "+instance))
+		client, err := bus.ConnectOwningStream(cfg.NATSURLs, options...)
 		if err == nil {
 			return client
 		}
@@ -917,6 +934,22 @@ func newDeliveryLedger(deliveryLease *lease, machineID string, requestLimit time
 	})
 }
 
+// listenerStreamOptions are the options envoy-listener starts the stream with
+// (bus.ConnectOwningStream): the deployment's replica count and byte limit, from cfg, and the
+// buckets the listener opens at that count (bus.ListenerBuckets: store.Open's interest and role
+// buckets, session.OpenSessionRegistry's and cistore.Open's, the list its NATS grant is built
+// from), which the client's keeper raises back to it when a concurrent start or an operator
+// lowered one (bus.WithKeptBuckets). The CI bucket is named even on a listener with no GitHub
+// route, which opens none: the keeper skips a bucket that does not exist. main and the tests that
+// start the listener's stream both take them from here.
+func listenerStreamOptions(cfg config.Service) []bus.ConnectOption {
+	return []bus.ConnectOption{
+		bus.WithReplicas(cfg.NATSReplicas),
+		bus.WithStreamMaxBytes(cfg.StreamMaxBytes),
+		bus.WithKeptBuckets(bus.ListenerBuckets()...),
+	}
+}
+
 func main() {
 	instance, err := listenerInstance()
 	if err != nil {
@@ -1048,7 +1081,8 @@ func main() {
 	logger.Info("envoy-listener listening", slog.String("addr", ln.Addr().String()))
 
 	// Phase 5: Connect to NATS, for as long as NATS takes to answer. The listener owns
-	// ENVOY_NOTIFICATIONS: this start reconciles the stream (bus.ConnectOwningStream).
+	// ENVOY_NOTIFICATIONS: this start reconciles the stream (bus.ConnectOwningStream) at the
+	// deployment's replica count and byte limit (listenerStreamOptions).
 	client := connectListener(cfg, instance, logger)
 	consumer := bus.ListenerDurable(cfg.MachineID)
 	// The durable is checked here, before the cache warm-ups below (up to 30 s each), so a refused
@@ -1316,6 +1350,8 @@ func main() {
 		receiver:    receiver,
 		streamName:  bus.Stream,
 		podHostname: podHostname,
+		delivery:    &deliveryConfig,
+		confirmed:   dedupe.New(10 * time.Minute),
 	}
 	openV1Routes(v1Gate, ready, cfg.MachineID, logger, listeningAt)
 
