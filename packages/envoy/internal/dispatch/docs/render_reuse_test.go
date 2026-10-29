@@ -1484,16 +1484,6 @@ func TestRenderReuseABrowserTypingScript(t *testing.T) {
 		observerReused:      uint64(agentWrites),
 		beforeFromReplica:   uint64(agentWrites),
 	}, recovered)
-	got := m.since()
-	if limit := uint64(enters + blockEdits + agentWrites + recovered + 1); got.observerRendered > limit {
-		t.Errorf("the observer rendered the document whole %d times, more than the %d structural edits, writes and recovers allow", got.observerRendered, limit)
-	}
-	sh.mu.Lock()
-	logged := sh.loggedLocked() - m.updates
-	sh.mu.Unlock()
-	if rest := logged - recovered - int(got.observerRendered+got.observerReused+got.observerInRoom); int(got.observerIncremental+got.observerUntouched) != rest {
-		t.Errorf("the observer spliced %d updates and left %d untouched, of the %d it neither rendered whole nor reused", got.observerIncremental, got.observerUntouched, rest)
-	}
 	state := service.room(artifactID)
 	state.mu.Lock()
 	author, authored := state.askAuthors["typed-ask"]

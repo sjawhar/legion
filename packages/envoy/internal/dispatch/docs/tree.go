@@ -382,9 +382,7 @@ type renderedReplica struct {
 	// markdown is the room's rendered markdown as the replica's latest update left it, or as the
 	// log's base rendered before any; nil while the document is outside the schema.
 	markdown *string
-	// layout is the pmdoc.Layout of markdown, valid only with it: nil whenever markdown is nil, and
-	// whenever markdown came from a rendering that recorded none (a published rendering without
-	// one), which the next update's whole render records again.
+	// layout is the pmdoc.Layout of markdown, valid only with it: nil exactly when markdown is nil.
 	layout *pmdoc.Layout
 	// touched records the top-level blocks of fragment the update being applied changed, and
 	// whether it is to be rendered whole (touchedBlocks). finder records into it as doc's
@@ -600,24 +598,20 @@ func noteChangedTypes(txn *crdt.Transaction, fragment *crdt.YXmlFragment, into *
 			into.renderWhole()
 			return
 		}
-		for block, level := changed, 1; ; level++ {
-			parent := block.Parent()
-			if parent == nil {
-				break
-			}
-			if parent != root {
-				if level == pmdoc.MaxTreeDepth {
-					into.renderWhole()
-					return
-				}
-				block = parent
-				continue
-			}
-			into.touch(block)
-			if into.whole {
+		block, parent := changed, changed.Parent()
+		for level := 1; parent != nil && parent != root; level++ {
+			if level == pmdoc.MaxTreeDepth {
+				into.renderWhole()
 				return
 			}
-			break
+			block, parent = parent, parent.Parent()
+		}
+		if parent == nil {
+			continue
+		}
+		into.touch(block)
+		if into.whole {
+			return
 		}
 	}
 }
@@ -634,9 +628,9 @@ func noteChangedTypes(txn *crdt.Transaction, fragment *crdt.YXmlFragment, into *
 //     replica is then the fork the operation rendered, so the rendering is the replica's, and the
 //     update changed the markdown exactly when it differs from the replica's before it. The
 //     replica takes its markdown and the layout recorded with it, which is valid with that
-//     markdown; one that recorded none leaves the replica none, so the next update is rendered
-//     whole. A change the operation did not see as one carries no ask blocks, so it is measured
-//     after all;
+//     markdown. A warm operation always records one, so the replica's layout stays nil exactly
+//     when its markdown is. A change the operation did not see as one carries no ask blocks, so it
+//     is measured after all;
 //   - its room instance's load already held it (liveWriteOrigin.inRoom), so applying it changed
 //     nothing, while the replica renders at all: one outside the schema renders the update, so it
 //     still logs and counts as changed.
@@ -950,11 +944,9 @@ func (r *renderedReplica) updateChangesMarkdown(room string) (bool, func() map[s
 		}
 		return true, nil
 	}
-	if r.markdown != nil && *r.markdown == markdown {
-		r.layout = layout
+	if !r.keep(markdown, layout) {
 		return false, nil
 	}
-	r.markdown, r.layout = &markdown, layout
 	return true, func() map[string]struct{} { return askBlockIDs(tree) }
 }
 
@@ -991,11 +983,9 @@ func (r *renderedReplica) spliceTouched() (changed bool, asks func() map[string]
 	if !ok {
 		return false, nil, false
 	}
-	if markdown == *r.markdown {
-		r.layout = layout
+	if !r.keep(markdown, layout) {
 		return false, nil, true
 	}
-	r.markdown, r.layout = &markdown, layout
 	fragment := r.fragment
 	return true, func() map[string]struct{} {
 		ids := map[string]struct{}{}
@@ -1015,6 +1005,18 @@ func (r *renderedReplica) spliceTouched() (changed bool, asks func() map[string]
 		}
 		return ids
 	}, true
+}
+
+// keep makes markdown, rendered with layout, the replica's rendering and reports whether it changed
+// the replica's markdown: the replica takes layout either way, and keeps its own markdown string
+// where markdown equals it. The caller holds mu.
+func (r *renderedReplica) keep(markdown string, layout *pmdoc.Layout) bool {
+	r.layout = layout
+	if r.markdown != nil && *r.markdown == markdown {
+		return false
+	}
+	r.markdown = &markdown
+	return true
 }
 
 // closureChangedMarkdown reports whether a document closure that produced after changed the

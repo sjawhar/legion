@@ -1,16 +1,13 @@
 package pmdoc
 
-import (
-	"math"
-	"unsafe"
-)
+import "math"
 
 // Layout is what one whole render (RenderWithLayout) records of the top level of the markdown it
 // writes, valid only with that markdown. The render writes the document's top-level blocks
 // B0 … Bn-1 as `B0 "\n\n" B1 … "\n\n" Bn-1 "\n"` (renderer.blocks); the layout holds, for each
 // block, where its bytes end and what of it the rest of the document depends on (blockFlags), and
 // whether the render is one that Splice can continue at all. It holds 5 bytes for each top-level
-// block and a few words (Size). A Layout is never modified once made: Splice answers a new one and
+// block and a few words. A Layout is never modified once made: Splice answers a new one and
 // leaves the one it was called on valid with the markdown it came with.
 type Layout struct {
 	// ends is each top-level block's end offset in the markdown, the separator after it excluded.
@@ -80,11 +77,6 @@ func (l *Layout) AskBlocks() []int {
 	return asks
 }
 
-// Size is how many bytes the layout holds: its own fields and its two slices' arrays.
-func (l *Layout) Size() int {
-	return int(unsafe.Sizeof(*l)) + cap(l.ends)*int(unsafe.Sizeof(uint32(0))) + cap(l.flags)
-}
-
 // newLayout is a layout about to record blocks top-level blocks, incremental until a check fails.
 func newLayout(blocks int) *Layout {
 	return &Layout{ends: make([]uint32, 0, blocks), flags: make([]blockFlags, 0, blocks), incremental: true}
@@ -116,10 +108,10 @@ func (l *Layout) record(r *renderer, written *Node, otherMarker bool, spans int)
 	l.flags = append(l.flags, flags)
 }
 
-// finish completes the layout of a render of read (written being asWritten(read)) with spanCells
-// for its tables' spans, r its last renderer, which first wrote a blank empty code block when
-// blankEmptyCode says so. Splice may continue the render (incremental) only where every block of a
-// whole render is written by the one rendering Splice reproduces block by block:
+// finish completes the layout of a render of written, a document as written (asWritten), with
+// spanCells for its tables' spans, r its last renderer, which first wrote a blank empty code block
+// when blankEmptyCode says so. Splice may continue the render (incremental) only where every block
+// of a whole render is written by the one rendering Splice reproduces block by block:
 //   - at least two top-level blocks: a document holding only an empty paragraph renders as nothing
 //     (render), and a single block is not worth splicing;
 //   - the first block is not a rule, which renderBlocks rewrites `***` after reading the whole
@@ -130,11 +122,11 @@ func (l *Layout) record(r *renderer, written *Node, otherMarker bool, spans int)
 //     only where it reaches 0 (tableGrid takes the budget in min only to leave it 0), so while it
 //     never does, every block writes what it writes with any budget that lasts;
 //   - every record kept it incremental.
-func (l *Layout) finish(read, written *Node, spanCells int, r *renderer, blankEmptyCode bool) {
+func (l *Layout) finish(written *Node, spanCells int, r *renderer, blankEmptyCode bool) {
 	l.spanCells = spanCells - r.spanBudget
 	l.incremental = l.incremental && len(written.Children) >= 2 && written.Children[0].Type != "hr" &&
 		!blankEmptyCode && spanCells == maxSpanCells && r.spanBudget > 0
-	for index, block := range read.Children {
+	for index, block := range written.Children {
 		l.flags[index] |= holdsFlags(block)
 	}
 }

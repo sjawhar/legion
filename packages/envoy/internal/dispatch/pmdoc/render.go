@@ -129,7 +129,6 @@ func renderDocument(doc *Node, spanCells int, recordLayout bool) (r *renderer, e
 	// runs, and an escape is decided within one run: rendering the document without them merges
 	// the runs, so a mark never changes the markdown (`snake_case`, never `snake\_case`). The line
 	// breaks the browser editor holds that markdown has no form for are written as it draws them.
-	read := doc
 	doc = asWritten(doc)
 	if holdsOnlyAnEmptyParagraph(doc) {
 		r = &renderer{spanBudget: spanCells}
@@ -152,7 +151,7 @@ func renderDocument(doc *Node, spanCells int, recordLayout bool) (r *renderer, e
 		return nil, r.err
 	}
 	if recordLayout {
-		r.layout.finish(read, doc, spanCells, r, blankEmptyCode)
+		r.layout.finish(doc, spanCells, r, blankEmptyCode)
 	}
 	return r, nil
 }

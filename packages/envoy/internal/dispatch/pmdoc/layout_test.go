@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/reearth/ygo/crdt"
 )
@@ -93,9 +95,9 @@ func assertSpliceIsWhole(t *testing.T, name, markdown string, layout *Layout, ne
 			name, touched, at, excerpt(got, at), excerpt(want, at))
 		return true
 	}
-	if !reflect.DeepEqual(gotLayout, wantLayout) || gotLayout.Size() != wantLayout.Size() {
+	if !reflect.DeepEqual(gotLayout, wantLayout) || layoutSize(gotLayout) != layoutSize(wantLayout) {
 		t.Errorf("%s: Splice of %v answered layout %+v (%d bytes), the whole render records %+v (%d bytes)",
-			name, touched, gotLayout, gotLayout.Size(), wantLayout, wantLayout.Size())
+			name, touched, gotLayout, layoutSize(gotLayout), wantLayout, layoutSize(wantLayout))
 	}
 	return true
 }
@@ -245,16 +247,12 @@ func mutate(block *Node, kind string, rng *rand.Rand, texts []string) {
 // collect lists every node under root, root included, that keep accepts, in document order.
 func collect(root *Node, keep func(*Node) bool) []*Node {
 	var found []*Node
-	var walk func(*Node)
-	walk = func(n *Node) {
+	Walk(root, func(n *Node) bool {
 		if keep(n) {
 			found = append(found, n)
 		}
-		for _, child := range n.Children {
-			walk(child)
-		}
-	}
-	walk(root)
+		return true
+	})
 	return found
 }
 
@@ -334,37 +332,32 @@ func changeAttribute(block *Node, rng *rand.Rand, texts []string) {
 		return
 	}
 	node := nodes[rng.IntN(len(nodes))]
-	attrs := cloneAttrs(node.Attrs)
-	if attrs == nil {
-		attrs = Attrs{}
-	}
 	switch node.Type {
 	case "heading":
-		attrs["level"] = float64(1 + rng.IntN(6))
+		node.Attrs = withAttr(node.Attrs, "level", float64(1+rng.IntN(6)))
 	case "code_block":
-		attrs["language"] = []any{nil, "go", "", "a`b"}[rng.IntN(4)]
+		node.Attrs = withAttr(node.Attrs, "language", []any{nil, "go", "", "a`b"}[rng.IntN(4)])
 	case "ordered_list":
-		attrs["order"] = float64(rng.IntN(12))
+		node.Attrs = withAttr(node.Attrs, "order", float64(rng.IntN(12)))
 	case "bullet_list":
-		attrs["spread"] = rng.IntN(2) == 0
+		node.Attrs = withAttr(node.Attrs, "spread", rng.IntN(2) == 0)
 	case "list_item":
 		if rng.IntN(2) == 0 {
-			attrs["checked"] = []any{nil, true, false}[rng.IntN(3)]
+			node.Attrs = withAttr(node.Attrs, "checked", []any{nil, true, false}[rng.IntN(3)])
 		} else {
-			attrs["spread"] = rng.IntN(2) == 0
+			node.Attrs = withAttr(node.Attrs, "spread", rng.IntN(2) == 0)
 		}
 	case "table_cell", "table_header":
 		if rng.IntN(2) == 0 {
-			attrs["alignment"] = []any{nil, "left", "center", "right"}[rng.IntN(4)]
+			node.Attrs = withAttr(node.Attrs, "alignment", []any{nil, "left", "center", "right"}[rng.IntN(4)])
 		} else {
-			attrs["colspan"] = float64(1 + rng.IntN(3))
+			node.Attrs = withAttr(node.Attrs, "colspan", float64(1+rng.IntN(3)))
 		}
 	case "callout":
-		attrs["title"] = texts[rng.IntN(len(texts))] + " title"
+		node.Attrs = withAttr(node.Attrs, "title", texts[rng.IntN(len(texts))]+" title")
 	case "ask":
-		attrs[BlockIDAttr] = fmt.Sprintf("ask-changed-%d", rng.IntN(1000))
+		node.Attrs = withAttr(node.Attrs, BlockIDAttr, fmt.Sprintf("ask-changed-%d", rng.IntN(1000)))
 	}
-	node.Attrs = attrs
 }
 
 // isTextEdit reports whether kind on block is a text insert or delete in a paragraph, a heading or a
@@ -402,11 +395,7 @@ func spliceDifferential(t *testing.T, name string, doc *Node, perBlock, rounds i
 			mutate(changed, mutationKinds[rng.IntN(len(mutationKinds))], rng, texts)
 			changes[index] = changed
 		}
-		touched := make([]int, 0, len(changes))
-		for index := range changes {
-			touched = append(touched, index)
-		}
-		slices.Sort(touched)
+		touched := slices.Sorted(maps.Keys(changes))
 		ok := assertSpliceIsWhole(t, fmt.Sprintf("%s round %d", name, round), markdown, layout, replaceBlocks(doc, changes), touched)
 		tally.count("several", false, ok)
 	}
@@ -418,7 +407,7 @@ func spliceDifferential(t *testing.T, name string, doc *Node, perBlock, rounds i
 func TestIncrementalRenderMatchesTheWholeRenderOnTheFixtures(t *testing.T) {
 	tally := newSpliceTally()
 	perBlock, rounds := 21, 30
-	if incrementalRaceBuild || testing.Short() {
+	if raceEnabled || testing.Short() {
 		perBlock, rounds = 7, 10
 	}
 	for index, fx := range loadFixtures(t) {
@@ -545,9 +534,10 @@ func TestIncrementalRenderMatchesTheWholeRenderOnALargeDocument(t *testing.T) {
 		t.Fatalf("generated document: %d bytes, incremental %v", len(markdown), layout.incremental)
 	}
 	kinds := map[string]bool{}
-	for _, node := range collect(doc, func(*Node) bool { return true }) {
+	Walk(doc, func(node *Node) bool {
 		kinds[node.Type] = true
-	}
+		return true
+	})
 	for _, kind := range []string{"heading", "paragraph", "bullet_list", "ordered_list", "table", "blockquote", "code_block", "callout", "ask", "hr", "footnote_definition", "footnote_reference"} {
 		if !kinds[kind] {
 			t.Fatalf("generated document holds no %s", kind)
@@ -556,7 +546,7 @@ func TestIncrementalRenderMatchesTheWholeRenderOnALargeDocument(t *testing.T) {
 	started := time.Now()
 	tally := newSpliceTally()
 	stride, rounds := 1, 20
-	if incrementalRaceBuild || testing.Short() {
+	if raceEnabled || testing.Short() {
 		stride, rounds = 16, 4
 	}
 	rng := rand.New(rand.NewPCG(644, 390))
@@ -577,16 +567,12 @@ func TestIncrementalRenderMatchesTheWholeRenderOnALargeDocument(t *testing.T) {
 			mutate(changed, []string{"insert", "delete"}[rng.IntN(2)], rng, texts)
 			changes[index] = changed
 		}
-		touched := make([]int, 0, len(changes))
-		for index := range changes {
-			touched = append(touched, index)
-		}
-		slices.Sort(touched)
+		touched := slices.Sorted(maps.Keys(changes))
 		ok := assertSpliceIsWhole(t, fmt.Sprintf("large round %d", round), markdown, layout, replaceBlocks(doc, changes), touched)
 		tally.count("several", false, ok)
 	}
 	tally.documents = 1
-	tally.log(t, fmt.Sprintf("large document (%d bytes, %d top-level blocks, layout %d bytes, %s)", len(markdown), layout.Blocks(), layout.Size(), time.Since(started).Round(time.Millisecond)))
+	tally.log(t, fmt.Sprintf("large document (%d bytes, %d top-level blocks, layout %d bytes, %s)", len(markdown), layout.Blocks(), layoutSize(layout), time.Since(started).Round(time.Millisecond)))
 	assertMostTextEditsSplice(t, tally)
 }
 
@@ -703,11 +689,7 @@ func spliceCase(t *testing.T, name string, doc *Node, changes map[int]*Node, wan
 	if err != nil {
 		t.Fatalf("%s: %v", name, err)
 	}
-	touched := make([]int, 0, len(changes))
-	for index := range changes {
-		touched = append(touched, index)
-	}
-	slices.Sort(touched)
+	touched := slices.Sorted(maps.Keys(changes))
 	if got := assertSpliceIsWhole(t, name, markdown, layout, replaceBlocks(doc, changes), touched); got != want {
 		t.Errorf("%s: Splice answered %v, want %v", name, got, want)
 	}
@@ -857,7 +839,12 @@ func TestIncrementalRenderLayoutRecordsAsksAndSize(t *testing.T) {
 			t.Errorf("block %d ends at %d in %q", index, end, markdown)
 		}
 	}
-	if size := layout.Size(); size < 4*5 || size > 4*5+64 {
-		t.Errorf("Size() = %d, want 5 bytes per block and the layout's own fields", size)
+	if size := layoutSize(layout); size < 4*5 || size > 4*5+64 {
+		t.Errorf("layoutSize = %d, want 5 bytes per block and the layout's own fields", size)
 	}
+}
+
+// layoutSize is how many bytes l holds: its own fields and its two slices' arrays.
+func layoutSize(l *Layout) int {
+	return int(unsafe.Sizeof(*l)) + cap(l.ends)*int(unsafe.Sizeof(uint32(0))) + cap(l.flags)
 }

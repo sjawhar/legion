@@ -196,8 +196,13 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	var markdown string
 	var offsets []pmdoc.BlockOffset
 	var layout *pmdoc.Layout
+	// Only a warm operation's layout is ever taken (publishedRendering below).
 	if err == nil {
-		markdown, offsets, layout, err = documentRenderingWithLayout(tree)
+		if read.warm {
+			markdown, offsets, layout, err = documentRenderingWithLayout(tree)
+		} else {
+			markdown, offsets, err = documentMarkdownWithOffsets(tree)
+		}
 	}
 	if err != nil {
 		return joinedSchemaError(err, start)
