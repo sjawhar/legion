@@ -1,5 +1,13 @@
 # Changelog
 
+## [main@c4cea404651d] - 2026-10-29
+
+### Added
+
+- Every Dispatch write a `dispatch` command makes carries one `Idempotency-Key` (INFRA-258): `DispatchClient.#send` mints a UUID per `POST` and `PATCH` call, sends it on every attempt of that call, and encodes the body once, so Dispatch runs the write once however many attempts reach it. A transport failure, any 5xx, a 408, a 429 and Dispatch's `409 KEY_IN_FLIGHT` are asked again under the key: at most five attempts, 1, 2, 4 and 8 s apart, a longer `Retry-After` waited instead, none starting more than 30 s after the first, all inside the call's 60 s deadline. An attempt that goes 20 s without progress before its answer begins is cut off and asked again the same way. A `GET`, `PUT` or `DELETE` carries no key and is sent once. A write is resent only against a Dispatch this process has seen run the keyed layer within the last five minutes: an answer echoing the key, or a `GET /healthz` answering `idempotency_keys: true` when no echo could arrive. Against a Dispatch without the layer nothing is resent, and the write is reported as one that may or may not have taken effect.
+
+  `DispatchClient.deliveryReply` sends a session's reply to a delivery attempt (`POST /api/v1/{messages,comments}/{id}/reply`), which `postDeliveryReply` used to send as a bare `fetch`: it is now keyed, retried and bounded by the client's 60 s deadline, and its refusals are `DispatchServiceError`s like every other call's.
+
 ## [main@a09a2f257406] - 2026-10-29
 
 ### Added

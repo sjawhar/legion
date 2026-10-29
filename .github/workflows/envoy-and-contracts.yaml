@@ -1245,11 +1245,13 @@ jobs:
             packages/envoy/internal/tests3/seaweedfs.go Image
       # The API package owns the largest set of Postgres-backed tests. Running it with the other
       # package binaries makes all of their per-test database cleanup queue on the service's one
-      # checkpointer, so run it before the rest of the module.
+      # checkpointer, so run it before the rest of the module. Alone it takes close to go test's
+      # default ten minutes (523 s on a workstation), and the documents package about nine with the
+      # rest, so every package here gets 20.
       - name: Unit test envoy Go package
         run: |
-          go test ./internal/dispatch/api
-          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test
+          go test -timeout 20m ./internal/dispatch/api
+          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -timeout 20m
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
@@ -1304,6 +1306,7 @@ jobs:
           path: |
             out/pr-artifacts/legion-envoy-amd64.tar.gz
             out/pr-artifacts/legion-envoy-arm64.tar.gz
+
 
   # The envoy-infra Pulumi plugin's module (packages/envoy/infra). It is not in the root go.work:
   # its own go.work binds it and packages/envoy, so Pulumi's requirements never move the versions

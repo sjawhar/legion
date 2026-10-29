@@ -1,5 +1,19 @@
 # Changelog
 
+## [main@c4cea404651d] - 2026-10-29
+
+### Added
+
+- One WebSocket per browser tab at `GET /ws/live` (INFRA-258), with the common `Live*` frames and `LiveView`: a `DeliveryLiveView`, the Dispatch event-feed `EventsLiveView`, or one session's `AgentLiveView`. Delivery views resume with `DeliveryLiveResume` (`seq`, `revs`); events views resume with `EventsLiveResume` (`since`) and begin with `LiveEventsStart`, whose `replay_complete` says whether the subscription replays every event after the resume (a resume at or below the feed's head), so a page owes no refresh for the gap; agent views begin from the session replay. `LiveEventFrame`, `LiveAgentFrame`, and `LiveEnded` complete the new frame family; a `LiveAgentFrame`'s `data` is an `AgentStreamResponder` for its `responder` event and `unknown` for `replay` and `frame`, the session's own JSON, which Dispatch relays unparsed and a page checks before it renders it. `LIVE_SOCKET_MAX_AGE_CLOSE` (4001) rotates a socket at a random age in [`LIVE_SOCKET_MIN_AGE_MS`, `LIVE_SOCKET_MAX_AGE_MS`) (30 to 60 minutes), and `LIVE_SOCKET_MAX_SUBSCRIPTIONS` is 64.
+
+  `AuthenticatedUser.event_head`, the decimal id of the newest event when `GET /auth/whoami` answered (INFRA-292). It is required: a page of this release subscribes the event feed on `GET /ws/live`, which only a server that answers the head serves, and the feed starts its first subscription there, so every read the page makes after the sign-in check is covered by a resume.
+
+### Changed
+
+- **Breaking:** a write names its intent by the `Idempotency-Key` request header (`IDEMPOTENCY_KEY_HEADER`) on every `POST` and `PATCH` route, not by a body field (INFRA-258): `CreateBroadcastInput.idempotency_key` is gone, and a body that still carries it is `400 INVALID_JSON`. The key is optional; a repeat under it is answered with the first answer and `IDEMPOTENCY_REPLAYED_HEADER`, a different request under it is `422 KEY_REUSED` (`IDEMPOTENCY_KEY_REUSED`), and a repeat while the first still runs is `409 KEY_IN_FLIGHT` (`IDEMPOTENCY_KEY_IN_FLIGHT`) with `Retry-After: 1`; a 5xx, 401, 408 or 429 is not kept, so the next attempt runs again, unless the first attempt had committed its write, which makes the next attempt `409 KEY_COMMITTED` (`IDEMPOTENCY_KEY_COMMITTED`): the write landed, Dispatch has no answer to replay, and a client treats it as landed. Added `IDEMPOTENCY_KEY_MAX`, `IDEMPOTENCY_KEY_PATTERN`, `IDEMPOTENCY_KEY_INVALID`, `IDEMPOTENCY_ANSWER_NOT_KEPT`, `IDEMPOTENCY_KEY_TTL_MS`, `IDEMPOTENCY_LEASE_MS`, `retriesUnderKey`, `answerNotKept`, `IdempotencyLandedCode`, `DISPATCH_LOGIN_HEADER`, and `DISPATCH_LOGIN_CHANGED`.
+
+  **Breaking:** the frames every live view shares are renamed (INFRA-258): `DeliveryLiveSubscribe`, `DeliveryLiveUnsubscribe`, `DeliveryLiveClientFrame`, `DeliveryLiveError`, `DeliveryLiveHeartbeat` and `DeliveryLiveServerFrame` are `LiveSubscribe`, `LiveUnsubscribe`, `LiveClientFrame`, `LiveError`, `LiveHeartbeat` and `LiveServerFrame`. `LiveSubscribe` is a union by view kind: a `DeliveryLiveView` resumes with a `DeliveryLiveResume`, an `EventsLiveView` with an `EventsLiveResume`, and an `AgentLiveView` with none, which are the only pairings Dispatch accepts. `LiveServerFrame` adds the events and agent views' frames. The frame fixtures move with them: `fixtures/delivery-live/` is now `fixtures/live/`.
+
 ## [main@a09a2f257406] - 2026-10-29
 
 ### Added
