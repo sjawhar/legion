@@ -366,7 +366,9 @@ func (p listItemColumns) Continue(node ast.Node, reader gmtext.Reader, pc parser
 // (fencedCodeText), and reading a whitespace-only line as that parser does: it takes up to as many
 // columns from each line of the code as the opening fence stands past its container's content, so
 // a whitespace-only line holding fewer is an empty line of the code. Goldmark keeps all such a line
-// holds, so `  ~~~\n \nx` held the code ` \nx`, where that parser reads `\nx`.
+// holds, so `  ~~~\n \nx` held the code ` \nx`, where that parser reads `\nx`. A last line of the
+// document with no line feed that holds nothing past the fence's indentation is no line of the code
+// to that parser, where goldmark ends it with a line feed, so `  ~~~\nx\n ` holds the code `x`.
 type fenceClosure struct{ parser.BlockParser }
 
 var (
@@ -396,14 +398,18 @@ func (p fenceClosure) Continue(node ast.Node, reader gmtext.Reader, pc parser.Co
 	if !util.IsBlank(line) {
 		return state
 	}
+	last := node.Lines().Len() - 1
+	code := node.Lines().At(last)
 	indent, _ := node.Attribute(fenceIndentAttr)
-	if position, _ := util.IndentPositionPadding(line, offset, segment.Padding, indent.(int)); position >= 0 {
-		return state
+	if position, _ := util.IndentPositionPadding(line, offset, segment.Padding, indent.(int)); position < 0 {
+		// Goldmark appended the whole line; the code's line is empty but for its line feed.
+		code = lineFeedOnly(segment, reader.Source())
+		code.ForceNewline = true
 	}
-	// Goldmark appended the whole line; the code's line is empty but for its line feed.
-	empty := lineFeedOnly(segment, reader.Source())
-	empty.ForceNewline = true
-	node.Lines().Set(node.Lines().Len()-1, empty)
+	if code.Start >= code.Stop && code.Padding == 0 && !bytes.HasSuffix(line, []byte("\n")) {
+		code.ForceNewline = false
+	}
+	node.Lines().Set(last, code)
 	return state
 }
 
