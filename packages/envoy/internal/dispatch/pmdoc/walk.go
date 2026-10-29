@@ -51,14 +51,11 @@ func walkNode(node *Node, path []int, pos int, sizes []int, index int, visit fun
 		return 0, false
 	}
 	index++
-	if node.Type == "text" || isLeafNodeType(node.Type) {
+	if isOpaqueNodeType(node.Type) {
 		return index, true
 	}
 
-	childPos := pos
-	if node.Type != "doc" {
-		childPos++
-	}
+	childPos := pos + boundaryTokens(node.Type)/2
 	for childIndex, child := range node.Children {
 		size := sizes[index]
 		var ok bool
@@ -87,14 +84,10 @@ func measure(node *Node, sizes *[]int) int {
 	size := 0
 	switch {
 	case node == nil:
-	case node.Type == "text":
-		size = len16(node.Text)
-	case isLeafNodeType(node.Type):
-		size = 1
+	case isOpaqueNodeType(node.Type):
+		size = opaqueNodeSize(node.Type, node.Text)
 	default:
-		if node.Type != "doc" {
-			size = 2
-		}
+		size = boundaryTokens(node.Type)
 		for _, child := range node.Children {
 			size += measure(child, sizes)
 		}
@@ -110,13 +103,38 @@ func measure(node *Node, sizes *[]int) int {
 // of the slice, never a wrong size.
 func walkedCount(node *Node) int {
 	count := 1
-	if node == nil || node.Type == "text" || isLeafNodeType(node.Type) {
+	if node == nil || isOpaqueNodeType(node.Type) {
 		return count
 	}
 	for _, child := range node.Children {
 		count += walkedCount(child)
 	}
 	return count
+}
+
+// isOpaqueNodeType reports whether a node of nodeType is one walk visits without entering its
+// children, which take no position: a text run or a leaf.
+func isOpaqueNodeType(nodeType string) bool {
+	return nodeType == "text" || isLeafNodeType(nodeType)
+}
+
+// opaqueNodeSize is the size of an opaque node (isOpaqueNodeType) of nodeType holding text: a text
+// run is its text's UTF-16 length, counted without copying it (len16), a leaf one position.
+func opaqueNodeSize(nodeType, text string) int {
+	if nodeType == "text" {
+		return len16(text)
+	}
+	return 1
+}
+
+// boundaryTokens is the positions a node of nodeType that is not opaque adds around its children:
+// an opening and a closing token, so its children start one past its own position, except for the
+// document, which has neither.
+func boundaryTokens(nodeType string) int {
+	if nodeType == "doc" {
+		return 0
+	}
+	return 2
 }
 
 func isLeafNodeType(nodeType string) bool {

@@ -3,6 +3,135 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [14.0.0] - 2026-10-29
+
+### Changed
+
+- A phase worker whose turn ends with its Legion phase still open is now reminded at the end of
+  **every** turn, for as long as that phase stays open. It used to get one follow-up,
+  and a second only when it answered the first by writing the tool call as text again, after which
+  a stalled worker sat silent: in Stage 3 two trees waited six hours each on a worker that had had
+  its one follow-up. The first reminder of a run is still the `session_stop` continuation, one more
+  turn of the same session; every one after it is a steered `legion-phase-reminder` message sent
+  from a timer, so the run settles first and the daemon sees the turn end and can deliver a queued
+  task. A reply whose line starts WAITING buys a quiet wait and then the same reminder again, and
+  a worker the daemon relaunched into an open phase is reminded from a timer, since nothing else
+  would wake it. The count of reminders the worker did nothing about drops to zero as soon as it
+  runs a tool call — Oh My Pi's `toolCall` block, not only Claude Code's `tool_use` — or anything
+  reaches the session, and a run of unanswered ones tells the issue's
+  architect over Envoy — once, under one idempotency key kept until the count resets, retried while
+  no live session holds that role. Four variables, read from the worker's own environment (the
+  daemon passes on whichever its own holds, to a pane and to a pod alike), tune it:
+  `LEGION_STALL_REMINDER_MS` (300000), `LEGION_STALL_WAITING_MS` (900000), `LEGION_STALL_RESUME_MS`
+  (120000) and `LEGION_STALL_ARCHITECT_AFTER` (3, clamped to 2 or more); a bad value is one `warn`
+  and the default. The state machine, the runner and the numbers now live in `@legion/pi-shared`
+  (`phase-stall.ts`, `phase-reminder.ts`, `stall-limits.ts`), which `@sjawhar/claude-envoy` drives
+  from Claude Code's own hooks, so one machine serves both harnesses and the Go bridge's copy of it
+  is gone. The transcript entry keeps its `legion-phase-stall` name and its `state`, and now also
+  carries the head of the worker's last message, so the notice a relaunched worker's resume
+  reminder earns still says what it last said; an entry an earlier build wrote, without it, still
+  reads. A session resumed on an
+  entry this build does not know — `{"state":"quiet"}` or `{"state":"text-call"}`, what the build
+  now in the pods wrote — reads as an open phase with no reminder yet, so it is reminded rather
+  than left alone. Daemon API contract 42 carries the four variables (and, in a pod, Claude Code's
+  three): install this release's pair with a `legion` built from the same commit.
+
+## [12.2.0] - 2026-10-29
+
+### Fixed
+
+- Plugin interface version 5: the operator's controller names its session in the interface's
+  `startupTurn` at `session_start` with the start due and not sent yet (`sentAt` undefined), so
+  pi-envoy keeps a card that reaches the session before `/legion-controller-start` sends the start
+  message from taking the first turn, for up to 30 s. The start command's send marks it sent; the
+  session's first run and its shutdown clear it, and so does a start claim refused before the send
+  or stopped for a session change. Install it with the `@sjawhar/pi-envoy` released beside it.
+
+## [12.1.1] - 2026-10-29
+
+### Changed
+
+- The bundled `legion-worker` merge-gate skill has the reviewer re-run only a run's failed and cancelled jobs (`gh run rerun <run> --failed`), never the whole run.
+
+## [12.1.0] - 2026-10-28
+
+### Changed
+
+- The `legion-controller` skill this plugin ships says when the controller is registered: at session
+  startup, or, in a controller an operator started, from its first command once Oh My Pi has
+  started, where it said the extension's startup claim; its takeover note's reason not to set
+  `LEGION_CONTROLLER=1` says that marker makes the session the launched controller, which needs a
+  start message.
+
+## [12.0.0] - 2026-10-28
+
+### Changed
+
+- A production check of `sjawhar/legion` wakes on Dispatch's `server.started` once every Dispatch
+  server process serves a build containing the merge, which is what that event now announces, and
+  the look's task names it `Dispatch serving build <sha> on every server process` where it said
+  `Dispatch's start on build <sha>`; the recorded cause keeps the name `dispatch start`. The
+  daemon's boot reads the build Dispatch's fleet serves from `/healthz`'s `fleet_commit`, falling
+  back to `commit` for a Dispatch older than the field. The `legion-worker` merge-gate reference and
+  the implementer's role prompt say so.
+- The `legion-controller` skill's daily-report reference and the `legion-worker` skill's findings
+  reference this plugin ships say a closed issue's close withdrew its open asks and a reopen brings
+  them back, where they said Dispatch hides them or takes them out of the Inbox.
+
+### Fixed
+
+- Daemon API contract 41 and plugin interface version 4: the operator's controller
+  start turn runs after Oh My Pi's startup, where the operator sees it, can type during it and can
+  interrupt it with Esc, and it is the session's first turn, ahead of any Envoy card or Legion
+  notice. The extension sent the start message (`LEGION_CONTROLLER_START_MESSAGE`) from its
+  `session_start` claim, and Oh My Pi holds every send a `session_start` handler makes and drains
+  them at the end of its startup, so the whole start turn ran inside the startup wait: the TUI
+  showed no start message and no busy row, Enter did not take typed text, and Esc did nothing. And
+  an Envoy card is a steer that starts its own turn, so with the role claimed during startup a card
+  on the role's lane, or a notice on the controller topic, could start its turn ahead of the start
+  message. The operator's controller now claims nothing at `session_start`: `legion controller
+  start` ends Oh My Pi's command line with `/legion-controller-start`, which Oh My Pi runs once its
+  startup is over and its TUI listens, and that new extension command runs the whole claim — the
+  start message read first, then the daemon's state and `claims/register` — and sends the start
+  message once the registration is in, right before the Envoy role claim and the controller-topic
+  subscription, so neither can deliver anything ahead of it (a card the listener forwards as soon
+  as it records the role can reach the session before the role claim's answer does), as a
+  follow-up when the operator already started a turn. The session is the controller to the
+  `legion` tool from its registration on, so the start turn's `read_state` and `set_status` work
+  while the role claim runs and after it fails. A send to an idle session names the session
+  current at the send in the plugin interface's new `startupTurn` (`{session, sentAt}` or
+  undefined) right before the send; a follow-up behind the operator's turn sets nothing, since that
+  run's one `agent_start` has already fired. A refusal anywhere in that claim is logged and shown
+  as one warning naming the refusal and `/legion-claim-controller`: refused before the send, that
+  command claims again and sends the start message once its claim succeeds; refused after it (the
+  role claim or the subscription), the warning says the start message was sent and the start turn
+  has the registration, and that command claims the role and its wakes again, sending nothing
+  more. Run again after a successful claim, or in any other session, the command says there is
+  nothing to do; run again once the start message is sent while the last claim that registered
+  (the one that sent it, or a later one) did not finish, it names `/legion-claim-controller` and
+  claims nothing. A `/new` while the command's claim runs stops that claim at its registration,
+  before the send, with no warning: the session change's re-claim registers the new session, sends
+  the start message there, and shows an info notice saying so. A claim that has to wait for one in
+  flight says so in one notice. A claim from `/legion-claim-controller` or a re-claim after a
+  session change sends the start message the same way when it is still unsent, and the message
+  still goes out once per process. A re-claim after a session change refused past its own
+  registration warns that the session keeps that registration; one refused before it warns that
+  the session has no controller grant. A re-claim that has to wait says so at once, while the
+  `/new` waits on it. Its refusal and that hand-over go to the host's extension widget
+  (`legion-controller-claim`), which Oh My Pi's `/new` leaves up when it resets the transcript
+  after the session_switch handlers return, a subagent view focused or not, until the session's
+  next run or a later claim that succeeds takes it down, so the operator
+  sees them. The session's first `agent_start` and its `session_shutdown` clear the mark. The
+  daemon-launched controller still claims at `session_start`, sends no start message of its own and
+  sets the mark, with `sentAt` now, right before `claims/ready`, after which the daemon delivers its
+  start prompt. `legion controller start` refuses a stdin that is not a terminal, right after the
+  operator token file's check and before any probe or mint: given the positional word and no
+  terminal, Oh My Pi would run headless print mode, running the start command after the mint
+  revoked the running controller. A pi-legion before 41 under this CLI would send from
+  `session_start` and then get the word as a prompt, and this plugin under an earlier CLI would
+  never claim the controller nor send the start, so the controller probe refuses either pair before
+  the mint. Install this release's pair with a `legion` built from the same commit.
+
 ## Before changelog fragments
 
 ### Added

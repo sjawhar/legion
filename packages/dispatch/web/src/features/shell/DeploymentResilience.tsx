@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
+import { REQUEST_DEADLINE_MS } from "../../api/client";
 import {
   borderStrong,
   card,
@@ -77,8 +78,14 @@ function runningIndexAsset(): string {
 // and a network failure, which rejects and which the caller swallows. A page that names no entry
 // chunk offers nothing either: the build ID it falls back to is never a live entry path, so under
 // `bun run dev` every focus would offer a reload.
+//
+// The request is held to the read deadline, its body included, so a check Dispatch never answers
+// gives up rather than holding one of the browser's few connections to it for good (INFRA-258).
 async function deploymentChanged(): Promise<boolean> {
-  const response = await fetch(DASHBOARD_BUILDS_PATH, { cache: "no-store" });
+  const response = await fetch(DASHBOARD_BUILDS_PATH, {
+    cache: "no-store",
+    signal: AbortSignal.timeout(REQUEST_DEADLINE_MS),
+  });
   if (response.status !== 200) {
     return false;
   }
@@ -136,6 +143,9 @@ function markPageLeavingForAnotherDocument(event: NavigateEvent): void {
 function markPageStaying(): void {
   leavingPage = false;
   lastDownloadUrl = undefined;
+  // A reload the reader turned down at a leave prompt - one an unconfirmed keyed send raises -
+  // leaves the tab's budget as it was: the page is plainly still theirs, so nothing is spent.
+  chunkReloadAskedAt = undefined;
 }
 
 function markPageStayingWhenVisible(): void {
@@ -176,6 +186,26 @@ export function spendChunkReload(now: number): boolean {
   return true;
 }
 
+// When a chunk failure asked for one of the tab's recovery reloads and the page has not gone yet;
+// undefined otherwise. The reload is spent as the page goes (`pagehide`), at that time, rather than
+// when it is asked for: the browser may never leave - a leave prompt the reader cancels, a reload
+// something else stops - and a reload asked for and never taken would leave the budget one short
+// with the failed chunk still on the page.
+let chunkReloadAskedAt: number | undefined;
+
+function spendAskedChunkReload(): void {
+  const askedAt = chunkReloadAskedAt;
+  if (askedAt === undefined) {
+    return;
+  }
+  chunkReloadAskedAt = undefined;
+  try {
+    spendChunkReload(askedAt);
+  } catch {
+    // A storage the browser refuses the page keeps no record; the reload still happens.
+  }
+}
+
 // Reloads the page for a chunk that failed to download while online, from the tab's budget.
 function reloadForChunkFailure(): void {
   if (leavingPage) {
@@ -186,9 +216,13 @@ function reloadForChunkFailure(): void {
   if (!navigator.onLine) {
     return;
   }
-  if (!spendChunkReload(Date.now())) {
+  if (chunkReloadAskedAt !== undefined) {
     return;
   }
+  if (recentChunkReloads(Date.now()).length >= CHUNK_RELOAD_BUDGET) {
+    return;
+  }
+  chunkReloadAskedAt = Date.now();
   window.location.reload();
 }
 
@@ -206,6 +240,7 @@ export function installChunkFailureRecovery(): () => void {
   const navigation = window.navigation;
   window.addEventListener("beforeunload", markPageLeaving);
   navigation?.addEventListener("navigate", markPageLeavingForAnotherDocument);
+  window.addEventListener("pagehide", spendAskedChunkReload);
   window.addEventListener("pageshow", markPageStaying);
   // Captured on the window, so a handler that stops a press from propagating cannot hide it.
   window.addEventListener("pointerdown", markPageStaying, { capture: true });
@@ -216,6 +251,7 @@ export function installChunkFailureRecovery(): () => void {
   return () => {
     window.removeEventListener("beforeunload", markPageLeaving);
     navigation?.removeEventListener("navigate", markPageLeavingForAnotherDocument);
+    window.removeEventListener("pagehide", spendAskedChunkReload);
     window.removeEventListener("pageshow", markPageStaying);
     window.removeEventListener("pointerdown", markPageStaying, { capture: true });
     window.removeEventListener("keydown", markPageStaying, { capture: true });

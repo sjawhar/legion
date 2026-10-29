@@ -13,27 +13,28 @@ import {
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
-// INFRA-492: how many reads one open tab sends while other sessions write. Every helper this file
-// uses exists at the commit before the change (16e4bb0f758e) and no `/api/v1/events/_test/*` hook
-// is touched, so the identical file runs at both commits: the budget and sidebar tests fail there
-// on their counts and pass at the change. The writer is an autonomous session acting through the
-// bearer API, as in `live.e2e.ts`; only alice's browser is real.
+// INFRA-492: how many reads one open tab sends while other sessions write. As #2324 wrote it, the
+// file ran unchanged at the commit before the change (16e4bb0f758e) and at the change, where the
+// budget and sidebar tests failed and passed on their counts. This copy is ported to the live
+// socket (`/ws/live`), which that commit did not serve, so it runs only from the live socket on.
+// The writer is an autonomous session acting through the bearer API, as in `live.e2e.ts`; only
+// alice's browser is real.
 const bob = { actor: { id: "bob", kind: "session" as const }, as: "agent" as const };
-const eventStreamUrl = /\/api\/v1\/events(\?|$)/;
 
 test.beforeEach(async () => {
   await resetDatabase();
 });
 
-/** What one page sends: its GETs under `/api/` (the event stream not counted) since the last
- *  `reset`, every read of one issue's detail since the page opened, and whether any request other
- *  than the stream is still in flight. */
+/** What one page sends: its GETs under `/api/` since the last `reset`, every read of one issue's
+ *  detail since the page opened, and whether any request is still in flight. The event feed rides
+ *  the page's live socket (`/ws/live`), which Playwright reports as a websocket and never as a
+ *  request, so none of these counts it. */
 interface Traffic {
-  /** Path and query of each GET under `/api/` since the last `reset`, the stream excepted. */
+  /** Path and query of each GET under `/api/` since the last `reset`. */
   readonly gets: string[];
   /** How many times `GET /api/v1/issues/<key>` (the full issue, not its summary) was sent. */
   issueReads(key: string): number;
-  /** Whether no request but the stream has been in flight for `ms`. */
+  /** Whether no request has been in flight for `ms`. */
   quietFor(ms: number): boolean;
   reset(): void;
 }
@@ -44,7 +45,6 @@ function watchTraffic(page: Page): Traffic {
   const inFlight = new Set<Request>();
   let lastSettledAt = Date.now();
   page.on("request", (request) => {
-    if (eventStreamUrl.test(request.url())) return;
     inFlight.add(request);
     const url = new URL(request.url());
     if (request.method() !== "GET" || !url.pathname.startsWith("/api/")) return;
@@ -70,7 +70,7 @@ function watchTraffic(page: Page): Traffic {
   };
 }
 
-/** Waits until no request but the event stream has been in flight for 500 ms. */
+/** Waits until no request has been in flight for 500 ms. */
 async function settled(traffic: Traffic): Promise<void> {
   await expect.poll(() => traffic.quietFor(500), { intervals: [100], timeout: 30_000 }).toBe(true);
 }
@@ -86,8 +86,8 @@ async function until(at: number): Promise<void> {
  * The event barrier, which needs nothing but the page and the API at either commit. Once the
  * header shows the open issue's current `title` (its first load landed), bob writes a new title,
  * again every 2 s, until the page has read `GET /api/v1/issues/<key>` once more than its loads so
- * far and the header shows the new title. Both can only happen after the page's event stream
- * delivered the write and the page handled it, so past this the stream is subscribed and every
+ * far and the header shows the new title. Both can only happen after the page's event feed
+ * delivered the write and the page handled it, so past this the feed is subscribed and every
  * event written before the barrier's has been handled. Returns the title it left.
  */
 async function eventBarrier(

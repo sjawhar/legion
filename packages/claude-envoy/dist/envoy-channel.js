@@ -6792,7 +6792,7 @@ var require_protocol = __commonJS(function(exports) {
     }
     disconnect() {
       this.dispatchStatus({ type: core_1.DebugEvents.StaleConnection, data: "" });
-      this.transport.disconnect();
+      this.transport.close();
     }
     reconnect() {
       if (this.connected) {
@@ -15633,6 +15633,7 @@ var require_node_transport = __commonJS(function(exports) {
         d.resolve(socket);
         socket.removeAllListeners();
       });
+      this.socket = socket;
       socket.on("error", (err) => {
         dialError = err;
       });
@@ -15915,8 +15916,11 @@ var require_node_transport = __commonJS(function(exports) {
     }
     _closed(err_1) {
       return __awaiter(this, arguments, undefined, function* (err, internal = true) {
-        if (!this.connected)
+        if (!this.connected) {
+          if (this.socket)
+            this.socket.destroy();
           return;
+        }
         if (this.done)
           return;
         this.closeError = err;
@@ -36256,6 +36260,21 @@ var MAX_ISSUE_PAGE_LIMIT = 250;
 var DEFAULT_ISSUE_PAGE_LIMIT = 50;
 var ASK_TURNS = ["human", "agent"];
 var DELIVERY_CAPABILITIES = ["aside", "btw", "steer"];
+var IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
+var IDEMPOTENCY_REPLAYED_HEADER = "Idempotency-Replayed";
+var IDEMPOTENCY_KEY_MAX = 128;
+var IDEMPOTENCY_KEY_PATTERN = new RegExp(`^[A-Za-z0-9._:-]{1,${IDEMPOTENCY_KEY_MAX}}$`);
+var IDEMPOTENCY_KEY_IN_FLIGHT = "KEY_IN_FLIGHT";
+var IDEMPOTENCY_KEY_COMMITTED = "KEY_COMMITTED";
+var IDEMPOTENCY_ANSWER_NOT_KEPT = "ANSWER_NOT_KEPT";
+function retriesUnderKey(status, code) {
+  return status >= 500 || status === 408 || status === 429 || status === 409 && code === IDEMPOTENCY_KEY_IN_FLIGHT;
+}
+function answerNotKept(status, replayed, body) {
+  return replayed && status >= 200 && status < 300 && typeof body === "object" && body !== null && Reflect.get(body, "code") === IDEMPOTENCY_ANSWER_NOT_KEPT;
+}
+var IDEMPOTENCY_KEY_TTL_MS = 24 * 60 * 60 * 1000;
+var IDEMPOTENCY_LEASE_MS = 60 * 1000;
 var DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
 var SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE = "embedder_unavailable";
 var IssueDeployedEventPayloadSchema = strictObject({
@@ -37280,7 +37299,43 @@ var LEGION_ROLES = [
   "reviewer",
   "merger"
 ];
+var PROJECT_TOKEN = /^[a-z0-9]+$/;
 var DISPATCH_KEY_PATTERN = /^([A-Z][A-Z0-9]*)-([0-9]+)$/;
+function roleForPhase(phase) {
+  switch (phase) {
+    case "planning":
+      return "planner";
+    case "implementing":
+    case "retro":
+      return "implementer";
+    case "testing":
+      return "tester";
+    case "reviewing":
+      return "reviewer";
+    case "accepting":
+      return "architect";
+    case "merging":
+      return "merger";
+    default:
+      return;
+  }
+}
+function isLegionProjectToken(project) {
+  return PROJECT_TOKEN.test(project);
+}
+function assertLegionProjectToken(project) {
+  if (!isLegionProjectToken(project)) {
+    throw new Error(`Invalid Legion project token: ${project}`);
+  }
+}
+function roleToken(project, issue, role) {
+  assertLegionProjectToken(project);
+  const dispatchMatch = DISPATCH_KEY_PATTERN.exec(issue);
+  if (!dispatchMatch)
+    throw new Error(`Invalid IssueKey: ${issue}`);
+  const [, dispatchProject, number] = dispatchMatch;
+  return `legion-${project}-${dispatchProject?.toLowerCase()}-${number}-${role}`;
+}
 // ../contracts/src/repo.ts
 function canonicalRepo(owner, repo) {
   return `${owner.trim().toLowerCase()}/${repo.trim().toLowerCase().replace(/\.git$/, "")}`;
@@ -38340,6 +38395,828 @@ function commandsHelp() {
 `);
 }
 
+// ../envoy-client/src/dispatch-http.ts
+class DispatchServiceError extends Error {
+  code;
+  status;
+  candidates;
+  current;
+  mismatches;
+  name = "DispatchServiceError";
+  fromDispatch = true;
+  constructor(code, status, message, candidates, current, mismatches) {
+    super(message);
+    this.code = code;
+    this.status = status;
+    this.candidates = candidates;
+    this.current = current;
+    this.mismatches = mismatches;
+  }
+}
+
+class DispatchGatewayError extends DispatchServiceError {
+  answer;
+  advice;
+  fromDispatch = false;
+  transient;
+  mayHaveReachedDispatch;
+  constructor(status, answer, advice, message = `${answer}, so ${advice}.`) {
+    super(`HTTP_${status}`, status, message);
+    this.answer = answer;
+    this.advice = advice;
+    this.transient = transientStatus(status);
+    this.mayHaveReachedDispatch = reachesDispatch(status);
+  }
+}
+
+class DispatchWriteUnsettledError extends Error {
+  last;
+  attempts;
+  name = "DispatchWriteUnsettledError";
+  constructor(last, attempts, unanswered) {
+    let answer;
+    let why = "an earlier attempt of the write may have reached Dispatch";
+    if (last instanceof DispatchGatewayError) {
+      answer = last.answer;
+    } else if (last instanceof DispatchServiceError) {
+      answer = `${last.code}: ${last.message}`;
+      if (last.code === IDEMPOTENCY_KEY_IN_FLIGHT) {
+        why = "Dispatch was still running an earlier attempt of the write";
+      }
+    } else {
+      answer = unanswered ?? last.message;
+      why = "an attempt of the write may have reached Dispatch";
+    }
+    const tried = attempts === 1 ? "its only attempt" : `the last of ${attempts} attempts`;
+    super(`${answer} (${tried}), and ${why}, so it may or may not have taken effect: check whether ` + "it did before retrying it.", { cause: last });
+    this.last = last;
+    this.attempts = attempts;
+  }
+}
+
+class DispatchWriteLandedError extends Error {
+  code;
+  status;
+  name = "DispatchWriteLandedError";
+  constructor(code, status, method, url) {
+    const lost = code === IDEMPOTENCY_ANSWER_NOT_KEPT ? "Dispatch kept no copy of its answer, which was too large" : "its answer was lost on the way back";
+    super(`${method} ${url} was made, but ${lost} (${code}), so this command cannot print what it ` + "made: read it back with `dispatch read`, or with the matching list for something it created.");
+    this.code = code;
+    this.status = status;
+  }
+}
+function asErrorShape(value) {
+  return typeof value === "object" && value !== null ? value : {};
+}
+function isJson(response) {
+  return response.headers.get("content-type")?.includes("application/json") ?? false;
+}
+function isNoRoute(error) {
+  return error instanceof DispatchServiceError && error.status === 404 && error.code === "NOT_FOUND" && error.message.startsWith("no route for ");
+}
+var ISSUE_EVENTS_PAGE_MAX = 200;
+var DISPATCH_TOOL_DEADLINE_MS = 60000;
+function requestSignal(signal) {
+  const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
+  return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+}
+var DISPATCH_WRITE_RETRY = {
+  pausesMs: [1000, 2000, 4000, 8000],
+  withinMs: 30000,
+  silenceMs: 20000
+};
+function pauseFor(ms, signal) {
+  const { promise, resolve, reject } = Promise.withResolvers();
+  if (signal.aborted) {
+    reject(signal.reason);
+    return promise;
+  }
+  const stop = () => {
+    clearTimeout(timer);
+    reject(signal.reason);
+  };
+  const timer = setTimeout(() => {
+    signal.removeEventListener("abort", stop);
+    resolve();
+  }, ms);
+  signal.addEventListener("abort", stop, { once: true });
+  return promise;
+}
+function retryAfterMs(response) {
+  const value = response.headers.get("Retry-After")?.trim() ?? "";
+  if (/^\d+$/.test(value))
+    return Number(value) * 1000;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? 0 : Math.max(0, at - Date.now());
+}
+var KEYED_LAYER_MEMORY_MS = 5 * 60000;
+var KEYED_LAYER_SEEN = new Map;
+var KEYED_LAYER_PROBES = new Map;
+var KEY_LAYER_PROBE_MS = 5000;
+function keyEchoed(response, key) {
+  const echoed = response.headers.get(IDEMPOTENCY_KEY_HEADER)?.trim() ?? "";
+  return echoed.replace(/^"(.*)"$/, "$1") === key;
+}
+var STREAMED_BODY_MIN = 1 << 20;
+var STREAMED_BODY_CHUNK = 64 << 10;
+function attemptBody(body, headers, progress) {
+  const bytes = typeof body.content === "string" ? new TextEncoder().encode(body.content) : body.content;
+  if (bytes.byteLength < STREAMED_BODY_MIN)
+    return { body: body.content, headers };
+  let sent = 0;
+  const stream = new ReadableStream({
+    pull(controller) {
+      progress();
+      if (sent >= bytes.byteLength) {
+        controller.close();
+        return;
+      }
+      const end = Math.min(sent + STREAMED_BODY_CHUNK, bytes.byteLength);
+      controller.enqueue(bytes.subarray(sent, end));
+      sent = end;
+    }
+  });
+  return { body: stream, headers: { ...headers, "Content-Length": String(bytes.byteLength) } };
+}
+
+class WriteAttemptSilent extends Error {
+  name = "WriteAttemptSilent";
+  constructor(silenceMs) {
+    super(`made no progress for ${silenceMs / 1000} s, so it was cut off`);
+  }
+}
+var NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
+async function writeAnswer(response, key) {
+  const echoed = keyEchoed(response, key);
+  if (response.ok || NULL_BODY_STATUSES.has(response.status)) {
+    return { response, again: false, reached: false, echoed, unjudged: false };
+  }
+  const { status } = response;
+  const text = await response.text();
+  let shape = {};
+  if (isJson(response)) {
+    try {
+      shape = asErrorShape(JSON.parse(text));
+    } catch {
+      shape = {};
+    }
+  }
+  const again = retriesUnderKey(status, shape.code);
+  return {
+    response: new Response(text, {
+      status,
+      statusText: response.statusText,
+      headers: response.headers
+    }),
+    again,
+    reached: status >= 500 || again && status === 409,
+    echoed,
+    unjudged: !echoed && typeof shape.error === "string"
+  };
+}
+function whyNotAPage(answer) {
+  if (typeof answer === "string") {
+    return `text that is not a JSON page, ${GATEWAY_PAGE}, so a retry may succeed.`;
+  }
+  let what;
+  if (Array.isArray(answer)) {
+    what = `a bare array of ${answer.length} entries, the unpaged listing, which means that Dispatch ` + "is older than sjawhar/legion#1612 or that change has regressed";
+  } else if (answer === null || typeof answer !== "object") {
+    what = answer === null ? "null" : `a ${typeof answer}`;
+  } else {
+    const fields = answer;
+    const lacking = [
+      ...Array.isArray(fields.issues) ? [] : ["an issues array"],
+      ...["total", "limit", "offset"].filter((name) => typeof fields[name] !== "number").map((name) => `a numeric ${name}`)
+    ];
+    if (lacking.length === 0)
+      return;
+    what = `an object without ${lacking.join(" or ")}`;
+  }
+  return `${what}. Retrying will not help: the same request gets the same answer until that ` + "Dispatch is upgraded or fixed.";
+}
+function whyNotAnArray(answer) {
+  if (typeof answer === "string")
+    return `text that is not JSON, ${GATEWAY_PAGE}, so a retry may succeed`;
+  if (answer === null)
+    return "null";
+  if (typeof answer !== "object")
+    return `a ${typeof answer}`;
+  if ("issues" in answer && Array.isArray(answer.issues)) {
+    return "a page, so this Dispatch pages a request that carries no limit and no offset";
+  }
+  return "an object that is not the listing";
+}
+var GATEWAY_PAGE = "which looks like a proxy or gateway page rather than Dispatch's own answer";
+function gatewayAdvice(method, status) {
+  if (!transientStatus(status)) {
+    return "a retry gets the same answer until the Dispatch URL, or whatever answers in its place, is fixed";
+  }
+  if (method === "GET")
+    return "a retry may succeed";
+  return reachesDispatch(status) ? "the write may or may not have reached Dispatch: check whether it took effect before retrying it" : "the write did not reach Dispatch, and a retry may succeed";
+}
+function transientStatus(status) {
+  return status >= 500 || status === 408 || status === 429;
+}
+function reachesDispatch(status) {
+  return status >= 500;
+}
+var REDACTED = "[redacted]";
+var EXCERPT_SCAN_LIMIT = 64 * 1024;
+var BEARER_PIECE = 8;
+function redactBearer(text, bearer) {
+  if (bearer === "")
+    return text.slice(0, EXCERPT_SCAN_LIMIT);
+  const length = Math.min(BEARER_PIECE, bearer.length);
+  const scanned = text.slice(0, EXCERPT_SCAN_LIMIT + length - 1);
+  const covered = new Uint8Array(scanned.length);
+  const pieces = new Set;
+  for (let at = 0;at + length <= bearer.length; at++)
+    pieces.add(bearer.slice(at, at + length));
+  for (const piece of pieces) {
+    let found = scanned.indexOf(piece);
+    while (found !== -1) {
+      covered.fill(1, found, found + length);
+      found = scanned.indexOf(piece, found + 1);
+    }
+  }
+  let redacted = "";
+  let kept = 0;
+  for (let start = covered.indexOf(1);start !== -1; start = covered.indexOf(1, kept)) {
+    redacted += `${scanned.slice(kept, start)}${REDACTED}`;
+    const end = covered.indexOf(0, start);
+    kept = end === -1 ? scanned.length : end;
+  }
+  return `${redacted}${scanned.slice(kept, EXCERPT_SCAN_LIMIT)}`.slice(0, EXCERPT_SCAN_LIMIT);
+}
+function excerpt(text, token) {
+  const plain = redactBearer(text, token.trim()).replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ").replace(/<[^<>]*>/g, " ");
+  return textHead(plain.replace(/(\bauthorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|digest|token)\s+)?)[^\s"'<>,;]+/gi, `$1${REDACTED}`).replace(/(\bbearer\s+)[^\s"'<>,;]+/gi, `$1${REDACTED}`));
+}
+
+class DispatchClient {
+  token;
+  fetchImpl;
+  writeRetry;
+  #baseUrl;
+  #resolvedIssues = new Map;
+  #signal;
+  constructor(baseUrl, token, fetchImpl = fetch, signal, writeRetry = DISPATCH_WRITE_RETRY) {
+    this.token = token;
+    this.fetchImpl = fetchImpl;
+    this.writeRetry = writeRetry;
+    this.#baseUrl = baseUrl.replace(/\/+$/, "");
+    this.#signal = requestSignal(signal);
+  }
+  async issue(input) {
+    return this.#json("POST", ["api", "v1", "issues"], input);
+  }
+  async resolveIssue(issueReference) {
+    return this.#resolveIssue(issueReference);
+  }
+  async listIssuePage(options, page) {
+    const path = ["api", "v1", "issues"];
+    const query = { ...options, limit: page.limit, offset: page.offset };
+    const answer = await this.#json("GET", path, undefined, query);
+    const refusal = whyNotAPage(answer);
+    if (refusal === undefined)
+      return answer;
+    throw new Error(`GET ${this.#url(path, query)} asked for a page ({issues, total, limit, offset}) and got ` + refusal);
+  }
+  async listAllIssues(options) {
+    const path = ["api", "v1", "issues"];
+    const query = { ...options };
+    const answer = await this.#json("GET", path, undefined, query);
+    if (Array.isArray(answer))
+      return answer;
+    throw new Error(`GET ${this.#url(path, query)} asked for the unpaged listing and got ${whyNotAnArray(answer)}.`);
+  }
+  async listProjectArtifacts(project, unlinked = false) {
+    return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);
+  }
+  async projectArtifact(project, input) {
+    return this.#upload(["api", "v1", "projects", project, "artifacts"], input);
+  }
+  async getProjectArtifact(project, slug) {
+    return this.#json("GET", ["api", "v1", "projects", project, "artifacts", slug]);
+  }
+  async agentArtifact(sessionId, input) {
+    return this.#upload(["api", "v1", "agents", sessionId, "artifacts"], input);
+  }
+  async getAgentArtifact(sessionId, slug) {
+    return this.#json("GET", ["api", "v1", "agents", sessionId, "artifacts", slug]);
+  }
+  async getIssueArtifact(issue, slug) {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue),
+      "artifacts",
+      slug
+    ]);
+  }
+  async search(query, options = {}) {
+    return this.#json("GET", ["api", "v1", "search"], undefined, { q: query, ...options });
+  }
+  async getIssue(issue) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue)]);
+  }
+  async updateIssue(issue, input) {
+    return this.#json("PATCH", ["api", "v1", "issues", await this.#resolveIssue(issue)], input);
+  }
+  async claimIssue(issue, input = {}) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"], input);
+  }
+  async releaseIssueClaim(issue, input = {}) {
+    return this.#json("DELETE", ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"], input);
+  }
+  async getIssueEvents(issue, after = 0, limit = ISSUE_EVENTS_PAGE_MAX) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "events"], undefined, { after, limit });
+  }
+  async read(issueReference, options = {}) {
+    const issueKey = await this.#resolveIssue(issueReference);
+    const issue = await this.getIssue(issueKey);
+    const requested = options.events;
+    const count = requested === undefined ? DEFAULT_ISSUE_READ_EVENTS : requested === "all" ? issue.last_seq : Math.min(requested, issue.last_seq);
+    const events = [];
+    let after = Math.max(0, issue.last_seq - count);
+    while (events.length < count) {
+      const limit = Math.min(ISSUE_EVENTS_PAGE_MAX, count - events.length);
+      const page = await this.getIssueEvents(issueKey, after, limit);
+      events.push(...page);
+      const last = page.at(-1);
+      if (page.length < limit || last === undefined || events.length >= count)
+        break;
+      if (last.seq <= after) {
+        throw new Error(`GET /api/v1/issues/${issueKey}/events?after=${after} answered no event after seq ${after}`);
+      }
+      after = last.seq;
+    }
+    return { issue, events };
+  }
+  async ask(issue, input) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "asks"], input);
+  }
+  async openAsks(sessionID, since) {
+    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, {
+      author_session: sessionID,
+      ...since === undefined ? {} : { since }
+    });
+  }
+  async openAsksForProject(project) {
+    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
+  }
+  async listAgents() {
+    return this.#json("GET", ["api", "v1", "agents"]);
+  }
+  async whoami() {
+    return this.#json("GET", ["api", "v1", "whoami"]);
+  }
+  async createProject(input) {
+    return this.#json("POST", ["api", "v1", "projects"], input);
+  }
+  async listProjects() {
+    return this.#json("GET", ["api", "v1", "projects"]);
+  }
+  async listArchitectureSources(project) {
+    try {
+      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
+    } catch (error) {
+      if (!isNoRoute(error))
+        throw error;
+    }
+    try {
+      const source = await this.#json("GET", [
+        "api",
+        "v1",
+        "projects",
+        project,
+        "architecture-source"
+      ]);
+      return source === null ? [] : [source];
+    } catch (error) {
+      if (error instanceof DispatchServiceError && error.status === 404 && error.code === "SOURCE_NOT_FOUND") {
+        return [];
+      }
+      throw error;
+    }
+  }
+  async syncArchitectureSources(project) {
+    try {
+      return await this.#json("POST", [
+        "api",
+        "v1",
+        "projects",
+        project,
+        "architecture-sources",
+        "sync"
+      ]);
+    } catch (error) {
+      if (!isNoRoute(error))
+        throw error;
+    }
+    const source = await this.#json("POST", [
+      "api",
+      "v1",
+      "projects",
+      project,
+      "architecture-source",
+      "sync"
+    ]);
+    return [source];
+  }
+  async syncArchitectureSource(project, repo) {
+    const [owner, name, ...rest] = repo.split("/");
+    if (!owner || !name || rest.length > 0) {
+      throw new Error(`repository must be owner/name, got ${JSON.stringify(repo)}`);
+    }
+    return this.#json("POST", [
+      "api",
+      "v1",
+      "projects",
+      project,
+      "architecture-sources",
+      owner,
+      name,
+      "sync"
+    ]);
+  }
+  async resolveAsk(id, input) {
+    return this.#json("POST", ["api", "v1", "asks", id, "resolve"], input);
+  }
+  async requestApproval(artifactID, input) {
+    const answer = await this.#jsonAnswer("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
+    return { ...answer.payload, recorded: answer.status === 201 };
+  }
+  async editAsk(id, input) {
+    return this.#json("PATCH", ["api", "v1", "asks", id], input);
+  }
+  async comment(issue, input) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"], input);
+  }
+  async listIssueAsks(issue, state) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "asks"], undefined, state === undefined ? undefined : { state });
+  }
+  async getArtifactAsks(id, state) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "asks"], undefined, state === undefined ? undefined : { state });
+  }
+  async artifactAsk(id, input) {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "asks"], input);
+  }
+  async suggest(issue, input) {
+    const { replace_with, ...comment } = input;
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"], {
+      ...comment,
+      suggestion: { replace_with }
+    });
+  }
+  async getArtifactComments(id) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "comments"]);
+  }
+  async artifactComment(id, input) {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], input);
+  }
+  async artifactSuggest(id, input) {
+    const { replace_with, ...comment } = input;
+    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], {
+      ...comment,
+      suggestion: { replace_with }
+    });
+  }
+  async message(issue, input) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "messages"], input);
+  }
+  async messageReply(id, input, options = {}) {
+    return this.#json("POST", ["api", "v1", "messages", id, "reply"], input, options.followUp === true ? { follow_up: "true" } : undefined);
+  }
+  async deliveryReply(resource, id, input) {
+    const collection = resource === "message" ? "messages" : "comments";
+    await this.#json("POST", ["api", "v1", collection, id, "reply"], input);
+  }
+  async getMessage(issue, id) {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue),
+      "messages",
+      id
+    ]);
+  }
+  async getMessageThread(id, session) {
+    return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
+  }
+  async acceptMessageDelivery(id, attempt, input) {
+    return this.#json("POST", ["api", "v1", "messages", id, "deliveries", String(attempt), "accept"], input);
+  }
+  async artifact(issue, input) {
+    return this.#upload(["api", "v1", "issues", await this.#resolveIssue(issue), "artifacts"], input);
+  }
+  async getArtifact(id) {
+    return this.#json("GET", ["api", "v1", "artifacts", id]);
+  }
+  async docRead(id, version) {
+    return version === undefined ? this.#json("GET", ["api", "v1", "artifacts", id, "text"]) : this.#json("GET", ["api", "v1", "artifacts", id, "versions", String(version)]);
+  }
+  async fileVersion(id, version) {
+    const url = this.#url(["api", "v1", "artifacts", id, "versions", String(version)]);
+    const response = await this.#send("GET", url, undefined, "*/*");
+    if (!response.ok)
+      return this.#response("GET", url, response);
+    return {
+      mime: response.headers.get("Content-Type") ?? "application/octet-stream",
+      bytes: new Uint8Array(await response.arrayBuffer())
+    };
+  }
+  async artifactBlocks(id) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
+  }
+  async docEdit(id, input) {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input);
+  }
+  async nameArtifactVersion(id, input) {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "versions"], input);
+  }
+  async getArtifactEvents(id, after = 0, limit = 200) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "events"], undefined, { after, limit });
+  }
+  async getArtifactReferences(id) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "references"]);
+  }
+  async getAsk(id) {
+    return this.#json("GET", ["api", "v1", "asks", id]);
+  }
+  async followAsk(id, sessionId, actor) {
+    await this.#json("PUT", ["api", "v1", "asks", id, "followers", sessionId], { actor });
+  }
+  async unfollowAsk(id, sessionId, actor) {
+    await this.#json("DELETE", ["api", "v1", "asks", id, "followers", sessionId], { actor });
+  }
+  async getComment(id) {
+    return this.#json("GET", ["api", "v1", "comments", id]);
+  }
+  async resolveComment(id, actor) {
+    return this.#json("POST", ["api", "v1", "comments", id, "resolve"], { actor });
+  }
+  async getComments(issue) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"]);
+  }
+  async getIssueReferences(issue) {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue),
+      "references"
+    ]);
+  }
+  async getReferences(query) {
+    return this.#json("GET", ["api", "v1", "references"], undefined, {
+      ..."to" in query ? { to: query.to } : { from: query.from },
+      ...query.kind === undefined || query.kind.length === 0 ? {} : { kind: query.kind.join(",") },
+      ...query.since === undefined ? {} : { since: query.since }
+    });
+  }
+  async#resolveIssue(issueReference) {
+    if (!issueReference.includes("#"))
+      return issueReference;
+    let resolved = this.#resolvedIssues.get(issueReference);
+    if (!resolved) {
+      resolved = this.#json("GET", ["api", "v1", "issues", "resolve"], undefined, {
+        ref: issueReference
+      }).then((resolution) => resolution.key);
+      this.#resolvedIssues.set(issueReference, resolved);
+    }
+    try {
+      return await resolved;
+    } catch (error) {
+      this.#resolvedIssues.delete(issueReference);
+      throw error;
+    }
+  }
+  async#json(method, path, body, query) {
+    return (await this.#jsonAnswer(method, path, body, query)).payload;
+  }
+  async#jsonAnswer(method, path, body, query) {
+    const url = this.#url(path, query);
+    const response = await this.#send(method, url, body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" });
+    return { status: response.status, payload: await this.#response(method, url, response) };
+  }
+  async#upload(path, input) {
+    if ("content" in input)
+      return this.#json("POST", path, input);
+    const form = new FormData;
+    form.set("name", input.name);
+    if (input.summary !== undefined)
+      form.set("summary", input.summary);
+    if (input.actor !== undefined)
+      form.set("actor", JSON.stringify(input.actor));
+    form.set("file", input.file, input.name);
+    return this.#form("POST", path, form);
+  }
+  async#form(method, path, form) {
+    const url = this.#url(path);
+    const encoded = new Response(form);
+    const type = encoded.headers.get("Content-Type") ?? "multipart/form-data";
+    const content = new Uint8Array(await encoded.arrayBuffer());
+    const response = await this.#send(method, url, { content, type });
+    return this.#response(method, url, response);
+  }
+  async#send(method, url, body, accept = "application/json") {
+    const headers = {
+      Accept: accept,
+      Authorization: `Bearer ${this.token}`
+    };
+    if (body !== undefined)
+      headers["Content-Type"] = body.type;
+    if (method !== "POST" && method !== "PATCH") {
+      return this.fetchImpl(url, {
+        method,
+        headers,
+        signal: this.#signal,
+        ...body === undefined ? {} : { body: body.content }
+      });
+    }
+    const key = crypto.randomUUID();
+    headers[IDEMPOTENCY_KEY_HEADER] = key;
+    const { pausesMs, withinMs, silenceMs, pause = pauseFor } = this.writeRetry;
+    const request = `${method} ${url}`;
+    const started = this.#now();
+    let reached = false;
+    for (let attempt = 1;; attempt++) {
+      let answer;
+      let thrown;
+      try {
+        answer = await writeAnswer(await this.#attempt(url, method, headers, body, silenceMs), key);
+        if (answer.echoed)
+          KEYED_LAYER_SEEN.set(this.#baseUrl, this.#now());
+        if (!answer.again)
+          return answer.response;
+        reached ||= answer.reached;
+      } catch (error) {
+        const name = error instanceof Error || error instanceof DOMException ? error.name : "";
+        if (!(error instanceof WriteAttemptSilent) && (this.#signal.aborted || name === "AbortError" || name === "TimeoutError")) {
+          throw this.#ended(error, request, attempt, true);
+        }
+        thrown = error;
+        reached = true;
+      }
+      const scheduled = pausesMs[attempt - 1];
+      const wait = Math.max(scheduled ?? 0, answer === undefined ? 0 : retryAfterMs(answer.response));
+      const inTime = scheduled !== undefined && this.#now() - started + wait <= withinMs;
+      if (!inTime || !(answer?.echoed || await this.#runsKeyedLayer(answer?.unjudged ?? false))) {
+        if (answer !== undefined) {
+          return this.#unsettled(method, url, answer.response, reached, attempt);
+        }
+        if (thrown instanceof WriteAttemptSilent) {
+          throw new DispatchWriteUnsettledError(thrown, attempt, `${request} ${thrown.message}`);
+        }
+        throw thrown;
+      }
+      await answer?.response.body?.cancel().catch(() => {
+        return;
+      });
+      try {
+        await pause(wait, this.#signal);
+      } catch (error) {
+        throw this.#ended(error, request, attempt, reached);
+      }
+    }
+  }
+  #now() {
+    return this.writeRetry.now?.() ?? performance.now();
+  }
+  async#attempt(url, method, headers, body, silenceMs) {
+    const cut = new AbortController;
+    const silent = () => cut.abort(new WriteAttemptSilent(silenceMs));
+    let timer = setTimeout(silent, silenceMs);
+    let answered = false;
+    const progress = () => {
+      if (answered)
+        return;
+      clearTimeout(timer);
+      timer = setTimeout(silent, silenceMs);
+    };
+    try {
+      return await this.fetchImpl(url, {
+        method,
+        signal: AbortSignal.any([this.#signal, cut.signal]),
+        ...body === undefined ? { headers } : attemptBody(body, headers, progress)
+      });
+    } catch (error) {
+      if (cut.signal.aborted && !this.#signal.aborted)
+        throw cut.signal.reason;
+      throw error;
+    } finally {
+      answered = true;
+      clearTimeout(timer);
+    }
+  }
+  #ended(error, request, attempts, mayHaveReached) {
+    const reason = this.#signal.aborted ? this.#signal.reason : error;
+    const timedOut = (reason instanceof Error || reason instanceof DOMException) && reason.name === "TimeoutError";
+    if (!timedOut || !mayHaveReached || !(error instanceof Error))
+      return error;
+    return new DispatchWriteUnsettledError(error, attempts, `${request} had no definitive answer when its deadline ended it`);
+  }
+  async#runsKeyedLayer(unjudged) {
+    const origin = this.#baseUrl;
+    if (unjudged)
+      KEYED_LAYER_SEEN.delete(origin);
+    const seen = KEYED_LAYER_SEEN.get(origin);
+    if (seen !== undefined && this.#now() - seen < KEYED_LAYER_MEMORY_MS)
+      return true;
+    let probe = KEYED_LAYER_PROBES.get(origin);
+    if (probe === undefined) {
+      probe = this.#probeKeyedLayer().finally(() => KEYED_LAYER_PROBES.delete(origin));
+      KEYED_LAYER_PROBES.set(origin, probe);
+    }
+    const runs = await probe;
+    if (runs)
+      KEYED_LAYER_SEEN.set(origin, this.#now());
+    return runs;
+  }
+  async#probeKeyedLayer() {
+    try {
+      const response = await this.fetchImpl(`${this.#baseUrl}/healthz`, {
+        method: "GET",
+        headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
+        signal: AbortSignal.any([this.#signal, AbortSignal.timeout(KEY_LAYER_PROBE_MS)])
+      });
+      if (!isJson(response))
+        return false;
+      const health = await response.json();
+      return typeof health === "object" && health !== null && Reflect.get(health, "idempotency_keys") === true;
+    } catch {
+      return false;
+    }
+  }
+  async#unsettled(method, url, response, reached, attempts) {
+    const refusal = await this.#response(method, url, response).catch((error) => error);
+    if (reached && refusal instanceof DispatchServiceError) {
+      const landedAlone = refusal instanceof DispatchGatewayError ? refusal.mayHaveReachedDispatch : refusal.status >= 500;
+      if (!landedAlone)
+        throw new DispatchWriteUnsettledError(refusal, attempts);
+    }
+    throw refusal;
+  }
+  #url(path, query) {
+    const url = new URL(`${path.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
+    if (query) {
+      for (const [name, value] of Object.entries(query)) {
+        if (typeof value === "string" || typeof value === "number") {
+          url.searchParams.set(name, String(value));
+        } else if (Array.isArray(value)) {
+          for (const item of value)
+            url.searchParams.append(name, String(item));
+        }
+      }
+    }
+    return url.toString();
+  }
+  async#response(method, url, response) {
+    const text = await response.text();
+    let payload = text;
+    if (text && isJson(response)) {
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        payload = text;
+      }
+    }
+    if (!response.ok) {
+      const error = asErrorShape(payload);
+      if (typeof error.error === "string") {
+        if (response.status === 409 && error.code === IDEMPOTENCY_KEY_COMMITTED) {
+          throw new DispatchWriteLandedError(IDEMPOTENCY_KEY_COMMITTED, response.status, method, url);
+        }
+        throw new DispatchServiceError(error.code ?? `HTTP_${response.status}`, response.status, error.error, error.candidates, error.current, error.mismatches);
+      }
+      const quoted = excerpt(text, this.token);
+      let body;
+      if (quoted !== "") {
+        body = `a body that is not Dispatch's error JSON (${JSON.stringify(quoted)})`;
+      } else if (text === "") {
+        body = "an empty body";
+      } else {
+        const within = text.length > EXCERPT_SCAN_LIMIT ? ` in its first ${EXCERPT_SCAN_LIMIT / 1024} KiB` : "";
+        const size = Buffer.byteLength(text).toLocaleString("en-US");
+        body = `a body of ${size} bytes and no readable text${within}`;
+      }
+      const reasonPhrase = excerpt(response.statusText, this.token);
+      const reason = reasonPhrase === "" ? "" : ` ${reasonPhrase}`;
+      throw new DispatchGatewayError(response.status, `${method} ${url} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`, gatewayAdvice(method, response.status));
+    }
+    const replayed = response.headers.get(IDEMPOTENCY_REPLAYED_HEADER)?.trim() === "?1";
+    if (answerNotKept(response.status, replayed, payload)) {
+      throw new DispatchWriteLandedError(IDEMPOTENCY_ANSWER_NOT_KEPT, response.status, method, url);
+    }
+    return payload;
+  }
+}
+
 // ../envoy-client/src/dispatch-owner.ts
 function documentLabel(project, slug) {
   return `${project}/${slug}`;
@@ -38576,19 +39453,12 @@ function dispatchReplyPath(resource, id) {
   return `/api/v1/${collection}/${encodeURIComponent(id)}/reply`;
 }
 async function postDeliveryReply(config, sessionId, delivery, result) {
-  const response = await fetch(`${config.url}${dispatchReplyPath(delivery.resource, delivery.id)}`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      actor: { kind: "session", id: sessionId },
-      attempt: delivery.attempt,
-      ...delivery.replyFields,
-      ...result
-    })
+  await new DispatchClient(config.url, config.token).deliveryReply(delivery.resource, delivery.id, {
+    actor: { kind: "session", id: sessionId },
+    attempt: delivery.attempt,
+    ...delivery.replyFields,
+    ...result
   });
-  if (!response.ok) {
-    throw new Error(`Dispatch reply failed: ${response.status} ${await response.text()}`);
-  }
 }
 function expectsLaneReceipt(frame) {
   return frame.reply !== undefined && frame.reply !== "" && frame.subject === frame.directSubject && frame.envelopeTopic !== undefined && frame.envelopeTopic !== frame.directSubject;
@@ -39684,563 +40554,6 @@ async function resolveOrigin(env, exec, cwd) {
       origin.pane = paneId;
   }
   return origin;
-}
-
-// ../envoy-client/src/dispatch-http.ts
-class DispatchServiceError extends Error {
-  code;
-  status;
-  candidates;
-  current;
-  mismatches;
-  name = "DispatchServiceError";
-  fromDispatch = true;
-  constructor(code, status, message, candidates, current, mismatches) {
-    super(message);
-    this.code = code;
-    this.status = status;
-    this.candidates = candidates;
-    this.current = current;
-    this.mismatches = mismatches;
-  }
-}
-
-class DispatchGatewayError extends DispatchServiceError {
-  answer;
-  advice;
-  fromDispatch = false;
-  transient;
-  mayHaveReachedDispatch;
-  constructor(status, answer, advice, message = `${answer}, so ${advice}.`) {
-    super(`HTTP_${status}`, status, message);
-    this.answer = answer;
-    this.advice = advice;
-    this.transient = transientStatus(status);
-    this.mayHaveReachedDispatch = reachesDispatch(status);
-  }
-}
-function asErrorShape(value) {
-  return typeof value === "object" && value !== null ? value : {};
-}
-function isJson(response) {
-  return response.headers.get("content-type")?.includes("application/json") ?? false;
-}
-function isNoRoute(error) {
-  return error instanceof DispatchServiceError && error.status === 404 && error.code === "NOT_FOUND" && error.message.startsWith("no route for ");
-}
-var ISSUE_EVENTS_PAGE_MAX = 200;
-var DISPATCH_TOOL_DEADLINE_MS = 60000;
-function requestSignal(signal) {
-  const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
-  return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
-}
-function whyNotAPage(answer) {
-  if (typeof answer === "string") {
-    return `text that is not a JSON page, ${GATEWAY_PAGE}, so a retry may succeed.`;
-  }
-  let what;
-  if (Array.isArray(answer)) {
-    what = `a bare array of ${answer.length} entries, the unpaged listing, which means that Dispatch ` + "is older than sjawhar/legion#1612 or that change has regressed";
-  } else if (answer === null || typeof answer !== "object") {
-    what = answer === null ? "null" : `a ${typeof answer}`;
-  } else {
-    const fields = answer;
-    const lacking = [
-      ...Array.isArray(fields.issues) ? [] : ["an issues array"],
-      ...["total", "limit", "offset"].filter((name) => typeof fields[name] !== "number").map((name) => `a numeric ${name}`)
-    ];
-    if (lacking.length === 0)
-      return;
-    what = `an object without ${lacking.join(" or ")}`;
-  }
-  return `${what}. Retrying will not help: the same request gets the same answer until that ` + "Dispatch is upgraded or fixed.";
-}
-function whyNotAnArray(answer) {
-  if (typeof answer === "string")
-    return `text that is not JSON, ${GATEWAY_PAGE}, so a retry may succeed`;
-  if (answer === null)
-    return "null";
-  if (typeof answer !== "object")
-    return `a ${typeof answer}`;
-  if ("issues" in answer && Array.isArray(answer.issues)) {
-    return "a page, so this Dispatch pages a request that carries no limit and no offset";
-  }
-  return "an object that is not the listing";
-}
-var GATEWAY_PAGE = "which looks like a proxy or gateway page rather than Dispatch's own answer";
-function gatewayAdvice(method, status) {
-  if (!transientStatus(status)) {
-    return "a retry gets the same answer until the Dispatch URL, or whatever answers in its place, is fixed";
-  }
-  if (method === "GET")
-    return "a retry may succeed";
-  return reachesDispatch(status) ? "the write may or may not have reached Dispatch: check whether it took effect before retrying it" : "the write did not reach Dispatch, and a retry may succeed";
-}
-function transientStatus(status) {
-  return status >= 500 || status === 408 || status === 429;
-}
-function reachesDispatch(status) {
-  return status >= 500;
-}
-var REDACTED = "[redacted]";
-var EXCERPT_SCAN_LIMIT = 64 * 1024;
-var BEARER_PIECE = 8;
-function redactBearer(text, bearer) {
-  if (bearer === "")
-    return text.slice(0, EXCERPT_SCAN_LIMIT);
-  const length = Math.min(BEARER_PIECE, bearer.length);
-  const scanned = text.slice(0, EXCERPT_SCAN_LIMIT + length - 1);
-  const covered = new Uint8Array(scanned.length);
-  const pieces = new Set;
-  for (let at = 0;at + length <= bearer.length; at++)
-    pieces.add(bearer.slice(at, at + length));
-  for (const piece of pieces) {
-    let found = scanned.indexOf(piece);
-    while (found !== -1) {
-      covered.fill(1, found, found + length);
-      found = scanned.indexOf(piece, found + 1);
-    }
-  }
-  let redacted = "";
-  let kept = 0;
-  for (let start = covered.indexOf(1);start !== -1; start = covered.indexOf(1, kept)) {
-    redacted += `${scanned.slice(kept, start)}${REDACTED}`;
-    const end = covered.indexOf(0, start);
-    kept = end === -1 ? scanned.length : end;
-  }
-  return `${redacted}${scanned.slice(kept, EXCERPT_SCAN_LIMIT)}`.slice(0, EXCERPT_SCAN_LIMIT);
-}
-function excerpt(text, token) {
-  const plain = redactBearer(text, token.trim()).replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ").replace(/<[^<>]*>/g, " ");
-  return textHead(plain.replace(/(\bauthorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|digest|token)\s+)?)[^\s"'<>,;]+/gi, `$1${REDACTED}`).replace(/(\bbearer\s+)[^\s"'<>,;]+/gi, `$1${REDACTED}`));
-}
-
-class DispatchClient {
-  token;
-  fetchImpl;
-  #baseUrl;
-  #resolvedIssues = new Map;
-  #signal;
-  constructor(baseUrl, token, fetchImpl = fetch, signal) {
-    this.token = token;
-    this.fetchImpl = fetchImpl;
-    this.#baseUrl = baseUrl.replace(/\/+$/, "");
-    this.#signal = requestSignal(signal);
-  }
-  async issue(input) {
-    return this.#json("POST", ["api", "v1", "issues"], input);
-  }
-  async resolveIssue(issueReference) {
-    return this.#resolveIssue(issueReference);
-  }
-  async listIssuePage(options, page) {
-    const path = ["api", "v1", "issues"];
-    const query = { ...options, limit: page.limit, offset: page.offset };
-    const answer = await this.#json("GET", path, undefined, query);
-    const refusal = whyNotAPage(answer);
-    if (refusal === undefined)
-      return answer;
-    throw new Error(`GET ${this.#url(path, query)} asked for a page ({issues, total, limit, offset}) and got ` + refusal);
-  }
-  async listAllIssues(options) {
-    const path = ["api", "v1", "issues"];
-    const query = { ...options };
-    const answer = await this.#json("GET", path, undefined, query);
-    if (Array.isArray(answer))
-      return answer;
-    throw new Error(`GET ${this.#url(path, query)} asked for the unpaged listing and got ${whyNotAnArray(answer)}.`);
-  }
-  async listProjectArtifacts(project, unlinked = false) {
-    return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);
-  }
-  async projectArtifact(project, input) {
-    return this.#upload(["api", "v1", "projects", project, "artifacts"], input);
-  }
-  async getProjectArtifact(project, slug) {
-    return this.#json("GET", ["api", "v1", "projects", project, "artifacts", slug]);
-  }
-  async agentArtifact(sessionId, input) {
-    return this.#upload(["api", "v1", "agents", sessionId, "artifacts"], input);
-  }
-  async getAgentArtifact(sessionId, slug) {
-    return this.#json("GET", ["api", "v1", "agents", sessionId, "artifacts", slug]);
-  }
-  async getIssueArtifact(issue, slug) {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue),
-      "artifacts",
-      slug
-    ]);
-  }
-  async search(query, options = {}) {
-    return this.#json("GET", ["api", "v1", "search"], undefined, { q: query, ...options });
-  }
-  async getIssue(issue) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue)]);
-  }
-  async updateIssue(issue, input) {
-    return this.#json("PATCH", ["api", "v1", "issues", await this.#resolveIssue(issue)], input);
-  }
-  async claimIssue(issue, input = {}) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"], input);
-  }
-  async releaseIssueClaim(issue, input = {}) {
-    return this.#json("DELETE", ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"], input);
-  }
-  async getIssueEvents(issue, after = 0, limit = ISSUE_EVENTS_PAGE_MAX) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "events"], undefined, { after, limit });
-  }
-  async read(issueReference, options = {}) {
-    const issueKey = await this.#resolveIssue(issueReference);
-    const issue = await this.getIssue(issueKey);
-    const requested = options.events;
-    const count = requested === undefined ? DEFAULT_ISSUE_READ_EVENTS : requested === "all" ? issue.last_seq : Math.min(requested, issue.last_seq);
-    const events = [];
-    let after = Math.max(0, issue.last_seq - count);
-    while (events.length < count) {
-      const limit = Math.min(ISSUE_EVENTS_PAGE_MAX, count - events.length);
-      const page = await this.getIssueEvents(issueKey, after, limit);
-      events.push(...page);
-      const last = page.at(-1);
-      if (page.length < limit || last === undefined || events.length >= count)
-        break;
-      if (last.seq <= after) {
-        throw new Error(`GET /api/v1/issues/${issueKey}/events?after=${after} answered no event after seq ${after}`);
-      }
-      after = last.seq;
-    }
-    return { issue, events };
-  }
-  async ask(issue, input) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "asks"], input);
-  }
-  async openAsks(sessionID, since) {
-    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, {
-      author_session: sessionID,
-      ...since === undefined ? {} : { since }
-    });
-  }
-  async openAsksForProject(project) {
-    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
-  }
-  async listAgents() {
-    return this.#json("GET", ["api", "v1", "agents"]);
-  }
-  async whoami() {
-    return this.#json("GET", ["api", "v1", "whoami"]);
-  }
-  async createProject(input) {
-    return this.#json("POST", ["api", "v1", "projects"], input);
-  }
-  async listProjects() {
-    return this.#json("GET", ["api", "v1", "projects"]);
-  }
-  async listArchitectureSources(project) {
-    try {
-      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
-    } catch (error) {
-      if (!isNoRoute(error))
-        throw error;
-    }
-    try {
-      const source = await this.#json("GET", [
-        "api",
-        "v1",
-        "projects",
-        project,
-        "architecture-source"
-      ]);
-      return source === null ? [] : [source];
-    } catch (error) {
-      if (error instanceof DispatchServiceError && error.status === 404 && error.code === "SOURCE_NOT_FOUND") {
-        return [];
-      }
-      throw error;
-    }
-  }
-  async syncArchitectureSources(project) {
-    try {
-      return await this.#json("POST", [
-        "api",
-        "v1",
-        "projects",
-        project,
-        "architecture-sources",
-        "sync"
-      ]);
-    } catch (error) {
-      if (!isNoRoute(error))
-        throw error;
-    }
-    const source = await this.#json("POST", [
-      "api",
-      "v1",
-      "projects",
-      project,
-      "architecture-source",
-      "sync"
-    ]);
-    return [source];
-  }
-  async syncArchitectureSource(project, repo) {
-    const [owner, name, ...rest] = repo.split("/");
-    if (!owner || !name || rest.length > 0) {
-      throw new Error(`repository must be owner/name, got ${JSON.stringify(repo)}`);
-    }
-    return this.#json("POST", [
-      "api",
-      "v1",
-      "projects",
-      project,
-      "architecture-sources",
-      owner,
-      name,
-      "sync"
-    ]);
-  }
-  async resolveAsk(id, input) {
-    return this.#json("POST", ["api", "v1", "asks", id, "resolve"], input);
-  }
-  async requestApproval(artifactID, input) {
-    const answer = await this.#jsonAnswer("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
-    return { ...answer.payload, recorded: answer.status === 201 };
-  }
-  async editAsk(id, input) {
-    return this.#json("PATCH", ["api", "v1", "asks", id], input);
-  }
-  async comment(issue, input) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"], input);
-  }
-  async listIssueAsks(issue, state) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "asks"], undefined, state === undefined ? undefined : { state });
-  }
-  async getArtifactAsks(id, state) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "asks"], undefined, state === undefined ? undefined : { state });
-  }
-  async artifactAsk(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "asks"], input);
-  }
-  async suggest(issue, input) {
-    const { replace_with, ...comment } = input;
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"], {
-      ...comment,
-      suggestion: { replace_with }
-    });
-  }
-  async getArtifactComments(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "comments"]);
-  }
-  async artifactComment(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], input);
-  }
-  async artifactSuggest(id, input) {
-    const { replace_with, ...comment } = input;
-    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], {
-      ...comment,
-      suggestion: { replace_with }
-    });
-  }
-  async message(issue, input) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "messages"], input);
-  }
-  async messageReply(id, input, options = {}) {
-    return this.#json("POST", ["api", "v1", "messages", id, "reply"], input, options.followUp === true ? { follow_up: "true" } : undefined);
-  }
-  async getMessage(issue, id) {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue),
-      "messages",
-      id
-    ]);
-  }
-  async getMessageThread(id, session) {
-    return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
-  }
-  async acceptMessageDelivery(id, attempt, input) {
-    return this.#json("POST", ["api", "v1", "messages", id, "deliveries", String(attempt), "accept"], input);
-  }
-  async artifact(issue, input) {
-    return this.#upload(["api", "v1", "issues", await this.#resolveIssue(issue), "artifacts"], input);
-  }
-  async getArtifact(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id]);
-  }
-  async docRead(id, version) {
-    return version === undefined ? this.#json("GET", ["api", "v1", "artifacts", id, "text"]) : this.#json("GET", ["api", "v1", "artifacts", id, "versions", String(version)]);
-  }
-  async fileVersion(id, version) {
-    const url = this.#url(["api", "v1", "artifacts", id, "versions", String(version)]);
-    const response = await this.fetchImpl(url, {
-      method: "GET",
-      headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` },
-      signal: this.#signal
-    });
-    if (!response.ok)
-      return this.#response("GET", url, response);
-    return {
-      mime: response.headers.get("Content-Type") ?? "application/octet-stream",
-      bytes: new Uint8Array(await response.arrayBuffer())
-    };
-  }
-  async artifactBlocks(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
-  }
-  async docEdit(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input);
-  }
-  async nameArtifactVersion(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "versions"], input);
-  }
-  async getArtifactEvents(id, after = 0, limit = 200) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "events"], undefined, { after, limit });
-  }
-  async getArtifactReferences(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "references"]);
-  }
-  async getAsk(id) {
-    return this.#json("GET", ["api", "v1", "asks", id]);
-  }
-  async followAsk(id, sessionId, actor) {
-    await this.#json("PUT", ["api", "v1", "asks", id, "followers", sessionId], { actor });
-  }
-  async unfollowAsk(id, sessionId, actor) {
-    await this.#json("DELETE", ["api", "v1", "asks", id, "followers", sessionId], { actor });
-  }
-  async getComment(id) {
-    return this.#json("GET", ["api", "v1", "comments", id]);
-  }
-  async resolveComment(id, actor) {
-    return this.#json("POST", ["api", "v1", "comments", id, "resolve"], { actor });
-  }
-  async getComments(issue) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"]);
-  }
-  async getIssueReferences(issue) {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue),
-      "references"
-    ]);
-  }
-  async getReferences(query) {
-    return this.#json("GET", ["api", "v1", "references"], undefined, {
-      ..."to" in query ? { to: query.to } : { from: query.from },
-      ...query.kind === undefined || query.kind.length === 0 ? {} : { kind: query.kind.join(",") },
-      ...query.since === undefined ? {} : { since: query.since }
-    });
-  }
-  async#resolveIssue(issueReference) {
-    if (!issueReference.includes("#"))
-      return issueReference;
-    let resolved = this.#resolvedIssues.get(issueReference);
-    if (!resolved) {
-      resolved = this.#json("GET", ["api", "v1", "issues", "resolve"], undefined, {
-        ref: issueReference
-      }).then((resolution) => resolution.key);
-      this.#resolvedIssues.set(issueReference, resolved);
-    }
-    try {
-      return await resolved;
-    } catch (error) {
-      this.#resolvedIssues.delete(issueReference);
-      throw error;
-    }
-  }
-  async#json(method, path, body, query) {
-    return (await this.#jsonAnswer(method, path, body, query)).payload;
-  }
-  async#jsonAnswer(method, path, body, query) {
-    const headers = {
-      Accept: "application/json",
-      Authorization: `Bearer ${this.token}`
-    };
-    if (body !== undefined)
-      headers["Content-Type"] = "application/json";
-    const url = this.#url(path, query);
-    const response = await this.fetchImpl(url, {
-      method,
-      headers,
-      signal: this.#signal,
-      ...body === undefined ? {} : { body: JSON.stringify(body) }
-    });
-    return { status: response.status, payload: await this.#response(method, url, response) };
-  }
-  async#upload(path, input) {
-    if ("content" in input)
-      return this.#json("POST", path, input);
-    const form = new FormData;
-    form.set("name", input.name);
-    if (input.summary !== undefined)
-      form.set("summary", input.summary);
-    if (input.actor !== undefined)
-      form.set("actor", JSON.stringify(input.actor));
-    form.set("file", input.file, input.name);
-    return this.#form("POST", path, form);
-  }
-  async#form(method, path, body) {
-    const url = this.#url(path);
-    const response = await this.fetchImpl(url, {
-      method,
-      headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
-      body,
-      signal: this.#signal
-    });
-    return this.#response(method, url, response);
-  }
-  #url(path, query) {
-    const url = new URL(`${path.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
-    if (query) {
-      for (const [name, value] of Object.entries(query)) {
-        if (typeof value === "string" || typeof value === "number") {
-          url.searchParams.set(name, String(value));
-        } else if (Array.isArray(value)) {
-          for (const item of value)
-            url.searchParams.append(name, String(item));
-        }
-      }
-    }
-    return url.toString();
-  }
-  async#response(method, url, response) {
-    const text = await response.text();
-    let payload = text;
-    if (text && isJson(response)) {
-      try {
-        payload = JSON.parse(text);
-      } catch {
-        payload = text;
-      }
-    }
-    if (!response.ok) {
-      const error = asErrorShape(payload);
-      if (typeof error.error === "string") {
-        throw new DispatchServiceError(error.code ?? `HTTP_${response.status}`, response.status, error.error, error.candidates, error.current, error.mismatches);
-      }
-      const quoted = excerpt(text, this.token);
-      let body;
-      if (quoted !== "") {
-        body = `a body that is not Dispatch's error JSON (${JSON.stringify(quoted)})`;
-      } else if (text === "") {
-        body = "an empty body";
-      } else {
-        const within = text.length > EXCERPT_SCAN_LIMIT ? ` in its first ${EXCERPT_SCAN_LIMIT / 1024} KiB` : "";
-        const size = Buffer.byteLength(text).toLocaleString("en-US");
-        body = `a body of ${size} bytes and no readable text${within}`;
-      }
-      const reasonPhrase = excerpt(response.statusText, this.token);
-      const reason = reasonPhrase === "" ? "" : ` ${reasonPhrase}`;
-      throw new DispatchGatewayError(response.status, `${method} ${url} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`, gatewayAdvice(method, response.status));
-    }
-    return payload;
-  }
 }
 
 // ../envoy-client/src/dispatch-picture-tools.ts
@@ -42401,7 +42714,7 @@ async function executeDispatchTool(input) {
     throw new ToolInputError(input.tool, checked.problems);
   const ownerArguments = checked.owner;
   const pictures = checked.pictures;
-  const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
+  const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal, input.writeRetry);
   if (input.tool === "dispatch_open_asks") {
     const client = dispatchClient();
     const project = optionalString(ownerArguments.args, "project");
@@ -42457,7 +42770,11 @@ async function executeDispatchTool(input) {
       throw new Error("issue or project is required");
     return owner;
   };
-  const postWithPictures = (text, limit, owner, upload) => textWithPictures(input.tool, text, pictures, limit, owner, upload, actor);
+  const postWithPictures = (text, limit, owner, upload) => textWithPictures(input.tool, text, pictures, limit, owner, (picture) => upload(picture).catch((error) => {
+    if (!(error instanceof DispatchWriteLandedError))
+      throw error;
+    throw new Error(`${error.message} That was a picture uploaded before this call's own write, so nothing else was written: run the call again, which uploads it as its next version.`, { cause: error });
+  }), actor);
   const writePictures = (resolved, text, limit) => {
     if (resolved?.owner.kind === "project") {
       const { project } = resolved.owner;
@@ -42569,6 +42886,9 @@ async function executeDispatchTool(input) {
             ref: dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id)
           };
         } catch (error) {
+          if (error instanceof DispatchWriteLandedError) {
+            throw new Error(`${error.message} That was the closing reason, so the close was not sent: read the issue's messages for it, then close with a reason that points at it, since retrying this call posts its reason again.`, { cause: error });
+          }
           const told = writeMayHaveLanded(error) ? "the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again" : "the reason was not posted, so the close was not sent";
           if (error instanceof DispatchServiceError)
             throw refusalWithCode(error, told);
@@ -42599,6 +42919,8 @@ async function executeDispatchTool(input) {
           actor
         });
       } catch (error) {
+        if (error instanceof DispatchWriteLandedError)
+          throw error;
         const taken = dispatchAnswered(error, 500) && newLinks.length > 0 ? `one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
         if (closingNote === undefined)
           throw refusalWithCode(error, taken);
@@ -43577,6 +43899,22 @@ function natsAuthOptions(seed) {
   return { authenticator: import_nats.nkeyAuthenticator(bytes) };
 }
 
+// ../envoy-client/src/nats-connection.ts
+var NATS_PING_INTERVAL_MS = 1e4;
+var NATS_MAX_PINGS_OUT = 2;
+function natsConnectionOptions(input) {
+  return {
+    servers: [...input.servers],
+    name: input.name,
+    ...natsAuthOptions(input.seed),
+    reconnect: true,
+    maxReconnectAttempts: -1,
+    reconnectTimeWait: 2000,
+    pingInterval: NATS_PING_INTERVAL_MS,
+    maxPingOut: NATS_MAX_PINGS_OUT
+  };
+}
+
 // ../envoy-client/src/envoy-config.ts
 import {
   chmodSync,
@@ -44185,7 +44523,9 @@ var SessionWireSchema = object({
   roles: array(string2()).optional(),
   capabilities: array(string2()).optional(),
   self_subscribed: boolean2(),
-  last_seen: number2().int().optional()
+  last_seen: number2().int().optional(),
+  plugin: string2().optional(),
+  plugin_version: string2().optional()
 });
 var RoleWireSchema = object({
   role: string2(),
@@ -44332,7 +44672,9 @@ function createEnvoyClient(config) {
       ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
       driving: input.driving,
       ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
-      host: machineID()
+      host: machineID(),
+      plugin: input.plugin.name,
+      plugin_version: input.plugin.version
     }))),
     unsubscribe: async (input) => {
       await post("/v1/interests/unsubscribe", {
@@ -45013,9 +45355,10 @@ function createReplayEngine(options) {
 function replaySuppressed(rendered) {
   return rendered.skip || rendered.malformedDelivery === true;
 }
+var REPLAYED_SUFFIX = "while this session's connection was down.";
 function replayedText(content, publishedAt) {
   return `${content}
-Published at ${publishedAt} while this session's connection was down.`;
+Published at ${publishedAt} ${REPLAYED_SUFFIX}`;
 }
 function failureNoticeFields(notice) {
   const readWith = notice.readWith === "dispatch read" ? "Read it with the `dispatch read` command on the issue or ask it concerns." : "Read it with the envoy_inbox tool.";
@@ -46302,11 +46645,14 @@ function parseStrictly(schema, body) {
 }
 function createLegionDaemonClient(baseUrl, fetchFn = fetch) {
   const endpoint = baseUrl.replace(/\/+$/, "");
-  const call = async (method, path, body) => {
-    const response = await fetchFn(`${endpoint}${path}`, body === undefined ? undefined : {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
+  const call = async (method, path, body, signal) => {
+    const response = await fetchFn(`${endpoint}${path}`, {
+      ...body === undefined ? {} : {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      },
+      ...signal === undefined ? {} : { signal }
     });
     const text = await response.text();
     if (response.ok)
@@ -46318,8 +46664,8 @@ function createLegionDaemonClient(baseUrl, fetchFn = fetch) {
     }
     throw new LegionDaemonApiError(method, path, response.status, undefined, `${JSON.stringify(text)} is not the daemon's refusal shape (${refusal.problem})`);
   };
-  const read = async (method, path, schema, body) => {
-    const { status, text } = await call(method, path, body);
+  const read = async (method, path, schema, body, signal) => {
+    const { status, text } = await call(method, path, body, signal);
     const parsed = parseStrictly(schema, text);
     if ("problem" in parsed) {
       throw new LegionDaemonContractError(method, path, status, parsed.problem);
@@ -46334,7 +46680,7 @@ function createLegionDaemonClient(baseUrl, fetchFn = fetch) {
     }
   };
   return {
-    state: () => read("GET", "/legion/v1/state", LegionStateResponse),
+    state: (options) => read("GET", "/legion/v1/state", LegionStateResponse, undefined, options?.signal),
     register: (input) => read("POST", "/legion/v1/claims/register", LegionRegisterResponse, input),
     registerController: (input) => read("POST", "/legion/v1/claims/register", LegionControllerRegisterResponse, input),
     ready: (input) => acknowledge("/legion/v1/claims/ready", input),
@@ -48832,10 +49178,12 @@ class StdioServerTransport {
 
 // src/envoy-channel-server.ts
 var import_nats2 = __toESM(require_mod4(), 1);
+
 // package.json
+var name = "@sjawhar/claude-envoy";
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 41
+  daemonApiVersion: 42
 };
 
 // src/channel-forwarder.ts
@@ -49314,13 +49662,19 @@ function claudeCommandLine(pid, read = processCommandLine, parent = parentProces
   }
   return;
 }
-function installedMarketplace(bundlePath) {
+function pluginCacheSegments(bundlePath) {
   const parts = bundlePath.split(sep);
-  for (let index = 0;index + 2 < parts.length; index++) {
+  for (let index = 0;index + 1 < parts.length; index++) {
     if (parts[index] === "plugins" && parts[index + 1] === "cache")
-      return parts[index + 2];
+      return parts.slice(index + 2);
   }
   return;
+}
+function installedMarketplace(bundlePath) {
+  return pluginCacheSegments(bundlePath)?.[0];
+}
+function installedPluginVersion(bundlePath) {
+  return pluginCacheSegments(bundlePath)?.[2];
 }
 var INLINE_MARKETPLACE = "inline";
 function loadedMarketplace(pluginRoot, bundlePath, commandLine) {
@@ -49719,7 +50073,8 @@ function legionPane(env) {
   return {
     daemonUrl: required("LEGION_DAEMON_URL"),
     configDir: required("CLAUDE_CONFIG_DIR"),
-    bootToken: pointer === undefined ? required("LEGION_BOOT_TOKEN") : readSecretFile("LEGION_BOOT_TOKEN_FILE", pointer)
+    bootToken: pointer === undefined ? required("LEGION_BOOT_TOKEN") : readSecretFile("LEGION_BOOT_TOKEN_FILE", pointer),
+    launcherSaves: configuredValue(env["LEGION_CLAUDE_SESSION_ID"]) !== undefined
   };
 }
 function logLegion(line) {
@@ -49740,17 +50095,33 @@ async function waitForTranscript(configDir, sessionID, signal, pollMs = 100) {
     signal.throwIfAborted();
     for (const directory of await readdir2(projects).catch(() => [])) {
       const file = join7(projects, directory, name);
-      if (await stat2(file).then((info) => info.isFile(), () => false))
+      if (await isFile(file))
         return file;
     }
     await delay(pollMs, undefined, { signal });
   }
+}
+var SAVED_MARKER_SUFFIX = ".legion-saved";
+async function waitForSavedTranscript(transcript, signal, pollMs = 100) {
+  const marker = `${transcript}${SAVED_MARKER_SUFFIX}`;
+  for (;; ) {
+    signal.throwIfAborted();
+    if (await isFile(marker))
+      return;
+    await delay(pollMs, undefined, { signal });
+  }
+}
+function isFile(file) {
+  return stat2(file).then((info) => info.isFile(), () => false);
 }
 function startLegionClaim(deps) {
   let capability;
   const { sessionID } = deps;
   const boot = async () => {
     const transcript = await waitForTranscript(deps.pane.configDir, sessionID, deps.signal, deps.pollMs);
+    if (deps.pane.launcherSaves) {
+      await waitForSavedTranscript(transcript, deps.signal, deps.pollMs);
+    }
     await bootLegionClaim({
       daemon: deps.daemon,
       registration: {
@@ -49850,6 +50221,595 @@ function createInboxNotifier(socketPath) {
       connected().write(`${JSON.stringify({ id, content: notification.params.content })}
 `);
       return settle.promise;
+    }
+  };
+}
+
+// src/legion-phase-hook.ts
+import { randomUUID as randomUUID3 } from "crypto";
+import { readFileSync as readFileSync7, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync3 } from "fs";
+import { dirname as dirname3, join as join8 } from "path";
+
+// ../pi-shared/src/phase-reminder.ts
+import { randomUUID as randomUUID2 } from "crypto";
+
+// ../pi-shared/src/phase-stall.ts
+var WAITING_REPLY = /^\W*WAITING\b/m;
+var TOOL_CALL_SHAPED = /<(?:[\w-]+:)?(?:function_calls\b|invoke\s+name\s*=|parameter\s+name\s*=)/;
+var REMINDER = "Your turn ended with your Legion phase still open: the `legion` tool's `handoff_complete` has " + "not succeeded since your assignment. If your phase's work is done, call the `legion` tool now " + "with op `handoff_complete` and the fields your role's instructions give. If you are waiting on " + "something (CI, a review, a person), reply with a line starting WAITING that names what you are " + "waiting on: that buys a quiet wait, and then this reminder comes again. This reminder repeats " + "at the end of every turn for as long as your phase is open.";
+var TEXT_TOOL_CALL = "Your last message holds a tool call written as text, so it did not run: make it a real tool call. ";
+function reminderText(lastAssistantText) {
+  return TOOL_CALL_SHAPED.test(lastAssistantText) ? TEXT_TOOL_CALL + REMINDER : REMINDER;
+}
+function stepPhaseStall(state, input) {
+  switch (input.kind) {
+    case "assignment":
+      return { state: { state: "open", count: 0 } };
+    case "phase-closed":
+      return { state: { state: "closed", count: 0 } };
+    case "inbound-event":
+      return state.state === "closed" ? { state } : { state: { state: "open", count: 0 } };
+    case "tool-call":
+      return { state: { state: state.state, count: 0 } };
+    case "reminded":
+      return state.state === "closed" ? { state } : { state: { state: "open", count: state.count + 1 } };
+    case "settle": {
+      if (state.state !== "open")
+        return { state };
+      if (WAITING_REPLY.test(input.lastAssistantText)) {
+        return { state: { state: "waiting", count: state.count } };
+      }
+      return { state, reminder: reminderText(input.lastAssistantText) };
+    }
+  }
+}
+function phaseStallFrom(data) {
+  if (!("state" in data) || typeof data.state !== "string")
+    return;
+  const recorded = "count" in data ? data.count : undefined;
+  const count = typeof recorded === "number" && Number.isInteger(recorded) && recorded >= 0 ? recorded : 0;
+  switch (data.state) {
+    case "closed":
+    case "open":
+    case "waiting":
+      return { state: data.state, count };
+    case "quiet":
+    case "text-call":
+      return { state: "open", count: 0 };
+    default:
+      return;
+  }
+}
+var LAST_MESSAGE_LIMIT = 500;
+function phaseStallReportFrom(data) {
+  const reported = "reported" in data && data.reported === true;
+  const key = "reportKey" in data && typeof data.reportKey === "string" ? data.reportKey : undefined;
+  return { reported, reportKey: key };
+}
+function phaseStallEntryFrom(data) {
+  if (data === undefined)
+    return;
+  const stall = phaseStallFrom(data);
+  if (stall === undefined)
+    return;
+  const report = phaseStallReportFrom(data);
+  const lastMessage = "lastMessage" in data && typeof data.lastMessage === "string" ? data.lastMessage.slice(0, LAST_MESSAGE_LIMIT) : "";
+  return {
+    state: stall.state,
+    count: stall.count,
+    reported: report.reported,
+    ...report.reportKey === undefined ? {} : { reportKey: report.reportKey },
+    ...lastMessage === "" ? {} : { lastMessage }
+  };
+}
+
+// ../pi-shared/src/phase-reminder.ts
+var RECORD_READ_BOUND_MS = 5000;
+function roleUnheld(error) {
+  if (!(error instanceof EnvoyApiError) || error.details.status !== 404)
+    return false;
+  let body;
+  try {
+    body = JSON.parse(error.details.responseBody);
+  } catch {
+    return false;
+  }
+  if (typeof body !== "object" || body === null || !("reason" in body))
+    return false;
+  return body.reason === "unclaimed" || body.reason === "holder_lapsed";
+}
+async function withBound(work, ms) {
+  const controller = new AbortController;
+  const deadline = Promise.withResolvers();
+  const timer = setTimeout(() => {
+    const late = new Error(`no answer within ${ms}ms`);
+    deadline.reject(late);
+    controller.abort(late);
+  }, ms);
+  try {
+    return await Promise.race([work(controller.signal), deadline.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function createPhaseReminder(deps) {
+  const boundMs = deps.recordBoundMs ?? RECORD_READ_BOUND_MS;
+  let stall = { state: "closed", count: 0 };
+  let reported = false;
+  let reportKey;
+  let generation = 0;
+  let turnRunning = false;
+  let continued = false;
+  let lastMessage = "";
+  let recorded = "";
+  const entryOf = () => ({
+    state: stall.state,
+    count: stall.count,
+    reported,
+    ...reportKey === undefined ? {} : { reportKey },
+    ...lastMessage === "" ? {} : { lastMessage }
+  });
+  const writeEntry = () => {
+    const entry = entryOf();
+    const written = JSON.stringify(entry);
+    if (written === recorded)
+      return;
+    recorded = written;
+    deps.saveEntry(entry);
+  };
+  recorded = JSON.stringify(entryOf());
+  const advance = (input) => {
+    const step = stepPhaseStall(stall, input);
+    stall = step.state;
+    if (stall.count === 0) {
+      reported = false;
+      reportKey = undefined;
+    }
+    writeEntry();
+    return step.reminder;
+  };
+  const recordCheck = async () => {
+    const claim = deps.claim();
+    if (claim === undefined)
+      return { reminds: true };
+    let record;
+    try {
+      record = (await withBound(deps.readState, boundMs)).issues[claim.issue];
+    } catch (error) {
+      deps.log.debug("legion: the daemon did not answer the phase reminder's record check", {
+        issue: claim.issue,
+        error: messageFor(error)
+      });
+      return { reminds: true };
+    }
+    if (record === undefined) {
+      deps.log.debug("legion: the daemon holds no record for this phase reminder's issue", {
+        issue: claim.issue
+      });
+      return { reminds: true };
+    }
+    if (roleForPhase(record.phase) !== claim.role) {
+      deps.log.debug("legion: this role no longer works this phase; no reminder is sent", {
+        issue: claim.issue,
+        phase: record.phase,
+        role: claim.role
+      });
+      return { reminds: false, record };
+    }
+    return { reminds: true, record };
+  };
+  const tellArchitect = async (record) => {
+    const claim = deps.claim();
+    if (claim === undefined)
+      return;
+    const publish = deps.publisher();
+    if (publish === undefined) {
+      deps.log.debug("legion: Envoy is off for this session; the architect is not told", {
+        issue: claim.issue,
+        reminders: stall.count
+      });
+      return;
+    }
+    reportKey ??= randomUUID2();
+    const key = reportKey;
+    writeEntry();
+    const phase = record?.phase ?? "unknown";
+    const reminders = stall.count;
+    try {
+      const live = record?.architect !== undefined && record.architect.state !== "retired" && record.architect.state !== "failed";
+      const topic = ROLE_TOPIC_PREFIX + roleToken(deps.project ?? "", live ? claim.issue : claim.tree, "architect");
+      await publish({
+        topic,
+        message: `The ${claim.role} of ${claim.issue} has let ${reminders} phase reminders go unanswered: ` + `its turns keep ending with the phase ${phase} still open and no successful ` + `handoff_complete, and nothing it does clears the reminder. ` + `What it last said was: ${lastMessage}`,
+        payload: JSON.stringify({
+          issue: claim.issue,
+          role: claim.role,
+          phase,
+          reminders,
+          lastMessage
+        }),
+        idempotencyKey: key,
+        sourceSessionID: claim.sessionID
+      });
+      if (reportKey !== key)
+        return;
+      reported = true;
+      writeEntry();
+    } catch (error) {
+      if (roleUnheld(error)) {
+        deps.log.debug("legion: no live session holds the architect role; telling it again later", {
+          issue: claim.issue,
+          reminders
+        });
+        return;
+      }
+      deps.log.warn("legion: the architect was not told its worker is stalled", {
+        issue: claim.issue,
+        reminders,
+        error: messageFor(error)
+      });
+    }
+  };
+  const deliver = async (reminder, record) => {
+    const uncounted = stall;
+    advance({ kind: "reminded" });
+    const counted = stall;
+    generation += 1;
+    const sentAt = generation;
+    try {
+      await deps.sendReminder(reminder);
+    } catch (error) {
+      deps.log.warn("legion: a phase reminder did not reach this worker; it comes again later", {
+        error: messageFor(error)
+      });
+      if (stall === counted) {
+        stall = uncounted;
+        writeEntry();
+      }
+      if (generation === sentAt)
+        armReminder(reminder, deps.limits.reminderMs);
+      return;
+    }
+    if (reported || stall.count < deps.limits.architectAfter)
+      return;
+    await tellArchitect(record);
+  };
+  const armReminder = (reminder, delayMs) => {
+    const armedAt = generation;
+    deps.armTimer(async () => {
+      if (generation !== armedAt || stall.state === "closed" || turnRunning)
+        return;
+      const check = await recordCheck();
+      if (!check.reminds)
+        return;
+      if (generation !== armedAt || turnRunning)
+        return;
+      await deliver(reminder, check.record);
+    }, delayMs);
+  };
+  return {
+    restore: (entry) => {
+      stall = entry === undefined ? { state: "closed", count: 0 } : { state: entry.state, count: entry.count };
+      reported = entry?.reported ?? false;
+      reportKey = entry?.reportKey;
+      lastMessage = entry?.lastMessage ?? "";
+      recorded = JSON.stringify(entryOf());
+    },
+    armResumeReminder: () => {
+      if (stall.state === "closed")
+        return;
+      armReminder(reminderText(""), deps.limits.resumeMs);
+    },
+    turnStarted: () => {
+      generation += 1;
+      turnRunning = true;
+    },
+    apply: (input) => {
+      if (input.kind === "phase-closed")
+        generation += 1;
+      advance(input);
+    },
+    settle: async (text, options) => {
+      turnRunning = false;
+      generation += 1;
+      if (stall.state !== "closed")
+        lastMessage = text.slice(0, LAST_MESSAGE_LIMIT);
+      const before = stall.count;
+      const reminder = advance({ kind: "settle", lastAssistantText: text });
+      if (stall.state === "waiting") {
+        continued = false;
+        armReminder(reminderText(text), deps.limits.waitingMs);
+        return;
+      }
+      if (reminder === undefined) {
+        continued = false;
+        return;
+      }
+      if (before !== 0 || continued || options?.canContinue === false) {
+        continued = false;
+        armReminder(reminder, deps.limits.reminderMs);
+        return;
+      }
+      if (!(await recordCheck()).reminds) {
+        continued = false;
+        return;
+      }
+      advance({ kind: "reminded" });
+      generation += 1;
+      continued = true;
+      return reminder;
+    },
+    sessionChanged: () => {
+      generation += 1;
+    }
+  };
+}
+
+// ../pi-shared/src/stall-limits.ts
+var DEFAULT_STALL_LIMITS = {
+  reminderMs: 300000,
+  waitingMs: 900000,
+  resumeMs: 120000,
+  architectAfter: 3
+};
+function integerSetting(env, log, name, fallback, least) {
+  const raw = env[name];
+  if (raw === undefined)
+    return fallback;
+  const value = raw.trim() === "" ? Number.NaN : Number(raw);
+  if (!Number.isInteger(value) || value < least) {
+    log.warn(`legion: ${name} is not an integer of ${least} or more; using ${fallback}`, {
+      value: raw
+    });
+    return fallback;
+  }
+  return value;
+}
+function stallLimits(env, log) {
+  return {
+    reminderMs: integerSetting(env, log, "LEGION_STALL_REMINDER_MS", DEFAULT_STALL_LIMITS.reminderMs, 0),
+    waitingMs: integerSetting(env, log, "LEGION_STALL_WAITING_MS", DEFAULT_STALL_LIMITS.waitingMs, 0),
+    resumeMs: integerSetting(env, log, "LEGION_STALL_RESUME_MS", DEFAULT_STALL_LIMITS.resumeMs, 0),
+    architectAfter: integerSetting(env, log, "LEGION_STALL_ARCHITECT_AFTER", DEFAULT_STALL_LIMITS.architectAfter, 2)
+  };
+}
+
+// ../pi-shared/src/workspace-recreated.ts
+var WORKSPACE_RECREATED_VARIABLE = "LEGION_WORKSPACE_RECREATED";
+function workspaceRecreated(environment) {
+  return environment[WORKSPACE_RECREATED_VARIABLE] === "true";
+}
+function workspaceRecreatedNotice(environment, issue) {
+  if (!workspaceRecreated(environment))
+    return;
+  return {
+    id: crypto.randomUUID(),
+    content: `Your workspace was recreated since your last turn: it holds what was pushed to legion/${issue} ` + "(the repository's default branch if nothing was), and anything you had not pushed is gone. " + "Before you continue, check the workspace against what you remember doing and re-read your " + "last handoff."
+  };
+}
+
+// src/legion-phase-hook.ts
+var PHASE_HOOK_TOOL_NAME = "legion_phase_hook";
+var PHASE_HOOK_REFUSAL = "legion_phase_hook is Claude Code's hook endpoint for Legion's phase reminder: Claude Code's " + "own hooks call it with the event they fire for, and it does nothing for a call the model " + "makes. Do not call it.";
+var HOOK_EVENTS = [
+  "Stop",
+  "StopFailure",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "UserPromptSubmit"
+];
+var WRITTEN_LINES_KEPT = 32;
+var hookArguments = object({
+  event: _enum2(HOOK_EVENTS),
+  lastAssistantMessage: string2().optional(),
+  stopHookActive: string2().optional(),
+  toolName: string2().optional(),
+  agentId: string2().optional(),
+  prompt: string2().optional()
+});
+function phaseHookToolDefinition() {
+  return {
+    name: PHASE_HOOK_TOOL_NAME,
+    description: PHASE_HOOK_REFUSAL,
+    inputSchema: toJSONSchema(hookArguments)
+  };
+}
+function phaseStallFile(configDir, sessionID) {
+  return join8(configDir, `legion-phase-stall-${sessionID}.json`);
+}
+function paneReminderLog(write) {
+  const line = (level, message, context) => {
+    write(context === undefined ? `${level}: ${message}` : `${level}: ${message} ${JSON.stringify(context)}`);
+  };
+  return {
+    debug: (message, context) => line("debug", message, context),
+    warn: (message, context) => line("warn", message, context)
+  };
+}
+var NO_RECORD = { entry: undefined, recreatedNoticeSent: false };
+function readPhaseStallRecord(file, log) {
+  let raw;
+  try {
+    raw = readFileSync7(file, "utf8");
+  } catch (error) {
+    const missing = typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+    if (!missing) {
+      log.warn("legion: the phase-stall state could not be read; this session starts afresh", {
+        file,
+        error: messageFor(error)
+      });
+    }
+    return NO_RECORD;
+  }
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch (error) {
+    log.warn("legion: the phase-stall state is not JSON; this session starts afresh", {
+      file,
+      error: messageFor(error)
+    });
+    return NO_RECORD;
+  }
+  if (typeof data !== "object" || data === null) {
+    log.warn("legion: the phase-stall state is not an object; this session starts afresh", { file });
+    return NO_RECORD;
+  }
+  const entry = phaseStallEntryFrom(data);
+  if (entry === undefined) {
+    log.warn("legion: the phase-stall state holds no state this build knows; starting afresh", {
+      file
+    });
+    return NO_RECORD;
+  }
+  return {
+    entry,
+    recreatedNoticeSent: "recreatedNoticeSent" in data && data.recreatedNoticeSent === true
+  };
+}
+function writePhaseStallRecord(file, entry, recreatedNoticeSent, log) {
+  const temporary = join8(dirname3(file), `.legion-phase-stall-${randomUUID3()}`);
+  try {
+    writeFileSync3(temporary, JSON.stringify({ ...entry, ...recreatedNoticeSent ? { recreatedNoticeSent } : {} }), { mode: 384 });
+    renameSync3(temporary, file);
+  } catch (error) {
+    rmSync4(temporary, { force: true });
+    log.warn("legion: the phase-stall state is not recorded for a relaunch", {
+      file,
+      error: messageFor(error)
+    });
+  }
+}
+function createPhaseHookEndpoint(deps) {
+  const limits = stallLimits(deps.env, deps.log);
+  const restored = readPhaseStallRecord(deps.stateFile, deps.log);
+  let entry = restored.entry ?? { state: "closed", count: 0, reported: false };
+  let recreatedNoticeSent = restored.recreatedNoticeSent;
+  const saveRecord = (next) => {
+    entry = next;
+    writePhaseStallRecord(deps.stateFile, next, recreatedNoticeSent, deps.log);
+  };
+  if (recreatedNoticeSent && !workspaceRecreated(deps.env)) {
+    recreatedNoticeSent = false;
+    saveRecord(entry);
+  }
+  let timer;
+  const dropTimer = () => {
+    if (timer === undefined)
+      return;
+    clearTimeout(timer);
+    timer = undefined;
+  };
+  const armTimer = (callback, delayMs) => {
+    dropTimer();
+    timer = setTimeout(() => {
+      timer = undefined;
+      callback();
+    }, delayMs);
+  };
+  let lastReminder;
+  const written = new Set;
+  const noteWritten = (content) => {
+    written.add(content);
+    for (const oldest of written) {
+      if (written.size <= WRITTEN_LINES_KEPT)
+        break;
+      written.delete(oldest);
+    }
+  };
+  const writeToSession = async (text, what) => {
+    const { inbox } = deps;
+    if (inbox === undefined) {
+      deps.log.warn(`legion: ${what} has no way to reach this worker: this session has no inbox`, {
+        text
+      });
+      return;
+    }
+    await inbox(text);
+  };
+  const sendReminder = (text) => {
+    lastReminder = text;
+    return writeToSession(text, "a phase reminder");
+  };
+  const reminder = createPhaseReminder({
+    sendReminder,
+    armTimer,
+    saveEntry: saveRecord,
+    claim: deps.claim,
+    readState: deps.readState,
+    publisher: () => deps.publish,
+    project: configuredValue(deps.env["LEGION_PROJECT"]),
+    limits,
+    log: deps.log
+  });
+  reminder.restore(restored.entry);
+  const sendRecreatedNotice = (issue) => {
+    if (recreatedNoticeSent)
+      return;
+    const notice = workspaceRecreatedNotice(deps.env, issue);
+    if (notice === undefined)
+      return;
+    recreatedNoticeSent = true;
+    saveRecord(entry);
+    noteWritten(notice.content);
+    writeToSession(notice.content, "the recreated-workspace notice").catch((error) => {
+      deps.log.warn("legion: the recreated-workspace notice did not reach this worker", {
+        error: messageFor(error)
+      });
+    });
+  };
+  deps.booted.then(() => {
+    const claim = deps.claim();
+    if (claim === undefined)
+      return;
+    sendRecreatedNotice(claim.issue);
+    if (claim.role !== "architect")
+      reminder.armResumeReminder();
+  });
+  return {
+    deliveryWritten: noteWritten,
+    phaseClosed: () => reminder.apply({ kind: "phase-closed" }),
+    stop: dropTimer,
+    handle: async (input) => {
+      const parsed = hookArguments.safeParse(input);
+      if (!parsed.success)
+        return { error: PHASE_HOOK_REFUSAL };
+      const event = parsed.data;
+      const claim = deps.claim();
+      if (claim === undefined || claim.role === "architect")
+        return {};
+      switch (event.event) {
+        case "Stop": {
+          deps.log.debug("legion: a Claude Code phase worker's turn is settling", {
+            issue: claim.issue,
+            role: claim.role,
+            stopHookActive: event.stopHookActive ?? ""
+          });
+          const reminded = await reminder.settle(event.lastAssistantMessage ?? "");
+          return reminded === undefined ? {} : { decision: "block", reason: reminded };
+        }
+        case "StopFailure": {
+          await reminder.settle(event.lastAssistantMessage ?? "", { canContinue: false });
+          return {};
+        }
+        case "PostToolUse":
+        case "PostToolUseFailure": {
+          if ((event.agentId ?? "") !== "")
+            return {};
+          reminder.apply({ kind: "tool-call" });
+          return {};
+        }
+        case "UserPromptSubmit": {
+          reminder.turnStarted();
+          dropTimer();
+          const prompt = event.prompt ?? "";
+          if (prompt === lastReminder)
+            return {};
+          const delivered = written.delete(prompt);
+          reminder.apply({ kind: delivered ? "inbound-event" : "assignment" });
+          return {};
+        }
+      }
     }
   };
 }
@@ -50028,9 +50988,9 @@ async function executeLegionTool(runtime, input, signal) {
 
 // src/replay-state.ts
 import { readFile as readFile2 } from "fs/promises";
-import { join as join8 } from "path";
+import { join as join9 } from "path";
 function replayStateFile(stateDirectory, sessionId) {
-  return join8(stateDirectory, `replay-${encodeURIComponent(sessionId)}.json`);
+  return join9(stateDirectory, `replay-${encodeURIComponent(sessionId)}.json`);
 }
 async function readReplayState(file) {
   let text;
@@ -50059,7 +51019,7 @@ async function writeReplayState(file, snapshot) {
 
 // src/session-title.ts
 import { execFileSync } from "child_process";
-import { readFileSync as readFileSync7 } from "fs";
+import { readFileSync as readFileSync8 } from "fs";
 import { basename as basename4 } from "path";
 var TMUX_PANE_FORMAT = [
   "#{session_name}",
@@ -50082,7 +51042,7 @@ function visible(value) {
 function parentPid(pid) {
   try {
     if (process.platform === "linux") {
-      const stat = readFileSync7(`/proc/${pid}/stat`, "utf8");
+      const stat = readFileSync8(`/proc/${pid}/stat`, "utf8");
       const parent = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
       return Number.isInteger(parent) ? parent : undefined;
     }
@@ -50105,21 +51065,45 @@ function isAncestor(candidate, pid = process.pid) {
   }
   return false;
 }
-function queryTmux(socket, pane, format) {
+async function queryTmux(socket, pane, format) {
+  let child;
   try {
-    const answer = execFileSync("tmux", ["-u", "-S", socket, "display-message", "-p", "-t", pane, format], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: TMUX_TIMEOUT_MS,
-      killSignal: "SIGKILL"
+    child = Bun.spawn(["tmux", "-u", "-S", socket, "display-message", "-p", "-t", pane, format], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore"
     });
-    return answer.trim() === "" ? undefined : answer;
   } catch {
     return;
   }
+  const reader = child.stdout.getReader();
+  const expired = Promise.withResolvers();
+  const timer = setTimeout(() => {
+    child.kill("SIGKILL");
+    reader.cancel().catch(() => {
+      return;
+    });
+    expired.resolve(undefined);
+  }, TMUX_TIMEOUT_MS);
+  const answered = (async () => {
+    const decoder = new TextDecoder;
+    let answer = "";
+    for (let chunk = await reader.read();!chunk.done; chunk = await reader.read()) {
+      answer += decoder.decode(chunk.value, { stream: true });
+    }
+    answer += decoder.decode();
+    return await child.exited === 0 && answer.trim() !== "" ? answer : undefined;
+  })().catch(() => {
+    return;
+  });
+  try {
+    return await Promise.race([answered, expired.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
-function tmuxPaneTitle(socket, serverPid, pane, ownPane, query = queryTmux) {
-  const fields = query(socket, pane, TMUX_PANE_FORMAT)?.replace(/\r?\n$/, "").split("\t");
+async function tmuxPaneTitle(socket, serverPid, pane, ownPane, query = queryTmux) {
+  const fields = (await query(socket, pane, TMUX_PANE_FORMAT))?.replace(/\r?\n$/, "").split("\t");
   if (fields === undefined || fields.length < 6)
     return;
   const [name = "", window2 = "", automaticRename, group = "", pid, panePid = ""] = fields.map(oneLine);
@@ -50133,7 +51117,7 @@ function tmuxPaneTitle(socket, serverPid, pane, ownPane, query = queryTmux) {
   }
   return /^[0-9]+$/.test(session) ? undefined : session;
 }
-function sessionTitle(environment, directory, sources = {}) {
+async function sessionTitle(environment, directory, sources = {}) {
   const {
     query = queryTmux,
     ownPane = (panePid) => isAncestor(panePid),
@@ -50149,7 +51133,7 @@ function sessionTitle(environment, directory, sources = {}) {
   const serverPid = parts.at(-2) ?? "";
   const pane = configuredValue(environment.TMUX_PANE)?.trim();
   const directoryName = oneLine(basename4(directory) || directory);
-  const name = (socket === "" || serverPid === "" || pane === undefined ? undefined : tmuxPaneTitle(socket, serverPid, pane, ownPane, query)) ?? (visible(directoryName) ? directoryName : "session");
+  const name = (socket === "" || serverPid === "" || pane === undefined ? undefined : await tmuxPaneTitle(socket, serverPid, pane, ownPane, query)) ?? (visible(directoryName) ? directoryName : "session");
   return (sessionId) => {
     const own = oneLine(chosen(sessionId) ?? "");
     return visible(own) ? own : `${name} ${sessionId.slice(0, SHORT_ID_LENGTH)}`;
@@ -50473,7 +51457,8 @@ async function startChannelSession(options) {
       title,
       capabilities: options.capabilities,
       driving: false,
-      selfSubscribed: true
+      selfSubscribed: true,
+      plugin: { name, version: options.pluginVersion }
     });
   };
   const restoreRole = async (previousSessionID = identity.id) => {
@@ -50698,8 +51683,12 @@ async function startChannelSession(options) {
   const heartbeatTimer = setInterval(() => {
     heartbeat();
   }, options.heartbeatMs);
+  const handoffFileChanged = (current) => {
+    if (current.ino !== 0)
+      requestHeartbeat();
+  };
   if (handoffFile !== undefined) {
-    watchFile(handoffFile, { interval: HANDOFF_POLL_MS }, requestHeartbeat);
+    watchFile(handoffFile, { interval: HANDOFF_POLL_MS }, handoffFileChanged);
     requestHeartbeat();
   }
   (async () => {
@@ -50762,7 +51751,7 @@ async function startChannelSession(options) {
       shuttingDown = true;
       clearInterval(heartbeatTimer);
       if (handoffFile !== undefined)
-        unwatchFile(handoffFile, requestHeartbeat);
+        unwatchFile(handoffFile, handoffFileChanged);
       await forwarder.close();
       await serialized(() => options.client.unregisterSession(identity.id)).catch((error) => {
         process.stderr.write(`envoy-channel: session deregistration failed \u2014 ${messageFor(error)}
@@ -50876,7 +51865,7 @@ async function runEnvoyChannelServer() {
 `);
   const overrideSessionId = process.env["ENVOY_SESSION_ID"];
   const pluginData = configuredValue(process.env["CLAUDE_PLUGIN_DATA"]);
-  const title = sessionTitle({
+  const title = await sessionTitle({
     ENVOY_SESSION_TITLE: process.env["ENVOY_SESSION_TITLE"],
     TMUX: process.env["TMUX"],
     TMUX_PANE: process.env["TMUX_PANE"]
@@ -50917,9 +51906,11 @@ async function runEnvoyChannelServer() {
   }), directory);
   const stateDirectory = pluginStateDirectory();
   const inboxSocket = configuredValue(process.env[INBOX_VARIABLE]);
+  const bundlePath = process.argv[1] ?? "";
+  const inbox = inboxSocket === undefined ? undefined : createInboxNotifier(inboxSocket);
   const channel = inboxSocket === undefined ? detectClaudeChannel({
     claudePid: process.ppid,
-    bundlePath: process.argv[1] ?? "",
+    bundlePath,
     environment: process.env
   }) : { loaded: true };
   if (!channel.loaded) {
@@ -50938,25 +51929,52 @@ async function runEnvoyChannelServer() {
   let runtime;
   let claim;
   const daemon = pane === undefined ? undefined : createLegionDaemonClient(pane.daemonUrl);
+  const phaseLog = paneReminderLog(logLegion);
+  const claimBooted = Promise.withResolvers();
+  const phaseHook = pane === undefined || daemon === undefined ? undefined : createPhaseHookEndpoint({
+    stateFile: phaseStallFile(pane.configDir, identity.id),
+    claim: () => claim?.capability(),
+    booted: claimBooted.promise,
+    readState: (signal) => daemon.state({ signal }),
+    inbox: inbox === undefined ? undefined : (text) => inbox.notification({
+      method: CHANNEL_NOTIFICATION_METHOD,
+      params: { content: text, meta: {} }
+    }),
+    publish: client.publish,
+    env: process.env,
+    log: phaseLog
+  });
   const toolDefinitions = [
     ...channelToolDefinitions(),
-    ...daemon === undefined ? [] : [legionToolDefinition()]
+    ...daemon === undefined ? [] : [legionToolDefinition(), phaseHookToolDefinition()]
   ];
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefinitions }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    if (phaseHook !== undefined && request.params.name === PHASE_HOOK_TOOL_NAME) {
+      return mcpResult(await phaseHook.handle(request.params.arguments));
+    }
     if (daemon !== undefined && request.params.name === LEGION_TOOL_NAME) {
       const legionRuntime = {
         daemon,
         claim: () => claim?.capability(),
         handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env })
       };
-      return mcpResult(await executeLegionTool(legionRuntime, request.params.arguments, extra.signal));
+      const answer = await executeLegionTool(legionRuntime, request.params.arguments, extra.signal);
+      const op = request.params.arguments?.["op"];
+      if (op === "handoff_complete" || op === "request_backward_move")
+        phaseHook?.phaseClosed();
+      return mcpResult(answer);
     }
     if (runtime === undefined)
       throw new Error("Envoy channel server is still starting");
     return mcpResult(await executeEnvoyTool(runtime, request.params.name, request.params.arguments));
   });
-  const notifier = inboxSocket === undefined ? server : createInboxNotifier(inboxSocket);
+  const notifier = inbox === undefined ? server : phaseHook === undefined ? inbox : {
+    notification: async (notification) => {
+      phaseHook.deliveryWritten(notification.params.content);
+      await inbox.notification(notification);
+    }
+  };
   const capabilities = inboxSocket !== undefined ? INBOX_CAPABILITIES : channel.loaded ? CHANNEL_CAPABILITIES : [];
   const booting = new AbortController;
   const stopped = Promise.withResolvers();
@@ -50967,6 +51985,7 @@ async function runEnvoyChannelServer() {
       return;
     stopping = true;
     booting.abort();
+    phaseHook?.stop();
     if (session === undefined) {
       stopped.resolve();
       return;
@@ -50988,14 +52007,11 @@ async function runEnvoyChannelServer() {
       stampOnce(() => identity.id);
       session = inboundOffChannelSession({ identity, stateDirectory, why: inbound.off });
     } else {
-      connection = await import_nats2.connect({
-        servers: [...inbound.natsUrls],
+      connection = await import_nats2.connect(natsConnectionOptions({
+        servers: inbound.natsUrls,
         name: `claude-envoy-channel-${identity.id}`,
-        ...natsAuthOptions(inbound.natsSeed),
-        reconnect: true,
-        maxReconnectAttempts: -1,
-        reconnectTimeWait: 2000
-      });
+        seed: inbound.natsSeed
+      }));
       session = await startChannelSession({
         identity,
         connection,
@@ -51006,6 +52022,7 @@ async function runEnvoyChannelServer() {
         configFile,
         stateDirectory,
         title,
+        pluginVersion: installedPluginVersion(bundlePath) ?? "source",
         ...stamping ? { stampTitle } : {},
         ...configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}
       });
@@ -51022,6 +52039,7 @@ async function runEnvoyChannelServer() {
         log: logLegion,
         stop: endPane
       });
+      claim.booted.then(claimBooted.resolve);
     }
     if (stopping)
       await session.shutdown();

@@ -272,31 +272,22 @@ const referenceExcerptLease = "reference-excerpts"
 // written by the binary a deploy replaces left behind, while both run; until a tick marks one,
 // GET /api/v1/references serves that older excerpt. A mention owed an excerpt is answered with
 // the document's name until this stores one.
+//
+// The ticks are duty.RunLeasedAfterEachPass's, each one the wait the pass before it asked for after
+// that pass returned, and so is the period each runs under: that wait, referenceExcerptStep while
+// drift remains and the full interval once none does. A tick inside it is a tick some process has
+// already made, so it is skipped; passing the full interval instead would make the converging 2 s
+// steps - this loop's whole point when a rebuild leaves thousands of mentions owed an excerpt - one
+// batch per five minutes. A tick whose lease another process holds, or whose period that process
+// has already served, waits the full interval: that process is doing this work, and the drift it
+// leaves is what the next tick to take the lease finds. leases is required, as it is of every
+// leased loop.
 func (s *Service) RunReferenceExcerptReconciliation(ctx context.Context, leases duty.Leases) {
 	ctx = store.WithTransactionTracking(ctx)
 	started := time.Now()
-	// period is this loop's own interval at this moment, which is the wait the last tick asked
-	// for: referenceExcerptStep while drift remains, the full interval once none does. A tick
-	// inside it is a tick some process has already made, so it is skipped; passing the full
-	// interval instead would make the converging 2 s steps - this loop's whole point when a
-	// rebuild leaves thousands of mentions owed an excerpt - one batch per five minutes.
-	period := ReferenceExcerptReconcileInterval
-	for {
-		// A tick whose lease another process holds, or whose period that process has already
-		// served, waits the full interval: that process is doing this work, and the drift it
-		// leaves is what the next tick to take the lease finds. leases is required, as it is of
-		// every leased loop.
-		wait := ReferenceExcerptReconcileInterval
-		duty.Exclusive(ctx, leases, referenceExcerptLease, period, func(ctx context.Context) {
-			wait = s.reconcileExcerptTick(ctx, started)
-		})
-		period = wait
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(wait):
-		}
-	}
+	duty.RunLeasedAfterEachPass(ctx, leases, referenceExcerptLease, ReferenceExcerptReconcileInterval, func(ctx context.Context) time.Duration {
+		return s.reconcileExcerptTick(ctx, started)
+	})
 }
 
 // reconcileExcerptTick is one tick of the reconciliation - the stale marking its first
