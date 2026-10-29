@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-593",
+  "completed": "2026-10-29T21:40:55Z",
+  "round": 6,
+  "headReviewed": "f8482b2f4ce20eab95ac87429474e8aaa5f57bb5",
+  "ciHead": "2dfde180b5995d963a349eb5e80df02afc5da43c",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "deltaSinceApproval": "From my approval at edd72926: six docs/solutions lessons (retro, renamed to ...-pr2444.md) and .legion handoffs only; no code. The six lessons cite code, tests and earlier solutions that exist (pgmigrate.CensusTableLimit, the pr2396 and transaction-never-waits solutions, Quiesce's pause) and name no private infrastructure.",
+  "ci": "At 2dfde180 (run 40927706871, which tests refs/pull/2444/merge, this branch merged into the current main): required lint, typecheck, test and pr-title passed; every other lane passed but envoy-go-race. Its first step, go test -race -timeout 30m over internal/dispatch/docs and the other dispatch packages, hit 'panic: test timed out after 30m0s' in internal/dispatch/docs at 1801.0 s, and again at 1800.9 s on the one re-run of the failed job (job 123716984268). At 26953da8, merged into an older main, the same package passed in 1565 s; at 3e89ac6f, 1523 s. On main alone it passes in 1741.6 s and 1759.8 s (CI runs 40904196639, 40902000005).",
+  "keyFindings": [
+    {"severity": "important", "file": ".github/workflows/ci.yaml", "description": "The merge of this PR into current main times out internal/dispatch/docs under envoy-go-race's -timeout 30m, twice in a row (1801.0 s, 1800.9 s). Main alone already uses 1742-1760 s of the 1800 s; this PR's added docs tests carry the merged package past it. Once merged, the lane goes red on main and on every branch. Make the merged package fit: shorten this PR's slowest docs tests (real waits, 30 s awaits, backdating loops), or give internal/dispatch/docs a race step of its own with a timeout and job timeout-minutes that fit it, keeping the 'timeout fires before the job is cancelled' rule the job comment states. Prove it with a green envoy-go-race at the new head."}
+  ],
+  "notDefects": [],
+  "reportedOutside": "Main's own margin (1742-1760 s of 1800 s) was sent to the INFRA controller with the run ids at 19:50 UTC."
+}
