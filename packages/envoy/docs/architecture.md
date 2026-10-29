@@ -77,7 +77,8 @@ attempt:
 
 | Outcome of the attempt | Answer |
 | --- | --- |
-| The store says the key is gone (`nats.ErrKeyNotFound`, which also covers a session id no session can register under) | `404 {"error":"no live session <id>"}` |
+| The store says the key is gone (`nats.ErrKeyNotFound`, which also covers a session id no session can register under) and this listener holds the registration's last heartbeat | `404 {"error":"no live session <id>: its registration lapsed, last seen <age> ago"}` |
+| The store says the key is gone and this listener holds no record of one lapsing (a stale or mistyped id, or a session gone longer than one registry TTL) | `404 {"error":"no live session <id>: no registration, and none lapsed in the last <ttl>; check the session id"}` |
 | The store read did not answer (its second ran out, or the read failed any other way) | `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1` |
 | The target is live but does not advertise the frame's `delivery.mode`, or that mode cannot be read unambiguously | `403` naming the session, and the mode when it could be read |
 | The publish is refused as too large (`bus.ErrTooLarge`) | `413` naming the size against the server's max payload |

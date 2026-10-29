@@ -82,7 +82,10 @@ summary line repeating its first line.
 
 It also proves the three answers a sender gets when a send cannot be delivered:
 a send to a session the store does not hold is refused `404 {"error":"no live
-session <id>"}`; each send leaves exactly one `listener send` record in
+session <id>: no registration, and none lapsed in the last <ttl>; check the
+session id"}`, the wording for an id this listener never held a registration
+for (one it watched lapse names that registration's last heartbeat instead);
+each send leaves exactly one `listener send` record in
 `listener.log`, INFO when accepted and WARN when refused, carrying
 `target_session`, `event_id`, `source`, `source_session`, `payload_summary`,
 `outcome` and `status`; and a send whose bus is gone is refused `503` with

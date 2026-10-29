@@ -433,7 +433,10 @@ jq -e --arg recipient "$session_id" --arg message "$direct_message" \
 
 # A send to a session id nothing registered. The store holds no key for it, so the listener refuses
 # the send by name instead of publishing into a topic no one reads: the sender is told which
-# session is gone, and can route around that pane. `curl -fsS` cannot assert a refusal (it prints
+# session is gone, and can route around that pane. The refusal also says which absence it is —
+# here no registration at all, since this listener never held one for this id, which is what a
+# stale or mistyped id reads as; a registration it watched lapse names the last heartbeat instead.
+# `curl -fsS` cannot assert a refusal (it prints
 # no body and exits non-zero), so this takes the status from -w as the unheld-role publish above does.
 printf 'posting a direct message to an unregistered session\n'
 absent_summary="Absent session acceptance summary."
@@ -445,8 +448,10 @@ absent_status="$(curl -sS -o "$absent_session_response_file" -w '%{http_code}' \
   -X POST -H 'Content-Type: application/json' \
   "${listener_url}/v1/messages/send" -d "$absent_body")"
 if [[ "$absent_status" != 404 ]] || ! jq -e --arg session_id "$absent_session_id" \
-  '.error == ("no live session " + $session_id)' "$absent_session_response_file" >/dev/null; then
-  printf 'ERR: a send to the unregistered session %s answered HTTP %s, not a 404 naming it.\n' \
+  '(.error | startswith("no live session " + $session_id + ": "))
+   and (.error | endswith("check the session id"))
+   and (.error | contains("no registration"))' "$absent_session_response_file" >/dev/null; then
+  printf 'ERR: a send to the unregistered session %s answered HTTP %s, not a 404 naming it and saying it holds no registration.\n' \
     "$absent_session_id" "$absent_status" >&2
   cat "$absent_session_response_file" >&2
   exit 1

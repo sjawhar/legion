@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -660,7 +661,8 @@ func TestSendRefusesTheBusRatherThanTheSessionWhenTheStoreReadDoesNotAnswer(t *t
 	if answered.Code != http.StatusNotFound {
 		t.Fatalf("a send whose bucket read answered that the key is gone: status %d, body %s; want 404", answered.Code, answered.Body.String())
 	}
-	if got, want := strings.TrimSpace(answered.Body.String()), fmt.Sprintf(`{"error":"no live session %s"}`, target); got != want {
+	if got, want := strings.TrimSpace(answered.Body.String()),
+		fmt.Sprintf(`{"error":%q}`, noLiveSessionRefusal(target, 0, observer.sessions.TTL(), time.Now())); got != want {
 		t.Fatalf("the 404 body is %s, want %s", got, want)
 	}
 	assertRecordFields(t, answeredRecord, map[string]any{
@@ -704,4 +706,126 @@ func TestSendRefusesTheBusRatherThanTheSessionWhenTheStoreReadDoesNotAnswer(t *t
 		"target_session": target,
 		"source_session": sender,
 	})
+}
+
+// A send is refused 404 for two different facts, and said one sentence for both: the session's
+// registration lapsed while its process runs, or Envoy holds no registration under that id at
+// all. A sender can act on each and on neither as the other: a lapsed session comes back, and a
+// wrong id never does. On 2026-10-29 an agent completed a session id it had been given as its
+// first group alone, sent to the id it had made, read "no live session" as the answer about the
+// session it meant, and wrote that session down as dead in a note and in messages to other
+// agents while it was registering every 90 s; the same night a session whose process stalled
+// past the bucket's TTL was refused the same sentence while it ran (dispatch://INFRA-392).
+//
+// The two sends below differ in one thing: whether this listener's registry ever held the
+// target. Each is answered by the same route with the same status, and the bodies and the
+// records must name which fact it is, or the pair cannot be told apart by anything downstream.
+func TestSendNamesWhetherTheTargetLapsedOrNeverRegistered(t *testing.T) {
+	const lapsedTarget = "ses_lapsed_registration"
+	const unknownTarget = "ses_never_registered"
+	const sender = "ses_bounce_sender"
+	// A short bucket TTL ages the registration out as a stalled session's does, inside a test.
+	const ttl = 2 * time.Second
+	client := setupPublishTestClient(t)
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open the interest registry: %v", err)
+	}
+	sessions, err := session.OpenSessionRegistry(
+		client.Conn,
+		session.WithSessionReplicas(1),
+		session.WithSessionTTL(ttl),
+	)
+	if err != nil {
+		t.Fatalf("open the session registry: %v", err)
+	}
+	if got := sessions.TTL(); got != ttl {
+		t.Fatalf("session TTL = %s, want %s: the bucket this test ages a registration out of is not its own", got, ttl)
+	}
+	deps := &listenerDeps{registry: registry, sessions: sessions, client: client}
+	if err := sessions.Put(lapsedTarget, session.SessionEntry{
+		MachineID: "test-machine",
+		Dir:       "/test/" + lapsedTarget,
+		Port:      4242,
+	}); err != nil {
+		t.Fatalf("register %s: %v", lapsedTarget, err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if _, err := sessions.Get(lapsedTarget); errors.Is(err, nats.ErrKeyNotFound) {
+			break
+		} else if err != nil {
+			t.Fatalf("read %s back while waiting for its registration to lapse: %v", lapsedTarget, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s's registration had not lapsed %s after it was written, with a %s TTL", lapsedTarget, time.Since(deadline), ttl)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	send := func(target string) (*httptest.ResponseRecorder, map[string]any) {
+		t.Helper()
+		return serveRecorded(t, func(logger *logging.Logger) http.HandlerFunc {
+			return sendHandler(deps, logger)
+		}, postJSON("/v1/messages/send", sendBody(map[string]any{
+			"target_session": target,
+			"source":         "agent",
+			"source_session": sender,
+			"message":        "are you there?",
+		})))
+	}
+	errorOf := func(recorder *httptest.ResponseRecorder) string {
+		t.Helper()
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("status %d, body %s; want 404", recorder.Code, recorder.Body.String())
+		}
+		var refusal apiError
+		if err := json.Unmarshal(recorder.Body.Bytes(), &refusal); err != nil {
+			t.Fatalf("decode the refusal %s: %v", recorder.Body.String(), err)
+		}
+		return refusal.Error
+	}
+
+	lapsed, lapsedRecord := send(lapsedTarget)
+	lapsedError := errorOf(lapsed)
+	// The prefix is the contract: Dispatch classifies a delivery failure on it
+	// (internal/dispatch/api/comment_delivery.go) and the dashboard prints the whole text.
+	if !strings.HasPrefix(lapsedError, "no live session "+lapsedTarget) {
+		t.Fatalf("the lapsed target's refusal reads %q, want it to begin with the prefix Dispatch classifies on", lapsedError)
+	}
+	if !strings.Contains(lapsedError, "registration lapsed") || !strings.Contains(lapsedError, "last seen") {
+		t.Fatalf("the lapsed target's refusal reads %q: it must say the registration lapsed and when it was last seen", lapsedError)
+	}
+	assertRecordFields(t, lapsedRecord, map[string]any{
+		"msg":            "listener send",
+		"level":          "WARN",
+		"outcome":        "no_live_session",
+		"status":         float64(http.StatusNotFound),
+		"target_session": lapsedTarget,
+		"source_session": sender,
+	})
+	recordedLastSeen, ok := lapsedRecord["last_seen"].(float64)
+	if !ok || recordedLastSeen <= 0 {
+		t.Fatalf("the lapsed target's line carries last_seen %#v, want the heartbeat it lapsed from: an operator counts these two refusals apart by it", lapsedRecord["last_seen"])
+	}
+
+	unknown, unknownRecord := send(unknownTarget)
+	unknownError := errorOf(unknown)
+	if !strings.HasPrefix(unknownError, "no live session "+unknownTarget) {
+		t.Fatalf("the unregistered target's refusal reads %q, want it to begin with the prefix Dispatch classifies on", unknownError)
+	}
+	if !strings.Contains(unknownError, "no registration") || !strings.Contains(unknownError, "check the session id") {
+		t.Fatalf("the unregistered target's refusal reads %q: it must say there is no registration and that the id is worth checking", unknownError)
+	}
+	// Never a claim that the id never existed: this listener holds a lapsed registration's last
+	// heartbeat for one TTL, so the sentence names that window and nothing beyond it.
+	if !strings.Contains(unknownError, ttl.String()) {
+		t.Fatalf("the unregistered target's refusal reads %q, want it to name the %s window it speaks for", unknownError, ttl)
+	}
+	if strings.Contains(unknownError, "lapsed, last seen") {
+		t.Fatalf("the unregistered target's refusal reads %q: nothing lapsed, so it must not read as a session that was working", unknownError)
+	}
+	if _, carried := unknownRecord["last_seen"]; carried {
+		t.Fatalf("the unregistered target's line carries last_seen %#v, want the field left off: this listener never saw it heartbeat", unknownRecord["last_seen"])
+	}
 }

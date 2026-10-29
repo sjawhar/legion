@@ -943,8 +943,16 @@ func TestSendHandler_RejectsUnknownTarget(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
 		t.Fatalf("decode error response: %v", err)
 	}
-	if response.Error != "no live session ses_missing" {
-		t.Fatalf("error = %q, want %q", response.Error, "no live session ses_missing")
+	// The prefix is the contract Dispatch classifies on; what follows it says which of the two
+	// absences this is, and an id nothing ever registered is the one a sender can act on. The
+	// window named is the bucket's own TTL, over which this listener would still hold a lapsed
+	// registration's last heartbeat.
+	want := fmt.Sprintf(
+		"no live session ses_missing: no registration, and none lapsed in the last %s; check the session id",
+		sessions.TTL(),
+	)
+	if response.Error != want {
+		t.Fatalf("error = %q, want %q", response.Error, want)
 	}
 }
 

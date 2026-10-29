@@ -488,9 +488,18 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		// Only the bucket's own word for it (nats.ErrKeyNotFound, which Refresh also returns for a
 		// key no session can register under) is the 404 a sender routes around the pane on; a read
 		// that did not answer is the 503 below, which asks it to try again instead.
+		//
+		// That 404 names which of the two it is (noLiveSessionRefusal): a registration this
+		// listener saw lapse, which says the session may come back, or no record of one at all,
+		// which says the id is worth checking. The sender cannot tell them apart from the outside,
+		// and reading them as one sentence is how a session that is running gets written down as
+		// dead.
 		target, err := liveSessionEntry(ctx, d.sessions, targetSession, sendSessionReadTimeout, registered)
 		if errors.Is(err, nats.ErrKeyNotFound) {
-			record.refuse(w, http.StatusNotFound, outcomeNoLiveSession, fmt.Sprintf("no live session %s", targetSession))
+			lastSeen := d.sessions.LastSeen(targetSession)
+			record.lastSeen = lastSeen
+			record.refuse(w, http.StatusNotFound, outcomeNoLiveSession,
+				noLiveSessionRefusal(targetSession, lastSeen, d.sessions.TTL(), time.Now()))
 			return
 		}
 		if err != nil {

@@ -81,6 +81,13 @@ type requestRecord struct {
 	// its line, with the envelope's four fields empty rather than no line at all.
 	item   *contracts.Envelope
 	holder string
+	// lastSeen is the final heartbeat of a send's target, when the session bucket no longer holds
+	// it and this listener's cache still remembers its expiry (SessionRegistry.LastSeen, retained
+	// one TTL past it). Zero leaves the field off the line, as holder's empty string does: the
+	// registration lapsed longer ago than that window, or this listener never saw it lapse. It is
+	// what tells a bounce against a session that was working a moment ago from one against an id
+	// nothing ever registered, which the two read the same way without it.
+	lastSeen int64
 }
 
 // accept writes the handler's 200 and records the request as accepted.
@@ -153,7 +160,7 @@ func (rec *requestRecord) write(status int, outcome requestOutcome) {
 		eventID, source = rec.item.EventID, rec.item.Source
 		sourceSession, payloadSummary = rec.item.SourceSession, rec.item.PayloadSummary
 	}
-	attrs := make([]slog.Attr, 0, 8)
+	attrs := make([]slog.Attr, 0, 9)
 	attrs = append(attrs,
 		slog.String(rec.laneKey, rec.lane),
 		slog.String("event_id", eventID),
@@ -164,6 +171,9 @@ func (rec *requestRecord) write(status int, outcome requestOutcome) {
 		slog.Int("status", status))
 	if rec.holder != "" {
 		attrs = append(attrs, slog.String("holder", rec.holder))
+	}
+	if rec.lastSeen != 0 {
+		attrs = append(attrs, slog.Int64("last_seen", rec.lastSeen))
 	}
 	level := slog.LevelWarn
 	if outcome == outcomeAccepted {
