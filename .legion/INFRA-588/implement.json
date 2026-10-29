@@ -2,13 +2,45 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-588",
-  "completed": "2026-10-29T21:58:19Z",
-  "round": "tester's round-6 finding: no widening at a boot without a timestamped migration",
+  "completed": "2026-10-29T23:14:15Z",
+  "round": "review round 6 answered: main merged, nine findings",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2411",
-  "head": "7ab3f40f9cdf4e72ede9d871ece4dc13901d0a36",
-  "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6509260491",
-  "reviewAnswered": "Tester's verdict fail (round 6): createVersionTable widened schema_migrations.version at every boot, so this release's roll failed main's uncast health read once per serving pod. 7ab3f40f widens only when the loaded set holds a version above int4, as the daemon does. The red test 017d1df01dcb passes unmodified.",
+  "head": "9ce23f73feeaa0c60dc83ff35909ca9ae3efcfa6",
+  "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6510716704",
+  "reviewAnswered": "Review round 6 (3 Important, 6 Minor): main merged forward (650e3cb567b7, brings 0141); b5d974fdde6f one shared identifier rule (migrationid.Check, no last number, errors.Join; pgmigratetest.CheckIdentifiers and recordingTB deleted; one test helper for the integer table); 9ce23f73feea the auto-deployer and the loadtest seed compare the set of applied versions, docs state the apply order across releases, the author's rule and the release order. 5 threads answered and resolved; findings 4, 5, 9 were body-only and are fixed.",
   "proof": [
+    {
+      "criterion": "Main's 0141 and the identifier rule: both packages' identifier tests pass on main's set and on a merged tree of two concurrent migrations, with no last number recorded",
+      "surface": "git merge-tree on two branches off the head, and go test on the merged tree",
+      "command": "bash $TMPDIR/i588/concurrent.sh 9ce23f73 $TMPDIR/i588/cc4; go test ./internal/store/migrations/ (daemon) and ./internal/dispatch/store/ -run TestMigrationSetTakesNumbersThenTimestamps (envoy) in cc4/merged and cc4/clash",
+      "observed": "merge-tree both ways exit 0 (tree 51e0a00b278e); merged tree (Dispatch 0001..0141 plus two timestamps): both tests ok",
+      "headSha": "9ce23f73feeaa0c60dc83ff35909ca9ae3efcfa6",
+      "negativeControl": "cc4/clash (b renamed to a's timestamp, no git conflict): both tests FAIL naming 20261030100000_concurrent_a.up.sql and _b.up.sql"
+    },
+    {
+      "criterion": "The auto-deployer's rollback guard detects a migration applied below the highest version",
+      "surface": "packages/envoy/deploy/scripts/autodeploy_test.sh (fake docker/psql, the deployer's real --once path)",
+      "command": "LOCPATH=$TMPDIR/locales-out bash packages/envoy/deploy/scripts/autodeploy_test.sh",
+      "observed": "PASS, including the new case: set 1..112 plus applied 20260115123000, the failed image applies 113, max unchanged, the deployer refuses the rollback; and the old-form record case",
+      "headSha": "9ce23f73feeaa0c60dc83ff35909ca9ae3efcfa6",
+      "negativeControl": "the guard reverted to comparing max(version) (every older case green) fails exactly the new case: rolling back to old-image (schema 20260115123000 (114 applied))"
+    },
+    {
+      "criterion": "Each migration runs once on main-migrated, pre-merge, out-of-order and fresh databases, and no prepared read fails during a rolling deploy",
+      "surface": "each tree's real runner and Dispatch Pool.Healthy on PostgreSQL 18.6 + pgvector",
+      "command": "bash $TMPDIR/i588/pgproof2.sh $TMPDIR/i588/cc4; bash $TMPDIR/i588/rollproof2.sh $TMPDIR/i588/cc4",
+      "observed": "every database ends with both timestamps x1, 1 row in each new table, bigint, second migrate 0 (Dispatch from main 141 -> 20261030110000); main's pod over this head: 41 reads 0 failed, column integer; this release's pod over the merged tree: 41 reads 0 failed, column bigint",
+      "headSha": "9ce23f73feeaa0c60dc83ff35909ca9ae3efcfa6",
+      "negativeControl": "the widen-every-boot head c635b7a9 over main's pod: 1 of 41 reads failed, cached plan must not change result type"
+    },
+    {
+      "criterion": "The suites and the router's filter check pass at the head",
+      "surface": "go test against the real Postgres; check-ci-filters.sh; scripts/conflicts lanes",
+      "command": "daemon go vet -tags e2e ./... and go test ./internal/store/... ./internal/api/; envoy go vet ./... and go test ./migrationid/ ./internal/pgmigrate/... ./internal/dispatch/store/ ./internal/broker/store/ and ./cmd/dispatch -run 'Healthz|Census|Migrat'; .github/scripts/check-ci-filters.sh; biome and bun test scripts/conflicts",
+      "observed": "all ok (daemon store 92.112s, api 195.396s; dispatch/store 268.393s); check-ci-filters 25 gates exit 0; conflicts 40 pass",
+      "headSha": "9ce23f73feeaa0c60dc83ff35909ca9ae3efcfa6",
+      "negativeControl": "migrationid tests refuse a gap, a 13-digit value, month 13, 31 February and a 15-digit value, and report every problem joined"
+    },
     {
       "criterion": "After the version columns widen from int4 to bigint, no prepared or cached read of them fails, including old pods' open connections during a rolling deploy",
       "surface": "a rolling deploy on PostgreSQL 18.6 + pgvector: the old release's real Pool.Healthy every 50 ms on one connection while the new release's real store.Migrate boots on the same database (rollproof.sh)",
@@ -83,12 +115,35 @@
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/store/store.go",
+    "packages/envoy/migrationid/migrationid.go (new)",
+    "packages/envoy/migrationid/migrationid_test.go (new)",
+    "packages/daemon/internal/store/migrations/embed.go",
+    "packages/daemon/internal/store/migrations/embed_test.go",
+    "packages/daemon/internal/store/store.go",
+    "packages/daemon/internal/api/version.go",
+    "packages/envoy/internal/pgmigrate/pgmigratetest/pgmigratetest.go",
+    "packages/envoy/internal/pgmigrate/pgmigratetest/pgmigratetest_test.go",
+    "packages/envoy/internal/pgmigrate/set.go",
+    "packages/envoy/internal/dispatch/store/store_test.go",
+    "packages/envoy/internal/dispatch/store/migrate_out_of_order_test.go",
+    "packages/envoy/deploy/scripts/autodeploy.sh",
+    "packages/envoy/deploy/scripts/autodeploy_test.sh",
+    "packages/envoy/deploy/README.md",
+    "packages/envoy/loadtest/common.sh",
+    "packages/envoy/loadtest/stack.sh",
+    "packages/envoy/loadtest/README.md",
     "packages/envoy/cmd/dispatch/README.md",
-    "packages/envoy/.changes/unreleased/pr-2411-migration-timestamps.yaml"
+    "packages/envoy/internal/dispatch/store/README.md",
+    "packages/envoy/.changes/unreleased/pr-2411-migration-timestamps.yaml",
+    "docs/kubernetes.md",
+    ".github/workflows/ci.yaml",
+    ".github/workflows/docs-pages.yaml",
+    "two docs/solutions/envoy learnings (status)"
   ],
   "trickyParts": [
-    "The widening must happen only in a release whose pods replace pods that read the version cast: this release (no timestamped migration) leaves an integer column alone; the first release with a timestamped migration widens it, rolling over this release's pods, whose Healthy reads ::bigint."
+    "migrationid.Check derives the numbered series from the set: values below 10^13 must be exactly 1..N for the N present; values from 10^13 up must be real 14-digit UTC instants. It re-checks neither duplicates nor < 1, which both loaders refuse.",
+    "The auto-deployer records <max>-<count>-<sha256 of the sorted versions>; a bare-number record from the previous deployer is still compared by max while its tag stays deployed.",
+    "autodeploy_test.sh's locale precondition needs en_US.UTF-8; in the pod it was generated under $TMPDIR and passed as LOCPATH (the suite stops before any case without it, on main too)."
   ],
   "deviations": [],
   "openQuestions": [],
