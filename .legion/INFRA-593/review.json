@@ -2,31 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-593",
-  "completed": "2026-10-28T22:58:34Z",
-  "round": 1,
-  "headReviewed": "d1939c8689f53e46ea10804b353f13aa312425aa",
+  "completed": "2026-10-29T02:07:35Z",
+  "round": 2,
+  "headReviewed": "d741863c765161e472f2145d53c5c231d674ff28",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 4,
-  "minor": 7,
-  "ci": "At 22:57 UTC every required check (lint, typecheck, test, pr-title) at the CI head d1939c86 was queued; a request for changes does not wait for CI.",
-  "thermonuclear": "Both run once at d1939c86: deep review CHANGES (2 medium, 6 minor), code quality CHANGES (4 important, 3 minor). Core data safety (version/xmin recheck, doc_compaction_owed upkeep, load read-back, failRoom, tail rule on every production path) checked clean.",
+  "important": 1,
+  "minor": 4,
+  "ci": "At 02:05 UTC at the CI head d741863c: the required lint, typecheck, test and pr-title passed; envoy-go, envoy-go-race, dispatch, dispatch-memory, dispatch-multiprocess and the Postgres 16 Dispatch suite were still queued or running. A request for changes does not wait for them; the next round reads them.",
+  "thermonuclear": "Both run once at d741863c: deep review APPROVE (all six round-1 findings fixed correctly; 4 minors), code quality CHANGES (1 important, 5 minors).",
+  "roundOneThreads": "All 12 threads answered in my own words as accepted and fixed in 61cc109a (PRRT_kwDORFy7ds6xWob3, ...ob8, ...ocC, ...ocH, ...ocJ, ...ocL, ...ocM, ...ocQ, ...ocV, ...oca, ...ocd, ...oce); the implementer resolved them all.",
+  "census": "The PR body's Contract change census re-run at the head: the CompactAll, outbox.Deps{ and doc_updates writer searches give exactly the hits the body lists.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/store/pool.go", "description": "compactionPoolSize is not in ConnectionsPerProcess (still 86), and infra/gcp/dispatch.go dispatchConnectionsPerPod stays 86, so TestDispatchConnectionsPerPodIsTheServers cannot catch the new pool; the docs and CHANGELOG say 88."},
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/fold.go", "description": "foldRead commits and then folds up to 32 MiB per load with no connection held; at base the rooms pool (4) bounded concurrent load folds, now nothing does (cold reads of distinct documents, room loads)."},
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/compaction_queue.go", "description": "A retry step that finds no aged row returns compactionDone even when young rows remain (later > 0), and note() drops a note while its room is in flight; both drop a room whose rows will come due, so the 15-minute / 16-row bound the PR body states becomes the hourly sweep's."},
-    {"severity": "important", "file": "PR body", "description": "No Contract change census: docs.API loses CompactAll, outbox.Deps loses Docs and Leases, VersionedStore gains pgVersioned(), and doc_compaction_owed is a schema the previous release does not write during a roll."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/fold.go", "description": "memoryUpdates never checks ctx, so coldReadTimeout and Shutdown's deadline no longer interrupt a buffered fold."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/compaction_queue.go", "description": "noteStoredUpdates' oldest argument is unused, yet readStoredLog runs an extra min(version) subquery on every load to fill it."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/persistence.go", "description": "Load and LoadDocument duplicate the read-then-foldRead-then-note sequence and already differ in how they wrap the empty-history commit error."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/compaction_sweep.go", "description": "The queue and the sweep each map compactOutcome to retry/leave; and a failed forgetCompactionCandidate logs as a failed check."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/service.go", "description": "Comment says every committed append notes its room; settlement-repair and block-id backfill appends through AppendUpdateTx do not."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/store/migrations/0137_doc_compaction_owed.census.sql", "description": "Comment says 0136 creates doc_compaction_owed; it is 0137."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/compaction.go", "description": "PgVersioned.Compact's comment says an older build sharing the database runs it; an older build runs its own binary's Compact."}
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/compaction_queue.go", "description": "note() changes nothing for a room already waiting in the heap. A room a quiet check parked until its 15-minute mark collects any number of rows older than 2 minutes before its check, so the drained-queue bound the PR body states in place of acceptance 6's 1.25x condition (fewer than 16 older rows) fails during a burst that starts after that check. Pull a waiting entry forward to firstCheck on a note, as settle already does for a room in flight."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/compaction_sweep.go", "description": "compactionSweepTick has no production caller after the move to duty.RunLeased; only tests call it. Move it into the test file."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/duty/ticker_test.go", "description": "Lines 68-70 and 81 cite the daily compaction and lease document-compaction as a loop that must not tick at start; this PR removes it and runs document-compaction with TickAtStart."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/fold.go", "description": "bufferedFolds = 4 claims to equal store's roomsPoolSize, tied only by a comment (also AGENTS.md); state the bound on its own terms or derive it."},
+    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/main.go", "description": "The comment calls the hourly sweep a pass over every document; it reads only the documents doc_compaction_owed names."}
   ],
   "notDefects": [
-    "pending_authors.go passing 1000 lines: moving its room-load code now would conflict with the trees editing the same file (INFRA-556, INFRA-605); not a defect of this change.",
-    "A failed room's eviction waits for the lock while holding a compaction-pool connection: latency only, no deadlock (transactions never wait on recovery).",
-    "A compaction that fails the same way is retried at most once a minute, logged each time: no error is hidden."
+    "compactionTry/compactionAttempt between tryCompaction and compactionStep: tryCompaction is the one mapping round 1 asked for; the step's translation is a short, readable switch.",
+    "A load waiting for a fold slot holds its rooms-pool connection idle in its transaction: latency only, no deadlock (a slot holder waits on no connection or lock), and no worse than main, where every load folded on a rooms-pool connection. Recorded in the PR body's risks.",
+    "The 2-minute tail measured on created_at (the inserting transaction's start): bounded by the transaction's length, recorded as not proven in the PR body."
   ]
 }
