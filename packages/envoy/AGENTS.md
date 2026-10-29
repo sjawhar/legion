@@ -76,8 +76,9 @@ that may carry its mark (`pmdoc.QuoteFinder.NearestFirst`): an occurrence where 
 mark of its type - an ask's quote in a code block, any anchor's in the front matter - is passed over,
 so a copy there leaves the anchor on the original. An upload that leaves the quote nowhere it may
 stand is the caller's markdown: `pmdoc.ErrMarkNotAllowed` becomes `400 INVALID_MARKDOWN` naming the
-anchor's kind and quote and every distinct place its text landed, nearest first, so one pass over
-the markdown resolves it, and the room keeps its tree (`reanchorError`).
+anchor's kind and quote and each kind of place its text landed in with how many such places
+("two code blocks"), nearest first, so one pass over the markdown resolves it, and the room keeps
+its tree (`reanchorError`).
 Any other refusal to re-anchor is a plain `ErrDocSchema`, answered 500 and logged as the server's. Without either change,
 every upload wrote a `blockId` tombstone for every block, and one per open anchor, which a live
 room keeps decoded for the document's life (INFRA-715). Document

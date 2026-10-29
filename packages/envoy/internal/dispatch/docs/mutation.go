@@ -10,6 +10,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -630,6 +631,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 				// allows the mark is the upload refused, as its markdown's to fix (reanchorError).
 				finder := pmdoc.NewQuoteFinder(target)
 				writer := pmdoc.NewMarkWriter(scratchFragment)
+			reanchors:
 				for _, reanchor := range reanchors {
 					occurrences, err := finder.NearestFirst(reanchor.mark.anchor.Quote, reanchor.range_.From)
 					if errors.Is(err, pmdoc.ErrTargetNotFound) {
@@ -644,22 +646,19 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 						Attrs: reanchor.attrs,
 					}.pmMark()
 					// Every occurrence the schema refuses the mark on is kept, so a quote with
-					// nowhere left to stand names each place it stands rather than the last one
-					// tried, and one fix of the markdown resolves the upload.
-					var refused error
+					// nowhere left to stand names each place it stands, and how many places of each
+					// kind, rather than the last place tried, and one fix of the markdown resolves
+					// the upload.
 					var notAllowed []error
 					for _, occurrence := range occurrences {
-						refused = writer.Mark(txn, occurrence, mark)
+						refused := writer.Mark(txn, occurrence, mark)
+						if refused == nil || errors.Is(refused, pmdoc.ErrTargetNotFound) {
+							continue reanchors
+						}
 						if !errors.Is(refused, pmdoc.ErrMarkNotAllowed) {
-							break
+							return reanchorError(reanchor.mark, refused)
 						}
 						notAllowed = append(notAllowed, refused)
-					}
-					if refused == nil || errors.Is(refused, pmdoc.ErrTargetNotFound) {
-						continue
-					}
-					if !errors.Is(refused, pmdoc.ErrMarkNotAllowed) {
-						return reanchorError(reanchor.mark, refused)
 					}
 					return reanchorError(reanchor.mark, notAllowed...)
 				}
@@ -702,35 +701,79 @@ var anchorKinds = map[string]string{
 // mark writer's refusal, and, where every occurrence of the quote refuses the mark, one refusal an
 // occurrence, nearest first. A mark the schema allows nowhere the anchor's quote now stands
 // (pmdoc.MarkNotAllowedError) is the caller's markdown to fix: ErrInvalidMarkdown, naming the
-// anchor's kind and quote, every distinct place its text landed, nearest first, so one pass over
-// the markdown resolves the upload rather than sending its author back for the next place, and the
-// two ways out, holding no cause it wraps, so no route reads it as a document outside its schema.
+// anchor's kind and quote, each kind of place its text landed and how many such places, the kinds
+// in the order of their first occurrence, so the nearest comes first, and the two ways
+// out, holding no cause it wraps, so no route reads it as a document outside its schema. The count
+// is what keeps one pass over the markdown enough: a quote left in two code blocks says so, rather
+// than reading as one code block and refusing the upload again once its author has moved the first.
 // Any other cause, or a mark type no open anchor carries, is a fault of the stored anchor or of
 // the server: a plain ErrDocSchema, which the routes answer 500 and log, and never a stored
 // document to repair, since the scratch document no peer can reach holds nothing but the caller's
 // target.
 func reanchorError(mark anchoredMark, causes ...error) error {
 	kind, named := anchorKinds[mark.markType]
-	places := make([]string, 0, len(causes))
+	places := make([]refusedPlace, 0, len(causes))
 	for _, cause := range causes {
 		var notAllowed *pmdoc.MarkNotAllowedError
 		if !named || !errors.As(cause, &notAllowed) {
 			return fmt.Errorf("%w: re-anchor %s %s: %v", ErrDocSchema, mark.markType, mark.anchor.MarkID, errors.Join(causes...))
 		}
-		if place := notAllowed.Place(); !slices.Contains(places, place) {
-			places = append(places, place)
+		place := notAllowed.Place()
+		if index := slices.IndexFunc(places, func(seen refusedPlace) bool { return seen.singular == place }); index >= 0 {
+			if !slices.Contains(places[index].at, notAllowed.At) {
+				places[index].at = append(places[index].at, notAllowed.At)
+			}
+			continue
 		}
+		places = append(places, refusedPlace{singular: place, plural: notAllowed.PlacePlural(), at: []int{notAllowed.At}})
 	}
-	them := "it"
-	if len(places) > 1 {
+	them, distinct := "it", 0
+	for _, place := range places {
+		distinct += len(place.at)
+	}
+	if distinct > 1 {
 		them = "them"
 	}
+	counted := make([]string, len(places))
+	for index, place := range places {
+		counted[index] = place.String()
+	}
 	return fmt.Errorf("%w: the open %s anchored on %q would land in %s, where its mark is not allowed, and the upload leaves its quote nowhere it may stand; move that text out of %s, or resolve the %s first",
-		ErrInvalidMarkdown, kind, mark.anchor.Quote, placeList(places), them, kind)
+		ErrInvalidMarkdown, kind, mark.anchor.Quote, placeList(counted), them, kind)
 }
 
+// refusedPlace is one kind of place an upload left an anchor's quote where its mark is not allowed,
+// with where each such place begins (pmdoc.MarkNotAllowedError.At): a quote left in two code blocks
+// is one refusedPlace holding two, so the refusal says "two code blocks" and its author moves both
+// out in one pass over the markdown, while two occurrences in one code block are one place. singular
+// and plural are pmdoc.MarkNotAllowedError's words for the place, the plural empty where the schema
+// holds one place of the kind at most.
+type refusedPlace struct {
+	singular string
+	plural   string
+	at       []int
+}
+
+// String names the place as a person counts it: "a code block" for one, "two code blocks" for two,
+// and "the front matter" always, since a document inside the schema holds one.
+func (p refusedPlace) String() string {
+	count := len(p.at)
+	if count < 2 || p.plural == "" {
+		return p.singular
+	}
+	if count < len(spelledCounts) {
+		return spelledCounts[count] + " " + p.plural
+	}
+	return strconv.Itoa(count) + " " + p.plural
+}
+
+// spelledCounts are the counts a person reads as a word before a place ("two code blocks"); past
+// them the digits read better, and a quote standing in that many places is past counting at a
+// glance anyway.
+var spelledCounts = [...]string{2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+
 // placeList reads the places a refused anchor's quote stands as a person says them: "a code
-// block", "the front matter and a code block", "the front matter, a code block and a heading".
+// block", "the front matter and two code blocks".
 func placeList(places []string) string {
 	if len(places) < 2 {
 		return strings.Join(places, "")

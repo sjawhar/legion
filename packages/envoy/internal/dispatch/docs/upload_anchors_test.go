@@ -204,9 +204,10 @@ func TestAnUploadLeavesTheAnchorsOnTheTextItKeeps(t *testing.T) {
 // An upload that moves an open anchor's quote where its mark is not allowed - an ask's into a code
 // block, a comment's into the front matter, which allows no anchor - and leaves it nowhere else is
 // refused as the caller's markdown (ErrInvalidMarkdown, which the routes answer 400), naming the
-// anchor and every distinct place its text landed, nearest first, so one pass over the markdown
-// resolves it, never as a document outside its schema (a 500 or a repair), and the room keeps the
-// tree it held.
+// anchor and each kind of place its text landed in with how many such places, the kinds
+// ordered by their first occurrence, nearest to where the anchor stood rather than in document
+// order, so one pass over the markdown resolves it, never as a document outside its schema (a 500
+// or a repair), and the room keeps the tree it held.
 func TestAnUploadMovingAnAnchorsQuoteWhereItsMarkIsNotAllowedIsRefused(t *testing.T) {
 	for _, test := range []struct {
 		name, seed, upload, quote, want string
@@ -227,6 +228,20 @@ func TestAnUploadMovingAnAnchorsQuoteWhereItsMarkIsNotAllowedIsRefused(t *testin
 			seed:   "Intro.\n\nrun the tests\n",
 			upload: "---\ntitle: run the tests\n---\n\nIntro.\n\n```\nrun the tests\n```\n",
 			want:   `the open ask anchored on "run the tests" would land in the front matter and a code block`,
+		},
+		{
+			name: "an ask into a code block where it stood and the front matter far above", kind: MarkAsk, quote: "run the tests",
+			seed: "Filler one opens the document and says nothing of the tests.\n\nFiller two says as little, at as much length.\n\nFiller three carries on in the same vein.\n\nrun the tests\n",
+			upload: "---\ntitle: run the tests\n---\n\nFiller one opens the document and says nothing of the tests.\n\n" +
+				"Filler two says as little, at as much length.\n\nFiller three carries on in the same vein.\n\n```\nrun the tests\n```\n",
+			want: `the open ask anchored on "run the tests" would land in a code block and the front matter`,
+		},
+		{
+			name: "an ask into two code blocks", kind: MarkAsk, quote: "run the tests",
+			seed:   "Intro.\n\nrun the tests\n",
+			upload: "Intro.\n\n```\nrun the tests\n```\n\nAnd again:\n\n```\nrun the tests\n```\n",
+			want: `the open ask anchored on "run the tests" would land in two code blocks, where its mark is not allowed, ` +
+				`and the upload leaves its quote nowhere it may stand; move that text out of them, or resolve the ask first`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -298,15 +313,17 @@ func holderType(at pmdoc.TextblockAt) string {
 }
 
 // Only marks the schema allows nowhere their quote stands are the caller's, and the refusal names
-// every distinct place it stands, in the order it was tried, so one pass over the markdown resolves
-// the upload; any other refusal to re-anchor - one among places the schema allows no mark, and a
-// mark type no open anchor carries - is the server's or the stored anchor's: a plain ErrDocSchema,
-// which the routes answer 500 and log, never a document outside its schema that a route would offer
-// to repair, and never an invalid-markdown answer.
+// each kind of place it stands in with how many such places, the kinds in the order they were
+// tried, so one pass over the markdown resolves the upload; any other refusal to re-anchor -
+// one among places the schema allows no mark, and a mark type no open anchor carries - is the
+// server's or the stored anchor's: a plain ErrDocSchema, which the routes answer 500 and log, never
+// a document outside its schema that a route would offer to repair, and never an invalid-markdown
+// answer.
 func TestAReanchorErrorIsTheCallersOnlyWhenTheMarkIsNotAllowed(t *testing.T) {
 	ask := anchoredMark{markType: string(MarkAsk), anchor: model.Anchor{Quote: "run the tests"}}
-	notAllowed := &pmdoc.MarkNotAllowedError{Mark: string(MarkAsk), Textblock: "code_block"}
-	inFrontMatter := &pmdoc.MarkNotAllowedError{Mark: string(MarkAsk)}
+	notAllowed := &pmdoc.MarkNotAllowedError{Mark: string(MarkAsk), Textblock: "code_block", At: 40}
+	inAnotherCodeBlock := &pmdoc.MarkNotAllowedError{Mark: string(MarkAsk), Textblock: "code_block", At: 70}
+	inFrontMatter := &pmdoc.MarkNotAllowedError{Mark: string(MarkAsk), At: 1}
 	serverFault := fmt.Errorf("%w: unsupported Yjs text embed", pmdoc.ErrSchema)
 	for _, test := range []struct {
 		name   string
@@ -322,6 +339,11 @@ func TestAReanchorErrorIsTheCallersOnlyWhenTheMarkIsNotAllowed(t *testing.T) {
 			name:   "two places, the nearer first",
 			causes: []error{inFrontMatter, notAllowed},
 			want:   `the open ask anchored on "run the tests" would land in the front matter and a code block, where its mark is not allowed, and the upload leaves its quote nowhere it may stand; move that text out of them, or resolve the ask first`,
+		},
+		{
+			name:   "two places of one kind",
+			causes: []error{notAllowed, inAnotherCodeBlock},
+			want:   `the open ask anchored on "run the tests" would land in two code blocks, where its mark is not allowed, and the upload leaves its quote nowhere it may stand; move that text out of them, or resolve the ask first`,
 		},
 		{
 			name:   "one place its quote stands in twice",

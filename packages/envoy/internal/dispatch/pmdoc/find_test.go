@@ -972,10 +972,11 @@ func TestAMarkNotAllowedWhereItsTextStandsIsTheOnlyErrMarkNotAllowed(t *testing.
 
 // NearestFirst lists every match of a quote in the order Find with near chooses among them: its
 // first is Find's answer, the nearest to near, and of two as near the earlier comes first. A quote
-// that matches nothing is ErrTargetNotFound. The first paragraph holds an even number of positions,
-// so the two matches in it and the next paragraph stand an even number of positions apart and the
-// position halfway between them is as near each: the tie is a real one, not one the fixture can
-// miss.
+// that matches nothing is ErrTargetNotFound itself, not a miss describing the document's nearest
+// blocks, which a caller dropping the miss would pay another walk for. The first paragraph holds an
+// even number of positions, so the two matches in it and the next paragraph stand an even number of
+// positions apart and the position halfway between them is as near each: the tie is a real one, not
+// one the fixture can miss.
 func TestNearestFirstListsEveryMatchInFindsOrderOfChoice(t *testing.T) {
 	doc, err := Parse("brown ones\n\nbrown two\n\nbrown three\n")
 	if err != nil {
@@ -1016,8 +1017,8 @@ func TestNearestFirstListsEveryMatchInFindsOrderOfChoice(t *testing.T) {
 	if found, err := FindQuote(doc, "brown", nil, &halfway); err != nil || found != all[0] {
 		t.Fatalf("FindQuote halfway between the first two matches, at %d = %v, %v; want NearestFirst's first %v", halfway, found, err, all[0])
 	}
-	if _, err := finder.NearestFirst("purple", 0); !errors.Is(err, ErrTargetNotFound) {
-		t.Fatalf("NearestFirst(purple) = %v, want ErrTargetNotFound", err)
+	if _, err := finder.NearestFirst("purple", 0); err != ErrTargetNotFound {
+		t.Fatalf("NearestFirst(purple) = %v, want ErrTargetNotFound itself", err)
 	}
 }
 

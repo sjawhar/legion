@@ -37,6 +37,10 @@ var ErrMarkNotAllowed = errors.New("mark not allowed on this text")
 type MarkNotAllowedError struct {
 	Mark      string
 	Textblock string
+	// At is where the refused text begins in the document. A code block or the front matter holds
+	// its text as one run, so two refusals with the same Textblock and At are one place, and two
+	// with different At are two places of one kind.
+	At int
 }
 
 func (e *MarkNotAllowedError) Error() string {
@@ -52,13 +56,29 @@ func (e *MarkNotAllowedError) Is(target error) bool {
 // for text no textblock holds, since in a document inside the schema only front matter holds text
 // outside a paragraph, heading or code block.
 func (e *MarkNotAllowedError) Place() string {
+	singular, _ := e.place()
+	return singular
+}
+
+// PlacePlural names several places of the kind the refused text stands in, for a count to stand
+// before: "code blocks". It is empty where a document inside the schema holds one place of the
+// kind at most - the front matter - so a caller counting the places a quote landed in names that
+// one as Place names it however often the quote landed there.
+func (e *MarkNotAllowedError) PlacePlural() string {
+	_, plural := e.place()
+	return plural
+}
+
+// place is where the refused text stands, as a person says it of one such place and of several,
+// held as one mapping so the singular and the plural never name different things.
+func (e *MarkNotAllowedError) place() (singular, plural string) {
 	switch e.Textblock {
 	case "":
-		return "the front matter"
+		return "the front matter", ""
 	case "code_block":
-		return "a code block"
+		return "a code block", "code blocks"
 	}
-	return e.Textblock
+	return e.Textblock, e.Textblock + "s"
 }
 
 // ErrQuoteNotFound reports a quote miss with up to three closest rendered textblocks, in
@@ -158,7 +178,42 @@ func NewQuoteFinder(doc *Node) *QuoteFinder {
 
 // Find is FindQuote(doc, quote, occurrence, near): the same range or the same error.
 func (f *QuoteFinder) Find(quote string, occurrence, near *int) (Range, error) {
-	return f.find(quote, occurrence, near)
+	matches, err := f.matches(quote)
+	if err != nil {
+		return Range{}, err
+	}
+	doc, text := f.doc, f.text
+	if len(matches) == 0 {
+		return Range{}, quoteNotFound(doc, quote)
+	}
+	if occurrence != nil {
+		if *occurrence < 0 || *occurrence >= len(matches) {
+			miss := quoteNotFound(doc, quote)
+			var missing *ErrQuoteNotFound
+			if errors.As(miss, &missing) {
+				missing.Matches = len(matches)
+			}
+			return Range{}, miss
+		}
+		return matches[*occurrence].Range, nil
+	}
+	if len(matches) == 1 {
+		return matches[0].Range, nil
+	}
+	if near != nil {
+		// MinFunc returns the first least match, which nearerFirst's earlier-of-two-as-near tie
+		// makes the first NearestFirst lists.
+		return slices.MinFunc(matches, nearerFirst(*near)).Range, nil
+	}
+
+	candidates := make([]Candidate, 0, len(matches))
+	for _, match := range matches {
+		candidates = append(candidates, Candidate{
+			Range:   match.Range,
+			Context: context16(text.value, max(0, match.textFrom-40), min(len16(text.value), match.textTo+40)),
+		})
+	}
+	return Range{}, &ErrTargetAmbiguous{Target: quote, Candidates: candidates}
 }
 
 // NearestFirst is every range quote matches, as Find matches it, ordered as Find with near chooses
@@ -214,45 +269,6 @@ func (f *QuoteFinder) matches(quote string) ([]quoteMatch, error) {
 		return headingQuoteMatches(f.doc, f.text, quote[len(marker):]), nil
 	}
 	return quoteMatches(f.text, quote), nil
-}
-
-func (f *QuoteFinder) find(quote string, occurrence, near *int) (Range, error) {
-	matches, err := f.matches(quote)
-	if err != nil {
-		return Range{}, err
-	}
-	doc, text := f.doc, f.text
-	if len(matches) == 0 {
-		return Range{}, quoteNotFound(doc, quote)
-	}
-	if occurrence != nil {
-		if *occurrence < 0 || *occurrence >= len(matches) {
-			miss := quoteNotFound(doc, quote)
-			var missing *ErrQuoteNotFound
-			if errors.As(miss, &missing) {
-				missing.Matches = len(matches)
-			}
-			return Range{}, miss
-		}
-		return matches[*occurrence].Range, nil
-	}
-	if len(matches) == 1 {
-		return matches[0].Range, nil
-	}
-	if near != nil {
-		// MinFunc returns the first least match, which nearerFirst's earlier-of-two-as-near tie
-		// makes the first NearestFirst lists.
-		return slices.MinFunc(matches, nearerFirst(*near)).Range, nil
-	}
-
-	candidates := make([]Candidate, 0, len(matches))
-	for _, match := range matches {
-		candidates = append(candidates, Candidate{
-			Range:   match.Range,
-			Context: context16(text.value, max(0, match.textFrom-40), min(len16(text.value), match.textTo+40)),
-		})
-	}
-	return Range{}, &ErrTargetAmbiguous{Target: quote, Candidates: candidates}
 }
 
 // TargetSpansBlocks reports whether r is not wholly contained by one
@@ -1119,7 +1135,7 @@ func (w *MarkWriter) Mark(txn *crdt.Transaction, r Range, mark Mark) error {
 	last := first
 	for ; last < len(spans) && spans[last].From < r.To; last++ {
 		if !markAllowedInTextblock(mark.Type, spans[last].textblock) {
-			return &MarkNotAllowedError{Mark: mark.Type, Textblock: spans[last].textblock}
+			return &MarkNotAllowedError{Mark: mark.Type, Textblock: spans[last].textblock, At: spans[last].From}
 		}
 	}
 	if first == last {
