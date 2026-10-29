@@ -160,7 +160,11 @@ function renderSidebar(pathname = "/", pending?: CredentialPendingRow[]) {
   });
   // Needs you counts the reader's own questions, so the badge waits on `/auth/whoami`; the
   // sidebar is handed the same person below.
-  queryClient.setQueryData(whoAmIQuery().queryKey, { kind: "user", login: "alice" });
+  queryClient.setQueryData(whoAmIQuery().queryKey, {
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const view = render(
     createElement(
       MemoryRouter,
@@ -168,7 +172,7 @@ function renderSidebar(pathname = "/", pending?: CredentialPendingRow[]) {
       createElement(
         QueryClientProvider,
         { client: queryClient },
-        createElement(Sidebar, { user: { kind: "user", login: "alice" } })
+        createElement(Sidebar, { user: { event_head: "0", kind: "user", login: "alice" } })
       )
     )
   );
@@ -258,7 +262,11 @@ for (const [unread, name] of [
   [0, "Replies"],
 ] as const) {
   test(`sidebar lists the Replies row with ${unread === 0 ? "no badge" : "its count"} at ${unread}`, async () => {
-    const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+    const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+      event_head: "0",
+      kind: "user",
+      login: "alice",
+    });
     const listMyReplies = spyOn(api, "listMyReplies").mockResolvedValue({
       limit: 1,
       offset: 0,
@@ -307,7 +315,7 @@ test("sidebar keeps its hide control available while navigation loads", () => {
           onHide: () => {
             hideCount += 1;
           },
-          user: { kind: "user", login: "alice" },
+          user: { event_head: "0", kind: "user", login: "alice" },
         })
       )
     )

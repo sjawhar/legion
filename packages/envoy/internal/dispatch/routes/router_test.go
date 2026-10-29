@@ -262,6 +262,7 @@ func newSignInRigFor(t *testing.T, serverURL string, rule identity.SignInRule, h
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
+	standInEventLog(rig.ctx, 0)
 	rig.handler, _ = New(rig.ctx)
 	return rig
 }
@@ -808,6 +809,7 @@ func newTestRouter(t *testing.T) (http.Handler, *AppContext) {
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
+	standInEventLog(ctx, 0)
 	handler, _ := New(ctx)
 	return handler, ctx
 }
@@ -1630,6 +1632,7 @@ func cookieRouter(t *testing.T, serverURL string) (http.Handler, *http.Cookie, *
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
+	standInEventLog(ctx, 0)
 	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sami@d.example", 0, testSigningKey, true))
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
