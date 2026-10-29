@@ -252,12 +252,12 @@ the same refusals:
   `dist/envoy-channel.js` and the generated Legion plugin's `legion/.claude-plugin/plugin.json`.
   A checkout of a commit on `main`, never of a branch, already holds both (`AGENTS.md`, "Deploys
   come only from main"): main's Rebuild Claude Envoy plugin workflow commits them after each merge.
-  `bun run check-dist` in that package confirms them. A checkout taken after a merge and before its
-  rebuild commit (one run of that workflow, its runner queues included) holds the previous build:
-  build the plugin from it with `bun scripts/build.ts --out <dir>` in that package, into a
-  directory outside the checkout, and point `LEGION_CLAUDE_PLUGIN_DIR` at `<dir>` until the rebuild
-  commit lands. That leaves the checkout's tracked files as they are, so its next `git pull`
-  fast-forwards.
+  `bun run check-dist` in that package confirms them. A checkout taken after a merge and before a
+  rebuild of it lands (at most one run of that workflow behind its inputs, its runner queues
+  included) holds an earlier build: build the plugin from it with `bun scripts/build.ts --out
+  <dir>` in that package, into a directory outside the checkout, and point
+  `LEGION_CLAUDE_PLUGIN_DIR` at `<dir>` until the rebuild commit lands. That leaves the checkout's
+  tracked files as they are, so its next `git pull` fast-forwards.
 
 A missing one refuses the boot, naming every gap in one line. The daemon names no model for Claude
 Code. Its key reaches it the way an Oh My Pi pane's does: `provider_keys` (for example

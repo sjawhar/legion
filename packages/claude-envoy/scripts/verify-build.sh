@@ -14,6 +14,11 @@
 # outside the repository, and <tar> must be outside it too. The jobs that then put <tar> into a
 # checkout are named at `release-push.sh extract-built`.
 #
+# Every file this script and scripts/build.ts read is a build input, so scripts/build-inputs.txt
+# must name it: main's push job lands a build on a moved main and decides from that list alone
+# whether the move changed the build (tests/build-inputs.test.ts holds the list to what the build
+# reads).
+#
 # In order, whatever the caller's directory:
 #   1. `bun scripts/build.ts --out` twice, into two scratch directories, and the two builds'
 #      dist/ and legion/ compared byte for byte, so what lands is what the source builds to, not
