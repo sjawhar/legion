@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-520",
-  "completed": "2026-10-29T09:47:46Z",
+  "completed": "2026-10-29T11:47:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2316",
   "proof": [
+    {
+      "criterion": "Review at 2a21eebc: the pull request merges with main 8a911ecc with envoy-and-contracts.yaml kept deleted, and both trigger checks pass",
+      "surface": "GitHub mergeability and the two checks on the merged tree",
+      "command": "gh pr view 2316 -R sjawhar/legion --json mergeable,mergeStateStatus; .github/scripts/check-ci-filters.sh; .github/scripts/check-image-trigger-paths.sh; jj diff --stat --from 0dc57a01 --to ae8b66d6 -- .github",
+      "observed": "MERGEABLE/BLOCKED at ae8b66d6; main 8a911ecc is still the newest. check-ci-filters.sh: 23 gates, 0 uncovered. check-image-trigger-paths.sh: every image trigger covers every input its build reads (5 image builds). No file under .github differs from 0dc57a01: #2486's pg18 image and dispatch_browser_multiprocess filter (dispatch list plus the workflow file) were already ci.yaml's. Fingerprint comment 6495795395.",
+      "headSha": "ae8b66d6f2333cc523915f1c4a3aea88fffa9fb6",
+      "negativeControl": "Before the merge, GitHub reported the pull request CONFLICTING at 2a21eebc on envoy-and-contracts.yaml (modify/delete), and jj's merge showed that conflict alone."
+    },
     {
       "criterion": "Review at 029b5024: the pull request merges with main 5443d99b, #2186's new worker image inputs reach ci.yaml's worker_image filter, and both trigger checks pass",
       "surface": "GitHub mergeability and the local checks on the merged tree",
