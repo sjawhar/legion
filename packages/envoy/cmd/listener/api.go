@@ -224,11 +224,14 @@ func writeNATSError(w http.ResponseWriter, err error, status int, message string
 const busUnansweredPrefix = "envoy: the message bus did not answer"
 
 // publishDeniedPrefix opens the body of every answer this listener gives a publish the NATS server
-// refused under its connection's own publish permissions, so one string matches in a test and in a
-// deployed log filter. It is deliberately not busUnansweredPrefix: the bus answered this publish,
-// and answered it with a denial, so "the message bus did not answer" would be false of it, and the
-// operator reading it would go looking for an outage instead of for the grant that forbids the
-// subject.
+// refused under its connection's own publish permissions, so one string matches in a test, in a
+// deployed log filter and in the Legion daemon, whose notify.HTTPPublisher finishes a notice on a
+// 403 whose error opens with its copy of this string (publishDeniedPrefix,
+// packages/daemon/internal/notify/notify.go). Rewording it turns that denial back into a notice the
+// daemon retries without a cap, holding the architect's later notices behind it. It is
+// deliberately not busUnansweredPrefix: the bus answered this publish, and answered it with a
+// denial, so "the message bus did not answer" would be false of it, and the operator reading it
+// would go looking for an outage instead of for the grant that forbids the subject.
 const publishDeniedPrefix = "envoy: the message bus denied the publish under this listener's own permissions"
 
 // streamFullPrefix opens the body of every answer this listener gives a send or publish the stream
@@ -424,18 +427,91 @@ func senderStamp(ctx context.Context, registry *store.Registry, sessions *sessio
 	return sender
 }
 
+// forwardVerdictKind is how beforeForward judged a message to a holder.
+type forwardVerdictKind uint8
+
+const (
+	// forwardAllowed: nothing stops the forward.
+	forwardAllowed forwardVerdictKind = iota
+	// forwardEcho: the message's source session is the holder itself.
+	forwardEcho
+	// forwardRepeat: the holder already took a message under this dedupe key.
+	forwardRepeat
+	// forwardModeUnreadable: the payload's delivery mode cannot be read unambiguously.
+	forwardModeUnreadable
+	// forwardModeUnadvertised: the holder does not advertise the payload's delivery mode.
+	forwardModeUnadvertised
+)
+
+// forwardVerdict is beforeForward's judgement. mode is the payload's delivery mode, set for
+// forwardModeUnadvertised; refusal is the refusal's text, set for both mode verdicts, and is what
+// sendHandler and the publish route answer in their 403.
+type forwardVerdict struct {
+	kind    forwardVerdictKind
+	mode    string
+	refusal string
+}
+
+// beforeForward applies, to a message about to be forwarded to holder, whose session entry is
+// entry, the rules a role delivery applies before it forwards, in this order: the source session
+// holds the role (an echo, never forwarded back), seen reports the holder already took this dedupe
+// key (a repeat), and the holder cannot take the payload's delivery mode (deliveryModeVerdict). The
+// role lane (roleTopicDelivery) and the publish route (roleSend.settledBeforeForward) both judge by
+// it, each with the record it trusts as seen, so both refuse and skip the same messages. Guarding
+// after the dedupe check keeps a delivered repeat from being judged by the holder's current
+// capabilities, which can have changed since the original forward and would misreport a delivered
+// message as failed — a false signal the Legion daemon treats as cause to probe and potentially
+// resume the worker.
+func beforeForward(item contracts.Envelope, holder string, entry session.SessionEntry, seen func(key, sessionID string) bool) forwardVerdict {
+	if item.SourceSession != "" && item.SourceSession == holder {
+		return forwardVerdict{kind: forwardEcho}
+	}
+	if seen(item.DedupeKey, holder) {
+		return forwardVerdict{kind: forwardRepeat}
+	}
+	return deliveryModeVerdict(holder, entry, item.Payload)
+}
+
+// deliveryModeVerdict judges a message to sessionID, whose session entry is entry, by its
+// payload's delivery mode, read as the receiving client reads it (frameDeliveryMode): the mode
+// cannot be read unambiguously, or entry does not advertise it (hasCapability); otherwise the
+// message may be forwarded. sendHandler answers a refusal 403 with its text, recorded as
+// outcomeCapabilityRefused, as the publish route does through beforeForward.
+func deliveryModeVerdict(sessionID string, entry session.SessionEntry, payload string) forwardVerdict {
+	var framed *string
+	if payload != "" {
+		framed = &payload
+	}
+	mode, err := frameDeliveryMode(framed)
+	switch {
+	case err != nil:
+		return forwardVerdict{
+			kind:    forwardModeUnreadable,
+			refusal: fmt.Sprintf("session %s (%s) sent a delivery mode that cannot be read unambiguously", sessionID, entry.Title),
+		}
+	case mode != "" && !hasCapability(entry.Capabilities, mode):
+		return forwardVerdict{
+			kind:    forwardModeUnadvertised,
+			mode:    mode,
+			refusal: fmt.Sprintf("session %s (%s) does not advertise %s", sessionID, entry.Title, mode),
+		}
+	}
+	return forwardVerdict{kind: forwardAllowed}
+}
+
 // sendRequestBudget is the bus work a /v1 route does under the request's own context: the send
-// route's read of the target session, the publish route's resolution of a role lane's holder
-// (resolveLiveRoleHolder, every attempt of it), both routes' read of the sender's interest record
-// (senderStamp) and both routes' publish share it, and GET /v1/roles/<role> resolves its holder
-// within it too. GET /v1/sessions, GET /v1/registry/<session_id> and GET
-// /v1/interests/<session_id> read within it as well, and every route that writes does its store
-// work within it: subscribe, unsubscribe, POST /v1/roles/set, and DELETE of
-// /v1/interests/<session_id> and /v1/sessions/<session_id>. The HTTP client gives each
-// attempt 5 s (packages/envoy-client/src/transport.ts) and this listener's HTTP write timeout is
-// 10 s (main.go), so answering inside 3.5 s leaves the rest for TLS, scheduling and the body: a
-// sender whose bus cannot be reached reads the 503 that names the reason, in time to act on it,
-// instead of the timeout it would otherwise retry blind.
+// route's read of the target session, its read of the sender's interest record (senderStamp) and
+// its publish share it, and GET /v1/roles/<role> resolves its holder within it too. The publish
+// route spends it on the publish of a topic the stream captures, and a role send's first
+// resolution of the role's holder (sendToRole, every attempt of that resolution) is answered within
+// it too; a role or ad-hoc topic send then runs on within publishDeliveryWindow (confirmed.go). GET
+// /v1/sessions, GET /v1/registry/<session_id> and GET /v1/interests/<session_id> read within it as
+// well, and every route that writes does its store work within it: subscribe, unsubscribe, POST
+// /v1/roles/set, and DELETE of /v1/interests/<session_id> and /v1/sessions/<session_id>. The HTTP
+// client gives each attempt 5 s (packages/envoy-client/src/transport.ts) and this listener's HTTP
+// write timeout is 10 s (main.go), so answering inside 3.5 s leaves the rest for TLS, scheduling
+// and the body: a sender whose bus cannot be reached reads the 503 that names the reason, in time
+// to act on it, instead of the timeout it would otherwise retry blind.
 const sendRequestBudget = 3500 * time.Millisecond
 
 // sendSessionReadTimeout bounds the send route's read of the target session from the bucket, so a
@@ -454,7 +530,8 @@ const senderStampReadTimeout = 1 * time.Second
 // sendHandler publishes a direct message only while the session store itself, not merely this
 // listener's cache of it, holds the target's entry: a 404 here is a sender's cue to route around
 // the pane, so only the store's word that the key is gone earns one, and a store or a bus that did
-// not answer earns the 503 that asks the sender to try the same route again. Every one of those
+// not answer earns the 503 that asks the sender to try the same route again. A target that cannot
+// take the payload's delivery mode (deliveryModeVerdict) is the 403 naming it. Every one of those
 // answers is written through record, so this route's one line per request is written with it.
 func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -518,21 +595,8 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuseBusUnavailable(w, err)
 			return
 		}
-		var itemPayload *string
-		if item.Payload != "" {
-			itemPayload = &item.Payload
-		}
-		mode, deliveryErr := frameDeliveryMode(itemPayload)
-		if deliveryErr != nil {
-			record.refuse(w, http.StatusForbidden, outcomeCapabilityRefused, fmt.Sprintf(
-				"session %s (%s) sent a delivery mode that cannot be read unambiguously", targetSession, target.Title,
-			))
-			return
-		}
-		if mode != "" && !hasCapability(target.Capabilities, mode) {
-			record.refuse(w, http.StatusForbidden, outcomeCapabilityRefused, fmt.Sprintf(
-				"session %s (%s) does not advertise %s", targetSession, target.Title, mode,
-			))
+		if verdict := deliveryModeVerdict(targetSession, target, item.Payload); verdict.refusal != "" {
+			record.refuse(w, http.StatusForbidden, outcomeCapabilityRefused, verdict.refusal)
 			return
 		}
 		item.Sender = senderStamp(ctx, d.registry, d.sessions, item.SourceSession)
@@ -572,7 +636,11 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 }
 
 // publishHandler rejects agent-targeted topics (must use /v1/messages/send
-// instead) and publishes the envelope to NATS. An explicit dedupe_key is used
+// instead) and sends the envelope. A role topic is forwarded to its holder and
+// an ad-hoc topic confirmed with each self-subscribed recipient, both answered
+// once confirmed or when publishDeliveryWindow from the request's arrival has
+// passed (sendToRole, sendToTopic in confirmed.go); a topic the stream captures
+// is answered once the stream stored it. An explicit dedupe_key is used
 // verbatim (a re-send a receiver's own dedupe recognises); it is mutually
 // exclusive with idempotency_key, may not begin with roleForwardDedupePrefix,
 // the mark the role arbiter drops on sight, and may not ride a dispatch
@@ -582,20 +650,16 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 // host drop the real event it names. Dispatch itself never needs this route's
 // key: its outbox publishes to the bus directly and its sends go through
 // /v1/messages/send, whose key is the listener's. Like the send route, it answers through record,
-// which writes this route's one line per request with the answer.
+// which writes this route's one line per request with the answer; a confirmed send answers through
+// it too.
 func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		arrived := time.Now()
 		record := &requestRecord{logger: logger, line: "listener publish", laneKey: "topic"}
 		if r.Method != http.MethodPost {
 			record.refuse(w, http.StatusMethodNotAllowed, outcomeInvalidRequest, "method not allowed")
 			return
 		}
-		// Every bus call below - the role-holder resolution of a role lane and the publish - takes
-		// this one deadline, derived from the caller's own context, so this route too answers a bus
-		// it cannot reach rather than spending the caller's attempt: a resolution that runs it out
-		// is the 503 below, and one that leaves little of it leaves the publish only that little.
-		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
-		defer cancel()
 		var request struct {
 			messageBody
 			Topic string `json:"topic"`
@@ -652,45 +716,29 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, err.Error())
 			return
 		}
-		result := roleHolderResult{state: roleHolderLive}
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
-			var err error
-			result, err = resolveLiveRoleHolder(ctx, d.registry, d.sessions, role)
-			if errors.Is(err, errRoleHolderChanged) {
-				// The claim moved while it was being resolved: the role has a holder, this
-				// publish simply never got a settled one to forward to. Retrying is right, so
-				// the 503 and the Retry-After stand, but the answer says the race rather than
-				// claiming the bus went quiet.
-				record.refuseRoleHolderChanged(w, role)
-				return
-			}
-			if errors.Is(err, store.ErrMalformedRoleClaim) {
-				// The bus answered with a claim record no read can decode, and will answer the same
-				// record again, so this is neither the bus going quiet nor a retry's to fix.
-				record.refuseRoleClaimUnreadable(w, role, err)
-				return
-			}
-			if err != nil {
-				// A role holder read that did not answer - within its own cap or within this
-				// request's budget - says nothing about the role: the claim is not resolved, so the
-				// caller is asked to try again rather than told the role has no live holder.
-				record.refuseBusUnavailable(w, err)
-				return
-			}
-			if result.state != roleHolderLive {
-				record.refuseRoleHolder(w, role, result)
-				return
-			}
-			// The lane resolved: the session this role topic reaches is on the record from here
-			// on, which nothing else in the line names.
-			record.holder = result.holder
+			ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(publishDeliveryWindow))
+			defer cancel()
+			sendToRole(ctx, w, record, d, item, role, arrived)
+			return
 		}
+		if bus.UsesCoreTransport(request.Topic) {
+			ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(publishDeliveryWindow))
+			defer cancel()
+			sendToTopic(ctx, w, record, d, item, arrived)
+			return
+		}
+		// The sender stamp's read and the publish take this one deadline, derived from the
+		// caller's own context, so this route too answers a bus it cannot reach rather than
+		// spending the caller's attempt.
+		ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(sendRequestBudget))
+		defer cancel()
 		item.Sender = senderStamp(ctx, d.registry, d.sessions, item.SourceSession)
 		if err := d.client.PublishWithin(ctx, item); err != nil {
 			record.refuseBusUnavailable(w, err)
 			return
 		}
-		record.accept(w, publishResponse{Envelope: item, Holder: result.holder})
+		record.accept(w, publishResponse{Envelope: item})
 	}
 }
 
@@ -1080,7 +1128,8 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 }
 
 // roleGetHandler answers GET /v1/roles/<role> with the role's live holder. It resolves the holder
-// within sendRequestBudget of the request's own context, as a role-lane publish does, so a bus that
+// (resolveRoleHolder, with registered: any entry) within sendRequestBudget of the request's own
+// context, as a role send's first resolution through the publish route does, so a bus that
 // does not answer is reported inside the caller's attempt. A resolution that lost the race for the
 // role's claim (errRoleHolderChanged) is the publish route's 503 with Retry-After: 1, worded for a
 // lookup, since every read answered and a fresh lookup wins the race once the replacement claim
@@ -1103,7 +1152,7 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
-		result, err := resolveLiveRoleHolder(ctx, d.registry, d.sessions, role)
+		result, err := resolveRoleHolder(ctx, d.registry, d.sessions, role, registered)
 		if errors.Is(err, errRoleHolderChanged) {
 			writeRoleHolderChanged(w, role, "lookup")
 			return

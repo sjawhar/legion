@@ -10,7 +10,7 @@ body: |-
     route or an author route reaches and that a mention names hears the comment once, from the
     mention; when that mention's send fails, the route or author copy skipped for it is published to
     it then. When the send was in flight at a kill, the outbox records the copy it skipped (migration
-    `0139`, `comment_fallback_copies`) and publishes it to that one destination only once the resend
+    `0141`, `comment_fallback_copies`) and publishes it to that one destination only once the resend
     fails; a copy whose publish fails is retried on the outbox's event backoff, never given up, and
     logged at Error when it reaches the ten attempts at which the outbox reports an event
     dead-lettered. The comment's own event is never published again, so a route, claimant or follower

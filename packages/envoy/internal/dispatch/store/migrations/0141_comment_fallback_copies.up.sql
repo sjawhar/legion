@@ -1,4 +1,4 @@
--- 0139_comment_fallback_copies.up.sql
+-- 0141_comment_fallback_copies.up.sql
 --
 -- The copies of a new comment the outbox held back for a mention its sender died sending
 -- (internal/dispatch/outbox/mentions.go): one row per (comment, destination topic) the outbox did
