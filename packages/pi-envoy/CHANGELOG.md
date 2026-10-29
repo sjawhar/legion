@@ -1,5 +1,47 @@
 # Changelog
 
+## [11.8.0] - 2026-10-28
+
+### Added
+
+- Every registration names the plugin: `plugin` `@sjawhar/pi-envoy` and `plugin_version` this
+  package's version, which the listener's `GET /v1/sessions` and `GET /v1/registry/<id>`, and
+  `envoy_sessions`, show.
+
+### Fixed
+
+- A session whose NATS path freezes (packets stop, neither side closes) reconnects within 30 s,
+  52 s when its first redial also hangs, instead of after up to 6 minutes: it dials with
+  `@legion/envoy-client/nats-connection`'s options, a ping every 10 s and the connection dropped
+  after two unanswered pings, in place of nats.js's default 120 s ping. The reconnect runs the
+  catch-up, so the session shows the messages sent meanwhile once.
+- A NATS redial that hangs (its TCP connect, or a server that never sends `INFO`) is closed once
+  nats.js gives up on it at its 20 s dial timeout, instead of keeping its socket open for the
+  process's life: the bundle carries `patches/nats@2.29.3.patch`, which makes nats.js destroy the
+  socket of a transport that never finished connecting. The patch also makes nats.js close a stale
+  connection without flushing it first, so a session that published agent-stream frames after its
+  path froze still reconnects: the flush never completed behind data the dead path never
+  acknowledged, and the session never redialed.
+
+## [11.7.0] - 2026-10-28
+
+### Changed
+
+- The `dispatch` skill this plugin ships says what a claim delivers, where it said a claim delivers
+  no comments: a person's answers, comments and messages on the claimed issue reach the session,
+  and a new comment that mentions it arrives as the mention alone once that mention was delivered,
+  or twice when the mention's receipt timed out. A `session:` route to the session brings a
+  person's answers, comments and messages as a claim does; a subscription to the issue brings
+  other agents' activity, beyond a reply in an ask the session follows.
+- `dispatch issue-update --help` says closing an issue withdraws its open asks (record kind
+  `withdrawn`, naming the closer, written only by Dispatch) and a reopen brings back exactly those,
+  and `dispatch resolve-ask --help` says an ask on a closed issue is refused (`409 ISSUE_CLOSED`)
+  until the issue reopens.
+- Plugin interface version 4: the interface carries `startupTurn`, the session whose
+  first turn a start that runs after Oh My Pi's startup owns and when that start was sent, which
+  `@sjawhar/pi-legion` sets for its controller's start message and clears at that session's first
+  run or shutdown. Install it with the `@sjawhar/pi-legion` released beside it.
+
 ## Before changelog fragments
 
 ### Added
