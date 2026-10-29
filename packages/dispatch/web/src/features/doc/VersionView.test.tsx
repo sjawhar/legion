@@ -43,7 +43,7 @@ function renderVersionView({
   if (blockSchema === undefined) {
     throw new Error("VersionView test runtime must provide a block schema.");
   }
-  const view = render(
+  const tree = (shown: { by: string; id: string; quote: string } | undefined) => (
     <QueryClientProvider client={queryClient}>
       <DocumentRuntime.Provider value={runtime.runtime}>
         <VersionView
@@ -51,15 +51,47 @@ function renderVersionView({
           asks={[]}
           blockSchema={blockSchema}
           createdAt="2026-09-09T00:00:00Z"
-          highlight={highlight}
+          highlight={shown}
           owner={undefined}
           version={1}
         />
       </DocumentRuntime.Provider>
     </QueryClientProvider>
   );
-  return { ...runtime, blockSchema, view };
+  const view = render(tree(highlight));
+  /** Renders the view again with `shown`, as its parent does on every render of its own. */
+  const rerender = (shown: { by: string; id: string; quote: string } | undefined) =>
+    view.rerender(tree(shown));
+  return { ...runtime, blockSchema, rerender, view };
 }
+
+// The parent builds `highlight` afresh on every render. An editor rebuilt for each such render
+// collapsed the page and scrolled again, and its last scroll could run before the last editor had
+// laid out, leaving the reader at the top of the page; a browser row catches that only sometimes.
+test("VersionView keeps its editor when the parent renders again with an equal highlight, and builds a new one for another comment", async () => {
+  const markdown = "Read the current specification and the older note";
+  const { editors, rerender, view } = renderVersionView({
+    highlight: { by: "user:alice", id: "comment-1", quote: "current" },
+    markdown,
+  });
+
+  try {
+    await waitFor(() => expect(editors).toHaveLength(1));
+    rerender({ by: "user:alice", id: "comment-1", quote: "current" });
+    rerender({ by: "user:alice", id: "comment-1", quote: "current" });
+    await Bun.sleep(20);
+    expect(editors).toHaveLength(1);
+    expect(editors[0]?.destroyed).toBe(false);
+    expect(editors[0]?.focused).toEqual(["comment-1"]);
+
+    rerender({ by: "user:bob", id: "comment-2", quote: "older" });
+    await waitFor(() => expect(editors).toHaveLength(2));
+    expect(editors[0]?.destroyed).toBe(true);
+    expect(editors[1]?.focused).toEqual(["comment-2"]);
+  } finally {
+    view.unmount();
+  }
+});
 
 test("VersionView renders the version read-only with the highlighted quote focused", async () => {
   const { editors, view } = renderVersionView({
