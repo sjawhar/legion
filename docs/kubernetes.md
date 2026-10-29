@@ -3247,26 +3247,29 @@ launch credentials. The daemon-launched controller takes the same path, because 
 that secret to every launch it builds, whichever kind of pod the role names. So every role of
 every issue of the project, and that controller, present the same bytes.
 
-Dispatch matches those bytes against the deployment's shared agent tokens
-(`DISPATCH_AGENT_TOKEN`, `MatchesSharedAgentToken`,
+When `dispatch_token_file` holds one of the deployment's shared agent tokens
+(`DISPATCH_AGENT_TOKEN`), Dispatch matches the bytes against them (`MatchesSharedAgentToken`,
 `packages/envoy/internal/dispatch/auth/agent_token.go`) and reads no person, no service and no
-project from them. The acting session is the one the request body names (`bearerSessionActor`,
+project from them. The acting session is then the one the request body names (`bearerSessionActor`,
 `packages/envoy/internal/dispatch/api/server.go`), which for the daemon's own writes is
-`legion-daemon:<PROJECT>` (`DaemonSession`, `packages/daemon/internal/dispatch/client.go`). So the
-token names nobody. An operator sees this with `dispatch whoami` in a role, which answers
+`legion-daemon:<PROJECT>` (`DaemonSession`, `packages/daemon/internal/dispatch/client.go`), so the
+token names nobody. Dispatch takes any other bearer as a service token or a personal token
+(`optionalActor`, `server.go`), and then every role acts as that token's service or owner.
+`dispatch whoami` in a role tells the two apart: for a shared agent token it answers
 `Session <id> runs under the shared token: no owner, …`
 (`packages/envoy-client/src/dispatch-execute.ts`).
 
-The one Kubernetes token this runtime projects for a role is the broker's, `agent-secrets-token`
-under `runtime.kubernetes.agent_secrets` (`agentSecretsVolumes`, `manifest.go`), and it reaches
-the secrets broker and nothing else. Dispatch can verify a projected token minted for its own
-audience (`DISPATCH_OIDC_AUDIENCE` in `packages/envoy/cmd/dispatch/settings.go`, checked by
+The one Kubernetes service-account token this runtime projects for a role is the broker's,
+`agent-secrets-token` under `runtime.kubernetes.agent_secrets` (`agentSecretsVolumes`,
+`manifest.go`), and it reaches the secrets broker and nothing else. Dispatch can verify a projected
+token minted for its own audience (`DISPATCH_OIDC_AUDIENCE` in
+`packages/envoy/cmd/dispatch/settings.go`, checked by
 `serviceTokenActor` in `packages/envoy/internal/dispatch/api/server.go`), and the runtime projects
 none. The operator's own pod volumes are outside this statement: the operator controls them.
-`legion controller start` is the other case. It points
+An operator-launched controller can differ: `legion controller start` points
 `DISPATCH_TOKEN_FILE` at the controller file's own `dispatch_token_file`
-(`controllerEnvironment`, `packages/daemon/cmd/legion/controller.go`), so an operator-launched
-controller presents whatever token the operator put there. What the broker can already issue is
+(`controllerEnvironment`, `packages/daemon/cmd/legion/controller.go`), so it presents the token
+that file holds, which need not be the daemon's. What the broker can already issue is
 [The Dispatch identity the broker can issue](#the-dispatch-identity-the-broker-can-issue).
 `dispatch://INFRA-267` is where Legion's pods and its daemon get tokens of their own, and
 `dispatch://INFRA-264` is where Dispatch accepts one.
@@ -5955,10 +5958,11 @@ repository, its workflow path and its ref (`Set.Workflow`). A machine login's to
 at all: the person is the login's approver, the scope is `person`, and the token names no project
 (`Set.Machine`). A session name belongs to one principal — the service account, the workflow, or
 the person — and the broker refuses `invalid_grant` to another principal that names it
-(`claimSession`, `packages/envoy/internal/broker/oauth/exchange.go`). A claim holds the name until
+(`claimSession`, `packages/envoy/internal/broker/oauth/exchange.go`). A claim holds the name for
 `oauthstore.SessionRetention`, 90 days, past the expiry of the token the claim was made for
-(`packages/envoy/internal/broker/oauthstore/exchange.go`). Where the asking principal's own entry
-fixes that name, the claim takes it from any other holder instead.
+(`BindSession`, `packages/envoy/internal/broker/oauthstore/exchange.go`). A name an entry fixes is
+the entry's with no expiry: the broker reserves it for the entry (`ReserveSessions`, the same
+file), and the entry's own exchange takes it from any other holder.
 
 A resource server reads such a token back with `POST /v1/oauth/introspect`
 (`packages/envoy/internal/broker/api/handlers_introspect.go`). It authenticates with its own

@@ -227,12 +227,14 @@ every launch secret to a 0600 file of its own under `<state_dir>/secrets` and te
 matching `<NAME>_FILE` pointer, here `ENVOY_TOKEN_FILE` (`secretFiles`, `WriteSecretFiles` and
 `panePairs`, `packages/daemon/internal/runtime/tmux/spawn.go`).
 
-Dispatch takes that bearer for nobody. It matches it against the deployment's shared agent tokens
-(`DISPATCH_AGENT_TOKEN`, `MatchesSharedAgentToken`,
+When `dispatch_token_file` holds one of the deployment's shared agent tokens
+(`DISPATCH_AGENT_TOKEN`), Dispatch matches the bearer against them (`MatchesSharedAgentToken`,
 `packages/envoy/internal/dispatch/auth/agent_token.go`) and reads no person, no service and no
-project from it. The acting session is the one the request body names (`bearerSessionActor`,
-`packages/envoy/internal/dispatch/api/server.go`). `dispatch whoami` in a pane answers
-`Session <id> runs under the shared token: no owner, …`
+project from it. The acting session is then the one the request body names (`bearerSessionActor`,
+`packages/envoy/internal/dispatch/api/server.go`). Dispatch takes any other bearer as a service
+token or a personal token (`optionalActor`, the same file), and then every pane acts as that
+token's service or owner. `dispatch whoami` in a pane tells the two apart: for a shared agent token
+it answers `Session <id> runs under the shared token: no owner, …`
 (`packages/envoy-client/src/dispatch-execute.ts`). A pod's side of this is in `docs/kubernetes.md`,
 "Anatomy of a Sandbox pod". A person's own session on the same box uses a personal token instead,
 minted from Dispatch's Settings → Agent tokens
