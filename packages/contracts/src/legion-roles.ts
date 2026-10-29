@@ -35,6 +35,33 @@ export function isLegionRole(role: string): role is LegionRole {
   return LEGION_ROLES.some((candidate) => candidate === role);
 }
 
+/**
+ * The role that works a phase, the TypeScript mirror of the daemon's own table
+ * (`packages/daemon/internal/workflow/effects.go`, `RoleFor`). A phase no role works —
+ * `admitted`, `awaiting_merge`, `done`, `held`, `unrecorded` — has none, and so has any value
+ * that is not a phase; `accepting` is the tree architect's, and `retro` is the implementer's
+ * second turn on the issue it developed.
+ */
+export function roleForPhase(phase: string): LegionRole | undefined {
+  switch (phase) {
+    case "planning":
+      return "planner";
+    case "implementing":
+    case "retro":
+      return "implementer";
+    case "testing":
+      return "tester";
+    case "reviewing":
+      return "reviewer";
+    case "accepting":
+      return "architect";
+    case "merging":
+      return "merger";
+    default:
+      return undefined;
+  }
+}
+
 export function isLegionProjectToken(project: string): boolean {
   return PROJECT_TOKEN.test(project);
 }
