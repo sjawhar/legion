@@ -247,8 +247,9 @@ func (c *Client) hooksDue() bool {
 func (c *Client) reportHookFailure(err error) {
 	stall, _ := c.HookStall()
 	// One call for both lines, so an attribute added later goes on the WARN and the ERROR alike.
-	// The two messages and the three attributes are matched by an operator's filter and by the
-	// AWS log-metric filter, so neither is rewritten here.
+	// The AWS log-metric filter reads the level and the words of the ERROR message alone
+	// (infra/aws/rendering/metricfilters.go, reconnect-hooks-stalled): neither the WARN line nor
+	// any attribute. An operator's own filter may match the rest, so neither line is rewritten here.
 	level, msg := slog.LevelWarn, "envoy nats reconnect hook failed; it is retried"
 	if stall >= RepairGrace {
 		level, msg = slog.LevelError, "envoy nats reconnect hooks have not succeeded"

@@ -65,11 +65,11 @@ func TestRewatchRetryAfterAReconnectLogsNoError(t *testing.T) {
 	}
 }
 
-// The acceptance clause this holds: the stall is exposed so cmd/listener can answer 503 on
-// /healthz. A rewatch that keeps failing ends no watcher, so nothing else tells the listener its
-// caches are off their buckets: before HookStall, hooks that never succeeded were invisible to
-// /healthz, which is the regression this catches. HookStall reports the time since the connection
-// event they have not covered, measured on the client's own clock
+// The acceptance clause this holds: the stall is exposed so cmd/listener can answer 200
+// "degraded" on /healthz. A rewatch that keeps failing ends no watcher, so nothing else tells the
+// listener its caches are off their buckets: before HookStall, hooks that never succeeded were
+// invisible to /healthz, which is the regression this catches. HookStall reports the time since
+// the connection event they have not covered, measured on the client's own clock
 // (bus.WithReconnectErrClock, so the test moves bus.RepairGrace rather than waiting it out), and
 // the error of the last run that failed, so the answer names what is broken and for how long.
 func TestHookStallReportsTheStallAndTheLastHookError(t *testing.T) {
@@ -93,7 +93,7 @@ func TestHookStallReportsTheStallAndTheLastHookError(t *testing.T) {
 	})
 
 	// The clock has not moved since the reconnect it timed, so there is no stall yet: the recovery
-	// is retrying, and the error alone is no reason for /healthz to refuse.
+	// is retrying, and the error alone does not make /healthz answer degraded.
 	stall, hookErr := client.HookStall()
 	if stall != 0 || !errors.Is(hookErr, errRewatch) {
 		t.Fatalf("HookStall() = (%v, %v) before the clock moved; want (0, %v)", stall, hookErr, errRewatch)

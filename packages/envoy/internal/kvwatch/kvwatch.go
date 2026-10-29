@@ -220,9 +220,9 @@ func (w *Watcher) Start() {
 // because another attempt follows. The bus arms one within seconds while its hooks are due after
 // a connection event (internal/bus/recovery.go, recoverUntilHealthy), and a watcher that stopped
 // on its own while the hooks are current is rewatched by the listener's self-health rebuild on
-// the monitor's tick instead (cmd/listener/main.go:123, from main.go:177). Either way the wait
-// armed at the stop reports the outage once, at bus.RepairGrace (consume). The error is returned
-// unchanged, which its caller already logs.
+// the monitor's tick instead (cmd/listener/main.go, rewatchListenerKVWatchers, called from
+// rebuildListenerDependencies). Either way the wait armed at the stop reports the outage once, at
+// bus.RepairGrace (consume). The error is returned unchanged, which its caller already logs.
 //
 // The replacement resumes after the last revision the cache applied when it can, rather than
 // reading every key again (resumeFrom says when): it delivers only what was written since, so a
@@ -741,10 +741,11 @@ func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64, started ti
 	// none of its own, because it is not the end of the attempt: the bus arms another repair
 	// within seconds while its hooks are due after a connection event (internal/bus/recovery.go,
 	// recoverUntilHealthy), and a watcher that stopped while they are current is rewatched by the
-	// listener's self-health rebuild on the monitor's tick (cmd/listener/main.go:123, from
-	// main.go:177), so one attempt that failed says only that the outage is still running. That
-	// refines, and does not drop, what INFRA-182 settled - an ERROR when nothing has repaired the
-	// watcher within a minute - by making unrepairedDelay the single point it is reported at.
+	// listener's self-health rebuild on the monitor's tick (cmd/listener/main.go,
+	// rewatchListenerKVWatchers, called from rebuildListenerDependencies), so one attempt that
+	// failed says only that the outage is still running. That refines, and does not drop, what
+	// INFRA-182 settled - an ERROR when nothing has repaired the watcher within a minute - by
+	// making unrepairedDelay the single point it is reported at.
 	w.repairTimer = w.after(unrepairedDelay, func() { w.reportUnrepaired(generation) })
 	w.mu.Unlock()
 	w.logger().Warn(w.name+" watcher stopped", slog.String("error", err.Error()))
