@@ -1236,8 +1236,16 @@ func publishRoute(deps Deps, eventID int64, item contracts.Envelope, a *attempt,
 	return publishDestination(deps, eventID, item, a, "publish route", *route)
 }
 
+// envelope builds the bus envelope of one event. Its payload is the event with one field the
+// event log does not hold: `quiet` (events.Quiet), whether the event carries nothing for a
+// reader following its owner topic. A reader takes it as the whole answer, where `notify` says
+// only whether the event wakes the route, so an agent's comment on an issue reaches the sessions
+// that subscribed to that issue's topic.
 func envelope(event model.Event, slug string) (contracts.Envelope, error) {
-	payload, err := json.Marshal(event)
+	payload, err := json.Marshal(struct {
+		model.Event
+		Quiet bool `json:"quiet"`
+	}{Event: event, Quiet: events.Quiet(event)})
 	if err != nil {
 		return contracts.Envelope{}, fmt.Errorf("encode event: %w", err)
 	}
