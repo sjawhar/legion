@@ -2,53 +2,60 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-590",
-  "completed": "2026-10-28T23:55:00Z",
-  "round": 9,
-  "testedHead": "2ba3ba486fcba9a4ae1f23c8c155914a7e4ae2d7",
+  "completed": "2026-10-29T09:20:00Z",
+  "round": 10,
+  "testedHead": "90383ad764e578f7fcb98ee639ce23b7600b0812",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Ran the implementer's commands again at 2ba3ba48 on this pod's Postgres 17. The multiprocess package passed (688.3 s). The outbox (242.6 s; the round's new tests TestOneBrokenRowOfARecipientReadCostsTheBatchAboutTwoStatementsPerHalving, TestABrokenRowOfAnEventThatIsNotDueFailsNoOtherOwnersRecipientRead, TestAnEventBehindAnotherThatIsNotDueIsHeldOnlyOnTheKeysTheOtherCouldStillOwe and TestARefusedConnectionOrAFailingServerIsNoRefusedStatement among them), deliveryaudit, duty, bus and cmd/listener packages all passed. I drove review finding 1 on real processes, against the previous head as the negative control (proof below)."
+    "how": "Ran the implementer's commands again at 90383ad7 on this pod's Postgres 17. The multiprocess package passed (728.6 s). The outbox, deliveryaudit, duty and bus packages passed. cmd/listener passed except one intermittent test that fails on main as well (observations). I drove the review's role-move finding on real processes, with the previous head as the negative control. Interim evidence was posted before the 02:30Z daemon roll (PR comments 6486125032, 6486157275); the pod disk did not survive the roll, so the pod Postgres was rebuilt and the listener runs repeated after it."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review finding 1: an event waiting out a back-off holds a later event of its issue back only on the keys it could still owe, not from a session it already reached",
-      "surface": "two real envoy-dispatch binaries (multiprocess harness, throwaway probe TestProbeNotDueEventHoldsOnlyItsStalledKey). Issue X is routed to a role whose holder H withholds its receipt. Thread A: root by T1, reply by T2. Thread B: root by T2. A person's reply N in thread A reaches T1 and, through thread A's recipient read, T2; its role forward to H gets no receipt, so N is backed off and not due. A person's reply N+1 in thread B, which T2 rooted, is then written",
-      "command": "cd packages/envoy (scratch copy) && GOWORK=off DISPATCH_TEST_DATABASE_URL=<pg> go test -tags multiprocess -count=1 -run TestProbeNotDueEventHoldsOnlyItsStalledKey -v ./cmd/dispatch, at 2ba3ba48 and at 2f3bf214",
-      "observed": "At 2ba3ba48, N+1 reached T2 21 ms after its write while N (attempts 3) waited on H. Once H answered, H took N and then N+1. Every session's frames were in order",
-      "headSha": "2ba3ba486fcba9a4ae1f23c8c155914a7e4ae2d7",
-      "negativeControl": "At 2f3bf214 (the previous head), N+1 reached T2 only 3.973 s after its write, held until N's retry, although N had already reached T2. The probe fails there with 'N+1 waited 3.972836316s for T2, a key N already reached'. That is the defect the review found"
+      "criterion": "Review finding (round 6): an incomplete event whose role route reached the role's old holder holds a later forward to the new holder until its own retry",
+      "surface": "two real envoy-dispatch binaries (multiprocess harness, throwaway probe TestProbeRoleMovesUnderAnIncompleteEvent). X is routed to a role held by O. Thread A on X's spec: root by T1, reply by N. With the spec's credit list broken, a person's reply E reaches O through the role and its recipient read fails. The role then moves to N, and a person's plain comment C is forwarded to N",
+      "command": "cd packages/envoy (scratch copy) && GOWORK=off DISPATCH_TEST_DATABASE_URL=<pg> go test -tags multiprocess -count=1 -run TestProbeRoleMovesUnderAnIncompleteEvent -v ./cmd/dispatch, at 90383ad7 and at 2ba3ba48",
+      "observed": "At 90383ad7, N had not taken C 4 s after its write. After the repair, N took E (02:07:44.432) and then C (02:07:44.434)",
+      "headSha": "90383ad764e578f7fcb98ee639ce23b7600b0812",
+      "negativeControl": "At 2ba3ba48 (the previous head), N took C at once (02:08:04.104) and E only after the repair (02:08:09.913). The probe fails there: 'N took C before E: per-(owner, destination) order broken across the role's move'"
     },
     {
-      "criterion": "Round 8's guarantees still hold: a failed recipient read holds its issue's later session copies, backs off only the events that need it, and other issues keep publishing",
-      "surface": "round 8's throwaway probe TestProbeFailedRecipientRead, re-run on two real processes at this head",
-      "command": "same command as round 8, at 2ba3ba48",
-      "observed": "While X's spec credit list was broken (8 s), T1 took nothing; X#4 and X#5 were backed off with attempts 4; X#6 (the resolve) was held; routed issue Y's comment reached R. After the repair (7.2 s), T1 took #4 and then #6, T2 #4, and D #4 and #5, in order",
-      "headSha": "2ba3ba486fcba9a4ae1f23c8c155914a7e4ae2d7",
-      "negativeControl": "Round 8 ran the same probe at bf30591d, where the whole outbox stalled"
+      "criterion": "The fix is pinned by a test",
+      "surface": "outbox package on real Postgres and NATS, under a mutation in a scratch copy",
+      "command": "GOWORK=off go test ./internal/dispatch/outbox/ with planChains' new 'skip a delivered destination' check disabled",
+      "observed": "TestAnEarlierEventsReachedRoleRouteDoesNotNameTheRolesCurrentHolder fails",
+      "headSha": "90383ad764e578f7fcb98ee639ce23b7600b0812",
+      "negativeControl": "the mutation is the broken input; it turned the test red"
     },
     {
-      "criterion": "The new rules are pinned: delivered keys join the hold's named keys, and a refused connection or failing server is no refused statement",
-      "surface": "outbox package on real Postgres and NATS, under mutations made in a scratch copy",
-      "command": "GOWORK=off go test ./internal/dispatch/outbox/ with (a) the delivered-subjects loop that joins named emptied; (b) refusedStatement accepting every *pgconn.PgError and ConnectError",
-      "observed": "(a) fails TestAnEventBehindAnotherThatIsNotDueIsHeldOnlyOnTheKeysTheOtherCouldStillOwe. (b) fails TestARefusedConnectionOrAFailingServerIsNoRefusedStatement: 'refusedStatement(a connection refused for too_many_connections (53300)) = true, want false', and the same for admin_shutdown (57P01) and connection_failure (08006). TestOneBrokenRowOfARecipientReadCostsTheBatchAboutTwoStatementsPerHalving logs 13 document credit reads for 64 documents with one broken",
-      "headSha": "2ba3ba486fcba9a4ae1f23c8c155914a7e4ae2d7",
-      "negativeControl": "each mutation is the deliberately broken input; each turned a test red (review finding 3: the hold is now pinned)"
+      "criterion": "Rounds 8 and 9 still hold: a failed recipient read holds its issue's later session copies and isolates other issues; an event waiting out a back-off holds a later event only on keys it could still owe",
+      "surface": "rounds 8 and 9 throwaway probes, re-run on two real processes at this head",
+      "command": "go test -tags multiprocess -run 'TestProbeFailedRecipientRead|TestProbeNotDueEventHoldsOnlyItsStalledKey' -v ./cmd/dispatch (scratch copy)",
+      "observed": "Round 8 probe: T1 took nothing while the read failed, then the reply before the resolve; routed issue Y's comment reached R at once. Round 9 probe: the later reply reached T2 27 ms after its write while N waited on the role holder",
+      "headSha": "90383ad764e578f7fcb98ee639ce23b7600b0812",
+      "negativeControl": "Round 8's probe stalls the whole outbox at bf30591d; round 9's holds the copy 3.97 s at 2f3bf214"
+    },
+    {
+      "criterion": "After the merge of main: main's build runs on this head's schema",
+      "surface": "envoy-dispatch at head and main's envoy-dispatch (merge base d4cbcfe6) on one database and a real NATS",
+      "command": "the head build migrates a fresh database, publishes a comment, stops with SIGTERM (duty_holds empty); main's build then posts 3 comments",
+      "observed": "Schema 138. Main's build booted on schema_version 138 and published 4 of 4 comments",
+      "headSha": "90383ad764e578f7fcb98ee639ce23b7600b0812",
+      "negativeControl": "Round 6 showed the connection-count test failing at 87 against this branch's 88; the count is unchanged by this merge"
     },
     {
       "criterion": "One publisher; a killed, cut, silently cut or frozen publisher is replaced within 10 s; each session takes each event once and in order",
       "surface": "the repository's multiprocess harness at the head",
       "command": "cd packages/envoy && GOWORK=off DISPATCH_TEST_DATABASE_URL=<pg> go test -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch",
-      "observed": "ok, 688.3 s. Take-over: SIGKILL 5.268 s, NATS cut 3.004 s, silent cut 2.852 s, SIGSTOP 4.999 s. 200 comments: watcher 200, role holder 80, author 60, each once and in order. Killed mid-batch: comment 1 at sequence 3, comment 2 at 4",
-      "headSha": "2ba3ba486fcba9a4ae1f23c8c155914a7e4ae2d7",
+      "observed": "ok, 728.6 s. Take-over: SIGKILL 5.1 s, NATS cut 3.0 s, silent cut 2.3 s, SIGSTOP 5.7 s",
+      "headSha": "90383ad764e578f7fcb98ee639ce23b7600b0812",
       "negativeControl": "TestAFrozenPublisherSendsNothingWhenItResumes: the resumed process started no batch"
     }
   ],
   "observations": [
-    "CI at 2ba3ba48: every check was queued when read.",
-    "This round merged no main, so round 8's migration and rollback checks (schema 138, main's build c24ea568 on it, count 88) stand.",
-    "Fast-follow reads none; this round adds no Dispatch key.",
-    "pmdoc's docstest.NestedValue import, fixed by the open #2481, is main's (controller, 22:50Z). #2324 and #2473 are on this branch."
+    "cmd/listener's TestListenerFollowsTheInterestRegistryAcrossNATSRestarts fails intermittently on main too, so it is not this PR's. Each run alone on the pod: this head 2 failures in 49 runs (3+15+30, plus one failure in a run that overlapped the multiprocess suite); 2ba3ba48 1 in 18; main's merge base d4cbcfe6 1 in 49 (4+15+30). The error is the same class each time: 'ERROR envoy nats reconnect hook failed … rewatch <session|interest> cache: watch <session registry|role claims> KV bucket: context deadline exceeded' after a NATS restart, which the test treats as a failure. This PR does not change the rewatch hooks; on the reconnect path it adds only connectionChanged(), which closes a channel under c.mu. Not found tracked in Dispatch; sent to the architect as a finding outside this PR.",
+    "CI at 90383ad7: lint, typecheck, test and pr-title success; envoy-go, envoy-go-race, dispatch-multiprocess, dispatch-memory, envoy-e2e-local and envoy-smoke success. dispatch failed only on e2e/close-withdraws-asks.e2e.ts:126, the red the controller named as main's (00:56Z, 01:51Z).",
+    "Fast-follow reads none; this round adds no Dispatch key."
   ]
 }
