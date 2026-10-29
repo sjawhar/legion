@@ -1181,12 +1181,15 @@ test("an agent error frame reaches onUnavailable and is not retried", () => {
     // A reconnect resubscribes the feed and not the refused view, which the page no longer holds.
     restart(socket);
     sockets.latest().open();
-    expect(
+    const subscribedKinds = () =>
       sockets
         .latest()
         .subscribes()
-        .map((frame) => frame.view.kind)
-    ).toEqual(["events"]);
+        .map((frame) => frame.view.kind);
+    expect(subscribedKinds()).toEqual(["events"]);
+    // Nor later: no retry of the refused view waits to be sent on the open socket.
+    jest.advanceTimersByTime(10_000);
+    expect(subscribedKinds()).toEqual(["events"]);
     stopAgent();
     expect(sockets.latest().unsubscribes()).toEqual([]);
     expect(agent.seen).toHaveLength(1);
