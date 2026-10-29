@@ -480,3 +480,46 @@ func TestWhoamiAnswersAtOnceWhileAWriteOfThisDatabaseIsOpen(t *testing.T) {
 		t.Fatalf("whoami answered event_head %d while event %d was open below the committed %d, want an id below it and at or above the earlier answer %d", head, low, high, earlier)
 	}
 }
+
+// TestWhoamiDoesNotSendAPageToReplayTheWholeLogWhileAWriteFromBeforeBootIsOpen: a page resumes its
+// first events subscription from event_head and is replayed every event above it. On a process
+// just started while a write of Dispatch's own database that took its transaction id before boot
+// is still open (a restart under load, where writes hold their ids for seconds), no mark the server
+// holds counts and no horizon is proven, and an event_head of 0 has every page that loads then
+// replayed the whole log: on 5,000,000 events a page so resumed was sent 1,998,016 frames in its
+// first 120 s and had not reached the newest. Every event that committed before that write took its
+// id is final, so event_head may stand below the open write but not below those.
+func TestWhoamiDoesNotSendAPageToReplayTheWholeLogWhileAWriteFromBeforeBootIsOpen(t *testing.T) {
+	const committed = 1000
+	database := storetest.Open(t)
+	ctx := t.Context()
+	if _, err := database.Pool.Exec(ctx, `
+		insert into events (seq, type, actor, payload, notify, published_at)
+		select 0, 'test.filler', '{"kind":"system","id":"test"}', '{}', false, now()
+		from generate_series(1, $1)
+	`, committed); err != nil {
+		t.Fatalf("fill the event log: %v", err)
+	}
+	var final int64
+	if err := database.Pool.QueryRow(ctx, `select max(id) from events`).Scan(&final); err != nil {
+		t.Fatalf("read the event log's head: %v", err)
+	}
+	writer, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the write: %v", err)
+	}
+	var once sync.Once
+	end := func() { once.Do(func() { _ = writer.Rollback(context.Background()) }) }
+	t.Cleanup(end)
+	if _, err := writer.Exec(ctx, `select pg_current_xact_id()`); err != nil {
+		t.Fatalf("take the write's transaction id: %v", err)
+	}
+	// The write took its id before the server below takes its boot mark, and ends three seconds
+	// later, as a write holding its id for seconds does.
+	handler := storeRouter(t, database)
+	ended := time.AfterFunc(3*time.Second, end)
+	t.Cleanup(func() { ended.Stop() })
+	if head := eventHeadID(t, askWhoami(t, handler)); head < final {
+		t.Fatalf("whoami answered event_head %d while a write from before boot was open, want at least %d, the newest of the events that committed before it: the page would be replayed the whole log", head, final)
+	}
+}

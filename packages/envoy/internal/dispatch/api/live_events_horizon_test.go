@@ -293,6 +293,33 @@ func TestTheFirstColdSubscriptionOfAFreshProcessIsSentAnEventCommittedWhileTheRe
 	expectEventsInOrder(t, client, "events", committed)
 }
 
+// TestTheFirstColdSubscriptionIsSentAnEventCommittedWhileAWriteFromBeforeBootHoldsTheStart: the
+// same start, held this time by a write of Dispatch's own database that took its transaction id
+// before the boot mark (a restart under load). The first start waits for a mark that counts, which
+// none does until that write ends, and its floor is then the newest such mark, taken after the
+// write: an event that committed after the subscription began and before the write ended stands
+// at or below that floor, and so below the cursor the subscription starts at, and must still reach
+// the subscription.
+func TestTheFirstColdSubscriptionIsSentAnEventCommittedWhileAWriteFromBeforeBootHoldsTheStart(t *testing.T) {
+	var release func()
+	// persistence runs on the test's database before register takes the boot mark.
+	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond, persistence: func(database *store.Store) docs.VersionedStore {
+		release = holdEventWriterTransactionID(t, database)
+		return nil
+	}}, nil)
+	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
+
+	client := rig.dial(t, withBearer("agent-token"))
+	sendEventsSubscribe(t, client, "events", nil)
+	awaitRelayStart(t, rig.served.eventRelay)
+	renameIssue(t, rig.handler, issue.Key, "Renamed while the relay starts")
+	committed := eventHead(t, rig.database)
+	release()
+
+	eventsStartID(t, client, "events")
+	expectEventsInOrder(t, client, "events", committed)
+}
+
 // eventsTuplesRead is how many rows of events every statement so far has read, by a sequential
 // scan of the table or through its primary key: the cost of a read of the event log, whichever
 // plan Postgres chose for it. A backend keeps its statistics until it has been idle for up to ten
