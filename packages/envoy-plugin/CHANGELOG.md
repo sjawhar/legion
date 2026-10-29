@@ -1,5 +1,13 @@
 # Changelog
 
+## [9.8.0] - 2026-10-28
+
+### Added
+
+- Every registration names the plugin: `plugin` `@sjawhar/opencode-legion-envoy` and
+  `plugin_version` this package's version, which the listener's `GET /v1/sessions` and
+  `GET /v1/registry/<id>` show.
+
 ## Before changelog fragments
 
 ### Added

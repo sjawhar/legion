@@ -1,4 +1,4 @@
-// Package events owns Dispatch's durable event log and in-process SSE fan-out.
+// Package events owns Dispatch's durable event log and its in-process fan-out.
 package events
 
 import (
@@ -18,8 +18,8 @@ import (
 // Its fan-out is a Stream of its own (stream.go), so the one implementation of the overflow
 // contract serves both it and the reader's live feed. A Broker's subscribers are the ones that
 // want this process's own writes as it commits them: the outbox's local wake
-// (outbox/publisher.go) and the delivery hub's intake (api/delivery_live_hub_intake.go). An open
-// SSE connection is not one of them; it reads the relay's stream, which carries the other
+// (outbox/publisher.go) and the delivery hub's intake (api/delivery_live_hub_intake.go). An
+// events subscription is not one of them; it reads the relay's stream, which carries the other
 // process's events too.
 type Broker struct {
 	stream *Stream
@@ -294,7 +294,7 @@ func lockEventOwner(ctx context.Context, tx pgx.Tx, e *model.Event) (int, error)
 }
 
 // Notify reports whether an event should wake agents and receive routed delivery.
-// The issue topic, event log, and SSE carry every event regardless of this value.
+// The issue topic, event log, and event feed carry every event regardless of this value.
 // A message reply (`message.answered`) follows the same rule as a fresh message: a targeted
 // one reached its session through the synchronous listener send and stays quiet; a human's
 // reply on a plain agent message must wake the route and the message's author.
@@ -317,7 +317,7 @@ func (b *Broker) Notify(e model.Event) bool {
 		"architecture.synced", "architecture.sync_failed", "user_state.updated", "user_agent_state.updated",
 		"user_thread_state.updated":
 		// Settings, importer and per-viewer bookkeeping: retained on their log and carried by
-		// SSE, but nobody is woken by them.
+		// the event feed, but nobody is woken by them.
 		return false
 	case "child.status", "child.added", "child.removed":
 		// A child status flip or a reparent changes the parent's Children set whoever

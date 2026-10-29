@@ -381,11 +381,11 @@ export function DeliveryPage(): ReactNode {
 
   // Whether the page shows the setup form: the last settled timeline read's answer, held while a
   // read is in flight. A refetch with nothing cached clears `query.error` the moment it starts
-  // (the window regaining focus, the event stream's reconnect refresh), so a body read live from
-  // the query would unmount the form, and the draft typed into it, on every tab switch. A read
-  // that settles on anything but `DELIVERY_NOT_CONFIGURED` shows that instead: the timeline a
-  // save brings, or a failure with Retry. Set during render (React's pattern for state derived
-  // from props), so the render that settles already shows the new body.
+  // (the window regaining focus or a live-socket gap refresh), so a body read live from the query
+  // would unmount the form, and the draft typed into it, on every tab switch. A read that settles
+  // on anything but `DELIVERY_NOT_CONFIGURED` shows that instead: the timeline a save brings, or a
+  // failure with Retry. Set during render (React's pattern for state derived from props), so the
+  // render that settles already shows the new body.
   const [notConfigured, setNotConfigured] = useState(false);
   if (query.fetchStatus === "idle" && isDeliveryNotConfigured(query.error) !== notConfigured) {
     setNotConfigured(!notConfigured);

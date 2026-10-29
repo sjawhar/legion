@@ -489,14 +489,14 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 // generous, since an open write anywhere on the test cluster holds the horizon back.
 func awaitGraphEdges(t *testing.T, handler http.Handler, query url.Values, want int) model.GraphReferences {
 	t.Helper()
-	deadline := time.Now().Add(sseFrameWait)
+	deadline := time.Now().Add(eventFeedWait)
 	for {
 		read := graphEdges(t, handler, query)
 		if len(read.Edges) == want {
 			return read
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("GET /api/v1/references?%s = %#v after %s; want %d edges", query.Encode(), read.Edges, sseFrameWait, want)
+			t.Fatalf("GET /api/v1/references?%s = %#v after %s; want %d edges", query.Encode(), read.Edges, eventFeedWait, want)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -522,7 +522,7 @@ func TestReferencesSinceAnswersAMentionCommittedBeforeTheReadOnAQuietServer(t *t
 	comment := createReferenceAPIComment(t, handler, citing.Key, "Blocked on "+targetRef)
 
 	query := url.Values{"to": {targetRef}, "since": {"0"}}
-	deadline := time.Now().Add(sseFrameWait)
+	deadline := time.Now().Add(eventFeedWait)
 	for {
 		started := time.Now()
 		read := graphEdges(t, handler, query)
@@ -548,7 +548,8 @@ func TestReferencesSinceAnswersAMentionCommittedBeforeTheReadOnAQuietServer(t *t
 // Once a commits it answers both. Each edit indexes its comment's body as a comment write does
 // (refs.ReplaceCounted, then refs.Stamp with the edit's event).
 func TestReferencesSinceWithholdsEveryMentionAboveAnOpenLowerEvent(t *testing.T) {
-	handler, database, broker := newTestHandlerWithBroker(t)
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	broker := deps.Events
 	createReferenceAPIProject(t, handler, "CORE")
 	issue := func(title string) model.Issue {
 		t.Helper()

@@ -156,6 +156,8 @@ test("a card survives a held-button drag that leaves its reference and comes bac
     const turns = page.getByRole("list", { name: "Conversation turns" });
     const link = turns.getByRole("link", { name: "Hover target" });
     await expect(link).toBeVisible();
+    // The dwell's read mark drops the `New` mark and moves the reference 24 px up; settle it first.
+    await expect(turns.getByText("New", { exact: true })).toHaveCount(0);
     await link.hover();
     const card = page.getByRole("tooltip");
     await expect(card).toBeVisible();
@@ -206,6 +208,8 @@ test("a card survives a held-button move from the card back onto its reference",
     const turns = page.getByRole("list", { name: "Conversation turns" });
     const link = turns.getByRole("link", { name: "Hover target" });
     await expect(link).toBeVisible();
+    // The dwell's read mark drops the `New` mark and moves the reference 24 px up; settle it first.
+    await expect(turns.getByText("New", { exact: true })).toHaveCount(0);
     await link.hover();
     const card = page.getByRole("tooltip");
     await expect(card).toBeVisible();

@@ -86,15 +86,16 @@ func (g *eventGapReread) due() <-chan time.Time {
 	return g.timer.C
 }
 
-// eventStreamRelay is the live source of every open SSE connection on this process: it holds a
-// `listen dispatch_events` connection of its own (migration 0107 notifies on each commit) and
-// publishes every committed event into its events.Stream, whichever process committed it.
+// eventStreamRelay is the live source of every events subscription on this process (the event
+// feed, live_events.go): it holds a `listen dispatch_events` connection of its own (migration 0107
+// notifies on each commit) and publishes every committed event into its events.Stream, whichever
+// process committed it.
 //
 // Two envoy-dispatch processes serve one Postgres. The broker's fan-out reaches only the process
-// that appended the event, so a reader whose connection landed on the other one would see nothing
-// of it until it reconnected. Re-sourcing the live stream from the database carries both
-// processes' events on the one path, and makes the live frame and the replayed frame the same
-// bytes: both come from readEventsAfterID, with an ask event's read-time fields attached.
+// that appended the event, so a page whose socket landed on the other one would see nothing of it
+// until it subscribed again. Re-sourcing the live feed from the database carries both processes'
+// events on the one path, and makes the live frame and the replayed frame the same bytes: both
+// come from readEventsAfterID, with an ask event's read-time fields attached.
 //
 // cursor is the id the relay has published through, and cursorAt the created_at of the event it
 // stands at. Event ids are not commit order: writes to different owners take no lock in common
@@ -157,9 +158,9 @@ func newEventStreamRelay(s *server, lifetime context.Context) *eventStreamRelay 
 	}
 }
 
-// subscribe answers one open SSE connection its live feed and the id the relay had published
-// through when that feed began, starting the relay on the first connection: a process nobody
-// streams from opens no listening connection of its own.
+// subscribe answers one events subscription its live feed and the id the relay had published
+// through when that feed began, starting the relay on the first one: a process nobody subscribes
+// to opens no listening connection of its own.
 //
 // The subscription and the cursor are taken under the one hold of mu that every page's publish
 // and cursor move also take, so they describe the same moment: every event at or below the
@@ -167,7 +168,7 @@ func newEventStreamRelay(s *server, lifetime context.Context) *eventStreamRelay 
 // from the log), and every event above it will be published into the subscription, in strictly
 // increasing id order. Read apart, a page published between the two would reach the caller twice
 // or, read in the other order, not at all. A start that fails starts nothing and is the caller's
-// error; the next connection tries again.
+// error; the next subscription tries again.
 func (r *eventStreamRelay) subscribe(ctx context.Context) (<-chan model.Event, func(), int64, error) {
 	if err := r.start(ctx); err != nil {
 		return nil, nil, 0, err
@@ -179,8 +180,8 @@ func (r *eventStreamRelay) subscribe(ctx context.Context) (<-chan model.Event, f
 }
 
 // start reads the first cursor and runs the relay's two goroutines, once. The first cursor stands
-// on a row whose created_at the reset check can compare, and is the first connection's start
-// point (subscribe), so it must leave nothing that commits after that connection's request at or
+// on a row whose created_at the reset check can compare, and is the first subscription's start
+// point (subscribe), so it must leave nothing that commits after that subscription began at or
 // below it (firstRelayCursor).
 //
 // That read can wait for a safe observation, which an open write anywhere on the instance can
@@ -189,7 +190,7 @@ func (r *eventStreamRelay) subscribe(ctx context.Context) (<-chan model.Event, f
 // included, leaves the relay unstarted, and the next caller runs the read again.
 //
 // A start whose read ends after the relay's lifetime has is refused, and starts nothing. The
-// caller's subscribe runs on a goroutine the SSE handler detaches (awaitEventSubscription), so the
+// caller's subscribe runs on a goroutine of the live socket's own (runSubscription), so the
 // server's shutdown does not wait for it, and the shutdown may already be in wait: running's Add
 // then would race that Wait, and the goroutines it counted would run unwaited for. The check and
 // the Add are under the one hold of mu that wait takes before its Wait, so either the Add comes
@@ -207,7 +208,7 @@ func (r *eventStreamRelay) start(ctx context.Context) error {
 			case <-starting:
 				continue
 			case <-ctx.Done():
-				return fmt.Errorf("wait for the live event stream to start: %w", ctx.Err())
+				return fmt.Errorf("wait for the event stream relay to start: %w", ctx.Err())
 			}
 		}
 		starting := make(chan struct{})
@@ -221,11 +222,11 @@ func (r *eventStreamRelay) start(ctx context.Context) error {
 		close(starting)
 		if err != nil {
 			r.mu.Unlock()
-			return fmt.Errorf("read the live event stream's cursor: %w", err)
+			return fmt.Errorf("read the event stream relay's cursor: %w", err)
 		}
 		if err := r.lifetime.Err(); err != nil {
 			r.mu.Unlock()
-			return fmt.Errorf("start the live event stream: the server is shutting down: %w", err)
+			return fmt.Errorf("start the event stream relay: the server is shutting down: %w", err)
 		}
 		r.cursor, r.cursorAt, r.started = cursor, cursorAt, true
 		r.running.Add(2)
@@ -251,8 +252,8 @@ func (r *eventStreamRelay) start(ctx context.Context) error {
 	}
 }
 
-// firstRelayCursor is the relay's first cursor, which is the first connection's start point, so
-// no event that commits after that connection's request may stand at or below it. It reads the
+// firstRelayCursor is the relay's first cursor, which is the first subscription's start point, so
+// no event that commits after that subscription began may stand at or below it. It reads the
 // log as it stands at the start, in one statement: its newest id and every gap among its ids above
 // a floor at or below which no event can still be open (firstRelayFloor). An event that commits
 // after that read stands above the newest id, or in one of those gaps: an id it drew before the
@@ -262,14 +263,14 @@ func (r *eventStreamRelay) start(ctx context.Context) error {
 // It then waits for a horizon proven after the read (Horizon.Await), past which every id at or
 // below that newest one is final, and reads which of the gaps have filled since: those are events
 // that committed after the start began. The cursor is the last event below the lowest of them, or
-// at the newest id when none filled, so the first connection is sent every event that committed
+// at the newest id when none filled, so the first subscription is sent every event that committed
 // after the read and none committed before it, but those between the lowest late one and the
 // newest id. A gap still empty then is a rollback, and moves the cursor nowhere.
 //
 // The wait is the start's, as before: as long as any transaction open on the instance holds the
-// horizon back, with the connection not yet open (streamEvents). The gap read covers the ids above
+// horizon back, with the subscription's events_start not yet sent (feedEvents). The gap read covers the ids above
 // the floor, which are the ids written since a recent mark, however long the log. An event that
-// commits between the first connection's request and this read, a round trip apart, counts as
+// commits between the first subscription's start and this read, a round trip apart, counts as
 // committed before it.
 func (s *server) firstRelayCursor(ctx context.Context) (int64, time.Time, error) {
 	pool := s.deps.Store.Pool
@@ -330,7 +331,7 @@ func (s *server) firstRelayFloor(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	if !ok {
-		slog.Warn("dispatch: the live event stream's first start reads every event id above the proven horizon: a transaction in this database has held a transaction id since before the server's boot mark",
+		slog.Warn("dispatch: the event stream relay's first start reads every event id above the proven horizon: a transaction in this database has held a transaction id since before the server's boot mark",
 			"above", floor)
 	}
 	return floor, nil
@@ -349,7 +350,7 @@ func (s *server) takeBootMark() {
 		mark, err := s.horizon().Mark(s.lifetime)
 		if err != nil {
 			if s.lifetime.Err() == nil {
-				slog.Warn("dispatch: could not take the event log's boot mark; the live event stream's first start falls back to a mark of its own", "error", err)
+				slog.Warn("dispatch: could not take the event log's boot mark; the event stream relay's first start falls back to a mark of its own", "error", err)
 			}
 			return
 		}
@@ -524,9 +525,9 @@ func (r *eventStreamRelay) run(ctx context.Context) {
 }
 
 // read publishes every event after the cursor and at or below the safe horizon, in id order,
-// through the same read a reconnect's catch-up uses (readEventsAfterID), and moves the cursor
+// through the same read an events subscription's catch-up uses (readEventsAfterID), and moves the cursor
 // over each page as it publishes it (publish). Nothing but this goroutine writes the cursor once
-// the relay has started. It pages until a short page, as streamEvents does, or until the cursor
+// the relay has started. It pages until a short page, as that catch-up does, or until the cursor
 // stands on the horizon, all through the one horizon it read first: what commits meanwhile is the
 // next read's. A log that was reset under the cursor is answered first, and publishes nothing
 // (resetCursor); checkReset false skips that check (run's gap re-read).
@@ -541,7 +542,7 @@ func (r *eventStreamRelay) read(ctx context.Context, checkReset bool) (safe int6
 		switch reset, resetSafe, err := r.resetCursor(tracked); {
 		case err != nil:
 			if ctx.Err() == nil {
-				slog.Warn("dispatch: live event stream could not check its cursor against the event log; retrying", "error", err)
+				slog.Warn("dispatch: the event stream relay could not check its cursor against the event log; retrying", "error", err)
 			}
 			return 0, false, false
 		case reset:
@@ -551,7 +552,7 @@ func (r *eventStreamRelay) read(ctx context.Context, checkReset bool) (safe int6
 	safe, err := horizon.Safe(tracked)
 	if err != nil {
 		if ctx.Err() == nil {
-			slog.Warn("dispatch: live event stream could not observe the event log's safe horizon; retrying", "error", err)
+			slog.Warn("dispatch: the event stream relay could not observe the event log's safe horizon; retrying", "error", err)
 		}
 		return 0, false, false
 	}
@@ -563,12 +564,12 @@ func (r *eventStreamRelay) read(ctx context.Context, checkReset bool) (safe int6
 		page, err := r.server.readEventsAfterID(tracked, cursor, safe)
 		if err != nil {
 			if ctx.Err() == nil {
-				slog.Warn("dispatch: live event stream could not read the committed events; retrying", "error", err)
+				slog.Warn("dispatch: the event stream relay could not read the committed events; retrying", "error", err)
 			}
 			return 0, false, false
 		}
 		r.publish(page)
-		if len(page) < maxSSEReplay {
+		if len(page) < maxEventReplay {
 			return safe, horizon.Pending(), true
 		}
 	}
@@ -611,13 +612,14 @@ func (r *eventStreamRelay) publish(page []model.Event) {
 //
 // A reset is the one thing the relay cannot publish its way out of, because its ids have been
 // reused: the rows it would read as `id > cursor` are not the ones it published, and every open
-// subscription's since (streamEvents) is a position in a log that no longer exists, so no frame
+// subscription's since (live_events.go) is a position in a log that no longer exists, so no frame
 // it sent could mean what its reader would take it to mean. Ending the subscriptions is the
 // honest answer and the one the stream already has for a subscriber it cannot serve in order: it
-// closes the SSE response body, exactly as an overflowed subscriber's is closed (Stream.Publish),
-// and sends each browser through its reconnect-from-last-id, which resolves its position against
-// the log as it now stands. The cursor moves and the subscriptions end under one hold of mu, so a
-// connection that subscribed while the new horizon was awaited, on the old cursor, is ended too,
+// closes each subscriber's channel, exactly as an overflowed subscriber's is closed
+// (Stream.Publish), which ends each events subscription with an ended frame (behind) and sends its
+// page to subscribe again from the last id it applied, a since the subscription clamps to the log
+// as it now stands. The cursor moves and the subscriptions end under one hold of mu, so a
+// subscription made while the new horizon was awaited, on the old cursor, is ended too,
 // and one that subscribes after holds the new cursor. The rows between the old cursor and the new
 // one are published to nobody: a subscription that could have received them is gone, and every
 // one opened after this holds a cursor at or past them.

@@ -59,7 +59,11 @@ if ("WorkerGlobalScope" in globalThis) {
     configurable: true,
     get: () => undefined,
     set: () => {
-      // beautiful-mermaid writes back the value it read; there is nothing to keep.
+      // beautiful-mermaid writes the value it read back once ELK is built (`if (hadSelf) g.self =
+      // origSelf;`, beautiful-mermaid 1.1.3 `dist/index.js:5951-5957`), and that value is the
+      // `undefined` the getter above returned, so there is nothing to keep. The setter must
+      // still exist: the bundle is a module, so strict code, where an assignment to an accessor
+      // with no setter throws a `TypeError`, which would refuse every flowchart.
     },
   };
   scope.addEventListener("message", (event) => {

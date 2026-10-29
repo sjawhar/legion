@@ -23,8 +23,8 @@ var eventInsertStatement = regexp.MustCompile(`\binsert into events\b`)
 // nothing before it, takes its transaction id only as it writes the row, after its default drew the
 // id, so an observation taken between the two could prove a horizon above an id still open. The
 // relay (event_stream_relay.go), the delivery hub and `GET /references?since=` would then read past
-// that id, and its row, committed later, would reach no open stream until the reader reconnected --
-// a missing comment or ask on an open page, with nothing to show for it in any log.
+// that id, and its row, committed later, would reach no open subscription until the page subscribed
+// again -- a missing comment or ask on an open page, with nothing to show for it in any log.
 //
 // Owner sequence allocation: Append locks the event's owner row and takes the owner's next seq under
 // that lock, so one owner's events commit in id order and their seqs run without a gap or a repeat.
@@ -61,7 +61,7 @@ func TestOnlyTheBrokerInsertsEvents(t *testing.T) {
 			"Append the event through events.Broker.Append instead. It takes its transaction id "+
 			"before the insert draws the event's id, which the safe horizon every reader of the log "+
 			"by id reads through needs (events/horizon.go): a row inserted without it can commit "+
-			"behind a horizon that passed its id and reach no open stream. It also allocates the "+
+			"behind a horizon that passed its id and reach no open subscription. It also allocates the "+
 			"owner's seq under the owner's row lock.", brokerEventInsert, strings.Join(offences, "\n\t"))
 	}
 	if broker != 1 {

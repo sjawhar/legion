@@ -58,8 +58,9 @@ type callerKey struct{}
 
 // recorder is one request's response writer and its line's facts. It wraps the server's writer
 // rather than replacing it, and carries through the three interfaces Dispatch's handlers take it
-// for: Flusher for the event streams, Hijacker for the websocket upgrade, and ReaderFrom so an
-// artifact download still streams through the server's own copy.
+// for: Flusher for the body drain's flush of an answer (api.drainingWriter), Hijacker for the
+// websocket upgrade, and ReaderFrom so an artifact download still streams through the server's own
+// copy.
 type recorder struct {
 	http.ResponseWriter
 	// mu guards kind, id and credential alone: Note may run on another goroutine than the
@@ -181,9 +182,9 @@ func Note(ctx context.Context, kind, id string) {
 
 // Detached returns ctx with its request's recorder masked, so a caller resolved on it names no
 // one on the line. A connection that resolves its caller again on every heartbeat
-// (api.whileCallerResolves, the event streams) does so on it: the line names the caller the
-// request was admitted as, and a heartbeat that resolves only the bearer's credential would
-// otherwise replace the session the request named.
+// (api.whileCallerResolves: the document socket and the live socket) does so on it: the line
+// names the caller the request was admitted as, and a heartbeat that resolves only the bearer's
+// credential would otherwise replace the session the request named.
 func Detached(ctx context.Context) context.Context {
 	return context.WithValue(ctx, callerKey{}, (*recorder)(nil))
 }
