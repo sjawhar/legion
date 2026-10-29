@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-624",
-  "completed": "2026-10-29T00:45:00Z",
+  "completed": "2026-10-29T02:31:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2433",
   "proof": [
+    {
+      "criterion": "Review round 8 and the architect's check: for every decision body of up to five blocks from {paragraph, empty paragraph, list, list holding a nested list}, following the refusal exactly as written (one ApplyOps of the named deletes, then the ask edit) ends valid keeping every word not named for deletion, or the refusal names no delete and says why",
+      "surface": "Go document service against Postgres, the real code path (SetAskBlockText refusal, ApplyOps, SetAskBlockText, settlement)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55433/postgres go test ./internal/dispatch/docs/ -count=1 -timeout 60m",
+      "observed": "ok (1112s). TestSetAskBlockTextRefusalOfEveryBrokenBodyLeadsToAValidDecision: 1364 bodies, 1242 breaking the rule, 892 followed to a valid decision with every unnamed word kept and every deleted word quoted, 350 (no paragraph holding text) refused naming no delete with 'has an empty question'; 0 failing. TestSetAskBlockTextRefusalNamesADeleteThatAppliesWhateverTheShape pins the delete ids for a list before the question, a paragraph after the list and an empty first paragraph; the nested-ask row names no delete and says why (no 'are ;'); the unsettled-ids test settles, retries and follows the refusal.",
+      "headSha": "c937f3978d52562d51ce0b8ec9b676569a0e0bd0",
+      "negativeControl": "With b0fea9fc's ask_block_text.go the exhaustive test fails on 152 bodies (E-L-P first: the empty paragraph kept as the question, the text paragraph named for deletion, and doc-edit refuses 'has an empty question'); the empty-first-paragraph and nested-ask rows fail too."
+    },
     {
       "criterion": "Review round 7: the broken-decision refusal lists every block to delete for ONE document edit (an agent following it never sends a delete that leaves the decision broken), and names no delete while block ids are unsettled",
       "surface": "Go document service against Postgres: the refusal followed through the real code path (ApplyOps with the ids read from the reason, then SetAskBlockText, then settlement)",
@@ -110,5 +118,5 @@
     "Round 10: per the architect's design change, the two-list rebuild, the repeated-label rule and the protected-option rule are removed; their tests are removed (TestSetAskBlockTextRefusesAnEditLeavingASecondBulletList, TestSetAskBlockTextRepairsATwoListAskWhenSentEveryOptionItHolds, TestSetAskBlockTextRefusesOptionsDeletingAListTheAskRowNeverHeld, ...DroppingTheDescription..., ...RevertingADescription...) or folded into TestSetAskBlockTextRefusesEveryEditOfAnAskBreakingItsContentRule (repeated label, rich item, paragraph after the list), and the tester's TestSetAskBlockTextNewItemContentRefusalNamesStepsThatApply is replaced by TestSetAskBlockTextRefusalOfABrokenAskNamesAPathThatApplies."
   ],
   "openQuestions": [],
-  "round": 11
+  "round": 12
 }
