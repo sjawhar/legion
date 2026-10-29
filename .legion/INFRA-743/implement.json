@@ -1,59 +1,57 @@
 {
   "schemaVersion": 1,
+  "schemaNote": "Round 4: the forward merge that resolves #2377's conflict. No product change of this issue's own.",
   "phase": "implement",
   "issue": "INFRA-743",
-  "completed": "2026-10-29T20:20:00Z",
-  "round": 3,
-  "summary": "No change to the product code. Round 2's code at ee461d32 is what the tester verified, and its one failure was that the round carried no CI. The cause was not the skip-checks trailer: GitHub reported this pull request CONFLICTING with main, and it computes no merge ref for a conflicting head, so it ran no pull_request workflow at all. A forward merge of main (40e9841d) cleared the conflict, resolving three documentation conflicts, and CI was created for that head within a minute of the push.",
+  "completed": "2026-10-29T22:00:00Z",
+  "round": 4,
+  "summary": "sjawhar/legion#2377 merged to main at dfd128f1 and overlaps this change, so GitHub reported the pull request CONFLICTING, which also costs it every check. This round is the forward merge of main at 9ab28e09 (head 806dbdaf) with the three resolutions #2377's reviewer recorded and nothing else, plus the census row the architect asked for, which now names the folded CHANGELOG.md lines and says this pull request does not correct them.",
   "proof": [
     {
-      "criterion": "The round's head carries CI, so the static lanes, the reviewer's approval by SHA and the base's required checks have a run to read.",
-      "surface": "GitHub Actions on the pull request's branch and the pull request's own mergeability, read through the REST API as the reviewer and the daemon read them.",
-      "command": "gh pr view 2504 --json mergeable,mergeStateStatus; jj git push of three heads that carry no skip-checks trailer (9c2ea00f empty, 5c47bed0 a handoff, 40e9841d the forward merge); gh api repos/sjawhar/legion/commits/<head>/check-runs --jq .total_count and gh api 'repos/sjawhar/legion/actions/runs?branch=legion%2FINFRA-743'",
-      "observed": "Before the merge: mergeable=CONFLICTING, mergeStateStatus=DIRTY, and 0 check runs at ee461d32, f570b6fe, cfb7b124, at the trailer-free empty commit 9c2ea00f (19:29Z) and at the trailer-free handoff 5c47bed0 (19:36Z), while the repository's Actions were live for other branches at 19:25-19:27Z. After the merge: mergeable=MERGEABLE, and the runs 'CI' and 'PR Title' were created for 40e9841d at 19:56:17Z, within a minute of the push. At this writing PR Title is completed success and CI is queued; the daemon reads its result.",
-      "headSha": "40e9841deb54d91071e2026482536c2a28ae10ff",
-      "negativeControl": "The two trailer-free pushes before the merge are the control: an empty commit and a handoff commit, neither carrying skip-checks: true, both started nothing while the pull request was conflicting. That is what rules the trailer out as this round's cause and leaves the conflicting head as the cause, since the merge alone changed the outcome."
+      "criterion": "The conflict with #2377 is resolved as recorded, and the merged code is the behaviour both changes describe: a failed rewatch reports nothing of its own while the resume path of #2377 stays.",
+      "surface": "The repository's Go test harness for every package either change touches, with the resolved files compiled and exercised: internal/kvwatch (the resume and the repair report), internal/bus, cmd/listener (whose restart test asserts main's resumed warm-up after every restart), cmd/dispatch and the separate packages/envoy/infra module.",
+      "command": "cd packages/envoy && go build ./... && go vet ./internal/bus/ ./internal/kvwatch/ ./cmd/listener/ && go test ./internal/kvwatch/ ./internal/bus/ -count=1 -timeout 30m && go test ./cmd/listener/ -count=1 -timeout 40m -skip '<the four Docker-only TestDispatch tests>' && go test ./cmd/dispatch/ -run 'Settings|Boot|Replica|Stream' -count=1; cd infra && go build ./... && go vet ./... && go test ./aws/... ./render/... -count=1",
+      "observed": "build and vet exit 0; ok internal/kvwatch 63.491s, ok internal/bus 306.064s, ok cmd/listener 485.614s (which includes TestListenerFollowsTheInterestRegistryAcrossNATSRestarts asserting outcome 'resumed' with no entries after each restart, so #2377's side is exercised), ok cmd/dispatch 35.182s, ok infra/aws 7.109s, ok infra/aws/rendering 0.017s, ok infra/render 0.264s.",
+      "headSha": "806dbdaf2a1b3ee44a433fb5d24c7838dcb29e03",
+      "negativeControl": "The merge's own conflict markers are the control: with them in place the tree does not compile (go build fails on kvwatch.go), and the build above passes only because each of the three conflicts was resolved. A wrong resolution of the call shape (w.watch(kv, 0), main's old arity) fails the same build."
     },
     {
-      "criterion": "The forward merge changed nothing of this pull request's behaviour: the listener, the bus, internal/kvwatch and the AWS rendering are as the tester verified them, and the suites and the production-like proof hold at the merge head.",
-      "surface": "The repository's Go test harness for every package the change touches, the separate packages/envoy/infra module, and the built envoy-listener binary against a real nats-server v2.10.29 with JetStream.",
-      "command": "cd packages/envoy && go build ./... && go vet ./internal/bus/ ./internal/kvwatch/ ./cmd/listener/ ./cmd/dispatch/ && go test ./internal/bus/ ./internal/kvwatch/ -count=1 && go test ./cmd/listener/ -count=1 -skip '<the four Docker-only TestDispatch tests>' && go test ./cmd/dispatch/ -run 'Settings|Boot|Replica|Stream' -count=1; cd infra && go build ./... && go vet ./... && go test ./aws/... ./render/... -count=1; then go build -o $TMPDIR/smoke/envoy-listener ./cmd/listener && bash $TMPDIR/smoke/smoke.sh",
-      "observed": "build and vet exit 0; ok internal/bus 297.638s, ok internal/kvwatch 62.585s, ok cmd/listener 539.065s, ok cmd/dispatch 36.172s, ok infra/aws 7.552s, ok infra/aws/rendering 0.015s, ok infra/render 0.271s. Smoke: 200 healthy at start and after a plain NATS restart with the interest written then served and 0 ERROR lines; with KV consumer creation denied, 200 healthy inside the grace and 200 {\"error\":\"KV watch rebuild unavailable: rewatch interest cache: watch interest registry KV bucket: context deadline exceeded\\nrewatch session cache: watch session registry KV bucket: context deadline exceeded (no rebuild has succeeded for 1m1s)\",\"status\":\"degraded\"} past it; 200 healthy again once the deny was lifted, with a new interest served.",
-      "headSha": "40e9841deb54d91071e2026482536c2a28ae10ff",
-      "negativeControl": "The same scenario at this branch's base 88840d35, as a Go probe in a throwaway copy of the tree: TestBaseHealthzAnswersAHookStallPastAMinute fails, '/healthz 75 s into a rebuild that never succeeded = 200 map[... status:healthy]', and TestBaseRewatchRetryAfterAReconnectLogsNoError fails on the ERROR the base logs for a rewatch the retry repairs."
+      "criterion": "Review round 1 item 1 and the architect's decision, re-driven at the merge head: a KV watch rebuild stalled past bus.RepairGrace answers /healthz 200 degraded naming the rebuild, the answer under the grace is unchanged, and the caches follow their buckets again once the fault is lifted.",
+      "surface": "The built envoy-listener binary against a real nats-server v2.10.29 with JetStream, restarted under a configuration denying only $JS.API.CONSUMER.CREATE.KV_envoy_{interests,roles,sessions}.>; /healthz and GET /v1/interests/ over HTTP.",
+      "command": "cd packages/envoy && go build -o $TMPDIR/smoke/envoy-listener ./cmd/listener && bash $TMPDIR/smoke/smoke.sh",
+      "observed": "200 healthy at start; 200 healthy after a plain NATS restart with the interest written then served and 0 ERROR lines; with the deny in place 200 healthy inside the grace, then 200 {\"error\":\"KV watch rebuild unavailable: rewatch interest cache: watch interest registry KV bucket: context deadline exceeded\\nrewatch session cache: watch session registry KV bucket: context deadline exceeded (no rebuild has succeeded for 1m0s)\",\"status\":\"degraded\"}; 200 healthy again once the deny was lifted, with a new interest served.",
+      "headSha": "806dbdaf2a1b3ee44a433fb5d24c7838dcb29e03",
+      "negativeControl": "At this branch's base 88840d35, as Go probes in a throwaway copy of the tree: TestBaseHealthzAnswersAHookStallPastAMinute fails ('/healthz 75 s into a rebuild that never succeeded = 200 map[... status:healthy]') and TestBaseRewatchRetryAfterAReconnectLogsNoError fails on the ERROR the base logs for a rewatch the retry repairs."
     },
     {
-      "criterion": "Acceptance 3 at the head that merges: TestListenerFollowsTheInterestRegistryAcrossNATSRestarts passes 200 of 200 isolated runs.",
+      "criterion": "Acceptance 3 at the head that merges: TestListenerFollowsTheInterestRegistryAcrossNATSRestarts passes 200 of 200 isolated runs, now against #2377's rewritten test body.",
       "surface": "The listener's own harness, which builds and runs the listener against a real NATS, driven from packages/envoy/cmd/listener.",
-      "command": "cd packages/envoy/cmd/listener && go test -c -o \"$TMPDIR/listener-r3.test\" . && for i in $(seq 1 200); do \"$TMPDIR/listener-r3.test\" -test.run '^TestListenerFollowsTheInterestRegistryAcrossNATSRestarts$' -test.count=1 >\"$TMPDIR/r3-runs/run-$i.log\" 2>&1; done (serial, one process per run, no -race)",
-      "observed": "200 PASS, 0 FAIL at the merge head 40e9841d. The same loop ran 200/0 at ee461d32, at b7cccdc9 and at a3b2b533, and the tester's own loop ran 200/0 at ee461d32.",
-      "headSha": "40e9841deb54d91071e2026482536c2a28ae10ff",
+      "command": "cd packages/envoy/cmd/listener && go test -c -o \"$TMPDIR/listener-r4.test\" . && for i in $(seq 1 200); do \"$TMPDIR/listener-r4.test\" -test.run '^TestListenerFollowsTheInterestRegistryAcrossNATSRestarts$' -test.count=1 >\"$TMPDIR/r4-runs/run-$i.log\" 2>&1; done (serial, one process per run, no -race)",
+      "observed": "200 PASS, 0 FAIL at 806dbdaf, against the version of the test #2377 wrote, which asserts the resumed warm-up after each restart. The same loop ran 200/0 at 40e9841d, ee461d32, b7cccdc9 and a3b2b533.",
+      "headSha": "806dbdaf2a1b3ee44a433fb5d24c7838dcb29e03",
       "negativeControl": "The same loop with 49 runs at the base 88840d35: 48 PASS, 1 FAIL, the failure being this issue's symptom (ERROR envoy nats reconnect hook failed ... rewatch session cache: open session registry KV bucket: context deadline exceeded)."
     },
     {
-      "criterion": "Round 2's accepted behaviour, carried unchanged into this head: a stalled KV watch rebuild answers 200 degraded, no probe acts on it, the zero-stall lock holds, and the ERROR pages through the new alarm.",
-      "surface": "The tester's own re-drive at ee461d32 (.legion/INFRA-743/test.json), whose code this merge does not touch, plus this round's smoke at the merge head.",
-      "command": "The tester's $TMPDIR/t/tester-smoke2.sh, filtercheck.sh and loop200.sh at ee461d32, and this round's smoke at 40e9841d.",
-      "observed": "Tester: 200 at all 150 samples of the stalled window with curl -sf exiting 0 each time, healthy again 2 s after the repair, idle 75/75 and plain restart 100/100 healthy, the rendered filter pattern matching the four real ERROR lines and neither WARN, the zero-stall lock failing under the one-line mutation and passing without it, 200/200 on the restart test. This round's smoke reproduces the three /healthz answers at the merge head.",
-      "headSha": "40e9841deb54d91071e2026482536c2a28ae10ff",
-      "negativeControl": "The tester's own: the same deny window against a listener built from main 1f5b0828 answered 200 healthy at all 150 samples, with no word for the state."
+      "criterion": "The pull request carries CI again: a conflicting head gets none, so the merge is what lets the lanes run for this code.",
+      "surface": "GitHub's own mergeability and Actions on the branch, read through the REST API.",
+      "command": "gh pr view 2504 --json mergeable,mergeStateStatus; gh api 'repos/sjawhar/legion/actions/runs?branch=legion%2FINFRA-743'",
+      "observed": "Before this merge: CONFLICTING/DIRTY at 76c80ac5. The merge 806dbdaf was pushed as a code push whose head carries no skip-checks trailer, and the handoff follows in a push of its own. The lanes at the previous merge head 40e9841d had already run green or skipped with envoy-go-race, dispatch and dispatch-memory still going at the tester's read, which is the evidence that a non-conflicting head runs them.",
+      "headSha": "806dbdaf2a1b3ee44a433fb5d24c7838dcb29e03",
+      "negativeControl": "Round 3's record: three pushes while the pull request was conflicting (ee461d32, the empty 9c2ea00f and the handoff 5c47bed0, the last two carrying no trailer) produced 0 check runs each, and only the merge that cleared the conflict produced any."
     }
   ],
   "filesChanged": [
-    "No product code changed. The branch gains 9c2ea00f (empty, no trailer), 5c47bed0 (this handoff's previous version, no trailer) and 40e9841d, the forward merge of main at 15be33d1.",
-    "The merge resolved three documentation conflicts: packages/envoy/docs/architecture.md keeps main's rewritten /v1/messages/publish row and this branch's /healthz row; packages/envoy/.changes/unreleased/pr-2362-replica-count.yaml and pr-2362-stream-byte-limit.yaml are deleted, as main deleted them when the changelog fold moved them into packages/envoy/CHANGELOG.md."
+    "No file of this issue's own change was edited this round. The merge 806dbdaf resolves three conflicts: internal/kvwatch/kvwatch.go (Rewatch's doc keeps this change's failure sentence and #2377's resume paragraph; its body calls w.watch(kv, conn, 0) with no reportFailedRepair), packages/envoy/AGENTS.md (the reconnect bullet keeps this change's hook-failure sentence, the warm-up bullet keeps #2377's resumed text with this change's reason and both repairers named, and #2377's new session-cache bullet is kept whole), and the two pr-2362 changelog fragments, which main deleted when the fold moved them into packages/envoy/CHANGELOG.md.",
+    "The pull request body's census now has its own row for those fragments and a row naming the folded CHANGELOG.md lines 64 and 93 under ## [22.1.0] - 2026-10-29, stating that this pull request does not correct them and why, with the runtime correction in cmd/dispatch/settings.go:83,85 named in their place."
   ],
   "trickyParts": [
-    "A conflicting pull request gets no CI at all: GitHub computes no merge ref for it, so no pull_request workflow runs, and every push looks silently ignored. The skip-checks trailer on the head of a push is a second, independent way to get no run; both were in play this round, and only the conflict explains the zero runs at the trailer-free heads 9c2ea00f and 5c47bed0.",
-    "The two pr-2362 changelog fragments this change had corrected are now folded into packages/envoy/CHANGELOG.md with their old sentence about the log line. The fold owns that file and a released entry records what shipped, so the deletion is taken rather than the CHANGELOG edited, as the INFRA-182 'repair failed' entry is left in the census. The corrected sentence stands where an operator reads it at runtime, in cmd/dispatch/settings.go's two descriptions."
+    "A conflicting pull request gets no CI at all, so a conflict with a sibling that merged first costs the round its checks as well as its mergeability; the forward merge is the repair for both.",
+    "#2377's resume work and this change's deletion meet inside one function: Rewatch now takes conn for the resume and reports nothing of its own on failure. The listener's restart test, which #2377 rewrote to assert the resumed warm-up, is what exercises both sides together, and it is the test the 200-run loop drives."
   ],
-  "deviations": [
-    "The architect's task asked for one commit without the trailer and a read of the lanes. That alone did not start CI, because the cause was the conflicting head rather than the trailer; the forward merge was needed, and it is sanctioned for exactly this trigger (GitHub reporting CONFLICTING). Its fingerprints and resolutions are in the pull request's merge comment.",
-    "From this round on, every push of this issue that carries code ends on a commit without the trailer, and the handoff goes in a push of its own, as the architect directed."
-  ],
+  "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": [
-    "CI at 40e9841d was still queued when this handoff was written (PR Title completed success; CI queued since 19:56:17Z), the repository's runners being backed up. The daemon reads the result; nothing in this round waits for it.",
-    "Sibling contracts: from this round the implementer tells each sibling implementer itself whenever a shared contract changes. The round-2 /healthz change reached INFRA-594 from me and INFRA-514 and INFRA-590 from the tester; all three confirmed their resolutions in writing."
+    "#2446 (INFRA-594) is still open and conflicts with main on its own in 18 files; against this head it adds cmd/listener/main.go, where this change's 200 degraded branch and its 503 'role lane subscription inactive' branch both belong. Its implementer has that resolution in writing.",
+    "This pod has two CPUs, so the tester and the implementer cannot both drive a smoke or a 200-run loop without spoiling each other's counts."
   ]
 }
