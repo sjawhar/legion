@@ -1,9 +1,0 @@
-kind: Added
-body: |-
-    Every registration names the plugin: `plugin` `@sjawhar/claude-envoy` and `plugin_version` the
-    version directory Claude Code's plugin cache installed it under (the marketplace commit's first
-    12 characters), or `source` for a bundle outside the plugin cache, which the listener's
-    `GET /v1/sessions` and `GET /v1/registry/<id>`, and `envoy_sessions`, show. `dist/` was rebuilt.
-time: 2026-10-28T10:32:58.826423865Z
-custom:
-    Issue: pr2331
