@@ -2,17 +2,39 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-720",
-  "completed": "2026-10-29T07:50:00Z",
+  "completed": "2026-10-29T15:15:00Z",
   "implementerProof": {
-    "verdict": "rejected",
-    "how": "The round-2 proof shows `envoy-dispatch census` refuses a 0136 database that holds an anchored ask with block_artifact_id set and anchor artifact_id 'not-a-uuid' ('census: REFUSED 0137_asks_anchor_artifact_id.up.sql: its census counts 1', exit 1). The INFRA-512 architect's requirement (dispatch://INFRA-720/comment/5ce0fe01-fda7-4f0b-b9fa-a6eb5a072a26, 06:54Z, and the Envoy messages 34dcf426 at 07:35Z and 1eafbff6 at 07:36Z) asks for the opposite. That proof is therefore evidence that the head fails. On the architect's instruction ('fail head 9b9cb94a now, without a full round'), I ran no real-surface round on this head."
+    "verdict": "verified",
+    "how": "I drove the implementer's first proof on my own live server: head 1f4f79e7 boots over stored anchors that do not cast, logs the count, and serves every ask route, while base 8a911ecc answers 500 on the same data. I re-ran settlement A1 across the TTL on the live server. CI at 1f4f79e7 is green on every lane. A2 and A3 change nothing in recordedMarkRefs relative to my round-1 verification, apart from the guarded asks expression, which the implementer's plan test pins."
   },
   "failures": [
     {
-      "criterion": "The INFRA-512 architect's requirement: migration 0137 boots on any data production could hold, and the server keeps serving. The index expression and the read predicate must not raise on any stored anchor, and the read stays an index scan. The census does not refuse: a boot log line counts the rows the index leaves out. Rows stay identical to INFRA-648's for every ask whose anchor casts, an upper-case uuid anchor included.",
-      "evidence": "Head 9b9cb94a changes only 0137's census and comments. `create index asks_anchor_artifact_id on asks (((anchor->>'artifact_id')::uuid)) where anchor is not null;` is byte-identical to ff4d51c8. My round-1 real boot of ff4d51c8 over such a row (local Postgres 17.11, replay seed migrated to 0136 by base bb9fe49c) exited with `apply migration 137: ... invalid input syntax for type uuid: \"not-a-uuid\" (SQLSTATE 22P02)`, and the schema stayed at 136. The new census makes the pre-deploy gate refuse that database: the implementer's own run shows `census: REFUSED ... counts 1`, exit 1. Production may hold such rows (asks_anchor_artifact's coalesce never casts the anchor when block_artifact_id is set), and nobody can count production's asks, so this head can stop a production deploy until someone edits the data by hand. Red test 92cbecc9 (`go test ./internal/dispatch/store/ -run TestCensusCountsAnAskWhoseBlockColumnHidesAnAnchorArtifactIDThatDoesNotCast`) pins the refusal the architect has now rejected. As the architect directed, the implementer replaces it with a test that boots over such a row (Envoy 1eafbff6). The next round's real-surface check: a boot of the next head over a non-castable both-column anchor succeeds and keeps serving."
+      "criterion": "The INFRA-512 architect's requirement (comment 5ce0fe01, 06:54Z: 'keep the result rows identical for every ask whose anchor does cast'; decision at 14:59Z, Envoy 78916235): each ask reader keeps base's answer for every anchor that casts. Only the index expression keeps the immutable lower-case regex guard, and recordedMarkRefs stays as it is.",
+      "evidence": "The head guards askRowFrom (issue ask list, single-ask read), events.go ask hydration, refs/graph.go loadAskNodes, the search ask arms and docs/marks.go:592 with store.CanonicalUUID (the lower-case regex). An upper-case or braced anchor artifact_id casts, yet it now resolves to no document. Live server, same database: base 8a911ecc `GET /api/v1/asks/{id}` gives anchor_artifact 't720-a.md' for the upper-case and the braced anchor; head 1f4f79e7 `GET /api/v1/issues/ACME-1/asks` gives anchor_artifact null for both. Red tests, commit 1b43d81b: `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test ./internal/dispatch/api/ -run TestAskReadersResolveAnUpperCaseOrBracedAnchorToItsDocument -count=1` fails 'issue ask list / single ask read / issue events: the upper case (and braces) anchor's document = nil'. `go test ./internal/dispatch/refs/ -run TestAskNodeKeepsTheDocumentAnUpperCaseOrBracedAnchorNames -count=1` fails 'ask parent = issue CORE-1, want the spec'. Both pass in a scratch copy where those readers use `case when pg_input_is_valid(x, 'uuid') then x::uuid end`, and the implementer's '...AnchorArtifactIDThatDoesNotCast' api tests still pass there. Evidence: https://github.com/sjawhar/legion/pull/2483#issuecomment-6500492050"
     }
   ],
   "failed": 1,
-  "ci": "No check runs on 9b9cb94a or 4f950c13 at the time of reading."
+  "proof": [
+    {
+      "criterion": "Migration 0139 boots on any data production could hold and the server keeps serving; the census refuses nothing; the boot logs the count left out",
+      "surface": "a live local Dispatch (binary from each tree), Postgres 17.11, NATS; database migrated to 0138 by base 8a911ecc; data created through base's API, then 7 both-column asks rewritten by SQL to anchor artifact_id not-a-uuid / upper case / braces / trailing \\n / '' / '5' / leading space",
+      "command": "envoy-dispatch census (head); boot head; /legion/scratch/tmp/t720r4/routes.sh (issue asks, ?thread=1, inbox, issue, events, references, search, every single-ask read, answer, resolve, PATCH, document edit)",
+      "observed": "census 0139: 0, ok, exit 0; boot 138 -> 139 with WARN 'anchored asks left out of asks_anchor_artifact_id' count=7; every route 200",
+      "headSha": "1f4f79e7fb4795755864c31b77c30e6f20274624",
+      "negativeControl": "base 8a911ecc on the same data: 500 on issue asks, inbox, issue, events, search, answer, resolve, PATCH, and the single-ask reads of the 5 shapes that do not cast"
+    },
+    {
+      "criterion": "A1: the both-column ask keeps its mark on the anchor's document past the TTL",
+      "surface": "the same live head server",
+      "command": "edit document A; sleep 75 s (TTL 1 min); three more edits; GET /api/v1/issues/ACME-1/asks",
+      "observed": "both-column ask orphaned:false, control orphaned:false; doc_settlements_pending empty",
+      "headSha": "1f4f79e7fb4795755864c31b77c30e6f20274624",
+      "negativeControl": "base bb9fe49c in round 1, same probe: the both-column ask orphaned:true"
+    }
+  ],
+  "notes": [
+    "Rollback: base 8a911ecc boots and serves on the 0139 database.",
+    "Outside this criterion: an anchor whose artifact_id is a JSON number (5, not \"5\") gives 500 on head and on base: 'decode ask anchor: json: cannot unmarshal number into Go struct field Anchor.artifact_id of type string'. That is Go decoding, not the uuid cast, and no release writes a non-string artifact_id. Reported to the architect.",
+    "CI at 1f4f79e7: every lane green. 16475ee4 is a handoff-only head with no runs."
+  ]
 }
