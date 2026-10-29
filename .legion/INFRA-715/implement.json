@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-715",
-  "completed": "2026-10-29T19:10:00Z",
+  "completed": "2026-10-29T19:50:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2480",
-  "codeHead": "4be0d238b669f5b028787326326988aa09e4ead8",
+  "codeHead": "37f334f05032fbc6110476de4d30bea4f1e6b6fe",
   "proof": [
     {
       "criterion": "A2: on the cluster copy, an hour at ten times grows Dispatch's memory by no more than the documents' stored growth plus a stated constant (1 GiB); the curve is quoted against the 2026-10-28 baseline",
@@ -77,6 +77,14 @@
       "observed": "PASS. An ask quote left in two code blocks gets: would land in two code blocks, where its mark is not allowed, and the upload leaves its quote nowhere it may stand; move that text out of them, or resolve the ask first. A quote left in a code block where the anchor stood, with the front matter far above, gets: would land in a code block and the front matter .... Two occurrences in one code block are one place (it). NearestFirst's miss is ErrTargetNotFound itself. Also passing: the docs suite (1080 s), the pmdoc suite without its timing tests (135 s) and the api anchor tests (36 s).",
       "headSha": "4be0d238b669f5b028787326326988aa09e4ead8",
       "negativeControl": "With MarkNotAllowedError.At left unset, the two-code-blocks case fails: it reads would land in a code block. Listing places in document order fails the nearest-first case."
+    },
+    {
+      "criterion": "Review round 6: two matches of an anchored quote inside one code block are counted as one place, pinned by an upload test",
+      "surface": "the real docs.Service on Postgres 16 (ReplaceText over an open ask)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres go test ./internal/dispatch/docs/ -run TestAnUploadMovingAnAnchorsQuoteWhereItsMarkIsNotAllowedIsRefused -count=1 -v",
+      "observed": "PASS, all six rows. The new row is an upload of \"Intro.\\n\\n```\\nrun the tests\\nand run the tests\\n```\\n\" over an open ask on \"run the tests\". It is refused: would land in a code block, where its mark is not allowed, and the upload leaves its quote nowhere it may stand; move that text out of it, or resolve the ask first. The upload, anchor and ReplaceText tests pass.",
+      "headSha": "37f334f05032fbc6110476de4d30bea4f1e6b6fe",
+      "negativeControl": "With MarkNotAllowedError.At set to the refused range's start (max(r.From, spans[last].From)), the new row fails: it reads would land in two code blocks."
     }
   ],
   "filesChanged": [
@@ -113,10 +121,11 @@
     "GitHub created no Tests run for the code push bf2118ca (pushed 15:10:01Z), probably because the handoff push came 71 s later. This handoff commit carries no skip-checks trailer, so the pull request's Tests run starts at this head, whose code is bf2118ca's.",
     "Round 5 answers review round 3: a forward merge of main 30ecdcd4 at 84001a00, the only conflict being the README row (fingerprint comment 6502316391), and threads PRRT_kwDORFy7ds6xofnK, PRRT_kwDORFy7ds6xofnP and PRRT_kwDORFy7ds6xofnW, each replied to and resolved at 090ae14d.",
     "Round 6 answers review round 4: threads PRRT_kwDORFy7ds6xqDFj, PRRT_kwDORFy7ds6xqDFu and PRRT_kwDORFy7ds6xqDF1, each replied to and resolved at e0629eed. The reviewer's prose commit 4cd42dff stays.",
-    "Round 7 answers review round 5: threads PRRT_kwDORFy7ds6xsYkA, PRRT_kwDORFy7ds6xsYkH, PRRT_kwDORFy7ds6xsYkM, PRRT_kwDORFy7ds6xsYkV and PRRT_kwDORFy7ds6xsYkY, each replied to and resolved at 4be0d238. The census row now matches the 400 text, multi-place form included. The reviewer's prose commit 63abb711 stays."
+    "Round 7 answers review round 5: threads PRRT_kwDORFy7ds6xsYkA, PRRT_kwDORFy7ds6xsYkH, PRRT_kwDORFy7ds6xsYkM, PRRT_kwDORFy7ds6xsYkV and PRRT_kwDORFy7ds6xsYkY, each replied to and resolved at 4be0d238. The census row now matches the 400 text, multi-place form included. The reviewer's prose commit 63abb711 stays.",
+    "Round 8 answers review round 6: thread PRRT_kwDORFy7ds6xuR36, replied to and resolved at 37f334f0. The change is a test only. The reviewer's comment commit 8ca80716 stays."
   ],
   "openQuestions": [
     "The literal bound holds for an hour because the 1 GiB constant absorbs comment growth; the measured proportional factor is k ~ 19 (working-set growth per stored byte). INFRA-179's room byte budget caps the unbounded case."
   ],
-  "round": 7
+  "round": 8
 }
