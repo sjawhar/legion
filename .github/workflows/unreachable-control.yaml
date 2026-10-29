@@ -1,0 +1,92 @@
+name: Unreachable Source Control
+
+# A scratch control for dispatch://INFRA-567, and nothing else. It is not part of this
+# repository's CI: it exists on one scratch branch, its run is quoted on sjawhar/legion#2512, and
+# the branch is deleted after.
+#
+# The spec's `Proven on` line asks for "a run with the third-party source made unreachable for one
+# job (a negative control)". This job makes all three unreachable in its first step — the registry
+# CI fetched images from before (mirror.gcr.io), Docker Hub's own registry (registry-1.docker.io)
+# and Go's module proxy (proxy.golang.org) — and then does the two things a CI job of this
+# repository does with a third-party source today: it pulls a test image, and it builds Go.
+#
+# It also proves the block itself, so a green run cannot be a run where the block did nothing: the
+# step before the ghcr.io pull asks mirror.gcr.io for the same image and must fail.
+#
+# The ten `services:` consumers cannot carry this control: the runner creates a service container
+# before a job's first step, so no step of the job can block a host first. The gate's refusal of
+# any reference outside ghcr.io/sjawhar/legion/ci is their proof.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The value every workflow of this repository now sets. A `|` falls through to the next source
+  # after any error, where a `,` falls through only after a 404 or a 410.
+  GOPROXY: https://proxy.golang.org|direct
+  # The copy of nats:2.10 in this repository's own package (.github/ci-images.yaml).
+  CI_IMAGE: ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+  # The same image at the registry this change removes, for the control below.
+  MIRROR_IMAGE: mirror.gcr.io/library/nats:2.10
+
+jobs:
+  unreachable:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Make every third-party source unreachable
+        run: |
+          set -euo pipefail
+          printf '0.0.0.0 %s\n' registry-1.docker.io index.docker.io auth.docker.io \
+            mirror.gcr.io proxy.golang.org | sudo tee -a /etc/hosts
+          getent hosts mirror.gcr.io proxy.golang.org registry-1.docker.io
+
+      - name: The block works - the same image from the old registry fails
+        run: |
+          set -uo pipefail
+          if docker pull "$MIRROR_IMAGE"; then
+            echo "::error::$MIRROR_IMAGE was still reachable, so this run proves nothing"
+            exit 1
+          fi
+          echo "docker pull $MIRROR_IMAGE failed, as it must"
+
+      - name: Pull the test image from this repository's own package
+        run: |
+          set -euo pipefail
+          docker pull "$CI_IMAGE"
+          docker image inspect "$CI_IMAGE" --format 'pulled {{.Id}}'
+
+      - name: Run the image, as a test does
+        run: |
+          set -euo pipefail
+          container=$(docker run -d --rm -p 127.0.0.1::4222 "$CI_IMAGE" -js)
+          port=$(docker port "$container" 4222/tcp | sed -n '1s/.*://p')
+          for _ in $(seq 1 30); do
+            nc -z 127.0.0.1 "$port" && break
+            sleep 1
+          done
+          nc -z 127.0.0.1 "$port"
+          echo "the NATS copy answered on 127.0.0.1:$port"
+          docker rm -f "$container" >/dev/null
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/daemon/go.mod
+          cache: false
+
+      - name: Build Go over a cold module cache, with the proxy unreachable
+        run: |
+          set -euo pipefail
+          export GOMODCACHE="$RUNNER_TEMP/modcache"
+          go env GOPROXY
+          go build ./cmd/legion
+          ./legion version | head -1
+        working-directory: packages/daemon

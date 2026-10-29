@@ -199,6 +199,11 @@ on:
       - 'scripts/third-party-notices.ts'
       - '.github/scripts/check-private-names.sh'
   workflow_dispatch:
+  # SCRATCH CONTROL for dispatch://INFRA-567, on this branch alone and never merged: it runs
+  # main's own build, with the `upload-pages-artifact` step, on the pull request, so the step
+  # that crosses the called-workflow boundary has a surface before the merge. `deploy` skips,
+  # because its `if:` holds the deployment to main.
+  pull_request:
 
 # One run at a time, in push order: `queue: max` keeps up to 100 runs waiting in the group, first
 # in, first out, where the default keeps one and replaces it with the next arrival
