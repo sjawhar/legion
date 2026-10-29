@@ -63,6 +63,11 @@ jobs:
   # Which proofs this run makes, read from .github/e2e-scripts.json: the one the dispatch input
   # names, or every hosted proof for a label and for the nightly. A pull request run whose added
   # label is not `e2e` skips this job, and the proofs with it, so another label takes no runner.
+  #
+  # .github/scripts/select-e2e-proofs.sh holds that logic, beside the repository's other checks:
+  # which rows a run selects, the matrix each one becomes, and every refusal, each of which names
+  # the file, the row and the remedy. Its harness, select-e2e-proofs.test.sh, runs in ci.yaml's
+  # test job.
   select:
     if: github.event_name != 'pull_request' || github.event.label.name == 'e2e'
     runs-on: ubuntu-24.04
@@ -78,69 +83,7 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           REQUESTED: ${{ inputs.script }}
-        run: |
-          python3 <<'PY'
-          import json
-          import os
-          import pathlib
-
-          data = json.loads(pathlib.Path(".github/e2e-scripts.json").read_text())
-          hosted = {row["script"]: row for row in data["hosted"]}
-          elsewhere = {row["script"]: row for row in data["elsewhere"]}
-          listed = set(hosted) | set(elsewhere)
-          present = sorted(path.name for path in pathlib.Path("scripts/e2e").glob("*.sh"))
-
-          problems = [
-              f"scripts/e2e/{name} is in neither list: add it to `hosted` with what a job must "
-              f"give it, or to `elsewhere` with what its own header says it needs"
-              for name in present
-              if name not in listed
-          ] + [
-              f"this file names {name}, and scripts/e2e/ does not hold it: delete its row"
-              for name in sorted(listed)
-              if name not in present
-          ]
-          for problem in problems:
-              print(f"::error file=.github/e2e-scripts.json::{problem}")
-          if problems:
-              raise SystemExit(1)
-
-          if os.environ["EVENT"] == "workflow_dispatch":
-              asked = os.environ["REQUESTED"].strip()
-              name = asked if asked.endswith(".sh") else f"{asked}.sh"
-              if name in elsewhere:
-                  print(
-                      f"::error::scripts/e2e/{name} needs {elsewhere[name]['needs']}. A "
-                      f"GitHub-hosted runner gives none of that, so this workflow runs it nowhere."
-                  )
-                  raise SystemExit(1)
-              if name not in hosted:
-                  print(
-                      f"::error::scripts/e2e/{name} is no proof a GitHub-hosted runner can run. "
-                      f"Name one of: {', '.join(sorted(hosted))}."
-                  )
-                  raise SystemExit(1)
-              chosen = [hosted[name]]
-          else:
-              chosen = [hosted[name] for name in sorted(hosted)]
-
-          proofs = [
-              {
-                  "script": row["script"],
-                  "proof": row["script"][: -len(".sh")],
-                  "go_version_file": row["go_version_file"],
-                  "apt": " ".join(row["apt"]),
-                  "bun": row["bun"],
-                  "jj": row["jj"],
-                  "evidence_variable": row["evidence_variable"],
-                  "timeout_minutes": row["timeout_minutes"],
-              }
-              for row in chosen
-          ]
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-              out.write(f"proofs={json.dumps(proofs)}\n")
-          print(f"{len(proofs)} proof(s): {', '.join(row['script'] for row in proofs)}")
-          PY
+        run: .github/scripts/select-e2e-proofs.sh
 
   # One job per proof. Its limit is the script's own row, measured from that script's header with
   # headroom: no-required-checks waits for three reads of what each base requires, so a run takes

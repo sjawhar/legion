@@ -389,13 +389,15 @@ GATES = [
         (".github/scripts/*", f"{at('test', 'Test release scripts')} and the steps after it: each .github/scripts/*.test.sh sources "
                               "test-lib.sh and runs its checker (with workflow_paths.py, check-pr-text.sh, ci_filter_coverage.py, "
                               "ci_job_reads.py or release-bump.sh where a checker reads them)"),
+        (".github/e2e-scripts.json", f"{at('test', 'Test the e2e proof selector')}: select-e2e-proofs.test.sh runs the "
+                                     "selector over the repository's own list"),
         ("scripts/third-party-notices.test.ts", at("test", "Test third-party notices")),
         ("scripts/third-party-notices.ts", "scripts/third-party-notices.test.ts:5,125; scripts/pi-plugin-prepack.sh:93,96 (packed by promptreferences_omp_test.go)"),
         ("scripts/sessions-import-pods.test.sh", at("test", "Test the session import pods script (a stand-in kubectl)")),
         ("scripts/sessions-import-pods.sh", "scripts/sessions-import-pods.test.sh:11"),
         ("scripts/e2e/**", f"{at('test', 'bun test scripts/e2e/lib')} (lib/script-functions.test.ts:101-104 scans scripts/e2e/*.sh and lib/*); "
                            f"{at('test', 'Stage 1 live proof')}: stage1-skeleton.sh sources lib/rig.sh (with port-file.sh, held-port.py) "
-                           "and runs built-from.sh"),
+                           f"and runs built-from.sh; {at('test', 'Test the e2e proof selector')}: the selector reads scripts/e2e/*.sh"),
         (CONTRACTS_SRC, "scripts/e2e/lib/envoy-bridge.ts:9-10, session-settings-services.ts:6; scripts/dispatch/ask-census.ts:9 (tsc -p scripts/dispatch)"),
         (ENVOY_CLIENT_SRC, "scripts/e2e/lib/nats-stream.ts:16-18, operator-dispatch.ts:16-21, envoy-bridge.ts:11; scripts/dispatch/ask-census.ts:10-15"),
         ("scripts/dispatch/**", f"{at('test', 'Lint the Dispatch census script')}, typecheck and test"),
