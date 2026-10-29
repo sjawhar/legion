@@ -16,6 +16,7 @@
 import { Editor, editorViewCtx, marksCtx, nodesCtx, remarkStringifyOptionsCtx } from '@milkdown/core';
 import { schema as commonmarkSchema } from '@milkdown/preset-commonmark';
 import { type BlockIdGenerator, blockIdSchemas, mintBlockId, withBlockIds } from './editor/schema/block-ids';
+import { withoutLeafMarks } from './editor/schema/leaf-marks';
 import {
   blockSchemaPlugins,
   remarkTypedBlocks,
@@ -185,7 +186,9 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
       parsers.set(softBreaks, parse);
     }
     try {
-      return withBlockIds(parse(markdown), mint);
+      // Beside `withBlockIds`, never inside it: that walk returns its input unchanged when no
+      // id was missing (see ./editor/schema/leaf-marks.ts).
+      return withoutLeafMarks(withBlockIds(parse(markdown), mint));
     } catch (error) {
       // A throw leaves this ParserState's stack open, so its next parses would throw too. Drop
       // it; the next parse of this policy builds a fresh one (about 0.03 ms).

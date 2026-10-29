@@ -22,6 +22,7 @@
  */
 
 import { BLOCK_ID_DOM_ATTR, blockIdOf, blockIdPlugins } from './editor/schema/block-ids';
+import { withoutLeafMarks } from './editor/schema/leaf-marks';
 import { blockSchemaPlugins, type BlockSchema, type HostBlockRenderer } from './block-schema';
 import { createTypedBlockCommands, type TypedBlockCommands } from './typed-block-commands';
 import {
@@ -50,6 +51,7 @@ import { collabCursorPlugin } from './collab-cursor-plugin';
 import type { Awareness } from 'y-protocols/awareness';
 import type * as Y from 'yjs';
 import type { EditorView } from '@milkdown/kit/prose/view';
+import type { Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
 import type { Ctx, MilkdownPlugin } from '@milkdown/ctx';
 
 import { proofMarkPlugins } from 'proof-sdk-upstream/src/editor/schema/proof-marks';
@@ -265,19 +267,23 @@ function cssEscapeAttrValue(value: string): string {
  * passes it, so it heals the same way. The wrapper itself never changes once installed: it
  * rebuilds its own closed-over parser from the schema and remark processor the broken one used,
  * keeps the fresh one for the next call, and rethrows the original error, so the one refused
- * parse still fails exactly as it did before and only the shared state is what recovers.
+ * parse still fails exactly as it did before and only the shared state is what recovers. Every
+ * document it returns is read through `withoutLeafMarks` first, so no inline leaf of a paste or
+ * an editor parse carries a mark (./editor/schema/leaf-marks.ts).
  */
 function installSelfHealingParser(ctx: Ctx): void {
   const schema = ctx.get(schemaCtx);
   const remark = ctx.get(remarkCtx);
   let parse = ctx.get(parserCtx);
   ctx.set(parserCtx, (markdown) => {
+    let parsed: ProseMirrorNode;
     try {
-      return parse(markdown);
+      parsed = parse(markdown);
     } catch (error) {
       parse = ParserState.create(schema, remark);
       throw error;
     }
+    return withoutLeafMarks(parsed);
   });
 }
 
@@ -437,7 +443,9 @@ export async function createProofEditor(
         editor.ctx.get(schemaCtx),
         editor.ctx.get(remarkCtx)().use(remarkSoftBreakAsSpace),
       );
-      const parsed = importParser(markdown);
+      // This parser is its own, so the shared parserCtx's rule is applied here too: no inline
+      // leaf of an imported document carries a mark (./editor/schema/leaf-marks.ts).
+      const parsed = withoutLeafMarks(importParser(markdown));
       const { state } = view;
       view.dispatch(state.tr.replaceWith(0, state.doc.content.size, parsed.content));
     },
