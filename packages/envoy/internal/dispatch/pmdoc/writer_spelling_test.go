@@ -36,28 +36,25 @@ func TestTheWriterSpellsEveryTreeItReadsAsTheEngine(t *testing.T) {
 		{"an italic bare URL before a letter", "*http\\://a.example/a*b\\)**\n", "*http\\://a.example/a*b)**\n"},
 	}
 	markdowns := make([]string, len(rows))
-	for index, row := range rows {
-		markdowns[index] = row.markdown
-	}
-	readings := engineReadings(t, markdowns)
 	docs := make([]*Node, len(rows))
 	parseErrs := make([]error, len(rows))
 	rendered := make([]string, len(rows))
 	renderErrs := make([]error, len(rows))
 	for index, row := range rows {
+		markdowns[index] = row.markdown
 		docs[index], parseErrs[index] = Parse(row.markdown)
 		if parseErrs[index] == nil {
 			rendered[index], renderErrs[index] = Render(docs[index])
 		}
 	}
-	backReadings := engineReadings(t, rendered)
+	readings := engineReadings(t, append(append([]string{}, markdowns...), rendered...))
 	for index, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			doc, rendering := docs[index], rendered[index]
 			if parseErrs[index] != nil {
 				t.Fatalf("Parse(%q) = %v", row.markdown, parseErrs[index])
 			}
-			readsAsEngine := t.Run("1 Parse reads it as the engine", func(t *testing.T) {
+			t.Run("1 Parse reads it as the engine", func(t *testing.T) {
 				if readings[index] == nil {
 					t.Fatalf("the engine does not read %q", row.markdown)
 				}
@@ -65,31 +62,25 @@ func TestTheWriterSpellsEveryTreeItReadsAsTheEngine(t *testing.T) {
 					t.Errorf("%q: Go reads\n\t%s\nthe engine\n\t%s", row.markdown, readingSummary(doc), readingSummary(readings[index]))
 				}
 			})
-			stored := t.Run("2 ParseForWrite stores it", func(t *testing.T) {
+			t.Run("2 ParseForWrite stores it", func(t *testing.T) {
 				if _, err := ParseForWrite(row.markdown, nil); err != nil {
 					t.Errorf("ParseForWrite(%q) = %v", row.markdown, err)
 				}
 			})
-			readsBack := t.Run("3 Render reads back in both parsers", func(t *testing.T) {
+			t.Run("3 Render reads back in both parsers", func(t *testing.T) {
 				if renderErrs[index] != nil {
 					t.Fatalf("Render(Parse(%q)) = %v", row.markdown, renderErrs[index])
 				}
 				if back, err := Parse(rendering); err != nil || !back.Equal(doc) {
 					t.Errorf("Go reads the rendering %q of %q back as\n\t%s (%v)\nnot\n\t%s", rendering, row.markdown, readingSummary(back), err, readingSummary(doc))
 				}
-				if engine := backReadings[index]; engine == nil || !engine.Equal(doc) {
+				if engine := readings[len(rows)+index]; engine == nil || !engine.Equal(doc) {
 					t.Errorf("the engine reads the rendering %q of %q back as\n\t%s\nnot\n\t%s", rendering, row.markdown, readingSummary(engine), readingSummary(doc))
 				}
 			})
 			t.Run("4 Render writes want", func(t *testing.T) {
 				if renderErrs[index] != nil {
 					t.Fatalf("Render(Parse(%q)) = %v", row.markdown, renderErrs[index])
-				}
-				if row.want == "" {
-					if readsAsEngine && stored && readsBack {
-						t.Fatalf("want not yet recorded: Render wrote %q", rendering)
-					}
-					t.Fatalf("want not yet recorded, and Render wrote %q, which steps 1-3 refuse", rendering)
 				}
 				if rendering != row.want {
 					t.Errorf("Render(Parse(%q)) = %q, want %q", row.markdown, rendering, row.want)

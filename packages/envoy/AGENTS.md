@@ -1884,7 +1884,7 @@ stored run's bytes change. A letter written as a character reference for the fla
 one more backslash there where the bytes before it end in an odd run of backslashes, since
 `\&#97;` reads as an escaped `&` (`pairBackslash`). A run whose one free asterisk run stands beside
 a bold or italic code span is read back and written there with every `*` and `_` escaped
-(`delimitersInText` with `codeMarks`). An escaped tilde is written `\~` there, beside which the
+(`delimitersInText`'s `lastHeld`). An escaped tilde is written `\~` there, beside which the
 browser editor's parser lets a `*` run open or close, where the `;` ending `&#126;` is punctuation
 that keeps it from closing before a letter (`tildeBackslash`). Marks are opened by reach there, the
 one the texts after carry furthest outermost, so that a nearer one ending closes no other

@@ -192,23 +192,23 @@ const (
 // delimitersInText is the first escape a run's text could need: delimitersTildes when a text node
 // outside a code span holds a tilde; delimitersAll when asterisks or underscores could pair - two
 // free runs of one of them, or one free run of asterisks beside bold or italic text, whose markers
-// are asterisks too, a bold or italic code span counted as such text only where codeMarks; and
-// delimitersAsRuled otherwise, when nothing is read back.
-func delimitersInText(nodes []*Node, codeMarks bool) delimiterEscapes {
-	stars, underscores := 0, 0
+// are asterisks too; and delimitersAsRuled otherwise, when nothing is read back. held counts the
+// text alone; lastHeld counts a bold or italic code span as such text too.
+func delimitersInText(nodes []*Node) (held, lastHeld delimiterEscapes) {
+	stars, codeStars, underscores := 0, 0, 0
 	for _, node := range nodes {
 		if node.Type != "text" {
 			continue
 		}
 		marked := nodeHasMark(node, "strong") || nodeHasMark(node, "emphasis")
 		if nodeHasMark(node, "inlineCode") {
-			if codeMarks && marked {
-				stars++
+			if marked {
+				codeStars++
 			}
 			continue
 		}
 		if strings.ContainsRune(node.Text, '~') {
-			return delimitersTildes
+			return delimitersTildes, delimitersTildes
 		}
 		stars += freeDelimiterRuns(node.Text, '*')
 		underscores += freeDelimiterRuns(node.Text, '_')
@@ -216,6 +216,12 @@ func delimitersInText(nodes []*Node, codeMarks bool) delimiterEscapes {
 			stars++
 		}
 	}
+	return delimitersPairing(stars, underscores), delimitersPairing(stars+codeStars, underscores)
+}
+
+// delimitersPairing is delimitersAll where two of the free delimiter runs counted could pair, and
+// delimitersAsRuled where none can.
+func delimitersPairing(stars, underscores int) delimiterEscapes {
 	if stars >= 2 || underscores >= 2 {
 		return delimitersAll
 	}

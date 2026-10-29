@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"slices"
 	"strings"
@@ -25,9 +26,10 @@ import (
 // opened again inside that text's other marks wherever the order puts it after them: bold inside
 // italic comes out as `*`, `**` and `*` side by side, one run of four asterisks. The parser splits
 // such a fused run as written where its flanking allows, so a fused first writing that reads back
-// is kept, as main writes it, and one that does not is written again in the plain respellings, as
-// main writes it again. Only where none of those reads back is it written with open marks kept
-// open (keepingOpen), each such spelling kept only where it reads back with no delimiter run fused.
+// is kept, as the writer before sjawhar/legion#2360 keeps it, and one that does not is written
+// again in the plain respellings, as that writer writes it again. Only where none of those reads
+// back is it written with open marks kept open (keepingOpen), each such spelling kept only where
+// it reads back with no delimiter run fused.
 // Then come those spellings again with the letter beside each such delimiter run written as a
 // character reference, which is punctuation to the flanking rules, as the browser editor writes it
 // (flanking).
@@ -57,7 +59,7 @@ import (
 // Only where no writing so far reads back under inlineMarkdown is a run written again in each of
 // lastResorts' spellings, so that none changes the bytes of a run another writing stores. A run
 // none of the cases above reads back, but whose free asterisk run stands beside a bold or italic
-// code span (delimitersInText with codeMarks), is read back as well, and written again only there.
+// code span (delimitersInText's lastHeld), is read back as well, and written again only there.
 //
 // What a writing reads back as is decided by its bytes alone, and many spellings write the same
 // bytes: a flag the run gives nothing to change. So each spelling is written once and only bytes
@@ -120,7 +122,8 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 		}
 		return false
 	}
-	if keepsDeeper(runSpellings(needs)) || firstReads == 0 && keepsDeeper(lastResorts(needs)) {
+	spellings := runSpellings(needs)
+	if keepsDeeper(spellings) || firstReads == 0 && keepsDeeper(lastResorts(needs, spellings)) {
 		return
 	}
 	r.b.Truncate(from)
@@ -148,9 +151,10 @@ type runNeeds struct {
 // runs where fused.
 func runNeedsOf(nodes []*Node, context inlineContext, fused bool) runNeeds {
 	colons, dots, ats := writesAddressSyntax(nodes)
+	held, lastHeld := delimitersInText(nodes)
 	return runNeeds{
-		held:     delimitersInText(nodes, false),
-		lastHeld: delimitersInText(nodes, true),
+		held:     held,
+		lastHeld: lastHeld,
 		bareURL:  writesBareURL(nodes, context.tableCell),
 		colons:   colons,
 		dots:     dots,
@@ -280,44 +284,45 @@ func escapesFrom(held delimiterEscapes) []delimiterEscapes {
 
 // lastResorts is every spelling inlineWithEscapes writes a run in only where no writing before
 // reads back under inlineMarkdown, so that no run another writing stores changes its bytes, in
-// the order it tries them: the flanking spellings runSpellings tried, again with a literal
-// backslash right before a character reference written `\\`, where it would otherwise escape the
-// reference's `&`; the delimiter escapes runSpellings did not try, with an asterisk run beside a
-// bold or italic code span counted as one beside a bold or italic text (delimitersInText,
-// needs.lastHeld for its held); then the escapes from the fewest with each escaped tilde written
-// `\~`, which the browser editor reads as a tilde beside which a `*` run may open or close, where
-// its reference ends in `;`; then with the marks ordered by reach (byReach); then reopened
-// (reopening); last, where the run writes a bare URL (bareURL), the escapes from the fewest with
-// each bare URL written as text whose scheme colon is escaped (bareURLColons).
-func lastResorts(needs runNeeds) []runSpelling {
-	var spellings []runSpelling
-	for _, spelling := range runSpellings(needs) {
+// the order it tries them: the flanking spellings of spellings, the list runSpellings gave, again
+// with a literal backslash right before a character reference written `\\`, where it would
+// otherwise escape the reference's `&`; the delimiter escapes runSpellings did not try, with an
+// asterisk run beside a bold or italic code span counted as one beside a bold or italic text
+// (delimitersInText's lastHeld for its held); then the escapes from the fewest with each escaped
+// tilde written `\~`, which the browser editor reads as a tilde beside which a `*` run may open or
+// close, where its reference ends in `;`; then with the marks ordered by reach (byReach); then
+// reopened (reopening); last, where the run writes a bare URL (bareURL), the escapes from the
+// fewest with each bare URL written as text whose scheme colon is escaped (bareURLColons).
+func lastResorts(needs runNeeds, spellings []runSpelling) []runSpelling {
+	escapes := escapesFrom(needs.lastHeld)
+	var resorts []runSpelling
+	for _, spelling := range spellings {
 		if spelling.flanking {
 			spelling.pairBackslash = true
-			spellings = append(spellings, spelling)
+			resorts = append(resorts, spelling)
 		}
 	}
 	if needs.held == delimitersAsRuled && needs.lastHeld != delimitersAsRuled {
-		for _, delimiters := range escapesFrom(needs.lastHeld)[1:] {
-			spellings = append(spellings, runSpelling{escapes: delimiters})
+		for _, delimiters := range escapes[1:] {
+			resorts = append(resorts, runSpelling{escapes: delimiters})
 		}
 	}
-	for _, delimiters := range escapesFrom(needs.lastHeld) {
+	for _, delimiters := range escapes {
 		if delimiters >= delimitersTildes {
-			spellings = append(spellings, runSpelling{escapes: delimiters, tildeBackslash: true})
+			resorts = append(resorts, runSpelling{escapes: delimiters, tildeBackslash: true})
 		}
 	}
 	for _, order := range []markOrder{marksByReach, marksReopened} {
-		for _, delimiters := range escapesFrom(needs.lastHeld) {
-			spellings = append(spellings, runSpelling{escapes: delimiters, order: order})
+		for _, delimiters := range escapes {
+			resorts = append(resorts, runSpelling{escapes: delimiters, order: order})
 		}
 	}
 	if needs.bareURL {
-		for _, delimiters := range escapesFrom(needs.lastHeld) {
-			spellings = append(spellings, runSpelling{escapes: delimiters, bareURLColons: true})
+		for _, delimiters := range escapes {
+			resorts = append(resorts, runSpelling{escapes: delimiters, bareURLColons: true})
 		}
 	}
-	return spellings
+	return resorts
 }
 
 // keepingOpen orders marks, the marks a text is written under, so that no mark it or the text
@@ -358,23 +363,35 @@ func sharedOpenMarks(active, marks []Mark) int {
 func byReach(active, marks []Mark, nodes []*Node, index int, escapePipes, wwwBare bool, spelling runSpelling) []Mark {
 	kept := sharedOpenMarks(active, marks)
 	ordered := append(make([]Mark, 0, len(marks)), active[:kept]...)
-	rest := make([]Mark, 0, len(marks))
-	reach := make([]int, 0, len(marks))
-	for _, mark := range marks {
-		if containsSameMark(active[:kept], mark) {
-			continue
-		}
-		texts := 1
-		for texts+index < len(nodes) && containsSameMark(spelledMarks(nodes[index+texts], escapePipes, wwwBare, spelling), mark) {
-			texts++
-		}
-		at := len(rest)
-		for at > 0 && reach[at-1] < texts {
-			at--
-		}
-		rest, reach = slices.Insert(rest, at, mark), slices.Insert(reach, at, texts)
+	// rest is each of the text's other marks with how many texts from its own, that one counted,
+	// carry it in a row.
+	type reach struct {
+		mark  Mark
+		texts int
 	}
-	return codeInnermost(append(ordered, rest...))
+	rest := make([]reach, 0, len(marks))
+	for _, mark := range marks {
+		if !containsSameMark(active[:kept], mark) {
+			rest = append(rest, reach{mark: mark, texts: 1})
+		}
+	}
+	// The texts after are read in order, each once, while a mark still reaches them: a mark whose
+	// reach is the texts read so far carries on into the next one or stops there.
+	for texts, reaching := 1, len(rest); reaching > 0 && index+texts < len(nodes); texts++ {
+		later := spelledMarks(nodes[index+texts], escapePipes, wwwBare, spelling)
+		reaching = 0
+		for at := range rest {
+			if rest[at].texts == texts && containsSameMark(later, rest[at].mark) {
+				rest[at].texts++
+				reaching++
+			}
+		}
+	}
+	slices.SortStableFunc(rest, func(a, b reach) int { return cmp.Compare(b.texts, a.texts) })
+	for _, carried := range rest {
+		ordered = append(ordered, carried.mark)
+	}
+	return codeInnermost(ordered)
 }
 
 // reopening orders marks, the marks a text is written under, so that none of active, the marks

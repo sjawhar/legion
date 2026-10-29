@@ -777,7 +777,7 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 			segmentStart = byteOffset + width
 		} else if escape {
 			r.writeText(value[segmentStart:byteOffset])
-			r.writeSyntax(textEscape(char, char == '~' && context.tildeBackslash))
+			r.writeSyntax(textEscape(char, context.tildeBackslash))
 			segmentStart = byteOffset + width
 		} else if char == '<' {
 			r.openers = append(r.openers, angleOpener{at: r.b.Len() + byteOffset - segmentStart, node: node, offset: byteOffset})

@@ -436,7 +436,8 @@ func TestDifferentialCompare(t *testing.T) {
 
 	var summary strings.Builder
 	fmt.Fprintf(&summary, "documents: %d (the engine cannot read %d)\n", documents, counts["engine cannot read"])
-	for _, line := range []struct{ label, key string }{
+	// gates is each count that is summarized and that fails the test, in the order both read them.
+	gates := []struct{ label, key string }{
 		{"regressions (base stores correctly, head does not)", "regression"},
 		{"misreads (base refuses, head stores what reads back otherwise)", "misread"},
 		{"churn (base stores correctly, head's bytes differ)", "churn"},
@@ -445,7 +446,8 @@ func TestDifferentialCompare(t *testing.T) {
 		{"head panics (recovered or not)", "head panic"},
 		{"lost fixed points (base reads the markdown as the engine and writes it back as read, head does not)", "lost fixed point"},
 		{"newly refused by the writer (base stores, head's rendering reads back otherwise)", "newly refused by the writer"},
-	} {
+	}
+	for _, line := range gates {
 		fmt.Fprintf(&summary, "GATE %-86s %d\n", line.label, counts[line.key])
 	}
 	for _, line := range []struct{ label, key string }{
@@ -463,9 +465,9 @@ func TestDifferentialCompare(t *testing.T) {
 		fmt.Fprintf(&summary, "  %s: %d\n", key, counts[key])
 	}
 	fmt.Print(summary.String())
-	for _, gate := range []string{"regression", "misread", "churn", "engine-tree regression", "engine-tree churn", "head panic", "lost fixed point", "newly refused by the writer"} {
-		if counts[gate] > 0 {
-			t.Errorf("%d %s; see %s", counts[gate], gate, os.Getenv("PMDOC_DIFF_REPORT"))
+	for _, gate := range gates {
+		if counts[gate.key] > 0 {
+			t.Errorf("%d %s; see %s", counts[gate.key], gate.key, os.Getenv("PMDOC_DIFF_REPORT"))
 		}
 	}
 }
