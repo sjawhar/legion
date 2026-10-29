@@ -5,20 +5,23 @@
 # runner pod inside it, samples every copy container's cgroup, collects, and removes the copy.
 #
 #   cluster.sh up --namespace NS --storage-class SC --dispatch-commit SHA --pg-major 16|18
-#                 --production-repo OWNER/REPO [--listener-image REF] [--stored-order-commit SHA]
-#                 [--browsertype-commit SHA]
+#                 --production-repo OWNER/REPO [--listener-image REF] [--stored-order-source SHA |
+#                 --stored-order-checker-commit SHA] [--browsertype-commit SHA]
 #       Refuses, before it creates anything, a commit with no ghcr.io envoy:<commit> image (naming
 #       the newest first-parent ancestor that has one), a --pg-major other than the production
 #       repository's dispatch/main.go databaseVersion, an image tag that does not resolve to a
-#       digest, a --stored-order-commit that this checkout's git store does not hold or whose
-#       tree has no packages/envoy/cmd/dispatch/storedorder.go, and a --browsertype-commit that
-#       the git store does not hold or whose tree has no packages/envoy/loadtest/browsertype.
-#       Refuses with exit 2 while the lock ConfigMap dispatch-loadtest-lock exists. Then takes the
-#       lock, installs the copy (Postgres 16 CPU / 60Gi, Dispatch 16 / 32Gi, listener 500m /
-#       512Mi, NATS 3 × 2 / 4Gi, runner 8 / 16Gi), builds loadgen, (with --stored-order-commit) a
-#       static envoy-dispatch of that commit for the stored-order check and (with
-#       --browsertype-commit) a static browsertype of that commit for browser typing (below),
-#       starts the heartbeat and the sampler, and prints each copy container's requests and limits.
+#       digest, a stored-order checker it cannot build (below: a --dispatch-commit that this
+#       checkout's git store does not hold; a dispatch tree without the stored-order command and
+#       no --stored-order-source, or with it and a --stored-order-source; a source without
+#       INFRA-707's files or registration; a dispatch subcommand table without the registration's
+#       anchor; a build failure, naming the commits and the compiler's first error), and a
+#       --browsertype-commit that the git store does not hold or whose tree has no
+#       packages/envoy/loadtest/browsertype. Refuses with exit 2 while the lock ConfigMap
+#       dispatch-loadtest-lock exists. Then takes the lock, installs the copy (Postgres 16 CPU /
+#       60Gi, Dispatch 16 / 32Gi, listener 500m / 512Mi, NATS 3 × 2 / 4Gi, runner 8 / 16Gi), builds
+#       loadgen and (with --browsertype-commit) a static browsertype of that commit for browser
+#       typing (below), starts the heartbeat and the sampler, and prints each copy container's
+#       requests and limits.
 #   cluster.sh seed --namespace NS            loadgen seed and seed-finish, then the template
 #                                             database dispatch_seed.
 #   cluster.sh step --namespace NS NAME FACTOR [--duration 10m] [--reads-only] [--typing
@@ -80,21 +83,35 @@
 #       line each. all runs no browser typing; with --browsertype-commit and --keep, the run
 #       stays up for typing steps and replays named by the caller.
 #
+# The stored-order checker: up builds a static envoy-dispatch from --dispatch-commit's own tree
+# (git archive of this checkout's git store, built in a scratch directory), so the checker's
+# renderer is the one Dispatch runs. A dispatch tree without the stored-order command
+# (packages/envoy/cmd/dispatch/storedorder.go) needs --stored-order-source SHA, refused otherwise:
+# that commit's INFRA-707 files (internal/dispatch/docs/storedorder.go,
+# cmd/dispatch/storedorder.go) are copied into the scratch copy, and its stored-order entry of
+# cmd/dispatch/subcommands.go's table is inserted after the dispatch tree's table opener `var
+# subcommands = []subcommand{` (refused when that line is not there exactly once). The escape
+# --stored-order-checker-commit SHA builds the checker wholly from SHA instead; up warns that its
+# renderer may differ from Dispatch's and records renderer_matches false. state.json stored_order
+# records dispatch_commit, built_from (the commit whose tree was built), overlay_source (or null),
+# overlay_files, registration (the file the overlay edited, or null), renderer_matches and the
+# binary's sha256; up builds the checker before it takes the lock.
+#
 # The stored-order check (INFRA-707's oracle): after each step's and each replay's loadgen run,
-# while Dispatch still runs, the runner runs `envoy-dispatch stored-order --since <meta.json
-# window_start>` of --stored-order-commit, with the copy's DATABASE_URL on its standard input (never
-# on a command line), for at most 30 min. Its output goes into <step>/stored-order.txt, its summary
-# line into <step>/stored-order.json, and one line names the counts. A non-zero exit is a
-# correctness finding, not a step failure. Before the next reset drops the database, the rows of
-# each mismatched or refused document (artifacts, doc_checkpoints, artifact_versions, doc_updates,
-# doc_snapshots), its issue's events since window_start (issue-events-in-window), and its
-# doc_checkpoints, artifact_versions, doc_updates and doc_snapshots in the template database the
-# step was reset from (start-<table>) go into <step>/stored-order-evidence/<artifact uuid>/ as
-# gzipped CSVs, with version-<n>.md for each mismatched version's stored markdown, through psql
-# \copy to stdout in the Postgres pod, within 600 s; stored-order.json evidence names them. A failed
-# export is reported, never a step failure, and the evidence is never uploaded. collect writes
-# <run>/STORED-ORDER.md. Without --stored-order-commit, each step prints one line saying that the
-# check is skipped.
+# while Dispatch still runs, the runner runs the checker's `stored-order --since <meta.json
+# window_start>`, with the copy's DATABASE_URL on its standard input (never on a command line),
+# for at most 30 min. Its output goes into <step>/stored-order.txt, the checker's fields and its
+# summary line into <step>/stored-order.json (renderer_matches false when Dispatch was redeployed
+# to another commit), and one line names the counts. A non-zero exit is a correctness finding,
+# not a step failure. Before the next reset drops the database, the rows of each mismatched or
+# refused document (artifacts, doc_checkpoints, artifact_versions, doc_updates, doc_snapshots),
+# its issue's events since window_start (issue-events-in-window), and its doc_checkpoints,
+# artifact_versions, doc_updates and doc_snapshots in the template database the step was reset
+# from (start-<table>) go into <step>/stored-order-evidence/<artifact uuid>/ as gzipped CSVs,
+# with version-<n>.md for each mismatched version's stored markdown, through psql \copy to stdout
+# in the Postgres pod, within 600 s; stored-order.json evidence names them. A failed export is
+# reported, never a step failure, and the evidence is never uploaded. collect writes
+# <run>/STORED-ORDER.md.
 #
 # Browser typing (step and replay --typing, INFRA-707's race of agent writes and browser typing):
 # INFRA-707's browsertype of --browsertype-commit, refused without it, types into the K
@@ -121,9 +138,8 @@
 # directory ${LOADTEST_CLUSTER_ROOT:-$TMPDIR/dispatch-loadtest-cluster}/<run id>/ (state.json, mode
 # 600, holds the digests and the run's random credentials; cgroup.jsonl; steps/; logs/); --run ID
 # names the run instead. Needs kubectl, jq, curl, gh, go, setsid, timeout, tar, gzip, base64,
-# sha256sum, uv (collect), git (up --stored-order-commit and --browsertype-commit), dispatch
-# (collect --upload-issue), and DISPATCH_URL and DISPATCH_TOKEN_FILE (replay-prepare's downloads,
-# without --from-dir).
+# sha256sum, uv (collect), git (up), dispatch (collect --upload-issue), and DISPATCH_URL and
+# DISPATCH_TOKEN_FILE (replay-prepare's downloads, without --from-dir).
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -158,6 +174,17 @@ REPLAY_TEMPLATE=dispatch_replay
 REPLAY_POD_DUMP=/var/lib/postgresql/copy/replay-seed.dump
 OUTAGE_CORES=11.1,13.8
 OUTAGE_MEMORY_GIB=13.8
+# The stored-order checker (INFRA-707's command): the file whose presence in a tree means the tree
+# has the command, the files an overlay copies from --stored-order-source into a dispatch tree
+# without it, the subcommand table the overlay registers it in, and the table's opener, after
+# which the overlay inserts the source's stored-order entry. CHECKER_TMP is up's scratch
+# directory for the checker until the run directory exists (removed on every exit), and
+# STORED_ORDER_STATE the checker's state.json stored_order (stored_order_build).
+STORED_ORDER_COMMAND=packages/envoy/cmd/dispatch/storedorder.go
+STORED_ORDER_FILES=(packages/envoy/internal/dispatch/docs/storedorder.go "$STORED_ORDER_COMMAND")
+STORED_ORDER_REGISTRY=packages/envoy/cmd/dispatch/subcommands.go
+STORED_ORDER_ANCHOR='var subcommands = []subcommand{'
+CHECKER_TMP="" STORED_ORDER_STATE=""
 # The stored-order check's bound, in seconds (its timeout's exit status is 124).
 STORED_ORDER_SECONDS=1800
 # The stored-order evidence export's bound for all of one step's documents, in seconds, and the
@@ -1037,18 +1064,152 @@ commit_source() {
     die "up: --$1 $2 has no $3, $4; name a commit that has it"
 }
 
-# build_at_commit COMMIT PACKAGE OUT: a static binary of COMMIT's Go package PACKAGE (a path under
-# packages/envoy, as ./cmd/dispatch) at OUT (an absolute path): `git archive` of this checkout's
-# git store unpacked in a scratch directory beside OUT, built there outside any workspace, then
-# the scratch directory removed. It builds the stored-order check's envoy-dispatch and browser
-# typing's browsertype.
+# tree_has COMMIT PATH: COMMIT's tree in this checkout's git store holds PATH.
+tree_has() { git -C "$REPO_DIR" cat-file -e "$1:$2" 2>/dev/null; }
+
+# build_at_commit COMMIT PACKAGE OUT [SOURCE]: a static binary of COMMIT's Go package PACKAGE (a
+# path under packages/envoy, as ./cmd/dispatch) at OUT (an absolute path): `git archive` of this
+# checkout's git store unpacked in a scratch directory beside OUT, with SOURCE's stored-order
+# command added to that scratch copy when SOURCE is given (stored_order_overlay), built there
+# outside any workspace, then the scratch directory removed. It builds the stored-order checker
+# and browser typing's browsertype. The overlay's and go's errors go to standard error.
 build_at_commit() {
-  local commit=$1 pkg=$2 out=$3 src rc=0
+  local commit=$1 pkg=$2 out=$3 source=${4:-} src rc=0
   src=$(mktemp -d "${out%/*}/.build-src.XXXXXX") || return 1
   { git -C "$REPO_DIR" archive "$commit" packages/envoy | tar -C "$src" -xf - &&
+    { [ -z "$source" ] || stored_order_overlay "$src" "$commit" "$source"; } &&
     (cd -- "$src/packages/envoy" && CGO_ENABLED=0 GOWORK=off go build -buildvcs=false -o "$out" "$pkg"); } || rc=$?
   rm -rf -- "$src"
   return "$rc"
+}
+
+# stored_order_entry SOURCE: the stored-order entry of SOURCE's subcommand table
+# (STORED_ORDER_REGISTRY), from its line that starts `<tab>{"stored-order", func(` through the
+# first `<tab>}},` line after it. Fails when the table holds no such entry, or more than one.
+stored_order_entry() {
+  local table
+  table=$(git -C "$REPO_DIR" cat-file -p "$1:$STORED_ORDER_REGISTRY" 2>/dev/null) || return 1
+  awk '/^\t\{"stored-order", func\(/ { n++; on = 1 } on { print } on && $0 == "\t}}," { on = 0; closed++ }
+    END { exit !(n == 1 && closed == 1) }' <<<"$table"
+}
+
+# stored_order_register FILE ENTRY COMMIT: ENTRY (stored_order_entry's) inserted into FILE, the
+# scratch copy of dispatch commit COMMIT's STORED_ORDER_REGISTRY, on the line after the table's
+# opener STORED_ORDER_ANCHOR, in place. Refuses, saying why on standard error, a FILE that is
+# missing, that holds the opener on other than exactly one line, or that registers stored-order
+# already, and checks that the result registers it on exactly one line.
+stored_order_register() {
+  local file=$1 entry=$2 commit=$3 n opener=$'^\t{"stored-order", func('
+  if [ ! -f "$file" ]; then
+    printf 'the overlay: dispatch commit %s has no %s, the subcommand table that registers stored-order\n' "$commit" "$STORED_ORDER_REGISTRY" >&2
+    return 1
+  fi
+  n=$(grep -cxF -- "$STORED_ORDER_ANCHOR" "$file") || true
+  if ((n != 1)); then
+    printf "the overlay: dispatch commit %s's %s holds the registration's anchor \`%s\` on %s lines, not 1, so the overlay cannot register stored-order there\n" \
+      "$commit" "$STORED_ORDER_REGISTRY" "$STORED_ORDER_ANCHOR" "$n" >&2
+    return 1
+  fi
+  if grep -q -- "$opener" "$file"; then
+    printf "the overlay: dispatch commit %s's %s registers stored-order already\n" "$commit" "$STORED_ORDER_REGISTRY" >&2
+    return 1
+  fi
+  ENTRY=$entry awk -v anchor="$STORED_ORDER_ANCHOR" '{ print } $0 == anchor { print ENVIRON["ENTRY"] }' "$file" >"$file.tmp" &&
+    mv -- "$file.tmp" "$file" || return 1
+  n=$(grep -c -- "$opener" "$file") || true
+  if ((n != 1)); then
+    printf "the overlay: dispatch commit %s's %s registers stored-order on %s lines after the edit, not 1\n" "$commit" "$STORED_ORDER_REGISTRY" "$n" >&2
+    return 1
+  fi
+}
+
+# stored_order_overlay DIR COMMIT SOURCE: SOURCE's stored-order command added to DIR, the scratch
+# copy of dispatch commit COMMIT's archive: STORED_ORDER_FILES copied from SOURCE's tree, and
+# SOURCE's stored-order entry registered in DIR's STORED_ORDER_REGISTRY (stored_order_register).
+# Refuses, saying why on standard error, a SOURCE without the entry and a registry without the
+# anchor.
+stored_order_overlay() {
+  local dir=$1 commit=$2 source=$3 entry
+  if ! entry=$(stored_order_entry "$source"); then
+    printf "the overlay: source commit %s's %s holds no single stored-order entry to register\n" "$source" "$STORED_ORDER_REGISTRY" >&2
+    return 1
+  fi
+  if ! git -C "$REPO_DIR" archive "$source" "${STORED_ORDER_FILES[@]}" | tar -C "$dir" -xf -; then
+    printf 'the overlay: git archive of %s from source commit %s failed\n' "${STORED_ORDER_FILES[*]}" "$source" >&2
+    return 1
+  fi
+  stored_order_register "$dir/$STORED_ORDER_REGISTRY" "$entry" "$commit"
+}
+
+# stored_order_args COMMIT SOURCE CHECKER: refuse, before up creates anything, stored-order
+# flags from which up cannot build a checker for dispatch commit COMMIT: COMMIT not in this
+# checkout's git store; with CHECKER (--stored-order-checker-commit), a SOURCE too, CHECKER not
+# 40 hex, COMMIT itself, or not a commit whose tree has the command; a COMMIT tree with the
+# command and a SOURCE; a COMMIT tree without it and no SOURCE, or a SOURCE that is not 40 hex or
+# whose tree lacks STORED_ORDER_FILES or a stored-order entry in STORED_ORDER_REGISTRY.
+stored_order_args() {
+  local commit=$1 source=$2 checker=$3 f
+  git -C "$REPO_DIR" cat-file -e "$commit^{commit}" 2>/dev/null ||
+    die "up: --dispatch-commit $commit is not a commit in this checkout's git store ($REPO_DIR), and the stored-order checker is built from its tree; fetch it (jj git fetch)"
+  if [ -n "$checker" ]; then
+    [ -z "$source" ] || die "up: --stored-order-source and --stored-order-checker-commit exclude each other: the source adds INFRA-707's files to the dispatch tree, the checker commit replaces that tree; give one"
+    valid commit "$checker" || die "up: --stored-order-checker-commit '$checker' is not a full 40-hex commit sha"
+    [ "$checker" != "$commit" ] || die "up: --stored-order-checker-commit $checker is --dispatch-commit itself; drop it: the checker is built from the dispatch commit by default"
+    commit_source stored-order-checker-commit "$checker" "$STORED_ORDER_COMMAND" "so its envoy-dispatch has no stored-order command (INFRA-707)"
+  elif tree_has "$commit" "$STORED_ORDER_COMMAND"; then
+    [ -z "$source" ] || die "up: --stored-order-source $source is refused: --dispatch-commit $commit's tree has the stored-order command ($STORED_ORDER_COMMAND), so the checker is built from that tree alone"
+  else
+    [ -n "$source" ] || die "up: --dispatch-commit $commit's tree has no stored-order command ($STORED_ORDER_COMMAND); give --stored-order-source <commit>, whose INFRA-707 files (${STORED_ORDER_FILES[*]}) and stored-order registration are added to it, or, naming the renderer mismatch, --stored-order-checker-commit <commit> to build the checker wholly from another commit"
+    valid commit "$source" || die "up: --stored-order-source '$source' is not a full 40-hex commit sha"
+    for f in "${STORED_ORDER_FILES[@]}" "$STORED_ORDER_REGISTRY"; do
+      commit_source stored-order-source "$source" "$f" "so it lacks INFRA-707's stored-order command"
+    done
+    stored_order_entry "$source" >/dev/null ||
+      die "up: --stored-order-source $source's $STORED_ORDER_REGISTRY holds no single stored-order entry (a line starting {\"stored-order\", func( and the }}, that closes it); name a commit that registers the command"
+  fi
+}
+
+# stored_order_build COMMIT SOURCE CHECKER: the stored-order checker, a static envoy-dispatch, at
+# CHECKER_TMP/envoy-dispatch (a scratch directory in CLUSTER_ROOT, since the run directory does
+# not exist yet), and its state.json stored_order object in STORED_ORDER_STATE: built from
+# dispatch commit COMMIT's tree, with SOURCE's overlay when SOURCE is given, or wholly from
+# CHECKER when it is given, after a warning that its renderer may differ from Dispatch's
+# (renderer_matches false). stored_order_args checked the flags. Dies, before up creates
+# anything, when it does not build, after the overlay's and go's whole output: naming the dispatch
+# commit, the source commit (or none), the checker commit when given, and the first error.
+stored_order_build() {
+  local commit=$1 source=$2 checker=$3 from what err first files='[]' registry="" matches=true
+  (umask 077 && mkdir -p -- "$CLUSTER_ROOT") || die "up: cannot create $CLUSTER_ROOT"
+  CHECKER_TMP=$(mktemp -d "$CLUSTER_ROOT/.checker.XXXXXX") || die "up: cannot create a scratch directory in $CLUSTER_ROOT"
+  err=$CHECKER_TMP/build.err
+  if [ -n "$checker" ]; then
+    from=$checker matches=false what="checker commit $checker, not dispatch commit $commit"
+    note "WARNING: --stored-order-checker-commit $checker: the stored-order checker is built wholly from $checker, not from dispatch commit $commit, so its renderer may differ from Dispatch's and a mismatch it reports may be renderer skew; state.json records renderer_matches false"
+  elif [ -n "$source" ]; then
+    from=$commit what="dispatch commit $commit with INFRA-707's files of source commit $source (${STORED_ORDER_FILES[*]}, registered in $STORED_ORDER_REGISTRY)"
+    files=$(printf '%s\n' "${STORED_ORDER_FILES[@]}" | jq -Rnc '[inputs]')
+    registry=$STORED_ORDER_REGISTRY
+  else
+    from=$commit what="dispatch commit $commit"
+  fi
+  note "building the stored-order checker, envoy-dispatch (static) of $what"
+  if ! build_at_commit "$from" ./cmd/dispatch "$CHECKER_TMP/envoy-dispatch" "$source" 2>"$err"; then
+    cat -- "$err" >&2
+    first=$(grep -v -m1 -e '^#' -e '^[[:space:]]*$' "$err") || first="go build failed with no error line"
+    die "up: the stored-order checker does not build (dispatch commit $commit, source commit ${source:-none}${checker:+, checker commit $checker}): $first"
+  fi
+  # shellcheck disable=SC2016 # $d, $b, $s, $f, $r, $m and $sha are jq's variables
+  STORED_ORDER_STATE=$(jq -nc --arg d "$commit" --arg b "$from" --arg s "$source" --argjson f "$files" --arg r "$registry" \
+    --argjson m "$matches" --arg sha "$(sha256_of "$CHECKER_TMP/envoy-dispatch")" \
+    '{dispatch_commit: $d, built_from: $b, overlay_source: (if $s == "" then null else $s end), overlay_files: $f,
+      registration: (if $r == "" then null else $r end), renderer_matches: $m, sha256: $sha}')
+  note "the stored-order checker's sha256 is $(jq -r .sha256 <<<"$STORED_ORDER_STATE"), renderer_matches $matches"
+}
+
+# checker_tmp_remove: up's scratch directory for the checker removed (an exit trap's part).
+checker_tmp_remove() {
+  [ -z "$CHECKER_TMP" ] || rm -rf -- "$CHECKER_TMP"
+  CHECKER_TMP=""
 }
 
 # ---- the stored-order check -----------------------------------------------------------------------
@@ -1058,18 +1219,35 @@ build_at_commit() {
 # shellcheck disable=SC2016 # expanded by the runner's sh
 STORED_ORDER_SCRIPT='IFS= read -r DATABASE_URL; export DATABASE_URL; exec timeout "$1" /work/envoy-dispatch stored-order --since "$2"'
 
-# stored_order_summary TXT COMMIT EXIT SINCE: stored-order.json from the command's output TXT: the
-# commit it was built from, its exit status (null when it did not run), --since (null when none),
-# and the counts of the last summary line (`stored-order: documents=N clean=N mismatched=N
-# refused=N failed=N`), each null when there is no such line or the command timed out (exit 124),
-# never 0.
+# stored_order_summary TXT CHECKER EXIT SINCE: stored-order.json from the command's output TXT:
+# the checker's fields (CHECKER, the JSON object stored_order_checker gives: dispatch_commit,
+# built_from, overlay_source, overlay_files, registration, renderer_matches, sha256), its exit
+# status (null when it did not run), --since (null when none), and the counts of the last summary
+# line (`stored-order: documents=N clean=N mismatched=N refused=N failed=N`), each null when there
+# is no such line or the command timed out (exit 124), never 0.
 stored_order_summary() {
-  jq -Rn --arg commit "$2" --argjson exit "${3:-null}" --arg since "$4" '
+  jq -Rn --argjson checker "$2" --argjson exit "${3:-null}" --arg since "$4" '
     ([inputs | capture("^stored-order: documents=(?<documents>[0-9]+) clean=(?<clean>[0-9]+) mismatched=(?<mismatched>[0-9]+) refused=(?<refused>[0-9]+) failed=(?<failed>[0-9]+)$")] | last) as $s
-    | {commit: $commit, exit: $exit, since: (if $since == "" then null else $since end)}
+    | $checker + {exit: $exit, since: (if $since == "" then null else $since end)}
       + (if $s == null or $exit == 124 then {documents: null, clean: null, mismatched: null, refused: null, failed: null}
         else $s | map_values(tonumber) end)' <"$1"
 }
+
+# stored_order_checker: state.json's stored_order (the run's checker, stored_order_build) as one
+# line of JSON, its renderer_matches false when Dispatch now runs another commit than the one the
+# checker was built for (a redeploy); empty when state.json records no checker.
+stored_order_checker() {
+  jq -c '.dispatch_commit as $running | .stored_order // empty
+    | .renderer_matches = (.renderer_matches and .dispatch_commit == $running)' "$STATE"
+}
+
+# The jq function that names a checker (stored_order_checker's object) in one phrase.
+# shellcheck disable=SC2016 # jq's program
+STORED_ORDER_LABEL='def checker_label: if .overlay_source != null
+    then "dispatch commit \(.built_from[0:12]) + INFRA-707 files of \(.overlay_source[0:12])"
+  elif .built_from == .dispatch_commit then "dispatch commit \(.built_from[0:12])"
+  else "checker commit \(.built_from[0:12]), not dispatch commit \(.dispatch_commit[0:12])" end
+  + ", renderer_matches \(.renderer_matches)";'
 
 # stored_order_flagged TXT: each document that stored-order's output TXT names as mismatched or
 # refused, once, in the order TXT first names it: a document line with mismatches above 0 or a
@@ -1250,17 +1428,17 @@ stored_order_evidence() {
 
 # stored_order_check NAME DIR: the stored-order check of step NAME (see the header) after its
 # loadgen run, while Dispatch still runs: DIR/stored-order.txt (the command's standard output and
-# error), DIR/stored-order.json (stored_order_summary, and evidence: stored_order_evidence's
-# export of each mismatched or refused document, made here, before the next reset drops the
-# database) and one line naming the counts. A non-zero exit is a finding, never the step's failure.
-# Browser typing, when the step runs it, stops right after the command (typing_stop). Without the
-# run's envoy-dispatch (up was given no --stored-order-commit), one line says that the check is
-# skipped.
+# error), DIR/stored-order.json (stored_order_summary with the run's checker, and evidence:
+# stored_order_evidence's export of each mismatched or refused document, made here, before the
+# next reset drops the database) and one line naming the checker and the counts. A non-zero exit
+# is a finding, never the step's failure. Browser typing, when the step runs it, stops right
+# after the command (typing_stop). A run whose state.json records no checker (up builds one for
+# every run) says so in one line and runs nothing.
 stored_order_check() {
-  local name=$1 dir=$2 commit since evidence rc=0 txt=$2/stored-order.txt
-  commit=$(state '.stored_order.commit // empty')
-  if [ -z "$commit" ]; then
-    note "step $name: the stored-order check is skipped: up was given no --stored-order-commit"
+  local name=$1 dir=$2 checker since evidence rc=0 txt=$2/stored-order.txt
+  checker=$(stored_order_checker)
+  if [ -z "$checker" ]; then
+    note "step $name: the stored-order check is not run: $STATE records no stored-order checker"
     return 0
   fi
   since=$(jq -r '.window_start // empty' "$dir/meta.json" 2>/dev/null || true)
@@ -1274,9 +1452,9 @@ stored_order_check() {
     since="" rc=null
   fi
   typing_stop "$name" "$dir"
-  stored_order_summary "$txt" "$commit" "$rc" "$since" >"$dir/stored-order.json"
-  note "$(jq -r --arg name "$name" 'def n: if . == null then "null" else tostring end;
-    "step \($name): stored-order (envoy-dispatch of \(.commit[0:12])) since \(.since | n): "
+  stored_order_summary "$txt" "$checker" "$rc" "$since" >"$dir/stored-order.json"
+  note "$(jq -r --arg name "$name" "$STORED_ORDER_LABEL"' def n: if . == null then "null" else tostring end;
+    "step \($name): stored-order (envoy-dispatch of \(checker_label)) since \(.since | n): "
     + if .exit == null then "not run: meta.json holds no window_start"
       else "exit \(.exit)\(if .exit == 124 then " (timed out)" else "" end), documents=\(.documents | n) clean=\(.clean | n) mismatched=\(.mismatched | n) refused=\(.refused | n) failed=\(.failed | n)"
         + (if .exit == 0 then "" else "; a correctness finding, not a step failure: \($name)/stored-order.txt" end) end' "$dir/stored-order.json")"
@@ -1288,30 +1466,34 @@ stored_order_check() {
   mv -- "$dir/stored-order.json.tmp" "$dir/stored-order.json"
 }
 
-# stored_order_table DIR...: <run>/STORED-ORDER.md: the commit the check's envoy-dispatch was built
-# from, then one row per step directory in the order given (the run's) from its stored-order.json,
-# "not run" for a step without one. A count that no summary line gave is null, never 0. The
-# Typing column is the keystroke updates browser typing sent during the step (browsertype.json
-# sent, null when its output held no peer line), or none for a step without --typing.
+# stored_order_table DIR...: <run>/STORED-ORDER.md: the checker the run's up built (state.json
+# stored_order: the dispatch commit it was built for, the commit whose tree was built, the
+# overlay's source commit and files, renderer_matches and the binary's sha256), then one row per
+# step directory in the order given (the run's) from its stored-order.json, "not run" for a step
+# without one. A count that no summary line gave is null, never 0. Renderer matches is the step's
+# renderer_matches (false after a redeploy to another commit). The Typing column is the keystroke
+# updates browser typing sent during the step (browsertype.json sent, null when its output held no
+# peer line), or none for a step without --typing.
 stored_order_table() {
-  local commit sha bt d typing out=$RUN_DIR/STORED-ORDER.md
-  commit=$(state '.stored_order.commit // empty')
-  sha=$(state '.stored_order.sha256 // empty')
+  local bt d typing out=$RUN_DIR/STORED-ORDER.md
   bt=$(state '.browsertype.commit // empty')
   {
     printf '# Stored order\n\n'
-    if [ -n "$commit" ]; then
-      printf "INFRA-707's oracle \`envoy-dispatch stored-order\`, built from commit %s (binary sha256 %s), ran on each step after its window, while Dispatch still ran, with \`--since\` the window start. Exit 1 (a mismatch, a refused document or a failed read) is a correctness finding, not a failed step; \`<step>/stored-order.txt\` holds its lines.\n\n" "$commit" "$sha"
-    else
-      printf "No step ran INFRA-707's oracle \`envoy-dispatch stored-order\`: up was given no \`--stored-order-commit\`.\n\n"
-    fi
+    jq -r '.stored_order | if . == null then "No step ran INFRA-707'\''s oracle `envoy-dispatch stored-order`: state.json records no stored-order checker."
+      else "INFRA-707'\''s oracle `envoy-dispatch stored-order` ran on each step after its window, while Dispatch still ran, with `--since` the window start. Exit 1 (a mismatch, a refused document or a failed read) is a correctness finding, not a failed step; `<step>/stored-order.txt` holds its lines.\n\n"
+        + "The checker was built for dispatch commit \(.dispatch_commit) "
+        + (if .overlay_source != null then "from that commit'\''s tree with INFRA-707'\''s files of source commit \(.overlay_source) added (\(.overlay_files | map("`\(.)`") | join(", ")); its stored-order entry registered in `\(.registration)`)"
+          elif .built_from == .dispatch_commit then "from that commit'\''s own tree (no overlay)"
+          else "wholly from checker commit \(.built_from) (`--stored-order-checker-commit`), whose renderer may differ from Dispatch'\''s: a mismatch may be renderer skew" end)
+        + ". renderer_matches: \(.renderer_matches). Binary sha256 \(.sha256)." end' "$STATE" || return 1
+    printf '\n'
     if [ -n "$bt" ]; then
       printf "Typing: the keystroke updates that INFRA-707's \`browsertype\`, built from commit %s, sent into the step's documents from its warm-up until the check ended (\`<step>/browsertype.json\`); \`none\` for a step run without \`--typing\`.\n\n" "$bt"
     else
       printf "Typing: \`none\` for every step: up was given no \`--browsertype-commit\`.\n\n"
     fi
-    printf '| Step | Since | Exit | Documents | Clean | Mismatched | Refused | Failed | Typing |\n'
-    printf '| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n'
+    printf '| Step | Since | Exit | Documents | Clean | Mismatched | Refused | Failed | Renderer matches | Typing |\n'
+    printf '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n'
     for d in "$@"; do
       typing=none
       if [ -f "$d/browsertype.json" ]; then
@@ -1319,10 +1501,10 @@ stored_order_table() {
       fi
       if [ -f "$d/stored-order.json" ]; then
         jq -r --arg step "${d##*/}" --arg typing "$typing" 'def n: if . == null then "null" else tostring end;
-          "| \($step) | \(.since | n) | \(if .exit == null then "not run" else .exit | tostring end) | \(.documents | n) | \(.clean | n) | \(.mismatched | n) | \(.refused | n) | \(.failed | n) | \($typing) |"' \
+          "| \($step) | \(.since | n) | \(if .exit == null then "not run" else .exit | tostring end) | \(.documents | n) | \(.clean | n) | \(.mismatched | n) | \(.refused | n) | \(.failed | n) | \(.renderer_matches | n) | \($typing) |"' \
           "$d/stored-order.json" || return 1
       else
-        printf '| %s | | not run | | | | | | %s |\n' "${d##*/}" "$typing"
+        printf '| %s | | not run | | | | | | | %s |\n' "${d##*/}" "$typing"
       fi
     done
   } >"$out.tmp" || return 1
@@ -1459,8 +1641,8 @@ typing_summary() {
 # DIR/browsertype.json): SIGTERM to browsertype, its exit status (at most 120 s later), its output
 # into DIR/browsertype.txt and typing_summary into DIR/browsertype.json, the token removed from the
 # runner, and one line naming the sums. A peer error or a non-zero exit is said, never a step
-# failure. Called right after the stored-order command, and again after the check (which a step
-# without --stored-order-commit skips), so it never fails.
+# failure. Called right after the stored-order command, and again after the check (which a run
+# whose state.json records no checker does not run), so it never fails.
 typing_stop() {
   local name=$1 dir=$2 job=typing-$1 rc
   { [ -n "$TYPING" ] && [ ! -f "$dir/browsertype.json" ]; } || return 0
@@ -2221,17 +2403,18 @@ down_run() {
 # ---- subcommands ----------------------------------------------------------------------------------
 
 cmd_up() {
-  parse "namespace storage-class dispatch-commit pg-major production-repo listener-image stored-order-commit browsertype-commit" "" "$@"
+  parse "namespace storage-class dispatch-commit pg-major production-repo listener-image stored-order-source stored-order-checker-commit browsertype-commit" "" "$@"
   positional 0 "no positional arguments"
   trap up_exit EXIT
   up_run
   trap - EXIT
 }
 
-# up_exit: up's trap: a failure after the lock was taken names the command that removes what up
-# made.
+# up_exit: up's trap: the checker's scratch directory removed; a failure after the lock was taken
+# names the command that removes what up made.
 up_exit() {
   local rc=$?
+  checker_tmp_remove
   if ((rc != 0)) && [ -n "${RUN_TAKEN:-}" ]; then
     note "up failed after it took the lock for run $RUN; cluster.sh down --namespace $NS --run $RUN removes what it made"
   fi
@@ -2240,10 +2423,10 @@ up_exit() {
 # up_run: up from OPT (also all's first phase).
 up_run() {
   local sc=${OPT[storage-class]:-} commit=${OPT[dispatch-commit]:-} major=${OPT[pg-major]:-}
-  local so_commit=${OPT[stored-order-commit]:-} bt_commit=${OPT[browsertype-commit]:-}
+  local so_source=${OPT[stored-order-source]:-} so_checker=${OPT[stored-order-checker-commit]:-} bt_commit=${OPT[browsertype-commit]:-}
   PRODUCTION_REPO=${OPT[production-repo]:-}
   local tool
-  for tool in kubectl jq curl gh go setsid timeout sha256sum awk tar gzip base64; do
+  for tool in kubectl jq curl gh go git setsid timeout sha256sum awk tar gzip base64; do
     command -v "$tool" >/dev/null || die "up needs $tool on PATH"
   done
   [ -n "$sc" ] || die "up: --storage-class is required (for GKE: premium-rwo)"
@@ -2261,11 +2444,7 @@ up_run() {
   valid pod "$HOLDER_POD" || die "up: this pod's name '$HOLDER_POD' is not a pod name"
   valid uid "${POD_UID:-}" || die "up: POD_UID ('${POD_UID:-}') is not a pod uid; the lock names its holder's uid (a Legion pod sets POD_UID)"
   valid issue "${LEGION_ISSUE:-}" || die "up: LEGION_ISSUE ('${LEGION_ISSUE:-}') is not an issue key; the lock names it (a Legion pod sets LEGION_ISSUE)"
-  if [ -n "$so_commit" ]; then
-    valid commit "$so_commit" || die "up: --stored-order-commit '$so_commit' is not a full 40-hex commit sha"
-    commit_source stored-order-commit "$so_commit" packages/envoy/cmd/dispatch/storedorder.go \
-      "so its envoy-dispatch has no stored-order command (INFRA-707)"
-  fi
+  stored_order_args "$commit" "$so_source" "$so_checker"
   if [ -n "$bt_commit" ]; then
     valid commit "$bt_commit" || die "up: --browsertype-commit '$bt_commit' is not a full 40-hex commit sha"
     commit_source browsertype-commit "$bt_commit" packages/envoy/loadtest/browsertype \
@@ -2292,14 +2471,20 @@ up_run() {
   runner_image=$(resolve_image "$RUNNER_IMAGE") || die "up: the runner image does not resolve"
   nats_images=$(nats_manifest_images) || die "up: manifests/nats.yaml names an image that does not resolve"
 
+  # The stored-order checker, before the lock, so a checker that does not build is refused.
+  stored_order_build "$commit" "$so_source" "$so_checker"
+
   set_run "lt-$(date -u +%Y%m%dt%H%M%S)-$(random_hex 2)"
   kube_lock_take
   RUN_TAKEN=1
   note "took the lock $LOCK in $NS for run $RUN"
   (umask 077 && mkdir -p -- "$RUN_DIR/logs" "$RUN_DIR/tmp" "$RUN_DIR/steps")
+  mv -- "$CHECKER_TMP/envoy-dispatch" "$STORED_ORDER_BIN" || die "moving the stored-order checker into $STORED_ORDER_BIN failed"
+  checker_tmp_remove
   local tier
   tier=$(pg_tier 16 60)
   (umask 077 && jq -n --arg ns "$NS" --arg run "$RUN" --arg sc "$sc" --arg commit "$commit" --arg major "$major" \
+    --argjson stored_order "$STORED_ORDER_STATE" \
     --arg repo "$PRODUCTION_REPO" --arg created "$(utc_now)" --arg holder "$HOLDER_POD" \
     --arg dispatch "$dispatch_image" --arg listener "$listener_image" --arg listener_ref "$listener_ref" \
     --arg pg "$pg_image" --arg socat "$socat_image" --arg runner "$runner_image" --argjson nats "$nats_images" \
@@ -2307,19 +2492,13 @@ up_run() {
     --arg sk "$(random_hex 32)" '{namespace: $ns, run: $run, storage_class: $sc, dispatch_commit: $commit,
       pg_major: $major, production_repo: $repo, created: $created, holder_pod: $holder,
       images: ({dispatch: $dispatch, listener: $listener, postgres: $pg, socat: $socat, runner: $runner} + $nats),
-      image_sources: {listener: $listener_ref}, postgres: $tier, stored_order: null, browsertype: null,
+      image_sources: {listener: $listener_ref}, postgres: $tier, stored_order: $stored_order, browsertype: null,
       secrets: {pg_password: $pgpw, dispatch_token: $dt, listener_token: $lt, signing_key: $sk}}' >"$STATE")
   chmod 600 "$STATE"
   start_daemon heartbeat
 
   note "building loadgen (static) into $LOADGEN"
   (cd -- "$ENVOY_DIR" && CGO_ENABLED=0 go build -o "$LOADGEN" ./loadtest) || die "go build of loadgen failed"
-  if [ -n "$so_commit" ]; then
-    note "building envoy-dispatch (static) of commit $so_commit into $STORED_ORDER_BIN, for the stored-order check"
-    build_at_commit "$so_commit" ./cmd/dispatch "$STORED_ORDER_BIN" || die "go build of envoy-dispatch at commit $so_commit failed"
-    # shellcheck disable=SC2016 # $c and $s are jq's variables
-    state_set '.stored_order = {commit: $c, sha256: $s}' --arg c "$so_commit" --arg s "$(sha256_of "$STORED_ORDER_BIN")"
-  fi
   if [ -n "$bt_commit" ]; then
     note "building browsertype (static) of commit $bt_commit into $BROWSERTYPE_BIN, for browser typing"
     build_at_commit "$bt_commit" ./loadtest/browsertype "$BROWSERTYPE_BIN" || die "go build of browsertype at commit $bt_commit failed"
@@ -2340,7 +2519,7 @@ up_run() {
   kube_for 960 wait --for=condition=Ready pod/runner --timeout=900s >/dev/null || die "the runner was not ready within 15 min"
   start_copy
   put_loadgen
-  [ -z "$so_commit" ] || put_executable "$STORED_ORDER_BIN" /work/envoy-dispatch
+  put_executable "$STORED_ORDER_BIN" /work/envoy-dispatch
   [ -z "$bt_commit" ] || put_executable "$BROWSERTYPE_BIN" /work/browsertype
   save_pg_settings "$RUN_DIR/postgres-settings.txt"
   psql_at postgres 'select version()' >"$RUN_DIR/postgres-version.txt" || die "select version() failed"
@@ -2461,6 +2640,9 @@ cmd_redeploy() {
   scale_to dispatch 0
   apply_manifest dispatch.yaml
   note "Dispatch now runs $image (commit $commit)"
+  if [ "$(state '.stored_order.dispatch_commit // empty')" != "$commit" ]; then
+    note "WARNING: the stored-order checker was built for dispatch commit $(state '.stored_order.dispatch_commit // "none"'), not $commit: its renderer may differ from this Dispatch's, so each step's stored-order.json records renderer_matches false"
+  fi
   if db_exists dispatch_seed; then
     reset_copy "$RUN_DIR/logs/redeploy-$commit-reset.json"
   else
@@ -2550,7 +2732,7 @@ cmd_down() {
 }
 
 cmd_all() {
-  parse "namespace storage-class dispatch-commit pg-major production-repo listener-image stored-order-commit browsertype-commit profile manifest upload-issue" "keep" "$@"
+  parse "namespace storage-class dispatch-commit pg-major production-repo listener-image stored-order-source stored-order-checker-commit browsertype-commit profile manifest upload-issue" "keep" "$@"
   positional 0 "no positional arguments"
   local step_d hour_d replay_to refine collect_rc issue=${OPT[upload-issue]:-} manifest=${OPT[manifest]:-$REPLAY_MANIFEST} why
   case ${OPT[profile]:-} in
@@ -2614,10 +2796,12 @@ cmd_all() {
   ((collect_rc == 0)) || die "all: collect ended with exit $collect_rc; its messages above name what failed"
 }
 
-# all_exit: all's trap: any exit with a run taken runs down, unless --keep.
+# all_exit: all's trap: up's scratch directory for the checker removed; any exit with a run taken
+# runs down, unless --keep.
 all_exit() {
   local rc=$?
   trap - EXIT
+  checker_tmp_remove
   if [ -n "${RUN_TAKEN:-}" ] && [ -z "${ALL_KEEP:-}" ]; then
     note "all: exiting with status $rc; tearing run $RUN down (--keep skips this)"
     isolated down_run

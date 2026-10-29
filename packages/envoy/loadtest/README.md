@@ -1407,20 +1407,20 @@ credential: every token and password is random and made for the run.
   ephemeral storage, 8 pods, 6 Services, and 4 claims of 20Gi (80Gi) on `--storage-class`. At the
   4-vCPU tier (`db-size 4 15Gi`) Postgres requests 12 CPUs and 45Gi less. No Service is a
   LoadBalancer or a NodePort, and no pod has a priority class.
-- **The tools on the worker's `PATH`:** `kubectl`, `jq`, `curl`, `gh`, `go`, `setsid`, `timeout`,
-  `tar`, `gzip` and `base64` (the stored-order evidence), `sha256sum`, `uv` (collect's zstd
-  compression), `git` (only for `--stored-order-commit` and `--browsertype-commit`) and `dispatch`
-  (only for `--upload-issue`). `gh` must read the deployment repository that `--production-repo`
-  names: `up` reads its main's `dispatch/main.go` (`databaseVersion`) and
+- **The tools on the worker's `PATH`:** `kubectl`, `jq`, `curl`, `gh`, `go`, `git` (`up`'s
+  stored-order checker and `--browsertype-commit`), `setsid`, `timeout`, `tar`, `gzip` and
+  `base64` (the stored-order evidence), `sha256sum`, `uv` (collect's zstd compression) and
+  `dispatch` (only for `--upload-issue`). `gh` must read the deployment repository that
+  `--production-repo` names: `up` reads its main's `dispatch/main.go` (`databaseVersion`) and
   `dispatch/Pulumi.prod.yaml` (`<project>:listenerImage`).
 - **For the replay:** `DISPATCH_URL` and `DISPATCH_TOKEN_FILE` (a token that may read
   INFRA-639's artifacts), from which `replay-prepare` downloads INFRA-639's parts, as
   `stack.sh replay-get` does. The copy's pods never reach production: the worker downloads, and
   pushes into the copy.
 - **An image of the commit** (An image for a commit, below).
-- **For the stored-order check:** the `--stored-order-commit` in this checkout's git store
-  (`jj git fetch` fills it), with `packages/envoy/cmd/dispatch/storedorder.go` in its tree (The
-  stored-order check, below).
+- **For the stored-order check:** the `--dispatch-commit` in this checkout's git store (`jj git
+  fetch` fills it), and, when its tree has no `packages/envoy/cmd/dispatch/storedorder.go`, a
+  `--stored-order-source` there too (The stored-order check, below).
 - **For browser typing:** the `--browsertype-commit` in this checkout's git store, with
   `packages/envoy/loadtest/browsertype` in its tree (Browser typing, below).
 
@@ -1429,7 +1429,7 @@ credential: every token and password is random and made for the run.
 ```bash
 packages/envoy/loadtest/cluster/cluster.sh all --namespace loadtest --storage-class premium-rwo \
   --dispatch-commit <sha> --pg-major <n> --production-repo <owner/repo> \
-  --stored-order-commit <sha> --profile full
+  --profile full
 ```
 
 `<owner/repo>` is the deployment repository. `all` runs `up`, `seed`, the series (1x, 2x, 3x, 5x,
@@ -1453,7 +1453,8 @@ run on a copy that `up --browsertype-commit` (or `all --browsertype-commit --kee
 | `--pg-major` | `16` or `18`. Required. It must equal production's major (`databaseVersion` in the deployment repository), else `up` refuses and names both. |
 | `--production-repo` | The deployment repository, `owner/repo`. Required. |
 | `--listener-image` | The listener's image. Default: production's `listenerImage` from the deployment repository. |
-| `--stored-order-commit` | The full 40-hex commit whose `envoy-dispatch stored-order` checks each step (The stored-order check, below). Optional: without it, each step prints one line saying that the check is skipped. |
+| `--stored-order-source` | The full 40-hex commit whose INFRA-707 files (`internal/dispatch/docs/storedorder.go`, `cmd/dispatch/storedorder.go`) and `stored-order` registration are added to the `--dispatch-commit` tree to build the stored-order checker (The stored-order check, below). Required when that tree has no `cmd/dispatch/storedorder.go`; refused when it has one. For INFRA-598's 9b92ac14: INFRA-707's head. |
+| `--stored-order-checker-commit` | The escape: the full 40-hex commit the stored-order checker is built from wholly, in place of the `--dispatch-commit` tree. `up` warns that its renderer may differ from Dispatch's and records `renderer_matches: false`. Refused beside `--stored-order-source`. |
 | `--browsertype-commit` | The full 40-hex commit whose INFRA-707 `browsertype` types into documents for `step --typing` and `replay --typing` (Browser typing, below). Optional: without it, `--typing` is refused. `all` itself runs no typing. |
 | `--profile` | `quick` or `full` (Profiles, below). Required. |
 | `--manifest` | The replay's manifest. Default: the committed `replay-2026-10-26.json`. |
@@ -1471,7 +1472,7 @@ so. A write (`drop database`, a `kubectl cp`, a start in the runner) is never re
 
 | Subcommand | What it does |
 | --- | --- |
-| `up <up's flags>` | Refuses, before it creates anything, a commit with no image, a `--pg-major` other than production's, an image tag that does not resolve to a digest, a `--stored-order-commit` that the git store does not hold or whose tree has no `cmd/dispatch/storedorder.go`, and a `--browsertype-commit` that the git store does not hold or whose tree has no `loadtest/browsertype`. Refuses with exit status 2 while the lock exists. Then takes the lock, installs the copy, builds `loadgen`, (with `--stored-order-commit`) `envoy-dispatch` and (with `--browsertype-commit`) `browsertype`, starts the heartbeat and the sampler, and prints each container's requests and limits. |
+| `up <up's flags>` | Refuses, before it creates anything, a commit with no image, a `--pg-major` other than production's, an image tag that does not resolve to a digest, stored-order flags it cannot build the checker from (The stored-order check, below: a `--dispatch-commit` the git store does not hold; a tree without `cmd/dispatch/storedorder.go` and no `--stored-order-source`, or one with it and a `--stored-order-source`; a source or checker commit the git store does not hold or whose tree lacks INFRA-707's files or registration), an overlay whose subcommand table lacks the registration's anchor, a checker that does not compile (naming the dispatch commit, the source commit and the compiler's first error), and a `--browsertype-commit` that the git store does not hold or whose tree has no `loadtest/browsertype`. Refuses with exit status 2 while the lock exists. Then takes the lock, installs the copy, builds `loadgen` and (with `--browsertype-commit`) `browsertype`, starts the heartbeat and the sampler, and prints each container's requests and limits. |
 | `seed` | `loadgen seed` from the runner through Dispatch's Service, then `loadgen seed-finish`. Then it stops Dispatch and the listener and renames the database to the template `dispatch_seed`. |
 | `step NAME FACTOR [--duration 10m] [--reads-only] [--typing [--typing-peers 2] [--typing-rate 5] [--typing-docs 20]]` | The reset, then one `loadgen run` at FACTOR × (4 events/s, 60 requests/s) with the `series-sessions` count, then the crash check, the stored-order check, `cgroup-merge` and `tables`. FACTOR can be fractional (`8.5`). `--reads-only` sends 0 events. Postgres's write-out counters go into `pg-stats-before.json` and `pg-stats-after.json`. `--typing` adds browser typing (below). |
 | `series [--duration 10m]` | 1x, 2x, 3x, 5x, 7x, 10x and `10x-reads`, then the refinement (below). |
@@ -1562,15 +1563,40 @@ The check is INFRA-707's correctness oracle, `envoy-dispatch stored-order`
 ([INFRA-707](dispatch://INFRA-707)). For each document, it folds the stored updates in version
 order and compares the result with every stored class and every version's markdown. It reads
 only, in read-only transactions, and runs no migration. Each step and each replay runs it, so
-every spec that the load wrote is checked after its runs. The copy's Dispatch runs
-`--dispatch-commit`, which can be older than the command (INFRA-598's 9b92ac14 has no
-`stored-order`). So `up --stored-order-commit <sha>` builds the command from another commit:
-`git archive <sha> packages/envoy` from this checkout's git store, then `CGO_ENABLED=0 GOWORK=off
-go build ./cmd/dispatch` in a scratch directory, into `<run>/envoy-dispatch`. `state.json`
-`stored_order` records the commit and the binary's sha256. The runner gets the binary as
-`/work/envoy-dispatch` only when its sha256 differs there, as with `loadgen`. Before it creates
-anything, `up` refuses, and names, a commit that git does not have or whose tree has no
-`packages/envoy/cmd/dispatch/storedorder.go`.
+every spec that the load wrote is checked after its runs.
+
+The checker must render markdown as the Dispatch under test does: a checker with another
+renderer reports renderer skew as a mismatch (on replay r16 of 9b92ac14, a checker built from
+ac29b1a9, which has #2272's table rendering of a pipe in inline code, reported one such
+document). So `up` builds the checker from `--dispatch-commit`'s own tree: `git archive <sha>
+packages/envoy` from this checkout's git store, then `CGO_ENABLED=0 GOWORK=off go build
+./cmd/dispatch` in a scratch directory, before it takes the lock, then into
+`<run>/envoy-dispatch`. The runner gets the binary as `/work/envoy-dispatch` only when its sha256
+differs there, as with `loadgen`.
+
+A dispatch tree older than the command (INFRA-598's 9b92ac14 has no `stored-order`) needs
+`--stored-order-source <sha>`, which `up` refuses for a tree that has the command. The overlay is
+applied to the scratch copy only: it copies that commit's
+`packages/envoy/internal/dispatch/docs/storedorder.go` and
+`packages/envoy/cmd/dispatch/storedorder.go` into it, and inserts that commit's `stored-order`
+entry of the subcommand table (`packages/envoy/cmd/dispatch/subcommands.go`, from its
+`{"stored-order", func(` line to the `}},` that closes it) on the line after the dispatch tree's
+table opener `var subcommands = []subcommand{`. `up` refuses a source without that entry, and a
+dispatch table that holds the opener on other than exactly one line, naming the anchor. For
+9b92ac14 with INFRA-707's head, nothing else is needed: the build compiles, and the binary's
+`stored-order` without `DATABASE_URL` answers `stored-order: DATABASE_URL is required`.
+
+The escape `--stored-order-checker-commit <sha>` builds the checker wholly from another commit
+whose tree has the command. `up` warns that its renderer may differ from Dispatch's, so a mismatch
+it reports may be renderer skew, and records `renderer_matches: false`. It is refused beside
+`--stored-order-source`, and when it names `--dispatch-commit` itself.
+
+A checker that does not build is refused before `up` creates anything: `up` shows go's output,
+then one line naming the dispatch commit, the source commit (or `none`) and the first error.
+`state.json` `stored_order` records the checker: `dispatch_commit` (the commit it was built for),
+`built_from` (the commit whose tree was built), `overlay_source` (or `null`), `overlay_files` (`[]`
+without an overlay), `registration` (the file the overlay edited, or `null`), `renderer_matches`
+(`true` but for the escape) and `sha256`, the binary's.
 
 The check runs after the step's window, when `loadgen run` has finished and while Dispatch still
 runs: before the next reset or scale-down, so the document rooms are still resident, as INFRA-707
@@ -1588,21 +1614,24 @@ without a check. Each step then writes:
 - `stored-order.txt`: the command's standard output and standard error. That is one line for each
   document, one line for each mismatch, and the summary line `stored-order: documents=N clean=N
   mismatched=N refused=N failed=N`.
-- `stored-order.json`: `commit`, `exit`, `since`, and `documents`, `clean`, `mismatched`,
-  `refused` and `failed`, from the last summary line. A count is `null`, never 0, when there is no
-  summary line. A run that takes longer than 30 min is stopped: its `exit` is 124 and its counts
-  are `null`. A step whose `meta.json` has no `window_start` does not run the command: its `exit`
-  is `null`.
+- `stored-order.json`: the checker's fields from `state.json` (`dispatch_commit`, `built_from`,
+  `overlay_source`, `overlay_files`, `registration`, `renderer_matches` and `sha256`), `exit`,
+  `since`, and `documents`, `clean`, `mismatched`, `refused` and `failed`, from the last summary
+  line. `renderer_matches` is `false` too when `redeploy` moved Dispatch to another commit than
+  the checker's `dispatch_commit` (`redeploy` warns so). A count is `null`, never 0, when there
+  is no summary line. A run that takes longer than 30 min is stopped: its `exit` is 124 and its
+  counts are `null`. A step whose `meta.json` has no `window_start` does not run the command: its
+  `exit` is `null`.
 
-`cluster.sh` prints one line with the counts. Exit 0 means that every document replays. Exit 1 (a
-mismatch, a refused document, or a read that failed) is a correctness finding, not a failed step:
-the step goes on, and it writes no `step-failed.json` reason. `collect` writes
-`<run>/STORED-ORDER.md`, which has a line naming the commit and one row for each step, in the
-order the steps ran: `since`, the exit and the five counts (`not run` for a step with no
-`stored-order.json`), and Typing, the keystroke updates browser typing sent during the step
-(`browsertype.json` `sent`), or `none` for a step without `--typing` (Browser typing, below).
-Without `--stored-order-commit`, each step prints `step <name>: the stored-order check is skipped:
-up was given no --stored-order-commit`, and `STORED-ORDER.md` says that no step ran the check.
+`cluster.sh` prints one line with the checker (its commits and `renderer_matches`) and the counts.
+Exit 0 means that every document replays. Exit 1 (a mismatch, a refused document, or a read that
+failed) is a correctness finding, not a failed step: the step goes on, and it writes no
+`step-failed.json` reason. `collect` writes `<run>/STORED-ORDER.md`, which names the checker (the
+dispatch commit, its own tree or the overlay's source commit and files or the escape's commit,
+`renderer_matches` and the binary's sha256) and has one row for each step, in the order the
+steps ran: `since`, the exit, the five counts (`not run` for a step with no `stored-order.json`),
+the step's `renderer_matches`, and Typing, the keystroke updates browser typing sent during the
+step (`browsertype.json` `sent`), or `none` for a step without `--typing` (Browser typing, below).
 
 The next step's reset drops the database, and with it the rows behind a mismatch. So when
 `stored-order.txt` names a document as mismatched or refused (its document line has
@@ -1710,9 +1739,9 @@ the worker pod.
 
 | File | What it holds |
 | --- | --- |
-| `state.json` | Mode 600. The namespace, the run id, the storage class, the commit, the Postgres major, the deployment repository, the start time, the holder pod, every image by digest, the Postgres tier and its settings, `stored_order` (the `--stored-order-commit` and the sha256 of its `envoy-dispatch`, or `null` without the flag), `browsertype` (the `--browsertype-commit` and the sha256 of its `browsertype`, or `null` without the flag), and the run's random credentials. |
+| `state.json` | Mode 600. The namespace, the run id, the storage class, the commit, the Postgres major, the deployment repository, the start time, the holder pod, every image by digest, the Postgres tier and its settings, `stored_order` (the stored-order checker: `dispatch_commit`, `built_from`, `overlay_source`, `overlay_files`, `registration`, `renderer_matches` and the sha256 of its `envoy-dispatch`), `browsertype` (the `--browsertype-commit` and the sha256 of its `browsertype`, or `null` without the flag), and the run's random credentials. |
 | `loadgen` | The static `loadgen` of this checkout, which the runner also gets. |
-| `envoy-dispatch` | Only with `--stored-order-commit`: the static `envoy-dispatch` of that commit, which the runner also gets (The stored-order check, above). |
+| `envoy-dispatch` | The stored-order checker: the static `envoy-dispatch` of `--dispatch-commit`'s tree (with `--stored-order-source`'s overlay, or of `--stored-order-checker-commit`), which the runner also gets (The stored-order check, above). |
 | `browsertype` | Only with `--browsertype-commit`: the static `browsertype` of that commit, which the runner also gets (Browser typing, above). |
 | `seed.json`, `seed.meta.json` | The seed (The seed, above), and its migration, build commit, start time, `seed_seconds` and counts. |
 | `postgres-settings.txt`, `postgres-version.txt` | Postgres's `SHOW ALL` (after `up` and after `db-size`) and `select version()`. |
@@ -1745,7 +1774,7 @@ its cores and working set from `cgroup.json`. It also holds:
 | `step-failed.json` | Only when the step failed: `reasons`, each with `kind`, `role` and `detail`. `restart`: a container of the copy restarted during the step. `loadgen_exit`: `loadgen run` exited non-zero. `sampler_gap`: a container had no good cgroup read for more than 30 s in the window. |
 | `cgroup.json` | `loadgen cgroup-merge` of `cgroup.jsonl` over the window: `window_start`, `window_end`, `window_s`, `failed` and `failures`, and for each role `pods`, `container`, `samples`, `failed_reads`, `restarts`, `cpu_max`, `limit_cores`, `cores_mean`, `cores_peak_5s`, `cpu_s`, `throttled_s`, `working_set_bytes_mean` and `working_set_bytes_max` (`memory.current` less `inactive_file`), `max_gap_s`, and `minutes` (each whole minute's cores and mean working set; `null` for a minute with a gap over 30 s). A figure the reads cannot give is `null`, never 0. |
 | `loadgen.out` | The output of `loadgen run` in the runner. |
-| `stored-order.txt`, `stored-order.json`, `stored-order-evidence/` | Only with `--stored-order-commit`: the output of `envoy-dispatch stored-order --since <window_start>` after the step, and `commit`, `exit`, `since` and the counts of its summary line (`null` without one, never 0) and `evidence`; and the rows of each mismatched or refused document, never uploaded (The stored-order check, above). A non-zero exit is a correctness finding, not a `step-failed.json` reason. |
+| `stored-order.txt`, `stored-order.json`, `stored-order-evidence/` | The output of `envoy-dispatch stored-order --since <window_start>` after the step, and the checker's fields (`dispatch_commit`, `built_from`, `overlay_source`, `overlay_files`, `registration`, `renderer_matches`, `sha256`), `exit`, `since` and the counts of its summary line (`null` without one, never 0) and `evidence`; and the rows of each mismatched or refused document, never uploaded (The stored-order check, above). A non-zero exit is a correctness finding, not a `step-failed.json` reason. |
 | `browsertype.txt`, `browsertype.json` | Only with `--typing`: browsertype's output, one line per peer, and `commit`, `docs`, `peers`, `rate`, `exit` and the sums `sent`, `skipped` and `errors` (Browser typing, above). A peer error is reported, not a `step-failed.json` reason. |
 | `dispatch.log`, `listener.log`, `postgres.log`, `nats-0.log`, `nats-1.log`, `nats-2.log` | Each container's log from the step's start. |
 | `CODEPATHS.md`, `codepaths.json` | `loadgen codepaths` (a replay step's from `replay` and again from `collect`, with the replay's flags; every other step's from `collect`): Dispatch's CPU by entry point and by subsystem (cores = the share × the Dispatch container's `cores_mean`), its working set at the window's end split into heap by code path, heap idle, stacks, other runtime memory and non-Go memory, and the outage's 10-minute buckets beside it. |
