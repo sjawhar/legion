@@ -57,7 +57,7 @@ func TestAPublishThatLosesTheRoleClaimRaceSaysSoRatherThanBlamingTheBus(t *testi
 	// gone and tries to release it -- and loses that release to the KV above, every time.
 	setRegistryRoleKV(t, registry, supersedingRoleDeleteKV{KeyValue: registryRoleKV(t, registry)})
 
-	if _, err := resolveLiveRoleHolder(context.Background(), registry, sessions, role); !errors.Is(err, errRoleHolderChanged) {
+	if _, err := resolveLiveRoleHolder(context.Background(), registry, sessions, role, releaseLapsedClaim); !errors.Is(err, errRoleHolderChanged) {
 		t.Fatalf("resolving a claim superseded on every attempt = %v, want errRoleHolderChanged", err)
 	}
 
@@ -97,12 +97,12 @@ func TestAPublishThatLosesTheRoleClaimRaceSaysSoRatherThanBlamingTheBus(t *testi
 	t.Logf("lost claim race: %s", refusal.Error)
 }
 
-// GET /v1/roles/<role> resolves its holder exactly as a role-lane publish does, so it can lose the
-// same race, and it answers it as the publish route does: the 503 and the Retry-After that ask for
-// the retry a fresh lookup wins, and a body that names the race in a lookup's words. Every bus read
-// answered and the claim decoded, so neither the bus-unavailable 503 this route gives a read that
-// did not answer nor the 500 it gives an undecodable claim would be true of it.
-func TestARoleLookupThatLosesTheRoleClaimRaceSaysSoRatherThanFailing(t *testing.T) {
+// POST /v1/roles/release releases the claim it read, conditionally on the holder it read, so it
+// can lose the same race a publish loses, and it answers it the same way: the 503 and the
+// Retry-After that ask for the retry a fresh attempt wins, with a body that names the race in a
+// release's words. Every bus read answered and the claim decoded, so neither the bus-unavailable
+// 503 nor the 500 an undecodable claim gets would be true of it.
+func TestARoleReleaseThatLosesTheRoleClaimRaceSaysSoRatherThanFailing(t *testing.T) {
 	const (
 		role   = "reviewer"
 		holder = "ses_superseded_holder"
@@ -112,29 +112,31 @@ func TestARoleLookupThatLosesTheRoleClaimRaceSaysSoRatherThanFailing(t *testing.
 	if _, err := registry.SetRole(holder, "test-machine", role, false); err != nil {
 		t.Fatalf("seed the role claim: %v", err)
 	}
-	// As in the publish test above: the holder is never registered, so every attempt finds it gone
-	// and loses its conditional release.
+	// As in the publish test above: the holder is never registered, so the release finds it gone
+	// and loses its conditional delete.
 	setRegistryRoleKV(t, registry, supersedingRoleDeleteKV{KeyValue: registryRoleKV(t, registry)})
 
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	recorder := httptest.NewRecorder()
-	roleGetHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/roles/"+role, nil))
+	roleReleaseHandler(state, logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(
+		http.MethodPost, "/v1/roles/release",
+		strings.NewReader(`{"role":"`+role+`","released_by":"the race test"}`)))
 	if recorder.Code != http.StatusServiceUnavailable {
-		t.Fatalf("lookup into a lost claim race: status %d, body %s; want 503", recorder.Code, recorder.Body.String())
+		t.Fatalf("release into a lost claim race: status %d, body %s; want 503", recorder.Code, recorder.Body.String())
 	}
 	if got := recorder.Header().Get("Retry-After"); got != "1" {
-		t.Fatalf("Retry-After = %q, want 1: a fresh lookup wins this race as soon as the replacement claim settles", got)
+		t.Fatalf("Retry-After = %q, want 1: a fresh attempt wins this race as soon as the replacement claim settles", got)
 	}
 	var refusal apiError
 	if err := json.Unmarshal(recorder.Body.Bytes(), &refusal); err != nil {
 		t.Fatalf("decode the refusal %s: %v", recorder.Body.String(), err)
 	}
-	want := "envoy: the holder of role reviewer changed while this lookup was resolving it"
+	want := "envoy: the holder of role reviewer changed while this release was resolving it"
 	if refusal.Error != want {
 		t.Fatalf("the refusal reads %q, want %q", refusal.Error, want)
 	}
 	if got, err := registry.RoleHolder(role); err != nil || got != holder {
-		t.Fatalf("the claim after the lookup = %q, %v; want %s's, untouched", got, err, holder)
+		t.Fatalf("the claim after the refused release = %q, %v; want %s's, untouched", got, err, holder)
 	}
 }
 
@@ -262,13 +264,16 @@ func TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget(t *tes
 	}
 }
 
-// A lookup whose role store does not answer inside its budget is a bus that did not answer, and
-// GET /v1/roles/<role> answers it as every other route does (writeBusUnavailable): 503, Retry-After:
+// A role route whose role store does not answer inside its budget is a bus that did not answer, and
+// GET /v1/roles/<role> and POST /v1/roles/release answer it as every other route does
+// (writeBusUnavailable): 503, Retry-After:
 // 1, and a body that begins busUnansweredPrefix and names the call that did not answer. A 500 here
 // reads as a broken listener rather than an unreachable bus, the distinction the spec gives
 // bus-down its 503 for, so an operator's filter on that prefix finds this outage too; and the
 // publish route already answers the same stalled store this way, in the test above. The bus is
-// connected throughout, so nothing but the stalled role-bucket call can end the lookup.
+// connected throughout, so nothing but the stalled role-bucket call can end the request. The
+// conditional release is the release route's call, not the lookup's: a lookup keeps a lapsed
+// claim, so it makes no delete to stall.
 func TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering(t *testing.T) {
 	const (
 		role   = "reviewer"
@@ -279,9 +284,26 @@ func TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering(t *test
 		name                  string
 		stallGet, stallDelete bool
 		unanswered            string
+		serve                 func(*listenerDeps, *httptest.ResponseRecorder)
 	}{
-		{name: "the claim read", stallGet: true, unanswered: "read role reviewer's claim: context deadline exceeded"},
-		{name: "the conditional release", stallDelete: true, unanswered: "release role reviewer's expired claim held by " + holder + ": context deadline exceeded"},
+		{
+			name:       "the claim read",
+			stallGet:   true,
+			unanswered: "read role reviewer's claim: context deadline exceeded",
+			serve: func(state *listenerDeps, recorder *httptest.ResponseRecorder) {
+				roleGetHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/roles/"+role, nil))
+			},
+		},
+		{
+			name:        "the conditional release",
+			stallDelete: true,
+			unanswered:  "release role reviewer's expired claim held by " + holder + ": context deadline exceeded",
+			serve: func(state *listenerDeps, recorder *httptest.ResponseRecorder) {
+				roleReleaseHandler(state, logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(
+					http.MethodPost, "/v1/roles/release",
+					strings.NewReader(`{"role":"`+role+`","released_by":"the stalled store test"}`)))
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := setupPublishTestClient(t)
@@ -302,10 +324,10 @@ func TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering(t *test
 
 			started := time.Now()
 			recorder := httptest.NewRecorder()
-			roleGetHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/roles/"+role, nil))
+			tc.serve(state, recorder)
 			elapsed := time.Since(started)
 			if recorder.Code != http.StatusServiceUnavailable {
-				t.Fatalf("lookup whose role store did not answer: status %d, body %s; want 503 - the bus did not answer, the listener did not fail", recorder.Code, recorder.Body.String())
+				t.Fatalf("a role route whose role store did not answer: status %d, body %s; want 503 - the bus did not answer, the listener did not fail", recorder.Code, recorder.Body.String())
 			}
 			if elapsed >= within {
 				t.Fatalf("answered after %s, want inside %s", elapsed, within)

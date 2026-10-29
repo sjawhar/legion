@@ -60,6 +60,7 @@ requires a bearer checks no `Host`.
 | `/v1/interests/` | GET | List persisted interests |
 | `/v1/interests/{session_id}` | GET/DELETE | Get or delete a session's persisted interests. A GET reads a cache miss from the bucket within 3.5 s: 404 only for a key the bucket does not hold, 413 or 400 for an id NATS will not take as a key, `500 {"error":"envoy: the interest record of session <id> is unreadable: <reason>"}` with no `Retry-After` for a record this build cannot decode (`store.ErrMalformedInterest`), 503 with `Retry-After: 1` for a read that did not answer. A DELETE removes a record this build cannot decode too, releasing the session's role claims, with 204; it is a write route |
 | `/v1/roles/set` | POST | Claim a role for a live session; the claim makes it the holder, and the route also adds the role's topic to its record. A write route |
+| `/v1/roles/release` | POST | End the claim of a role whose holder has left the session bucket, naming the caller in `released_by`, which the listener records. A live holder's claim, and one another session holds when the request names a `holder`, are refused 409. A write route |
 | `/v1/registry/{session_id}` | GET | The authoritative answer for one session — reads through the cache to the session bucket, so a session the cache has not refilled is still found, and returns the same body a `/v1/sessions` row carries, roles from the claims included. A live session whose id only the interest bucket refuses as a key is a 200 with no topics, as the list shows it, logged at WARN naming it: Dispatch's envoy client reads a 413 or 400 here as a session that cannot exist. It refuses with 413 or 400 for an id the session bucket will not take as a key, `404 {"error":"no live session <id>"}` only for a key the bucket does not hold, the unreadable-interest-record 500 `/v1/interests/{session_id}` gives, and 503 with `Retry-After: 1` for a read that did not answer, the session's, its interest record's or the claims view's, all within a 3.5 s budget |
 | `/v1/sessions/{session_id}` | DELETE | Remove a live session registration. A write route |
 | `/v1/messages/send` | POST | Send a direct agent-to-agent message. The target is read from the session store itself, so a 404 means the store says that session's key is gone; a store read or a publish the bus did not answer is a 503 with `Retry-After: 1` (see “Send and publish answers” below). |
@@ -101,11 +102,17 @@ and the `Retry-After: 1`, since a fresh read wins that race as soon as the repla
 settles, but answers its own body,
 `{"error":"envoy: the holder of role <role> changed while this publish was resolving it"}`,
 recorded `role_holder_changed`: every bus read answered, so no bus was unavailable.
-`GET /v1/roles/<role>` resolves its holder the same way, within the same budget, and answers that
-race with the same 503 and `Retry-After: 1`, worded
-`{"error":"envoy: the holder of role <role> changed while this lookup was resolving it"}`; a read
+`GET /v1/roles/<role>` resolves its holder the same way, within the same budget, but it releases
+nothing: a holder the session bucket no longer holds is answered `holder_lapsed` with
+`claim_released: false` and its last-seen time, and the claim stays where it is, so a lookup
+cannot end a holder's claim and the lookup cannot lose that race at all. Releasing a lapsed claim
+is `POST /v1/roles/release`, which names its caller in `released_by`, refuses a live holder and
+one the request does not name with the 409 a soft claim gives a held role, releases conditionally
+on the holder it read, and answers that race with the same 503 and `Retry-After: 1`, worded
+`{"error":"envoy: the holder of role <role> changed while this release was resolving it"}`. On
+either route a read
 that did not answer, within its cap or that budget, is the bus-unavailable 503 above with
-`Retry-After: 1`, naming the call, and a key NATS refuses keeps its 413 or 400. On both routes a
+`Retry-After: 1`, naming the call, and a key NATS refuses keeps its 413 or 400. On all three a
 claim record no read can decode (`store.ErrMalformedRoleClaim`: one naming no holder, or JSON that
 is not a claim) is `500 {"error":"envoy: the claim record of role <role> is unreadable: <reason>"}`
 with no `Retry-After` (`writeRoleClaimUnreadable`), recorded `role_claim_unreadable` on a publish:

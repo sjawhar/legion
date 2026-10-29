@@ -634,7 +634,10 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		result := roleHolderResult{state: roleHolderLive}
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
 			var err error
-			result, err = resolveLiveRoleHolder(ctx, d.registry, d.sessions, role)
+			// A publish holds a message for this role: a holder that has left the session
+			// bucket cannot take it, so this path releases the lapsed claim as the role-lane
+			// delivery does (delivery.go). A lookup does not (roleGetHandler).
+			result, err = resolveLiveRoleHolder(ctx, d.registry, d.sessions, role, releaseLapsedClaim)
 			if errors.Is(err, errRoleHolderChanged) {
 				// The claim moved while it was being resolved: the role has a holder, this
 				// publish simply never got a settled one to forward to. Retrying is right, so
@@ -1058,17 +1061,23 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 	}
 }
 
-// roleGetHandler answers GET /v1/roles/<role> with the role's live holder. It resolves the holder
-// within sendRequestBudget of the request's own context, as a role-lane publish does, so a bus that
-// does not answer is reported inside the caller's attempt. A resolution that lost the race for the
-// role's claim (errRoleHolderChanged) is the publish route's 503 with Retry-After: 1, worded for a
-// lookup, since every read answered and a fresh lookup wins the race once the replacement claim
-// settles. A claim record that cannot be decoded (store.ErrMalformedRoleClaim) is the publish
-// route's 500 with no Retry-After (writeRoleClaimUnreadable): the bus answered it. Any other
-// failure is a role store call that did not answer within its cap or that budget - the claim read,
-// the holder's session read or the conditional release - and is answered as the publish route
-// answers it (writeBusUnavailable): the 503 with Retry-After: 1 whose body begins
-// busUnansweredPrefix and names the call, or the 413 and 400 a refused key gets.
+// roleGetHandler answers GET /v1/roles/<role> with the role's live holder, and changes nothing.
+// For a holder the session bucket no longer holds it answers the 404 that names the lapse, its
+// prior holder and that holder's last-seen time, and leaves the claim where it is
+// (keepLapsedClaim): a lookup is a read, and releasing the claim as it answered made every tool
+// that merely looks a role up end its holder's claim - a holder that had missed one heartbeat on a
+// loaded machine while its process worked, as often as one that had died. Releasing is
+// POST /v1/roles/release, which the caller asks for by name and is recorded against.
+//
+// It resolves the holder within sendRequestBudget of the request's own context, as a role-lane
+// publish does, so a bus that does not answer is reported inside the caller's attempt. A
+// resolution that keeps the claim writes nothing, so it cannot lose the claim's race and never
+// answers errRoleHolderChanged. A claim record that cannot be decoded (store.ErrMalformedRoleClaim)
+// is the publish route's 500 with no Retry-After (writeRoleClaimUnreadable): the bus answered it.
+// Any other failure is a role store call that did not answer within its cap or that budget - the
+// claim read or the holder's session read - and is answered as the publish route answers it
+// (writeBusUnavailable): the 503 with Retry-After: 1 whose body begins busUnansweredPrefix and
+// names the call, or the 413 and 400 a refused key gets.
 func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -1082,11 +1091,7 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
-		result, err := resolveLiveRoleHolder(ctx, d.registry, d.sessions, role)
-		if errors.Is(err, errRoleHolderChanged) {
-			writeRoleHolderChanged(w, role, "lookup")
-			return
-		}
+		result, err := resolveLiveRoleHolder(ctx, d.registry, d.sessions, role, keepLapsedClaim)
 		if errors.Is(err, store.ErrMalformedRoleClaim) {
 			writeRoleClaimUnreadable(w, role, err)
 			return
@@ -1109,6 +1114,187 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 			"capabilities": append([]string{}, result.entry.Capabilities...),
 			"last_seen":    result.entry.UpdatedAt,
 		})
+	}
+}
+
+// roleReleaseResponse is the answer to POST /v1/roles/release: what the role's claim was, whether
+// this call ended it, and the caller the listener recorded for it.
+type roleReleaseResponse struct {
+	Role string `json:"role"`
+	// Holder is the session whose claim this call found, absent for an unclaimed role.
+	Holder string `json:"holder,omitempty"`
+	// Released is true only when this call's conditional delete removed the claim.
+	Released bool `json:"released"`
+	// Reason is the state the claim was found in: unclaimed, or holder_lapsed.
+	Reason roleHolderState `json:"reason"`
+	// LastSeen is the lapsed holder's final heartbeat, while this listener still remembers it.
+	LastSeen *int64 `json:"last_seen,omitempty"`
+	// ReleasedBy is the caller the request named and the listener logged.
+	ReleasedBy string `json:"released_by"`
+	// Detail is the one-line account of what happened, as the log line carries it.
+	Detail string `json:"detail"`
+}
+
+// releasedByLimit bounds the caller name a release records, so one request cannot write an
+// unbounded line into the listener's log.
+const releasedByLimit = 200
+
+// roleReleaseHandler answers POST /v1/roles/release: the explicit end of a role claim whose holder
+// has left the session bucket. It exists because the lookup used to do this silently
+// (roleGetHandler): a caller that means to release says so here, names itself in released_by, and
+// the listener writes one `listener role release` line with that name, the role, the holder and
+// the outcome, so a claim that ends can be traced to the caller that ended it rather than inferred
+// afterwards.
+//
+// It takes the role in the body, as /v1/roles/set does, and the same key refusals apply. A live
+// holder's claim is never released: that is a 409 naming the holder, the shape /v1/roles/set
+// answers a held role with. An unclaimed role is a 200 that released nothing, so a caller whose
+// claim the role reaper already took needs no special case. holder, when given, is the session the
+// caller believes holds the role: another holder is the same 409, so a release written for one
+// incident cannot end the claim of the session that replaced it. The store's own answers keep the
+// answers the lookup gives them: a lost race for the claim is the 503 with Retry-After: 1
+// (writeRoleHolderChanged), an undecodable claim record the 500 (writeRoleClaimUnreadable), and a
+// call that did not answer the bus-unavailable 503 (writeBusUnavailable).
+func roleReleaseHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var body struct {
+			Role string `json:"role"`
+			// Holder, when given, is the session the caller means to release: the claim is
+			// left alone when another session holds it.
+			Holder string `json:"holder"`
+			// ReleasedBy names the caller, for the record. Required.
+			ReleasedBy string `json:"released_by"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		role := strings.TrimSpace(body.Role)
+		holder := strings.TrimSpace(body.Holder)
+		releasedBy := strings.TrimSpace(body.ReleasedBy)
+		if role == "" {
+			writeJSONError(w, http.StatusBadRequest, "role is required", "role")
+			return
+		}
+		if !isValidRole(role) {
+			writeJSONError(w, http.StatusBadRequest, "role must match "+rolePatternString, "role")
+			return
+		}
+		if releasedBy == "" {
+			writeJSONError(w, http.StatusBadRequest, "released_by is required: a release is recorded against its caller", "released_by")
+			return
+		}
+		if len(releasedBy) > releasedByLimit {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("released_by must be at most %d characters", releasedByLimit), "released_by")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
+		defer cancel()
+		// The claim is read first, with nothing released, so a live holder and a holder other
+		// than the one the caller named are refused before any write.
+		found, err := resolveLiveRoleHolder(ctx, d.registry, d.sessions, role, keepLapsedClaim)
+		if errors.Is(err, store.ErrMalformedRoleClaim) {
+			writeRoleClaimUnreadable(w, role, err)
+			return
+		}
+		if err != nil {
+			writeBusUnavailable(w, err)
+			return
+		}
+		switch {
+		case found.state == roleHolderLive:
+			logger.Warn("listener role release refused",
+				slog.String("role", role),
+				slog.String("holder", found.holder),
+				slog.String("released_by", releasedBy),
+				slog.String("outcome", "live_holder"))
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error":  fmt.Sprintf("role %s is held by live session %s", role, found.holder),
+				"role":   role,
+				"holder": found.holder,
+			})
+			return
+		case found.state == roleHolderLapsed && holder != "" && holder != found.holder:
+			logger.Warn("listener role release refused",
+				slog.String("role", role),
+				slog.String("holder", found.holder),
+				slog.String("released_by", releasedBy),
+				slog.String("outcome", "holder_changed"))
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error":  fmt.Sprintf("role %s is held by %s, not by %s", role, found.holder, holder),
+				"role":   role,
+				"holder": found.holder,
+			})
+			return
+		case found.state == roleHolderUnclaimed:
+			answer := roleReleaseResponse{
+				Role:       role,
+				Reason:     roleHolderUnclaimed,
+				ReleasedBy: releasedBy,
+				Detail:     fmt.Sprintf("role %s has no claim; nothing was released", role),
+			}
+			logger.Info("listener role release",
+				slog.String("role", role),
+				slog.String("released_by", releasedBy),
+				slog.Bool("released", false),
+				slog.String("outcome", string(roleHolderUnclaimed)))
+			writeJSON(w, http.StatusOK, answer)
+			return
+		}
+		// The claim found above is released conditionally on that same holder
+		// (store.Registry.ReleaseExpiredRoleClaim deletes only while it still holds the role),
+		// so a claim that moved to another session between the read and the delete is reported
+		// as the race it is rather than taken from whoever holds it now.
+		release, superseded, err := releaseExpiredRoleClaim(ctx, d.registry, role, found.holder, d.sessions.TTL())
+		if superseded {
+			logger.Warn("listener role release refused",
+				slog.String("role", role),
+				slog.String("holder", found.holder),
+				slog.String("released_by", releasedBy),
+				slog.String("outcome", "holder_changed"))
+			writeRoleHolderChanged(w, role, "release")
+			return
+		}
+		if errors.Is(err, store.ErrMalformedRoleClaim) {
+			writeRoleClaimUnreadable(w, role, err)
+			return
+		}
+		if err != nil {
+			writeBusUnavailable(w, err)
+			return
+		}
+		answer := roleReleaseResponse{
+			Role:       role,
+			Holder:     found.holder,
+			Released:   release == store.ExpiredRoleClaimReleased,
+			Reason:     roleHolderLapsed,
+			ReleasedBy: releasedBy,
+		}
+		if found.lastSeenAvailable {
+			answer.LastSeen = &found.lastSeen
+		}
+		switch release {
+		case store.ExpiredRoleClaimReleased:
+			answer.Detail = fmt.Sprintf("role %s: holder %s lapsed; claim released by %s", role, found.holder, releasedBy)
+		case store.ExpiredRoleClaimMissing:
+			answer.Detail = fmt.Sprintf("role %s: holder %s lapsed; its claim was already absent", role, found.holder)
+		default:
+			// The listener restarted less than one session TTL ago and restored this claim, so
+			// the holder still has that window to register again (ReleaseExpiredRoleClaim).
+			answer.Detail = fmt.Sprintf("role %s: holder %s lapsed; claim retained for the listener's restart grace window", role, found.holder)
+		}
+		logger.Info("listener role release",
+			slog.String("role", role),
+			slog.String("holder", answer.Holder),
+			slog.String("released_by", releasedBy),
+			slog.Bool("released", answer.Released),
+			slog.String("outcome", string(answer.Reason)),
+			slog.Int64("last_seen", found.lastSeen))
+		writeJSON(w, http.StatusOK, answer)
 	}
 }
 
@@ -1370,6 +1556,9 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 		writeJSON(w, http.StatusOK, map[string][]string{"removed": removed})
 	})
 	v1.HandleFunc("/v1/roles/set", roleSetHandler(d, machineID))
+	// An exact path, as /v1/roles/set is, so a role named `release` is as unreachable by
+	// lookup as one named `set` already was.
+	v1.HandleFunc("/v1/roles/release", roleReleaseHandler(d, logger))
 	v1.HandleFunc("/v1/roles/", roleGetHandler(d))
 	v1.HandleFunc("/v1/registry/", sessionEntryHandler(d))
 

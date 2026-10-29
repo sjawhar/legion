@@ -91,6 +91,28 @@ func writeRoleHolderError(w http.ResponseWriter, role string, result roleHolderR
 
 const roleHolderResolutionAttempts = 2
 
+// roleClaimDisposition is what a resolution may do with the claim of a holder that has left the
+// session bucket. It is a parameter rather than a rule of resolveLiveRoleHolder's own because the
+// two kinds of caller need opposite things of the same resolution, and the listener once gave them
+// both the releasing one: GET /v1/roles/<role> answered `holder_lapsed` with `claim_released`, so
+// every tool that merely looked a role up ended that holder's claim as a side effect of the
+// lookup, with nothing in the route's name or shape to warn its caller and no record of who caused
+// it. A holder is absent from the session bucket as soon as it misses one heartbeat inside the
+// bucket's TTL, which a loaded machine does while the process is working, so a read that released
+// turned that transient into a permanent fact.
+const (
+	// keepLapsedClaim reports the lapse and changes nothing: the resolution's claimRelease is
+	// store.ExpiredRoleClaimRetained, which writeRoleHolderError answers with
+	// `claim_released: false`. Every read takes this.
+	keepLapsedClaim roleClaimDisposition = iota
+	// releaseLapsedClaim drops the claim, as the delivery paths do: a role-lane publish and a
+	// role-lane delivery have a message in hand for a holder that is not there, and
+	// POST /v1/roles/release is a caller asking for the release by name and recording itself.
+	releaseLapsedClaim
+)
+
+type roleClaimDisposition uint8
+
 // writeRoleHolderChanged answers a role-holder resolution that lost the race for the role's claim
 // (errRoleHolderChanged), for both routes that resolve one: asking is what the caller asked for, a
 // "publish" or a "lookup". The 503 and the Retry-After are the same ask as a bus that did not
@@ -211,7 +233,12 @@ var errRoleHolderChanged = errors.New("role holder changed while resolving")
 // call that did not answer, and is answered as a bus that did not answer. A claim record that
 // cannot be read is store.ErrMalformedRoleClaim, which the routes answer as such
 // (writeRoleClaimUnreadable).
-func resolveLiveRoleHolder(ctx context.Context, registry roleClaimResolver, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
+//
+// disposition says what it may do with the claim of a holder the session bucket no longer holds:
+// keepLapsedClaim leaves it where it is, releaseLapsedClaim drops it. A resolution that keeps the
+// claim runs one attempt by construction - it writes nothing, so there is no conditional delete to
+// lose to a fresh claim - and never answers errRoleHolderChanged.
+func resolveLiveRoleHolder(ctx context.Context, registry roleClaimResolver, sessions *session.SessionRegistry, role string, disposition roleClaimDisposition) (roleHolderResult, error) {
 	for range roleHolderResolutionAttempts {
 		if err := ctx.Err(); err != nil {
 			return roleHolderResult{}, fmt.Errorf("resolve role %s's holder: %w", role, err)
@@ -226,6 +253,16 @@ func resolveLiveRoleHolder(ctx context.Context, registry roleClaimResolver, sess
 		entry, err := liveSessionEntry(ctx, sessions, claim.HolderSessionID, roleHolderReadTimeout, registered)
 		if errors.Is(err, nats.ErrKeyNotFound) {
 			lastSeen := sessions.LastSeen(claim.HolderSessionID)
+			lapsed := roleHolderResult{
+				state:             roleHolderLapsed,
+				holder:            claim.HolderSessionID,
+				lastSeen:          lastSeen,
+				lastSeenAvailable: lastSeen != 0,
+				claimRelease:      store.ExpiredRoleClaimRetained,
+			}
+			if disposition == keepLapsedClaim {
+				return lapsed, nil
+			}
 			release, superseded, err := releaseExpiredRoleClaim(ctx, registry, role, claim.HolderSessionID, sessions.TTL())
 			if err != nil {
 				return roleHolderResult{}, fmt.Errorf("drop expired role claim: %w", err)
@@ -233,13 +270,8 @@ func resolveLiveRoleHolder(ctx context.Context, registry roleClaimResolver, sess
 			if superseded {
 				continue
 			}
-			return roleHolderResult{
-				state:             roleHolderLapsed,
-				holder:            claim.HolderSessionID,
-				lastSeen:          lastSeen,
-				lastSeenAvailable: lastSeen != 0,
-				claimRelease:      release,
-			}, nil
+			lapsed.claimRelease = release
+			return lapsed, nil
 		}
 		if err != nil {
 			return roleHolderResult{}, fmt.Errorf("read role holder session: %w", err)
