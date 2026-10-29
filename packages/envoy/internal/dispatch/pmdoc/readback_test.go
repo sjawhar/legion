@@ -92,8 +92,9 @@ func TestRenderKeepsABackslashInsideABareURL(t *testing.T) {
 	}
 }
 
-// A fused delimiter run that reads back is written as main writes it: the parser splits it as
-// written, and the browser editor's parser reads the same bytes as the same tree.
+// A fused delimiter run that reads back is written as the writer before sjawhar/legion#1464
+// writes it: the parser splits it as written, and the browser editor's parser reads the same
+// bytes as the same tree.
 func TestRenderKeepsAFusedRunThatReadsBack(t *testing.T) {
 	assertRenders(t, []struct{ markdown, want string }{
 		{"*x**b***\n", "*x****b***\n"},
@@ -107,10 +108,11 @@ func TestRenderKeepsAFusedRunThatReadsBack(t *testing.T) {
 	})
 }
 
-// A fused run that does not read back is written again in the plain respellings, as main writes
-// it, before any spelling that keeps marks open: main's escaped bytes read back in both parsers,
-// so a keep-open spelling tried first changed a document main stores correctly.
-func TestRenderRespellsAFusedRunAsMainDoesBeforeKeepingMarksOpen(t *testing.T) {
+// A fused run that does not read back is written again in the plain respellings, as the writer
+// before sjawhar/legion#1464 writes it, before any spelling that keeps marks open: that writer's
+// escaped bytes read back in both parsers, so a keep-open spelling tried first changed a document
+// that writer stores correctly.
+func TestRenderRespellsAFusedRunPlainlyBeforeKeepingMarksOpen(t *testing.T) {
 	assertRenders(t, []struct{ markdown, want string }{
 		{"- ****1**a__1***\n", "- \\*\\*\\**1****a\\_\\_1***\n"},
 		{"****b.**(c)***(c)\n", "\\*\\*\\**b.****(c)***(c)\n"},
