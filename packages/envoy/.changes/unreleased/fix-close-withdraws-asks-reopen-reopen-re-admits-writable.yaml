@@ -1,5 +1,0 @@
-kind: Fixed
-body: Reopening an issue closes its document rooms on the server process that reopened it, as closing it does, so a page whose socket was admitted read-only while the issue was closed reconnects and is admitted writable, instead of staying read-only until the person reloads.
-time: 2026-10-29T06:00:00.000000000Z
-custom:
-    Issue: fix-close-withdraws-asks-reopen

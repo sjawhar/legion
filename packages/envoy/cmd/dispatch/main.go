@@ -83,7 +83,12 @@ type bootConfig struct {
 	SignInGroup        string
 	SignInDomain       string
 	NATSDisabled       bool
-	TestHooksEnabled   bool
+	// NATSReplicas is ENVOY_NATS_REPLICAS, the deployment's replica count for the stream and the
+	// webhook redelivery bucket, and StreamMaxBytes is ENVOY_STREAM_MAX_BYTES, the stream's byte
+	// limit or 0 for none set (bus.ParseNATSReplicas, bus.ParseStreamMaxBytes).
+	NATSReplicas     int
+	StreamMaxBytes   int64
+	TestHooksEnabled bool
 	// SettleDelay is how long a document waits after a live change before it settles, zero for the
 	// document service's own default; only DISPATCH_TEST_SETTLE_DELAY, under the test hooks, sets it.
 	SettleDelay time.Duration
@@ -213,7 +218,7 @@ func main() {
 	if boot.NATSDisabled {
 		slog.Info("dispatch: NATS publisher disabled")
 	} else {
-		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, serverClient(bus.WithEnvironment(env.lookup), bus.WithName("dispatch"))...)
+		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, serverClient(dispatchStreamOptions(boot, env)...)...)
 		if err != nil {
 			slog.Error("dispatch: connect NATS", "error", err)
 			os.Exit(1)
@@ -470,7 +475,7 @@ func main() {
 	// reopens during a roll are withdrawn or restored every interval after the boot's own pass.
 	go api.RunIssueAskRepair(ctx, issueAskRepairDeps, leases)
 
-	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
+	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase, boot.NATSReplicas)
 	if err != nil {
 		slog.Error("dispatch: open webhook redelivery", "error", err)
 		os.Exit(1)
@@ -651,6 +656,24 @@ func loadAppCredentials(env settingValues, dataDir string) (*auth.AppConfig, app
 	return cfg, appCredentialSource{Path: path}, nil
 }
 
+// dispatchStreamOptions are the options the Dispatch server's publisher connects with, the
+// stream's other owner (bus.ConnectOwningStream): its name, the settings table's lookup for NATS's
+// reach and nkey, the deployment's replica count and byte limit from boot, and the webhook
+// redelivery bucket, the one bucket Dispatch opens at that count (webhookSweeper) and its NATS
+// grant covers, which the client's keeper raises back to it when a concurrent start or an
+// operator lowered it (bus.WithKeptBuckets). A server with no App key opens no such bucket, and
+// the keeper skips one that does not exist. main and the tests that start Dispatch's stream both
+// take them from here.
+func dispatchStreamOptions(boot bootConfig, env settingValues) []bus.ConnectOption {
+	return []bus.ConnectOption{
+		bus.WithEnvironment(env.lookup),
+		bus.WithName("dispatch"),
+		bus.WithReplicas(boot.NATSReplicas),
+		bus.WithStreamMaxBytes(boot.StreamMaxBytes),
+		bus.WithKeptBuckets(bus.WebhookRedeliveryBucket),
+	}
+}
+
 // resolveBootConfig is the server's configuration from what the settings table read (env),
 // checked before anything connects. It holds the settings main hands on as values; three groups
 // reach their readers from env instead, through the table's lookup: the GitHub App credentials
@@ -709,6 +732,12 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	if boot.MaxDocConnections, err = positiveSetting(env, "DISPATCH_MAX_DOC_CONNECTIONS"); err != nil {
+		return bootConfig{}, err
+	}
+	if boot.NATSReplicas, err = bus.ParseNATSReplicas(env.get(bus.ReplicasEnvVar)); err != nil {
+		return bootConfig{}, err
+	}
+	if boot.StreamMaxBytes, err = bus.ParseStreamMaxBytes(env.get(bus.StreamMaxBytesEnvVar)); err != nil {
 		return bootConfig{}, err
 	}
 	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_SETTLE_DELAY")); raw != "" {
