@@ -858,8 +858,8 @@ change finder (`blockChangeFinder`, `changedTypesFinder`): after each transactio
 update to the replica, it reads the shared types ygo says the transaction changed
 (`crdt.Transaction.ChangedTypes`) and walks each up its `Parent` chain to the top-level block it
 sits in, and it marks the update for a whole render when one is the fragment itself or sits deeper
-than any document in the schema nests (`noteChangedTypes`). sjawhar/ygo v1.51.3-sami.4 exports
-neither accessor; the fork adds both for this. Beside its markdown the replica keeps that
+than any document in the schema nests (`noteChangedTypes`). Both accessors are the sjawhar/ygo
+fork's since v1.51.3-sami.8 (reearth/ygo#336). Beside its markdown the replica keeps that
 markdown's `pmdoc.Layout`, 5 bytes per top-level block (each block's end offset and flags); a
 published live write's rendering carries its own layout (`publishedRendering.layout`), which the
 replica takes with the markdown, and a rendering that carries none leaves the next update a whole
