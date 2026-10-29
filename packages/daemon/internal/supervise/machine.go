@@ -153,6 +153,30 @@ type Claim struct {
 	// records the daemon's own contract, so a registration that still differs while it equals the
 	// daemon's contract is the one that is charged rather than relaunched again uncharged.
 	PluginRelaunchFor int
+	// UpdateRound is the update round this claim is in, and "" when none is open: the round's
+	// identity and its kind in one string. "pod:<pod uid>" is the drift round of the pod the claim
+	// runs on, which every claim of that pod shares, and "plugin:<daemon contract>" the per-claim
+	// round of a claim whose plugin is behind this daemon. A round ends when the process it waits
+	// for is replaced, and the daemon replaces nothing until every claim of the round has
+	// signalled, so no unpushed work dies with the disk the replacement deletes.
+	UpdateRound string
+	// UpdateReasons is what the round was opened for, as the daemon found the drift: the task's
+	// text and the operator's reading of why this pod is being replaced.
+	UpdateReasons string
+	// UpdateOpenedAt is the round's own clock — when the round was opened on this claim — and
+	// UpdateTaskedAt each task send's, so a re-task of a worker that never answered never
+	// postpones the notice the round is measured from. UpdateSignalledAt is when the worker
+	// answered ready_for_update, nil until it has.
+	UpdateOpenedAt    *time.Time
+	UpdateTaskedAt    *time.Time
+	UpdateSignalledAt *time.Time
+	// UpdateHead is the commit the worker reported, when it signalled, as the head of its issue
+	// branch at origin, and "" when it reported none (a planner before its first push). It is the
+	// worker's word, which nothing verifies.
+	UpdateHead string
+	// UpdateToldAt is when this round was last reported to the operator's side, so one round is
+	// not reported again at every sweep that finds it open.
+	UpdateToldAt *time.Time
 }
 
 // RuleMayResume says whether the rule may resume this suspended claim: every suspension but the
@@ -193,8 +217,8 @@ func (c Claim) treeRoot() bool { return claim.IsTreeArchitect(c.Role, c.Issue, c
 
 // Event is everything that reaches a machine. The set is sealed: RuntimeObservation,
 // StreamHello, StreamTurnStart, StreamTurnEnd, StreamClosed, StreamLateRefusal, PromptAcked,
-// PromptRefused, Timer, StalePlugin, and the nine requests. The transition table has a row or a
-// named ignore for every one of them in every state.
+// PromptRefused, Timer, StalePlugin, PodUpdateSignalled, and the nine requests. The transition
+// table has a row or a named ignore for every one of them in every state.
 type Event interface{ isEvent() }
 
 // Store is the persistence a machine writes through. A claim and its pending delivery are
@@ -1312,6 +1336,8 @@ func claimOf(ev Event) claim.Token {
 	case Timer:
 		return ev.Claim
 	case StalePlugin:
+		return ev.Claim
+	case PodUpdateSignalled:
 		return ev.Claim
 	case RequestSpawn:
 		return ev.Claim

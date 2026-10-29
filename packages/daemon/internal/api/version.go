@@ -407,4 +407,17 @@ package api
 // refuses either pair. This change adds no store migration. (This branch took 36 through 41 in
 // turn; main landed each of those numbers first, the controller start command last at 41, so this
 // branch takes the number above them, as the collision note says.)
-const DaemonAPIVersion = 42
+//
+// 43: INFRA-484 -- the update round, which replaces a pod only once the work on it is pushed.
+// `POST /legion/v1/claims/ready-for-update` is a new claim route in the shape of `claims/ready`
+// (`claim.ReadyForUpdateRequest`: `claimToken`, `sessionId`, `secret`, `generation`, and an
+// optional `head`), answering 204: it is the worker's answer to the update task — everything it
+// wants kept is pushed, and its process may now be replaced — and `head` is the commit the worker
+// reports as the head of its issue branch at `origin`, empty when the branch is not there. Both
+// plugins gain the `ready_for_update` op that posts it, so a worker under either one can end its
+// round. A claim whose update round is open is served on its contract of before the round, on
+// every route: the claim routes, the grants route's claim form and every grant-bearing route,
+// where a stale plugin contract otherwise refuses. A plugin before 43 has no op to signal with,
+// so its pod's round would never end, and a daemon before 43 answers that op's post a 404; the
+// boot gate and `legion probe-image` refuse either pair.
+const DaemonAPIVersion = 43

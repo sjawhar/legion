@@ -123,6 +123,18 @@ type StalePlugin struct {
 	Trigger string
 }
 
+// PodUpdateSignalled is the worker's answer to the update task (api's claims/ready-for-update):
+// it has pushed everything it wants kept, and the process holding this claim may now be replaced.
+// Head is the commit it reports as the head of its issue branch at origin, "" when the branch is
+// not there — a planner before its first push — and is the worker's word, which nothing verifies.
+// Generation and Session are the claim it says it holds, as every agent request carries them.
+type PodUpdateSignalled struct {
+	Claim      claim.Token
+	Generation uint64
+	Session    string
+	Head       string
+}
+
 // RequestSpawn launches a queued claim.
 type RequestSpawn struct{ Claim claim.Token }
 
@@ -256,6 +268,7 @@ func (PromptAcked) isEvent()          {}
 func (PromptRefused) isEvent()        {}
 func (Timer) isEvent()                {}
 func (StalePlugin) isEvent()          {}
+func (PodUpdateSignalled) isEvent()   {}
 func (RequestSpawn) isEvent()         {}
 func (RequestRegister) isEvent()      {}
 func (RequestReady) isEvent()         {}
@@ -307,6 +320,8 @@ const (
 
 	onStalePlugin eventKind = "stale_plugin"
 
+	onPodUpdateSignalled eventKind = "pod_update_signalled"
+
 	timerPrefix eventKind = "timer:"
 )
 
@@ -332,6 +347,8 @@ func kindOf(ev Event) eventKind {
 		return timerPrefix + eventKind(ev.Kind)
 	case StalePlugin:
 		return onStalePlugin
+	case PodUpdateSignalled:
+		return onPodUpdateSignalled
 	case RequestSpawn:
 		return onSpawn
 	case RequestRegister:
@@ -387,6 +404,8 @@ func requestName(ev Event) (string, bool) {
 		return "deliver", true
 	case RequestExit:
 		return "exit", true
+	case PodUpdateSignalled:
+		return "ready_for_update", true
 	}
 	return "", false
 }
@@ -530,6 +549,14 @@ func fillTable(t *builder) {
 		[]ClaimState{StateLaunching, StateFailed}, StateRegistered, StateReady, StateWorking, StateIdle)
 	t.ignore(onStalePlugin, "a claim still launching is left to its registration, which decides it the moment it arrives",
 		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateSuspended, StateFailed, StateRetired)
+
+	// The worker's answer to the update task: it has pushed its work and may be replaced.
+	t.row(onPodUpdateSignalled, "the worker signalled that its work is pushed and its process may be replaced", podUpdateSignalled,
+		nil, StateRegistered, StateReady, StateWorking, StateIdle, StateSuspended)
+	t.ignore(onPodUpdateSignalled, "a claim with no registered agent cannot have signalled",
+		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
+	t.ignore(onPodUpdateSignalled, "the claim failed; the process that would have signalled is gone", StateFailed)
+	t.ignore(onPodUpdateSignalled, "the claim is retired; its update round ended with it", StateRetired)
 
 	// Requests.
 	t.row(onSpawn, "launch", spawn, []ClaimState{StateLaunching, StateFailed}, StateQueued)
@@ -1314,6 +1341,19 @@ func exit(m *Machine, ctx context.Context, ev Event) error {
 		m.log.Error("supervise: could not release the exited agent's process; retiring its claim anyway", "error", err)
 	}
 	return m.retire(ctx)
+}
+
+// podUpdateSignalled records the worker's answer to the update task — its work is pushed, and the
+// process holding this claim may now be replaced — and the head it reported, which nothing
+// verifies. It changes no state: the round's own sweep is what reads the signal and replaces the
+// process, once every claim of the round has answered. A signal that arrives while no round is
+// open is not an error either; it is recorded, and with no round to end it does nothing.
+func podUpdateSignalled(m *Machine, ctx context.Context, ev Event) error {
+	signal := ev.(PodUpdateSignalled)
+	at := m.deps.Clock.Now()
+	m.claim.UpdateSignalledAt = &at
+	m.claim.UpdateHead = signal.Head
+	return m.persist(ctx)
 }
 
 func nothingToDo(*Machine, context.Context, Event) error { return nil }

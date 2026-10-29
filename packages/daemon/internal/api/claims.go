@@ -342,8 +342,15 @@ func (s *server) readRegisterBody(w http.ResponseWriter, r *http.Request, into *
 // relaunch nothing (PluginRelaunchable false, LEGION-164's degraded Kubernetes mode) never
 // starts that relaunch, so a stale claim there is left running and answered as any other:
 // refusing it would stall agents that work today.
+//
+// A claim whose update round is open (Claim.UpdateRound) is not stale here either, whatever its
+// contract: the round's whole point is that the worker pushes its work before its process is
+// replaced, and it cannot push without the daemon it already speaks to. So while the round is
+// open the daemon serves the claim on its previous contract — grants, handoff_complete and every
+// other grant-bearing route, as well as the claim routes — and the end of the round is what
+// relaunches the process onto the current plugin.
 func (s *server) staleClaim(c supervise.Claim) (int, bool) {
-	return c.PluginContract, s.pluginRelaunchable && c.PluginContract != DaemonAPIVersion
+	return c.PluginContract, s.pluginRelaunchable && c.PluginContract != DaemonAPIVersion && c.UpdateRound == ""
 }
 
 // logStaleRefusal is the one log line every stale-caller refusal writes: never the body,
