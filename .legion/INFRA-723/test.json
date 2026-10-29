@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-723",
+  "completed": "2026-10-29T13:35:00Z",
+  "round": "testing round 4, after READY was refused (READY_HEAD_CONFLICTS against #2316, the CI router) and the implementer forward-merged main. Code head af843c867d997a6040cf51362511dc8494dcf66e (the merge), branch head 96c913891479e3734a0a7bf93d8f62d660a28082 (handoff-only).",
+  "codeHead": "af843c867d997a6040cf51362511dc8494dcf66e",
+  "note": "Retro ran before this round and removed .legion/INFRA-723/, so my earlier handoffs are no longer in the tree. Rounds 1-3 are in the pull request's history (test.json at 05ce51ec and 4c6e53aa) and in the PR body's E2E lines. This file is round 4 alone.",
+  "forwardMerge": {
+    "procedure": "skill://legion-worker/references/conflicts-and-rewrites.md, 'The unchanged-diff check', computed at my own last verified head and the new head, not taken from the implementer",
+    "oldHead": "854256b692c09c1976a933624cbaf1cdfc81417b",
+    "newHead": "96c913891479e3734a0a7bf93d8f62d660a28082",
+    "fingerprintBefore": "81df9c4d22ed9ad55e9fa505c1fe3c8e5eb6f2e94d9cf149c42d136355426e6d",
+    "fingerprintAfter": "97917f4ec9728d16652019eb24e681200024d6ef4fd39fd8006ab5bfdf919ef4",
+    "verdict": "changed, so a full test round, not bare gates. My 'after' equals the implementer's 97917f4e; my 'before' is my own round-3 head rather than its tip, which is the point of each role computing its own pair.",
+    "whatMoved": "Four files differ between my round-3 verified head and this one, and every one of the four differs in comments alone, which I read line by line: .github/scripts/release-push.test.sh (its header now says CI runs it in ci.yaml's test job, not pr-and-main.yaml), packages/claude-envoy/scripts/build-inputs.txt, scripts/build.ts and scripts/verify-build.sh (the reviewer's own prose commit 9ec57a01, naming every hand-listed group: .bun-version, bunfig.toml, the .gitignore and .gitattributes files, third-party-notices.ts, pi-plugin-prepack.sh and the four .github paths). .github/scripts/release-push.sh and .github/workflows/claude-envoy-rebuild.yaml are byte-identical at both heads. The behaviour change itself therefore did not move; what moved is the router (ci.yaml gains the step, pr-and-main.yaml's deletion taken) and prose."
+  },
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Each of its three entries reproduces at the merge head. (1) The router claim I checked on the live run rather than from the file alone, below. (2) `bash .github/scripts/release-push.test.sh` -> 'Results: 623 passed, 0 failed', with 8 'run from packages/claude-envoy' assertions and 0 pre-receive noise lines. (3) `cd packages/claude-envoy && bun test tests/build-inputs.test.ts tests/dist-fresh.test.ts tests/build-out.test.ts` -> '20 pass, 0 fail, 55 expect() calls' (it ran build-inputs alone and reported 1 pass; the three together are the fuller read) and `bun run verify-build` packs a tar 'main's rebuild accepts', 61 files. I also re-ran `uv run --with pyyaml==6.0.2 --no-project bash .github/scripts/check-ci-filters.sh` myself. Its real-history script is in a scratch I cannot read, so I re-ran my own drive instead: 48 of 48 at this head."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "The architect's named check for this round: the build-inputs test still runs on a pull request, inside the router's selected jobs",
+      "surface": ".github/workflows/ci.yaml's `test` job on this pull request, through the router's own `changes` job, which selects the jobs that read the change's paths",
+      "command": "gh run view 40879673045 -R sjawhar/legion --json status,conclusion,jobs ; gh pr view 2493 --repo sjawhar/legion --json files ; grep -n -B3 -A3 'build input list covers' .github/workflows/ci.yaml ; uv run --with pyyaml==6.0.2 --no-project bash .github/scripts/check-ci-filters.sh",
+      "observed": "Selection is decided and observed, not inferred: in CI run 40879673045 at this head, the router's `changes` job is completed/success and `test` is among the jobs it produced, queued rather than skipped — a job whose `if:` on a `changes` output is false shows as skipped, so `test` being queued is the selection itself. The step is in that job at ci.yaml:1309-1311, 'Check the Claude Code plugin's build input list covers what the build reads', `bun test tests/build-inputs.test.ts`, working-directory packages/claude-envoy, between the verify-build step (:1304-1306) and 'Test release scripts' (:1313). The pull request touches .github/scripts/release-push.sh, .github/workflows/ci.yaml and packages/claude-envoy/**, each named by the `test` filter (ci.yaml:437, which unions the claude_envoy anchor at :410 and bun_install at :141), so the selection is what the filter says it should be. check-ci-filters.sh passes at this head: 'every ci.yaml filter matches every file its job reads (23 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)', with 'ci-filters: 2491 files, 0 uncovered'. The step's own result, and ci-ok, were still queued when I wrote this; see ciState below.",
+      "headSha": "af843c867d997a6040cf51362511dc8494dcf66e",
+      "negativeControl": "The `docs` job is in the same run and, like every job the filter did not select for this change, is produced by the same `changes` decision — so the router is deciding per filter and not running everything. The refusal control for the gate itself is the list control below: with a path removed from build-inputs.txt the step fails, so a selected-and-run step is a real gate rather than a green no-op."
+    },
+    {
+      "criterion": "Acceptance 1 still holds at the merge head, on the surface the spec names",
+      "surface": "the `.github/scripts` shell test, run from the issue workspace against a local bare origin through the deploy-key path, the insteadOf rewrite and a stub gh",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bash .github/scripts/release-push.test.sh",
+      "observed": "exit 0, 'Results: 623 passed, 0 failed'. `grep -c 'PASS: run from packages/claude-envoy'` -> 8; `grep -c 'No such file or directory\\|hooks/pre-receive: line'` -> 0.",
+      "headSha": "af843c867d997a6040cf51362511dc8494dcf66e",
+      "negativeControl": "Case C of my own drive: the real verify-build tar re-packed carrying dist/leak.js -> /etc/passwd, main moved by four real commits → exit 1, ::error:: naming the member, origin untouched, gh never called."
+    },
+    {
+      "criterion": "Acceptance 1 on real sjawhar/legion history at the merge head",
+      "surface": "the checkout's own `.github/scripts/release-push.sh push-built <base> <tar>` — the command claude-envoy-rebuild.yaml's push job runs — in a push-job checkout standing at a base built from real main commits, against a scratch bare origin, the deploy-key path with GIT_CONFIG insteadOf, a stub gh on PATH, and a real `bun run verify-build` tar of this head. The base's release-push.sh is byte-identical to this head's committed one (cmp, asserted at the start of every run).",
+      "command": "bash /legion/scratch/tmp/t723/drive.sh  (my own script, re-pointed at af843c86; windows 6d60a27fcc5b..4e91eaa85984 and 12c9baf52c6c..d317f2181ba7)",
+      "observed": "'Results: 48 passed, 0 failed', the same 48 as round 3. A: one github-actions[bot] commit on the tip it checked, subject naming the base with the skip keyword, 0 paths outside the two directories, no gh call, the landed bytes equal the checked tar file for file, and the landed tree carries legion/hooks/hooks.json. B: lands and exactly one `gh workflow run claude-envoy-rebuild.yaml --repo example/repo --ref main`, the notice naming the first three changed inputs and '23 more'. D: a racer between fetch and push → nothing landed, one fresh run. E and F: a newer bot rebuild, and a bot rebuild subject naming a non-ancestor, each stop it. H: an invalid pathspec in the base's list → exit 1, fails closed. G: the same window with main's own release-push.sh at 1767c9af lands nothing. I: from packages/claude-envoy it still refuses against a newer build.",
+      "headSha": "af843c867d997a6040cf51362511dc8494dcf66e",
+      "negativeControl": "Case J, the before/after control for review finding 2: the identical subdirectory run with release-push.sh as the review found it (d7b3cc91) misses main's newer build, prints no newer-build notice, and lands over it. Case C is the tar-refusal control."
+    },
+    {
+      "criterion": "The input list still covers what the build reads, through what both halves of the build report",
+      "surface": "packages/claude-envoy/tests/build-inputs.test.ts as ci.yaml's selected `test` job runs it, beside the two other tests of the same build",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/claude-envoy\" && bun test tests/build-inputs.test.ts tests/dist-fresh.test.ts tests/build-out.test.ts && bun run verify-build \"$TMPDIR/t723/built.tar\"",
+      "observed": "'20 pass, 0 fail, 55 expect() calls' across 3 files, 9.04 s. verify-build: 'holds a build main's rebuild accepts', the private-name check over 61 files.",
+      "headSha": "af843c867d997a6040cf51362511dc8494dcf66e",
+      "negativeControl": "Round 3's control stands at this head, since neither the test nor the list's pathspecs changed (only the list's header comments did): removing the line `skills` from build-inputs.txt fails the test, listing the staged skill sources buildLegionPlugin reports. Re-running it this round would have re-proved an unchanged path; the four files that moved since my last verified head differ in comments alone, which I read."
+    }
+  ],
+  "ciState": {
+    "requiredSet": "ci-ok and pr-title, as #2316 left it (the architect's message, 13:05Z) — no longer lint, typecheck and test individually",
+    "atCodeHead": "CI run 40879673045 at af843c86, created 13:11:31Z, still queued when I completed: `changes` completed/success, and lint, typecheck, test, ci-filters and the rest of the selected jobs queued, waiting for runners. Nothing has failed. I read a running lane as running and did not wait for it; that is this repository's own 70-minute runner queue, the very wait this issue is about.",
+    "atBranchHead": "96c91389 is handoff-only with the skip-checks trailer, so it carries no check of its own and the daemon carries the code head's verdict.",
+    "pullRequest": "MERGEABLE, reviewDecision APPROVED. The round-2 shape (a code push headed by a skip-checks commit, with no run at all) has not returned: a run exists and is progressing.",
+    "forTheReviewer": "Read run 40879673045's ci-ok and pr-title at af843c86 at your own turn; my behavioural evidence above does not depend on them, and the daemon sends the issue back by itself if CI settles red."
+  },
+  "notTested": [
+    {
+      "criterion": "Acceptance 3: the next run on main lands a rebuild commit though main moved; its built files equal a build of the base its subject names; a later run lands a newer build when inputs changed",
+      "why": "The spec assigns it to the production check after the merge. No pre-merge surface reaches it: the push job runs only on refs/heads/main, and driving it would push to main."
+    }
+  ],
+  "reviewerNotes": [
+    "The merge took main's deletion of pr-and-main.yaml and moved the step into ci.yaml's test job; it added nothing to any filter, and nothing needed adding — the `test` filter already unions claude_envoy and bun_install, which between them name every path tests/build-inputs.test.ts reads (packages/claude-envoy/**, skills/**, packages/pi-legion/agents/**, contracts/envoy-client/pi-shared src, pi-plugin-prepack.sh, third-party-notices.ts, release-push.sh, and from bun_install the lockfile, the manifests, patches, .bun-version and setup-bun). check-ci-filters.sh agrees at this head.",
+    "build-inputs.txt names .github/workflows/claude-envoy-rebuild.yaml and .github/actions/setup-bun as build inputs and never named pr-and-main.yaml, so the router rename needed no change there; ci.yaml is not a build input and was rightly not added."
+  ],
+  "environmentEvidence": "Not called for by this issue's acceptance criteria. The drive's DEPLOY_KEY is the literal string 'local-origin-no-ssh' against a local bare origin reached through a GIT_CONFIG insteadOf rewrite, so no credential was read, printed or needed."
+}
