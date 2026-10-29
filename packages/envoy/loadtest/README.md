@@ -545,7 +545,7 @@ packages/envoy/loadtest/run-step.sh replay-f0.1 --replay --rate 0.1
 # The same on Dispatch at production's commit of 2026-10-26, Dispatch on one core:
 packages/envoy/loadtest/run-step.sh replay-f0.1-35ef --replay --rate 0.1 --dispatch-commit 35efd326 --gomaxprocs 1
 # What a run would send, without a stack (counts only):
-loadgen replay-plan -replay-inputs "$LOADTEST_ROOT/replay/bundle" -replay-rate 0.1
+packages/envoy/loadtest/stack.sh loadgen replay-plan -replay-inputs "$LOADTEST_ROOT/replay/bundle" -replay-rate 0.1
 ```
 
 **The bundle** (`loadgen replay-fetch`, read-only from a Dispatch; `replay_bundle.go`) is LINUX's
@@ -637,10 +637,10 @@ dump as `seed-check.json`, and in `seed.meta.json` and the manifest's `seed.chec
 dumps are equal; `replay-logical-dump` masks every uuid and timestamp:
 
 ```bash
-stack.sh replay-seed --bundle BUNDLE --keys-file KEYS --stock --out "$TMPDIR/seed-stock"
-stack.sh loadgen replay-logical-dump -db dispatch_replay_build -out "$TMPDIR/stock.dump"
-stack.sh replay-seed --bundle BUNDLE --keys-file KEYS --out "$TMPDIR/seed-patched"
-stack.sh loadgen replay-logical-dump -db dispatch_replay_build -out "$TMPDIR/patched.dump"
+packages/envoy/loadtest/stack.sh replay-seed --bundle BUNDLE --keys-file KEYS --stock --out "$TMPDIR/seed-stock"
+packages/envoy/loadtest/stack.sh loadgen replay-logical-dump -db dispatch_replay_build -out "$TMPDIR/stock.dump"
+packages/envoy/loadtest/stack.sh replay-seed --bundle BUNDLE --keys-file KEYS --out "$TMPDIR/seed-patched"
+packages/envoy/loadtest/stack.sh loadgen replay-logical-dump -db dispatch_replay_build -out "$TMPDIR/patched.dump"
 cmp "$TMPDIR/stock.dump" "$TMPDIR/patched.dump"
 ```
 
@@ -933,35 +933,54 @@ when absent), `heap_start_at`, `heap_end_at`, `dispatch_build` (the build JSON:
 `go_version`, `newest_migration`) and `last_reset` (`replay/last-reset.json`: the template,
 `seed_dump_sha256`, `checksum`, ...); `nproc`, `build_commit` and `pg_direct` are `meta.json`'s own.
 
-**The merge rule.** A change to Dispatch's write path is measured with six runs of one bundle,
-one set of flags and one `--rng-seed`: three with `--dispatch-commit` at the commit before the
-change and three at its head. The plans are equal unless the two builds serve different markdown
-for a document the window writes, which `replay.base_docs.documents` names on each side, so the
-runs differ only in Dispatch:
+**Measuring a change.** This README states no merge rule; the rule is in dispatch://INFRA-512/spec.
+It states how to run a comparison and what to compare.
+
+A change to Dispatch's write path is measured with six runs of one bundle, one set of flags, one
+`--gomaxprocs` and one `--rng-seed`: three with `--dispatch-commit` at the commit before the change
+and three at its head. The plans are equal unless the two builds serve different markdown for a
+document the window writes, which `replay.base_docs.documents` names on each side, so the runs
+differ only in Dispatch.
+
+Run the six on one box in one session, interleaved base, head, base, head, base, head, never three
+of one build then three of the other. The absolute cores figure is a property of the machine and
+the hour, not of Dispatch alone: the same binary, the same inputs and the same work at 35efd326
+gave 9.60-9.98 cores at the full rate on 2026-10-28 23:50Z-01:53Z and 14.65-14.88 cores on the
+2026-10-29 afternoon, on the same 2-core pod type. A comparison is valid only between runs
+interleaved on one box in one session; runs from two sessions, or two boxes, are not comparable.
 
 ```bash
 for i in 1 2 3; do
-  packages/envoy/loadtest/run-step.sh base-$i --replay --rate 0.1 --rng-seed 1 --dispatch-commit BASE
-done
-for i in 1 2 3; do
-  packages/envoy/loadtest/run-step.sh head-$i --replay --rate 0.1 --rng-seed 1 --dispatch-commit HEAD
+  packages/envoy/loadtest/run-step.sh base-$i --replay --rate 0.1 --rng-seed 1 --gomaxprocs 2 --dispatch-commit B
+  packages/envoy/loadtest/run-step.sh head-$i --replay --rate 0.1 --rng-seed 1 --gomaxprocs 2 --dispatch-commit H
 done
 ```
 
-The spread is the highest base run's `replay.dispatch_cpu_s` less the lowest. The runs'
-`replay.end_state.sha256` are compared: equal hashes show that every run did the same work, within
-each build always, and across the two builds when neither replanned (`base_docs.replanned` false
-on both) and the build's answers are the same. The
-change merges when every head run uses less CPU than every base run, or, where its expected gain
-is smaller than the spread, when the changed function's share of CPU in a profile at its head is
-lower than in one at its base by at least half the expected gain. The pull request quotes the runs,
-the spread, the command and the inputs (`replay.inputs`).
+B is the commit before the change and H is its head; the six steps are `base-1`, `head-1`,
+`base-2`, `head-2`, `base-3`, `head-3`, in that order.
+
+What to compare, from each step's `summary.json` and `samples.json`:
+
+| Read | Where | What it says |
+| --- | --- | --- |
+| The CPU | `summary.json` `replay.dispatch_cpu_s` | Dispatch's CPU-seconds over the window: the figure the three base runs and the three head runs are compared on. The spread is the highest base run's value less the lowest. |
+| The same work | `summary.json` `replay.end_state.sha256` | Equal hashes show the runs did the same work. Within one build they are always equal; across the two builds they are equal when neither replanned (`base_docs.replanned` false on both) and the builds' answers are the same, and can differ when the builds' renderings differ (The client's text is the build's, above). |
+| Not saturated | `summary.json` `replay.saturated` | False in every one of the six runs. A saturated run measures the box's limit, not the change. |
+| Memory | `samples.json` `heap_inuse` and `rss_kib` key `dispatch`, over the samples with `in_window` true | Dispatch's heap in use and its resident size during the window. |
+
+The pull request quotes the six runs in their order, their `replay.dispatch_cpu_s`, the spread, the
+command and the inputs (`replay.inputs`).
 
 **What the replay does not reproduce:**
 
 - **GOMAXPROCS 16.** Production's Dispatch ran with 16 cores, and Go's garbage collector runs idle
   mark workers on idle processors, which count as CPU. On this box `GOMAXPROCS` is nproc or
   `--gomaxprocs`, so there are fewer idle workers to count.
+- **The machine's own speed.** The cores figure is a property of the box at the hour of the run,
+  not of Dispatch alone: the same binary, inputs and work at 35efd326 gave 9.60-9.98 cores at the
+  full rate on 2026-10-28 23:50Z-01:53Z and 14.65-14.88 on the 2026-10-29 afternoon, on the same
+  2-core pod type. Only runs interleaved on one box in one session compare (Measuring a change,
+  above).
 - **Reads.** None were logged: the read actions are an assumption, rho per write at the read mix.
 - **The edit and upload split.** U is an assumption: a named version with a diff is an upload with
   share U, else an edit.
