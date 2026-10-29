@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -148,6 +149,58 @@ func TestParseReadsALineBothParsersReadAsText(t *testing.T) {
 			}
 			if _, err := ParseForWrite(test.markdown, nil); err != nil {
 				t.Errorf("ParseForWrite(%q) = %v, want it read", test.markdown, err)
+			}
+		})
+	}
+}
+
+// browserBlockHTML is the part of htmlFlowRefusal's reason (html_flow.go) that says why the line it
+// names cannot be stored; the reason names the line itself, which differs from document to
+// document.
+const browserBlockHTML = "opens with HTML the browser editor's parser reads as a block of HTML"
+
+// The corpus-errors documents measured for PR #2507, each refused by every reader of caller
+// markdown for the reason named here, so that a reader lifting a refusal for some other reason
+// would still be caught. Two reasons stand behind them. A footnote definition inside a typed block
+// whose delimiter-like line and narrower setext underline the browser editor's parser reads as a
+// table and a heading holds a block other than a paragraph there (typedDefinitionHoldingBlock),
+// which main refused already and this change leaves refused. A line whose tab, lower-case
+// declaration or closing tag of a raw text name opens a block of HTML for that parser, where
+// goldmark's own patterns read the text of a paragraph, is refused by name (browserBlockHTML):
+// the Proof schema holds no block of HTML, and that parser drops the one it reads together with
+// the container around it, so no tree the document could be stored as reads back.
+func TestCorpusErrorsOfDefinitionsAndBrowserBlockHTMLAreRefused(t *testing.T) {
+	for name, refusal := range map[string]string{
+		"nested-typed-blocks-definition-before-an-indented-underline":                     typedDefinitionHoldingBlock,
+		"nested-typed-blocks-definition-ending-in-a-hard-break-before-a-tabbed-underline": typedDefinitionHoldingBlock,
+		"typed-block-definition-before-a-tabbed-underline":                                typedDefinitionHoldingBlock,
+		"typed-block-definition-before-an-indented-underline":                             typedDefinitionHoldingBlock,
+		"typed-block-definition-ending-in-a-hard-break-before-a-tabbed-underline":         typedDefinitionHoldingBlock,
+		"typed-block-definition-ending-in-a-hard-break-before-an-indented-underline":      typedDefinitionHoldingBlock,
+		"typed-block-definition-of-an-underline-character-before-a-tabbed-underline":      typedDefinitionHoldingBlock,
+		"warning-typed-block-definition-before-an-indented-underline":                     typedDefinitionHoldingBlock,
+		"warning-typed-block-definition-of-a-bracket-before-a-tabbed-underline":           typedDefinitionHoldingBlock,
+		"written-out-typed-block-definition-before-an-indented-underline":                 typedDefinitionHoldingBlock,
+		"written-out-typed-block-definition-of-other-text-before-an-indented-underline":   typedDefinitionHoldingBlock,
+		"item-text-block-opening-with-a-closing-tag-a-tab-ends":                           browserBlockHTML,
+		"quoted-paragraph-opening-with-a-closing-raw-text-tag":                            browserBlockHTML,
+		"quoted-paragraph-opening-with-a-closing-tag-a-tab-ends":                          browserBlockHTML,
+		"quoted-paragraph-opening-with-a-lower-case-declaration":                          browserBlockHTML,
+		"quoted-paragraph-opening-with-a-tab-before-a-tags-slash":                         browserBlockHTML,
+		"quoted-paragraph-opening-with-a-tag-a-tab-follows":                               browserBlockHTML,
+		"quoted-paragraph-then-a-tab-indented-block-tag":                                  browserBlockHTML,
+		"quoted-paragraph-then-a-tab-indented-comment":                                    browserBlockHTML,
+		"quoted-setext-heading-opening-with-a-closing-tag-a-tab-ends":                     browserBlockHTML,
+	} {
+		t.Run(name, func(t *testing.T) {
+			markdown, err := os.ReadFile("testdata/corpus-errors/" + name + ".md")
+			if err != nil {
+				t.Fatalf("read %s corpus: %v", name, err)
+			}
+			for _, reader := range blockMarkdownReaders() {
+				if _, err := reader.parse(string(markdown)); !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), refusal) {
+					t.Errorf("%s of %s: %v, want ErrSchema saying %q", reader.name, name, err, refusal)
+				}
 			}
 		})
 	}
