@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-148",
-  "completed": "2026-10-28T13:41:40Z",
+  "completed": "2026-10-29T23:05:16Z",
   "proof": [
     {
       "criterion": "A1: a session whose ask a person answered carries that answer word for word in its next model request (Oh My Pi)",
@@ -91,6 +91,22 @@
       "observed": "A comment on an issue routed to the session that mentions it: with the mention recorded failed at publish time the outbox publishes the route copy to the session's topic; once the delivery reads sent, the list holds the comment once, as `mentioned you`.",
       "headSha": "6d96a55f97e02e8ee16e68a33baf4d8ce39e4099",
       "negativeControl": "With the query's dedupe broken (`group by id, m`), the same test fails: Total 2, the comment listed as commented_on_an_issue and as mentioned_you."
+    },
+    {
+      "criterion": "Final round, at the merged head: a person's answer reaches the next Oh My Pi model request word for word, dispatch answers lists it, a reply in a thread on the session's document is listed once, doc-read prints the open thread in full, and the saved list stands in with Dispatch down",
+      "surface": "Dispatch built from the head (cluster pgvector Postgres 18, nats-server v2.10.29 with JetStream, trusted-header identity), real /opt/omp/bin/omp with this checkout's pi-envoy, stand-in Messages endpoint and Envoy listener",
+      "command": "$TMPDIR/infra148/smoke11 (drive.ts through packages/pi-shared/test/omp-harness.ts; RESULTS.md), run 2026-10-29T23:00:55Z-23:01:11Z, session 01a189e5-265c-75c6-8351-7ee4e9f4f65e, issue SMKA-10",
+      "observed": "Turn 2's last message is the list with `SMOKE-ANSWER-11 naïve café 日本語 \"quoted\"` once and no cache_control; `dispatch answers` exit 0 with one item, another session `No person wrote to this session in the last 72 hours.`; alice's reply in bob's thread on the session's project document listed once in answers and the next request; doc-read printed `Open anchored threads:` with both bodies; after Dispatch was stopped turn 3 carried the saved list `As read at 2026-10-29T23:01:09.366Z; this read failed: ECONNREFUSED`.",
+      "headSha": "7ff7de30c591d3b92017dd20d41d844e3d1be85b",
+      "negativeControl": "alice's reply on bob's issue-conversation comment (no document) is absent from dispatch answers and from the next request."
+    },
+    {
+      "criterion": "Final round: the related-item check's two allowance sites share relatedBounds; an expired decision-block allowance records timeout, a cancelled request records cancelled, and a live decision block's check still runs",
+      "surface": "Dispatch API Go tests on the cluster pgvector Postgres 18; the live doc-edit route of the smoke11 Dispatch",
+      "command": "cd packages/envoy && go test ./internal/dispatch/api -count=1 (ok, 878.552s); go test ./internal/dispatch/api -run 'Related|Suggest|DecisionBlock|WriteAdvice' -count=1 (ok, 120.418s); smoke11 step 7: dispatch doc-edit inserting :::ask{#smoke}",
+      "observed": "TestRelatedCheckBoundsDecisionBlocksPastTheAllowanceAreRecordedTimeout: both blocks not made, `the search behind it did not answer within 500ms`, related_checks reason timeout; TestRelatedCheckBoundsARequestThatEndsFirstIsRecordedCancelled passes. Live: the edit's advice.decision_block_checks named the block, related_checks row source_kind decision_block outcome found reason no_embedder.",
+      "headSha": "7ff7de30c591d3b92017dd20d41d844e3d1be85b",
+      "negativeControl": "With decisionBlockChecks bounding by context.WithTimeout (cause dropped), the new test fails: `Missing:the request that ran it ended before the check finished`."
     }
   ],
   "filesChanged": [
@@ -112,7 +128,8 @@
     "Round 7 (merge): forward merges of main b295a3fb (merge 0e10ce38: claude-envoy dist rebuilt with Bun 1.4.4, envoy-client package.json build list, pi-envoy imports; askgate imports moved to dispatch-session-directory) and 4e55b2e0 (merge 8a2c0562, clean); answers-hook.test.ts accepts every design outcome (allowedOutcome); changelog entries moved to changie fragments pr2376-*.yaml with CHANGELOG.md as main has it; no Dispatch key in any added line (old-server message now 'its build is older than the answers route'); forward merge of main aeeee6c0 (merge 594b8de6): the three .dispatch/architecture conflicts keep both sides, claude-envoy dist rebuilt with Bun 1.4.4",
     "Round 8 (review 5): claude-envoy session-hook.ts strict URL comparison, no refresher when envoy.json names no Dispatch URL, timing-file write guarded; answers-hook.test.ts two carry-rule tests and the empty-list request count accepts a read that missed; dist rebuilt with Bun 1.4.4",
     "Forward merge of main 0a921021 (merge 5c38603c, #2225's claimant route and delivered-mention rule): envoy AGENTS.md, model.go and publisher.go keep this PR's reply-on-a-document routing and suppressed_authors rule with main's leftToMention wording; the outbox reply-mention case now records the mention as sent, and the session-answers mention-plus-follower test expects the follower copy left to the delivered mention",
-    "Acceptance round: api/session_answers_test.go (stale paragraph dropped, follower+mention test renamed, new route+mention dedupe test with setCommentDelivery); claude-envoy answers-hook.test.ts request count compared against the expected count; forward merge of main 5fbd8391 (clean)"
+    "Acceptance round: api/session_answers_test.go (stale paragraph dropped, follower+mention test renamed, new route+mention dedupe test with setCommentDelivery); claude-envoy answers-hook.test.ts request count compared against the expected count; forward merge of main 5fbd8391 (clean)",
+    "Final round: forward merge of main 421055ab (merge ae693c92): main's comment-recipient routing (outbox recipients.go) and main's doc-read open-thread printing replace this branch's suppressed_authors/loadThreadRoot routing and doc-read comment printing, with their tests, help sentence, AGENTS.md text and fragments; migrations renumbered 0142-0144; claude-envoy dist/legion are main's; ci.yaml (which replaced envoy-and-contracts.yaml) installs the pinned Claude Code in the claude-envoy job; client census and tool count (25) updated. 865c9a6c: suggestions.go relatedBounds and the cancelled answer, related_check_test.go decision-block timeout test. 7ff7de30: ci.yaml and docs-pages.yaml filters name internal/dispatch/sessionanswers."
   ],
   "trickyParts": [
     "A person's reply to a message is a message.answered event, so S1 and the 0121 index take message.answered as well as message.created.",
@@ -135,9 +152,13 @@
     "Live steering on the OpenAI Codex WebSocket path runs the context handler on the queued steering messages alone, which carry nothing that tells them from a first request, so the list (and dispatch-first, as before this PR) goes out with a live steer there; documented in pi-envoy AGENTS.md.",
     "Side-turn and handoff detection read the pinned host's prompt texts; a pin bump that rewords them fails session-answers-omp.test.ts cases (i) and (j).",
     "Open, documented in pi-envoy AGENTS.md: a speculative compaction with an empty tail running beside the main-loop request it matches can drop that request's list (needs the kept turn right after a failed reply the branch still holds); a task subagent's empty-tail compaction still carries the list, since a subagent is not in the host's registry.",
-    "The tester's red test (cross-URL) was strengthened as the reviewer and architect asked: it now waits for the first refresher to run its command, holds the second hook's code until that refresher finished (preload), and asserts the exact mismatch reason; it still asserts the earlier Dispatch's list is not carried."
+    "The tester's red test (cross-URL) was strengthened as the reviewer and architect asked: it now waits for the first refresher to run its command, holds the second hook's code until that refresher finished (preload), and asserts the exact mismatch reason; it still asserts the earlier Dispatch's list is not carried.",
+    "Final round: spec point 2 (dispatch doc-read prints each open anchored comment's author, time and full text) is now delivered by main's #2366, which prints every open anchored thread, asks included; this branch's own printing was removed at the merge rather than kept beside it, since both would print each thread twice. Likewise main's #2366 recipient routing replaced this branch's reply-on-a-document routing.",
+    "Final round: relatedAllowance stays (a test and two doc comments outside suggestions.go name it); relatedBounds wraps it, so both WithTimeoutCause sites go through one helper."
   ],
-  "openQuestions": [],
+  "openQuestions": [
+    "cmd/dispatch TestADevSignInServerRestartedAfterAKillStarts cannot run in this pod: DISPATCH_DEV_SIGNIN refuses the non-loopback cluster Postgres and the role may not port-forward; it is main's test and this branch does not touch dev sign-in."
+  ],
   "discoveredComplexity": [
     "The answers-hook wall-time checks (< 1 s) measured 0.87-0.90 s on this loaded pod because Bun start-up varies 240-760 ms; a very loaded CI runner could make them flaky.",
     "Under synthetic overload (four busy loops on 2 CPUs) the five-source content test can miss: a hook whose start-up spent the budget waits only 150 ms for a quick Dispatch read, and the design then carries the failure line (1 of 3 loaded runs here).",
