@@ -208,9 +208,10 @@ func autolinkAt(after []byte) bool {
 	return util.FindURLIndex(address) == end || util.FindEmailIndex(address) == end
 }
 
-// rawHTMLParser is goldmark's inline raw HTML parser, which every reader of Parse's reads raw HTML
-// with (inlineParsers).
-var rawHTMLParser = parser.NewRawHTMLParser()
+// rawHTMLParser is goldmark's inline raw HTML parser reading a declaration itself
+// (declarationParser), which every reader of Parse's reads raw HTML with (inlineParsers), so the
+// writer's scan and the readers read a declaration by the one walk.
+var rawHTMLParser = declarationParser{parser.NewRawHTMLParser()}
 
 // openTagPattern is an open tag as CommonMark 0.31 and the browser editor's engine (micromark's
 // html-text) read one, which is goldmark's pattern with CommonMark's unquoted attribute value: one
@@ -248,8 +249,8 @@ const (
 // reads less as raw HTML than CommonMark 0.31 and the engine do, so it is asked only for a closing
 // tag, a comment, a processing instruction and a CDATA section, which it reads as they do or
 // more; an open tag is matched against CommonMark's (openTagPattern), and a declaration, `<!` and
-// any ASCII letter where goldmark reads one only after an uppercase letter, ends at the first `>`
-// after it (declarationEnd). It reads the run's lines as the readers do, each later line without
+// any ASCII letter where goldmark reads one only after an uppercase letter, is read by the parser
+// the readers read one with. It reads the run's lines as the readers do, each later line without
 // the prefix written after the line feed (as readsBackUnder takes it off), so a `>` of a quote
 // marker closes nothing.
 //
@@ -266,9 +267,11 @@ type rawHTMLScan struct {
 	from    int
 	prefix  string
 	// lines are the run's lines the reader reads, made at the first ask; line is the one the last
-	// `<` asked about is on.
+	// `<` asked about is on, and pc the context the parser keeps what it reads of those lines in
+	// (declarationBlock), the run's lines being one block to it.
 	lines  text.Segments
 	reader text.BlockReader
+	pc     parser.Context
 	line   int
 	// ends is, for each kind rawHTMLCloser tells apart, where the construct its last ask found
 	// ends, htmlEndNone where that ask found none, and htmlEndUnasked before any ask.
@@ -299,15 +302,11 @@ func (s *rawHTMLScan) opensAt(at int) bool {
 			return true
 		}
 	}
-	switch {
-	case kind == htmlDeclaration:
-		s.ends[kind] = s.declarationEnd(at)
-		return s.ends[kind] != htmlEndNone
-	case isASCIILetter(s.written[at+1]):
+	if isASCIILetter(s.written[at+1]) {
 		return s.reader.Match(openTagPattern)
 	}
-	// The raw HTML parser reads neither the parent nor the parser context.
-	html := rawHTMLParser.Parse(nil, s.reader, nil)
+	// The raw HTML parser reads no parent.
+	html := rawHTMLParser.Parse(nil, s.reader, s.pc)
 	if kind != htmlNoCloser {
 		s.ends[kind] = htmlEndNone
 		if html != nil {
@@ -318,23 +317,8 @@ func (s *rawHTMLScan) opensAt(at int) bool {
 	return html != nil
 }
 
-// declarationEnd is where the declaration opened at at, on the line the scan is at, ends: after
-// the first `>` on the run's lines from there (declarationClose, the reader's own closer),
-// htmlEndNone where none follows.
-func (s *rawHTMLScan) declarationEnd(at int) int {
-	for line := s.line; line < s.lines.Len(); line++ {
-		segment := s.lines.At(line)
-		if line == s.line {
-			segment = segment.WithStart(at)
-		}
-		if end := declarationClose(segment.Value(s.written)); end >= 0 {
-			return segment.Start + end
-		}
-	}
-	return htmlEndNone
-}
-
-// readLines makes the run's lines and a reader over them.
+// readLines makes the run's lines, a reader over them and the context the parser keeps what it
+// reads of them in.
 func (s *rawHTMLScan) readLines() {
 	for start := s.from; start < len(s.written); {
 		stop, next := blockLine(s.written, start, s.prefix)
@@ -342,6 +326,7 @@ func (s *rawHTMLScan) readLines() {
 		start = next
 	}
 	s.reader = text.NewBlockReader(s.written, &s.lines)
+	s.pc = parser.NewContext()
 }
 
 // blockLine is the line of written that starts at start: where it stops, after its line feed or

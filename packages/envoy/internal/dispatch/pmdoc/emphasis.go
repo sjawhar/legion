@@ -11,26 +11,28 @@ import (
 )
 
 // inlineParsers is goldmark's default inline parsers, each found by its type as blockParsers finds
-// the block parsers it wraps: its emphasis parser replaced by emphasisParser, and its link parser
-// measuring the images it makes and pairing their labels' runs (imageNesting), with tildeParser
-// added at the priority goldmark's strikethrough extension gives its own (500), every delimiter
-// run read by rules, and declarationParser at 350, between goldmark's autolink parser (300) and
-// its raw HTML parser (400), so every inline HTML declaration is read by the one rule
-// (opensDeclaration) before goldmark's own parser, which opens one only after an uppercase
-// letter, is asked.
+// the block parsers it wraps: its emphasis parser replaced by emphasisParser, its link parser
+// measuring the images it makes and pairing their labels' runs (imageNesting), and its raw HTML
+// parser reading an inline HTML declaration itself (declarationParser), where that parser stands
+// (400), so a `<` is read by one parser and every declaration by the one rule (opensDeclaration),
+// which opens one at any ASCII letter where goldmark's parser opens one only after an uppercase
+// letter. tildeParser is added at the priority goldmark's strikethrough extension gives its own
+// (500), and every delimiter run is read by rules.
 func inlineParsers(rules delimiterRules) []util.PrioritizedValue {
 	parsers := parser.DefaultInlineParsers()
 	emphasisType := reflect.TypeOf(parser.NewEmphasisParser())
 	linkType := reflect.TypeOf(parser.NewLinkParser())
+	rawHTMLType := reflect.TypeOf(parser.NewRawHTMLParser())
 	for index, prioritized := range parsers {
 		switch reflect.TypeOf(prioritized.Value) {
 		case emphasisType:
 			parsers[index].Value = emphasisParser{rules: rules}
 		case linkType:
 			parsers[index].Value = imageNesting{prioritized.Value.(goldmarkLinkParser)}
+		case rawHTMLType:
+			parsers[index].Value = declarationParser{prioritized.Value.(parser.InlineParser)}
 		}
 	}
-	parsers = append(parsers, util.Prioritized(declarationParser{}, 350))
 	return append(parsers, util.Prioritized(tildeParser{rules: rules}, 500))
 }
 
