@@ -2,29 +2,40 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-220",
-  "completed": "2026-10-28T23:31:00Z",
-  "round": 16,
-  "testedHead": "009871fb650d91dd15a4adb3374b94f713d7773f (code head, a forward merge of main; PR head 562f7843 adds only .legion/)",
+  "completed": "2026-10-29T01:16:00Z",
+  "round": 17,
+  "testedHead": "7d5a2eaf7b16b47b78f0ab1723b4d5c93939c307 (code head: a forward merge of main past 571f729be; PR head ca0c0684 adds only .legion/)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "In-pod at 009871fb650d91dd15a4adb3374b94f713d7773f: `bun test claude-backend-bun-pin.test.ts claude-backend-key-runner.test.ts model-endpoint.test.ts app-logins.test.ts install-key-file-model-route.test.ts` -> 46 pass, 0 fail. bash -n ok on both proofs. DaemonAPIVersion is 42 in version.go, the fixture and both package.json files (main is at 41). No teardown file changed since bb11c27a."
+    "how": "Round 16's two failures are fixed. 7d5a2eaf7b16b47b78f0ab1723b4d5c93939c307 contains af8b5cbfd and 571f729be (the TLS-probe fixes), and GitHub no longer reports a conflict. The sandbox proof's daemon check passed on this head's image (proof 2). In-pod at 7d5a2eaf7b16b47b78f0ab1723b4d5c93939c307: `cd scripts/e2e/lib && bun test claude-backend-bun-pin.test.ts claude-backend-key-runner.test.ts model-endpoint.test.ts app-logins.test.ts install-key-file-model-route.test.ts` -> 46 pass, 0 fail. `cd packages/pi-legion && bun test scripts/skill-scenarios/rig.test.ts -t install_model_route` -> 6 pass, 0 fail. bash -n ok on both proofs. DaemonAPIVersion 42 in version.go, the fixture and both package.json files (main 41). `go test ./cmd/legion/ -run 'TLS|Probe'` ok, once the pod's own PI_*/OMP_SESSION_* variables are unset (with them set, TestProbeImageReadsEachRolesOwnOverlaysAsTheRoleStarts reads the pod's PI_CONFIG_FILES; CI's test job is green)."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "The sandbox live proof passes at the final head",
-      "evidence": "The INFRA lead ran claude-backend-sandbox.sh at 009871fb650d91dd15a4adb3374b94f713d7773f on image sha256:970dacaf406d8d0d4a1f0815958ce708ac0e5b0c1b39276bad20360f53deb02e (Worker Image run 40769658702; I read revision label 009871fb650d91dd15a4adb3374b94f713d7773f from the config blob). It started 22:49:04Z and stopped 22:56:40Z at 'FAIL daemon: the Go daemon exited before it answered /healthz', after 'probe-image: TLS client chromium emSign: unavailable (signal: killed …)'. Checks before it passed: prerequisites, rig, snapshot, bridge, operator-route. namespace-clean found 0 of the run's objects before and after. This is main's TLS-probe defect, which the branch carries: chromium waits on the emSign chain's AIA issuer fetches and is killed at the probe's 20 s bound. Main fixed it in af8b5cbfd (90 s bound) and 571f729be (#2475, merged 23:08:56Z: chromium resolves only the site under test). 009871fb650d91dd15a4adb3374b94f713d7773f contains neither. Fix: forward-merge main past 571f729be, then build the image and run the proofs at the merged head."
+      "criterion": "N1/N3 at the final head: a Claude Code implementer under tmux registers, is reminded by the Stop hook while its phase is open, completes through the legion MCP tool, and resumes the same session after its pane is killed",
+      "surface": "devbox (INFRA lead's lane): real Go daemon with the tmux runtime, real Claude Code, real Envoy/Dispatch/NATS, sjawhar/legion-smoke, role Apps 5341240/5341243, model gateway with INFRA's key (legion-gateway-key-infra), Bun 1.4.4",
+      "command": "agent-secrets register --exec -- env PATH=<Bun 1.4.4 first> LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_MODEL_BASE_URL=<box gateway URL> LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 gateway key file> LEGION_E2E_CLAUDE_KEY_FILE=<same> LEGION_E2E_APP_KEY_RUNNER=agent-secrets LEGION_E2E_IMPLEMENT_APP_ID=5341240 LEGION_E2E_REVIEW_APP_ID=5341243 bash scripts/e2e/claude-backend-tmux.sh (2026-10-29 00:02:17-00:24:16Z)",
+      "observed": "exit 0, 'claude backend e2e: PASS', 10/10 ok: prerequisites, rig, admission, architect-registers-the-gate, planner-handoff, claude-implementer-registers, stop-hook-reminds-the-open-phase, claude-implementer-handoff, kill-resumes-the-same-claude-session (70 earlier turns, 710850 bytes unchanged, marker quoted back), every-launch-endpoint-checked. 'checks keys: GET /v1/models with no key answered 401' and 'the model key is legion-infra … (GET /key/info)'. legion, envoy-listener and envoy-dispatch stamped 7d5a2eaf7b16b47b78f0ab1723b4d5c93939c307 modified=false. No anthropic.com. I read dispatch://INFRA-220/artifact/infra220-7d5a2eaf-tmux-transcript-log.",
+      "headSha": "7d5a2eaf7b16b47b78f0ab1723b4d5c93939c307",
+      "negativeControl": "A Bun other than the pin is refused in prerequisites, naming 1.4.4 (round 15, driven in the pod, and red test claude-backend-bun-pin.test.ts, passing here). The lane's first attempt at this head, with PATH lost under agent-secrets, stopped the same way in 47 s before any check ran."
     },
     {
-      "criterion": "The pull request can merge",
-      "evidence": "GitHub reports #2186 CONFLICTING at 562f7843 (read 23:29Z). The same forward merge fixes it."
+      "criterion": "N2/N4 at the final head: a Claude Code implementer under the Kubernetes runtime runs the bridge in its issue pod, is reminded by the Stop hook, completes, and a replacement pod resumes the same Claude Code session from the session table",
+      "surface": "devbox daemon (bridge reachability) against the production GKE cluster, namespace legion. Worker image ghcr.io/sjawhar/legion-worker@sha256:31203268506b9ed1bcce90e1fdad96c06debdf590988609f3adaebbbc7770bd0 (Worker Image run 40788418055; I read org.opencontainers.image.revision=7d5a2eaf7b16b47b78f0ab1723b4d5c93939c307 from its config blob). Model gateway at its in-cluster address with INFRA's key. Scratch Postgres session store, no priority class.",
+      "command": "agent-secrets register --exec -- env LEGION_E2E_POD_REACHABILITY=bridge LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_MODEL_BASE_URL=http://model-gateway-egress.legion.svc.cluster.local:4000 LEGION_E2E_MODEL_PREFLIGHT_BASE_URL=<box gateway URL> LEGION_E2E_STORAGE_CLASS=standard-rwo LEGION_E2E_CLAUDE_MODEL=claude-sonnet-5 LEGION_E2E_CLAUDE_KEY_FILE=<0600 gateway key file> LEGION_E2E_RUNTIME_KUBECONFIG=<ADC kubeconfig copy> GOOGLE_APPLICATION_CREDENTIALS=<ADC copy> LEGION_E2E_APP_KEY_RUNNER=agent-secrets LEGION_E2E_IMPLEMENT_APP_ID=5341240 LEGION_E2E_REVIEW_APP_ID=5341243 LEGION_E2E_IMAGE=<digest above> ports 13380-13385 bash scripts/e2e/claude-backend-sandbox.sh (2026-10-29 00:26:34-01:11:28Z)",
+      "observed": "exit 0, 'claude backend sandbox e2e: PASS', 15/15 ok: prerequisites, rig, snapshot, bridge, operator-route, daemon (the image probe passed, the check round 16 failed), admission, architect-registers-the-gate, planner-handoff, claude-implementer-registers, claude-pod-runs-the-bridge, stop-hook-reminds-the-open-phase, claude-implementer-handoff, pod-deleted-resumes-the-same-claude-session (old pod gone; the table row is 674391 bytes, whose first 673541 are the transcript from before the deletion; 48 earlier turns unchanged in the table and the restored file; marker quoted back), namespace-clean (0 of the run's objects before and after). 'checks keys … answered 401' and 'the model key is legion-infra'. Stamps 7d5a2eaf7b16b47b78f0ab1723b4d5c93939c307 modified=false. No anthropic.com. I read dispatch://INFRA-220/artifact/infra220-7d5a2eaf-sandbox-transcript-log.",
+      "headSha": "7d5a2eaf7b16b47b78f0ab1723b4d5c93939c307",
+      "negativeControl": "SIGINT control (round 13, ec8efe54; no proof script or teardown file has changed since, checked at each later head): interrupted run, teardown clean, no FAIL cleanup, no App key files left, nothing left in the namespace (dispatch://INFRA-220/artifact/infra220-ec8efe54-sandbox-sigint-transcript-log)"
     }
   ],
-  "failed": 2,
-  "standing": {
-    "tmux": "PASS at f319ebaa (round 14). The merge into 009871fb650d91dd15a4adb3374b94f713d7773f changed daemon code, so tmux runs again at the next head, with the sandbox proof.",
-    "sigint": "Stands from ec8efe54: no teardown file changed since then."
-  },
-  "mainReds": "Per the controller's 22:50Z list: #2324 (recipients-claim) and #2473 (envoy deliveryaudit_test) are in 009871fb650d91dd15a4adb3374b94f713d7773f, so a failure of either here would count. #2470 (mermaid timing) is not in 009871fb650d91dd15a4adb3374b94f713d7773f, so a failure of it is main's. #2481 (pmdoc docstest.NestedValue) is not merged.",
-  "ci": "At 009871fb650d91dd15a4adb3374b94f713d7773f: Tests 40769658879 (lint, typecheck, test, and the daemon Go suite on Postgres 16) success, Docs success, PR Title success, Worker Image 40769658702 success. Legion Envoy and Contracts 40769658652 still queued at 23:30Z.",
-  "nextRound": "After the forward merge past 571f729be: the worker image at the merged head (label checked), then the sandbox proof and then the tmux proof on legion-gateway-key-infra, each transcript showing 'the model key is legion-infra'."
+  "observations": [
+    "The sandbox transcript has a bare 'command terminated with exit code 1' before 'ok claude-pod-runs-the-bridge'. The same line was in the 7a93f98f run. It comes from a kubectl exec probe in the check's poll, and the check then passed. Not a defect."
+  ],
+  "mainReds": "Per the controller (00:56Z), main's known reds are packages/dispatch/e2e/close-withdraws-asks.e2e.ts:126 (INFRA-138's tree) and pmdoc's cpuTimeOf call in typed_nesting_test.go:23 (#2484). Neither appears in this head's required CI, which is green.",
+  "ci": "At 7d5a2eaf7b16b47b78f0ab1723b4d5c93939c307, read 01:14Z: Tests 40788417882 (lint, typecheck, test, and the daemon Go suite on Postgres 16) success, Docs success, PR Title success, Worker Image 40788418055 success. Legion Envoy and Contracts 40788418202 still queued.",
+  "notTested": [
+    "The sandbox runtime identity is the operator's ADC identity, not the daemon's restricted identity (the implementer's recorded deviation)."
+  ],
+  "forbiddenKeyRecord": "Every live run before round 12 used a model key now disabled, and none of them is evidence. Every run from round 13 on used INFRA's gateway key."
 }
