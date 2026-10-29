@@ -2127,6 +2127,66 @@ func TestRoomLiveHookIsGatedByTestHooksEnabled(t *testing.T) {
 	}
 }
 
+// The hold-admission hook is a browser test's alone: unmounted without DISPATCH_TEST_HOOKS, and with
+// them it makes the document's next socket wait the time it names before the server answers its
+// upgrade, once: the socket after it is answered at once. A wait past two minutes, or below zero,
+// is refused.
+func TestHoldAdmissionHookIsGatedByTestHooksEnabled(t *testing.T) {
+	const hold = 1500 * time.Millisecond
+	handler := newTestHandler(t)
+	unhooked := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/00000000-0000-0000-0000-000000000001/_test/hold-admission", map[string]int64{"ms": 1000}, "alice")
+	if unhooked.Code != http.StatusNotFound {
+		t.Fatalf("hold-admission hook without TestHooksEnabled: status=%d, want %d", unhooked.Code, http.StatusNotFound)
+	}
+	// A document service that signs browsers in, as Dispatch's does, under an API with the hooks.
+	database := storetest.Open(t)
+	seedPeople(t, database, "alice")
+	service := docs.New(docs.Deps{Store: database, Identity: headerIdentity(database), Events: events.NewBroker(), ServerURL: "https://dispatch.example", Settle: time.Hour})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	deps, err := NewDeps(DepsInput{
+		Store:            database,
+		Identity:         headerIdentity(database),
+		AgentTokens:      sharedAgentTokens(t, "agent-token"),
+		Docs:             service,
+		ServerURL:        "https://dispatch.example",
+		TestHooksEnabled: true,
+	})
+	if err != nil {
+		t.Fatalf("new API dependencies: %v", err)
+	}
+	hooked := http.NewServeMux()
+	Register(hooked, deps)
+	issue := createInteractionIssue(t, hooked, "TEST", "Held admission", "A spec.")
+	path := "/api/v1/artifacts/" + issue.PrimaryArtifactID + "/_test/hold-admission"
+	for _, ms := range []int64{-1, 120_001} {
+		if refused := dispatchRequest(t, hooked, http.MethodPost, path, map[string]int64{"ms": ms}, "alice"); refused.Code != http.StatusBadRequest {
+			t.Fatalf("hold-admission hook for %d ms: status=%d body=%s, want %d", ms, refused.Code, refused.Body.String(), http.StatusBadRequest)
+		}
+	}
+	documentServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(documentServer.Close)
+	open := func(what string) time.Duration {
+		t.Helper()
+		started := time.Now()
+		connection, response, err := gws.DefaultDialer.Dial("ws"+strings.TrimPrefix(documentServer.URL, "http")+"/ws/doc/"+issue.PrimaryArtifactID, http.Header{"X-Dispatch-User": {"alice"}})
+		if err != nil {
+			t.Fatalf("open the document %s: response=%#v err=%v", what, response, err)
+		}
+		took := time.Since(started)
+		_ = connection.Close()
+		return took
+	}
+	if held := dispatchRequest(t, hooked, http.MethodPost, path, map[string]int64{"ms": hold.Milliseconds()}, "alice"); held.Code != http.StatusNoContent {
+		t.Fatalf("hold-admission hook: status=%d body=%s, want %d", held.Code, held.Body.String(), http.StatusNoContent)
+	}
+	if took := open("with the hold"); took < hold {
+		t.Fatalf("the held socket's upgrade was answered after %s, want at least the %s hold", took, hold)
+	}
+	if took := open("after the hold was used"); took >= hold {
+		t.Fatalf("the socket after the held one was answered after %s, want it answered without the %s hold", took, hold)
+	}
+}
+
 // The used-up hook is a browser test's alone: unmounted without DISPATCH_TEST_HOOKS, and with them
 // it leaves the document's history near enough a room's scan total that the rebuild it refused
 // before takes it, the re-scan of its history named as why.

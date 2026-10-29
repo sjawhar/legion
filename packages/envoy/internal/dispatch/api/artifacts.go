@@ -16,6 +16,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -1409,6 +1410,44 @@ func (s *server) artifactRoomLive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	WriteJSON(w, http.StatusOK, map[string]bool{"live": s.deps.Docs.RoomLiveForTest(artifact.ID)})
+}
+
+// maxAdmissionHold is the longest a test may hold a document's next socket before its admission
+// (holdArtifactAdmission): two minutes, the longest a browser of the room budget's burst of fifty
+// measured waited to be answered (TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays).
+const maxAdmissionHold = 2 * time.Minute
+
+// holdArtifactAdmission makes the document's next socket wait the request's ms before its
+// admission, or takes back such a hold for zero (docs.Service.HoldNextAdmissionForTest).
+// Test-only: mounted by routes() only when Deps.TestHooksEnabled is set, so a browser test can keep
+// a document's first sync waiting as long as a browser in a burst waits for its room.
+func (s *server) holdArtifactAdmission(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	var input struct {
+		MS int64 `json:"ms"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if input.MS < 0 || input.MS > maxAdmissionHold.Milliseconds() {
+		writeError(w, "INVALID_JSON", http.StatusBadRequest, fmt.Sprintf("ms is how long the next socket waits, from 0 to %d", maxAdmissionHold.Milliseconds()))
+		return
+	}
+	wait := time.Duration(input.MS) * time.Millisecond
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if artifact.Kind != "doc" {
+		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
+		return
+	}
+	s.deps.Docs.HoldNextAdmissionForTest(artifact.ID, wait)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // useUpArtifactScanTotal gives the document a stored history whose re-scan uses up a room's scan

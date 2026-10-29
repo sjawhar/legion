@@ -186,6 +186,13 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
         }
       }
     };
+    // Nothing here ends a socket that waits for its room. The server answers the upgrade only
+    // once it has admitted the browser and loaded the document, which a burst has kept a browser
+    // waiting 21.4 s for on the copy bound alone (doc.e2e.ts holds one 25 s). Until the first
+    // frame arrives the provider is `connecting`: its `messageReconnectTimeout` check (30 s) skips
+    // a socket that is not connected or has received nothing, and its retry has no `timeout`
+    // (@hocuspocus/provider 2.15.3, dist/hocuspocus-provider.esm.js:1676,1692,1903-1914). Any
+    // timeout added to this path must outlast that wait, or the reconnect queues the browser again.
     const websocket = new HocuspocusProviderWebsocket({
       WebSocketPolyfill,
       connect: false,

@@ -815,6 +815,24 @@ export function quiesceDocuments(options: ApiOptions = {}): Promise<{ ok: boolea
   );
 }
 
+/**
+ * Makes the document's next socket wait `ms` before its admission, as a browser in a burst waits
+ * for its room before the server answers its upgrade; 0 takes the hold back. Test-only endpoint
+ * (mounted when DISPATCH_TEST_HOOKS=1, see run-server.sh).
+ */
+export function holdDocumentAdmission(
+  artifactId: string,
+  ms: number,
+  options: ApiOptions = {}
+): Promise<void> {
+  return request<void>(
+    `/api/v1/artifacts/${encodeURIComponent(artifactId)}/_test/hold-admission`,
+    "POST",
+    { ms },
+    options
+  );
+}
+
 /** The route of `project`'s source `repo` (`owner/name`): a source is addressed by its repository. */
 function architectureSourcePath(project: string, repo: string): string {
   const [owner = "", name = ""] = repo.split("/");

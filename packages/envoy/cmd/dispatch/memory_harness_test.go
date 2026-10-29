@@ -480,25 +480,38 @@ func documentFrame(room string, tag uint64, payload []byte) []byte {
 }
 
 // dialDocument connects to the document's room as a person's browser does: signed in, read-write
-// at the server's schema version (schemaReadOnly, internal/dispatch/docs/websocket.go:376-378).
+// at the server's schema version (schemaReadOnly, internal/dispatch/docs/websocket.go:388-390).
 // The server answers the upgrade only once it has admitted the browser and loaded the document
-// (Service.ServeHTTP, websocket.go:274-341), and a burst of browsers to documents at the bound
-// queues behind one count of a stored version at a time (storedCounts.counting) and loads sharing
+// (Service.ServeHTTP, websocket.go:274-353), and a burst of browsers to documents at the bound
+// queues behind one count of a stored version at a time (storedCounts.takeTurn) and loads sharing
 // two processors, so a browser waits for that answer as long as a browser does rather than the
-// 45 seconds gorilla's default dialer gives up after.
+// 45 seconds gorilla's default dialer gives up after. An upgrade the server answers with an HTTP
+// status in place of the socket is an *upgradeRefused.
 func (p *memoryServer) dialDocument(artifactID string) (*gws.Conn, error) {
 	address := "ws" + strings.TrimPrefix(p.base, "http") + "/ws/doc/" + artifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
 	dialer := gws.Dialer{Proxy: http.ProxyFromEnvironment, HandshakeTimeout: 10 * time.Minute}
 	connection, answer, err := dialer.Dial(address, http.Header{"X-Dispatch-User": {"alice"}})
 	if err != nil {
-		status := 0
 		if answer != nil {
-			status = answer.StatusCode
+			return nil, &upgradeRefused{status: answer.StatusCode, err: err}
 		}
-		return nil, fmt.Errorf("connect to the document's room: %w (status %d)", err, status)
+		return nil, fmt.Errorf("connect to the document's room: %w", err)
 	}
 	return connection, nil
 }
+
+// upgradeRefused is a document socket's upgrade the server answered with an HTTP status, such as
+// the 503 its admission answers for anything but the room budget's refusal.
+type upgradeRefused struct {
+	status int
+	err    error
+}
+
+func (u *upgradeRefused) Error() string {
+	return fmt.Sprintf("connect to the document's room: %v (status %d)", u.err, u.status)
+}
+
+func (u *upgradeRefused) Unwrap() error { return u.err }
 
 // browserAnswerWithin is how long a browser waits for the room to answer what it sent: an update's
 // apply on a document at the bound, with its rendering and its replica's apply of it, takes about a

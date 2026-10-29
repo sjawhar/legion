@@ -18,7 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
-	"golang.org/x/sync/singleflight"
+	"golang.org/x/sync/semaphore"
 )
 
 // roomBudgetBytes is the most heap the open rooms are charged together (roomCharge): 2 GiB of the
@@ -1224,10 +1224,11 @@ func (s *Service) reserveRoom(ctx context.Context, room string) (*roomReservatio
 // which decodes nothing. It is paid on the path a person reaches when they open a document, once
 // for each version in each process, since the count is kept (storedCounts) - never on a keystroke,
 // and never inside a room's update observer. The admissions that miss one version at once share
-// one count, the others waiting for the one that counts, and counts of different documents run one
-// at a time (storedCounts.counting), so a burst of admissions holds one parse's heap and one stored
-// update's bytes rather than one for each. Only the latest version's number is read on every
-// admission; its markdown and the stored history are read only to count them.
+// one count, the others waiting for the one that counts (storedCounts.await), and counts of
+// different documents run one at a time, in the order they asked (storedCounts.takeTurn), so a
+// burst of admissions holds one parse's heap and one stored update's bytes rather than one for
+// each. Only the latest version's number is read on every admission; its markdown and the stored
+// history are read only to count them.
 func (s *Service) storedRoomReservation(ctx context.Context, room string) (int64, error) {
 	var number int64
 	err := s.queryFrom(ctx).QueryRow(ctx, `
@@ -1242,31 +1243,33 @@ func (s *Service) storedRoomReservation(ctx context.Context, room string) (int64
 	if heap, ok := s.budget.stored.get(room, number); ok {
 		return roomWeight(heap, 0, 0), nil
 	}
-	flight := s.budget.stored.flights.DoChan(room+"@"+strconv.FormatInt(number, 10), func() (any, error) {
-		return s.countStoredVersion(ctx, room, number)
+	heap, err := s.budget.stored.await(ctx, room, number, func(wanted context.Context) (int64, error) {
+		return s.countStoredVersion(wanted, room, number)
 	})
-	select {
-	case <-ctx.Done():
-		return 0, ctx.Err()
-	case result := <-flight:
-		if result.Err != nil {
-			return 0, result.Err
-		}
-		return roomWeight(result.Val.(int64), 0, 0), nil
+	if err != nil {
+		return 0, err
 	}
+	return roomWeight(heap, 0, 0), nil
 }
 
 // countStoredVersion is the price of one copy of room's version number (copyHeap), counted from its
 // stored markdown and the structs of the history stored when it counts (storedStructs) and kept
-// (storedCounts.put), unless an admission that started its count before this one's miss has kept
-// it already. It runs once for each version however many admissions miss it at once
-// (storedRoomReservation), so it belongs to the version rather than to the admission that started
-// it: it reads on a context no admission's end cancels, bounded as a cold read's fold is
-// (coldReadTimeout), and through the pool rather than any caller's transaction, and an admission
-// whose request ends returns at once and leaves the count to the others. Its error is a read's, or
-// a panic recovered from the parse or the walk: singleflight re-panics an unrecovered panic of a
-// call it has waiters for in a goroutine nothing can recover, as foldDocument says.
-func (s *Service) countStoredVersion(ctx context.Context, room string, number int64) (heap int64, err error) {
+// (storedCounts.put), unless a count that took its turn before this one has kept it already. It
+// runs once for each version however many admissions miss it at once (storedCounts.await), so it
+// belongs to the version rather than to the admission that started it. It waits for its turn
+// (storedCounts.takeTurn) for as long as wanted holds, which is for as long as any admission still
+// waits for it, since counts of other documents take theirs one at a time before it: fifty
+// browsers opening fifty documents of a mebibyte at once, their rooms loading beside the counts,
+// were answered over two minutes, the last admitted at 1m49s and the last refused at 2m0.5s
+// (TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays). A count that had to take its turn within
+// its own read bound saw that bound pass in the queue: 22 of those fifty were answered 503 at
+// 60.3 s that way. Once it holds its turn, it reads on a context no admission's end cancels,
+// bounded as a cold read's fold is (coldReadTimeout), through the pool rather than any caller's
+// transaction, and keeps what it counted for the next admission even if every admission waiting
+// for it has gone. Its error is the end of wanted, a read's, or a panic recovered from the parse
+// or the walk: the count runs on a goroutine of its own (storedCounts.await), where nothing else
+// could recover it.
+func (s *Service) countStoredVersion(wanted context.Context, room string, number int64) (heap int64, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("counting the stored document panicked: %v\n%s", recovered, debug.Stack())
@@ -1274,10 +1277,15 @@ func (s *Service) countStoredVersion(ctx context.Context, room string, number in
 		}
 	}()
 	counts := &s.budget.stored
+	release, err := counts.takeTurn(wanted)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
 	if heap, ok := counts.get(room, number); ok {
 		return heap, nil
 	}
-	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), coldReadTimeout)
+	readCtx, cancel := context.WithTimeout(context.WithoutCancel(wanted), coldReadTimeout)
 	defer cancel()
 	var markdown string
 	if err := s.store.Pool.QueryRow(readCtx, `
@@ -1285,8 +1293,6 @@ func (s *Service) countStoredVersion(ctx context.Context, room string, number in
 	`, room, number).Scan(&markdown); err != nil {
 		return 0, fmt.Errorf("read the document's version %d: %w", number, err)
 	}
-	counts.counting.Lock()
-	defer counts.counting.Unlock()
 	if counts.beforeCount != nil {
 		counts.beforeCount(room, number)
 	}
@@ -1345,8 +1351,11 @@ const storedCountsHeld = 4_096
 // stored version (countStoredVersion), the most recently admitted first, for at most
 // storedCountsHeld documents. It is shaped as the cold reads' cache is (documentReads,
 // read_cache.go:82-142): one mutex, a map into a list kept in the order of use, one entry for a
-// document, a newer version's count replacing an older one's, and a singleflight group, so that
-// the admissions missing one version at once share one count rather than each parsing it.
+// document, a newer version's count replacing an older one's, and the counts in flight, so that
+// the admissions missing one version at once share one count rather than each parsing it (await).
+// Unlike that cache's singleflight group, the counts in flight know how many admissions wait for
+// each, so a count every admission has left ends its wait for its turn rather than parse for
+// nobody.
 //
 // Unlike that cache's renderings, an element count never goes stale, and needs no stamp: a
 // version's markdown is written once, by the insert that makes the version
@@ -1363,10 +1372,14 @@ type storedCounts struct {
 	mu      sync.Mutex
 	entries map[string]*list.Element
 	order   *list.List
-	// flights counts each (document, version) once however many admissions miss it at once.
-	flights singleflight.Group
-	// counting lets one count run at a time, of whichever documents.
-	counting sync.Mutex
+	// flights is the counts running or waiting for their turn, one for each (document, version)
+	// however many admissions miss it at once (await).
+	flights map[string]*countFlight
+	// turnOnce makes turn on first use.
+	turnOnce sync.Once
+	// turn lets one count run at a time, of whichever documents, in the order they asked for it
+	// (takeTurn).
+	turn *semaphore.Weighted
 	// beforeCount runs in a count once it has read the version's markdown and before it parses it.
 	// Nil outside tests; tests use it to count the parses and to hold one while admissions arrive.
 	beforeCount func(room string, number int64)
@@ -1415,6 +1428,82 @@ func (c *storedCounts) put(count *storedCount) {
 	if c.order.Len() > storedCountsHeld {
 		delete(c.entries, c.order.Remove(c.order.Back()).(*storedCount).room)
 	}
+}
+
+// countFlight is one count of a stored version (countStoredVersion) and the admissions waiting for
+// it.
+type countFlight struct {
+	// done is closed once the count has returned heap and err.
+	done chan struct{}
+	heap int64
+	err  error
+	// waiting is how many admissions wait for the count. storedCounts.mu guards it.
+	waiting int
+	// abandon ends the count's wait for its turn once no admission waits for it.
+	abandon context.CancelFunc
+}
+
+// await is the price count gives of one copy of room's version number, counted once however many
+// admissions miss it at once: the first starts count on a goroutine of its own, and the rest wait
+// for that one. The count is the version's, not an admission's: ctx bounds only this admission's
+// wait, so an admission whose request ends returns at once with ctx's error and leaves the count to
+// the others, and count's context, wanted, ends only once every admission waiting for it has gone,
+// which ends a count still waiting for its turn (countStoredVersion). An admission that misses the
+// version after that starts a count of its own.
+func (c *storedCounts) await(ctx context.Context, room string, number int64, count func(wanted context.Context) (int64, error)) (int64, error) {
+	key := room + "@" + strconv.FormatInt(number, 10)
+	c.mu.Lock()
+	flight := c.flights[key]
+	if flight == nil {
+		wanted, abandon := context.WithCancel(context.WithoutCancel(ctx))
+		flight = &countFlight{done: make(chan struct{}), abandon: abandon}
+		if c.flights == nil {
+			c.flights = make(map[string]*countFlight)
+		}
+		c.flights[key] = flight
+		go func() {
+			defer abandon()
+			heap, err := count(wanted)
+			c.mu.Lock()
+			c.forgetLocked(key, flight)
+			c.mu.Unlock()
+			flight.heap, flight.err = heap, err
+			close(flight.done)
+		}()
+	}
+	flight.waiting++
+	c.mu.Unlock()
+	select {
+	case <-flight.done:
+		return flight.heap, flight.err
+	case <-ctx.Done():
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if flight.waiting--; flight.waiting == 0 {
+			flight.abandon()
+			c.forgetLocked(key, flight)
+		}
+		return 0, ctx.Err()
+	}
+}
+
+// forgetLocked drops flight as key's count in flight, unless a later count has replaced it. Its
+// caller holds mu.
+func (c *storedCounts) forgetLocked(key string, flight *countFlight) {
+	if c.flights[key] == flight {
+		delete(c.flights, key)
+	}
+}
+
+// takeTurn waits until no other count runs, then holds the turn until release is called. Counts
+// take their turns in the order they asked (semaphore.Weighted), so one is not passed over by those
+// behind it. It returns ctx's error, holding nothing, if ctx ends first.
+func (c *storedCounts) takeTurn(ctx context.Context) (release func(), err error) {
+	c.turnOnce.Do(func() { c.turn = semaphore.NewWeighted(1) })
+	if err := c.turn.Acquire(ctx, 1); err != nil {
+		return nil, err
+	}
+	return func() { c.turn.Release(1) }, nil
 }
 
 // chargeLoadedRoom charges room's newly loaded instance, live, whose replica has just published

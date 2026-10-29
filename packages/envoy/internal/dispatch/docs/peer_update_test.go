@@ -1345,7 +1345,7 @@ func chainedCharacters(n int) []byte {
 // applyAllocation is what ygo's apply of update into a document into makes allocates, the least of
 // three runs, each into a fresh document from into: an upper bound on the heap the apply adds at
 // its peak, since no byte it holds can be one it did not allocate. The document has an update
-// observer, as every room does (ygo's own, and the room's, websocket.go:605), so the apply
+// observer, as every room does (ygo's own, and the room's, websocket.go:617), so the apply
 // encodes the update its transaction made for the observers (sjawhar/ygo v1.51.3-sami.7,
 // crdt/doc.go:606-612) as a room's does. Two collections before each run empty the pool ygo's
 // encoders come from (encoding/pool.go:17-19), whose primary and victim caches each survive one,

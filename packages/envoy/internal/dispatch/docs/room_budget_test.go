@@ -762,6 +762,182 @@ func TestTwoAdmissionsAtOnceCountTheStoredVersionOnce(t *testing.T) {
 	}
 }
 
+// Counts of distinct documents take their turns one at a time (storedCounts.takeTurn), so in a
+// burst the last of them waits for every count before it. Each count's read bound (coldReadTimeout)
+// starts once it holds its turn, not when its admission asks: n admissions of n documents whose
+// counts each take twice the bound over n, the burst together twice the bound, all complete, none
+// with a count that timed out, each document counted once and no two counts at the same time.
+func TestABurstOfAdmissionsToDistinctDocumentsCountsEachWithinItsOwnReadBound(t *testing.T) {
+	const n = 6
+	const bound = 600 * time.Millisecond
+	const slow = 2 * bound / n
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	rooms := createDocuments(t, database, n)
+	oldTimeout := coldReadTimeout
+	coldReadTimeout = bound
+	t.Cleanup(func() { coldReadTimeout = oldTimeout })
+	var parses, running atomic.Int64
+	var overlapped atomic.Bool
+	service.budget.stored.beforeCount = func(string, int64) {
+		if running.Add(1) > 1 {
+			overlapped.Store(true)
+		}
+		parses.Add(1)
+		time.Sleep(slow)
+		running.Add(-1)
+	}
+	type admission struct {
+		room        string
+		reservation *roomReservation
+		err         error
+	}
+	admissions := make(chan admission, n)
+	started := time.Now()
+	for _, room := range rooms {
+		go func() {
+			reservation, err := service.reserveRoom(ctx, room)
+			admissions <- admission{room, reservation, err}
+		}()
+	}
+	admitted := 0
+	for range n {
+		select {
+		case got := <-admissions:
+			switch {
+			case got.err == nil && got.reservation != nil:
+				admitted++
+				defer service.budget.release(got.reservation)
+			case errors.Is(got.err, errRoomBudgetFull):
+			default:
+				t.Errorf("the admission to %s answered %v (%v) %s into the burst, want it admitted or refused by the budget", got.room, got.reservation, got.err, time.Since(started).Round(time.Millisecond))
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatal("an admission of the burst never returned")
+		}
+	}
+	elapsed := time.Since(started)
+	t.Logf("%d admissions of %d documents, each count %s against a read bound of %s: %d admitted in %s", n, n, slow, bound, admitted, elapsed.Round(time.Millisecond))
+	if elapsed <= bound {
+		t.Fatalf("the burst took %s, want it past one read bound, %s, so its last counts waited past it", elapsed, bound)
+	}
+	if parses.Load() != n || overlapped.Load() {
+		t.Fatalf("the burst parsed %d times, overlapping %v, want each of the %d documents counted once and one count at a time", parses.Load(), overlapped.Load(), n)
+	}
+}
+
+// An admission whose request ends while the count it waits for still waits for its turn returns at
+// once with its request's error, and leaves the count to the admissions still waiting for it, which
+// are admitted at that count, the document parsed once. A count every admission has left behind
+// ends its wait for its turn and never parses: nobody is waiting for it.
+func TestAnAdmissionWhoseRequestEndsWhileItsCountWaitsForItsTurnLeavesTheCountToTheOthers(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	ids := createDocuments(t, database, 3)
+	held, shared, abandoned := ids[0], ids[1], ids[2]
+	var mu sync.Mutex
+	parsed := map[string]int{}
+	counting, release := make(chan struct{}, 1), make(chan struct{})
+	var released sync.Once
+	t.Cleanup(func() { released.Do(func() { close(release) }) })
+	service.budget.stored.beforeCount = func(room string, _ int64) {
+		mu.Lock()
+		parsed[room]++
+		mu.Unlock()
+		if room == held {
+			counting <- struct{}{}
+			<-release
+		}
+	}
+	type admission struct {
+		reservation *roomReservation
+		err         error
+	}
+	admit := func(ctx context.Context, room string) chan admission {
+		answered := make(chan admission, 1)
+		go func() {
+			reservation, err := service.reserveRoom(ctx, room)
+			answered <- admission{reservation, err}
+		}()
+		return answered
+	}
+	answer := func(answered chan admission, what string) admission {
+		t.Helper()
+		select {
+		case got := <-answered:
+			return got
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s never returned", what)
+			return admission{}
+		}
+	}
+	waitingFor := func(room string) (flights, waiting int) {
+		service.budget.stored.mu.Lock()
+		defer service.budget.stored.mu.Unlock()
+		for key, flight := range service.budget.stored.flights {
+			if strings.HasPrefix(key, room+"@") {
+				flights++
+				waiting += flight.waiting
+			}
+		}
+		return flights, waiting
+	}
+
+	holding := admit(ctx, held)
+	select {
+	case <-counting:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first admission's count never took its turn")
+	}
+	leaving, leave := context.WithCancel(ctx)
+	defer leave()
+	left := admit(leaving, shared)
+	staying := admit(ctx, shared)
+	gone, goAway := context.WithCancel(ctx)
+	defer goAway()
+	alone := admit(gone, abandoned)
+	waitFor(t, 5*time.Second, "two admissions waiting for one count of the shared document, one for the abandoned", func() bool {
+		sharedFlights, sharedWaiting := waitingFor(shared)
+		abandonedFlights, abandonedWaiting := waitingFor(abandoned)
+		return sharedFlights == 1 && sharedWaiting == 2 && abandonedFlights == 1 && abandonedWaiting == 1
+	})
+
+	leave()
+	if got := answer(left, "the admission whose request ended"); got.reservation != nil || !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("the admission whose request ended answered %v (%v), want its request's end", got.reservation, got.err)
+	}
+	if flights, waiting := waitingFor(shared); flights != 1 || waiting != 1 {
+		t.Fatalf("once one of its admissions left, the shared document has %d counts with %d admissions waiting, want its one count with the other still waiting", flights, waiting)
+	}
+	goAway()
+	if got := answer(alone, "the abandoned document's only admission"); got.reservation != nil || !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("the abandoned document's only admission answered %v (%v), want its request's end", got.reservation, got.err)
+	}
+	if flights, _ := waitingFor(abandoned); flights != 0 {
+		t.Fatalf("the abandoned document still has %d counts in flight once its only admission left, want none", flights)
+	}
+
+	released.Do(func() { close(release) })
+	for what, answered := range map[string]chan admission{"the first admission": holding, "the admission that stayed": staying} {
+		got := answer(answered, what)
+		if got.err != nil || got.reservation == nil {
+			t.Fatalf("%s answered %v (%v), want it admitted", what, got.reservation, got.err)
+		}
+		defer service.budget.release(got.reservation)
+	}
+	stored := latestVersionMarkdown(t, database, shared)
+	if want := roomWeight(copyHeap(int64(len(stored)), countElements(stored), storedHistoryStructs(t, database, shared)), 0, 0); budgetUsed(service) != 2*want {
+		t.Fatalf("the budget holds %d bytes, want the two admissions' %d each", budgetUsed(service), want)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if parsed[held] != 1 || parsed[shared] != 1 || parsed[abandoned] != 0 {
+		t.Fatalf("the documents were parsed %v times, want the held and the shared once each and the abandoned never", parsed)
+	}
+}
+
 // A document whose history outgrows its rendering reserves its structs and is charged them once
 // loaded: a small document whose first paragraph took 100,000 characters, each typed before the
 // last and then deleted (typedBeforeState), renders the paragraph it began as, a few elements, from

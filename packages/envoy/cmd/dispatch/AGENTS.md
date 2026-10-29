@@ -149,6 +149,10 @@ resume path can be exercised. `POST
 /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed tree the document-repair
 browser test uses. `GET /api/v1/artifacts/{id}/_test/live` answers whether the document's room is
 resident in this server, loading and rebuilding nothing, for the real-process memory drives.
+`POST /api/v1/artifacts/{id}/_test/hold-admission` with `{"ms": n}` makes the document's next
+socket wait n milliseconds (at most two minutes; 0 takes the hold back) before its admission, as a
+browser in a burst waits for its room before the server answers its upgrade, for the browser test
+of the editor's wait for its first sync.
 `POST /api/v1/agents/{id}/stream/_test/publish` feeds the in-memory agent
 relay the live view's browser rows run against: with no query it publishes one frame, `?as=replay`
 sets what the next connection to that session is answered with, `?as=responder` says whether
@@ -522,6 +526,7 @@ the table says human only.
 | `/api/v1/events` | GET | identity | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
 | `/api/v1/artifacts/_test/quiesce` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every live document and wait for the settlements in flight; not mounted otherwise. |
 | `/api/v1/artifacts/{id}/_test/live` | GET | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Answer `{live}`, whether the document's room is resident in this server, loading and rebuilding nothing; not mounted otherwise. |
+| `/api/v1/artifacts/{id}/_test/hold-admission` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Make the document's next socket wait `ms` (0 to 120000; 0 takes the hold back) before its admission; not mounted otherwise. |
 | `/api/v1/events/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open SSE connection; not mounted otherwise. |
 | `/api/v1/delivery/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open `/ws/delivery` socket; not mounted otherwise. |
 | `/api/v1/agents/{session_id}/stream/_test/publish` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Feed the in-memory agent relay: one frame, `?as=replay` what the next connection is answered with, `?as=responder` whether anyone answers on the control subject, `?as=drop` end every open viewer stream so the page's reconnect rebuilds from that replay; not mounted otherwise. |

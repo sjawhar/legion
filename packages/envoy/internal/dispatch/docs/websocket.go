@@ -300,6 +300,14 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// the stored document would cost until the room's load charges the room itself, and every way
 	// out of this handler returns what it still holds (reserveRoom). maxLiveRooms stays the count
 	// backstop above.
+	if wait, held := s.admissionHolds.LoadAndDelete(room); held {
+		select {
+		case <-time.After(wait.(time.Duration)):
+		case <-r.Context().Done():
+			return
+		}
+	}
+	admitting := time.Now()
 	reservation, err := s.reserveRoom(r.Context(), room)
 	defer s.budget.release(reservation)
 	if errors.Is(err, errRoomBudgetFull) {
@@ -307,6 +315,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		// Anything but the budget's refusal is answered 503, which the editor's backoff retries;
+		// the line says why, and whether the browser had already gone.
+		slog.Warn("dispatch: a document socket's admission failed; answered 503", "room", room, "error", err,
+			"waited", time.Since(admitting), "request_ended", r.Context().Err() != nil)
 		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
 		return
 	}

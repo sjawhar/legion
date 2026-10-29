@@ -196,6 +196,7 @@ func (s *server) routes() []apiRoute {
 			apiRoute{http.MethodPost, "/api/v1/artifacts/_test/room-budget", authAny, "Test hook: set the open documents' memory budget to bytes (0 restores the real one), so a browser test can fill it.", s.setRoomBudget},
 			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
 			apiRoute{http.MethodGet, "/api/v1/artifacts/{id}/_test/live", authAny, "Test hook: whether the document's room is resident in this server, {live}; loads and rebuilds nothing.", s.artifactRoomLive},
+			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/hold-admission", authAny, "Test hook: make the document's next socket wait ms before its admission, as a browser in a burst waits for its room (0 takes the hold back).", s.holdArtifactAdmission},
 			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/used-up", authAny, "Test hook: close the document's room and append a stored history whose re-scan uses up a room's scan total.", s.useUpArtifactScanTotal},
 			apiRoute{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authHuman, "Test hook: publish one frame to a session's conversation viewers.", s.publishAgentStreamFrame},
 		)

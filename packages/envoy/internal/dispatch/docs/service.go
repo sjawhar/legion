@@ -201,6 +201,9 @@ type Service struct {
 	// closes the room (evictFailed). Nil outside tests; tests use it to close and reload the room
 	// another way first.
 	beforeFailedEviction func(room string)
+	// admissionHolds holds, for a document, how long its next socket waits before its admission
+	// (HoldNextAdmissionForTest). Empty outside browser tests.
+	admissionHolds sync.Map
 	// inServiceTransaction runs first in every transaction a service mutation makes through
 	// Server.Apply (serviceTransact). Nil outside tests; tests use it to change the live document
 	// between the mutation's read of it and its write, where a peer's update can land: Apply runs

@@ -95,6 +95,20 @@ const (
 	// fails unless the charges its shrinks leave are within it; a wrong mirror moves only that
 	// check, beside which it logs the server's own figures.
 	pressureReserveBytesForTest = 256 << 20
+
+	// bytesOfHeapAByteAtTheDensestForTest mirrors bytesOfHeapAByteAtTheDensest
+	// (internal/dispatch/docs/room_budget.go:135), what a room is charged at each copy for a byte of
+	// content its transactions add until its next count. With bytesOfHeapAStructForTest and
+	// splitsAStructCanCauseForTest it prices the most a keystroke adds to its room's charge
+	// (keystrokeChargeForTest), from which
+	// TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory leaves the room its person
+	// types in what all of their keystrokes could add, so no keystroke is refused for the budget; a
+	// wrong mirror moves only that room, beside which it logs the budget's arithmetic.
+	bytesOfHeapAByteAtTheDensestForTest = 1_058
+	// keystrokeChargeForTest is the most one keystroke, a one-character insert, adds to its room's
+	// charge: its struct and the two splits it can cause in the structure part, and its byte of
+	// content at the densest price at both copies, none of it re-based by a count.
+	keystrokeChargeForTest = bytesOfHeapAStructForTest*(1+splitsAStructCanCauseForTest) + bytesOfHeapAByteAtTheDensestForTest*roomCopiesForTest
 )
 
 // One browser's update is bounded by bytes, over a real document socket of a real server
@@ -832,9 +846,11 @@ func TestTheHeaviestHandoffTheBoundsAllowIsNotClosedForSize(t *testing.T) {
 //
 // Fifty at once, each browser hands back its whole state as soon as it has the room's, as the
 // editor does on every connect, and then edits: the budget admits within one room of the same
-// number and refuses the rest at admission, and no admitted browser's handoff or first edit is
-// refused, since a handoff of the state the room holds adds nothing to its charge (deletedRuns) and
-// each room's second copy was charged before the edit made it.
+// number and refuses the rest at admission, every browser one or the other and none answered 503,
+// though the counts of their fifty stored versions take their turns one at a time
+// (storedCounts.takeTurn) and the last waits for all the others; and no admitted browser's handoff
+// or first edit is refused, since a handoff of the state the room holds adds nothing to its charge
+// (deletedRuns) and each room's second copy was charged before the edit made it.
 func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 	const burst, gone = 50, 5
 	memory := newMemoryHarness(t)
@@ -1060,18 +1076,24 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 			}
 			group.Wait()
 		})
-		applied, atAdmission, atHandoff, atEdit := 0, 0, 0, 0
+		applied, atAdmission, atHandoff, atEdit, unavailable := 0, 0, 0, 0, 0
+		var slowestAdmitted, slowestRefused time.Duration
 		for index, outcome := range outcomes {
-			switch {
+			switch refused := (*upgradeRefused)(nil); {
+			case errors.As(outcome.err, &refused) && refused.status == http.StatusServiceUnavailable:
+				t.Errorf("browser %d was answered 503 after %s, want it admitted or refused by the budget with %d", index, outcome.answered.Round(time.Millisecond), contracts.DocumentBusyCloseCode)
+				unavailable++
 			case outcome.err != nil:
 				t.Errorf("browser %d, answered after %s: %v", index, outcome.answered.Round(time.Millisecond), outcome.err)
 			case outcome.applied:
 				applied++
+				slowestAdmitted = max(slowestAdmitted, outcome.answered)
 			case outcome.closed == nil:
 				t.Errorf("browser %d's handoff or edit was not applied and its socket stayed open, want both applied or the browser refused with %d", index, contracts.DocumentBusyCloseCode)
 			case outcome.opened == nil:
 				requireClose(t, outcome.closed, contracts.DocumentBusyCloseCode, contracts.DocumentBusyCloseReason, fmt.Sprintf("browser %d", index))
 				atAdmission++
+				slowestRefused = max(slowestRefused, outcome.answered)
 				requireRoomAbsent(t, server, fleet.copies[index], fmt.Sprintf("browser %d's document, refused at admission", index))
 			case !outcome.handedBack:
 				t.Errorf("browser %d's handoff of the state its room holds was refused with %v, want it applied", index, outcome.closed)
@@ -1081,8 +1103,12 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 				atEdit++
 			}
 		}
-		t.Logf("%d browsers at once: %d handed their state back and edited their rooms, %d refused at admission, %d refused their handoff, %d their edit; peak resident memory %d MiB", burst, applied, atAdmission, atHandoff, atEdit, peak>>20)
+		t.Logf("%d browsers at once: %d handed their state back and edited their rooms, the slowest answered after %s; %d refused at admission, the slowest after %s; %d answered 503; %d refused their handoff, %d their edit; peak resident memory %d MiB",
+			burst, applied, slowestAdmitted.Round(time.Millisecond), atAdmission, slowestRefused.Round(time.Millisecond), unavailable, atHandoff, atEdit, peak>>20)
 		requireBudgetRefusals(t, server, fleet.reserved)
+		if applied+atAdmission != burst {
+			t.Errorf("%d browsers were admitted and %d refused by the budget, want every one of the %d one or the other", applied, atAdmission, burst)
+		}
 		if applied < rooms-1 || applied > rooms+1 {
 			t.Errorf("%d rooms took their browser's handoff and edit, want within one of the budget's %d", applied, rooms)
 		}
@@ -2206,21 +2232,29 @@ func TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory(t *testing.T) {
 // limit. The server's peak resident memory, read from /proc, stays under the pod's 4 GiB through
 // every step, and every honest handoff, load and fold completes.
 //
-// On one server: first the budget is filled by browsers that stay - two rooms of the long-edited
-// document typed on until 4,096 structs short of the decode cap and padded to F by text nested
-// under the margin (paddedToTheHeaviestFrame), whose browsers later hand back, then copies of the
-// long-edited document at the decode cap - leaving room, by the budget's arithmetic computed here
-// from the server's constants, for one more document an agent rewrote to the decode cap and not
-// two. Then the cache is filled by cold reads of documents of the heaviest headings the element
-// bound admits, one more than its budget holds. Then, all at once, three browsers of the rooms at F
-// hand their whole state back with a few words typed, two browsers open two copies of the
+// On one server: first the budget is filled by browsers that stay - a browser of an ordinary small
+// document, two rooms of the long-edited document typed on until 4,096 structs short of the decode
+// cap and padded to F by text nested under the margin (paddedToTheHeaviestFrame), whose browsers
+// later hand back, then copies of the long-edited document at the decode cap - leaving room, by
+// the budget's arithmetic computed here from the server's constants, for what typing adds to the
+// small document's room and one more document an agent rewrote to the decode cap, and not two.
+// Then the cache is filled by cold reads of documents of the heaviest headings the element bound
+// admits, one more than its budget holds. Then, all at once, three browsers of the rooms at F hand
+// their whole state back with a few words typed, two browsers open two copies of the
 // agent-rewritten document, of which the budget admits one and refuses the other with 4503 within
 // its arithmetic, and four struct-dense documents no room holds are read cold.
+//
+// Through the cache's fill and the heavy step a person types in the small document's room, a
+// keystroke every 200 ms, each sent once the room has answered the last applied (startTyping).
+// Neither bound holds a keystroke - an ordinary room's update weighs too little to wait for the
+// apply bound and loads nothing - so every keystroke applies, in each step answered within 2 s at
+// the 99th percentile and none past 5 s: the person does not wait behind the heavy work.
 //
 // The server logs each grant of either bound that waited or held its whole bound (heapGrantLine),
 // from which the drive reads that a handoff holding the whole apply bound and a copy holding the
 // whole copy bound were held at the same moment, so the worst case did happen, and the longest wait
-// either bound made. It logs those beside each step's peak and duration.
+// either bound made. It logs those beside each step's peak and duration, and the keystrokes'
+// latencies at their 50th, 90th and 99th percentiles and their most.
 func TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory(t *testing.T) {
 	const folds = 4
 	building := time.Now()
@@ -2238,18 +2272,21 @@ func TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory(t *testing.
 	}
 	cached, cacheWeight := memory.readCacheFill(t)
 	heavyRooms := memory.cloneDocuments(t, heaviest.id, 2)
-	fill := (roomBudgetBytesForTest - 2*heaviest.reserved - agent.reserved) / longEdited.reserved
-	free := roomBudgetBytesForTest - 2*heaviest.reserved - fill*longEdited.reserved
-	if fill < 1 || free < agent.reserved || free >= 2*agent.reserved {
-		t.Fatalf("two rooms at F and %d at the decode cap leave %d of the %d-byte budget, want room for one agent-rewritten document (%d bytes) and not two",
-			fill, free, roomBudgetBytesForTest, agent.reserved)
+	typedIDs, _ := memory.smallDocuments(t, 1)
+	typed := memory.storedShape(t, "the ordinary document a person types in", typedIDs[0])
+	typedGrowth := int64(typingKeystrokes * keystrokeChargeForTest)
+	fill := (roomBudgetBytesForTest - 2*heaviest.reserved - typed.reserved - typedGrowth - agent.reserved) / longEdited.reserved
+	free := roomBudgetBytesForTest - 2*heaviest.reserved - typed.reserved - fill*longEdited.reserved
+	if fill < 1 || free-typedGrowth < agent.reserved || free >= 2*agent.reserved {
+		t.Fatalf("two rooms at F, the typed room and %d at the decode cap leave %d of the %d-byte budget, want room for one agent-rewritten document (%d bytes) beside the %d its typing can add, and not for two before any typing",
+			fill, free, roomBudgetBytesForTest, agent.reserved, typedGrowth)
 	}
 	filling := memory.cloneDocuments(t, longEdited.id, int(fill))
 	lastRooms := memory.cloneDocuments(t, agent.id, 2)
 	folded := append(memory.cloneDocuments(t, agent.id, folds/2), memory.cloneDocuments(t, longEdited.id, folds/2)...)
 	worst := int64(roomBudgetBytesForTest) + documentReadBudgetForTest + heaviestHandoffEstimate + copyHeapBoundForTest
-	t.Logf("the budget: two rooms at F reserve %d bytes each and %d at the decode cap %d each, which leaves %d, room for one agent-rewritten document (%d) and not two",
-		heaviest.reserved, fill, longEdited.reserved, free, agent.reserved)
+	t.Logf("the budget: two rooms at F reserve %d bytes each, the room a person types in %d and up to %d more for its %d keystrokes, and %d rooms at the decode cap %d each, which leaves %d, room for one agent-rewritten document (%d) beside the typing and not two",
+		heaviest.reserved, typed.reserved, typedGrowth, typingKeystrokes, fill, longEdited.reserved, free, agent.reserved)
 	t.Logf("the bounds: a handoff at F is estimated at %d bytes, past the %d-byte apply bound, so it holds all of it; a fold or load of a struct-dense state is weighed at %d bytes a byte, %d for the agent's %d bytes and %d for the long-edited document's %d, past the %d-byte copy bound, so it holds all of it",
 		heaviestHandoffEstimate, applyHeapBoundForTest, copyHeapPerByteForTest, agent.stateBytes*copyHeapPerByteForTest, agent.stateBytes,
 		longEdited.stateBytes*copyHeapPerByteForTest, longEdited.stateBytes, copyHeapBoundForTest)
@@ -2274,15 +2311,19 @@ func TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory(t *testing.
 
 	step := time.Now()
 	var handing []*browser
+	var typing *browser
 	filledPeak := server.peakResident(t, func() {
+		typing = open(t, typedIDs[0])
 		handing = append(handing, open(t, heavyRooms[0]), open(t, heavyRooms[0]), open(t, heavyRooms[1]))
 		for _, room := range filling {
 			open(t, room)
 		}
 	})
-	t.Logf("the budget is filled: two rooms at F held by %d browsers and %d rooms at the decode cap, in %s; peak resident memory %d MiB, %d MiB resident now",
+	t.Logf("the budget is filled: the room a person types in, two rooms at F held by %d browsers and %d rooms at the decode cap, in %s; peak resident memory %d MiB, %d MiB resident now",
 		len(handing), len(filling), time.Since(step).Round(time.Second), filledPeak>>20, server.resident(t, "VmRSS")>>20)
 
+	// From here through the heaviest applies a person types in the room they opened first.
+	typist := startTyping(t, typing)
 	step = time.Now()
 	before := server.resident(t, "VmRSS")
 	cachePeak := server.peakResident(t, func() {
@@ -2365,6 +2406,30 @@ func TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory(t *testing.
 	})
 	took := time.Since(step)
 	window := server.output.String()[mark:]
+	keys, typingErr := typist.finish()
+	if typingErr != nil {
+		t.Errorf("the person typing in an ordinary room through the cache's fill and the heaviest applies stopped before them: %v", typingErr)
+	}
+	for _, during := range []struct {
+		what string
+		keys []keystroke
+	}{
+		{"the cache's fill", slices.DeleteFunc(slices.Clone(keys), func(key keystroke) bool { return !key.sent.Before(step) })},
+		{"the heaviest applies beside full copy bounds", slices.DeleteFunc(slices.Clone(keys), func(key keystroke) bool { return key.sent.Before(step) })},
+		{"both", keys},
+	} {
+		latency := keystrokeLatencies(during.keys)
+		t.Logf("keystrokes in the ordinary room during %s: %d, each answered applied in p50 %s, p90 %s, p99 %s, at most %s",
+			during.what, len(during.keys), latency.p50, latency.p90, latency.p99, latency.max)
+		if len(during.keys) == 0 {
+			t.Errorf("the person typed nothing during %s, want a keystroke every %s", during.what, typingInterval)
+			continue
+		}
+		if latency.p99 >= 2*time.Second || latency.max >= 5*time.Second {
+			t.Errorf("keystrokes in an ordinary room during %s were answered in p99 %s and at most %s, want p99 under 2 s and none over 5 s: typing waited behind the heavy work",
+				during.what, latency.p99, latency.max)
+		}
+	}
 
 	for index, result := range handed {
 		t.Logf("handoff %d of %d bytes: applied %v, closed %v, answered in %s", index, len(handoffs[index]), result.applied, result.closed, result.took.Round(time.Millisecond))
@@ -2437,6 +2502,114 @@ func TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory(t *testing.
 			t.Errorf("the server's resident memory peaked at %d MiB, want under the pod's %d MiB", peak>>20, podMemory>>20)
 		}
 	}
+}
+
+// typingInterval is how often the person typing in an ordinary room presses a key (startTyping),
+// and typingKeystrokes the most keys they press: 3 min 25 s of typing, past the minute the cache's
+// fill and the heavy step took together (29 s and 32 s in one run, 34 s and 33 s in another), and
+// what the budget's arithmetic leaves their room room for (keystrokeChargeForTest).
+const (
+	typingInterval   = 200 * time.Millisecond
+	typingKeystrokes = 1_024
+)
+
+// keystroke is one key a person pressed in a room: when its update was sent, and how long the room
+// took to answer that it applied it.
+type keystroke struct {
+	sent time.Time
+	took time.Duration
+}
+
+// typist is a person typing in a room they hold open (startTyping), until finish.
+type typist struct {
+	stop     chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
+	mu       sync.Mutex
+	keys     []keystroke
+	err      error
+}
+
+// startTyping has a person type in typing's room: a keystroke every typingInterval, each the
+// one-character insert the editor sends for it, typed after the last at the head of the room's
+// first text, and sent once the room has answered the last as applied, so a keystroke the room is
+// slow to answer delays the next rather than queueing beside it. The typing stops at the first
+// keystroke the room does not apply, when the test ends, and once the person has pressed
+// typingKeystrokes keys, which finish reports as the person having run out.
+func startTyping(t *testing.T, typing *browser) *typist {
+	t.Helper()
+	document := newBrowserDocument(t, typing.state(t))
+	text := firstXMLText(document.fragment)
+	if text == nil {
+		t.Fatal("the typed room's state holds no text")
+	}
+	person := &typist{stop: make(chan struct{}), done: make(chan struct{})}
+	go func() {
+		defer close(person.done)
+		ticker := time.NewTicker(typingInterval)
+		defer ticker.Stop()
+		for typed := 0; ; typed++ {
+			if typed == typingKeystrokes {
+				person.mu.Lock()
+				person.err = fmt.Errorf("the person pressed all %d keys before the typing was to stop", typingKeystrokes)
+				person.mu.Unlock()
+				return
+			}
+			select {
+			case <-person.stop:
+				return
+			case <-ticker.C:
+			}
+			var update []byte
+			stop := document.doc.OnUpdate(func(made []byte, _ any) { update = made })
+			document.doc.Transact(func(txn *crdt.Transaction) { text.Insert(txn, typed, "k", nil) })
+			stop()
+			sent := time.Now()
+			applied, closed, err := typing.send(typing.updateFrame(update))
+			person.mu.Lock()
+			person.keys = append(person.keys, keystroke{sent: sent, took: time.Since(sent)})
+			if err != nil || !applied {
+				person.err = fmt.Errorf("keystroke %d was answered applied %v, closed %v, %v", typed, applied, closed, err)
+			}
+			failed := person.err != nil
+			person.mu.Unlock()
+			if failed {
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() { person.finish() })
+	return person
+}
+
+// finish stops the typing, and is every keystroke it sent and why the last was not applied, if it
+// was not.
+func (p *typist) finish() ([]keystroke, error) {
+	p.stopOnce.Do(func() { close(p.stop) })
+	<-p.done
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.keys), p.err
+}
+
+// latencies is the 50th, 90th and 99th percentiles and the most of how long keystrokes took.
+type latencies struct{ p50, p90, p99, max time.Duration }
+
+// keystrokeLatencies is the percentiles of keys' times to be answered, nearest-rank, rounded to the
+// millisecond; zero for no keys.
+func keystrokeLatencies(keys []keystroke) latencies {
+	if len(keys) == 0 {
+		return latencies{}
+	}
+	took := make([]time.Duration, len(keys))
+	for index, key := range keys {
+		took[index] = key.took
+	}
+	slices.Sort(took)
+	rank := func(percent int) time.Duration {
+		return took[max((len(took)*percent+99)/100-1, 0)].Round(time.Millisecond)
+	}
+	return latencies{p50: rank(50), p90: rank(90), p99: rank(99), max: took[len(took)-1].Round(time.Millisecond)}
 }
 
 // requireBusyAndUnchanged sends update to room from a browser of its own and fails the test unless
@@ -2813,7 +2986,7 @@ func (h *memoryHarness) settled(t *testing.T, artifactID string) bool {
 }
 
 // serverOpenedCloseLine is the line the server logs as it closes a room its own work opened over the
-// budget, once nothing holds it (closeIfOpenedOverBudget, internal/dispatch/docs/room_budget.go:1507-1532).
+// budget, once nothing holds it (closeIfOpenedOverBudget, internal/dispatch/docs/room_budget.go:1596-1621).
 var serverOpenedCloseLine = regexp.MustCompile(`msg="dispatch: the room budget closed a document the server opened over it" room=(\S+) charged_before=\d+ charged=\d+ limit=\d+`)
 
 // requireClosedOnceSettled fails the test unless the room of artifactID, which the server's own work
@@ -3044,7 +3217,7 @@ func requireBudgetRefusals(t *testing.T, server *memoryServer, reserved int64) [
 }
 
 // budgetCloseLine is the line the room budget's sweep logs for each unused room it closes, in the
-// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1462-1495).
+// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1551-1584).
 var budgetCloseLine = regexp.MustCompile(`msg="dispatch: the room budget closed an unused document" room=(\S+) charged_before=(\d+) charged=(\d+) limit=(\d+) making_room_for=(\d+)`)
 
 // budgetClose is one close the server logged: the room, what the budget charged before and after
@@ -3089,7 +3262,7 @@ func closesOf(t *testing.T, server *memoryServer, rooms []string, want int) []bu
 
 // storedShape is a stored document a struct-dense drive copies (cloneDocuments), and what an
 // admission to a copy of it reserves, computed here as the server computes it
-// (storedRoomReservation, internal/dispatch/docs/room_budget.go:1231-1300): the structs of its
+// (storedRoomReservation, internal/dispatch/docs/room_budget.go:1232-1306): the structs of its
 // stored history, each stored update walked as a room's own state is (docs.StateStructsForTest),
 // and its latest version's markdown, counted and measured in bytes, priced at the heaviest of a
 // struct's, an element's and a rendered byte's price (copyHeap, :592-602), at both copies.

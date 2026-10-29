@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
@@ -39,6 +40,21 @@ func (s *Service) SetRoomBudgetForTest(bytes int64) int64 {
 // Dispatch's test-hook route.
 func (s *Service) RoomLiveForTest(artifactID string) bool {
 	return s.srv.GetDoc(artifactID) != nil
+}
+
+// HoldNextAdmissionForTest makes the next socket to artifactID wait for wait before its admission
+// (ServeHTTP), so a browser test can keep a document's first sync waiting as long as a browser in a
+// burst waits for its room - for its stored version's count (storedCounts.takeTurn) and for the
+// copy bound, all before the server answers the socket's upgrade - and see what the editor does
+// meanwhile. The wait ends early, and the socket is answered nothing, if its request ends. A wait
+// of zero or less takes back a hold no socket has used yet. It is mounted only through Dispatch's
+// test-hook route.
+func (s *Service) HoldNextAdmissionForTest(artifactID string, wait time.Duration) {
+	if wait <= 0 {
+		s.admissionHolds.Delete(artifactID)
+		return
+	}
+	s.admissionHolds.Store(artifactID, wait)
 }
 
 // The tangle UseUpScanTotalForTest appends: a chain of usedUpChain one-character items, each of a
