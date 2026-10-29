@@ -2,37 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-535",
-  "completed": "2026-10-29T19:05:00Z",
-  "round": 3,
-  "decision": "changes_requested",
-  "reviewedCodeHead": "2e357b5b69436f6511f0076735f7179b08ff4729",
+  "completed": "2026-10-29T20:10:00Z",
+  "round": 4,
+  "decision": "approved",
+  "scope": "Past the round cap: per the INFRA-138 architect (18:40Z), this round judges only round 3's two orderMarks points and that the dumps stay byte-identical; other points fixed by the reviewer in prose.",
+  "reviewedCodeHead": "601c6971174fa4824b0229ebd3c888c67be40d18",
   "reviewerProseCommits": [
-    "f3cda761: escape_test.go:283 cited sjawhar/legion#1594 (a skills PR that only reflowed the line) -> #1429, the PR that wrote it; TestRenderRespellsAFusedRunAsMainDoesBeforeKeepingMarksOpen -> TestRenderRespellsAFusedRunPlainlyBeforeKeepingMarksOpen",
-    "f4d26d77: TestRenderKeepsStoredMarkdownThatReadsBack's header claimed every row is the #1383 writer's own rendering (false for later rows, deep review ran them at 6e4bd145e^); the alt-text failure message claimed #1429's bytes for rows #2360 added"
+    "15327924: orderMarks' doc said following is nil after the last text (reopening returns an empty slice there) and gave keeping open marks open to marksKeptOpen alone (byReach does it too through sharedOpenMarks)."
   ],
-  "ci": "CI at code head 2e357b5b was queued when read; this round requests changes, which waits on no CI. The reviewer's prose pushes start a new run.",
-  "forwardMerge": "2e357b5b merges main 2b427f93 at the architect's request, no conflict; implementer's fingerprint unchanged (04a881ce...). Not a confirmation: the branch's own diff changed this round (7c8ff872, 7511136b).",
+  "roundThreePoints": {
+    "followingComputedInOrderMarks": "Done in 601c6971: run_spellings.go:339-342 build following from nodes[index+1] with wwwBare, nil-guarded, once per call; the caller (render_inline.go:413) passes spelledMarks(n, ..., bareHere, ...) as next. Both reviews traced the retry loop: same value per pass, same value after the loop.",
+    "docComment": "Done in 601c6971: each order described on its own; the three back-reference lines removed. Two wording slips fixed by the reviewer in 15327924."
+  },
+  "byteIdentical": "Implementer and tester: TestDifferentialDump at 601c6971 cmp-identical to 2e357b5b over 435,640 documents, 0 writer refusals; negative control cmp against pre-merge 7511136b exits 1.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at f3cda761. longestRun equal to both old loops over 3,000,000 random samples incl. invalid UTF-8; orderMarks moves the old switch verbatim; merge diff equals pre-merge diff up to offsets; every cited PR number checked by blame. Two Minor comment findings, fixed by the reviewer in f4d26d77.",
-    "codeQuality": "Verdict: CHANGES at f3cda761: (1) orderMarks takes following from the caller while computing nodes[index+2] itself; (2) orderMarks' doc comment is wrong for marksReopened, and three back-reference lines repeat the markOrder mapping."
+    "deepReview": "Verdict: APPROVE at 601c6971; one Minor (nil vs empty wording), fixed in 15327924. go test ./internal/dispatch/pmdoc passed with -timeout 3000s (707 s).",
+    "codeQuality": "Verdict: CHANGES at 601c6971 for the same wording plus the byReach phrasing, both fixed in 15327924; behaviour unchanged."
   },
   "critical": 0,
   "important": 0,
-  "minor": 2,
-  "keyFindings": [
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/run_spellings.go",
-      "description": "orderMarks (run_spellings.go:334) gets following from writeInlineNodes (render_inline.go:414-417 compute spelledMarks(nodes[index+1], ..., wwwBare, ...)) but computes nodes[index+2]'s marks itself, so the lookahead lives in two files. Drop the following parameter, compute it at the top of orderMarks, return (next, following). Differential dumps byte-identical."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/run_spellings.go",
-      "description": "orderMarks' doc (run_spellings.go:330-331) says every order other than marksAsWritten keeps the open marks open around the text where it can; reopening does the opposite by design. Reword per order, and drop the three 'orderMarks orders each text this way under the ... spelling' lines (run_spellings.go:362-363, 393, 433), which repeat the markOrder constants' mapping (197-204)."
-    }
-  ],
-  "notHeld": [
-    ".legion/INFRA-535/implement.json deviations[3] still says the orderMarks fold is not done; the architect said not to hold the round for handoff text, since retro removes .legion/. The PR body was corrected by the reviewer instead.",
-    "Three 'main' comments in files sjawhar/legion#2481 owns (source_lines.go:175, lines.go:379, fenced_code_test.go:27) go to INFRA-722's pull request, per the architect."
-  ]
+  "minor": 0,
+  "keyFindings": []
 }
