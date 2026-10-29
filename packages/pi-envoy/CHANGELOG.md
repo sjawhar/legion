@@ -1,5 +1,44 @@
 # Changelog
 
+## [11.9.0] - 2026-10-29
+
+### Fixed
+
+- A person's Send from Dispatch's live view no longer waits behind Envoy notifications, and an
+  interrupt no longer drops the notifications queued when it lands. Every card (an Envoy
+  notification, an issue message, a comment mention, a Dispatch Steer that was not accepted as the
+  person's own turn) went into the host's steering queue, which the host drains one message per
+  step, so a session that received many cards took a person's Send minutes later, and an Esc
+  emptied that queue. While a turn runs a card now goes as an aside, which the host folds in at the
+  next step, after the Send, without ending the running tool batch; a card still queued at an
+  interrupt is folded into the context with no run and read at the next turn. On an idle session a
+  card is still a steer with `triggerTurn`, so it starts a turn as before; a targeted Aside stays
+  an aside, and a host context without `ctx.isIdle()` keeps every other card a steer. A card the
+  host folds into the context with no turn, as it does for an aside that lands as a run ends in a
+  session interrupted earlier, or in plan mode, now gets one hidden wake that starts a turn to read
+  it, unless an interrupt is still in effect or the card was a targeted Aside; a card sent while
+  the session sets up a prompt is left to that prompt's run, so an interrupt there starts no turn
+  either. The limits are in the package's `AGENTS.md`.
+- The Legion controller's start message is its session's first turn, ahead of any Envoy card that
+  arrived while the session started. A card that reached the operator's controller in a terminal
+  before `/legion-controller-start` ran started its own turn ahead of the start message, and in RPC
+  mode a startup card's wake could fire once the host was idle after its startup, before the
+  daemon's start prompt arrived. While the plugin interface's `startupTurn` names the session (the
+  start sent under 30 s ago, or due and not sent yet for under 30 s), a card that finds it idle goes
+  as a follow-up that starts no turn, in any mode, and the startup wake waits for the start turn:
+  once that turn ends, one wake starts a turn for every card that arrived meanwhile, counted even
+  though the start turn's reply follows them, unless a later reply read them. A start that never
+  comes holds the cards back for 30 s, and a start claim refused before the send releases them
+  within a second. A mark naming another session, or one whose start was sent 30 s ago or more,
+  changes nothing. Plugin interface version 5, which pi-envoy reads; install it with the
+  `@sjawhar/pi-legion` released beside it.
+- A card that reaches an RPC session while Oh My Pi starts no longer holds back every RPC command
+  until the turn it started ends. Oh My Pi settles every extension send of its startup before RPC
+  mode reads its input, and an idle card's send lasted its whole turn, so a Legion worker's
+  `get_state` and task waited for it (once 72 minutes). Such a card now goes into the context with
+  no turn, and the wake starts its turn once the host is idle after its startup. Print, json and
+  terminal sessions keep the idle steer.
+
 ## [11.8.0] - 2026-10-28
 
 ### Added
