@@ -44,12 +44,12 @@ func blockRefusal(node ast.Node, source []byte, firstLine int, htmlFlow map[int]
 		if reason, ok := paragraphDirectiveReason(current.Lines(), source, firstLine); ok {
 			return refuse(reason)
 		}
-		if err := htmlFlowRefusal(current.Lines(), htmlFlow, source, firstLine); err != nil {
+		if err := htmlFlowRefusal(current, current.Lines(), htmlFlow, source, firstLine); err != nil {
 			return err
 		}
 	case *ast.Heading:
 		// A setext heading holds the lines of the paragraph its underline ended.
-		if err := htmlFlowRefusal(current.Lines(), htmlFlow, source, firstLine); err != nil {
+		if err := htmlFlowRefusal(current, current.Lines(), htmlFlow, source, firstLine); err != nil {
 			return err
 		}
 		if _, underlined := current.Attribute(underlinedTextAttr); underlined {

@@ -240,9 +240,15 @@ func (l tableLines) asRead(index int) gmtext.Segment {
 }
 
 // isLazy reports whether line index is a lazy continuation line, one no container around the
-// paragraph continues (lazyLinesAttr).
+// paragraph continues (lazyLinesAttr). lineRecordingParagraph.Continue appends each lazy line's
+// start as it reads it, so the starts rise and a search over them costs a logarithm rather than
+// the walk a scan of every candidate delimiter row would pay for every lazy line before it.
 func (l tableLines) isLazy(index int) bool {
-	return len(l.lazy) > 0 && slices.Contains(l.lazy, lineStart(l.source, l.lines.At(index).Start))
+	if len(l.lazy) == 0 {
+		return false
+	}
+	_, lazy := slices.BinarySearch(l.lazy, lineStart(l.source, l.lines.At(index).Start))
+	return lazy
 }
 
 // findTableRows reads lines as the browser editor's parser reads them

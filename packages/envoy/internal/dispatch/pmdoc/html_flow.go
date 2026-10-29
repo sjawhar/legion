@@ -62,20 +62,26 @@ func htmlFlowLines(node ast.Node) map[int]struct{} {
 	return lines
 }
 
-// htmlFlowRefusal is why a paragraph, text block or setext heading holding lines cannot be stored
-// when the browser editor's parser reads one of them as opening a block of HTML (recorded, from
-// htmlFlowLines), naming the first such line as source's markdown numbers it from firstLine, or
-// nil where it reads none of them so. It wraps ErrBlockHTML, the refusal of the block of HTML
+// htmlFlowRefusal is why node, a paragraph, text block or setext heading holding lines, cannot be
+// stored when the browser editor's parser reads one of them as opening a block of HTML (recorded,
+// from htmlFlowLines), naming the first such line as source's markdown numbers it from firstLine,
+// or nil where it reads none of them so. It wraps ErrBlockHTML, the refusal of the block of HTML
 // goldmark opens itself, because the document is unreadable for the same reason and a caller
 // telling the two apart would learn nothing (docs/edits.go, unreadableReason).
 //
-// A paragraph of that one line is read alike by both and is not refused: the browser's block of
-// HTML holds the same one line, and the editor draws such a block as a paragraph holding it as
-// inline HTML (packages/proof-editor, remarkHtmlBlockParagraphs), which is goldmark's reading of
-// it. What differs, and what this refuses, is a block that swallows the paragraph's other lines
-// into one node where goldmark reads them as the paragraph's own text.
-func htmlFlowRefusal(lines *gmtext.Segments, recorded map[int]struct{}, source []byte, firstLine int) error {
-	if recorded == nil || lines.Len() < 2 {
+// A node that is read alike is not refused: that parser's block of HTML runs to the first blank
+// line, and the editor draws such a block as a paragraph holding its text as inline HTML
+// (packages/proof-editor, remarkHtmlBlockParagraphs), which is goldmark's own reading of the one
+// line. So the two agree where the block holds that line and nothing else: the node holds no
+// other line, and nothing stands between it and the blank line or the container's end - no block
+// opening right under it (a heading, a list, a fence, a rule, a table), which goldmark reads as
+// its own and that parser swallows, and no setext underline, which goldmark takes into the
+// heading and that parser swallows the same way.
+func htmlFlowRefusal(node ast.Node, lines *gmtext.Segments, recorded map[int]struct{}, source []byte, firstLine int) error {
+	if recorded == nil {
+		return nil
+	}
+	if lines.Len() < 2 && readAloneBeforeABlankLine(node) {
 		return nil
 	}
 	for index := range lines.Len() {
@@ -92,6 +98,19 @@ func htmlFlowRefusal(lines *gmtext.Segments, recorded map[int]struct{}, source [
 		return fmt.Errorf("%w: line %d, %q, opens with HTML the browser editor's parser reads as a block of HTML where goldmark reads the text of a paragraph: that parser takes a tab in the line's indentation, inside the tag or after it as goldmark takes spaces, and reads a declaration opening with a lower-case letter, or a closing tag of script, pre or style, as a block as well; escape the < to write it as text", ErrBlockHTML, number, written)
 	}
 	return nil
+}
+
+// readAloneBeforeABlankLine reports whether node is the last block the browser editor's parser's
+// block of HTML could hold: a blank line, or the end of the container around it, stands right
+// after it, so that parser's block ends where goldmark's node does. A setext heading never is:
+// its underline stands on the line after the lines it holds, and that parser takes the underline
+// into the block. A sibling under it with no blank line between is the block's next line too.
+func readAloneBeforeABlankLine(node ast.Node) bool {
+	if _, heading := node.(*ast.Heading); heading {
+		return false
+	}
+	next := node.NextSibling()
+	return next == nil || next.HasBlankPreviousLines()
 }
 
 // htmlFlowKind is the kind of block of HTML the browser editor's parser (micromark's html-flow,
@@ -128,7 +147,7 @@ func htmlFlowKind(line []byte, column int) int {
 	case line[1] == '!':
 		// A declaration, which micromark opens on a letter of either case where goldmark's
 		// pattern takes an upper-case one alone.
-		if len(line) > 2 && htmlAlpha(line[2]) {
+		if len(line) > 2 && isASCIILetter(line[2]) {
 			return 4
 		}
 		return 0
@@ -144,11 +163,11 @@ func htmlFlowKind(line []byte, column int) int {
 	if closing {
 		index++
 	}
-	if !htmlAlpha(next()) {
+	if !isASCIILetter(next()) {
 		return 0
 	}
 	nameStart := index
-	for char := next(); htmlAlpha(char) || char >= '0' && char <= '9' || char == '-'; char = next() {
+	for char := next(); isASCIILetter(char) || char >= '0' && char <= '9' || char == '-'; char = next() {
 		index++
 	}
 	// The name ends at the line's end, a slash, a `>`, a space or a tab, and ends the tag
@@ -200,7 +219,7 @@ func completeAttributes(line []byte, at *int) bool {
 		}
 		return 0
 	}
-	nameStart := func(char byte) bool { return char == ':' || char == '_' || htmlAlpha(char) }
+	nameStart := func(char byte) bool { return char == ':' || char == '_' || isASCIILetter(char) }
 	nameChar := func(char byte) bool {
 		return nameStart(char) || char >= '0' && char <= '9' || char == '-' || char == '.'
 	}
@@ -264,13 +283,10 @@ func completeAttributes(line []byte, at *int) bool {
 	}
 }
 
-// htmlAlpha, htmlSpace and htmlValueEnd are micromark's asciiAlpha, markdownSpace and the
-// characters that end an unquoted attribute value, over the bytes of a line that holds no line
-// ending: a tab stands for the columns it spans, which micromark reads as spaces of its own.
-func htmlAlpha(char byte) bool {
-	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z'
-}
-
+// htmlSpace and htmlValueEnd are micromark's markdownSpace and the characters that end an
+// unquoted attribute value, over the bytes of a line that holds no line ending: a tab stands for
+// the columns it spans, which micromark reads as spaces of its own. Its asciiAlpha is this
+// package's isASCIILetter.
 func htmlSpace(char byte) bool { return char == ' ' || char == '\t' }
 
 func htmlValueEnd(char byte) bool {
