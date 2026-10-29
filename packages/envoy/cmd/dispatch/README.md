@@ -572,22 +572,25 @@ What the two processes share, and what each keeps to itself:
   by, asking every two seconds, and takes the durable over within seconds of the holder dying.
 - No leased background loop runs a pass beside another process's pass of the same loop. Each
   pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a process
-  whose attempt lands inside another's pass finds it held and logs a skip. The seven timer loops —
+  whose attempt lands inside another's pass finds it held and logs a skip. The eight timer loops —
   the delivery reconcile, the architecture import, the webhook redelivery sweep, the outbox's
   daily document compaction, the block index reconciliation, the repair of closed and reopened
-  issues' asks and the prune of the registry of live server processes — also record each pass in
+  issues' asks, the keyed writes' maintenance sweep (lease `suggestion-outcomes`) and the prune of
+  the registry of live server processes — also record each pass in
   `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick lands
   between another's passes — the ordinary case, since each ticker draws its phase at boot and a
   rolling update starts the second process minutes after the first — finds the period already
-  served and logs the same skip: each runs once per period across the processes. The three
-  woken loops, the reference excerpts, the edit notices and the suggestion outcomes, take their
-  lease with no period: a process that finds it held tries again until a pass of its own runs,
-  since the other process's pass may have read before the change that woke this one (Background
-  loops, below). The settlement resumption, the delivery live hub, the event-stream relay, the
-  stale-room evictor, the shared wake listener and the document rooms' timers stay per-process by
-  design, and the embedding queue, the task progress reconciliation and the outbox's own scan
-  claim their own work; the embedding queue's coverage pass runs in every process with no lease,
-  each of its steps safe beside another process's, and drops every vector its own embedder did not
+  served and logs the same skip: each runs once per period across the processes. The two leased
+  woken loops, the reference excerpts and the edit notices, take their lease with no period: a
+  process that finds it held tries again until a pass of its own runs, since the other process's
+  pass may have read before the change that woke this one. The suggestion outcome sweep takes no
+  lease at all: each of its pages holds the `suggestion_outcome_cursor` row `for update`, which
+  serialises two processes by itself (Background loops, below). The settlement resumption, the
+  delivery live hub, the event-stream relay, the stale-room evictor, the shared wake listener and
+  the document rooms' timers stay per-process by design, and the embedding queue, the task
+  progress reconciliation and the outbox's own scan claim their own work; the embedding queue's
+  coverage pass runs in every process with no lease, each of its steps safe beside another
+  process's, and drops every vector its own embedder did not
   make, so every process takes the same embedder settings (Search, below); `cmd/dispatch/main.go`
   says at the call site which loop is which and why.
 - The registry of live server processes is shared. Each process stamps its `server_processes` row
@@ -673,11 +676,9 @@ classes at the call site.
 
 **Woken loops** run a pass at start and then only when a Postgres notification says their work
 may have changed, or when a due time their last pass asked for comes round. With nothing written
-and nothing due they hold no timer and send no statement — the suggestion outcome sweep
-excepted, which asks for a pass every minute for the work it carries that no notification
-announces (below). The four that run passes (`duty.RunWoken`) start two passes no closer
-together than the period of the ticker each replaced, so under load each runs no more often than
-that ticker did.
+and nothing due they hold no timer and send no statement. The four that run passes
+(`duty.RunWoken`) start two passes no closer together than the period of the ticker each
+replaced, so under load each runs no more often than that ticker did.
 
 - The embedding queue (`embedqueue.Run`) scans when `embeddings_enqueue`, which every embedding
   trigger calls, writes a row: it notifies `dispatch_embeddings` (migration `0139`) for a new item
@@ -709,9 +710,9 @@ that ticker did.
   after a sweep (past a batch of 20, or one whose send failed) is swept again 5 s later, and a
   notice goes at most 5 s after its due time. A held window, which names nobody and has no due
   time, neither wakes it nor keeps a timer.
-- The suggestion outcome sweep (`api.RunSuggestionOutcomeSweep`, lease `suggestion-outcomes`) is
-  woken by `dispatch_events` (`0107`), which every event commit notifies whichever process made
-  it. Passes start at least 60 s apart. A pass reads the events after its cursor
+- The suggestion outcome sweep (`api.RunSuggestionOutcomeSweep`) is woken by `dispatch_events`
+  (`0107`), which every event commit notifies whichever process made it. Passes start at least
+  60 s apart. A pass reads the events after its cursor
   (`suggestion_outcome_cursor`, `0142`) and the suggestions no pass has judged yet
   (`write_suggestions.swept`, `0143`), in pages of 1,000, each page in a transaction that holds the
   cursor row `for update`, and judges only the pending suggestions those can resolve: the newly
@@ -720,11 +721,11 @@ that ticker did.
   later pass, which the pass asks for as its due time, so an agent's writes within a minute are
   judged together. The first pass on a database, whose cursor is null, judges every pending
   suggestion once, as every pass of the release before it did. A failed pass is retried a minute
-  later. This loop alone also keeps a minute's tick in the server: the same pass carries the keyed
-  writes' sweep (Keyed writes, below) — the `Idempotency-Key` rows past their 24 hours, and the
-  deliveries a process that died left owed — which no notification announces, since a process
-  that dies commits nothing. A pass of it elsewhere (every test that passes no resume) holds no
-  timer.
+  later. It is the one woken loop that takes no lease: the cursor row each page holds is what
+  serialises two processes woken by one commit, the first pass included, since the row is there
+  from `0142` with a null `event_id`. The second process's page waits on the row and then reads
+  the cursor the first advanced, so it judges what the first did not rather than the same page
+  twice, and no wake is given up to another process's pass.
 - The delivery settings both GitHub intakes route by are one cache per process
   (`delivery.SettingsCache`), read at start and again when `delivery_settings` changes:
   `delivery_settings_changed` notifies `dispatch_delivery_settings` (`0144`) for a change to any
@@ -733,10 +734,10 @@ that ticker did.
   a timer; a read that fails is tried again 30 s later. The release before this one polls the row
   every 30 s and may run beside it during a roll.
 
-The three leased woken loops take their lease with no period. A process that finds it held
-tries again — every 2 s for the excerpts, every 5 s for the edit notices, every minute for the
-suggestions, plus up to a tenth again — until a pass of its own runs, because the other process's
-pass may have read before the change that woke this one.
+The two leased woken loops take their lease with no period. A process that finds it held
+tries again — every 2 s for the excerpts, every 5 s for the edit notices, plus up to a tenth
+again — until a pass of its own runs, because the other process's pass may have read before the
+change that woke this one.
 
 **Boot passes** run once at start:
 
@@ -753,15 +754,26 @@ pass may have read before the change that woke this one.
   and doubling to at most a minute, and drift left after them is logged at WARN and left to the
   next start.
 
-**Timers that stay**, because GitHub has no feed of what they would miss — a webhook that never
-arrived, a delivery that failed, a source's branch head:
+**Timers that stay**, because nothing announces what they would miss — a webhook that never
+arrived, a delivery that failed, a source's branch head, an expired key, a delivery a process
+that died still owes:
 
 - The delivery reconcile (`delivery.ReconcileInterval`) and the architecture import
   (`architecture.SyncInterval`) run every 5 minutes through `duty.RunJittered`, the first pass
   after a random delay within one interval. The webhook redelivery sweep (Webhook redelivery,
   above; `redeliver.Interval`) runs every 2 minutes, its first sweep at start. Each waits the
   interval plus up to a tenth again after every pass (`duty.Jittered`), drawn afresh every period,
-  so two processes' passes drift apart rather than ticking in step.
+  so two processes' passes drift apart rather than ticking in step. GitHub has no feed of what
+  these three would miss.
+- The keyed writes' maintenance sweep (`api.RunMaintenanceSweep`, lease `suggestion-outcomes`,
+  `api.MaintenanceSweepInterval`) deletes the `Idempotency-Key` rows past their 24 hours and then
+  sends every delivery a process that died left owed (Keyed writes, below), once a minute across
+  the processes: its pass records its period in `duty_passes` like the timers above, so the other
+  process's tick inside a period already served skips. No notification replaces this timer,
+  which is why it is the one piece of maintenance that stayed one: a key passes its window by the
+  clock alone, and a delivery is owed because the process holding it died, which commits nothing
+  to announce. It keeps the lease name the suggestion outcome sweep carried this work under, so
+  during a roll the earlier release's pass and this one still exclude each other on it.
 
 Outside these classes, the outbox still scans on a 5 s retry ticker and compacts daily, the
 settlement resumption still runs every minute, the block index reconciliation (lease
@@ -1843,8 +1855,8 @@ did, unkeyed, so a script or the Legion daemon's outbox keeps working. `PUT` and
 key, being idempotent already. A key is 1 to 128 letters, digits, `.`, `_`, `:` and `-`, bare or
 double-quoted, and belongs to the caller who sent it: a person's canonical login (from the
 dashboard or through a personal token), a service token's subject, or the shared agent token.
-Dispatch keeps each key's answer for 24 hours (`request_keys`, migration `0137`; the
-suggestion-outcome sweep deletes older rows).
+Dispatch keeps each key's answer for 24 hours (`request_keys`, migration `0137`; the maintenance
+sweep deletes older rows, Background loops above).
 
 A keyed write finishes on the server whatever its client does. Its handler runs with the client's
 cancellation taken off, bounded at ten minutes (past which its work rolls back and the key is

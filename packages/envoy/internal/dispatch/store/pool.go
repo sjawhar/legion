@@ -269,18 +269,22 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // the whole requirement, and it is a caller and not a lease that needs one: Exclusive takes its
 // connection before it learns whether the lease is held, so a pass that skips because the other
 // process holds the lease holds a connection for that round trip too. Twelve names are leased -
-// the document compaction, the suggestion-outcome sweep, the reference-excerpt reconciliation, the
-// block-index reconciliation, the GitHub webhook redelivery sweep, the architecture import, the
-// delivery reconcile, the edit-notice sweep, the repair of closed and reopened issues' asks
-// (api.RunIssueAskRepair), one per delivery durable for the consumers' reconciliation
-// (delivery.consumerLease, a name each for delivery-events and delivery-jobs) and the server
-// process registry's prune (processes.RunPrune) - taken by twelve callers, since each delivery
-// intake takes its own durable's name from a bind poll of its own, so twelve callers can be inside
-// Exclusive at once. Twelve connections are exactly those twelve: the headroom is zero, not one,
-// and the next leased loop added here makes a thirteenth caller that waits for a connection rather
-// than failing, for as long as the longest pass then holding one. They cannot come from the shared
-// pool: a lease is held for the whole pass, which is minutes for the compaction, and the shared
-// pool's sharedPoolSize connections are what every request reads through.
+// the document compaction, the keyed writes' maintenance sweep (api.RunMaintenanceSweep, which
+// keeps the lease name suggestion-outcomes the suggestion sweep carried that work under), the
+// reference-excerpt reconciliation, the block-index reconciliation, the GitHub webhook
+// redelivery sweep, the architecture import, the delivery reconcile, the edit-notice sweep, the
+// repair of closed and reopened issues' asks (api.RunIssueAskRepair), one per delivery durable
+// for the consumers' reconciliation (delivery.consumerLease, a name each for delivery-events and
+// delivery-jobs) and the server process registry's prune (processes.RunPrune) - taken by twelve
+// callers, since each delivery intake takes its own durable's name from a bind poll of its own,
+// so twelve callers can be inside Exclusive at once. The suggestion outcome sweep is not among
+// them: it takes no lease, since the cursor row each of its pages holds for update serialises two
+// processes by itself (api/suggestion_outcomes.go). Twelve connections are exactly those twelve:
+// the headroom is zero, not one, and the next leased loop added here makes a thirteenth caller
+// that waits for a connection rather than failing, for as long as the longest pass then holding
+// one. They cannot come from the shared pool: a lease is held for the whole pass, which is
+// minutes for the compaction, and the shared pool's sharedPoolSize connections are what every
+// request reads through.
 const leasePoolSize = 12
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that

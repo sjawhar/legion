@@ -1197,11 +1197,13 @@ func lockTables(t *testing.T, database *store.Store, mode string, tables ...stri
 // pglisten.Hub wake after its first LISTEN: the process that found the lease held retries (every
 // two seconds, its MinGap) until it runs a pass of its own, because the other's pass may have
 // read before whatever woke it, so after the release each process runs at least one pass and no
-// count is held to one. suggestion-outcomes, a woken loop too, has a row of its own below. The
-// other five are not observable, and this row says so rather than pretending:
-// document-compaction's interval is 24 h; issue-ask-repair's first leased pass is one
-// IssueAskRepairInterval (10 min) in, the boot's repair taking no lease; architecture-import's
-// and delivery-reconcile's first pass is jittered uniformly over SyncInterval/ReconcileInterval
+// count is held to one. The other six are not observable, and this row says so rather than
+// pretending: document-compaction's interval is 24 h; issue-ask-repair's first leased pass is one
+// IssueAskRepairInterval (10 min) in, the boot's repair taking no lease; suggestion-outcomes,
+// which the keyed writes' maintenance sweep holds (api.RunMaintenanceSweep, the suggestion
+// outcome sweep itself taking no lease), has its first leased pass one MaintenanceSweepInterval
+// (1 min) in, and each process ticks on a phase of its own; architecture-import's and
+// delivery-reconcile's first pass is jittered uniformly over SyncInterval/ReconcileInterval
 // (5 min) and each process draws its own, so whether their passes ever overlap is a coin toss no
 // test should turn into a flake; and edit-notices is a woken loop whose passes here, with nothing
 // due, take milliseconds, so whether the two processes' boot passes meet is luck too
@@ -1261,6 +1263,7 @@ func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 	for _, unobserved := range []struct{ lease, why string }{
 		{"document-compaction", "its interval is 24 h, so no pass is due inside any window a test can wait out"},
 		{"issue-ask-repair", "its first leased pass is one IssueAskRepairInterval (10 min) after each process started"},
+		{"suggestion-outcomes", "the keyed writes' maintenance sweep holds it, and its first leased pass is one MaintenanceSweepInterval (1 min) after each process started"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
 		{"delivery-reconcile", "its first pass is jittered over ReconcileInterval (5 min) and each process draws its own"},
 		{"edit-notices", "a woken loop whose passes take milliseconds here, so its boot passes meet by luck"},
@@ -1274,31 +1277,41 @@ func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 	}
 }
 
-// The suggestion-outcome sweep is a woken loop (api.RunSuggestionOutcomeSweep): each process runs
-// a pass at start under the suggestion-outcomes lease, and the two start together, so their boot
-// passes meet. The one holding the lease waits inside its first statement - the read of the cursor
-// row it holds for update, behind a lock this test takes - and the other finds the lease held and
-// runs nothing beside it. Once the lock lets go, the other keeps retrying (every minute, its
-// MinGap) until it runs a pass of its own: the first process's pass may have read before
-// whatever woke the second, so a woken loop never gives its pass up to another process's.
-func TestTheSuggestionOutcomeSweepNeverPassesAtOnceAcrossBothProcessesAndBothPass(t *testing.T) {
+// The suggestion-outcome sweep (api.RunSuggestionOutcomeSweep) is a woken loop that takes no
+// lease: each of its pages runs in a transaction holding the suggestion_outcome_cursor row `for
+// update`, which is what keeps two processes from judging one page twice. Each process runs a
+// pass at start, and the two start together, so their boot passes meet. Both reach that row - a
+// lease would have left one of them outside it, which is the change this row is about - and this
+// test holds the row with a lock of its own to see both arrive. Once the lock lets go, one pass
+// judges the page and advances the cursor and the other, which was waiting on the row, reads the
+// cursor that pass advanced: no wake is lost to another process's pass, and neither process
+// judges what the other judged.
+func TestTheSuggestionOutcomeSweepSerialisesOnTheCursorAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
 	gate := lockTables(t, pair.database, "exclusive", "suggestion_outcome_cursor")
 	pair.start(t, nil)
 
-	if waiting := storetest.WaitForLockWaiters(t, gate, 1, 60*time.Second); waiting < 1 {
-		t.Fatalf("no suggestion-outcome pass reached the cursor lock, so neither process took the lease:\nA:\n%s\nB:\n%s",
-			pair.a.Output.String(), pair.b.Output.String())
-	}
-	waitForLease(t, pair, leaseSkipped, "suggestion-outcomes", 60*time.Second)
-	if ran := countLease(pair.a, leaseRan, "suggestion-outcomes") + countLease(pair.b, leaseRan, "suggestion-outcomes"); ran != 0 {
-		t.Errorf("a suggestion-outcome pass reported running %d times while the one holding the lease is still inside the cursor lock", ran)
+	if waiting := storetest.WaitForLockWaiters(t, gate, 2, 60*time.Second); waiting < 2 {
+		t.Fatalf("%d of the two processes' suggestion-outcome passes reached the cursor lock, want both; the loop takes no lease, so neither waits outside the row:\nA:\n%s\nB:\n%s",
+			waiting, pair.a.Output.String(), pair.b.Output.String())
 	}
 	if err := gate.Rollback(context.Background()); err != nil {
-		t.Fatalf("release the cursor the pass is waiting on: %v", err)
+		t.Fatalf("release the cursor the passes are waiting on: %v", err)
 	}
-	// The second process's next retry is up to a minute and a tenth after its last skip.
-	waitForLeaseInEach(t, pair, leaseRan, "suggestion-outcomes", 3*time.Minute)
+	// Both passes come out of the row in turn: the first judges every pending suggestion and sets
+	// the cursor, the second reads it set and finds its page empty.
+	waitUntil(t, 60*time.Second, "the cursor the first pass out of the lock advanced", func() bool {
+		var cursor *int64
+		if err := pair.database.Pool.QueryRow(context.Background(), `select event_id from suggestion_outcome_cursor`).Scan(&cursor); err != nil {
+			t.Fatalf("read the cursor: %v", err)
+		}
+		return cursor != nil
+	})
+	for name, process := range map[string]*dispatchProcess{"A": pair.a, "B": pair.b} {
+		if failed := strings.Count(process.Output.String(), "suggestion outcome sweep failed"); failed != 0 {
+			t.Errorf("process %s logged %d failed suggestion-outcome passes:\n%s", name, failed, process.Output.String())
+		}
+	}
 }
 
 // A rolling update starts the second process minutes after the first, and at a steady two

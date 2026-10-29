@@ -387,14 +387,15 @@ func main() {
 	//     pass asked for comes round: the embedding queue (embedqueue.WakeChannel), the reference
 	//     excerpts (docs.ExcerptsOwedChannel), the edit notices (docs.EditNoticesChannel), the
 	//     suggestion outcomes (api.EventsChannel) and the delivery settings both intakes route by
-	//     (delivery.SettingsChannel). The three leased ones, reference-excerpts, edit-notices and
-	//     suggestion-outcomes, take their lease with no period (duty.RunWoken): a process that
-	//     finds it held retries until a pass of its own runs, since the other process's pass may
-	//     have read before the change that woke this one. The suggestion-outcome loop keeps a
-	//     minute's tick of its own all the same, because its pass carries the keyed writes' own
-	//     sweep (api/request_keys.go, api/delivery_sweep.go): the Idempotency-Keys past their
-	//     window, and the deliveries a process that died left owed, which no wake announces - a
-	//     death commits nothing.
+	//     (delivery.SettingsChannel). The two leased ones, reference-excerpts and edit-notices,
+	//     take their lease with no period (duty.RunWoken): a process that finds it held retries
+	//     until a pass of its own runs, since the other process's pass may have read before the
+	//     change that woke this one. The suggestion-outcome loop takes none: each of its pages
+	//     runs in a transaction holding the suggestion_outcome_cursor row for update, which
+	//     serialises two processes woken by one commit, the first pass on a database included
+	//     (api/suggestion_outcomes.go). The keyed writes' own sweep - the Idempotency-Keys past
+	//     their window, and the deliveries a process that died left owed - keeps a timer of its
+	//     own below, because no wake announces either: a death commits nothing.
 	//   - boot passes, which run once at start: the embedding coverage pass (embedqueue.Run starts
 	//     it, and repeats only its identity steps while another identity's rows remain) and the
 	//     task progress reconciliation (retrying, briefly, rows another writer held).
@@ -410,10 +411,11 @@ func main() {
 	//     a pass, so the lease alone would exclude nothing.
 	//   - timers that poll the database: the block-index reconciliation (every 30 s, 2 s while a
 	//     batch is full), the repair of closed and reopened issues' asks (api.RunIssueAskRepair,
-	//     every 10 minutes on a plain ticker, after the boot's own unleased pass) and the prune of
+	//     every 10 minutes on a plain ticker, after the boot's own unleased pass), the prune of
 	//     the server process registry (processes.RunPrune, every minute, which joinRegistry starts
-	//     below), each recording its passes in duty_passes like the timers above; each tick sends
-	//     its statements whether or not anything is owed.
+	//     below) and the keyed writes' maintenance sweep (api.RunMaintenanceSweep, every minute),
+	//     each recording its passes in duty_passes like the timers above; each tick sends its
+	//     statements whether or not anything is owed.
 	//
 	// The shared listener is one pglisten.Hub per process, on one held connection of the store's
 	// listener pool, carrying every woken loop's channel. Every wake is registered before it runs
@@ -584,11 +586,15 @@ func main() {
 
 	routesHandler, background := routes.New(appCtx)
 	// LEGION-550: resolves write_suggestions outcomes off the write path, from the events written
-	// since its last pass, woken by every event commit whichever process made it. The same pass
-	// deletes the Idempotency-Keys past their 24 hours and sends every delivery a process that
-	// died left owed, which is why it starts once the API server it resumes them through is built,
-	// and why this loop alone keeps a tick of its own: no commit announces a process having died.
-	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, leases, eventsWake, background.ResumeDeliveries)
+	// since its last pass, woken by every event commit whichever process made it. It takes no
+	// lease: each of its pages holds the suggestion_outcome_cursor row for update, which is what
+	// keeps two processes from judging one page twice.
+	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, eventsWake)
+	// The Idempotency-Keys past their 24 hours and the deliveries a process that died
+	// left owed, once a minute across the processes under the suggestion-outcomes lease. It is a
+	// timer and not a woken loop because no commit announces either, and it starts here because
+	// it resumes those deliveries through the API server built just above.
+	go api.RunMaintenanceSweep(ctx, database.Pool, api.MaintenanceSweepInterval, leases, background.ResumeDeliveries)
 	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
 	server := newHTTPServer(handler, time.Now)
 	// The server serves on the socket it inherited (DISPATCH_LISTEN_FD) or binds its address, and

@@ -102,10 +102,9 @@ func startIdleSweep(t *testing.T, project string, settle time.Duration) idleSwee
 
 	counter := &storetest.StatementCounter{}
 	counted := &store.Store{Pool: storetest.Traced(t, database.Pool, counter, nil)}
-	leases := sweepLeases(t, counted)
 	schedule := suggestionSchedule{minGap: idleSweepGap, settle: settle, page: suggestionOutcomePage}
 	started := time.Now()
-	runSweep(t, func(ctx context.Context) { runSuggestionOutcomeSweep(ctx, counted.Pool, leases, wake, nil, schedule) })
+	runSweep(t, func(ctx context.Context) { runSuggestionOutcomeSweep(ctx, counted.Pool, wake, schedule) })
 	select {
 	case <-connected:
 	case <-time.After(10 * time.Second):

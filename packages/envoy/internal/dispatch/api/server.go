@@ -396,7 +396,7 @@ type Background struct {
 	Wait func()
 	// ResumeDeliveries is one pass of the delivery sweep (resumeOwedDeliveries): every delivery a
 	// process that died left owed is sent, once, under its own attempt number. The maintenance loop
-	// runs it (RunSuggestionOutcomeSweep).
+	// runs it (RunMaintenanceSweep).
 	ResumeDeliveries func(context.Context) error
 }
 
