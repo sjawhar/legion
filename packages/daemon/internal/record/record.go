@@ -400,11 +400,22 @@ func (o ReviewOrder) After(other ReviewOrder) bool {
 
 // PullRequest is the daemon's latest GitHub observation for one issue's pull request.
 type PullRequest struct {
-	Issue   string
-	Repo    string
-	Number  int
-	Branch  string
-	HeadSHA string
+	Issue  string
+	Repo   string
+	Number int
+	Branch string
+	// Base is the branch the pull request's head merges into, as GitHub's pull-request webhook
+	// names it (`base_ref`) and the daemon's own read of the pull request names it (`base.ref`);
+	// "" is a pull request recorded before the daemon kept the base, which the next read fills. A
+	// push to this branch is what tells the daemon the head may have gone behind or dirty, since
+	// GitHub sends no event for the pull request when its base moves (workflow's basePush).
+	Base string
+	// BaseMoved is the commit the latest push onto Base left that branch at, "" when no such push
+	// is recorded. It says which base the mergeability and merge state recorded below were read
+	// against: while it is set, GitHub may have recomputed both, so the next read of the pull
+	// request is known to be needed rather than waited for.
+	BaseMoved string
+	HeadSHA   string
 	// HeadUpdatedAt is the latest updated_at among the lifecycle observations applied (opened,
 	// reopened, synchronize or closed; one with no clock never lowers it): an older one is a late
 	// redelivery and changes nothing (classify.LateLifecycle).
@@ -984,6 +995,9 @@ type Store interface {
 	PullRequestByNumber(ctx context.Context, tx pgx.Tx, repo string, number int) (*PullRequest, error)
 	// OpenPullRequests is every open pull request of the Dispatch project key project's issues.
 	OpenPullRequests(ctx context.Context, tx pgx.Tx, project string) ([]PullRequest, error)
+	// OpenPullRequestsOnBase is every open pull request of repo recorded on the base branch base,
+	// by issue: the pull requests one push onto that branch may have taken behind or dirty.
+	OpenPullRequestsOnBase(ctx context.Context, tx pgx.Tx, repo, base string) ([]PullRequest, error)
 	PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest) error
 	// ProductionCheck is issue's production check, nil for none; PutProductionCheck writes it,
 	// one per issue.

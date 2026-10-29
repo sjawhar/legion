@@ -66,11 +66,15 @@ func (w *workflowRuntime) watchRequiredChecks(ctx context.Context) {
 // synchronize the webhook would have carried and goes on with the record that leaves (followHead);
 // when following fails short of GitHub's rate limit, it goes on with the record as it stands.
 // It applies an intake.PullRequestMergeability fact whenever GitHub's lazily computed mergeability
-// is CONFLICTING, or when either it or GitHub's merge state differs from the one recorded -
-// workflow's mergeability decides a CONFLICTING read every time, even one that only confirms the
-// stored value, so a conflict the poll recorded before the issue reached awaiting_merge is still
-// acted on once it gets there, and a merge state that moved while the mergeability stood still is
-// recorded as the read found it. It then reads the pull request's reviews and applies a deciding
+// is CONFLICTING, or when either it or GitHub's merge state differs from the one recorded, or when
+// the base GitHub names is not the recorded one, or when a push onto that base is recorded with no
+// read of it yet (record.PullRequest.BaseMoved) - workflow's mergeability decides a CONFLICTING
+// read every time, even one that only confirms the stored value, so a conflict the poll recorded
+// before the issue reached awaiting_merge is still acted on once it gets there; a merge state that
+// moved while the mergeability stood still is recorded as the read found it; and this read is the
+// one that records the base, both for a pull request whose record has none and as the answer to a
+// push onto its base, which GitHub recomputed the mergeability for and sent no event about. It
+// then reads the pull request's reviews and applies a deciding
 // one the daemon has not recorded, whose webhook never arrived (readReviews), whatever phase the
 // issue is in, and, for a review round whose approval is set aside below the head, GitHub's
 // compare of the approved head with the head, applying the handoff-only push it shows
@@ -132,7 +136,12 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 		// which the GitHub consumer's backlog can hold for a while.
 		prCtx, cancel := context.WithTimeout(ctx, requiredChecksRead)
 		base, mergeable, state := pull.Base.Ref, pull.mergeability(), pull.mergeState()
-		if pr.Mergeability != mergeable || pr.MergeState != state || mergeable == record.MergeabilityConflicting {
+		// The fact also carries the base GitHub names, so this read is what records the base of a
+		// pull request whose record has none - every one opened before the daemon kept it - and
+		// what answers a push onto that base the record is still holding (workflow's basePush):
+		// GitHub recomputed the mergeability and the merge state when the base moved, and this is
+		// the read of them.
+		if pr.Mergeability != mergeable || pr.MergeState != state || pr.Base != base || pr.BaseMoved != "" || mergeable == record.MergeabilityConflicting {
 			eventID := fmt.Sprintf("mergeability:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, pr.Repo, pr.Number, time.Now().UnixNano())
 			fact := intake.PullRequestMergeability{Repo: pr.Repo, Number: pr.Number, Base: base, Mergeable: mergeable, MergeState: state}
 			if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, fact, w.handlers...); err != nil {

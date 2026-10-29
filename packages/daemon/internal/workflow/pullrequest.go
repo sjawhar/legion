@@ -35,7 +35,7 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	pr := record.PullRequest{Issue: issue.Key, Repo: fact.Repo, Number: fact.Number, Branch: fact.Branch, HeadSHA: fact.HeadSHA,
+	pr := record.PullRequest{Issue: issue.Key, Repo: fact.Repo, Number: fact.Number, Branch: fact.Branch, Base: fact.Base, HeadSHA: fact.HeadSHA,
 		HeadUpdatedAt: fact.UpdatedAt, Failing: []string{}, State: record.PullRequestOpen}
 	recorded, err := e.store.PullRequest(ctx, tx, issue.Key)
 	if err != nil {
@@ -71,6 +71,13 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 		pr.HeadCounted, pr.PlannedRed, pr.Pushes, pr.Moves, pr.Run = carried.HeadCounted, carried.PlannedRed, carried.Pushes, carried.Moves, carried.Run
 		e.stampRun(&pr)
 		pr.Required, pr.Workflows, pr.WorkflowsHead = carried.Required, carried.Workflows, carried.WorkflowsHead
+		// The reopen keeps the base and the push onto it the next read still owes an answer for: a
+		// pull request reopens onto the base it was opened on, and a fact that names none (a
+		// listener that predates the field) must not forget the recorded one.
+		pr.BaseMoved = recorded.BaseMoved
+		if pr.Base == "" {
+			pr.Base = recorded.Base
+		}
 		pr.HeadUpdatedAt = classify.LatestClock(recorded.HeadUpdatedAt, fact.UpdatedAt)
 	}
 	if err := e.store.PutPullRequest(ctx, tx, pr); err != nil {
@@ -136,6 +143,14 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 		return intake.Result{}, err
 	}
 	prior := *pr
+	// GitHub names the base on every pull-request event, so a synchronize is also where a base
+	// retargeted on GitHub reaches the record; one that names none (a listener that predates the
+	// field, or the daemon's own read of the head) leaves the recorded base as it is, for the
+	// two-minute pass to fill. A late redelivery that writes nothing records no base either, as it
+	// records nothing else.
+	if fact.Base != "" {
+		pr.Base = fact.Base
+	}
 	named := record.Named{Before: fact.Before, SHA: fact.HeadSHA, Sender: fact.Sender, At: fact.UpdatedAt}
 	if classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
 		if *pr = classify.NameMove(*pr, named); pr.Run == prior.Run {

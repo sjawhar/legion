@@ -79,14 +79,22 @@ func (e *Engine) requiredChecks(ctx context.Context, tx pgx.Tx, fact intake.Requ
 // repeated CONFLICTING read from withdrawing twice. GitHub's own merge state for the head rides
 // along on the same fact and is recorded with the verdict, deciding nothing of itself: it is what
 // the read found, kept for a reader that needs to tell a head GitHub holds on a check or a review
-// the repository requires from one GitHub would merge now.
+// the repository requires from one GitHub would merge now. The base the read names is recorded with
+// them, since that read is the only one that names the base of a pull request opened before the
+// record kept one: it is what a push onto that branch finds the pull request by (basePush), and a
+// read that answers for a base push already recorded clears the push's mark, the two having been
+// read together.
 func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRequestMergeability) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
-	if pr.Mergeability != fact.Mergeable || pr.MergeState != fact.MergeState {
-		pr.Mergeability, pr.MergeState = fact.Mergeable, fact.MergeState
+	base := pr.Base
+	if fact.Base != "" {
+		base = fact.Base
+	}
+	if pr.Mergeability != fact.Mergeable || pr.MergeState != fact.MergeState || pr.Base != base || pr.BaseMoved != "" {
+		pr.Mergeability, pr.MergeState, pr.Base, pr.BaseMoved = fact.Mergeable, fact.MergeState, base, ""
 		if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 			return intake.Result{}, err
 		}

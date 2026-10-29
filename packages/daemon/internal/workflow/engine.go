@@ -136,6 +136,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.pullRequestSynchronized(ctx, tx, fact)
 	case intake.Push:
 		return e.push(ctx, tx, fact)
+	case intake.BasePush:
+		return e.basePush(ctx, tx, fact)
 	case intake.PullRequestChecks:
 		return e.checks(ctx, tx, fact)
 	case intake.RequiredChecks:

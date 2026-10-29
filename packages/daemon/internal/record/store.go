@@ -409,7 +409,7 @@ func scanPhase(row scanner) (PhaseRow, error) {
 	return phase, nil
 }
 
-const pullRequestColumns = `issue, repo, number, branch, head_sha, head_updated_at,
+const pullRequestColumns = `issue, repo, number, branch, base, base_moved, head_sha, head_updated_at,
 	failing, cancelled, fix_attempts, blocked_attempts, check_runs,
 	generation, snapshot, pushes, head_moves, head_counted, head_run, planned_red, review_seen, review_seen_at, state,
 	checked_head, required, required_workflows, required_workflows_head, mergeability, merge_state, merge_sha`
@@ -452,22 +452,48 @@ func (s *Postgres) PullRequestByNumber(ctx context.Context, tx pgx.Tx, repo stri
 
 // OpenPullRequests is every open pull request of the Dispatch project's issues, by issue key.
 func (s *Postgres) OpenPullRequests(ctx context.Context, tx pgx.Tx, project string) ([]PullRequest, error) {
+	describe := fmt.Sprintf("list the open pull requests of %s", project)
 	rows, err := tx.Query(ctx, "select "+pullRequestColumns+" from pull_requests where state = $1 and issue in (select key from issues where project = $2) order by issue",
 		PullRequestOpen, project)
 	if err != nil {
-		return nil, fmt.Errorf("list the open pull requests of %s: %w", project, err)
+		return nil, fmt.Errorf("%s: %w", describe, err)
 	}
+	return collectPullRequests(rows, describe)
+}
+
+// OpenPullRequestsOnBase is every open pull request of repo whose recorded base branch is base, by
+// issue key. It is one indexed lookup (pull_requests_open_on_base, a partial index of the open rows
+// by repository and base), so a push onto a branch no open pull request sits on - the common case
+// for a repository other automation pushes to many times a minute - reads one index and no row. A
+// base recorded as "" is every pull request written before the daemon kept the base at all, so it
+// matches none: the caller never asks for one, and the next GitHub read fills those rows.
+func (s *Postgres) OpenPullRequestsOnBase(ctx context.Context, tx pgx.Tx, repo, base string) ([]PullRequest, error) {
+	if base == "" {
+		return nil, nil
+	}
+	describe := fmt.Sprintf("list the open pull requests of %s on %s", repo, base)
+	rows, err := tx.Query(ctx, "select "+pullRequestColumns+" from pull_requests where repo = $1 and base = $2 and state = $3 order by issue",
+		repo, base, PullRequestOpen)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", describe, err)
+	}
+	return collectPullRequests(rows, describe)
+}
+
+// collectPullRequests reads every row of a pull request listing, naming the listing in any failure
+// as describe.
+func collectPullRequests(rows pgx.Rows, describe string) ([]PullRequest, error) {
 	defer rows.Close()
 	open := []PullRequest{}
 	for rows.Next() {
 		pr, err := scanPullRequest(rows)
 		if err != nil {
-			return nil, fmt.Errorf("list the open pull requests of %s: %w", project, err)
+			return nil, fmt.Errorf("%s: %w", describe, err)
 		}
 		open = append(open, *pr)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list the open pull requests of %s: %w", project, err)
+		return nil, fmt.Errorf("%s: %w", describe, err)
 	}
 	return open, nil
 }
@@ -511,12 +537,13 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 			return fmt.Errorf("put pull request for %s: encode the head run: %w", pr.Issue, err)
 		}
 	}
-	_, err = tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at,
+	_, err = tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, base, base_moved, head_sha, head_updated_at,
 		failing, cancelled, fix_attempts, blocked_attempts, check_runs, generation, snapshot, pushes, head_moves,
 		head_counted, head_run, planned_red, review_seen, review_seen_at, state, checked_head, required,
 		required_workflows, required_workflows_head, mergeability, merge_state, merge_sha)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
 		on conflict (issue) do update set repo = excluded.repo, number = excluded.number, branch = excluded.branch,
+		base = excluded.base, base_moved = excluded.base_moved,
 		head_sha = excluded.head_sha, head_updated_at = excluded.head_updated_at,
 		failing = excluded.failing, cancelled = excluded.cancelled, fix_attempts = excluded.fix_attempts,
 		blocked_attempts = excluded.blocked_attempts, check_runs = excluded.check_runs,
@@ -527,7 +554,7 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 		required = excluded.required, required_workflows = excluded.required_workflows,
 		required_workflows_head = excluded.required_workflows_head, mergeability = excluded.mergeability,
 		merge_state = excluded.merge_state, merge_sha = excluded.merge_sha`,
-		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA, pr.HeadUpdatedAt,
+		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.Base, pr.BaseMoved, pr.HeadSHA, pr.HeadUpdatedAt,
 		failing, cancelled, pr.FixAttempts, pr.BlockedAttempts, checkRuns,
 		pr.Generation, pr.Snapshot, pushes, moves, pr.HeadCounted, run, pr.PlannedRed,
 		pr.ReviewSeen.ID, pr.ReviewSeen.SubmittedAt, pr.State, pr.CheckedHead, required,
@@ -608,7 +635,7 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where, issues, key, describ
 func scanPullRequest(row scanner) (*PullRequest, error) {
 	var pr PullRequest
 	var failing, cancelled, checkRuns, pushes, moves, required, workflows, run []byte
-	if err := row.Scan(&pr.Issue, &pr.Repo, &pr.Number, &pr.Branch, &pr.HeadSHA, &pr.HeadUpdatedAt,
+	if err := row.Scan(&pr.Issue, &pr.Repo, &pr.Number, &pr.Branch, &pr.Base, &pr.BaseMoved, &pr.HeadSHA, &pr.HeadUpdatedAt,
 		&failing, &cancelled, &pr.FixAttempts, &pr.BlockedAttempts, &checkRuns, &pr.Generation, &pr.Snapshot,
 		&pushes, &moves, &pr.HeadCounted, &run, &pr.PlannedRed, &pr.ReviewSeen.ID, &pr.ReviewSeen.SubmittedAt, &pr.State,
 		&pr.CheckedHead, &required, &workflows, &pr.WorkflowsHead, &pr.Mergeability, &pr.MergeState, &pr.MergeSHA); err != nil {

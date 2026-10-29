@@ -371,10 +371,14 @@ func (ControllerTick) isFact() {}
 
 // PullRequestOpened registers a pull request whose branch or body identifies a Dispatch issue.
 type PullRequestOpened struct {
-	Repo      string
-	Number    int
-	Branch    string
-	HeadSHA   string
+	Repo    string
+	Number  int
+	Branch  string
+	HeadSHA string
+	// Base is the branch the pull request merges into (the listener's `base_ref`, GitHub's
+	// base.ref), empty from a listener that predates the field; the workflow records it so a push
+	// onto that branch finds the pull request again (record.PullRequest.Base).
+	Base      string
 	Body      string
 	URL       string
 	UpdatedAt time.Time
@@ -393,12 +397,16 @@ func (PullRequestOpened) isFact() {}
 // the branch (the webhook's sender), empty from a listener that predates the field and from the
 // daemon's own read.
 type PullRequestSynchronized struct {
-	Repo      string
-	Number    int
-	Branch    string
-	Before    string
-	Sender    string
-	HeadSHA   string
+	Repo    string
+	Number  int
+	Branch  string
+	Before  string
+	Sender  string
+	HeadSHA string
+	// Base is the branch the pull request merges into, as PullRequestOpened.Base is; empty from a
+	// listener that predates the field and from the daemon's own read of the head, and an empty
+	// one leaves the recorded base as it is.
+	Base      string
 	Body      string
 	UpdatedAt time.Time
 }
@@ -594,6 +602,22 @@ type Push struct {
 }
 
 func (Push) isFact() {}
+
+// BasePush is a push to a branch that is no issue's (decodePush), which is the shape of a branch
+// pull requests sit on: a base. GitHub recomputes whether each head on that base still merges into
+// it and sends no event for the pull request when it does, so a head the record holds as clean can
+// already be behind or dirty; this fact is the only notice the daemon gets. The workflow finds the
+// open pull requests recorded on Branch and records that their base moved to After (workflow's
+// basePush), so the next read of each is known to be needed. Nothing in it is a decision: a push
+// to a branch no pull request is on changes nothing.
+type BasePush struct {
+	Repo   string
+	Branch string
+	// After is the commit the push left the base branch at.
+	After string
+}
+
+func (BasePush) isFact() {}
 
 // WorkflowRunCompleted is Envoy's `workflow_run` `completed` envelope: attempt Attempt of GitHub
 // Actions run RunID of the workflow file Path (GitHub's `workflow_run.path`, the run's top-level
