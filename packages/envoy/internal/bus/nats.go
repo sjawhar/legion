@@ -445,8 +445,18 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		if ownsStream {
 			c.AddReconnectHook(c.ensureStreamOnce(&stream, opts.keptBuckets, opts.keepInterval))
 		}
-		// onConnect counts the first connection only once it is c.Conn, which install makes it.
-		install := func(nc *nats.Conn) error { return c.install(nc, nil) }
+		// onConnect counts the first connection only once it is c.Conn, which install makes it. An
+		// install that fails returns no client, so it stops the client before
+		// connectFirstInBackground closes the connection, as the foreground path does below. At the
+		// pinned nats.go (v1.50.0) it cannot fail: JetStream with these options returns no error, and
+		// there is no stream to reconcile here. The stop guards a nats.go whose JetStream can.
+		install := func(nc *nats.Conn) error {
+			if err := c.install(nc, nil); err != nil {
+				c.stop()
+				return err
+			}
+			return nil
+		}
 		if _, err := connectFirstInBackground(c.name, urls, c.reconnectErrClock, dial, c.onConnect, install); err != nil {
 			return nil, err
 		}

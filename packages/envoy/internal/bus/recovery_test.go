@@ -1075,7 +1075,9 @@ func closedConnectionIsReplacedOnce(t *testing.T, through func(uri string) []bus
 // logging `envoy nats reconnect attempt failed` once a minute into whatever then holds the default
 // logger: TestAStuckDeliveryStillEndsTheKVWatchers failed on the ones TestARefusedRaiseNamesTheReplicaSetting
 // and TestOneServerStoppedACreateAtThreeCopiesFailsNamingTheSetting left. A single server refuses
-// a create at three copies.
+// a create at three copies. The server lists a connection the client closed until its read loop
+// sees the close, so the test polls its connection list rather than reading it once: on main the
+// replacement stays listed for good, and the poll runs out.
 func TestARefusedStartLeavesNoConnectionOpen(t *testing.T) {
 	srv, uri := testnats.Start(t)
 	connections := serverConnections(t, srv)
@@ -1094,7 +1096,15 @@ func TestARefusedStartLeavesNoConnectionOpen(t *testing.T) {
 	if got := logs.count(name, "envoy nats recovery attempt"); got != 0 {
 		t.Errorf("the recovery the refused start's close began made %d attempt(s), want none", got)
 	}
-	if open := connections()[name]; len(open) != 0 {
-		t.Fatalf("the server holds connection(s) %v of the refused start, want none", open)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		open := connections()[name]
+		if len(open) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the server holds connection(s) %v of the refused start, want none", open)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
