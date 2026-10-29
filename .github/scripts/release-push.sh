@@ -482,14 +482,17 @@ is_ancestor() {
   return "$status"
 }
 
-# fresh_run <workflow-file> <why>: start a run of <workflow-file> on main (`gh
-# workflow run`, with $GH_TOKEN) and print the run's URL gh prints, or nothing
-# on an older gh (restart's note). A failed start is an ::error:: and exit 1
-# that says <why> and names the command a person runs instead.
+# fresh_run <workflow-file> <why> <title> <lead>: start a run of <workflow-file>
+# on main (`gh workflow run`, with $GH_TOKEN), then give a ::notice titled
+# <title>: <lead>, then the run's URL gh printed, or "the newest run of
+# <workflow-file>" on an older gh that prints none (restart's note). A failed
+# start is an ::error:: and exit 1 that says <why> and names the command a
+# person runs instead.
 fresh_run() {
-  local workflow=$1 why=$2
-  gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref main ||
+  local workflow=$1 why=$2 title=$3 lead=$4 started
+  started=$(gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref main) ||
     fail_error "$why, and starting a fresh run of $workflow on main failed; start one by hand: gh workflow run $workflow --repo $GITHUB_REPOSITORY --ref main"
+  echo "::notice title=$title::$lead a fresh run of $workflow on main, ${started:-the newest run of $workflow}, builds main's tip" >&2
 }
 
 # pushed_tag <tag-prefix> [<package-dir>]: print the release tag an earlier
@@ -904,7 +907,7 @@ insert_block() {
 # rebases. Returns 0 when it pushed or started a run, leaving which in $landed
 # (pushed or restarted); every other outcome is an ::error:: and exit 1.
 land_on_main() {
-  local onto=$1 workflow=$2 shas head parents tip started why
+  local onto=$1 workflow=$2 shas head parents tip why
   landed=''
   # HEAD's sha, then its parents, space-separated: exactly one, onto.
   shas=$(git rev-list --parents -n 1 HEAD) || fail_error "reading HEAD failed"
@@ -929,12 +932,10 @@ land_on_main() {
     fi
   fi
   # main moved past onto: what HEAD holds was made on an older main, so a fresh
-  # run works from main's tip instead. gh prints the new run's URL (restart's
-  # note), or nothing on an older gh.
+  # run works from main's tip instead.
   why="main moved from $onto, the commit $head was made on, to $tip"
-  started=$(fresh_run "$workflow" "$why") || exit 1
+  fresh_run "$workflow" "$why" "Nothing pushed; a fresh run started" "$why, so $head was not pushed;"
   landed=restarted
-  echo "::notice title=Nothing pushed; a fresh run started::$why, so $head was not pushed; a fresh run of $workflow on main, ${started:-the newest run of $workflow}, builds main's tip" >&2
 }
 
 case "$command" in
@@ -1335,8 +1336,7 @@ case "$command" in
     tip=$(git rev-parse FETCH_HEAD) || fail_error "reading main's fetched tip failed"
     if ! is_ancestor "$base" "$tip"; then
       why="main's tip $tip does not descend from $base, the commit the build was made from, so main was rewritten"
-      started=$(fresh_run "$workflow" "$why") || exit 1
-      echo "::notice title=Nothing pushed; a fresh run started::$why; nothing was pushed, and a fresh run of $workflow on main, ${started:-the newest run of $workflow}, builds main's tip" >&2
+      fresh_run "$workflow" "$why" "Nothing pushed; a fresh run started" "$why; nothing was pushed, and"
       exit 0
     fi
     built_base=$(main_build_base "$tip") || exit 1
@@ -1366,8 +1366,7 @@ case "$command" in
     if [ "$tree" = "$onto_tree" ]; then
       echo "::notice title=Nothing to push::main's packages/claude-envoy/dist and packages/claude-envoy/legion at $onto already match this build" >&2
       if [ -n "$inputs_why" ]; then
-        started=$(fresh_run "$workflow" "$inputs_why") || exit 1
-        echo "::notice title=A fresh run started::$inputs_why, so a fresh run of $workflow on main, ${started:-the newest run of $workflow}, builds main's tip" >&2
+        fresh_run "$workflow" "$inputs_why" "A fresh run started" "$inputs_why, so"
       fi
       exit 0
     fi
@@ -1388,8 +1387,7 @@ case "$command" in
     land_on_main "$onto" "$workflow"
     if [ "$landed" = pushed ] && [ -n "$inputs_why" ]; then
       why="the build already landed on main as $commit, but $inputs_why, so main's build is one run behind its inputs"
-      started=$(fresh_run "$workflow" "$why") || exit 1
-      echo "::notice title=A fresh run started::the build landed on main as $commit, but $inputs_why, so a fresh run of $workflow on main, ${started:-the newest run of $workflow}, builds main's tip" >&2
+      fresh_run "$workflow" "$why" "A fresh run started" "the build landed on main as $commit, but $inputs_why, so"
     fi
     ;;
   handed)
