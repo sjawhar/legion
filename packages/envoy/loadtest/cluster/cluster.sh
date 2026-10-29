@@ -212,6 +212,11 @@ STORED_ORDER_START_TABLES=(doc_checkpoints:artifact_id artifact_versions:artifac
 # step's document list.
 TYPING_SESSION=ses-browsertype
 TYPING_DIR=/work/typing
+# The text browsertype must never type into: loadgen's edits replace the spec's "Revision token
+# rN" and its uploads read it, so one keystroke there fails every later edit and upload to the
+# document (404 TARGET_NOT_FOUND). browsertype -protect skips each paragraph that holds it; up
+# refuses a browsertype without that flag.
+TYPING_PROTECT="Revision token"
 # A step's --typing settings (typing_parse); TYPING is empty for a step without --typing. The
 # step's documents (TYPING_LIST), a load step's planned versions of each of them (TYPING_PLANNED,
 # typing_plan_step; null for a replay, whose documents come from its bundle) and, once
@@ -1688,7 +1693,7 @@ typing_start() {
   rm -f -- "$docs"
   runner_start "typing-$name" /work/browsertype -url "http://dispatch.$NS.svc:8766" -token-file "$TYPING_DIR/token" \
     -session "$TYPING_SESSION" -artifacts-file "$TYPING_DIR/$name.docs" -peers "$TYPING_PEERS" -rate "$TYPING_RATE" \
-    -duration "$((seconds + STORED_ORDER_SECONDS + 600))s" -seed 1
+    -duration "$((seconds + STORED_ORDER_SECONDS + 600))s" -seed 1 -protect "$TYPING_PROTECT"
   note "step $name: browsertype (commit $(state '.browsertype.commit[0:12]')) started: $TYPING_PEERS peers on each of ${#TYPING_LIST[@]} documents at $TYPING_RATE keystroke updates/s, until the stored-order check ends"
   TYPING_STEP=("$name" "$dir")
   trap typing_stop_at_exit EXIT
@@ -2581,6 +2586,16 @@ up_run() {
 
   # The stored-order checker, before the lock, so a checker that does not build is refused.
   stored_order_build "$commit" "$so_source" "$so_checker"
+  # browsertype too, before the lock, so a driver that does not build or has no -protect is refused
+  # with nothing taken.
+  if [ -n "$bt_commit" ]; then
+    note "building browsertype (static) of commit $bt_commit, for browser typing"
+    build_at_commit "$bt_commit" ./loadtest/browsertype "$CHECKER_TMP/browsertype" || die "up: go build of browsertype at commit $bt_commit failed"
+    local bt_help
+    bt_help=$("$CHECKER_TMP/browsertype" -help 2>&1 || true)
+    [[ $bt_help == *-protect* ]] ||
+      die "up: browsertype of commit $bt_commit has no -protect flag: it would type into loadgen's '$TYPING_PROTECT' paragraph and fail every later edit and upload of the typed documents; give a commit of INFRA-707's driver that has -protect"
+  fi
 
   set_run "lt-$(date -u +%Y%m%dt%H%M%S)-$(random_hex 2)"
   kube_lock_take
@@ -2588,6 +2603,7 @@ up_run() {
   note "took the lock $LOCK in $NS for run $RUN"
   (umask 077 && mkdir -p -- "$RUN_DIR/logs" "$RUN_DIR/tmp" "$RUN_DIR/steps")
   mv -- "$CHECKER_TMP/envoy-dispatch" "$STORED_ORDER_BIN" || die "moving the stored-order checker into $STORED_ORDER_BIN failed"
+  [ -z "$bt_commit" ] || mv -- "$CHECKER_TMP/browsertype" "$BROWSERTYPE_BIN" || die "moving browsertype into $BROWSERTYPE_BIN failed"
   checker_tmp_remove
   local tier
   tier=$(pg_tier 16 60)
@@ -2608,8 +2624,6 @@ up_run() {
   note "building loadgen (static) into $LOADGEN"
   (cd -- "$ENVOY_DIR" && CGO_ENABLED=0 go build -o "$LOADGEN" ./loadtest) || die "go build of loadgen failed"
   if [ -n "$bt_commit" ]; then
-    note "building browsertype (static) of commit $bt_commit into $BROWSERTYPE_BIN, for browser typing"
-    build_at_commit "$bt_commit" ./loadtest/browsertype "$BROWSERTYPE_BIN" || die "go build of browsertype at commit $bt_commit failed"
     # shellcheck disable=SC2016 # $c and $s are jq's variables
     state_set '.browsertype = {commit: $c, sha256: $s}' --arg c "$bt_commit" --arg s "$(sha256_of "$BROWSERTYPE_BIN")"
   fi

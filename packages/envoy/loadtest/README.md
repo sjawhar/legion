@@ -1759,13 +1759,25 @@ the caller's: for INFRA-514, the two replays and the step `10x-typing`, each nam
 `-typing`.
 
 `up --browsertype-commit <sha>` builds `browsertype` from that commit with the stored-order
-check's build code: `git archive <sha> packages/envoy` from this checkout's git store, then
-`CGO_ENABLED=0 GOWORK=off go build ./loadtest/browsertype` in a scratch directory, into
-`<run>/browsertype`. `state.json` `browsertype` records the commit and the binary's sha256. The
-runner gets the binary as `/work/browsertype` only when its sha256 differs there. Before it
-creates anything, `up` refuses, and names, a commit that git does not have or whose tree has no
-`packages/envoy/loadtest/browsertype`. `--typing` on a run that `up` gave no
-`--browsertype-commit` is refused, naming the flag, before the step touches anything.
+check's build code, before it takes the lock: `git archive <sha> packages/envoy` from this
+checkout's git store, then `CGO_ENABLED=0 GOWORK=off go build ./loadtest/browsertype` in a scratch
+directory, moved into `<run>/browsertype` once the lock is taken. `state.json` `browsertype`
+records the commit and the binary's sha256. The runner gets the binary as `/work/browsertype` only
+when its sha256 differs there. Before it creates anything, `up` refuses, and names, a commit that
+git does not have or whose tree has no `packages/envoy/loadtest/browsertype`, and, after the
+build and still before the lock, a `browsertype` whose `-help` lists no `-protect`. `--typing`
+on a run that `up` gave no `--browsertype-commit` is refused, naming the flag, before the step
+touches anything.
+
+`-protect` is what keeps typing from breaking the load. A load step's edits replace the spec's
+`Revision token r<N>` and its uploads read it. A browser that types into that paragraph changes the
+token, and every later edit of the document fails `404 TARGET_NOT_FOUND` and every later upload
+stops at its read: in run `lt-20261029t115927-655c`, with a driver that had no `-protect`, step
+`10x-typing` lost 114 edits and 30 uploads that way, and its typed documents kept 0 to 5 versions.
+`cluster.sh` passes `-protect 'Revision token'`, so no peer types into that paragraph. A replay's
+edits find their logged text, which typing can change too: `r16-typing` and `r4-typing` of that run
+lost 82 and 85 of 874 edits, against none without typing. `-protect` does not cover those, and a
+replay with typing is not compared with the outage.
 
 The documents are the ones the step writes most:
 
@@ -1792,7 +1804,7 @@ run` starts, so the peers connect during its 30 s warm-up, the runner starts:
 ```bash
 /work/browsertype -url http://dispatch.<namespace>.svc:8766 -token-file /work/typing/token \
   -session ses-browsertype -artifacts-file /work/typing/<step>.docs -peers <P> -rate <R> \
-  -duration <s> -seed 1
+  -duration <s> -seed 1 -protect 'Revision token'
 ```
 
 `-duration` is `loadgen run`'s bound (its warm-up, window, grace and drain), the stored-order

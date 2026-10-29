@@ -407,7 +407,13 @@ if [ "${*: -1}" = ./loadtest/browsertype ]; then
     exit 1
   }
   printf 'GOWORK=%s CGO_ENABLED=%s go %s\n' "${GOWORK:-}" "${CGO_ENABLED:-}" "$*" >>"$FAKE_DIR/go-browsertype.log"
-  printf '#!/usr/bin/env bash\necho "fake browsertype: $*"\n' >"$out"
+  # Its -help lists -protect, as INFRA-707's fixed driver does; FAKE_BT_NO_PROTECT=1 builds one
+  # without it, as the driver before that fix.
+  if [ -n "${FAKE_BT_NO_PROTECT:-}" ]; then
+    printf '#!/usr/bin/env bash\n[ "$1" = -help ] && { echo "  -peers int"; exit 0; }\necho "fake browsertype: $*"\n' >"$out"
+  else
+    printf '#!/usr/bin/env bash\n[ "$1" = -help ] && { echo "  -protect value"; exit 0; }\necho "fake browsertype: $*"\n' >"$out"
+  fi
   chmod +x "$out"
   exit 0
 fi
@@ -835,6 +841,16 @@ for c in "abab|--browsertype-commit 'abab' is not a full 40-hex commit sha" \
     fail "up built a binary before refusing --browsertype-commit ${c%%|*}"
 done
 pass "up refuses a --browsertype-commit that is not 40 hex, that the git store lacks, or whose tree has no loadtest/browsertype, naming it, before creating anything"
+
+# A browsertype whose -help lists no -protect would type into loadgen's revision token: refused
+# after its build, before the lock.
+reset_fake
+FAKE_BT_NO_PROTECT=1 run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok" --browsertype-commit "$commit_bt"
+((RC != 0)) || fail "up accepted a browsertype with no -protect"
+grep -qF -- "has no -protect flag" "$tmp/out" || fail "up's refusal of a browsertype without -protect does not say so: $(tail -3 "$tmp/out")"
+no_create || fail "up created something before refusing a browsertype without -protect"
+[ ! -f "$fake/lock.json" ] || fail "up took the lock before refusing a browsertype without -protect"
+pass "up refuses a browsertype with no -protect before the lock, naming the flag"
 
 # ---- (b) replay-prepare's refusals ---------------------------------------------------------------------
 
@@ -1347,8 +1363,10 @@ jq -e --arg c "$commit_bt" --arg s "$(sha256sum <"$run_dir/browsertype" | cut -d
   "$run_dir/state.json" >/dev/null || fail "state.json does not record the browsertype commit and binary's sha256: $(jq -c .browsertype "$run_dir/state.json")"
 grep -qx -- "-C $(cd -- "$here/../../../.." && pwd) archive $commit_bt packages/envoy" "$fake/git.log" ||
   fail "up did not git archive packages/envoy of $commit_bt: $(cat "$fake/git.log")"
-grep -qx -- "GOWORK=off CGO_ENABLED=0 go build -buildvcs=false -o $run_dir/browsertype ./loadtest/browsertype" "$fake/go-browsertype.log" ||
-  fail "up did not build a static browsertype with build_at_commit: $(cat "$fake/go-browsertype.log" 2>/dev/null)"
+# Built in up's scratch directory before the lock, then moved to $run_dir/browsertype.
+grep -qxE -- "GOWORK=off CGO_ENABLED=0 go build -buildvcs=false -o $LOADTEST_CLUSTER_ROOT/\.checker\.[^/]+/browsertype \./loadtest/browsertype" "$fake/go-browsertype.log" ||
+  fail "up did not build a static browsertype with build_at_commit before the lock: $(cat "$fake/go-browsertype.log" 2>/dev/null)"
+[ -x "$run_dir/browsertype" ] || fail "up did not move browsertype into $run_dir"
 { [ -s "$fake/go-dispatch.log" ] && [ -x "$run_dir/envoy-dispatch" ]; } || fail "up --browsertype-commit did not build the stored-order checker too"
 [ -z "$(find "$run_dir" -maxdepth 1 -name '.build-src.*')" ] || fail "up left a build's scratch source in the run directory"
 [ "$(grep -c -- "^-n $ns cp $run_dir/browsertype runner:/work/browsertype " "$fake/kubectl.log")" = 1 ] || fail "up did not copy browsertype into the runner"
@@ -1378,7 +1396,7 @@ grep -qxF -- "plan-docs -json -seed $run_dir/seed.json -sessions 400 -top 3 -eve
   fail "the step's typing documents are not the 3 plan-docs plans the most versions for: $(cat "$fake/runner/work/typing/10x-typing.docs" 2>/dev/null)"
 ! grep -q 'WARNING: step 10x-typing:' "$tmp/out" ||
   fail "a step whose 3rd typed document has 30 planned versions warned: $(grep 'WARNING: step 10x-typing:' "$tmp/out")"
-grep -qxF -- "typing-10x-typing /work/browsertype -url http://dispatch.$ns.svc:8766 -token-file /work/typing/token -session ses-browsertype -artifacts-file /work/typing/10x-typing.docs -peers 3 -rate 2.5 -duration 8810s -seed 1" \
+grep -qxF -- "typing-10x-typing /work/browsertype -url http://dispatch.$ns.svc:8766 -token-file /work/typing/token -session ses-browsertype -artifacts-file /work/typing/10x-typing.docs -peers 3 -rate 2.5 -duration 8810s -seed 1 -protect Revision token" \
   "$fake/runner-starts" || fail "browsertype did not start with the step's flags: $(grep '^typing-' "$fake/runner-starts")"
 # The token: written into the runner from standard input, on no command line, in no file under the
 # step directory, never printed.
