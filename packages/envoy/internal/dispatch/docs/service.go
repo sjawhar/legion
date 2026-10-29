@@ -130,6 +130,9 @@ type Service struct {
 	unrecordedMarkTTL time.Duration
 	// editNoticeQuiet is Deps.EditNoticeQuiet, with its default applied.
 	editNoticeQuiet time.Duration
+	// keepAlive is how often a document socket's peer is sent a keep-alive (keepalive.go):
+	// documentKeepAlive, which a test shortens.
+	keepAlive time.Duration
 	// afterEditNoticeIDs runs once an edit-notice sweep has read its due ids, with no lock held,
 	// and before it locks the first. Nil outside tests; tests use it to delete a document in that
 	// window.
@@ -698,6 +701,7 @@ func New(deps Deps) *Service {
 		agentTokens:       deps.AgentTokens,
 		serverURL:         strings.TrimSuffix(deps.ServerURL, "/"),
 		settle:            settle,
+		keepAlive:         documentKeepAlive,
 		markWait:          markWait,
 		now:               time.Now,
 		timers:            make(map[uint64]*time.Timer),
@@ -1338,6 +1342,18 @@ func (s *Service) retrySettleSoon(room string) {
 		return
 	}
 	s.rearmSettleLocked(room, state)
+}
+
+// settleAfter arms the document's settlement to run after delay, replacing the timer armed for it,
+// unless the service or the room is shutting down. It arms the timer whatever the room's appends
+// are doing: a settlement that finds them in flight waits for them itself (settleRoomWithin).
+func (s *Service) settleAfter(artifactID string, delay time.Duration) {
+	if s.stopping.Load() || s.shuttingDown(artifactID) {
+		return
+	}
+	state := s.lockState(artifactID)
+	defer s.unlockState(artifactID, state)
+	s.scheduleSettleAfterLocked(artifactID, state, delay)
 }
 
 // rearmSettleLocked arms room's settlement at once for a settlement whose wait for the room's
@@ -2463,6 +2479,16 @@ func (s *Service) ScheduleSettlement(artifactID string) {
 	s.scheduleSettle(artifactID)
 }
 
+// SettleNow arms the document's settlement to run at once rather than at the end of the settle
+// window: it replaces the timer a write armed, and a settlement with nothing owed writes nothing.
+// A settlement armed this way waits for the room's appends as any other does (settleRoomWithin).
+// Nothing in production calls it. It exists for tests that hold a write unsettled across a window
+// wide enough to land another write in it: once that write has landed, the test settles the
+// document now instead of waiting the window out.
+func (s *Service) SettleNow(artifactID string) {
+	s.settleAfter(artifactID, 0)
+}
+
 type BlockIDBackfill struct {
 	ArtifactID string
 	Stamped    int
@@ -2630,10 +2656,12 @@ func waitGroup(ctx context.Context, wg *sync.WaitGroup) {
 	}
 }
 
-// SetIssueClosed refreshes the closed state every room of an issue remembers, and closes them when
-// the issue closes. When it reopens, a state the close left without a latest edit source takes the
-// one its document's pending-settlement row holds (restoreLastActor). A document with no state has
-// no room to tell: its next load reads the issue.
+// SetIssueClosed refreshes the closed state every room of an issue remembers, and closes every
+// room of the issue on this process, on a close and on a reopen alike (below), so each browser
+// reconnects and is admitted as the issue now stands. When it reopens, a state the close left
+// without a latest edit source takes the one its document's pending-settlement row holds
+// (restoreLastActor) before its room closes. A document no room of this process holds has nothing
+// to close: its next load reads the issue.
 // Its caller runs it after its own transaction has committed, and it takes that caller's context
 // so the pool can see it: a caller that ever runs it with a transaction still open is refused, not
 // wedged. That context is one caller holding at most one connection, so the rooms are recorded and
@@ -2699,17 +2727,27 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 			if persisted {
 				s.lastActorPersisted(room, creditSeq)
 			}
-			// A room still loading is closed once it has loaded: CloseRoom waits for the load.
-			_ = s.srv.CloseRoom(room, true)
 		}
+		// Every room of the issue closes on this process, on a close and on a reopen alike: a
+		// connection keeps the admission it was authorized with, read-only or writable, and the
+		// state's closed flag says nothing about it - a connection's own registration
+		// (addConnection) or a load after the reopen committed makes a state that reads the issue
+		// open while a browser on it was admitted read-only. A room still loading is closed once
+		// its load has returned: ygo's CloseRoom waits for the load's ready barrier.
+		_ = s.srv.CloseRoom(room, true)
 	}
 }
 
 // restoreLastActor gives the state of a reopened issue's document the latest edit source its
-// pending-settlement row holds, as a room's load does (onLoadDocument): the close moved it from
-// the state to the row (lastActorPersisted), and a room that loaded while the issue was closed
-// restored none, so without this the settlement the document owes would name no latest editor.
-// An edit observed since the reopen's snapshot (a later creditSeq) keeps its own.
+// pending-settlement row holds, before the reopen closes its room: the close moved it from the
+// state to the row (lastActorPersisted), and a room that loaded while the issue was closed
+// restored none. The load of the next room takes the row's source too (onLoadDocument), but only
+// while the state holds nothing newer than the row (rowIsCurrent). A state that still holds an
+// update whose append has not landed - the reopen's own ask writes, published into the room just
+// before this closes it - keeps its own source through a load that starts before the close's flush
+// takes that update (ygo takes the room out of its map before CloseRoom returns), and without this
+// that source would be the none the close left, so the settlement the document owes would name no
+// latest editor. An edit observed since the reopen's snapshot (a later creditSeq) keeps its own.
 func (s *Service) restoreLastActor(ctx context.Context, room string, creditSeq uint64) {
 	owed, lastActor, err := readOwedSettlement(ctx, s.store.Pool, room)
 	if err != nil {

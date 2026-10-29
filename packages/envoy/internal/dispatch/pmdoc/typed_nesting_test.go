@@ -20,7 +20,7 @@ func TestParseForWriteRefusesDeeplyNestedBareDirectivesQuickly(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var err error
-			took, timing := cpuTimeOf(func() { _, err = ParseForWrite(test.markdown, nil) })
+			took, timing := cpuTimeOf(again(func() { _, err = ParseForWrite(test.markdown, nil) }))
 			if timing != nil {
 				t.Fatal(timing)
 			}

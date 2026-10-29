@@ -662,16 +662,36 @@ func (p *Pool) begin(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error)
 	if err != nil {
 		return nil, err
 	}
-	return &trackedTx{Tx: tx, release: hold(ctx)}, nil
+	beforeCommit, _ := ctx.Value(beforeCommitKey{}).(BeforeCommit)
+	return &trackedTx{Tx: tx, release: hold(ctx), beforeCommit: beforeCommit}, nil
 }
 
-// trackedTx is a transaction of this pool. It clears the caller's hold mark however the
-// transaction ends, when the caller's context carried one (release is nil for a context the pool
-// cannot see), and then runs what AfterCommit registered on it. Callers commit and then run a
-// deferred rollback: the first of the two ends the transaction, and the second ends nothing again.
+// BeforeCommit is a step every transaction a request opens takes just before its COMMIT, inside
+// that transaction, so what it writes commits with the request's own write or not at all. An
+// error from it rolls the transaction back, and Commit returns that error.
+type BeforeCommit func(ctx context.Context, tx pgx.Tx) error
+
+type beforeCommitKey struct{}
+
+// WithBeforeCommit returns ctx carrying step, which every transaction this pool opens under ctx,
+// or a context derived from it, takes before it commits (BeforeCommit). A keyed write marks its
+// Idempotency-Key committed this way, in the transaction of the write itself (api/request_keys.go).
+// A transaction already failed when its caller commits it skips the step: pgx answers that commit
+// with its own rollback error, as it would without one.
+func WithBeforeCommit(ctx context.Context, step BeforeCommit) context.Context {
+	return context.WithValue(ctx, beforeCommitKey{}, step)
+}
+
+// trackedTx is a transaction of this pool. It takes the caller's BeforeCommit step before it
+// commits, clears the caller's hold mark however the transaction ends, when the caller's context
+// carried one (release is nil for a context the pool cannot see), and then runs what AfterCommit
+// registered on it. Callers commit and then run a deferred rollback: the first of the two ends the
+// transaction, and the second ends nothing again. A context with no BeforeCommit step commits as
+// it is.
 type trackedTx struct {
 	pgx.Tx
-	release func()
+	release      func()
+	beforeCommit BeforeCommit
 	// mu guards ended and after: a transaction is used from one goroutine at a time, but nothing
 	// stops a caller from registering on one goroutine and ending it on another.
 	mu    sync.Mutex
@@ -682,6 +702,12 @@ type trackedTx struct {
 func (t *trackedTx) Commit(ctx context.Context) error {
 	committed := false
 	defer func() { t.end(committed) }()
+	if t.beforeCommit != nil && t.Tx.Conn().PgConn().TxStatus() == 'T' {
+		if err := t.beforeCommit(ctx, t.Tx); err != nil {
+			_ = t.Tx.Rollback(ctx)
+			return err
+		}
+	}
 	err := t.Tx.Commit(ctx)
 	committed = err == nil
 	return err

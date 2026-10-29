@@ -336,7 +336,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer withdraw()
 	ctx := context.WithValue(r.Context(), connectionContextKey{}, connection)
-	s.srv.ServeHTTP(w, r.WithContext(ctx))
+	// The socket's peer hears from it at least every s.keepAlive (documentKeepAlive), however idle
+	// the room (keepalive.go), so its provider never takes the socket for dead.
+	keepAlive := newKeepAliveWriter(w, room, s.keepAlive)
+	s.srv.ServeHTTP(keepAlive, r.WithContext(ctx))
+	keepAlive.stop()
 }
 
 // admitDocument decides whether a socket may join room's document. A browser editor normalizes a

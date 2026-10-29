@@ -1,7 +1,7 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useId, useRef, useState } from "react";
 
-import { api, apiErrorMessage } from "../../api/client";
+import { api, apiErrorMessage, type WriteBounds } from "../../api/client";
 import { isLiveQuery } from "../../api/query-refresh";
 import type { DeliverySessionGroup } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
@@ -18,7 +18,18 @@ import {
 } from "../../theme/classes";
 import { AgentName, useAgentText } from "../refs/AgentName";
 import { useDialog } from "../shell/useDialog";
+import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { storedSessionTitle } from "./lib/sessionTitles";
+
+/** One change to the groups: what it is, in the reader's words, and one attempt of it. A delete
+ *  is idempotent and goes without the key. A create names what it makes (`made`), which the
+ *  editor says was made when Dispatch lost its answer. */
+interface GroupChange {
+  readonly label: string;
+  readonly made?: string;
+  readonly run: (bounds: WriteBounds) => Promise<unknown>;
+}
 
 const sectionLabel = `text-xs tracking-wide uppercase ${textMutedOnSurface}`;
 const fieldClass = `h-8 min-w-0 flex-1 rounded border px-2 text-sm ${inputClasses(true)} ${textPrimaryOnSurface}`;
@@ -37,7 +48,7 @@ function GroupCard({
   storedTitle: (session: string) => string | undefined;
   selected: readonly string[];
   pending: boolean;
-  write: (change: () => Promise<unknown>) => void;
+  write: (change: GroupChange) => void;
 }): ReactNode {
   const id = useId();
   const text = useAgentText();
@@ -59,7 +70,11 @@ function GroupCard({
           className={secondaryButtonCompact}
           disabled={pending || name.trim() === "" || name.trim() === group.name}
           onClick={() =>
-            write(() => api.updateDeliverySessionGroup(group.id, { name: name.trim() }))
+            write({
+              label: `Rename of the group ${group.name}`,
+              run: (bounds) =>
+                api.updateDeliverySessionGroup(group.id, { name: name.trim() }, bounds),
+            })
           }
           type="button"
         >
@@ -82,7 +97,11 @@ function GroupCard({
               className={dismissButtonText}
               disabled={pending}
               onClick={() =>
-                write(() => api.updateDeliverySessionGroup(group.id, { remove: [session] }))
+                write({
+                  label: `Removal of ${text.sessionText(session, storedTitle(session))} from ${group.name}`,
+                  run: (bounds) =>
+                    api.updateDeliverySessionGroup(group.id, { remove: [session] }, bounds),
+                })
               }
               type="button"
             >
@@ -95,7 +114,12 @@ function GroupCard({
         <button
           className={secondaryButtonCompact}
           disabled={pending || addable.length === 0}
-          onClick={() => write(() => api.updateDeliverySessionGroup(group.id, { add: addable }))}
+          onClick={() =>
+            write({
+              label: `Sessions added to ${group.name}`,
+              run: (bounds) => api.updateDeliverySessionGroup(group.id, { add: addable }, bounds),
+            })
+          }
           type="button"
         >
           Add selected
@@ -103,7 +127,12 @@ function GroupCard({
         <button
           className={`${secondaryButtonCompact} ${dangerText}`}
           disabled={pending}
-          onClick={() => write(() => api.deleteDeliverySessionGroup(group.id))}
+          onClick={() =>
+            write({
+              label: `Deletion of the group ${group.name}`,
+              run: (bounds) => api.deleteDeliverySessionGroup(group.id, bounds),
+            })
+          }
           type="button"
         >
           Delete group
@@ -138,8 +167,10 @@ export function SessionGroupsEditor({
   const dialog = useDialog<HTMLElement>({ initialFocusRef: closeButtonRef, onClose, open: true });
   const [selected, setSelected] = useState<string[]>([]);
   const [name, setName] = useState("");
-  const save = useMutation({
-    mutationFn: (change: () => Promise<unknown>) => change(),
+  // The editor shows a refusal itself, as the server wrote it.
+  const save = useKeyedWrite({
+    inline: true,
+    label: (change: GroupChange) => change.label,
     onSuccess: () => {
       setSelected([]);
       void queryClient.invalidateQueries({
@@ -147,6 +178,7 @@ export function SessionGroupsEditor({
         predicate: (query) => !isLiveQuery(query),
       });
     },
+    write: (change, bounds) => change.run(bounds),
   });
 
   const text = useAgentText();
@@ -165,9 +197,18 @@ export function SessionGroupsEditor({
       current.includes(session) ? current.filter((s) => s !== session) : [...current, session]
     );
   const create = () =>
-    save.mutate(() => api.createDeliverySessionGroup({ name: name.trim(), sessions: selected }), {
-      onSuccess: () => setName(""),
-    });
+    save.mutate(
+      {
+        label: `New group ${name.trim()}`,
+        made: `The group “${name.trim()}”`,
+        run: (bounds) =>
+          api.createDeliverySessionGroup({ name: name.trim(), sessions: selected }, bounds),
+      },
+      // Made either way - with no answer to give too - so the name goes and a second press
+      // makes nothing.
+      { onSuccess: () => setName("") }
+    );
+  const madeUnanswered = save.unanswered?.variables.made;
 
   return (
     <aside
@@ -238,7 +279,10 @@ export function SessionGroupsEditor({
           <input
             className={fieldClass}
             id={`${id}-new-name`}
-            onChange={(event) => setName(event.target.value)}
+            onChange={(event) => {
+              save.forgetUnanswered();
+              setName(event.target.value);
+            }}
             placeholder="Group name"
             value={name}
           />
@@ -251,6 +295,7 @@ export function SessionGroupsEditor({
             Create group
           </button>
         </div>
+        {madeUnanswered === undefined ? null : <LandedWithoutAnswer what={madeUnanswered} />}
       </section>
 
       {save.isError ? (

@@ -1,0 +1,10 @@
+{
+  "type": "subscribe",
+  "sub": "events-1",
+  "view": {
+    "kind": "events"
+  },
+  "resume": {
+    "since": "41"
+  }
+}

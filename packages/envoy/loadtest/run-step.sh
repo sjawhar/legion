@@ -3,7 +3,7 @@
 #
 #   run-step.sh <name> --events <per s> --sessions <n> --requests <per s>
 #     [--duration 180s] [--warmup 30s] [--grace 20s] [--event-mix <preset or kind=w,...>]
-#     [--route-mix <file>] [--human 0.1] [--sse <n>] [--rng-seed <n>] [--out <dir>]
+#     [--route-mix <file>] [--human 0.1] [--live <n>] [--rng-seed <n>] [--out <dir>]
 #     [--editors 0] [--editor-rate 2] [--editor-docs 10]
 #
 # From a fresh checkout it sets up, starts and seeds the stack (stack.sh). Then, every step that is
@@ -52,7 +52,7 @@ while [ $# -gt 0 ]; do
     --events) have_events=true ;;
     --sessions) have_sessions=true ;;
     --requests) have_requests=true ;;
-    --duration | --warmup | --grace | --event-mix | --human | --sse | --rng-seed) ;;
+    --duration | --warmup | --grace | --event-mix | --human | --live | --rng-seed) ;;
     --editors | --editor-rate | --editor-docs) ;;
     --route-mix)
       [ -f "$value" ] || die "--route-mix names $value, which is not a file"

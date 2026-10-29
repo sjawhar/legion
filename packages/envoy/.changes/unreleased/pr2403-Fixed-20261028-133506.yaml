@@ -1,7 +1,0 @@
-kind: Fixed
-body: |-
-    A document write now reads the spacing of a list and its items around an unclosed code fence
-    inside a typed block in a list item, a quote or a footnote definition as the browser does.
-time: 2026-10-28T13:35:06.390473897Z
-custom:
-    Issue: pr2403
