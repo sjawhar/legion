@@ -2450,8 +2450,10 @@ export const DOCUMENT_SCHEMA_CLOSE_REASON = "DOC_SCHEMA";
 
 /**
  * The close code the document websocket (`/ws/doc/{room}`) refuses one browser's update with when
- * applying it would grow the document past the size bound every server write obeys
- * (`pmdoc.MaxDocumentBytes`) or past the element bound (`pmdoc.MaxDocumentElements`): the update is
+ * applying it would take the document past a bound of its own: the size bound every server write
+ * obeys (`pmdoc.MaxDocumentBytes`, with a small allowance past it for the editor's own derived
+ * writes and for typing), the structs ygo decodes in one update, the bytes it would hold that no
+ * rendering shows, or the heaviest whole-state message a browser may hand back: the update is
  * neither stored nor relayed, and that one browser is closed with this code and
  * `DOCUMENT_TOO_LARGE_CLOSE_REASON`. It is in the 4400-4499 band collaborative servers publish as
  * permanent, so the dashboard acts on the close — it drops the refused edit and re-reads the
@@ -2467,17 +2469,18 @@ export const DOCUMENT_TOO_LARGE_CLOSE_REASON = "DOC_TOO_LARGE";
 
 /** The reason the document websocket closes with `DOCUMENT_TOO_LARGE_CLOSE_CODE` when the server
  *  could not merge the update into the document quickly enough: its merge would scan more of the
- *  document's items than the server lets one update scan (ygo's integrate-scan bound), so it is
+ *  document's items than the room allows one apply to scan, so it is
  *  refused whole, with nothing of it stored or relayed. Permanent like the size refusal: the
  *  dashboard drops the refused edit and re-reads the document, and tells the person in words of
  *  its own. Generated into Go as `contracts.DocumentTooTangledCloseReason`. */
 export const DOCUMENT_TOO_TANGLED_CLOSE_REASON = "DOC_TOO_TANGLED";
 
 /** The reason the document websocket closes with `DOCUMENT_TOO_LARGE_CLOSE_CODE` when the document
- *  must be rebuilt before it can take the update: the browser still holds the edit history a
- *  rebuild of the document replaced, so the update is refused whole, with nothing of it stored or
- *  relayed. Permanent like the size refusal: the dashboard drops the refused edit and re-reads the
- *  rebuilt document. Generated into Go as `contracts.DocumentNeedsRebuildCloseReason`. */
+ *  must be rebuilt before it can take the update: its edit history has used up what the room lets
+ *  its applies scan, or the browser still holds the edit history a rebuild of the document
+ *  replaced, so the update is refused whole, with nothing of it stored or relayed. Permanent like
+ *  the size refusal: the dashboard drops the refused edit, re-reads the document and offers the
+ *  rebuild. Generated into Go as `contracts.DocumentNeedsRebuildCloseReason`. */
 export const DOCUMENT_NEEDS_REBUILD_CLOSE_REASON = "DOC_NEEDS_REBUILD";
 
 /**

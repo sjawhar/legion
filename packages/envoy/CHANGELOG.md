@@ -1352,76 +1352,12 @@
 
 ### Fixed
 
-- `envoy-dispatch` sets the Go runtime's soft memory limit to 90% of its container's when it
-  starts, 3.6 GiB of the GKE pod's 4 GiB, so the collector works harder as the heap nears the limit
-  instead of letting garbage pile up until the container is killed (INFRA-179). The limit is read
-  by `github.com/KimMachineGun/automemlimit` from the control group (`memory.max` under version
-  two, `memory.limit_in_bytes` under version one, the smallest in the hierarchy), and the server
-  logs one line naming the limit it read and the limit it set. Where no limit is readable (`max`,
-  or no control group) it sets none and the line says so. `GOMEMLIMIT` in the environment is used
-  as it is and the container's limit is not read; `AUTOMEMLIMIT=off` turns the limit off, and any
-  other `AUTOMEMLIMIT` is the ratio, in (0, 1]. Both are the library's variables, not rows of the
-  settings table.
-
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.
   Firefox opened the stream only once its first byte arrived, and a stream with no backlog and no
   new event sent none until the first heartbeat, fifteen seconds later: until then the page stayed
   "Reconnecting…" and skipped the refresh a reconnect owes every view. `GET /api/v1/events` now
   sends an SSE comment, `: open`, with its headers, so the stream opens at once in every browser.
-
-- The ygo pin moves from `v1.51.3-sami.6` to `v1.51.3-sami.7` (commit `bc93c5b0`), which carries
-  every member of `v1.51.3-sami.6` unchanged and a per-apply scan budget (INFRA-179). A document
-  can ask its owner, under its lock and with the apply's origin, how many items each remote
-  apply's conflict scans may pass, the drain of the pending queue drawing on the same allowance
-  (`Doc.SetIntegrateScanBudget`); a document with a budget applies every remote update whole or
-  not at all, and a drain the allowance cannot hold is taken back with the parked queue kept. What
-  a committed transaction's scans passed is read from `Transaction.IntegrateScanned`, and a failed
-  apply on such a document returns a `*crdt.RefusedUpdateError` carrying what its scans passed.
-  Dispatch replaces the room's fixed bound of 28,640 items an update with that budget: each
-  browser's update in a room scans at most the per-frame ceiling or what is left of the room's
-  scan total, whichever is less, and is refused 4413 `DOC_TOO_TANGLED` past it, or
-  `DOC_NEEDS_REBUILD` once the room's scan total is used up, when it still takes an update
-  scanning 64 items or fewer, so typing in place goes on.
-
-- The ygo pin moves from `v1.51.3-sami.5` to `v1.51.3-sami.6` (commit `32e09873`), which carries
-  every member of `v1.51.3-sami.5` unchanged and three more (INFRA-179). A bounded document's
-  remote apply keeps the parked structs and parked delete ranges by reference rather than copying
-  them, so a keystroke into a room holding the most its struct total admits, 349,517 parked structs
-  or 524,280 parked delete ranges, allocates 4,240 bytes where it allocated 2,806,176 and
-  25,171,104, and the peer update hook's apply-heap estimate drops the term that priced that copy.
-  Parked delete ranges are retried only once the structs they name can have arrived, and the
-  pending cap (`Server.MaxPendingItems`, 1,048,576 in Dispatch) now caps them too, apart from
-  parked structs: a decode that would park more delete ranges than the cap is refused, so a stored
-  history holding more than 1,048,576 parked delete ranges, which no room's struct total admits, no
-  longer loads and is rebuilt as any history that does not load is. ygo's websocket server decodes
-  a room's stored state with the cap lifted and sets the cap before `OnLoadDocument`, so the load's
-  own applies and every peer's are held to it. And the items a remote update defers integrate in
-  dependency order: ygo's release notes record the state of a 400-paragraph document after 240
-  versions, each written by a fresh client id, decoding in 143 ms where it took 433 ms.
-
-- The ygo pin moves from `v1.51.3-sami.4` to `v1.51.3-sami.5` (commit `e0a2f4ff`), which carries
-  every member of `v1.51.3-sami.4` unchanged and two more (INFRA-179). reearth/ygo#304, which
-  `v1.51.3-sami.2` carried and `v1.51.3-sami.3` and `v1.51.3-sami.4` left out, is carried again:
-  ygo's websocket server takes a `Server.OnPeerUpdate` hook, which runs in place of the room's own
-  apply of a read-write peer's SyncStep2 or Update (Sync tag 0, SyncReply tag 4). It is handed the
-  room's name, its document, the update's V1 bytes and the transaction origin (`PeerUpdateInfo`),
-  and an `apply func() error` that applies the update exactly as the room does without a hook, a
-  second call to which returns `ErrPeerUpdateApplied`, so a server can refuse an update before it
-  reaches the room or any other peer, or hold a lock of its own across the apply. An update `apply`
-  did not apply is not broadcast, and is answered `SyncStatus(0)` on a Hocuspocus-framed
-  connection; a hook error that is or wraps a `*PeerClose{Code, Reason}` then closes the peer with
-  that code, its reason cut at a rune boundary to the 123 bytes a close frame carries. An update
-  `apply` applied is broadcast and answered `SyncStatus(1)` whatever the hook returns, and a
-  read-only peer's update never reaches the hook. New in `v1.51.3-sami.5`: a document can bound
-  the items one remote update's conflict scans pass (`Doc.SetMaxIntegrateScan`); past the bound
-  `ApplyUpdateV1` returns `ErrIntegrateScanBudget`, which wraps `ErrInvalidUpdate`, and a bounded
-  document applies every remote update whole or not at all, so an update whose apply fails leaves
-  the document as it was and fires no observer. ygo's release notes record 2,000 such items (about
-  12 KB) into a list of 20,000 unmerged items taking 20.8 s and 2,365,640,192 bytes on
-  `v1.51.3-sami.4`. And split runs of one item merge back at commit in one linear pass, bounded or
-  not: 20,000 halves of a 40,000-character run allocated 440,968,992 bytes in one apply on
-  `v1.51.3-sami.4` and 11,384,168 on `v1.51.3-sami.5`.
 
 - A person who edits a document in the browser while an agent's write to it is published is now
   credited for the edit. ygo runs each change's observers after it unlocks the document, so the two
@@ -1896,8 +1832,8 @@
 - A table whose rows hold an escaped pipe in a code span parsed in time quadratic in its size: goldmark's table transformer checked every code span's text against every escaped pipe in the document, and 1 MiB of such rows took over two minutes. Dispatch takes the backslash out of those pipes itself, in one pass, and 1 MiB parses in about two seconds (LEGION-465).
 - An id outside nats.go's key alphabet (`ses:bad`) failed whatever met it in the interest and role buckets, since nats.go refuses such a key on every read, write and delete and the stores took that refusal for a failure. A role claim over such a holder, which an earlier build's bare-string claim or a direct bucket write can leave in the role bucket, wrote the claim and then answered 500. A caller could cause the same 500 itself: a session subscribed to a role topic outside the alphabet (`notifications.role.bad:role`, which subscribe accepts) got it on every unsubscribe of that topic, every unsubscribe of all its topics and every `DELETE /v1/interests/<id>`, and its interest stayed. An interest or claim stored under such a key, which only a direct bucket write makes, stopped the interest reaper or the role reaper at that key every five minutes, logging `reaper cycle failed` or `role claim reaper cycle failed` at ERROR. The handle every bucket opens through now names nats.go's refusal as the refusal it is (`bus.ErrInvalidKey`, naming the key), so each of these skips the key as it already skipped one past the key bound: the claim and the unsubscribe answer 200, and the reapers go on, with a WARN naming the key they cannot delete, which an operator removes by hand (`packages/envoy/AGENTS.md`). A `/v1` route given a session id or role outside the alphabet answers 400 naming it, where it answered 500 (503 on subscribe, 404 reading the interests of a session it holds none for), and Dispatch reads a 400 or 413 from `GET /v1/interests/<id>` as no interest, as it reads a 404 (LEGION-456).
 - Marking or unmarking a document's text, and checking whether a concurrent change removed the text a write inserted, walked the live tree one stack frame per level with no bound, where an authenticated peer can grow the tree through any number of small websocket updates. Each now refuses a node more than 1,000 levels deep, text included, as the document's reads do, and a peer's update that deepens the tree between a write's read and its transaction is answered `500 DOC_SCHEMA` rather than `500 INTERNAL` (LEGION-465).
-- Deleting an element of a live document took one stack frame per level of nesting inside it, so an ordinary delete of a tree an authenticated peer had grown through any number of small websocket updates needed more stack than the goroutine had. Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork (at `v1.51.3-sami.6` since the entries above), which walks the deleted children iteratively and carries the transactional GC fix, both open upstream as reearth/ygo#263 and #262 (LEGION-465).
-- Dispatch pinned `github.com/reearth/ygo` to the `sjawhar/ygo` fork at `v1.51.3-sami.1` (commit
+- Deleting an element of a live document took one stack frame per level of nesting inside it, so an ordinary delete of a tree an authenticated peer had grown through any number of small websocket updates needed more stack than the goroutine had. Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork (at `v1.51.3-sami.1` since the entries below), which walks the deleted children iteratively and carries the transactional GC fix, both open upstream as reearth/ygo#263 and #262 (LEGION-465).
+- Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork at `v1.51.3-sami.1` (commit
   `e5c1aacf`): upstream v1.51.2 and seven fixes, each open upstream as a reearth/ygo pull
   request - #258 (carried as the fork's own #262), #260, #263, #266, #268, #269 and #291
   (LEGION-535). A browser's document connection now gets a `SyncStatus` frame (Hocuspocus tag 8)

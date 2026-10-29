@@ -4,29 +4,6 @@
 
 ### Added
 
-- `DOCUMENT_TOO_LARGE_CLOSE_CODE` (4413) with `DOCUMENT_TOO_LARGE_CLOSE_REASON`
-  (`DOC_TOO_LARGE`), and `DOCUMENT_BUSY_CLOSE_CODE` (4503) with `DOCUMENT_BUSY_CLOSE_REASON`
-  (`DOC_BUSY`), the two closes the document websocket refuses a browser's update with, generated
-  into Go beside `DOCUMENT_SCHEMA_CLOSE_CODE`. 4413 is permanent — the update would take the
-  document past the size or element bound every server write obeys, so the dashboard drops the
-  refused edit and re-reads the document rather than reconnecting into the same refusal. 4503 is
-  transient — the memory budget over the documents Dispatch holds open is full and nothing can be
-  closed, so the dashboard keeps the edit and the provider's own backoff retries it (INFRA-179).
-- `DOCUMENT_TOO_TANGLED_CLOSE_REASON` (`DOC_TOO_TANGLED`), a second reason for
-  `DOCUMENT_TOO_LARGE_CLOSE_CODE` (4413), generated into Go as
-  `contracts.DocumentTooTangledCloseReason`: the server could not merge the browser's update into
-  the document quickly enough, because its merge would scan more of the document's items than the
-  server lets one update scan (ygo's integrate-scan bound), so the update is refused whole and
-  nothing of it is stored or relayed. Like `DOC_TOO_LARGE` it is permanent: the dashboard drops the
-  refused edit and re-reads the document, and says "Your last edit was not saved: Dispatch could not
-  merge it into this document quickly enough. Your other edits are kept." (INFRA-179).
-- `DOCUMENT_NEEDS_REBUILD_CLOSE_REASON` (`DOC_NEEDS_REBUILD`), a third reason for
-  `DOCUMENT_TOO_LARGE_CLOSE_CODE` (4413), generated into Go as
-  `contracts.DocumentNeedsRebuildCloseReason`: the document cannot take the browser's update until
-  it is rebuilt. The server closes with it a browser that reconnects still holding the edit history
-  a rebuild of the document replaced, so the old history is never handed back beside the rebuilt
-  one. Like `DOC_TOO_LARGE` it is permanent: the dashboard drops the refused edit and re-reads the
-  rebuilt document (INFRA-179).
 - `dispatch doc-edit --help` says the spec, not every document, holds no progress or status, and that a record of open items or progress is a document of its own.
 
 - `SearchCoverage`, `SearchCoverageKinds` and `SearchCoverageCounts`, the body of

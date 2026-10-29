@@ -184,11 +184,13 @@ const DocumentSchemaCloseCode = ${DOCUMENT_SCHEMA_CLOSE_CODE}
 const DocumentSchemaCloseReason = ${JSON.stringify(DOCUMENT_SCHEMA_CLOSE_REASON)}
 
 // DocumentTooLargeCloseCode and DocumentTooLargeCloseReason close the one browser whose update
-// would grow a document past the document bound; with the same code, DocumentTooTangledCloseReason
-// closes the one whose update the server could not merge within the integrate-scan bound, and
-// DocumentNeedsRebuildCloseReason the one whose update the document cannot take until it is
-// rebuilt; DocumentBusyCloseCode and DocumentBusyCloseReason close a browser the room-memory budget
-// has no room for, and the one whose update would grow a document while that budget is full.
+// would grow a document past a bound of its own; with the same code, DocumentTooTangledCloseReason
+// closes the one whose update would scan more of the document than the room allows one apply to
+// scan, and DocumentNeedsRebuildCloseReason the one whose update the document cannot take until it
+// is rebuilt - its history has used up what the room lets its applies scan, or the browser still
+// holds a history a rebuild replaced; DocumentBusyCloseCode and DocumentBusyCloseReason close a
+// browser the room-memory budget has no room for, and the one whose update would grow a document
+// while that budget is full.
 // Generated from DOCUMENT_TOO_LARGE_CLOSE_CODE, DOCUMENT_TOO_LARGE_CLOSE_REASON,
 // DOCUMENT_TOO_TANGLED_CLOSE_REASON, DOCUMENT_NEEDS_REBUILD_CLOSE_REASON, DOCUMENT_BUSY_CLOSE_CODE
 // and DOCUMENT_BUSY_CLOSE_REASON in packages/contracts so the server's closes and the dashboard's

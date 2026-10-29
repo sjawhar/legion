@@ -290,8 +290,8 @@ func TestTheRoomBudgetsArithmetic(t *testing.T) {
 
 // The densest price (bytesOfHeapAByteAtTheDensest) is the most elements a byte of rendered
 // markdown makes, measured here over the dense shapes pmdoc's own tests build
-// (pmdoc/elements_test.go: the shapes its gate, its refusal of a mebibyte and its spelling of
-// every node type use) and over this repository's markdown files, and this fails once any shape
+// (pmdoc/elements_test.go: the shapes its refusal of a mebibyte and its spelling of every node
+// type use) and over this repository's markdown files, and this fails once any shape
 // prices higher at a mebibyte than the constant does. What is measured is each one's rendering,
 // since that is what the budget prices: a version is stored as its rendering
 // (pmdoc/parse.go:120-122), and a room's replica publishes its own.
@@ -493,8 +493,8 @@ func repositoryRoot(t *testing.T) string {
 }
 
 // repositoryMarkdown is every markdown file under root, skipping the trees nothing in this
-// repository wrote - its dependencies, its version control, the caches each leaves - as pmdoc's
-// own walk of them does (pmdoc/elements_test.go:263-288).
+// repository wrote - its dependencies, its version control, the caches each leaves. It is this
+// test's own walk: no other package walks the repository's markdown.
 func repositoryMarkdown(t *testing.T, root string) []string {
 	t.Helper()
 	var files []string

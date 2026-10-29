@@ -3499,12 +3499,17 @@ func budgetCloses(t *testing.T, server *memoryServer) []budgetClose {
 }
 
 // closesOf is the closes the server has logged of rooms (budgetCloses), once they number want or
-// ten seconds have passed. A sweep logs a close once its eviction returns, after the budget has
-// taken the room's charge back and any admission waiting on it has gone on, and the line reaches
-// the test through the pipe the server's output is copied through.
+// the patience below has passed: ten seconds and one for each room wanted, since a sweep closes
+// the rooms one at a time and each close flushes a room's updates to the store and compacts them
+// before the room's charge leaves (evictRoom) - the thirty-nine rooms of a mebibyte
+// TestTheRoomBudgetDoesNotOverchargeTypingAndPasting leaves took 25 s to close here on 2026-10-29,
+// where sixteen had closed within the ten. A sweep logs a close once its eviction returns, after
+// the budget has taken the room's charge back and any admission waiting on it has gone on, and the
+// line reaches the test through the pipe the server's output is copied through. A caller wanting
+// none takes what has been logged by now.
 func closesOf(t *testing.T, server *memoryServer, rooms []string, want int) []budgetClose {
 	t.Helper()
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+	for deadline := time.Now().Add(10*time.Second + time.Duration(want)*time.Second); ; time.Sleep(100 * time.Millisecond) {
 		closes := slices.DeleteFunc(budgetCloses(t, server), func(made budgetClose) bool { return !slices.Contains(rooms, made.room) })
 		if len(closes) >= want || time.Now().After(deadline) {
 			return closes
