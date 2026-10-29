@@ -135,13 +135,63 @@ func renderingProblem(write *liveWrite) string {
 	return ""
 }
 
-// newForkReadsRoom is a service whose settlement waits an hour, holding renderReuseDocument in a
+// forkReadsSection is one section of forkReadsDocument: its number, which every sentence of it
+// carries, and whether it holds a callout.
+type forkReadsSection struct {
+	number  int
+	callout bool
+}
+
+// forkReadsSections are the sections the cases here quote, each case taking a section of its own
+// so no two touch the same text: 0 the room's seeded browser edit; 3 to 10 the anchor placements
+// (a list item, a table cell, a callout, and a quote across a paragraph and the list after it),
+// warm and cold; 11 to 22 the refusals; 41 to 44 the warm flows and 51 and 52 the cold ones; and
+// 61 to 73 the panicked writes (panicked_fork_test.go).
+var forkReadsSections = []forkReadsSection{
+	{number: 0},
+	{number: 3}, {number: 4}, {number: 5, callout: true}, {number: 6}, {number: 8}, {number: 10, callout: true},
+	{number: 11}, {number: 12}, {number: 21}, {number: 22},
+	{number: 41}, {number: 42}, {number: 43}, {number: 44}, {number: 51}, {number: 52},
+	{number: 61}, {number: 62}, {number: 63}, {number: 71}, {number: 72}, {number: 73},
+}
+
+// forkReadsAreas are the rows of the document's one table, among them the cells a case anchors in.
+var forkReadsAreas = []int{7, 9}
+
+// forkReadsDocument is the few kilobytes the tests here write on: a heading, one table, and one
+// section per case, each holding a paragraph, a bullet list, an ordered list, and a callout where
+// a case anchors in one. It is renderReuseDocument's shape in the size each case needs, and not
+// renderReuseDocument itself, which generates 400 KB: every operation here reads, renders and
+// encodes the whole document, each rendering check renders and marshals it twice more, and each
+// cold case loads it from the store again, so these tests cost their document's size many times
+// over, and the cases are the same on four hundred kilobytes as on seven.
+func forkReadsDocument() string {
+	var b strings.Builder
+	b.WriteString("# Equivalence specification\n\n")
+	b.WriteString("| Area | Owner | State |\n| --- | --- | --- |\n")
+	for _, area := range forkReadsAreas {
+		fmt.Fprintf(&b, "| Area %d | Team %d | open |\n", area, area%4)
+	}
+	b.WriteString("\n")
+	for _, section := range forkReadsSections {
+		fmt.Fprintf(&b, "## Section %d\n\n", section.number)
+		fmt.Fprintf(&b, "Paragraph %d opens the section with enough words to read like specification prose about the subject at hand.\n\n", section.number)
+		fmt.Fprintf(&b, "- Bullet %d alpha names one requirement of the section.\n- Bullet %d beta names another requirement of the section.\n\n", section.number, section.number)
+		fmt.Fprintf(&b, "1. Step %d one is taken first.\n2. Step %d two is taken next.\n\n", section.number, section.number)
+		if section.callout {
+			fmt.Fprintf(&b, ":::callout{#callout-%d kind=\"note\" title=\"\"}\nCallout %d holds a note the readers of the section need.\n:::\n\n", section.number, section.number)
+		}
+	}
+	return b.String()
+}
+
+// newForkReadsRoom is a service whose settlement waits an hour, holding forkReadsDocument in a
 // room one browser edit has written to, durable.
 func newForkReadsRoom(t *testing.T) (*Service, string) {
 	t.Helper()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
-	seedServiceText(t, service, artifactID, renderReuseDocument())
+	seedServiceText(t, service, artifactID, forkReadsDocument())
 	editAsConnectedPeer(t, service, artifactID, 1, model.Actor{Kind: "user", ID: "carol"}, replaceRun("Paragraph 0 opens", "Paragraph 0 first opens"))
 	waitForLandedAppends(t, service, artifactID)
 	return service, artifactID
