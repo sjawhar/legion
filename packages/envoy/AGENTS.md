@@ -1893,10 +1893,33 @@ under that parser's rules (`inlineMarkdown`, `editorRules`) and both readers Dis
 markdown under (`storedMarkdown`: `*`/`_` judged beside another `*` or `_` but not a `~`, `~` runs
 of either length paired, a run after any `~` refused, every run in one loop; `flankingMarkdown`:
 the same with flanking alone), and failing that under the first two, and failing that under
-that parser's alone (`inlineWithEscapes`), so wherever the bytes main wrote read back as that
-parser reads them they stay; an image's alt text is kept the same way under `Parse` and
-`storedMarkdown` (`altReadsBack`). A code span keeps the whitespace that
-starts each of its later lines past the prefix of the containers around it, as the browser editor's
+that parser's alone (`inlineWithEscapes`), so wherever the bytes the writer before
+sjawhar/legion#2360 wrote read back as that parser reads them they stay: the one rule is that the
+writer keeps the earliest spelling of the greatest read-back prefix depth under `readBackReaders`
+(`inlineWithEscapes`, `readsBackUnder`). A text
+`!` written right before a link's `[` is written `\!`, since `![` opens an image
+(`needsInlineEscape`'s `beforeLabel`).
+A code block whose language holds a backtick is fenced with tildes, since a backtick fence's info
+string cannot hold one (`codeBlockFence`). Every order the writer opens marks in opens a code span's
+mark innermost, since a mark opened inside the span would be its text (`codeInnermost`). Only where
+no spelling before reads back under `inlineMarkdown` does the writer try `lastResorts`, so that no
+stored run's bytes change. A letter written as a character reference for the flanking rules takes
+one more backslash there where the bytes before it end in an odd run of backslashes, since
+`\&#97;` reads as an escaped `&` (`pairBackslash`). A run whose one free asterisk run stands beside
+a bold or italic code span is read back and written there with every `*` and `_` escaped
+(`delimitersInText`'s `lastHeld`). An escaped tilde is written `\~` there, beside which the
+browser editor's parser lets a `*` run open or close, where the `;` ending `&#126;` is punctuation
+that keeps it from closing before a letter (`tildeBackslash`). Marks are opened by reach there, the
+one the texts after carry furthest outermost, so that a nearer one ending closes no other
+(`byReach`). And marks a text shares with the one before are closed and opened again there inside
+the marks it opens (`*a*~~*b*~~`), so that the new run stands beside a delimiter run rather than a
+letter (`reopening`). And a bare URL whose text is its href is written there as text with the
+colon of its scheme escaped, so that the tokenizer reads no URL and reads no delimiter run written
+after it on into one, while the decoded text is the URL the transform links again
+(`bareURLColons`). An
+image's alt text is kept the same way under `Parse` and `storedMarkdown` (`altReadsBack`). A code
+span keeps the whitespace that starts each of its later lines past the prefix of the containers
+around it, as the browser editor's
 parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
 trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space or a line feed is the padding
 such a span sheds at each end (`codeSpanPadded`) where something else stands between, and the
@@ -2015,7 +2038,7 @@ back (`linkifyBlock.settle`), and a markdown holding no address is counted and w
 it. Its transform (`autolink_transform.go`) reads, at block close, each run of text nodes between
 other nodes, decoded, its URL pattern first and its email pattern over what that leaves
 (`linkTextAddresses`); one decoder gives each text's decoded text and the source offset each of its
-characters was written at (`decodeMarkdownTextOffsets`), where an address's edges split the text.
+characters was written at (`decodeMarkdown`), where an address's edges split the text.
 The two readers end an address differently (`x;https://x.test/a_ b` leaves the `_` out, `see
 http\://x.test/a_ b` keeps it), each as the engine does. So an address is a link after any
 punctuation, a letter outside ASCII, `]`, `|`, `!`, a character reference or an escape, a URL after
@@ -2056,11 +2079,11 @@ written in one order - link, strong, emphasis - so where a text still carries a 
 before it opened, and the order puts that mark after the text's other marks, the mark is closed and
 opened again; where that puts two runs of one delimiter character side by side (bold inside italic:
 `*`, `**` and `*`), the parser reads one run. Such a run is kept where it reads back, as the parser
-then splits it as written, and one that does not is written again in the plain respellings, as main
-writes it again. Only where none of those reads back, and a text is under more than one mark
-(`nestsMarks`), is it written with the marks still open kept
-open, then the marks the next text still carries, and the text's others opened inside them
-(`keepingOpen`), kept only where that reads back with nothing fused, so `_**a** b_` is written
+then splits it as written, and one that does not is written again in the plain respellings, as the
+writer before sjawhar/legion#1464 writes it again. Only where none of those reads back, and a text
+is under more than one mark (`nestsMarks`), is it written with the marks still open kept open, then
+the marks the next text still carries, and the text's others opened inside them (`keepingOpen`),
+kept only where that reads back with nothing fused, so `_**a** b_` is written
 `***a** b*`; a run that fuses nothing is written as before, so italic closed around a link keeps
 its bytes. A spelling that writes a delimiter run's neighbouring letter as a reference (`flanking`)
 is made only where such a letter stands beside one (`letterBesideDelimiter`). The respellings are
