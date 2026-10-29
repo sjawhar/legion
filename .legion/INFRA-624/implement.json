@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-624",
-  "completed": "2026-10-29T08:05:00Z",
+  "completed": "2026-10-29T09:53:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2433",
   "proof": [
+    {
+      "criterion": "Review round 9: when a decision nested in an option breaks, the refusal names one combined doc-edit that repairs both and doc-edit accepts, and names only the decision that breaks the content rule; every body of up to four children whose alphabet adds an option holding a decision (valid or broken) follows its refusals to a valid end or names no delete and says why",
+      "surface": "Go document service against Postgres, the real code path (refusal, ApplyOps of the named ids, ask edit, settlement); plus the browser suite in Chromium and the multiprocess SIGTERM test",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55433/postgres go test ./internal/dispatch/docs/ -count=1 -timeout 60m; go test -tags multiprocess -count=10 -p 1 -run TestSIGTERMWithOpenStreamsExitsPromptlyAndSettlesTheOwedDocument ./cmd/dispatch; cd packages/dispatch && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts unknown-directive.e2e.ts ask-blocks.e2e.ts editor-paste.e2e.ts text-typed-blocks.e2e.ts --project chromium --project iphone",
+      "observed": "Full docs suite ok at c5d2f236 (1114s); ask/settlement tests ok at d3e0a98a. TestSetAskBlockTextRefusalOfEveryBrokenBodyHoldingADecisionLeadsToAValidDecision: 780 bodies, 715 broken; 348 refusals followed to a valid decision, 765 name no delete and say why (named asks truly break the rule; still-unreadable decisions refuse the next edit with no delete, so no loop); 48 s. TestSetAskBlockTextRefusalOfNestedDecisionsNamesOnlyWhatBreaksTheRule holds the reviewer's both-broken and misattribution shapes. SIGTERM test: 10/10 pass at c5d2f236 and 10/10 at d3e0a98a (exits 35-144 ms after SIGTERM), so main was not run. Browser suite at d3e0a98a: 177 passed. Merge with main (5443d99b) resolved proof-editor AGENTS.md (main's mermaid code-block view row and list) and the legion-owned count, now Sixteen.",
+      "headSha": "d3e0a98a5e3e9bd8ba567754e5402ff56608131c",
+      "negativeControl": "With 608e4e9f's ask_block_text.go the extended test fails on 190 of 715 shapes (155 the loop: the held decision's named delete refused by doc-edit because its holder stays broken; 35 a no-delete reason naming an ask that does not break the rule), and both named rows fail."
+    },
     {
       "criterion": "Review round 8 and the architect's check: for every decision body of up to five blocks from {paragraph, empty paragraph, list, list holding a nested list}, following the refusal exactly as written (one ApplyOps of the named deletes, then the ask edit) ends valid keeping every word not named for deletion, or the refusal names no delete and says why",
       "surface": "Go document service against Postgres, the real code path (SetAskBlockText refusal, ApplyOps, SetAskBlockText, settlement)",
@@ -116,8 +124,9 @@
     "Round 4: the reviewer's fast-follow (test setup duplication) is not done in this round, as the architect narrowed the round to the review's must-change list.",
     "Round 9: the tester's red test TestSetAskBlockTextNewItemContentRefusalNamesADocumentEditThatApplies (82346586) was replaced by the tester's rewrite TestSetAskBlockTextNewItemContentRefusalNamesStepsThatApply, as the INFRA-138 architect approved (21:06Z). No doc-edit op nests the deleted words back under an option; they come back as its description, which the reason says.",
     "Round 10: per the architect's design change, the two-list rebuild, the repeated-label rule and the protected-option rule are removed; their tests are removed (TestSetAskBlockTextRefusesAnEditLeavingASecondBulletList, TestSetAskBlockTextRepairsATwoListAskWhenSentEveryOptionItHolds, TestSetAskBlockTextRefusesOptionsDeletingAListTheAskRowNeverHeld, ...DroppingTheDescription..., ...RevertingADescription...) or folded into TestSetAskBlockTextRefusesEveryEditOfAnAskBreakingItsContentRule (repeated label, rich item, paragraph after the list), and the tester's TestSetAskBlockTextNewItemContentRefusalNamesStepsThatApply is replaced by TestSetAskBlockTextRefusalOfABrokenAskNamesAPathThatApplies.",
-    "Round 13: CI red at 57b9f2f1 was required `test`, failing in .github/scripts/changelog-fold.test.sh (main's breakage after main's 2026-10-29 fold, fixed on main by #2487). Merged main forward at 608e4e9f; no code change."
+    "Round 13: CI red at 57b9f2f1 was required `test`, failing in .github/scripts/changelog-fold.test.sh (main's breakage after main's 2026-10-29 fold, fixed on main by #2487). Merged main forward at 608e4e9f; no code change.",
+    "Round 14: Dispatch keys this branch added (INFRA-624, 11 mentions in comments, test headers, AGENTS.md and two learning notes) are replaced by sjawhar/legion#2433, per the controller's ruling; keys already on main stay for dispatch://INFRA-472."
   ],
   "openQuestions": [],
-  "round": 13
+  "round": 14
 }
