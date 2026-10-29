@@ -2,17 +2,18 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-607",
-  "completed": "2026-10-29T20:25:47Z",
+  "completed": "2026-10-29T23:37:08Z",
   "decision": "approved",
-  "reviewedCodeHead": "84d139a3081a42151483832938b3c77355f9aa68",
-  "round": 6,
+  "reviewedCodeHead": "bc54fc4fdd2ee70e20f101e4d4f098b0f3e4ce13",
+  "round": 7,
   "critical": 0,
   "important": 0,
   "minor": 0,
-  "scope": "Since my round-5 review (code a01bc655) one commit, 84d139a3: api/maintenance_test.go checks each pass's key-sweep count inside its resume, after the delete returned and under the lease, and waits on completed passes; the four prose fixes (dispatch-api.md, dispatch-server.md, main.go timer count, README and suggestion_outcomes.go wording) and the multiprocess exemption reason. Test and comments only, no runtime code, so the round-5 thermonuclear pair at a01bc655 stands.",
-  "roundFiveFindings": [
-    {"thread": "PRRT_kwDORFy7ds6xr8P-", "status": "fixed in 84d139a3: the comparison runs in the resume, where no other runner's delete can be in flight (the other runner's tick finds the lease held or the period served and makes no statement), so deletes started equal passes run; the elapsed bound is unchanged"}
-  ],
-  "ci": "CI head 84d139a3 (newest pull_request run); compare 84d139a3...3ecb7d1b is .legion/ only. Required lint, typecheck, test, pr-title: success at 20:24Z. Non-required: everything completed green except envoy-go-race (red: internal/dispatch/docs hit the 30 m -race timeout in TestSetAskBlockText... and pmdoc's linearity tests starved; main's envoy-go-race runs docs at 1352-1791 s and failed the same way at 1cd93f48, and this PR does not touch pmdoc), with envoy-go and dispatch still running. In that race job the PR's packages api, delivery, store and bus passed.",
+  "scope": "bc54fc4f is a forward merge of main 5455925b into 84d139a3, which I approved at 419ac85e. Unchanged-diff fingerprint at 419ac85e b2755e7f470f, at 5f5f8647 9c3fe489e68a: different, so a new round. With the branch's migration numbers shifted by one (main took 0141_drop_broadcast_idempotency_keys; 0141-0147 became 0142-0148) the two PR diffs are byte-identical (0 differing lines of 10,005), and the only textual conflict was cmd/dispatch/README.md, both sides kept. The thermonuclear pair audited main's 17 new commits against the PR's runtime code.",
+  "thermonuclear": {
+    "deepReview": "Verdict: APPROVE at bc54fc4f (no finding): main adds no loop, lease, listener, NOTIFY, embedding trigger or shutdown step; 0141 drops a table the maintenance sweep does not read; migrations 0139-0148 in order; every migration number reference points at its file",
+    "codeQuality": "Verdict: APPROVE at bc54fc4f (no finding)"
+  },
+  "ci": "CI head bc54fc4f (newest pull_request run); compare bc54fc4f...5f5f8647 is .legion/ only. Required lint, typecheck, test, pr-title: success at 23:36Z. Non-required: envoy-go, the multiprocess jobs, dispatch-memory, envoy-e2e-local, envoy-smoke, envoy-session-stall, envoy-infra-go, listener-server-change, docs, pi-legion and the worker-image build success; dispatch and envoy-go-race still running.",
   "keyFindings": []
 }
