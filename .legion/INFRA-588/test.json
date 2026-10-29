@@ -2,54 +2,51 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-588",
-  "completed": "2026-10-29T22:03:00Z",
-  "round": 7,
-  "head": "845b318b1e2b0979cd517f2b208d4177cbaa84cb",
-  "codeHead": "7ab3f40f9cdf4e72ede9d871ece4dc13901d0a36",
-  "roundNote": "Round 7 tests the fix for round 6's finding. 7ab3f40f makes Dispatch's createVersionTable widen schema_migrations.version only when the loaded set holds a version above int4, as the daemon already does. Since round 6 it changes only packages/envoy/internal/dispatch/store/store.go, cmd/dispatch/README.md and the changelog fragment, so round 6's daemon, merge-order, duplicate-identifier and unchanged-file proofs still apply. I re-ran the Dispatch ones on branches built off this head.",
+  "completed": "2026-10-29T22:45:00Z",
+  "round": 8,
+  "head": "7f191555961d37fd69b63743d7a2ce4510c40126",
+  "codeHead": "9ce23f73feeaa0c60dc83ff35909ca9ae3efcfa6",
+  "roundNote": "Round 8 tests the answer to review round 6. 650e3cb5 merges main forward and brings Dispatch's 0141. b5d974fd adds one identifier rule both runners load (packages/envoy/migrationid, Check) and records no last number. 9ce23f73 makes autodeploy.sh's rollback guard and the loadtest seed check compare the set of applied migrations, and updates the docs. Dispatch's createVersionTable is unchanged since round 7, so round 7's rolling-deploy proofs still apply.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I drove the rolling deploy myself on my own PostgreSQL 18.6 + pgvector 0.8.7 (127.0.0.1:55433, UTF8, separate data directory). The drivers call Dispatch's real store.Open, Migrate and Pool.Healthy. They are built from main 2b427f930eac, this head 7ab3f40f, a B-only tree and a merged tree; the branches and the merge are made off this head in a scratch clone. My counts differ from the implementer's (25 against 41 reads) because my loop polls every 200 ms. The results agree: 0 failed on both steps, and 1 failed when main's pods face a release with timestamped migrations directly. The red test passes with its file unchanged since 017d1df01dcb."
+    "how": "The proofs the implementer records hold where I drove them: 0141 is byte-identical to main; the identifier, pgmigrate, migrationid and migrate tests pass at this head on my own PostgreSQL 18.6; autodeploy.sh's guard and the loadtest seed check do what the handoff says on real psql output. The implementer's proof does not cover the case below. The handoff's own description, 'no last number', is the cause."
   },
-  "failures": [],
-  "failed": 0,
+  "failures": [
+    {
+      "criterion": "Migration identifiers two concurrent pull requests cannot both claim, for both runners (plan.md 'Migration numbering' item 1, from the INFRA-537 spec v2)",
+      "evidence": "migrationid.Check (b5d974fd) accepts any numbered series 1..N with no gap. Nothing records where the numbered migrations ended, so a branch that adds the next number is a valid longer series. Driven in a scratch clone: branches nbx and nby off 9ce23f73 each add packages/daemon/internal/store/migrations/0062_t588_<x|y>.up.sql and packages/envoy/internal/dispatch/store/migrations/0142_t588_<x|y>.up.sql + .census.sql. On each branch alone, the daemon's migrations package tests and Dispatch's TestMigrationSetTakesNumbersThenTimestamps pass ('ok'). git merge-tree of the two gives exit 0, tree 42acee2d. Only the merged tree fails: 'migrations 0062_t588_x.up.sql and 0062_t588_y.up.sql share version 62' and 'migrations 0142_t588_x.up.sql and 0142_t588_y.up.sql share version 142'. That is the conflict the change exists to remove: both pull requests pass, and the second to merge must renumber. Negative control, the previous round's code 7ab3f40f, which recorded the last number: a branch adding the daemon's 0062 alone fails 'migration 0062_t588_x.up.sql takes version 62: a migration added after 0061 is named for the UTC moment it was created', and Dispatch's 0141 alone fails '140 is the last numbered migration'. Review round 6 asked to set the last number to 141 (finding 1); this head removed it instead. Red tests, each its own commit: packages/daemon/internal/store/migrations/next_number_test.go TestLoadRefusesANewMigrationNumberedAfterTheShippedSet (7feb642d6bbb) and packages/envoy/internal/dispatch/store/next_number_test.go TestMigrationSetRefusesANewMigrationNumberedAfterTheShippedSet (a25cec37291a). Each adds a file numbered one past the shipped set's highest numbered migration and expects the refusal to name it. Commands: cd packages/daemon && go test ./internal/store/migrations/ -run '^TestLoadRefusesANewMigrationNumberedAfterTheShippedSet$' -count=1, which fails 'Load accepted the shipped set plus 0062_next_number.up.sql'; cd packages/envoy && go test ./internal/dispatch/store/ -run '^TestMigrationSetRefusesANewMigrationNumberedAfterTheShippedSet$' -count=1, which fails 'the identifier check accepted the shipped set plus 0142_next_number.up.sql'. The daemon test passes when copied onto 7ab3f40f. The Dispatch test reads the set as TestMigrationSetTakesNumbersThenTimestamps does, through migrationid.Check(versions). If the fix moves that check to another entry point, tell me and I will move my test to it, since the test is not the implementer's to change."
+    }
+  ],
+  "failed": 1,
   "proof": [
     {
-      "criterion": "After the version columns widen from int4 to bigint, no prepared or cached read of them fails, including old pods' open connections during a rolling deploy (architect, Envoy c4f2e430; round 6's finding)",
-      "surface": "Dispatch's real Migrate and Pool.Healthy, from binaries built at main, this head and a later release made off this head with two timestamped migrations, on one database; the old process probes Healthy every 200 ms while the next release boots",
-      "command": "database x_path seeded by main's Migrate; dispatch-main loop 5 s while dispatch-head migrate runs on it; then dispatch-head loop 5 s while dispatch-ab (merged tree: 20261029200000, 20261029210000) migrate runs on it",
-      "observed": "main's pods while this release boots: 25 clean reads, 0 failed; the new boot reports column=integer, rows=140, Healthy=140. This release's pods while the later release boots: 25 clean, 0 failed; the later boot reports column=bigint, rows=142, both timestamps recorded x1",
-      "headSha": "845b318b1e2b0979cd517f2b208d4177cbaa84cb",
-      "negativeControl": "main's pods while that later release boots directly (skipping this release), on database x_skip: 24 clean, 1 failed, '22:00:54.339 Healthy=0 err=ERROR: cached plan must not change result type (SQLSTATE 0A000)'. That is the release-order case: the cast must reach the pods before a timestamped migration does, as for the daemon"
+      "criterion": "A failed deploy that applied a migration below the highest applied version is not rolled back onto the previous image (review round 6, finding 2)",
+      "surface": "autodeploy.sh's schema_applied, schema_max, schema_label and roll_back_or_stop, extracted as written, against real psql output from PostgreSQL 18.6; only docker is stubbed (pg_client runs the script's own psql line locally; compose and rollback log)",
+      "command": "database ad with schema_migrations holding 1..141 and 20261029210000; baseline=$(schema_applied); then roll_back_or_stop sha-new sha-prev <baseline> 8766 after: (1) nothing applied; (2) 20261029200000 inserted, below the max; (3) the same with a legacy bare-max baseline; (4) a legacy baseline with the max raised; (5) an unreachable database",
+      "observed": "baseline 20261029210000-142-656ea3c9…; (1) 'rolling back to sha-prev (schema 20261029210000 (142 applied))', exit 0; (2) 'refusing to roll back to sha-prev … changed the applied migrations to 20261029210000 (143 applied)', exit 1; (3) rolls back, the documented comparison for a baseline the previous deployer wrote, which can meet no timestamped migration since pre-change images carry none; (4) refused, exit 1; (5) 'could not read the schema version … (status 2), so refusing', exit 1",
+      "headSha": "7f191555961d37fd69b63743d7a2ce4510c40126",
+      "negativeControl": "the previous deployer's schema_version and roll_back_or_stop (650e3cb5) on case (2): 'rolling back to sha-prev (schema 20261029210000)', exit 0, onto a schema the previous image never ran on"
     },
     {
-      "criterion": "The round-6 red test passes unmodified, and the migrate and identifier tests still pass",
-      "surface": "go test against my Postgres, in the issue workspace at this head",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55433/postgres?sslmode=disable go test ./internal/dispatch/store/ -run '^(TestMigrateWithNoTimestampedMigrationKeepsThePreviousReleasesHealthProbeAnswering|TestHealthyAnswersAcrossTheWideningOfTheVersionColumn|TestMigrateWidensAnIntegerVersionColumnAndRecordsATimestamp|TestMigrateAppliesAMigrationThatArrivedBelowOneAlreadyApplied|TestMigrateAppliesBothTimestampedMigrationsOnceOnAFreshDatabase|TestMigrateCreatesEmptySchemaAndIsIdempotent|TestMigrateSkipsVersionRecordedOutsideTheRunner|TestMigrationSetTakesNumbersThenTimestamps|TestScannedTimestampsCarryUTCWhateverTheHostZone)$' -count=1 -v",
-      "observed": "all 9 PASS, ok 3.455s. jj diff from 017d1df0 to 7ab3f40f over migrate_out_of_order_test.go: 0 files changed",
-      "headSha": "845b318b1e2b0979cd517f2b208d4177cbaa84cb",
-      "negativeControl": "the same red test at 7fcdf0e1 (round 6) failed with 'cached plan must not change result type (SQLSTATE 0A000)'"
+      "criterion": "The loadtest seed check compares the set of migrations, not the highest (review round 6, finding 4)",
+      "surface": "loadtest/common.sh's build_migration_versions and seed_migration_check, extracted as written, with die and note stubbed; the seed's migrations list from stack.sh's own query on PostgreSQL 18.6",
+      "command": "seed.meta.json with migrations [..141, 20261029200000, 20261029210000] from \"select coalesce(json_agg(version order by version), '[]'::json) from schema_migrations\"; build directories copied from this head's Dispatch migrations plus T1+T2 (both), T2 only, or T1+T2+T3 (extra); then the same with a legacy meta holding only .migration",
+      "observed": "both: nothing printed; T2 only (same max as the seed): 'DIE: the seed holds 1 migration(s) this build does not have, the highest 20261029200000'; extra: 'NOTE: this build holds 1 migration(s) the seed lacks, the highest 20261029220000'; legacy meta: 'NOTE: this seed records only its highest migration … only the highest is compared'",
+      "headSha": "7f191555961d37fd69b63743d7a2ce4510c40126",
+      "negativeControl": "the previous check compared the highest file name only (removed lines of 9ce23f73): T2 only reads as build_level 20261029210000 = seed_level, so it passes"
     },
     {
-      "criterion": "Two concurrent branches merge in either order, and each migration runs exactly once on a database migrated before, with the newer one first, and fresh (re-run off this head)",
-      "surface": "git merge-tree in a scratch clone; Dispatch's real Migrate on my Postgres",
-      "command": "branches bra (20261029200000_t588_a) and brb (20261029210000_t588_b) off 7ab3f40f, each adding a daemon migration and a Dispatch migration with its census; git merge-tree --write-tree both orders; x_path (main, this release, merged), x_b (B-only, then merged twice), x_f (fresh by this release, then merged); psql row counts of each new table",
-      "observed": "both orders exit 0, tree 9f71bf967200ccb4e546213e57aef3022f4cf1f3. x_b: 141 rows (20261029210000 x1), then 142 with both x1, then unchanged. x_f: this release creates the column bigint with 140 rows, and the merged tree adds both x1. Every new table holds 1 row in all three databases",
-      "headSha": "845b318b1e2b0979cd517f2b208d4177cbaa84cb",
-      "negativeControl": "round 6: a shared timestamp fails both packages' identifier tests, naming both files, and a daemon built from that tree refuses to migrate (identifier code unchanged since)"
-    },
-    {
-      "criterion": "No Dispatch key in the round's new public text",
-      "surface": "the added lines of aa11d355..7ab3f40f",
-      "command": "jj diff --from aa11d355 --to 7ab3f40f --git, added lines grepped -E '\\b[A-Z][A-Z0-9]+-[0-9]+\\b|dispatch://'",
-      "observed": "no hit (grep exit 1); the changelog fragment is pr-2411-migration-timestamps.yaml, as the controller's ruling names fragments",
-      "headSha": "845b318b1e2b0979cd517f2b208d4177cbaa84cb",
-      "negativeControl": "round 4: the same grep found 4 keys in README.md at 5cfd10800698"
+      "criterion": "The forward merge brings main's 0141 unchanged; the identifier, pgmigrate and migrate tests pass at this head; the round-6 red test still pins its defect after the reviewer's refactor",
+      "surface": "the merge 650e3cb5 against main 08c2e8ad; go test against my own PostgreSQL 18.6 + pgvector 0.8.7",
+      "command": "jj diff 08c2e8ad..9ce23f73 over migrations/0141*; go test ./migrationid/ ./internal/pgmigrate/... and the store's identifier, embed and migrate tests (envoy); go test ./internal/store/migrations/ (daemon); then the red test in a scratch tree of this head with createVersionTable forced to widen at every boot",
+      "observed": "0141: 0 files changed; all ok. The red test's setup moved into databaseFromBeforeTheWidening (review round 6, finding 8); its statements are the same as I wrote them, and its assertions are unchanged. Forced to widen it fails 'cached plan must not change result type (SQLSTATE 0A000)', so it still pins round 6's defect",
+      "headSha": "7f191555961d37fd69b63743d7a2ce4510c40126",
+      "negativeControl": "the same red test with the widening forced on fails, as above"
     }
   ],
   "observations": [
-    "CI at code head 7ab3f40f: only changes (queued) and pr-title exist yet; no lint, typecheck or test result. 845b318b is handoff-only. At 7fcdf0e1 every job was cancelled by the newer push, but GitHub's router did schedule conflicts-script for this pull request: the job exists in that run's check list.",
-    "Release order, for the architect and the reviewer: a deployment that goes from main straight to a release with its first timestamped migration, skipping this one, fails each old pod's uncast health read once (my control above). The same holds for the daemon (round 6). This release must be rolled out before one carrying a timestamped migration.",
+    "CI at code head 9ce23f73: only changes (queued) and pr-title runs exist; no lint, typecheck or test result. 7f191555 is handoff-only.",
+    "Round 7's release-order note still applies: this release must roll out before any release carrying a timestamped migration. The docs now state it (9ce23f73).",
     "Round 4's note on the squash body (the commit subjects naming the key) and round 1's note on a PR merged exactly at `since` still apply."
   ]
 }
