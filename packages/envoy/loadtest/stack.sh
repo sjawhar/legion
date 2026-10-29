@@ -8,9 +8,10 @@
 #                           initdb, write stack.json. Idempotent: a rerun rebuilds incrementally.
 #   stack.sh start          start Postgres, the proxy, NATS and the listener (one already running is
 #                           kept); refuses a port another process holds, naming it.
-#   stack.sh seed [--force] seed through Dispatch (18 to 27 min on 2 vCPU), drain the outbox, vacuum,
-#                           install the commit-time trigger, write seed.meta.json and keep the result as
-#                           the template database dispatch_seed. --force drops an existing seed first.
+#   stack.sh seed [--force] seed through Dispatch, then its production-shaped references (37 to 50 min
+#                           on 2 vCPU in all), drain the outbox, vacuum, install the commit-time trigger,
+#                           write seed.meta.json and keep the result as the template database
+#                           dispatch_seed. --force drops an existing seed first.
 #   stack.sh reset [LOG]    what run-step.sh does before each step: stop Dispatch and the listener,
 #                           recreate database dispatch from dispatch_seed, restart NATS on a fresh store
 #                           and the listener, start Dispatch (its log to LOG) and wait for /healthz.
@@ -423,9 +424,15 @@ cmd_setup() {
   if ! { [ -x "$BIN/nats-server" ] && "$BIN/nats-server" --version | grep -qF "$nats_version"; }; then
     note "installing nats-server $nats_version into $BIN"
     # A go build inside the envoy module fails (its main imports a module go.sum lacks), so it is
-    # installed on its own, as scripts/e2e/dispatch-session-settings.sh does.
-    GOBIN=$BIN go install "github.com/nats-io/nats-server/v2@$nats_version"
+    # installed on its own, as scripts/e2e/dispatch-session-settings.sh does: with the toolchain's
+    # own go, under its own GOROOT. mise's go shim replaces a caller's GOBIN when go.set_gobin is
+    # true, and, on mise before 2026.9.0, in any shell `mise activate` set up. Separately, an
+    # activated shell exports mise's Go's GOROOT, whose compiler a newer toolchain's go refuses.
+    local goroot
+    goroot=$(go env GOROOT)
+    GOBIN=$BIN GOROOT=$goroot "$goroot/bin/go" install "github.com/nats-io/nats-server/v2@$nats_version"
   fi
+  [ -x "$BIN/nats-server" ] || die "no executable nats-server in $BIN after go install"
   note "$("$BIN/nats-server" --version)"
 
   if [ ! -x "$PGBIN/postgres" ]; then
@@ -506,6 +513,12 @@ cmd_seed() {
     note "already seeded: database dispatch_seed and $SEED_META exist (stack.sh seed --force reseeds)"
     return 0
   fi
+  # This drops the template, seed.meta.json and seed.json below, and reaches seed-refs only after
+  # the 14 to 27 minutes of loadgen seed. A loadgen built from a checkout older than the references
+  # (README.md, "Before and after across commits") knows no seed-refs and would exit 2 there, with
+  # the old seed already gone, so it is asked first.
+  loadgen seed-refs -h >/dev/null 2>&1 ||
+    die "the loadgen at $BIN was built from a checkout that has no seed-refs; seed with a loadgen that has it, then run the older build on that seed"
   local started=$SECONDS
   stop_one dispatch
   sql postgres 'drop database if exists dispatch' >/dev/null
@@ -515,8 +528,11 @@ cmd_seed() {
   trap 'stop_one dispatch' EXIT
   start_dispatch "$LOGS/dispatch-seed.log"
 
-  note "seeding through Dispatch (18 to 27 min on 2 vCPU); log $LOGS/seed.log"
+  note "seeding through Dispatch (14 to 27 min on 2 vCPU); log $LOGS/seed.log"
   loadgen seed -out "$ROOT/seed.json" 2>&1 | tee "$LOGS/seed.log" >&2
+
+  note "writing production-shaped references (about 23 min on 2 vCPU); log $LOGS/seed-refs.log"
+  loadgen seed-refs 2>&1 | tee "$LOGS/seed-refs.log" >&2
 
   note "waiting for the outbox to publish every seed event"
   local deadline=$((SECONDS + 900)) pending
@@ -544,6 +560,16 @@ cmd_seed() {
   stop_one dispatch
   trap - EXIT
 
+  # seed-refs writes under idempotency keys, so Dispatch keeps one request_keys row per write. They
+  # protect retries during the seed only. Left in the template, Dispatch's sweep of keys older than
+  # a day (24 h) would delete them inside the window of every step on a seed older than that, and
+  # not on a younger one. A build older than migration 0137 has no such table.
+  if [ "$(sql dispatch "select to_regclass('public.request_keys') is not null")" = t ]; then
+    note "deleting the seed's idempotency keys (request_keys)"
+    sql dispatch 'delete from request_keys' >/dev/null
+    [ "$(sql dispatch 'select count(*) from request_keys')" = 0 ] ||
+      die "request_keys still holds rows after the delete; the template would carry them"
+  fi
   note "vacuum analyze"
   sql dispatch 'vacuum analyze' >/dev/null
   note "installing the commit-time trigger (loadtest.event_commits)"
@@ -557,6 +583,10 @@ cmd_seed() {
       'comments', (select count(*) from comments),
       'artifacts', (select count(*) from artifacts),
       'artifact_versions', (select count(*) from artifact_versions),
+      'ref_targets', (select count(*) from artifacts where name like 'ref-target-%'),
+      'ref_target_versions', (select count(*) from artifact_versions v join artifacts a on a.id = v.artifact_id where a.name like 'ref-target-%'),
+      'ref_sources', (select count(*) from artifacts where name = 'references.md'),
+      'artifact_refs', (select count(*) from refs where to_kind = 'artifact'),
       'events', (select count(*) from events))")
   jq -n --argjson migration "$migration" --arg commit "$(build_commit)" --argjson dirty "$(build_dirty)" \
     --argjson counts "$counts" --arg at "$(date -u +%FT%TZ)" --arg pg "$("$PGBIN/postgres" --version)" \

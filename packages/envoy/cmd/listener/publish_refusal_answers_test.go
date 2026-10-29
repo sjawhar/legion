@@ -20,7 +20,7 @@ import (
 // supersedingRoleDeleteKV answers every conditional Delete of a role claim with nats.ErrKeyExists,
 // the server's word for a revision that is no longer the stored one: a fresh claim landed first.
 // store.ReleaseExpiredRoleClaim reads that as ExpiredRoleClaimSuperseded, so each attempt
-// resolveLiveRoleHolder makes loses its compare-and-swap while every bus read it makes answers --
+// resolveRoleHolder makes loses its compare-and-swap while every bus read it makes answers --
 // the one state that spends all of roleHolderResolutionAttempts on supersessions. The claim's
 // stored bytes are left alone: every other call goes to the real bucket.
 type supersedingRoleDeleteKV struct {
@@ -33,7 +33,7 @@ func (kv supersedingRoleDeleteKV) Delete(key string, opts ...nats.DeleteOpt) err
 
 // A publish whose role claim is superseded on every resolution attempt is a lost race against a
 // live replacement holder, not a bus that went quiet: each attempt's reads were answered, and only
-// the conditional release lost. This asserts the sentinel resolveLiveRoleHolder returns for it and
+// the conditional release lost. This asserts the sentinel resolveRoleHolder returns for it and
 // the whole answer publishHandler gives it -- the 503 and the Retry-After that ask for the retry a
 // fresh read wins, the body that names the race, and the record that names it too, so the
 // bus_unavailable bucket an operator reads afterwards keeps meaning a bus that did not answer.
@@ -57,11 +57,11 @@ func TestAPublishThatLosesTheRoleClaimRaceSaysSoRatherThanBlamingTheBus(t *testi
 	// gone and tries to release it -- and loses that release to the KV above, every time.
 	setRegistryRoleKV(t, registry, supersedingRoleDeleteKV{KeyValue: registryRoleKV(t, registry)})
 
-	if _, err := resolveLiveRoleHolder(context.Background(), registry, sessions, role); !errors.Is(err, errRoleHolderChanged) {
+	if _, err := resolveRoleHolder(context.Background(), registry, sessions, role, registered); !errors.Is(err, errRoleHolderChanged) {
 		t.Fatalf("resolving a claim superseded on every attempt = %v, want errRoleHolderChanged", err)
 	}
 
-	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	state := withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 	recorder, record := serveRecorded(t,
 		func(logger *logging.Logger) http.HandlerFunc { return publishHandler(state, logger) },
 		postJSON("/v1/messages/publish", sendBody(map[string]any{
@@ -97,7 +97,7 @@ func TestAPublishThatLosesTheRoleClaimRaceSaysSoRatherThanBlamingTheBus(t *testi
 	t.Logf("lost claim race: %s", refusal.Error)
 }
 
-// GET /v1/roles/<role> resolves its holder exactly as a role-lane publish does, so it can lose the
+// GET /v1/roles/<role> resolves its holder exactly as a role send through the publish route does, so it can lose the
 // same race, and it answers it as the publish route does: the 503 and the Retry-After that ask for
 // the retry a fresh lookup wins, and a body that names the race in a lookup's words. Every bus read
 // answered and the claim decoded, so neither the bus-unavailable 503 this route gives a read that
@@ -173,7 +173,7 @@ func (kv stalledRoleKV) Delete(key string, opts ...nats.DeleteOpt) error {
 	return kv.KeyValue.Delete(key, opts...)
 }
 
-// A role-lane publish resolves its role's holder within sendRequestBudget of the request's own
+// A role send through the publish route resolves its role's holder within sendRequestBudget of the request's own
 // context, so a role-bucket call that does not answer - the claim read, or the conditional release
 // of a claim whose holder is gone, neither of which takes a context in nats.go - is reported inside
 // the caller's attempt (the client gives each 5 s, packages/envoy-client/src/transport.ts) rather
@@ -217,7 +217,7 @@ func TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget(t *tes
 				stall:       6 * time.Second,
 				released:    released,
 			})
-			return &listenerDeps{client: client, registry: registry, sessions: sessions}
+			return withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 		}
 		answeredInTime := func(t *testing.T, elapsed time.Duration) {
 			t.Helper()
