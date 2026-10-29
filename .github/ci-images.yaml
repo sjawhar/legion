@@ -4,10 +4,9 @@
 #
 # One row per distinct upstream image. Each row holds:
 #
-#   upstream  the reference .github/workflows/mirror-images.yaml copies from. It names
-#             mirror.gcr.io, Google's pull-through cache of Docker Hub, which keeps each image's
-#             bytes and so its digest. The mirror workflow is the only thing in this repository
-#             that reads that host, and it runs only when this file changes.
+#   upstream  the reference .github/workflows/mirror-images.yaml copies from: the image's own
+#             Docker Hub reference. The copy runs only when this file changes, so the one place
+#             this repository reads Docker Hub is a workflow that runs a few times a year.
 #   tag       the copy's tag in the package. A tag keeps the manifest from being a package
 #             version nothing names, which a retention policy may remove. The rule is the
 #             upstream repository's last path element, then the upstream tag, or the first eight
@@ -29,68 +28,68 @@ registry: ghcr.io/sjawhar/legion/ci
 
 images:
   # Postgres with pgvector: the `services:` Postgres of ten CI jobs, and testpg.Image.
-  - upstream: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+  - upstream: docker.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
     tag: pgvector-2358fcba
     digest: sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
 
   # NATS: the `services:` NATS of the pi-envoy and pi-legion jobs, both testnats.Image constants,
   # the envoy-client job's pre-pull, nats-server.ts and scripts/e2e/lib/nats-stream.test.ts.
-  - upstream: mirror.gcr.io/library/nats:2.10
+  - upstream: docker.io/library/nats:2.10
     tag: nats-2.10
     digest: sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
 
   # The NATS hub the two-image natslive matrix runs against: testnats.HubImage.
-  - upstream: mirror.gcr.io/library/nats:2.15.1-alpine@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6
+  - upstream: docker.io/library/nats:2.15.1-alpine@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6
     tag: nats-2.15.1-alpine
     digest: sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6
 
   # The S3-compatible server the dispatch and envoy-go jobs start: tests3.Image.
-  - upstream: mirror.gcr.io/chrislusf/seaweedfs:3.97
+  - upstream: docker.io/chrislusf/seaweedfs:3.97
     tag: seaweedfs-3.97
     digest: sha256:bb05d66d2963b1cc48073190781c3dd29e2c4c88a2ae2986bf58e38c86d89c6e
 
   # The judge container of pi-legion's skill scenarios: rig.sh's judge_image.
-  - upstream: mirror.gcr.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+  - upstream: docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
     tag: ubuntu-534baea6
     digest: sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
 
   # The Envoy listener image's web stage. Its upstream tag carries the Bun version .bun-version
   # locks, and check-ci-images.sh refuses a row whose version is not that one.
-  - upstream: mirror.gcr.io/oven/bun:1.4.4
+  - upstream: docker.io/oven/bun:1.4.4
     tag: bun-1.4.4
     digest: sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d
 
   # The worker image's plugin stage; the same Bun pin, with the -slim suffix that file names.
-  - upstream: mirror.gcr.io/oven/bun:1.4.4-slim
+  - upstream: docker.io/oven/bun:1.4.4-slim
     tag: bun-1.4.4-slim
     digest: sha256:1846adf22496bd711036aae8be147e57bdebbaea2e5264e3e0b5af1db187d9a4
 
   # The Go build stage of the Envoy listener image, the held-port wrapper and the worker image.
   # Its upstream tag carries worker.Dockerfile's ARG GO_VERSION, and check-ci-images.sh refuses a
   # row whose version is not that one.
-  - upstream: mirror.gcr.io/library/golang:1.27.1-alpine
+  - upstream: docker.io/library/golang:1.27.1-alpine
     tag: golang-1.27.1-alpine
     digest: sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414
 
   # The Envoy listener image's runtime stage and the worker image's tools stage.
-  - upstream: mirror.gcr.io/library/debian:bookworm-slim
+  - upstream: docker.io/library/debian:bookworm-slim
     tag: debian-bookworm-slim
     digest: sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
 
   # The worker image's toolchain and runtime-base stages.
-  - upstream: mirror.gcr.io/library/debian:trixie-slim
+  - upstream: docker.io/library/debian:trixie-slim
     tag: debian-trixie-slim
     digest: sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
 
   # The BuildKit the worker image's and the listener image's buildx builders run. Nothing bumps
   # it: a BuildKit fix reaches this repository when a person edits this row.
-  - upstream: mirror.gcr.io/moby/buildkit:buildx-stable-1
+  - upstream: docker.io/moby/buildkit:buildx-stable-1
     tag: buildkit-buildx-stable-1
     digest: sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
 
   # The Postgres the Stage 1 live proof starts when no DSN is given. The `test` job gives it one
   # (LEGION_E2E_PG_DSN), so CI does not reach this pull today; the devbox does, and it was the
   # one reference in a file CI runs that went to Docker Hub direct.
-  - upstream: mirror.gcr.io/library/postgres:16
+  - upstream: docker.io/library/postgres:16
     tag: postgres-16
     digest: sha256:1beaa3084eee2676f20a9cd9928f0bf2c5bf674f8e49f81017912183d377c61c
