@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-645",
-  "completed": "2026-10-29T09:52:00Z",
+  "completed": "2026-10-29T12:55:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2497",
   "proof": [
+    {
+      "criterion": "The required checks and suites (A5): the docs package fits envoy-go-race's 30 m limit, adding at most 30 s over main's slowest run (the tester's failure)",
+      "surface": "the docs package's new tests under go test -race on a real Postgres 17 + pgvector in the issue pod (2 cores); CI's envoy-go-race lane reads the same package",
+      "command": "cd packages/envoy && CGO_ENABLED=1 DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55433/postgres go test -race ./internal/dispatch/docs/ -run '^(TestForkReads.*|TestAPanickedWriteLeavesNoForkForTheTransactionsLaterWrites)$' -count=1 -v",
+      "observed": "Before (612648e7, ~400 KB document): 136.23 + 98.64 + 44.50 = 279.37 s, and CI run 40852446247 timed the docs package out at 1801.513 s. After (6fc96db1, 7.3 KB document of the same shape, every case and assertion kept): 4.35 + 2.63 + 1.24 s, package line 9.372 s. That adds about 8 s to main's slowest CI docs run, 1745.847 s. The CI lane's time at 6fc96db1 comes from that run.",
+      "headSha": "6fc96db18c30c7f955dd1852eef90c59fef709bb",
+      "negativeControl": "With liveOperation.abandon reverted to main's condition, the panic test fails on the small document ('version 3 records 7297 bytes of markdown, not the committed document's 7286 bytes'). With buildFork's write.dropRendering() removed, the browser-commit flow fails. With renderingReused.Add removed, the count assertions fail."
+    },
     {
       "criterion": "Nothing anyone sees changes (A3)",
       "surface": "Dispatch server HTTP API (packages/envoy/cmd/dispatch), main 88840d35 and head cb2f45ba builds, each on its own fresh restore of the INFRA-512 replay seed, Postgres 17.11 + pgvector 0.8.7, NATS 2.12.1",
@@ -40,7 +48,8 @@
     "packages/envoy/internal/dispatch/docs/write_corpus_test.go",
     "packages/envoy/internal/dispatch/docs/write_corpus_reads_test.go",
     "packages/envoy/AGENTS.md",
-    "packages/envoy/.changes/unreleased/INFRA-645-write-rendering-reuse.yaml"
+    "packages/envoy/.changes/unreleased/INFRA-645-write-rendering-reuse.yaml",
+    "packages/envoy/internal/dispatch/docs/fork_reads_test.go (round 1: small fixture document)"
   ],
   "trickyParts": [
     "write_corpus_test.go must compile unchanged at main, so the base and head dumps can be compared with cmp; it uses no head-only symbol.",
@@ -50,7 +59,9 @@
     "The replay CPU gate (A1) was not run as paired runs. sjawhar/legion#2448 removed MarkQuote's third read on main before the head runs, so the expected gain is near 0 at the current base. The architect decided that the CPU part is written up on INFRA-512 (dispatch://INFRA-512/comment/ad919553-ec42-46b6-9321-87dd191e3b5a), and that only parts with their own evidence merge.",
     "C1 (reading the anchor inside the write) was dropped by the architect's criterion 2: the API cannot reach the refusal, and a rolled-back refusal leaves the same state on main and head.",
     "pmdoc.ReadUnshared (INFRA-692) is not adopted: INFRA-692 has not merged. The architect gives it to a later child.",
-    "The forced-GC heap check (A4) was not run, because no replay head runs were made. The change keeps no new state: the reuse returns the tree the write already holds, and the counters are two atomic integers."
+    "The forced-GC heap check (A4) was not run, because no replay head runs were made. The change keeps no new state: the reuse returns the tree the write already holds, and the counters are two atomic integers.",
+    "Round 1: the real-size proof of the rendering reuse stays in the HTTP equivalence run and the benchmark; go test runs on a 7.3 KB document so envoy-go-race fits its limit."
   ],
-  "openQuestions": []
+  "openQuestions": [],
+  "round": 1
 }
