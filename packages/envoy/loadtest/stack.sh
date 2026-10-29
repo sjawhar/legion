@@ -510,11 +510,8 @@ cmd_seed() {
   # This drops the template, seed.meta.json and seed.json below, and reaches seed-refs only after
   # the 14 to 27 minutes of loadgen seed. A loadgen built from a checkout older than the references
   # (README.md, "Before and after across commits") knows no seed-refs and would exit 2 there, with
-  # the old seed already gone, so its usage is read first. loadgen with no argument prints that
-  # usage and exits 2, which is not a failure here.
-  local loadgen_usage
-  loadgen_usage=$(loadgen 2>&1) || true
-  grep -q '^  seed-refs ' <<<"$loadgen_usage" ||
+  # the old seed already gone, so it is asked first.
+  loadgen seed-refs -h >/dev/null 2>&1 ||
     die "the loadgen at $BIN was built from a checkout that has no seed-refs; seed with a loadgen that has it, then run the older build on that seed"
   local started=$SECONDS
   stop_one dispatch
@@ -557,6 +554,16 @@ cmd_seed() {
   stop_one dispatch
   trap - EXIT
 
+  # seed-refs writes under idempotency keys, so Dispatch keeps one request_keys row per write. They
+  # protect retries during the seed only. Left in the template, Dispatch's sweep of keys older than
+  # a day (24 h) would delete them inside the window of every step on a seed older than that, and
+  # not on a younger one. A build older than migration 0137 has no such table.
+  if [ "$(sql dispatch "select to_regclass('public.request_keys') is not null")" = t ]; then
+    note "deleting the seed's idempotency keys (request_keys)"
+    sql dispatch 'delete from request_keys' >/dev/null
+    [ "$(sql dispatch 'select count(*) from request_keys')" = 0 ] ||
+      die "request_keys still holds rows after the delete; the template would carry them"
+  fi
   note "vacuum analyze"
   sql dispatch 'vacuum analyze' >/dev/null
   note "installing the commit-time trigger (loadtest.event_commits)"

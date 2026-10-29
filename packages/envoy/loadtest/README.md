@@ -334,7 +334,11 @@ more for the references (2,232 s for the whole seed on 2026-10-29). It does thes
    `block_grammar_owed` both empty, at most 900 s; a build older than migration 0121 has neither
    table and skips this wait). Then it stops Dispatch. A seed that still owed the backfill would
    give every step about 100 s of it in its window: Dispatch indexes 20 documents every 2 s.
-5. It runs `vacuum analyze`, then installs the commit-time trigger (`loadgen trigger-sql`).
+5. It deletes the idempotency keys of the reference writes (`request_keys`), which protect
+   retries during the seed only, and checks that none is left. Left in the template, Dispatch's
+   sweep of keys older than a day would delete about 19,800 rows inside the window of every step on
+   a seed older than that. Then it runs `vacuum analyze` and installs the commit-time trigger
+   (`loadgen trigger-sql`).
 6. It writes `seed.meta.json` and renames the database to `dispatch_seed`, the template.
 
 The seed content does not depend on the clock. Each issue's text comes from a generator seeded by
@@ -399,7 +403,7 @@ packages/envoy/loadtest/run-step.sh step-1x-after --events 4 --sessions 400 --re
 ```
 
 Seed with a checkout that has `loadgen seed-refs`. The references are part of the seed, and a
-loadgen older than them cannot write them: `stack.sh seed` reads that loadgen's usage and refuses
+loadgen older than them cannot write them: `stack.sh seed` asks that loadgen for `seed-refs -h` and refuses
 to drop the template, naming the cause. The references add no Dispatch migration, so a seed with
 them sits at the migration level a seed without them sat at, and an older build's steps run on it.
 

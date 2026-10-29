@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 )
@@ -110,21 +109,14 @@ const refPlanSHA256 = "7414809c6e1617d6a0e25749a60ae834966a410ca911d691ff4747b4a
 
 // refPlanDigest is a sha256 over the whole plan in a fixed serialization: every target's number,
 // issue, version count, writers and writer of each version, in target order; then every LGA key,
-// in sorted order, with the targets it cites, sorted.
+// in the plan's order, with the targets it cites, in the plan's order.
 func refPlanDigest(p refPlan) string {
 	h := sha256.New()
 	for _, t := range p.targets {
 		fmt.Fprintf(h, "target %d %s %d %v %v\n", t.n, t.issue, t.versions, t.writers, t.order)
 	}
-	keys := make([]string, 0, len(p.sources))
-	for key := range p.sources {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		cited := append([]int(nil), p.sources[key]...)
-		sort.Ints(cited)
-		fmt.Fprintf(h, "source %s %v\n", key, cited)
+	for _, key := range p.lga {
+		fmt.Fprintf(h, "source %s %v\n", key, p.sources[key])
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

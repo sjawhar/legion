@@ -252,8 +252,7 @@ func refSourceKey(issue string) string { return "refs-s-" + issue }
 
 // writeRefTargets writes every version of every target, longest target first so the long tail
 // does not finish alone at the end: g.Go blocks while the limit is reached, so the targets start
-// in that order. One target's versions are written in order by one goroutine. It counts the 201s,
-// one per key, and fails when they are not the plan's versions.
+// in that order. One target's versions are written in order by one goroutine.
 func writeRefTargets(ctx context.Context, a *api, p refPlan) (int, error) {
 	start := time.Now()
 	total := 0
@@ -290,20 +289,15 @@ func writeRefTargets(ctx context.Context, a *api, p refPlan) (int, error) {
 	if err := g.Wait(); err != nil {
 		return 0, err
 	}
-	if int(written.Load()) != total {
-		return 0, fmt.Errorf("seed-refs wrote %d target versions, the plan holds %d", written.Load(), total)
-	}
 	log.Printf("seed-refs: wrote %d targets, %d versions in %s", len(p.targets), written.Load(), time.Since(start).Round(time.Second))
 	return int(written.Load()), nil
 }
 
 // writeRefSources writes one references.md per LGA issue that cites at least one target. Each
 // citation is a dispatch:// reference to a target document, which is what makes the references
-// answer of that issue do member work. It counts the 201s, one per key, and fails when they are
-// not the issues the plan cites from.
+// answer of that issue do member work.
 func writeRefSources(ctx context.Context, a *api, p refPlan) (issues, cites int, err error) {
 	start := time.Now()
-	var written atomic.Int64
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(refWorkers)
 	for _, key := range p.lga {
@@ -324,15 +318,11 @@ func writeRefSources(ctx context.Context, a *api, p refPlan) (issues, cites int,
 			if res.err != nil || res.status != http.StatusCreated {
 				return fmt.Errorf("write %s on %s: %d %s %v, want 201", refSourceName, key, res.status, trunc(res.body), res.err)
 			}
-			written.Add(1)
 			return nil
 		})
 	}
 	if err := g.Wait(); err != nil {
 		return 0, 0, err
-	}
-	if int(written.Load()) != issues {
-		return 0, 0, fmt.Errorf("seed-refs wrote %s on %d issues, the plan cites from %d", refSourceName, written.Load(), issues)
 	}
 	log.Printf("seed-refs: wrote %s on %d of %d LGA issues, citing %d targets in %s", refSourceName, issues, len(p.lga), cites, time.Since(start).Round(time.Second))
 	return issues, cites, nil
