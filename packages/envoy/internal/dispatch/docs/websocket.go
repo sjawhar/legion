@@ -346,9 +346,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // admitDocument decides whether a socket may join room's document. A browser editor normalizes a
 // tree it cannot represent and writes the result back, so no connection - a first one, or a
 // provider's reconnect - joins a room outside the Proof schema until it is replaced from markdown.
-// The server decides it for every client at once, by the same document and rendering `/text`
-// answers with (readDocument), so a socket is refused exactly when that read is
-// ErrDocOutsideSchema. A resident room's update observer has rendered the room after every update
+// An ask holding blocks off its content rule is inside it: the editor keeps such an ask rather
+// than normalizing it away, and settlement marks it `invalid`. The server decides it for every
+// client at once, by the same document and rendering `/text` answers with (readDocument), so a
+// socket is refused exactly when that read is ErrDocOutsideSchema. A resident room's update observer has rendered the room after every update
 // it took, as that read renders it, and recorded the verdict (residentVerdict), which is taken
 // as it stands; only a room with no verdict - not resident, or with a replica that lost the room's
 // state - is read and rendered here. A cold socket offers the state it read to the room's load

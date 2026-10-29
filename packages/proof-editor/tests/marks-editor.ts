@@ -10,12 +10,24 @@ import {
 import { createHeadlessProof } from "../src/lib-headless.js";
 import { withDomWindow } from "./dom-window";
 
+/**
+ * The keydown each chord `press` sends, as a browser reports it. A browser reports Shift+Z as key
+ * "Z" with key code 90; prosemirror-keymap finds "Mod-Shift-z" through the key code.
+ */
+const KEYS = {
+  "Mod-z": { key: "z", keyCode: 90, ctrlKey: true, shiftKey: false },
+  "Mod-Shift-z": { key: "Z", keyCode: 90, ctrlKey: true, shiftKey: true },
+  Backspace: { key: "Backspace", keyCode: 8, ctrlKey: false, shiftKey: false },
+  Enter: { key: "Enter", keyCode: 13, ctrlKey: false, shiftKey: false },
+} as const;
+
 export interface MarksEditor {
   readonly handle: ProofEditorHandle;
   readonly view: EditorView;
-  /** Presses Mod-z (undo) or Mod-Shift-z (redo) in the editor, as a reader does: the history
-   *  keymap takes it first, and the collab keymap when that one declines. */
-  press(chord: "Mod-z" | "Mod-Shift-z"): void;
+  /** Presses Mod-z (undo) or Mod-Shift-z (redo), or a bare Backspace or Enter, in the editor, as a
+   *  reader does: the history keymap takes Mod-z first, and the collab keymap when that one
+   *  declines. */
+  press(chord: keyof typeof KEYS): void;
   /** The undo steps each manager holds: prosemirror-history's, and y-prosemirror's UndoManager's. */
   depths(): { history: number; yjs: number };
   /** The Y.Doc the editor is bound to, for a test that applies a collaborator's update to it. */
@@ -25,8 +37,9 @@ export interface MarksEditor {
 /**
  * Runs `run` against the editor `createProofEditor` builds - Milkdown's presets, the collab
  * binding with both undo managers, and every plugin of the stack - in happy-dom, configured as
- * Dispatch's margin configures it, over a Y.Doc seeded with `markdown`; `options` adds to or
- * overrides that configuration (an `onMarkAction`, `readOnly`). The real stack matters:
+ * Dispatch's margin configures it, over a Y.Doc seeded with `markdown` (parsed with
+ * `options.blockSchema` when given); `options` adds to or overrides that configuration (an
+ * `onMarkAction`, `readOnly`, a `blockSchema`). The real stack matters:
  * plugins such as commonmark's hard-break mark cleaner append transactions after a mark write, and
  * only the whole stack shows what reaches each undo manager.
  */
@@ -35,7 +48,7 @@ export async function withMarksEditor(
   run: (editor: MarksEditor) => void | Promise<void>,
   options: Partial<CreateProofEditorOptions> = {}
 ): Promise<void> {
-  const { parseMarkdown } = await createHeadlessProof();
+  const { parseMarkdown } = await createHeadlessProof({ blockSchema: options.blockSchema });
   const ydoc = new Y.Doc();
   prosemirrorToYXmlFragment(parseMarkdown(markdown), ydoc.getXmlFragment("prosemirror"));
   await withDomWindow(async (window) => {
@@ -57,16 +70,10 @@ export async function withMarksEditor(
         }),
         handle,
         press: (chord) => {
-          const redo = chord === "Mod-Shift-z";
-          // A browser reports Shift+Z as key "Z" with key code 90; prosemirror-keymap finds
-          // "Mod-Shift-z" through the key code.
           const event = new window.KeyboardEvent("keydown", {
             bubbles: true,
             cancelable: true,
-            ctrlKey: true,
-            key: redo ? "Z" : "z",
-            keyCode: 90,
-            shiftKey: redo,
+            ...KEYS[chord],
           }) as unknown as KeyboardEvent;
           // What ProseMirror's own keydown listener does with the event: offer it to every
           // plugin's handleKeyDown in order. happy-dom does not deliver a synthetic keydown to

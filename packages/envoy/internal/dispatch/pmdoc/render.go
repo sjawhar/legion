@@ -103,17 +103,39 @@ func (b *SpanBudget) Render(doc *Node) (string, error) {
 }
 
 // RenderWithBlockOffsets renders a document and records each identified block's
-// byte range in the returned markdown.
+// byte range in the returned markdown. It validates doc first.
 func RenderWithBlockOffsets(doc *Node) (string, []BlockOffset, error) {
-	r, err := render(doc, maxSpanCells)
+	return renderWithBlockOffsets(doc, true)
+}
+
+// RenderWithBlockOffsets is RenderWithBlockOffsets of d's tree without validating it again: the
+// renderer's own refusals still run, and a panic in it is still an ErrPanic. The zero
+// ValidDocument is RenderWithBlockOffsets' error for a nil tree.
+func (d ValidDocument) RenderWithBlockOffsets() (string, []BlockOffset, error) {
+	return renderWithBlockOffsets(d.doc, false)
+}
+
+// renderWithBlockOffsets is the markdown of doc and its blocks' byte ranges in it, validating doc
+// first only when validate says so (renderDocument).
+func renderWithBlockOffsets(doc *Node, validate bool) (string, []BlockOffset, error) {
+	r, err := renderDocument(doc, maxSpanCells, validate)
 	if err != nil {
 		return "", nil, err
 	}
 	return r.b.String(), r.blockOffsets, nil
 }
 
-// render writes doc, its tables' spans adding at most spanCells empty cells (tableGrid).
-func render(doc *Node, spanCells int) (r *renderer, err error) {
+// render writes doc, its tables' spans adding at most spanCells empty cells (tableGrid), after
+// validating doc.
+func render(doc *Node, spanCells int) (*renderer, error) {
+	return renderDocument(doc, spanCells, true)
+}
+
+// renderDocument is render, validating doc first only when validate says so: ValidDocument's
+// rendering passes false for the tree it validated once already. A nil or non-doc tree is refused
+// either way, every refusal of the renderer's own runs either way, and a panic is an ErrPanic
+// either way.
+func renderDocument(doc *Node, spanCells int, validate bool) (r *renderer, err error) {
 	// The renderer reads back what it writes (blockKinds, parseInlineWithDefinitions).
 	defer recoverPanic(&r, &err, "rendering a document")
 	if doc == nil || doc.Type != "doc" {
@@ -122,8 +144,10 @@ func render(doc *Node, spanCells int) (r *renderer, err error) {
 		}
 		return nil, fmt.Errorf("%w: Render wants a doc, got %q", ErrSchema, doc.Type)
 	}
-	if err := doc.Validate(); err != nil {
-		return nil, err
+	if validate {
+		if err := doc.Validate(); err != nil {
+			return nil, err
+		}
 	}
 	// Anchor marks render nothing, but one that starts or ends inside a word splits its text into
 	// runs, and an escape is decided within one run: rendering the document without them merges
@@ -136,9 +160,9 @@ func render(doc *Node, spanCells int) (r *renderer, err error) {
 	labels := definedFootnoteLabels(doc)
 	r = renderBlocks(doc, labels, false, spanCells)
 	// An empty code block in a typed block in a spread list item is written with a line between its
-	// fences, as main wrote it, except in a document holding a shape this parser reads only as the
-	// browser editor does, where that line is refused (emptyCodeWrittenBare): there the document is
-	// written again with the fences alone.
+	// fences, as the writer before sjawhar/legion#1464 wrote it, except in a document holding a
+	// shape this parser reads only as the browser editor does, where that line is refused
+	// (emptyCodeWrittenBare): there the document is written again with the fences alone.
 	if r.err == nil && r.wroteBlankEmptyCode && holdsBrowserOnlyShape(r.b.Bytes()) {
 		r = renderBlocks(doc, labels, true, spanCells)
 	}
@@ -668,29 +692,33 @@ func emptyCode(node *Node) bool {
 	return true
 }
 
+// codeBlockFence is a code block's fence: backticks, one more than the longest run of them in its
+// text and at least three - or, where its language holds a backtick, which a backtick fence's info
+// string cannot, tildes counted the same way.
 func codeBlockFence(node *Node) string {
+	fence := byte('`')
+	if language, _ := node.Attrs["language"].(string); strings.Contains(language, "`") {
+		fence = '~'
+	}
 	longest := 0
 	for _, child := range node.Children {
-		for run, char := 0, 0; ; {
-			if char < len(child.Text) && child.Text[char] == '`' {
-				run++
-				if run > longest {
-					longest = run
-				}
-				char++
-				continue
-			}
-			if char == len(child.Text) {
-				break
-			}
+		longest = max(longest, longestRun(child.Text, fence))
+	}
+	return strings.Repeat(string(fence), max(longest, 2)+1)
+}
+
+// longestRun is the length of the longest run of char in text, zero where text holds none.
+func longestRun(text string, char byte) int {
+	longest, run := 0, 0
+	for index := range len(text) {
+		if text[index] != char {
 			run = 0
-			char++
+			continue
 		}
+		run++
+		longest = max(longest, run)
 	}
-	if longest < 2 {
-		longest = 2
-	}
-	return strings.Repeat("`", longest+1)
+	return longest
 }
 
 func isBareURLLink(node *Node, marks []Mark, escapePipes bool) bool {
@@ -819,10 +847,6 @@ func escapeImageSource(src string, escapePipes bool) string {
 // bare, a `<` opening it escaped.
 func escapeDestination(href string, escapePipes bool, ampersand string) string {
 	angle := strings.ContainsAny(href, " ()")
-	if !angle && !strings.ContainsAny(href, "\\&") && !strings.HasPrefix(href, "<") && !(escapePipes && strings.Contains(href, "|")) &&
-		!strings.ContainsFunc(href, asciiControl) {
-		return href
-	}
 	var written strings.Builder
 	written.Grow(len(href) + 4)
 	if angle {

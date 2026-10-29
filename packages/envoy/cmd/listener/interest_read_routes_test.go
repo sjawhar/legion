@@ -87,7 +87,7 @@ func TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget(t *t
 		return get(sessionEntryHandler(state), "/v1/registry/"+id)
 	}
 	interests := func(id string) (*httptest.ResponseRecorder, time.Duration) {
-		return get(adminInterestsHandler(registry), "/v1/interests/"+id)
+		return get(adminInterestsHandler(registry, sessions), "/v1/interests/"+id)
 	}
 	wantTopics := func(t *testing.T, info sessionInfo, want []string) {
 		t.Helper()
