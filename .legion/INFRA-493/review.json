@@ -2,42 +2,33 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-493",
-  "completed": "2026-10-28T22:53:22Z",
-  "decision": "changes_requested",
-  "reviewedHead": "7bf5aeb19269c95bfc1c475047af4eddcf8b56ac",
-  "codeHead": "7aa6d1601741864b3d7eb03bc97e77245fb0c95e",
+  "completed": "2026-10-29T02:40:01Z",
+  "decision": "approved",
+  "round": 2,
+  "reviewedHead": "the handoff commit above 2ec58c57a6ad34b2cb75cb87f7e0600217b479cf (named by SHA in the approval)",
+  "codeHead": "a8a2c1b1c24800e5d2fa651328a0077ae0828e06",
   "critical": 0,
-  "important": 4,
-  "minor": 1,
+  "important": 0,
+  "minor": 3,
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/daemon/internal/api/handoff.go",
-      "description": "A pull request merged while the issue is in implementing (or before a return to implementing) now stalls the issue: the completion is refused HANDOFF_NO_PULL_REQUEST (handoff.go:280-286) and the guard needs an open record (workflow/table.go:63), but nothing is recorded, so the pass never sends pull-request-missing (record/store.go HandedOffWithoutOpenPullRequest needs handoff_commit), and the architect's pr-merged guidance (prompts/go/architect-common.md:18, skills/legion-architect/references/wake-routing.md:30) still says the workflow runs on and no further notice follows. On main the merged record let the issue advance."
-    },
-    {
-      "severity": "important",
-      "file": "packages/daemon/internal/intake/consume.go",
-      "description": "Lag (consume.go:364-372) reads the three consumers in sequence under one 2 s deadline; NATS answers a permission-refused STREAM.MSG.GET with an async -ERR only, so before the envoy-infra grant rolls out one waiting Dispatch consumer spends the whole bound and the server and github consumers show waiting 0 / unavailable. The PR body's rollout note (oldest reads unavailable) understates it; the tests' stand-in refuses at once."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/infra/aws/rendering/metricfilters.go",
-      "description": "The sweep now retries a 422/503 for 72 h (2,4,8,16,32 then 60 min, about 76 requests); each retry logs the refused/failed line the webhook-refused and publish-failure alarms count, and the alarm (Period 300, 1 period, notBreaching, Alarm and OK actions on the topic, infra/aws/webhooklistener.go:272-282) flips ALARM/OK about 74 times per persistently refused delivery where it used to fire once. Neither bounded nor named in the PR."
-    },
-    {
-      "severity": "important",
-      "file": "PR body",
-      "description": "No `## Contract change census`: the PR adds the HANDOFF_NO_PULL_REQUEST refusal on POST /legion/v1/handoff/complete and required state fields (consumers, repositories.withoutWebhookApp) under daemon API contract 42 that a 41 plugin's strict reader refuses."
+      "severity": "minor",
+      "file": "packages/envoy/internal/webhook/webhook.go",
+      "description": "Hardening, no exploit path: the remembered-failures key is X-GitHub-Delivery, outside the HMAC and with no length cap (each key up to Go's 1 MB header limit, 4,096 entries); cap or truncate it. Fast-follow."
     },
     {
       "severity": "minor",
-      "file": "packages/daemon/internal/intake/consume.go",
-      "description": "consume.go:252-254 logs ERROR 'any event published between was lost' whenever the last applied fact is older than the stream's first message, which happens on a quiet project (positions advance only on applied facts, position.go:39-51), though the consumer may have handled every message."
+      "file": "packages/pi-legion/.changes/unreleased/pr2478-Changed-20261028-200000.yaml",
+      "description": "Wording: the pi-legion fragment omits 'and the record holds none merged'; the envoy fragment does not name the listener's `redelivery <delivery>:` line. Fast-follow."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/workflow/engine.go",
+      "description": "Behaviour-neutral structure: the open-or-merged rule is spelled at engine.go:826, pullrequest.go:496, store.go:244 and handoff.go:285 (one predicate on record.PullRequest); the GitHub-only failure memory lives in the shared webhook.go and the counted log format is written twice (webhook.go:27, :89); consumer_lag_test.go:172-173 comment still says sequential. Fast-follow."
     }
   ],
-  "ci": "Required set lint, typecheck, test, pr-title. CI head ac10118d (compare to 7bf5aeb1: handoffsOnly true, 1 file); every required check there completed cancelled at 22:44Z; reran Tests, Legion Envoy and Contracts, Docs and Worker Image once (runs 40778226800, 40778226738, 40778226719, 40778226718). 55eb11c8's Tests run 40762777994 was red on the drain test, fixed by 7aa6d160.",
-  "thermonuclear": "deep-review (two slices) and code-quality ran at 7bf5aeb1; the four Important findings above come from them and were re-verified by reading the cited lines.",
-  "threads": "0 threads, 0 prior reviews or comments.",
-  "e2eLines": "E2E (implementer) and E2E (tester) both present in the PR body."
+  "roundOneFindings": "All five fixed and accepted: merged record lets the completion move (9583427d), per-consumer lag bounds (db9c30ee), counted alarm line once per delivery per task (b7a9efb5), contract change census added (four searches re-run at the head: 13, 30, 22, 93 hits, every one listed), old-position line is a WARN (db9c30ee). Threads PRRT_kwDORFy7ds6xWjhr, PRRT_kwDORFy7ds6xWjht, PRRT_kwDORFy7ds6xWjhx, PRRT_kwDORFy7ds6xWjh3 answered by the reviewer and accepted.",
+  "ci": "Required set lint, typecheck, test, pr-title. CI head a8a2c1b1 (newest pull_request run; compare to 2ec58c57 handoffsOnly true, 2 files): lint, typecheck, test success, pr-title success. Non-required reds envoy-go and the Dispatch Go suite: typed_nesting_test.go:23 cpuTimeOf compile error, main's pmdoc red (#2484), not this change.",
+  "thermonuclear": "deep-review and code-quality ran at 2ec58c57 on the round-2 delta: no Medium or High; three Minor items above, all fast-follow.",
+  "e2eLines": "E2E (implementer) round 3 at a8a2c1b1 and E2E (tester) at a8a2c1b1, both present."
 }
