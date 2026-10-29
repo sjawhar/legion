@@ -26,7 +26,6 @@ import {
 import type { ReplyTarget } from "./composer-model";
 import {
   type CarriedBlockIds,
-  carriedIds,
   type SentDraft,
   type SentRequest,
   saveCommentEdit,
@@ -51,9 +50,10 @@ export interface ComposerSend {
 }
 
 /** A comment edit as a send keeps it across a reload: which comment it saves, and the ids its
- *  press carried (`carriedIds`), since the host that gave the page its save and the blocks the
- *  editor followed are both gone with the page. A record the build before this one kept holds
- *  the comment's id alone, and restores carrying no ids, as that build's save did. */
+ *  press carried (`SentRequest.edit.carried`), since the host that gave the page its save and the
+ *  blocks the editor followed are both gone with the page. A record the build before this one
+ *  kept holds the comment's id alone: that build kept no ids, so its edit restores carrying
+ *  none, and the server matches its blocks by their text. */
 type KeptEdit = string | { readonly carried?: CarriedBlockIds; readonly id: string };
 
 /** A composer's send as it is kept across a reload: an edit by what it saves, not how. */
@@ -176,7 +176,7 @@ const keptActor = shape.either(
   shape.record({ id: shape.string, kind: shape.oneOf("system") })
 ) satisfies Shape<Actor>;
 
-/** The ids a kept edit carries, as `carriedIds` worked them out at the press. */
+/** The ids a kept edit carries, as its press worked them out (`carriedIdsOf`). */
 const keptCarried = shape.record({
   base_revision: shape.number,
   blocks: shape.array(shape.record({ from: shape.number, id: shape.string })),
@@ -246,18 +246,15 @@ function hold(client: QueryClient, mutationKey: MutationKey, answer: () => Promi
     .catch(() => {});
 }
 
-/** A kept edit as the send it belongs to saves it again: it follows no blocks - the editor that
- *  followed them is gone with the page - and saves through the default save, carrying the ids
- *  its press carried, so a Retry under the send's own key sends the very body Dispatch judged
- *  under that key. A record from the build before those ids were kept carries none, and the
- *  server matches its blocks by their text, as it did for that build's first attempt. */
+/** A kept edit as the send it belongs to saves it again: through the default save - the host
+ *  that gave the page its save is gone with it - carrying the ids its press carried, so every
+ *  attempt under the send's own key, however many reloads it outlives, sends the very body
+ *  Dispatch judged under that key. A record from the build before those ids were kept carries
+ *  none: that build kept no ids, and the server matches the edit's blocks by their text. */
 function restoredEdit(edit: KeptEdit): NonNullable<SentRequest["edit"]> {
-  const carried = typeof edit === "string" ? undefined : edit.carried;
-  return {
-    blocks: undefined,
-    id: typeof edit === "string" ? edit : edit.id,
-    save: (id, body, followed, bounds) => saveCommentEdit(id, body, followed ?? carried, bounds),
-  };
+  return typeof edit === "string"
+    ? { carried: undefined, id: edit, save: saveCommentEdit }
+    : { carried: edit.carried, id: edit.id, save: saveCommentEdit };
 }
 
 /**
@@ -277,7 +274,7 @@ export const composerSend = defineWriteKind<ComposerSend, KeptComposerSend>({
       mutationKey,
       request: {
         ...kept,
-        edit: edit === undefined ? null : { carried: carriedIds(request), id: edit.id },
+        edit: edit === undefined ? null : { carried: edit.carried, id: edit.id },
       },
     };
   },

@@ -24,7 +24,7 @@ import { KEPT_SEND_RESUME_MS } from "../writes/write-storage";
 import { Writes } from "../writes/write-store";
 import { type HeldSend, HeldSends, heldSends, stoppable } from "./held-sends";
 import { PendingSendTurn } from "./PendingSendTurn";
-import { requestFor, type SentRequest, saveCommentEdit } from "./send-request";
+import { carriedIdsOf, requestFor, type SentRequest, saveCommentEdit } from "./send-request";
 import { useSessionSends } from "./useSessionSends";
 
 const request: SentRequest = {
@@ -56,22 +56,26 @@ const sentMessage = {
 } as unknown as Message;
 
 /** A comment edit's send, as a composer whose host gave it no save of its own builds one: the
- *  blocks the editor followed through the edit, and the default save. */
+ *  ids its press worked out from the blocks the editor followed through the edit, and the
+ *  default save. */
 const editSend: SentRequest = {
   ...request,
   draft: { body: "Alpha\n\nBeta", mentions: [], replacement: "" },
   edit: {
-    blocks: {
-      revision: 3,
-      spans: {
-        held: [],
-        live: [
-          { end: 5, id: "b1", start: 0 },
-          { end: 11, id: "b2", start: 7 },
-        ],
+    carried: carriedIdsOf(
+      {
+        revision: 3,
+        spans: {
+          held: [],
+          live: [
+            { end: 5, id: "b1", start: 0 },
+            { end: 11, id: "b2", start: 7 },
+          ],
+        },
+        value: "Alpha\n\nBeta",
       },
-      value: "Alpha\n\nBeta",
-    },
+      "Alpha\n\nBeta"
+    ),
     id: "comment-1",
     save: saveCommentEdit,
   },
@@ -268,7 +272,7 @@ test("a reply to a thread is kept and resumed whole", async () => {
   }
 });
 
-// INFRA-368. A comment edit's first save carries the ids the editor followed through it, at the
+// A comment edit's first save carries the ids the editor followed through it, at the
 // revision the blocks route answered. The page reloads before Dispatch answers and comes back
 // later than a send is made again on its own, so the send shows refused and its Retry goes under
 // its own key - and Dispatch judges a key by the body it was first used for. So the retried save
@@ -301,8 +305,53 @@ test("a comment edit retried after a reload sends the body its first save sent",
   }
 });
 
+// The ids are kept as the send's own data, so every reload keeps them again: after two reloads,
+// and after a reload that interrupts a Retry already out, the next Retry under the send's key
+// still sends the body its first save sent.
+test("a comment edit keeps its ids through two reloads and through a reload that interrupts its Retry", async () => {
+  const tab = keptTab();
+  const editComment = spyOn(api, "editComment").mockReturnValue(
+    Promise.withResolvers<Comment>().promise
+  );
+  try {
+    heldOf(tab).held.send(editKey, editSend);
+    await settle();
+    pressedLongAgo(tab, "send-edit");
+    heldOf(tab).writes.resume("alice");
+    await settle();
+    pressedLongAgo(tab, "send-edit");
+
+    const second = heldOf(tab);
+    second.writes.resume("alice");
+    await settle();
+    retryHeld(second.held, editKey);
+    await settle();
+    pressedLongAgo(tab, "send-edit");
+
+    const third = heldOf(tab);
+    third.writes.resume("alice");
+    await settle();
+    retryHeld(third.held, editKey);
+    await settle();
+    expect(editComment.mock.calls).toEqual([
+      ["comment-1", editPatch, keyedAttempt],
+      ["comment-1", editPatch, keyedAttempt],
+      ["comment-1", editPatch, keyedAttempt],
+    ]);
+    expect(editComment.mock.calls.map((call) => call[2]?.key)).toEqual([
+      "send-edit",
+      "send-edit",
+      "send-edit",
+    ]);
+  } finally {
+    editComment.mockRestore();
+    tab.close();
+  }
+});
+
 // A record the build before those ids were kept wrote holds its edit as the comment's id alone.
-// It still restores, and its Retry saves the comment carrying no ids, as that build's save did.
+// It still restores; that build kept no ids, so its Retry saves the comment carrying none, and
+// the server matches its blocks by their text.
 test("a send kept with its edit as a bare comment id still restores", async () => {
   const tab = keptTab();
   const editComment = spyOn(api, "editComment").mockReturnValue(

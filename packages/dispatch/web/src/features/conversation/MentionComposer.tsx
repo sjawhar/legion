@@ -81,6 +81,7 @@ import { MODE_LABELS, plainDelivery } from "./delivery";
 import type { HeldSend } from "./held-sends";
 import { ReplyQuote } from "./ReplyQuote";
 import {
+  carriedIdsOf,
   DELIVERY_COMMANDS,
   type DeliveryPlan,
   deliveryPlan,
@@ -896,7 +897,7 @@ export function MentionComposer({
       edit === undefined
         ? undefined
         : {
-            blocks: followedBlocks.current,
+            carried: carriedIdsOf(followedBlocks.current, body),
             id: edit.id,
             save: saveEdit ?? saveCommentEdit,
           },
