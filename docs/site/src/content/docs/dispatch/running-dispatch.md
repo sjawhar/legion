@@ -445,8 +445,11 @@ first; above one replica, scale to zero before the new version starts. Releases 
 again. Rolling it back brings the hazard back the other way: a tab still open, and a `dispatch`
 client that saw this version keep keys in the last five minutes, retry a write whose answer was
 lost against the earlier server, which runs it again. So fix it forward, as above; if you must roll
-back, stop this version first, knowing a write in flight at that moment may land twice. A tab
-opened before the deploy needs a reload: its event route is gone and it shows
+back, stop this version first, knowing a write in flight at that moment may land twice. Once a
+later release has dropped the broadcast send's old key table (migration `0141`), rolling back past
+this version also stops broadcasts: the earlier version's broadcast send reads and writes that
+table, so every broadcast send fails while the rest of that version keeps working. A tab opened
+before the deploy needs a reload: its event route is gone and it shows
 **Live updates unavailable**, and its broadcast body still carries a field the new server refuses.
 
 From that release on, every page write that could otherwise happen twice carries an
