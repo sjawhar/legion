@@ -1889,7 +1889,10 @@ that keeps it from closing before a letter (`tildeBackslash`). Marks are opened 
 one the texts after carry furthest outermost, so that a nearer one ending closes no other
 (`byReach`). And marks a text shares with the one before are closed and opened again there inside
 the marks it opens (`*a*~~*b*~~`), so that the new run stands beside a delimiter run rather than a
-letter (`reopening`). An
+letter (`reopening`). And a bare URL whose text is its href is written there as text with the
+colon of its scheme escaped, so that the tokenizer reads no URL and reads no delimiter run written
+after it on into one, while the decoded text is the URL the transform links again
+(`bareURLColons`). An
 image's alt text is kept the same way under `Parse` and `storedMarkdown` (`altReadsBack`). A code
 span keeps the whitespace that starts each of its later lines past the prefix of the containers
 around it, as the browser editor's

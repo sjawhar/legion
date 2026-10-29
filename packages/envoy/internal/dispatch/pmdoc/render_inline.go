@@ -247,7 +247,8 @@ var readBackReaders = [...]inlineReader{inlineMarkdown, storedMarkdown, flanking
 // text it escapes, whether it writes each bare URL (isBareURLLink) as an autolink (`<href>`, whose
 // text both readers read as written and whose `>` ends it), whether it escapes the colons of URL
 // schemes, the dots after `www` and the `@`s in text outside a link (escapeContext.schemeColons,
-// wwwDots, ats), the order it opens each text's marks in (markOrder), whether a letter beside a
+// wwwDots, ats), whether it writes each bare URL as text with that colon escaped as well
+// (bareURLColons), the order it opens each text's marks in (markOrder), whether a letter beside a
 // delimiter run that punctuation stands inside is a character reference (flanking), whether it
 // writes each email link as its address (isBareEmailLink), text outside a link to the escapes,
 // whether a literal backslash right before such a reference is written `\\` (pairBackslash), and
@@ -255,6 +256,7 @@ var readBackReaders = [...]inlineReader{inlineMarkdown, storedMarkdown, flanking
 type runSpelling struct {
 	escapes                               delimiterEscapes
 	angleURLs, schemeColons, wwwDots, ats bool
+	bareURLColons                         bool
 	order                                 markOrder
 	flanking                              bool
 	bareEmails                            bool
@@ -363,7 +365,8 @@ func escapesFrom(held delimiterEscapes) []delimiterEscapes {
 // needs.lastHeld for its held); then the escapes from the fewest with each escaped tilde written
 // `\~`, which the browser editor reads as a tilde beside which a `*` run may open or close, where
 // its reference ends in `;`; then with the marks ordered by reach (byReach); then reopened
-// (reopening).
+// (reopening); last, where the run writes a bare URL (bareURL), the escapes from the fewest with
+// each bare URL written as text whose scheme colon is escaped (bareURLColons).
 func lastResorts(needs runNeeds) []runSpelling {
 	var spellings []runSpelling
 	for _, spelling := range runSpellings(needs) {
@@ -385,6 +388,11 @@ func lastResorts(needs runNeeds) []runSpelling {
 	for _, order := range []markOrder{marksByReach, marksReopened} {
 		for _, delimiters := range escapesFrom(needs.lastHeld) {
 			spellings = append(spellings, runSpelling{escapes: delimiters, order: order})
+		}
+	}
+	if needs.bareURL {
+		for _, delimiters := range escapesFrom(needs.lastHeld) {
+			spellings = append(spellings, runSpelling{escapes: delimiters, bareURLColons: true})
 		}
 	}
 	return spellings
@@ -1037,7 +1045,13 @@ func (r *renderer) writeInlineNodes(nodes []*Node, prefix string, context inline
 				position.atLineStart, position.atTextStart, position.afterMarker = false, false, false
 				continue
 			}
-			if isBareURLLink(n, marks, escapePipes) && literalLength(n.Text) != 0 || bareHere && isBareWWWLink(n, marks, escapePipes) {
+			// bareURL reports whether this text is a URL the tokenizer reads whole, which is
+			// written as its bytes unless the spelling writes it as text with its scheme colon
+			// escaped (bareURLColons): the tokenizer then reads no URL there, so a delimiter run
+			// written after it stays a delimiter run rather than being read on into the URL, and
+			// the transform, which reads the decoded text, links the URL again.
+			bareURL := isBareURLLink(n, marks, escapePipes) && literalLength(n.Text) != 0
+			if bareURL && !spelling.bareURLColons || bareHere && isBareWWWLink(n, marks, escapePipes) {
 				// The tokenizer reads a bare URL's bytes as they are written, a backslash among
 				// them, so its text takes no escape either. A www URL begins only after some
 				// characters; where its run does not read back, the angleURLs spelling writes it as
@@ -1056,7 +1070,7 @@ func (r *renderer) writeInlineNodes(nodes []*Node, prefix string, context inline
 			r.writeInlineText(n, &position, prefix, escapeContext{
 				footnoteLabels: r.footnoteLabels,
 				tableCell:      escapePipes,
-				schemeColons:   spelling.schemeColons && !hasLink,
+				schemeColons:   spelling.schemeColons && !hasLink || bareURL,
 				wwwDots:        spelling.wwwDots && !hasLink,
 				ats:            spelling.ats && !hasLink,
 				label:          label,
