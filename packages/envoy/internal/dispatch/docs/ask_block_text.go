@@ -566,8 +566,7 @@ type askRepairPlan struct {
 	// they would leave unreadable (holder).
 	blocked error
 	// holder reports whether the deletes the plan would have named leave a decision holding the
-	// edited one unreadable, which no ask edit of this decision can repair while the holder's own
-	// problem stands.
+	// edited one unreadable; no ask edit of this decision repairs that.
 	holder bool
 }
 

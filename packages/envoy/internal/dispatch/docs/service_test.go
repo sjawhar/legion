@@ -1462,9 +1462,9 @@ func TestSetAskBlockTextRefusalOfNestedDecisionsNamesOnlyWhatBreaksTheRule(t *te
 
 	// The same decision, its holder's own problem repaired: the holder holds its question again,
 	// which a person writes in the document editor, since no document edit of the route's own may
-	// touch it while the decision it holds breaks the content rule. The refusal's other way out
-	// then holds, word for word: this same ask edit, sent again, names this decision's deletes and
-	// following it leaves both decisions reading as decisions.
+	// touch it while the decision it holds breaks the content rule. Once it is repaired, this same
+	// ask edit, sent again, names this decision's deletes, and following them leaves both decisions
+	// reading as decisions.
 	t.Run("the decision holding it holds its question again", func(t *testing.T) {
 		service, artifactID := seedIndexedShipAsk(t, "ask-lists")
 		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
@@ -1495,9 +1495,9 @@ func TestSetAskBlockTextRefusalOfNestedDecisionsNamesOnlyWhatBreaksTheRule(t *te
 	})
 
 	// The decided holder, its own problem repaired in the document editor: its own second list
-	// deleted, which leaves the decision it holds broken still. The refusal's other way out holds
-	// here too - this same ask edit, sent again, names this decision's deletes and following it
-	// leaves both reading as decisions - and it holds for a holder no ask edit of its own reaches.
+	// deleted, which leaves the decision it holds broken still. Here too this same ask edit, sent
+	// again, names this decision's deletes, and following them leaves both reading as decisions,
+	// for a holder no ask edit of its own reaches.
 	t.Run("the decision holding it is decided and repaired", func(t *testing.T) {
 		service, artifactID := seedIndexedShipAsk(t, "ask-lists")
 		answerIndexedAsk(t, service, artifactID, "ask-lists")
