@@ -2,105 +2,77 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-567",
-  "completed": "2026-10-29T20:05:00Z",
+  "completed": "2026-10-29T21:40:00Z",
+  "round": 2,
+  "answers": "Test round 1's four findings, the architect's five fixes, and spec version 6's folded items from dispatch://INFRA-333 and dispatch://INFRA-318",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2512",
-  "head": "efa6b01814ba5c53a818e0026a4ac0c37f1eae28",
+  "head": "a744ce6172dd3e2f30a0b7e07f0f0f21ba94bd38",
   "proof": [
     {
-      "criterion": "Acceptance 1 / R1 / R4 — every image a CI job fetches comes from a source this repository controls and pins, with no retry loop in front of it",
-      "surface": "The gate .github/scripts/check-ci-images.sh, which ci.yaml's lint job runs, over the whole repository tree in the issue pod",
-      "command": "bash .github/scripts/check-ci-images.sh",
-      "observed": "exit 0: `.github/ci-images.yaml holds 12 row(s), 12 of them in the package; 34 reference(s) in 31 file(s) of CI's reach name one of those rows; of 6270 text file(s) swept, the 29 that name mirror.gcr.io are all in the exception list`. No `for attempt in` loop around a docker pull remains under .github/.",
-      "headSha": "efa6b01814ba5c53a818e0026a4ac0c37f1eae28",
-      "negativeControl": "testnats.Image set back to mirror.gcr.io/library/nats:2.10 -> exit 1 with two refusals naming packages/envoy/internal/testnats/nats.go:46 and the remedy; testpg.Image given a digest no row holds -> exit 1 naming packages/envoy/internal/testpg/testpg.go:25. Both reverted; the working copy was clean afterwards."
+      "criterion": "Spec `Proven on` — \"a run with the third-party source made unreachable for one job (a negative control)\", the tester's failure 1",
+      "surface": "GitHub Actions in sjawhar/legion: one job of the scratch pull request sjawhar/legion#2520, opened off this branch for the two controls and closed after they were quoted",
+      "command": "The `Unreachable Source Control` workflow, run 40946334621 (https://github.com/sjawhar/legion/actions/runs/40946334621), at head f3024ecb",
+      "observed": "Every step green. The first step put registry-1.docker.io, index.docker.io, auth.docker.io, mirror.gcr.io and proxy.golang.org at 0.0.0.0. The job then pulled ghcr.io/sjawhar/legion/ci@sha256:5498ba57 (`pulled sha256:1fd1a8eb`), ran it (`the NATS copy answered on 127.0.0.1:32768`), and built Go over a cold module cache with `go build ./cmd/legion`: 92 `go: downloading` lines through `direct`, then `legion (devel)`.",
+      "headSha": "f3024ecbed65ee557da54861c6724a29f5bb9c5b",
+      "negativeControl": "In the same run, the step before the pull asked the old registry for the same image and had to fail: `docker pull mirror.gcr.io/library/nats:2.10 failed, as it must`. A green run where the block did nothing is therefore not possible."
     },
     {
-      "criterion": "Acceptance 1 — the 12 copies exist in ghcr.io/sjawhar/legion/ci and answer an anonymous pull, so no consuming job needs a login step and no service container needs a credentials: block",
-      "surface": "ghcr.io, read from the issue pod with no credential",
-      "command": "curl -s 'https://ghcr.io/token?scope=repository:sjawhar/legion/ci:pull&service=ghcr.io' then one `curl -I -H 'Authorization: Bearer <token>' https://ghcr.io/v2/sjawhar/legion/ci/manifests/<digest>` per row",
-      "observed": "All 12 digests answered 200: pgvector-2358fcba, nats-2.10, nats-2.15.1-alpine, seaweedfs-3.97, ubuntu-534baea6, bun-1.4.4, bun-1.4.4-slim, golang-1.27.1-alpine, debian-bookworm-slim, debian-trixie-slim, buildkit-buildx-stable-1, postgres-16. Reported on the issue as task B4.",
-      "headSha": "efa6b01814ba5c53a818e0026a4ac0c37f1eae28",
-      "negativeControl": "The same HEAD with no token at all -> 401, which is the registry asking for a token rather than refusing the package."
+      "criterion": "The tester's failure 2 — the gate passed a Dockerfile that builds FROM a third-party image named through an ARG default",
+      "surface": "The gate .github/scripts/check-ci-images.sh and its harness, which ci.yaml's ci-images and test jobs run",
+      "command": "bash .github/scripts/check-ci-images.test.sh ; bash .github/scripts/check-ci-images.sh",
+      "observed": "`Results: 67 passed, 0 failed` (65 before the tester's case, 67 with it), including the tester's own `a third-party default fails` and `names the image the build fetches`; the tester's case is in the file word for word and was not edited. On the real tree the gate prints `.github/ci-images.yaml holds 12 row(s), 12 of them in the package; 35 reference(s) in 32 file(s) of CI's reach name one of those rows; of 6274 text file(s) swept, the 29 that name mirror.gcr.io are all in the exception list`, exit 0. scan_dockerfile now substitutes each ARG's default into the FROM and reads the result; a re-declaration without `=` keeps the earlier default, and a variable declared with no default anywhere is still skipped, because whoever runs the build passes it.",
+      "headSha": "a744ce6172dd3e2f30a0b7e07f0f0f21ba94bd38",
+      "negativeControl": "The tester's case is the red one: `ARG BASE_IMAGE=docker.io/library/debian:trixie-slim` with `FROM ${BASE_IMAGE} AS build` fails the gate and names docker.io/library/debian:trixie-slim. It failed to fail before this change and fails now."
     },
     {
-      "criterion": "R2 — a Go command in CI survives a failure of proxy.golang.org",
-      "surface": "The Go toolchain the CI jobs run (go1.27.1), with the module proxy pointed at a dead address and a cold module cache",
-      "command": "GOMODCACHE=<fresh dir> GOFLAGS= GOWORK=off GOPROXY='http://127.0.0.1:1|direct' go mod download github.com/hashicorp/hcl/v2@v2.24.0",
-      "observed": "exit 0; the module was fetched through `direct` (git) and written to the cache (v2.24.0.info, .mod, .zip). That is the value every CI workflow and the three Dockerfile Go stages now set.",
-      "headSha": "efa6b01814ba5c53a818e0026a4ac0c37f1eae28",
-      "negativeControl": "The same command with today's separator, GOPROXY='http://127.0.0.1:1,direct' -> exit 1, `go: github.com/hashicorp/hcl/v2@v2.24.0: Get \"http://127.0.0.1:1/...\": dial tcp 127.0.0.1:1: connect: connection refused`. A `,` falls through only after a 404 or a 410, which is why catalog row 65's stream reset turned envoy-infra-go red."
+      "criterion": "The tester's failure 4 and the architect's fifth fix — a pull request that adds a row must not race its own gate",
+      "surface": "The copy script and the gate, driven over fixtures with a fake crane first on PATH and the gate's documented CI_IMAGES_MANIFEST_HEAD seam, so no case reaches the network",
+      "command": "bash .github/scripts/mirror-ci-images.test.sh",
+      "observed": "`Results: 20 passed, 0 failed`. The ordering case is the point: a fixture whose package lacks one row fails check 7 of the gate before .github/scripts/mirror-ci-images.sh runs, and passes it after. In ci.yaml the two are one job, ci-images, whose steps are the copy then the gate, and which is in ci-ok's needs and in ci_filter_coverage.py's ALWAYS_RUN, so its failure fails the required check. mirror-images.yaml keeps the copy for a push to main and has lost its pull_request trigger.",
+      "headSha": "a744ce6172dd3e2f30a0b7e07f0f0f21ba94bd38",
+      "negativeControl": "Three more cases of the same harness: a row the package already holds is not copied again; a copy that lands at another digest fails naming the row and both digests; and the ordering case's `before` half, which is the gate refusing the row the package lacks."
     },
     {
-      "criterion": "R3 — no package install in CI resolves a version no committed file pins",
-      "surface": "The worker image's CodeGraph project (packages/daemon/docker/codegraph), installed with the repository's Bun 1.4.4 as worker.Dockerfile's plugin stage installs it",
-      "command": "bun install --frozen-lockfile --ignore-scripts, over a copy of packages/daemon/docker/codegraph",
-      "observed": "exit 0; `+ @colbymchenry/codegraph@1.5.0`, 2 packages installed; node_modules/@colbymchenry/codegraph-linux-x64/bin/codegraph --version prints 1.5.0. Everything beside it is pinned by bun.lock's sha512 integrity hashes.",
-      "headSha": "efa6b01814ba5c53a818e0026a4ac0c37f1eae28",
-      "negativeControl": "The same install with registry.npmjs.org unreachable (NPM_CONFIG_REGISTRY=http://127.0.0.1:1) -> exit 1, `error: ConnectionRefused downloading tarball @colbymchenry/codegraph@1.5.0`. This failure is on purpose and is the recorded evidence for departure 2: npm meets `pins`, not `survives`."
+      "criterion": "Spec version 6, from dispatch://INFRA-333 — \"in a fresh worker pod, `go test ./...` in `packages/daemon` downloads no module\", read as the architect settled it: no network read and no time lost, the `go: downloading` lines coming from the image's own cache",
+      "surface": "The image's own mechanism, run in the issue pod: a download cache filled the way worker.Dockerfile's `go` stage fills it, then a fresh module cache served by that cache through a `file://` proxy with the public proxy at a dead address",
+      "command": "cd packages/daemon && GOMODCACHE=<fresh> GOPROXY='file://<the filled cache>/cache/download|http://127.0.0.1:1' go build ./cmd/legion",
+      "observed": "exit 0, a 100 MB binary, 92 `go: downloading` lines, every one served from the file proxy with no network read possible. The filled cache is 380 MiB over 419 module zips, which is what the runtime stage copies to /home/legion/go/pkg/mod/cache/download, owned by the runtime user; the extracted trees (2.2 GiB) stay out of the image. The toolchain stage rewrites /opt/go/go.env's GOPROXY to `file:///home/legion/go/pkg/mod/cache/download|https://proxy.golang.org|direct`, which is how the cache reaches a role: a pod sets GOMODCACHE=/legion/go/mod, the issue volume, and a container's environment outranks an image ENV.",
+      "headSha": "a744ce6172dd3e2f30a0b7e07f0f0f21ba94bd38",
+      "negativeControl": "The same fresh module cache with the file proxy taken away, GOPROXY='http://127.0.0.1:1' alone -> exit 1, `go: github.com/jackc/pgx/v5@v5.11.0: Get \"http://127.0.0.1:1/...\": dial tcp 127.0.0.1:1: connect: connection refused`."
     },
     {
-      "criterion": "R6 — every job definition carries a timeout-minutes above its slowest green run (part 1 of dispatch://INFRA-333)",
-      "surface": "The ten workflow files as GitHub parses them, compared against the measurement over main in 2026-10-22T15:53Z..2026-10-29T15:53Z",
-      "command": "A PyYAML parse of .github/workflows/*.yaml comparing every job's timeout-minutes with the measured slowest green run",
-      "observed": "`56 job definitions, 51 with a limit, 5 reusable-workflow calls`, and no job whose limit is below its slowest green run. The five calls carry none because GitHub's keywords for a job that calls a reusable workflow leave timeout-minutes out. The table of every job, its slowest green run and its limit is in the pull request body.",
-      "headSha": "efa6b01814ba5c53a818e0026a4ac0c37f1eae28",
-      "negativeControl": "pr-title's limit removed -> `PROBLEMS: ['pr-title.yaml:pr-title has no timeout-minutes']`. Restored."
-    },
-    {
-      "criterion": "R7 — the 14 docs steps ci.yaml's docs job and docs-pages.yaml's build job both carried have one source",
-      "surface": "The workflow files, and the pull request's own CI run",
-      "command": "grep -c 'bun run docs:build' .github/workflows/ci.yaml .github/workflows/docs-pages.yaml .github/workflows/docs-site.yaml",
-      "observed": "0, 0, 1. Both jobs are now `uses: ./.github/workflows/docs-site.yaml`, which holds the steps and the Postgres service once; two boolean inputs carry the only differences (the Pages artifact and the go-docs cache save, both main's).",
-      "headSha": "efa6b01814ba5c53a818e0026a4ac0c37f1eae28",
-      "negativeControl": "check-ci-filters.test.sh's new case `a why cites a step of another workflow file`: the fixture passes while the cited workflow holds the step, and fails naming the step, its job and the file once the step changes."
-    },
-    {
-      "criterion": "R8 — check-ci-filters.sh fails when a job `changes` can select is absent from ci-ok's needs or from SELECTED_BY",
-      "surface": "The gate and its harness, which ci.yaml's ci-filters and test jobs run",
-      "command": "bash .github/scripts/check-ci-filters.test.sh and bash .github/scripts/check-ci-filters.sh",
-      "observed": "The harness prints `Results: 132 passed, 0 failed`, the new case among them; the real tree prints `every ci.yaml filter matches every file its job reads (24 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)`.",
-      "headSha": "efa6b01814ba5c53a818e0026a4ac0c37f1eae28",
-      "negativeControl": "The new case deletes a job from the fixture's ci-ok `needs` and from its SELECTED_BY; the check then exits 1 naming the job and both lists it is missing from."
+      "criterion": "Spec version 6, from dispatch://INFRA-318 — a workflow runs the scripts/e2e proofs on a GitHub-hosted runner, started by a label or by workflow_dispatch with a script name and nightly on main, uploading each run's evidence",
+      "surface": "GitHub Actions in sjawhar/legion: the `e2e` label on this pull request, which is the one label-started workflow of this repository",
+      "command": "gh pr edit 2512 --add-label e2e, which started E2E proofs run 40957651922 (https://github.com/sjawhar/legion/actions/runs/40957651922) at head a744ce61",
+      "observed": "The label started the workflow at this head, one job per proof over the five scripts a hosted runner can run. The run was still queued when this phase completed: every workflow of this repository was queued behind GitHub's own backlog at the time (main's own docs-pages runs had been pending for over an hour), which is an Actions capacity condition and not a property of this change. The tester reads its verdict and its artifacts with `gh run view 40957651922` and `gh run download 40957651922`; this is the one line of this handoff whose result is not yet in hand, and it is named as such in the pull request body.",
+      "headSha": "a744ce6172dd3e2f30a0b7e07f0f0f21ba94bd38",
+      "negativeControl": "The select job's refusal path, read from the workflow: a workflow_dispatch naming a script of the `elsewhere` list fails with `scripts/e2e/<name> needs <what its header says>`, and a script in neither list fails the run, so a new script under scripts/e2e/ joins one list or the workflow stops. The list file and the scripts were checked against each other in the pod: 20 scripts present, 0 unlisted, 0 stale rows."
     }
   ],
   "filesChanged": [
-    ".github/ci-images.yaml (new): the 12 rows, each upstream, tag and digest",
-    ".github/workflows/mirror-images.yaml (new): copies the rows the package does not hold, with crane",
-    ".github/actions/install-crane/action.yml (new): crane v0.22.1, checked against its SHA-256",
-    ".github/scripts/check-ci-images.sh and .github/scripts/check-ci-images.test.sh (new): the gate and its 65 assertions, wired into ci.yaml's lint and test jobs",
-    ".github/workflows/docs-site.yaml (new): the reusable workflow ci.yaml's docs job and docs-pages.yaml's build job both call",
-    ".github/workflows/ci.yaml, docs-pages.yaml, worker-image.yaml, release-envoy-listener.yaml, release.yaml, release-envoy-infra.yaml, changelog-fold.yaml, claude-envoy-rebuild.yaml, pr-title.yaml, tests-closed.yaml: the image references, the timeouts, the GOPROXY env, the docs calls",
-    "packages/daemon/docker/worker.Dockerfile, packages/envoy/docker/Dockerfile, packages/envoy/infra/host/heldportwrapper/Dockerfile: the FROM digests and ENV GOPROXY",
-    "packages/daemon/docker/codegraph/package.json and bun.lock (new): the CodeGraph CLI's committed one-package project",
-    "packages/daemon/internal/testnats/nats.go, packages/envoy/internal/testnats/nats.go, packages/envoy/internal/testpg/testpg.go, packages/envoy/internal/tests3/seaweedfs.go, packages/envoy-client/src/__tests__/nats-server.ts, scripts/e2e/lib/nats-stream.test.ts, packages/pi-legion/scripts/skill-scenarios/rig.sh, scripts/e2e/stage1-skeleton.sh: the image constants and the shell references",
-    ".github/actions/pull-test-images/action.yml: the retry loop deleted",
-    ".github/scripts/check-bun-version.sh and its test: the mirror path, with three red cases",
-    ".github/scripts/ci_filter_coverage.py and ci_job_reads.py: a step citation may name another workflow file; check_ci_ok builds its job list from ci.yaml's jobs; 74 stale source citations corrected",
-    "AGENTS.md, .dispatch/architecture/release-engineering.md, docs/kubernetes.md, packages/envoy/AGENTS.md, docs/solutions/envoy/ghcr-docker-multiarch-ci.md, scripts/e2e/lib/bridge-tunnel.sh: the prose this change falsifies",
-    "docs/solutions/github/: two pages retired, one replacement page written",
-    "packages/envoy/.changes/unreleased/INFRA-567-ci-images-by-digest.yaml"
-  ],
-  "trickyParts": [
-    "The mirror workflow's first run failed part way with BLOB_UNKNOWN from mirror.gcr.io, the exact fault this issue is about, so each row's upstream is the image's own Docker Hub reference instead. The 12 digests are the same at both hosts, read at both.",
-    "A workflow-level `env:` holding GOPROXY would have made every claimed go command of ci.yaml fall to `reads everything` in check-ci-filters.sh, which refuses any env name outside ENV_ALLOWED. GOPROXY is added to that list with its reason: it says where a module's bytes come from, never which version (the module files decide that, and go.sum holds each hash), and the check's own go commands run with GOPROXY=off.",
-    "check-bun-version.sh keyed its FROM rule on `oven/bun` in the image reference. With the FROM a digest, that rule would have stopped applying silently, so the script now reads .github/ci-images.yaml and holds a FROM on the package to the row whose upstream is the pinned Bun, suffix and all.",
-    "ARG CODEGRAPH_VERSION is removed rather than kept: a committed lockfile names the version by construction, so an ARG would be a second name with nothing holding the two in step. The notices stage now reads the pin from the manifest, as it already does for the language servers.",
-    "The forward merge against main was forced by GitHub reporting the pull request CONFLICTING, which left the head with no checks at all. It changed four files of this pull request's own diff; the comment on the pull request names each and both fingerprints."
+    ".github/scripts/check-ci-images.sh: scan_dockerfile reads each ARG's default into the FROM; corpus-copy.sh's exception ground corrected to `no CI job runs it`",
+    ".github/scripts/mirror-ci-images.sh and .github/scripts/mirror-ci-images.test.sh (new): the copy, and the case that proves it runs before the gate reads the package",
+    ".github/workflows/ci.yaml: the ci-images job (the copy then the gate), the gate's step out of lint, ci-images in ci-ok's needs, the new test step",
+    ".github/workflows/mirror-images.yaml: runs the script, and no longer triggers on a pull request",
+    ".github/scripts/ci_filter_coverage.py and .github/scripts/ci-ok.sh: ci-images joins the jobs that always run and need no SELECTED_BY entry",
+    ".github/workflows/docs-pages.yaml: workflow_dispatch, and deploy held to main",
+    "packages/daemon/docker/worker.Dockerfile: python3-yaml, and the warm Go module cache with its go.env proxy",
+    ".github/workflows/e2e.yaml and .github/e2e-scripts.json (new): the hosted e2e runner and its two lists",
+    "scripts/e2e/README.md, AGENTS.md, docs/kubernetes.md, docs/solutions/github/an-image-pull-that-fails-in-ci-…-INFRA-567.md, docs/solutions/github/join-a-job-to-the-ci-router.md: the prose each change falsified"
   ],
   "deviations": [
-    "The plan's task order put the gate (C1) before the cutover (C2) and tightened it afterwards (C4). The gate is written strict from the start instead, and the cutover and the gate are one commit: a lenient gate written to be deleted in the same pull request is work nobody reads.",
-    "The plan's acceptance A2 and A3 name a scratch branch for the two unreachable-source controls. A phase worker pushes only its own issue branch, so both controls were run in the issue pod against the same toolchain CI runs, with the third-party source pointed at a dead address. The GOPROXY control is the stronger of the two readings, since it isolates the one variable.",
-    "scripts/e2e/stage1-skeleton.sh's postgres:16 is repointed, as the architect asked, although the `test` job never reaches that pull: the job sets LEGION_E2E_PG_DSN, and the docker run is inside `if [ -z \"${LEGION_E2E_PG_DSN:-}\" ]`. The file is in the gate's reach list, so its reference is held to a row like any other.",
-    "GOPROXY is set in the two listener-image Dockerfiles as well as the worker image's go stage, which the plan named alone: both build Go inside Docker, where a workflow's env does not reach.",
-    "Five files main brought while this branch was open name mirror.gcr.io and are in neither list; each is added to the gate's exception list with its ground, and packages/daemon/internal/testpg/testpg.go's ground is that its Image appears only in the skip message a developer reads."
+    "dispatch-session-settings.sh is in the e2e workflow's refused list, not among the six the architect named. Sami answered dispatch://INFRA-567/ask/4fd91c78: no API key goes into sjawhar/legion, and a smoke test that calls a model runs in the deployment repository on workload identity federation. The script's own prerequisite check refuses without a key for each of its two models, so a hosted row for it could only ever refuse. The architect accepted this.",
+    "stage4a-sandbox-runtime.sh is in no workflow. It needs the production cluster's restricted kubeconfig, an operator context, a local Docker daemon and agent-secrets, which no GitHub-hosted runner has and no repository secret supplies. Sami settled it on dispatch://INFRA-567/ask/520c4968: what the daemon may do on a cluster is the operator's, not this repository's.",
+    "The acceptance line naming parked-decision-devbox.sh is dropped by the architect: no such file exists in sjawhar/legion (`grep -rIln 'parked-decision'` over the tree finds nothing, and scripts/e2e holds 20 .sh files, none of that name).",
+    "The warm Go module cache reaches a role as a `file://` proxy rather than as its GOMODCACHE, because a pod sets GOMODCACHE=/legion/go/mod and a container's environment outranks an image ENV. The architect settled the reading: no network read and no time lost, and manifest.go is not touched, because the issue volume's cache is shared across a pod's roles and an image path would lose that."
   ],
   "openQuestions": [
-    "No CI job prints `go env GOPROXY`, so that the value reaches a CI job's go command is read from GitHub's documented workflow-level env semantics and a green Go lane, not from a line in a run's log. The change in behaviour itself is proven directly, in the pod, against the same go1.27.1.",
-    "ci.yaml's `docs` check-run name becomes `docs / build` and docs-pages.yaml's `build` becomes `build / build`, which is how GitHub names a called workflow's job. main's ruleset requires `ci-ok` and `pr-title` only, and `ci-ok`'s needs names the calling job, so nothing required moves; a reader who has pinned either old name elsewhere should know.",
-    "The gate's check 7 reads ghcr.io over the network once per row. A ghcr.io outage therefore turns the lint job red. The seam CI_IMAGES_MANIFEST_HEAD exists for the harness alone and nothing in CI sets it."
+    "E2E proofs run 40957651922 was queued, not settled, when this phase completed; GitHub's own backlog had every workflow of this repository queued, main's docs-pages runs for over an hour. Its verdict and its evidence artifacts are the tester's to read.",
+    "The docs-pages control run on the scratch pull request (40946334589, head f3024ecb) was still pending for the same reason, behind the `pages` concurrency group, where main's own runs were also pending. What it would show is the two steps only main reaches: docs-site.yaml's upload-pages-artifact step and docs-pages.yaml's deploy job skipping on a branch. The change that gives those steps a surface, workflow_dispatch on docs-pages.yaml with deploy held to main, is in the branch and is readable; the run is not.",
+    "No CI job prints `go env GOPROXY`, so that the workflow-level value reaches a CI job's go command is read from GitHub's documented env semantics and a green Go lane. The behaviour itself is proven directly, twice, against the same go1.27.1."
   ],
   "discoveredComplexity": [
-    "mirror.gcr.io was reached by 34 references in 31 files, of which only 4 were pinned by digest; two of them, the bun and golang FROM lines, interpolated a version, so pinning them by digest broke the .bun-version chain until check-bun-version.sh learned the mirror path.",
-    "The repository's own gates are the hard part of a registry move, not the references: check-ci-filters.sh pins step text and refuses unknown env names, check-image-trigger-paths.sh holds a build's trigger to the files it reads, and check-bun-workspace-manifests.sh fixes where a frozen install may sit in a Dockerfile."
+    "A workflow_dispatch cannot start a workflow whose file is not yet on the default branch, so the two controls had to run through a pull_request event: the scratch pull request for the unreachable-source job and for docs-pages, and the `e2e` label for the e2e workflow.",
+    "Adding GOPROXY to a workflow's env would have made every claimed go command of ci.yaml fall to `reads everything` in check-ci-filters.sh, which refuses an env name outside ENV_ALLOWED; GOPROXY is now in that list with its reason."
   ]
 }
