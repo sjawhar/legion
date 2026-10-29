@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-741",
+  "completed": "2026-10-29T09:38:06Z",
+  "plan": "dispatch://INFRA-741/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the phase order, the workspace binding, the commit-and-push rules (this push carries code, so no skip-checks trailer) and handoff_complete, which is the only way to end the phase.",
+      "skill://legion-worker/references/pr-body.md: defines the six fields of a proof entry and the rule that the proof runs on a production-like surface with a negative control; this change's surface is a cluster Job in the builds namespace, not CI, because CI exercises no changed line.",
+      "skill://dispatch and skill://dispatch-writing-specs: the implementer records the Job driver as the artifact pg18-job-proof.sh on dispatch://INFRA-741 so the tester re-runs the identical thing, and these give the write form and the wording rules.",
+      "skill://asd-ste100: the pull-request body and any message a person reads are written in it."
+    ],
+    "test": [
+      "skill://legion-worker and skill://legion-worker/references/pr-body.md: the tester re-runs the named surface itself and records its own observation; it may not adopt the implementer's quoted logs as its evidence.",
+      "skill://legion-worker/references/tools.md: what the pod already carries (kubectl; psql and pg_isready live in the image under test, not in the role pod) and the pinned runner forms, before installing anything to re-run the driver.",
+      "skill://dispatch: reading the pg18-job-proof.sh artifact the implementer recorded."
+    ],
+    "review": [
+      "skill://legion-worker/references/review-threads.md: posting, replying to and resolving review threads, and judging a bot's finding on a diff that is one digest repeated at nine sites.",
+      "skill://legion-worker/references/merge-gate.md: what approving a head means and what READY will compare that approved head against.",
+      "skill://ce-simplify-code: the simplify pass over the settled diff, whose one judgement call is that the single testpg.Image constant is the whole of the duplication removed and nothing further is invented.",
+      "skill://asd-ste100: review wording."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "A1. The spec's body names six sites, but its own acceptance grep (git grep -n 'postgres:16' -- scripts/e2e docs/site/media packages/daemon) covers thirteen lines: three more byte-identical Go skip messages (api/harness_test.go:57, daemon/daemon_test.go:64, store/store_test.go:34) and four prose lines (scripts/e2e/README.md:129 and :244, stage2-tmux-supervision.sh:18, record-casts.sh:5).",
+        "answer": "The plan takes the acceptance grep as the scope and lists all thirteen lines in its first table, with tasks 1-4 covering every one. The four Go docker run lines carry no --mount, so the spec's mount instruction does not apply to them and they stay mountless (decision D-d): on 18 the refusal needs /var/lib/postgresql/data to be a mount point, and the image's own VOLUME is /var/lib/postgresql."
+      },
+      {
+        "finding": "A2. The tree already pins exactly one Postgres digest, pgvector/pgvector@sha256:2358fcba... (PostgreSQL 18.6), at five sibling scripts in the same directory and at stage4b-sandbox-tree.sh:214, which pulls it in the same run as the site being changed. library/postgres:18 shares zero layers with it (trixie pgdg13+2 against bookworm pgdg12+2), so a cold devbox running stage4b downloads about 155 MiB more and holds two images.",
+        "answer": "Decision D-a: follow the spec and pin mirror.gcr.io/library/postgres by digest. The daemon's store uses no pgvector extension, and naming a pgvector image in the daemon's own guidance says it does; the spec and its acceptance name library/postgres explicitly. The measurement is recorded in the plan so the architect can overrule it with one line."
+      },
+      {
+        "finding": "A3. docs/kubernetes.md:4121 is image: mirror.gcr.io/library/postgres:16 and :4127 mounts /var/lib/postgresql/data, inside the one documented cluster-Job recipe the acceptance's own proof instruction sends the implementer to. It is outside the acceptance grep's path list, and after this change it is the last live /var/lib/postgresql/data mount in the tree.",
+        "answer": "In scope, recorded as spec departure D1. Tasks 5 moves :4121, :4127 and the present-tense claim at :4313 together, and leaves the dated measurements at :1571, :1577, :1580, :4199, :4326 and :4408 untouched, so the page keeps its readings of the recipe it published before."
+      },
+      {
+        "finding": "A4. docs/solutions/testing/proving-an-omp-build-in-your-own-process-a-loopback-database-is-a-fixture-not-a-rig.md:40 carries a copyable docker run with postgres:16 and no mount.",
+        "answer": "Left, and named in the plan's D2 with the rule it follows: a live recipe in operating documentation moves (D1), a dated record in docs/solutions/ or a dated reading stays. Its sibling docs/solutions/infra/...-pr2364.md:21 deliberately states that a postgres:16 site keeps /data, and the acceptance grep deliberately excludes the directory. The line carries no mount, so no reader of it meets the refusal."
+      },
+      {
+        "finding": "B1. 'Each changed docker run ... serves select 1' names a surface this pod does not have: command -v docker podman nerdctl finds none, and kubectl auth can-i create pods/exec answers no, which rules out kubectl exec.",
+        "answer": "The plan restates it as a runnable criterion: one Kubernetes Job per changed site in namespace builds, two containers in one pod. The db container is the image under test with no command and no args, that site's own env set, and its only volume at the new destination; the client container is the same image, carries PGPASSWORD, and runs pg_isready then psql against 127.0.0.1:5432 over the shared network namespace, which is what -p 127.0.0.1::5432 plus a host client is on the devbox. No Service, no reachability label, no pods/exec. The pass line names the exact output: select 1, server_version_num at or above 180000, data_directory /var/lib/postgresql/18/docker, and the pod's db image field."
+      },
+      {
+        "finding": "B1b. A Job is not a docker run: tmpfs against emptyDir, --cpus 2 or 0.5 against an admission floor of four processors for the largest container, and no port publishing.",
+        "answer": "The plan names each difference and why it does not weaken the proof: the refusal and the data directory depend only on the path being a mount point, and the client reaches the server over loopback TCP as the devbox host client does. It also tells the implementer to try emptyDir with medium Memory first, the closest thing to the scripts' tmpfs, and to fall back to a plain emptyDir and record which was used if admission refuses it."
+      },
+      {
+        "finding": "B2. The 18 entrypoint's refusal fires only when PGDATA is the image default, the data directory is fresh and /var/lib/postgresql/data is a mount point; and the message is a heredoc that wraps mid-sentence.",
+        "answer": "The plan states the three conditions, requires the negative-control Job to start on a fresh volume, and gives the matchable text: /var/lib/postgresql/data (unused mount/volume) verbatim, plus the fragment 'Error: in 18+, these Docker images are configured to store database data in a', never the sentence as one string."
+      },
+      {
+        "finding": "B3. The acceptance's only CI criterion exercises no changed line: pr-and-main.yaml's test job sets LEGION_E2E_PG_DSN, so stage1-skeleton.sh:148 skips the edited docker run, no workflow runs the other four scripts, LEGION_TEST_PG_DSN keeps every skip message unprinted, and the workflow runs no shellcheck or shfmt.",
+        "answer": "The plan says so in bold, records A4 as a regression check rather than evidence, and adds the checks a machine can run: the acceptance grep, a /var/lib/postgresql/data grep with its expected non-mount hits, a digest count, bash -n on each changed script, go vet and go build, gofmt, and check-private-names.sh."
+      },
+      {
+        "finding": "B4. 'Pinned by digest' has no settled text form, and the house forms differ: inline digest in the shell scripts, a named const with a comment naming the tag and the server version in packages/envoy/internal/testpg/testpg.go:21-24.",
+        "answer": "One call for all nine sites. Decision D-c: inline digest, no tag and no variable, in the five shell scripts, as four sibling scripts already write it. Decision D-b: one const Image in packages/daemon/internal/testpg/testpg.go carrying the digest with a comment naming the tag and the server version, referenced by the three test files."
+      },
+      {
+        "finding": "B5. Nothing keeps the four Go skip messages identical: they are four independent string literals in four packages, and no test, lint or CI step compares them.",
+        "answer": "Decision D-b removes the duplication at its cause: the digest is written once as testpg.Image and the three test files import it. testpg imports only pgx and the standard library, so no import cycle is possible, and packages/envoy/internal/testpg/testpg.go:24 is the same pattern in the same repository."
+      },
+      {
+        "finding": "B6. Four prose lines become false after the edit (scripts/e2e/README.md:129 and :244, stage2-tmux-supervision.sh:18, record-casts.sh:5), while the tmpfs comments at stage2-tmux-supervision.sh:406-407 and README.md:245-246 stay true at the new path.",
+        "answer": "Task 4 rewrites the four to name PostgreSQL 18, and the plan records that the tmpfs comments stay true because the 18 image's only declared VOLUME is /var/lib/postgresql."
+      },
+      {
+        "finding": "B7. mirror.gcr.io/library/postgres:18 is a moving tag, so a digest recorded today may be stale when the pull request lands.",
+        "answer": "Task 0 makes re-resolution the implementer's first step, against the mirror and against registry-1.docker.io, requires the two to agree, requires the amd64 config's PG_VERSION, PGDATA and Volumes to be recorded, and requires all of it quoted in the pull-request body; and every site carries a comment naming the tag and the server version so the next bump has an anchor."
+      },
+      {
+        "finding": "B8. Checked and not findings: no script assumes the old anonymous volume (docker rm -f -v at four sites, and the tmpfs covers the image's only VOLUME on both majors); pg_isready is unchanged by the major and the same wait shape already runs against an 18 image at stage4a-sandbox-runtime.sh:395-397; no changelog fragment is owed, since packages/daemon has no .changes directory; and nothing regenerates the recorded casts, which contain no occurrence of postgres.",
+        "answer": "Recorded in the plan's 'What the code shows' so no role re-opens them, and the casts and the changelog are named as explicitly not owed."
+      },
+      {
+        "finding": "C1. The spec's premise 'CI runs every Postgres job on the pgvector 0.8.7-pg18 image' is refuted: .github/workflows/envoy-and-contracts.yaml:1094 still pins pgvector@sha256:7b822b0a..., which is PostgreSQL 16.15.",
+        "answer": "Left, and named in D2 with the reason: dispatch://INFRA-729 ('The last sjawhar/legion CI job on Postgres 16, dispatch-browser-multiprocess, moves to Postgres 18') is a live tree, in needs_review on 2026-10-29, that owns exactly that line, and touching it here would collide with its pull request. The premise is wrong only in a way another tree is already closing; the work this issue delivers is unaffected."
+      },
+      {
+        "finding": "C2. 'That instance has run PostgreSQL 18.6 since 28 October' cannot be re-measured from this pod: the command is gcloud sql instances describe and the pod holds only its builds service-account token.",
+        "answer": "Recorded as sourced to dispatch://INFRA-717 and sjawhar/legion#2476, not independently verified. Nothing in the plan depends on it: the change is justified by the CI digest and by the daemon's own guidance lagging, both readable in the tree."
+      },
+      {
+        "finding": "C4. 'As the repository's AGENTS.md requires' is a mis-citation: AGENTS.md requires the mirror, and its digest rule is about the worker image (runtime.kubernetes.image), not a third-party test image.",
+        "answer": "Decision D-e records the mis-citation and changes nothing: the plan pins by digest anyway, because every image in scripts/e2e is pinned by digest and that practice is what the spec is reaching for."
+      },
+      {
+        "finding": "C5. 'Change nothing else' and the acceptance grep contradict each other, since the grep forbids thirteen lines and the body names six.",
+        "answer": "The plan follows the acceptance grep, which is the spec's own machine-checkable text, and records its one genuine scope departure (D1, docs/kubernetes.md) separately so the architect can decide it."
+      },
+      {
+        "finding": "C6. The spec presents the change as a migration to design; it is the completion of the sweep docs/solutions/infra/...-pr2364.md records, five of the ten scripts/e2e Postgres sites being on the 18 digest already.",
+        "answer": "The plan's 'What the code shows' names the five sibling scripts whose shape is the target and says the five sites are the stragglers, so the implementer copies an existing line rather than inventing one, and the reviewer has the comparison."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "The spec's scope line says 'Change nothing else', and its acceptance grep names only the paths scripts/e2e, docs/site/media and packages/daemon.",
+      "plan": "The plan also moves docs/kubernetes.md:4121 (image: mirror.gcr.io/library/postgres:16) to the pinned 18 image, :4127 (mountPath: /var/lib/postgresql/data) to /var/lib/postgresql, and the present-tense claim at :4313 to name 18, while leaving the dated measurements at :1571, :1577, :1580, :4199, :4326 and :4408 exactly as they are.",
+      "evidence": "Those two lines are the cluster-Job recipe the acceptance's own proof instruction sends the implementer to (docs/kubernetes.md:3874, 'Running a workload in the cluster from a role'), and after this change :4127 is the only live /var/lib/postgresql/data mount left in the tree (git grep -n '/var/lib/postgresql/data': the five sites, that line, a comment at packages/envoy/internal/testpg/testpg.go:110, five statements in docs/solutions/infra/...-pr2364.md and a shell-quoting fixture). docs/solutions/infra/...-pr2364.md:22 says 'When you bump an image's digest or copy a docker run line, change the image and the mount in one edit', so a reader who bumps :4121 alone meets the entrypoint's refusal.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "The file set grows by docs/kubernetes.md (three lines). The spec's Summary and all five acceptance lines still hold, and no decision a human settled is overturned."
+      }
+    }
+  ]
+}
