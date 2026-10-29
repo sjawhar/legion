@@ -2,73 +2,60 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-168",
-  "completed": "2026-10-29T19:52:00Z",
-  "round": 13,
-  "headSha": "9aed5df868124734e6579fc42e412bff0a97234e",
-  "handoffHead": "00c88b9fde6486e9f8212f953a492a8beadc3699",
-  "scope": "Full round after the port onto main's marker gate (generation 5, plan rev 11). The architect's brief (19:23Z): drive everything again; main question, whether the 10 s margin makes this branch post asks unreviewed that main would have reviewed at the default 30 s ceiling; if so, fail.",
-  "provider": "anthropic/claude-opus-5 served all 217 assistant turns of the 57 sessions, read from each session's own turns. 40 charter and 24 rules calls answered as anthropic/claude-opus-5; in 11 sessions a review call was refused by the provider ('Refusal (reasoning_extraction)') and fell back to anthropic/claude-opus-4-8 (11 charter, 4 rules). Those runs are infrastructure errors, excluded from every comparison.",
-  "fingerprint": "153f222953c9edcd… at 00c88b9f (changed from round 12's 25b33d4c…), computed with the skill's command: a full round.",
+  "completed": "2026-10-29T21:10:00Z",
+  "round": 14,
+  "headSha": "bd250c480ce4750433d886f125097fd60a371b24",
+  "handoffHead": "38b5846df8ff3e572b16cf448a56da81880334f0",
+  "scope": "The architect's brief (20:28Z): at the default 30 s ceiling prove (1) the deadline is 25,000 ms and the branch posts no ask unreviewed that main 15be33d1 reviews, (2) no Dispatch record is lost on the normal path, the agent's next call starting at once included, (3) at shutdown with Dispatch slow or unreachable the advisor-gate-record entry with recordError is present before exit and askgate-report.ts and score.ts read it correctly; then the five cases in warn and block. A refused model call is infrastructure.",
+  "provider": "anthropic/claude-opus-5 served all 340 assistant turns of the 91 sessions, read from each session's own turns. In 9 sessions a review call was refused by the provider ('Refusal (reasoning_extraction)') and answered by the fallback anthropic/claude-opus-4-8: 14-c3-block, D14-l4-main-6, M14-c5-branch-4, M14-l4-main-4, S14-c5-branch-1, S14-c5-branch-2, S14-l4-branch-1, S14-l4-branch-2, S14-l4-branch-4; excluded from the comparisons.",
+  "fingerprint": "beb82fdd2b8a0913… at 38b5846d, changed from round 13's 153f2229…: a full round.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the implementer's G6 cases again on this branch at 9aed5df8 with the tester's own wording, its CLI first on PATH: A2 refusal with an empty marker store, the rebuttal and its resent commented form, A3, A4 both ways, the unmarked pipe in both modes with asksCarried 1 on Dispatch, and the Dispatch read-back. Its case-5 observation (charter timeout at 20,000 ms at the default ceiling) reproduced, and against main it is the failure below."
+    "how": "Its two live runs (deadlineMs 25000; the record landing after the call) reproduced at scale: every branch entry at the default ceiling records deadlineMs 25000, and 57 publishable entries over 51 branch sessions match 57 Dispatch records. The red test e2e88a97 passes unedited at the head."
   },
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "The architect's main question for the round (19:23Z): at the default 30 s tool-call ceiling this change must not post asks unreviewed that main alone would have reviewed. Main's review deadline there is 25,000 ms (CEILING_MARGIN_MS 5,000); this branch's is 20,000 ms (CEILING_MARGIN_MS = 5,000 + RECORD_TIMEOUT_MS).",
-      "evidence": "Paired runs, block mode, default ceiling, 8 sessions at a time, branch 9aed5df8 vs main 15be33d1 (git archive under $TMPDIR/maintree, its own build and dispatch CLI), asks l2/l3/l4 (literal asks recommending a change) and c5 (the ask quoting the agent's own gh error), three reps each (runs L30-* under /legion/scratch/tmp/t7/runs, table from lat.py). Clean runs (no failedModels): branch 3 of 9 timed out at 20,000 ms, each ask posted unreviewed with outcome timeout and model anthropic/claude-opus-5 (L30-c5-branch-1 charterLatencyMs 19734, L30-l4-branch-1 19484, L30-l4-branch-3 19765); main 1 of 9 timed out at 25,000 ms and returned verdicts at 20,777 (L30-l4-main-2), 21,058 (L30-l4-main-1) and 22,849 ms (L30-c5-main-1), reviews the branch's deadline cuts. The case runs add four branch timeouts at 20 s, all clean: 13-c0-warn and 13-c0-block (the charter-only comment posted unreviewed), 13-c5-block (the ask posted unreviewed), 13-c3-warn (refused anyway by the rules check). Uncapped (toolCallTimeoutMs 120000, L120-*, clean): branch charter 10.6-26.8 s (20.6, 20.9, 26.8 above 20 s), main 11.0-18.1 s. Red test, commit e2e88a97: packages/pi-envoy/extensions/askgate/askgate.test.ts 'at the default 30 s ceiling the review keeps main's 25,000 ms deadline, so a review main finishes is not cut' — `cd packages/pi-envoy && bun test extensions/askgate/askgate.test.ts -t \"keeps main's 25,000 ms deadline\"` gives Expected >= 25000, Received 20000, 0 pass, 1 fail. The test 'the deadline sits under the runner's handler ceiling' (askgate.test.ts:1411) and the README/AGENTS lines that state 20,000 ms pin the current behaviour and change with the fix."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "proof": [
     {
-      "criterion": "A2: a no-change ask is refused in warn and block and no marker is minted for it; the rebuttal opens and its recorded commented form is read back as the same rebuttal.",
-      "surface": "Nested headless Oh My Pi sessions on the branch build in this Legion pod, the branch's dispatch CLI first on PATH, production Dispatch, dispatch://INFRA-766.",
-      "command": "/legion/scratch/tmp/t7/run-case.sh 13-c1-<mode> and 13-c2-<mode> (env -u LEGION_* … PATH=<branch pi-envoy>/bin:$PATH LEGION_ISSUE=INFRA-766 OMP_SESSION_STORAGE=file OMP_ASKGATE=<mode> OMP_ASKGATE_RECORD_PROJECT=INFRA /opt/omp/bin/omp --extension <branch pi-envoy> -p …); the case-1 session then runs ls -la \"$(jq -r .store \"$DISPATCH_STATE_DIR\"/sessions/\"$DISPATCH_SESSION_ID\"/askgate/*.json)/markers\" and command -v dispatch.",
-      "observed": "c1 refused in both modes (rule no_change, ruleOutcome match); the markers directory empty right after; command -v dispatch printed the branch CLI. c2 opened in both (outcome rebuttal), and the recorded '… # --advisor-rebuttal '…'' command resent was recorded again as outcome rebuttal with the same line; all four asks retracted.",
-      "headSha": "9aed5df868124734e6579fc42e412bff0a97234e",
-      "negativeControl": "c2's rebuttal opened where c1's same ask was refused."
+      "criterion": "(1) At the default 30 s ceiling the review deadline is main's 25,000 ms, and the branch posts no ask unreviewed that main reviews.",
+      "surface": "Nested headless Oh My Pi sessions in this Legion pod, block mode, production Dispatch, dispatch://INFRA-766; this branch, main 15be33d1 (git archive under $TMPDIR/maintree with its own build and dispatch CLI), and a diagnostic branch copy with the rules call removed ($TMPDIR/norules).",
+      "command": "/legion/scratch/tmp/t7/run-case.sh M14-<ask>-<tree>-<rep> block p14/<ask>.txt with TREE=branch|main, asks l2/l3/l4/c5, eight sessions at a time paired (reps 1-3 for all four asks, 4-6 for l4 and c5); D14-l4-<tree>-<rep> with TREE=branch|norules|main, nine at a time, six reps; S14-* at toolCallTimeoutMs 120000 with OMP_ASKGATE_DUMP; tables from lat2.py.",
+      "observed": "deadlineMs 25000 on every default-ceiling entry of both trees. Clean outcomes: M14 branch 11 verdicts / 6 timeouts, main 16 / 1 (five branch timeouts on l4); D14 l4 branch 4 / 2, main 1 / 4, norules 5 / 1. Every timeout on either tree came within 0.3 s of 25,000 ms. The charter request is the same on both trees (OMP_ASKGATE_DUMP of l4: one differing line, the agent's own envoy_publish tool description). The M14 l4 gap did not reproduce in D14, where main timed out more; no reproducible case of an ask the branch posts unreviewed that main reviews.",
+      "headSha": "bd250c480ce4750433d886f125097fd60a371b24",
+      "negativeControl": "At 9aed5df8 (round 13) the same comparison read deadlineMs 20000 and the branch cut reviews main finished at 20.8-22.8 s; red test e2e88a97 failed there (received 20000) and passes here."
     },
     {
-      "criterion": "A3, A4 and the charter-only call.",
-      "surface": "The same.",
-      "command": "13-c3-*, 13-c4-*, 13-c5-*, 13-c0-* in warn and block.",
-      "observed": "c3 refused naming #log-retention (no_change) in both; c4 refused untried_access in both; c5 rules none in both, ask opened (the charter timed out, see the failure); c0 no rules call, posted (charter timed out at 20 s in both modes).",
-      "headSha": "9aed5df868124734e6579fc42e412bff0a97234e",
-      "negativeControl": "c5's tried read answered none where c4's untried read matched."
+      "criterion": "(2) No Dispatch record is lost on the normal path, including gated calls back to back and a session that ends right after a gated call.",
+      "surface": "The same sessions and production Dispatch.",
+      "command": "python3 /legion/scratch/tmp/t7/reconcile.py M14- S14- D14- R14- 14- (per branch session: advisor-gate entries with a ruleOutcome, an override or outcome unmarked, against `dispatch doc-read --project INFRA --artifact askgate-decisions-<session>-md` records, plus advisor-gate-record entries); R14-rec1-<mode>: three gated asks as parallel tool calls in one message, then a fourth at once; R14-rec2-<mode>: one gated ask, then the turn ends; bun packages/pi-envoy/scripts/askgate-report.ts --dispatch-project INFRA --since 2026-10-29T20:29:00Z.",
+      "observed": "57 expected, 57 records, 0 advisor-gate-record entries over 51 branch sessions; rec1 4 of 4 in both modes; rec2 1 of 1 in both modes, the session exiting about 2 s after the gate entry. Report: 49 sessions, 50 rules calls (the branch's rules entries in the window: 18 M14, 8 S14, 6 D14, 10 R14, 8 case runs), 16 refusals (no_change 14, untried_access 2), 0 overrides, 0 rules errors, unmarked 1 block and 1 warn carrying 2 asks.",
+      "headSha": "bd250c480ce4750433d886f125097fd60a371b24",
+      "negativeControl": "The charter-only comments (14-c0-*) publish nothing and their documents hold no record (expected 0, got 0)."
     },
     {
-      "criterion": "Repeated flags, the unmarked record, shutdown and an ended call.",
-      "surface": "The same; probe.py for the shutdown (omp --mode json -p, Dispatch unreachable, SIGTERM 1.5 s after toolcall_end) and the abort (omp --mode rpc-ui, warn, RPC abort 3 s after toolcall_end).",
-      "command": "13-r8-block; 13-u1-<mode> (echo x | dispatch ask …); python3 /legion/scratch/tmp/t7/probe.py shutdown 13-s-1; python3 probe.py abort 13-a-1; dispatch doc-read --project INFRA --artifact askgate-decisions-<session>-md.",
-      "observed": "r8: entry rebuttal 'first reason; third; reason; second reason', all three flags in the comment, ask opened at urgency low, retracted. u1: refused by the CLI in block, posted with its warning in warn (retracted); each session's document holds one record outcome unmarked, asksCarried 1, no ask text. Shutdown: session_exit then the advisor-gate entry (rebuttal, recordError 'the session shut down before Dispatch answered the record') before exit. Abort: entry outcome abandoned, mintSkipped 'call-ended'.",
-      "headSha": "9aed5df868124734e6579fc42e412bff0a97234e",
-      "negativeControl": "u1-block's refusal names the missing marker, so the CLI checks it; the shutdown entry's recordError shows the record was still in flight at SIGTERM."
+      "criterion": "(3) At shutdown with Dispatch unreachable, the advisor-gate-record entry with recordError is present before exit, and the readers handle it.",
+      "surface": "omp --mode json -p, block mode, DISPATCH_URL=http://10.255.255.1:8766.",
+      "command": "python3 /legion/scratch/tmp/t7/probe.py shutdown 14-s-1 (a rebutted dispatch comment, SIGTERM 1.5 s after its toolcall_end); bun packages/pi-envoy/scripts/askgate-report.ts --sessions runs/14-s-1/sessions --since 2026-10-29T21:00:00Z --sample 0 --out <dir>.",
+      "observed": "advisor-gate (rebuttal) at 21:02:07.485Z, session_exit sigterm at 21:02:08.747Z, then advisor-gate-record {toolCallId, tool: dispatch_comment, recordError: 'the session shut down before Dispatch answered the record'} at 21:02:10.019Z, +2.77 s after the call; process exit at +2.88 s. The report counts 1 gated call (outcome rebuttal 1), the record entry not counted as a call. score.ts selects customType 'advisor-gate' only (gateEntries, score.ts:442); the rig needs docker, so the scorer was read, not run.",
+      "headSha": "bd250c480ce4750433d886f125097fd60a371b24",
+      "negativeControl": "recordError names the shutdown cut, so the record was in flight at SIGTERM."
     },
     {
-      "criterion": "The breaker invariant and A1's pin.",
-      "surface": "A git archive copy of 9aed5df8 under $TMPDIR/mut13, breaker.ts mutated and restored.",
-      "command": "bun test extensions/askgate/askgate.test.ts -t 'after two charter refusals of' unmutated, with callKeys' upload return replaced by M1 `return asks.length === 0 ? [WHOLE_CALL] : asks.map(askIdentity);` and by M2 `JSON.stringify([\"upload\", name, null])`; bun test … -t 'byte for byte'.",
-      "observed": "Unmutated 4 pass; M1 3 fail; M2 2 fail; restored (cmp). A1 pin 1 pass, MEASURED unedited.",
-      "headSha": "9aed5df868124734e6579fc42e412bff0a97234e",
-      "negativeControl": "M1 and M2."
-    },
-    {
-      "criterion": "A5: the runs counted through Dispatch alone, and the census.",
-      "surface": "Production Dispatch.",
-      "command": "bun packages/pi-envoy/scripts/askgate-report.ts --dispatch-project INFRA --since 2026-10-29T19:27:00Z; bun scripts/dispatch/ask-census.ts --project INFRA --from 2026-10-29T00:00:00Z --to <now> --json",
-      "observed": "267 documents, 0 unreadable, 33 sessions; 28 rules calls, 6 refusals (no_change 4, untried_access 2), 0 overrides, 0 rules errors; unmarked 1 refused in block and 1 posted in warn, asks carried 2; all pod. Census: 119 asks for the day.",
-      "headSha": "9aed5df868124734e6579fc42e412bff0a97234e",
-      "negativeControl": "28 rules calls equals the branch sessions' rules entries (20 latency runs, 8 case runs); the rebuttals had no refusal before them and count 0 overrides."
+      "criterion": "Regression: the five cases, the charter-only call, repeated flags, the unmarked record, an ended call, callKeys and A1's pin.",
+      "surface": "The same; unit tests at the head.",
+      "command": "run-case.sh 14-c<0-5>-<mode>, 14-r8-block, 14-u1-<mode>; probe.py abort 14-a-1; cd packages/pi-envoy && bun test extensions/askgate/askgate.test.ts -t \"keeps main's 25,000 ms deadline|after two charter refusals of|byte for byte\".",
+      "observed": "c1 refused no_change with the marker store empty after; c2 rebuttal opened and its recorded commented form resent read as the same rebuttal; c3 refused naming #log-retention; c4 refused untried_access; c5 rules none; c0 allowed in warn, revised by the charter for its own reasons in block; r8 three flags kept; u1 refused in block and posted with its warning in warn, each with an unmarked asksCarried 1 record; abort: outcome abandoned, mintSkipped call-ended; unit filter 6 pass, 0 fail.",
+      "headSha": "bd250c480ce4750433d886f125097fd60a371b24",
+      "negativeControl": "c2's rebuttal opened where c1 was refused; c5's tried read answered none where c4 matched."
     }
   ],
   "observations": [
-    "Load: the comparison ran 8 sessions at a time on the pod's shared model route, the case runs 15 at a time; the clean charter latencies on both trees reached 20-27 s under that load, which is the band the 5 s cut lands in.",
-    "The provider refused review calls with 'Refusal (reasoning_extraction)' in 11 of 57 sessions, on both trees, and the fallback to anthropic/claude-opus-4-8 then ran out of time or answered slowly. Not counted as evidence; it is not this change's.",
-    "I ran bun install for the build, which changed bun.lock in the working copy; that change was abandoned and is not pushed.",
+    "Under the pod's load, reviews on both trees often take 20-25 s and many time out at the 25,000 ms deadline, posting with the timeout note; that is main's design, and the operator overlay's 120000 ceiling is the remedy the README names.",
+    "Provider refusals ('reasoning_extraction') hit the branch's charter calls 5 times in the low-concurrency S14 wave and main's 0 times, with byte-identical charter requests; across rounds 13 and 14 the totals are branch 12, main 7. Treated as infrastructure per the brief and named for the reviewer.",
+    "I ran bun install for the builds; its bun.lock churn was restored before my commit and is not pushed.",
     "Every ask the runs opened is retracted (by the sessions); dispatch://INFRA-766 has no open ask."
   ],
-  "ci": "Read at 19:43Z, nothing re-run: at 9aed5df8, CI run 40939085381 queued (its pi-envoy job, A1's pin, not started), PR Title 40939376195 queued, 40939085366 cancelled; no run on 00c88b9f.",
+  "ci": "Read at 21:03Z, nothing re-run: at 38b5846d, CI run 40948880085 queued (pi-envoy not started), PR Title 40948987696 success; no run on bd250c48 itself.",
   "priorRounds": [
     {
       "round": 1,
@@ -151,6 +138,13 @@
       "headSha": "2ac8abe5c966d5ef135fe49278857bcdcbd250fc",
       "verdict": "pass",
       "summary": "Tests-only: compare from 632f8d02 changed only askgate.test.ts; bare gates green; the three new tests failed under both callKeys mutants. Full record in commit de86dce3's test.json."
+    },
+    {
+      "round": 13,
+      "headSha": "9aed5df868124734e6579fc42e412bff0a97234e",
+      "fixture": "dispatch://INFRA-766",
+      "verdict": "fail",
+      "summary": "57 sessions after the port onto main's marker gate: at the default ceiling the branch's 20,000 ms deadline cut reviews main finished at 20.8-22.8 s; red test e2e88a97. Everything else held. Full record in commit 33993581's test.json."
     }
   ]
 }
