@@ -299,47 +299,45 @@ func (s *server) firstRelayCursor(ctx context.Context) (int64, time.Time, error)
 }
 
 // firstRelayFloor is the id the first start reads the log's gaps above (firstRelayCursor): one at
-// or below which no event can still be open, so no gap there can fill (Horizon.WriterFloor). Its
-// candidates are a mark taken now and the server's boot mark (takeBootMark), each good while every
-// transaction holding an id in Dispatch's own database got it after the mark: a mark taken now is,
-// unless a write was already open, and the boot mark is, unless one has been open since boot.
-// The floor is then the newest such mark's id, so the read covers only the ids written since it,
-// whatever the size of the log. With neither good, it is the horizon already proven, 0 on a
-// process where none is, and the read covers the whole log; that is logged, once per start.
+// or below which no event can still be open, so no gap there can fill (Horizon.WriterFloor over the
+// server's marks, eventMarks). A mark counts once every transaction holding a transaction id in
+// Dispatch's own database took it after the mark, so the floor is the newest mark that counts, and
+// the read covers only the ids written since it, whatever the size of the log. A transaction open
+// elsewhere on the instance (another database's, which holds the safe horizon back) is no writer of
+// this log and keeps no mark from counting.
 //
-// Neither mark waits on a transaction: each is one statement, and a transaction open elsewhere on
-// the instance (another database's, which holds the safe horizon back) is no writer of this log
-// and disqualifies neither.
+// While none counts, a write in this database has been open since before every mark kept, the
+// boot mark included: it marks again, 10 ms doubling to 250 ms, and the marks of the writes open
+// when the oldest was taken end first. It never reads the whole log in place of that wait. The
+// start waits for that same write in any case: the horizon it awaits next is proven only once every
+// transaction open when its observation began has ended (Horizon.Await), so the wait here is the
+// one the start already had, taken before the read rather than after it.
 func (s *server) firstRelayFloor(ctx context.Context) (int64, error) {
-	horizon := s.horizon()
-	marks := make([]events.Mark, 0, 2)
-	if now, err := horizon.Mark(ctx); err == nil {
-		marks = append(marks, now)
-	} else if ctx.Err() != nil {
-		return 0, err
-	}
 	if s.bootMark != nil {
 		select {
 		case <-s.bootMark:
-			marks = append(marks, s.bootMarkValue)
 		case <-ctx.Done():
 			return 0, ctx.Err()
 		}
 	}
-	floor, ok, err := horizon.WriterFloor(ctx, marks...)
-	if err != nil {
-		return 0, err
+	for wait := 10 * time.Millisecond; ; wait = min(2*wait, 250*time.Millisecond) {
+		floor, ok, _, err := s.writerFloor(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			return floor, nil
+		}
+		if !waitFor(ctx, wait) {
+			return 0, ctx.Err()
+		}
 	}
-	if !ok {
-		slog.Warn("dispatch: the event stream relay's first start reads every event id above the proven horizon: a transaction in this database has held a transaction id since before the server's boot mark",
-			"above", floor)
-	}
-	return floor, nil
 }
 
-// takeBootMark takes the server's boot mark (bootMark) on a goroutine of its own, so register,
-// which must not touch the Store, returns at once; a server with no Store pool takes none. It is one statement that waits on no
-// transaction, and a mark that fails leaves the boot mark zero, which no start uses.
+// takeBootMark takes the server's boot mark (eventMarks' boot) on a goroutine of its own, so
+// register, which must not touch the Store, returns at once; a server with no Store pool takes
+// none. It is one statement that waits on no transaction; bootMark closes once it has run, and a
+// mark that fails leaves none, so the marks the readers take themselves are all there are.
 func (s *server) takeBootMark() {
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return
@@ -350,11 +348,11 @@ func (s *server) takeBootMark() {
 		mark, err := s.horizon().Mark(s.lifetime)
 		if err != nil {
 			if s.lifetime.Err() == nil {
-				slog.Warn("dispatch: could not take the event log's boot mark; the event stream relay's first start falls back to a mark of its own", "error", err)
+				slog.Warn("dispatch: could not take the event log's boot mark; readers of the event log mark it themselves", "error", err)
 			}
 			return
 		}
-		s.bootMarkValue = mark
+		s.eventMarks.setBoot(mark)
 	}()
 }
 
@@ -448,6 +446,7 @@ func (s *server) horizon() *events.Horizon {
 // delivery hub (seedEvents) both answer a reset through it.
 func (s *server) reseedEventCursor(ctx context.Context) (safe, id int64, at time.Time, err error) {
 	s.horizon().Reset()
+	s.eventMarks.forget()
 	return s.awaitEventCursor(ctx)
 }
 

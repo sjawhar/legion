@@ -297,24 +297,64 @@ func (h *Horizon) Proven() int64 {
 }
 
 // Mark is one observation of the event log that a reader keeps for itself: Newest, the newest id
-// its snapshot saw, and Xid, the transaction id the observation took after that snapshot.
+// its snapshot saw, NewestAt, that event's created_at (zero for an empty log), and Xid, the
+// transaction id the observation took after that snapshot.
 type Mark struct {
-	Newest int64
-	Xid    uint64
+	Newest   int64
+	NewestAt time.Time
+	Xid      uint64
 }
+
+// markSQL is one mark's statement: the newest event and its created_at, as the statement's
+// snapshot sees them, and the transaction id pg_current_xact_id assigns while the statement runs,
+// after that snapshot was taken.
+const markSQL = `
+	select coalesce(newest.id, 0), newest.created_at, pg_current_xact_id()::text
+	from (select 1) one
+	left join lateral (select id, created_at from events order by id desc limit 1) newest on true
+`
 
 // Mark takes one observation now and answers it, without recording it among the observations H is
 // proven from, and without waiting on any transaction. It consumes one transaction id.
 //
 // A mark bounds the ids a writer can still hold open (WriterFloor): a transaction whose own id
 // came after Xid drew every event id it holds after the mark's snapshot, by the writer invariant,
-// and so above Newest.
+// and so above Newest. That holds only while the log the mark saw stands: a reset restarts the ids
+// at 1, and a writer of the new log draws ids at or below Newest after the mark. NewestAt is what
+// tells the two logs apart (WriterFloor).
 func (h *Horizon) Mark(ctx context.Context) (Mark, error) {
-	observation, _, err := h.take(ctx)
-	if err != nil {
-		return Mark{}, err
+	batch := &pgx.Batch{}
+	batch.Queue(`begin`)
+	batch.Queue(`set local synchronous_commit = off`)
+	batch.Queue(markSQL)
+	batch.Queue(`commit`)
+	results := h.db.SendBatch(ctx, batch)
+	var mark Mark
+	var newestAt *time.Time
+	var xidText string
+	_, err := results.Exec()
+	if err == nil {
+		_, err = results.Exec()
 	}
-	return Mark{Newest: observation.newest, Xid: observation.xid}, nil
+	if err == nil {
+		err = results.QueryRow().Scan(&mark.Newest, &newestAt, &xidText)
+	}
+	if err == nil {
+		_, err = results.Exec()
+	}
+	if closeErr := results.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return Mark{}, fmt.Errorf("mark the event log: %w", err)
+	}
+	if newestAt != nil {
+		mark.NewestAt = *newestAt
+	}
+	if mark.Xid, err = strconv.ParseUint(xidText, 10, 64); err != nil {
+		return Mark{}, fmt.Errorf("mark the event log: parse transaction id %q: %w", xidText, err)
+	}
+	return mark, nil
 }
 
 // oldestEventWriterSQL answers the oldest transaction id held in this database, by a backend
@@ -352,6 +392,11 @@ const oldestEventWriterSQL = `
 // transaction id in this database, either now, and so above that mark's Xid, or from after this
 // read, and so above it too: either way every event id it holds stands above that mark's Newest.
 // ok is false when no mark qualified, so the floor is H alone.
+//
+// A mark counts only while the log it saw stands: the row at its Newest still carries its
+// NewestAt, or it saw an empty log. A mark from before a reset of the log is passed over. So is H
+// when it stands above the first mark's Newest, which only a reset the horizon has not yet
+// forgotten (Reset) leaves it: the first mark is the newest, and ids only grow until a reset.
 func (h *Horizon) WriterFloor(ctx context.Context, marks ...Mark) (floor int64, ok bool, err error) {
 	var oldestText *string
 	if err := h.db.QueryRow(ctx, oldestEventWriterSQL).Scan(&oldestText); err != nil {
@@ -364,9 +409,21 @@ func (h *Horizon) WriterFloor(ctx context.Context, marks ...Mark) (floor int64, 
 		}
 	}
 	floor = h.Proven()
+	if len(marks) > 0 && floor > marks[0].Newest {
+		floor = 0
+	}
 	for _, mark := range marks {
 		if mark.Xid == 0 || (oldestText != nil && oldest <= mark.Xid) {
 			continue
+		}
+		if mark.Newest > 0 {
+			var stands bool
+			if err := h.db.QueryRow(ctx, `select exists (select 1 from events where id = $1 and created_at = $2)`, mark.Newest, mark.NewestAt).Scan(&stands); err != nil {
+				return 0, false, fmt.Errorf("check a mark's log against the event log: %w", err)
+			}
+			if !stands {
+				continue
+			}
 		}
 		return max(floor, mark.Newest), true, nil
 	}

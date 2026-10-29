@@ -814,3 +814,33 @@ func TestWriterFloorIgnoresATransactionInAnotherDatabase(t *testing.T) {
 		t.Fatalf("WriterFloor with a transaction open in another database = %d, %t, %v; want the mark's %d", floor, ok, err, newest)
 	}
 }
+
+// A mark counts only while the log it saw stands. A reset restarts the ids at 1, so a writer of the
+// new log draws ids at or below an old mark's Newest after that mark: once the new log has climbed
+// past it, the mark would vouch for ids still open. WriterFloor passes over a mark whose newest row
+// is gone or carries another created_at.
+func TestWriterFloorPassesOverAMarkFromBeforeAReset(t *testing.T) {
+	database := storetest.Open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	horizon := NewHorizon(database.Pool)
+
+	commitHorizonEvent(ctx, t, database)
+	old := commitHorizonEvent(ctx, t, database)
+	before, err := horizon.Mark(ctx)
+	if err != nil || before.Newest != old {
+		t.Fatalf("mark before the reset = %+v, %v; want newest %d", before, err, old)
+	}
+	resetEventLog(ctx, t, database)
+	for range 3 {
+		commitHorizonEvent(ctx, t, database)
+	}
+	writer, _ := openEventWriter(ctx, t, database)
+	open := insertHorizonEvent(ctx, t, writer)
+	if open <= before.Newest {
+		t.Fatalf("the new log's open id %d is not above the old mark's newest %d, so this test proves nothing", open, before.Newest)
+	}
+	if floor, ok, err := horizon.WriterFloor(ctx, before); err != nil || ok || floor != 0 {
+		t.Fatalf("WriterFloor with only a mark from before the reset = %d, %t, %v; want H (0), not ok", floor, ok, err)
+	}
+}

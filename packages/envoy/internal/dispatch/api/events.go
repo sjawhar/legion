@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -159,61 +158,41 @@ func (s *server) readEventsAfterID(ctx context.Context, after, through int64) ([
 	`, after, through, maxEventReplay)
 }
 
-// eventFeedHeadWait bounds how long eventFeedHead waits for the writes in Dispatch's database that
-// were open when it took its mark to end. They are this service's own writes, which take
-// milliseconds, so the wait ends in a few rounds; only a transaction in this database that holds a
-// transaction id for longer (an operator's session, a migration) reaches the bound.
+// eventFeedHeadWait bounds how long eventFeedHead waits on a process that has proven no horizon
+// yet, while no mark it keeps counts (a write in Dispatch's database open since before its boot
+// mark). It waits nowhere else.
 const eventFeedHeadWait = 2 * time.Second
 
 // eventFeedHead is the event_head GET /auth/whoami answers, which a page resumes its first events
 // subscription from: an id at or below which every event is final, so a page that starts its reads
-// after it and is replayed every event above it misses nothing that commits later, and as close to
-// the log's newest id as the open writes allow.
+// after it and is replayed every event above it misses nothing that commits later.
 //
-// It takes a mark (Horizon.Mark), whose newest id every event that was still open then stands
-// below only if a transaction in this database that took its id before the mark holds it (the
-// writer invariant), and waits, eventFeedHeadWait at most, until no such transaction is left
-// (Horizon.WriterFloor). It waits on no transaction elsewhere on the instance, which the safe
-// horizon itself waits on: another database's transaction writes no event. Past the bound it
-// answers the floor of the server's boot mark, or the horizon already proven, which may stand far
-// below the newest id, so the page is replayed more events than it needed; that is logged.
+// It answers at once (server.writerFloor): the newest of the server's marks that counts, a mark
+// older than every transaction holding a transaction id in Dispatch's own database, or the horizon
+// already proven when it stands higher or none counts. A mark taken a moment ago counts as soon as
+// the writes open then have ended, which for this service's own writes is milliseconds, so the
+// head trails the log's newest id by about that. It waits on no transaction elsewhere on the
+// instance, which the safe horizon itself waits on: another database's transaction writes no event.
+//
+// Only a process that has proven no horizon yet, with no mark counting, would answer 0 and have
+// its page replayed the whole log; that one waits, eventFeedHeadWait at most, marking again as the
+// relay's first start does, and past it answers what it has, which is logged.
 func (s *server) eventFeedHead(ctx context.Context) (int64, error) {
-	horizon := s.horizon()
-	mark, err := horizon.Mark(ctx)
-	if err != nil {
-		return 0, err
+	floor, ok, newest, err := s.writerFloor(ctx)
+	if err != nil || ok || floor > 0 {
+		return floor, err
 	}
 	deadline := time.Now().Add(eventFeedHeadWait)
-	for wait := 10 * time.Millisecond; ; wait = min(2*wait, 250*time.Millisecond) {
-		floor, ok, err := horizon.WriterFloor(ctx, mark)
-		if err != nil {
-			return 0, err
-		}
-		if ok {
-			return floor, nil
-		}
-		if time.Now().After(deadline) {
-			break
-		}
+	for wait := 10 * time.Millisecond; time.Now().Before(deadline); wait = min(2*wait, 250*time.Millisecond) {
 		if !waitFor(ctx, wait) {
 			return 0, ctx.Err()
 		}
-	}
-	marks := []events.Mark{}
-	if s.bootMark != nil {
-		select {
-		case <-s.bootMark:
-			marks = append(marks, s.bootMarkValue)
-		case <-ctx.Done():
-			return 0, ctx.Err()
+		if floor, ok, newest, err = s.writerFloor(ctx); err != nil || ok || floor > 0 {
+			return floor, err
 		}
 	}
-	floor, _, err := horizon.WriterFloor(ctx, marks...)
-	if err != nil {
-		return 0, err
-	}
-	slog.Warn("dispatch: whoami's event_head stands below the newest event, so the page's event feed replays more: a transaction in this database has held a transaction id for longer than the wait",
-		"wait", eventFeedHeadWait, "event_head", floor, "newest", mark.Newest)
+	slog.Warn("dispatch: whoami's event_head is 0, so the page's event feed replays the whole log: no horizon is proven yet and a transaction in this database has held a transaction id since before every mark",
+		"wait", eventFeedHeadWait, "newest", newest)
 	return floor, nil
 }
 

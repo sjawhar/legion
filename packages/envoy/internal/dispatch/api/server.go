@@ -309,11 +309,12 @@ type server struct {
 	// register, which must not touch the Store.
 	horizonOnce  sync.Once
 	eventHorizon *events.Horizon
-	// bootMark is the event log mark the server takes when it is registered (takeBootMark), which
-	// the relay's first start bounds its read of the log by: closed once taken, with the mark in
-	// bootMarkValue, zero when it failed or the server has no Store.
-	bootMark      chan struct{}
-	bootMarkValue events.Mark
+	// bootMark closes once the server's boot mark has been taken (takeBootMark), which the marks
+	// in eventMarks begin with; nil on a server with no Store.
+	bootMark chan struct{}
+	// eventMarks is the event log marks the relay's first start and GET /auth/whoami bound the ids
+	// a writer can still hold open by (event_marks.go).
+	eventMarks eventMarks
 	// detached is everything a request started that runs on past its client: every keyed write's
 	// handler (keyedWrites, which runs it on a context the client's going away does not cancel) and
 	// every delivery a handler started and did not wait for (a broadcast's recipients, a sweep's

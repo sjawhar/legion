@@ -415,9 +415,9 @@ func holdClusterTransactionID(t *testing.T, hold time.Duration) (release func())
 // can see says nothing about the ids below it. A page starts its reads after whoami answers and
 // resumes its first events subscription from event_head, which is replayed every event above that
 // id alone: an event_head of max(id) with a lower id still open would have the page miss that event
-// for good. So whoami waits for the writes of this database that were open when it took its mark
-// (api's eventFeedHead, two seconds at most) and then answers the floor of the server's boot mark,
-// which stands below the open id. Once that write commits, it answers at least the higher id.
+// for good. So whoami answers the newest of the server's marks taken before every write of this
+// database still open, the boot mark here, which stands below the open id. Once that write
+// commits, it answers at least the higher id.
 func TestWhoamiEventHeadStaysBelowAnEventStillOpen(t *testing.T) {
 	database := storetest.Open(t)
 	handler := storeRouter(t, database)
@@ -455,5 +455,28 @@ func TestWhoamiDoesNotWaitOnATransactionInAnotherDatabase(t *testing.T) {
 	}
 	if head := eventHeadID(t, answer); head != newest {
 		t.Fatalf("whoami answered event_head %d while another database's transaction was open, want the log's newest id %d", head, newest)
+	}
+}
+
+// TestWhoamiAnswersAtOnceWhileAWriteOfThisDatabaseIsOpen: a page's load waits on whoami, and at load
+// a write of Dispatch's own database is often open, so whoami must not wait for it. A mark it took
+// on an earlier call stands below every id that write holds, the write having taken its transaction
+// id after that mark, so it answers from that mark at once: below the open id, and at or above
+// what the earlier call answered.
+func TestWhoamiAnswersAtOnceWhileAWriteOfThisDatabaseIsOpen(t *testing.T) {
+	database := storetest.Open(t)
+	handler := storeRouter(t, database)
+	createProject(t, handler, "ONE")
+	createProject(t, handler, "TWO")
+	earlier := eventHeadID(t, askWhoami(t, handler))
+
+	low, high, _ := appendOutOfOrder(t, database, "ONE", "TWO")
+	began := time.Now()
+	head := eventHeadID(t, askWhoami(t, handler))
+	if waited := time.Since(began); waited > 500*time.Millisecond {
+		t.Fatalf("whoami answered %s after a write of this database took its transaction id, want no wait on it", waited)
+	}
+	if head >= low || head < earlier {
+		t.Fatalf("whoami answered event_head %d while event %d was open below the committed %d, want an id below it and at or above the earlier answer %d", head, low, high, earlier)
 	}
 }
