@@ -2,37 +2,43 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-251",
-  "completed": "2026-10-29T22:11:00Z",
-  "round": 8,
-  "headSha": "d262a1f6160bdd8e643d2690b1dc8dcf1a98f9c3",
-  "handoffHead": "9f05c30feacc15a53551db8600de2398a49037ce",
+  "completed": "2026-10-29T23:56:00Z",
+  "round": 9,
+  "headSha": "331bfa178058c52eb2a656f2834831b5f5301e42",
+  "handoffHead": "9b011313ea51b925c9ad66f4b8f53ef95021469f",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its commands on the issue's real PostgreSQL 17.2: my red test TestAStartThatFindsTheRootArchitectRunningNamesEachKeptDecisionOnce PASS, unmodified (`jj diff --from 3e3d8731b3e1 --to d262a1f6160b --stat` on its file: 0 files changed), with TestAStartThatFindsTheRootArchitectRunningTellsItItsTree and the two forget tests PASS; TestAReadmissionWithNoStaleApprovalDropsTheOneAnEarlierKept (3 subtests) and TestARootReadmittedOnAnOlderApprovalIsToldBothVersions (4) PASS. Re-ran both its negative controls my own way: outbox.go put back as at a3c47bc9 -> the red test FAILs; keepStaleApproval returning nil instead of DropReadmittedApproval -> all 3 subtests FAIL."
+    "how": "Re-ran the 30 tests the branch adds under packages/daemon (admit, daemon, record, store, workflow) on the issue's real PostgreSQL 17.2 and a real nats-server 2.10.29: 30 PASS, the 0062 migration test among them (a fresh database migrated to 0062 by store.Migrate). Re-ran one claim control my own way: parkedDecisions naming claimed rows too (`not $2 or true`) -> TestACatchUpLeavesOutWhatAQueuedStartClaims FAILs ('the catch-up names dispatch://LEGION-1/ask/ask-1, which the queued start claims')."
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "A re-admission's start names each kept decision once to the architect, and a delivery that fails and is retried loses nothing and doubles nothing",
-      "surface": "The whole Legion daemon (startDaemonWithin) on the issue's real PostgreSQL 17.2 and a real nats-server 2.10.29; Dispatch events as envelopes on ENVOY_NOTIFICATIONS; the architect's shim and registration over the daemon's own worker stream and HTTP routes; notices read from the Envoy listener stand-in. Throwaway driver, not committed; kept at $TMPDIR/tnats/zz_tester_parked_live_test.round8.go (TestTesterRunningArchitectReadmissionLive)",
-      "command": "LEGION_TEST_PG_DSN=postgres://...@127.0.0.1:55432/postgres LEGION_E2E_NATS_URL=nats://127.0.0.1:54333 go test -tags e2e -count=1 -run '^TestTesterRunningArchitectReadmissionLive$' -v ./internal/daemon/",
-      "observed": "PASS, 4 steps. A root parked by a person while its architect claim was launching (the linger's suspend arrives while launching); the architect then registered and reported ready during the linger, and the daemon suspended it (state suspended), so on the whole daemon the claim does not stay running through a linger. A person's answer on the parked tree: 1 parked-decision, 1 kept. A person set the root to todo with the Envoy listener refusing the first publish to the architect's topic: the start's task named dispatch://<root>/ask/ask-t, the kept row went to 0, the relaunched architect registered and reported ready, the catch-up's first publish was refused (refused=1) and its retry accepted once (catch-ups accepted=1), and the decision was named exactly once across the task and every message on the architect's topic. The start-finds-the-architect-running branch itself is a race (a start that runs before the linger's suspend) the whole daemon does not let a driver hold; that branch is proven by the red test against a real supervisor, workflow engine and admission on real PostgreSQL, which now passes.",
-      "headSha": "d262a1f6160bdd8e643d2690b1dc8dcf1a98f9c3",
-      "negativeControl": "With outbox.go put back as at a3c47bc9 (ClaimReady before the delivery), the red test FAILs: the catch-up names dispatch://LEGION-208/ask/ask-1 again beside the start task."
-    },
-    {
-      "criterion": "Regression: round 7's whole-daemon drive at this head, with the guard mutations",
-      "surface": "The same whole daemon (TestTesterParkedDecisionLive, 14 steps), with 13 real ask and comment events read from production Dispatch's events route",
-      "command": "LEGION_TEST_PG_DSN=... LEGION_E2E_NATS_URL=nats://127.0.0.1:54333 TESTER_REAL_EVENTS=$TMPDIR/real-ask-events.jsonl go test -tags e2e -count=1 -run '^TestTesterParkedDecisionLive$' -v ./internal/daemon/",
-      "observed": "PASS in 39s, all 14 steps: one parked-decision per person's decision on a parked tree and none on redelivery or restart; the child's reply names the root; session and human-turn replies relay nothing; the parked spec's approval relays design-approved; awaiting_person, slotted and lingering-in_progress roots keep and send nothing; a slot-waiting root keeps its decision, its start names it and forgets it; a kept decision survives two refused resumes and is forgotten once delivered; the real events relay exactly the 3 a person made.",
-      "headSha": "d262a1f6160bdd8e643d2690b1dc8dcf1a98f9c3",
-      "negativeControl": "Each reverted with jj restore: `|| root.AwaitingPerson()` dropped from record.WaitsForSlot -> FAIL at the awaiting-root-set-to-todo step (a reply kept for W); the RelayNotParked check disabled -> FAIL at the lingering-root step (`parked-decision notices = 6, want 3`)."
+      "criterion": "The architect's item 3 and the invariant: a retried start after a failed forget is not delivered twice; every kept decision reaches its architect once",
+      "evidence": "Red test TestAStartWhoseForgetFailedIsNotDeliveredAgainAfterItsTurn (packages/daemon/internal/daemon/parked_decision_test.go, commit df02ec30). Command: `cd packages/daemon && LEGION_TEST_PG_DSN=... go test -count=1 -run TestAStartWhoseForgetFailedIsNotDeliveredAgainAfterItsTurn ./internal/daemon/` -> FAIL: `the retried start queued &supervise.Delivery{ID:\"outbox:72\", Task:\"a person decided on the tree: dispatch://LEGION-1/ask/ask-1\", ... DeliveredAt:... MarkedBy:\"outbox:72\" ...} again after the architect's turn on it ended; want each decision told once`. The delivered mark (start-delivered:<row>) is written in forgetKept's transaction, after RequestDeliver has already queued the task in the supervisor's store. When that transaction does not commit (a database error, or the daemon dying in the gap: the reviewer's crash window), the row retries with no mark. supervise.queue (delivery.go:105-111) dedupes only against a delivery still pending; once the architect's turn on the task ends and the delivery retires, the retry queues the same task again and the architect is prompted with each kept decision a second time. The state table's crash case ('the retry's RequestDeliver with the same id and task is accepted as already queued') holds only while that delivery is still pending. TestARetriedStartDeliversItsTaskOnce covers the ClaimReady-fails-after-the-forget case only, where the mark did commit. A fix has to make 'this row's task was delivered' durable no later than the delivery itself: for example, have the retry treat its own delivery id as delivered when the claim already queued or retired it, or write the mark in the transaction that persists the delivery."
     }
   ],
-  "ci": "PR head 9f05c30feacc (no skip-checks trailer, so it carries the code head d262a1f6's CI), read 2026-10-29T22:10Z: CI run 40962213344 queued (its `changes` job queued); PR Title run 40962332581 queued, 40962213395 cancelled. Not waited on.",
-  "notes": [
-    "Not a defect, named for the record: the running-architect branch now applies its ClaimReady after delivering, so a row whose ClaimReady apply fails retries the delivery under the same id. supervise's queue (delivery.go:105-111) accepts the same id and task while it is still pending, so nothing doubles then; only if that task had already been sent and retired before the retry would the row's fixed task text be queued again. That needs a database failure between the delivery and the fact, then a whole agent turn before the retry's backoff ends.",
-    "The architect's chosen order stands: in the running case the architect gets the start's task before the catch-up that names its tree's new generation."
-  ]
+  "failed": 1,
+  "proof": [
+    {
+      "criterion": "Regression, round 7's whole-daemon drive at this head, with the claim mechanics observed",
+      "surface": "The whole Legion daemon (startDaemonWithin) on real PostgreSQL 17.2 and nats-server 2.10.29, Dispatch events only as envelopes on ENVOY_NOTIFICATIONS, 13 real production Dispatch events; throwaway driver at $TMPDIR/tnats/zz_tester_parked_live_test.round9.go",
+      "command": "LEGION_TEST_PG_DSN=... LEGION_E2E_NATS_URL=nats://127.0.0.1:54333 TESTER_REAL_EVENTS=$TMPDIR/real-ask-events.jsonl go test -tags e2e -count=1 -run '^(TestTesterParkedDecisionLive|TestTesterRunningArchitectReadmissionLive)$' -v ./internal/daemon/",
+      "observed": "Both PASS (14 + 4 steps). New this round: while P's re-admission start retried through three refused resumes, its outbox row (591) claimed all 6 of P's kept decisions (claimed_by = 591, 6 of 6) and they stayed kept; once a resume succeeded the task named all 6, the rows went to 0, processed_events holds start-delivered|591 and the row is gone. The running-architect drive again names the decision once across the start task and the catch-up, with the first catch-up publish refused and retried.",
+      "headSha": "331bfa178058c52eb2a656f2834831b5f5301e42",
+      "negativeControl": "Each reverted with jj restore: `|| root.AwaitingPerson()` dropped from record.WaitsForSlot -> FAIL at the awaiting-root-set-to-todo step; the RelayNotParked check off -> FAIL at the lingering-root step (`parked-decision notices = 6, want 3`)."
+    },
+    {
+      "criterion": "Review finding 4 / architect's item 4: every relay outcome writes an accurate log line and parked-decision-verdict.jq reads the daemon's real log as the devbox script expects",
+      "surface": "The same whole-daemon run with the daemon's own slog JSON handler writing its log, then the devbox script's own verdict command",
+      "command": "TESTER_JSON_LOG=$TMPDIR/tnats/daemon14.json go test -tags e2e ... ; jq -R -s -f scripts/e2e/lib/parked-decision-verdict.jq $TMPDIR/tnats/daemon14.json",
+      "observed": "Verdict: undelivered 2 (design-approved on P and on R), sent 1 (P), kept 0, handled 0, unrelayed 1 (`outbox parked decision not relayed: its root is not parked`, R, the lingering in_progress root), unmatched []. Workflow lines match what the drive did: 5 `a person's decision on a parked tree goes to the controller` (P's answer, PC's reply, 3 real events), 1 kept for a slot-waiting root, 2 `a decision on a lingering root someone moved back into the workflow is not relayed` (R), 4 session replies and 1 session answer not relayed.",
+      "headSha": "331bfa178058c52eb2a656f2834831b5f5301e42",
+      "negativeControl": "The verdict's unmatched list is the control: every undelivered spec-decision line found its pairing line by row; an undelivered line with no pairing would be listed there."
+    }
+  ],
+  "notDriven": [
+    "The ErrDeliveryPending and ready-between-delivery-and-forget windows were not driven on the whole daemon: they need a held pending task and a ready timed inside one transaction, which the live harness cannot schedule. They stand on TestACatchUpLeavesOutWhatAQueuedStartClaims and the claimed_by rows I read on the whole daemon above.",
+    "The second re-admission's kept approval pair under an armed gate was not driven on the whole daemon; it stands on the implementer's TestARootReadmittedTwiceWithNoStartDeliveredIsStillToldBothVersions, which passes, and on keepStaleApproval's code (gate nil under an armed gate keeps the pair)."
+  ],
+  "migration": "0062 applies on a fresh database (store.Migrate in every isolatedOutboxPool test and TestParkedDecisionsArriveWith0062AndGoWithTheirRoot, all PASS). main at 61e55841dfec ends at 0061_pull_request_head_run, and deployments run only main's releases, so no deployed database can hold the earlier 0062; only this pod's scratch database did, which the implementer rebuilt.",
+  "ci": "PR head 9b011313, read 2026-10-29T23:55Z: CI's `changes` job queued; PR Title runs queued, earlier ones cancelled. GitHub reports mergeable UNKNOWN while it recomputes against main 61e55841. Not waited on."
 }
