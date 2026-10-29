@@ -2,39 +2,39 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-723",
-  "completed": "2026-10-29T10:05:20Z",
+  "completed": "2026-10-29T10:17:03Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2493",
   "proof": [
     {
       "criterion": "1: push-built lands on a moved tip with no input change; lands and starts one fresh run when an input changed; lands nothing when main holds a newer build; a bad tar refused either way; now also from a subdirectory of the checkout",
       "surface": "the .github/scripts shell test against a local bare origin through the deploy key, the insteadOf rewrite and the stub gh",
       "command": "bash .github/scripts/release-push.test.sh",
-      "observed": "Results: 623 passed, 0 failed (615 before plus 8 new: push-built run from packages/claude-envoy refuses with 'main holds a newer build' against a newer bot rebuild, nothing landed, no gh call; and lands with a relative tar path through built_landed). No 'hooks/pre-receive: line' or 'No such file or directory' line in the output. https://github.com/sjawhar/legion/pull/2493#issuecomment-6493410028",
-      "headSha": "38789e6762cfa6da6c04f905320a86b2e358d127",
+      "observed": "Results: 623 passed, 0 failed (615 before plus 8 new: push-built run from packages/claude-envoy refuses with 'main holds a newer build' against a newer bot rebuild, nothing landed, no gh call; and lands with a relative tar path through built_landed). No 'hooks/pre-receive: line' or 'No such file or directory' line in the output. https://github.com/sjawhar/legion/pull/2493#issuecomment-6493410028 Re-run at the merge head 854256b6: same result. https://github.com/sjawhar/legion/pull/2493#issuecomment-6493978896",
+      "headSha": "854256b692c09c1976a933624cbaf1cdfc81417b",
       "negativeControl": "The arm's `cd \"$root\"` replaced by a no-op: 621 passed, 2 failed (the two subdirectory newer-build checks); restored."
     },
     {
       "criterion": "1 on real history and a real build",
       "surface": "this branch's push-built on a bare clone of sjawhar/legion (X' = X + the branch's list and script, Y' = X..Y replayed), tars from `bun run verify-build` at X, stub gh",
       "command": "bash $TMPDIR/infra723/proof.sh (script byte-identical to the head's release-push.sh)",
-      "observed": "f45c6716->1767c9af: Landing on main's tip, 0 paths outside dist/legion, 0 gh calls. f45c6716->305a1033: lands and exactly 1 gh workflow run. a409c128->1767c9af: Nothing to push and 1 fresh run. https://github.com/sjawhar/legion/pull/2493#issuecomment-6493410028",
-      "headSha": "38789e6762cfa6da6c04f905320a86b2e358d127",
+      "observed": "f45c6716->1767c9af: Landing on main's tip, 0 paths outside dist/legion, 0 gh calls. f45c6716->305a1033: lands and exactly 1 gh workflow run. a409c128->1767c9af: Nothing to push and 1 fresh run. https://github.com/sjawhar/legion/pull/2493#issuecomment-6493410028 Re-run at the merge head 854256b6: same result. https://github.com/sjawhar/legion/pull/2493#issuecomment-6493978896",
+      "headSha": "854256b692c09c1976a933624cbaf1cdfc81417b",
       "negativeControl": "Base f45c6716 with no list: '::warning title=No build input list', the build lands, and exactly one fresh run."
     },
     {
       "criterion": "2': the input list covers what the bundles and buildLegionPlugin read, with no hand copy in the test",
       "surface": "packages/claude-envoy/tests/build-inputs.test.ts in pr-and-main.yaml's required test job; buildLegionPlugin now returns its reads",
       "command": "cd packages/claude-envoy && bun test tests/build-inputs.test.ts tests/dist-fresh.test.ts tests/build-out.test.ts (Bun 1.4.4)",
-      "observed": "20 pass, 0 fail, 55 expect() calls",
-      "headSha": "38789e6762cfa6da6c04f905320a86b2e358d127",
+      "observed": "20 pass, 0 fail, 55 expect() calls at the merge head, with main's phase-reminder hooks in buildLegionPlugin; `bun run verify-build` packs a tar main's rebuild accepts. https://github.com/sjawhar/legion/pull/2493#issuecomment-6493978896",
+      "headSha": "854256b692c09c1976a933624cbaf1cdfc81417b",
       "negativeControl": "packages/pi-legion/agents dropped from build-inputs.txt: the test fails naming packages/pi-legion/agents/deep-worker.md, oracle.md, plan-gap-analyst.md, plan-reviewer.md, ...; restored (jj status clean)."
     },
     {
       "criterion": "2: credentials check, lint, typecheck",
       "surface": "the repository's scripts and linters",
       "command": "uv run --with pyyaml==6.0.2 --no-project bash -c 'bash .github/scripts/check-release-credentials.test.sh; bash .github/scripts/check-release-credentials.sh'; bunx biome check .; (cd packages/claude-envoy && bun run typecheck && bun run lint); bash .github/scripts/check-private-names.sh",
-      "observed": "credentials: PASS, '7 credentialed job(s) and 10 build job(s) across 5 workflows keep credentials out of jobs that run dependency code'; biome 1254 files, no errors (the one warning is main's dist-fresh.test.ts:241); tsc clean; lint clean; private names clean.",
-      "headSha": "38789e6762cfa6da6c04f905320a86b2e358d127",
+      "observed": "At the merge head: credentials test PASS and '7 credentialed job(s) and 10 build job(s) across 5 workflows keep credentials out of jobs that run dependency code'; biome 1321 files, no errors (its two warnings are main's: dist-fresh.test.ts:241, scripts/e2e/lib/app-logins.test.ts:607); typecheck and lint clean; private names clean. https://github.com/sjawhar/legion/pull/2493#issuecomment-6493978896",
+      "headSha": "854256b692c09c1976a933624cbaf1cdfc81417b",
       "negativeControl": "Without PyYAML the credentials test cannot parse the workflows (ModuleNotFoundError: yaml), so it was run with the parser present, as CI has it."
     }
   ],
@@ -47,19 +47,21 @@
     "packages/claude-envoy/README.md",
     "packages/claude-envoy/scripts/build-inputs.txt",
     "packages/claude-envoy/scripts/build.ts",
+    "packages/claude-envoy/scripts/build.ts (merge resolution)",
     "packages/claude-envoy/scripts/verify-build.sh",
     "packages/claude-envoy/tests/build-inputs.test.ts"
   ],
   "trickyParts": [
     "commit_build_on is called directly, not in $(...), because a subshell's EXIT trap would remove the deploy key's directory before land_on_main pushes.",
     "The subdirectory landing case passes even without the new cd (extract_built moves to the root itself); the newer-build subdirectory case is the one that proves the fix.",
-    "buildLegionPlugin maps each staged skill file to skills/<same path> and throws when the source is missing, so a changed staging layout fails loudly rather than under-reporting reads."
+    "buildLegionPlugin maps each staged skill file to skills/<same path> and throws when the source is missing, so a changed staging layout fails loudly rather than under-reporting reads.",
+    "Forward merge: main's a7c762f6 (#2186) made buildLegionPlugin also write legion/hooks/hooks.json from LEGION_HOOKS; those hooks read no repository file (PHASE_HOOK_TOOL_NAME comes from packages/claude-envoy, already in the list), so buildLegionPlugin's reported reads are unchanged."
   ],
   "deviations": [
-    "Round-1 push wrongly ended on a skip-checks handoff commit while carrying code; fixed forward with this trailer-free handoff commit (no force push, no rewrite)."
+    "Round-1 push wrongly ended on a skip-checks handoff commit while carrying code; fixed forward with a trailer-free handoff commit and then the code-carrying merge head (no force push, no rewrite)."
   ],
   "openQuestions": [],
-  "round": "test round 2 sent back (verdict fail, no CI): the round-1 code at 38789e67 reached GitHub only under a push whose head 3894a46c carried skip-checks: true, so no workflow ran; this handoff commit carries no skip keyword, so lint, typecheck, test and pr-title run on a head holding all of that code. Code unchanged since 38789e67; the proofs below stand at that commit.",
+  "round": "test round 2 sent back (verdict fail, no CI). Cause: the round-1 push ended on a skip-checks handoff while carrying code, and GitHub also reported the PR CONFLICTING with main, so no pull_request check could run. Fix: a trailer-free handoff commit (6d05d7ee), then a forward merge of main (854256b6, the one conflict in packages/claude-envoy/scripts/build.ts resolved: main's #2186 phase-reminder hooks kept, this branch's Promise<string[]> return kept). The PR is MERGEABLE and 7 workflow runs started at 854256b6. Fingerprint b8af345e... -> 81df9c4d...: changed (build.ts), so the head goes through the tester again.",
   "threads": [
     "PRRT_kwDORFy7ds6xe-nV fixed in b36421220f41",
     "PRRT_kwDORFy7ds6xe-nZ fixed in 2d7200de83ad",
