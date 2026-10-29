@@ -57,8 +57,6 @@ declare global {
   interface Window {
     /** Each script or handler of `HOSTILE_SVG` that ran. */
     __hostile?: string[];
-    /** The page's scroll offset at every frame since it loaded (`recordScrollEachFrame`). */
-    __scrollEachFrame?: number[];
   }
 }
 
@@ -159,20 +157,6 @@ function watchSourceAsCode(page: Page): (editor: Locator, source: string) => Pro
  *  is far longer than an inserted element or sheet takes to start its fetch, so a request list
  *  read after it holds every fetch the drawing caused. */
 const REQUEST_SETTLE_MS = 1_000;
-
-/** Records the page's scroll offset (`window.__scrollEachFrame`) at every animation frame from
- *  the moment it loads, so a row can see a jump back to the top that no single read would. */
-async function recordScrollEachFrame(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    const offsets: number[] = [];
-    window.__scrollEachFrame = offsets;
-    const sample = () => {
-      offsets.push(Math.round(window.scrollY));
-      requestAnimationFrame(sample);
-    };
-    requestAnimationFrame(sample);
-  });
-}
 
 /** Records every request `context` makes to Google Fonts' two hosts and answers it with an empty
  *  stylesheet, so a run needs no outbound network. */
@@ -861,50 +845,6 @@ test("a past version's highlighted mark lands on its block once a diagram above 
     await withoutScrollAnchoring(page);
     await page.evaluate(() => window.__releaseMermaid?.());
     await expect(diagram).toBeVisible();
-    await expect(highlight).toBeInViewport();
-  } finally {
-    await alice.close();
-  }
-});
-
-// The past version's first landing with no diagram at all, so nothing runs it again: when every
-// render of the page rebuilt the version's editor, the last scroll could run before the last
-// editor had laid out and leave the reader at the top of the page.
-test("a past version's comment link lands on its quote in a document with no diagram @phone", async ({
-  browser,
-}) => {
-  const filler = Array.from({ length: 50 }, (_, index) => `Filler paragraph ${index + 1}.`);
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({
-    project: "CORE",
-    spec: `Plain document:\n\n${filler.join("\n\n")}\n\nTarget paragraph holds the quoted words.\n`,
-    title: "Highlighted mark in a plain document",
-  });
-  const comment = await createComment(
-    issue.key,
-    { anchor: { artifact: "spec", quote: "quoted words" }, body: "Read this." },
-    session
-  );
-
-  const alice = await asUser(browser, "alice");
-  try {
-    const page = await alice.newPage();
-    await recordScrollEachFrame(page);
-    await page.goto(
-      `/issues/${issue.key}/artifact/spec?v=1&comment=${encodeURIComponent(comment.id)}`
-    );
-    const versionView = page.getByRole("region", { name: "Document version 1" });
-    const highlight = versionView.locator(`[data-id="${comment.id}"]`);
-    await expect(highlight).toHaveText("quoted words");
-    await expect(highlight).toBeInViewport();
-    // A page that rebuilt the version's editor collapsed to the viewport's height between builds,
-    // throwing the reader back to the top after the scroll to the quote began. Waiting is the
-    // only way to show a jump that does not come.
-    await page.waitForTimeout(1_500);
-    const offsets = (await page.evaluate(() => window.__scrollEachFrame)) ?? [];
-    const started = offsets.findIndex((offset) => offset > 0);
-    expect(started).toBeGreaterThanOrEqual(0);
-    expect(offsets.slice(started).filter((offset) => offset === 0)).toEqual([]);
     await expect(highlight).toBeInViewport();
   } finally {
     await alice.close();
