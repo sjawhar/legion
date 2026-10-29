@@ -21,3 +21,9 @@ Phase: implementing, not complete. PR sjawhar/legion#2462 (draft). Branch head p
    seed; series --duration 10m (refines); collect --upload-issue INFRA-514; soak --duration 60m; step 10x-typing 10 --duration 10m --typing; collect; replay-prepare; replay r16-typing --from 0 --to 39m --typing; collect; db-size 4 15Gi; step 1x-db4 1 --duration 10m; replay r4-typing --from 0 --to 39m --typing; collect --upload-issue INFRA-514; down.
 2. Results v2 on INFRA-514 (fixed-sampler runs only; replay tables beside 11.1-13.8 cores / 13.8 GiB with residual; stored-order per run with its checker commit; anchor-placement and sign-flipped notes; copy Postgres 18.2 vs production 18.6); update the API-2/BG-1/BG-3 Cost text to the new numbers.
 3. implement.json (proof array), PR body (E2E line, Threads, Size), push, handoff_complete.
+
+## Update 2026-10-29 09:48Z
+- 08:52Z: started the final run (lt-20261029t085250-7c56), stopped it at once and tore it down so INFRA-715's 1.5 h soak could go first. No cluster run of mine is in progress; namespace held by INFRA-715.
+- Regenerated code-path tables of lt-20261028t223135-7f42 (HeapReleased fix): dispatch://INFRA-514/artifact/codepaths-heapreleased-lt-20261028t223135-7f42-tar-gz. r16: 10.69 cores / 7.53 GiB, residual 0.41-3.11 cores, 6.27 GiB; non-Go 1.28 GiB.
+- Final run: same command as above with --stored-order-source and --browsertype-commit = a6b64ddb21782dc5e5680433a9934fbd707925c2 (legion/INFRA-707; checker built from 9b92ac14 + INFRA-707's files, renderer_matches true). Starts when INFRA-715 messages that its lock is gone.
+- INFRA-707 acceptance (architect, 09:30Z): after my baseline, unless its tester is ready first (next free slot, never interrupting a run): r16 and 10x-typing with Dispatch and checker from the head the tester names (architect dispatches the branch image: run 40850134172 for a6b64ddb), plus the same on the newest main ancestor of that head that has an image, named in the result.
