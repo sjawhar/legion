@@ -2,53 +2,56 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-514",
-  "completed": "2026-10-29T13:40:00Z",
-  "round": 2,
-  "headSha": "41fa18b19e7159f61f615b0c1d921e812605c83d",
-  "branchHead": "80332949f6a4f3874afa5f55d9a03030c8879b22",
+  "completed": "2026-10-29T14:46:00Z",
+  "round": 3,
+  "headSha": "469224906252b9a0284c776c49eb8c6f54f3f38e",
+  "branchHead": "98a53d6ef8b70226ecb63e819ad87884b5b762a3",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I built envoy-listener and envoy-dispatch at 80332949 (code identical to 41fa18b1) and re-ran the implementer's heartbeat-proof.py with my listener (400 sessions): 1.203 KV writes per heartbeat (interest 0.203, session 1.000) against its 1.204, and resumed interest and session warm-ups on all three listeners after the nats-server restart. I re-ran its last-seen driver as lastseen.sh on my builds, with a 20 s session TTL. The subscribers list showed the dead session's second heartbeat, and after a listener restart it fell back to updated_at, as the implementer's proof says."
+    "how": "I re-ran the implementer's browser test (bun run e2e -- --grep \"a subscriber no longer live shows its last heartbeat\") at the head: passed. I re-ran it with only subscribers.go and client.go restored to 278c9c06: failed, received the row's updated_at two hours before the seeded last_seen, as its negative control says. I re-ran its heartbeat-proof.py with my own listener build at 98a53d6e (1.202 KV writes per heartbeat against its 1.203, resumed warm-ups) and its last-seen driver (as lastseen.sh) on my own listener and Dispatch builds."
   },
-  "failures": [
-    {
-      "criterion": "The pull request merges into main and its required CI runs; R8: the listener's race step covers ./internal/session/",
-      "evidence": "gh pr view 2377 -R sjawhar/legion --json mergeable at 2026-10-29 13:25Z: CONFLICTING. git merge-tree --write-tree --name-only 41fa18b19e71 fe31539233c0 (main@origin): 'CONFLICT (modify/delete): .github/workflows/envoy-and-contracts.yaml deleted in fe31539233c0 and modified in 41fa18b19e71'. #2316 (14d907b6) moved pull-request CI into .github/workflows/ci.yaml, whose listener race step (ci.yaml:2311 at fe315392) runs 'go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/kvwatch/...' without ./internal/session/. The forward merge must carry this pull request's ./internal/session/ addition into that step. Until then GitHub builds no merge ref, and the required CI of the head cannot run: 'Legion Envoy and Contracts' at 41fa18b1 was still queued at 13:32Z. This needs the implementer's forward merge, not a red test."
-    },
-    {
-      "criterion": "Deployment instructions, 'Proving a change to a page a person reads in Dispatch': before the merge, a change to a page a person reads is proven by a test in Dispatch's browser suite (packages/dispatch/e2e, bun run e2e). The test must fail against a build of the commit before the change and pass at the change's head, and both runs are quoted on the pull request.",
-      "evidence": "Commit 395a0ca2 changes the last_seen that Dispatch's GET /api/v1/issues/<key>/subscribers answers for a subscriber that is no longer live. The issue page renders that value as the row's time: packages/dispatch/web/src/features/issue/SubscribedAgents.tsx:52, <Timestamp at={new Date(subscriber.last_seen).toISOString()} />. So the page a person reads now shows a different time. filesChanged has no file under packages/dispatch/e2e, and the pull request body quotes no browser run. The fake listener the suite uses (packages/dispatch/e2e/fake-envoy.ts) serves GET /v1/interests/ from FakeInterest, which has updated_at but no last_seen. So the test needs that field, a seeded interest row with updated_at T0 and last_seen T1 > T0 and no live session, and an assertion that the subscribers list shows T1. On a build of 278c9c06 it must show T0. My lastseen.sh shows the API half of this on real processes (proof below); the deployment instructions require the browser test itself."
-    }
+  "failures": [],
+  "failed": 0,
+  "roundTwoFindings": [
+    "Conflict with main: fixed by the forward merge 5e318b72. ci.yaml's envoy-go-race step runs 'go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...' (R8), with its gate in .github/scripts/ci_job_reads.py, and GitHub reports the pull request MERGEABLE (read 14:28Z).",
+    "Missing browser test: fixed by 46922490 (packages/dispatch/e2e/issue.e2e.ts:372, with last_seen on the fake listener's interest rows)."
   ],
-  "failed": 2,
   "proof": [
     {
-      "criterion": "Round 2: Dispatch's subscribers list shows a subscriber that is no longer live with its session's last heartbeat (expired or deleted), not the interest row's updated_at; the listener keeps it for the reaper's grace; a restarted listener falls back to updated_at",
-      "surface": "Real envoy-listener and envoy-dispatch builds at 80332949, nats-server 2.10.29 with envoy_sessions created at MaxAge 20 s, private Postgres 16. Read through Dispatch's GET /api/v1/issues/PRF-1/subscribers as a person (header identity) and the listener's GET /v1/interests/",
-      "command": "bash lastseen.sh head bin/listener-head bin/dispatch-head (dispatch://INFRA-514/artifact/infra514-tester-round2-tar-gz)",
-      "observed": "ses-a (two identical heartbeats 8 s apart, then stopped): row updated_at 1793280521156, Dispatch live=false last_seen 1793280529244 (the second heartbeat). ses-b (deleted with DELETE /v1/sessions/ses-b): live=false, last_seen = its heartbeat. ses-c: live=true. The same answers came 60 s after the expiry, three TTLs past it, so WithLastSeenRetention is wired. After a listener restart: no last_seen on the rows, and Dispatch showed updated_at.",
-      "headSha": "41fa18b19e7159f61f615b0c1d921e812605c83d",
-      "negativeControl": "lastseen.sh before with 278c9c06's builds: the rows carry no last_seen, and Dispatch showed ses-a at 1793280624804, its first heartbeat, 8 s before its last one"
+      "criterion": "Deployment instructions, a change to a page a person reads in Dispatch: the issue page's Subscribed agents row shows a subscriber that is no longer live at its last heartbeat. A browser-suite test fails before the change and passes at the head.",
+      "surface": "Dispatch's browser suite: a real Dispatch server and web build, Playwright Chromium, the suite's fake listener, a loopback Postgres 16; the issue page's Subscribed agents region",
+      "command": "cd packages/dispatch && PLAYWRIGHT_BROWSERS_PATH=… DATABASE_URL=postgres://…@127.0.0.1:25432/e2e_tester bun run e2e -- --grep \"a subscriber no longer live shows its last heartbeat\"; then the same with --grep subscri (dispatch://INFRA-514/artifact/infra514-tester-round3-tar-gz)",
+      "observed": "head: 1 passed (e2e/issue.e2e.ts:372, 2.8 s). The row's <time dateTime> equals the seeded last_seen, one hour ago, not updated_at, three hours ago. --grep subscri: all 5 subscriber tests passed (followers.e2e.ts:103 and issue.e2e.ts:27, 308, 372, 666)",
+      "headSha": "469224906252b9a0284c776c49eb8c6f54f3f38e",
+      "negativeControl": "The same test with only packages/envoy/internal/dispatch/api/subscribers.go and internal/dispatch/envoy/client.go restored to 278c9c06 (then restored back) failed: Expected \"2026-10-29T13:35:16.277Z\", Received \"2026-10-29T11:35:16.277Z\""
     },
     {
-      "criterion": "R6 EV-11 and R4 EV-7 at the merge head (main's bus changes merged in): an unchanged heartbeat is not rewritten, and a rewatch after a nats-server restart resumes",
-      "surface": "The implementer's real-process driver: nats-server 2.10.29, three envoy-listener processes built at 80332949, 400 sessions heartbeating every 90 s through POST /v1/interests/subscribe; KV LastSeq read from /jsz",
-      "command": "python3 heartbeat-proof.py tester-head <my listener-head build> 400",
-      "observed": "1,334 heartbeats in 300 s: interest writes 271 (0.203 per heartbeat), session writes 1,334 (1.000), 1.203 KV writes per heartbeat; after the restart, interest and session warm-ups were outcome resumed with 0 entries on all three listeners (role claims completed, its bucket empty)",
-      "headSha": "41fa18b19e7159f61f615b0c1d921e812605c83d",
-      "negativeControl": "round 1's main listener in the INFRA-589 harness: 2.00 KV writes per heartbeat and completed warm-ups reading all 400 keys (dispatch://INFRA-514/artifact/infra514-tester-evidence-tar-gz). The implementer's main 8a911ecc run with this driver: 2.00."
+      "criterion": "Dispatch's subscribers list shows a subscriber that is no longer live (expired or deleted) at its session's last heartbeat. The listener keeps that heartbeat for the reaper's grace, and a restarted listener falls back to updated_at.",
+      "surface": "Real envoy-listener and envoy-dispatch builds at 98a53d6e, nats-server 2.10.29 with envoy_sessions at MaxAge 20 s, Postgres 16; Dispatch's GET /api/v1/issues/PRF-1/subscribers as a person and the listener's GET /v1/interests/",
+      "command": "bash lastseen.sh head3 bin/listener-head bin/dispatch-head",
+      "observed": "ses-a (two identical heartbeats 8 s apart): row updated_at 1793284566339, Dispatch live=false last_seen 1793284574417 (the second heartbeat). ses-b (deleted): live=false at its heartbeat. ses-c: live=true. The same answers came 60 s after the expiry. After a listener restart: no last_seen on the rows, and Dispatch showed updated_at.",
+      "headSha": "469224906252b9a0284c776c49eb8c6f54f3f38e",
+      "negativeControl": "round 2's lastseen.sh on 278c9c06's builds: the rows carry no last_seen, and Dispatch showed the stopped session at its first heartbeat, 8 s before its last one"
     },
     {
-      "criterion": "R7: review only after INFRA-610's production check shows all three listeners on a build containing ae36683e",
-      "surface": "sjawhar/legion#2374's Production line and its production-check comment",
-      "command": "gh pr view 2374 --json body; gh api repos/sjawhar/legion/issues/comments/6492594577; git merge-base --is-ancestor ae36683e b9883e6a",
-      "observed": "The Production line reads pass. Dispatch's listener pod runs ae36683e and gke's runs b9883e6a. envoy-hub's pin is b9883e6a, and the hub VM was recreated from that pin at about 12:10Z today. b9883e6a contains ae36683e (ancestry check exit 0). The reap probe read 'new rule' on production.",
-      "headSha": "41fa18b19e7159f61f615b0c1d921e812605c83d",
-      "negativeControl": "On 2026-10-27 at 16:55Z the same line read 'pending deploy of ae36683e', and round 1 failed on it"
+      "criterion": "R6 EV-11 and R4 EV-7 at the new merge head: an unchanged heartbeat is not rewritten, and a rewatch after a nats-server restart resumes",
+      "surface": "The implementer's real-process driver: nats-server 2.10.29, three envoy-listener processes built at 98a53d6e, 400 sessions heartbeating every 90 s through POST /v1/interests/subscribe; KV LastSeq read from /jsz",
+      "command": "python3 heartbeat-proof.py tester-head3 <my listener-head build> 400",
+      "observed": "1,334 heartbeats in 300 s: interest writes 270 (0.202 per heartbeat), session writes 1,334 (1.000), 1.202 KV writes per heartbeat; after the restart, interest and session warm-ups were outcome resumed with 0 entries on all three listeners",
+      "headSha": "469224906252b9a0284c776c49eb8c6f54f3f38e",
+      "negativeControl": "round 1's main listener in the INFRA-589 harness: 2.00 KV writes per heartbeat and completed warm-ups that read all 400 keys (dispatch://INFRA-514/artifact/infra514-tester-evidence-tar-gz)"
+    },
+    {
+      "criterion": "R1/R5 and R9 (session cache, reaper and rewatch scale; delivery p99), carried from round 1",
+      "surface": "INFRA-589 harness and Go benchmarks, round 1 at 278c9c06; the code of internal/session, internal/kvwatch, internal/store and internal/bus/kvresume.go has changed since only by round 2's lastSeen retention, which I tested above",
+      "command": "round 1's harness-514.sh runs and go test -bench 'Registry|Reap|Rewatch' base vs head (dispatch://INFRA-514/artifact/infra514-tester-evidence-tar-gz)",
+      "observed": "Registry/Get 1.14x from 400 to 3,000 sessions (base 8.1x); Reap 7.2x (base 76x); cistore Rewatch of 25,000 records 3.20 s -> 5 ms; delivery p99 270 ms at head. The implementer's benchmarks at the merge head 41fa18b1 agree (Get 1.06x, Reap 7.4x).",
+      "headSha": "278c9c06140d1b26f678ff2b31b8c64cbac3da6a",
+      "negativeControl": "main's code in the same benchmarks: Get 8.1x and Reap 76x"
     }
   ],
   "observations": [
-    "With WithLastSeenRetention at InterestReapGrace+InterestRefreshAge (15 min), the session cache's lastSeen records and revision fences now live 15 min after a session leaves, instead of one TTL (5 min). That is about three times as many dead-session entries, still bounded by session churn, and the expiry heap removes them (TestLastSeenRetentionKeepsTheRecordAndFenceThatLong).",
-    "A forward merge onto fe315392 changes the pull request's diff, since the race-step line moves to ci.yaml. So the next round is a full test round, not a fingerprint re-check."
+    "CI at 46922490 (the CI router workflow run 40889828326) was still queued at 14:43Z, with changes complete and every selected job queued. I did not wait for it.",
+    "R7 passed in round 2: sjawhar/legion#2374's Production line records all three listeners on a build that contains ae36683e."
   ]
 }
