@@ -123,7 +123,10 @@ type Config struct {
 	// as owner-tag-malformed.
 	ServicesByAccount map[string]string
 	// BROKER_SERVICE_LOGINS: the ServiceAccounts that log in as a service with their own projected
-	// token (POST /v1/launcher-credentials/token), whitespace-separated <service>=<service account>
+	// token (POST /v1/launcher-credentials/token), and that authenticate the routes a service
+	// calls as itself (serviceAuth, today POST /v1/oauth/exchange/pod-sessions, where a
+	// deployment's daemon registers a pod it starts under a session name),
+	// whitespace-separated <service>=<service account>
 	// entries, such as legion-daemon=system:serviceaccount:legion-system:legion-daemon-legion. Each
 	// account (system:serviceaccount:<namespace>:<name>, named exactly: there is no wildcard) logs in
 	// as the one service its entry names and is given once; one service may have several accounts,

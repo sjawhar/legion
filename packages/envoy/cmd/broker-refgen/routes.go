@@ -96,6 +96,7 @@ var credentialLabels = map[string]string{
 	"renewAuth":    "Renewal session proof",
 	"launcherAuth": "Machine credential",
 	"accountAuth":  "Caller ServiceAccount token",
+	"serviceAuth":  "Service login ServiceAccount token",
 }
 
 // readAuthClasses reads each adapter a route uses: its doc comment, the routeAuth constant it

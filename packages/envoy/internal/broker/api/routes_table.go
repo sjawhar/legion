@@ -16,6 +16,7 @@ const (
 	authProof
 	authRenewProof
 	authAccount
+	authService
 )
 
 // caller is who server.authenticate proved a request came from. Which field is set follows from
@@ -27,6 +28,9 @@ type caller struct {
 	// authenticated the request: its name, which a handler that acts logs, and the powers that
 	// name carries, which authenticate checks against the route's before the handler runs.
 	account Account
+	// service is the service BROKER_SERVICE_LOGINS says the ServiceAccount token that
+	// authenticated the request logs in as, which a serviceAuth handler logs when it acts.
+	service string
 }
 
 // power is one authority over the broker a caller of an accountAuth route may hold: one bit, so
@@ -146,6 +150,23 @@ func accountAuth(needs power, h func(*server, http.ResponseWriter, *http.Request
 	}}
 }
 
+// serviceAuth is a route for a service calling the broker with its own Kubernetes ServiceAccount
+// token, the account BROKER_SERVICE_LOGINS lets log in as that service — a deployment's Legion
+// daemon, which registers the pods it starts. The token is verified and mapped to its service by
+// the very check a token login makes (machine.Service.VerifyServiceToken), and the handler is
+// given that service's name.
+//
+// It is a class of its own rather than a power of accountAuth's because the two lists are two
+// authorities: BROKER_API_ACCOUNTS names the callers that relay a person's decisions and read
+// tokens back, and a daemon that registers its own pods is not one of them. A deployment already
+// lists its per-project daemons in BROKER_SERVICE_LOGINS for their token logins, so these routes
+// need no new setting and no new account.
+func serviceAuth(h func(*server, http.ResponseWriter, *http.Request, string)) routeHandler {
+	return routeHandler{auth: authService, serve: func(s *server, w http.ResponseWriter, r *http.Request, who caller) {
+		h(s, w, r, who.service)
+	}}
+}
+
 type apiRoute struct {
 	Method  string
 	Pattern string
@@ -178,6 +199,11 @@ func routes() []apiRoute {
 		// is, the session, the person and the project it carries, and the key it is bound to.
 		// Mounted only when the broker runs its OAuth provider.
 		{http.MethodPost, "/v1/oauth/introspect", accountAuth(readsTokensBack, (*server).introspect)},
+		// Register that one pod may exchange under one session name: the row the token exchange
+		// reads before it mints a token for a pod of an account that fixes no session, written by
+		// the deployment's own daemon as it starts that pod. Mounted only when the broker runs its
+		// OAuth provider.
+		{http.MethodPost, "/v1/oauth/exchange/pod-sessions", serviceAuth((*server).registerPodSession)},
 		// Extend the calling session's lease.
 		{http.MethodPost, "/v1/enrollments/{id}/renew", renewAuth((*server).renewEnrollment)},
 		// Describe the calling session's enrollment and its live grants.

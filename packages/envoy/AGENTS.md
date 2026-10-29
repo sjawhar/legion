@@ -4056,7 +4056,9 @@ registered),
 `BROKER_MINT_TARGETS` (removed; startup refuses it because a secret's `kind` tag now selects what
 the broker mints),
 `BROKER_SERVICE_LOGINS` (optional; whitespace-separated `<service>=system:serviceaccount:<namespace>:<name>`
-entries, the ServiceAccounts that log in as a service with their own token, each account given
+entries, the ServiceAccounts that log in as a service with their own token and that authenticate
+the `serviceAuth` routes a service calls as itself
+(`POST /v1/oauth/exchange/pod-sessions`), each account given
 once and named exactly, keyed by account in `Config.ServiceLogins`; read by the same parser as
 `BROKER_SERVICES` (`parseServiceAccounts`), so a namespace's `default` account is refused, and so
 is an account `BROKER_SERVICES` binds for a service's pods, since every such pod holds a token for
@@ -4205,11 +4207,11 @@ literal that is not
 a documented `exit*` constant or another such function's result. The CLI reference is the built
 binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 30 HTTP routes —
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 31 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the broker's design overview. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`,
-`renewAuth`, `accountAuth`),
+`renewAuth`, `accountAuth`, `serviceAuth`),
 which fixes both the credential `server.authenticate` checks and the caller the handler receives
 (a launcher `enroll.Credential`, an enrollment id, or, for an `accountAuth` route, the name
 `BROKER_API_ACCOUNTS` gives the calling service — which is all that credential says, so every
@@ -4233,6 +4235,13 @@ introspection alone never gives it approval or revocation authority
 (`TestEveryAccountRouteDeclaresItsPower` fails on a row that declares none).
 `accountCaller` is the check a service's token login makes
 (`machine.Service.VerifyServiceToken`), against the same verifier and with the same taxonomy);
+`serviceAuth` is that same check, taken as the whole of a route's authentication: the handler is
+given the service `BROKER_SERVICE_LOGINS` says the calling account logs in as, a token of an
+account that list does not name is `403 ACCOUNT_NOT_LISTED` and every other refusal is
+`accountCaller`'s, and the class holds `POST /v1/oauth/exchange/pod-sessions` alone. It is a
+class rather than a power of `accountAuth`'s because the two lists are two authorities: a
+deployment's daemon registering the pods it starts is not a caller that relays a person's
+decisions, and putting it on `BROKER_API_ACCOUNTS` would hand it the approval relays.
 `renewAuth` alone adds
 `ENROLLMENT_NOT_LIVE` for a valid session proof that names an ended enrollment. A store that
 cannot answer while authenticating is a 503 naming it. Every 500 is logged with its cause
@@ -4344,9 +4353,55 @@ writes as, the person it acts for, and its project scope — `named`, the one pr
 `BROKER_EXCHANGE_ACCOUNTS`/`BROKER_EXCHANGE_WORKFLOWS` fixes, or `person`, every project its
 person may write, which is what a person's own credential gets. Its refusals are one answer an
 operator can act on each: `ErrNoEntry`, `ErrNoPodBinding`, `ErrSessionMismatch`,
-`ErrSessionRequired`, `ErrSessionInvalid` and `ErrClaimMissing`. The whole exchange runs in one
+`ErrSessionRequired`, `ErrSessionInvalid`, `ErrClaimMissing` and, of a pod-session registration,
+`ErrSessionFixed`. The whole exchange runs in one
 transaction, because the claim on the session name and the token it is claimed for must land
 together or not at all.
+
+A pod exchanges under a session name only while a registration says that pod may
+(`oauth_pod_sessions`, migration 0020). What that binding holds, and what it does not: the name
+still belongs to the *principal*, the listed service account, so a registered successor keeps
+what its predecessor held — a relaunched pod of a free-session entry writes under the name again
+once its deployment registers that second pod uid, and no claim is ever re-pointed
+(`exchange.Set.Pod`, whose `Instance` is the pod uid for a free-session entry and empty for every
+other caller). Two instances of one account are separated by that registration and by nothing
+else: they are one principal, so `oauth_session_bindings` refuses neither, and the registration
+is the only thing that keeps one pod of an account out of another's session. An entry that fixes
+a session needs none at all, since the name is the configuration's and every pod of that account
+writes under it, which is why the registration route refuses such an entry by name
+(`409 SESSION_FIXED`) and the exchange gates nothing for it — the replacement pod of a
+fixed-session account, and the next run of a fixed-session workflow, are answered with the table
+empty. The broker asks the cluster nothing here either: a registration is a row, read in the
+exchange's own transaction (`oauthstore.Store.PodSessionRegistered`, through `s.db(ctx)`), so a
+deleted pod's token goes on exchanging until its own expiry exactly as the offline verification
+of that token does. And the authority is the registrar's: a registration is kept
+`oauthstore.PodSessionRetention` past its last write — 24 hours, derived from
+`oauth.kubernetesTolerance`, the longest a presented pod token can live, and not configured — and
+the store's sweep deletes it then, so a daemon that stops registering costs its pods their writes
+within that window, and one that keeps registering renews them.
+
+`POST /v1/oauth/exchange/pod-sessions` is where that row is written, and the only place
+(`handlers_pod_sessions.go`). It is the one `serviceAuth` route: the caller is the deployment's
+own daemon presenting its ServiceAccount token, the account `BROKER_SERVICE_LOGINS` lets log in
+as a service, which is the list it already holds for its token login — no new setting and no new
+account, and deliberately not `BROKER_API_ACCOUNTS`, which would hand it the approval relays. The
+body is `{"pod_token", "session"}`: the pod's own projected token for the broker's audience, the
+one a daemon enrolls that pod with, verified by the very verifier an enrolling pod's token is
+verified with (`Deps.Enroll.Pod.VerifyAccount`), and the name that pod may write under. The pod's
+account is the token's subject and its uid the `kubernetes.io` → `pod` → `uid` claim, so a
+registrar cannot register a pod whose token it does not hold and nothing but the name is taken on
+its word. The answer is `{pod_uid, session, expires_at}`, a later write extending that expiry
+(`greatest`, so no write shortens another's). Its refusals: `401 POD_TOKEN_EXPIRED` and
+`401 POD_TOKEN_INVALID` for the body's token, `400 POD_NOT_BOUND` for a token bound to no pod,
+`403 POD_ACCOUNT_NOT_LISTED` for a subject no `BROKER_EXCHANGE_ACCOUNTS` entry lists (a code of
+its own, since `ACCOUNT_NOT_LISTED` is the caller's own list refusing), `409 SESSION_FIXED` for an
+entry that fixes a session, and `400 SESSION_INVALID` for a name no request could name back. The
+gate itself is `oauth.Provider.registeredPodSession`, read beside `liveCredential` and before the
+library builds the answer, never inside `decide`: a refusal raised through the library's store
+hook arrives as `invalid_request`, and this one is `invalid_grant` — the subject token is sound
+and it is broker state that refuses, exactly as a session name another principal holds is — and
+its hint names the session and says that a pod writes under a session name its deployment
+registered for it.
 
 `POST /v1/oauth/introspect` (RFC 7662, `handlers_introspect.go`) is how a resource server reads
 one of those opaque access tokens back: the broker's tokens carry no claims in their own bytes,
@@ -4830,14 +4885,22 @@ exactly `envoy-listener`, `envoy-dispatch`, `envoy-broker`, and `agent-secrets`.
 `dev-oidc-issuer` serves `internal/oidc/oidctest`'s issuer, the Go tests' own, on a loopback port
 (a process `oidctest.TB` whose `Fatalf` exits), and keeps each `--token
 <audience>=<service account>=<file>` in its file, minted for `machine.MaxTokenLoginLifetime`,
-bound to a pod uid of its own, and rewritten by rename at four fifths of that life, as a kubelet
+bound to its account's pod uid (every `--token` of one service account names one pod, as a pod's
+projected tokens for two audiences do), and rewritten by rename at four fifths of that life, as a
+kubelet
 rewrites a projected token; it logs `issuer listening url=<url>` once every file is written. Its
 key lives in its memory alone, so its tokens stop verifying when it stops. `dev-broker.sh` starts
-it with two tokens, `account-token` for `system:serviceaccount:example-ns:example-dispatch` (the
-broker's `BROKER_API_ACCOUNTS` caller `dispatch`) and `exchange-token` for
+it with five tokens: `account-token` for `system:serviceaccount:example-ns:example-dispatch` (the
+broker's `BROKER_API_ACCOUNTS` caller `dispatch`), `listener-token` for its caller `listener`,
+`exchange-token` for
 `system:serviceaccount:example-ns:example-worker`'s pod at the exchange audience (its
 `BROKER_EXCHANGE_ACCOUNTS` entry, project `EXAMPLE` for `ada@example.com`, no fixed session),
-points the broker's `BROKER_K8S_OIDC_ISSUER` at it, and stops it on exit. It prints the exports a
+`pod-token` for that same pod at the broker's own audience, and `registrar-token` for
+`system:serviceaccount:example-ns:example-daemon`, its `BROKER_SERVICE_LOGINS` service login. Once
+the broker is healthy it makes one `POST /v1/oauth/exchange/pod-sessions` with the registrar
+token and `pod-token`, registering that pod for `example-worker-session`, which is the one name
+its exchange is answered under (an unregistered name is `invalid_grant`); it
+points the broker's `BROKER_K8S_OIDC_ISSUER` at the issuer, and stops it on exit. It prints the exports a
 second shell needs (`AGENT_SECRETS_URL`, `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`,
 `AGENT_SECRETS_APPROVER`, the helper's `AGENT_SECRETS_HELPER_SOCK`, `AGENT_SECRETS_OPERATOR_FILE`
 and `AGENT_SECRETS_MACHINE_FILE`, all in its workdir, where it writes the operator file, and

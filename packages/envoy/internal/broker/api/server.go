@@ -90,7 +90,8 @@ type Deps struct {
 	// balancer. See limits.go's clientAddress.
 	TrustedProxyHeader string
 	// OAuth is the machine login's OAuth provider and the token exchange. POST
-	// /v1/oauth/device_authorization, POST /v1/oauth/token and POST /v1/oauth/introspect are
+	// /v1/oauth/device_authorization, POST /v1/oauth/token, POST /v1/oauth/introspect and POST
+	// /v1/oauth/exchange/pod-sessions are
 	// mounted only when it is set, with DeviceLogin and both TokenHooks, which it then requires
 	// (Register panics without them).
 	OAuth *oauth.Provider
@@ -183,10 +184,13 @@ const oauthRoutes = "/v1/oauth/"
 
 // authenticate proves who r comes from, as route's authentication requires, or writes the
 // refusal. A bad or missing credential is a 401; a store that cannot answer is a 503 naming it,
-// never mistaken for a bad credential. A route a ServiceAccount token authenticates first spends
+// never mistaken for a bad credential. A route a ServiceAccount token authenticates — one a
+// listed caller's token does (accountAuth) and one a service's own login token does (serviceAuth)
+// — first spends
 // its source address's bucket (DefaultAccountLimit), a refusal being 429 RATE_LIMITED with
 // Retry-After, so a flood of forged tokens past that bucket costs no verification and no fetch of
-// the issuer's keys, and then must be a caller holding the power the row declares.
+// the issuer's keys; a listed caller must then hold the power its row declares, and a service's
+// token must name an account BROKER_SERVICE_LOGINS lists.
 func (s *server) authenticate(w http.ResponseWriter, r *http.Request, route apiRoute) (caller, bool) {
 	auth := route.Handler.auth
 	switch auth {
@@ -211,6 +215,11 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, route apiR
 			return caller{}, false
 		}
 		return who, true
+	case authService:
+		if s.refuseAccountAddress(w, r) {
+			return caller{}, false
+		}
+		return s.serviceCaller(w, r)
 	case authLauncher:
 		subject, err := s.proofSubject(r)
 		switch {
@@ -299,6 +308,37 @@ func (s *server) accountCaller(w http.ResponseWriter, r *http.Request) (caller, 
 		return caller{}, false
 	}
 	return caller{account: account}, true
+}
+
+// serviceCaller authenticates a service's own projected ServiceAccount token for authenticate,
+// the credential serviceAuth's routes take, and answers the service BROKER_SERVICE_LOGINS lets
+// that account log in as. It is the token login's own check
+// (machine.Service.VerifyServiceToken), so a route of this class and a token login accept exactly
+// the same credential: the same verifier, the same hour-from-issue bound on a copied token, and
+// the same list. An account that list does not name is 403 ACCOUNT_NOT_LISTED, the credential
+// being sound and the broker's list refusing; a broker that trusts no Kubernetes token issuer
+// answers 401 ACCOUNT_TOKENS_OFF, as this class's routes then authenticate no one. No refusal
+// repeats the token.
+func (s *server) serviceCaller(w http.ResponseWriter, r *http.Request) (caller, bool) {
+	account, err := s.deps.MachineLogin.VerifyServiceToken(r.Context(), bearer(r))
+	switch {
+	case errors.Is(err, machine.ErrTokenLoginsOff):
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKENS_OFF", "this broker trusts no Kubernetes token issuer, so no service authenticates with a ServiceAccount token")
+		return caller{}, false
+	case errors.Is(err, machine.ErrTokenExpired):
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_EXPIRED", "the ServiceAccount token has expired")
+		return caller{}, false
+	case errors.Is(err, machine.ErrTokenTooLongLived):
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_TOO_LONG_LIVED", "the ServiceAccount token lives longer than an hour from its issue")
+		return caller{}, false
+	case errors.Is(err, machine.ErrAccountNotListed):
+		writeError(w, http.StatusForbidden, "ACCOUNT_NOT_LISTED", "this ServiceAccount is not in BROKER_SERVICE_LOGINS")
+		return caller{}, false
+	case err != nil:
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_INVALID", "the ServiceAccount token does not verify")
+		return caller{}, false
+	}
+	return caller{service: account.Service}, true
 }
 
 // proofSubject verifies r's Proof header and returns who it authenticates, unwrapped: authLauncher

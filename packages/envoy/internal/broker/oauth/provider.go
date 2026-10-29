@@ -340,6 +340,24 @@ func (p *Provider) Token(w http.ResponseWriter, r *http.Request, hooks TokenHook
 	p.oauth.WriteAccessResponse(ctx, w, request, resp)
 }
 
+// RegisterPodSession records that the pod podUID of the service account account may exchange
+// under the session name session, and answers when that registration runs out
+// (oauthstore.PodSessionRetention from now, extended by every later write). It is what
+// POST /v1/oauth/exchange/pod-sessions does once it has verified the pod's own token, and the
+// only way a row the exchange's gate reads is written.
+//
+// The policy decides what may be registered, in the same words the exchange refuses a pod with
+// (exchange.Set.Registration): a token bound to no pod, an account no entry lists and an entry
+// that fixes a session are each refused, the last because the name such an entry writes under is
+// the configuration's and its pods need no registration at all. A caller maps those sentinels
+// onto its own refusals; anything else is the store's.
+func (p *Provider) RegisterPodSession(ctx context.Context, account, podUID, session string) (time.Time, error) {
+	if err := p.exchange.Policy.Registration(account, podUID, session); err != nil {
+		return time.Time{}, err
+	}
+	return p.store.RegisterPodSession(ctx, podUID, session)
+}
+
 // writeError answers err as the library's OAuth error JSON, logging a server error's cause.
 func (p *Provider) writeError(ctx context.Context, w http.ResponseWriter, request oauth2.AccessRequester, err error) {
 	if oauth2.ErrorToRFC6749Error(err).CodeField >= http.StatusInternalServerError {

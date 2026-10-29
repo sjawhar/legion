@@ -84,7 +84,9 @@ var subjectTokenAlgorithms = []jose.SignatureAlgorithm{
 const (
 	// kubernetesTolerance admits a projected service-account token's whole life. Kubernetes
 	// bounds one at 24 hours, so a shorter window would refuse a freshly minted token outright
-	// for expiring too far in the future.
+	// for expiring too far in the future. It is also what a pod-session registration is kept for
+	// past its last write (oauthstore.PodSessionRetention), since a registration must outlive
+	// every token the pod it was written for can still present.
 	kubernetesTolerance = 24 * time.Hour
 	// githubTolerance admits a workflow run's token, which lives minutes, while bounding how
 	// stale an iat the exchange accepts.
@@ -237,7 +239,9 @@ func keyFunc(keys KeySource) jwt.Keyfunc {
 // or not at all. The machine access-token subject type takes its decision here, between the
 // library validating the request and the library building the answer, and then holds its launcher
 // credential's row (liveCredential) until the token commits; the two JWT types took their
-// decision during validation, through Store.ExchangeSubject. The claim on the session name is made
+// decision during validation, through Store.ExchangeSubject. Beside liveCredential, and for every
+// type, the registration a pod's session name needs is read before the library builds anything
+// (registeredPodSession). The claim on the session name is made
 // for every type once the library has built the answer, because that is when the issued token's
 // expiry is set, and the claim must not end before the token it is made for.
 func (p *Provider) exchangeGrant(w http.ResponseWriter, r *http.Request) {
@@ -276,6 +280,10 @@ func (p *Provider) exchangeGrant(w http.ResponseWriter, r *http.Request) {
 			p.writeError(ctx, w, request, err)
 			return
 		}
+	}
+	if err := p.registeredPodSession(txCtx, session); err != nil {
+		p.writeError(ctx, w, request, err)
+		return
 	}
 	resp, err := p.oauth.NewAccessResponse(txCtx, request)
 	if err != nil {
@@ -381,7 +389,7 @@ func (p *Provider) decide(_ context.Context, request oauth2.Requester, subjectTo
 		return "", oauth2.ErrInvalidRequest.WithHintf("The subject token was refused: %s.", err).WithWrap(err).WithDebugError(err)
 	}
 	session.Subject, session.Username = claims.Person, claims.Person
-	session.Principal = claims.Principal
+	session.Principal, session.Instance = claims.Principal, claims.Instance
 	if session.Extra == nil {
 		// A session read back out of a row that carried no extra claims has none to write on.
 		session.Extra = map[string]any{}
@@ -450,6 +458,34 @@ func (p *Provider) liveCredential(ctx context.Context, subjectToken map[string]a
 	}
 	if err != nil {
 		return oauth2.ErrServerError.WithWrap(err).WithDebugError(err)
+	}
+	return nil
+}
+
+// registeredPodSession refuses an exchange whose claims name an instance (exchange.Claims.Instance,
+// a pod uid) that no registration names for the session the token would write under, reading
+// oauthstore.Store.PodSessionRegistered in the exchange's own transaction. An exchange whose
+// claims carry no instance is not gated: a fixed-session entry's pod, a workflow run and a dev box
+// each write under a name their configuration or their person decides, and nothing of theirs is
+// registered.
+//
+// It is the second, independent rule beside the claim on the session name: the claim refuses
+// another principal the name, and this refuses another pod of the same principal, which the claim
+// cannot tell apart because the name belongs to the account. It runs here rather than inside
+// decide because a refusal raised through the library's store hook arrives as invalid_request,
+// and this one is invalid_grant: the subject token is sound and it is the broker's state that
+// refuses it, exactly as a session name another principal holds is.
+func (p *Provider) registeredPodSession(ctx context.Context, session *oauthstore.ExchangeSession) error {
+	if session.Instance == "" {
+		return nil
+	}
+	name, _ := session.Extra[ClaimSession].(string)
+	registered, err := p.store.PodSessionRegistered(ctx, session.Instance, name)
+	if err != nil {
+		return oauth2.ErrServerError.WithWrap(err).WithDebugError(err)
+	}
+	if !registered {
+		return oauth2.ErrInvalidGrant.WithHintf("No registration says this pod may write under the session name '%s'. A pod writes under a session name its deployment registered for it.", name)
 	}
 	return nil
 }
