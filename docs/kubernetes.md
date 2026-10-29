@@ -3245,6 +3245,44 @@ names no repository and the default is then the project's owners sorted and the 
 (`appauth.GitHubCredential`, `credential.go`);
 [Daemon-launched controller](#daemon-launched-controller) has the rest of it.
 
+The token behind `DISPATCH_TOKEN_FILE` is the daemon's own, not the role's. The daemon reads it
+once at boot from `dispatch_token_file` (`readBoot`,
+`packages/daemon/internal/daemon/bootreads.go`) and puts it in every launch's secrets as
+`DISPATCH_TOKEN` (`secrets[dispatchTokenKey]`,
+`packages/daemon/internal/runtime/sandbox/manifest.go`, the key from `names.go`), and the role's
+launcher writes it into the generation's `g<generation>` directory beside the generation's other
+launch credentials. The daemon-launched controller takes the same path, because `prepare` adds
+that secret to every launch it builds, whichever kind of pod the role names. So every role of
+every issue of the project, and that controller, present the same bytes.
+
+When `dispatch_token_file` holds one of the deployment's shared agent tokens
+(`DISPATCH_AGENT_TOKEN`), Dispatch matches the bytes against them (`MatchesSharedAgentToken`,
+`packages/envoy/internal/dispatch/auth/agent_token.go`) and reads no person, no service and no
+project from them. Whatever the bearer, the acting session is the one the request body names
+(`bearerSessionActor`, `packages/envoy/internal/dispatch/api/server.go`), which for the daemon's
+own writes is `legion-daemon:<PROJECT>` (`DaemonSession`,
+`packages/daemon/internal/dispatch/client.go`), so a shared agent token names nobody. Dispatch
+takes any other bearer as a service token or a personal token (`optionalActor`, `server.go`), and
+every role's session then carries that token's service or owner as well.
+`dispatch whoami` in a role tells the two apart: for a shared agent token it answers
+`Session <id> runs under the shared token: no owner, …`
+(`packages/envoy-client/src/dispatch-execute.ts`).
+
+The one Kubernetes service-account token this runtime projects for a role is the broker's,
+`agent-secrets-token` under `runtime.kubernetes.agent_secrets` (`agentSecretsVolumes`,
+`manifest.go`), and it reaches the secrets broker and nothing else. Dispatch can verify a projected
+token minted for its own audience (`DISPATCH_OIDC_AUDIENCE` in
+`packages/envoy/cmd/dispatch/settings.go`, checked by
+`serviceTokenActor` in `packages/envoy/internal/dispatch/api/server.go`), and the runtime projects
+none. The operator's own pod volumes are outside this statement: the operator controls them.
+An operator-launched controller can differ: `legion controller start` points
+`DISPATCH_TOKEN_FILE` at the controller file's own `dispatch_token_file`
+(`controllerEnvironment`, `packages/daemon/cmd/legion/controller.go`), so it presents the token
+that file holds, which need not be the daemon's. What the broker can already issue is
+[The Dispatch identity the broker can issue](#the-dispatch-identity-the-broker-can-issue).
+`dispatch://INFRA-267` is where Legion's pods and its daemon get tokens of their own, and
+`dispatch://INFRA-264` is where Dispatch accepts one.
+
 Every role is told `LEGION_GH_OWNERS_DIR=/var/run/legion/gh`, the bundle's root (its own, bound
 there in its namespaces),
 `GH_CONFIG_DIR` at the issue's repository's owner's directory under it (the table above), and
@@ -4267,13 +4305,13 @@ spec:
         <the compute-class selector the deployment's declaration names>
       containers:
         - name: db
-          image: mirror.gcr.io/library/postgres:16   # the mirror, as every image here is pulled
+          image: mirror.gcr.io/library/postgres@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4   # the mirror, as every image here is pulled
           terminationMessagePolicy: FallbackToLogsOnError   # an exited server's last lines stay in its status
           env:
             - { name: POSTGRES_PASSWORD, value: "$password" }
           resources:
             requests: { cpu: "4", memory: 8Gi }      # the largest container asks at least 4 CPU
-          volumeMounts: [{ name: data, mountPath: /var/lib/postgresql/data }]
+          volumeMounts: [{ name: data, mountPath: /var/lib/postgresql }]
       volumes:
         - name: data
           emptyDir: {}                    # dies with the pod, by design
@@ -4459,7 +4497,7 @@ it names the class of the failure, which is what the readings below key on.
 
 It loops because `kubectl wait` cannot tell a role the server is listening. The pod carries no
 readiness probe, so `condition=Ready` means the container started, and a database spends its
-first seconds initialising with its listener closed — `postgres:16`'s entrypoint does exactly
+first seconds initialising with its listener closed — `postgres:18`'s entrypoint does exactly
 that. A connection *refused* in those first seconds is the workload reachable and not listening
 yet: the loop retries and it answers. When the minute runs out, the check prints the class of its
 last attempt alone, with a reading for it, and each reading is the next thing to check rather than
@@ -5900,6 +5938,67 @@ issue's pod (every role of it alike) and the image probe's.
   failed key is the fallback the gate exists to stop. Nothing restarts the Go daemon on its own: it
   runs off the cluster, and whoever started it starts it again.
 
+#### The Dispatch identity the broker can issue
+
+The secrets broker also serves an RFC 8693 token exchange at `POST /v1/oauth/token`, which every
+caller reaches with `client_id=dispatch-token-exchange` (`ExchangeClientID`,
+`packages/envoy/internal/broker/oauthwire`). It takes three kinds of subject token, each under its
+own `subject_token_type`: a pod's projected Kubernetes service-account token, minted for the
+exchange's own audience (`SubjectTokenTypeKubernetes`), a GitHub Actions workflow run's token
+(`SubjectTokenTypeGitHub`), and a machine login's own access token
+(`SubjectTokenTypeAccessToken`).
+
+The exchange answers with an opaque Dispatch access token, bound to the key the request's DPoP
+proof names (`exchangeGrant`, `packages/envoy/internal/broker/oauth/exchange.go`). The token
+lives `BROKER_ACCESS_TOKEN_SECONDS`, 900 seconds by default
+(`packages/envoy/internal/broker/config/config.go`).
+An issued token carries these claims and no others:
+
+- `session` — the session the token's writes are recorded as.
+- `person` — the person the session acts for.
+- `project_scope` — `named` or `person`, which says what `project` means.
+- `project` — the one project key a `named` token may write. A `person` token carries none.
+
+The subject token's own kind decides those claims
+(`packages/envoy/internal/broker/exchange/exchange.go`). A pod's token needs an entry for its
+service account, which gives the project and the person and may fix the session, and Kubernetes
+must have bound that token to a pod (`Set.Pod`). A workflow run's token needs an entry for its
+repository, its workflow path and its ref (`Set.Workflow`). A machine login's token needs no entry
+at all: the person is the login's approver, the scope is `person`, and the token names no project
+(`Set.Machine`). A session name belongs to one principal — the service account, the workflow, or
+the person — and the broker refuses `invalid_grant` to another principal that names it
+(`claimSession`, `packages/envoy/internal/broker/oauth/exchange.go`). A claim holds the name for
+`oauthstore.SessionRetention`, 90 days, past the expiry of the token the claim was made for
+(`BindSession`, `packages/envoy/internal/broker/oauthstore/exchange.go`). A name an entry fixes is
+held for that entry with no expiry: the broker reserves it for the entry unless another principal
+holds it (`ReserveSessions`, the same file), and the entry's own exchange takes it from any other
+holder.
+
+A resource server reads such a token back with `POST /v1/oauth/introspect`
+(`packages/envoy/internal/broker/api/handlers_introspect.go`). It authenticates with its own
+Kubernetes service-account token, of an account the broker lists in `BROKER_API_ACCOUNTS`. The
+answer carries `active` and, for a live token, the four claims, `exp`, `client_id` and `jkt`
+(`Introspection`, `packages/envoy/internal/broker/oauth/introspect.go`).
+
+A broker that sets neither `BROKER_EXCHANGE_K8S_AUDIENCE` nor `BROKER_EXCHANGE_GITHUB_ISSUER`
+accepts no pod's token and no workflow run's token, and says so at boot with the log line
+`token exchange state=unconfigured`. With either one set it logs `token exchange state=on`, naming
+which issuers it accepts and how many entries it holds (`packages/envoy/cmd/broker/main.go`). A
+machine login's access token is exchanged in both cases, because its subject type is always
+registered (`ExchangeConfig.tokenTypes`, `packages/envoy/internal/broker/oauth/exchange.go`). For
+the settings themselves, read the broker's generated configuration reference, which
+`docs/site/generators/broker-reference.sh` writes from the doc comments in
+`packages/envoy/internal/broker/config/config.go`, and the
+walk-through in `docs/site/src/content/docs/broker/guides/run-locally.md`, its section "Exchange a
+pod's token".
+
+Nothing Legion runs presents such a token at this release. A pod, the daemon, a tmux pane and the
+daemon-launched controller present the daemon's shared bearer that
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod) describes. An operator-launched controller
+presents the token its own file names. Dispatch accepts no broker token yet.
+`dispatch://INFRA-264` is where Dispatch accepts one and reads the session, the person and the
+project from it. `dispatch://INFRA-267` is where Legion's pods and its daemon get tokens of their
+own, and the daemon hands none out.
 
 #### Network shares
 

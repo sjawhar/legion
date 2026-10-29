@@ -127,7 +127,7 @@ plugins (`lib/install-plugin-profile.sh`); this one proves the skeleton.
 
 | input | default | meaning |
 | :--- | :--- | :--- |
-| `LEGION_E2E_PG_DSN` | unset | the Postgres to run against. Unset, the script starts its own `postgres:16` container (`legion-e2e-pg-<pid>`) on an ephemeral loopback port and removes it on the way out — the devbox path. Set, it starts no container: that is how CI hands it the job's service. |
+| `LEGION_E2E_PG_DSN` | unset | the Postgres to run against. Unset, the script starts its own PostgreSQL 18 container (`legion-e2e-pg-<pid>`) on an ephemeral loopback port and removes it on the way out — the devbox path. Set, it starts no container: that is how CI hands it the job's service. |
 
 Everything the run takes is its own, so two runs on one box — a CI job and a devbox session, or
 two sessions — neither collide nor report each other as a leftover:
@@ -242,7 +242,7 @@ route, and the Envoy role claim.
 
 What it stands up, all of it the run's own:
 
-- **Postgres**: `LEGION_E2E_PG_DSN` when set; otherwise a `postgres:16` container on tmpfs
+- **Postgres**: `LEGION_E2E_PG_DSN` when set; otherwise a PostgreSQL 18 container on tmpfs
   (`legion-e2e2-pg-<pid>`) on an ephemeral loopback port — tmpfs rather than the image's anonymous
   volume, which a box whose docker volume subsystem stalls would hang on.
 - **NATS and the Envoy listener** on the host: a `nats:2.10 -js` container
@@ -4094,21 +4094,20 @@ session database).
 . "$root/scripts/e2e/lib/bridge-tunnel.sh"     # sourced, never run
 ```
 
-The caller sets `root` (the checkout, for the pinned chisel client's `go install`), `operator` (the
-admin kubectl context, the only one this file uses), `work` (the run's scratch directory),
-`bridge_name` (the run's deterministic bridge pod/Service name, set before `bridge_start` runs, so
-the cluster-DNS name pods dial is known from it alone), `run_label` and, optionally,
-`bridge_priority_class` (a PriorityClass the bridge pod runs at; unset, it has none), beside
-`lib/namespace-rig.sh`'s own (`namespace`, and `op`, which every read and write here goes through)
-and `begin`, `note`, `fail` and `pass`. It defines `kill_harness`, which stops whatever the run
-drives. This file defines `bridge_start` and `bridge_stop`. The watchdog's two fatal paths, a
-port-forward it cannot restart within 60 s and a chisel client that exits, both go through
-`bridge_down`: it writes the reason and the bridge pod's last events (or, once the pod's are gone,
-its node's) to `$work/bridge-failed` for the caller's `FAIL` line, calls `kill_harness` and sends
-the script `SIGTERM`, and does nothing once `bridge_stop` has begun. The watchdog runs under the
-caller's `errexit`, so every command on that path that may fail (a `kill` of a process already
-gone, `kill_harness`) is guarded, and its `EXIT` trap, which stops the port-forward and the chisel
-client it last started, never changes its exit status.
+The caller sets `operator` (the admin kubectl context, the only one this file uses), `work` (the
+run's scratch directory), `bridge_name` (the run's deterministic bridge pod/Service name, set
+before `bridge_start` runs, so the cluster-DNS name pods dial is known from it alone), `run_label`
+and, optionally, `bridge_priority_class` (a PriorityClass the bridge pod runs at; unset, it has
+none), beside `lib/namespace-rig.sh`'s own (`namespace`, and `op`, which every read and write here
+goes through) and `begin`, `note`, `fail` and `pass`. It defines `kill_harness`, which stops
+whatever the run drives. This file defines `bridge_start` and `bridge_stop`. The watchdog's two
+fatal paths, a port-forward it cannot restart within 60 s and a chisel client that exits, both go
+through `bridge_down`: it writes the reason and the bridge pod's last events (or, once the pod's
+are gone, its node's) to `$work/bridge-failed` for the caller's `FAIL` line, calls `kill_harness`
+and sends the script `SIGTERM`, and does nothing once `bridge_stop` has begun. The watchdog runs
+under the caller's `errexit`, so every command on that path that may fail (a `kill` of a process
+already gone, `kill_harness`) is guarded, and its `EXIT` trap, which stops the port-forward and
+the chisel client it last started, never changes its exit status.
 
 | function | does |
 | :--- | :--- |

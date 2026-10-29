@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	natsgo "github.com/nats-io/nats.go"
 )
@@ -82,4 +83,42 @@ func connectCluster(t *testing.T, cluster *Cluster) *natsgo.Conn {
 	}
 	t.Cleanup(conn.Close)
 	return conn
+}
+
+// A member in lame duck closes its clients' connections over its lame-duck window, and a client
+// that knows the cluster's other URLs reconnects to one of them: the move a hub's server change
+// forces on every session. The client knows only the URLs it was given, since the members
+// advertise none of their own.
+func TestALameDuckMemberSendsItsClientsToAnotherMember(t *testing.T) {
+	cluster := StartCluster(t, 3)
+	conn, err := natsgo.Connect(cluster.URL(),
+		natsgo.DontRandomize(),
+		natsgo.Timeout(dialTimeout),
+		natsgo.ReconnectWait(retryInterval),
+		natsgo.MaxReconnects(-1),
+	)
+	if err != nil {
+		t.Fatalf("connect to the cluster: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	if got := conn.ConnectedServerName(); got != cluster.Name(0) {
+		t.Fatalf("the client is connected to %q, want the first URL's member %q", got, cluster.Name(0))
+	}
+	if discovered := conn.DiscoveredServers(); len(discovered) != 0 {
+		t.Fatalf("the members advertised %v to the client, want no URL beyond the ones it was given", discovered)
+	}
+
+	if err := cluster.Servers[0].LameDuck(); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(connectTimeout)
+	for !conn.IsConnected() || cluster.Member(conn.ConnectedServerName()) <= 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the client did not move to another member within %s of the lame duck: status %s, connected to %q", connectTimeout, conn.Status(), conn.ConnectedServerName())
+		}
+		time.Sleep(retryInterval)
+	}
+	cluster.Servers[0].Start(t)
+	cluster.AwaitReady(t)
 }
