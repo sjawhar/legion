@@ -103,12 +103,10 @@ type AfterFunc func(d time.Duration, f func()) Timer
 
 // unrepairedDelay is how long a stop nobody asked for waits for a repair before it is reported as
 // an ERROR. The bus's reconnect hook rewatches within seconds of a reconnect, so a minute passes
-// only when nothing is repairing the cache at all.
-const unrepairedDelay = time.Minute
-
-// repairFailedReason names the report a failed Rewatch makes: the repair the stop was waiting for
-// ran and did not work, so the ERROR need not wait out unrepairedDelay.
-const repairFailedReason = "repair failed"
+// only when nothing is repairing the cache at all. It is bus.RepairGrace itself: the bus reports a
+// rebuild of its own that has not succeeded at that same minute, so one outage reports once at one
+// bound rather than twice at two.
+const unrepairedDelay = bus.RepairGrace
 
 // WithAfterFunc sets how the watcher arms its unrepairedDelay wait, time.AfterFunc by default. The
 // production wait is a minute, so a test hands in its own, keeps the callback and fires it itself
@@ -193,22 +191,20 @@ func (w *Watcher) Start() {
 // store writes through the connection its cache reads. After a server restart conn is the
 // connection the store opened on, reconnected in place; when the bus replaces a closed connection,
 // conn is the new one and the cache moves to it. A failure leaves the watcher and the handle as
-// they were. After Stop it arms nothing and still moves the handle. A failure repairs nothing, so
-// when a stop nobody asked for is still outstanding it reports that stop as unrepaired
-// (reportFailedRepair) before returning the error unchanged, which its caller already logs.
+// they were and reports nothing of its own: it is not the end of the attempt to repair, because
+// the bus arms another repair within seconds (internal/bus/recovery.go, recoverUntilHealthy), so
+// the wait armed at the stop reports the outage once, at bus.RepairGrace (consume). The error is
+// returned unchanged, which its caller already logs.
 func (w *Watcher) Rewatch(conn *nats.Conn) error {
 	js, err := conn.JetStream(nats.MaxWait(10 * time.Second))
 	if err != nil {
-		w.reportFailedRepair()
 		return fmt.Errorf("open %s JetStream: %w", w.name, err)
 	}
 	kv, err := bus.OpenKeyValue(js, w.bucket)
 	if err != nil {
-		w.reportFailedRepair()
 		return fmt.Errorf("open %s KV bucket: %w", w.name, err)
 	}
 	if err := w.watch(kv, 0); err != nil {
-		w.reportFailedRepair()
 		return fmt.Errorf("watch %s KV bucket: %w", w.name, err)
 	}
 	return nil
@@ -596,8 +592,12 @@ func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64, started ti
 	// not at ERROR, because nothing repairs a watcher while the listener's connection to NATS is
 	// down: a line held back until a repair result is known would leave such an outage ending in a
 	// restart with no line at all, while an ERROR at the stop itself is noise whenever the rebuild
-	// a moment later repairs it. The ERROR is the repair's to make - a failed Rewatch reports at
-	// once, and this wait reports a stop nothing has repaired within unrepairedDelay.
+	// a moment later repairs it. This wait is the stop's one report. A Rewatch that failed makes
+	// none of its own, because it is not the end of the attempt: the bus arms another repair
+	// within seconds (internal/bus/recovery.go, recoverUntilHealthy), so one attempt that failed
+	// says only that the outage is still running. That refines, and does not drop, what INFRA-182
+	// settled - an ERROR when nothing has repaired the watcher within a minute - by making
+	// unrepairedDelay the single point it is reported at.
 	w.repairTimer = w.after(unrepairedDelay, func() {
 		w.reportUnrepaired("no repair within "+unrepairedDelay.String(), generation)
 	})
@@ -648,25 +648,14 @@ func (w *Watcher) rescanFrom(generation uint64) {
 	}
 }
 
-// reportFailedRepair reports the stop nobody asked for that is outstanding when a Rewatch fails, if
-// one is, as repairFailedReason: the outstanding stop is the current generation's (repairTimer).
-// When the generation moves between reading it here and reportUnrepaired, a repair or a Stop
-// cleared that stop, and a later stop has its own wait to report it.
-func (w *Watcher) reportFailedRepair() {
-	w.mu.RLock()
-	generation := w.generation
-	w.mu.RUnlock()
-	w.reportUnrepaired(repairFailedReason, generation)
-}
-
 // reportUnrepaired logs the one ERROR for the stop nobody asked for that the watcher of generation
-// made, naming reason: a repair that failed, or unrepairedDelay passing with none. It returns
-// silently unless that stop is still outstanding: repairTimer is set and generation is still
-// current. The generation tells a wait's own stop from a later one. time.AfterFunc's callback can
-// already be running when Stop returns false, so a wait a repair cleared can still call here after
-// the replacement has ended on its own and armed a wait of its own; reporting then would log that
-// stop moments after it happened and leave its own wait nothing to report. The same check under mu
-// makes the ERROR exactly one, since a failed repair racing the wait would otherwise log twice.
+// made, naming reason, which is now the wait's own alone: unrepairedDelay passed with no repair.
+// It returns silently unless that stop is still outstanding: repairTimer is set and generation is
+// still current. The generation tells a wait's own stop from a later one. time.AfterFunc's
+// callback can already be running when Stop returns false, so a wait a repair cleared can still
+// call here after the replacement has ended on its own and armed a wait of its own; reporting then
+// would log that stop moments after it happened and leave its own wait nothing to report. Clearing
+// repairTimer under the same mu is what makes the ERROR exactly one.
 func (w *Watcher) reportUnrepaired(reason string, generation uint64) {
 	w.mu.Lock()
 	timer := w.repairTimer
