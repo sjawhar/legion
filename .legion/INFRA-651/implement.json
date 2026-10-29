@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-651",
-  "completed": "2026-10-29T14:40:00Z",
+  "completed": "2026-10-29T16:10:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2469",
   "evidence": "dispatch://INFRA-651/artifact/infra651-measurements-tgz version 4 (sha256 235a9c6b3a85bdf11887976099ed126a5f014d347a8c0e8eada08872fe689ecb); round3/ holds this round's seed, identity and runs",
   "proof": [
@@ -117,6 +117,14 @@
       "observed": "fresh seed: ref_targets 1000, ref_target_versions 19471, ref_sources 310, artifact_refs 51071 (seed 2390 s), refs-shape PASS with mean rows 2508.3, share 0.0539, 231.0 B/row, refs-fetch 1000 issues, 310 with members, 0 not 200; second seed-refs exit 0 in 61 s and counts 1000|19471|310|310 before and after (every write replayed its stored 201 under refs-t<n>-v<v> / refs-s-<key>); with main's loadgen, seed --force exits 1 naming the missing seed-refs and dispatch_seed, seed.json and seed.meta.json are all still there; the mutated draw fails TestMakeRefPlan on its plan digest",
       "headSha": "9511fa836f8a947d17c7b03e86de1329b3fa0633",
       "negativeControl": "an unkeyed POST of the same target adds a version (ref-target-7 3 -> 4, version 4 created), which is the write the keys prevent; the overlay mutation fails 'the plan hashes to b37b4497..., want 7414809c...' while the old 1,000 / 19,471 / 310 checks still pass"
+    },
+    {
+      "criterion": "Tester round 5: the pull request merges into main, and CI runs on the code head",
+      "surface": "GitHub (pull request mergeability and check runs) and the repository's local checks at the merge head",
+      "command": "jj new legion/INFRA-651 \"main\"@origin; README conflict resolved keeping main's /api/v1/projects/{key}/related and /api/v1/related-checks rows and this PR's references?versions= row; go build ./... && go vet ./internal/dispatch/api/ ./loadtest/ && go test ./loadtest/ && go test ./internal/dispatch/api/ -run RoutesTable; envoy-client bun test; contracts typecheck; bunx biome check; push of the merge alone; gh api repos/sjawhar/legion/pulls/2469; gh run list --commit <merge>",
+      "observed": "three rows each byte-identical to their side; fingerprint 5d08eedf... before and after; every local check passes; GitHub mergeable true, mergeable_state blocked (required checks pending); CI run 40906744214 and PR Title run 40906744314 queued on e510068f, which carries no skip-checks line",
+      "headSha": "e510068fceaa6253513273e48f790374357223a6",
+      "negativeControl": "at f115e4e1 GitHub reported CONFLICTING/DIRTY and ceba343c had 0 check runs, because its push carried the skip-checks trailer"
     }
   ],
   "filesChanged": [
@@ -160,7 +168,8 @@
     "The forward merge drops packages/claude-envoy/dist from the diff: main now builds those bundles itself after each merge and a pull request never commits them (packages/claude-envoy/AGENTS.md:165); the merge's fingerprint changed only by those three files (PR comment 6492562896).",
     "Measured seed time 2232 s (references 23 min), so the README and stack.sh estimates say 37 to 50 min and about 23 min, not the 53 to 62 / 35 min first written.",
     "CI lint round: the sample file is now Biome-formatted (one number per line inside each array); same data, so the seed and every measurement of round 3 stand.",
-    "Review round 3: no new merge-rule runs. The server code is unchanged since a3cd6ffc, and the seed's plan is pinned by digest and gives the same counts and shape as round 3's seed, so round 3's runs stand. The architect narrowed this round to the reviewer's findings (13:13Z)."
+    "Review round 3: no new merge-rule runs. The server code is unchanged since a3cd6ffc, and the seed's plan is pinned by digest and gives the same counts and shape as round 3's seed, so round 3's runs stand. The architect narrowed this round to the reviewer's findings (13:13Z).",
+    "Round 5: the handoff push of round 4 carried skip-checks with the code commit, so CI never ran on 9511fa83; this round's forward merge e510068f was pushed on its own without the line, and this handoff is pushed after CI started on it."
   ],
   "openQuestions": []
 }
