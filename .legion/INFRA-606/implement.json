@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-29T00:53:57Z",
+  "completed": "2026-10-29T17:58:01Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -164,6 +164,22 @@
       "observed": "Replayed KiB per run 116,579 (base) vs 355 (head); per stale reconnect 11,612.6 vs 0.04; refetch requests 0 vs 60; mentioned-comment p50 in the window 3,850 vs 1,900 ms; after the restart 0 of 37 mentioned comments answered on base in every run vs all on head (p50 16,536 ms); Dispatch CPU-s in the 60 s after the restart 24.84 (23.95-25.56) vs 25.37 (23.75-27.04) - not lower; committed events/s 3.68 vs 3.68. dispatch://INFRA-606/artifact/infra606-criterion5-runs-tar-gz.",
       "headSha": "2eda91938cc216e419bd7eb347232fbf0ced49e5",
       "negativeControl": "The base side is the control: the same seed, flags and rng seed on main 0a1f1f90 replay every stale stream's 12,600 events and answer no mentioned comment in the minute after the restart."
+    },
+    {
+      "criterion": "Review round 3 finding 1 (architect's ruling): a comment_fallback_copies row is retried as an event is and never settled unpublished, so an outage longer than 10 passes still ends with the copy delivered once.",
+      "surface": "The outbox's fallback pass against Postgres with a fake NATS publisher that denies, or answers unreachable, for 12 passes and then accepts",
+      "command": "go test ./internal/dispatch/outbox/ -run 'TestAFallbackCopyNATSDeniesIsRetriedPastTheDeadLetterThresholdUntilItIsPublished|TestAFallbackCopyOutlivesANATSOutageLongerThanTheDeadLetterThreshold|TestAFallbackPassWritesNothingToARowClaimedSinceItsClaim' -count=1",
+      "observed": "Denied: 12 passes, attempts 1..12 each due retry.Delay(n), one Error line at 10, then one publish with the mention's dedupe key and the row settled. Unreachable: 12 passes with no attempt counted and no threshold line, then one publish. A pass whose claim was taken over writes nothing.",
+      "headSha": "fd8e79810484c1e5391f6bdecc169094ecdd20e6",
+      "negativeControl": "With the ErrUnavailable branch counting like a denial, the outage test fails on pass 1 (attempts=1); with the claim guard loosened, all three takeover cases fail."
+    },
+    {
+      "criterion": "Plan criterion 5 on the surface main now serves (/ws/live, after #2449): before and after on the committed load reproduction, five runs per side.",
+      "surface": "packages/envoy/loadtest (restart scenario ported to /ws/live) on a local stack: Postgres 16, NATS, the listener behind a 200 ms proxy; envoy-dispatch from base main 7c2effba and from head fd8e7981; one base-built seed (migration 140) restored per step; 2-vCPU gVisor pod",
+      "command": "for i in 1..5: LOADTEST_DISPATCH_SRC=<main 7c2effba export> run-step.sh base-1x-$i $FLAGS; run-step.sh head-1x-$i $FLAGS (FLAGS=--events 4 --sessions 400 --requests 60 --live 50 --live-resume 1 --live-stale 10 --restart-at 90s --mention-frac 0.2 --mentions 3 --envoy-rtt 200ms --rng-seed 1); stack.sh loadgen tables",
+      "observed": "Replayed KiB per run 122,839 (base) vs 3,647 (head); per stale reconnect 11,791 vs 0.43, each stale head resume replay_complete false then 6 refetch GETs (60 per run); mentioned comments answered in the window 3.4 vs 54.8 of 103, after the restart 0 vs 4-11 of 37; Dispatch CPU-s in the restart minute 21.50 (20.97-21.84) vs 18.59 (15.64-21.47); committed events/s 2.15 vs 2.47. dispatch://INFRA-606/artifact/infra606-criterion5-live-runs-tar-gz.",
+      "headSha": "fd8e79810484c1e5391f6bdecc169094ecdd20e6",
+      "negativeControl": "The base side: the same seed, flags and rng seed on main 7c2effba replays every stale socket's ~12,600 events and answers no mentioned comment in the minute after the restart."
     }
   ],
   "filesChanged": [
@@ -214,12 +230,16 @@
     "packages/envoy/internal/dispatch/api/delivery_live_hub_view.go",
     "packages/envoy/internal/dispatch/api/delivery_live_hub_worker.go",
     "packages/envoy/internal/dispatch/api/delivery_live_socket_test.go",
+    "packages/envoy/internal/dispatch/api/delivery_sweep.go",
     "packages/envoy/internal/dispatch/api/envoy_resolve.go",
     "packages/envoy/internal/dispatch/api/event_stream_relay.go",
     "packages/envoy/internal/dispatch/api/event_stream_relay_test.go",
     "packages/envoy/internal/dispatch/api/events.go",
     "packages/envoy/internal/dispatch/api/events_log_test.go",
+    "packages/envoy/internal/dispatch/api/handler_errors.go",
     "packages/envoy/internal/dispatch/api/issue_refs.go",
+    "packages/envoy/internal/dispatch/api/live_agent.go",
+    "packages/envoy/internal/dispatch/api/live_events.go",
     "packages/envoy/internal/dispatch/api/message_delivery.go",
     "packages/envoy/internal/dispatch/api/routes_table.go",
     "packages/envoy/internal/dispatch/api/routes_table_test.go",
@@ -234,12 +254,11 @@
     "packages/envoy/internal/dispatch/outbox/publisher.go",
     "packages/envoy/internal/dispatch/outbox/publisher_claimant_test.go",
     "packages/envoy/internal/dispatch/outbox/publisher_mentions_test.go",
-    "packages/envoy/internal/dispatch/store/migrations/0137_comment_deliveries_pending.census.sql",
-    "packages/envoy/internal/dispatch/store/migrations/0137_comment_deliveries_pending.up.sql",
-    "packages/envoy/internal/dispatch/store/migrations/0138_comment_fallback_copies.census.sql",
-    "packages/envoy/internal/dispatch/store/migrations/0138_comment_fallback_copies.up.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0141_comment_fallback_copies.census.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0141_comment_fallback_copies.up.sql",
     "packages/envoy/internal/dispatch/store/pool.go",
     "packages/envoy/loadtest/README.md",
+    "packages/envoy/loadtest/live.go",
     "packages/envoy/loadtest/mentions.go",
     "packages/envoy/loadtest/reconnect.go",
     "packages/envoy/loadtest/restart.go",
@@ -282,7 +301,11 @@
     "Review round 2: the reopen of comment.created and the outbox's claim-token guard are removed (architect's ruling); a copy held for a stranded pass's resend is a comment_fallback_copies row the outbox's fallback pass publishes to that one destination. Two red-test assertions read the copy from that row instead of the event row (comment_delivery_silent_listener_test.go, the copy count; comment_delivery_fallback_copy_test.go, the claimant case).",
     "Fallback rows stop at the outbox's dead-letter threshold (10 attempts): my finding, not the reviewer's.",
     "Forward merges of main at 615ea555 (migrations renumbered to 0137/0138, route pin 143) and 2eda9193 (#2396's lifetime model; its eventCursorCheck single-statement fix and lazy hub dial carried into this branch's relay and hub). pmdoc left as on main, broken until #2481.",
-    "Criterion 5's expectation that Dispatch CPU in the minute after a restart is lower than main's is not met at 1x over five runs per side (24.84 vs 25.37 CPU-s); recorded in the PR body's risk line."
+    "Criterion 5's expectation that Dispatch CPU in the minute after a restart is lower than main's is not met at 1x over five runs per side (24.84 vs 25.37 CPU-s); recorded in the PR body's risk line.",
+    "Forward merges of main at a9f77e43 (f9c01e92, with #2449), e4bf08ee and fd8e7981 (7c2effba): #2449 removed the SSE stream, the agent SSE stream and /ws/delivery, so the bounded resume, relay generations and agent budget now ride /ws/live; main's delivery sweep replaces this PR's stranded pass, and the outbox's predicates are built from the sweep's owed-attempt rule; this PR's 0137 index is dropped (main's 0138 creates it) and the fallback table is migration 0141.",
+    "The tester's red tests in comment_delivery_silent_listener_test.go changed only where they started the removed stranded pass (now one resumeOwedDeliveries pass) and the two claimLease substitutions the reviewer asked for; one test renamed from ...OrTheStrandedPassNotBoth to ...OrTheSweepNotBoth.",
+    "Main's TestARepeatedSubReplacesAnotherKind fails 2-4 of 20 on main alone; its rig (live_socket_test.go) now stalls the page's writes itself, the test unchanged.",
+    "Main's tests that pinned the relay and hub running after their last subscriber (TestTheBackgroundWaitHoldsFor...) are rewritten to this PR's stop-at-zero behaviour; the delivery-sweep comment tests wait for the post-response send."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -291,7 +314,7 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 9,
+  "round": 10,
   "answersTest": "896d09b4b50d9e93f28e4d71afd74b648fee346e",
-  "answersReview": "65fa5fb7e730508b2e974c103d4715213b759a09"
+  "answersReview": "443aae3579981f75df76c95cc31294cf76f19468"
 }
