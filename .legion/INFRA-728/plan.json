@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-728",
+  "completed": "2026-10-29T09:02:00Z",
+  "plan": "dispatch://INFRA-728/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the phase shape, the shared workspace, the handoff and the push; this issue's pushes are handoff-only except the code commits.",
+      "skill://legion-worker/references/pr-body.md: the six fields every proof entry needs, the one Fast-follow line, and what counts as a proof on a production-like surface.",
+      "skill://legion-worker/references/tools.md: task 0 installs Postgres, pgvector and three browser engines in a pod with no root; this names where they may land and what may be left resolving.",
+      "skill://legion-worker/references/skip-checks-trailer.md: the branch alternates code pushes and handoff-only pushes, and a wrong trailer stalls the issue.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md: main moved at 08:42Z (e21cfc61), so a forward merge is likely before review.",
+      "skill://legion-worker/references/default-branch-check.md: the App identity check before each push, in a workspace six roles share.",
+      "skill://ce-simplify-code: this issue is itself a simplify pass; run the skill's own three-reviewer pass over the branch diff before review.",
+      "skill://dispatch and skill://dispatch-first: before any Dispatch write, and before raising anything found outside this issue.",
+      "skill://asd-ste100: messages to the architect and the pull request's prose."
+    ],
+    "test": [
+      "skill://legion-worker: the tester's phase, its handoff and its own push.",
+      "skill://legion-worker/references/pr-body.md: the proof shape, the counts line, and the negative control each criterion needs; A2's four controls are written out in the plan.",
+      "skill://legion-worker/references/tools.md: the harness is already up from task 0 - source its env.sh, take your own lane and database, and stop nothing a sibling holds."
+    ],
+    "review": [
+      "skill://legion-worker: the reviewer's phase and the round's shape.",
+      "skill://legion-worker/references/merge-gate.md: approval of the head by SHA, and the order of the gate.",
+      "skill://legion-worker/references/review-threads.md: answering and resolving each thread, and judging a bot's finding.",
+      "skill://legion-worker/references/pr-body.md: judging both E2E lines and the Fast-follow line, and the rule that a prose-only finding is the reviewer's own fix."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "Moving the no-diagram row into doc.e2e.ts drops it from webkit and firefox, and A1 cannot be met as written: playwright.config.ts:167-172 and :193-198 select specs by file name and neither lists doc.e2e.ts.",
+        "answer": "The plan carries the move as the spec writes it, states the run matrix per project (A1 section: webkit and firefox run mermaid and deep-links only), records the coverage loss and its reason (the row guards a React remount, not an engine's scrolling), and names the two alternatives for the architect (move to deep-links.e2e.ts, or add doc to both testMatch regexes). Recorded as departure 2."
+      },
+      {
+        "finding": "A2's fault injection cannot fail the row it names: refocusAfterDiagrams returns a no-op when no diagram is waiting (refocus-after-diagrams.ts:24) and the moved row has no diagram. Also 'rows' is plural while one row moves.",
+        "answer": "A2 control 1 is the VersionView dependency-list mutation (the one VersionView.test.tsx:71 locks) for the moved row; control 2 keeps the re-run mutation for the row that stays, mermaid.e2e.ts:1033. The bar is 'fails at least once in 40 chromium runs', because round 3 of #2472 measured 5 of 40. Recorded as departure 1."
+      },
+      {
+        "finding": "'Any large drop' names no threshold, no baseline and no tolerance, and no way to produce a mid-page drop is named.",
+        "answer": "Task 2 fixes the rule's shape (running maximum minus the sample, against MAX_SCROLL_FALL_PX) and requires the constant to be measured: 20 chromium runs at the head give the largest legitimate adjustment, the task-2 control gives the collapse's own fall, and the two must be separated by at least five times or the implementer reports it rather than picking a passing number. A2 control 3 injects the mid-page drop with one scratch window.scrollTo line and also runs it against the old === 0 filter, which must pass."
+      },
+      {
+        "finding": "Running A1/A2 at all is a prerequisite the spec does not mention: the pod has no Postgres, no docker, no root and no browsers; and nothing in the Change list touches deep-links.e2e.ts.",
+        "answer": "Task 0 is the harness, with the three learnings that describe it, the engine proof, the SPA build and the handover note for the tester. deep-links stays in the run matrix as A1 names it: it is in all four projects and exercises the same landing and focus paths, so it is the cheap regression guard for the rows that move."
+      },
+      {
+        "finding": "The Exclude typing does not compile as a one-line change: the cache's writer settle, refusal's return and answer's local must narrow together.",
+        "answer": "Task 6 names all four sites (mermaid-diagrams.ts:108, :205, :184, :254), keeps LateDraw and drawBlock wide because fail() hands them unavailable, and chooses a local alias over exporting one from the proof-editor subpath, which is a published contract described in packages/proof-editor/AGENTS.md:50."
+      },
+      {
+        "finding": "Naming ProofDocument as the parent would replace a true comment with a false one: ArtifactDocument builds the highlight, ProofDocument only forwards it.",
+        "answer": "Task 7 names both with their real roles and paths (ProofDocument.tsx:918-926 renders and forwards; features/artifacts/ArtifactDocument.tsx:59-70 rebuilds the object) and keeps the sentence that says why the effect keys on the fields."
+      },
+      {
+        "finding": "'A shared e2e module' has no second consumer, and the two bullets conflict over where recordScrollEachFrame goes; the module must also own its Window keys, and the moved row's session actor changes.",
+        "answer": "Task 1 splits them so each helper has one home: recordScrollEachFrame has one caller and goes to doc.e2e.ts with its row, the other two scroll helpers and every worker helper go to e2e/mermaid-helpers.ts. The task moves the four Window keys into the new module's declare global and deletes them from mermaid.e2e.ts; __scrollEachFrame goes to doc.e2e.ts; the moved row reuses doc.e2e.ts's own session, which it asserts nothing about. The name carries no .e2e.ts, so no testMatch collects it. Task 4 gives the module set a real second consumer by de-duplicating blockId."
+      },
+      {
+        "finding": "A3 names fewer checks than the change needs, and 'no runtime behaviour changes' has no check: showPlainLayout's clearing half is covered by no test.",
+        "answer": "The A3 section gives both packages' own typecheck, lint and test commands with their package.json lines, names the required CI set, and decides 'no runtime behaviour change' task by task. Task 5 adds the missing unit case: a mermaid block that drew, then switched language, leaves an empty hidden preview and status; A2 control 4 is deleting the clearPreview call, which must fail it."
+      },
+      {
+        "finding": "'Trim the failing-worker row's duplicated text' has three readings: between-row duplication, the lead comment, and the closing assertions.",
+        "answer": "Task 3 takes the between-row duplication and the closing assertions (one file-local helper for both rows, since the no-worker row holds the other copy) and keeps each lead comment, because mermaid.e2e.ts:1183-1184 names the redeploy case the file header does not."
+      },
+      {
+        "finding": "Scope reconciliation: the review's fast-follow list also asked to remove focusInEditor's refocus parameter and the blockId copy, and the spec drops both.",
+        "answer": "The plan's fact table records that refocus is used (ProofDocument.tsx:342, call site :457-462), so no later reader re-removes it, and that lib.ts re-exports nothing and the view has no request counter left. blockId is taken as task 4, flagged as added scope and droppable; recorded as departure 3."
+      }
+    ]
+  },
+  "planReview": { "verdict": "approved", "rounds": 1 },
+  "specDepartures": [
+    {
+      "spec": "A2: 'With the page's jump re-run removed (restored afterwards), the moved past-version rows still fail.'",
+      "plan": "The moved row's control is putting highlight back in VersionView's effect dependency list, not removing the re-run; the re-run's removal is the control for the row that stays in mermaid.e2e.ts. The bar is one failure in 40 chromium runs.",
+      "evidence": "refocusAfterDiagrams returns a no-op when nothing is waiting to draw (packages/dispatch/web/src/features/doc/refocus-after-diagrams.ts:24), and the moved row is the one with no diagram at all (e2e/mermaid.e2e.ts:1072-1076), so removing the re-run leaves it passing. Round 3 of sjawhar/legion#2472 measured the unfixed VersionView failing 5 of 40 chromium runs.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A2's injection for the moved row becomes the VersionView dependency-list mutation; the re-run removal stays the control for the diagram-bearing row that does not move, and the bar is at least one failure in 40 chromium runs."
+        ]
+      }
+    },
+    {
+      "spec": "A1: 'The Mermaid, doc and deep-links browser specs pass at the head in chromium, iphone, webkit and firefox, one project at a time.'",
+      "plan": "Each project runs the specs it selects: chromium and iphone run mermaid, doc and deep-links; webkit and firefox run mermaid and deep-links. The moved row therefore keeps chromium and iphone only.",
+      "evidence": "The webkit and firefox projects select by file name and list neither doc (e2e/playwright.config.ts:167-172, :193-198), so naming doc.e2e.ts in those runs selects no test. Alternatives named for the architect: move the row into e2e/deep-links.e2e.ts, which is in all four projects, or add doc to both testMatch regexes at the cost of running about 30 unrelated doc rows in two more engines.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A1 reads: mermaid, doc and deep-links in chromium and iphone; mermaid and deep-links in webkit and firefox."
+        ],
+        "scope": "The moved row loses webkit and firefox coverage, which it has today only because it sits in mermaid.e2e.ts."
+      }
+    },
+    {
+      "spec": "The Change list's six bullets.",
+      "plan": "Task 4 adds a seventh edit: move blockId into e2e/editor.ts and delete both copies, in mermaid.e2e.ts and block-references.e2e.ts.",
+      "evidence": "mermaid.e2e.ts:136-137 says of itself 'Copied from block-references.e2e.ts, whose helpers each live in their own file'; the original is block-references.e2e.ts:31. Round 1 of sjawhar/legion#2472 listed it under 'fix now if you touch these files anyway', and this change rewrites the file holding the copy.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "One more spec file is edited (block-references.e2e.ts) and run in chromium and iphone. Dropping task 4 changes nothing else in the plan."
+      }
+    },
+    {
+      "spec": "Summary: 'None of it changes what a reader sees', with A3 asking only for typecheck and lint.",
+      "plan": "Task 5 adds one unit case to packages/proof-editor/tests/mermaid-code-block-view.test.ts: a mermaid block that drew, then switched language, leaves an empty hidden preview and an empty hidden status.",
+      "evidence": "The existing case at tests/mermaid-code-block-view.test.ts:253 switches a block that never drew, so the four statements the refactor extracts (mermaid-code-block-view.ts:157-160) are observed by no test. Without the case, the one way this refactor can change a reader's page - a drawing left standing above a JavaScript block - is proven by reading alone.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A3 gains: the new unit case passes at the head and fails when clearPreview is dropped from showPlainLayout."
+        ]
+      }
+    }
+  ]
+}
