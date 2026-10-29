@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-624",
-  "completed": "2026-10-28T23:05:00Z",
+  "completed": "2026-10-29T00:45:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2433",
   "proof": [
+    {
+      "criterion": "Review round 7: the broken-decision refusal lists every block to delete for ONE document edit (an agent following it never sends a delete that leaves the decision broken), and names no delete while block ids are unsettled",
+      "surface": "Go document service against Postgres: the refusal followed through the real code path (ApplyOps with the ids read from the reason, then SetAskBlockText, then settlement)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55433/postgres go test ./internal/dispatch/docs/ -count=1 -timeout 50m",
+      "observed": "ok (1013s). TestSetAskBlockTextRefusalOfAThreeListAskNamesEveryDeleteInOneEdit: the reason's 'the blocks to delete are \"<id3>\", \"<id4>\"' applied in one ApplyOps call, then edit-ask, ends valid with no word lost and every deleted word quoted; TestSetAskBlockTextRefusalOfABrokenAskNamesAPathThatApplies follows the one-edit wording; TestSetAskBlockTextRefusalBeforeBlockIDsSettleNamesNoDelete (a list with no id; an id repeated outside the ask) names no delete and says to retry once the document settles. Reviewer probes R7ThreeList, R7NoID and R7DuplicateID pass (R7WeirdID's own raw-character check is the known %q behaviour; the reason names no command).",
+      "headSha": "b0fea9fc9ab2766bc5523edcac07e2681a879aef",
+      "negativeControl": "At 39014e29 the three-list row fails (the refusal gives 0 delete lists; following 'delete the block or blocks' one list at a time is refused by doc-edit), and both unsettled-id rows fail (the reason names `a block with no id` or the repeated `dup`, whose delete removes an unrelated paragraph)."
+    },
     {
       "criterion": "Architect's design change (round 6): every ask edit of a decision that breaks its content rule is refused; the reason quotes every block in full with its id as data (no shell command or ops) and names one path: delete the block(s) to drop with dispatch doc-edit, then edit the ask",
       "surface": "the real dispatch CLI against the real Go server and Postgres on decisions two Chromium editors broke (throwaway spec from the tester's r7 probe, deleted after), and the Go document service",
@@ -102,5 +110,5 @@
     "Round 10: per the architect's design change, the two-list rebuild, the repeated-label rule and the protected-option rule are removed; their tests are removed (TestSetAskBlockTextRefusesAnEditLeavingASecondBulletList, TestSetAskBlockTextRepairsATwoListAskWhenSentEveryOptionItHolds, TestSetAskBlockTextRefusesOptionsDeletingAListTheAskRowNeverHeld, ...DroppingTheDescription..., ...RevertingADescription...) or folded into TestSetAskBlockTextRefusesEveryEditOfAnAskBreakingItsContentRule (repeated label, rich item, paragraph after the list), and the tester's TestSetAskBlockTextNewItemContentRefusalNamesStepsThatApply is replaced by TestSetAskBlockTextRefusalOfABrokenAskNamesAPathThatApplies."
   ],
   "openQuestions": [],
-  "round": 10
+  "round": 11
 }
