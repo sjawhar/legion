@@ -2,62 +2,49 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-567",
-  "completed": "2026-10-29T22:40:00Z",
-  "round": 3,
-  "answers": "Test round 2's three findings, as the architect settled each",
+  "completed": "2026-10-29T23:10:00Z",
+  "round": 4,
+  "answers": "Test round 3's three findings, narrowed by the architect to exactly those three",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2512",
-  "head": "4d8ae1f71ffaf5b761f294826e3dd03192ed4de6",
+  "head": "37ded4e7505541b77fc45dd98108b122e6f5cf8c",
   "proof": [
     {
-      "criterion": "The tester's finding 1, and Sami's router design (dispatch://INFRA-490/comment/e0ed1a3b): a pull request runs only the jobs its change needs, so the ci-images job must not run on every change",
-      "surface": "ci.yaml as GitHub parses it, and the router's own checks, which are what decide whether a job runs",
-      "command": "bash .github/scripts/check-ci-filters.sh ; bash .github/scripts/check-ci-filters.test.sh ; bash .github/scripts/ci-ok.test.sh ; and a PyYAML parse of ci.yaml for the job's wiring",
-      "observed": "`every ci.yaml filter matches every file its job reads (25 gates)`, 24 before. The parse reads ci-images as `needs: changes`, `if: needs.changes.outputs.ci_images == 'true'`, in ci-ok's needs and with `\"ci-images\": \"ci_images\"` in its SELECTED_BY; ci_filter_coverage.py's ALWAYS_RUN is back to `(\"changes\", \"lint\")` and ci-ok.sh is byte-identical to its pre-round-1 content. The gate is split by what each half reads: `check-ci-images.sh tree` prints `.github/ci-images.yaml holds 12 row(s); 35 reference(s) in 31 file(s) of CI's reach name one of those rows; of 6273 text file(s) swept, the 29 that name mirror.gcr.io are all in the exception list` and makes no network read, and `check-ci-images.sh package` prints `.github/ci-images.yaml holds 12 row(s), 12 of them in the package`. lint runs the tree half on every change, because a change that puts mirror.gcr.io back into a Go constant touches no file an image filter would name; ci-images runs the copy and then the package half, selected by its own filter.",
-      "headSha": "4d8ae1f71ffaf5b761f294826e3dd03192ed4de6",
-      "negativeControl": "bash .github/scripts/check-ci-images.sh with no mode -> exit 1, `this check takes one mode: tree reads the files of this tree and makes no network read, and package reads ghcr.io/sjawhar/legion/ci`; the harness has a case for no mode and for both. Its case `each mode runs its own half` refuses a tree with a docker.io Go string under `tree`, with a spy on CI_IMAGES_MANIFEST_HEAD proving zero package reads, and passes the same tree under `package` with four package reads and no tree refusal. 82 assertions, 67 before."
+      "criterion": "Spec, `Also delivered (part 1 of dispatch://INFRA-333)`: \"The pull request lists each job with its slowest green run and its limit\" — the tester's finding 1, the table being 56 rows against 58 jobs",
+      "surface": "The pull request body, rebuilt from the eleven workflow files at this head rather than edited by hand",
+      "command": "A PyYAML parse of .github/workflows/*.yaml joined with the measurement of main this change made in round 1, written straight into the body through `gh api repos/sjawhar/legion/pulls/2512 --method PATCH`",
+      "observed": "58 rows for 58 job definitions, counted back out of the live body with awk between the table's header and the section after it. `mirror-images.yaml | mirror` is gone with the workflow round 3 deleted. The three jobs the last rounds added are in it: `ci.yaml:ci-images` at 15 and `e2e.yaml:select` at 10, each a job with no green run in the window and so on the 30-minute rule's floor, and `e2e.yaml:proof`, whose limit is its matrix row's `timeout_minutes` in .github/e2e-scripts.json, 20 to 30 by proof. The five reusable-workflow calls carry none, as GitHub's keywords leave it out.",
+      "headSha": "37ded4e7505541b77fc45dd98108b122e6f5cf8c",
+      "negativeControl": "The same parse is the control that no limit is missing: it asserts every job that is not a reusable-workflow call carries a timeout-minutes and raises the job's name otherwise. It passes at this head, 58 jobs, 5 calls."
     },
     {
-      "criterion": "The tester's finding 1, second half — on a push to main that touches .github/ci-images.yaml, mirror-images.yaml and ci-images both ran the copy",
-      "surface": "The workflow files, and every file that named the deleted one",
-      "command": "grep -rIn 'mirror-images' over the tree ; bash .github/scripts/check-image-trigger-paths.sh ; bash .github/scripts/check-action-pins.sh ; a PyYAML parse of every workflow file",
-      "observed": ".github/workflows/mirror-images.yaml is deleted: ci.yaml runs on a pull request, a merge group and a push to main, so the ci-images job covers every event that can bring a new row, and one copy path is the whole of it. A failed copy is re-run with `gh run rerun`, as any job is. grep finds the name nowhere; the files that carried it are corrected (.github/ci-images.yaml, mirror-ci-images.sh, check-ci-images.sh's messages, check-bun-version.sh, ci.yaml's comments, AGENTS.md, .dispatch/architecture/release-engineering.md, the INFRA-567 solution page, rig.sh). Every workflow parses, every action is pinned, and every image trigger still covers every input its build reads (5 image builds). 58 job definitions, 5 reusable-workflow calls, every other carrying a timeout-minutes.",
-      "headSha": "4d8ae1f71ffaf5b761f294826e3dd03192ed4de6",
-      "negativeControl": "check-ci-images.sh's own staleness rule is the control that the deletion did not leave a lie behind: an EXCEPTIONS entry naming a file the tree no longer holds, or a reach file that is gone, fails the check, and the tree half passes."
+      "criterion": "The tester's finding 3 — the refusal discipline this change's own gates keep: a line a check cannot read is a refusal that names it, never a traceback",
+      "surface": "The selector itself, driven over fixture trees by a harness of its own, as every other check of this repository is",
+      "command": "bash .github/scripts/select-e2e-proofs.test.sh",
+      "observed": "`Results: 94 passed, 0 failed` over 15 cases. The `select` job's Python moved to .github/scripts/select-e2e-proofs.sh, where one table names each key a hosted row gives the matrix and what it must hold; the validation and the matrix entry are both built from that table, so a key added later is a key every row must then carry. Its refusals keep their old wording and gain: a hosted row missing keys, naming the row and every key it lacks; a key of the wrong kind, naming the row, the key and what it must hold; a row that is not an object or has no `script` string; an `elsewhere` row with no `needs` text; a file that is not JSON or a top level without both lists; and an empty EVENT or GITHUB_OUTPUT. e2e.yaml's select job runs the script, and ci.yaml's test job runs the harness beside its siblings.",
+      "headSha": "37ded4e7505541b77fc45dd98108b122e6f5cf8c",
+      "negativeControl": "The tester's own input is a case: a hosted row with `jj` deleted now fails with `::error file=.github/e2e-scripts.json::` naming the row and every key the matrix reads, and the case asserts the output holds no `Traceback` and that no matrix was written. A case over the repository's own .github/e2e-scripts.json and scripts/e2e/ proves the real data still passes, for a schedule run and for a workflow_dispatch of each of the five."
     },
     {
-      "criterion": "Spec version 6 from dispatch://INFRA-318 — a workflow runs the scripts/e2e proofs on a GitHub-hosted runner, the tester's finding 2",
-      "surface": "GitHub Actions in sjawhar/legion: the `e2e` label on this pull request",
-      "command": "The E2E proofs workflow: run 40957651922 at a744ce61, then run 40966595125 at 4d8ae1f7 after the fix that run found",
-      "observed": "Run 40957651922 settled and did its job, which is to find what a reading of the scripts cannot: `stage1-skeleton` and `dispatch-claimant-delivery` passed, and the three proofs that start the Go daemon failed at one line, read from the evidence artifact each job uploaded: `the daemon exited before it answered /healthz: missing required daemon tools: jj (set LEGION_JJ_PATH to an absolute executable path)`. The job gave them no jj. .github/e2e-scripts.json now marks the three rows that start the daemon and the job installs the jj the worker image ships for those rows alone. Run 40966595125 is that head's run. The artifacts themselves are the second half of the acceptance and they worked: `gh run download 40957651922 --name e2e-merged-root-waits-40957651922-1` gave transcript.log, proof.log, daemon.log, nats.log and output.log, which is how the cause was read.",
-      "headSha": "4d8ae1f71ffaf5b761f294826e3dd03192ed4de6",
-      "negativeControl": "The run itself was the control: three of five proofs failed, each naming its cause, so the workflow reports a failing proof rather than passing it. The select job's refusal path is the other: a workflow_dispatch naming a script of the `elsewhere` list fails with what that script's own header needs, and a script in neither list fails the run."
-    },
-    {
-      "criterion": "The tester's finding 3 — the pull request body's cache figures did not reconcile with the tree or with each other",
-      "surface": "The measurement itself, repeated in this pod, and every file that carries a figure",
-      "command": "Fill a scratch GOMODCACHE the way worker.Dockerfile's go stage fills it (`go mod download` over go.work from packages/daemon), then du -sh, du -sb, and a count of the module zips",
-      "observed": "The download cache the image copies is 380 MiB by `du -sh`, 392,260,597 bytes apparent, over 419 module zips, and holds 3,337 files of every kind, the .lock files and sumdb/ among them. The whole module cache, the extracted module trees included, is 2.2 GiB, and the image carries the download half alone. Every figure in packages/daemon/docker/worker.Dockerfile, docs/kubernetes.md and the pull request body is now exactly that, the 2.2 GiB is named as the whole cache rather than as the trees, and the file count is dropped rather than published: it is the one figure a reader cannot reproduce from what the image carries, which is why the tester and I measured it differently.",
-      "headSha": "4d8ae1f71ffaf5b761f294826e3dd03192ed4de6",
-      "negativeControl": "The tester's own five counts of the same directory (3,325; 2,906; 2,869; 2,450; 2,031) against my 3,337 are the control: a file count of a module cache depends on what the counter excludes, so no single one is reproducible, and the two figures that both of us reproduce exactly, 380 MiB and 419 zips, are the ones published."
+      "criterion": "The round's other checks, which the two changes above could have broken",
+      "surface": "The repository's own gates, over the real tree",
+      "command": "bash .github/scripts/check-ci-filters.sh ; check-ci-images.sh tree ; check-action-pins.sh ; check-private-names.sh ; a PyYAML parse of every workflow file",
+      "observed": "`every ci.yaml filter matches every file its job reads (25 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)`; `.github/ci-images.yaml holds 12 row(s); 35 reference(s) in 31 file(s) of CI's reach name one of those rows; of 6275 text file(s) swept, the 29 that name mirror.gcr.io are all in the exception list`; `every remote action across 20 files is pinned to a commit SHA`; `no file or path names the private deployment repository or the company`; every workflow file parses.",
+      "headSha": "37ded4e7505541b77fc45dd98108b122e6f5cf8c",
+      "negativeControl": "check-ci-filters.sh is itself the control on the new step: ci.yaml's test job gained a step, and the check fails a step whose reads its filter misses. .github/e2e-scripts.json is now named in the test filter and cited in ci_job_reads.py to that step."
     }
   ],
   "filesChanged": [
-    ".github/scripts/check-ci-images.sh: one required mode, tree or package, with the header's refusal list split between them",
-    ".github/scripts/check-ci-images.test.sh: every case under the mode that owns it, a case per mode on the real tree, a case for no mode and for both, and a case proving each mode runs its own half",
-    ".github/workflows/ci.yaml: lint runs the tree half; ci-images is an ordinary router job with its own ci_images filter and output, and runs the copy then the package half",
-    ".github/scripts/ci_filter_coverage.py, ci-ok.sh, ci-ok.test.sh, ci_job_reads.py: ALWAYS_RUN back to changes and lint, and the ci_images gate wired the ordinary way",
-    ".github/workflows/mirror-images.yaml: deleted, with every file that named it corrected",
-    ".github/e2e-scripts.json and .github/workflows/e2e.yaml: the rows that start the daemon get jj",
-    "packages/daemon/docker/worker.Dockerfile and docs/kubernetes.md: one cache figure, 380 MiB over 419 module zips, with the 2.2 GiB named as the whole module cache"
+    ".github/scripts/select-e2e-proofs.sh and .github/scripts/select-e2e-proofs.test.sh (new): the selector and its 94 assertions",
+    ".github/workflows/e2e.yaml: the select job runs the script in place of its heredoc",
+    ".github/workflows/ci.yaml: the test job runs the new harness, and its filter names .github/e2e-scripts.json",
+    ".github/scripts/ci_job_reads.py: the test gate's reads and whys name the new step",
+    "The pull request body: the job table rebuilt from the workflows, 58 rows for 58 jobs"
   ],
-  "deviations": [
-    "mirror-images.yaml is deleted rather than kept with workflow_dispatch alone, which the architect left to me. With ci-images selected on a pull request, a merge group and a push to main by the same paths, a workflow_dispatch-only file would be a second way to do one thing with no caller, and a failed copy is re-run with gh run rerun like any job."
-  ],
+  "deviations": [],
   "openQuestions": [
-    "E2E proofs run 40966595125 at this head, the run that carries the jj fix, had not settled when this phase completed. The run before it, 40957651922, is the evidence that the workflow runs the proofs and reports a failure with its cause and its artifacts; this one is the evidence that all five pass. The tester reads it with `gh run view 40966595125` and `gh run download 40966595125`.",
-    "Docs (main) run 40946334589 on scratch pull request #2520 is still pending in the `pages` concurrency group, where main's own runs are pending too. It would show docs-site.yaml's upload-pages-artifact step and docs-pages.yaml's deploy job skipping on a branch. #2520 stays open until it settles, because closing it would cancel the only surface that step has before the merge."
+    "E2E proofs run 40966595125 at 4d8ae1f7, which carries the jj fix, was still queued at completion; GitHub had 65 runs of this repository queued against 4 in progress. The settled run before it, 40957651922, is the evidence that the workflow runs the proofs and reports a failure with its cause and its artifacts. This round's selector change does not alter what that run does, so its result stands for this head too.",
+    "Docs (main) run 40946334589 on scratch pull request #2520 is still pending in the `pages` concurrency group, where main's own runs are pending. #2520 stays open until it settles.",
+    "The tester's observation, which is not a failure and which I have not acted on: with the package half of the gate selected by the ci_images filter, a row that .github/ci-images.yaml names and a consumer pins, but which the package no longer holds — a retention deletion, say — goes unnoticed until something in that filter changes. The per-row tag exists to stop exactly that, and the copy verifies each row's digest when it lands. A periodic run of `check-ci-images.sh package` would close it, and that is the architect's call rather than this round's, which was narrowed to three findings."
   ],
-  "discoveredComplexity": [
-    "A reading of a live proof's header does not tell you what its binaries need: all three live-daemon-proof scripts name go and awk alone, and the daemon they start refuses to boot without jj. Only the run found it, which is the argument for the workflow this issue adds."
-  ]
+  "discoveredComplexity": []
 }
