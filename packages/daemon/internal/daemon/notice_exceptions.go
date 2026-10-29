@@ -146,13 +146,11 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 			return fmt.Errorf("re-hold the notice of exception %s: %w", envelope.EventID, err)
 		}
 		if stoppedWithTree(lingers, held) {
-			parked, err := r.parkDecision(ctx, issue, root, notice, exception.DedupeKey)
-			if err != nil {
+			if err := r.parkDecision(ctx, issue, root, notice, exception.DedupeKey, reported.row); err != nil {
 				return fmt.Errorf("re-hold the notice of exception %s: %w", envelope.EventID, err)
 			}
 			r.log.Info("outbox notice not re-held: its architect stopped with its finished tree",
 				"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "reason", exception.Reason, "state", held.State, "stopping", held.Stopping)
-			parked.log(r.log, "row", reported.row, "kind", notice.Kind, "issue", issue, "root", root)
 			return nil
 		}
 	}

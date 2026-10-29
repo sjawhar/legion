@@ -777,14 +777,12 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if !controllerOnlyNoticeKind(value.Kind) && !validNoticeKind(value.Kind) {
 			return fmt.Errorf("unknown controller notice kind %q", value.Kind)
 		}
-		if (value.Kind == ParkedDecisionNotice) != (value.Decision != "") {
-			return fmt.Errorf("a %s controller notice carries a decision only when it is %s", value.Kind, ParkedDecisionNotice)
-		}
-		if value.Kind == ParkedDecisionNotice && (!validDecisionKind(value.Decision) || value.Root == "" || value.Ref == "" || !PersonActor(value.Actor)) {
-			return fmt.Errorf("a parked-decision notice needs a known decision, its tree's root, the decision's Dispatch reference and the person who made it")
-		}
-		if value.Kind != ParkedDecisionNotice && (value.Actor != "" || value.Ref != "" || value.Root != "") {
-			return fmt.Errorf("a %s controller notice carries an actor, a ref or a root; only a parked-decision does", value.Kind)
+		if value.Kind == ParkedDecisionNotice {
+			if !validDecisionKind(value.Decision) || value.Root == "" || value.Ref == "" || !PersonActor(value.Actor) {
+				return fmt.Errorf("a parked-decision notice needs a known decision, its tree's root, the decision's Dispatch reference and the person who made it")
+			}
+		} else if value.Decision != "" || value.Actor != "" || value.Ref != "" || value.Root != "" {
+			return fmt.Errorf("a %s controller notice carries a decision, an actor, a ref or a root; only a parked-decision does", value.Kind)
 		}
 	case SuperviseRequest:
 		if !validSuperviseOp(value.Op) {

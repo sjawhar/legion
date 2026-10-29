@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"log/slog"
 
 	"github.com/jackc/pgx/v5"
 
@@ -21,67 +20,52 @@ import (
 // decision.
 const parkedDecisionSource = "parked-decision"
 
-// parkedDecision is what parkDecision did with a notice: nothing (key empty) for a kind that is no
-// spec decision; else whether it relayed it (sent), found it relayed already, or relayed nothing
-// because the notice names no person (unnamed: gates.design off opened the gate, or the release
-// before this one queued the notice, which then carries no ref either).
-type parkedDecision struct {
-	key     string
-	sent    bool
-	unnamed bool
-	ref     string
-}
-
-// log writes the line that pairs an undelivered decision with what became of it.
-func (p parkedDecision) log(log *slog.Logger, args ...any) {
-	msg := "outbox parked decision sent to the controller"
-	switch {
-	case p.key == "":
-		return
-	case p.unnamed:
-		msg = "outbox parked decision not relayed: it names no person"
-		args = append(args, "ref", p.ref)
-	case !p.sent:
-		msg = "outbox parked decision already sent to the controller"
-	}
-	log.Info(msg, append(args, "key", p.key)...)
-}
-
 // parkDecision hands the project's controller the person's spec decision a notice reports when
 // nobody inside its tree will hear it (the notice executor's two undelivered branches, the
 // re-hold's stopped-with-tree branch): one parked-decision controller notice for issue, naming
 // root, and the decision kept for root's next admission, in a transaction of its own that marks
 // key processed and owns the commit hook the write registers (projectRecords, intake.OnCommit), so
-// the notice's lane wakes as it commits. A notice that names no person relays nothing.
-func (r *outbox) parkDecision(ctx context.Context, issue, root string, notice record.Notice, key string) (parkedDecision, error) {
+// the notice's lane wakes as it commits. It does nothing for a kind that is no spec decision, and
+// relays nothing for a notice that names no person (gates.design off opened the gate, or the
+// release before this one queued the notice, which then carries no ref either). Each outcome logs
+// the line that pairs the undelivered row with what became of its decision: sent, already sent, or
+// not relayed.
+func (r *outbox) parkDecision(ctx context.Context, issue, root string, notice record.Notice, key string, row any) error {
 	decision, ok := record.SpecDecision(notice.Kind)
 	if !ok {
-		return parkedDecision{}, nil
+		return nil
 	}
+	args := []any{"row", row, "kind", notice.Kind, "issue", issue, "root", root, "key", key}
 	if !record.PersonActor(notice.Actor) {
-		return parkedDecision{key: key, unnamed: true, ref: notice.Ref}, nil
+		r.log.Info("outbox parked decision not relayed: it names no person", append(args, "ref", notice.Ref)...)
+		return nil
 	}
 	now := r.now().UTC()
-	row, err := record.NewOutboxRow(issue, record.ControllerNotice{Kind: record.ParkedDecisionNotice, Decision: decision, Root: root,
+	outboxRow, err := record.NewOutboxRow(issue, record.ControllerNotice{Kind: record.ParkedDecisionNotice, Decision: decision, Root: root,
 		Ref: notice.Ref, Actor: notice.Actor, Version: notice.Version, Reason: notice.Reason}, now)
 	if err != nil {
-		return parkedDecision{}, err
+		return err
 	}
-	parked := parkedDecision{key: key}
+	sent := false
 	scoped, committed := intake.WithCommitHooks(ctx)
 	if err := pgx.BeginFunc(scoped, r.pool, func(tx pgx.Tx) error {
 		fresh, err := r.records.MarkProcessed(scoped, tx, parkedDecisionSource, key)
 		if err != nil || !fresh {
 			return err
 		}
-		parked.sent = true
+		sent = true
 		if err := r.records.AddParkedDecision(scoped, tx, record.ParkedDecision{Root: root, Ref: notice.Ref, Decision: decision, Actor: notice.Actor, At: now}); err != nil {
 			return err
 		}
-		return r.records.Enqueue(scoped, tx, row)
+		return r.records.Enqueue(scoped, tx, outboxRow)
 	}); err != nil {
-		return parkedDecision{}, fmt.Errorf("send the controller the decision %s carried on %s: %w", key, issue, err)
+		return fmt.Errorf("send the controller the decision %s carried on %s: %w", key, issue, err)
 	}
 	committed()
-	return parked, nil
+	msg := "outbox parked decision sent to the controller"
+	if !sent {
+		msg = "outbox parked decision already sent to the controller"
+	}
+	r.log.Info(msg, args...)
+	return nil
 }
