@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-745",
-  "completed": "2026-10-29T22:55:00Z",
+  "completed": "2026-10-30T00:05:00Z",
   "proof": [
     {
       "criterion": "2 - a session following an issue's topic is shown an agent's comment on it, with the fix's two halves joined on one real wire frame",
@@ -75,6 +75,14 @@
       "observed": "the unforced create answers 409 POSSIBLE_DUPLICATE naming ACME-1, which is the lane's failure; the forced one answers 201 with key ACME-2, and the comment the helper posts next on it answers 201. check-ci-filters.sh exits 0, ending 'every ci.yaml filter matches every file its job reads (24 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)'. The three skills are 1998 words, and skills-guard.test.ts is 10 pass, 0 fail, 1 environmental skip (it needs LEGION_TEST_OMP). The live test compiles under its own tag.",
       "headSha": "e09361f829a93e872a2a26fecb74cca55daa67ee",
       "negativeControl": "each lane's failure reproduced at this head before its fix: the unforced create's 409 above, the filter check's refusal naming what it lacked ('on.push.paths lacks packages/envoy/internal/metrics/*' once the filter had grown and the push workflow had not), and the word count at 2016 against the guard's 2000."
+    },
+    {
+      "criterion": "the tester's failure of round 5 (the trimmed skill dropped a rule) and the architect's instruction that the missing CI is a conflicting pull request, not a trailer: the rule is restored under the word guard, and main is merged forward with each resolution named",
+      "surface": "the guard the three Dispatch skills are held by, the repository's own check-ci-filters.sh against main's filters, and the branch's Go and TypeScript suites, all at the merge head; the pull request's own state on GitHub",
+      "command": "cat skills/dispatch/*.md skills/dispatch-first/*.md skills/dispatch-writing-specs/*.md | wc -w; cd packages/pi-envoy && bun test src/skills-guard.test.ts; jj new legion/INFRA-745 main@origin -m 'merge: resolve conflict against main@origin', resolve packages/envoy/AGENTS.md three-way; bash .github/scripts/check-ci-filters.sh; cd packages/envoy && go vet ./... and go test ./internal/bus/ ./internal/dispatch/outbox/ ./internal/dispatch/events/ -count=1; bun test in envoy-client and contracts; gh pr view 2508 --json mergeable,mergeStateStatus",
+      "observed": "the 'Close what you opened' bullet reads 'once anything makes it needless: another answer, a later write, work dropped', so an ask made moot by any cause carries its instruction again, and the three skills are 1996 words with skills-guard.test.ts 10 pass, 0 fail. The pull request was CONFLICTING/DIRTY at 72dfa6a9, which is why no pull_request workflow had started; after the merge of main 61e55841 it reads MERGEABLE and GitHub started runs at this head. check-ci-filters.sh is clean against main's filters (24 gates, 1 push workflow), go vet ./... is clean, internal/bus 330 s, outbox 181 s, events 5 s, envoy-client 1096 tests, contracts 317 tests, all green.",
+      "headSha": "1b8ecc251f0bccd4349cb9496cea0b2fe3b1b60c",
+      "negativeControl": "the merge's one conflict is the control for taking a side: packages/envoy/AGENTS.md's publish row, where main's version still carries the sentence review round 1 found false ('which only a core publish's confirmation produces') and this branch's carries the correction without main's holder_lapsed sentence. The merged row has both, and the file now holds no 'only a core publish' and two citations of deniedPublish."
     }
   ],
   "filesChanged": [
