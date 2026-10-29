@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-756",
+  "completed": "2026-10-29T16:16:00Z",
+  "plan": "dispatch://INFRA-756/artifact/plan-md (version 1). Summary: .github/workflows/ci.yaml gains the router job envoy-go-race-docs, which runs `go test -race -timeout 60m ./internal/dispatch/docs/` alone with timeout-minutes 70, its own Postgres service and DISPATCH_TEST_DATABASE_URL, a restore-only go-envoy cache, no Bun, and its own filter envoy_go_race_docs (the docs package's 24-directory closure, its three testdata trees, the store migrations and pmdoc schema it embeds, go_workspace, ci.yaml and packages/contracts/fixtures/decision-blocks/*). envoy-go-race keeps its name, filter, two steps and timeout-minutes 75 and loses ./internal/dispatch/docs/ from step 1, whose step name and pinned text move with it in .github/scripts/ci_job_reads.py; the decision-blocks fixture pattern moves to the new filter, since docs/approval_carry_test.go:26 is its only reader in packages/envoy. ci-ok gains the job in needs and SELECTED_BY (not PULL_REQUEST_ONLY). Four prose places are corrected: packages/envoy/AGENTS.md:661-664 and :2454, ci.yaml's go-envoy cache sentence, and docs/testing.md:40-42's dead workflow path. No changelog fragment: no package behaviour changes.",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker and references/pr-body.md: the body template, what a proof is, the no-deferral rule, and that the implementer never waits on this pull request's CI.",
+      "skill://legion-worker/references/default-branch-check.md: the App identity of every commit is checked before the push, since every role shares this workspace.",
+      "skill://legion-worker/references/skip-checks-trailer.md: this change's push carries code, so it carries no trailer; only the handoff-only push does.",
+      "skill://legion-worker/references/tools.md: the image's python3 has no PyYAML, and the drift check needs it, so the pinned runner form (uv run --with pyyaml==6.0.3) is used rather than an unpinned install.",
+      "skill://ce-simplify-code: pr-body.md requires one pass at the head in the first implementing round, and the Thermo line records its result.",
+      "skill://dispatch-first and skill://dispatch: the bus red on main belongs to dispatch://INFRA-750; search before raising anything, and open no new issue.",
+      "skill://asd-ste100: the pull request body and every comment a person reads.",
+      "skill://envoy: the message that reports the bus red and the INFRA-757 naming collision to the architect."
+    ],
+    "test": [
+      "skill://legion-worker and references/pr-body.md: the tester verifies the implementer's proof, adds its own E2E line, reads CI at the head it judges and re-runs no lane as evidence.",
+      "skill://legion-worker/references/merge-gate.md: what the round records before the reviewer reads the head.",
+      "skill://envoy: reading the pull request's checks and messaging the architect.",
+      "skill://dispatch-first and skill://dispatch: routing a red that belongs to dispatch://INFRA-750 rather than filing anything.",
+      "skill://asd-ste100: the E2E (tester) line and the measured time it writes into the body."
+    ],
+    "review": [
+      "skill://legion-worker/references/merge-gate.md: the approval, the approved head and READY's rules for this change.",
+      "skill://legion-worker/references/review-threads.md: replies to and resolution of each thread, and how a bot's finding is judged.",
+      "skill://legion-worker/references/pr-body.md: the reviewer writes Look at first and Not proven / risk, and checks the measured time acceptance 3 requires is in the body.",
+      "skill://thermonuclear-deep-review and skill://thermonuclear-code-quality: the pair the reviewer runs at the reviewed head.",
+      "skill://asd-ste100: the review text a person reads."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1 (owner-only): dispatch://INFRA-747's carry note section 4, carried to dispatch://INFRA-757, keeps envoy-go-race as the docs-only job and moves the other packages out, which collides with this issue's design over job names.",
+        "answer": "The plan follows INFRA-756's acceptance, which pins the other arrangement (docs in 'a job of its own'; 'the new job has its own filter (the docs package's closure)'); it names the job envoy-go-race-docs and the filter envoy_go_race_docs, which fit INFRA-757's own envoy-go-race-<group> table, so its rebase keeps its four jobs and drops the line that renames envoy-go-race. The plan's Coordination section records this and the planner reports it to the architect, which owns telling INFRA-757's tree."
+      },
+      {
+        "finding": "F2: the acceptance never names Postgres, and a docs race job without DISPATCH_TEST_DATABASE_URL would be green having skipped nearly every test (storetest.Open calls t.Skip, storetest.go:57-61; persistence_test.go:19 makes storetest.Main the package TestMain).",
+        "answer": "T2 copies the services.postgres block and the env from ci.yaml:2280-2292 and says it is load-bearing; acceptance 3a's check reads the job log for `ok  github.com/sjawhar/envoy/internal/dispatch/docs  <N>s` and for the absence of the 'DISPATCH_TEST_DATABASE_URL must be set' line; negative control 3 shows that skip locally."
+      },
+      {
+        "finding": "F3 (owner-only part): the race lane is red on main today on internal/bus (TestADrainEndsTheKVWatchersBeforeTheConnection, drain_kv_watcher_test.go:27, in run 40877712458 at 14d907b6 - the very job the spec's Evidence cites), so acceptance 3's 'the remaining race lane passes' is not in this change's control.",
+        "answer": "The plan's rule for 3b: a required red returns the issue to implementing, the implementer traces it by test name, re-runs the failed jobs once (the one re-run pr-body.md allows), records the run ids and the trace under Not proven / risk, and reports it to the architect naming dispatch://INFRA-750 as the owner. No role fixes a bus race here. Recorded as this plan's one spec departure, for the architect to settle."
+      },
+      {
+        "finding": "F4: the 1773 s baseline was measured with other race binaries on the same runner (job 123461966609: six package times summing to 5125 s inside 1842 s of step wall), and 'its measured time' names no number; docs has 625 top-level tests and two t.Parallel() calls, so it will not use the freed cores itself.",
+        "answer": "The plan defines the measured time as the package line `ok  .../internal/dispatch/docs  <N>s` plus the job's wall time, both quoted with run and job ids, and gives the off-CI re-run command. It states that -timeout 60m and timeout-minutes 70 stand whatever the number is, since acceptance 1 fixes them, and records the contention reading as the reason the number may fall far below 1773 s."
+      },
+      {
+        "finding": "F5 (owner-only): the spec's Evidence is wrong in two ways - the cited baseline job failed on internal/bus, not on time, and the 69 lines at job 123503246603 are failures (62 from the test binary's deadline), not tests refused by a time guard; acceptance 4's third non-goal has no subject, since both docs time guards already t.Fatalf.",
+        "answer": "The plan records all three as corrections in its own 'Corrections to the spec's Evidence' section and the planner names them in the completion summary; the spec stays as approved and nothing the plan builds changes."
+      },
+      {
+        "finding": "F6: hidden requirements a router job carries - no Bun, the cache question, the timeout arithmetic in a comment, the old job's stale prose and pinned step name, draft/merge-queue/concurrency/required-check behaviour, and a second Postgres service.",
+        "answer": "T2 states each: no Bun (no subprocess in the package), a restore-only go-envoy cache in dispatch-browser-multiprocess's shape (ci.yaml:1980-1990), timeout-minutes 70 with its arithmetic in a comment, an if: with no github.event_name term and no concurrency of its own, and no ruleset change since only ci-ok is required. T3 rewrites the old job's comment, step name and the stale 880 s figure, and T6 adds the ci.yaml cache-family sentence. The second Postgres runs on its own runner and storetest clones a template database per test."
+      },
+      {
+        "finding": "F7: check-ci-filters.sh never fails a filter that is wider than the closure, so copying envoy_go_race's packages/envoy/** would pass; the narrow closure is the plan's choice and rests on hand-kept RULES.",
+        "answer": "The plan chooses the narrow closure, because a wide filter would run a 20-to-30-minute race job on every packages/envoy change, which is the parent issue's whole point, and records the grep that verified the docs package's out-of-package reads (only ci_job_reads.py:258-260 are unconditional; the corpus-gated reads stay out, as the router page says)."
+      },
+      {
+        "finding": "F8: removing one package from envoy-go-race forces an edit of the gate's pinned step name, text and package list, and no filter edit; neither check-ci-filters.test.sh nor ci-ok.test.sh reads the real table, so no test must be extended.",
+        "answer": "T5 moves the step name and the pinned text with the step, T3 keeps the envoy_go_race filter except the decision-blocks pattern (whose only reader in packages/envoy is docs/approval_carry_test.go:26), and T7.2 still runs both script tests as a cheap sanity check."
+      },
+      {
+        "finding": "F9: four prose places state what the lane is - packages/envoy/AGENTS.md:661-664 and :2454, ci.yaml's go-envoy cache sentence, and docs/testing.md:40-42, which names a workflow file this repository no longer has.",
+        "answer": "T6 edits all four, the docs/testing.md path correction included, and notes that INFRA-757 also rewrites the two AGENTS.md lines, so the edits stay minimal and contiguous."
+      },
+      {
+        "finding": "F10: acceptance lines no machine could check as written - the total test set, 'the closure as the drift check computes it', the measured time and the remaining lane.",
+        "answer": "The plan's acceptance table gives each a command: a go list diff for the total set (T7.4), the drift check's '24 gates, 0 uncovered' plus a PathsFilter selection proof with three positive and three negative paths (T7.1, T7.5), the job log's package line for the time, and the 3b rule above for the remaining lane."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 2
+  },
+  "specDepartures": [
+    {
+      "spec": "Acceptance 3 asks, without qualification, that on this pull request's own runs the docs race job passes and 'the remaining race lane passes'.",
+      "plan": "The plan proves the docs job unconditionally, and judges the remaining lane as: green, or a red traced by test name to a package this change does not touch, re-run once by the implementer, recorded in the body under Not proven / risk with the run ids and the trace, and reported to the architect naming its owning issue. No role fixes a bus race in this pull request.",
+      "evidence": "Run 40877712458 at 14d907b6 - the job the spec's own Evidence cites, 123461966609 - ended envoy-go-race as a failure with 'FAIL github.com/sjawhar/envoy/internal/bus 315.651s' and '--- FAIL: TestADrainEndsTheKVWatchersBeforeTheConnection/consumer_already_gone' (packages/envoy/internal/bus/drain_kv_watcher_test.go:27); run 40885743586 at 1f5b0828 was red too. dispatch://INFRA-750 owns that package's chance failures and already folds in TestAStuckDeliveryStillEndsTheKVWatchers (drain_hook_edges_test.go:211), but does not name this test. dispatch://INFRA-747's architect gave the same trace-and-rerun clause to the sibling issue (dispatch://INFRA-747/comment/2791753c).",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "3: the remaining race lane passes - judged as green, or as a red outside this change's packages that is re-run once, recorded and routed to its owning issue."
+        ]
+      }
+    }
+  ]
+}
