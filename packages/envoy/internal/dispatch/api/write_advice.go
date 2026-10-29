@@ -37,14 +37,15 @@ type writeAdvice struct {
 	*documentBlocks
 	// editBlocks is set by a document edit; nil omits its field.
 	*editBlocks
-	// Suggestions is LEGION-550's write-time feedback, set only on an issue or ask creation;
-	// nil (omitted) everywhere else.
+	// Suggestions is the related-item check's result, set only on an issue or ask
+	// creation; nil (omitted) everywhere else.
 	Suggestions *model.Suggestions `json:"suggestions,omitempty"`
 }
 
 // suggestionsOnlyAdvice is the advice of a write with no issue state to report: an ask on an
 // unlinked project document, which has no issue status, no writes-since-human count and no
-// issue-scoped open-ask list, but does get LEGION-550's suggestions.
+// issue-scoped open-ask list, or an issue or ask write whose write-advice read failed. It still
+// carries the related-item check's result (withSuggestions).
 type suggestionsOnlyAdvice struct {
 	Suggestions *model.Suggestions `json:"suggestions"`
 }
@@ -131,11 +132,10 @@ func (s *server) computeWriteAdvice(
 // failure is not fatal to the advice: the two before it are what a session asked for, while this
 // one decides a single line, and every issue is created in triage, so returning an
 // adviceQueryError here would put a third failure mode on the path that runs for every
-// session-authored `dispatch issue`. What that costs a creation is not a copy of something
-// already stored: issue_create.go computes and persists LEGION-550's suggestions only once the
-// advice survives (`if advice != nil`), after it, so a fatal advice failure there means the
-// suggestions are never computed and no row is ever written. Nothing runs after this step, so
-// the advice already assembled is complete without it.
+// session-authored `dispatch issue`. What that would cost a creation is its issue state alone: the
+// related-item check runs after the write commits whatever the advice answered, and rides a
+// suggestions-only advice when it failed (withSuggestions). Nothing runs after this step, so the
+// advice already assembled is complete without it.
 //
 // The walk takes a savepoint of its own inside the advice savepoint, because a failed statement
 // aborts the transaction it ran in: run directly on the advice savepoint, its failure would also
@@ -254,9 +254,19 @@ type unparsedOpeners struct {
 
 // editBlocks is what a document edit's advice reports about the typed blocks it wrote: how many ask
 // blocks the edited document holds that the document before the edit did not
-// (docs.EditOutcome.AskBlocksAdded), as the server's parser reads them.
+// (docs.EditOutcome.AddedAskBlocks), as the server's parser reads them, and the related-item check
+// each of them got (decisionBlockChecks), omitted when the edit added none.
 type editBlocks struct {
-	DecisionBlocksAdded int `json:"decision_blocks_added"`
+	DecisionBlocksAdded int                  `json:"decision_blocks_added"`
+	DecisionBlockChecks []decisionBlockCheck `json:"decision_block_checks,omitempty"`
+}
+
+// decisionBlockCheck is one added decision block's related-item check: the block, its
+// question, and the check's result.
+type decisionBlockCheck struct {
+	BlockID     string             `json:"block_id"`
+	Question    string             `json:"question"`
+	Suggestions *model.Suggestions `json:"suggestions"`
 }
 
 const (
@@ -384,9 +394,10 @@ func withAdvice(payload any, advice *writeAdvice) any {
 
 // withRawAdvice wraps payload with whatever advice shape the caller already decided is worth
 // sending, with no nil-check (contrast withAdvice, which treats a nil *writeAdvice as "send
-// nothing"). Three shapes ride it: a document write's block counts (*documentBlocks/*editBlocks,
+// nothing). Two kinds of shape ride it: a document write's block report (*documentBlocks/*editBlocks,
 // when a project document has no issue state to report, or an issue document's bounded
-// issue-advice query failed), and an ask on an unlinked project document's suggestionsOnlyAdvice.
+// issue-advice query failed), and suggestionsOnlyAdvice (withSuggestions): an ask on an unlinked
+// project document, or an issue or ask write whose write advice failed.
 func withRawAdvice(payload any, advice any) any {
 	return advisedResponse{payload: payload, advice: advice}
 }

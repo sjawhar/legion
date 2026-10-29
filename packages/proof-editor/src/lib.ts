@@ -76,7 +76,8 @@ import { markPopoverPlugin } from 'proof-sdk-upstream/src/editor/plugins/mark-po
 import { arrowCommentPlugin } from 'proof-sdk-upstream/src/editor/plugins/arrow-comment';
 import { findHighlightsPlugin } from 'proof-sdk-upstream/src/editor/plugins/find-highlights';
 import { markdownLinkClickPlugin } from 'proof-sdk-upstream/src/editor/plugins/markdown-link-click';
-import { mermaidDiagramsPlugin } from 'proof-sdk-upstream/src/editor/plugins/mermaid-diagrams';
+import { mermaidCodeBlockPlugin } from './mermaid-code-block-view';
+import type { MermaidDrawer } from './mermaid-svg';
 import { taskCheckboxesPlugin } from 'proof-sdk-upstream/src/editor/plugins/task-checkboxes';
 import { tableKeyboardPlugin } from 'proof-sdk-upstream/src/editor/plugins/table-keyboard';
 import { placeholderPlugin } from 'proof-sdk-upstream/src/editor/plugins/placeholder';
@@ -156,6 +157,9 @@ export interface CreateProofEditorOptions {
   blockSchema?: BlockSchema;
   /** Renders a host-owned typed block node when the schema declares `render: "host"`. */
   renderBlock?: HostBlockRenderer;
+  /** The host's Mermaid renderer, which draws each mermaid code block's diagram. Without one a
+   *  document's mermaid blocks show their source. */
+  drawMermaid?: MermaidDrawer;
 }
 
 export interface ProofEditorHandle extends TypedBlockCommands {
@@ -352,7 +356,7 @@ export async function createProofEditor(
     .use(dispatchActionBarPlugin({ by: opts.user.name, onMarkAction: opts.onMarkAction }))
     .use(findHighlightsPlugin)
     .use(taskCheckboxesPlugin)
-    .use(mermaidDiagramsPlugin)
+    .use(mermaidCodeBlockPlugin(opts.drawMermaid))
     .use(markdownLinkClickPlugin)
     // Register unified marks plugin
     .use(marksPlugins)

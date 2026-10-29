@@ -276,38 +276,34 @@ func htmlValueEnd(char byte) bool {
 }
 
 // htmlNamed reports whether name, a tag name read as written, is one micromark opens a block of
-// kind 1 or of kind 6 on. It folds the name's case into a buffer of its own rather than a string,
-// which only a name no longer than the longest either list holds can match.
-func htmlNamed(name []byte) (raw, block bool) {
-	var folded [10]byte
-	if len(name) > len(folded) {
-		return false, false
-	}
-	for position, char := range name {
-		if char >= 'A' && char <= 'Z' {
-			char += 'a' - 'A'
-		}
-		folded[position] = char
-	}
-	return htmlRawNames[string(folded[:len(name)])], htmlBlockNames[string(folded[:len(name)])]
-}
-
-// htmlRawNames and htmlBlockNames are micromark-util-html-tag-name's lists: the tag names the
-// browser editor's parser opens a block of HTML of kind 1 and of kind 6 on. Goldmark's own list
+// kind 1 or of kind 6 on: a name of htmlRawNames or of htmlBlockNames, which both it and the
+// writer's own reading of a line (htmlBlockStart) match in any case. Goldmark's list
 // (parser/html_block.go, allowedBlockTags) holds one name more, `meta`, which it opens a block of
 // kind 6 on and refuses there.
-var (
-	htmlRawNames   = map[string]bool{"pre": true, "script": true, "style": true, "textarea": true}
-	htmlBlockNames = map[string]bool{
-		"address": true, "article": true, "aside": true, "base": true, "basefont": true, "blockquote": true,
-		"body": true, "caption": true, "center": true, "col": true, "colgroup": true, "dd": true,
-		"details": true, "dialog": true, "dir": true, "div": true, "dl": true, "dt": true, "fieldset": true,
-		"figcaption": true, "figure": true, "footer": true, "form": true, "frame": true, "frameset": true,
-		"h1": true, "h2": true, "h3": true, "h4": true, "h5": true, "h6": true, "head": true, "header": true,
-		"hr": true, "html": true, "iframe": true, "legend": true, "li": true, "link": true, "main": true,
-		"menu": true, "menuitem": true, "nav": true, "noframes": true, "ol": true, "optgroup": true,
-		"option": true, "p": true, "param": true, "search": true, "section": true, "summary": true,
-		"table": true, "tbody": true, "td": true, "tfoot": true, "th": true, "thead": true, "title": true,
-		"tr": true, "track": true, "ul": true,
+func htmlNamed(name []byte) (raw, block bool) {
+	return htmlNameIn(htmlRawNames, name), htmlNameIn(htmlBlockNames, name)
+}
+
+// htmlNameIn reports whether name, read as written, is one of names, which are written in lower
+// case: it folds name's own case as it compares, taking no buffer and no string of its own.
+func htmlNameIn(names []string, name []byte) bool {
+	for _, known := range names {
+		if len(known) != len(name) {
+			continue
+		}
+		folded := true
+		for position, char := range name {
+			if char >= 'A' && char <= 'Z' {
+				char += 'a' - 'A'
+			}
+			if char != known[position] {
+				folded = false
+				break
+			}
+		}
+		if folded {
+			return true
+		}
 	}
-)
+	return false
+}

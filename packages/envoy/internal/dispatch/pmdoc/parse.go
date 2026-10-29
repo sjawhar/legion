@@ -268,8 +268,8 @@ func inlineParserOptions(rules delimiterRules) []parser.Option {
 		parser.WithInlineParsers(inlineParsers(rules)...),
 		parser.WithInlineParsers(
 			util.Prioritized(elementInlineCounter{}, -1),
-			util.Prioritized(newLinkifyGuard(), 999),
 		),
+		parser.WithInlineParsers(linkifyParsers()...),
 	}
 }
 
@@ -819,7 +819,7 @@ func parseTableRow(row ast.Node, header bool, source []byte, footnotes map[int]s
 			// refuseBlocks refuses every block outside convertedBlocks, and goldmark builds a row of cells.
 			panic(fmt.Sprintf("conversion reached a table row holding a %s block, which parseTableRow does not convert", child.Kind()))
 		}
-		content, err := parseTableCellInline(cell, source, nil, footnotes)
+		content, err := parseInline(cell, source, nil, footnotes)
 		if err != nil {
 			return nil, err
 		}
@@ -870,16 +870,8 @@ func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Nod
 	}}, nil
 }
 
-func parseTableCellInline(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string) ([]*Node, error) {
-	return parseInlineWithTableCellLinks(parent, source, initial, footnotes, true)
-}
-
 func parseInline(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string) ([]*Node, error) {
-	return parseInlineWithTableCellLinks(parent, source, initial, footnotes, false)
-}
-
-func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string, tableCell bool) ([]*Node, error) {
-	children, _, err := parseInlineMarks(parent, source, initial, footnotes, tableCell)
+	children, _, err := parseInlineMarks(parent, source, initial, footnotes)
 	return children, err
 }
 
@@ -889,7 +881,7 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 // opened it, whose own close would have ended it. So `*x *y* z*` is `x y` in emphasis and ` z`
 // without, and `****a****` is strong once. ended is the marks of initial such a close inside parent
 // ended, which the text after parent does not carry either.
-func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string, tableCell bool) (children []*Node, ended []Mark, err error) {
+func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string) (children []*Node, ended []Mark, err error) {
 	trimLineSuffixes(parent, source)
 	active := append([]Mark(nil), initial...)
 	// within reads a mark node's content under active and marks, then ends for the text after it
@@ -901,7 +893,7 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 				next = append(next, mark)
 			}
 		}
-		content, inner, err := parseInlineMarks(node, source, next, footnotes, tableCell)
+		content, inner, err := parseInlineMarks(node, source, next, footnotes)
 		if err != nil {
 			return nil, err
 		}
@@ -978,23 +970,17 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			}
 			children = append(children, content...)
 		case *ast.Link:
-			href := string(current.Destination)
-			if tableCell {
-				href = string(util.UnescapePunctuations(current.Destination))
-			}
+			// A destination's escapes and character references are decoded, as the browser editor's
+			// parser decodes them (escapeLinkDestination writes it back).
+			href := decodeMarkdownText(current.Destination)
 			content, err := within(current, Mark{Type: "link", Attrs: Attrs{"href": href, "title": titleOrNil(current.Title)}})
 			if err != nil {
 				return nil, nil, err
 			}
 			children = append(children, content...)
 		case *ast.AutoLink:
-			// goldmark gives an email autolink the bare address as its URL; the browser editor's
-			// engine, like a comment's renderer, links it to the address's mailto: URL.
-			href := string(current.URL(source))
-			if current.AutoLinkType == ast.AutoLinkEmail {
-				href = "mailto:" + href
-			}
-			children = appendTextPiece(children, string(current.Label(source)), append(active, Mark{Type: "link", Attrs: Attrs{"href": href, "title": nil}}))
+			label, href := autolinkText(current, source)
+			children = appendTextPiece(children, label, append(active, Mark{Type: "link", Attrs: Attrs{"href": href, "title": nil}}))
 		case *extensionast.Strikethrough:
 			content, err := within(current, Mark{Type: "strike_through"})
 			if err != nil {

@@ -365,14 +365,25 @@ func (p listItemColumns) Continue(node ast.Node, reader gmtext.Reader, pc parser
 
 // fenceClosure is goldmark's fenced code parser recording on a block whether a closing fence closed
 // it (fenceClosedAttr), which the browser editor's parser reads its trailing blank line by
-// (fencedCodeText), and reading a line of spaces and tabs narrower than the opening fence's
-// indentation as an empty line of code, as that parser does (emptyCodeLine).
+// (fencedCodeText), and reading a whitespace-only line as that parser does: it takes up to as many
+// columns from each line of the code as the opening fence stands past its container's content, so
+// a whitespace-only line holding fewer is an empty line of the code. Goldmark keeps all such a line
+// holds, so `  ~~~\n \nx` held the code ` \nx`, where that parser reads `\nx`. A last line of the
+// document with no line feed that holds nothing past the fence's indentation is no line of the code
+// to that parser (fenceEndsEmptyAttr): `  ~~~\nx\n ` holds the code `x`, and in a quote, which takes
+// a blank line from the code's end, the quote takes that line (fencedCodeText).
 type fenceClosure struct{ parser.BlockParser }
 
 var (
 	fenceClosedAttr = []byte("pmdoc-fence-closed")
-	// fenceIndentAttr holds the columns the opening fence stands indented past its containers,
-	// which goldmark takes off each of the block's lines (parser/fcode_block.go, fenceData.indent).
+	// fenceEndsEmptyAttr marks a fenced code block whose last line is the document's, with no line
+	// feed, holding nothing past the fence's indentation. The line stays among the code's lines, as
+	// goldmark appends it, so the counters of blank lines read it as the reader before PR #2481
+	// read it; only the code's text drops it (fencedCodeText).
+	fenceEndsEmptyAttr = []byte("pmdoc-fence-ends-empty")
+	// fenceIndentAttr is how many columns a fenced code block's opening fence stands past its
+	// container's content, as goldmark measures them, and takes off each of the block's lines
+	// (fenceClosure.Open; parser/fcode_block.go, fenceData.indent).
 	fenceIndentAttr = []byte("pmdoc-fence-indent")
 )
 
@@ -388,44 +399,29 @@ func (p fenceClosure) Open(parent ast.Node, reader gmtext.Reader, pc parser.Cont
 }
 
 func (p fenceClosure) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
-	if emptyCodeLine(node, reader) {
-		return parser.Continue | parser.NoChildren
-	}
+	line, segment := reader.PeekLine()
+	offset := reader.LineOffset()
 	state := p.BlockParser.Continue(node, reader, pc)
 	if state == parser.Close {
 		node.SetAttribute(fenceClosedAttr, true)
+		return state
 	}
+	if !util.IsBlank(line) {
+		return state
+	}
+	last := node.Lines().Len() - 1
+	code := node.Lines().At(last)
+	indent, _ := node.Attribute(fenceIndentAttr)
+	if position, _ := util.IndentPositionPadding(line, offset, segment.Padding, indent.(int)); position < 0 {
+		// Goldmark appended the whole line; the code's line is empty but for its line feed.
+		code = lineFeedOnly(segment, reader.Source())
+		code.ForceNewline = true
+	}
+	if code.Start >= code.Stop && code.Padding == 0 && !bytes.HasSuffix(line, []byte("\n")) {
+		node.SetAttribute(fenceEndsEmptyAttr, true)
+	}
+	node.Lines().Set(last, code)
 	return state
-}
-
-// emptyCodeLine takes the line reader stands at as an empty line of node, a fenced code block,
-// where the line holds spaces and tabs alone and fewer columns of them than the fence's own
-// indentation (fenceIndentAttr), and reports whether it did. The browser editor's parser takes
-// that indentation off every line of the block and takes a line holding less whole, so such a
-// line is empty. Goldmark's own Continue falls back there to the line's first non-space position,
-// which a line of whitespace has none of, less the segment's padding, so it started the line that
-// many bytes before its text, inside the markers of the container whose marker took part of the
-// tab the padding is left of: `>    ```\n>\t` read `>\t` as the code. The line keeps its line
-// ending as written, CR included, as every other line of code does.
-func emptyCodeLine(node ast.Node, reader gmtext.Reader) bool {
-	attribute, ok := node.Attribute(fenceIndentAttr)
-	if !ok {
-		return false
-	}
-	line, segment := reader.PeekLine()
-	value := reader.Source()[segment.Start:segment.Stop]
-	written := bytes.TrimRight(value, "\r\n")
-	if len(bytes.TrimLeft(written, " \t")) > 0 {
-		return false
-	}
-	if position, _ := util.IndentPositionPadding(line, reader.LineOffset(), segment.Padding, attribute.(int)); position >= 0 {
-		return false
-	}
-	empty := gmtext.NewSegment(segment.Start+len(written), segment.Stop)
-	empty.ForceNewline = true
-	node.Lines().Append(empty)
-	reader.AdvanceToEOL()
-	return true
 }
 
 // codeColumns is goldmark's indented code parser measuring a blank line's indentation from the
@@ -434,27 +430,80 @@ func emptyCodeLine(node ast.Node, reader gmtext.Reader) bool {
 // code's text. Goldmark counts every tab on a blank line as four columns wherever it stands, so in
 // a list item, where the line starts past the item's columns, a tab short of the code's indentation
 // left a space in the code (`- x\n  \n      a\n   \t\n      b` read `a\n \nb`).
+//
+// It also ends the code where the browser editor's parser does: at the last line that is code - a
+// line of text, or a blank line holding four columns or more past the code's container - with the
+// shorter blank lines between, where goldmark drops every blank line after the last line of text
+// (`    code\n      \nx` holds the code `code\n  `). Code right after a list outside it, or right
+// after a quote with no blank line between them, keeps goldmark's end: that parser holds the list
+// or quote open there (heldOpenBy). The blank lines the code keeps past goldmark's end are
+// its held lines (codeHeldAttr), which space no list (sourceLines.held).
 type codeColumns struct{ parser.BlockParser }
+
+var (
+	// codeKeptAttr is how many of an indented code block's lines run to its last blank line of four
+	// columns or more, as codeColumns.Continue reads them.
+	codeKeptAttr = []byte("pmdoc-code-kept")
+	// codeHeldAttr is the index of an indented code block's first held line: its lines from there
+	// on are blank lines goldmark drops and the browser editor's parser keeps (codeColumns).
+	codeHeldAttr = []byte("pmdoc-code-held")
+)
 
 func (p codeColumns) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
 	line, segment := reader.PeekLine()
 	if !util.IsBlank(line) {
 		return p.BlockParser.Continue(node, reader, pc)
 	}
-	if position, padding := util.IndentPosition(line, reader.LineOffset(), 4); position >= 0 {
+	position, padding := util.IndentPosition(line, reader.LineOffset(), 4)
+	if position >= 0 {
 		reader.AdvanceAndSetPadding(position, padding)
 		_, segment = reader.PeekLine()
 	} else {
 		// Nothing past the code's indentation: the line is empty but for its line feed.
-		start := segment.Stop
-		if start > segment.Start && reader.Source()[start-1] == '\n' {
-			start--
-		}
-		segment = gmtext.NewSegment(start, segment.Stop)
+		segment = lineFeedOnly(segment, reader.Source())
 	}
 	node.Lines().Append(segment)
+	if position >= 0 {
+		node.SetAttribute(codeKeptAttr, node.Lines().Len())
+	}
 	reader.AdvanceToEOL()
 	return parser.Continue | parser.NoChildren
+}
+
+// Close drops the code's trailing blank lines as goldmark does, then takes back those up to the
+// last one codeKeptAttr counts, unless the code stands right after a list or a quote the browser
+// editor's parser holds open there.
+func (p codeColumns) Close(node ast.Node, reader gmtext.Reader, pc parser.Context) {
+	p.BlockParser.Close(node, reader, pc)
+	if heldOpenBy(node) != nil {
+		return
+	}
+	kept, ok := node.Attribute(codeKeptAttr)
+	if !ok {
+		return
+	}
+	// Goldmark's Close only reslices the lines, so those it dropped are still past their end.
+	if trimmed := node.Lines().Len(); kept.(int) > trimmed {
+		node.Lines().SetSliced(0, kept.(int))
+		node.SetAttribute(codeHeldAttr, trimmed)
+	}
+}
+
+// heldOpenBy is the list right before indented code, outside it, or the quote right before it with
+// no blank line between them, which the browser editor's parser holds open across the code's first
+// line; nil when neither stands there. Close keeps goldmark's end of such code, interruptsOpenBlock
+// reads such code as holding nothing open, and the refusal of such code holding more than one line
+// names what it holds (refuseBlocks), so all three read the one shape.
+func heldOpenBy(code ast.Node) ast.Node {
+	switch previous := code.PreviousSibling().(type) {
+	case *ast.List:
+		return previous
+	case *ast.Blockquote:
+		if !code.HasBlankPreviousLines() {
+			return previous
+		}
+	}
+	return nil
 }
 
 // setPadding sets reader's padding and drops the line it has peeked, which goldmark's
@@ -462,6 +511,15 @@ func (p codeColumns) Continue(node ast.Node, reader gmtext.Reader, pc parser.Con
 func setPadding(reader gmtext.Reader, padding int) {
 	reader.SetPadding(padding)
 	reader.Advance(0)
+}
+
+// lineFeedOnly is segment's line emptied but for its line feed.
+func lineFeedOnly(segment gmtext.Segment, source []byte) gmtext.Segment {
+	start := segment.Stop
+	if start > segment.Start && source[start-1] == '\n' {
+		start--
+	}
+	return gmtext.NewSegment(start, segment.Stop)
 }
 
 var (
@@ -572,13 +630,8 @@ func interruptsOpenBlock(parent ast.Node, source []byte, start int, pc parser.Co
 		last := previous.Lines().At(previous.Lines().Len() - 1)
 		return bytes.Count(source[last.Start:start], []byte("\n")) <= 1
 	case *ast.CodeBlock:
-		switch previous.PreviousSibling().(type) {
-		case *ast.List:
+		if heldOpenBy(previous) != nil {
 			return false
-		case *ast.Blockquote:
-			if !previous.HasBlankPreviousLines() {
-				return false
-			}
 		}
 		if previous.Lines().Len() == 0 {
 			return false
@@ -712,7 +765,11 @@ func recordLine(line gmtext.Segment, source []byte, pc parser.Context) {
 // its parse, so pmdoc registers none, and takes the backslash out of a cell's escaped pipes itself
 // once the bounds hold (unescapeTablePipes).
 func parseSource(p parser.Parser, source []byte, context parser.Context) (ast.Node, error) {
-	root := p.Parse(gmtext.NewReader(source), parser.WithContext(context))
+	reader := &lastLineColumns{Reader: gmtext.NewReader(source)}
+	root := p.Parse(reader, parser.WithContext(context))
+	if reader.kept {
+		root.SetAttribute(lastLineKeptAttr, true)
+	}
 	definitionsInPlace(root, context)
 	if recorded := context.Get(untrimmedLinesKey); recorded != nil {
 		root.SetAttribute(untrimmedLinesAttr, recorded)
@@ -725,6 +782,73 @@ func parseSource(p parser.Parser, source []byte, context parser.Context) (ast.No
 	}
 	unescapeTablePipes(root, source)
 	return root, nil
+}
+
+// lastLineColumns is goldmark's reader keeping the document's last line where it has no line feed
+// and its containers' markers leave only columns of a tab they took part of: goldmark reads no
+// line past the source's end, so it dropped that line, where the browser editor's parser reads the
+// columns left as the line's (`> ```\n> x\n>\t` holds the code `x\n  `, as it does with a line
+// feed after the tab). The line is the columns, as goldmark's reader writes a padded line's value
+// (Segment.Value); a last line its containers leave nothing of stays no line to either parser.
+type lastLineColumns struct {
+	gmtext.Reader
+	// kept is whether it served such a line, which parseSource records on the document
+	// (lastLineKeptAttr).
+	kept bool
+}
+
+// lastLineKeptAttr marks a document whose last line lastLineColumns kept, which goldmark dropped:
+// the refusals that read the lines as before read it as the blank line it was then
+// (blanksOutsideCode).
+var lastLineKeptAttr = []byte("pmdoc-last-line-kept")
+
+func (r *lastLineColumns) PeekLine() ([]byte, gmtext.Segment) {
+	line, segment := r.Reader.PeekLine()
+	if line == nil && segment.Padding > 0 && segment.Start == len(r.Source()) {
+		r.kept = true
+		return segment.Value(r.Source()), segment
+	}
+	return line, segment
+}
+
+// AdvanceLine drops the columns left at the source's end, which goldmark's reader keeps there, so
+// the last line is read once.
+func (r *lastLineColumns) AdvanceLine() {
+	r.Reader.AdvanceLine()
+	if _, segment := r.Reader.Position(); segment.Start >= len(r.Source()) {
+		r.Reader.SetPadding(0)
+	}
+}
+
+// AdvanceToEOL takes every column left at the source's end, as it takes the rest of any line, so
+// an item whose content stands past them takes them all (`> -  ```\n>    x\n>\t` holds the code
+// `x`).
+func (r *lastLineColumns) AdvanceToEOL() {
+	r.Reader.AdvanceToEOL()
+	if _, segment := r.Reader.Position(); segment.Start >= len(r.Source()) && segment.Padding > 0 {
+		r.Reader.Advance(0) // forgets the line offset and the peeked line
+		r.Reader.SetPadding(0)
+	}
+}
+
+// Advance takes n of the columns left at the source's end, where goldmark's reader takes none, so
+// a container inside the one that left them takes its own columns from them too (`> - ```\n>   x\n>\t`
+// leaves the item nothing, and holds the code `x`).
+func (r *lastLineColumns) Advance(n int) {
+	_, segment := r.Reader.Position()
+	if segment.Start < len(r.Source()) || segment.Padding == 0 {
+		r.Reader.Advance(n)
+		return
+	}
+	r.Reader.Advance(0) // forgets the line offset and the peeked line
+	r.Reader.SetPadding(max(segment.Padding-n, 0))
+}
+
+func (r *lastLineColumns) AdvanceAndSetPadding(n, padding int) {
+	r.Advance(n)
+	if _, segment := r.Reader.Position(); padding > segment.Padding {
+		r.Reader.SetPadding(padding)
+	}
 }
 
 // multilineCodeSpanText is the text of a code span that runs over more than one line, as the

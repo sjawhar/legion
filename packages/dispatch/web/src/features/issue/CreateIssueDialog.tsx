@@ -1,9 +1,9 @@
 import { ISSUE_TITLE_MAX } from "@legion/contracts";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
-import { ApiError, api } from "../../api/client";
+import { ApiError, api, type WriteBounds } from "../../api/client";
 import { projectsQuery } from "../../api/queries";
 import type { CreateIssueInput, Issue } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
@@ -26,8 +26,11 @@ import {
 } from "../../theme/classes";
 import { buildIssuePath, routeProjectOf } from "../refs/routes";
 import { useDialog } from "../shell/useDialog";
+import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 
-const createIssue = (input: CreateIssueInput): Promise<Issue> => api.createIssue(input);
+const createIssue = (input: CreateIssueInput, bounds: WriteBounds): Promise<Issue> =>
+  api.createIssue(input, bounds);
 
 /**
  * The `c` shortcut's minimal create-issue dialog: project (preselecting the route's project),
@@ -42,7 +45,7 @@ export function CreateIssueDialog({
 }: {
   onClose: () => void;
   /** Write seam for tests; defaults to the real API. */
-  createIssue?: (input: CreateIssueInput) => Promise<Issue>;
+  createIssue?: (input: CreateIssueInput, bounds: WriteBounds) => Promise<Issue>;
 }): ReactNode {
   const location = useLocation();
   const navigate = useNavigate();
@@ -55,14 +58,24 @@ export function CreateIssueDialog({
   const [title, setTitle] = useState("");
   const [spec, setSpec] = useState("");
   const submitGuard = useSubmitGuard();
-  const mutation = useMutation({
-    mutationFn: create,
+  // The dialog shows a refusal itself, beside the draft it was refused over.
+  const mutation = useKeyedWrite({
+    inline: true,
+    label: (input: CreateIssueInput) => `New issue “${input.title}”`,
     onSettled: () => submitGuard.release(),
+    write: create,
     onSuccess: (issue) => {
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
       void queryClient.invalidateQueries({ queryKey: projectsQuery().queryKey });
-      onClose();
-      navigate(buildIssuePath({ key: issue.key, kind: "issue" }));
+      if (issue !== null) {
+        onClose();
+        navigate(buildIssuePath({ key: issue.key, kind: "issue" }));
+        return;
+      }
+      // Made, with no answer to open: the draft goes, so a second press makes nothing, and the
+      // dialog says what was made (`mutation.unanswered`).
+      setTitle("");
+      setSpec("");
     },
   });
 
@@ -141,7 +154,10 @@ export function CreateIssueDialog({
               className={`mt-1 block min-h-11 w-full rounded-lg border px-3 py-2 text-sm font-normal outline-none ${inputClasses(true)}`}
               disabled={mutation.isPending}
               maxLength={ISSUE_TITLE_MAX}
-              onChange={(event) => setTitle(event.target.value)}
+              onChange={(event) => {
+                mutation.forgetUnanswered();
+                setTitle(event.target.value);
+              }}
               ref={titleRef}
               type="text"
               value={title}
@@ -158,6 +174,9 @@ export function CreateIssueDialog({
               value={spec}
             />
           </label>
+          {mutation.unanswered === undefined ? null : (
+            <LandedWithoutAnswer what={`The issue “${mutation.unanswered.variables.title}”`} />
+          )}
           {mutation.isError ? (
             duplicate === undefined ? (
               <QueryError
