@@ -27,3 +27,9 @@ const (
 // alternatingBlocks are the documents TestUpdateIsLinearInTheBlockCount replaces every other block
 // of: 16,384 blocks is about the most paragraphs the 65,536 elements one upload may make allow.
 var alternatingBlocks = []int{4_096, 16_384}
+
+// tagShapeSizes are the sizes TestBareURLShapesParseAndRenderLinearly reads and writes a run of
+// tags it times at: an address in each tag's quoted attribute value, which the writer escapes the
+// `<` of (rawHTMLScan). They are the test's other sizes, up to a mebibyte; -race takes smaller
+// ones (linear_sizes_race.go).
+var tagShapeSizes = []int{16 << 10, 256 << 10, 1 << 20}

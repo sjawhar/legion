@@ -310,7 +310,8 @@ func TestParseIsLinearInATableOfEscapedPipes(t *testing.T) {
 // it, and unreadableRun calls for every family of them. The plain text after it is in each writing,
 // and each distinct writing is read back once (TestRenderReadsEachWritingBackUnderAReaderOnce). It
 // is timed up to renderFullTarget, which -race shrinks, as
-// TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText times a render.
+// TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText times a render. A run of tags is timed at
+// tagShapeSizes, which -race shrinks too.
 func TestBareURLShapesParseAndRenderLinearly(t *testing.T) {
 	sizes := []int{16 << 10, 256 << 10, 1 << 20}
 	for _, shape := range []string{
@@ -321,9 +322,13 @@ func TestBareURLShapesParseAndRenderLinearly(t *testing.T) {
 	}
 	for _, shape := range []struct{ opener, closer string }{
 		{"&lt;!-- a@b.cc ", "-->"}, {"&lt;?x;https://a.bc/ ", "?>"}, {"&lt;!X a@b.cc ", ">"}, {"&lt;![CDATA[ a@b.cc ", "]]>"},
-		{`&lt;a b="x;a@b.cc `, `">`}, {`&lt;a b='&lt;a c="x;a@b.cc `, `'>`},
 	} {
 		readsAndWritesLinearly(t, "", shape.opener, shape.closer, sizes)
+	}
+	for _, shape := range []struct{ opener, closer string }{
+		{`&lt;a b="x;a@b.cc `, `">`}, {`&lt;a b='&lt;a c="x;a@b.cc `, `'>`},
+	} {
+		readsAndWritesLinearly(t, "", shape.opener, shape.closer, tagShapeSizes)
 	}
 	readsAndWritesLinearly(t, unreadableRun, "lorem ipsum ", "", []int{renderFullTarget / 16, renderFullTarget})
 }
