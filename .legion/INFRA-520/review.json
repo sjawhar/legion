@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-520",
-  "completed": "2026-10-29T08:52:48Z",
-  "round": 7,
-  "reviewedHead": "2acfcfda16888bd3fa726fc15ddaa262de6c8d26 (code head f78f383ede82)",
+  "completed": "2026-10-29T09:31:27Z",
+  "round": 8,
+  "reviewedHead": "0602c6943eef41bc4b54edcff88a4192b3c98a47 (code head 5e6cac9ba234, the merge of main 88840d35)",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
@@ -12,11 +12,11 @@
   "keyFindings": [
     {
       "severity": "important",
-      "file": ".github/workflows/ci.yaml (conflict with main 88840d35)",
-      "description": "GitHub reports #2316 CONFLICTING/DIRTY at 2acfcfda. `git merge-tree` against main 88840d35: modify/delete on .github/workflows/envoy-and-contracts.yaml and a content conflict in packages/envoy/cmd/dispatch/AGENTS.md, both from main's #2449 (one live socket per tab). Merge main; carry #2449's edits to the deleted workflow into ci.yaml (and the drift check's gates if a job's reads change); keep envoy-and-contracts.yaml deleted; required checks green at the new head."
+      "file": ".github/workflows/worker-image.yaml; .github/workflows/ci.yaml worker_image filter (conflict with main a7c762f6)",
+      "description": "Main moved again while this head's CI ran: GitHub reports CONFLICTING/DIRTY at 0602c694. `git merge-tree` against main a7c762f6: content conflicts in .github/workflows/worker-image.yaml and packages/daemon/internal/claudebridge/bridge_test.go, both from #2186. #2186 widens the worker image's build inputs (the old pull_request paths gain packages/claude-envoy/** and .bun-version; the image now builds the Claude Code plugin). Here the pull-request trigger lives in ci.yaml's worker_image filter, so that filter must gain those inputs (check-image-trigger-paths.sh holds it to what the build reads); keep worker-image.yaml's pull_request trigger removed. Required checks green at the merged head."
     }
   ],
-  "roundSixItems": "All verified at f78f383e: the three Postgres 16 jobs are gone from ci.yaml with filters, outputs, ci-ok needs, SELECTED_BY and gates, and from the header; pi-envoy carries #2278's NATS service (same pinned image) and LEGION_TEST_NATS_URL; release-engineering.md takes main's sentence; main's two new imports are in their filters (internal/logtest at ci.yaml:349, internal/dispatch/docs/crafted at ci.yaml:225 and docs-pages.yaml:127); docs' changes output is false on a push (ci.yaml:83) and the docs job tests only it (ci.yaml:1472); NOT_ON_PUSH is gone from ci.yaml, ci-ok.sh, EVENT_LISTS and their tests. On a copy of f78f383e: check-ci-filters.sh exit 0 (23 gates), ci-ok.test.sh passes, check-ci-filters.test.sh 127/127.",
-  "ci": "CI run 40805326445 at f78f383e: 23 jobs succeeded; ci-ok red naming envoy-go and dispatch. dispatch: close-withdraws-asks.e2e.ts:126, main's recorded red. envoy-go: cmd/listener TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget; this pull request changes nothing in cmd/listener or what it imports (its packages/envoy diff since a09a2f25 is docs, test helpers of other packages and a testpg comment), so recorded as not this pull request's. The head now conflicts, so no new run can start.",
-  "thermonuclear": "Not run: the round-6 diff (merge plus the Fast-follow) is the narrowed scope the architect set, verified by hand and by the checks above; round 5's pair approved the code before it."
+  "roundSevenItem": "Verified at 5e6cac9b: #2449's only edit to the deleted envoy-and-contracts.yaml (-timeout 20m on both go commands of envoy-go's unit-test step) is in ci.yaml, and the step's exact entry in ci_job_reads.py pins the new script; packages/envoy/cmd/dispatch/AGENTS.md equals main's 88840d35 but for the branch's four envoy-and-contracts.yaml -> ci.yaml renames; check-ci-filters.sh on a copy of 5e6cac9b exits 0 (23 gates).",
+  "ci": "CI run 40845855821 at 5e6cac9b: changes success, pr-title success; lint in progress, typecheck and test queued at 09:30Z when the head went CONFLICTING again. No verdict at that head.",
+  "thermonuclear": "Not run: the round's scope is the merge port the architect narrowed it to, checked by hand and by the drift check."
 }
