@@ -582,6 +582,25 @@ func (w *workflowRuntime) ensureWorkspace(ctx context.Context, issue string, rep
 	return w.outbox.ensureWorkspace(ctx, issue, repo, defaultBranch)
 }
 
+// enqueueOutbox writes one outbox row of issue, due now, in a transaction of its own, which owns
+// the commit hook that write registers (projectRecords, intake.OnCommit) so the row's lane is
+// woken as it commits — exactly as the re-hold of a notice does (reholdNotice). It is what
+// supervision's update-round sweep writes its controller notice and its issue message through
+// (supervision.enqueue), and the narrowest thing that gives supervision an outbox at all: a row
+// to write, and no engine, no admission and no Dispatch client behind it.
+func (w *workflowRuntime) enqueueOutbox(ctx context.Context, issue string, payload record.OutboxPayload) error {
+	row, err := record.NewOutboxRow(issue, payload, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("enqueue a %s row of %s: %w", payload.OutboxKind(), issue, err)
+	}
+	scoped, committed := intake.WithCommitHooks(ctx)
+	if err := pgx.BeginFunc(scoped, w.pool, func(tx pgx.Tx) error { return w.records.Enqueue(scoped, tx, row) }); err != nil {
+		return fmt.Errorf("enqueue a %s row of %s: %w", payload.OutboxKind(), issue, err)
+	}
+	committed()
+	return nil
+}
+
 func (w *workflowRuntime) attach(supervision *supervision) {
 	w.log.Info("legion workflow boot stage", "stage", "outbox")
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
@@ -589,6 +608,7 @@ func (w *workflowRuntime) attach(supervision *supervision) {
 		supervision.plan.tools, w.log)
 	w.outboxWake.Store(w.outbox)
 	supervision.supervisor.OnTerminal(w.terminal)
+	supervision.enqueue = w.enqueueOutbox
 }
 
 // replayTerminal applies the ready or failure fact of every stored claim in either state that no

@@ -979,6 +979,15 @@ type supervision struct {
 	// reportStore persists each report as it arrives (store.Store), so a restart renders the
 	// sessions it re-adopts without waiting for them to report again.
 	reportStore capabilityReportStore
+	// enqueue writes one outbox row of an issue, the workflow's own enqueue in its own
+	// transaction (workflowRuntime.enqueueOutbox); nil in a deployment with no workflow, which
+	// has no outbox to write to and no Dispatch issue to write on. It is the whole of the record
+	// the update-round sweep needs (reconcilePodUpdates): the controller notice it publishes and
+	// the message it writes on the issue are both outbox rows, and threading the workflow engine
+	// into supervision to post two rows would tie every claim decision to the workflow. The
+	// workflow sets it where it attaches, before supervision restores or launches any claim, as
+	// it sets the supervisor's terminal callback there.
+	enqueue func(ctx context.Context, issue string, payload record.OutboxPayload) error
 
 	cancel context.CancelFunc
 	// draining is the worker stream's life and what the API's routes run their decisions on
@@ -1097,6 +1106,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		},
 		PluginContract:     api.DaemonAPIVersion,
 		PluginRelaunchable: p.pluginRelaunchable,
+		PodUpdateRetask:    cfg.PodUpdateRetask,
 	}
 	stopping, beginStop := context.WithCancel(context.Background())
 	return &supervision{
@@ -1201,13 +1211,19 @@ func (s *supervision) start(boot context.Context, settle func() error) error {
 // without waiting for the next restart. refreshPlugin's own re-check makes a re-post for a claim a
 // prior attempt already moved on — relaunched, or registered current — a no-op. A claim still
 // launching is left to its own registration, which decides the comparison the moment it arrives,
-// so only the four states whose process has registered are read. A daemon that cannot relaunch
+// so only the four states whose process has registered are read. A claim already in an update
+// round is skipped whatever its contract: the round is carrying it, and it is replaced when that
+// round ends (reconcilePodUpdates) — a StalePlugin post would start the round's clock again at
+// every sweep, or relaunch mid-turn a claim the round is waiting on. A daemon that cannot relaunch
 // onto a plugin (PluginRelaunchable false, LEGION-164's degraded Kubernetes mode) posts nothing;
 // it logs one Error line per stale claim at boot only — a sweep's finding would only repeat a line
 // the boot already wrote, since nothing relaunchable has changed in between.
 func (s *supervision) refreshStalePlugins(claims []supervise.Claim, trigger string) {
 	for _, c := range claims {
 		if c.Session == "" || c.PluginContract == api.DaemonAPIVersion || !supervise.HoldsCapability(c.State) {
+			continue
+		}
+		if c.UpdateRound != "" {
 			continue
 		}
 		if !s.plan.pluginRelaunchable {
@@ -1351,10 +1367,11 @@ func (s *supervision) relaunchUnfinished(tokens []claim.Token, reconciled bool) 
 }
 
 // reconcileOrphans ends, every sweep interval, whatever the runtime holds that belongs to none of
-// the claims the daemon has not retired, once it has idled past the grace, and re-posts
-// StalePlugin for every live claim whose contract still differs — the retry a relaunch the boot
-// pass (refreshStalePlugins) could not complete needs, riding the sweep because it is the one
-// periodic pass that already reads every claim, rather than running a timer of its own.
+// the claims the daemon has not retired, once it has idled past the grace, re-posts StalePlugin
+// for every live claim whose contract still differs — the retry a relaunch the boot pass
+// (refreshStalePlugins) could not complete needs — and carries every update round a step
+// (reconcilePodUpdates). Both ride the sweep because it is the one periodic pass that already
+// reads every claim, rather than running a timer of their own.
 func (s *supervision) reconcileOrphans(ctx context.Context) {
 	ticker := time.NewTicker(s.plan.orphanSweep)
 	defer ticker.Stop()
@@ -1375,6 +1392,7 @@ func (s *supervision) reconcileOrphans(ctx context.Context) {
 			s.log.Error("reconcile orphans", "error", err)
 		}
 		s.refreshStalePlugins(claims, "sweep")
+		s.reconcilePodUpdates(ctx, claims)
 	}
 }
 

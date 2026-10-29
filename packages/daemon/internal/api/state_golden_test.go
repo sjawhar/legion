@@ -240,6 +240,11 @@ func populatedState(t *testing.T) State {
 									Container: "roles", Generation: 2,
 								},
 							},
+							// The pod's update round, which every claim of that pod shares: the daemon
+							// replaces the pod only once each has answered. This one has, and reported
+							// the head it pushed.
+							UpdateRound: "pod:7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+							UpdateHead:  "4c1b8e2a6f9d3047b5e1c8a2f6d940b3e7c5a128",
 						},
 						HandoffCommit: "9f2c1d7a4b6e8c3f5a90d2e14b7c6f8a3d5e0b21",
 						Rounds:        0,
@@ -265,6 +270,9 @@ func populatedState(t *testing.T) State {
 								OK:          []string{"subagents", "dispatch-envoy-tools"},
 								Open:        []CapabilityGap{{Name: "github", Detail: "gh api user: HTTP 401: Bad credentials"}},
 							},
+							// The same round, on the worker that has not answered it yet: no head is
+							// reported until a worker answers.
+							UpdateRound: "pod:7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
 						},
 						HandoffCommit: "",
 						Rounds:        2,
@@ -663,6 +671,10 @@ func operatorClaim() OperatorClaim {
 			Interrupted: true,
 		},
 		SuspensionHeld: true,
+		// The claim's own plugin round: its process speaks a plugin contract this daemon does not,
+		// and it is replaced only once its worker has pushed its work and answered, which it has.
+		UpdateRound: "plugin:43",
+		UpdateHead:  "4c1b8e2a6f9d3047b5e1c8a2f6d940b3e7c5a128",
 	}
 }
 

@@ -84,8 +84,10 @@ func decodeAnswer(answer []byte, into any) error {
 	return decoder.Decode(into)
 }
 
-// printClaim is the one line a claim prints as: token, role, issue, state, generation, and the
-// plugin contract its registration declared (0 when none is recorded).
+// printClaim is the one line a claim prints as: token, role, issue, state, generation, the plugin
+// contract its registration declared (0 when none is recorded), and the update round the claim is
+// in with the head its worker reported when it answered (`-` for a claim in no round, and `-` for
+// a head no worker has reported yet).
 func printClaim(w io.Writer, answer []byte) error {
 	var c api.OperatorClaim
 	if err := decodeAnswer(answer, &c); err != nil {
@@ -107,7 +109,16 @@ func printClaims(w io.Writer, answer []byte) error {
 }
 
 func writeClaimLine(w io.Writer, c api.OperatorClaim) {
-	fmt.Fprintf(w, "%s %s %s %s %d %d\n", c.Token, c.Role, c.Issue, c.State, c.Generation, c.PluginContract)
+	fmt.Fprintf(w, "%s %s %s %s %d %d %s %s\n", c.Token, c.Role, c.Issue, c.State, c.Generation, c.PluginContract,
+		orNone(c.UpdateRound), orNone(c.UpdateHead))
+}
+
+// orNone is a field a claim need not have, as the line prints it.
+func orNone(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
 }
 
 // runClaimsSpawn creates the claim on --role of --issue, in the tree --tree roots, and launches

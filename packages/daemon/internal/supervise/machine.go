@@ -628,6 +628,31 @@ func (m *Machine) ReleaseUncertainLaunch(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// PodUpdateTold marks this claim's open update round as reported to the operator's side, so the
+// daemon's sweep (internal/daemon's reconcilePodUpdates) tells one round once however many ticks
+// find it still open. It is no event: the sweep is what decides a round is stalled, and the mark
+// is bookkeeping of that decision, as StartedBy is of the row running against the claim.
+//
+// It stamps nothing and reports false when the claim is no longer in round — the round ended, or
+// another opened — or when this round was already told: both are decisions already taken, not
+// faults, since the sweep posts over the same claims at every tick. A write the store refuses is
+// returned with false, and the sweep tells the round again at the next tick rather than lose the
+// notice.
+func (m *Machine) PodUpdateTold(ctx context.Context, round string) (bool, error) {
+	m.mu.Lock()
+	defer m.unlock()
+	if m.claim.UpdateRound != round || m.claim.UpdateToldAt != nil {
+		return false, nil
+	}
+	told := m.deps.Clock.Now()
+	m.claim.UpdateToldAt = &told
+	if err := m.persist(ctx); err != nil {
+		m.claim.UpdateToldAt = nil
+		return false, err
+	}
+	return true, nil
+}
+
 // ReleasedLaunch is whether a stored claim is an uncertain launch ReleaseUncertainLaunch released
 // and no launch then recorded: queued at a generation above zero, with no process. A claim is
 // created queued at generation zero, and only a release makes one queued again after a launch, so

@@ -32,5 +32,7 @@
     "interrupted": true
   },
   "suspensionHeld": true,
-  "pluginContract": 0
+  "pluginContract": 0,
+  "updateRound": "plugin:43",
+  "updateHead": "4c1b8e2a6f9d3047b5e1c8a2f6d940b3e7c5a128"
 }

@@ -417,7 +417,12 @@ package api
 // plugins gain the `ready_for_update` op that posts it, so a worker under either one can end its
 // round. A claim whose update round is open is served on its contract of before the round, on
 // every route: the claim routes, the grants route's claim form and every grant-bearing route,
-// where a stale plugin contract otherwise refuses. A plugin before 43 has no op to signal with,
-// so its pod's round would never end, and a daemon before 43 answers that op's post a 404; the
-// boot gate and `legion probe-image` refuse either pair.
+// where a stale plugin contract otherwise refuses. Every claim view gains the round it is in and
+// the head its worker reported when it answered — `updateRound` and `updateHead`, both absent
+// when there is none — on the state's claims (`api.ClaimView`) and on the operator's
+// (`api.OperatorClaim`), which `packages/contracts/src/legion-api.ts` mirrors; a strict reader
+// before 43 refuses a state carrying either. `legion.yaml` gains `pod_update_retask_hours` and
+// `pod_update_notice_hours`, which the settings carry as the two numbers they are. A plugin
+// before 43 has no op to signal with, so its pod's round would never end, and a daemon before 43
+// answers that op's post a 404; the boot gate and `legion probe-image` refuse either pair.
 const DaemonAPIVersion = 43
