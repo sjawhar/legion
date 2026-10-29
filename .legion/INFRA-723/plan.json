@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-723",
+  "completed": "2026-10-29T02:14:00Z",
+  "planDocument": "dispatch://INFRA-723/artifact/plan-md (version 1; the full plan: code read, measurements, decisions D1-D7, tasks 1-9, acceptance table)",
+  "summary": "release-push.sh push-built checks the tar first, fetches main once, and when main's tip descends from the build's base and main's committed build is not newer (D2: base named by main's newest bot rebuild commit, else the newest dist-touching commit, is an ancestor of this base) commits dist/ and legion/ onto the tip with a temporary index (no checkout of the tip) and lands it through land_on_main; when a path in packages/claude-envoy/scripts/build-inputs.txt changed between base and tip (git diff --no-renames) it also starts one fresh run. A Bun test (packages/claude-envoy/tests/build-inputs.test.ts, added to pr-and-main.yaml's required test job) holds the list complete against the build's metafile inputs, staged skills, pi-legion agents and each reached package root's manifest, tsconfig and license files.",
+  "tasks": [
+    "1. packages/claude-envoy/scripts/build-inputs.txt (D1): one git pathspec per line, # comments; whole claude-envoy/envoy-client/contracts/pi-shared dirs minus dist/legion/tests/docs/changes; pi-legion/agents, skills, bun.lock, package.json, patches, .bun-version, bunfig.toml, .gitignore/.gitattributes (root and packages/), scripts/third-party-notices.ts, scripts/pi-plugin-prepack.sh, check-private-names.sh, release-push.sh, the workflow, setup-bun.",
+    "2. build.ts: buildBundles returns the metafile input paths.",
+    "3. packages/claude-envoy/tests/build-inputs.test.ts (D6), matching with git ls-files in a scratch repository; negative control: drop the packages/pi-shared line.",
+    "4. release-push.sh: deploy_key_env idempotent; land_on_main records its outcome and its notice/error stop calling <base-sha> the build's commit (push-fold's test updated too); push-built per D2/D3; header paragraphs rewritten (incl. the fetch-to-push race: land_on_main pushes only when main's tip is still HEAD's parent).",
+    "5. release-push.test.sh push-built cases a-l (docs-only move lands; input move lands + one fresh run; rename out of an input; excluded path inside input dir; list change; newer build on main lands nothing; equal build; rewritten main; main moves again between fetch and push; missing list; doctored tar refused with both kinds of move; gh failure after landing); rewrite the old 'moved' case.",
+    "6. Workflow header 20-31 and push-job comments; pr-and-main.yaml step running the Bun test.",
+    "7. Guides: packages/claude-envoy/AGENTS.md 165-179, README.md 274-279, docs/deployment.md 253-260, verify-build.sh header.",
+    "8. Changelog fragment packages/claude-envoy/.changes/unreleased/pr<N>-rebuild-lands-on-moved-main.yaml, kind Fixed.",
+    "9. Bring main in only on a real conflict."
+  ],
+  "acceptance": [
+    {"criterion": "1: push-built lands on a moved tip with no input change; lands and starts a fresh run when an input changed; lands nothing when main holds a newer build; a bad tar refused in every case", "surface": "the .github/scripts shell test against a local bare origin", "command": "bash .github/scripts/release-push.test.sh"},
+    {"criterion": "1 on real history", "surface": "push-built on a bare clone of sjawhar/legion with a real verify-build tar and stub gh", "command": "plan.md row 1′: pairs f45c6716→1767c9af (lands, no run) and a409c128→1767c9af (lands, one fresh run), each base given the branch's list as X′ with base..tip replayed onto it"},
+    {"criterion": "2: check-release-credentials and its test; lint, typecheck, test jobs of pr-and-main.yaml", "surface": "the scripts and PR CI", "command": "bash .github/scripts/check-release-credentials.test.sh && .github/scripts/check-release-credentials.sh; bunx biome check .; (cd packages/claude-envoy && bun run typecheck && bun run lint && bun test tests/build-inputs.test.ts); CI green on the head"},
+    {"criterion": "3: next run on main lands a rebuild commit though main moved; its built files equal a build of the base its subject names; a later run lands a newer build when inputs changed", "surface": "the workflow's runs on main", "command": "gh run list -R sjawhar/legion --workflow claude-envoy-rebuild.yaml --branch main; at commit C naming base B: C^ != B, git diff --name-only C^ C only dist/legion, worktree at B with C's dist/legion checked out passes bun run check-dist"}
+  ],
+  "requiredSkills": {
+    "implement": ["legion-worker: phase mechanics, pr-body proofs, push rules", "ce-simplify-code: simplify pass on release-push.sh and the new test before review"],
+    "test": ["legion-worker: proof entries with negative controls, re-running the named commands at the head"],
+    "review": ["thermonuclear-deep-review: correctness of a credential-holding push path (deploy key, land_on_main shared with push-fold)", "legion-worker: merge-gate and review-thread rules"]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "Outcome 'within one run' not met by land-only-when-unchanged (measured 30% of moved windows)", "answer": "Sent to the architect; architect changed the spec (22:40Z) to land whenever newer and also start a fresh run when inputs changed. Plan follows it (D2, D3)."},
+      {"finding": "Acceptance 3 depends on chance", "answer": "Acceptance 3 rewritten by the architect; plan's check compares C's built files with a build of the base its subject names (acceptance row 3), and push-built prints a 'Landing on main's tip' notice."},
+      {"finding": "Inputs a metafile test misses: workspace LICENSE/NOTICE, .gitignore/.gitattributes, bunfig.toml, what bun install and setup-bun read", "answer": "Whole package directories and explicit root paths in the list (D1); test probes LICENSE/NOTICE/tsconfig/package.json at each reached package root (D6)."},
+      {"finding": "Second deploy_key_env call leaves the key directory on disk", "answer": "deploy_key_env returns early when already set up (D4); 'nothing left in TMPDIR' checks kept."},
+      {"finding": "land_on_main messages false when passed the tip; both callers' tests pin the text", "answer": "Reworded, both push-built and push-fold tests updated together (D4)."},
+      {"finding": "Race between push-built's fetch and the push", "answer": "land_on_main pushes only when the tip is still HEAD's parent, never forced; a further move starts one fresh run; documented and tested (D5, case i)."},
+      {"finding": "Checking out the tip rewrites the running script", "answer": "No checkout: temporary index, read-tree tip, commit-tree (D3.7)."},
+      {"finding": "Missing or empty list; existing fixtures lack it; 'moved' case flips", "answer": "Missing/empty list counts as changed with a warning (case j); fixtures seed the real list; old 'moved' case rewritten."},
+      {"finding": "No criterion for the list test or that it runs in a required job; AC1 lacks edge cases; AC2's jobs unnamed", "answer": "Test added to pr-and-main.yaml's required test job with a negative control (D6); cases a-l; AC2 = pr-and-main.yaml lint/typecheck/test."},
+      {"finding": "Documents reached but not named: release-push.sh header, push-job comments, #2423's changelog fragment, a new fragment", "answer": "Tasks 4, 6, 7, 8; #2423's fragment left as its own record."},
+      {"finding": "Unverified live claims and simulation method", "answer": "Plan cites the commands; simulation re-run with the final list: 99/350 commits touch an input, 93/312 moved windows touch none."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 2},
+  "specDepartures": [
+    {
+      "spec": "Acceptance 1, second sentence: 'When main moved by a commit that touches a build input, it lands nothing and starts a fresh run.'",
+      "plan": "Follows the revised Scope (architect decision 22:40Z): with an input changed, push-built lands the build when it is newer than main's and also starts one fresh run; it lands nothing only when main already holds a newer build. Tests cases b and f.",
+      "evidence": "Spec Scope bullet 1 as revised and the architect's Envoy message 2026-10-28T22:38Z; Acceptance 1 text was not updated to match.",
+      "outcome": {"kind": "changed", "acceptance": ["Acceptance 1's second sentence should read: lands the build when newer and starts a fresh run; lands nothing when main holds a newer build."]}
+    }
+  ]
+}
