@@ -437,15 +437,21 @@ test("an editor that fails to load after sync is reported the same way, and late
 });
 
 test("ProofDocument makes a schema-read-only admission non-editable and reloadable", async () => {
-  const { admit, connections, editors, sync, view } = renderProofDocument();
+  const { admit, connections, editors, status, sync, view } = renderProofDocument();
 
   try {
     await waitFor(() => expect(connections).toHaveLength(1));
+    act(() => status("connected"));
     act(() => admit(true));
     await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     expect(editors[0]?.readOnly).toBe(true);
     expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe("true");
+    expect(within(view.container).getByText("Reload to edit.")).toBeDefined();
+    // A socket that is not connected names no reload: its reconnect's admission decides.
+    act(() => status("offline"));
+    expect(within(view.container).queryByText("Reload to edit.")).toBeNull();
+    act(() => status("connected"));
     expect(within(view.container).getByText("Reload to edit.")).toBeDefined();
   } finally {
     view.unmount();
@@ -454,39 +460,74 @@ test("ProofDocument makes a schema-read-only admission non-editable and reloadab
 
 // The server admits a closed issue's socket read-only as it admits a schema it does not serve, and
 // a reload cannot make a closed issue's document editable, so that admission names no reload: not
-// while the issue is closed, and not once it reopens, while the socket the reopen drops still holds
-// it. A read-only admission that comes while the issue is open is the schema's, and names one.
+// while the issue is closed, not once it reopens while that socket still holds it, and not through
+// the drop and the reconnect's draw that follow, until the reconnect's own admission decides. A
+// read-only admission that comes while the issue is open is the schema's, and names one.
 test("ProofDocument names a reload for a read-only admission only while the issue is open", async () => {
-  const { admit, connections, editors, rerender, sync, view } = renderProofDocument({
+  const { admit, connections, editors, rerender, status, sync, view } = renderProofDocument({
     isClosed: true,
   });
+  const reloadLine = () => within(view.container).queryByText("Reload to edit.");
 
   try {
     await waitFor(() => expect(connections).toHaveLength(1));
+    act(() => status("connected"));
     act(() => admit(true));
     await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     expect(editors[0]?.readOnly).toBe(true);
     expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe("true");
-    expect(within(view.container).queryByText("Reload to edit.")).toBeNull();
+    expect(reloadLine()).toBeNull();
 
+    // The reopen, then the drop it makes and the reconnect's draw: no reload is named at any step.
     act(() => rerender({ isClosed: false }));
     expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe("true");
-    expect(within(view.container).queryByText("Reload to edit.")).toBeNull();
-
+    expect(reloadLine()).toBeNull();
+    for (const step of ["offline", "connecting", "connected"] as const) {
+      act(() => status(step));
+      expect(reloadLine()).toBeNull();
+    }
     act(() => admit(false));
     expect(editors[0]?.readOnly).toBe(false);
     expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe(
       "false"
     );
-    expect(within(view.container).queryByText("Reload to edit.")).toBeNull();
+    expect(reloadLine()).toBeNull();
 
+    // A reconnect the server admits read-only while the issue is open is the schema's.
+    act(() => status("offline"));
+    act(() => status("connected"));
     act(() => admit(true));
     expect(editors[0]?.readOnly).toBe(true);
-    expect(within(view.container).getByText("Reload to edit.")).toBeDefined();
+    expect(reloadLine()).not.toBeNull();
 
     act(() => rerender({ isClosed: true }));
-    expect(within(view.container).queryByText("Reload to edit.")).toBeNull();
+    expect(reloadLine()).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+// The page cannot tell a close that dropped its socket from one that did not - a close served by
+// another server process, or a room read that failed - so a close and a reopen on one socket leave
+// its admission as it was: a schema's read-only admission still names the reload that fixes it.
+test("ProofDocument names a reload again for a schema's admission when a close and a reopen leave its socket", async () => {
+  const { admit, connections, editors, rerender, status, sync, view } = renderProofDocument();
+  const reloadLine = () => within(view.container).queryByText("Reload to edit.");
+
+  try {
+    await waitFor(() => expect(connections).toHaveLength(1));
+    act(() => status("connected"));
+    act(() => admit(true));
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    expect(reloadLine()).not.toBeNull();
+
+    act(() => rerender({ isClosed: true }));
+    expect(reloadLine()).toBeNull();
+    act(() => rerender({ isClosed: false }));
+    expect(editors[0]?.readOnly).toBe(true);
+    expect(reloadLine()).not.toBeNull();
   } finally {
     view.unmount();
   }
