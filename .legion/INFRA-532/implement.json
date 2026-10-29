@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-532",
+  "completed": "2026-10-29T07:45:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2472",
+  "round": 5,
+  "reason": "The controller's 10-28 ruling, relayed by the INFRA-138 architect: a new docs/solutions file on sjawhar/legion is named <slug>-pr<PR number>.md and carries no Dispatch key. The code is unchanged since the approved head ffb93ba0; only docs/solutions/ changed after READY's head 991f7c90.",
+  "proof": [
+    {
+      "criterion": "The five retro learnings are named -pr2472.md and carry no Dispatch key; the line this PR added to #2470's note names the pull request, not the issue; nothing else changes",
+      "surface": "The pull request's tree on GitHub (sjawhar/legion#2472, head e0a2679d)",
+      "command": "jj diff --from 991f7c90 --to e0a2679d --summary; grep -c INFRA-532 on each of the five -pr2472.md files at f4dce88d; line 56 of docs/solutions/testing/a-browser-row-that-needs-work-to-outlast-a-deadline-holds-the-worker-rather-than-trusting-a-slow-input-pr2470.md",
+      "observed": "Five renames (R, -INFRA-532.md -> -pr2472.md) and one changed line in the pr2470 note; 0 matches of INFRA-532 in each renamed file; line 56 reads 'sjawhar/legion#2472 moved both time-limit rows…'. No path outside docs/solutions/ changed, and neither commit carries skip-checks.",
+      "headSha": "e0a2679d",
+      "negativeControl": "The same grep over the five files at 991f7c90 (before the rename) counts 5 matches of \"INFRA-532\", one per file's related_issues line."
+    }
+  ],
+  "filesChanged": [
+    "docs/solutions/architecture-patterns/a-queue-whose-producer-dies-answers-every-waiter-with-a-terminal-value-never-just-clears-pr2472.md (renamed)",
+    "docs/solutions/dispatch-web/a-focus-that-late-content-can-push-away-runs-again-once-the-content-settles-unless-the-reader-moved-pr2472.md (renamed)",
+    "docs/solutions/dispatch-web/a-prosemirror-node-view-sets-layout-only-in-update-and-an-async-answer-fills-only-its-own-region-pr2472.md (renamed)",
+    "docs/solutions/dispatch-web/an-effect-keyed-on-a-prop-object-the-parent-rebuilds-reruns-every-render-key-on-its-fields-and-lock-it-with-an-equal-rerender-pr2472.md (renamed)",
+    "docs/solutions/testing/a-failing-deep-equality-on-a-fake-that-holds-dom-or-an-editor-can-print-a-diff-that-oom-kills-the-pod-pr2472.md (renamed)",
+    "docs/solutions/testing/a-browser-row-that-needs-work-to-outlast-a-deadline-holds-the-worker-rather-than-trusting-a-slow-input-pr2470.md (line 56)"
+  ],
+  "deviations": [
+    "Two learnings still cite older notes by path whose names hold a key (-INFRA-43.md, -LEGION-695.md); the architect said to leave them, since they name files already on main."
+  ]
+}
