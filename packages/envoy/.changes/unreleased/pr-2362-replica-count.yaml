@@ -15,8 +15,11 @@ body: |-
     `envoy-dispatch redeliver-webhooks`. More than 1 needs a clustered NATS: a single server
     (nats-server v2.15.1 included) refuses both a create and a raise above 1, and the listener's start
     then stops with an error naming `ENVOY_NATS_REPLICAS=<n>` (Dispatch's server, which connects in
-    the background, serves on and logs `envoy nats reconnect hook failed` with that error); a refused bucket raise names the bucket
-    too, as `raise KV_envoy_interests: ENVOY_NATS_REPLICAS=3: context deadline exceeded` (a grant
+    the background, serves on and logs that error as the warning
+    `envoy nats reconnect hook failed; it is retried` while its retries stay under a minute, and as
+    the error `envoy nats reconnect hooks have not succeeded` from a minute on); a refused bucket
+    raise names the bucket too, as
+    `raise KV_envoy_interests: ENVOY_NATS_REPLICAS=3: context deadline exceeded` (a grant
     without `$JS.API.STREAM.UPDATE.KV_<bucket>` shows as that timeout after 10 seconds). A cluster
     with one of three servers stopped creates a new stream at 3 copies, one offline peer assigned,
     and the start succeeds on nats-server v2.15.1; v2.10.29 refuses that create.

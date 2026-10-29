@@ -24,7 +24,9 @@ body: |-
     non-integer is refused at load naming the variable, and a limit above what the server can
     reserve is refused at create or update: the listener's start then stops with an error naming
     `ENVOY_STREAM_MAX_BYTES=<n>`, and Dispatch's server, which connects in the background, serves on
-    and logs `envoy nats reconnect hook failed` with that error at each retry.
+    and logs that error as the warning `envoy nats reconnect hook failed; it is retried` while its
+    retries stay under a minute, and as the error `envoy nats reconnect hooks have not succeeded`
+    from a minute on.
 time: 2026-10-28T10:11:16.371529334Z
 custom:
     Issue: pr2362

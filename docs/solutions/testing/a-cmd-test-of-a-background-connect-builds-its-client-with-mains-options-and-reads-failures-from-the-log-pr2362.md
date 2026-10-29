@@ -32,5 +32,8 @@ After the merge of sjawhar/legion#2390, `cmd/dispatch/main.go` connects Dispatch
 helper `startDispatchStream` in `cmd/dispatch/stream_replicas_test.go` still connected
 synchronously, and a reviewer's mutation of the background branch (plain stream config, no keeper)
 passed every test. Commit 8ec4e3643684 builds the helper with `serverClient(...)`, waits for the
-background reconcile, and returns the error from the logged `envoy nats reconnect hook failed`
-record (`reconcileFailure`); the same mutation now fails three tests.
+background reconcile, and returns the error from the record the bus logs for a failed run of the
+reconnect hooks (`reconcileFailure`); the same mutation now fails three tests. Since INFRA-743
+that record is the WARN `envoy nats reconnect hook failed; it is retried` under `bus.RepairGrace`
+and the ERROR `envoy nats reconnect hooks have not succeeded` at or past it, and the helper reads
+either.
