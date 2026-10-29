@@ -2,40 +2,31 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-624",
-  "completed": "2026-10-29T00:49:32Z",
-  "round": 8,
-  "reviewedHead": "6b8bda987131bf6562463e9c6d40edf662b0eb91",
-  "codeHead": "b0fea9fc9ab2",
+  "completed": "2026-10-29T08:09:34Z",
+  "round": 9,
+  "reviewedHead": "6c80533dd9f621c114289512f4cf4cd057286598",
+  "codeHead": "608e4e9f82fa",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 1,
-  "minor": 3,
-  "scope": "Narrowed by the INFRA-138 architect to round 7's list (review 5691214763): the one-edit wording, the settlement id, the two comments, the AGENTS.md count; correctness defects anywhere still fixed here; other points on Fast-follow.",
-  "ci": "CI head 0a1716e7 (newest pull_request run; compare to 6b8bda98 handoffsOnly true, 1 file): required lint, typecheck, test, pr-title queued at 00:49Z. GitHub reports MERGEABLE.",
-  "roundSevenItems": "All fixed in e194c750/b0fea9fc and accepted: one document edit listing every delete (PRRT_kwDORFy7ds6xXanP; deep review followed it on two lists, three lists, a paragraph after the list, [list, P, list], [P, list, P, list], [P, P, list, list], each valid with every unquoted word kept); no id named before settlement, retry asked, delete list after settlement (PRRT_kwDORFy7ds6xXanT; no id, a number id, a duplicate outside the ask, a duplicate on a list item); the two comments (PRRT_kwDORFy7ds6xXanW, PRRT_kwDORFy7ds6xXanY); proof-editor AGENTS.md now says Fifteen.",
+  "important": 2,
+  "minor": 0,
+  "scope": "Narrowed by the INFRA-138 architect to round 8's four items (review 5691562116) and the exhaustive Go test; correctness defects outside the exhaustive test's shapes still fixed here; other points on Fast-follow.",
+  "ci": "CI head 608e4e9f (newest pull_request run; compare to 6c80533d handoffsOnly true, 2 files under .legion/INFRA-624/): required lint, typecheck, test, pr-title success; envoy-go, envoy-go-race success; dispatch in progress. dispatch-multiprocess (not required) failed in TestSIGTERMWithOpenStreamsExitsPromptlyAndSettlesTheOwedDocument with only 'did not settle the owed document before exiting' (no unconfirmed settlement, nothing left owed); it passes on main and on this branch's earlier heads, and passed 3 of 3 locally at the head (go test -tags multiprocess -count=3): a timing flake, not this change's.",
+  "merge": "608e4e9f merges main 166bc0c4: every PR file's diff against main is byte-identical before and after the merge, except pmdoc/reanchor_test.go, whose local NestedValue import fix is dropped because main now carries it (#2482, #2484).",
+  "roundEightItems": "All fixed and accepted (PRRT_kwDORFy7ds6xYGI2, PRRT_kwDORFy7ds6xYGI4, PRRT_kwDORFy7ds6xYGI6, PRRT_kwDORFy7ds6xYGI9). The exhaustive test enumerates all 1364 bodies of up to five children from {P, empty P, list, nested list}, reads the delete ids from the reason text, applies them in one ApplyOps, re-runs the edit and asserts a valid end with every unquoted word kept; it fails on 152 bodies against 9a5c72e3's ask_block_text.go (code-quality review).",
   "keyFindings": [
     {
       "severity": "important",
       "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
-      "description": "askBlocksToDrop (:545-566) keeps the paragraph run starting at the first paragraph even when it holds no text, so for [empty P, list, P \"Should we ship?\"] the refusal names the question paragraph for deletion and doc-edit refuses the one edit ('ask block \"ask-lists\" has an empty question'); [empty P, list, list, P] and [list, empty P, list, P] fail the same way (deep-review probe TestProbeR8Shapes against Postgres). The one path the refusal names does not apply."
+      "description": "When the outer ask O breaks its own rule and an ask X nested in its kept list also breaks (O [P, L(item holding X), L3], X [P, L, L2]), the path loops: O's refusal says 'edit that decision first' (:537); X's refusal names X's L2; doc-edit deleting exactly that is refused because O, whose subtree it changes, still breaks; both refusals repeat. One edit deleting X's L2 and O's L3 together applies, but no refusal names it. Reviewer re-ran the deep-review probe TestProbeR9NestedAndOuterBothBroken against Postgres."
     },
     {
-      "severity": "minor",
+      "severity": "important",
       "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
-      "description": "case drop == nil (:527) cannot run, since askBlockOf refuses an ask with no paragraph first, while an empty non-nil drop list falls into the default branch: an option item holding a nested ask with two lists makes AskContentError report the outer ask and the reason reads 'the blocks to delete are ; then edit the ask' (code-quality probe). packages/envoy/AGENTS.md:2234 documents the dead case."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
-      "description": "The reason (:536) and the Changed fragment say the deletes keep 'its question and its first list', which is false when a list comes before the question: [list 'Early', P, list] gets the Early list on the delete list. AGENTS.md:2231's wording, 'the first list after them', is the true one."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/service_test.go",
-      "description": "followRefusal (:722) runs only on two and three lists: a mutated askBlocksToDrop that drops children[2:] passes every TestSetAskBlockText* test, and TestSetAskBlockTextRefusalBeforeBlockIDsSettleNamesNoDelete (:798) never settles and retries (code-quality probes)."
+      "description": "brokenNestedAsk (:585) names the first nested ask failing readAskBlockStrictly, parse failures included, not the one breaking the content rule: with a nested ask-y holding an empty question before the broken ask-nested, O's refusal says to edit ask-y, whose edit is refused 'has an empty question' with no path, and fixing it would not fix O (TestProbeR9NestedMisattributed, re-run by the reviewer)."
     }
   ],
   "fastFollow": "none",
-  "thermonuclear": "Both run at 6b8bda98 (code b0fea9fc): deep review CHANGES (item 1), code quality CHANGES (items 2-4).",
-  "security": "untrusted-input: delete ids appear only as strconv.Quote data and the reason names `dispatch doc-edit` with no command line or ops (ask_block_text.go:531-537); TestSetAskBlockTextRefusalGivesABlockIDOnlyAsQuotedData still bans command text. authz: no new route; the refusal runs inside SetAskBlockText behind the unchanged ask-edit handler."
+  "thermonuclear": "Both run at 6c80533d (code 608e4e9f): deep review CHANGES (both findings), code quality APPROVE (round 8 items and the exhaustive test sound).",
+  "security": "untrusted-input: ids in the reason stay strconv.Quote data and the nested-ask branch names an id with %q and no command (ask_block_text.go:530-546). authz: no new route; every refusal runs inside SetAskBlockText behind the unchanged ask-edit handler."
 }
