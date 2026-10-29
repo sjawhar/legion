@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as mermaidRenderer from "@legion/proof-editor/mermaid-render";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
@@ -22,6 +22,12 @@ import {
   type MermaidReply,
   type MermaidRequest,
 } from "./mermaid-render.worker";
+import {
+  flushTasks,
+  installFakeParseWorker,
+  markdownWorkerThreshold,
+  restoreParseWorker,
+} from "./parse-worker-fixture";
 
 function withQueries(children: ReactNode): ReactNode {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -1607,4 +1613,232 @@ test("a task item draws one disabled checkbox, ticked as its source is, in every
   } finally {
     view.unmount();
   }
+});
+
+/** The element a body is painted into (`markdownClassName`), which carries `data-markdown-pending`
+ *  while the worker owes its formatting and `data-markdown-fallback` when the parser refused it. */
+function markdownElement(container: HTMLElement): HTMLElement {
+  return container.firstElementChild as HTMLElement;
+}
+
+function pendingMark(container: HTMLElement): string | null {
+  return markdownElement(container).getAttribute("data-markdown-pending");
+}
+
+function fallbackMark(container: HTMLElement): string | null {
+  return markdownElement(container).getAttribute("data-markdown-fallback");
+}
+
+/** The body's own list items, not an `ask` block's options, so a row counts what it wrote. */
+function topItems(container: HTMLElement): HTMLElement[] {
+  return Array.from(markdownElement(container).querySelectorAll<HTMLElement>(":scope > ul > li"));
+}
+
+/** A list longer than the threshold, under a lead line that is the row's own, so no row reads
+ *  the answer the engine cached for another row's body. */
+const longItems = Math.ceil(markdownWorkerThreshold / "- x\n".length) + 200;
+
+function longBody(lead: string): string {
+  return `${lead}\n\n${"- x\n".repeat(longItems)}`;
+}
+
+/**
+ * A body longer than `markdownWorkerThreshold` is parsed in a Web Worker (sjawhar/legion#2403),
+ * so the reader's own thread is free while the heaviest body on the page parses. These rows are
+ * what a reader sees of that: the text at once, the formatting when the answer lands, their
+ * place in the body kept across it, and - whatever becomes of the worker - a formatted body in
+ * the end. `data-markdown-fallback` keeps its one meaning, a body the parser itself refused.
+ */
+describe("A long body parsed in the worker", () => {
+  beforeEach(async () => {
+    await warmMarkdownRenderer();
+  });
+
+  afterEach(restoreParseWorker);
+
+  test("paints its text at once, marked pending, then its formatted body", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = longBody("A list the worker is parsing");
+    const view = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      // The reader has the body's own text while the worker parses it: readable, selectable,
+      // and never the failure marker.
+      await waitFor(() => expect(pendingMark(view.container)).toBe("true"));
+      expect(view.container.textContent).toBe(markdown);
+      expect(fallbackMark(view.container)).toBeNull();
+      expect(topItems(view.container)).toHaveLength(0);
+
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+      expect(view.container.textContent).not.toContain("- x");
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The live view hands each streamed delta to the same body as a longer `markdown`. Between the
+  // delta and the worker's answer the reader keeps the paint they were reading: a turn that
+  // flipped back to its source text on every delta would be unreadable while it streamed.
+  test("keeps the formatted body it painted when its text grows, until the new answer lands", async () => {
+    const worker = installFakeParseWorker();
+    const first = longBody("A turn still streaming");
+    const grown = `${first}${"- y\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+
+      view.rerender(<MarkdownBody markdown={grown} />);
+      await waitFor(() => expect(pendingMark(view.container)).toBe("true"));
+      expect(topItems(view.container)).toHaveLength(longItems);
+      expect(view.container.textContent).not.toContain("- x");
+      expect(fallbackMark(view.container)).toBeNull();
+
+      await act(() => worker.answer(1));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 50));
+      expect(topItems(view.container).at(-1)?.textContent).toBe("y");
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("drops an older answer that arrives after a newer one, so only the newest source paints", async () => {
+    const worker = installFakeParseWorker();
+    const first = longBody("A turn answered out of order");
+    const grown = `${first}${"- y\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      await worker.waitForRequests(1);
+      view.rerender(<MarkdownBody markdown={grown} />);
+      await worker.waitForRequests(2);
+      expect(worker.requests.map(({ markdown }) => markdown)).toEqual([first, grown]);
+
+      // The newer body is answered first, the older one after it.
+      await act(() => worker.answer(1));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 50));
+      await act(() => worker.answer(0));
+      await flushTasks();
+
+      expect(topItems(view.container)).toHaveLength(longItems + 50);
+      expect(topItems(view.container).at(-1)?.textContent).toBe("y");
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The parser refusing a body is the one final failure, and the only thing
+  // `data-markdown-fallback` says: pending before it was interim, never a failure.
+  test("ends as its literal text, marked as the fallback, where the parser refuses it", async () => {
+    const worker = installFakeParseWorker();
+    const refused =
+      'A body with <span data-dispatch="bogus">a span</span> this schema has no node for';
+    const markdown = longBody(refused);
+    const view = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      await waitFor(() => expect(pendingMark(view.container)).toBe("true"));
+      expect(fallbackMark(view.container)).toBeNull();
+
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(fallbackMark(view.container)).toBe("true"));
+      expect(pendingMark(view.container)).toBeNull();
+      expect(view.container.textContent).toBe(markdown);
+      expect(topItems(view.container)).toHaveLength(0);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("ends formatted on the page's own thread when no worker can be created", async () => {
+    const worker = installFakeParseWorker({ refuseToCreate: true });
+    const view = render(<MarkdownBody markdown={longBody("A page that allows no worker")} />);
+
+    try {
+      // The page parses it itself: the reader waits, and then reads the body as a list. A
+      // worker that cannot be created is never the parser refusing the body.
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      expect(worker.created).toBeGreaterThan(0);
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("ends formatted on the page's own thread when the worker crashes", async () => {
+    const worker = installFakeParseWorker();
+    const view = render(<MarkdownBody markdown={longBody("A worker that crashes")} />);
+
+    try {
+      await act(() => worker.crash(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // Nothing ever answers this body. The engine's deadline (10 s in the design this row is
+  // written against) ends with the body parsed on the page; the 25 s below is room for a loaded
+  // runner, not a second bound.
+  test("ends formatted on the page's own thread when the worker misses its deadline", async () => {
+    const worker = installFakeParseWorker();
+    const view = render(<MarkdownBody markdown={longBody("A worker that never answers")} />);
+
+    try {
+      await worker.waitForRequests(1);
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems), {
+        interval: 250,
+        timeout: 25_000,
+      });
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  }, 40_000);
+
+  // Every paint recomputes the ask hosts, so a body whose decision card arrives late draws it
+  // from the answer it already has: the card is a dependency of the render, never a new parse.
+  test("repaints for a new decision card without sending the body a second time", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = `:::ask{urgency="high"}\n${askBody}\n${longBody("A decision above a list")}`;
+    const view = render(
+      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+        <TextAskCard.Provider value={undefined}>
+          <MarkdownBody markdown={markdown} />
+        </TextAskCard.Provider>
+      </MemoryRouter>
+    );
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      const shell = await findAskShell(view.container);
+      expect(within(shell).queryByText("Decision")).toBeNull();
+      expect(worker.requests).toHaveLength(1);
+
+      view.rerender(withAskCard(<MarkdownBody markdown={markdown} />));
+      const carded = await findAskShell(view.container);
+      expect(await within(carded).findByText("Decision")).toBeDefined();
+      await flushTasks();
+
+      expect(worker.requests).toHaveLength(1);
+      expect(topItems(view.container)).toHaveLength(longItems);
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
 });
