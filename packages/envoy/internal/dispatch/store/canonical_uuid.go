@@ -19,10 +19,10 @@ const canonicalUUIDForm = `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9
 // since the ids the server passes and compares as text are lower-case and never matched such a
 // spelling either.
 //
-// asks_anchor_artifact_id (migration 0137) indexes exactly CanonicalUUID("anchor->>'artifact_id'"),
+// asks_anchor_artifact_id (migration 0139) indexes exactly CanonicalUUID("anchor->>'artifact_id'"),
 // written out as literal SQL because a migration's text is immutable. Postgres reaches an
 // expression index only through a predicate comparing its exact expression, so an edit here that
-// 0137 does not carry costs the asks read its index scan:
+// 0139 does not carry costs the asks read its index scan:
 // docs.TestRecordedMarkRefsReadsThroughTheAnchorIndexes fails the moment the two diverge.
 func CanonicalUUID(text string) string {
 	return `(case when ` + text + ` ~ '` + canonicalUUIDForm + `' then (` + text + `)::uuid end)`

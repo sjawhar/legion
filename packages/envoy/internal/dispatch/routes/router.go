@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -71,10 +72,16 @@ type AppContext struct {
 	// reaching Dispatch over plain http (cmd/dispatch: DISPATCH_INSECURE_COOKIE).
 	InsecureCookie bool
 	apiDeps        api.Deps
+	// lifetime is AppContextOptions.Lifetime, which New passes to api.Register.
+	lifetime context.Context
 	// devSignInHost is the dashboard origin's host:port when the dev sign-in route is mounted,
 	// and empty otherwise. Only BuildAppContext sets it, from DevSignInOrigin, so no caller can
 	// turn the route on without the origin check.
 	devSignInHost string
+	// eventHead reads the id of the newest committed event, which GET /auth/whoami answers as
+	// event_head: through apiDeps.Store, the database the API reads the event log from, or, for a
+	// context with no Store, nothing, since it has no event log to read (whoami then answers 503).
+	eventHead func(context.Context) (int64, error)
 }
 
 // AppContextOptions is the explicit-injection bundle main.go assembles
@@ -110,7 +117,9 @@ type AppContextOptions struct {
 	GitHubAPIBase string
 	OIDC          api.ServiceTokenVerifier
 	AgentStream   agentstream.Source
-	Lifetime      context.Context
+	// Lifetime is the process context the API's background work runs on, which New passes to
+	// api.Register as its lifetime; required, since api.Register refuses a nil one.
+	Lifetime context.Context
 	// AgentSecretsURL/AgentSecretsTokenFile configure the credential-request UI's secrets broker
 	// client; empty URL means the feature is off. See api.DepsInput.
 	AgentSecretsURL       string
@@ -169,7 +178,6 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		GitHubAPIBase:          opts.GitHubAPIBase,
 		OIDC:                   opts.OIDC,
 		AgentStream:            opts.AgentStream,
-		Lifetime:               opts.Lifetime,
 		AgentSecretsURL:        opts.AgentSecretsURL,
 		AgentSecretsTokenFile:  opts.AgentSecretsTokenFile,
 		Files:                  opts.Files,
@@ -179,6 +187,10 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("BuildAppContext: %w", err)
+	}
+	eventHead := func(context.Context) (int64, error) { return 0, errNoEventLog }
+	if database := apiDeps.Store; database != nil {
+		eventHead = func(ctx context.Context) (int64, error) { return api.EventHead(ctx, database) }
 	}
 	return &AppContext{
 		SigningKey:     opts.SigningKey,
@@ -195,8 +207,13 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		InsecureCookie: opts.InsecureCookie,
 		devSignInHost:  devSignInHost,
 		apiDeps:        apiDeps,
+		eventHead:      eventHead,
+		lifetime:       opts.Lifetime,
 	}, nil
 }
+
+// errNoEventLog is what a context built with no Store answers for the event log's head.
+var errNoEventLog = errors.New("this server holds no store, so no event log to read the head of")
 
 // Architecture is the shared architecture importer the HTTP routes use, so the
 // server's five-minute sync ticker drives the same serialized Sync the Refresh
@@ -225,9 +242,12 @@ type router struct {
 	assets *assetCache
 }
 
-// New returns an http.Handler that serves all dispatch routes, and a wait that returns once the
-// delivery hub and its sockets have ended after the process lifetime is cancelled.
-func New(ctx *AppContext) (http.Handler, func()) {
+// New returns an http.Handler that serves all dispatch routes, and the API server's background
+// work (api.Background): its Wait returns once every keyed write's handler and every delivery a
+// request left running past its answer has settled, and the delivery hub, every live socket and
+// their subscriptions, and the event stream relay have ended after the process lifetime is
+// cancelled; its ResumeDeliveries is the delivery sweep's pass the maintenance loop runs.
+func New(ctx *AppContext) (http.Handler, api.Background) {
 	r := &router{
 		ctx:          ctx,
 		retainedHeld: semaphore.NewWeighted(maxRetainedBytesHeld),
@@ -241,13 +261,13 @@ func New(ctx *AppContext) (http.Handler, func()) {
 	mux.HandleFunc("POST /auth/logout", accesslog.HandlerFunc("/auth/logout", r.authLogout))
 	mux.HandleFunc("GET /auth/whoami", accesslog.HandlerFunc("/auth/whoami", r.authWhoami))
 	mux.HandleFunc(githubapi.Prefix, accesslog.HandlerFunc(githubapi.Prefix, r.apiGithubRest))
-	waitDelivery := api.Register(mux, r.ctx.apiDeps)
+	background := api.Register(mux, r.ctx.lifetime, r.ctx.apiDeps)
 	mux.HandleFunc("/", r.staticHandler)
 	if ctx.devSignInHost == "" {
-		return r.enforceCookieOrigin(mux), waitDelivery
+		return r.enforceCookieOrigin(mux), background
 	}
 	mux.HandleFunc("GET /auth/_dev/signin", accesslog.HandlerFunc("/auth/_dev/signin", r.authDevSignIn))
-	return requireHost(ctx.devSignInHost, r.enforceCookieOrigin(mux)), waitDelivery
+	return requireHost(ctx.devSignInHost, r.enforceCookieOrigin(mux)), background
 }
 
 // ───── auth ─────────────────────────────────────────────────────────────────
@@ -415,12 +435,37 @@ func (r *router) authLogout(w http.ResponseWriter, req *http.Request) {
 	api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// whoamiAnswer is what GET /auth/whoami answers a signed-in person, the Go mirror of
+// packages/contracts' AuthenticatedUser. Its fields are in their keys' order, which is the order the
+// answer's JSON has always carried them in.
+type whoamiAnswer struct {
+	EventHead string `json:"event_head"`
+	Kind      string `json:"kind"`
+	Login     string `json:"login"`
+}
+
+// authWhoami answers the signed-in person and event_head, the decimal id of the newest committed
+// event, read after the sign-in check and before the answer is written. The page starts every read
+// the event feed keeps current only once whoami has answered, and resumes its first events
+// subscription from event_head, so a change committed while it loads is replayed rather than
+// missed. A head that cannot be read is 503 EVENT_HEAD_UNAVAILABLE, never a whoami without it: a
+// page that took a missing head for an older server's answer would start its feed at the server's
+// head and could miss such a change.
 func (r *router) authWhoami(w http.ResponseWriter, req *http.Request) {
 	email, ok := r.login(w, req)
 	if !ok {
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"kind": "user", "login": email})
+	head, err := r.ctx.eventHead(req.Context())
+	if err != nil {
+		// A read the page's own leaving cut short says nothing of the database.
+		if req.Context().Err() == nil {
+			slog.Warn("dispatch: whoami could not read the event log's head", "error", err)
+		}
+		writeCodeError(w, http.StatusServiceUnavailable, "the event log's head could not be read; ask again", "EVENT_HEAD_UNAVAILABLE")
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, whoamiAnswer{EventHead: strconv.FormatInt(head, 10), Kind: "user", Login: email})
 }
 
 // apiGithubRest serves the web app's GitHub reads to a person, as the GitHub App.

@@ -6,16 +6,16 @@ import (
 	"testing"
 )
 
-const asksAnchorArtifactIDVersion = 137
+const asksAnchorArtifactIDVersion = 139
 
-// 0137 must boot over any data a schema before it accepted. asks_anchor_artifact (0032) casts
+// 0139 must boot over any data a schema before it accepted. asks_anchor_artifact (0032) casts
 // anchor->>'artifact_id' only where block_artifact_id is null, so an ask holding both columns can
 // carry an artifact_id no index has ever cast, and production's asks cannot be counted to show
 // none does. The index expression's regex guard answers null for such a row instead of raising,
-// so 0137 applies, refuses nothing (its census answers 0), and leaves those rows out of
+// so 0139 applies, refuses nothing (its census answers 0), and leaves those rows out of
 // asks_anchor_artifact_id, where AsksOutsideAnchorArtifactIndex counts them for the boot log. A
 // non-canonical spelling of a real document id is left out the same way.
-func TestMigration0137BootsOverAnAskWhoseAnchorArtifactIDDoesNotCast(t *testing.T) {
+func TestMigration0139BootsOverAnAskWhoseAnchorArtifactIDDoesNotCast(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	if err := store.migrate(ctx, migrationsThrough(t, asksAnchorArtifactIDVersion-1)); err != nil {
@@ -61,7 +61,7 @@ func TestMigration0137BootsOverAnAskWhoseAnchorArtifactIDDoesNotCast(t *testing.
 	}
 
 	if got := censusCount(t, store, asksAnchorArtifactIDVersion); got != 0 {
-		t.Fatalf("census = %d, want 0: 0137 refuses no row", got)
+		t.Fatalf("census = %d, want 0: 0139 refuses no row", got)
 	}
 	if err := store.migrate(ctx, migrationsThrough(t, asksAnchorArtifactIDVersion)); err != nil {
 		t.Fatalf("migrate through %d over an anchored ask whose artifact_id does not cast: %v", asksAnchorArtifactIDVersion, err)

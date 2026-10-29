@@ -43,16 +43,23 @@ publishes nothing, so the first publisher wins. The object carries:
 - `bootstrappedSession` — the transcript of the session this process bootstrapped as its Legion
   identity (`src/subagent-session.ts`).
 - `startupTurn` — `{session, sentAt}` or undefined: the session whose first turn a start that runs
-  after Oh My Pi's startup owns, and when that start was sent (milliseconds since the epoch). The
-  Legion entry sets it (`markStartupTurnSent`, `src/startup-turn.ts`): any claim that sends the
-  operator's controller its start message to an idle session, right before the send (the claim
-  `/legion-controller-start` runs after Oh My Pi's startup, a later `/legion-claim-controller`, or
-  a re-claim after a session change), and the daemon-launched controller right before
-  `claims/ready`. A start message queued as a follow-up behind a turn the operator already started
-  sets nothing: that run, the session's first, has already started. That session's first
-  `agent_start`, and its `session_shutdown`, clear it (`clearStartupTurn`;
-  `packages/pi-legion/AGENTS.md`, "The controller's start turn"). The Envoy entry does not read it
-  yet; a later pi-envoy change uses it.
+  after Oh My Pi's startup owns, and when that start was sent (milliseconds since the epoch;
+  undefined while the start is due and not sent yet). The Legion entry sets it
+  (`src/startup-turn.ts`): the operator-launched controller marks its session unsent at
+  `session_start` (`markStartupTurnPending`), since it claims and sends only from
+  `/legion-controller-start`, which Oh My Pi runs after its startup; any claim that sends the
+  operator's controller its start message to an idle session marks it sent right before the send
+  (`markStartupTurnSent`: the claim `/legion-controller-start` runs, a later
+  `/legion-claim-controller`, or a re-claim after a session change); and the daemon-launched
+  controller marks it sent right before `claims/ready`. A start message queued as a follow-up behind
+  a turn the operator already started marks nothing: that run, the session's first, has already
+  started, and its `agent_start` cleared the unsent mark. That session's first `agent_start`, and
+  its `session_shutdown`, clear it, and so does a start command whose claim fails before the send or
+  hands over to a new session (`clearStartupTurn`; `packages/pi-legion/AGENTS.md`, "The
+  controller's start turn"). The Envoy entry reads it (`packages/pi-envoy/src/card-wake.ts`): while
+  it names the Envoy entry's own live session and its start was sent under 30 s ago, or is unsent
+  and the Envoy entry first read that unsent mark under 30 s ago (re-read every second until then),
+  a card that finds the session idle starts no turn and the startup wake waits for the start turn.
 
 Every consumer resolves the object at each use through `envoyPluginInterface()`; nothing caches it
 at module scope, and `resetEnvoyPluginInterfaceForTests()` is the one test seam.
@@ -70,9 +77,11 @@ exact `Symbol.for` strings, so renaming one is a daemon change too):
 it, bumps `ENVOY_PLUGIN_INTERFACE_VERSION`; both plugins release from the same commit, and the
 daemon's gate refuses a pair whose versions differ.
 
-**The current version, 4.** Version 2 told the two separately bundled plugins that typed turns are
+**The current version, 5.** Version 2 told the two separately bundled plugins that typed turns are
 tag-matched rather than text-matched and that a tagged `skill-prompt` is the person's turn;
-version 3 adds `roleClaim.slackRoleOwned`; version 4 adds `startupTurn`. The real readers are the
+version 3 adds `roleClaim.slackRoleOwned`; version 4 adds `startupTurn`; version 5 lets
+`startupTurn.sentAt` be undefined (a start due and not sent yet) and has the Envoy entry read the
+mark. The real readers are the
 Legion load marker (`extensions/legion.ts`), `readEnvoyPluginInterface`, the Envoy publisher's
 mismatch refusal and the daemon probe (`packages/daemon/probe.mjs`), which take
 `ENVOY_PLUGIN_INTERFACE_VERSION`, and

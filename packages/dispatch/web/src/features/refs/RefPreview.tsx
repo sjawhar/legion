@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 
 import { primarySpec } from "../../api/issue-cache";
+import { issueQuery } from "../../api/queries";
 import { AttentionBadge } from "../../components/Badge";
 import { LabelPill, StatusPill } from "../../components/Pill";
 import {
@@ -21,7 +22,6 @@ import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-pre
 import {
   artifactTextQuery,
   blockText,
-  issueQuery,
   prefetchReference,
   useBlockDocument,
   useReferenceData,

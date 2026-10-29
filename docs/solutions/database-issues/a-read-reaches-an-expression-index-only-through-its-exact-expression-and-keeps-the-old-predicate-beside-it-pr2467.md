@@ -57,7 +57,7 @@ related_issues:
   enforces this, and rows written by earlier releases are unchecked: an ask holding both columns
   was listed under neither document, so its mark was swept. Since sjawhar/legion#2483 the read no
   longer depends on it: asks are read by the anchor's artifact alone, the same predicate as
-  comments, through `asks_anchor_artifact_id` (migration `0137`), an index added for that exact
+  comments, through `asks_anchor_artifact_id` (migration `0139`), an index added for that exact
   expression rather than a predicate bent to fit the index that existed. That index's expression
   guards the cast with a canonical-form regex (`case when anchor->>'artifact_id' ~ '^[0-9a-f]{8}-…$'
   then (anchor->>'artifact_id')::uuid end`), so a stored anchor that does not cast can fail
