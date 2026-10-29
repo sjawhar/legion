@@ -15,10 +15,12 @@ import (
 )
 
 // fakeSeedDB answers seed-finish's queries: each count query its counts in turn (the last one
-// again once they run out), the block-index table check `indexed`. ran is every statement in order.
+// again once they run out), the block-index table check `indexed`, the request_keys table check
+// `keyed`. ran is every statement in order.
 type fakeSeedDB struct {
 	counts  map[string][]int64
 	indexed bool
+	keyed   bool
 	ran     []string
 }
 
@@ -38,8 +40,11 @@ func (r fakeRow) Scan(dest ...any) error {
 
 func (db *fakeSeedDB) QueryRow(_ context.Context, sql string, _ ...any) pgx.Row {
 	db.ran = append(db.ran, sql)
-	if sql == sqlBlockIndexTables {
+	switch sql {
+	case sqlBlockIndexTables:
 		return fakeRow{db.indexed}
+	case sqlRequestKeysTable:
+		return fakeRow{db.keyed}
 	}
 	seq := db.counts[sql]
 	if len(seq) > 1 {
@@ -82,18 +87,19 @@ func TestSeedFinishWaitsForTheOutboxAndTheBackfillThenVacuumsAndInstallsTheTrigg
 	var logged bytes.Buffer
 	f, clock := fakeFinisher(15*time.Minute, &logged)
 	start := *clock
-	db := &fakeSeedDB{indexed: true, counts: map[string][]int64{sqlUnpublishedEvents: {5, 3, 0}, sqlBlockIndexOwed: {7, 0}}}
+	db := &fakeSeedDB{indexed: true, keyed: true, counts: map[string][]int64{sqlUnpublishedEvents: {5, 3, 0}, sqlBlockIndexOwed: {7, 0}, sqlRequestKeysCount: {0}}}
 	if err := f.finish(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{sqlUnpublishedEvents, sqlUnpublishedEvents, sqlUnpublishedEvents, sqlBlockIndexTables, sqlBlockIndexOwed, sqlBlockIndexOwed, sqlVacuumAnalyze, commitTriggerSQL}
+	want := []string{sqlUnpublishedEvents, sqlUnpublishedEvents, sqlUnpublishedEvents, sqlBlockIndexTables, sqlBlockIndexOwed, sqlBlockIndexOwed,
+		sqlRequestKeysTable, sqlRequestKeysDel, sqlRequestKeysCount, sqlVacuumAnalyze, commitTriggerSQL}
 	if !slices.Equal(db.ran, want) {
 		t.Fatalf("statements run %q, want %q", db.ran, want)
 	}
 	if waited := clock.Sub(start); waited != 3*seedFinishPoll {
 		t.Errorf("waited %s, want three polls of 2 s", waited)
 	}
-	for _, phase := range []string{"waiting for the outbox", "block-index backfill", "vacuum analyze", "installing the commit-time trigger"} {
+	for _, phase := range []string{"waiting for the outbox", "block-index backfill", "idempotency keys", "vacuum analyze", "installing the commit-time trigger"} {
 		if !strings.Contains(logged.String(), phase) {
 			t.Errorf("the log lacks %q:\n%s", phase, logged.String())
 		}
@@ -109,8 +115,23 @@ func TestSeedFinishSkipsTheBackfillWaitOnABuildWithoutItsTables(t *testing.T) {
 	if err := f.finish(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}
-	if count(db.ran, sqlBlockIndexOwed) != 0 || count(db.ran, sqlVacuumAnalyze) != 1 || count(db.ran, commitTriggerSQL) != 1 {
-		t.Fatalf("statements run %q: want no block-index count, one vacuum and one trigger install", db.ran)
+	if count(db.ran, sqlBlockIndexOwed) != 0 || count(db.ran, sqlRequestKeysDel) != 0 || count(db.ran, sqlVacuumAnalyze) != 1 || count(db.ran, commitTriggerSQL) != 1 {
+		t.Fatalf("statements run %q: want no block-index count, no key delete, one vacuum and one trigger install", db.ran)
+	}
+}
+
+// TestSeedFinishRefusesATemplateThatStillHoldsIdempotencyKeys: keys left after the delete would
+// be swept inside a later step's window, so seed-finish fails before vacuum and the trigger.
+func TestSeedFinishRefusesATemplateThatStillHoldsIdempotencyKeys(t *testing.T) {
+	var logged bytes.Buffer
+	f, _ := fakeFinisher(15*time.Minute, &logged)
+	db := &fakeSeedDB{keyed: true, counts: map[string][]int64{sqlUnpublishedEvents: {0}, sqlRequestKeysCount: {3}}}
+	err := f.finish(context.Background(), db)
+	if err == nil || !strings.Contains(err.Error(), "request_keys still holds 3 rows") {
+		t.Fatalf("error %v, want the 3 rows request_keys still holds named", err)
+	}
+	if count(db.ran, sqlVacuumAnalyze)+count(db.ran, commitTriggerSQL) != 0 {
+		t.Errorf("vacuum or the trigger ran after the keys were left: %q", db.ran)
 	}
 }
 

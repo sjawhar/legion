@@ -22,7 +22,7 @@
 #       loadgen and (with --browsertype-commit) a static browsertype of that commit for browser
 #       typing (below), starts the heartbeat and the sampler, and prints each copy container's
 #       requests and limits.
-#   cluster.sh seed --namespace NS            loadgen seed and seed-finish, then the template
+#   cluster.sh seed --namespace NS            loadgen seed, seed-refs and seed-finish, then the template
 #                                             database dispatch_seed.
 #   cluster.sh step --namespace NS NAME FACTOR [--duration 10m] [--reads-only] [--typing
 #                   [--typing-peers 2] [--typing-rate 5] [--typing-docs 20]]
@@ -550,6 +550,35 @@ use_run() {
   set_run "$run"
   [ -f "$STATE" ] || die "no $STATE: run $run was not started from this pod (LOADTEST_CLUSTER_ROOT $CLUSTER_ROOT)"
   [ "$(jq -r .namespace "$STATE")" = "$NS" ] || die "run $run is in namespace $(jq -r .namespace "$STATE"), not $NS"
+  register_command
+}
+
+# proc_start PID: the process's start time (field 22 of /proc/PID/stat, read after the command name,
+# which may hold spaces), so a pid the kernel reused for another process is told apart.
+proc_start() { sed -E 's/^.*\) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20; }
+
+# register_command: this command of RUN (never one of its daemons) is alive: its pid in
+# <run>/commands/, holding its start time. The heartbeat renews the lock only while one is.
+register_command() {
+  [[ $CMD == _* ]] && return 0
+  mkdir -p -- "$RUN_DIR/commands"
+  proc_start "$$" >"$RUN_DIR/commands/$$"
+}
+
+# run_command_alive: some command of RUN that registered itself is still the same live process;
+# the file of each one that is not is removed.
+run_command_alive() {
+  local f pid alive=1
+  for f in "$RUN_DIR"/commands/*; do
+    [ -f "$f" ] || continue
+    pid=${f##*/}
+    if [[ $pid =~ ^[0-9]+$ ]] && [ -n "$(<"$f")" ] && [ "$(proc_start "$pid")" = "$(<"$f")" ]; then
+      alive=0
+    else
+      rm -f -- "$f"
+    fi
+  done
+  return "$alive"
 }
 
 set_run() {
@@ -683,7 +712,10 @@ stop_daemon() {
 }
 
 # The heartbeat: every 60 s, the lock's heartbeat, by a JSON patch that first tests that the lock
-# still names this run; it ends when the lock is gone or another run's.
+# still names this run; it ends when the lock is gone or another run's, and when no command of the
+# run is alive (run_command_alive). A command that dies without its EXIT trap (killed, an OOM, a
+# worker turn interrupted) then leaves a lock that ages, so after 15 min the next up names it stale
+# with the down command; the run's next command restarts the heartbeat (ensure_daemons).
 cmd__heartbeat() {
   parse "namespace run" "" "$@"
   use_run
@@ -691,6 +723,11 @@ cmd__heartbeat() {
   local patch out lock
   while :; do
     sleep 60
+    if ! run_command_alive; then
+      note "heartbeat: no command of run $RUN is alive; stopping, so the lock ages and goes stale"
+      rm -f -- "$RUN_DIR/heartbeat.pid"
+      exit 0
+    fi
     patch=$(jq -nc --arg run "$RUN" --arg now "$(utc_now)" \
       '[{op: "test", path: "/data/run", value: $run}, {op: "replace", path: "/data/heartbeat", value: $now}]')
     if ! out=$(kube patch configmap "$LOCK" --type json -p "$patch" 2>&1); then
@@ -1244,14 +1281,16 @@ STORED_ORDER_SCRIPT='IFS= read -r DATABASE_URL; export DATABASE_URL; seconds=$1;
 # the checker's fields (CHECKER, the JSON object stored_order_checker gives: dispatch_commit,
 # built_from, overlay_source, overlay_files, registration, renderer_matches, sha256), its exit
 # status (null when it did not run), --since (null when none), and the counts of the last summary
-# line (`stored-order: documents=N clean=N mismatched=N refused=N failed=N`), each null when there
-# is no such line or the command timed out (exit 124), never 0.
+# line (`stored-order: documents=N clean=N mismatched=N refused=N failed=N`, which INFRA-707's
+# checker from eb0fe0be on ends with ` unchecked=N`, a document it compared no update and no version
+# of), each null when there is no such line or the command timed out (exit 124), never 0; unchecked
+# is null too for a line without it.
 stored_order_summary() {
   jq -Rn --argjson checker "$2" --argjson exit "${3:-null}" --arg since "$4" '
-    ([inputs | capture("^stored-order: documents=(?<documents>[0-9]+) clean=(?<clean>[0-9]+) mismatched=(?<mismatched>[0-9]+) refused=(?<refused>[0-9]+) failed=(?<failed>[0-9]+)$")] | last) as $s
+    ([inputs | capture("^stored-order: documents=(?<documents>[0-9]+) clean=(?<clean>[0-9]+) mismatched=(?<mismatched>[0-9]+) refused=(?<refused>[0-9]+) failed=(?<failed>[0-9]+)( unchecked=(?<unchecked>[0-9]+))?$")] | last) as $s
     | $checker + {exit: $exit, since: (if $since == "" then null else $since end)}
-      + (if $s == null or $exit == 124 then {documents: null, clean: null, mismatched: null, refused: null, failed: null}
-        else $s | map_values(tonumber) end)' <"$1"
+      + (if $s == null or $exit == 124 then {documents: null, clean: null, mismatched: null, refused: null, failed: null, unchecked: null}
+        else $s | map_values(if . == null or . == "" then null else tonumber end) end)' <"$1"
 }
 
 # stored_order_checker: state.json's stored_order (the run's checker, stored_order_build) as one
@@ -1469,7 +1508,7 @@ stored_order_note() {
   note "$(jq -r --arg name "$1" --arg what "$2" --arg txt "$4" --arg why "$5" "$STORED_ORDER_LABEL"' def n: if . == null then "null" else tostring end;
     "step \($name): \($what) (envoy-dispatch of \(checker_label)) since \(.since | n): "
     + if .exit == null then "not run: \($why)"
-      else "exit \(.exit)\(if .exit == 124 then " (timed out)" else "" end), documents=\(.documents | n) clean=\(.clean | n) mismatched=\(.mismatched | n) refused=\(.refused | n) failed=\(.failed | n)"
+      else "exit \(.exit)\(if .exit == 124 then " (timed out)" else "" end), documents=\(.documents | n) clean=\(.clean | n) mismatched=\(.mismatched | n) refused=\(.refused | n) failed=\(.failed | n) unchecked=\(.unchecked | n)"
         + (if .exit == 0 then "" else "; a correctness finding, not a step failure: \($txt)" end) end' "$3")"
 }
 
@@ -1545,7 +1584,7 @@ stored_order_table() {
   {
     printf '# Stored order\n\n'
     jq -r '.stored_order | if . == null then "No step ran INFRA-707'\''s oracle `envoy-dispatch stored-order`: state.json records no stored-order checker."
-      else "INFRA-707'\''s oracle `envoy-dispatch stored-order` ran on each step after its window, while Dispatch still ran, with `--since` the window start. Exit 1 (a mismatch, a refused document or a failed read) is a correctness finding, not a failed step; `<step>/stored-order.txt` holds its lines.\n\n"
+      else "INFRA-707'\''s oracle `envoy-dispatch stored-order` ran on each step after its window, while Dispatch still ran, with `--since` the window start. Exit 1 (a mismatch, a refused document, a failed read, or a document the checker compared no update and no version of) is a correctness finding, not a failed step; `<step>/stored-order.txt` holds its lines. Unchecked counts those documents; it is `null` for a checker older than INFRA-707'\''s eb0fe0be, whose summary line has no such count.\n\n"
         + "The checker was built for dispatch commit \(.dispatch_commit) "
         + (if .overlay_source != null then "from that commit'\''s tree with INFRA-707'\''s files of source commit \(.overlay_source) added (\(.overlay_files | map("`\(.)`") | join(", ")); its stored-order entry registered in `\(.registration)`)"
           elif .built_from == .dispatch_commit then "from that commit'\''s own tree (no overlay)"
@@ -1558,23 +1597,23 @@ stored_order_table() {
       printf "Typing: \`none\` for every step: up was given no \`--browsertype-commit\`.\n\n"
     fi
     printf "Typed: the counts of the call that runs first over the step's typed documents alone (\`stored-order --since <window start> --artifact <id>\`, \`<step>/stored-order-typed.json\`), so their result stands even when the run over every document then times out; \`none\` for a step that typed into no document.\n\n"
-    printf '| Step | Since | Exit | Documents | Clean | Mismatched | Refused | Failed | Typed documents | Typed clean | Typed mismatched | Typed refused | Typed failed | Renderer matches | Typing |\n'
-    printf '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n'
+    printf '| Step | Since | Exit | Documents | Clean | Mismatched | Refused | Failed | Unchecked | Typed documents | Typed clean | Typed mismatched | Typed refused | Typed failed | Typed unchecked | Renderer matches | Typing |\n'
+    printf '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n'
     for d in "$@"; do
-      typing=none typed='none | none | none | none | none'
+      typing=none typed='none | none | none | none | none | none'
       if [ -f "$d/browsertype.json" ]; then
         typing=$(jq -r '.sent | if . == null then "null" else tostring end' "$d/browsertype.json") || return 1
       fi
       if [ -f "$d/stored-order-typed.json" ]; then
         typed=$(jq -r 'def n: if . == null then "null" else tostring end;
-          "\(.documents | n) | \(.clean | n) | \(.mismatched | n) | \(.refused | n) | \(.failed | n)"' "$d/stored-order-typed.json") || return 1
+          "\(.documents | n) | \(.clean | n) | \(.mismatched | n) | \(.refused | n) | \(.failed | n) | \(.unchecked | n)"' "$d/stored-order-typed.json") || return 1
       fi
       if [ -f "$d/stored-order.json" ]; then
         jq -r --arg step "${d##*/}" --arg typed "$typed" --arg typing "$typing" 'def n: if . == null then "null" else tostring end;
-          "| \($step) | \(.since | n) | \(if .exit == null then "not run" else .exit | tostring end) | \(.documents | n) | \(.clean | n) | \(.mismatched | n) | \(.refused | n) | \(.failed | n) | \($typed) | \(.renderer_matches | n) | \($typing) |"' \
+          "| \($step) | \(.since | n) | \(if .exit == null then "not run" else .exit | tostring end) | \(.documents | n) | \(.clean | n) | \(.mismatched | n) | \(.refused | n) | \(.failed | n) | \(.unchecked | n) | \($typed) | \(.renderer_matches | n) | \($typing) |"' \
           "$d/stored-order.json" || return 1
       else
-        printf '| %s |  | not run |  |  |  |  |  | %s |  | %s |\n' "${d##*/}" "$typed" "$typing"
+        printf '| %s |  | not run |  |  |  |  |  |  | %s |  | %s |\n' "${d##*/}" "$typed" "$typing"
       fi
     done
   } >"$out.tmp" || return 1
@@ -2602,6 +2641,7 @@ up_run() {
   RUN_TAKEN=1
   note "took the lock $LOCK in $NS for run $RUN"
   (umask 077 && mkdir -p -- "$RUN_DIR/logs" "$RUN_DIR/tmp" "$RUN_DIR/steps")
+  register_command
   mv -- "$CHECKER_TMP/envoy-dispatch" "$STORED_ORDER_BIN" || die "moving the stored-order checker into $STORED_ORDER_BIN failed"
   [ -z "$bt_commit" ] || mv -- "$CHECKER_TMP/browsertype" "$BROWSERTYPE_BIN" || die "moving browsertype into $BROWSERTYPE_BIN failed"
   checker_tmp_remove
@@ -2693,6 +2733,12 @@ seed_run() {
   runner_start seed /work/loadgen seed -allow-foreign "${ENDPOINTS[@]}" -out /work/seed.json
   rc=$(runner_wait seed 5400)
   [ "$rc" = 0 ] || die "loadgen seed ended with $rc; see $RUN_DIR/logs/seed.log"
+  # The reference seed, as stack.sh seed writes it: 1,000 cited documents and their citations, so
+  # the references route does the work it does in production.
+  note "writing the production-shaped references through Dispatch's Service from the runner"
+  runner_start seed-refs /work/loadgen seed-refs -allow-foreign "${ENDPOINTS[@]}" -seed /work/seed.json
+  rc=$(runner_wait seed-refs 5400)
+  [ "$rc" = 0 ] || die "loadgen seed-refs ended with $rc; see $RUN_DIR/logs/seed-refs.log"
   runner_start seed-finish /work/loadgen seed-finish -pg "$(pg_url)" -timeout 15m
   rc=$(runner_wait seed-finish 2400)
   [ "$rc" = 0 ] || die "loadgen seed-finish ended with $rc; see $RUN_DIR/logs/seed-finish.log"

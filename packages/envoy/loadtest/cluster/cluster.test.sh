@@ -975,7 +975,7 @@ so_call=$(grep -F '/work/envoy-dispatch stored-order' "$fake/kubectl.log") || fa
 ! grep -qF -- "$pg_password" <<<"$so_call" || fail "stored-order's kubectl call carries the Postgres password"
 grep -qx 'stored-order: documents=2 clean=2 mismatched=0 refused=0 failed=0' "$run_dir/steps/smoke/stored-order.txt" ||
   fail "stored-order.txt does not hold the command's output: $(cat "$run_dir/steps/smoke/stored-order.txt" 2>/dev/null)"
-jq -e --argjson k "$checker" '. == $k + {exit: 0, since: "2026-10-28T10:00:00Z", documents: 2, clean: 2, mismatched: 0, refused: 0, failed: 0, evidence: []}' \
+jq -e --argjson k "$checker" '. == $k + {exit: 0, since: "2026-10-28T10:00:00Z", documents: 2, clean: 2, mismatched: 0, refused: 0, failed: 0, unchecked: null, evidence: []}' \
   "$run_dir/steps/smoke/stored-order.json" >/dev/null || fail "a clean run's stored-order.json is wrong: $(cat "$run_dir/steps/smoke/stored-order.json" 2>/dev/null)"
 grep -qF "step smoke: stored-order (envoy-dispatch of dispatch commit aaaaaaaaaaaa, renderer_matches true) since 2026-10-28T10:00:00Z: exit 0, documents=2 clean=2 mismatched=0 refused=0 failed=0" "$tmp/out" ||
   fail "step smoke did not print the stored-order counts"
@@ -1004,9 +1004,9 @@ pass "step and replay refuse --typing when up was given no --browsertype-commit,
 boxes=$(grep -c -- "-l dispatch-loadtest/run=$run,dispatch-loadtest/role=nats-box -o json" "$fake/kubectl.log" || true)
 FAKE_STORED_ORDER=mismatch run_cluster step --namespace "$ns" reads 10 --duration 1m --reads-only
 ((RC == 0)) || fail "step --reads-only with a stored-order mismatch exited $RC"
-jq -e --argjson k "$checker" 'del(.evidence) == $k + {exit: 1, since: "2026-10-28T10:00:00Z", documents: 3, clean: 1, mismatched: 1, refused: 1, failed: 0}' \
+jq -e --argjson k "$checker" 'del(.evidence) == $k + {exit: 1, since: "2026-10-28T10:00:00Z", documents: 3, clean: 1, mismatched: 1, refused: 1, failed: 0, unchecked: null}' \
   "$run_dir/steps/reads/stored-order.json" >/dev/null || fail "a mismatching run's stored-order.json is wrong: $(cat "$run_dir/steps/reads/stored-order.json" 2>/dev/null)"
-grep -qF 'step reads: stored-order (envoy-dispatch of dispatch commit aaaaaaaaaaaa, renderer_matches true) since 2026-10-28T10:00:00Z: exit 1, documents=3 clean=1 mismatched=1 refused=1 failed=0; a correctness finding, not a step failure' "$tmp/out" ||
+grep -qF 'step reads: stored-order (envoy-dispatch of dispatch commit aaaaaaaaaaaa, renderer_matches true) since 2026-10-28T10:00:00Z: exit 1, documents=3 clean=1 mismatched=1 refused=1 failed=0 unchecked=null; a correctness finding, not a step failure' "$tmp/out" ||
   fail "step reads did not print the mismatching stored-order counts as a finding"
 [ ! -f "$run_dir/steps/reads/step-failed.json" ] || fail "a stored-order mismatch was recorded as a step failure: $(cat "$run_dir/steps/reads/step-failed.json")"
 grep -q "^cgroup-merge $run_dir/steps/reads " "$fake/loadgen.log" || fail "step reads did not go on to cgroup-merge after a stored-order mismatch"
@@ -1095,7 +1095,7 @@ jq -e --arg dump "$(jq -r .seed.dump_sha256 "$seeded")" --arg tar "$(jq -r .bund
   "$run_dir/replay-prepared.json" >/dev/null || fail "replay-prepared.json lacks a field: $(cat "$run_dir/replay-prepared.json")"
 FAKE_STORED_ORDER=nosummary run_cluster replay --namespace "$ns" r16
 ((RC == 0)) || fail "replay r16 exited $RC"
-jq -e --argjson k "$checker" '. == $k + {exit: 1, since: "2026-10-28T10:00:00Z", documents: null, clean: null, mismatched: null, refused: null, failed: null, evidence: []}' \
+jq -e --argjson k "$checker" '. == $k + {exit: 1, since: "2026-10-28T10:00:00Z", documents: null, clean: null, mismatched: null, refused: null, failed: null, unchecked: null, evidence: []}' \
   "$run_dir/steps/r16/stored-order.json" >/dev/null || fail "a stored-order run with no summary line does not record null counts: $(cat "$run_dir/steps/r16/stored-order.json" 2>/dev/null)"
 grep -qF 'stored-order: open database: failed to connect' "$run_dir/steps/r16/stored-order.txt" || fail "stored-order.txt does not hold the command's standard error"
 [ "$(grep -c -- "^-n $ns cp $run_dir/envoy-dispatch runner:/work/envoy-dispatch " "$fake/kubectl.log")" = 1 ] ||
@@ -1166,10 +1166,10 @@ for s in smoke reads; do
 done
 [ "$(grep -c -- "^codepaths -step $run_dir/steps/r16 .* -residual-notes " "$fake/loadgen.log")" = 2 ] ||
   fail "collect did not run the replay step's loadgen codepaths beside the outage"
-none5='none | none | none | none | none'
-printf '%s\n' "| smoke | 2026-10-28T10:00:00Z | 0 | 2 | 2 | 0 | 0 | 0 | $none5 | true | none |" \
-  "| reads | 2026-10-28T10:00:00Z | 1 | 3 | 1 | 1 | 1 | 0 | $none5 | true | none |" \
-  "| r16 | 2026-10-28T10:00:00Z | 1 | null | null | null | null | null | $none5 | true | none |" >"$tmp/want-stored-order"
+none6='none | none | none | none | none | none'
+printf '%s\n' "| smoke | 2026-10-28T10:00:00Z | 0 | 2 | 2 | 0 | 0 | 0 | null | $none6 | true | none |" \
+  "| reads | 2026-10-28T10:00:00Z | 1 | 3 | 1 | 1 | 1 | 0 | null | $none6 | true | none |" \
+  "| r16 | 2026-10-28T10:00:00Z | 1 | null | null | null | null | null | null | $none6 | true | none |" >"$tmp/want-stored-order"
 sed -n '/^| --- /,$p' "$run_dir/STORED-ORDER.md" | tail -n +2 | diff -u "$tmp/want-stored-order" - >&2 ||
   fail "STORED-ORDER.md does not hold one row per step, in the order they ran, with their counts, exit, the typed call's counts and renderer_matches"
 grep -qF "The checker was built for dispatch commit $commit_ok from that commit's own tree (no overlay). renderer_matches: true. Binary sha256 $(jq -r .stored_order.sha256 "$run_dir/state.json")." "$run_dir/STORED-ORDER.md" ||
@@ -1431,7 +1431,7 @@ typed_args=$(printf -- ' --artifact %s' "${want_docs_a[@]}")
   fail "the second stored-order call is not the run over every document within what is left of the bound: ${so_calls[1]}"
 grep -qx 'stored-order: documents=2 clean=2 mismatched=0 refused=0 failed=0' "$tdir/stored-order-typed.txt" ||
   fail "stored-order-typed.txt does not hold the typed call's output: $(cat "$tdir/stored-order-typed.txt" 2>/dev/null)"
-jq -e --argjson k "$checker" '. == $k + {exit: 0, since: "2026-10-28T10:00:00Z", documents: 2, clean: 2, mismatched: 0, refused: 0, failed: 0}' \
+jq -e --argjson k "$checker" '. == $k + {exit: 0, since: "2026-10-28T10:00:00Z", documents: 2, clean: 2, mismatched: 0, refused: 0, failed: 0, unchecked: null}' \
   "$tdir/stored-order-typed.json" >/dev/null || fail "the typed call's stored-order-typed.json is wrong: $(cat "$tdir/stored-order-typed.json" 2>/dev/null)"
 grep -qF 'step 10x-typing: stored-order over the 3 typed documents (envoy-dispatch of dispatch commit aaaaaaaaaaaa, renderer_matches true) since 2026-10-28T10:00:00Z: exit 0, documents=2 clean=2' "$tmp/out" ||
   fail "the typed stored-order call printed no line of its own"
@@ -1734,11 +1734,11 @@ pass "the replay residual is the notes, then the seed check's anchors by placeme
   printf '%s\n' "$doc" 'stored-order: documents=2 clean=2' >"$dir/truncated.txt"
   printf '%s\n' "$doc" 'stored-order: documents=1 clean=1 mismatched=0 refused=0 failed=0' 'stored-order: timed out after 1800 s (exit 124)' >"$dir/timeout.txt"
   printf '%s\n' 'stored-order: not run: x/meta.json holds no RFC 3339 window_start' >"$dir/notrun.txt"
-  nulls='documents: null, clean: null, mismatched: null, refused: null, failed: null'
+  nulls='documents: null, clean: null, mismatched: null, refused: null, failed: null, unchecked: null'
   checker=$(jq -nc --arg d "$commit_old" --arg s "$commit_so" '{dispatch_commit: $d, built_from: $d, overlay_source: $s,
     overlay_files: ["a.go", "b.go"], registration: "c.go", renderer_matches: true, sha256: "feed"}')
-  for c in "clean|0|$since|\$k + {exit: 0, since: \$s, documents: 1, clean: 1, mismatched: 0, refused: 0, failed: 0}" \
-    "mismatch|1|$since|\$k + {exit: 1, since: \$s, documents: 4, clean: 1, mismatched: 2, refused: 0, failed: 1}" \
+  for c in "clean|0|$since|\$k + {exit: 0, since: \$s, documents: 1, clean: 1, mismatched: 0, refused: 0, failed: 0, unchecked: null}" \
+    "mismatch|1|$since|\$k + {exit: 1, since: \$s, documents: 4, clean: 1, mismatched: 2, refused: 0, failed: 1, unchecked: null}" \
     "missing|1|$since|\$k + {exit: 1, since: \$s, $nulls}" \
     "truncated|1|$since|\$k + {exit: 1, since: \$s, $nulls}" \
     "timeout|124|$since|\$k + {exit: 124, since: \$s, $nulls}" \

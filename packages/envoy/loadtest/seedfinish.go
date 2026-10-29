@@ -23,6 +23,13 @@ const (
 	sqlBlockIndexTables  = "select to_regclass('public.document_block_versions') is not null and to_regclass('public.block_grammar_owed') is not null"
 	sqlBlockIndexOwed    = "select (select count(*) from document_block_versions where version is null) + (select count(*) from block_grammar_owed)"
 	sqlVacuumAnalyze     = "vacuum analyze"
+	// seed-refs writes under idempotency keys, so Dispatch keeps one request_keys row per write.
+	// They protect retries during the seed only. Left in the template, Dispatch's sweep of keys
+	// older than a day would delete them inside the window of every step on a seed older than
+	// that, and not on a younger one. A build older than migration 0137 has no such table.
+	sqlRequestKeysTable = "select to_regclass('public.request_keys') is not null"
+	sqlRequestKeysDel   = "delete from request_keys"
+	sqlRequestKeysCount = "select count(*) from request_keys"
 )
 
 // pgSession is what seed-finish uses of a Postgres connection; *pgx.Conn is one.
@@ -74,8 +81,9 @@ func runSeedFinish(args []string) error {
 // finish waits until the outbox has published every seed event, then, when the build has the
 // block-index tables, until Dispatch's block-index backfill owes nothing: a seed that still owed
 // it would hand every step about 100 s of that backfill inside its window, and production in
-// steady state owes none. Then it runs vacuum analyze and installs the commit-time trigger
-// (commitTriggerSQL).
+// steady state owes none. Then, when the build has request_keys, it deletes the seed's
+// idempotency keys and checks that none is left; then it runs vacuum analyze and installs the
+// commit-time trigger (commitTriggerSQL).
 func (f seedFinisher) finish(ctx context.Context, db pgSession) error {
 	f.lg.Print("waiting for the outbox to publish every seed event")
 	if err := f.waitZero(ctx, db, sqlUnpublishedEvents, "the outbox still holds %d unpublished events"); err != nil {
@@ -92,6 +100,25 @@ func (f seedFinisher) finish(ctx context.Context, db pgSession) error {
 		}
 	} else {
 		f.lg.Print("no block-index tables (a build older than migration 0121): no backfill to wait for")
+	}
+	var keyed bool
+	if err := db.QueryRow(ctx, sqlRequestKeysTable).Scan(&keyed); err != nil {
+		return fmt.Errorf("%s: %w", sqlRequestKeysTable, err)
+	}
+	if keyed {
+		f.lg.Print("deleting the seed's idempotency keys (request_keys)")
+		if _, err := db.Exec(ctx, sqlRequestKeysDel); err != nil {
+			return fmt.Errorf("%s: %w", sqlRequestKeysDel, err)
+		}
+		var left int64
+		if err := db.QueryRow(ctx, sqlRequestKeysCount).Scan(&left); err != nil {
+			return fmt.Errorf("%s: %w", sqlRequestKeysCount, err)
+		}
+		if left != 0 {
+			return fmt.Errorf("request_keys still holds %d rows after the delete; the template would carry them", left)
+		}
+	} else {
+		f.lg.Print("no request_keys table (a build older than migration 0137): no idempotency keys to delete")
 	}
 	f.lg.Print("vacuum analyze")
 	if _, err := db.Exec(ctx, sqlVacuumAnalyze); err != nil {

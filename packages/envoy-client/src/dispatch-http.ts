@@ -1271,13 +1271,12 @@ export class DispatchClient {
   }
 
   async getIssueReferences(issue: string): Promise<IssueReferences> {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue),
-      "references",
-    ]);
+    return this.#json(
+      "GET",
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "references"],
+      undefined,
+      { versions: "latest" }
+    );
   }
 
   async getReferences(query: GraphReferencesQuery): Promise<GraphReferences> {

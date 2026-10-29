@@ -285,7 +285,7 @@ describe("DispatchClient", () => {
       "/api/v1/artifacts/artifact-1/comments",
       "/api/v1/artifacts/artifact-1/comments",
       "/api/v1/artifacts/artifact-1/events?after=0&limit=200",
-      "/api/v1/issues/CORE-1/references",
+      "/api/v1/issues/CORE-1/references?versions=latest",
       "/api/v1/artifacts/artifact-1/references",
       "/api/v1/references?to=dispatch%3A%2F%2FCORE-1%2Fask%2Fask-1",
       "/api/v1/references?from=dispatch%3A%2F%2FCORE%2Fartifact%2Frunbook-md&kind=mentions%2Cattached_to&since=918",
