@@ -2,13 +2,13 @@
  "schemaVersion": 1,
  "phase": "test",
  "issue": "INFRA-568",
- "completed": "2026-10-29T09:12:42Z",
- "testedHead": "f331172b153f1ef4b0f9909723a9a06981276df5",
- "codeHead": "dc9071e65c3b44ec4a18bdca6f230ab5aadc016a",
- "round": "Round 15: fix round after round 14's two failures. Fingerprint 985555c0 4ed3a0af… → f331172b b8970b00…, changed by one census test line only; no forward merge (main is at 88840d35, GitHub reports the PR MERGEABLE). The server and CLI builds are byte-identical to round 14's (proof 2), so round 14's real-surface runs stand; this round re-measured recall under spec v3, judged the census fix and drove the no-write route at this head.",
+ "completed": "2026-10-29T12:25:47Z",
+ "testedHead": "2e275c88fcf195f483bcac5e1da35b0bad9bf48d",
+ "codeHead": "ca85bfa9816a4af2e13595e5701af169ff65a435",
+ "round": "Round 16, full, after review round 12's changes request: ca85bfa9 runs the record retry as the server's detached work (backgroundWork.goDetached) and drops relatedRecordRetries, and rewords the allowlist reason and 'cancelled'. Fingerprint f331172b b8970b00… → 2e275c88 6b57ad93…, changed. No forward merge (GitHub reports MERGEABLE). The pod was replaced, so the harness was rebuilt: Postgres 17.11 + pgvector on 5433 and ICU en-US on 5434, the fake Azure embedder, head, main 166bc0c4 and pre-fix dc9071e6 servers, the CLI from this head, and the recall corpus copied again.",
  "implementerProof": {
   "verdict": "verified",
-  "how": "Re-ran the recall measurement the implementer cites under spec v3 on the 28 October pairs at this head (old 4, new 5); read the census fix against dispatch-http.ts's related method; confirmed the 29 October numbers (old 7, new 6) match round 14's run. Its statement that DISPATCH_RECALL_REQUIRE_NO_LOSS is opt-in holds (related_recall_test.go:422)."
+  "how": "Drove the shutdown path the proof's test models on a real server with a real SIGTERM, keyed and unkeyed: the retry starts mid-wait, the wait counts it, no panic, exit 0. The proof's last observation ('the one timeout row is written') holds only in the test, which leaves lifetime live while waitBackground runs; on the real server lifetime is cancelled first (main.go:194 signal.NotifyContext, shutdown.go), so the retry ends at once with context canceled and the row is dropped and logged, as suggestions.go's comment says ('on the server's lifetime'). Recorded as an observation."
  },
  "failed": 0,
  "failures": [],
@@ -36,38 +36,47 @@
  ],
  "collationTest": {
   "test": "TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (packages/envoy/internal/dispatch/api/rank_test.go:306); it refuses at rank_test.go:317 when select 'a' < 'B' is false",
-  "cluster": "rebuilt this round: rootless Postgres 17.11 + pgvector 0.8.0 on 127.0.0.1:5434, ICU en-US (select 'a' < 'B' true)",
+  "cluster": "rebuilt this round: Postgres 17.11 + pgvector 0.8.0 on 127.0.0.1:5434, ICU en-US (select 'a' < 'B' true)",
   "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5434/dispatch_tester_go?sslmode=disable go test ./internal/dispatch/api -run TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves -count=1 -v",
-  "observed": "--- PASS (4.17s) at 985555c0"
+  "observed": "--- PASS (2.99s) at 2e275c88"
  },
  "proof": [
   {
-   "criterion": "Spec v3 duplicate recall before the merge: on the set fixed on 28 October, the keyword search finds no fewer targets than the old 40-word OR query (9 pairs, old 4, new 5)",
-   "surface": "TestRelatedRecallOnDuplicates on rootless Postgres 17.11 + pgvector (5433) at this head, over the corpus copied from production INFRA on 29 October with its pairs cut to the nine filed by 26 October (INFRA-82, 130, 214, 287, 310, 374, 431, 432, 459: 7 duplicate of, 1 superseded by, 1 folded into; the 28 October set's makeup), every other INFRA issue kept as a competitor (739 issues, 1796 searchable items)",
-   "command": "cd packages/envoy && DISPATCH_RECALL_REQUIRE_NO_LOSS=1 DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_tester_go?sslmode=disable DISPATCH_RECALL_CORPUS=$TMPDIR/tester568/recall-oct28.jsonl go test ./internal/dispatch/api -run TestRelatedRecallOnDuplicates -count=1 -v",
-   "observed": "--- PASS; related_recall_test.go:416 duplicate of old 3 of 7 / check 4 of 7, folded into 0 of 1 / 0 of 1, superseded by 1 of 1 / 1 of 1, every pair old 4 of 9 / check 5 of 9. The 15-pair 29 October set (round 14, same ranking code) stays old 7 / new 6.",
-   "headSha": "f331172b153f1ef4b0f9909723a9a06981276df5",
-   "negativeControl": "The same gated test over the whole 29 October set fails at related_recall_test.go:423 ('the check's ranking lists 6 targets, the old query 7'), round 14 at 985555c0, whose ranking code and server build equal this head's."
+   "criterion": "Review round 12 finding 1: a related_checks record retry that starts while shutdown's waitBackground is already waiting is counted by it and does not panic; the process exits cleanly",
+   "surface": "head server built from 2e275c88 (GOWORK=off go build ./cmd/dispatch) on rootless Postgres 17.11 + pgvector 0.8.0 (127.0.0.1:5433), fresh database per run; real SIGTERM to the server pid; the CLI built from this head (keyed create) and curl with no Idempotency-Key (unkeyed create)",
+   "command": "$TMPDIR/tester568/shut.sh: seed SHUT-1 and wait 20 s for its document to settle; psql tx1 'lock table issues in share mode' 14 s and tx2 'lock table asks in access exclusive mode' 40 s; at +0.5 s file 'Zymurgy ledger totals drift' (keyed via dispatch issue --force, or unkeyed via curl POST /api/v1/issues); at +1.0 s kill -TERM the server; read the server log, the client output and related_checks",
+   "observed": "Keyed: SIGTERM +1.0 s; 12:07:21.8 'settle documents with requests still in flight' (shutdown reached waitBackground about +12 s with the keyed handler still counted); the create committed at +14 s and answered not_made timeout ('No related-item check was made: … within 5s', 'Title overlaps you forced past: SHUT-1'); the record's first attempt failed and its retry started at 12:07:29.9, mid-wait, and logged 'related-item check not recorded rows=1 error=\"context canceled\"'; deregistered 12:07:30.4; server exit 0 at +20.7 s; no panic in the log. Unkeyed: same sequence, HTTP 201 at +20.2 s, retry at 12:08:14.0 logged context canceled, deregistered 12:08:14.7, exit 0 at +20.9 s, no panic.",
+   "headSha": "2e275c88fcf195f483bcac5e1da35b0bad9bf48d",
+   "negativeControl": "The same unkeyed scenario on the pre-fix build (dc9071e6, sync.WaitGroup) also exits 0 with no panic and the same log: the sync.WaitGroup misuse the review named is a race too narrow to show on a real server, so the real-surface run confirms the fixed behaviour and does not tell the two builds apart; the fix is judged by reading backgroundWork (server.go: start/done/wait allow work to start while wait waits) and goDetached at suggestions.go:863."
   },
   {
-   "criterion": "The round-14 fix changes no shipped artifact, so round 14's real-surface runs at 985555c0 apply to this head",
-   "surface": "the dispatch server and the claude-envoy dispatch CLI bundle built from 985555c0 and from f331172b",
-   "command": "git archive of each commit; GOWORK=off go build -buildvcs=false -trimpath ./cmd/dispatch; bun scripts/build.ts --out (Bun 1.4.4); sha256sum; jj diff --stat 985555c0..f331172b",
-   "observed": "Outside .legion/ the only change is one line of packages/envoy-client/src/__tests__/dispatch-client-census.test.ts. Server builds d163255e… = d163255e…; CLI bundle f3bbb10a… = f3bbb10a…. The stamped binaries differ only by vcs.revision. Fingerprint 4ed3a0af → b8970b00 changes by that test line alone.",
-   "headSha": "f331172b153f1ef4b0f9909723a9a06981276df5",
-   "negativeControl": "go version -m on the stamped builds shows vcs.revision 985555c0 vs f331172b: the comparison detects a difference when there is one."
+   "criterion": "The record retry outside shutdown still writes the row, and at most relatedRecordRetryLimit (4) retries run at once",
+   "surface": "head server built from 2e275c88 (GOWORK=off go build ./cmd/dispatch) on rootless Postgres 17.11 + pgvector 0.8.0 (127.0.0.1:5433) with no embedder (8789)",
+   "command": "lock table related_checks in access exclusive mode for 4 s, then dispatch issue --project CORE --force --title 'Retry pelican record'; then lock it 5 s and file six issues at once",
+   "observed": "The create answered in 1309 ms (the 1 s first attempt) and listed related items; its related_checks row (no_embedder) is present once the lock is released, written by the retry. Burst: 4 of 6 rows written; the log shows two 'related-item check not recorded: too many records are already being retried' lines.",
+   "headSha": "2e275c88fcf195f483bcac5e1da35b0bad9bf48d",
+   "negativeControl": "Without the lock the same filing writes its row at once and logs nothing."
   },
   {
-   "criterion": "No-write route through dispatch related at this head: no issue, ask, suggestion, related_checks record or event",
-   "surface": "head server (built from f331172b) on dispatch_tester_upg, 8788; the CLI bundle built from f331172b",
-   "command": "dispatch related --project UPG --title 'Pangolin queue stall' --text '…'; dispatch related --project UPG --title 'Pangolin queue stall again'; row counts of issues, asks, write_suggestions, related_checks, events, request_keys before and after",
-   "observed": "Lists UPG-1, UPG-7, UPG-6 (keywords only). Counts 9|0|16|3|10 unchanged; request_keys 13 → 15: main's keyed layer (request_keys.go, INFRA-258) holds one row per POST key, status 200 stored for replay, committed_at null, swept after IdempotencyKeyTTL (request_keys.go:1238-1244). That is retry bookkeeping on every POST, not a product write; the web dialog's GET form carries no key.",
-   "headSha": "f331172b153f1ef4b0f9909723a9a06981276df5",
-   "negativeControl": "dispatch related --project NOPE --title x → 'project not found'."
+   "criterion": "Every acceptance row and the upgrade, driven again at this head on real servers (the server build changed: server.go and suggestions.go)",
+   "surface": "main 166bc0c4's server then the head server on one database with the fake Azure embedder (8788); the head server with no embedder (8789); the CLI bundle built from this head (f3bbb10a…, equal to rounds 14 and 15)",
+   "command": "same commands as rounds 13 and 14: seed on main, boot head, file and dispatch related across rows 1a, 1b, 2a-2d, 4, 5, budget, external, records, auth, no-write, cancel/timeout",
+   "observed": "Upgrade 0138 → 0140 and UPG-1 re-embedded as title plus spec; first check on the upgraded head meaning_and_keywords {pangolin,stall,marmoset,rebuild}. 1b on main: 'the server did not say whether it searched'. 1a: not_made timeout + 'Title overlaps you forced past: CORE-32', row not_made timeout 5000; control lists CORE-32. 2a: the refresh ran at boot (12:11:36) and at the tick (12:21:37, 3 projects, 20105 items, 888 ms); after it {zebu,ocelot,xanthan} lists CORE-1. 2b: 10,000-word spec found, 9 terms, 48 ms. 2c: meaning and keywords finds UPG-8 by meaning alone; keywords only asked; meaning >3 s (3127 ms); embed failure. 2d: no_embedder keyword-only found. 4: 'options chosen: Honour' after the second answer; with events locked and a retracted ask present, 'Answer state not reported by this Dispatch'. 5: new decision block checked, plain edit not. Budget on 20,000 issues: {deploy,marshal,quokka,siev,xanthan}, first run 685 ms on a cold cluster, then about 100 ms. External twice: 'Dispatch already holds CORE-46 … nothing was created'. Records: total 50, by_reason already_exists 1, cancelled 1, no_embedder 46, timeout 2. Auth 401 401 403 400. No-write: issues/asks/suggestions/related_checks/events counts unchanged across 3 dispatch related and 3 bare GETs. Hang-up without a key: cancelled 1479 ms; the CLI that waits: timeout 5000 ms.",
+   "headSha": "2e275c88fcf195f483bcac5e1da35b0bad9bf48d",
+   "negativeControl": "dispatch related --project NOPE --title x → 'project not found'; a title with no shared word ('Quixotic yodel brambleberry') → 'searched … and found nothing'."
+  },
+  {
+   "criterion": "Spec v3 duplicate recall before the merge: on the set fixed on 28 October the keyword search finds no fewer targets than the old query (9 pairs, old 4, new 5)",
+   "surface": "TestRelatedRecallOnDuplicates on Postgres 17.11 + pgvector (5433) at this head, over the corpus copied from production INFRA today (746 issues, 16 pairs) cut to the nine 28 October pairs",
+   "command": "bash packages/envoy/scripts/related-recall.sh INFRA $TMPDIR/tester568/recall.jsonl; cd packages/envoy && DISPATCH_RECALL_REQUIRE_NO_LOSS=1 DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_tester_go?sslmode=disable DISPATCH_RECALL_CORPUS=$TMPDIR/tester568/recall-oct28.jsonl go test ./internal/dispatch/api -run TestRelatedRecallOnDuplicates -count=1 -v",
+   "observed": "--- PASS; every pair old 40-word OR query 4 of 9, the check's keyword query 5 of 9 (duplicate of 3→4 of 7, folded into 0→0 of 1, superseded by 1→1 of 1).",
+   "headSha": "2e275c88fcf195f483bcac5e1da35b0bad9bf48d",
+   "negativeControl": "Round 14: the same gated test over the whole 29 October set fails at related_recall_test.go:423 (6 vs 7); no ranking code changed since."
   }
  ],
  "observations": [
-  "CI at f331172b (it carries dc9071e6's code) read at 09:10Z: changes and pr-title success; envoy-go-race and test in progress; envoy-client and the rest queued. Not waited for.",
-  "The architect's hazard notice (no envoy.yaml dispatch with stacks=legion or both) does not touch this round; nothing was dispatched."
+  "CI at code head ca85bfa9: every check run completed success (skips: attest, broker-multiprocess, deploy); 2e275c88 is the handoff-only head and carries none.",
+  "TestRelatedCheckRecordRetryStartedWhileShutdownWaitsIsWaitedFor (related_check_test.go:497-557) asserts the retried row is written once the lock is released; a real shutdown cancels lifetime before waitBackground, so the retry is cancelled at once and the row is dropped with a log line. The behaviour matches the code's own comment and loses only a statistics row during a shutdown under lock contention; the test's final assertion describes a state shutdown never reaches. For the reviewer to judge.",
+  "Reviewer minor findings 2 and 3 (allowlist reason, 'cancelled' wording) are rewordings in keyed_write_guard_test.go, suggestions.go, 0139_related_checks.up.sql and the README; observed consistent with behaviour: a hang-up without a key records cancelled (1479 ms), a keyed CLI create that waits records timeout."
  ]
 }
