@@ -2,37 +2,41 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-557",
-  "completed": "2026-10-29T00:52:00Z",
-  "round": 2,
-  "scope": "Narrowed by the INFRA-63 architect (2026-10-28 19:13Z): the six round-1 findings, per-machine scoping of $KV.envoy_listener, two-pod rows under the real rendered grant, required checks at the new code head; a new finding that is not a correctness defect goes on the Fast-follow line.",
-  "reviewedHead": "75ad248670bd7b5b1a100e9e5976e21407ee7257",
+  "completed": "2026-10-29T12:19:54Z",
+  "round": 3,
+  "scope": "Narrowed by the INFRA-63 architect (2026-10-29 00:54Z and 12:09Z): only the two round-2 fixes, each with its failing-first row, plus the required checks. The PR conflicts with main, so no CI ran at 9c5cd05b; the controller holds forward merges until INFRA-520's merge queue is on, so this round cannot approve: request changes naming the forward merge, and any fix that does not hold.",
+  "reviewedHead": "9c5cd05b99938e552b237ca0c73c270eb69e1bc3",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
+  "important": 4,
   "minor": 0,
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. At 75ad2486 every required check was queued when read; at 6ee80831 Tests and Legion Envoy and Contracts were cancelled. A request for changes does not wait on it.",
-  "thermonuclear": "deep-review: CHANGES at 75ad2486 (H1, M1 below; round-1 findings 1, 2, 4, 5 closed, 3 closed for the first hand-over only); code-quality: CHANGES at 75ad2486 (structural only, on the Fast-follow line per the architect's scope).",
-  "roundOneFindings": {
-    "1 GetRevision refused under the grant": "closed in 28d478d5: lease.go and registry.go recordSeen read back with Get by key and compare Revision(); no runtime GetRevision left",
-    "2 own-boot InFlight acks undelivered messages": "closed in 18779a03: dedupe/kv.go judge holds a pair only while this process holds that revision; Clear forgets before deleting",
-    "3 settle hold ran to 13 s on any NAK delay": "closed for the first graceful hand-over (3 s cap) and hard take-over (7 s cap) in 21a1dd2b; reopened from the second graceful hand-over by finding H1",
-    "4 stuck holder kept the lease with no alarm": "closed in d19302d3: failures timed per term, ERROR alarm line after 135 s, lease given up",
-    "5 unplaceable deferral expiry 17 s": "closed in d19302d3: fixed 125 s",
-    "6 contract change census": "closed: PR body carries the census; its consumers (dispatch_kube probes, ECS, host:Listener, Dockerfile, deploy probe, notice_exceptions) match the searches",
-    "per-machine scope": "done: permissions.go grants envoy_listener writes only to lease.listener-<m>, delivery.listener-<m>.> and seen.>",
-    "rows under the rendered grant": "done: mpStartNATS signs each pod in under testnats.ListenerGrant (HostGrant for two-build rows), pinned byte for byte to core.ListenerPermissions by infra/core/grant_fixture_test.go"
+  "ci": "No pull_request run at 9c5cd05b (mergeable CONFLICTING, mergeStateStatus DIRTY). The last code run, at 75ad2486, has Legion Envoy and Contracts failed: envoy-go, envoy-go-race and the Dispatch Go suite on the then-known pmdoc build break (main's), and envoy-infra-go on TestHostPermissionsOnRealServers/{hub,2.10}/without_its_durable's_consumer_create_the_listener_never_reaches_healthy, which is green on main (8a911ecca3) and which the PR's behaviour breaks.",
+  "thermonuclear": "deep-review: CHANGES at 9c5cd05b; code-quality: CHANGES at 9c5cd05b. Every finding below was checked in the code by the reviewer.",
+  "roundTwoFindings": {
+    "A stale_binding across repeated graceful hand-overs": "closed for the case filed (a chain of graceful stops each bridged by the linger; rows TestTwoPodsEveryGracefulStop* fail at 75ad2486), but ack_wait_owed is written on only two exit paths, which opens the gap in keyFindings[1]",
+    "B awaitedBinding after abandon": "closed for the give-up path (row TestAPodThatGaveTheLeaseUpWhileWaitingOutABindingSettlesAHardTakeoverAfterIt fails before the fix); the same skipped settle remains when the term ends by losing the lease (keyFindings[2])"
   },
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/cmd/listener/receive.go:479",
-      "description": "A term taken from a graceful hand-back (HandedBack) still sets stale_binding when the durable is push-bound, and it always is then: the stopping pod lingers on its subscription by design. Nothing clears it for the rest of the term (only a begin that finds the durable unbound, line 477), so the term's release carries stale_binding and the next holder computes handedBack false (lease.go:806) and settles with the 7 s ack-wait cap. From the second graceful hand-over on (a rolling deploy's second pod), a stop with a prompt in hand past the 3 s grace (cancelled, NAKed with a delay, so outstanding) delivers about 3 + 1 + 0.5 + 7 = 11.5 s after SIGTERM, past the 10 s graceful bound. The deep-review subagent's scratch probe: C took B's record with handedBack=false, cap 7s, held_ms 7000 with a 30 s retry outstanding. Every graceful row starts from mpStartPair's first record, so none covers it."
+      "file": "PR #2404",
+      "description": "Forward merge of main needed: the PR conflicts with main (DIRTY), so no CI runs on its code. Keep both sides, take main's pmdoc lines (fixed on main by #2482 and #2484), and push the merge without the skip-checks trailer so CI runs. The controller holds this merge until INFRA-520's merge queue is on; the implementer waits for the architect's word."
     },
     {
       "severity": "important",
-      "file": "packages/envoy/cmd/listener/receive.go:543",
-      "description": "abandon (new in d19302d3) gives the lease up without clearing awaitedBinding, which only a successful begin clears. A pod that gave up while waiting out a binding later takes an expired record from a holder that died hard and computes settle false (line 442), as if the expiry were its own lapsed renewal: it skips the hold (the dead pod's messages after newer ones) or waits out a lost node's binding for minutes."
+      "file": "packages/envoy/cmd/listener/lease.go:827",
+      "description": "handedBack now reads only !ack_wait_owed, and ack_wait_owed is set only by handBack during an ack-wait hold and by a stuck abandon. Three exits release unsettled without it while a lost node's binding may still be open (stale_binding on the record): a graceful stop whose linger ends 'not taken' (no standby; lingerUntaken 1 s) so the frozen connection is the deliver subject's only subscriber until a later pod subscribes; a holder that took a hand-back and gives up after 135 s (settle && !HandedBack false); a Stop before the term subscribed (Release writes unsettled from the acquiring write, ack_wait_owed false). The next pod gets the 3 s cap while messages pushed to the lost binding alone come back only at their 6 s ack wait, so they are delivered after newer ones in the same session. Before d3787812 the carried stale_binding forced 7 s in these cases."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/cmd/listener/receive.go:448",
+      "description": "awaitedBinding still survives a term ended by losing the lease: awaitUnbound returns termCtx's error when the lease watcher cancels the term, abandon takes the refuse path and returns before line 557. Another pod then takes and holds the record; if it dies hard, this pod's later expired take-over is counted as its own resume, settle is false, and the dead pod's messages arrive after newer ones."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/cmd/listener/main.go:478",
+      "description": "envoy-infra-go fails at 75ad2486 on TestHostPermissionsOnRealServers/*/without_its_durable's_consumer_create_the_listener_never_reaches_healthy (both images; green on main 8a911ecca3; the subtest is unchanged by this PR): with CONSUMER.CREATE removed from the grant, /healthz answered {status: healthy, role: standby, receive: 'preparing the durable'} at 1.5 s, because a holder whose first durable attempt has not failed yet has report.Failing == 0. Nothing in 9c5cd05b touches it, so it is still red."
     }
   ],
-  "fastFollow": "From code-quality: make the owed settle a level on the record instead of stale_binding's second meaning; split ownAttempt's write lock from the held attempt; one ledgerSettle value instead of three booleans; one alarm-throttle helper; promptsHere vs session.Deliverer ownership predicate; receive.go split."
+  "fastFollow": "Split receive.go (1414 lines); the round-2 structural items stand."
 }
