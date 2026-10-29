@@ -2,27 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-593",
-  "completed": "2026-10-29T11:59:59Z",
-  "round": 3,
-  "headReviewed": "713982bbf92e35eb0d66dda0498b65fa74a6b5b6",
+  "completed": "2026-10-29T13:46:42Z",
+  "round": 4,
+  "headReviewed": "3e89ac6ff215e6e163e9e206ce40ea74c8ac3cbd",
+  "reviewerProseCommits": ["44f459e21b7dc6b089a3215fad47f11057ca7863", "9502de11bf04fdc981f83502891e4119ee43632e"],
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 6,
-  "ci": "At 11:58 UTC at the CI head 713982bb: required lint, typecheck, test and pr-title passed; dispatch, dispatch-memory, dispatch-multiprocess, envoy-go-race and the rest succeeded; envoy-go failed in cmd/listener (TestListenerFollowsTheInterestRegistryAcrossNATSRestarts, 'nats: outbound buffer limit exceeded'), a package this PR does not touch, in the same class of NATS flake main's own envoy-go shows (8a911ecc: internal/bus; e21cfc61: dispatch/startup). Its failed job was re-run once (run 40849116610 attempt 2, in progress). internal/dispatch/api passed in 463 s under its 20-minute timeout. No check in this run is named the Postgres 16 Dispatch suite.",
-  "thermonuclear": "Both run once at 713982bb: deep review APPROVE (3 minors), code quality CHANGES (cleanup-only minors). Heap index invariants and the 0137->0139 renumber checked clean.",
-  "roundTwoThreads": "PRRT_kwDORFy7ds6xZA2H, ...ZA2I, ...ZA2J, ...ZA2L each answered as accepted and fixed in 299ac590; already resolved by the implementer.",
+  "minor": 0,
+  "ci": "At 13:45 UTC at 3e89ac6f: required lint, typecheck, test and pr-title passed; dispatch, dispatch-memory, dispatch-multiprocess and the rest passed. envoy-go-race failed in this PR's own package: TestTheCompactionQueueFoldsTheOldRowsOfADocumentItsWritesNoted/browser_edits timed out at compaction_queue_test.go:70 (run 40876511289). envoy-go failed in cmd/listener (TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget), a package this PR does not touch, which main has changed since the fork point. GitHub started no workflow run for the reviewer's two prose commits 44f459e2 and 9502de11 (actions/runs?head_sha total_count 0 at 13:22 and 13:27 UTC); the architect was told.",
+  "thermonuclear": "Both run once on the delta at 44f459e2: deep review APPROVE (one minor short line, fixed in 9502de11), code quality one cleanup minor (settle's equality guard before delete), judged not a defect.",
+  "roundThreeThreads": "PRRT_kwDORFy7ds6xiiMl, ...iiMv, ...iiM2, ...iiM6, ...iiNA, ...iiNE answered as accepted and fixed in 3e89ac6f; already resolved by the implementer.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/infra/go.work.sum", "description": "The fifth merge of main (713982bb) took the branch's old copy of a file the branch never changed: against main it deletes 24 lines main added (#2449, #2456) and adds 2. Restore main's copy."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/compaction_queue.go", "description": "note's held.index < 0 cannot be true for a held entry that is not current; it silently drops a note if the invariant broke. Remove it and fold the held case into one switch with one unlock."},
-    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/main.go", "description": "Comment line 399 is 143 columns; re-wrap 397-401."},
-    {"severity": "minor", "file": "packages/envoy/AGENTS.md", "description": "Line 309: 'so at most four times 32 MiB of buffered rows' has no verb; the paragraph is wrapped raggedly."},
-    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/README.md", "description": "Two blank lines before the 0139_doc_compaction_owed paragraph."},
-    {"severity": "minor", "file": "docs/site/src/content/docs/dispatch/running-dispatch.md", "description": "Line 363 runs past the paragraph's wrap (104 columns)."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/duty/run_leased_period_test.go", "description": "Lines 17-18 cite 'a compaction that walks every document'; the sweep now reads only the documents doc_compaction_owed names."}
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/compaction_queue_test.go", "description": "Red in envoy-go-race at the code head. Since 299ac590 a note brings a waiting room's check forward, and quickCompactionQueue's timing leaves firstCheck at 0, so the notes of writes 20-21 (lines 60-62) move the parked check to now and the queue can compact the document before the test reads `before` (line 64) and `from` (line 68). The await at line 70 then waits for a second compaction that never comes. The test must capture `from` before those writes, or hold the queue (pause) across them, so it is deterministic under -race."}
   ],
   "notDefects": [
-    "A load waiting for a fold slot holds its rooms-pool connection idle: latency only, recorded in the PR body's risks.",
-    "envoy-go's cmd/listener failure: an untouched package, the NATS-restart flake class main also shows; re-run once."
+    "settle's `q.rooms[entry.room] == entry` guard before the delete: it protects another room's entry and drops nothing, unlike note's removed guard.",
+    "envoy-go's cmd/listener failure: an untouched package; main changed cmd/listener after the fork point."
   ]
 }
