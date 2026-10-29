@@ -312,14 +312,13 @@ the room for compaction once its transaction ends (`noteStoredUpdates`). Nothing
 content back from the store: every document built from it is a `crdt.New`, which drops an item's
 content in the transaction that deletes it, the one that applies a load included; a version stores
 its own markdown in `artifact_versions`; and no route reads an update or a state before the head.
-What a load's document parks - an update whose
-dependency no stored update supplies, a delete of an item none holds - is merged back into the
-state, so the room that loads it parks it again until a peer sends what it waits on. A state is
-kept only when it reads back as the document that made it: decoded into a fresh document, it must
-make the same state vector. That catches a re-encoding that renumbers or drops a client's clocks,
-as a decoder that integrated the items after a skipped clock range would; ygo parks them (upstream
-since v1.51.0, reearth/ygo#257). It does not catch a re-encoding that keeps every clock and moves
-text, such as a lost right origin, which
+What a load's document parks - an update whose dependency no stored update supplies, a delete of an
+item none holds - is merged back into the state, so the room that loads it parks it again until a
+peer sends what it waits on. A state is kept only when it reads back as the document that made it:
+decoded into a fresh document, it must make the same state vector. That catches a re-encoding that
+renumbers or drops a client's clocks, as a decoder that integrated the items after a skipped clock
+range would; ygo parks them (upstream since v1.51.0, reearth/ygo#257). It does not catch a
+re-encoding that keeps every clock and moves text, such as a lost right origin, which
 `TestACompactedDocumentKeepsItsOrderThroughLaterUpdates` guards on each ygo bump. A state that
 reads back otherwise, or a log the fold's document cannot apply (one parking more than the pending
 queue below holds), is logged (`dispatch: a document's stored updates do not fold into a state that
