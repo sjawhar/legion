@@ -2,32 +2,37 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-715",
-  "completed": "2026-10-29T14:50:00Z",
-  "round": 2,
+  "completed": "2026-10-29T15:55:00Z",
+  "round": 3,
   "decision": "changes_requested",
-  "reviewedCodeHead": "44036ea5ca4c4c9b7621cba5892d87a0c2b7edff",
+  "reviewedCodeHead": "bf2118caebaa",
   "critical": 0,
-  "important": 1,
+  "important": 2,
   "minor": 2,
   "keyFindings": [
     {
       "severity": "important",
+      "file": "packages/envoy/cmd/dispatch/README.md",
+      "description": "#2480 is CONFLICTING (mergeStateStatus DIRTY) at fb584253, so GitHub runs no pull-request checks: no code head of this PR has finished CI. git merge-tree with main a1a134a3 conflicts only in packages/envoy/cmd/dispatch/README.md. Forward-merge main (never rebase), resolve the README row, push without a skip-checks trailer, and then CI runs at the merged head."
+    },
+    {
+      "severity": "important",
       "file": "packages/envoy/internal/dispatch/docs/mutation.go",
-      "description": "mutation.go:484-485 answers every re-anchor error but ErrTargetNotFound as refusedReanchor (400 INVALID_MARKDOWN, cause kept only as text). Only pmdoc/find.go:1066 (mark not allowed in this block) is the caller's markdown; the other MarkWriter.Mark guards (find.go:1042-1049: empty range, unknown mark type, attrNestingError over the stored mark's attrs), yTextRanges/yFragmentLocations errors over the scratch, and any non-NotFound finder error are server faults that would be told to the uploader as its markdown, with no ERROR log. Fix: a pmdoc sentinel (e.g. ErrMarkNotAllowed) wrapped with ErrSchema at find.go:1066; refusedReanchor only for it; every other error through documentSchemaError as before (500); a test that the sentinel marks the not-allowed refusal and no other guard (pmdoc level); narrow mutation.go:468-472 and AGENTS.md:71-73. The tree's architect asked for this mapping."
+      "description": "mutation.go:478 re-anchors at the quote's nearest occurrence, even one where the mark is not allowed. So an upload that only adds a copy of anchored text (a front-matter title equal to a commented heading, or a code block quoting an ask's text above it) is refused 400 'would land in the front matter / a code block; move that text out of it', though the anchored text is untouched. The deep review reproduced both cases with go test -overlay. On the base this was a 500; the PR now presents it as the caller's error, with advice that drops the user's new text. Fix: on a MarkNotAllowedError, re-anchor at the nearest occurrence where the mark is allowed, and refuse only when none is; add a test."
     },
     {
       "severity": "minor",
       "file": "packages/envoy/internal/dispatch/docs/mutation.go",
-      "description": "A quote moved into YAML front matter is refused for every anchor kind (yFragmentLocations sets no textblock for front matter, find.go:1206-1209; markAllowedInTextblock(_, \"\") is false), and the 400 reads 'not allowed in )' with an empty block name (deep review reproduced it with a comment). Name front matter in the refusal, cover front matter and every anchor kind in the changelog fragment, AGENTS.md and the INVALID_MARKDOWN row of cmd/dispatch/README.md, and add a test. The PR body's claim that comments are unaffected holds only for code blocks."
+      "description": "The 500 fallback at mutation.go:487-490 has no test. The deep review replaced it with `return refusedReanchor(...)`, which drops a refusal silently and writes the room without the anchor, and every docs test still passed. Make the decision one function that returns ErrInvalidMarkdown or a plain ErrDocSchema (not documentSchemaError, whose OutsideSchemaError means a stored tree to repair), and test both outcomes."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/mutation.go",
-      "description": "refusedReanchor's `if kind == \"\" { kind = mark.markType }` fallback (mutation.go:526-528) is dead: openAnchoredMarks yields only the three mapped types (marks.go:494-498)."
+      "file": "packages/envoy/internal/dispatch/pmdoc/find.go",
+      "description": "The place name is chosen in two packages: Place() returns 'the front matter' or the raw 'code_block', and mutation.go:540 swaps 'code_block' for 'a code block'. Let Place() return the reader's wording for both, and update reanchor_test.go:479."
     }
   ],
-  "threads": "PRRT_kwDORFy7ds6xk5xU (mutation.go 500 finding): the caller case is fixed in 44036ea5, accepted; the over-broad classification is this round's new inline finding. PRRT_kwDORFy7ds6xk5xa (test class): fixed in 44036ea5, accepted. Both already resolved by the implementer.",
-  "ci": "Required set lint, typecheck, test, pr-title. CI head 44036ea5 (compare to 6082a10f handoffsOnly true): run created 14:10Z, every lane but changes still queued at 14:24Z. The runs at 125abf85 and 0164ae30 were cancelled by later pushes before the document suites finished, so no code head of this PR has a finished envoy-go, envoy-go-race, dispatch, dispatch-memory or dispatch-multiprocess yet. A change request does not wait on CI.",
-  "notProvenAdded": "The 200-upload room test's noise (tester risk 2) is on the PR body's Not proven line.",
-  "thermonuclear": "Run once at 44036ea5: deep review (approve, rated the classification Minor as unreachable today, found the front-matter case, reproduced it via go test -overlay); code quality (classification High/blocking, dead fallback Low). Reviewer rates the classification important per the No-deferrals rule: it hides a server error."
+  "accepted": "Round-2 findings fixed in bf2118ca and confirmed by the tester on a real server: the sentinel/typed error marks only the mark-not-allowed refusal, every other error stays 500, the front matter is named, and the dead fallback is gone. Not a defect: ErrMarkNotAllowed and *MarkNotAllowedError are two names for one refusal (both documented, both tested).",
+  "threads": "Replied and accepted: PRRT_kwDORFy7ds6xmcRe, PRRT_kwDORFy7ds6xmcRu, PRRT_kwDORFy7ds6xmcR3 (already resolved by the implementer).",
+  "ci": "No run at bf2118ca or above: the PR head conflicts with main, so GitHub starts no pull_request run. The tester's test.json ci.state/ci.action blame GitHub run creation; the tester corrected that by Envoy at 15:38Z, and the conflict is the cause.",
+  "thermonuclear": "Run once at bf2118ca: deep review approve with two Minors (untested fallback; refusal of an upload that copies anchored text); code quality three low/medium maintainability items (split decision and wrapper, sentinel without a production reader, place naming in two packages). The reviewer raised the copy case to important because it changes behaviour."
 }
