@@ -458,21 +458,24 @@ meant a block learns it is text; a count of zero alone reads as a document needi
 and as the whole advice of a project document's edit: the ask blocks the edited tree holds whose
 block id no ask block in the tree before the batch carried (`addedAskBlocks`, counted in the
 transaction that applies the batch), so an inserted or retyped block counts wherever the parser
-reads one and a moved or reworded block does not. Issue-state advice is computed in the write
-transaction after its event is appended, so it includes that write. A stored document's decision
-blocks and unparsed openers are read from one parse of the canonical Markdown after the write
-transaction commits (`readDocumentBlocks`). Advice queries run
+reads one and a moved or reworded block does not. Beside it, `decision_block_checks`
+lists each block the edit added, in document order (`docs.EditOutcome.AddedAskBlocks`), as
+`{block_id, question, suggestions}`: the related-item check run on the block's question once the
+edit has committed (`decisionBlockChecks`), the first five checked at once under one 5 s
+allowance and each past them answered, and recorded, as not made; it is omitted when the edit
+added none. A conditional edit releases its document's edit gate at the commit, before those
+checks run, so they never hold the next conditional edit. Issue-state advice is computed in the
+write transaction after its event is appended, so it includes that write. A stored document's
+decision blocks and unparsed openers are read from one parse of the canonical Markdown after the
+write transaction commits (`readDocumentBlocks`). Advice queries run
 behind a savepoint with a 500 ms
 timeout that is restored before the savepoint is released: a failure of either session-scoped
 query is logged and omits `advice` without preventing the write from committing, while the
 `legion_managed_status` walk, which takes a savepoint of its own inside that one, is logged and
-omits that field alone, keeping the advice already assembled. That matters most on an issue
-creation, where `computeAndPersistSuggestions` runs only once the advice survives (`if advice
-!= nil`, `issue_create.go`), after it: a fatal advice failure there means LEGION-550's
-suggestions are never computed and no row is ever written, so what the walk's tolerance saves is
-the whole of that offer rather than a copy of something already stored. An ask is the other way
-round - `asks.go` computes its suggestions first and falls back to a suggestions-only advice, so
-they survive a fatal advice failure there. The consecutive-write query counts only the
+omits that field alone, keeping the advice already assembled. Neither failure costs a creation
+its related-item check: issue and ask creation run it after the write commits whatever the
+advice answered, and when the advice was omitted its result rides a suggestions-only advice
+(`withSuggestions`). The consecutive-write query counts only the
 calling actor's own events (it runs for a session caller alone; any other actor reports zero with no
 query) and materializes the last-human fence so its `max(id)` runs once, and relies on the
 `events (issue_key, seq)` unique index's issue prefix and commit-ordered event ids; the open-ask
@@ -653,8 +656,8 @@ instance's replica or none, never its successor's. `TestReadsOfALiveDocumentRunB
 each of these reads while a websocket peer types, until 50 of its runs have overlapped one of the
 peer's updates, and CI's `envoy-go-race` job runs the `docs` and `api` packages under `-race`, which
 reports a walk of the live tree beside a write; the unit tests' own step runs without it. The race
-job runs only when a file its `envoy_go_race` filter in `.github/workflows/envoy-and-contracts.yaml`
-names changes; see Critical conventions for what keeps that filter current.
+job runs only when a file its `envoy_go_race` filter in `.github/workflows/ci.yaml` names
+changes; see Critical conventions for what keeps that filter current.
 
 Writes to one room never meet each other unlocked. A browser's update reaches the room as ygo
 applies it, inside one Yjs transaction under the document's lock (`sync.ApplySyncMessage`,
@@ -2444,7 +2447,7 @@ read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy census").
 - Every KV bucket is opened through `bus.EnsureKeyValue` or `bus.OpenKeyValue`, whose handle checks its keys as the bus checks a subject (`bus.ErrRefused`), since a KV call builds its subjects from the key: a key that would take one past the server's 4 KiB protocol line, or holding an empty token, is refused before anything is sent, and nats.go's own refusal of a key outside its key alphabet (`ses:bad`), which it makes on every read, write, delete and watch before sending anything, is named the refusal it is (`bus.ErrInvalidKey`, naming the key). A write is held to the longest subject its key makes (a watcher's create request), so a key written now stays readable, watchable and deletable; any other call only to its own subject, so a key an earlier build stored past that bound still lists and deletes. The stores skip a key they cannot read or rewrite, with a WARN whose `error` names it (or, past the bound, its size), rather than fail a start, a sweep or a caller's own request, and the reapers delete it. No build writes a key outside the alphabet, but a direct bucket write can store one, and an earlier build's bare-string role claim can name one as its holder; no KV call deletes it either, so the reapers skip it with that WARN every cycle until an operator purges it by hand with the purge nats.go would send for it, `nats pub '$KV.<bucket>.<key>' '' -H 'KV-Operation:PURGE' -H 'Nats-Rollup:sub'`. That removes every revision of the key, every listener's cache drops it at once, and the purge marker it leaves is collected as any other (the interest bucket's marker collection, `nats kv compact <bucket>` for the others). A JetStream purge filtered to the subject (`nats req '$JS.API.STREAM.PURGE.KV_<bucket>' '{"filter":"$KV.<bucket>.<key>"}'`) leaves no marker, but nothing a watcher sees, so a listener's interest cache keeps the key, and its reaper keeps warning, until the listener restarts.
 - A failed control delivery or a terminal capability refusal during generic fanout emits `notifications.envoy.exceptions.<original-topic>`. Control exceptions keep their ordinary transport: a role lane's `notifications.envoy.exceptions.notifications.role.<role>` takes core NATS because no stream subject captures it (`usesCoreTransport`), and an agent subject's `notifications.envoy.exceptions.notifications.agent.<id>` is the one exception subject the stream captures, so it keeps JetStream. A fanout refusal's original topic is never a control topic, since `listenerDeliveryHandler` sends a `notifications.role.` topic to `roleTopicDelivery` and a `notifications.agent.` topic to `agentSubjectDelivery` and only what remains to `fanoutDelivery`, the one place `fanoutRefusal` is set; its exception subject is therefore never one the stream captures either, so `bus.usesCoreTransport` already routes it over core NATS and the explicit `client.PublishCore` in `publishDeliveryException` now only restates the routing rule's own answer for every reachable input. The payload preserves `original_topic`, `event_id`, `reason` (one of `no_holder`, `delivery_failed`, `receipt_timeout`), `recipient_session` when a recipient is known (the receiving session, not `source_session`; omitted rather than empty when unknown), `payload_summary`, the original machine `payload`, `dedupe_key`, `source`, and `source_session`; the exception lane is not recursively exceptional. Each refusal records its recipient before publishing its exception, so an identical redelivery emits at most one exception during the attempt-cache window and never NAKs the original envelope. An API publish to an unheld role is rejected synchronously with 404 instead.
 - **Source-specific vs generic ingestion**: Envoy has two ingestion paths: listener-hosted webhook handlers behind the listener's starting gate (`internal/webhook/{github,slack,ghostwispr}.go`, `startingGate` in `cmd/listener/main.go`) and the generic MCP bridge (`cmd/mcp/`). The MCP bridge connects to any MCP server that publishes resources, so it's the low-maintenance default for new sources. Building source-specific webhook logic adds maintenance burden — consider whether the cost justifies the benefit over the generic MCP bridge before adding custom source-specific logic to Envoy. When using the MCP bridge, Envoy should stay naive about the message content — the MCP server owns the domain logic.
-- Five Go jobs of `.github/workflows/envoy-and-contracts.yaml` run only when a file their own filter there names changes: `dispatch-memory` (`dispatch_memory`), `dispatch-multiprocess` (`dispatch_multiprocess`), `broker-multiprocess` (`broker_multiprocess`), `envoy-go-race` (`envoy_go_race`) and `envoy-infra-go` (`envoy_infra_go`). Each filter lists the packages the job's command compiles with its build tags, the packages of each binary its tests build, and the files its tests read. Any change that makes a job's command, or a binary its tests build, compile a new package or read a new file - production code included, not only a test - adds that package or file to that job's filter in the same pull request: the pull request that adds the import still runs the job, so nothing else reports the filter falling behind. `envoy-go`, gated by the broad `envoy` filter, runs every untagged unit test of the `packages/envoy` module on every Envoy change (`internal/integration` in a step of its own in that job), so it also runs the untagged tests of every other job's packages in that module; `packages/envoy/infra` is a module of its own, which that `go test` does not reach, so envoy-infra's unit tests run only in `envoy-infra-go` and nothing else backs up the `envoy_infra_go` filter when it falls behind.
+- Every Go job of `.github/workflows/ci.yaml` runs only when a file its own filter there names changes, the five Envoy jobs this module's tagged and race suites run in among them: `dispatch-memory` (`dispatch_memory`), `dispatch-multiprocess` (`dispatch_multiprocess`), `broker-multiprocess` (`broker_multiprocess`), `envoy-go-race` (`envoy_go_race`) and `envoy-infra-go` (`envoy_infra_go`). Each filter lists the packages the job's command compiles with its build tags, the packages of each binary its tests build, and the files its tests read. Any change that makes a job's command, or a binary its tests build, compile a new package or read a new file - production code included, not only a test - adds that package or file to that job's filter in the same pull request. `.github/scripts/check-ci-filters.sh` (ci.yaml's `ci-filters` job) recomputes each go command's package closure and fails naming a file a filter misses; a file a test reads through `..` and a go command a test starts are rows of `.github/scripts/ci_job_reads.py`, which the change that adds them extends, since the check finds neither by itself. `envoy-go`, gated by its broad `envoy_go` filter, runs every untagged unit test of the `packages/envoy` module on every Envoy change (`internal/integration` in a step of its own in that job), so it also runs the untagged tests of every other job's packages in that module; `packages/envoy/infra` is a module of its own, which that `go test` does not reach, so envoy-infra's unit tests run only in `envoy-infra-go`.
 
 ## Security
 
@@ -4788,7 +4791,7 @@ Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd
 than fail, when `BROKER_TEST_DATABASE_URL` is unset (`t.Skip`, e.g. `internal/broker/store`,
 `internal/broker/requests`); `packages/envoy/scripts/dev-postgres.sh` starts a local Postgres for
 them, the same script `cmd/dispatch/README.md` documents for its own Postgres-backed tests, and
-CI's `envoy-go` job (`.github/workflows/envoy-and-contracts.yaml`) points
+CI's `envoy-go` job (in `.github/workflows/ci.yaml`) points
 `BROKER_TEST_DATABASE_URL` at the same server as `DISPATCH_TEST_DATABASE_URL`.
 `storetest.URL` stays the helper for everything ordinary: a migrated schema of its own per test,
 cheaper than a database and isolating rows just as well. `storetest.DatabaseURL` hands out a
@@ -4805,7 +4808,7 @@ past the old ten-second shutdown budget. CI's `broker-multiprocess` job runs the
 `go test -tags multiprocess -count=1 -timeout 20m ./cmd/broker` in `packages/envoy` — in a job of
 its own, since each row waits out tens of seconds and `envoy-go`'s unit step runs under go test's
 default ten-minute package deadline. The job runs only when a file its `broker_multiprocess` filter
-in `.github/workflows/envoy-and-contracts.yaml` names changes; see Critical conventions for what
+in `.github/workflows/ci.yaml` names changes; see Critical conventions for what
 keeps that filter current. Every client-facing
 lane's own test mounts the real broker handlers (`api.Register` with real, Postgres-backed services)
 rather than a hand-rolled fake standing in for broker behavior — `internal/broker/api/api_test.go`,
@@ -4928,8 +4931,9 @@ would itself be the directory mise strips. `release_build` builds them with the 
 stamped in, and `release_publish` attests every `agent-secrets-*.tar.gz`; the `build` matrix job
 builds only `legion-envoy-<arch>.tar.gz` (envoy-listener alone, with its
 `THIRD_PARTY_NOTICES`). Each `agent-secrets` tarball also holds `agent-secrets/THIRD_PARTY_NOTICES`,
-the licenses of the Go modules its binaries compile in, and `pr-and-main.yaml` writes those
-notices for every archive and compiles the darwin client on each pull request. A host installs
+the licenses of the Go modules its binaries compile in, and the lint job of `ci.yaml` writes those
+notices for every archive and compiles the darwin client on each pull request whose change its
+`go_notices` filter matches. A host installs
 both binaries from this release (through the operator's dotfiles, under the broker design's
 devbox-enrollment plan), and a laptop the CLI.
 

@@ -498,7 +498,8 @@ mutable; the daemon must know exactly what it probed, so a tag reference is refu
 
 Where the digest is published:
 
-- the job summary of every `Worker Image` run (Actions → Worker Image → the run → Summary);
+- the job summary of every run that builds the image: `release.yaml`'s run on `main`, `ci.yaml`'s run on a
+  pull request (its `worker-image` job), or a dispatched `Worker Image` run (Actions → the run → Summary);
 - the body of the `legion-v<version>` GitHub release, under "Worker image", when `release.yaml` released
   `legion` in the same run (`gh release view legion-v<version> --json body -q .body`);
 - `docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:<tag>` for a `sha-` or
@@ -555,20 +556,25 @@ The attestation is separate from the image's own BuildKit provenance, which the 
 ### How it is built — and the iteration rule
 
 `.github/workflows/worker-image.yaml` builds on the GitHub-hosted runner with `docker/setup-buildx-action`
-+ `docker/build-push-action` (the pair `release-envoy-listener.yaml` uses), layer cache in GitHub Actions
-cache under the image's own scope (`cache-from: type=gha,scope=worker-image`, and on `main` only
-`cache-to: type=gha,mode=max,scope=worker-image`), read by every build and written only by a build on
-`main`, pushed with the workflow's own `GITHUB_TOKEN`
-— no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` on
-every `main` run (its push paths include every file the image builds from): a build-only call beside the
-`publish` job, linking the plugin pair `legion_build` decided, then an attest-only call after `publish`;
-(2) on a pull request against `main` whose diff touches any of those files — building
-the PR head and publishing `sha-` only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the
-workflow exists on `main`. Trigger (2) does not build every head. A draft's head builds no image and
-publishes no `sha-` tag. Marking the pull request ready builds that head. A newer push to the pull
-request cancels the build of an older head, waiting or running, so that older head gets no image.
-Closing the pull request cancels its build too. No `main`, `release.yaml` or `workflow_dispatch` run is
-ever cancelled this way. A reopen within about a minute of the close can race the `closed` run:
+and `docker/build-push-action` (the pair `release-envoy-listener.yaml` uses). Its layer cache is the
+GitHub Actions cache under the image's own scope (`cache-from: type=gha,scope=worker-image`). Only a
+build on `main` writes it, only the final image's layers (`cache-to: type=gha,mode=min,scope=worker-image,ignore-error=true`); a pull
+request's build reads what main wrote and writes none, because a newer head can cancel that build in
+the middle of a cache export, and because GitHub never lets a `main` run restore a branch's entries, so
+no pull request can put a layer into the attested release build. The image is pushed with the
+workflow's own `GITHUB_TOKEN`: no third-party builder, no project variable, no extra credential. It runs
+(1) from `release.yaml` on every `main` run (its push paths include every file the image builds from): a
+build-only call beside the `publish` job, linking the plugin pair `legion_build` decided, then an
+attest-only call after `publish`; (2) from the `worker-image` job of `ci.yaml` on every head of a pull
+request, on any base, whose diff its `worker_image` filter matches — building the PR head and publishing
+`sha-` only (a stacked pull request publishes a `sha-` tag too, which a pin never accepts) — and (3) by
+`gh workflow run worker-image.yaml --ref <ref>`. Trigger (2) does not build every head. A draft's head
+builds no image and publishes no `sha-` tag (ci.yaml's `changes` skips a draft). Marking the pull request
+ready builds that head. A pull request's builds share one concurrency group, so a newer push to the pull
+request cancels the build of an older head, waiting or running, and that older head gets no image.
+Closing the pull request cancels its build too: `.github/workflows/tests-closed.yaml` joins ci.yaml's
+concurrency group and cancels its run. No `main`, `release.yaml` or `workflow_dispatch` run is ever
+cancelled this way. A reopen within about a minute of the close can race that closed run:
 `.github/workflows/tests-closed.yaml` says what happens and what to do. The
 files the image builds from are every context source `worker.Dockerfile` copies: the root manifest,
 lockfile, patches and each root workspace's `package.json` (the frozen install); the packages it copies
@@ -576,7 +582,8 @@ whole — the Dockerfile (`packages/daemon/docker/**`), the two plugins and what
 `packages/pi-legion/**`, `packages/pi-shared/**`, `packages/envoy-client/**`, `packages/contracts/**`), the skills (`skills/**`) and the
 prepack that stages them (`scripts/pi-plugin-prepack.sh`); the OMP pin
 (`.omp-pin`); the whole Go module the image compiles `legion` from (`packages/daemon/**`) and its build
-inputs; the context's `.dockerignore`; and the workflow itself. What a pod executes is part of the image's
+inputs; the context's `.dockerignore`; and the workflows (`worker-image.yaml`, and `ci.yaml`, which calls
+it on a pull request). What a pod executes is part of the image's
 behaviour — the command a Sandbox pod runs, the launch probes `legion probe-image` runs in the image's
 final step and in the Go daemon's probe Sandbox, and every package they import — so a change to any of it
 builds the image it is proven on, and a change that breaks the image fails on its own pull request rather
@@ -584,15 +591,19 @@ than merging and publishing nothing. The Go build inputs are `go.work`, `go.work
 (copied whole for the `agent-secrets` binary the image also builds): the image compiles the Go `legion` at
 `go.work`'s Go version, so a change that moves it past the build stage's Go fails on its own pull request
 rather than in the next image build.
-`.github/scripts/check-image-trigger-paths.sh` (the lint job of `pr-and-main.yaml`) parses the Dockerfile
-and fails when trigger (1) or (2) misses a file it reads, so these lists cannot drift from it.
-Trigger (2) is `pull_request`, not `push`: GitHub evaluates `pull_request` path filters against the whole PR
-diff, so a later commit that touches none of those paths (a handoff, a docs fix) still gets the check and the
-PR head never loses it; a `push` trigger filters on the pushed commits alone and would leave such a head
-unguarded. The workflow's `packages`/`contents` permissions apply to same-repo pull requests (this
-repository takes no fork PRs, whose token would be read-only). The `attest` job's `id-token` and
-`attestations` scopes reach a pull request run only if it drops that job's `if:`, and its attestation
-then names `refs/pull/<n>/merge`, which the verify command above refuses.
+`.github/scripts/check-image-trigger-paths.sh` (the lint job of `ci.yaml`) parses the Dockerfile
+and fails when trigger (1) or (2) misses a file it reads, so these lists cannot drift from it. It also
+fails when trigger (2)'s `worker_image` filter matches a file the build does not read (one the
+`.dockerignore` drops, or one no `COPY` names), since a pull request touching only that file would build
+an image for nothing; the filter's `!` patterns drop those, under its step's `some-with-excludes`.
+Trigger (2) selects by the pull request's whole diff: on `pull_request`, the `changes` job of `ci.yaml`
+reads the pull request's file list, so a later commit that touches none of those paths (a handoff, a docs
+fix) still gets the build and the PR head never loses it, unless that head carries `skip-checks: true`,
+which starts no run at all. A filter on the pushed commits alone would leave such a head unguarded. The
+`worker-image` job of `ci.yaml` grants the called workflow its `packages`/`contents` permissions, which
+apply to same-repo pull requests (this repository takes no fork PRs, whose token would be read-only). The
+`attest` job's `id-token` and `attestations` scopes reach a pull request run only if it drops that job's
+`if:`, and its attestation then names `refs/pull/<n>/merge`, which the verify command above refuses.
 
 **The image is built only by this workflow, on the GitHub-hosted runner.** Never build it on a workstation
 — no `docker build`, `docker buildx`, or `docker compose build`: an unrelated buildx job took the devbox
@@ -605,8 +616,10 @@ or by pushing the branch again. In a `release.yaml` run, `--failed` keeps the bu
 and a failed `publish` reruns whole, each step safe to repeat: npm reuses a published version, the tag step
 accepts its own tag, the push to `main` pushes nothing once `main` holds that version, and the release step
 reuses a published release. A whole-run rerun of `release.yaml`, or a `workflow_dispatch` of it while main's
-tip still carries a `legion-v` tag, re-executes `legion_build`, which decides the same version (it holds no
-credential), and `publish` releases that tag again, each step safe to repeat: the image is rebuilt,
+tip still carries a `legion-v` tag, re-executes `legion_build`, which reads that tag and decides the same
+version (`release-push.sh version` releases again a tag that names the run's commit; the job holds only
+`contents: read` and no secret, so its rerun writes nothing), and `publish` releases that tag again, each
+step safe to repeat: the image is rebuilt,
 `worker_image_release` moves the `<legion version>` tag to the rebuild's digest, and the release body's
 "Worker image" names that digest. `release-envoy-listener.yaml` needs no re-run when its `release_publish` finds, at "Confirm the
 version", that another run took the tag first: it publishes nothing and, when its commit still needs a release
