@@ -12,11 +12,14 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -281,6 +284,96 @@ func TestOnlyADeliveredCatchUpForgetsTheDecisionsItNamed(t *testing.T) {
 				t.Fatalf("kept after the catch-up %s = %#v, want %d", tc.name, left, tc.stillKept)
 			}
 		})
+	}
+}
+
+// A re-admission's start that finds the root's architect still running (its claim was mid-launch
+// when the linger's suspend ran) both delivers its task, which names the decisions kept for the
+// root, and tells the running architect its tree as a ready would (the start-running catch-up).
+// The architect is told each kept decision once: the catch-up does not name again what the task it
+// rides beside already names, or the architect reads one person's decision as two and may act on
+// it twice.
+func TestAStartThatFindsTheRootArchitectRunningNamesEachKeptDecisionOnce(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208",
+		Title: "Workflow", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 5}
+	putOutboxIssue(t, pool, records, root)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	admission := admit.New(records, engine, 2, "legion", quietLogger())
+	runner := &outbox{
+		dispatchProject: "LEGION",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
+		handlers: []intake.Handler{engine, admission}, now: time.Now, log: quietLogger(),
+		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
+			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
+		},
+	}
+	if err := runner.execute(ctx, mustOutboxRow(t, root.Key, record.SuperviseRequest{Op: "start", Tree: root.Tree, Role: claim.RoleArchitect, Generation: 1}, time.Now())); err != nil {
+		t.Fatalf("start the architect: %v", err)
+	}
+	token, err := claim.NewToken("legion", root.Key, claim.RoleArchitect)
+	if err != nil {
+		t.Fatalf("claim token: %v", err)
+	}
+	machine, _ := sup.Machine(token)
+	launch := machine.Claim().Generation
+	for _, ev := range []supervise.Event{
+		supervise.StreamHello{Claim: token, Generation: launch},
+		supervise.RequestRegister{Claim: token, Generation: launch, Session: "ses-architect", SessionFile: "/tmp/architect.jsonl"},
+		supervise.RequestReady{Claim: token, Generation: launch, Session: "ses-architect"},
+	} {
+		if err := machine.Handle(ctx, ev); err != nil {
+			t.Fatalf("handle %T: %v", ev, err)
+		}
+	}
+	if _, err := pool.Exec(ctx, "delete from outbox"); err != nil {
+		t.Fatalf("deliver the generation 1 notices: %v", err)
+	}
+
+	// A person answered on the parked tree; the re-admission at generation 2 names it in the start's
+	// task, as admission writes it (workflow.Engine.ParkedDecisionTask), while the architect still runs.
+	answer := record.ParkedDecision{Root: root.Key, Ref: "dispatch://LEGION-208/ask/ask-1", Decision: record.DecisionAskAnswered, Actor: "user:alice",
+		At: time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)}
+	root.Generation = 2
+	putOutboxIssue(t, pool, records, root)
+	var task string
+	var kept *record.KeptDecisions
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		if err := records.AddParkedDecision(ctx, tx, answer); err != nil {
+			return err
+		}
+		var err error
+		task, kept, err = engine.ParkedDecisionTask(ctx, tx, root)
+		return err
+	}); err != nil {
+		t.Fatalf("keep the answer and name it: %v", err)
+	}
+	if kept == nil || !strings.Contains(task, answer.Ref) {
+		t.Fatalf("the start task = %q naming %#v, want it to name %s", task, kept, answer.Ref)
+	}
+	start := mustOutboxRow(t, root.Key, record.SuperviseRequest{Op: "start", Tree: root.Tree, Role: claim.RoleArchitect, Generation: 2, Task: task, Kept: kept}, time.Now())
+	if err := runner.execute(ctx, start); err != nil {
+		t.Fatalf("start the running architect for generation 2: %v", err)
+	}
+	if pending := machine.Claim().Pending; pending == nil || !strings.Contains(pending.Task, answer.Ref) {
+		t.Fatalf("the architect's pending task = %#v, want the start's task naming %s", pending, answer.Ref)
+	}
+	rows, err := pool.Query(ctx, "select coalesce(payload->'catch_up'->>'decided', '') from outbox where kind = 'notice' and payload->>'kind' = 'catch-up' order by id")
+	if err != nil {
+		t.Fatalf("read the catch-ups: %v", err)
+	}
+	decided, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("scan the catch-ups: %v", err)
+	}
+	if len(decided) != 1 {
+		t.Fatalf("catch-ups after the generation 2 start = %q, want the one the running architect is told its tree by", decided)
+	}
+	if strings.Contains(decided[0], answer.Ref) {
+		t.Fatalf("the catch-up names %s again beside the start task that names it: %q; want each kept decision told once", answer.Ref, decided[0])
 	}
 }
 
