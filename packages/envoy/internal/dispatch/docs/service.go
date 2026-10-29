@@ -2703,21 +2703,26 @@ func (s *Service) closeRoomOnReplacedHistory(room string, instance *roomInstance
 // the room: the room that loads next reads the issue open and settles what the document owes
 // (onLoadDocument).
 //
-// closeUnrecorded is whether a room with no record is closed all the same, for a change this
-// process has just been told of (issueOpenChanged): a room still loading has no record yet, and may
-// have read the issue's state from before the change; ygo closes it once its load is done, and the
-// next load reads the issue again. A recheck (recheckResidentIssues) reads only rooms that hold a
-// record. Its ctx is the room-sync lane's or a close's own, holding no transaction, so the rooms are
-// recorded and closed one at a time.
-func (s *Service) setRoomIssueOpen(ctx context.Context, room string, open, closeUnrecorded bool) {
+// notified is whether this process has just been told of the change (issueOpenChanged), rather
+// than rechecking after a LISTEN (recheckResidentIssues). A notified change closes a room with no
+// record all the same: a room still loading has no record yet, and may have read the issue's state
+// from before the change; ygo closes it once its load is done, and the next load reads the issue
+// again. A notified reopen also closes a room whose record already reads open: a record a
+// connection's own registration (addConnection) or a load after the reopen committed made holds
+// the default open flag while a browser on the room was admitted read-only before the reopen, and
+// only a reconnect gives that browser the writable scope. A recheck reads only rooms that hold a
+// record and closes only those whose record holds the other state, so a LISTEN that stands again
+// closes no room the issue's state already matches. Its ctx is the room-sync lane's or a close's
+// own, holding no transaction, so the rooms are recorded and closed one at a time.
+func (s *Service) setRoomIssueOpen(ctx context.Context, room string, open, notified bool) {
 	state := s.lockExistingState(room)
 	if state == nil {
-		if closeUnrecorded {
+		if notified {
 			_ = s.srv.CloseRoom(room, true)
 		}
 		return
 	}
-	if state.closed == !open {
+	if state.closed == !open && !(open && notified) {
 		s.unlockState(room, state)
 		return
 	}
