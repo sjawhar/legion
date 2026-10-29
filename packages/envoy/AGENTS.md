@@ -1810,7 +1810,11 @@ markdown whether it becomes blocks or table rows, a retype's attributes); in a s
 typed block (`SetBlockAttributes`, `pmdoc.LineFeedAttrs`), and in an answer's text, which its
 ask block carries; and in a block ask's edited question and options. The browser editor's own
 updates cannot carry a carriage return. No stored document holds one, and `pmdoc` handles line
-feeds alone. Caller text never holds a U+0000, which the API refuses (`NUL_CHARACTER`, below); a
+feeds alone. Caller text never holds a U+0000, which the API refuses (`NUL_CHARACTER`, below), and
+every reader of a caller's markdown reads one as U+FFFD where it takes the bytes in
+(`parseUnstamped`, `readInline`), as CommonMark and the browser editor's parser read it, since
+goldmark keeps the character while the rendering writes it as U+FFFD, which left a write holding
+one accepted into a tree the markdown it is stored as did not carry (PR #2507). A
 browser's update can put one in the live document, and text Dispatch takes from the tree carries
 it as U+FFFD, which is what CommonMark reads one as (`pmdoc`'s `nulAsReplacement`): the rendering
 a version stores and every read serves, a block's id among it, an anchor's quote (`FindMark`), an
@@ -2095,10 +2099,11 @@ container, so a reference anywhere in the document reaches it. One inside a type
 item around it, inside the typed block or outside it, is refused, since that parser counts the
 definition's lines and the blank lines next to it otherwise when it decides whether the item is
 spread: it reads the first line of a definition opening on a later line, or of an empty one, as a
-blank line of the typed block, and a blank line inside the typed block as spacing the item. So
-is one inside a typed block that holds any block but paragraphs (a list, a quote, code): that
-parser reads a list there spread where this one stores it tight, so only a definition of
-paragraphs is read alike by both. A definition whose label holds whitespace is refused, which that parser reads as a paragraph. A label
+blank line of the typed block, and a blank line inside the typed block as spacing the item
+(`typedDefinitionInItem`). So is one inside a typed block that holds a block other than a paragraph,
+which is what the reader checks: the browser editor reads a list there with other spacing, and the
+definition's other blocks (a quote, code) are refused with it until they are shown to read alike
+(`typedDefinitionHoldingBlock`, `typedDefinitionRefusal`). A definition whose label holds whitespace is refused, which that parser reads as a paragraph. A label
 is stored as that parser reads it, its escapes and character references decoded
 (`[^a\*]` is `a*`, `[^f&amp;g]` is `f&g`), while a reference still finds its definition by the
 label as written; the writer escapes a bracket, a pipe, a backslash before punctuation or at the

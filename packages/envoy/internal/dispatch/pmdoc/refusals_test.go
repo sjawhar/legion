@@ -13,6 +13,7 @@ func TestParseNamesTheFirstRefusedBlock(t *testing.T) {
 	blocks := []struct{ name, markdown string }{
 		{"a link reference definition", "[a]: http://x\n"},
 		{"block HTML", "<div>\nx\n</div>\n"},
+		{"a quoted line the browser editor reads as block HTML", "> </a\t>\n> text\n"},
 		{"an unknown typed block", ":::unknown{#b1}\nBody.\n:::\n"},
 		{"an undeclared attribute", ":::callout{#b2 kind=\"note\" title=\"T\" priority=\"high\"}\nBody.\n:::\n"},
 		{"an invalid attribute value", ":::callout{#b3 kind=\"urgent\" title=\"T\"}\nBody.\n:::\n"},

@@ -257,34 +257,30 @@ func TestQuotedListsAreSpreadWhereTheBrowserEditorsExitLands(t *testing.T) {
 // parser reads as the code's, and a definition inside a typed block with a list item around it,
 // whose lines and the blank lines next to it that parser counts otherwise.
 func TestCorpusErrorsOfItemSpreadReadOtherwiseAreRefused(t *testing.T) {
-	const (
-		fenceBlanks     = "blank lines after a list item in a quote ending in a footnote definition whose typed block holds a fenced code block no fence closed"
-		typedDefinition = "a footnote definition inside a typed block with a list item around it"
-	)
 	for name, refusal := range map[string]string{
-		"quoted-star-item-definition-callout-unclosed-fence-then-blank-lines":                     fenceBlanks,
-		"quoted-star-item-unspaced-definition-callout-unclosed-fence-then-blank-lines":            fenceBlanks,
-		"quoted-star-item-definition-unspaced-callout-unclosed-fence-then-blank-lines":            fenceBlanks,
-		"quoted-item-definition-callout-unclosed-fence-then-blank-lines":                          fenceBlanks,
-		"quoted-item-definition-callout-unclosed-fence-then-blank-lines-and-text":                 fenceBlanks,
-		"quoted-item-definition-callout-unclosed-tilde-fence-holding-code-then-blank-lines":       fenceBlanks,
-		"ordered-item-callout-holding-a-definition-opening-on-a-later-line":                       typedDefinition,
-		"item-callout-holding-a-definition-opening-on-a-later-line":                               typedDefinition,
-		"item-text-then-callout-holding-a-definition-opening-on-a-later-line":                     typedDefinition,
-		"referenced-item-callout-holding-a-definition-opening-on-a-later-line":                    typedDefinition,
-		"item-unclosed-callout-holding-a-definition-opening-on-a-later-line":                      typedDefinition,
-		"quoted-item-callout-holding-a-definition-opening-on-a-later-line":                        typedDefinition,
-		"item-callout-opening-with-a-blank-line-before-a-definition":                              typedDefinition,
-		"item-callout-opening-with-a-blank-line-before-an-empty-definition-at-the-end":            typedDefinition,
-		"item-callout-definition-then-blank-line-and-text":                                        typedDefinition,
-		"ordered-item-nested-callout-opening-with-a-blank-line-before-a-definition":               typedDefinition,
-		"ordered-item-nested-callout-opening-with-a-whitespace-line-before-a-rule-and-definition": typedDefinition,
-		"item-callout-quote-then-two-blank-lines-before-a-list-and-definition":                    typedDefinition,
-		"quoted-item-callout-empty-definition-before-text":                                        typedDefinition,
-		"quoted-callout-quoted-item-empty-definition-before-text":                                 typedDefinition,
-		"quoted-ordered-item-callout-quoted-item-empty-definition-before-text":                    typedDefinition,
-		"quoted-callout-item-definition-then-blank-line-and-text":                                 typedDefinition,
-		"quoted-callout-item-empty-definition-before-next-item":                                   typedDefinition,
+		"quoted-star-item-definition-callout-unclosed-fence-then-blank-lines":                     quotedDefinitionFenceBlank,
+		"quoted-star-item-unspaced-definition-callout-unclosed-fence-then-blank-lines":            quotedDefinitionFenceBlank,
+		"quoted-star-item-definition-unspaced-callout-unclosed-fence-then-blank-lines":            quotedDefinitionFenceBlank,
+		"quoted-item-definition-callout-unclosed-fence-then-blank-lines":                          quotedDefinitionFenceBlank,
+		"quoted-item-definition-callout-unclosed-fence-then-blank-lines-and-text":                 quotedDefinitionFenceBlank,
+		"quoted-item-definition-callout-unclosed-tilde-fence-holding-code-then-blank-lines":       quotedDefinitionFenceBlank,
+		"ordered-item-callout-holding-a-definition-opening-on-a-later-line":                       typedDefinitionInItem,
+		"item-callout-holding-a-definition-opening-on-a-later-line":                               typedDefinitionInItem,
+		"item-text-then-callout-holding-a-definition-opening-on-a-later-line":                     typedDefinitionInItem,
+		"referenced-item-callout-holding-a-definition-opening-on-a-later-line":                    typedDefinitionInItem,
+		"item-unclosed-callout-holding-a-definition-opening-on-a-later-line":                      typedDefinitionInItem,
+		"quoted-item-callout-holding-a-definition-opening-on-a-later-line":                        typedDefinitionInItem,
+		"item-callout-opening-with-a-blank-line-before-a-definition":                              typedDefinitionInItem,
+		"item-callout-opening-with-a-blank-line-before-an-empty-definition-at-the-end":            typedDefinitionInItem,
+		"item-callout-definition-then-blank-line-and-text":                                        typedDefinitionInItem,
+		"ordered-item-nested-callout-opening-with-a-blank-line-before-a-definition":               typedDefinitionInItem,
+		"ordered-item-nested-callout-opening-with-a-whitespace-line-before-a-rule-and-definition": typedDefinitionInItem,
+		"item-callout-quote-then-two-blank-lines-before-a-list-and-definition":                    typedDefinitionInItem,
+		"quoted-item-callout-empty-definition-before-text":                                        typedDefinitionInItem,
+		"quoted-callout-quoted-item-empty-definition-before-text":                                 typedDefinitionInItem,
+		"quoted-ordered-item-callout-quoted-item-empty-definition-before-text":                    typedDefinitionInItem,
+		"quoted-callout-item-definition-then-blank-line-and-text":                                 typedDefinitionInItem,
+		"quoted-callout-item-empty-definition-before-next-item":                                   typedDefinitionInItem,
 	} {
 		markdown, err := os.ReadFile("testdata/corpus-errors/" + name + ".md")
 		if err != nil {
@@ -303,6 +299,10 @@ func TestCorpusErrorsOfItemSpreadReadOtherwiseAreRefused(t *testing.T) {
 // typed block. A document write either refuses it or reads the item spread, so the blank line the
 // writer put there is kept; storing the item tight drops it, which main avoided by refusing every
 // footnote definition in a typed block (INFRA-581).
+// All three are refused today, each as a definition holding a block other than a paragraph
+// (typedDefinitionHoldingBlock, measured over them for PR #2507), so the refusal is pinned by its
+// reason: a reader that lifted it for another reason would still pass. The spread branch stands for
+// the reader that reads one of them instead.
 func TestAListInADefinitionInATypedBlockIsReadSpreadAsTheBrowserReadsItOrRefused(t *testing.T) {
 	for _, markdown := range []string{
 		":::callout{}\n[^f]: - a\n\n    - b\n:::\n\nText[^f].\n",
@@ -311,6 +311,9 @@ func TestAListInADefinitionInATypedBlockIsReadSpreadAsTheBrowserReadsItOrRefused
 	} {
 		doc, err := ParseForWrite(markdown, nil)
 		if errors.Is(err, ErrSchema) {
+			if !strings.Contains(err.Error(), typedDefinitionHoldingBlock) {
+				t.Errorf("ParseForWrite(%q) = %v, want it refused as %q", markdown, err, typedDefinitionHoldingBlock)
+			}
 			continue
 		}
 		if err != nil {

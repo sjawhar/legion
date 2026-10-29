@@ -90,21 +90,8 @@ func blockRefusal(node ast.Node, source []byte, firstLine int, htmlFlow map[int]
 		if bytes.ContainsAny(current.Ref, " \t") {
 			return refuse("a footnote definition whose label holds whitespace, which the browser editor's parser reads as a paragraph")
 		}
-		// The browser editor's parser reads a typed block as a container, so a definition inside
-		// one reads as one inside a quote does, but only one holding paragraphs alone is read alike
-		// by both parsers: where a list item stands around it, inside the typed block or outside
-		// it, or where it holds any other block (a list, a quote, code), that parser counts the
-		// definition's lines and the blank lines among them otherwise when it decides whether a
-		// list item is spread.
-		if _, typed := ancestor[*typedDirective](current); typed {
-			if _, item := ancestor[*ast.ListItem](current); item {
-				return refuse("a footnote definition inside a typed block with a list item around it, whose spacing the browser editor reads otherwise")
-			}
-			for child := current.FirstChild(); child != nil; child = child.NextSibling() {
-				if _, paragraph := child.(*ast.Paragraph); !paragraph {
-					return refuse("a footnote definition inside a typed block holding a block other than a paragraph, whose spacing the browser editor reads otherwise")
-				}
-			}
+		if err := typedDefinitionRefusal(current); err != nil {
+			return err
 		}
 	case *typedDirective:
 		return typedDirectiveRefusal(current)
@@ -151,6 +138,43 @@ var convertedBlocks = map[ast.NodeKind]bool{
 	extensionast.KindTableHeader: true,
 	extensionast.KindTableRow:    true,
 	extensionast.KindTableCell:   true,
+}
+
+// typedDefinitionInItem and typedDefinitionHoldingBlock are why a footnote definition inside a
+// typed block is refused (typedDefinitionRefusal). Each is named so that what the reader says and
+// what a test asserts are one text.
+const (
+	typedDefinitionInItem       = "a footnote definition inside a typed block with a list item around it, whose spacing the browser editor reads otherwise"
+	typedDefinitionHoldingBlock = "a footnote definition inside a typed block holding a block other than a paragraph: the browser editor reads a list there with other spacing, and the definition's other blocks are refused with it until they are shown to read alike"
+)
+
+// typedDefinitionRefusal is why a footnote definition inside a typed block cannot be stored as it
+// reads, or nil. The browser editor's parser reads a typed block as a container, so a definition
+// inside one reads as a definition inside a quote does, and one holding paragraphs alone, with no
+// list item around it, is read alike by both parsers.
+//
+// Where a list item stands around the definition, inside the typed block or outside it, that
+// parser counts the definition's lines and the blank lines next to it otherwise when it decides
+// whether the item is spread: it reads the first line of a definition opening on a later line, or
+// of an empty one, as a blank line of the typed block, and a blank line inside the typed block as
+// spacing the item. Where the definition holds a block other than a paragraph, which is what this
+// checks, the block measured reading otherwise is a list, which that parser reads spread where this
+// reader stores it tight; the definition's other blocks (a quote, code) are refused with it because
+// none of them has been shown to read alike, which is what the refusal names, rather than claiming
+// that the spacing of each is misread.
+func typedDefinitionRefusal(definition *extensionast.Footnote) error {
+	if _, typed := ancestor[*typedDirective](definition); !typed {
+		return nil
+	}
+	if _, item := ancestor[*ast.ListItem](definition); item {
+		return fmt.Errorf("%w: %s", ErrSchema, typedDefinitionInItem)
+	}
+	for child := definition.FirstChild(); child != nil; child = child.NextSibling() {
+		if _, paragraph := child.(*ast.Paragraph); !paragraph {
+			return fmt.Errorf("%w: %s", ErrSchema, typedDefinitionHoldingBlock)
+		}
+	}
+	return nil
 }
 
 // typedDirectiveRefusal refuses a typed block the browser editor's parser reads differently or
