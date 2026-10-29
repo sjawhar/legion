@@ -97,6 +97,35 @@ func TestEveryPodReportsALapsedSessionsLastSeenAlike(t *testing.T) {
 	}
 }
 
+// The state bucket drops a `seen.` record one MaxAge (10 minutes) after its last write, while the
+// listener keeps answering a lapsed session for the interest reaper's longer allowance. A pod that
+// watched the session still answers once the record is gone, from its own record of the
+// registration; only a pod that never saw the session depends on the bucket's record.
+func TestAPodThatSawTheSessionReportsItsLastSeenAfterTheBucketsRecordIsGone(t *testing.T) {
+	const (
+		sessionID = "ses_outlives_record"
+		ttl       = 2 * time.Second
+	)
+	a := lastSeenPod(t, "a", ttl, WithLastSeenRetention(time.Minute))
+	if err := a.Put(sessionID, SessionEntry{Port: 4243, MachineID: "box-a"}); err != nil {
+		t.Fatalf("register %s through pod a: %v", sessionID, err)
+	}
+	deadline := time.Now().Add(ttl + 10*time.Second)
+	for a.LastSeen(sessionID) == 0 || func() bool { _, err := a.Get(sessionID); return err == nil }() {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s did not lapse on pod a with a last-seen time within %s", sessionID, ttl+10*time.Second)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// What the bucket's MaxAge does to the record ten minutes after its write.
+	if err := a.seen.Delete(lastSeenKey(sessionID)); err != nil {
+		t.Fatalf("remove %s's seen record: %v", sessionID, err)
+	}
+	if got := a.LastSeen(sessionID); got == 0 {
+		t.Fatalf("pod a, which saw %s's registration, reports no last-seen time once the bucket's record is gone", sessionID)
+	}
+}
+
 // failingPutKV is a listener state bucket whose every Put fails.
 type failingPutKV struct {
 	natsgo.KeyValue

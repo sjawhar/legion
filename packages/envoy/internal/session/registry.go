@@ -110,10 +110,11 @@ func (e SessionEntry) HostOrMachine() string {
 type SessionRegistryOption func(*sessionRegistryOpts)
 
 type sessionRegistryOpts struct {
-	replicas int
-	ttl      time.Duration
-	log      *slog.Logger
-	seen     bus.KeyValue
+	replicas          int
+	ttl               time.Duration
+	lastSeenRetention time.Duration
+	log               *slog.Logger
+	seen              bus.KeyValue
 }
 
 func WithSessionReplicas(n int) SessionRegistryOption {
@@ -142,9 +143,23 @@ func WithLastSeenBucket(kv bus.KeyValue) SessionRegistryOption {
 	return func(o *sessionRegistryOpts) { o.seen = kv }
 }
 
+// WithLastSeenRetention sets how long after a session leaves the cache LastSeen still answers its
+// final heartbeat; the id's revision fence is kept as long. The default, and any value shorter
+// than the bucket's TTL, is one TTL: the fence must outlive the id's leaving by at least one TTL
+// for dropping it to stay safe (expireDue). The listener keeps it for as long as the interest
+// reaper can still hold a dead session's interest, so its interests API can report the session's
+// last heartbeat for every interest row it still lists. With the listener state bucket
+// (WithLastSeenBucket) a pod that never saw the session reads its `seen.` record instead, which
+// leaves that bucket one MaxAge after its last write; a pod that saw it answers for the whole
+// retention from its own record.
+func WithLastSeenRetention(d time.Duration) SessionRegistryOption {
+	return func(o *sessionRegistryOpts) { o.lastSeenRetention = d }
+}
+
 // cachedSession is a SessionEntry plus its local expiry deadline. JetStream
 // MaxAge TTL expiry is NOT delivered as a watcher delete event, so the registry
-// enforces the TTL locally by pruning entries past expiresAt at read time.
+// enforces the TTL locally: a read reports an entry past expiresAt as absent, and
+// the expiry timer removes it from the cache at that deadline (expireDue).
 type cachedSession struct {
 	entry     SessionEntry
 	expiresAt time.Time // zero means never expires (ttl <= 0)
@@ -163,18 +178,30 @@ func (c cachedSession) expired(now time.Time) bool {
 // problem for the interest registry.
 type SessionRegistry struct {
 	ttl time.Duration
+	// lastSeenRetention is WithLastSeenRetention's value; zero, as in a registry built from a
+	// struct literal, means one TTL (retention).
+	lastSeenRetention time.Duration
 
 	mu             sync.RWMutex
 	cache          map[string]cachedSession
 	cacheRevisions map[string]uint64
 	// seenLocal is LastSeen's per-process fallback, used while seen has no handle: the UpdatedAt
 	// of each session's latest registration this registry wrote or its watcher delivered, until
-	// one session TTL after that registration's expiry. It is guarded by mu.
+	// the retention past that registration's expiry. It is guarded by mu.
 	seenLocal map[string]int64
 
 	// seen is the listener state bucket LastSeen reads a lapsed session's `seen.` record from
 	// (WithLastSeenBucket); its KeyValue is nil when the registry has none.
 	seen bus.KeyValue
+
+	// expiries holds the deadline of each cached entry and of each last-seen record and revision
+	// fence, earliest first; expiryIndex finds an id's item so a write moves it in place.
+	// expiryTimer is armed for expiryArmedFor, the earliest deadline when it was last armed, and runs
+	// expireDue. A registry built from a struct literal starts with none of them (scheduleLocked).
+	expiries       expiryHeap
+	expiryIndex    map[expiryKey]*expiryItem
+	expiryTimer    *time.Timer
+	expiryArmedFor time.Time
 
 	// watcher feeds the cache from the session bucket and holds the handle the registry writes
 	// through. Once it is ready the cache is consistent with the bucket.
@@ -201,9 +228,9 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 	if err != nil {
 		return nil, err
 	}
-	// Prune against the bucket's real MaxAge, not the hardcoded default. If the
+	// Expire against the bucket's real MaxAge, not the hardcoded default. If the
 	// envoy_sessions bucket was created with a different TTL (an older build, a
-	// config change), pruning against opts.ttl would either hide live sessions
+	// config change), expiring against opts.ttl would either hide live sessions
 	// or surface expired ones. Status() is one round-trip; fall back to the
 	// configured ttl if it fails or reports no TTL.
 	ttl := opts.ttl
@@ -213,12 +240,13 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 		}
 	}
 	r := &SessionRegistry{
-		ttl:            ttl,
-		cache:          map[string]cachedSession{},
-		cacheRevisions: map[string]uint64{},
-		seenLocal:      map[string]int64{},
-		seen:           opts.seen,
-		log:            opts.log,
+		ttl:               ttl,
+		lastSeenRetention: opts.lastSeenRetention,
+		cache:             map[string]cachedSession{},
+		cacheRevisions:    map[string]uint64{},
+		seenLocal:         map[string]int64{},
+		seen:              opts.seen,
+		log:               opts.log,
 	}
 	r.watcher = kvwatch.New("session registry", kv, r.applyWatched, r.resetCache, kvwatch.WithLogger(opts.log))
 	// The watcher populates the cache asynchronously. A synchronous Keys()+per-key Get() loop
@@ -252,7 +280,10 @@ func (r *SessionRegistry) logger() *slog.Logger {
 	return r.log
 }
 
-// resetCache empties the cache and its revision fence, for a recreated session bucket.
+// resetCache empties the cache and its revision fence, for a recreated session bucket. The expiry
+// heap keeps its items, and they stay correct: a live item removes nothing unless the cache holds
+// an entry with its deadline, and a last-seen item still removes the per-process record, which
+// resetCache keeps, and drops a fence only for an id the cache does not hold.
 func (r *SessionRegistry) resetCache() {
 	r.mu.Lock()
 	r.cache = map[string]cachedSession{}
@@ -326,6 +357,14 @@ func (r *SessionRegistry) TTL() time.Duration {
 	return r.ttl
 }
 
+// retention is how long after a session leaves the cache its last-seen record and revision fence
+// are kept: WithLastSeenRetention's value, and never less than one TTL, so a registry built from a
+// struct literal keeps them one TTL. It means nothing when the TTL is not positive: then nothing
+// expires and no record is kept.
+func (r *SessionRegistry) retention() time.Duration {
+	return max(r.lastSeenRetention, r.ttl)
+}
+
 // CacheReady reports whether the cache is ready (kvwatch.Watcher.Ready). Observability for
 // /healthz; it does not iterate keys, so it never hangs.
 func (r *SessionRegistry) CacheReady() bool {
@@ -333,11 +372,26 @@ func (r *SessionRegistry) CacheReady() bool {
 }
 
 // CacheSize returns the number of cached sessions. Observability only; reports
-// the raw count without pruning expired-but-not-yet-read entries.
+// the raw count, including expired entries the expiry timer has not removed yet.
 func (r *SessionRegistry) CacheSize() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return len(r.cache)
+}
+
+// LiveCount returns the number of cached sessions that have not expired: the length List would
+// answer, counted under the shared lock with no allocation.
+func (r *SessionRegistry) LiveCount() int {
+	now := time.Now()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	live := 0
+	for _, cs := range r.cache {
+		if !cs.expired(now) {
+			live++
+		}
+	}
+	return live
 }
 
 // WatchErr is the cache watcher's terminal error, or nil while it runs, so the listener can tell a
@@ -440,13 +494,18 @@ func (r *SessionRegistry) write(ctx context.Context, sessionID string, merge fun
 	return fmt.Errorf("%w: session %s", ErrWriteConflict, sessionID)
 }
 
-// cachedEntry is sessionID's live cached registration and the revision the cache holds for it.
+// cachedEntry is sessionID's live cached registration and the revision the cache holds for it. An
+// entry past its deadline reads as absent, as every read reports it (Get), so the write reads the
+// bucket and writes at the revision it finds there.
 func (r *SessionRegistry) cachedEntry(sessionID string) (SessionEntry, uint64, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.pruneLocked(time.Now())
+	now := time.Now()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	cs, ok := r.cache[sessionID]
-	return cs.entry, r.cacheRevisions[sessionID], ok
+	if !ok || cs.expired(now) {
+		return SessionEntry{}, 0, false
+	}
+	return cs.entry, r.cacheRevisions[sessionID], true
 }
 
 // readStored reads sessionID's registration from the bucket for a write, within ctx (bus.Bounded), and
@@ -469,12 +528,14 @@ func (r *SessionRegistry) readStored(ctx context.Context, kv bus.KeyValue, sessi
 	return entry, stored.Revision(), err == nil, nil
 }
 
+// Get returns sessionID's live entry from the cache, or nats.ErrKeyNotFound when the cache holds
+// none or holds one past its deadline. It takes only the shared lock and changes nothing: the
+// expiry timer, not a read, removes an expired entry.
 func (r *SessionRegistry) Get(sessionID string) (SessionEntry, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.pruneLocked(time.Now())
+	r.mu.RLock()
 	cs, ok := r.cache[sessionID]
-	if !ok {
+	r.mu.RUnlock()
+	if !ok || cs.expired(time.Now()) {
 		return SessionEntry{}, nats.ErrKeyNotFound
 	}
 	return cs.entry, nil
@@ -514,35 +575,44 @@ func (r *SessionRegistry) Refresh(ctx context.Context, sessionID string) (Sessio
 // LastSeen is sessionID's last registration write, in Unix milliseconds, or 0 when there is none to
 // report. While the session is live it is the live registration's UpdatedAt. Once the session lapsed
 // (its registration expired or was deleted) it is the time its last registration write recorded
-// (recordSeen), for one session TTL after that registration's expiry, so callers can report why an
-// otherwise durable reference stopped resolving. With the listener state bucket
-// (WithLastSeenBucket) that time is the session's `seen.` record, the server's timestamp of the
-// write, which every listener pod reads alike, one that started after the session lapsed included.
-// The bucket keeps a record for its MaxAge (10 minutes) after the record's last write, which covers
-// the default 5 minute session TTL twice; a session bucket made with a longer TTL loses the record
-// before that retention ends. Without the bucket the time is this process's seenLocal, which knows
-// only the registrations this process saw and which a restart forgets. The retention is measured on
-// this process's clock against the server's timestamp; a skew of seconds against a TTL of minutes
-// moves its end by that skew.
+// (recordSeen), for the registry's retention (one TTL unless WithLastSeenRetention set longer)
+// after that registration's expiry, so callers can report why an otherwise durable reference
+// stopped resolving. That time is the later of two records: this process's seenLocal, the
+// UpdatedAt of every registration this process wrote or its watcher saw, which a restart forgets;
+// and, with the listener state bucket (WithLastSeenBucket), the session's `seen.` record, the
+// server's timestamp of the write, which a pod started after the session lapsed reads too. The
+// bucket keeps that record for its MaxAge (10 minutes) after its last write, so a pod that never
+// saw the session reports it for that long, and a pod that saw it for the whole retention. The
+// window is measured on this process's clock against the server's timestamp; a skew of seconds
+// against a TTL of minutes moves its end by that skew.
+//
+// It takes only the shared lock and changes nothing: an expired entry the expiry timer has not
+// removed yet answers the lapsed session's record, which is what its removal leaves in place, so
+// the answer is the same before and after the removal.
 func (r *SessionRegistry) LastSeen(sessionID string) int64 {
 	now := time.Now()
-	r.mu.Lock()
-	r.pruneLocked(now)
-	cs, live := r.cache[sessionID]
+	r.mu.RLock()
+	cs, cached := r.cache[sessionID]
 	at := r.seenLocal[sessionID]
-	r.mu.Unlock()
-	if live {
+	r.mu.RUnlock()
+	if cached && !cs.expired(now) {
 		return cs.entry.UpdatedAt
 	}
 	if r.ttl <= 0 {
 		return 0
 	}
 	if r.seen.KeyValue != nil {
-		var err error
-		if at, err = r.readSeen(sessionID); err != nil {
+		// The bucket's record is the server's timestamp of the write, which every pod reads alike,
+		// a pod started after the session lapsed included; once the bucket's MaxAge has removed it
+		// (or it cannot be read), this process's own record serves the rest of the window, so a
+		// pod that watched the session reports it for the whole retention.
+		stored, err := r.readSeen(sessionID)
+		if err != nil {
 			r.logger().Warn("session last-seen unavailable: its record in the listener state bucket could not be read",
 				slog.String("session_id", sessionID), slog.String("key", lastSeenKey(sessionID)), slog.String("error", err.Error()))
-			return 0
+		}
+		if stored > 0 {
+			at = stored
 		}
 	}
 	if at <= 0 || !now.Before(r.seenUntil(at)) {
@@ -552,9 +622,9 @@ func (r *SessionRegistry) LastSeen(sessionID string) int64 {
 }
 
 // seenUntil is when a lapsed session's last-seen time at (Unix milliseconds) stops being reported:
-// one session TTL after the expiry of the registration written at at.
+// the retention after the expiry of the registration written at at.
 func (r *SessionRegistry) seenUntil(at int64) time.Time {
-	return time.UnixMilli(at).Add(2 * r.ttl)
+	return time.UnixMilli(at).Add(r.ttl + r.retention())
 }
 
 // seenRecord is the value of a session's `seen.` record in the listener state bucket: at is the
@@ -670,53 +740,52 @@ type ListEntry struct {
 	SessionEntry
 }
 
-// List returns all live sessions from the in-memory cache, pruning entries past
-// their local TTL. Cache-only: no JetStream round-trips, so it can't hang on a
-// slow KV leader the way the old Keys()+per-key Get() loop did.
+// List returns all live sessions from the in-memory cache, leaving out entries past
+// their local TTL as it copies. It takes only the shared lock and changes nothing.
+// Cache-only: no JetStream round-trips, so it can't hang on a slow KV leader the
+// way the old Keys()+per-key Get() loop did.
 func (r *SessionRegistry) List() ([]ListEntry, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.pruneLocked(time.Now())
+	now := time.Now()
+	r.mu.RLock()
 	entries := make([]ListEntry, 0, len(r.cache))
 	for key, cs := range r.cache {
+		if cs.expired(now) {
+			continue
+		}
 		entries = append(entries, ListEntry{SessionID: key, SessionEntry: cs.entry})
 	}
+	r.mu.RUnlock()
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].SessionID < entries[j].SessionID
 	})
 	return entries, nil
 }
 
-// pruneLocked removes expired live entries and the per-process last-seen times past their retention.
-// Callers must hold r.mu for writing.
-func (r *SessionRegistry) pruneLocked(now time.Time) {
-	for key, cs := range r.cache {
-		if cs.expired(now) {
-			delete(r.cache, key)
-		}
-	}
-	for key, at := range r.seenLocal {
-		if !now.Before(r.seenUntil(at)) {
-			delete(r.seenLocal, key)
-		}
-	}
-}
-
-// cacheSessionLocked caches entry as sessionID's registration at revision unless the cache holds a
-// later one. Without the listener state bucket it is also where a registration's UpdatedAt becomes
-// the session's per-process last-seen time (seenLocal), whichever process wrote it.
+// cacheSessionLocked caches entry as sessionID's registration at revision unless the revision fence
+// holds a newer revision, and schedules the entry's removal at expiresAt. Without the listener
+// state bucket it is also where a registration's UpdatedAt becomes the session's per-process
+// last-seen time (seenLocal), whichever process wrote it. A put whose deadline has already passed
+// for an id the cache does not hold is not inserted: it would read as absent anyway, and inserting
+// it would bring back a last-seen record for a session that left long ago. That is the late
+// delivery of a revision older than a fence expireDue already dropped. Callers must hold r.mu for
+// writing.
 func (r *SessionRegistry) cacheSessionLocked(sessionID string, entry SessionEntry, expiresAt time.Time, revision uint64) {
 	if revision < r.cacheRevisions[sessionID] {
 		return
 	}
-	r.cache[sessionID] = cachedSession{entry: entry, expiresAt: expiresAt}
+	cs := cachedSession{entry: entry, expiresAt: expiresAt}
+	if _, cached := r.cache[sessionID]; !cached && cs.expired(time.Now()) {
+		return
+	}
+	r.cache[sessionID] = cs
 	r.cacheRevisions[sessionID] = revision
-	if r.seen.KeyValue == nil && r.ttl > 0 && entry.UpdatedAt > r.seenLocal[sessionID] {
+	if r.ttl > 0 && entry.UpdatedAt > r.seenLocal[sessionID] {
 		if r.seenLocal == nil {
 			r.seenLocal = map[string]int64{}
 		}
 		r.seenLocal[sessionID] = entry.UpdatedAt
 	}
+	r.scheduleLocked(sessionID, expireLive, expiresAt)
 }
 
 func (r *SessionRegistry) cachedRevision(sessionID string) uint64 {
@@ -725,10 +794,28 @@ func (r *SessionRegistry) cachedRevision(sessionID string) uint64 {
 	return r.cacheRevisions[sessionID]
 }
 
+// evictCachedSessionLocked removes sessionID from the cache for a delete, a purge or a malformed
+// value at revision, unless the revision fence holds a newer revision. The fence moves to revision
+// and leaves the retention from now, by when the session's last-seen record has ended too
+// (expireDue). Callers must hold r.mu for writing.
 func (r *SessionRegistry) evictCachedSessionLocked(sessionID string, revision uint64) {
 	if revision < r.cacheRevisions[sessionID] {
 		return
 	}
+	now := time.Now()
 	delete(r.cache, sessionID)
 	r.cacheRevisions[sessionID] = revision
+	r.scheduleLocked(sessionID, expireLastSeen, r.lastSeenUntilLocked(sessionID, now))
+}
+
+// lastSeenUntilLocked is when sessionID's per-process last-seen record and revision fence may be
+// dropped after its entry left the cache at left: the retention past that, and never before the
+// record's own end (seenUntil), so nothing LastSeen still reports is dropped. Callers must hold
+// r.mu.
+func (r *SessionRegistry) lastSeenUntilLocked(sessionID string, left time.Time) time.Time {
+	until := left.Add(r.retention())
+	if at, ok := r.seenLocal[sessionID]; ok && r.seenUntil(at).After(until) {
+		return r.seenUntil(at)
+	}
+	return until
 }

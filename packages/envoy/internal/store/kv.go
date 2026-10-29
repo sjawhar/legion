@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -389,10 +390,14 @@ func (r *Registry) deleteInterest(ctx context.Context, sessionID string) error {
 }
 
 // deleteInterestAt deletes sessionID's interest only while revision is its latest, waiting no
-// longer than ctx (bus.Bounded); a write since fails the delete with nats.ErrKeyExists. A delete ctx
-// abandoned may still land after this answer, and that is safe for the same reason: it deletes only
-// that revision.
+// longer than ctx (bus.Bounded); a write since fails the delete with nats.ErrKeyExists. Revision 0
+// names no revision, which a conditional delete cannot express, so that interest is deleted at the
+// revision it reads (deleteInterest). A delete ctx abandoned may still land after this answer, and
+// that is safe for the same reason: it deletes only that revision.
 func (r *Registry) deleteInterestAt(ctx context.Context, sessionID string, revision uint64) error {
+	if revision == 0 {
+		return r.deleteInterest(ctx, sessionID)
+	}
 	cached := r.cachedRevision(sessionID)
 	interests := r.interests()
 	_, answered, err := bus.Bounded(ctx, func() (struct{}, error) {
@@ -660,18 +665,42 @@ func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 }
 
 // UpsertWithin adds topics to item.SessionID's interest, merged onto the stored one
-// (mergeForUpsert) and written by compare-and-set (writeInterest), each bucket call waiting no
-// longer than ctx (bus.Bounded): an HTTP route passes its request's own context. A record this build
-// cannot decode (ErrMalformedInterest) is replaced by item and topics alone, and the registry logs
-// that at WARN naming the session. A write ctx abandoned may still land after this answer. That is
-// safe: it is a compare-and-set at the revision it read, so it replaces only that revision and never
-// a write that landed since, and it writes the record the caller's retry merges again.
+// (mergeForUpsert), stamped with the registry's clock and written by compare-and-set
+// (writeInterest), each bucket call waiting no longer than ctx (bus.Bounded): an HTTP route passes
+// its request's own context. It returns the record as it now stands. A record this build cannot
+// decode (ErrMalformedInterest) is replaced by item and topics alone, and the registry logs that at
+// WARN naming the session. A write ctx abandoned may still land after this answer. That is safe: it
+// is a compare-and-set at the revision it read, so it replaces only that revision and never a write
+// that landed since, and it writes the record the caller's retry merges again.
+//
+// A heartbeat re-sends the same topics every 90 seconds, so UpsertWithin returns the current row
+// without writing when the encoding of merged equals that of the row it holds, apart from
+// UpdatedAt, and the row is younger than InterestRefreshAge. An unchanged row is thus rewritten
+// once per InterestRefreshAge, its UpdatedAt lags the session's last heartbeat by less than that,
+// and Reap adds InterestRefreshAge to its grace window (InterestReapAllowance), so that lag never
+// shortens a paused session's grace. A changed row is written, and so is a record it cannot
+// decode; any other failed read refuses the write (mergeForUpsert). The session row
+// (session.SessionRegistry.Put) is written on every heartbeat: its bucket's MaxAge is the liveness
+// clock, and NATS connect notices ($SYS) are not available to replace it.
 func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []string) (Interest, error) {
 	var malformed bool
-	merged, revision, err := r.writeInterest(ctx, item.SessionID, func(cur Interest, curErr error) (Interest, bool, error) {
+	merged, revision, err := r.writeInterest(ctx, item.SessionID, func(cur Interest, curErr error) (Interest, writeAction, error) {
 		malformed = errors.Is(curErr, ErrMalformedInterest)
-		merged, err := mergeForUpsert(cur, curErr, item, topics, r.now().UnixMilli())
-		return merged, false, err
+		now := r.now().UnixMilli()
+		merged, err := mergeForUpsert(cur, curErr, item, topics, now)
+		if err != nil {
+			return Interest{}, writeStore, err
+		}
+		if curErr == nil && now-cur.UpdatedAt < InterestRefreshAge.Milliseconds() {
+			same, err := storesTheSameInterest(cur, merged)
+			if err != nil {
+				return Interest{}, writeStore, err
+			}
+			if same {
+				return cur, writeSkip, nil
+			}
+		}
+		return merged, writeStore, nil
 	})
 	if err != nil {
 		return Interest{}, err
@@ -686,16 +715,47 @@ func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []str
 	return merged, nil
 }
 
+// storesTheSameInterest reports whether writing next would store the row cur already holds. What
+// the skip asks is whether the write would change the bucket, so it compares the encoding of next
+// with that of cur rather than the fields one by one: a field added to Interest, a key only a newer
+// build knows (Interest.unknown), and the difference between a null and an empty topic list are
+// then covered by the encoding itself. cur is stamped with next's UpdatedAt, the one field a write
+// of an unchanged row would move.
+func storesTheSameInterest(cur, next Interest) (bool, error) {
+	cur.UpdatedAt = next.UpdatedAt
+	stored, err := encodeInterest(cur)
+	if err != nil {
+		return false, err
+	}
+	buf, err := encodeInterest(next)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(buf, stored), nil
+}
+
+// writeAction is what writeInterest does with what its change returned: store it, delete the
+// stored interest, or leave the bucket as it is.
+type writeAction uint8
+
+const (
+	writeStore writeAction = iota
+	writeRemove
+	writeSkip
+)
+
 // writeInterest writes sessionID's interest by compare-and-set on its KV revision, so a write another
 // listener made between this one's read and its write is never overwritten. change computes the
 // interest to write from the stored one and the error reading it (nats.ErrKeyNotFound when there is
-// none, ErrMalformedInterest for a record this build cannot decode), or remove to delete it. The
-// first attempt changes the cached interest. A cache miss, or a write the bucket refuses because the
-// revision moved, reads the bucket entry and changes that: an Update or a delete at its revision, or
-// a Create when there is none. After writeAttempts refused writes it returns ErrWriteConflict, having
-// written nothing. Each bucket call waits no longer than ctx (bus.Bounded). It returns the interest
-// written and the revision written, 0 for a delete or for nothing to delete.
-func (r *Registry) writeInterest(ctx context.Context, sessionID string, change func(cur Interest, curErr error) (next Interest, remove bool, err error)) (Interest, uint64, error) {
+// none, ErrMalformedInterest for a record this build cannot decode), or asks for the stored one to be
+// deleted (writeRemove) or left alone (writeSkip, for a write that would store the row the bucket
+// already holds). The first attempt changes the cached interest. A cache miss, or a write the bucket
+// refuses because the revision moved, reads the bucket entry and changes that: an Update or a delete
+// at its revision, or a Create when there is none. After writeAttempts refused writes it returns
+// ErrWriteConflict, having written nothing. Each bucket call waits no longer than ctx (bus.Bounded).
+// It returns the interest written and the revision written, 0 for a delete or for nothing to delete,
+// and for a skip the revision the interest stands at.
+func (r *Registry) writeInterest(ctx context.Context, sessionID string, change func(cur Interest, curErr error) (next Interest, action writeAction, err error)) (Interest, uint64, error) {
 	r.mu.RLock()
 	cur, found := r.cache[sessionID]
 	revision := r.cacheRevisions[sessionID]
@@ -707,15 +767,17 @@ func (r *Registry) writeInterest(ctx context.Context, sessionID string, change f
 			cur, revision, curErr = r.readInterest(ctx, sessionID)
 		}
 		read = true
-		next, remove, err := change(cur, curErr)
+		next, action, err := change(cur, curErr)
 		if err != nil {
 			return Interest{}, 0, err
 		}
 		var written uint64
 		switch {
-		case remove && revision == 0:
+		case action == writeSkip:
+			return next, revision, nil
+		case action == writeRemove && revision == 0:
 			return next, 0, nil
-		case remove:
+		case action == writeRemove:
 			err = r.deleteInterestAt(ctx, sessionID, revision)
 		default:
 			written, err = r.putInterestAt(ctx, sessionID, next, revision)
@@ -1042,17 +1104,17 @@ func (r *Registry) removeInterestTopics(ctx context.Context, sessionID string, t
 	if len(topics) == 0 {
 		return r.deleteInterest(ctx, sessionID)
 	}
-	_, _, err := r.writeInterest(ctx, sessionID, func(cur Interest, curErr error) (Interest, bool, error) {
+	_, _, err := r.writeInterest(ctx, sessionID, func(cur Interest, curErr error) (Interest, writeAction, error) {
 		if curErr != nil {
-			return Interest{}, false, curErr
+			return Interest{}, writeStore, curErr
 		}
 		item := Remove(cur, topics)
 		item.Topics = dropPrivateStreamTopics(sessionID, item.Topics)
 		if len(item.Topics) == 0 {
-			return item, true, nil
+			return item, writeRemove, nil
 		}
 		item.UpdatedAt = r.now().UnixMilli()
-		return item, false, nil
+		return item, writeStore, nil
 	})
 	if errors.Is(err, ErrMalformedInterest) {
 		r.logger().Warn("registry left an interest record it cannot decode unchanged",
@@ -1312,33 +1374,67 @@ const (
 	InterestRefreshAge = 5 * time.Minute
 )
 
+// InterestReapAllowance is the age past which Reap deletes a dead session's interest: grace, the
+// window the row's session is given after its last write, plus InterestRefreshAge, the most that
+// write may lag the session's last heartbeat. A row exactly that old is kept. The listener gives
+// the same allowance to the last-seen record its session cache keeps
+// (session.WithLastSeenRetention), so every row the reaper can still hold has one.
+func InterestReapAllowance(grace time.Duration) time.Duration {
+	return grace + InterestRefreshAge
+}
+
+// reapCandidate is one cached interest past the allowance as Reap's snapshot saw it.
+type reapCandidate struct {
+	sessionID string
+	revision  uint64
+}
+
 // Reap cross-references the interest cache with a session liveness check and
 // deletes an interest only when its session is dead AND more than the grace
 // window plus InterestRefreshAge has passed since the row's last write
-// (UpdatedAt); a row exactly that old is kept. A role claim is intentionally
-// not an interest: it remains available for its holder to re-register after a
-// listener restart, and the role delivery path drops it if that holder never
-// becomes live again.
+// (UpdatedAt, InterestReapAllowance); a row exactly that old is kept. A role
+// claim is intentionally not an interest: it remains available for its holder
+// to re-register after a listener restart, and the role delivery path drops it
+// if that holder never becomes live again.
+//
+// Under the read lock it copies the session id and cache revision of every cached
+// interest past that allowance, and then releases it, so isAlive runs with no interest
+// lock held and a heartbeat's Upsert never waits on a pass. Before it deletes a
+// candidate it reads it again and skips it when its revision changed or it is now
+// within the allowance, and it deletes at exactly the revision it checked, so a write
+// that lands after that check is kept: the delete fails with JetStream's wrong last
+// sequence (10071, nats.ErrKeyExists), and the candidate counts as skipped.
 func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (int, error) {
 	now := r.now().UnixMilli()
-	allowanceMs := graceWindow.Milliseconds() + InterestRefreshAge.Milliseconds()
+	allowanceMs := InterestReapAllowance(graceWindow).Milliseconds()
 
 	r.mu.RLock()
-	var stale []string
+	var candidates []reapCandidate
 	for sid, item := range r.cache {
-		if isAlive(sid) {
-			continue // session still alive
-		}
 		if now-item.UpdatedAt <= allowanceMs {
 			continue // within grace window plus refresh age
 		}
-		stale = append(stale, sid)
+		candidates = append(candidates, reapCandidate{sessionID: sid, revision: r.cacheRevisions[sid]})
 	}
 	r.mu.RUnlock()
 
 	reaped := 0
-	for _, sid := range stale {
-		err := r.deleteInterest(context.Background(), sid)
+	for _, candidate := range candidates {
+		sid := candidate.sessionID
+		if isAlive(sid) {
+			continue // session still alive
+		}
+		r.mu.RLock()
+		item, cached := r.cache[sid]
+		revision := r.cacheRevisions[sid]
+		r.mu.RUnlock()
+		if !cached || revision != candidate.revision || now-item.UpdatedAt <= allowanceMs {
+			continue // written or removed during the pass
+		}
+		err := r.deleteInterestAt(context.Background(), sid, revision)
+		if errors.Is(err, nats.ErrKeyExists) {
+			continue // written since the check; the write keeps the interest
+		}
 		if errors.Is(err, bus.ErrRefused) {
 			r.logger().Warn("reaper skipped an interest it cannot delete", slog.Int("key_bytes", len(sid)), slog.String("error", err.Error()))
 			continue
@@ -1410,15 +1506,16 @@ func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Dur
 // a channel closed once it has returned: a pass in flight when ctx ends finishes first. A pass
 // lists the bucket through watchers whose consumers nats.go creates and deletes, so the listener's
 // shutdown waits for it before it drains NATS (kvwatch.Watcher.End says what a drain does to such
-// a delete).
+// a delete). Each pass logs how many interests it reaped and how long it took (elapsed_ms).
 func (r *Registry) StartReaper(ctx context.Context, isAlive func(string) bool, interval, graceWindow time.Duration) <-chan struct{} {
 	return everyInterval(ctx, interval, func() {
+		started := time.Now()
 		count, err := r.Reap(isAlive, graceWindow)
 		if err != nil {
 			r.logger().Error("reaper cycle failed", slog.String("error", err.Error()))
 			return
 		}
-		r.logger().Info("reaper cycle", slog.Int("reaped", count))
+		r.logger().Info("reaper cycle", slog.Int("reaped", count), slog.Int64("elapsed_ms", time.Since(started).Milliseconds()))
 	})
 }
 
