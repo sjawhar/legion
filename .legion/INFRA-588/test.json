@@ -49,7 +49,7 @@
       "command": "jj diff --name-only from main filtered to /migrations/; jj diff --stat from a4ca5918 -- scripts/conflicts .github",
       "observed": "only embed.go and embed_test.go change under migrations/; no .sql file changes. scripts/conflicts and .github: 0 files changed",
       "headSha": "7fcdf0e1d50804a23fd05ace20be96de3785e53a",
-      "negativeControl": "the same filter lists the two crafted .sql files on the merged scratch tree"
+      "negativeControl": "git diff --name-only 2b427f930eac to the merged scratch tree, over the two migrations directories, lists the six crafted .sql files (two daemon, four Dispatch), so the filter does show a changed or added migration"
     }
   ],
   "observations": [
