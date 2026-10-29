@@ -37,12 +37,16 @@
 # toolchain at go.work's version (go and gofmt, /opt/go) with trixie's gcc and libc6-dev, the C
 # compiler and headers Go's cgo and race detector need (cgo stays off by default), gopls,
 # typescript-language-server with TypeScript's tsc and tsserver, pyright with its pyright-langserver,
-# and trixie's python3, curl, wget, jq, openssh-client (ssh-keygen), util-linux (flock),
-# postgresql-client (psql), redis-tools (redis-cli), sqlite3, netcat-openbsd (nc), bind9-dnsutils
-# (dig) and chromium (the browser Oh My Pi finds on PATH); and a generic toolchain for the
+# and trixie's python3 with PyYAML (python3-yaml), curl, wget, jq, openssh-client (ssh-keygen),
+# util-linux (flock), postgresql-client (psql), redis-tools (redis-cli), sqlite3,
+# netcat-openbsd (nc), bind9-dnsutils (dig) and chromium (the browser Oh My Pi finds on PATH);
+# and a generic toolchain for the
 # repositories the workers work, specific to none of them: uv and uvx, Node LTS with npm and
 # corepack's pnpm and yarn, the AWS CLI v2 and kubectl —
-# each of these on PATH at /usr/local/bin or /usr/bin; and the license of every third-party piece of
+# each of these on PATH at /usr/local/bin or /usr/bin; the warm Go module cache of the two modules
+# go.work binds, at /home/legion/go/pkg/mod/cache/download, which /opt/go/go.env names first in
+# GOPROXY (the go stage and the toolchain stage say why);
+# and the license of every third-party piece of
 # all that at /usr/share/doc/legion/THIRD_PARTY_NOTICES (the notices stage; its Debian list comes from
 # the image's own dpkg database).
 # The last three RUNs gate the publish, as the runtime user: the first checks every binary runs on
@@ -309,6 +313,14 @@ ARG GOPLS_VERSION
 RUN set -eu; \
     mkdir -p /out; \
     CGO_ENABLED=0 GOBIN=/out go install "golang.org/x/tools/gopls@v${GOPLS_VERSION}"
+# The module files and their download, in a layer above every source COPY, so a commit rebuilds
+# neither. GOMODCACHE moves to /gomodcache here, after the gopls and go-licenses layers. That
+# keeps the modules of those two tools out of this cache. The runtime stage ships
+# /gomodcache/cache/download to the workers as their warm module cache. One download serves the
+# build and the workers. A module-cache stage of its own would read the same 379 MiB from
+# proxy.golang.org a second time on every build that rebuilds this layer. This image's issue
+# (dispatch://INFRA-567) counts every such read.
+ENV GOMODCACHE=/gomodcache
 COPY go.work go.work.sum ./
 COPY packages/daemon/go.mod packages/daemon/go.sum packages/daemon/
 COPY packages/envoy/go.mod packages/envoy/go.sum packages/envoy/
@@ -364,6 +376,20 @@ RUN test -n "$LEGION_REVISION" \
 # starts with an allowlisted environment that drops CGO_ENABLED, and a test may build with go under an
 # environment it constructs. It is only a default: a role's `CGO_ENABLED=1` overrides it, as the final
 # stage's ENV comment says.
+# The same RUN points /opt/go/go.env's GOPROXY at the warm module cache the runtime stage copies,
+# before the public proxy:
+# `file:///home/legion/go/pkg/mod/cache/download|https://proxy.golang.org|direct`.
+# A `|` between entries makes a go command fall through to the next source after any error. A
+# module the image's cache does not hold therefore still comes from proxy.golang.org, and an image
+# whose cache was deleted still builds. The line replaces the GOPROXY line stock go.env carries,
+# and the RUN fails if that line is absent. go.env is the place for it, not an `ENV` of the final
+# stage. Two facts decide that. First, a pod tells every role `GOMODCACHE=/legion/go/mod`, the
+# issue volume (roleEnvironment, packages/daemon/internal/runtime/sandbox/manifest.go). That
+# volume is empty in a fresh pod and dies with it (docs/kubernetes.md, "The disk dies with its
+# pod"), so the image's cache reaches a role as a proxy and not as its GOMODCACHE. Second, a
+# variable the final stage's ENV sets is one `runtime.kubernetes.pod.env` may not set
+# (sandbox/operatorpod.go imageEnv). A go.env default leaves GOPROXY to an operator, a role or a
+# command that names its own. The process environment outranks go.env, so each of those wins.
 # ghcr.io/sjawhar/legion/ci, the copy of debian:trixie-slim (.github/ci-images.yaml)
 FROM ghcr.io/sjawhar/legion/ci@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS toolchain
 ARG UV_VERSION
@@ -410,6 +436,9 @@ RUN set -eu; \
     done; \
     tar -xzf "$t/go.tar.gz" -C /opt --no-same-owner; \
     printf 'CGO_ENABLED=0\n' >> /opt/go/go.env; \
+    goproxy='GOPROXY=file:///home/legion/go/pkg/mod/cache/download|https://proxy.golang.org|direct'; \
+    sed -i "s#^GOPROXY=.*#$goproxy#" /opt/go/go.env; \
+    grep -qxF "$goproxy" /opt/go/go.env; \
     for tool in go gofmt; do ln -s "/opt/go/bin/$tool" "/out/bin/$tool"; done; \
     unzip -q "$t/awscli.zip" -d "$t"; \
     "$t/aws/install" --install-dir /opt/aws-cli --bin-dir /out/bin; \
@@ -496,6 +525,14 @@ FROM ghcr.io/sjawhar/legion/ci@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a
 # because it is only a Recommends of gcc-14, and Recommends stay out here as everywhere. cgo stays off
 # by default all the same (the final stage's `ENV CGO_ENABLED=0` and the toolchain stage's go.env line
 # say how).
+# python3-yaml: Debian's PyYAML for the image's python3, so `python3 -c "import yaml"` answers in a
+# pod. Six of this repository's own gates run python3 with `import yaml`:
+# .github/scripts/check-action-pins.sh, check-bun-version.sh, check-ci-images.sh,
+# check-image-trigger-paths.sh, check-release-credentials.sh, and check-ci-filters.sh through
+# ci_filter_coverage.py. A Legion role runs those gates on its own change before it returns the
+# work. apt is the one install route here. This stage's apt RUN is the only one the image allows
+# (the paragraph at the top of the stage says why), and trixie marks its python3 externally
+# managed (PEP 668), which refuses a pip install into it.
 # /opt/legion and /opt/legion/bin are created here, root-owned, before any COPY into them: a COPY
 # creates a missing parent with its own --chown, so a runtime-user copy into /opt/legion would
 # otherwise leave the runtime user free to rename bin/ and plant its own `legion`. The final step
@@ -507,7 +544,7 @@ FROM ghcr.io/sjawhar/legion/ci@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a
 # volumes over the same paths, as it always has. The final step refuses an image where any is not
 # root's or is not empty.
 # hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates chromium curl gcc git jq libc6-dev netcat-openbsd openssh-client postgresql-client python3 redis-tools socat sqlite3 util-linux wget \
+RUN apt-get update && apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates chromium curl gcc git jq libc6-dev netcat-openbsd openssh-client postgresql-client python3 python3-yaml redis-tools socat sqlite3 util-linux wget \
     && rm -rf /var/lib/apt/lists/* \
     && chmod u-s /usr/lib/openssh/ssh-keysign \
     && chmod g-s /usr/bin/ssh-agent \
@@ -756,6 +793,17 @@ COPY --from=toolchain /opt/go /opt/go
 COPY --from=toolchain /opt/aws-cli /opt/aws-cli
 COPY --from=toolchain /out/bin/ /usr/local/bin/
 COPY --from=go /out/gopls /usr/local/bin/gopls
+# The warm Go module cache: the download cache the go stage filled from go.work's module files
+# (its zips, .mod and .info files and their hashes). It lands at the module cache a go with no
+# GOMODCACHE in its environment reads, /home/legion/go/pkg/mod: HOME is /home/legion, and GOPATH is
+# its default, $HOME/go. The extracted module trees stay out of the image. go extracts what a build
+# needs from these zips, and a role's GOMODCACHE is the issue volume anyway (the toolchain stage's
+# go.env paragraph), so the image carries the one form both uses read: 379 MiB rather than 2.2 GiB.
+# --chown makes the cache the runtime user's. Its files are mode 0644 in mode 0755 directories,
+# which is what lets a role add a module the cache does not hold. The read-only 0444 files and 0555
+# directories of a module cache are in the extracted trees, which this is not. The COPY sits in the
+# toolchain group for the toolchain group's reason: it changes only with go.work's module files.
+COPY --from=go --chown=1000:1000 /gomodcache/cache/download /home/legion/go/pkg/mod/cache/download
 USER root
 COPY --from=toolchain /out/chromium /opt/chromium
 COPY packages/daemon/docker/tls-roots /usr/share/legion/tls-roots
@@ -787,13 +835,19 @@ ENV AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt COREPACK_DEFAULT_TO_LATEST=
 # XDG_CONFIG_HOME in a scratch directory the step removes, so the layer keeps nothing (go, gofmt and
 # gopls write Go telemetry counters under the user config directory on every run, local mode being
 # Go's default; XDG_CONFIG_HOME is where they look for it). The image's own Python is checked here,
-# python3 --version; uv still installs each project's own at run time. `go version` alone would pass
+# python3 --version, and so is the PyYAML the gates import, `python3 -c 'import yaml'`;
+# uv still installs each project's own at run time. `go version` alone would pass
 # with a GOROOT go cannot find, and every `go build` would then fail, so the step requires GOROOT to
 # resolve to /opt/go through the /usr/local/bin/go symlink. gcc answers --version and is checked beside
 # go, whose cgo (and so whose race detector) needs it. The step then reads cgo's default with
 # CGO_ENABLED removed from the environment (XDG_CONFIG_HOME in scratch, so no `go env -w` file is
 # read), where only /opt/go/go.env's line holds it at 0, so the build fails if that line, the default
-# a scrubbed environment depends on, is ever lost. gofmt takes no --version; formatting a
+# a scrubbed environment depends on, is ever lost. It reads GOPROXY the same way, with GOPROXY
+# removed from the environment, and requires the line the toolchain stage wrote into the same
+# go.env: the warm module cache reaches a role through that line alone. It then holds the cache
+# itself to the runtime user and to a writable download directory. A role that cannot write there
+# cannot add a module the cache does not hold. The step prints how many modules the cache carries.
+# gofmt takes no --version; formatting a
 # line from stdin is its check. pyright-langserver takes none either (it opens its LSP connection
 # first and refuses without --stdio), so `pyright --version`, the same package's CLI, answers for it.
 # Being its own layer above `legion`, it reruns only when the toolchain or a layer before it changes,
@@ -820,9 +874,13 @@ RUN set -eu; \
     pnpx --help > "$scratch/pnpx-help"; sed -n 1p "$scratch/pnpx-help"; \
     go version; goroot="$(go env GOROOT)"; echo "GOROOT: $goroot"; test "$goroot" = /opt/go; gcc --version; \
     test "$(env -u CGO_ENABLED go env CGO_ENABLED)" = 0; \
+    test "$(env -u GOPROXY go env GOPROXY)" = 'file:///home/legion/go/pkg/mod/cache/download|https://proxy.golang.org|direct'; \
+    modcache=/home/legion/go/pkg/mod/cache/download; \
+    test "$(stat -c '%U' "$modcache")" = legion; test -w "$modcache"; \
+    printf 'go module cache: %s modules\n' "$(find "$modcache" -name '*.zip' | wc -l)"; \
     printf 'package main\n' | gofmt; gopls version; \
     typescript-language-server --version; tsc --version; pyright --version; \
-    python3 --version; curl --version; wget --version; jq --version; chromium --version; \
+    python3 --version; python3 -c 'import yaml'; curl --version; wget --version; jq --version; chromium --version; \
     socat -V > "$scratch/socat-V"; sed -n '/^socat version/p' "$scratch/socat-V"; \
     ssh-keygen -q -t ed25519 -N '' -f "$scratch/probe-key"; ssh-keygen -l -f "$scratch/probe-key.pub"; \
     flock --version; \

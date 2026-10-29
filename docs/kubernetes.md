@@ -92,7 +92,9 @@ phase worker `worker_backends` puts on `claude`, on Claude Code. It carries:
   `node`, `npm`, `npx` and `corepack` from Node 24 LTS, with `pnpm`, `pnpx`, `yarn` and `yarnpkg` linked
   to corepack's shims (the links `corepack enable` would write, which uid 1000 cannot); the Go toolchain
   at `go.work`'s version — `go` and `gofmt`, the tree at `/opt/go` (its `GOROOT`, which `go` finds by
-  resolving the `/usr/local/bin/go` symlink; the image sets no `GOROOT`); the AWS CLI v2's `aws`; and
+  resolving the `/usr/local/bin/go` symlink; the image sets no `GOROOT`), with the warm module cache
+  of the two modules `go.work` binds, which the second paragraph after this list places; the AWS
+  CLI v2's `aws`; and
   `kubectl` 1.35, the minor version of the API server of the production cluster the workers run on,
   which Kubernetes' version skew policy requires within one minor of kubectl (a deployment whose
   cluster runs another minor layers its own `kubectl` on the image:
@@ -120,7 +122,9 @@ phase worker `worker_backends` puts on `claude`, on Claude Code. It carries:
   the TypeScript installed beside it unless the repository's own
   `node_modules` holds one, which it prefers. From Debian trixie's archive, at `/usr/bin`: `python3`
   (the interpreter Oh My Pi's Python eval runs — `omp setup python --check` answers `available: true`
-  on it), `curl`, `wget`, `jq`, `flock` (from `util-linux`: the install Legion renders for an
+  on it) with Debian's PyYAML, `python3-yaml`, so `python3 -c "import yaml"` answers in a pod (the
+  third paragraph after this list names the gates that need it),
+  `curl`, `wget`, `jq`, `flock` (from `util-linux`: the install Legion renders for an
   installing launch serialises on the issue's shared bun install cache with `/usr/bin/flock`, so a
   `roles` container whose image lacks it fails every installing launch; the apt line names the package
   even though Debian's `priority:required` set already brings it into the base, so the day a base
@@ -202,12 +206,41 @@ runs. A deployment still pinning an older image digest has no `gcc`
 and needs zig as `CC`
 (`docs/solutions/testing/the-race-detector-runs-in-a-worker-pod-with-zig-as-the-c-compiler-and-a-library-callback-from-an-earlier-test-writes-your-log-sink-INFRA-182.md`).
 
+The image also carries the Go module cache of the two modules `go.work` binds, so a role's first Go
+build in this repository reads no package registry. The build fills it in the Dockerfile's `go`
+stage, in the layer that copies `go.work`, `go.work.sum` and each module's `go.mod` and `go.sum` and
+runs `go mod download`, above every source `COPY`, so a commit never rebuilds it. The runtime stage
+copies the download cache alone — the module zips, `.mod` and `.info` files and their hashes, 379
+MiB in 3,142 files — to `/home/legion/go/pkg/mod/cache/download`, as the runtime user, its files
+0644 in 0755 directories, so a role can add a module the cache does not hold. The extracted module
+trees are left out: `go` extracts what a build needs from the zips, and 2.2 GiB in every pull buys
+nothing. A pod tells every role `GOMODCACHE=/legion/go/mod` on the issue's volume
+(`roleEnvironment`, `manifest.go`), which is empty in a fresh pod and dies with it ([The disk dies
+with its pod](#the-disk-dies-with-its-pod)), so the image's copy reaches a role as a proxy rather
+than as its `GOMODCACHE`: the build rewrites `/opt/go/go.env`'s `GOPROXY` line to
+`file:///home/legion/go/pkg/mod/cache/download|https://proxy.golang.org|direct`, and the `|` makes
+a go command fall through to the public proxy after any error, so a module the cache does not hold
+still resolves. `go.env` is the place for it rather than the final stage's `ENV`, for the reason
+the cgo paragraph above gives in reverse: a variable the image's `ENV` sets is one
+`runtime.kubernetes.pod.env` may not set, while a `go.env` default leaves `GOPROXY` to an operator,
+a role, or one command, each of which outranks it through the process environment.
+
+The image's `python3` carries Debian's PyYAML, `python3-yaml`, because six of this repository's own
+gates read a workflow or `.github/ci-images.yaml` with `import yaml`:
+`.github/scripts/check-action-pins.sh`, `check-bun-version.sh`, `check-ci-images.sh`,
+`check-image-trigger-paths.sh`, `check-release-credentials.sh`, and `check-ci-filters.sh` through
+`ci_filter_coverage.py`. A role runs those gates on its own change, so an image without PyYAML
+fails every one of them. Debian's package is the route rather than `pip`, because the image
+installs system packages in one `apt` step and trixie marks its `python3` externally managed
+(PEP 668).
+
 It runs as user `legion` (uid 1000, declared numerically so `runAsNonRoot` can verify it from the image
 alone) with `HOME=/home/legion`, which must be writable (OMP writes logs and `models.db` under
 `~/.omp/profiles/legion`; every session is a row in the session database). Mount writable volumes
 below the profile directory, never at `/home/legion`
 itself: everything the image-time probe proved lives under `HOME` — the CodeGraph plugin's link and the
-lock at `~/.omp/profiles/legion/plugins`, the natives at `~/.omp/natives` — and a volume at `HOME` (an `emptyDir`,
+lock at `~/.omp/profiles/legion/plugins`, the natives at `~/.omp/natives`, the warm Go module cache at
+`~/go/pkg/mod/cache/download` — and a volume at `HOME` (an `emptyDir`,
 or a `HOME` volume under `readOnlyRootFilesystem`) shadows all of it silently. It is `linux/amd64` only:
 the OMP fork release has no linux/arm64 build. One commit ⇒ one image, with one exception: a
 fresh pod still loads the image's own copies of `@sjawhar/pi-envoy` and `@sjawhar/pi-legion`, from
@@ -279,7 +312,12 @@ image's compressed size is a cold launch's first cost. Before the capability too
 them it is 22 layers and 1007 MiB compressed (1,056,280,622 bytes, the `sha-ff33c8c9fb1b` build of the
 pull request that added them): the Debian layer grows from about 30 MiB to 307 MiB, almost all of it
 Chromium and the library closure it depends on; the Go toolchain is 64 MiB and `gopls` 20 MiB; Node's
-tree with the two npm language servers is 66 MiB. The five client tools
+tree with the two npm language servers is 66 MiB. The warm Go module cache is a layer of its own,
+379 MiB in 3,142 files — 419 module zips with their `.mod`, `.info` and hash files — measured on
+disk from `go mod download` over `go.work`'s two
+modules in a worker pod on 2026-10-29 rather than from a built image: the zips are compressed
+already, so the layer should land near that figure, and the image's first build is what measures
+it. The five client tools
 ([The tools a role's own work needs](#the-tools-a-roles-own-work-needs)) cost 7.9 MiB — not a slice
 of that 22-layer figure, but a difference measured like for like between a later pair of builds,
 this branch's head and the base it forks from: the head
@@ -477,8 +515,11 @@ the image `PATH` — the language servers (`gopls version`, `typescript-language
 version` with `go env GOROOT` required to be `/opt/go`, `gcc --version` (Go's cgo, and so its race
 detector, needs it), `go env CGO_ENABLED` with `CGO_ENABLED` removed from the environment required
 to be `0` (so the build fails if `/opt/go/go.env`'s `CGO_ENABLED=0` line, the default a scrubbed
-environment depends on, is ever lost), `gofmt`, `kubectl version --client`, and trixie's
-`python3`, `curl`, `wget`, `jq --version`, `flock --version`, `psql --version`, `redis-cli --version`,
+environment depends on, is ever lost), `go env GOPROXY` read the same way and required to be the
+`file:///home/legion/go/pkg/mod/cache/download|https://proxy.golang.org|direct` that same `go.env`
+carries, with the cache it names held to the runtime user and to a writable download directory,
+`gofmt`, `kubectl version --client`, and trixie's
+`python3` with `python3 -c "import yaml"` for its PyYAML, `curl`, `wget`, `jq --version`, `flock --version`, `psql --version`, `redis-cli --version`,
 `sqlite3 --version`, `nc -h`, `dig -v`, `chromium --version` and `socat -V` included — the corepack shims fetching their shipped default pnpm and yarn
 into a scratch directory the step removes. `ssh-keygen` takes no `--version`, so the step generates a
 throwaway ed25519 key in that scratch directory and fingerprints it with `ssh-keygen -l`. Two of the
@@ -489,7 +530,7 @@ prints its usage and exits 0, under the `nc` name the alternatives system instal
 when the toolchain or an earlier layer changes, so a commit that only rebuilds `legion` needs no package
 registry.
 To check a published image's toolchain end to end, a project Python install included:
-`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && kubectl version --client && go version && gcc --version && gopls version && python3 --version && jq --version && flock --version && psql --version && redis-cli --version && sqlite3 --version && nc -h && dig -v && ssh-keygen -t ed25519 -N "" -f /tmp/k && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
+`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && kubectl version --client && go version && go env GOPROXY && gcc --version && gopls version && python3 --version && python3 -c "import yaml" && jq --version && flock --version && psql --version && redis-cli --version && sqlite3 --version && nc -h && dig -v && ssh-keygen -t ed25519 -N "" -f /tmp/k && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
 
 ### Pin by digest, never by tag
 
@@ -3369,7 +3410,10 @@ too. The two Go caches
 are the issue's as they already were, one pair every role of the issue is told:
 `GOCACHE=/legion/go/build` and `GOMODCACHE=/legion/go/mod` (`goBuildCache` and `goModCache`,
 `manifest.go`), beside the workspaces rather than under the scratch, on the same volume beside
-uv's cache. Both hold content addressed
+uv's cache. Both are empty in a fresh pod, since the disk dies with its pod, and the module cache
+fills from the image rather than from `proxy.golang.org`: `/opt/go/go.env` names the image's own
+copy of this repository's modules first in `GOPROXY` ([Worker image](#worker-image)).
+Both hold content addressed
 by its hash, and the roles of one issue may fill them at once: of the build cache `go help cache`
 says "The cache is safe for concurrent invocations of the go command", and what reaches the
 module cache is a module zip or `go.mod` the go command has verified against a known hash
