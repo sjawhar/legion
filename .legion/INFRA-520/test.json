@@ -2,18 +2,26 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-520",
-  "completed": "2026-10-29T01:20:00Z",
-  "round": 13,
-  "headTested": "a39e93dc852f61d7cc8472333d232b499d280dd4 (code head bb1a700af2f3; no code changed since round 12)",
-  "previousRound": "Round 13 is the acceptance task: watch #2316's own ci.yaml run at code head bb1a700a to completion. Pass only if ci-ok is green with every selected job succeeded, a failure that is main's known red being recorded as main's. Record ci-filters' result. No code changed.",
-  "ci": "CI run 40768558349 (pull_request, bb1a700a, created 2026-10-28T21:02:31Z) completed at 2026-10-29T01:06:29Z with conclusion failure. changes succeeded and selected every job. 29 of the 30 selected jobs succeeded: lint, typecheck, test, docs, contracts, envoy-plugin, envoy-client, pi-shared, pi-envoy, pi-legion, claude-envoy, envoy-go, envoy-go-race, envoy-infra-go, dispatch-memory, dispatch-multiprocess, broker-multiprocess, envoy-smoke, envoy-e2e-local, envoy-session-stall, dispatch-browser-multiprocess, ci-filters, worker-image / build, and the Daemon, Dispatch and Broker Go suites on Postgres 16. worker-image / attest was skipped, as on every pull request. The one failure is dispatch. ci-ok (check run 123182985083) failed with the single error 'dispatch ended failure, but changes selected it (needs.changes.outputs.dispatch is true) \u2026'.",
+  "completed": "2026-10-29T02:24:00Z",
+  "round": 14,
+  "headTested": "bf327d74c05182fa3991df4f4dca2510b99e5f01 (code head f78f383ede82)",
+  "previousRound": "Review round 5 (review.json at bbda9d75) found #2316 CONFLICTING with main be4567e3. af395f91 merges main and carries #2476 (removes the three Postgres 16 jobs) and #2278 (pi-envoy's NATS service and LEGION_TEST_NATS_URL). f78f383e makes changes set docs' output false on a push (ci.yaml:83, `github.event_name != 'push' && steps.filter.outputs.docs || 'false'`) and drops ci-ok's NOT_ON_PUSH. Round 13's run result stands for the router at bb1a700a.",
+  "ci": "No CI run at f78f383e was read this round (the INFRA daemon roll suspends claims at 02:30Z). Round 13's router run 40768558349 at bb1a700a: ci-ok failed on main's two browser reds alone.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 12's verification stands at the same code head (bb1a700a): every checker test, the drift check's 26 gates, and the port of main's #2369, #2331 and #2323. This round adds the router's own run at that head, read through the jobs, check-run and job-log APIs."
+    "how": "At bf327d74. ci.yaml has no Postgres 16 job, filter, output or 7b822b0a digest left (grep count 0). pi-envoy carries #2278's nats:2.10@sha256:5498ba57\u2026 service and LEGION_TEST_NATS_URL nats://127.0.0.1:4222. ci-ok.test.sh: 40 passed, 0 failed. check-ci-filters.test.sh: 127 passed, 0 failed. check-ci-filters.sh on the tree exits 0 with 23 gates, and docs-pages' paths equal the docs filter. The docs job's if: is `needs.changes.outputs.docs == 'true'`."
   },
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "ci-ok on main pushes: the docs job, which docs-pages.yaml replaces there, is not selected on a push, and stays selected on pull requests and merge groups",
+      "surface": ".github/scripts/ci-ok.sh with the env of ci.yaml's ci-ok step (SELECTED_BY and the rest, read from ci.yaml at f78f383e)",
+      "command": "NEEDS crafted as changes success with docs output as ci.yaml:83 gives it, then ci-ok.sh: (push, docs output false, docs skipped); (pull_request, true, skipped); (pull_request, true, success); (merge_group, true, skipped)",
+      "observed": "push/false/skipped: exit 0. pull_request/true/success: exit 0. pull_request/true/skipped: exit 1, '::error::docs ended skipped, but changes selected it (needs.changes.outputs.docs is true); a selected job must succeed \u2026'. merge_group/true/skipped: exit 1, the same error",
+      "headSha": "f78f383ede82",
+      "negativeControl": "the pull_request and merge_group skips are refused, so dropping NOT_ON_PUSH opened no skip on the events where docs runs"
+    },
     {
       "criterion": "The router's own verdict on a real head: ci-ok reports, and every selected job but main's known reds succeeds",
       "surface": "GitHub Actions on sjawhar/legion#2316, CI run 40768558349 at code head bb1a700a",
@@ -72,14 +80,8 @@
     }
   ],
   "notProven": [
-    "ci-ok has not yet reported green at any #2316 head, because main's two browser reds fail the dispatch job. A green ci-ok needs main's fixes for close-withdraws-asks.e2e.ts:126 and mermaid.e2e.ts:194 to merge, then a run at a head that carries them.",
+    "No CI run at f78f383e has been read: the INFRA daemon roll at 02:30Z suspends this claim. A green ci-ok still needs main's fixes for close-withdraws-asks.e2e.ts:126 and mermaid.e2e.ts:194 (round 13).",
     "docs-pages.yaml runs only on a push to main. Its first run, queue order and deploy are the production check's.",
     "By the architect's decision (comment bafbc258), the check does not read environment writes made inside local actions or repository scripts (check-ci-filters.sh:84-88)."
-  ],
-  "ciFilters": "ci-filters (job 123128575345) succeeded in 29 s: 'every ci.yaml filter matches every file its job reads (26 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)'.",
-  "mainReds": [
-    "dispatch job (123128575617), step 'Browser-test dispatch dashboard': [chromium] e2e/close-withdraws-asks.e2e.ts:126 'a person's Close withdraws the issue's asks, an earlier version keeps its open block, and Reopen brings the asks back': expect(locator).toHaveCount: Expected 2, Received 0 at close-withdraws-asks.e2e.ts:161. This is on the controller's list of main's known reds, relayed by the architect at 00:56Z.",
-    "dispatch job, same step: e2e/mermaid.e2e.ts:194 'a diagram too large to draw in time shows the reason, and the page keeps responding @phone' in chromium, iphone, webkit and firefox: expected text 'Unable to render Mermaid diagram: it did not finish within 5 seconds', element(s) not found, at mermaid.e2e.ts:232. This test is NOT on the architect's list, but it is main's red. It fails in every main run of the dispatch job I read: envoy-and-contracts.yaml runs 40741493684 (300ff910, job 123098590202, chromium/iphone/webkit/firefox), 40738509801 (20ba65a6), 40731052796 (53f39ba0), 40730984263 (25eba0b1), 40726315452 (e82b013b), 40721990951 (8b4a862b) and 40712556666 (690c0136). Every one of those has 'mermaid.e2e.ts:194' among its failures (2 or 4 projects). This pull request changes no packages/dispatch code (its packages/envoy/cmd/dispatch change is AGENTS.md only).",
-    "pmdoc: neither compile error shows. envoy-go and envoy-go-race, which compile pmdoc's tests, succeeded at this head, which predates #2448 and #2403."
   ]
 }
