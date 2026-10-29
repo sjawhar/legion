@@ -60,9 +60,10 @@ func nodeHasMark(node *Node, markType string) bool {
 }
 
 // renderedMarkTypes are the marks canonical Markdown writes. Every other mark the schema allows
-// (markTypes) is an anchor, invisible to the rendering, and StripAnchorMarks removes exactly the
-// marks that are not here: what renders is one list, not two of opposite polarity that a new
-// invisible mark could fall between.
+// (markTypes) is an anchor, invisible to the rendering, and renderedMarks, the one filter the
+// rendering and StripAnchorMarks pass marks through, removes exactly the marks that are not here:
+// what renders is one list, not two of opposite polarity that a new invisible mark could fall
+// between.
 var renderedMarkTypes = map[string]bool{
 	"link": true, "strong": true, "emphasis": true, "strike_through": true, "inlineCode": true,
 }
@@ -113,17 +114,7 @@ func visibleMarks(marks []Mark) []Mark {
 	if kept {
 		out = slices.Clone(out)
 	}
-	if len(out) > 1 {
-		slices.SortFunc(out, func(left, right Mark) int {
-			switch {
-			case markLess(left, right):
-				return -1
-			case markLess(right, left):
-				return 1
-			}
-			return 0
-		})
-	}
+	sortMarks(out)
 	for i := range out {
 		for j := i + 1; j < len(out); j++ {
 			if renderMarkRank(out[j].Type) < renderMarkRank(out[i].Type) {
