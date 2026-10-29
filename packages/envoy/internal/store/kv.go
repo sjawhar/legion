@@ -1000,9 +1000,10 @@ func (r *Registry) RoleClaim(ctx context.Context, role string) (RoleClaim, error
 	return claim, err
 }
 
-// RoleHolder returns the authoritative session ID for role, read with no deadline of its own, for a
-// caller that answers no request; a route reads RoleClaim within its own. An unclaimed role returns
-// an empty holder without an error.
+// RoleHolder returns the authoritative session ID for role, read with no deadline of its own. Only
+// tests call it, to read what a claim left behind; every route and the role lane read RoleClaim
+// within a deadline (resolveRoleHolder, cmd/listener/role_holder.go). An unclaimed role returns an
+// empty holder without an error.
 func (r *Registry) RoleHolder(role string) (string, error) {
 	claim, err := r.RoleClaim(context.Background(), role)
 	if err != nil {
@@ -1052,12 +1053,30 @@ func (r *Registry) Get(ctx context.Context, sessionID string) (Interest, error) 
 	return fresh, nil
 }
 
+// Match returns the cached interests registered on machineID whose topics match topic: a
+// listener delivers live only to the sessions of its own machine.
 func (r *Registry) Match(machineID string, topic string) []Interest {
+	return r.match(topic, func(item Interest) bool { return item.MachineID == machineID })
+}
+
+// MatchAll returns every cached interest whose topics match topic, on any machine, sorted by
+// SessionID for deterministic output: a sender that must confirm delivery to each subscribed
+// session needs them all, wherever each session registered.
+func (r *Registry) MatchAll(topic string) []Interest {
+	out := r.match(topic, func(Interest) bool { return true })
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].SessionID < out[j].SessionID
+	})
+	return out
+}
+
+// match returns the cached interests keep accepts that have a topic pattern matching topic.
+func (r *Registry) match(topic string, keep func(Interest) bool) []Interest {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := []Interest{}
 	for _, item := range r.cache {
-		if item.MachineID != machineID {
+		if !keep(item) {
 			continue
 		}
 		for _, pattern := range item.Topics {

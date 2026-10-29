@@ -4259,13 +4259,13 @@ spec:
         <the compute-class selector the deployment's declaration names>
       containers:
         - name: db
-          image: mirror.gcr.io/library/postgres:16   # the mirror, as every image here is pulled
+          image: mirror.gcr.io/library/postgres@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4   # the mirror, as every image here is pulled
           terminationMessagePolicy: FallbackToLogsOnError   # an exited server's last lines stay in its status
           env:
             - { name: POSTGRES_PASSWORD, value: "$password" }
           resources:
             requests: { cpu: "4", memory: 8Gi }      # the largest container asks at least 4 CPU
-          volumeMounts: [{ name: data, mountPath: /var/lib/postgresql/data }]
+          volumeMounts: [{ name: data, mountPath: /var/lib/postgresql }]
       volumes:
         - name: data
           emptyDir: {}                    # dies with the pod, by design
@@ -4451,7 +4451,7 @@ it names the class of the failure, which is what the readings below key on.
 
 It loops because `kubectl wait` cannot tell a role the server is listening. The pod carries no
 readiness probe, so `condition=Ready` means the container started, and a database spends its
-first seconds initialising with its listener closed — `postgres:16`'s entrypoint does exactly
+first seconds initialising with its listener closed — `postgres:18`'s entrypoint does exactly
 that. A connection *refused* in those first seconds is the workload reachable and not listening
 yet: the loop retries and it answers. When the minute runs out, the check prints the class of its
 last attempt alone, with a reading for it, and each reading is the next thing to check rather than

@@ -455,8 +455,18 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		if ownsStream {
 			c.AddReconnectHook(c.ensureStreamOnce(&stream, opts.keptBuckets, opts.keepInterval))
 		}
-		// onConnect counts the first connection only once it is c.Conn, which install makes it.
-		install := func(nc *nats.Conn) error { return c.install(nc, nil) }
+		// onConnect counts the first connection only once it is c.Conn, which install makes it. An
+		// install that fails returns no client, so it stops the client before
+		// connectFirstInBackground closes the connection, as the foreground path does below. At the
+		// pinned nats.go (v1.50.0) it cannot fail: JetStream with these options returns no error, and
+		// there is no stream to reconcile here. The stop guards a nats.go whose JetStream can.
+		install := func(nc *nats.Conn) error {
+			if err := c.install(nc, nil); err != nil {
+				c.stop()
+				return err
+			}
+			return nil
+		}
 		if _, err := connectFirstInBackground(c.name, urls, c.reconnectErrClock, dial, c.onConnect, install); err != nil {
 			return nil, err
 		}
@@ -471,6 +481,11 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		owned = &stream
 	}
 	if err := c.install(nc, owned); err != nil {
+		// The constructor returns no client, so no caller can Close it: the client is stopped
+		// before nc closes, so the recovery nc's close begins (onClosed) finds it stopped and dials
+		// nothing. Running, that recovery would dial and install a connection held by no one, which
+		// with MaxReconnect -1 reconnects for the rest of the process once its server is gone.
+		c.stop()
 		nc.Close()
 		return nil, err
 	}
@@ -1112,7 +1127,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 	}
 }
 
-// usesCoreTransport reports whether topic travels over core NATS rather than JetStream: any
+// UsesCoreTransport reports whether topic travels over core NATS rather than JetStream: any
 // notification topic none of the stream's subjects captures. That holds the role lanes and their
 // exception lanes, which the stream must never retain and no stream subject captures
 // (TestStreamConfigExcludesRoleLanes), and every ad-hoc topic such as
@@ -1124,8 +1139,9 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 // before. The capture is judged on the subjects this binary compiles in, not the deployed stream's:
 // a topic under a subject only a newer build adds (which reconciliation keeps) goes over core NATS
 // from an older one, so the stream still stores it but without a MsgId, and the older listener's
-// durable never fans it out.
-func usesCoreTransport(topic string) bool {
+// durable never fans it out. The listener's publish route reads it too: such a topic is not
+// stored, so the route confirms it with each self-subscribed recipient itself.
+func UsesCoreTransport(topic string) bool {
 	return strings.HasPrefix(topic, NotificationTopicPrefix) && !StreamCaptures(topic)
 }
 
@@ -1261,7 +1277,7 @@ func (c *Client) refused(err error, size int) error {
 }
 
 // publishBound bounds Publish, PublishCoreTo and PublishReportingDuplicate, and the publishJetStream
-// and publishCoreTo of a caller that passed no deadline of its own: their wait for a reconnect and
+// and PublishCoreContext of a caller that passed no deadline of its own: their wait for a reconnect and
 // their flush or JetStream acknowledgement together. A publish window's sends take
 // publishAcknowledgementTimeout instead. It is also the HTTP client's per-attempt deadline
 // (packages/envoy-client/src/transport.ts), which a publish that spends the whole bound can never
@@ -1269,7 +1285,7 @@ func (c *Client) refused(err error, size int) error {
 const publishBound = 5 * time.Second
 
 // Publish routes role lanes, their delivery-exception lanes and every topic the stream does not
-// capture through core NATS (usesCoreTransport); every notification the stream captures retains
+// capture through core NATS (UsesCoreTransport); every notification the stream captures retains
 // JetStream durability. Its signature is an interface method in cistore, outbox and webhook, so a
 // caller that wants JetStream's duplicate verdict calls PublishReportingDuplicate instead, and one
 // that has a deadline of its own calls PublishWithin.
@@ -1310,8 +1326,8 @@ func (c *Client) PublishReportingDuplicate(item contracts.Envelope) (bool, error
 // duplicate verdict over the same two transports, with ctx as the whole publish's bound instead of
 // publishBound.
 func (c *Client) PublishReportingDuplicateWithin(ctx context.Context, item contracts.Envelope) (bool, error) {
-	if usesCoreTransport(item.Topic) {
-		return false, c.publishCoreTo(ctx, item.Topic, item)
+	if UsesCoreTransport(item.Topic) {
+		return false, c.PublishCoreContext(ctx, item.Topic, item)
 	}
 	return c.publishJetStream(ctx, item)
 }
@@ -1374,7 +1390,7 @@ func (c *Client) publishJetStream(ctx context.Context, item contracts.Envelope) 
 	}
 	options := []nats.PubOpt{nats.Context(ctx)}
 	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {
-		options = append(options, nats.MsgId(item.DedupeKey+":"+item.Topic))
+		options = append(options, nats.MsgId(ForwardMsgID(item.DedupeKey, item.Topic)))
 	}
 	ack, err := publish(options...)
 	if err != nil {
@@ -1402,16 +1418,18 @@ func (c *Client) PublishCore(item contracts.Envelope) error {
 // of a per-client grant), a flush that fails and a publish the server cannot be shown to have
 // accepted all return an error. The subject can differ from item.Topic when an authoritative
 // router forwards an envelope while retaining its original topic for the recipient. It bounds
-// itself at publishBound; a caller with a deadline of its own reaches the same publish through
-// PublishWithin.
+// itself at publishBound, a reconnect included; a caller with a deadline of its own reaches the
+// same publish through PublishCoreContext, or PublishWithin.
 func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 	ctx, cancel := context.WithTimeout(context.Background(), publishBound)
 	defer cancel()
-	return c.publishCoreTo(ctx, subject, item)
+	return c.PublishCoreContext(ctx, subject, item)
 }
 
-// publishCoreTo is PublishCoreTo under ctx: ctx is the whole publish's bound, so it is both what
-// the wait for a reconnect ends with and the window publishConfirmed flushes and confirms within.
+// PublishCoreContext is PublishCoreTo under ctx: ctx is the whole publish's bound, so it is both
+// what the wait for a reconnect ends with and the window publishConfirmed flushes and confirms
+// within, and a caller answering inside a deadline of its own (the listener's routes: a publish
+// through PublishWithin, the publish route's confirmed ad-hoc topic send) is never held past it.
 // The bound taken below is the earlier of ctx's own deadline and publishBound, since WithTimeout
 // keeps the parent's deadline when that is the earlier one; publishBound is what bounds a caller
 // that passed none.
@@ -1419,9 +1437,9 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 // A ctx that has ended puts nothing on the wire: ensureConnWithContext returns its error rather
 // than wait for a reconnect or dial one, and publishConfirmed refuses it immediately before the
 // publish, which also catches a cancel that lands as a reconnect completes. A deadline arrives
-// spent through publishHandler (cmd/listener/api.go), whose role-holder resolution shares the
-// route's context with the publish.
-func (c *Client) publishCoreTo(ctx context.Context, subject string, item contracts.Envelope) error {
+// spent through publishHandler (cmd/listener/api.go), whose reads before the publish (the sender
+// stamp's) share the route's deadline with it.
+func (c *Client) PublishCoreContext(ctx context.Context, subject string, item contracts.Envelope) error {
 	if err := checkSubject(subject); err != nil {
 		return err
 	}
@@ -1452,11 +1470,14 @@ func (c *Client) publishCoreTo(ctx context.Context, subject string, item contrac
 // timeout on a connection that stayed current (window.Request).
 var ErrReceiptTimeout = errors.New("bus: no receipt inside the request window")
 
-// ForwardMsgID is the Nats-Msg-Id of an envelope sent to subject under
-// dedupeKey: the key and the subject together, the shape a window's JetStream
-// send uses for its MsgId. A stream that captures subject stores a forward sent
-// again to the same subject once, within its duplicate window, and one sent to
-// another subject again, as a message of its own there.
+// ForwardMsgID is the Nats-Msg-Id of an envelope whose dedupe key is dedupeKey
+// sent to subject: the key, a colon, the subject. A publish and a window's
+// JetStream send stamp an envelope that earns a MsgId with it
+// (publishJetStream, window.sendJetStream), so each topic one upstream event
+// is published on keeps its own copy, and a forward passes it to RequestCoreTo
+// as the forward's Nats-Msg-Id. A stream that captures subject stores a
+// forward sent again to the same subject once, within its duplicate window,
+// and one sent to another subject again, as a message of its own there.
 func ForwardMsgID(dedupeKey, subject string) string {
 	return dedupeKey + ":" + subject
 }

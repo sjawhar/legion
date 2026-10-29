@@ -322,10 +322,13 @@ func TestAStoredTopicStillReachesAServingPortOnce(t *testing.T) {
 	requirePromptCarries(t, serving.awaitPrompt(t, 10*time.Second), inbox)
 	serving.noPrompt(t, 2*time.Second)
 
+	// Straight onto the role lane, which the live lane also takes: the publish route would forward
+	// the message to its holder itself.
 	role := "stored-once-" + id.New()
 	_, received := holdRole(t, listener, uri, role)
-	postListener(t, listener.port, "/v1/messages/publish", `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"a message for whoever holds the role"}`)
-	requireOneRoleMessage(t, received, contracts.RoleTopicPrefix+role, "a message for whoever holds the role", 2*time.Second)
+	roleMessage := newEnvelope("agent", contracts.RoleTopicPrefix+role, "a message for whoever holds the role")
+	publish(t, publisher, roleMessage)
+	requireOneRoleMessage(t, received, roleMessage.Topic, roleMessage.PayloadSummary, 2*time.Second)
 }
 
 // Two listeners of one machine, as a rolling deploy runs them, both with the live lane on: NATS
