@@ -2,73 +2,64 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-605",
-  "round": 5,
-  "completed": "2026-10-29T13:58:00Z",
-  "headTested": "a44405e0e239406caf666c389a227f094eb7f204 (handoff-only, skip-checks; its code head 97fdb4162f9ce836242b7fa6817aea064ee27633, main merged forward at 8a911ecc; real-surface runs used exports of 97fdb416 and of 8a911ecc with 97fdb416's loadtest/)",
+  "round": 6,
+  "completed": "2026-10-29T15:20:00Z",
+  "headTested": "b00e304dc29dd3a76394a24de3a084fa13ef106c (handoff-only, skip-checks; its code head a529f15fb3960643130adb33de94c6614514caae, the forward merge of main 1f5b0828 over my round-5 head 97fdb416; real-surface runs used exports of a529f15f and of 1f5b0828 with a529f15f's loadtest/)",
+  "forwardMerge": "fingerprint 97fdb416 -> a529f15f (the conflicts-and-rewrites command, fileset '~(.legion | docs/solutions)'): f0527f0b5abe885fb5c0614e45e4d3da998f1232b06bb64bcdf96c8c3c6e41d5 -> be3856472cc4a0ebad1c64027ba7b85ae093b9657c7df9075cfbe5948dba15dc, changed. The only changed lines of the pull request's own diff: infra/gcp/dispatch.go dispatchConnectionsPerPod 87 -> 95 (was 86 -> 94), and the matching totals in packages/envoy/AGENTS.md, cmd/dispatch/README.md and running-dispatch.md (64 + 13 + 8 + 4 + 1 + 1 + 1 + 3 = 95; leases 13). Changed, so a full round.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "A full round, since three merges of main and two code commits (1f6e81b5, d496213b) changed the code since my round-4 head 5e119d38. My four red tests are byte-identical at 97fdb416 to round 4 (now in socket_admission_test.go, head_read_freshness_test.go and head_liveness_test.go after the file split). All 25 tests of the red-test commits and later rounds pass against a real Postgres 16.2 here (go test -count=1 -run '<names>' ./internal/dispatch/docs/ ./internal/dispatch/api/ ./cmd/dispatch/: ok 137.3 s / 7.9 s / 14.3 s). On a fresh stack and seed (805 s, migration 138), editors-1x-over-0.25x base -> head: room round trips per editor update 9.53 -> 2.98, rooms' connections p50/p99/max 2/10/11 -> 1/3/7, shared-pool share 100% -> 32%, 5,914 batches of 7,197 updates in 17,739 round trips, durable p50/p99 56/1,143 -> 72/134 ms, relay p99 115 -> 50 ms, 7,193/7,193 acknowledged on both, REST 100% 2xx both (p99 437 -> 140 ms). These match the implementer's medians."
+    "how": "Round 5's one failure is fixed: gh pr view 2445 reads MERGEABLE (state BLOCKED, awaiting review), and the merge landed 95 connections per pod, main's 87 plus the 8-connection room-appends pool, with every document's total moved with it. My four red tests are unchanged since round 4 and all 25 named tests passed at 97fdb416 (round 5); the merge changes none of the branch's Go code. Real surface at a529f15f below."
   },
-  "ci": "Read on GitHub at 97fdb416 (13:53Z): every check run completed success or skipped - dispatch, dispatch-multiprocess, dispatch-memory, dispatch-browser-multiprocess, envoy-go, envoy-go-race, envoy-infra-go, envoy-e2e-local, envoy-smoke, envoy-session-stall, broker-multiprocess, lint, typecheck, test, build, pi-legion, changes, pr-title; none failed.",
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "The pull request can merge: no conflict with main",
-      "evidence": "gh pr view 2445 at 13:53Z: mergeable CONFLICTING, mergeStateStatus DIRTY. Main moved past the merged base 8a911ecc to fe315392 (#2316, #2397). git merge-tree --write-tree 97fdb416 fe315392 conflicts in .dispatch/architecture/dispatch-docs.md, docs/site/src/content/docs/dispatch/running-dispatch.md, packages/envoy/cmd/dispatch/README.md and packages/envoy/infra/gcp/dispatch.go. The last is the connection budget: #2397 raised leasePoolSize 12 -> 13 and dispatchConnectionsPerPod 86 -> 87 on main, and this branch raised it 86 -> 94 for the 8-connection room-appends pool, so the merge must land 95 (and the three documents' totals with it); TestDispatchConnectionsPerPodIsTheServers in envoy-infra-go checks only that the constant equals store.ConnectionsPerProcess. A forward merge must come before the reviewer approves the head, since READY refuses anything above the approved head but retro's commits."
-    }
-  ],
-  "checked": [
-    "Connection count at 97fdb416: store.ConnectionsPerProcess adds roomAppendsPoolSize (8) and infra/gcp dispatchConnectionsPerPod went 86 -> 94; envoy-infra-go green.",
-    "pmdoc is byte-identical to main's 8a911ecc (jj diff 8a911ecc..97fdb416 of packages/envoy/internal/dispatch/pmdoc: no change), so no local copy of #2481/#2484 remains.",
-    "packages/envoy/CHANGELOG.md is main's (no change); the entry is packages/envoy/.changes/unreleased/pr2445-Fixed-20261028-150000.yaml. .legion/INFRA-589/ is gone from the branch.",
-    "Dispatch keys in added text: only INFRA-66 in head_notice.go:12, a sentence moved from main's stale_room.go:18, and main's LEGION-484 / LEGION-513 in a rewrapped AGENTS.md paragraph; none new."
-  ],
+  "ci": "Read at a529f15f, 15:14Z, not settled. Completed success: test, lint, pi-legion, envoy-go, envoy-infra-go (TestDispatchConnectionsPerPodIsTheServers green at 95), envoy-smoke, envoy-session-stall, dispatch-multiprocess, dispatch-memory, dispatch-browser-multiprocess, broker-multiprocess, docs, worker-image build, ci-filters, changes, pr-title. Still running: dispatch. Completed failure: envoy-go-race (job 123503246603, run 40888302487). Its two red packages: internal/dispatch/docs ran into the lane's -timeout 30m (FAIL at 1801.1 s, 69 tests refused by the suite's own guard 'the test binary's deadline leaves 17.759s, not more than roomWaitMargin (30s)... raise -timeout'), and internal/bus failed TestAStuckDeliveryStillEndsTheKVWatchers ('the drain logged \"WARN envoy nats reconnect attempt failed\", want nothing'). Neither is shown to be this change's: main's own race lane at 14d907b6 (job 123461966609) is red in internal/bus (TestADrainEndsTheKVWatchersBeforeTheConnection), and its docs package took 1773.0 s of the 1800 s budget there without this change, while this branch's docs took 1742.2 s at 97fdb416 (green). This branch does not touch internal/bus. The lane must be green at the merging head; a single failed job is re-run on its own.",
+  "failed": 0,
+  "failures": [],
   "notMine": [
-    "Known red on main per the INFRA controller: packages/dispatch/e2e/close-withdraws-asks.e2e.ts:126 (INFRA-138's tree). It did not fail at 97fdb416."
+    "Main's: envoy-go-race - internal/bus drain-hook tests fail on main (14d907b6, TestADrainEndsTheKVWatchersBeforeTheConnection) and failed here in the same file family (TestAStuckDeliveryStillEndsTheKVWatchers); internal/dispatch/docs under -race takes 1773 s of the lane's 1800 s on main itself, so any run may cross it.",
+    "Known red on main per the INFRA controller: packages/dispatch/e2e/close-withdraws-asks.e2e.ts:126; dispatch-browser-multiprocess is green here."
   ],
   "observedNotAFailure": [
-    "A browser typing on process B while process A writes the same spec over REST: B's room is closed by the stale-room eviction after a few updates and the probe's 7 acknowledged updates are not stored (ж=0 on both processes, both read the same text with A's 8 edits). The base 8a911ecc does the same (9 acknowledged, 0 stored). My probe does not reconnect; the dashboard's Hocuspocus provider reconnects and syncs the updates its Yjs document still holds, so this is the eviction path main already has, not this change's."
+    "Load step tails: the first after run (r6) had relay p99 1,545 ms, durable p99 3,368 ms and REST p99 3,775 ms from one ~10 s pile-up at 14:39:00-14:39:09 (19 goroutines waiting for a pool connection, Dispatch's 'announce the server fleet's build ... deadline exceeded'); the second base run (r6b) had the same kind of episode (durable p99 23,182 ms, 8 pool waiters) and the second after run had none. Same on both builds, so main's or the box's, not this change's."
   ],
   "proof": [
     {
       "criterion": "Browser updates to one document are appended in batches on the room subsystem's own connections; round trips per update, connections held by rooms, update latency, before and after",
-      "surface": "INFRA-589's load reproduction (packages/envoy/loadtest) on this pod: local Postgres 16.2 behind the 1 ms latency proxy, NATS, the Envoy listener and Dispatch built from each tree, one fresh seed",
-      "command": "LOADTEST_ROOT=$TMPDIR/t605/lt LOADTEST_SRC=<before5-src|after5-src> packages/envoy/loadtest/run-step.sh r5-editors-1x-over-0.25x-<side> --events 1 --sessions 100 --requests 15 --editors 20 --editor-docs 10; loadgen tables over both",
-      "observed": "room round trips per update 9.53 -> 2.98; rooms' connections p50/p99/max 2/10/11 -> 1/3/7; shared-pool share 100% -> 32%; batches 5,914 / updates 7,197 / round trips 17,739; durable ms 56/1,143 -> 72/134; relay ms 5/115 -> 4/50; 7,193/7,193 acknowledged both; REST 100% 2xx, p99 437 -> 140 ms",
-      "headSha": "97fdb4162f9ce836242b7fa6817aea064ee27633",
-      "negativeControl": "the base 8a911ecc: /debug/vars answers 404, 100% of room-held connections on the shared request pool, 9.53 round trips per update"
+      "surface": "INFRA-589's load reproduction on this pod: local Postgres 16.2 behind the 1 ms latency proxy, NATS, the Envoy listener and Dispatch built from each tree, one seed (migration 138, migrated forward to 140 by each build at reset)",
+      "command": "LOADTEST_SRC=<before6-src|after6-src> packages/envoy/loadtest/run-step.sh r6[b]-editors-1x-over-0.25x-<side> --events 1 --sessions 100 --requests 15 --editors 20 --editor-docs 10; two runs per side",
+      "observed": "room round trips per update 9.54 / 9.55 -> 2.85 / 2.96; shared-pool share 100% / 100% -> 50% / 30%; batches 5,563 and 5,867 of 7,190 and 7,187 updates in 16,683 and 17,598 round trips; quiet runs (r6 before, r6b after): durable p50/p99 58/246 -> 76/224 ms, relay p99 59 -> 124 ms, rooms' connections p99 7 -> 6, REST p99 162 -> 308 ms; 7,193/7,193 acknowledged in all four",
+      "headSha": "a529f15fb3960643130adb33de94c6614514caae",
+      "negativeControl": "the base 1f5b0828: /debug/vars answers 404 and 100% of room-held connections are on the shared request pool at 9.5 round trips per update"
     },
     {
       "criterion": "DR-16: sockets opening together stay within DISPATCH_MAX_LIVE_ROOMS / DISPATCH_MAX_DOC_CONNECTIONS, refused with 503 only",
-      "surface": "dispatch-after5 on the stack's database, real document websockets (throwaway Hocuspocus probe), /debug/vars dispatch_rooms",
-      "command": "$TMPDIR/t605/caps.sh after5 t605c5 <rooms> <conns> for 2/1000, 1000/3, 2/3",
-      "observed": "2/1000: 10 at once on 10 specs - 2 admitted, 503:8, rooms 2; 10 on an 11th spec - 503:10. 1000/3: 3 admitted, 503:7 on 10 specs and again on one spec. 2/3: 2 admitted, 503:8, then 503:10. No 401.",
-      "headSha": "97fdb4162f9ce836242b7fa6817aea064ee27633",
+      "surface": "dispatch-after6 on the stack's database, real document websockets (throwaway Hocuspocus probe), /debug/vars dispatch_rooms",
+      "command": "$TMPDIR/t605/caps.sh after6 t605c6 2 3; caps.sh after6 t605c6 1000 3",
+      "observed": "2/3: 10 at once on 10 specs - 2 admitted, 503:8, rooms 2; then 10 on an 11th spec - 503:10. 1000/3: 3 admitted, 503:7 on 10 specs and again on one spec. No 401.",
+      "headSha": "a529f15fb3960643130adb33de94c6614514caae",
       "negativeControl": "the round-1 head 59a3aeae (round 1): 10 rooms admitted under a cap of 2, and 401s under 3 connections"
     },
     {
       "criterion": "DR-08: a reader whose document LISTEN goes half-open sees another process's write within the bound",
-      "surface": "two dispatch-after5 processes on one database; REST GET /api/v1/artifacts/<id>/text and POST .../edits; the reader's 'listen dispatch_doc_head...' backend stopped with SIGSTOP after its tracker trusted itself",
-      "command": "$TMPDIR/t605/halfopen.sh after5 t605h5",
-      "observed": "B trusted:true with the spec cached before the stall; A's edit 200; B fresh after 2.8 s; B trusted:false 4 s later",
-      "headSha": "97fdb4162f9ce836242b7fa6817aea064ee27633",
+      "surface": "two dispatch-after6 processes on one database; REST GET /api/v1/artifacts/<id>/text and POST .../edits; the reader's 'listen dispatch_doc_head...' backend stopped with SIGSTOP after its tracker trusted itself",
+      "command": "$TMPDIR/t605/halfopen.sh after6 t605h6",
+      "observed": "B trusted:true with the spec cached before the stall; A's edit 200; B fresh after 3.0 s; B trusted:false 4 s later",
+      "headSha": "a529f15fb3960643130adb33de94c6614514caae",
       "negativeControl": "the round-1 head 59a3aeae (round 4's run): B served the old text for 25.5 s while trusted:true"
     },
     {
-      "criterion": "The liveness ping: none while a process holds nothing (also after a heard write), about one per quiet window per deployment while processes hold something, and idle cost equal to the base",
-      "surface": "2 and 4 Dispatch processes on one database through the latency proxy, a psql LISTEN dispatch_doc_ping, /debug/vars",
-      "command": "$TMPDIR/t605/idle.sh <before5|after5> <db> <2|4> 60; PRE=edit SETTLE=110 idle.sh after5 t605i5e 2 60; PRE=read SETTLE=5 idle.sh after5 t605i5r 4 60",
-      "observed": "holding nothing, base -> head: 2 processes pings 0 -> 0/min, round trips 524 -> 532/min, commits 331 -> 335/min; 4 processes pings 0 -> 0, round trips 990 -> 995/min, commits 596 -> 603/min, Postgres CPU 0.14 -> 0.19 s/min. After one REST edit on process 1: 0 pings, 0 tracker entries on both. Four each holding one cached read: 50 pings/min, all trusted.",
-      "headSha": "97fdb4162f9ce836242b7fa6817aea064ee27633",
-      "negativeControl": "round 2's head 2fdeabab: 240 pings/min from four processes holding nothing; round 3's head 218146f0: 47/min after one heard write"
+      "criterion": "The liveness ping costs nothing at idle and starts for nothing a process does not hold",
+      "surface": "4 and 2 Dispatch processes on one database through the latency proxy, a psql LISTEN dispatch_doc_ping, /debug/vars",
+      "command": "$TMPDIR/t605/idle.sh <before6|after6> <db> 4 120 (twice per side); PRE=edit SETTLE=110 idle.sh after6 t605i6e 2 60",
+      "observed": "4 processes holding nothing, base -> head over two 120 s windows each: pings 0 -> 0, round trips 994 / 981 -> 988 / 988 per min, commits 603 / 595 -> 599 / 599, Postgres CPU 0.24 / 0.22 -> 0.28 / 0.24 s/min. After one REST edit on process 1: 0 pings, 0 tracker entries on both.",
+      "headSha": "a529f15fb3960643130adb33de94c6614514caae",
+      "negativeControl": "round 2's head 2fdeabab: 240 pings/min from four idle processes; round 3's head 218146f0: 47/min after one heard write"
     },
     {
       "criterion": "Head-tracker entries follow exactly what each process holds",
-      "surface": "two dispatch-after5 processes; three browsers typing, five and two REST cold reads, three REST edits; /debug/vars",
-      "command": "$TMPDIR/t605/leak.sh after5 t605lk5",
-      "observed": "right after: p1 {rooms 6, cache 5, entries 11}, p2 {rooms 0, cache 2, entries 2}; 130 s later: p1 {rooms 0, cache 5, entries 5}, p2 unchanged - p2 kept no entry for p1's writes",
-      "headSha": "97fdb4162f9ce836242b7fa6817aea064ee27633",
-      "negativeControl": "round 3's head 218146f0: a process with no room and no cached read kept a tracker entry for another process's write and pinged 47 times a minute"
+      "surface": "two dispatch-after6 processes; three browsers typing, five and two REST cold reads, three REST edits; /debug/vars",
+      "command": "$TMPDIR/t605/leak.sh after6 t605lk6",
+      "observed": "right after: p1 {rooms 6, cache 5, entries 11}, p2 {rooms 0, cache 2, entries 2}; 130 s later: p1 {rooms 0, cache 5, entries 5}, p2 unchanged",
+      "headSha": "a529f15fb3960643130adb33de94c6614514caae",
+      "negativeControl": "round 3's head 218146f0: a process with no room and no cached read kept an entry for another process's write and pinged 47 times a minute"
     }
   ]
 }
