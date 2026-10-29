@@ -137,23 +137,6 @@ func hubSubs(hub *deliveryHub) int {
 	return held
 }
 
-// waitStalled waits until running has queued nothing for 300 ms with socket's stream queue full:
-// the page that reads nothing has stopped the socket's writer, which is no longer writing.
-func waitStalled(t *testing.T, socket *liveSocket, running *fakeLiveSubscription) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	last, since := running.sent.Load(), time.Now()
-	for time.Since(since) < 300*time.Millisecond {
-		if time.Now().After(deadline) {
-			t.Fatalf("the writer still took frames of %q after 10s with the page reading nothing", running.sub)
-		}
-		time.Sleep(20 * time.Millisecond)
-		if sent := running.sent.Load(); sent != last || !streamFull(socket) {
-			last, since = sent, time.Now()
-		}
-	}
-}
-
 func TestASubscriptionPastTheCapIsRefused(t *testing.T) {
 	events := newFakeLiveKind(0, 0)
 	rig := newLiveSocketRig(t, testServerOptions{liveKinds: map[string]liveKind{liveEventsView: events.kind(true)}}, nil)
@@ -204,19 +187,20 @@ func TestASubscriptionPastTheCapIsRefused(t *testing.T) {
 
 func TestARepeatedSubReplacesAnotherKind(t *testing.T) {
 	events := newFakeLiveKind(-1, 512)
-	rig := newLiveSocketRig(t, testServerOptions{liveKinds: map[string]liveKind{liveEventsView: events.kind(true)}},
-		func(listener net.Listener) net.Listener { return smallSendBuffers{listener} })
-	client := rig.open(t, smallReadDialer(), asUser("alice"))
+	held := &heldWrites{}
+	rig := newLiveSocketRig(t, testServerOptions{liveKinds: map[string]liveKind{liveEventsView: events.kind(true)}}, held.listen)
+	client := rig.open(t, gws.DefaultDialer, asUser("alice"))
 
-	// The page reads nothing while x's events subscription fills the stream queue, until the writer
-	// is held back.
+	// The writer is held inside its first write of x's events, as a page that reads nothing holds
+	// it, while x's events subscription fills the stream queue.
+	held.hold(t)
 	client.send(t, liveSubscribe("x", eventsView(), ""))
 	first := events.next(t, 5*time.Second, "x's events subscription")
 	socket := rig.sockets(t, 1)[0]
-	waitStalled(t, socket, first)
+	held.waitHeld(t, socket)
 
-	// A delivery view in its place stops it, and the hub's answer waits behind the stalled writer
-	// with x's last frames still on the stream queue. None of them follows the answer.
+	// A delivery view in its place stops it, and the hub's answer waits behind the held writer with
+	// x's last frames still on the stream queue. None of them follows the answer.
 	client.send(t, deliverySubscribe("x", livePipelineView(nil)))
 	if err := first.ended(t, 5*time.Second); !errors.Is(err, context.Canceled) {
 		t.Fatalf("the replaced events subscription's SendWait answered %v, want its context's end", err)
@@ -225,6 +209,7 @@ func TestARepeatedSubReplacesAnotherKind(t *testing.T) {
 	if len(socket.stream) == 0 {
 		t.Fatal("no frame of x's was left on the stream queue for the answer to overtake")
 	}
+	held.release()
 	client.read()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -365,13 +350,14 @@ func TestASlowStreamWaitsAndNeverClosesTheSocket(t *testing.T) {
 func TestSendWaitReturnsWhenItsSubscriptionStops(t *testing.T) {
 	t.Run("the page unsubscribes", func(t *testing.T) {
 		events := newFakeLiveKind(-1, 512)
-		rig := newLiveSocketRig(t, testServerOptions{liveKinds: map[string]liveKind{liveEventsView: events.kind(true)}},
-			func(listener net.Listener) net.Listener { return smallSendBuffers{listener} })
-		client := rig.open(t, smallReadDialer(), asUser("alice"))
+		held := &heldWrites{}
+		rig := newLiveSocketRig(t, testServerOptions{liveKinds: map[string]liveKind{liveEventsView: events.kind(true)}}, held.listen)
+		client := rig.open(t, gws.DefaultDialer, asUser("alice"))
+		held.hold(t)
 		client.send(t, liveSubscribe("x", eventsView(), ""))
 		running := events.next(t, 5*time.Second, "x's events subscription")
 		socket := rig.sockets(t, 1)[0]
-		waitStalled(t, socket, running)
+		held.waitHeld(t, socket)
 
 		// The queue never drains, and the page's unsubscribe still ends the wait.
 		client.send(t, LiveUnsubscribe{Type: "unsubscribe", Sub: "x"})
