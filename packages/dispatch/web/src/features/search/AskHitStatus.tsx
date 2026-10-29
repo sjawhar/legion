@@ -18,16 +18,16 @@ function askStateLabel(ask: SearchAsk): string {
   return ask.answer === undefined ? "Closed, no answer" : "Closed after an answer";
 }
 
-/** How much of an ask's answer an ask hit carries: about three lines of the palette's widest row,
+/** How much of an ask's answer an ask hit carries: about three lines of the row it sits in,
  *  on the scale of the excerpt's 24-word window. The three-line clamp is CSS only, so an answer
- *  left whole (up to 1 MiB) would sit inside the option, which a screen reader then reads as the
- *  option's name from start to end. */
+ *  left whole (up to 1 MiB) would sit inside the row, which a screen reader then reads as the
+ *  row's name from start to end. */
 export const ANSWER_PREVIEW_CHARS = 280;
 
 /** Where an ask hit stands, under its excerpt: a badge for its state, who closed it and when,
  *  and its latest answer - who gave it, when, the options chosen and the start of its text
  *  (`ANSWER_PREVIEW_CHARS`), clamped to three lines. Every part wraps inside the row, so a long
- *  label or name never widens the palette. */
+ *  label or name never widens the row it sits in. */
 export function AskHitStatus({ ask, muted }: { ask: SearchAsk; muted: boolean }): ReactNode {
   const answer = ask.state === "open" ? undefined : ask.answer;
   return (

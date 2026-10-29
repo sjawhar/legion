@@ -28,6 +28,7 @@ import { buildIssuePath, routeProjectOf } from "../refs/routes";
 import { useDialog } from "../shell/useDialog";
 import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
+import { RelatedItems } from "./RelatedItems";
 
 const createIssue = (input: CreateIssueInput, bounds: WriteBounds): Promise<Issue> =>
   api.createIssue(input, bounds);
@@ -37,7 +38,9 @@ const createIssue = (input: CreateIssueInput, bounds: WriteBounds): Promise<Issu
  * title, and an optional first spec line. Mounted only while open, so its draft and error state
  * start fresh each time and `useDialog` restores focus to the caller on close. A server
  * `POSSIBLE_DUPLICATE` answer is shown with its candidate and can be overridden with
- * **Create anyway** (`force`), the same path an agent takes. Success opens the new issue.
+ * **Create anyway** (`force`), the same path an agent takes. Success opens the new issue. While
+ * a person types a title, the dialog lists the related items the check finds for it, so a
+ * duplicate is seen before it is filed.
  */
 export function CreateIssueDialog({
   onClose,
@@ -174,6 +177,7 @@ export function CreateIssueDialog({
               value={spec}
             />
           </label>
+          <RelatedItems project={selectedProject} title={title} />
           {mutation.unanswered === undefined ? null : (
             <LandedWithoutAnswer what={`The issue “${mutation.unanswered.variables.title}”`} />
           )}
