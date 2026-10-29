@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-228",
+  "completed": "2026-10-29T13:22:00Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "All six entries of .legion/INFRA-228/implement.json were re-run or driven independently from the tester container of pod legion-infra-infra-228 at head c1823f29, and every one held. Row 1 (dispatch whoami): re-run in the tester's own container, answering 'Session 01a187bc-f2ec-74d6-a202-a42d37d50c1b runs under the shared token: no owner, …' exit 0, with the one-byte-flip control refusing 'invalid bearer token' exit 1. Row 2 (same bytes in every role): re-proven tester to architect with a salt of the tester's own, the architect printing 'length=48' and 'equal' in its own container at 13:12Z. Row 4 (production broker): re-run, and extended from two subject token types to four -- kubernetes-service-account, github-workflow-run and jwt each refused 'not supported as a subject_token_type', access_token refused 'Token is not valid or has expired', and client_id=not-a-client refused 401 invalid_client, so the client is checked before the type. Row 3 (dev-broker exchange and introspection): re-run with the tester's own fresh P-256 key and session name, boot line 'token exchange state=on kubernetes=true github=false accounts=1 workflows=0', introspection carrying exactly session, person, project_scope, project plus exp, client_id and jkt, jkt equal to the caller's thumbprint, plus three controls the implementer did not run (no DPoP proof -> 400 invalid_dpop_proof; introspection as an unlisted account -> 401 ACCOUNT_TOKEN_INVALID; a token the broker never issued -> active false). Row 5 (the fence test): re-run plus six mutations of docs/kubernetes.md, each caught. Row 6 (repository checks): re-run, plus the refusal control the implementer asserted rather than ran. Evidence: https://github.com/sjawhar/legion/pull/2503#issuecomment-6497790394",
+    "proofFieldDefects": "One field of the implementer's proof array is not a negative control: row 6's negativeControl records check-private-names passing over the PR body and the evidence comment, which is a positive control. Recorded in failures below."
+  },
+  "failed": 2,
+  "failures": [
+    {
+      "criterion": "Plan section 7, 'Checks a docs-and-one-test pull request must pass': lint (check-private-names, check-pr-text, biome, gofmt), typecheck, test, the Docs workflow and the Envoy and Contracts workflow run on this pull request and pass. The merge gate also requires the tester to read CI green on GitHub at the head it tested.",
+      "evidence": "No CI has ever run on this change, because the pull request conflicts with main. `gh pr view 2503 --repo sjawhar/legion --json headRefOid,mergeable,mergeStateStatus` at 13:00Z: {\"headRefOid\":\"c1823f2959611c668b1ac29e5ddc3df893a343b9\",\"mergeStateStatus\":\"DIRTY\",\"mergeable\":\"CONFLICTING\"}. `git merge-tree --write-tree --name-only 14d907b6fdd3 c1823f2959611c668b1ac29e5ddc3df893a343b9` reports CONFLICT (content) in docs/kubernetes.md and auto-merges docs/deployment.md; the one conflicting hunk is main's 14d907b6 (merged 2026-10-29T12:58:09Z, three minutes after this pull request opened) rewriting 'Every role is told `LEGION_GH_OWNERS_DIR=…`' into 'Every role container is told …', the sentence this branch inserts its new paragraphs directly above. GitHub computes no merge ref for a conflicting head and starts no workflow run for it: `gh api repos/sjawhar/legion/commits/<sha>/check-runs --jq .total_count` is 0 for 682732a1, 14cd0def, b01d0dad and c1823f29, each with status `pending`, and `gh run list --repo sjawhar/legion --branch legion/INFRA-228` shows nothing newer than 2026-10-25 (PR #2187). So no code head carries a verdict for the handoff push to inherit either. No red test pins this: a merge conflict is not a behaviour a repository test can assert, and this deployment's instructions forbid a test that reads a workflow file and asserts things about its contents. The fix is a forward merge of main with that one hunk resolved (keep main's 'Every role container is told …' sentence and this branch's three new paragraphs above it), then a push that carries no skip-checks trailer, so CI runs. Once the unchanged-diff fingerprint at the new head equals the fingerprint at c1823f29, the real-surface verification in this handoff is not repeated: only the bare gates are."
+    },
+    {
+      "criterion": "skill://legion-worker/references/pr-body.md, 'What a proof is': every proof entry's negativeControl is a deliberately broken input or call and the refusal or failure observed.",
+      "evidence": "implement.json's proof row 6 records as its negativeControl: 'check-private-names over the PR body and the evidence comment as scratch files: passed, so the redaction of the broker host held; a .ts.net host in a scanned file is what the script refuses (plan D7).' That is a positive control -- the check passing on clean input -- with the refusal asserted from the plan rather than observed. The tester ran the refusal: a non-placeholder MagicDNS host written into docs/solutions/_tester228-control.md is refused with the remediation block naming the file, while the reserved example-tailnet.ts.net placeholder is allowed (the first attempt at this control used the placeholder and the check correctly passed). The criterion itself is proven; the handoff field is not. Fix: replace that negativeControl field with the refusal, which the tester's evidence comment section 7 quotes."
+    }
+  ],
+  "proof": [
+    {
+      "criterion": "Plan section 4 row 1: the credential a role pod holds names nobody, and Dispatch reads the session from the request body (docs/kubernetes.md 'Anatomy of a Sandbox pod', docs/deployment.md 'What a pane's Dispatch credential is').",
+      "surface": "production Dispatch, from the tester container of pod legion-infra-infra-228",
+      "command": "printf 'length=%s\\n' \"$(wc -c < \"$DISPATCH_TOKEN_FILE\")\"; dispatch whoami",
+      "observed": "length=48; 'Session 01a187bc-f2ec-74d6-a202-a42d37d50c1b runs under the shared token: no owner, so an issue you create without an assignee takes its parent's assignee, else the project's default assignee, else nobody.' exit 0. The tester's own session id, a different container and a different generation (g5) from the implementer's. The pod prose's other live facts hold here too: the file is /var/run/legion/private/g5/DISPATCH_TOKEN with ENVOY_TOKEN and LEGION_BOOT_TOKEN beside it in the generation's directory, and the daemon's own writes on this issue are recorded as session legion-daemon:INFRA.",
+      "headSha": "c1823f2959611c668b1ac29e5ddc3df893a343b9",
+      "negativeControl": "DISPATCH_TOKEN_FILE pointed at a copy with one byte flipped (only the differing-byte count printed, 1): 'invalid bearer token', exit 1."
+    },
+    {
+      "criterion": "Plan section 4 row 2: every role of the pod presents the same Dispatch bytes.",
+      "surface": "two role containers (tester, architect) of pod legion-infra-infra-228",
+      "command": "tester: sha256(fresh random salt || $DISPATCH_TOKEN_FILE); architect, in its own container: the same salted digest over its own file, printing only length and equal/differs",
+      "observed": "architect at 2026-10-29T13:12Z: 'length=48' and 'equal'. This is the tester-to-architect pair with the tester's own salt; the implementer proved the implementer-to-architect pair with another salt, so three of the pod's role containers are now known to hold the same 48 bytes.",
+      "headSha": "c1823f2959611c668b1ac29e5ddc3df893a343b9",
+      "negativeControl": "the same salted digest of a one-byte file: 'differs'."
+    },
+    {
+      "criterion": "docs/kubernetes.md: the one Kubernetes token this runtime projects into a role container is the broker's and it reaches the secrets broker and nothing else, Dispatch verifying only a token minted for its own audience, with the operator's own pod volumes outside the statement.",
+      "surface": "the live pod (kubectl) and production Dispatch, from the tester container",
+      "command": "kubectl -n legion get pod \"$(hostname)\" -o json (automount and projected volumes); then DISPATCH_TOKEN_FILE=/var/run/secrets/kubernetes.io/serviceaccount/token dispatch whoami and DISPATCH_TOKEN_FILE=/var/run/legion/agent-secrets-token/token dispatch whoami",
+      "observed": "automountServiceAccountToken false; two projected ServiceAccount tokens mounted into the role container -- agent-secrets-token with audience 'agent-secrets' at /var/run/legion/agent-secrets-token (the runtime's, agentSecretsVolumes) and the operator's kube-api volume with no audience at /var/run/secrets/kubernetes.io/serviceaccount, which is what this role's kubectl uses. The prose's carve-out is therefore load-bearing and correct as written: the runtime projects one, the operator's pod volumes are excluded, and Dispatch refuses both with 'invalid bearer token', so neither Kubernetes credential in the pod reaches Dispatch at this release.",
+      "headSha": "c1823f2959611c668b1ac29e5ddc3df893a343b9",
+      "negativeControl": "the broker's own projected token presented to Dispatch as a bearer -- the credential the prose says reaches the broker and nothing else: 'invalid bearer token'."
+    },
+    {
+      "criterion": "Plan section 4 row 4 (corrected): a broker with no subject token issuer set takes no pod's and no workflow run's token, while the access-token subject type stays registered (docs/kubernetes.md 'The Dispatch identity the broker can issue').",
+      "surface": "production secrets broker (host redacted as <the broker host>)",
+      "command": "four POSTs to <the broker host>/v1/oauth/token with grant_type=urn:ietf:params:oauth:grant-type:token-exchange, client_id=dispatch-token-exchange, subject_token=not-a-token, and subject_token_type in {kubernetes-service-account, github-workflow-run, jwt, access_token}; then the same form with client_id=not-a-client",
+      "observed": "2026-10-29T13:02:12Z: the first three http=400 invalid_request \"The '<type>' token type is not supported as a 'subject_token_type'\", the access-token type http=400 \"Token is not valid or has expired\", and the unknown client http=401 invalid_client. So the route serves the exchange, the access-token type is always registered (ExchangeConfig.tokenTypes), both JWT types are absent because no issuer is configured, and the client is checked before the subject type. No token was minted.",
+      "headSha": "c1823f2959611c668b1ac29e5ddc3df893a343b9",
+      "negativeControl": "the access-token subject type's refusal is itself the control for the other three: it proves the endpoint serves the exchange, so 'not supported' names the missing issuer rather than a dead route."
+    },
+    {
+      "criterion": "Plan section 4 row 3: the broker issues a DPoP-bound Dispatch token carrying session, person, project_scope and project, and introspection reports them.",
+      "surface": "the real broker binary built from this branch by packages/envoy/scripts/dev-broker.sh, on an embedded Postgres 16.4 at 127.0.0.1:54329, driven by a throwaway client with a fresh P-256 key",
+      "command": "DEV_BROKER_POSTGRES_URL=postgres://postgres@127.0.0.1:54329/postgres?sslmode=disable bash $TMPDIR/infra228/dev-broker-proof.sh; then uv run --with cryptography==43.0.3 --no-project python $TMPDIR/infra228/exchange_proof.py <broker url> <exchange-token> <account-token> infra228-tester-proof",
+      "observed": "boot 'token exchange state=on kubernetes=true github=false accounts=1 workflows=0'; exchange http=200 token_type DPoP expires_in 899 (BROKER_ACCESS_TOKEN_SECONDS defaults to 900, config.go:621); introspect {\"active\":true,\"session\":\"infra228-tester-proof\",\"person\":\"ada@example.com\",\"project_scope\":\"named\",\"project\":\"EXAMPLE\",\"exp\":1793280177,\"client_id\":\"dispatch-token-exchange\",\"jkt\":\"1NVyn6f3g1M-efGDIqJ-Urs8ipDxmP7-_IykdUbeVOI\"}; jkt equals this run's key thumbprint: True. Exactly the four documented claims, plus the three the prose says introspection adds.",
+      "headSha": "c1823f2959611c668b1ac29e5ddc3df893a343b9",
+      "negativeControl": "the same exchange presenting system:serviceaccount:example-ns:example-stranger's token, which no entry lists: http=400 'exchange: no entry lists this identity'. Three more: no DPoP proof at all -> http=400 invalid_dpop_proof 'The request requires a DPoP proof but none was provided'; introspection as an account outside BROKER_API_ACCOUNTS -> http=401 ACCOUNT_TOKEN_INVALID; introspection of a token the broker never issued -> http=200 {\"active\":false}."
+    },
+    {
+      "criterion": "Plan section 4 row 5 / D6: the claim names in docs/kubernetes.md are the claim names in the code, and the fence cannot pass while they differ.",
+      "surface": "the repository's Go suite for packages/envoy/internal/broker/oauth",
+      "command": "go test ./internal/broker/oauth/ -run TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries -count=1, then the same binary against six mutations of docs/kubernetes.md",
+      "observed": "PASS unmutated. Each mutation fails with the message a reader needs: delete the `project` bullet -> 'issued but not documented: project'; add an `extra` bullet -> 'documented but not issued: extra'; rename the bullet to `projekt` -> both directions; reword the marker sentence -> 'has no \"An issued token carries these claims and no others:\"'; replace the em dash with a colon -> the shape refusal naming line 4909; delete the whole list -> 'names no claim after'. The delete-the-bullet case is the 'miss wearing a pass' the test's own comment claims to defend against, since `project` still appears inside the project_scope bullet's prose, and it fails as claimed. docs/kubernetes.md was restored after each mutation; jj diff --stat is empty.",
+      "headSha": "c1823f2959611c668b1ac29e5ddc3df893a343b9",
+      "negativeControl": "the six mutations above are the control: every one fails, so no edit of the list can pass unnoticed, and no mutation produces a silent skip."
+    },
+    {
+      "criterion": "Plan section 4 row 6 / section 7: the tree names no private host, and the skills guard's refused phrases stay out of docs/kubernetes.md.",
+      "surface": "the repository's own checks, run on the issue workspace",
+      "command": ".github/scripts/check-private-names.sh; cd packages/pi-legion && bun test src/skills-guard.test.ts",
+      "observed": "check-private-names passed over 5195 files; skills guard 12 pass, 0 fail. The check also passed over the tester's evidence comment and the edited pull-request body, copied into the tree as scratch files before posting.",
+      "headSha": "c1823f2959611c668b1ac29e5ddc3df893a343b9",
+      "negativeControl": "a non-placeholder MagicDNS host written into docs/solutions/_tester228-control.md: refused, with the remediation block naming the file. The reserved example-tailnet.ts.net placeholder in the same position is allowed, so the check distinguishes a redacted host from a real one. Both scratch files were removed; jj diff --stat is empty."
+    },
+    {
+      "criterion": "The new operator prose's citations resolve: every path, symbol, default and derived claim it states is true at this head (the change is documentation, so its citations are its behaviour).",
+      "surface": "the issue workspace at c1823f29, read with grep and go test",
+      "command": "every backticked path in the three new sections checked for existence; every cited symbol grepped in its cited file; the broker's boot condition, claim constants, retention and token lifetime read at their lines",
+      "observed": "All 24 cited paths exist. Each cited symbol is in its cited file: readBoot, WriteDispatchTokenFile (whose own doc comment carries the sentence 'The value never enters tmux's argv or a pane's environment' verbatim, and DISPATCH_TOKEN_FILE is in tmux's runtimeOwned set, so no spec can override it), prepareTmux, panePairs, secretFiles, WriteSecretFiles, launchSecrets (ENVOY_TOKEN), MatchesSharedAgentToken, bearerSessionActor, serviceTokenActor, DaemonSession, dispatchTokenKey in both manifest.go and names.go, agentSecretsVolumes, controllerEnvironment, exchangeGrant, claimSession, ExchangeConfig.tokenTypes, Introspection, SessionRetention. prepare (manifest.go:202) sets secrets[dispatchTokenKey] for every launch it builds (:246). The boot lines are main.go:437 and :439 under exactly the stated condition. The four Claim constants are session, person, project_scope, project. SessionRetention is 90 days; BROKER_ACCESS_TOKEN_SECONDS defaults to 900. Set.Pod, Set.Workflow and Set.Machine derive the claims the prose describes, Set.Machine returning ProjectScopePerson with no project. The helper package names no exchange grant anywhere. 'Settings -> Agent tokens' is verbatim in the cited Dispatch page. Both new in-page anchors resolve to real headings. Two citations use a shorthand the file already uses elsewhere -- `oauth/exchange.go` for a path named in full earlier in the same section, and `(DISPATCH_OIDC_AUDIENCE, serviceTokenActor, server.go)` where the setting is read in cmd/dispatch/settings.go rather than in server.go -- neither false, both noted for the reviewer.",
+      "headSha": "c1823f2959611c668b1ac29e5ddc3df893a343b9",
+      "negativeControl": "the citation sweep is not vacuous: it reported `oauth/exchange.go` as a path that does not exist at the repository root, which is the shorthand above, and it reported three symbols as missing from their cited files -- the whoami sentence, the boot line and DISPATCH_OIDC_AUDIENCE -- each of which was then read at its real line (dispatch-execute.ts:2766, main.go:437-439, settings.go:102-104), so the sweep finds a miss when there is one."
+    }
+  ],
+  "ciRead": {
+    "head": "c1823f2959611c668b1ac29e5ddc3df893a343b9",
+    "readAt": "2026-10-29T13:00Z",
+    "state": "no check run and no workflow run exists for any commit of this push; the pull request is CONFLICTING with main, so GitHub computes no merge ref and starts nothing",
+    "rerunsByTheTester": "none"
+  },
+  "redTests": {
+    "written": 0,
+    "why": "The one failure of substance is a merge conflict and the absent CI that follows from it. No repository test can assert either: a conflict is a property of two heads, not of the code, and this deployment's instructions forbid a test that reads a workflow file and asserts things about its contents. Every behavioural claim the change makes was driven on a real surface and held, so there is no defect left to pin."
+  }
+}
