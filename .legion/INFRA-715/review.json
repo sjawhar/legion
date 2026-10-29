@@ -2,37 +2,41 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-715",
-  "completed": "2026-10-29T15:55:00Z",
-  "round": 3,
+  "completed": "2026-10-29T16:55:00Z",
+  "round": 4,
   "decision": "changes_requested",
-  "reviewedCodeHead": "bf2118caebaa",
+  "reviewedCodeHead": "090ae14dd225",
   "critical": 0,
-  "important": 2,
-  "minor": 2,
+  "important": 1,
+  "minor": 4,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/cmd/dispatch/README.md",
-      "description": "#2480 is CONFLICTING (mergeStateStatus DIRTY) at fb584253, so GitHub runs no pull-request checks: no code head of this PR has finished CI. git merge-tree with main a1a134a3 conflicts only in packages/envoy/cmd/dispatch/README.md. Forward-merge main (never rebase), resolve the README row, push without a skip-checks trailer, and then CI runs at the merged head."
-    },
-    {
-      "severity": "important",
       "file": "packages/envoy/internal/dispatch/docs/mutation.go",
-      "description": "mutation.go:478 re-anchors at the quote's nearest occurrence, even one where the mark is not allowed. So an upload that only adds a copy of anchored text (a front-matter title equal to a commented heading, or a code block quoting an ask's text above it) is refused 400 'would land in the front matter / a code block; move that text out of it', though the anchored text is untouched. The deep review reproduced both cases with go test -overlay. On the base this was a 500; the PR now presents it as the caller's error, with advice that drops the user's new text. Fix: on a MarkNotAllowedError, re-anchor at the nearest occurrence where the mark is allowed, and refuse only when none is; add a test."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/mutation.go",
-      "description": "The 500 fallback at mutation.go:487-490 has no test. The deep review replaced it with `return refusedReanchor(...)`, which drops a refusal silently and writes the room without the anchor, and every docs test still passed. Make the decision one function that returns ErrInvalidMarkdown or a plain ErrDocSchema (not documentSchemaError, whose OutsideSchemaError means a stored tree to repair), and test both outcomes."
+      "description": "When every occurrence refuses the mark, mutation.go:646-655 reports the refusal of the last occurrence NearestFirst lists, the farthest one. The deep review's probe: an ask's quote copied to the front matter (nearest) and to a code block (farther) got the 400 'would land in a code block'; an uploader who removes the code block is refused again for the front matter. Report the first (nearest) refusal, the one Find would have anchored at, or name every refused place; add a test."
     },
     {
       "severity": "minor",
       "file": "packages/envoy/internal/dispatch/pmdoc/find.go",
-      "description": "The place name is chosen in two packages: Place() returns 'the front matter' or the raw 'code_block', and mutation.go:540 swaps 'code_block' for 'a code block'. Let Place() return the reader's wording for both, and update reanchor_test.go:479."
+      "description": "QuoteFinder.FindDiscardingMiss (find.go:164-170) and find's describeMiss flag have no production caller left; ReplaceText was the only one. Delete both, drop their reanchor_test.go cases, and point AGENTS.md:2415, the pr2447 solutions note and the NearestFirst doc comment at NearestFirst."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/pmdoc/find.go",
+      "description": "The nearest-then-earlier rule exists twice: NearestFirst's comparator (find.go:188-193) and find's near loop (find.go:247-257). Write one comparator; find's near branch becomes slices.MinFunc with it, so 'Find with near returns NearestFirst's first' holds by construction."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/pmdoc/find_test.go",
+      "description": "The tie assertion at find_test.go:1006 runs only when the gap between the first two matches is even, and the fixture's gap is 11, so it never runs. Use a fixture with an exact tie and assert it every time."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/.changes/unreleased/INFRA-715-upload-ask-into-code-block.yaml",
+      "description": "The changelog said any copy into a code block keeps the anchor on the original; for a comment or suggestion a code block carries the mark. Fixed by the reviewer (prose only), scoped to where the anchor cannot stand."
     }
   ],
-  "accepted": "Round-2 findings fixed in bf2118ca and confirmed by the tester on a real server: the sentinel/typed error marks only the mark-not-allowed refusal, every other error stays 500, the front matter is named, and the dead fallback is gone. Not a defect: ErrMarkNotAllowed and *MarkNotAllowedError are two names for one refusal (both documented, both tested).",
-  "threads": "Replied and accepted: PRRT_kwDORFy7ds6xmcRe, PRRT_kwDORFy7ds6xmcRu, PRRT_kwDORFy7ds6xmcR3 (already resolved by the implementer).",
-  "ci": "No run at bf2118ca or above: the PR head conflicts with main, so GitHub starts no pull_request run. The tester's test.json ci.state/ci.action blame GitHub run creation; the tester corrected that by Envoy at 15:38Z, and the conflict is the cause.",
-  "thermonuclear": "Run once at bf2118ca: deep review approve with two Minors (untested fallback; refusal of an upload that copies anchored text); code quality three low/medium maintainability items (split decision and wrapper, sentinel without a production reader, place naming in two packages). The reviewer raised the copy case to important because it changes behaviour."
+  "accepted": "Round-3 findings fixed in 090ae14d: the copy case re-anchors at the nearest allowed occurrence (deep review: deleting the skip loop fails both copy tests), reanchorError is one decision returning a plain ErrDocSchema for server faults (removing that branch fails its test), and Place() owns the wording. The forward merge 84001a00 is correct: a three-way merge reproduces it, and the README row is main's with the PR's sentence appended. Not a defect: extracting the occurrence loop from ReplaceText (readability; the behaviour is tested).",
+  "ci": "CI run 40911247197 at code head 090ae14d was queued at 16:24Z; the PR is MERGEABLE again. My prose push starts a new run. A change request does not wait on CI.",
+  "thermonuclear": "Run once at 090ae14d: deep review approve with three minors (farthest place named, vacuous tie test, changelog breadth); code quality: dead FindDiscardingMiss, duplicated comparator, loop structure, vacuous tie test. The reviewer raised 'farthest place named' to important: the message sends the uploader to a second refusal."
 }
