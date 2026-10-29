@@ -2,63 +2,53 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-743",
-  "completed": "2026-10-29T18:40:00Z",
+  "completed": "2026-10-29T19:40:00Z",
+  "round": 3,
+  "summary": "No code change. Round 2's code at ee461d32 is what the tester verified; its one failure was that the round carried no CI, because the push that carried the three code commits ended on the implement handoff commit, whose message carries skip-checks: true, and GitHub reads that trailer on the head of the push. This round pushes heads that carry no such trailer so the lanes run for that code.",
   "proof": [
     {
-      "criterion": "Review round 1, item 1 and the architect's decision (dispatch://INFRA-743/comment/7d723c9e-5924-491f-9f4b-3e64d9512963, choice (a)): a stalled KV watch rebuild is reported on /healthz as 200 degraded, not 503, so no probe takes the listener out, and it still names the KV watch rebuild and the stall.",
-      "surface": "The built envoy-listener binary (go build -o $TMPDIR/smoke/envoy-listener ./cmd/listener) against a real nats-server v2.10.29 with JetStream, restarted under a configuration that denies only $JS.API.CONSUMER.CREATE.KV_envoy_interests/.roles/.sessions; /healthz over HTTP.",
-      "command": "bash $TMPDIR/smoke/smoke.sh, steps 4 and 5: restart under the deny configuration, poll /healthz once a second, read the listener's WARN and ERROR lines, then restart under the allow configuration and poll again.",
-      "observed": "Inside the grace: WARN 'envoy nats reconnect hook failed; it is retried ... stall_ms=20007' and 'stall_ms=40015' with /healthz 200 healthy. Past the grace: ERROR 'envoy nats reconnect hooks have not succeeded ... stall_ms=61022' and /healthz 200 {\"error\":\"KV watch rebuild unavailable: rewatch interest cache: watch interest registry KV bucket: context deadline exceeded\\nrewatch session cache: watch session registry KV bucket: context deadline exceeded (no rebuild has succeeded for 1m1s)\",\"status\":\"degraded\"}. With the deny lifted the next recovery repaired the caches, /healthz returned 200 healthy on the first sample after it, and an interest written then was served by GET /v1/interests/.",
-      "headSha": "ee461d32f32db97adb8e2967aaffab2e7e0036e8",
-      "negativeControl": "At this branch's base 88840d35, as a Go test in a throwaway copy of the tree with a real 75 s wait: go test ./cmd/listener/ -run TestBaseHealthzAnswersAHookStallPastAMinute -> FAIL, '/healthz 75 s into a rebuild that never succeeded = 200 map[... status:healthy]'. The base answers plain healthy, with no word for the state and no line past the first ERROR."
+      "criterion": "The round's head carries CI: a push whose head carries no skip-checks trailer starts the workflows, so the static lanes, the reviewer's approval by SHA and the base's required checks all have a run to read.",
+      "surface": "GitHub Actions on the pull request's branch, read through the REST API as the reviewer and the daemon read it.",
+      "command": "jj git push of a head whose message carries no skip-checks line, then gh api repos/sjawhar/legion/commits/<head>/check-runs --jq .total_count and gh api 'repos/sjawhar/legion/actions/runs?branch=legion%2FINFRA-743'",
+      "observed": "Before this round: 0 check runs at the code head ee461d32, 0 at the branch head f570b6fe and 0 at cfb7b124, with the newest workflow run on the branch still round 1's at b7cccdc9 (14:21Z). This round pushes 9c2ea00f (empty, no trailer) and this handoff commit (a file change, no trailer); the check runs at the head are read and reported with the completion.",
+      "headSha": "9c2ea00f9c385484c8d9cd2f95431380d972194b",
+      "negativeControl": "The previous push is the control: its three code commits carried no trailer and its head, f570b6fe, carried one, and GitHub started no workflow for any of them - 0 check runs 40 minutes later, which is what the tester recorded as this round's one failure."
     },
     {
-      "criterion": "Review round 1, item 2 (the architect's request, dispatch://INFRA-743/comment/3313691b-6e3d-4f9a-a977-54e2ce89c421): a listener that never reconnected reports no stall however long it runs, pinned by a test that fails under the mutation that would break it.",
-      "surface": "The in-process cmd/listener test over a real embedded NATS, a real durable and the real interest and session caches, driving healthzHandler through httptest - the same rig as the rest of the file.",
-      "command": "cd packages/envoy && go test ./cmd/listener/ -run 'TestHealthzAnswersAHookStallPastTheRepairGrace' -count=1 -timeout 10m, first with 'c.hooksDueSince = c.now()' added to the client's construction in internal/bus/nats.go (the mutation), then with that line removed.",
-      "observed": "With the mutation: FAIL, 'healthz_hook_stall_test.go:112: HookStall a whole bus.RepairGrace after the first connection = 1m0s <nil>, want 0 and no error'. Without it: ok github.com/sjawhar/envoy/cmd/listener 1.011s. The mutation is not in the tree; the test now advances the clock a whole grace before any hook and any reconnect and asserts HookStall() is (0, nil) and /healthz 200 healthy.",
+      "criterion": "Review round 1 item 1 and the architect's decision: a KV watch rebuild stalled past bus.RepairGrace answers /healthz 200 degraded naming the rebuild, no probe acts on it, and the state pages through the new alarm. Unchanged this round; the code is the same.",
+      "surface": "The built envoy-listener binary against a real nats-server v2.10.29 with JetStream, restarted under a configuration denying only $JS.API.CONSUMER.CREATE.KV_envoy_{interests,roles,sessions}.>; /healthz over HTTP.",
+      "command": "bash $TMPDIR/smoke/smoke.sh (the implementer's, at ee461d32), and the tester's own re-drive of the same scenario with curl -sf sampled once a second ($TMPDIR/t/tester-smoke2.sh, recorded in .legion/INFRA-743/test.json).",
+      "observed": "Under the grace 200 healthy; past it 200 {\"error\":\"KV watch rebuild unavailable: rewatch interest cache: watch interest registry KV bucket: context deadline exceeded\\nrewatch session cache: watch session registry KV bucket: context deadline exceeded (no rebuild has succeeded for 1m1s)\",\"status\":\"degraded\"}; healthy again on the first sample after the repair. The tester measured 200 at all 150 samples of the stalled window with curl -sf exiting 0 each time, healthy again 2 s after the repair, and idle 75/75 and plain restart 100/100 healthy.",
       "headSha": "ee461d32f32db97adb8e2967aaffab2e7e0036e8",
-      "negativeControl": "The mutation itself is the control: it is exactly the change that would make every listener answer degraded a minute after start, and before this lock every other test in the tree stayed green under it."
+      "negativeControl": "The same scenario against a listener built from main 1f5b0828: 150 of 150 samples answered 200 healthy with no word for the state (the tester's run), and at this branch's base 88840d35 the Go probe TestBaseHealthzAnswersAHookStallPastAMinute fails the same way."
     },
     {
-      "criterion": "Review round 1, item 1's second half: the state that no longer refuses pages instead, through a signal that counts the ERROR line the real binary writes and not the WARN.",
-      "surface": "The AWS rendering of the listener's log metric filters and alarms (packages/envoy/infra, its own Go module), which `envoy-infra render metric-filters` prints and Pulumi applies.",
-      "command": "cd packages/envoy/infra && go build ./... && go vet ./... && go test ./aws/... ./render/... ./core/... -count=1",
-      "observed": "ok infra/aws 6.638s, ok infra/aws/rendering 0.015s, ok infra/render 0.251s, ok infra/core 3.623s. The new signal is alarm 'reconnect-hooks-stalled', metric 'ReconnectHooksStalled', filter pattern [date=%^\\d{4}/\\d{2}/\\d{2}$%, time=%^\\d{2}:\\d{2}:\\d{2}$%, level=ERROR, w1=envoy, w2=nats, w3=reconnect, w4=hooks, w5=have, w6=not, w7=succeeded, ...], matching the real line '2026/10/29 13:26:22 ERROR envoy nats reconnect hooks have not succeeded name=envoy error=\"...\" stall_ms=61022'. The reference list in infra/aws/webhooklistener_test.go, the filter count in infra/render/render_test.go and the alarm list in infra/README.md carry it too.",
+      "criterion": "The zero-stall lock: a listener that never reconnected reports no stall however long it runs. Unchanged this round.",
+      "surface": "The in-process cmd/listener test over a real embedded NATS, a real durable and the real caches, driving healthzHandler through httptest.",
+      "command": "go test ./cmd/listener/ -run 'TestHealthzAnswersAHookStallPastTheRepairGrace' -count=1, with and without the one-line mutation 'c.hooksDueSince = c.now()' at the client's construction.",
+      "observed": "With the mutation: FAIL 'HookStall a whole bus.RepairGrace after the first connection = 1m0s <nil>, want 0 and no error'. Without it: ok. The tester re-ran both in a throwaway clone at ee461d32 and saw the same.",
       "headSha": "ee461d32f32db97adb8e2967aaffab2e7e0036e8",
-      "negativeControl": "The WARN the same call writes below the grace, 'envoy nats reconnect hook failed; it is retried', must not page: its level is WARN where the pattern requires ERROR, and its fourth word is 'hook' where the pattern requires 'hooks'. ./gcp fails in this pod for want of mkfs.ext4, identically with the change reverted (checked in a copy of the tree at $TMPDIR/pristine)."
+      "negativeControl": "The mutation is the control: it is the change that would make every listener answer degraded a minute after start, and before this lock every other test stayed green under it."
     },
     {
-      "criterion": "Acceptance 3 at the round's head, and acceptance 4a: no change to delivery semantics, the suites green.",
-      "surface": "The built listener binary against a real NATS (the loop), and the repository's Go test harness for every package this round touches.",
-      "command": "cd packages/envoy/cmd/listener && go test -c -o \"$TMPDIR/listener-r2.test\" . && for i in $(seq 1 200); do \"$TMPDIR/listener-r2.test\" -test.run '^TestListenerFollowsTheInterestRegistryAcrossNATSRestarts$' -test.count=1 … ; done; and cd packages/envoy && go build ./... && go vet ./internal/bus/ ./internal/kvwatch/ ./cmd/listener/ && go test ./internal/bus/ ./internal/kvwatch/ -count=1 && go test ./cmd/listener/ -count=1 -skip '<the four Docker-only TestDispatch tests>' && go test ./cmd/dispatch/ -run 'Settings|Boot|Replica|Stream' -count=1",
-      "observed": "200 PASS, 0 FAIL. ok internal/bus 314.564s, ok internal/kvwatch 62.747s, ok cmd/listener 459.566s, ok cmd/dispatch 35.960s; build and vet exit 0.",
+      "criterion": "Acceptance 3 and 4a at the code head: 200 of 200 isolated runs of TestListenerFollowsTheInterestRegistryAcrossNATSRestarts, and the suites green. Unchanged this round.",
+      "surface": "The listener's own harness against a real NATS, and the repository's Go test harness for every package the change touches, including the separate packages/envoy/infra module.",
+      "command": "go test -c then 200 serial runs of the restart test; go build ./... && go vet; go test ./internal/bus/ ./internal/kvwatch/ -count=1; go test ./cmd/listener/ -count=1 -skip '<the four Docker-only TestDispatch tests>'; go test ./cmd/dispatch/ -run 'Settings|Boot|Replica|Stream' -count=1; and in packages/envoy/infra go build ./... && go vet ./... && go test ./aws/... ./render/... ./core/... -count=1",
+      "observed": "200 PASS, 0 FAIL at ee461d32 (the tester's own loop at the same head: 200 PASS, 0 FAIL). ok internal/bus 314.564s, ok internal/kvwatch 62.747s, ok cmd/listener 459.566s, ok cmd/dispatch 35.960s, and the infra module's aws, rendering, render and core suites ok.",
       "headSha": "ee461d32f32db97adb8e2967aaffab2e7e0036e8",
-      "negativeControl": "The same 200-run loop with 49 runs at the base 88840d35: 48 PASS, 1 FAIL, the failure being this issue's symptom (ERROR envoy nats reconnect hook failed ... rewatch session cache: open session registry KV bucket: context deadline exceeded)."
+      "negativeControl": "The same loop with 49 runs at the base 88840d35: 48 PASS, 1 FAIL, the failure being this issue's symptom (ERROR envoy nats reconnect hook failed ... rewatch session cache: open session registry KV bucket: context deadline exceeded). infra/gcp needs mkfs.ext4, absent in this pod, and fails identically with the change reverted."
     }
   ],
   "filesChanged": [
-    "packages/envoy/cmd/listener/main.go: the HookStall branch answers 200 degraded (writeDependencyHealth's terminal=false); the branch comment and the handler's doc comment carry the reason (the ECS container health check, GKE readiness and the image's HEALTHCHECK all read /healthz) and name the paging signal.",
-    "packages/envoy/cmd/listener/healthz_hook_stall_test.go: the zero-stall lock before any hook and any reconnect; the past-the-grace expectation is 200 degraded.",
-    "packages/envoy/internal/bus/nats.go: HookStall's zero branch returns 0, nil, with its doc corrected.",
-    "packages/envoy/internal/bus/recovery.go: reportHookFailure chooses level and message and makes one slog.Log call; both messages and the three attributes are byte-identical.",
-    "packages/envoy/internal/kvwatch/kvwatch.go: three comment corrections (the bound reports both halves at the same minute, both repairers named in Rewatch's doc and at the arming site), and reportUnrepaired drops the dead timer.Stop and its local.",
-    "packages/envoy/infra/aws/rendering/metricfilters.go, infra/aws/webhooklistener_test.go, infra/render/render_test.go, infra/README.md: the reconnect-hooks-stalled signal, its reference, the filter count and the alarm list.",
-    "packages/envoy/AGENTS.md, packages/envoy/docs/architecture.md, docs/site/src/content/docs/dispatch/envoy.md, packages/envoy/cmd/dispatch/settings.go, packages/envoy/.changes/unreleased/INFRA-743-rewatch-retry-report.yaml, .changes/unreleased/pr-2362-replica-count.yaml, pr-2362-stream-byte-limit.yaml, docs/solutions/testing/a-cmd-test-of-a-background-connect-...-pr2362.md: the degraded answer and the two log lines, in every place the old 503 or the old message was named."
+    "No code, documentation or test file changed this round. The branch gains 9c2ea00f, an empty commit whose message carries no skip-checks trailer, and this handoff commit, also written without the trailer, so GitHub starts the lanes for the code of ee461d32."
   ],
   "trickyParts": [
-    "The answer had to stay a 200: three probes read /healthz (ECS container health check, GKE readiness, the image's own HEALTHCHECK), and a refusal would replace the only listener into the same failing rebuild whose cold caches warm up empty, so its fanout would acknowledge general-topic messages as unmatched. The PR body's census names each probe with its disposition.",
-    "The paging signal's pattern is matched against the wire format of Go's default text handler, not against a quoted phrase: level=ERROR and the plural 'hooks' are what keep the WARN below the grace out of the alarm.",
-    "The stall must not start at a listener's first connection: the lock test advances a whole grace before any reconnect, and was shown to fail under the one-line mutation that would break it."
+    "GitHub reads the skip-checks trailer on the head of the push, not on each commit: a push that carries code commits without the trailer and ends on a handoff commit with it starts no workflow for any of them. From now on every push of this issue that carries code ends on a commit without the trailer, and the handoff goes in a push of its own."
   ],
-  "deviations": [
-    "The approved plan chose 503. The architect's decision on review round 1 replaced it with 200 degraded plus the AWS alarm (dispatch://INFRA-743/comment/7d723c9e-5924-491f-9f4b-3e64d9512963); the plan document is not edited, as the spec and plan stay as approved.",
-    "The reviewer's optional HookStallErr() refactor is declined, with the reason on its thread: with the answer now 200 degraded, moving the comparison into internal/bus would put the listener's health policy there while /healthz still decides the status word.",
-    "docs/solutions/testing/a-cmd-test-of-a-background-connect-...-pr2362.md was corrected too. The review did not name it; it names the old log line in prose a reader would follow, and it is listed in the census."
-  ],
+  "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": [
-    "Three sibling pull requests still touch these files and none has merged: #2377 (INFRA-514), #2395 (INFRA-590), #2446 (INFRA-594). The tester's trial merges found #2377 conflicting in internal/kvwatch/kvwatch.go and packages/envoy/AGENTS.md and #2446 in internal/bus/nats.go, packages/envoy/AGENTS.md and docs/site/.../envoy.md, each resolving mechanically. INFRA-594's implementer was told this round that the stall branch is now 200 degraded, so its earlier confirmation ('both healthz 503 branches stay') no longer holds: its own 503 'role lane subscription inactive' branch is the one that stays.",
-    "This pod has two CPUs, so the tester and the implementer cannot both run a smoke or a 200-run loop without spoiling each other's counts; the tester waits for its task."
+    "The empty commit 9c2ea00f, pushed at 19:29Z with no trailer, had started no workflow when this handoff was written, while the repository's Actions were live for other branches at 19:25-19:27Z. This handoff commit is a file change pushed the same way, which is the second shape the architect named; the checks at the head are read and reported with the completion.",
+    "Sibling contracts: the round-2 /healthz change reached INFRA-594's implementer from me and INFRA-514's and INFRA-590's from the tester. From this round on the implementer tells each sibling implementer itself whenever a shared contract changes."
   ]
 }
