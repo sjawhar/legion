@@ -2313,7 +2313,7 @@ ask, every nested decision losing a block and every decision holding the ask rea
 doc-edit requires (`planAskRepair`). When no such edit exists - a delete here would leave a
 decision holding this one unreadable, or a decision needs words written rather than blocks
 deleted - it names no delete and no ask edit of another decision, and says the decision is
-repaired in the document editor, or by an ask edit once the decision holding it reads. An ask with no paragraph holding text is refused earlier, as having an empty
+repaired in the document editor. An ask with no paragraph holding text is refused earlier, as having an empty
 question. Tests follow the refusal for every body of up to five blocks drawn from paragraphs,
 empty paragraphs, lists and lists holding a nested list, and for every body of up to four that
 adds an option holding a decision of up to three such blocks. Before, an edit naming only `urgency` or `multiple` wrote the

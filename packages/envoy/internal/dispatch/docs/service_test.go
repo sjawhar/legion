@@ -1437,6 +1437,85 @@ func TestSetAskBlockTextRefusalOfNestedDecisionsNamesOnlyWhatBreaksTheRule(t *te
 		}
 		assertAskEditWroteNothing(t, service, artifactID, before, err)
 	})
+
+	// The same decision, its holder's own problem repaired: the holder holds its question again,
+	// which a person writes in the document editor, since no document edit of the route's own may
+	// touch it while the decision it holds breaks the content rule. The refusal's other way out
+	// then holds, word for word: this same ask edit, sent again, names this decision's deletes and
+	// following it leaves both decisions reading as decisions.
+	t.Run("the decision holding it holds its question again", func(t *testing.T) {
+		service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			ask := firstAsk(tree)
+			decision := parsedBlock(t, ":::ask{#ask-nested urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich day?\n\n- Monday\n:::\n")
+			decision.Children = append(decision.Children, parsedBlock(t, "- Tuesday\n"))
+			ask.Children[0].Children = nil
+			item := ask.Children[1].Children[0]
+			item.Children = append(item.Children, decision)
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		before := liveTree(t, service, artifactID)
+		held := editAskUrgency(service, artifactID, "ask-nested")
+		if got, want := held.Error(), heldBackRefusal(t, before); got != want {
+			t.Fatalf("refusal =\n%s\nwant\n%s", got, want)
+		}
+		assertHeldBackByItsHolder(t, before, "ask-nested", held)
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			blockByID(tree, "ask-lists").Children[0].Children = []*pmdoc.Node{{Type: "text", Text: "Should we ship?"}}
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		if why := followAskRefusal(t, service, artifactID, "ask-nested"); why != "" {
+			t.Fatalf("the ask edit of the held decision, the one holding it otherwise repaired, names no delete: %s", why)
+		}
+		assertHeldPairRepaired(t, service, artifactID, before, []string{"Tuesday"})
+	})
+
+	// The decided holder, its own problem repaired in the document editor: its own second list
+	// deleted, which leaves the decision it holds broken still. The refusal's other way out holds
+	// here too - this same ask edit, sent again, names this decision's deletes and following it
+	// leaves both reading as decisions - and it holds for a holder no ask edit of its own reaches.
+	t.Run("the decision holding it is decided and repaired", func(t *testing.T) {
+		service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+		answerIndexedAsk(t, service, artifactID, "ask-lists")
+		settleCurrentGeneration(t, service, artifactID)
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			ask := firstAsk(tree)
+			decision := parsedBlock(t, ":::ask{#ask-nested urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich day?\n\n- Monday\n:::\n")
+			decision.Children = append(decision.Children, parsedBlock(t, "- Tuesday\n"))
+			item := ask.Children[1].Children[0]
+			item.Children = append(item.Children, decision)
+			ask.Children = append(ask.Children, parsedBlock(t, "- Defer: Wait a week\n"))
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		before := liveTree(t, service, artifactID)
+		held := editAskUrgency(service, artifactID, "ask-nested")
+		if got, want := held.Error(), heldBackRefusal(t, before); got != want {
+			t.Fatalf("refusal =\n%s\nwant\n%s", got, want)
+		}
+		assertHeldBackByItsHolder(t, before, "ask-nested", held)
+		// A document edit of the route's own cannot write the holder's repair: it would leave an
+		// ask it changed breaking the content rule, since the decision it holds still does
+		// (validateEditedAskBlocks), which is why the refusal sends a person to the editor first.
+		holder := blockByID(before, "ask-lists")
+		own, _ := holder.Children[len(holder.Children)-1].Attrs[pmdoc.BlockIDAttr].(string)
+		ops := []model.EditOp{{Op: "delete", Block: own}}
+		if _, applyErr := joinedApplyOps(service, artifactID, ops, model.Actor{Kind: "user", ID: "alice"}, nil); applyErr == nil {
+			t.Fatalf("the document edit deleting the holder's own second list %q was allowed while the decision it holds breaks the rule", own)
+		}
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			ask := blockByID(tree, "ask-lists")
+			ask.Children = ask.Children[:len(ask.Children)-1]
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		if why := followAskRefusal(t, service, artifactID, "ask-nested"); why != "" {
+			t.Fatalf("the ask edit of the held decision, the one holding it otherwise repaired, names no delete: %s", why)
+		}
+		assertHeldPairRepaired(t, service, artifactID, before, []string{"Defer", "Wait", "a", "week", "Tuesday"})
+	})
 }
 
 // heldBackRefusal is the refusal of an ask edit of the decision ask-nested of tree, word for
@@ -1457,12 +1536,149 @@ func heldBackRefusal(t *testing.T, tree *pmdoc.Node) string {
 	return `block: ask block "ask-nested", asking "Which day?", holds a second bullet list where its content rule, ` +
 		`paragraph+ bullet_list?, allows one or more paragraphs and then at most one bullet list, last; ` +
 		`the ask-edit route does not rebuild a decision that breaks its content rule, and no document edit ` +
-		`deleting blocks of this decision leaves every decision it changes readable: a delete inside this one ` +
-		`changes the decision holding it, which such an edit may not leave unreadable, and these deletes would; ` +
+		`deleting blocks of this decision leaves every decision it changes readable: ` +
 		heldBackByItsHolder + `; its blocks are: ` +
 		`block ` + ids[0] + ` (paragraph) reads "Which day?"; ` +
 		`block ` + ids[1] + ` (bullet_list) reads "- Monday"; ` +
 		`block ` + ids[2] + ` (bullet_list) reads "- Tuesday"`
+}
+
+// assertHeldPairRepaired checks both decisions of the held pair read as decisions, settlement
+// left neither of them `invalid`, and the document kept every word but those of the blocks the
+// repair deleted.
+func assertHeldPairRepaired(t *testing.T, service *Service, artifactID string, before *pmdoc.Node, deleted []string) {
+	t.Helper()
+	after := liveTree(t, service, artifactID)
+	for _, id := range []string{"ask-lists", "ask-nested"} {
+		decision := blockByID(after, id)
+		if decision == nil {
+			t.Fatalf("ask block %q is gone from the repaired document", id)
+		}
+		if reason := readAskBlockStrictly(decision); reason != nil {
+			t.Fatalf("after the repair ask block %q does not read as a decision: %v", id, reason)
+		}
+		if invalid, exists := decision.Attrs["invalid"]; exists {
+			t.Fatalf("after the repair settlement left ask block %q invalid: %v", id, invalid)
+		}
+	}
+	words := textWords(after)
+	for _, word := range textWords(before) {
+		if slices.Contains(deleted, word) || slices.Contains(words, word) {
+			continue
+		}
+		t.Fatalf("the repair lost %q, which no delete it named dropped: the document reads %q", word, words)
+	}
+}
+
+// assertHeldBackByItsHolder checks a refusal saying the repair of blockID would have to change the
+// decision holding it tells the truth, recomputed here from the content rule alone: the blocks
+// that rule leaves no room for, deleted from a copy of tree, leave a decision holding blockID
+// unreadable. It reads none of the plan the refusal came from, so a repair that sent every nested
+// decision this way would be caught.
+func assertHeldBackByItsHolder(t *testing.T, tree *pmdoc.Node, blockID string, err error) {
+	t.Helper()
+	drops := blocksTheAskRuleLeavesNoRoomFor(blockByID(tree, blockID))
+	if len(drops) == 0 {
+		t.Fatalf("the refusal of %q says its repair would change the decision holding it, and the content rule leaves none of its blocks to delete: %v",
+			blockID, err)
+	}
+	pruned := tree
+	for _, id := range drops {
+		next, deleteErr := pmdoc.DeleteBlock(pruned, id)
+		if deleteErr != nil {
+			t.Fatalf("deleting block %q to weigh the refusal of %q: %v", id, blockID, deleteErr)
+		}
+		pruned = next
+	}
+	holders := decisionsHolding(tree, blockID)
+	if len(holders) == 0 {
+		t.Fatalf("the refusal of %q says a decision holds it, and none does: %v", blockID, err)
+	}
+	for _, id := range holders {
+		if holder := blockByID(pruned, id); holder != nil && readAskBlockStrictly(holder) != nil {
+			return
+		}
+	}
+	t.Fatalf("the refusal of %q says deleting its blocks would leave the decision holding it unreadable, and with %q deleted every one of %q reads as a decision: %v",
+		blockID, drops, holders, err)
+}
+
+// blocksTheAskRuleLeavesNoRoomFor is the block id of every block one repair of ask, a decision
+// breaking the content rule, would delete, read off the rule itself: in ask and in every decision
+// nested in the blocks it keeps, every child outside the run of paragraphs starting at its first
+// paragraph holding text and the one bullet list right after them.
+func blocksTheAskRuleLeavesNoRoomFor(ask *pmdoc.Node) []string {
+	if ask == nil || pmdoc.AskContentError(ask) == nil {
+		return nil
+	}
+	first := slices.IndexFunc(ask.Children, func(child *pmdoc.Node) bool {
+		return child != nil && child.Type == "paragraph" && strings.TrimSpace(pmdoc.TextContent(child)) != ""
+	})
+	keptFrom, keptTo := len(ask.Children), len(ask.Children)
+	if first >= 0 {
+		keptFrom, keptTo = first, first
+		for keptTo < len(ask.Children) && ask.Children[keptTo].Type == "paragraph" {
+			keptTo++
+		}
+		if keptTo < len(ask.Children) && ask.Children[keptTo].Type == "bullet_list" {
+			keptTo++
+		}
+	}
+	drops := []string{}
+	for index, child := range ask.Children {
+		if index < keptFrom || index >= keptTo {
+			id, _ := child.Attrs[pmdoc.BlockIDAttr].(string)
+			drops = append(drops, id)
+			continue
+		}
+		for _, nested := range decisionsNestedIn(child) {
+			drops = append(drops, blocksTheAskRuleLeavesNoRoomFor(nested)...)
+		}
+	}
+	return drops
+}
+
+// decisionsNestedIn is each decision nested in node that no nearer decision holds.
+func decisionsNestedIn(node *pmdoc.Node) []*pmdoc.Node {
+	if node == nil {
+		return nil
+	}
+	if node.Type == "ask" {
+		return []*pmdoc.Node{node}
+	}
+	var found []*pmdoc.Node
+	for _, child := range node.Children {
+		found = append(found, decisionsNestedIn(child)...)
+	}
+	return found
+}
+
+// decisionsHolding is the block id of each decision of tree holding the block blockID, outermost
+// first.
+func decisionsHolding(tree *pmdoc.Node, blockID string) []string {
+	var holders []string
+	var find func(node *pmdoc.Node, holding []string) bool
+	find = func(node *pmdoc.Node, holding []string) bool {
+		if node == nil {
+			return false
+		}
+		if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); id == blockID {
+			holders = slices.Clone(holding)
+			return true
+		}
+		if node.Type == "ask" {
+			id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+			holding = append(slices.Clone(holding), id)
+		}
+		for _, child := range node.Children {
+			if find(child, holding) {
+				return true
+			}
+		}
+		return false
+	}
+	find(tree, nil)
+	return holders
 }
 
 // namedAskBlock matches a decision a refusal names, its block id Go-quoted.
@@ -1521,6 +1737,9 @@ func followAskRefusal(t *testing.T, service *Service, artifactID, blockID string
 		why := noDeleteReason(unrepresentable.Reason)
 		if why == "" {
 			t.Fatalf("the refusal of the edit of %q names no delete and does not say why: %v", blockID, err)
+		}
+		if why == heldBackByItsHolder {
+			assertHeldBackByItsHolder(t, before, blockID, err)
 		}
 		assertAskEditWroteNothing(t, service, artifactID, before, err)
 		return why
@@ -1583,8 +1802,10 @@ func followAskRefusal(t *testing.T, service *Service, artifactID, blockID string
 const repairedInTheEditor = "this decision is repaired in the document editor"
 
 // heldBackByItsHolder is that way out for a decision whose repair would have to change the one
-// holding it: the editor, or this decision's own ask edit once the one holding it reads.
-const heldBackByItsHolder = repairedInTheEditor + ", or by an ask edit once the decision holding it reads as one"
+// holding it: the reason says the deletes would leave that decision unreadable, and sends the
+// caller to the editor alone.
+const heldBackByItsHolder = "a delete inside this one changes the decision holding it, which such an edit " +
+	"may not leave unreadable, and these deletes would; " + repairedInTheEditor
 
 // noDeleteReason is how a refusal that names no delete says why, or "" when it says none of the
 // three things it can say.

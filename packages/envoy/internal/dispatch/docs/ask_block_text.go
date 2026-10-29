@@ -494,10 +494,10 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 // tree, which ApplyOps would restamp first) the refusal names no delete and asks for a retry.
 // Where no one edit of deletes leaves every decision it changes readable, the refusal names no
 // delete and no decision to edit: it says the decision is repaired where a person writes it, in
-// the document editor, or by an ask edit of its own once the decision holding it reads. It sends
-// no caller to an ask edit of another decision, which is not the caller's to make: a decision
-// that does not parse is refused before its content rule is read (askBlockOf), and a decided one,
-// or one another person opened, is refused by the route above.
+// the document editor. It sends no caller to an ask
+// edit of another decision, which is not the caller's to make: a decision that does not parse is
+// refused before its content rule is read (askBlockOf), and a decided one, or one another person
+// opened, is refused by the route above.
 //
 // The refusal quotes every block of the decision in full, nested content and all, so a caller
 // deleting one can restore every word, and gives each block id as quoted data, never inside a
@@ -544,8 +544,7 @@ func refuseAskContentEdit(tree *pmdoc.Node, block askBlock) error {
 	case plan.holder:
 		reason += ", and no document edit deleting blocks of this decision leaves every decision it changes " +
 			"readable: a delete inside this one changes the decision holding it, which such an edit may not " +
-			"leave unreadable, and these deletes would; this decision is repaired in the document editor, or " +
-			"by an ask edit once the decision holding it reads as one"
+			"leave unreadable, and these deletes would; this decision is repaired in the document editor"
 	case plan.blocked != nil:
 		reason += ", and no document edit deleting this decision's blocks, or those of a decision nested in it, " +
 			"leaves it valid, since with them deleted " + plan.blocked.Error() + ", which needs words written, " +
@@ -567,7 +566,8 @@ type askRepairPlan struct {
 	// they would leave unreadable (holder).
 	blocked error
 	// holder reports whether the deletes the plan would have named leave a decision holding the
-	// edited one unreadable, which no ask edit of this decision can repair.
+	// edited one unreadable, which no ask edit of this decision can repair while the holder's own
+	// problem stands.
 	holder bool
 }
 
