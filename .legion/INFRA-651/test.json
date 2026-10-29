@@ -2,55 +2,52 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-651",
-  "completed": "2026-10-28T17:34:11Z",
-  "headTested": "705df7b5329d079002e56850c51fcab12a0a2ff5",
-  "codeHead": "a3cd6ffc58f617b2577fb5bb7ae27dc2d9e12feb",
-  "round": 3,
+  "completed": "2026-10-29T12:56:25Z",
+  "headTested": "823f38a4ff42740cd823692d2167b8697d98e920",
+  "codeHead": "6db4537626e2",
+  "round": 4,
+  "forwardMerge": {
+    "previousVerifiedHead": "705df7b5329d079002e56850c51fcab12a0a2ff5",
+    "merge": "b96ae4bedfa4 (main 4e91eaa85984)",
+    "fingerprints": "705df7b5: 1bf3824a... (standard fileset), 0c52bf66... with packages/claude-envoy/dist also left out; b96ae4be: 0c52bf66... both ways; 6b339c1e: 114bffb3...",
+    "verdict": "the merge left the diff unchanged but for the claude-envoy dist bundles, which main's .github/workflows/claude-envoy-rebuild.yaml builds after each merge (its header: a pull request never commits them); the claude-envoy changelog fragment stays. The seed commits d55525c5, 4b1d777a and 6db45376 change packages/envoy/loadtest, so this round is a full test of that surface."
+  },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently on my own local Dispatch (Postgres 16.2 + pgvector, real migrations, NATS; head rebuilt from this head and main eb21e78d8e6e on one database, data written through the API): the repeated and invalid versions forms on both servers, the route and ETag matrix, the trimmed-vs-cut comparison, base-vs-head full-answer identity, EXPLAIN VERBOSE of the select-star lateral, and dispatch read with the main and head CLI bundles and the committed Claude Code plugin bundle. The implementer's 1,000-issue identity and merge-rule runs were not repeated."
+    "how": "Re-ran the implementer's seed surface on a load-test stack of my own built from this head: stack.sh seed (with loadgen seed-refs), loadgen refs-shape and refs-fetch, and compared refs-fetch against main's envoy-dispatch (fork point 4e91eaa8) over the same template. Its counts (1,000 / 19,471 / 310 / 51,071), its PASS and its byte identity reproduce. Its merge-rule runs were not repeated."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Census change 1 / A3 / review finding 4: a repeated versions, or any value but all or latest, answers 400 INVALID_QUERY; identity is checked first",
-      "surface": "local Dispatch, head envoy-dispatch :28777 and main :28778 on one database, curl with the trusted identity header",
-      "command": "matrix2.sh 28777; matrix2.sh 28778 (m2-head.txt, m2-base.txt); matrix.sh 28777 m-head-r3",
-      "observed": "head: latest&latest, all&latest, latest&bogus, =&versions=latest, versions&versions -> 400 'versions must be given once, as all or latest'; last, %20latest, bogus, LATEST -> 400 'versions must be all or latest'; none, versions, versions=, all -> full (7,041 bytes); latest&x=1 -> trimmed (2,312); repeated with no identity -> 401 NO_IDENTITY; TST-999 repeated -> 400",
-      "headSha": "705df7b5329d079002e56850c51fcab12a0a2ff5",
-      "negativeControl": "main answers 200 with the full answer to every refused form; round 2's head answered latest&bogus with 200"
+      "criterion": "A6: the references seed is committed into the load test as part of stack.sh seed, keyless, reproducing INFRA-650's counts and production's shape",
+      "surface": "packages/envoy/loadtest at this head: stack.sh setup, start, seed (Postgres 16.2 + pgvector, real migrations, latency proxy, NATS, listener) on LOADTEST_ROOT=$TMPDIR/t651r4/lt, ports 35432/35433/34222/38222/39120/38777/36061",
+      "command": "stack.sh setup; stack.sh start; stack.sh seed; stack.sh reset; stack.sh loadgen refs-shape; stack.sh loadgen refs-fetch -out full-head.tsv",
+      "observed": "seed done in 2,298 s, build_commit 823f38a4 build_dirty false; counts projects 4, issues 1,000, comments 8,000, artifacts 2,310, artifact_versions 20,781, ref_targets 1,000, ref_target_versions 19,471, ref_sources 310, artifact_refs 51,071, events 29,785; refs-shape: 400 LGA issues, 90 empty, version rows p50 244 / p90 6,337 / max 19,356 / mean 2,508, response bytes max 7,145,397, distinct share 0.0539, 231.0 author bytes per row: PASS (exit 0); refs-fetch: 1,000 issues, 310 with members, 370,204,182 bytes. The sample file is 160 arrays of numbers, no key or name; 6db45376's reformat parses to the same 160 lists (22,460 numbers)",
+      "headSha": "823f38a4ff42740cd823692d2167b8697d98e920",
+      "negativeControl": "refs-shape after setting every ref-target version to one author: 'distinct share 0.0003 ... author bytes/row 40.0 ... FAIL', exit 1; refs-fetch without -out: '-out is required', exit 1; stack.sh seed --bogus: 'seed takes only --force', exit 1; a second stack.sh seed without --force: 'already seeded', template kept (refs-shape PASS again after a reset)"
     },
     {
-      "criterion": "Census change 2 / A4: dispatch read sends versions=latest from every shipped bundle and prints the same output; the web app is unaffected",
-      "surface": "the dispatch CLI bundled from main and from the head (build-dispatch-cli.sh) and the committed packages/claude-envoy/dist/dispatch.js, agent bearer, against both servers",
-      "command": "cli.sh base|head 28777 cli3/...; ce.sh new 28777 ce3/new; cli.sh head 28778 cli3/basesrv-head; diff -r; access-log bytes of route=/api/v1/issues/{key}/references",
-      "observed": "main CLI vs head CLI on the head server diff -r exit 0; plugin bundle output == head CLI output; head CLI on main's server identical but for the Link: port; TST-1 references 7,041 bytes (main CLI) vs 2,312 (head CLI and plugin bundle). The web app's client sends no query (packages/dispatch/web/src/api/client.ts:760) and the no-query answer is byte-identical to main's",
-      "headSha": "705df7b5329d079002e56850c51fcab12a0a2ff5",
-      "negativeControl": "the main CLI's request carries no versions and receives the 7,041-byte full answer"
+      "criterion": "A1 at real size on the committed seed: without the parameter the answer is byte-identical to main's",
+      "surface": "the same seeded template, served by this head's envoy-dispatch and by main's (git archive of fork point 4e91eaa85984, built with GOWORK=off) through stack.sh reset",
+      "command": "stack.sh loadgen refs-fetch -out full-head.tsv (head binary); swap bin/envoy-dispatch for main's, stack.sh reset, refs-fetch -out full-base.tsv; diff full-base.tsv full-head.tsv",
+      "observed": "diff exit 0 over 1,000 rows (key, status, ETag, body sha256, bytes); refs-shape PASS on both servers with the same numbers",
+      "headSha": "823f38a4ff42740cd823692d2167b8697d98e920",
+      "negativeControl": "main's server answers ?versions=latest with 200 and the full 7,145,397 bytes for LGA-202, and ?versions=latest&versions=bogus with 200; the head refuses the latter (round 3)"
     },
     {
-      "criterion": "A2 / review finding 2: the select-star lateral gives the same trimmed answer, own ETag, 304, and does not read unused columns",
-      "surface": "same local Dispatch and its Postgres",
-      "command": "jq -c '.members |= map(.artifact.versions |= [.[-1]])' full.body vs latest.body; cmp with round 2's latest.body; psql EXPLAIN VERBOSE of the statement; ALTER TABLE artifact_versions ADD COLUMN tester_extra, GET ?versions=latest, DROP COLUMN",
-      "observed": "cmp exit 0 and byte-identical to round 2; If-None-Match: own ETag 304, the other's 200; the lateral's Limit output projects NULL::bytea (content), NULL::tsvector (search), NULL ids, with Index Scan Backward on artifact_versions_artifact_id_number_key; with an extra column the trimmed answer is byte-identical",
-      "headSha": "705df7b5329d079002e56850c51fcab12a0a2ff5",
-      "negativeControl": "If-None-Match with the full answer's ETag on ?versions=latest -> 200 with the trimmed body"
-    },
-    {
-      "criterion": "A1: without the parameter (or versions=all) the answer is byte-identical (status, headers but Date, ETag, body)",
-      "surface": "same local Dispatch, both servers",
-      "command": "for k in TST-1..TST-4: curl -D - on :28777 and :28778, strip Date, append body sha256, cmp",
-      "observed": "4 of 4 identical",
-      "headSha": "705df7b5329d079002e56850c51fcab12a0a2ff5",
-      "negativeControl": "?versions=bogus: head 400, main 200"
+      "criterion": "A2 at real size on the committed seed: versions=latest gives each member with only its latest version, under its own ETag",
+      "surface": "the same seeded stack, head server, agent bearer",
+      "command": "cut.py: for every key, GET full and ?versions=latest, cut each full member's versions to the last, compare parsed JSON, compare ETags",
+      "observed": "1,000 of 1,000 equal, 33,351 multi-version members, 0 issues with members sharing an ETag, 48,601,700 trimmed bytes vs 370,204,182 full",
+      "headSha": "823f38a4ff42740cd823692d2167b8697d98e920",
+      "negativeControl": "a byte comparison against Python's re-encoding differs on every issue, empty answers included, because Go's encoder ends each answer with a newline and escapes HTML characters: the comparison is of parsed values, and the round-3 head check by cmp at small size still stands"
     }
   ],
   "notes": [
-    "versions=latest;versions=bogus answers the full answer with 200 on head and main alike: Go's url.ParseQuery drops a pair holding a semicolon, as for every route of this server. No client sends it; not a finding.",
-    "A document row with no version in an issue's closure answers 500 for both answers at main and head alike (round 1; inserted by SQL only). Unchanged by this PR.",
-    "Evidence: dispatch://INFRA-651/artifact/infra651-tester-evidence-tgz version 3 (sha256 daa4b416a067fc5ace536a82b2289060091757e43aef296be944f0464c8ee9d5).",
-    "CI at 705df7b5329d was pending when read (changes, lint, typecheck, test, build, Daemon Go suite, pr-title); not waited on.",
-    "A6 (refseed in the load test after sjawhar/legion#2369) is still open before READY, per the architect's decision; A9 is the production check."
+    "loadgen seed-refs, run by hand a second time on a seeded database, would add the targets' versions again; stack.sh seed never does that (it keeps an existing template unless --force drops it first).",
+    "CI at 823f38a4: every job green but dispatch, still running when read; close-withdraws-asks.e2e.ts:126 in that job is main's known red (INFRA-138's tree).",
+    "Evidence: dispatch://INFRA-651/artifact/infra651-tester-evidence-tgz version 4 (sha256 7738ca70b3488bac5618da55b188ae590c0b394f290fbe5a015d30e3878f2084). Earlier rounds' route, ETag and CLI proofs stand: the server and CLI code is unchanged since a3cd6ffc.",
+    "A9 is the production check after the merge."
   ]
 }
