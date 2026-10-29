@@ -401,17 +401,16 @@ func recordedResolution(issue record.Issue) Resolution {
 
 // ReenterChild takes a recorded child set back to todo into a new run under its live tree, the way
 // recordChildUnderLiveTree enters an unrecorded one: the run is the child's next generation, so no
-// row its previous run queued acts on it; the run it interrupted is stopped, the previous run's
-// facts are cleared, and the tree's architect is told. A child whose
-// tree is not live is an orphan, which admission, running after this handler, admits as a root of
-// its own. fact carries the values the new generation takes — a live todo event's for a reopened
-// child, or the child's own already-recorded ones for admission's promotion of a stranded child no
-// live event ever reopened, so the run is exported for that caller too: one re-entry, not two.
+// row its previous run queued acts on it; the previous run's facts are cleared, and the tree's
+// architect is told. A child whose tree is not live is an orphan, which admission, running after
+// this handler, admits as a root of its own. fact carries the values the new generation takes — a
+// live todo event's for a reopened child, or the child's own already-recorded ones for admission's
+// promotion of a stranded child no live event ever reopened, so the run is exported for that caller
+// too: one re-entry, not two.
 //
-// A done child's open production check closes as not run before the new run starts (the record
-// alone: markCheckClosed), since the rerun reuses the implementer's claim and the pod, and a look
-// would otherwise collide with the new run's task. A look open at the re-entry is interrupted as
-// the phase worker's run is: the implementer is suspended under the new generation's stamp.
+// A done child's open production check closes as not run before the new run starts
+// (markCheckClosed). The run's generation fences a completion left by an interrupted phase, and
+// the closed check refuses an old look's report, so both claims stay live.
 func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue, fact intake.DispatchIssue) error {
 	root, err := e.store.Issue(ctx, tx, child.Tree)
 	if err != nil || root == nil {
@@ -422,34 +421,17 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 		return err
 	}
 	next := child.Generation + 1
-	// The worker of the phase the child was taken out of is still working the interrupted run, and
-	// would report that run's handoff into the new one. Its claim carries no generation, so the
-	// stop is stamped with the generation the child is about to hold: that stamp is only the
-	// outbox's fence, and a row stamped with the run being left is dropped. The roles that finished
-	// earlier phases of the run stay live, as they do between phases, and the new run's starts hand
-	// them its tasks.
-	if role := RoleFor(child.Phase); role != "" && role != claim.RoleArchitect {
-		interrupted := child
-		interrupted.Generation = next
-		if err := e.suspend(ctx, tx, interrupted, role, fmt.Sprintf("%s was set back to todo", child.Key)); err != nil {
-			return err
-		}
-	}
+	// The worker of the phase the child was taken out of may still finish its old turn, but its
+	// completion serves the generation it took and the API refuses it once this generation begins.
+	// Roles that finished earlier phases of the run stay live, as they do between phases, and the
+	// new run's starts hand them their tasks.
 	check, err := e.store.ProductionCheck(ctx, tx, child.Key)
 	if err != nil {
 		return err
 	}
 	if check != nil && check.Open() {
-		lookOpen := check.LookOpen
 		if err := e.markCheckClosed(ctx, tx, check, record.CheckNotRun); err != nil {
 			return err
-		}
-		if lookOpen {
-			interrupted := child
-			interrupted.Generation = next
-			if err := e.suspend(ctx, tx, interrupted, claim.RoleImplementer, fmt.Sprintf("%s was set back to todo in a look of its production check", child.Key)); err != nil {
-				return err
-			}
 		}
 	}
 	// The child's open pull request outlives the run, and may still be armed for the READY of the
