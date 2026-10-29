@@ -2,24 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-590",
-  "completed": "2026-10-28T23:52:30Z",
-  "round": 6,
-  "reviewedCodeHead": "2ba3ba486fcba9a4ae1f23c8c155914a7e4ae2d7",
-  "decision": "changes_requested",
+  "completed": "2026-10-29T09:36:00Z",
+  "round": 7,
+  "reviewedCodeHead": "90383ad764e578f7fcb98ee639ce23b7600b0812",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "ci": "Required set (lint, typecheck, test, pr-title) queued at CI head 2ba3ba48 when read; compare 2ba3ba48...e6938ad6 is handoffs only. A request for changes does not wait on CI; the approval will also wait for envoy-go, envoy-go-race, dispatch, dispatch-multiprocess, dispatch-memory and the Postgres 16 Dispatch suite (architect, 23:43Z).",
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at 2ba3ba48.",
-  "threads": "Round-5 threads PRRT_kwDORFy7ds6xWNEi, PRRT_kwDORFy7ds6xWNEq, PRRT_kwDORFy7ds6xWNEv and round-4 PRRT_kwDORFy7ds6xSfQa accepted (replies 4407300666-4407301230).",
-  "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/outbox/batch.go:461", "description": "The incomplete event's hold names dest.key() for every destination, delivered ones included; a delivered role route gets the role's current holder in resolveRoleHolders (role.go:99-105), so after the holder moves from O to N an incomplete event E whose role route reached O names agent.N, a later event C's forward to N is neither held nor chained (E's delivered destination is skipped at :417), and when E's read later succeeds and names N as a thread or document session it reaches N after C. Fix: skip delivered destinations in that loop (the loop over delivered already names their recorded subjects), with a test."}
+  "ci": "At CI head 90383ad7 (compare to afe7258b handoffs only): required lint, typecheck, test, pr-title success; envoy-go, envoy-go-race, dispatch-multiprocess, dispatch-memory, dispatch-browser-multiprocess, envoy-infra-go success. dispatch failed only on packages/dispatch/e2e/close-withdraws-asks.e2e.ts:126 (1 failed), main's known red (controller 00:56Z, architect 09:12Z). The Postgres 16 Dispatch suite no longer runs: main's #2476 removed the Postgres 16 jobs now that production runs Postgres 18, and the pull_request run uses the merge ref with main.",
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at 90383ad7 over fix 5aa6a3a8 and merge 90383ad7; both approve with no finding.",
+  "threads": "Round-6 thread PRRT_kwDORFy7ds6xXYKY accepted (reply 4410721755); 18 threads, 0 unresolved.",
+  "keyFindings": [],
+  "recordedAsMain": [
+    "close-withdraws-asks.e2e.ts:126 in the dispatch job (INFRA-138's tree).",
+    "cmd/listener TestListenerFollowsTheInterestRegistryAcrossNATSRestarts intermittent (1 in 49 at main's d4cbcfe6; INFRA-743)."
   ],
-  "fastFollow": "One recursive loadRecipients in place of loadRecipients plus bisectRecipients (lookups.go:302-341).",
   "verifiedCorrect": [
-    "Not-due events take their recipient reads again; a healthy not-due event holds only its unreached keys.",
-    "Bisection answers or fails every id exactly once; one broken row costs 2*ceil(log2 n) extra statements; a non-refused failure fails the remaining ids.",
-    "refusedStatement: ConnectError checked before PgError; classes 08, 40, 53, 57, 58 and an ended ctx are not refused statements.",
-    "Each new test fails at 2f3bf214."
+    "Round-6 finding closed: the incomplete hold skips delivered destinations and names a reached role route by its role topic; a scratch planChains test sends the new holder's forward unheld against 2ba3ba48's batch.go and holds it at this head.",
+    "One recursive loadRecipients runs the same statements and answers or fails every id exactly once.",
+    "Merge with main's #2396: compactDaily via duty.RunLeased runs under Run's wait group, so the shutdown wait is unchanged; Deps.Leases still wired; pmdoc test files equal main's #2482/#2484; migrations 0136_dashboard_assets, 0137_duty_holds, 0138_outbox_claim; connections 88."
   ]
 }
