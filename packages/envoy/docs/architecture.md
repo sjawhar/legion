@@ -83,20 +83,22 @@ attempt:
 | The target is live but does not advertise the frame's `delivery.mode`, or that mode cannot be read unambiguously | `403` naming the session, and the mode when it could be read |
 | The publish is refused as too large (`bus.ErrTooLarge`) | `413` naming the size against the server's max payload |
 | The publish is refused for its subject or key (`bus.ErrRefused`) | `400` naming the refusal, with no `Retry-After` |
+| The server denies the publish under this listener's own grant (`bus.ErrPublishDenied`) | `403 {"error":"envoy: the message bus denied the publish under this listener's own permissions: <reason>"}` carrying the server's violation, with no `Retry-After`, recorded `publish_denied` |
 | Any other publish failure | `503` with the same prefix and `Retry-After: 1`, carrying the bus's own reason |
+
+Either transport can be denied this way: a role lane or an ad-hoc topic, which go over core NATS,
+is named a denial where its publish is confirmed (`confirmPublished`, `internal/bus/confirm.go`),
+and a topic the stream captures, a send's `notifications.agent.<id>` among them, is named one from
+the violation the connection recorded under its subject (`deniedPublish`,
+`internal/bus/denials.go`), since the stream acknowledges a denied publish with nothing. No retry
+gets past a grant that forbids the subject until an operator changes it, so the answer is no 5xx.
 
 `POST /v1/messages/publish` answers a publish failure, and a role-holder read that did not answer,
 exactly the same way; its role-holder resolution (the claim read, the holder's session read and the
 release of a lapsed claim) runs inside the same 3.5 s budget, and one the budget runs out on is that
-503 too, naming the call that did not answer. Its 413, its 400s and its role 404s (`unclaimed`,
-`holder_lapsed`) are unchanged. Two refusals are its own. A publish the server denies under this
-listener's own grant (`bus.ErrPublishDenied`) is
-`403 {"error":"envoy: the message bus denied the publish under this listener's own permissions: <reason>"}`
-with no `Retry-After`, recorded `publish_denied`. Only a topic the stream does not capture — a
-role lane or an ad-hoc topic, which go over core NATS — can be denied this way, since that error is
-made only where a core publish is confirmed (`confirmPublished`, `internal/bus/confirm.go`); a send
-publishes `notifications.agent.<id>`, which the stream captures, so it goes through JetStream and
-never meets it. The other is a publish that lost the race for the role's claim — every one
+503 too, naming the call that did not answer. Its 413, its 400s, its 403 for a denied publish and
+its role 404s (`unclaimed`, `holder_lapsed`) are unchanged. One refusal is its own: a publish that
+lost the race for the role's claim — every one
 of the two resolution attempts spent on a supersession (`errRoleHolderChanged`) — keeps the 503
 and the `Retry-After: 1`, since a fresh read wins that race as soon as the replacement claim
 settles, but answers its own body,

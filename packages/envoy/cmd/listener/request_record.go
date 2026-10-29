@@ -40,16 +40,15 @@ const (
 	// and no read can decode (store.ErrMalformedRoleClaim): a 500, not outcomeBusUnavailable,
 	// since the bus did answer and retrying reads the same record.
 	outcomeRoleClaimUnreadable requestOutcome = "role_claim_unreadable"
-	// outcomePublishDenied is a publish the server refused under this listener's own publish
-	// permissions (bus.ErrPublishDenied). Only the publish route can record it, and only for a
-	// topic the stream does not capture: bus.ErrPublishDenied is made in one place,
-	// confirmPublished (internal/bus/confirm.go), which only the core publishes (publishCoreTo,
-	// RequestCoreTo) reach, and a publish takes the core path only when usesCoreTransport
-	// (internal/bus/nats.go) finds its topic outside streamSubjects (internal/bus/stream.go) - a
-	// role lane or an ad-hoc topic. The send route publishes contracts.AgentSubject(target),
-	// which notifications.agent.> captures, so it goes through publishJetStream and is never
-	// denied this way. The publish route does not record it as outcomeBusUnavailable: the bus
-	// answered, with a denial no retry can get past.
+	// outcomePublishDenied is a send or publish the server refused under this listener's own
+	// publish permissions (bus.ErrPublishDenied), on either transport. A core publish (a role lane
+	// or an ad-hoc topic, which usesCoreTransport in internal/bus/nats.go sends outside the
+	// stream) is named a denial where it is confirmed (confirmPublished, internal/bus/confirm.go);
+	// a JetStream publish (every topic the stream captures, the send route's
+	// contracts.AgentSubject(target) among them) is named one by publishJetStream, from the
+	// violation the connection recorded under its subject (deniedPublish,
+	// internal/bus/denials.go), since the stream acknowledges a denied publish with nothing. It is
+	// not recorded as outcomeBusUnavailable: the bus answered, with a denial no retry can get past.
 	outcomePublishDenied requestOutcome = "publish_denied"
 	// outcomeStreamFull is a send or publish the stream refused because it holds its byte limit
 	// (bus.ErrStreamFull). It is not outcomeBusUnavailable: the bus answered, that the stream is

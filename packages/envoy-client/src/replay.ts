@@ -172,9 +172,10 @@ export interface ReplayFrame {
  * return `queued` for a frame it did not hand at all and could not hold (Oh My Pi's inert card of
  * a frame with no ledger key, sent while the host is busy): it released the claim, so the next
  * sweep shows the frame again.
- * `suppressed`: the host's renderer skips it for this session (`notify: false`, its own event,
- * another session's follow); nothing is recorded, so a copy on another subject that the renderer
- * does show still reaches the session. `failed`, or a throw: the frame stays for a later sweep.
+ * `suppressed`: the host's renderer skips it for this session (an event Dispatch marks `quiet` on
+ * an owner topic, its own event, another session's follow); nothing is recorded, so a copy on
+ * another subject that the renderer does show still reaches the session. `failed`, or a throw:
+ * the frame stays for a later sweep.
  */
 export type ReplayDeliveryOutcome = "shown" | "queued" | "suppressed" | "failed";
 

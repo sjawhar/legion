@@ -12,7 +12,9 @@ import (
 )
 
 // ErrPublishDenied is returned, wrapping nats.ErrPermissionViolation and the server's own text,
-// for a core publish the server refused under its connection's publish permissions.
+// for a publish the server refused under its connection's publish permissions: a core publish
+// confirmPublished names, and a JetStream publish whose subject's violation the connection
+// recorded (deniedPublish).
 var ErrPublishDenied = errors.New("NATS denied the publish")
 
 // errPublishUnconfirmed is wrapped, with the reason, by a core publish confirmPublished cannot
