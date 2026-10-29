@@ -14,6 +14,9 @@
 //                differ from it;
 //   --out <dir>  make <dir>, a new or empty directory outside the repository, a
 //                runnable copy of the plugin built from this tree.
+//
+// scripts/build-inputs.txt must name every file this build reads, since main's push job decides
+// from it alone whether a moved main changed the build; tests/build-inputs.test.ts holds it to that.
 import { cp, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
@@ -193,24 +196,25 @@ export function assertPinnedBun(running: string, pinned: string): void {
   )
 }
 
-/** The bundles and their notices, built into `outdir`. Bun writes each inlined module's path into
- *  the bundle relative to the working directory (`// ../envoy-client/bin/dispatch.ts` from the
- *  package, `// packages/envoy-client/...` from the repository root), so the build runs from the
- *  package root whatever the caller's directory: main's committed bytes and every check of them
- *  then agree. */
-export async function buildBundles(outdir: string): Promise<void> {
+/** The bundles and their notices, built into `outdir`; returns the absolute path of every file the
+ *  bundles read (the metafile's inputs), which tests/build-inputs.test.ts checks the input list
+ *  against. Bun writes each inlined module's path into the bundle relative to the working
+ *  directory (`// ../envoy-client/bin/dispatch.ts` from the package, `// packages/envoy-client/...`
+ *  from the repository root), so the build runs from the package root whatever the caller's
+ *  directory: main's committed bytes and every check of them then agree. */
+export async function buildBundles(outdir: string): Promise<string[]> {
   assertPinnedBun(Bun.version, pinnedBunVersion)
   const target = resolve(outdir)
   const callerDirectory = process.cwd()
   process.chdir(packageRoot)
   try {
-    await bundleFromPackageRoot(target)
+    return await bundleFromPackageRoot(target)
   } finally {
     process.chdir(callerDirectory)
   }
 }
 
-async function bundleFromPackageRoot(outdir: string): Promise<void> {
+async function bundleFromPackageRoot(outdir: string): Promise<string[]> {
   const result = await Bun.build({
     entrypoints: Object.values(BUNDLE_ENTRYPOINTS).map((entry) => join(packageRoot, entry)),
     outdir,
@@ -239,10 +243,10 @@ async function bundleFromPackageRoot(outdir: string): Promise<void> {
     throw new AggregateError(result.logs, "bundle build failed")
   }
   if (!result.metafile) throw new Error("Bun.build returned no metafile")
-  await writeFile(
-    join(outdir, "THIRD_PARTY_NOTICES"),
-    await thirdPartyNotices(Object.keys(result.metafile.inputs), packageRoot),
-  )
+  // The metafile's keys are relative to the working directory, the package root.
+  const inputs = Object.keys(result.metafile.inputs)
+  await writeFile(join(outdir, "THIRD_PARTY_NOTICES"), await thirdPartyNotices(inputs, packageRoot))
+  return inputs.map((input) => resolve(packageRoot, input))
 }
 
 async function checkBundles(distDirectory: string): Promise<string[]> {
