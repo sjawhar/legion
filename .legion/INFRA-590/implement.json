@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-29T02:05:00Z",
+  "completed": "2026-10-29T13:40:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "90383ad764e578f7fcb98ee639ce23b7600b0812",
-  "round": "10 (the round-6 review, changes requested at 2ba3ba48): the incomplete event's hold skips delivered destinations, so a reached role route names its role topic, not the role's current holder, and a later forward to a new holder waits for its retry (5aa6a3a8); the review's cleanups in the same commit: one recursive loadRecipients running the same statements, the lookups' own tests moved to lookups_test.go. Then a forward merge of main (GitHub reported CONFLICTING, 90383ad7): #2396's compactDaily via duty.RunLeased merged in; pmdoc's two test files are main's #2482/#2484 fixes byte for byte; migrations and the connection count (88) unchanged.",
+  "head": "295f42ac448409c085ee16b24aacdafdfa09fb59",
+  "round": "11 (forward merge before retro; GitHub reported CONFLICTING): main merged in twice, 8a911ecca (03cf1385) then fe3153923 (295f42ac), pushed together. Migrations renumbered to 0141_duty_holds and 0142_outbox_claim above main's 0140_issue_embedding_spec; connections per process 89 (main's #2397 lease pool 13, main's own 87, +2 this PR); main's ErrNotStored resend ported into the window and fenced by its deadline and connection; /healthz carries outbox_publisher and idempotency_keys; main's ci.yaml router gets the filter entries its coverage check names (internal/roles, session, kvwatch, store). No other change. Fingerprint comment 6498529810.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -126,6 +126,14 @@
       "observed": "All ok (outbox 306.2 s, store 235.8 s, cmd/dispatch 230.6 s, listener 419.8 s, bus 247.0 s, duty 20.0 s, pmdoc 533.9 s, docs 760.1 s under -timeout 40m); -race outbox ok 255.9 s; multiprocess ok 671.7 s; TestAnEarlierEventsReachedRoleRouteDoesNotNameTheRolesCurrentHolder passes; 13 reads for 64 documents with one broken; the seven-statement test logs 'ran 7'.",
       "headSha": "90383ad764e578f7fcb98ee639ce23b7600b0812",
       "negativeControl": "On 2ba3ba48 the new test fails: 'the later event was sent to [notifications.dispatch.issue.T-1.message.created notifications.role.reviewer], want [notifications.dispatch.issue.T-1.message.created]: its role forward to role-holder waits for the earlier event's retry'."
+    },
+    {
+      "criterion": "The forward-merged head keeps every behaviour of the approved code (one publisher, take-over within 10 s, per-(owner, destination) order, the role forward with a receipt, #2366 recipients, #2396 leased compaction) on main's newest code, with the migrations above main's and the connection count re-derived.",
+      "surface": "outbox, store, duty, bus, listener and cmd/dispatch packages on pod Postgres 17 (fresh UTF8 database) and the repository multiprocess harness (two real envoy-dispatch processes, one Postgres, one NATS)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -count=1 ./internal/dispatch/outbox/ ./internal/dispatch/store/ ./internal/dispatch/duty/ ./cmd/dispatch/ && go test -tags multiprocess -count=1 -timeout 25m ./cmd/dispatch && (cd infra && go test -count=1 -run TestDispatchConnectionsPerPodIsTheServers ./gcp/)",
+      "observed": "At 295f42ac: outbox ok 262.5 s, store ok 272.4 s, duty ok 27.1 s, cmd/dispatch ok 282.6 s, multiprocess ok 907.3 s, TestDispatchConnectionsPerPodIsTheServers ok at 89, main's CI filter check 0 uncovered. At 03cf1385 also deliveryaudit, bus, listener and -race on outbox ok, multiprocess ok 899.5 s.",
+      "headSha": "295f42ac448409c085ee16b24aacdafdfa09fb59",
+      "negativeControl": "Before the renumbering the store package's duplicate-version guard failed: 'migrations 0137_duty_holds.up.sql and 0137_request_keys.up.sql share version 137'; before the filter entries main's CI filter check reported 117 problems (internal/roles, session, kvwatch and store uncovered by the Dispatch and listener filters)."
     }
   ],
   "filesChanged": [
@@ -142,7 +150,8 @@
     "Round 7 merge: packages/envoy/internal/dispatch/outbox/{publisher.go,lookups.go,recipients.go,batch.go,THROUGHPUT.md} and tests (publisher_test, publisher_document_authors_test, publisher_comment_recipients_test, order_test, throughput_test), internal/dispatch/deliveryaudit/deliveryaudit_test.go, packages/envoy/AGENTS.md",
     "Round 8: outbox/{lookups.go,batch.go,publisher.go,recipients.go}, outbox tests (publisher_comment_recipients_test, publisher_test, publisher_document_authors_test), deliveryaudit/README.md, scripts/dispatch/comment-delivery/classes.ts, packages/envoy/AGENTS.md, .dispatch/architecture/dispatch-outbox.md, the changelog fragment; merge: migrations renamed to 0137_duty_holds/0138_outbox_claim and references, cmd/dispatch/README.md, cmd/dispatch/multiprocess_test.go imports, .github/workflows/envoy-and-contracts.yaml comment",
     "Round 9: outbox/{lookups.go,batch.go,publisher.go,recipients.go}, outbox tests (publisher_comment_recipients_test, order_test), packages/envoy/AGENTS.md, .dispatch/architecture/dispatch-outbox.md, docs/solutions/database-issues/...-pr2395.md",
-    "Round 10: outbox/{batch.go,lookups.go}, outbox tests (publisher_comment_recipients_test.go, new lookups_test.go), packages/envoy/AGENTS.md; merge: outbox/publisher.go Deps, docs/edit_notices.go, pmdoc/{reanchor_test.go,typed_nesting_test.go} (main's fixes)"
+    "Round 10: outbox/{batch.go,lookups.go}, outbox tests (publisher_comment_recipients_test.go, new lookups_test.go), packages/envoy/AGENTS.md; merge: outbox/publisher.go Deps, docs/edit_notices.go, pmdoc/{reanchor_test.go,typed_nesting_test.go} (main's fixes)",
+    "Round 11 merges: cmd/dispatch/{main.go,main_test.go,shutdown.go,shutdown_test.go,README.md}, internal/bus/{async.go,publish_not_stored_test.go,stream_replicas_test.go}, migrations renamed to 0141_duty_holds/0142_outbox_claim and references, infra/gcp/dispatch.go (89), running-dispatch.md, .github/workflows/{ci.yaml,docs-pages.yaml}, the changelog fragment"
   ],
   "trickyParts": [
     "Blocked events take their blocker's next_attempt_at (no attempt), so they are not re-read on every wake while the blocker waits out a back-off; an owner whose first 100 events all wait has its later due event deferred to the earliest of them (deferPastWindow).",
