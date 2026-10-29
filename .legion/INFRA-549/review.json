@@ -2,35 +2,35 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-549",
-  "completed": "2026-10-29T16:43:00Z",
-  "round": 7,
-  "reviewedCodeHead": "4c0da574bf8a",
+  "completed": "2026-10-29T17:05:30Z",
+  "round": 8,
+  "reviewedCodeHead": "85af7fcb193b",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 2,
-  "rebaseCheck": "Last review APPROVE at d945b51c. Fingerprint against main: d945b51c 956c3757..., 71646ee4 e99f1ccb... (changed). The PR-own diff (91d30dea..d945b51c vs 30ecdcd4..4c0da574) differs only by main's workflow rename (envoy-and-contracts.yaml to ci.yaml) and an architecture-doc sentence; every Go file byte-identical. Still a changed fingerprint, so a new round with the thermonuclear pair.",
+  "scope": "Narrowed by the INFRA-14 architect (2026-10-29 16:44Z) to round 7's three findings, ci-filters/ci-ok and no other change; then (17:04Z) the Fast-follow item brought into this pull request, with the Fast-follow line to read none.",
+  "roundSevenFindings": {
+    "ci_job_reads.py natslive Run": "fixed in 85af7fcb193b; check-ci-filters.sh exits 0 locally (24 gates, 0 uncovered)",
+    "bus.MaxReplicas in place of MaxNATSReplicas": "fixed in 85af7fcb193b; no MaxNATSReplicas left outside .legion/; core and aws tests pass",
+    "nats_auth_live_test.go comment": "fixed in 85af7fcb193b"
+  },
   "keyFindings": [
     {
-      "severity": "important",
-      "file": ".github/scripts/ci_job_reads.py",
-      "description": "main's check-ci-filters.sh (via ci_job_reads.py:616-617) still pins the envoy-infra-go natslive step as `go test -tags natslive ./core/ ./seed/`, while the PR's step (ci.yaml:2299) runs `go test -timeout 30m -tags natslive ./core/ ./seed/ ./gcp/`. Reproduced: check-ci-filters.sh exits 1 with 2 problems, so ci-filters fails and ci-ok, which main requires, fails with it. Fix: update the Run to the step's text with packages ./core/ ./seed/ ./gcp/ (a scratch copy with that change passes: 24 gates, 0 uncovered)."
+      "severity": "minor",
+      "file": "packages/envoy/infra/gcp/clusteredhub_autopilot.go",
+      "description": "Brought in from Fast-follow by the architect: podPriorityClass repeats newDispatchDisruption's inline priority-class rule (gcp/dispatch.go:749-758). Dispatch calls podPriorityClass(\"priorityClassName\", args.PriorityClassName) with its error text unchanged, and the helper moves beside dnsSubdomain (gcp/dispatch.go:686); the AGENTS.md gcp/ row stops naming the priority-class rule in clusteredhub_autopilot.go."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/infra/core/listener_env.go",
-      "description": "MaxNATSReplicas = 5 (:57-59, :176-177) duplicates bus.MaxReplicas, the bound bus.ParseNATSReplicas enforces and aws/rendering/listener.go:98-99 uses; core already imports bus. Use bus.MaxReplicas."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/infra/core/nats_auth_live_test.go",
-      "description": "Its comment at :18 still names the old natslive command (`go test -tags natslive ./core/ ./seed/`) of the step this PR changes."
+      "file": "packages/envoy/infra/gcp/clusteredhub_live_test.go",
+      "description": "The other Fast-follow item, brought in so the line reads none: loopbackPorts.mu (:486, locked at :495-496) guards a draw only the test goroutine makes; delete it."
     }
   ],
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 4c0da574 (High: stale ci_job_reads.py pin fails ci-filters and ci-ok; minors: stale PR body CI line, nats_auth_live_test.go comment, MaxNATSReplicas duplicate). Merge resolution sound; main invalidates nothing in the hub (helpers, listener env, healthz, durableBindDeadline, INFRA-557 still in progress, sizing constants match #2362).",
-    "codeQuality": "Verdict: CHANGES at 4c0da574 (the same ci_job_reads.py pin; MaxNATSReplicas duplicate, cleanup)."
+    "deepReview": "Verdict: APPROVE at 85af7fcb (no finding; the three fixes correct and complete; check-ci-filters.sh exit 0).",
+    "codeQuality": "Verdict: APPROVE at 85af7fcb (no blocking finding)."
   },
-  "ci": "Base is now main (required: lint, typecheck, test, pr-title; ci-ok aggregates the CI jobs). At 4c0da574 the CI run is queued (changes passed; ci-filters and the rest queued). Compare 4c0da574...71646ee4 handoffsOnly true, 2 files. ci-filters will fail on finding 1.",
-  "verifiedLocally": "At 4c0da574: gofmt clean, go vet -tags pulumilive,natslive ./... ok, go test ./... ok in every package (two mkfs.ext4 data-disk tests skipped; TestDispatchConnectionsPerPodIsTheServers passes, main has 87 on both sides), go test -tags natslive -run TestClusteredNatsHub ./gcp/ ok (68.2 s); check-ci-filters.sh (pyyaml 6.0.2 via uv) exits 1 with the two problems above."
+  "ci": "Base main (required lint, typecheck, test, pr-title; ci-ok). At 85af7fcb the CI run is queued (changes queued); not read as a pass. Compare 85af7fcb...32caca1c handoffsOnly true, 2 files.",
+  "verifiedLocally": "At 85af7fcb: uv run --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh exit 0; go vet ./core/ ok; go test ./core/ ./aws/... ok; go test ./gcp/ ok but for the two mkfs.ext4 data-disk tests (no mkfs.ext4 on this pod)."
 }
