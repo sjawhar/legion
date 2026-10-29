@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-715",
+  "completed": "2026-10-29T12:10:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2480",
+  "codeHead": "a0659390db336ad1465d2e0de1ff6b68350e8c4c",
+  "proof": [
+    {
+      "criterion": "A2: on the cluster copy, an hour at ten times grows Dispatch's memory by no more than the documents' stored growth plus a stated constant (1 GiB); the curve is quoted against the 2026-10-28 baseline",
+      "surface": "INFRA-598's cluster copy of Dispatch in namespace loadtest (Dispatch 16 CPU / 32Gi, Postgres 18, NATS hub, listener), image ghcr.io/sjawhar/legion/envoy@sha256:ba01291c51fc2631b2e8aa6b794c10bb7047392e2c644595eb60837ce8d521e4 built from the head",
+      "command": "packages/envoy/loadtest/cluster/cluster.sh (legion/INFRA-598 at 4fa0bee2) up --namespace loadtest --storage-class premium-rwo --dispatch-commit a0659390db336ad1465d2e0de1ff6b68350e8c4c --pg-major 18 --production-repo theorem-labs/agent-infra; seed; soak --duration 60m; collect; down (run lt-20261029t085434-3a20, window 09:03:03Z-10:03:03Z); working set per minute from cgroup.jsonl; stored bytes by SQL at minute 5 and 59",
+      "observed": "143,881 committed writes, 0 errors, 0 restarts. Dispatch working set m5 7.90 GiB, m60 8.74 GiB: delta 0.84 GiB, slope x 55 min 0.85 GiB. Stored document bytes 166,625,271 -> 213,810,328 (47.2 MB). Bound 47.2 MB + 1 GiB = 1.04 GiB: pass on both measures. 2026-10-28 on main 9b92ac14: 11.25 -> 21.23 GiB (+10.1 GiB/h). gc=1 live heap 3.96 / 4.40 / 4.34 GB at minutes 5, 30, 59. Raw: dispatch://INFRA-715/artifact/infra715-cluster-hour-2026-10-29-tgz",
+      "headSha": "a0659390db336ad1465d2e0de1ff6b68350e8c4c",
+      "negativeControl": "The same copy, settings and load on main 9b92ac14 (INFRA-598's 2026-10-28 10x-hour run) grew 9.98 GiB from minute 5 to 60, far past the bound."
+    },
+    {
+      "criterion": "A3: tests that fail on main: a room fed only by agent writes, kept in use, keeps memory within the bound after N writes",
+      "surface": "the real docs.Service on Postgres 16 (pgserver) with a live room kept in use, no browser, on the load test's 25 KB table-heavy spec",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres go test ./internal/dispatch/docs/ -run 'KeepMemoryWithinTheBound|KeepsMemoryWithinTheBound|TestAnUploadChangingOneTokenWritesASmallUpdateOverOpenAnchors' -count=1 -v; go test ./internal/dispatch/pmdoc/ -run TestAnUploadKeepsTheIDsOfTheBlocksItLeavesUnchanged -count=1 -v",
+      "observed": "All pass at the head. 200 one-token uploads: retained 135,176 B vs bound 2,273,276 B. 50 uploads + 100 anchored comments + 100 uploads: 760,496 B vs 2,328,698 B. 400 load-mix writes: 709,128 B vs 2,934,133 B. One-token upload over 20 open anchors writes 80 B. Block-id test: only the edited block's id changes (update 74 B).",
+      "headSha": "a0659390db336ad1465d2e0de1ff6b68350e8c4c",
+      "negativeControl": "The same test files on main bb9fe49c all fail: 97,993,328 B vs 18,945,189 B; 79,824,528 B vs 17,516,162 B; 15,182,480 B vs 8,035,421 B; 4,076 B per upload (want < 2,048); 1,658 of 1,658 block ids changed."
+    },
+    {
+      "criterion": "A1: heap profiles before and after on INFRA-589's harness and on the cluster copy show which causes hold, with bytes per write",
+      "surface": "INFRA-589's local load harness (2 vCPU pod, legion/INFRA-598 stack.sh), Dispatch built at base, main and head, gc=1 heap profiles at minute 1 and 19; the cluster copy's gc=1 profiles at minutes 5, 30, 59",
+      "command": "LOADTEST_DISPATCH_COMMIT=<commit> packages/envoy/loadtest/run-step.sh <name> --events 4 --sessions 400 --requests 0 --human 0 --duration 20m (base 8b4a862b, main bb9fe49c, head a0659390, base with --event-mix comment=3,anchored=33,reply=35,edit=22,upload=0); curl /debug/pprof/heap?gc=1 at m1 and m19; go tool pprof -diff_base",
+      "observed": "4,831 committed writes per step. Live heap m1->m19 per committed write: base 74.7 KB, main 58.8 KB, head 44.3 KB, base without uploads 24.5 KB; Dispatch cores 1.00 / 0.62 / 0.56 / 0.85. Upload holds (490 KB/upload retained on main, 676 B at head); len16 is in-flight allocation, absent from main/head profiles (#2455); compaction changes a resident room's heap by under 1 MB.",
+      "headSha": "a0659390db336ad1465d2e0de1ff6b68350e8c4c",
+      "negativeControl": "Base 8b4a862b with uploads on grew 361 MB in 18 minutes against 116 MB with uploads off, isolating the upload term the fix removes."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/pmdoc/carry_block_ids.go (new): carryBlockIDs keeps live ids on unchanged untyped blocks, pairing as pmdoc.Update aligns",
+    "packages/envoy/internal/dispatch/pmdoc/parse.go: parseForWrite calls carryBlockIDs between RepeatedBlockID and EnsureBlockIDs",
+    "packages/envoy/internal/dispatch/docs/mutation.go: ReplaceText builds the tree with open anchors in a scratch document (with #2447's QuoteFinder and MarkWriter) and writes it with one pmdoc.Update",
+    "packages/envoy/internal/dispatch/pmdoc/carry_block_ids_test.go, docs/upload_memory_test.go, docs/upload_anchors_test.go (new tests)",
+    "packages/envoy/internal/dispatch/docs/docstest/spec.go (new), docstest.go: the load harness spec generator shared by both packages' tests",
+    "packages/envoy/internal/dispatch/docs/marks_test.go: one expectation that pinned an upload re-minting every id",
+    "packages/envoy/AGENTS.md, packages/envoy/.changes/unreleased/INFRA-715-upload-keeps-block-ids.yaml"
+  ],
+  "trickyParts": [
+    "Identity rule: an id is carried only to an unchanged untyped block at its paired position; moved, swapped, retyped, edited blocks, their ancestors, and typed blocks naming no id get fresh ids.",
+    "The forward merge of main resolved a conflict with #2447 (INFRA-640): the scratch re-anchoring uses one QuoteFinder over the target and one MarkWriter over the scratch fragment."
+  ],
+  "deviations": [
+    "F-B was implemented after measurement: with F-A alone an upload over 100 open anchors retained 63,839 B vs 6,946 B over none (9.2x, trigger 1.1x).",
+    "The cluster hour ran on the INFRA-598 harness at 4fa0bee2 (the commit of the 2026-10-28 run), because the branch tip's cluster.sh needs a stored-order source this head does not carry.",
+    "Full suites at the head: pmdoc's three linearity timing tests fail in this pod's 10 ms clock identically at base; other failures in internal/dispatch are environmental (no Docker, C-locale Postgres, census URL, NATS timing) and do not import the changed packages."
+  ],
+  "openQuestions": [
+    "The literal bound holds for an hour because the 1 GiB constant absorbs comment growth; the measured proportional factor is k ~ 19 (working-set growth per stored byte). INFRA-179's room byte budget caps the unbounded case."
+  ]
+}
