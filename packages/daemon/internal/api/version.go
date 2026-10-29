@@ -385,4 +385,26 @@ package api
 // pi-legion v11.1.0 declaring it, without these shapes, so this branch takes the number above it,
 // as the collision note says. Other open branches may declare 41 too: whichever merges after
 // another takes the next free number, as the collision note says.)
-const DaemonAPIVersion = 41
+//
+// 42: a worker's environment gains the four LEGION_STALL_* numbers under both
+// runtimes (`internal/daemon/specs.go` merges each one the daemon holds into `spec.Env`, which a
+// pane's `-e` pairs and a pod launcher's start command carry verbatim), and a Claude Code role
+// gains CLAUDE_CONFIG_DIR, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS and CLAUDE_CODE_DISABLE_CRON in
+// its start command's environment. Both plugins read the four numbers through
+// `packages/pi-shared/src/stall-limits.ts`, and `@sjawhar/claude-envoy` reads the Claude
+// directory, so the daemon and the image that carries them ship together. With 37's disk dying
+// with its pod, a Claude Code role's session is kept in Oh My Pi's session table by the pod's
+// own launcher: each Claude launch's start command carries LEGION_CLAUDE_SESSION_ID, the session
+// it starts or resumes (`claudelaunch.SessionVariable`), and the image's `legion launcher` reads
+// it, in the manager of that role in the one `roles` container, to keep the transcript and the
+// phase-reminder record as rows of `omp_session_files` keyed by their paths, restoring both before
+// a resume's child starts, and writes `<transcript>.legion-saved` once its first save of a fresh
+// transcript has committed, which the image's `@sjawhar/claude-envoy` waits for before it
+// registers the transcript. A launcher before 42 ignores the variable and keeps nothing, so the
+// next pod's resume of that transcript is refused, and a claude-envoy before 42 registers a
+// transcript the table may not hold yet; an image at 42 under a daemon before 42 is told no
+// session, so its claude-envoy waits for no marker and its launcher keeps nothing. The image probe
+// refuses either pair. This change adds no store migration. (This branch took 36 through 41 in
+// turn; main landed each of those numbers first, the controller start command last at 41, so this
+// branch takes the number above them, as the collision note says.)
+const DaemonAPIVersion = 42

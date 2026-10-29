@@ -49,6 +49,19 @@ type listenerDeps struct {
 	consumer   string
 	streamName string
 	streamInfo streamInfoLookup
+	// delivery is the config main hands the delivery handlers (the role lane, the live lane and the
+	// durable), wired once, so the publish route forwards through its forwardRole, records each
+	// session it confirms in its dedupeCache (so the handlers do not push that key to it again), and
+	// writes each send's delivery line and delivery_status count through its logger and
+	// messagesDelivered, reading as the role lane's do, beside the route's own request record
+	// (request_record.go). The route never reads that dedupeCache, since the handlers also
+	// record a self-subscribed session whose push they skipped without hearing from it.
+	delivery *listenerDeliveryHandlerConfig
+	// confirmed is the publish route's own record of each (dedupe key, session) whose receipt arrived
+	// through the route, which only the route writes. A send skips a holder or recipient recorded
+	// there, so envoy-client's retry of a send does not forward again to one the first attempt
+	// confirmed, and no one is counted as confirming a message without having sent its receipt.
+	confirmed *dedupe.Cache
 }
 
 // kvCache is what the listener asks of each KV-backed cache it keeps.
@@ -579,6 +592,22 @@ func openV1Routes(gate *startingGate, ready *listenerDeps, machineID string, log
 	logger.Info("envoy-listener /v1 open", slog.Int64("since_listening_ms", time.Since(listeningAt).Milliseconds()))
 }
 
+// listenerStreamOptions are the options envoy-listener starts the stream with
+// (bus.ConnectOwningStream): the deployment's replica count and byte limit, from cfg, and the
+// buckets the listener opens at that count (bus.ListenerBuckets: store.Open's interest and role
+// buckets, session.OpenSessionRegistry's and cistore.Open's, the list its NATS grant is built
+// from), which the client's keeper raises back to it when a concurrent start or an operator
+// lowered one (bus.WithKeptBuckets). The CI bucket is named even on a listener with no GitHub
+// route, which opens none: the keeper skips a bucket that does not exist. main and the tests that
+// start the listener's stream both take them from here.
+func listenerStreamOptions(cfg config.Service) []bus.ConnectOption {
+	return []bus.ConnectOption{
+		bus.WithReplicas(cfg.NATSReplicas),
+		bus.WithStreamMaxBytes(cfg.StreamMaxBytes),
+		bus.WithKeptBuckets(bus.ListenerBuckets()...),
+	}
+}
+
 func main() {
 	// Phase 1: Load config (synchronous, fast). With ENVOY_LISTEN_FD, Load inspects the inherited
 	// socket and takes its address as cfg's, so the API auth fence below judges the address that
@@ -696,8 +725,9 @@ func main() {
 	logger.Info("envoy-listener listening", slog.String("addr", ln.Addr().String()))
 
 	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here). The listener owns
-	// ENVOY_NOTIFICATIONS: this start reconciles the stream (bus.ConnectOwningStream).
-	client, err := bus.ConnectOwningStream(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas))
+	// ENVOY_NOTIFICATIONS: this start reconciles the stream (bus.ConnectOwningStream) at the
+	// deployment's replica count and byte limit (listenerStreamOptions).
+	client, err := bus.ConnectOwningStream(cfg.NATSURLs, listenerStreamOptions(cfg)...)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -900,6 +930,8 @@ func main() {
 		caches:     caches,
 		consumer:   consumer,
 		streamName: bus.Stream,
+		delivery:   &deliveryConfig,
+		confirmed:  dedupe.New(10 * time.Minute),
 	}
 	openV1Routes(v1Gate, ready, cfg.MachineID, logger, listeningAt)
 

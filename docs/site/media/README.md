@@ -2,7 +2,7 @@
 
 The scripts here make the site's screenshots and narrated videos from code, so each one can be
 taken again when the product changes. Screenshots are not committed: CI
-(`.github/workflows/docs.yaml`) takes them before every site build. Videos are committed with
+(the `docs` job of `.github/workflows/ci.yaml`) takes them before every site build. Videos are committed with
 everything needed to record them again.
 
 | File | What it is |
