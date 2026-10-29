@@ -15177,7 +15177,8 @@ describe("messages missed while the subscription was down", () => {
 
       const [card] = session.cards("evt-own-iterator");
       expect(card?.content).toContain("while this session's connection was down");
-      expect(card?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+      // The host's turn streams, so the card goes as an aside (`handCard` in extensions/envoy.ts).
+      expect(card?.options).toEqual({ deliverAs: "aside", triggerTurn: true });
       await session.stillOnce(session.agentSubject, frame, "evt-own-iterator");
     });
 

@@ -67,6 +67,21 @@ a Send that arrived as a card, and one forged after a restart are each a card, w
 retry, a new attempt, can still be their turn. Every refusal, error and timeout (10 s), a Dispatch
 configuration that no longer resolves included, keeps the card and posts nothing.
 
+Every frame that is not a person's accepted turn and not a BTW is a card: an Envoy notification, an
+issue message, a comment mention, a Dispatch Steer the accept refused. A card goes as an aside
+while a turn runs, and as a steer with `triggerTurn` to an idle host (`handCard` in
+`extensions/envoy.ts`). The host drains its steering queue one message per turn, first in first
+out, so a session that received more cards per hour than it took turns fell behind without end;
+it folds every pending aside in whole at the next step boundary, after any steer, without ending
+the running tool batch. The idle arm keeps wake-on-message: an idle aside starts no turn after an
+interrupt or in plan mode, where a steer with `triggerTurn` starts one. A targeted Aside is an
+aside either way, an inert card stays a steer with `triggerTurn: false`, and a host context
+without `ctx.isIdle()` keeps every card a steer. The limit is the case the host folds into the
+context with no turn — an aside that lands as a run ends in a session interrupted earlier, or one
+in plan mode: that card is read at the next turn rather than starting one, where the steer started
+a turn. `extensions/card-delivery-omp.test.ts` measures the fold against the real binary, with the
+cards and the Send on a real NATS server.
+
 On a host with `pi.sendUserInput` (our Oh My Pi fork, can1357/oh-my-pi#14323) the body runs as if
 typed at the session's terminal (`runTypedInput`), with the Dispatch message id as the host's `tag`
 and `deliverAs: "aside"` for an Aside: a built-in the host runs headless, an extension or custom

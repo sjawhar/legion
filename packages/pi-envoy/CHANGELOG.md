@@ -217,6 +217,17 @@
 
 ### Fixed
 
+- A person's Send from Dispatch's live view no longer waits behind Envoy notifications. Every
+  card (an Envoy notification, an issue message, a comment mention, a Dispatch Steer that was not
+  accepted as the person's own turn) went into the host's steering queue, which the host drains
+  one message per turn, so a session that received more cards per hour than it took turns fell
+  behind without end. While a turn runs a card now goes as an aside, which the host folds in at
+  the next step, after any steer, without ending the running tool batch. On an idle session a card
+  is still a steer with `triggerTurn`, so it starts a turn as before; a targeted Aside stays an
+  aside, and a host context without `ctx.isIdle()` keeps every card a steer. A card the host folds
+  into the context with no turn (an aside that lands as a run ends in a session interrupted
+  earlier, or one in plan mode) is read at the next turn rather than starting one.
+
 - AskGate's rules no longer push a reviewer to shorten an ask below what its concrete case needs.
   They say a rewritten `dispatch ask` or `dispatch edit-ask` question is at most 2,000 characters
   (`ASK_QUESTION_MAX`), cut to fit and never below it to save room. Content failure 12 exempts the
