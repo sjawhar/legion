@@ -227,7 +227,7 @@ func requireForkReads(t *testing.T, what string, got, want forkReads) {
 // rendering only where the write kept it: a mark the growth weigh refuses drops the fork with its
 // rendering, a mark already written is no change and keeps both, and a document outside the
 // schema answers its own refusal, which a read of it answers too.
-func TestForkReadsAMarkQuoteReadsTheForkItWroteOnce(t *testing.T) {
+func TestForkReadsAMarkQuoteAnswersItsAnchorAndAVersionAfterItReusesItsRendering(t *testing.T) {
 	service, artifactID := newForkReadsRoom(t)
 	checks := checkRenderings(service)
 	topLevel := map[string]bool{}
