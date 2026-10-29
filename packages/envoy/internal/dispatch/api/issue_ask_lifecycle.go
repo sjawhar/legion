@@ -36,10 +36,11 @@ func withdrawnReason(issueKey string) string {
 // are not asks yet, and the close's sweep marks them resolved (sweepClosedIssueAsks). An issue
 // already closed, or none, settles nothing: its close is refused.
 //
-// ctx must not be cancelled by the client (context.WithoutCancel): a settlement runs to its end
-// whether or not the client waits for the close, as the settlement it stands in for would.
-// issueSettleBudget (docs.SettleIssueDocuments) bounds only the waits for the rooms' durable
-// appends and whether a retry starts, not a settlement already running.
+// ctx must not end when the client goes away (outlivingTheClient): a settlement runs to its end
+// whether or not the client waits for the close, as the settlement it stands in for would. On a
+// keyed request it still ends at the keyed run's bound (keyedRunLimit). issueSettleBudget
+// (docs.SettleIssueDocuments) bounds only the waits for the rooms' durable appends and whether a
+// retry starts, not a settlement already running.
 func (s *server) settleIssueBeforeClose(ctx context.Context, issueKey string) {
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return
@@ -189,7 +190,7 @@ func (s *server) restoreIssueAsksTx(ctx context.Context, tx pgx.Tx, issueKey str
 // block is logged. An issue reopened in the meantime is left alone. The sweep never fails the
 // close: an error is logged.
 //
-// ctx must not be cancelled by the client (context.WithoutCancel), and no transaction is open. It
+// ctx must not end when the client goes away (outlivingTheClient), and no transaction is open. It
 // carries the writer gates of the issue's documents the close took before its transaction
 // (docs.Service.AcquireDocumentWriter): no document is added to a closed issue, so those are every
 // document the sweep writes, and it takes no gate of its own.

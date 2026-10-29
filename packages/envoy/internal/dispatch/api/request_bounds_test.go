@@ -257,22 +257,22 @@ func TestARequestOnAFullPoolAnswersDatabaseBusy(t *testing.T) {
 	assertRetryable(t, response.Result(), http.StatusServiceUnavailable, admission.CodeDatabaseBusy)
 }
 
-// An event stream is neither admitted nor bounded by the read deadline: it stays open, and keeps
-// writing its heartbeat, long after an ordinary read's deadline would have ended it.
-func TestAnEventStreamOutlivesTheReadDeadline(t *testing.T) {
+// The live socket is mounted outside the route table, so it is neither admitted nor bounded by the
+// read deadline: it stays open, and keeps sending its heartbeat, long after an ordinary read's
+// deadline would have ended it.
+func TestTheLiveSocketOutlivesTheReadDeadline(t *testing.T) {
 	const deadline = 100 * time.Millisecond
-	handler, _, _ := newTestServer(t, testServerOptions{readDeadline: deadline, streamHeartbeat: 20 * time.Millisecond})
-	httpServer := httptest.NewServer(handler)
-	t.Cleanup(httpServer.Close)
+	rig := newLiveSocketRig(t, testServerOptions{
+		readDeadline: deadline, streamHeartbeat: 20 * time.Millisecond,
+	}, nil)
 
 	opened := time.Now()
-	scanner := openSSEStream(t, httpServer.URL+"/api/v1/events")
-	for scanner.Scan() {
-		if scanner.Text() == ": heartbeat" && time.Since(opened) > 3*deadline {
-			return
+	client := rig.dial(t, asUser("alice"))
+	for time.Since(opened) <= 3*deadline {
+		if frame := decodeSocketFrame(t, client.take(t, time.Second, "a heartbeat")); frame == nil {
+			t.Fatalf("the live socket sent a frame that is not one of its own after %v", time.Since(opened))
 		}
 	}
-	t.Fatalf("the event stream ended after %v (%v), within three read deadlines", time.Since(opened), scanner.Err())
 }
 
 // holdCommitsLockKey is the advisory lock the commit-holding trigger waits on.

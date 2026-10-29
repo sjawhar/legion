@@ -20,5 +20,9 @@ export function useIssueRepo(issueKey: string): IssueFieldWrite<string | null> {
       current?.map((issue) => (issue.key === issueKey ? { ...issue, ...fields } : issue))
     );
   };
-  return useIssueFieldWrite<string | null>(issueKey, { patch: (repo) => ({ repo }), show });
+  return useIssueFieldWrite<string | null>(issueKey, {
+    label: (repo) => `${issueKey} on ${repo ?? "its project's repository"}`,
+    patch: (repo) => ({ repo }),
+    show,
+  });
 }

@@ -115,10 +115,11 @@ func (s *Service) recordEditNotice(ctx context.Context, tx pgx.Tx, artifactID st
 	return nil
 }
 
-// editNoticeInterval is the sweep's period and its ticker's, editNoticeBatch the most due notices
-// one sweep sends, and editNoticeDiffBytes the most a notice's diff holds. A notice is due at most
-// editNoticeInterval before a sweep sends it, so a person's edit reaches its sessions within the
-// quiet time plus five seconds.
+// editNoticeInterval is the sweep's period and the wait after each sweep before the next,
+// editNoticeBatch the most due notices one sweep sends, and editNoticeDiffBytes the most a
+// notice's diff holds. A notice is due at most editNoticeInterval, plus the time the sweep before
+// took, before a sweep sends it, so a person's edit reaches its sessions within the quiet time
+// plus five seconds and that sweep's time.
 const (
 	editNoticeInterval  = 5 * time.Second
 	editNoticeBatch     = 20
@@ -140,29 +141,23 @@ const dueEditNotice = `
 
 // RunEditNotices sends each document's edit notice once its quiet window ends: one
 // artifact.human_edited event, which reaches the sessions the document credits and its issue's
-// route (outbox.publishAuthorRoutes). It sweeps at start and every editNoticeInterval until ctx
-// ends, under duty.EditNoticeLease, so one process sweeps a period however many serve the
-// database. The window is a row, not a timer, so a notice still pending when a process stops is
-// sent by the next sweep of any process. Its statements run on the background pool
-// (store.Pool.Background), which no request waits on.
+// route (outbox.publishAuthorRoutes). It sweeps at start and then editNoticeInterval after each
+// sweep returns (duty.RunLeasedAfterEachPass) until ctx ends, under duty.EditNoticeLease, so one
+// process sweeps a period however many serve the database. The window is a row, not a timer, so a
+// notice still pending when a process stops is sent by the next sweep of any process. Its
+// statements run on the background pool (store.Pool.Background), which no request waits on.
 func (s *Service) RunEditNotices(ctx context.Context, leases duty.Leases) {
 	ctx = store.WithTransactionTracking(ctx)
-	for {
-		duty.Exclusive(ctx, leases, duty.EditNoticeLease, editNoticeInterval, func(ctx context.Context) {
-			sent, err := s.sendDueEditNotices(ctx)
-			if err != nil && ctx.Err() == nil {
-				slog.Error("dispatch: send edit notices", "error", err)
-			}
-			if sent > 0 {
-				slog.Info("dispatch: sent edit notices", "notices", sent)
-			}
-		})
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(editNoticeInterval):
+	duty.RunLeasedAfterEachPass(ctx, leases, duty.EditNoticeLease, editNoticeInterval, func(ctx context.Context) time.Duration {
+		sent, err := s.sendDueEditNotices(ctx)
+		if err != nil && ctx.Err() == nil {
+			slog.Error("dispatch: send edit notices", "error", err)
 		}
-	}
+		if sent > 0 {
+			slog.Info("dispatch: sent edit notices", "notices", sent)
+		}
+		return editNoticeInterval
+	})
 }
 
 // sendDueEditNotices sends up to editNoticeBatch due notices, each in a transaction of its own, and

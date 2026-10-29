@@ -60,7 +60,7 @@ func writerGateHandler(
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
 	return withDeadline(mux), service, database
 }
 

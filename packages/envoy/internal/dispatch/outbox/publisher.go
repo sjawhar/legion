@@ -112,7 +112,7 @@ type Deps struct {
 	Publisher Publisher
 	Broker    *events.Broker
 	Docs      docs.API
-	// Leases is where the compaction tick takes duty.DocumentCompactionLease (compactDocuments). It
+	// Leases is where the compaction tick takes duty.DocumentCompactionLease (compactDaily). It
 	// is required of a Run that ticks: there is no nil-means-unleased path, and cmd/dispatch
 	// exits at boot if the lease pool cannot be opened.
 	Leases duty.Leases
@@ -156,32 +156,26 @@ func Run(ctx context.Context, deps Deps) {
 // compactDaily runs compactDocuments once per compactInterval until ctx ends, on a goroutine of its
 // own: a compaction walks every document for minutes, and on the outbox's loop nothing would
 // publish meanwhile. It goes through the document service's store, not the outbox's pool.
+//
+// Each compaction runs under duty.DocumentCompactionLease, so that one process does that walk
+// however many serve the database, once per compactInterval and not once per process: the period
+// is this loop's own interval, so a process whose tick comes hours after the other's finds the
+// day's compaction already done and skips it. The ticks are duty.RunLeased's, a ticker's: the
+// first tick one interval after the call, then one each interval; the first tick a compaction
+// overran comes at once with the moment it was due, and only the ones after it are dropped.
 func compactDaily(ctx context.Context, deps Deps) {
 	ctx = store.WithTransactionTracking(ctx)
-	compact := time.NewTicker(compactInterval)
-	defer compact.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-compact.C:
-			compactDocuments(ctx, deps)
-		}
-	}
+	duty.RunLeased(ctx, deps.Leases, duty.DocumentCompactionLease, compactInterval, duty.TickAfterInterval, func(ctx context.Context) {
+		compactDocuments(ctx, deps)
+	})
 }
 
-// compactDocuments runs the daily compaction of every document under duty.DocumentCompactionLease.
-// The compaction walks every document, so two envoy-dispatch processes compacting at the same
-// moment is twice the work for one result: under the lease one process does that walk however
-// many serve the database, once per compactInterval and not once per process. The period is this
-// loop's own tick, so a process whose ticker fires hours after the other's finds the day's
-// compaction already done and skips it.
+// compactDocuments is one daily compaction of every document, the pass compactDaily runs under
+// duty.DocumentCompactionLease.
 func compactDocuments(ctx context.Context, deps Deps) {
-	duty.Exclusive(ctx, deps.Leases, duty.DocumentCompactionLease, compactInterval, func(ctx context.Context) {
-		if err := deps.Docs.CompactAll(ctx); err != nil {
-			slog.Error("dispatch outbox: compact documents", "error", err)
-		}
-	})
+	if err := deps.Docs.CompactAll(ctx); err != nil {
+		slog.Error("dispatch outbox: compact documents", "error", err)
+	}
 }
 
 func scan(ctx context.Context, deps Deps) {

@@ -265,11 +265,12 @@ func (s *server) readIssueClaim(ctx context.Context, key string) (*model.IssueCl
 }
 
 // writeIssueClaim sets or clears an issue's claim; a nil claim clears it. The two claim
-// columns always move together, and the issue's status is never touched here.
+// columns always move together, and the issue's status is never touched here. updated_at moves
+// as every issue write moves it (issueUpdatedNow).
 func writeIssueClaim(ctx context.Context, tx pgx.Tx, key string, claim *model.IssueClaim) error {
 	if claim == nil {
 		_, err := tx.Exec(ctx, `
-			update issues set claimed_by = null, claimed_at = null, updated_at = now() where key = $1
+			update issues set claimed_by = null, claimed_at = null, updated_at = `+issueUpdatedNow+` where key = $1
 		`, key)
 		return err
 	}
@@ -278,7 +279,7 @@ func writeIssueClaim(ctx context.Context, tx pgx.Tx, key string, claim *model.Is
 		return err
 	}
 	_, err = tx.Exec(ctx, `
-		update issues set claimed_by = $2, claimed_at = $3, updated_at = now() where key = $1
+		update issues set claimed_by = $2, claimed_at = $3, updated_at = `+issueUpdatedNow+` where key = $1
 	`, key, actor, claim.At)
 	return err
 }

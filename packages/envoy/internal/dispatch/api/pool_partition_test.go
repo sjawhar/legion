@@ -1,10 +1,8 @@
 package api
 
 import (
-	"bufio"
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -58,40 +56,41 @@ func appendEventOn(t *testing.T, pool *store.Pool, issueKey string) int64 {
 	return event.ID
 }
 
-// readFramesThrough reads the stream's frames until one carries id, failing on a frame past it.
-func readFramesThrough(t *testing.T, stream *bufio.Scanner, id int64) {
+// readFeedThrough reads the events subscription's frames until one carries id, failing on a frame
+// past it.
+func readFeedThrough(t *testing.T, client *socketClient, sub string, id int64) {
 	t.Helper()
 	for got := int64(0); got != id; {
-		got = sseFrameID(t, readSSEFrame(t, stream))
+		got = nextEventID(t, client, sub)
 		if got > id {
-			t.Fatalf("the stream sent id %d before the event %d", got, id)
+			t.Fatalf("the feed sent id %d before the event %d", got, id)
 		}
 	}
 }
 
-// The live event stream reads through a pool of its own (store.Pool.Live): with every connection
-// of the request pool held - the requests of a burst - an open stream still receives an event
-// another writer commits, read back out of the log by the relay. The stream's own catch-up runs on
-// the request pool, so the stream is opened, and its catch-up seen done, before the pool is taken.
-func TestAnOpenEventStreamReceivesACommitWhileTheRequestPoolIsFullyAcquired(t *testing.T) {
-	handler, database, _ := newTestServer(t, testServerOptions{
+// The event feed reads through a pool of its own (store.Pool.Live): with every connection of the
+// request pool held - the requests of a burst - an open live socket's events subscription still
+// receives an event another writer commits, read back out of the log by the relay. The
+// subscription's own catch-up runs on the live pool too, and the socket is opened, and its first
+// frame seen, before the request pool is taken.
+func TestAnOpenEventFeedReceivesACommitWhileTheRequestPoolIsFullyAcquired(t *testing.T) {
+	rig := newLiveSocketRig(t, testServerOptions{
 		requestPoolSize: 4, acquireBound: partitionAcquireBound, streamHeartbeat: time.Hour,
-	})
-	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
-	httpServer := httptest.NewServer(handler)
-	t.Cleanup(httpServer.Close)
-	stream := openSSEStream(t, httpServer.URL+"/api/v1/events")
+	}, nil)
+	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
+	client := rig.dial(t, asUser("alice"))
+	subscribeEvents(t, client, "events", nil)
 
-	// A frame is sent only after the connection's catch-up has read its last page, so once this
-	// one arrives the stream reads nothing more of the request pool until its next heartbeat.
-	readFramesThrough(t, stream, appendEventOn(t, database.Pool, issue.Key))
+	// A frame is sent only after the subscription's catch-up has read its last page, so once this
+	// one arrives the feed reads nothing more until the next commit.
+	readFeedThrough(t, client, "events", appendEventOn(t, rig.database.Pool, issue.Key))
 
-	holdEveryConnection(t, database.Pool)
-	background, err := database.Pool.Background()
+	holdEveryConnection(t, rig.database.Pool)
+	background, err := rig.database.Pool.Background()
 	if err != nil {
 		t.Fatalf("open the background pool: %v", err)
 	}
-	readFramesThrough(t, stream, appendEventOn(t, background, issue.Key))
+	readFeedThrough(t, client, "events", appendEventOn(t, background, issue.Key))
 }
 
 // The suggestion sweep runs on the pool cmd/dispatch hands it, the background pool: with every
@@ -123,7 +122,7 @@ func TestASuggestionSweepPassCompletesWhileTheRequestPoolIsFullyAcquired(t *test
 	holdEveryConnection(t, database.Pool)
 	ctx, stop := context.WithCancel(t.Context())
 	done := make(chan struct{})
-	go func() { defer close(done); RunSuggestionOutcomeSweep(ctx, background, sweepLeaseTick, leases) }()
+	go func() { defer close(done); RunSuggestionOutcomeSweep(ctx, background, sweepLeaseTick, leases, nil) }()
 	defer func() { stop(); <-done }()
 	var outcome string
 	for deadline := time.Now().Add(30 * time.Second); outcome != "overridden"; {

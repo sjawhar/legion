@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // The pool refuses a second connection to a caller that already holds one of its transactions:
@@ -319,9 +320,7 @@ func TestEachBeginRefusalIsKeyedToItsCaller(t *testing.T) {
 	ctx, release := HoldsConnection(context.Background())
 	defer release()
 	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(&logs, nil))
 
 	if _, err := beginFromOneSite(ctx, database.Pool); !errors.Is(err, ErrNestedAcquire) {
 		t.Fatalf("transaction from the first call site: %v, want ErrNestedAcquire", err)

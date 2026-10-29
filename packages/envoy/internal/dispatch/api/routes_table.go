@@ -39,12 +39,8 @@ type routeRow struct {
 // apiRoute is one mounted route: its row, and how register serves it (serveRoute).
 type apiRoute struct {
 	routeRow
-	// Stream marks the two server-sent event streams, which run for as long as their client
-	// listens: they are neither admitted nor bounded by a deadline. INFRA-258 moves both onto a
-	// websocket, and the field goes with their rows.
-	Stream bool
-	// TestHook marks a route TestHooksEnabled mounts; a test's own route is neither admitted nor
-	// bounded either.
+	// TestHook marks a route TestHooksEnabled mounts: a test's own route is neither admitted nor
+	// bounded by a deadline.
 	TestHook bool
 	// Deadline replaces the server's read deadline (defaultReadDeadline) for a read whose work is
 	// bounded by the bytes it moves rather than by the database. Only a read has a deadline, so
@@ -53,9 +49,10 @@ type apiRoute struct {
 	// Weight is how many of its class's admission units a request takes (admission.Limiter): the
 	// most request-pool connections it holds at once. Zero is one.
 	Weight int
-	// BodyLimit is the most bytes the route reads of a request body, which is also how much of a
-	// refused request's body the server drains before it answers (drainRequestBody). Zero is
-	// maxJSONRequestBytes, every JSON route's limit.
+	// BodyLimit is the most bytes the route reads of a request body, which is also how much the
+	// keyed layer spools and how much of an early-answered request's body the server drains before
+	// it answers (routeBodyLimit, drainBeforeAnswer). Zero is maxJSONRequestBytes, every JSON
+	// route's limit.
 	BodyLimit int64
 }
 
@@ -71,7 +68,7 @@ type apiRoute struct {
 // A write never pins: it waits for its documents' writer gates between statements, which a caller
 // holding a connection is refused (docs.ErrGateWhileHoldingConnection).
 func (r apiRoute) pinsConnection() bool {
-	return r.Method == http.MethodGet && !r.Stream && !r.TestHook && r.Weight <= 1 && r.Deadline == 0
+	return r.Method == http.MethodGet && !r.TestHook && r.Weight <= 1 && r.Deadline == 0
 }
 
 // downloadDeadline is the deadline of the four file version downloads, which move a file up to
@@ -87,9 +84,6 @@ const concurrentReadWeight = 2
 // pattern. routes() refuses an entry that names no row, so a renamed route cannot silently lose
 // its serving.
 var routeServings = map[string]apiRoute{
-	"GET /api/v1/events":                     {Stream: true},
-	"GET /api/v1/agents/{session_id}/stream": {Stream: true},
-
 	"POST /api/v1/projects/{key}/artifacts":      {BodyLimit: maxUploadRequestBytes},
 	"POST /api/v1/issues/{key}/artifacts":        {BodyLimit: maxUploadRequestBytes},
 	"POST /api/v1/agents/{session_id}/artifacts": {BodyLimit: maxUploadRequestBytes},
@@ -197,7 +191,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/issues/{key}/messages", authAny, "Post an issue message; target and delivery address a session or role.", s.createMessage},
 		{http.MethodGet, "/api/v1/issues/{key}/messages", authAny, "List an issue's message threads: every root message, oldest first, each with its deliveries and its replies.", s.listIssueMessages},
 		{http.MethodGet, "/api/v1/issues/{key}/messages/{id}", authAny, "Read one message with its deliveries and replies.", s.getMessage},
-		{http.MethodGet, "/api/v1/messages/{id}", authAny, "Read the conversation a message belongs to by any message id in it, issue-less or not: the thread root with its deliveries and every reply, oldest first. An issue thread follows the issue's rule. On a direct (issue-less) thread a bearer names its session in ?session= and reads only one whose root targets that session or that it replied in (403 THREAD_FORBIDDEN), a guard against reading another session's conversation by mistake, not an authorization boundary. Direct-conversation text also reaches every authenticated caller through GET /api/v1/events; nothing in Dispatch restricts it by session.", s.getMessageThread},
+		{http.MethodGet, "/api/v1/messages/{id}", authAny, "Read the conversation a message belongs to by any message id in it, issue-less or not: the thread root with its deliveries and every reply, oldest first. An issue thread follows the issue's rule. On a direct (issue-less) thread a bearer names its session in ?session= and reads only one whose root targets that session or that it replied in (403 THREAD_FORBIDDEN), a guard against reading another session's conversation by mistake, not an authorization boundary. Direct-conversation text also reaches every authenticated caller through that caller's events view on GET /ws/live; nothing in Dispatch restricts it by session.", s.getMessageThread},
 		{http.MethodPost, "/api/v1/messages/{id}/deliveries", authAny, "Retry delivering a targeted message.", s.createDelivery},
 		{http.MethodPost, "/api/v1/messages/{id}/deliveries/{attempt}/accept", authBearer, "The attempt's session records that it took the message as its user's own turn; the session names itself in actor (403 ACCEPT_FORBIDDEN for another's attempt). One compare-and-set: only a direct message to that session, on no issue, neither a broadcast's copy nor a reply in a broadcast's thread, in a thread whose root targets it (409 ACCEPT_NOT_DIRECT), that a person wrote (409 ACCEPT_NOT_WRITTEN_BY_PERSON), sent as a Send or an Aside (409 ACCEPT_NOT_ASIDE_OR_STEER); only the message's latest attempt (409 ACCEPT_SUPERSEDED), when no attempt of it was accepted before (409 ACCEPT_ALREADY_ACCEPTED), which a person requested (409 ACCEPT_NOT_REQUESTED_BY_PERSON), that person being the message's author (409 ACCEPT_NOT_REQUESTED_BY_AUTHOR), which did not fail (409 ACCEPT_FAILED; a pending or sent attempt is taken), within the last minute (409 ACCEPT_STALE). Answers the attempt with accepted_at and accepted_as and the message's stored body; leaves the attempt's state to the send, and appends message.accepted.", s.acceptDelivery},
 		{http.MethodPost, "/api/v1/messages/{id}/reply", authBearer, "The targeted session's reply to a delivery; the session names itself in actor. Once the attempt is answered, ?follow_up=true posts other text as the session's follow-up, threaded under its first reply; with follow_up=false or absent, or with text the session already posted there, nothing is posted and the stored message comes back marked duplicate. Any other follow_up is 400 MESSAGE_INPUT.", s.replyMessage},
@@ -209,12 +203,11 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/search/coverage", authAny, "Meaning search's coverage {identity, place, model, total, kinds}: the configured embedder's identity, its place (bedrock or azure) and model, all three null with none configured; then, in total and for each kind (issue, document, comment, ask, message), the searchable items, how many carry a current vector from that identity, how many lack one, how many failed for good, and how many seconds the oldest lacking item has waited (null when none lacks).", s.searchCoverage},
 		{http.MethodGet, "/api/v1/agents", authAny, "Live sessions with roles, capabilities, open asks, and last activity, from Dispatch's copy of the Envoy listener's session list, at most 5 s old.", s.listAgents},
 		{http.MethodGet, "/api/v1/agents/{session_id}/messages", authHuman, "A session's targeted messages, newest first.", s.listAgentMessages},
-		{http.MethodPost, "/api/v1/agents/{session_id}/messages", authHuman, "Send an issue-less targeted message to a session.", s.createAgentMessage},
-		{http.MethodGet, "/api/v1/agents/{session_id}/stream", authHuman, "Server-sent stream of a live session's own conversation, relayed from the session itself: an SSE `replay` event with what the session can still replay, then a `frame` event per turn, tool call, and streamed update. Nothing is stored.", s.streamAgentConversation},
+		{http.MethodPost, "/api/v1/agents/{session_id}/messages", authHuman, "Send an issue-less targeted message to a session: {body, delivery, in_reply_to?}, answered once its own delivery attempt has settled, on past a client that gives up. Under an Idempotency-Key header (as every POST and PATCH takes one), a repeat with the same request answers 201 with the message the key made and its deliveries as they stand, Idempotency-Replayed: ?1, first sending the one attempt it still owes (none yet, or one stranded past its claim) and nothing else; a listener it cannot reach is recorded on the attempt, so a repeat is answered while the listener is down. An attempt a stopped process left owed is resumed by the server's delivery sweep whether anyone asks again or not.", s.createAgentMessage},
 		{http.MethodPost, "/api/v1/agents/{session_id}/artifacts", authAny, "Upload a file or image to an agent's conversation (multipart, as an issue upload, its kind read from its bytes): ref_key agent/<session_id>/<slug>, addressed dispatch://agent/<session_id>/artifact/<slug>. It holds files and images only: a markdown document (JSON content or a text/markdown file) is 400 ARTIFACT_INPUT, since a document belongs to an issue or a project. No event is appended. A session_id that is empty or holds /, ?, #, whitespace, a control character or a character that ends a reference in text (<>\"'`[]|) is 400 INVALID_SESSION_ID on every agent artifact route.", s.uploadAgentArtifact},
 		{http.MethodGet, "/api/v1/agents/{session_id}/artifacts/{slug}", authAny, "Read an agent's conversation's file or image and its versions by slug.", s.getArtifact},
 		{http.MethodGet, "/api/v1/agents/{session_id}/artifacts/{slug}/versions/{number}", authAny, "Download one version of an agent's conversation's file or image, as the issue form serves it (Cache-Control: private, max-age=31536000, immutable).", s.getArtifactVersion},
-		{http.MethodPost, "/api/v1/broadcasts", authHuman, "Send one message to many sessions: one targeted message per recipient under a shared broadcast. A selected session that is not live or does not advertise the mode is excluded and named in the response, never switched to another mode. `idempotency_key` names one send: a repeat with the same key and request answers the original broadcast (200); a reuse for a different request is 409 BROADCAST_KEY_REUSED naming the broadcast that used it, and sends nothing.", s.createBroadcast},
+		{http.MethodPost, "/api/v1/broadcasts", authHuman, "Send one message to many sessions: {body, delivery, session_ids}, one targeted message per recipient under a shared broadcast, answered once it is committed while each recipient's delivery runs behind the answer. A selected session that is not live or does not advertise the mode is excluded and named in the response, never switched to another mode. Under an Idempotency-Key header (as every POST and PATCH takes one), a repeat with the same request answers 201 at once with the broadcast the key made, every recipient's attempts as they stand and the first answer's exclusions, Idempotency-Replayed: ?1, and puts every recipient it still owes on its way behind the answer. A recipient a stopped process left owed is resumed by the server's delivery sweep whether anyone asks again or not.", s.createBroadcast},
 		{http.MethodGet, "/api/v1/broadcasts", authHuman, "Recent broadcasts, newest first, with their recipient and reply counts.", s.listBroadcasts},
 		{http.MethodGet, "/api/v1/broadcasts/{id}", authHuman, "One broadcast with every recipient's delivery attempts and replies, recipients in the order the send named them; a broadcast from before that order was stored falls back to created_at, id.", s.getBroadcast},
 		{http.MethodPost, "/api/v1/issues/{key}/asks", authAny, "Open a question ask on an issue (options optional). The response's advice.suggestions names any already-answered ask that may settle the same question, with who answered and when, without ever blocking or slowing the write.", s.createAsk},
@@ -275,7 +268,6 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPut, "/api/v1/me/agents/{session_id}/state", authHuman, "Clear an agent's conversation for the caller (cleared_before hides exchanges at or before it), mark it read (read_through only moves forward), and/or mark some of its replies read by id (read_replies, the session's own messages); answers the session's state.", s.putUserAgentState},
 		{http.MethodPut, "/api/v1/me/asks/{id}/snooze", authHuman, "Snooze an inbox row for the caller until snoozed_until.", s.putAskSnooze},
 		{http.MethodDelete, "/api/v1/me/asks/{id}/snooze", authHuman, "Un-snooze an inbox row for the caller.", s.deleteAskSnooze},
-		{http.MethodGet, "/api/v1/events", authAny, "Server-sent event stream; Last-Event-ID or ?since= resumes.", s.streamEvents},
 		{http.MethodGet, "/api/v1/credential-requests", authHuman, "List credential requests the caller may decide (?approver=me only): those naming the caller, a shared secret's and a service's machine login, which anyone signed in decides; null without a configured secrets broker.", s.listCredentialPending},
 		{http.MethodGet, "/api/v1/credential-requests/{id}", authHuman, "Read one credential request's facts; the broker is authoritative.", s.getCredentialRecord},
 		{http.MethodPost, "/api/v1/credential-requests/{id}/approve", authHuman, "Approve a credential request as the caller (a machine login also takes its typed code); the broker decides whether the caller is its approver.", s.approveCredentialRecord},
@@ -289,11 +281,12 @@ func (s *server) routes() []apiRoute {
 	var testHooks []routeRow
 	if s.deps.TestHooksEnabled {
 		testHooks = []routeRow{
-			{http.MethodPost, "/api/v1/events/_test/disconnect", authAny, "Test hook: drop every open event stream.", s.disconnectAllStreams},
-			{http.MethodPost, "/api/v1/delivery/_test/disconnect", authAny, "Test hook: close every open delivery socket with 1012, as a restart does.", s.disconnectDeliverySockets},
+			{http.MethodPost, "/api/v1/live/_test/disconnect", authAny, "Test hook: close every open live socket with 1012, as a restart does.", s.disconnectLiveSockets},
+			{http.MethodPost, "/api/v1/live/_test/rotate", authAny, "Test hook: close every open live socket with 4001 (max age), as its age does.", s.rotateLiveSockets},
 			{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document and finish the settlements in flight.", s.quiesceDocuments},
 			{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
 			{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authHuman, "Test hook: publish one frame to a session's conversation viewers.", s.publishAgentStreamFrame},
+			{http.MethodPost, "/api/v1/writes/_test/slow", authAny, "Test hook: {method, path, delay_ms} delays every keyed run of that method and path by delay_ms after its key is claimed, on the handler's own context; 0 disarms.", s.armSlowWrite},
 		}
 	}
 	return mountedRoutes(rows, testHooks)

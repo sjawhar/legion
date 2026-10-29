@@ -93,9 +93,9 @@ func TestScheduleWindowAndRecoveryReference(t *testing.T) {
 		t.Errorf("-recovery-ref-p99 250: %v, %v", ref, err)
 	}
 
-	if defaultSSE(60, nil) != 2 || defaultSSE(0, nil) != 1 || defaultSSE(60, s) != 8 {
-		t.Errorf("default SSE: %d at 60 req/s, %d at 0, %d at 60 req/s with a 4x peak; want 2, 1 and 8",
-			defaultSSE(60, nil), defaultSSE(0, nil), defaultSSE(60, s))
+	if defaultLiveSockets(60, nil) != 2 || defaultLiveSockets(0, nil) != 1 || defaultLiveSockets(60, s) != 8 {
+		t.Errorf("default live sockets: %d at 60 req/s, %d at 0, %d at 60 req/s with a 4x peak; want 2, 1 and 8",
+			defaultLiveSockets(60, nil), defaultLiveSockets(0, nil), defaultLiveSockets(60, s))
 	}
 }
 

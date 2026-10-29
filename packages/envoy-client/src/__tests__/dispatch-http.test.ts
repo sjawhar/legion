@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { ArchitectureSource, IssueSummary } from "@legion/contracts";
-import { DispatchClient, DispatchGatewayError, type RetryClock } from "../dispatch-http";
+import {
+  DISPATCH_WRITE_RETRY,
+  DispatchClient,
+  DispatchGatewayError,
+  type RetryClock,
+} from "../dispatch-http";
 import { fakeSearchResponse } from "./fake-search-response";
 
 interface RecordedRequest {
@@ -379,9 +384,17 @@ describe("DispatchClient", () => {
     ]);
 
     for (const request of requests) {
-      expect((request.init.headers as Record<string, string>).Authorization).toBe("Bearer secret");
-      expect((request.init.headers as Record<string, string>).Accept).toBe("application/json");
+      const headers = request.init.headers as Record<string, string>;
+      expect(headers.Authorization).toBe("Bearer secret");
+      expect(headers.Accept).toBe("application/json");
+      // Every write carries a key of its own; no read carries one.
+      if (request.init.method === "GET") expect(headers["Idempotency-Key"]).toBeUndefined();
+      else expect(headers["Idempotency-Key"]).toBeString();
     }
+    const writeKeys = requests
+      .filter((request) => request.init.method !== "GET")
+      .map((request) => (request.init.headers as Record<string, string>)["Idempotency-Key"]);
+    expect(new Set(writeKeys).size).toBe(writeKeys.length);
     expect(requestBody(requests[0] as RecordedRequest)).toEqual({
       project: "DSP",
       title: "Issue",
@@ -400,8 +413,13 @@ describe("DispatchClient", () => {
     expect(requestBody(requests[11] as RecordedRequest)).toEqual({ ops: [], actor });
     expect(requestBody(requests[12] as RecordedRequest)).toEqual({ summary: "Named", actor });
 
-    const artifactBody = requests[7]?.init.body as FormData;
-    expect(artifactBody).toBeInstanceOf(FormData);
+    // The form is sent encoded, once, so a retry sends the bytes and boundary its first attempt did.
+    const upload = requests[7] as RecordedRequest;
+    const artifactBody = await new Response(upload.init.body, {
+      headers: {
+        "Content-Type": (upload.init.headers as Record<string, string>)["Content-Type"] as string,
+      },
+    }).formData();
     expect(artifactBody.get("name")).toBe("spec.md");
     expect(artifactBody.get("primary")).toBeNull();
     expect(artifactBody.get("summary")).toBe("Initial spec");
@@ -562,7 +580,8 @@ describe("DispatchClient", () => {
   // a retry there can post a message twice: the write is told to check what took effect. A 408 or
   // 429 is the gateway's own timeout or rate limit, sent before it forwards the request, so the
   // write never reached Dispatch and a retry may succeed. Any other status still gets the same
-  // advice as a read, since the request never got past the gateway either.
+  // advice as a read, since the request never got past the gateway either. Each status is one
+  // write's last attempt here; how the attempts before it are made is dispatch-keyed-writes.test.ts.
   test("tells a write a gateway answered whether it may have reached Dispatch", async () => {
     const page = (status: number, statusText: string) =>
       new Response(`<html><body><h1>${status} ${statusText}</h1></body></html>`, {
@@ -576,7 +595,11 @@ describe("DispatchClient", () => {
       page(429, "Too Many Requests"),
       page(404, "Not Found"),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl, undefined, {
+      ...DISPATCH_WRITE_RETRY,
+      pausesMs: [],
+      withinMs: 0,
+    });
     const refusal = () =>
       client.message("DSP-1", { body: "Shipped.", actor }).then(
         () => {
@@ -1194,6 +1217,23 @@ describe("DispatchClient waits out Retry-After", () => {
     return { state, clock };
   }
 
+  // A write's own retries under its key are another mechanism (dispatch-keyed-writes.test.ts);
+  // here each attempt is one send, so what the rows below count is the wait-out alone.
+  function retryClient(fetchImpl: typeof fetch, clock: RetryClock): DispatchClient {
+    return new DispatchClient(
+      "http://dispatch.test",
+      "secret",
+      fetchImpl,
+      undefined,
+      {
+        ...DISPATCH_WRITE_RETRY,
+        pausesMs: [],
+        withinMs: 0,
+      },
+      clock
+    );
+  }
+
   function refusal(status: number, code: string, retryAfter?: string): Response {
     return new Response(JSON.stringify({ error: "busy", code }), {
       status,
@@ -1211,13 +1251,7 @@ describe("DispatchClient waits out Retry-After", () => {
     const issue = { key: "DSP-1", title: "Issue" };
     const { fetchImpl, requests } = fakeFetch([refusal(503, code, "2"), jsonResponse(issue)]);
     const { state, clock } = fakeClock();
-    const client = new DispatchClient(
-      "http://dispatch.test",
-      "secret",
-      fetchImpl,
-      undefined,
-      clock
-    );
+    const client = retryClient(fetchImpl, clock);
 
     await expect(client.getIssue("DSP-1")).resolves.toMatchObject(issue);
 
@@ -1234,13 +1268,7 @@ describe("DispatchClient waits out Retry-After", () => {
     const posted = { id: "message-1", issue_key: "DSP-1" };
     const { fetchImpl, requests } = fakeFetch([refusal(429, code, "3"), jsonResponse(posted)]);
     const { state, clock } = fakeClock();
-    const client = new DispatchClient(
-      "http://dispatch.test",
-      "secret",
-      fetchImpl,
-      undefined,
-      clock
-    );
+    const client = retryClient(fetchImpl, clock);
 
     await expect(client.message("DSP-1", { body: "Shipped.", actor })).resolves.toMatchObject(
       posted
@@ -1262,13 +1290,7 @@ describe("DispatchClient waits out Retry-After", () => {
   ])("a POST answered 503 %s is not sent again, since it may have committed", async (code) => {
     const { fetchImpl, requests } = fakeFetch([refusal(503, code, "1")]);
     const { state, clock } = fakeClock();
-    const client = new DispatchClient(
-      "http://dispatch.test",
-      "secret",
-      fetchImpl,
-      undefined,
-      clock
-    );
+    const client = retryClient(fetchImpl, clock);
 
     await expect(client.message("DSP-1", { body: "Shipped.", actor })).rejects.toMatchObject({
       name: "DispatchServiceError",
@@ -1292,13 +1314,7 @@ describe("DispatchClient waits out Retry-After", () => {
     ]) {
       const { fetchImpl, requests } = fakeFetch([answer]);
       const { state, clock } = fakeClock();
-      const client = new DispatchClient(
-        "http://dispatch.test",
-        "secret",
-        fetchImpl,
-        undefined,
-        clock
-      );
+      const client = retryClient(fetchImpl, clock);
 
       await expect(client.getIssue("DSP-1")).rejects.toMatchObject({ status: answer.status });
       expect(requests).toHaveLength(1);
@@ -1309,13 +1325,7 @@ describe("DispatchClient waits out Retry-After", () => {
   test("starts no retry whose wait would pass the deadline", async () => {
     const late = fakeFetch([refusal(503, "DATABASE_BUSY", "1")]);
     const lateClock = fakeClock();
-    const lateClient = new DispatchClient(
-      "http://dispatch.test",
-      "secret",
-      late.fetchImpl,
-      undefined,
-      lateClock.clock
-    );
+    const lateClient = retryClient(late.fetchImpl, lateClock.clock);
     lateClock.state.at = 59_500;
 
     await expect(lateClient.getIssue("DSP-1")).rejects.toMatchObject({
@@ -1334,13 +1344,7 @@ describe("DispatchClient waits out Retry-After", () => {
       refusal(429, "OVERLOADED", "30"),
     ]);
     const { state, clock } = fakeClock();
-    const client = new DispatchClient(
-      "http://dispatch.test",
-      "secret",
-      fetchImpl,
-      undefined,
-      clock
-    );
+    const client = retryClient(fetchImpl, clock);
 
     await expect(client.message("DSP-1", { body: "Shipped.", actor })).rejects.toMatchObject({
       code: "OVERLOADED",
@@ -1361,13 +1365,7 @@ describe("DispatchClient waits out Retry-After", () => {
       refusal(429, "EDIT_QUEUE_FULL"),
     ]);
     const { state, clock } = fakeClock();
-    const client = new DispatchClient(
-      "http://dispatch.test",
-      "secret",
-      fetchImpl,
-      undefined,
-      clock
-    );
+    const client = retryClient(fetchImpl, clock);
 
     await expect(
       client.docEdit("artifact-1", { ops: [{ op: "delete", find: "same" }], actor })

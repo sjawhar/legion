@@ -18,7 +18,7 @@ same step before and after its change, and compares the two rows.
 | `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `run`, `tables`, `series-sessions`, `trigger-sql`, `box-busy` |
 | `api.go` | The Dispatch HTTP client, with the request trace that gives the arrival time; the refusal code of a failed answer and the class of a connection-level failure |
 | `seed.go` | The seed: 4 projects, 1,000 issues and 8,000 comments through Dispatch's API, and `seed.json` |
-| `run.go` | One step: its phases (the window, SSE streams, the event and request generators on one open-loop schedule, the probes) and `summary.json` |
+| `run.go` | One step: its phases (the window, the dashboard live sockets, the event and request generators on one open-loop schedule, the probes) and `summary.json` |
 | `schedule.go` | The `-schedule` parser and the rate plan that the open-loop schedule follows |
 | `recovery.go` | The recovery after the schedule's last drop, in 10 s windows |
 | `sessions.go` | The simulated sessions: their NATS subscriptions and receipts, their listener registrations and heartbeats |
@@ -31,7 +31,7 @@ same step before and after its change, and compares the two rows.
 | `lockprobe.go` | The 20 ms sampler of the commit-order lock |
 | `locksampler.go` | The 1 s sampler of every ungranted lock in `pg_locks` |
 | `pgpoll.go` | The poll loop of the lock probes (`pollPG`), and the error policy of the probes' reads, which the 5 s sampler shares: failed reads are counted, the first three are logged, and so is their total past three |
-| `sse.go` | The parser of the dashboard SSE frames, and the SSE frame latencies |
+| `live.go` | The dashboard live sockets' reader of `GET /ws/live` event frames, and the live frame latencies |
 | `proxy.go` | The TCP latency proxy toward Postgres |
 | `tables.go` | `TABLES.md` from one or more `summary.json` files, the pprof tops and the goroutine summary |
 | `guard.go` | `stack.json`, the endpoint flags and the check that every endpoint is the stack's own |
@@ -107,7 +107,7 @@ the key stays the same across steps. `stack.sh` stops each process by the pid in
 ```bash
 packages/envoy/loadtest/run-step.sh <name> --events <per s> --sessions <n> --requests <per s> \
   [--duration 180s] [--warmup 30s] [--grace 20s] [--event-mix <preset or kind=w,...>] \
-  [--route-mix <file>] [--human 0.1] [--sse <n>] [--rng-seed 1] [--out <dir>] \
+  [--route-mix <file>] [--human 0.1] [--live <n>] [--rng-seed 1] [--out <dir>] \
   [--schedule <factor>x:<duration>,...] [--recovery-ref-p99 <ms>]
 ```
 
@@ -131,7 +131,7 @@ value.
 | `--event-mix` | `production-2026-10-26` | A preset name or `kind=weight,...` (Event mix, below). |
 | `--route-mix` | the committed `routes-2026-10-26-1719Z.txt` | A route-mix file (Route mix, below). It must be a file. |
 | `--human` | `0.1` | The share of writes that a person makes, 0 to 1. |
-| `--sse` | `max(1, round(requests × f / 30))` | Dashboard SSE streams (`GET /api/v1/events`), with f the highest factor of `--schedule` (1 without one): 2 at 60 req/s, 20 at 600 req/s, 10 at 60 req/s under a schedule that peaks at 5x. |
+| `--live` | `max(1, round(requests × f / 30))` | Dashboard live sockets (`GET /ws/live`, each subscribed to the event feed as a dashboard tab is), with f the highest factor of `--schedule` (1 without one): 2 at 60 req/s, 20 at 600 req/s, 10 at 60 req/s under a schedule that peaks at 5x. |
 | `--rng-seed` | `1` | The seed of the event and request schedules. |
 | `--out` | `$LOADTEST_ROOT/runs/<name>` | The step directory. It must not exist, or it must be empty. |
 | `--schedule` | none | The load over the window, `<factor>x:<duration>,...` (Load schedule and recovery, below). |
@@ -285,7 +285,7 @@ The series runs six steps with `run-step.sh`, in order, each from a fresh reset.
 into `$LOADTEST_ROOT/runs/series-<UTC time>/step-<f>x/`, and one `TABLES.md` across them in the
 series directory.
 
-| step | events/s | sessions | requests/s | SSE |
+| step | events/s | sessions | requests/s | live sockets |
 | --- | --- | --- | --- | --- |
 | step-0.25x | 1 | 100 | 15 | 1 |
 | step-0.5x | 2 | 200 | 30 | 1 |
@@ -295,15 +295,15 @@ series directory.
 | step-10x | 40 | 1,000 | 600 | 20 |
 
 - Events are 4/s and requests 60/s at 1x, multiplied by the load factor f.
-- SSE streams are `max(1, round(2f))`.
+- Live sockets are `max(1, round(2f))`.
 - Sessions are piecewise linear through the spec's three points: 100 at 0.25x, 400 at 1x and
   1,000 at 10x. That is 400·f up to 1x, and 400 + 600·(f − 1)/9 above it.
   `loadgen series-sessions <f>` prints the value.
 - The series passes every other flag to each step as given, and `run-step.sh` refuses one that it
   does not know: `--duration`, `--warmup`, `--grace`, `--event-mix`, `--route-mix`, `--human`,
   `--rng-seed`, `--schedule` and `--recovery-ref-p99`. With `--schedule`, each step's factors multiply
-  that step's events and requests, and its SSE streams stay the series' `max(1, round(2f))`. The
-  series refuses `--events`, `--sessions`, `--requests`, `--sse` and `--out`, because it sets them.
+  that step's events and requests, and its live sockets stay the series' `max(1, round(2f))`. The
+  series refuses `--events`, `--sessions`, `--requests`, `--live` and `--out`, because it sets them.
 - With the default window, a step takes about 5 minutes and a series about 30 minutes.
 - `run-series.sh` runs the setup (one build of the checkout), the start, the seed and the migration
   check once, before the series directory exists, and reads the build's commit and dirty flag once
@@ -463,7 +463,7 @@ The event generator sends five kinds of write, each on its real route. Each writ
 marker, `lgm<nonce><counter>x`: the run's nonce, 9 random decimal digits drawn when `loadgen run`
 starts, then the write's counter in the run (1, 2, ...). `summary.json` (`config.marker_nonce`),
 `meta.json` (`marker_nonce`) and the first line of `run.log` record the nonce. The run counts only
-the commit rows and SSE frames whose marker carries its own nonce, so a run on a database that
+the commit rows and live frames whose marker carries its own nonce, so a run on a database that
 earlier runs wrote to without a reset (`stack.sh loadgen run` resets nothing) still counts only its
 own writes.
 
@@ -597,7 +597,7 @@ When `loadgen` cannot read the run's rows of `loadtest.event_commits`, `events.c
 why. Then every count and latency that comes from the commit rows is 0 because nothing was read, not measured:
 committed (also per kind), the issue-topic and agent-topic receipts, the expected receipts,
 `missing`, `other_events`, `other_receipts`, `commit_times_missing`, `clock_anomalies` and every
-delivery latency. So is `sse.sse_frame_ms_from_write_response`, and
+delivery latency. So is `live.live_frame_ms_from_write_response`, and
 `resources.dispatch_cpu_s_per_op` is null. The tables show those cells as `-` with the mark
 `(commit rows not read)`, and the step fails (Run one step, above). A step with no write in the
 window reads no rows: nothing depends on them.
@@ -702,7 +702,7 @@ recovery tables, means that `loadgen` could not read the run's rows of `loadtest
 the database has no `commit-trigger.sql`, or Postgres did not answer. `events.commits_error` says
 why. Every cell that depends on those rows shows `-`, not a measured 0: here the committed rate,
 both delivery latencies and the receipts; per kind the committed count; in the resources table the
-Dispatch CPU-s per operation; the delivery from sent and the SSE frame latency from write
+Dispatch CPU-s per operation; the delivery from sent and the live frame latency from write
 response; and in the recovery tables the recovery seconds, each window's committed events and
 whether it recovered. The step failed (Run one step, above). `TABLES.md` repeats this under each
 table where a row has the mark.
@@ -837,21 +837,29 @@ When the event-lock change removes the commit-order lock, this table reads 0 by 
 backend can hold or wait for a lock that Dispatch does not take. The ungranted-locks table
 (Ungranted locks, below) is then the measure of lock waits.
 
-### Delivery from sending, and SSE frames
+### Delivery from sending, and live socket frames
 
-The dashboard SSE streams (`--sse`) parse each frame. A frame is one event: an `id` line, an
-`event` line and a `data` line, then a blank line. Comment lines (`: open`, `: heartbeat`) are not
-frames. The frame time is when its blank line arrives. Only the frames that arrive in the window
-count. A frame's event id is the `id` in its `data`, or the `id` line when the data has none.
+Each dashboard live socket (`--live`) opens `GET /ws/live` as `viewer-<i>` and sends the frame a
+dashboard tab sends for the event feed, `{"type":"subscribe","sub":"events","view":{"kind":"events"}}`,
+with no resume, so it follows the feed from its head. Dispatch answers `events_start`, then one
+`event` frame per event: `{"type":"event","sub":"events","id":"<n>","event":<the event's JSON>}`. Only
+`event` frames count as frames; `events_start`, `heartbeat` and every other frame type are read and
+not counted. The frame time is when its message arrives. Only the frames that arrive in the window
+count. A frame's event id is its `id`. An `ended` frame (the subscription fell behind) is answered
+with the same subscribe frame on the same socket, as a tab does. When the socket ends (Dispatch
+closes each at a random 30-60 min age with 4001, and at shutdown with 1012), or its subscription is
+refused or ends before its `events_start`, the socket is dialed again a second later. Each socket
+offers permessage-deflate, as a browser does. `live_bytes` is the bytes of every message the
+sockets read, after decompression.
 
 | Column | Unit | What it shows | Source |
 | --- | --- | --- | --- |
 | `step` | name | The step name, with the mark `(commit rows not read)` when the run's commit rows could not be read (Events, delivery and requests, above). | `config.step`, `events.commits_error` |
 | `NATS delivery ms from sent p50 / p99` | ms | Delivery latency from sent (Delivery latency, above), over every issue-topic receipt of a primary event. `-` when the commit rows were not read. | `events.delivery_ms_from_sent` |
-| `SSE frame ms from created_at p50 / p99` | ms | The frame time minus the `created_at` of the frame's event, over every frame with a `created_at`. | `sse.sse_frame_ms_from_created_at` |
-| `SSE frame ms from write response p50 / p99` | ms | The frame time minus the time when the client read the write's response. Only the frame of a primary event counts. Its write must be in the window, have a 2xx status and be committed. A write with no complete response has no response time, so its frames do not count. `-` when the commit rows were not read. | `sse.sse_frame_ms_from_write_response` |
-| `SSE frames` | count | The frames of all SSE streams that arrived in the window. | `sse.sse_frames` |
-| `SSE order violations` | count | The frames whose event id is not more than the event id of the previous frame on the same connection. The check starts again on each new connection. A value above 0 means that a stream sent events out of id order. | `sse.sse_order_violations` |
+| `live frame ms from created_at p50 / p99` | ms | The frame time minus the `created_at` of the frame's event, over every frame with a `created_at`. | `live.live_frame_ms_from_created_at` |
+| `live frame ms from write response p50 / p99` | ms | The frame time minus the time when the client read the write's response. Only the frame of a primary event counts. Its write must be in the window, have a 2xx status and be committed. A write with no complete response has no response time, so its frames do not count. `-` when the commit rows were not read. | `live.live_frame_ms_from_write_response` |
+| `live frames` | count | The event frames of all live sockets that arrived in the window. | `live.live_frames` |
+| `live order violations` | count | The frames whose event id is not more than the event id of the previous frame on the same connection. The check starts again on each new connection. A value above 0 means that a socket sent events out of id order. | `live.live_order_violations` |
 
 ### Ungranted locks
 
@@ -995,8 +1003,8 @@ Give `-nats-server-name` to keep the NATS check. The sampler gets no pids. `meta
   search falls back to keyword.
 - **A smaller dataset.** 1,000 issues and about 10,000 events at the start of each step.
 - **No browser documents.** No document websockets and no dashboard refetch fan-out. The browser
-  share of the route mix is plain GETs. The SSE streams read `/api/v1/events`, time each frame,
-  and do nothing more.
+  share of the route mix is plain GETs. The live sockets subscribe to the event feed alone (no
+  delivery or agent views), time each event frame, and do nothing more.
 - **One listener, sessions on NATS.** The sessions receive from NATS directly, as the pi plugin's
   self-subscription does. They register with port 0, so the listener delivers nothing to them.
 - **One process each.** One Dispatch process, one NATS server and one listener, all on

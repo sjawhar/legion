@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -42,7 +43,7 @@ type runConfig struct {
 	mix          eventMix
 	routes       routeMix
 	human        float64
-	sse          int
+	live         int
 	rngSeed      uint64
 	natsConns    int
 	buildCommit  string
@@ -74,7 +75,7 @@ func runLoad(args []string) error {
 	mixFlag := fs.String("event-mix", defaultEventMix, "event mix: a preset ("+eventMixPresetNames()+") or kind=weight,...")
 	routeFlag := fs.String("route-mix", "", "route-mix file (default: the committed "+defaultRouteMixName+")")
 	human := fs.Float64("human", 0.1, "share of writes made by a person")
-	sse := fs.Int("sse", -1, "dashboard SSE streams (default max(1, round(requests × the highest -schedule factor / 30)))")
+	live := fs.Int("live", -1, "dashboard live sockets (default max(1, round(requests × the highest -schedule factor / 30)))")
 	scheduleFlag := fs.String("schedule", "", "load factors over the window, <factor>x:<duration>,... (such as 1x:60s,5x:60s,1x:120s); each factor multiplies -events and -requests, and the window is their total")
 	recoveryRefP99 := fs.Float64("recovery-ref-p99", 0, "with -schedule: the reference request p99 in ms of the recovery criterion (default: the last three 10 s windows of the step)")
 	rngSeed := fs.Uint64("rng-seed", 1, "seed of the event and request schedules")
@@ -132,8 +133,8 @@ func runLoad(args []string) error {
 		return fmt.Errorf("-warmup and -grace must be 0 or more, -duration more than 0")
 	case *natsConns < 1:
 		return fmt.Errorf("-nats-conns must be at least 1")
-	case *sse < -1:
-		return fmt.Errorf("-sse must be 0 or more")
+	case *live < -1:
+		return fmt.Errorf("-live must be 0 or more")
 	case *boxBusyBefore > 1 || !finite(*boxBusyBefore):
 		return fmt.Errorf("-box-busy-before must be a fraction between 0 and 1")
 	}
@@ -155,8 +156,8 @@ func runLoad(args []string) error {
 			return fmt.Errorf("seed %s: issue %s has no quotes for anchored comments", *seedPath, is.Key)
 		}
 	}
-	if *sse < 0 {
-		*sse = defaultSSE(*requests, sched)
+	if *live < 0 {
+		*live = defaultLiveSockets(*requests, sched)
 	}
 	if *name == "" {
 		*name = filepath.Base(filepath.Clean(*out))
@@ -168,7 +169,7 @@ func runLoad(args []string) error {
 		ep: ep, allowForeign: ef.allowForeign, name: *name, out: *out, seedPath: *seedPath,
 		sessions: *sessions, events: *events, requests: *requests,
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
-		human: *human, sse: *sse, rngSeed: *rngSeed, natsConns: *natsConns, schedule: sched, recoveryRefP99: refP99,
+		human: *human, live: *live, rngSeed: *rngSeed, natsConns: *natsConns, schedule: sched, recoveryRefP99: refP99,
 		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: recordedArgs(fs),
 	}, sf)
 }
@@ -200,9 +201,9 @@ func recoveryReference(s schedule, ms float64, set bool) (*float64, error) {
 	return &ms, nil
 }
 
-// defaultSSE is the dashboard SSE streams when -sse is not given: one per 30 requests per second
-// at the schedule's highest factor (1 with no schedule), at least one.
-func defaultSSE(requests float64, s schedule) int {
+// defaultLiveSockets is the dashboard live sockets when -live is not given: one per 30 requests
+// per second at the schedule's highest factor (1 with no schedule), at least one.
+func defaultLiveSockets(requests float64, s schedule) int {
 	return max(1, int(math.Round(requests*s.maxFactor()/30)))
 }
 
@@ -282,7 +283,7 @@ type summaryConfig struct {
 	EventsPerS   float64  `json:"events_per_s"`
 	Sessions     int      `json:"sessions"`
 	RequestsPerS float64  `json:"requests_per_s"`
-	SSE          int      `json:"sse"`
+	Live         int      `json:"live"`
 	EventMix     eventMix `json:"event_mix"`
 	RouteMix     string   `json:"route_mix"`
 	Human        float64  `json:"human"`
@@ -315,8 +316,8 @@ type summary struct {
 	CommitOrderLock lockSummary       `json:"commit_order_lock"`
 	UngrantedLocks  ungrantedSummary  `json:"ungranted_locks"`
 	Sessions        sessionsSummary   `json:"sessions"`
-	SSE             sseSummary        `json:"sse"`
-	SSEBytes        int64             `json:"sse_bytes"`
+	Live            liveSummary       `json:"live"`
+	LiveBytes       int64             `json:"live_bytes"`
 	// Metrics is Dispatch's /metrics over the window: the Pools and admission table.
 	Metrics metricsSummary `json:"metrics"`
 	// Recovery is the recovery after the -schedule's last drop, absent without a schedule of two
@@ -370,8 +371,13 @@ func execute(cfg runConfig, sf seedFile) error {
 	if len(cfg.schedule) > 0 {
 		schedText = cfg.schedule.String()
 	}
-	lg.Printf("config: step=%s sessions=%d events=%g/s requests=%g/s schedule=%s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f sse=%d rng-seed=%d marker-nonce=%s",
-		cfg.name, cfg.sessions, cfg.events, cfg.requests, schedText, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.sse, cfg.rngSeed, formatNonce(nonce))
+	lg.Printf("config: step=%s sessions=%d events=%g/s requests=%g/s schedule=%s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d rng-seed=%d marker-nonce=%s",
+		cfg.name, cfg.sessions, cfg.events, cfg.requests, schedText, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.live, cfg.rngSeed, formatNonce(nonce))
+
+	liveURL, err := liveSocketURL(cfg.ep.dispatch)
+	if err != nil {
+		return err
+	}
 
 	if err := checkStack(ctx, cfg.ep); err != nil {
 		return err
@@ -397,7 +403,7 @@ func execute(cfg runConfig, sf seedFile) error {
 	lg.Printf("window %s to %s", st.winStart.UTC().Format(time.RFC3339), st.winEnd.UTC().Format(time.RFC3339))
 
 	a := newAPI(cfg.ep.dispatch, cfg.ep.token, 2048)
-	sse := st.startSSE(ctx)
+	live := st.startLive(ctx, liveURL)
 	writes, eventsDone := st.runEvents(ctx, newWriter(a, sf, nonce, lg))
 	reqs, requestsDone := st.runRequests(ctx, a)
 	pr := st.startProbes(ctx)
@@ -412,7 +418,7 @@ func execute(cfg runConfig, sf seedFile) error {
 	ns.close()
 	ns.envelopes.write(cfg.out, lg)
 
-	sum := st.buildSummary(ns, reg, writes, reqs, sse, pr)
+	sum := st.buildSummary(ns, reg, writes, reqs, live, pr)
 	writeJSONFile(filepath.Join(cfg.out, "summary.json"), sum, 0o644, lg)
 	meta.End = time.Now()
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
@@ -483,38 +489,29 @@ func (st *step) inWindow(t time.Time) bool { return inWindow(t, st.winStart, st.
 
 func inWindow(t, winStart, winEnd time.Time) bool { return !t.Before(winStart) && t.Before(winEnd) }
 
-// sseStreams is what the dashboard SSE streams read: their bytes and the frames that arrived in
-// the window.
-type sseStreams struct {
+// liveSockets is what the dashboard live sockets read: their bytes and the event frames that
+// arrived in the window.
+type liveSockets struct {
 	bytes  atomic.Int64
-	frames *collector[sseFrame]
+	frames *collector[liveFrame]
 }
 
-// startSSE opens the dashboard SSE streams, each reconnecting a second after its stream ends,
-// until ctx ends. Every data frame is timed on arrival (readSSE).
-func (st *step) startSSE(ctx context.Context) *sseStreams {
-	ss := &sseStreams{frames: newCollector[sseFrame](1 << 14)}
-	client := &http.Client{}
-	for i := range st.cfg.sse {
-		go func() {
-			for ctx.Err() == nil {
-				req, _ := http.NewRequestWithContext(ctx, "GET", st.cfg.ep.dispatch+"/api/v1/events", nil)
-				req.Header.Set("X-Dispatch-User", fmt.Sprintf("viewer-%d", i))
-				req.Header.Set("Accept", "text/event-stream")
-				if resp, err := client.Do(req); err == nil {
-					n, _ := readSSE(resp.Body, st.nonce, time.Now, func(f sseFrame) {
-						if st.inWindow(time.Unix(0, f.at)) {
-							ss.frames.add(f)
-						}
-					})
-					ss.bytes.Add(n)
-					_ = resp.Body.Close()
-				}
-				sleepUntil(ctx, time.Now().Add(time.Second))
+// startLive opens the dashboard live sockets on url, each subscribed to the event feed as a
+// dashboard tab is and reconnecting a second after its socket ends, until ctx ends. Every event
+// frame is timed on arrival (readLive).
+func (st *step) startLive(ctx context.Context, url string) *liveSockets {
+	ls := &liveSockets{frames: newCollector[liveFrame](1 << 14)}
+	// A browser offers permessage-deflate, and Dispatch accepts it.
+	dialer := &websocket.Dialer{HandshakeTimeout: 10 * time.Second, EnableCompression: true}
+	for i := range st.cfg.live {
+		header := http.Header{"X-Dispatch-User": {fmt.Sprintf("viewer-%d", i)}}
+		go followLive(ctx, dialer, url, header, st.nonce, time.Second, func(f liveFrame) {
+			if st.inWindow(time.Unix(0, f.at)) {
+				ls.frames.add(f)
 			}
-		}()
+		}, func(n int64) { ls.bytes.Add(n) })
 	}
-	return ss
+	return ls
 }
 
 // openLoop is an open-loop Poisson schedule whose rate per second the plan gives (ratePlan), from
@@ -664,10 +661,10 @@ func (st *step) profile(ctx context.Context) {
 
 // buildSummary joins what the phases recorded into summary.json, and writes samples.json. It
 // reads the run's commit rows and names the ungranted locks' relations, so it runs after the load.
-func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector[writeRec], reqs *requestLoad, sse *sseStreams, pr *probes) summary {
+func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector[writeRec], reqs *requestLoad, live *liveSockets, pr *probes) summary {
 	cfg := st.cfg
 	ws := writes.snapshot()
-	frames := sse.frames.snapshot()
+	frames := live.frames.snapshot()
 	pr.ls.resolveRelations(cfg.ep.pg)
 
 	var markers []int64
@@ -687,7 +684,7 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 	rs := reqs.recs.snapshot()
 	sum := summary{
 		Config: summaryConfig{
-			Step: cfg.name, EventsPerS: cfg.events, Sessions: cfg.sessions, RequestsPerS: cfg.requests, SSE: cfg.sse,
+			Step: cfg.name, EventsPerS: cfg.events, Sessions: cfg.sessions, RequestsPerS: cfg.requests, Live: cfg.live,
 			EventMix: cfg.mix, RouteMix: cfg.routes.Source, Human: cfg.human, WarmupS: cfg.warmup.Seconds(),
 			DurationS: durS, GraceS: cfg.grace.Seconds(), RNGSeed: cfg.rngSeed, NATSConns: cfg.natsConns,
 			Schedule: cfg.schedule, MarkerNonce: formatNonce(st.nonce),
@@ -700,8 +697,8 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 		},
 		CommitOrderLock: summarizeLock(pr.lp.samples, pr.lp.errors),
 		UngrantedLocks:  summarizeUngranted(pr.ls.samples, pr.ls.errors),
-		SSE:             summarizeSSE(frames, ws, commits),
-		SSEBytes:        sse.bytes.Load(),
+		Live:            summarizeLive(frames, ws, commits),
+		LiveBytes:       live.bytes.Load(),
 	}
 	if commitsErr != nil {
 		sum.Events.CommitsError = commitsErr.Error()

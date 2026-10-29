@@ -375,7 +375,7 @@ func readingServer(t *testing.T, database *store.Store, persist docs.VersionedSt
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
 	return mux
 }
 

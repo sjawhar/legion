@@ -1,9 +1,0 @@
-kind: Changed
-body: |-
-  A comment's margin-record write (a new anchored comment, a reply, a resolve, a reopen, an edit,
-  and an accept's or a reject's projection) no longer reads and renders the document a second time
-  or walks every anchor mark to weigh it, and the room's update observer no longer renders the
-  publish of a margin write forked from that same room. Responses and stored state are unchanged.
-time: 2026-10-28T10:10:00Z
-custom:
-  Issue: pr2448

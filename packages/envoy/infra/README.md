@@ -756,7 +756,7 @@ the kubelet's SIGKILL.
 
 The first Google Cloud deployment proves the Autopilot admission of both native sidecars, the
 Secret Manager CSI mount, the Auth Proxy's private-IP connection, the cluster's IP allocation,
-tailnet Serve for HTTPS, SSE and websockets, the SOCKS5 connection to the hub, the non-root image
+tailnet Serve for HTTPS and websockets, the SOCKS5 connection to the hub, the non-root image
 user, and the exec-plugin credentials on the machine that runs Pulumi. It also verifies that the
 pod is ready, Dispatch reports a schema version, the site signs in through the configured client,
 and the database retains backups and point-in-time recovery.

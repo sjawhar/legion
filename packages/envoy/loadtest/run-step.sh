@@ -3,7 +3,7 @@
 #
 #   run-step.sh <name> --events <per s> --sessions <n> --requests <per s>
 #     [--duration 180s] [--warmup 30s] [--grace 20s] [--event-mix <preset or kind=w,...>]
-#     [--route-mix <file>] [--human 0.1] [--sse <n>] [--rng-seed <n>] [--out <dir>]
+#     [--route-mix <file>] [--human 0.1] [--live <n>] [--rng-seed <n>] [--out <dir>]
 #     [--schedule <factor>x:<duration>,...] [--recovery-ref-p99 <ms>]
 #
 # --schedule varies the load over the window: each factor multiplies --events and --requests for its
@@ -56,7 +56,7 @@ while [ $# -gt 0 ]; do
     --events) have_events=true ;;
     --sessions) have_sessions=true ;;
     --requests) have_requests=true ;;
-    --duration | --warmup | --grace | --event-mix | --human | --sse | --rng-seed | --schedule | --recovery-ref-p99) ;;
+    --duration | --warmup | --grace | --event-mix | --human | --live | --rng-seed | --schedule | --recovery-ref-p99) ;;
     --route-mix)
       [ -f "$value" ] || die "--route-mix names $value, which is not a file"
       value=$(cd -- "$(dirname -- "$value")" && pwd -P)/$(basename -- "$value")

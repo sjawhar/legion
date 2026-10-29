@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // devSignInOrigin is the loopback dashboard origin the e2e harness serves on.
@@ -36,10 +37,12 @@ func newDevSignInRouterWithPeople(t *testing.T, serverURL string, sessions *memo
 		AgentTokens: sharedAgentTokens(t, "e2e-token"),
 		ServerURL:   serverURL,
 		DevSignIn:   true,
+		Lifetime:    t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
+	standInEventLog(ctx, 0)
 	handler, _ := New(ctx)
 	return handler, people
 }
@@ -88,9 +91,7 @@ func whoamiAs(t *testing.T, handler http.Handler, cookie *http.Cookie) *httptest
 
 func TestDevSignInIssuesTheSessionCookieAndRecordsThePerson(t *testing.T) {
 	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(&logs, nil))
 
 	// A generation other than the first proves the cookie carries the store's, not a constant.
 	sessions := &memorySessionStore{generations: map[string]int64{"alice@d.example": 3}}
@@ -110,7 +111,7 @@ func TestDevSignInIssuesTheSessionCookieAndRecordsThePerson(t *testing.T) {
 		t.Fatalf("cookie session = %#v valid=%t, want alice@d.example at generation 3", session, ok)
 	}
 	whoami := whoamiAs(t, handler, cookie)
-	if whoami.Code != http.StatusOK || strings.TrimSpace(whoami.Body.String()) != `{"kind":"user","login":"alice@d.example"}` {
+	if whoami.Code != http.StatusOK || strings.TrimSpace(whoami.Body.String()) != `{"event_head":"0","kind":"user","login":"alice@d.example"}` {
 		t.Fatalf("whoami with the minted cookie: %d %s", whoami.Code, whoami.Body.String())
 	}
 	if _, found := people.get("alice@d.example"); !found {
@@ -135,7 +136,7 @@ func TestDevSignInMintsTheLowercasedEmail(t *testing.T) {
 		t.Fatal("sign-in as Alice set no dsession cookie")
 	}
 	whoami := whoamiAs(t, handler, cookie)
-	if whoami.Code != http.StatusOK || strings.TrimSpace(whoami.Body.String()) != `{"kind":"user","login":"alice@d.example"}` {
+	if whoami.Code != http.StatusOK || strings.TrimSpace(whoami.Body.String()) != `{"event_head":"0","kind":"user","login":"alice@d.example"}` {
 		t.Fatalf("whoami: %d %s, want the lowercased email", whoami.Code, whoami.Body.String())
 	}
 }
@@ -308,6 +309,7 @@ func TestDevSignInIsNotMountedByDefault(t *testing.T) {
 		Sessions:   sessions,
 		Identity:   identity.CookieIdentity{SigningKey: testSigningKey, Sessions: sessions},
 		ServerURL:  devSignInOrigin,
+		Lifetime:   t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("build context: %v", err)

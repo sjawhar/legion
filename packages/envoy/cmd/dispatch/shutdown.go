@@ -39,6 +39,10 @@ const shutdownMargin = 3 * time.Second
 // 1 MiB document's settlement took 4.5 s at load 90 against a 5 s budget, a 3.4 s overrun past it -
 // is what the reserve is sized to outlast; a worker still running at that deadline makes Shutdown
 // return the settlements-unconfirmed error instead of reading back what committed.
+//
+// An open live socket holds none of the HTTP drain: HTTP shutdown never waits for a hijacked
+// connection, and every live socket closes with the process context (the lifetime api.Register
+// takes), which is cancelled before shutdown starts.
 const documentReserve = docs.ShutdownDrainBudget + 5*time.Second
 
 // silentProbes is how many health probes (store.Pool.Healthy, two seconds each) in a row must fail,
@@ -118,9 +122,11 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 //
 //  1. HTTP drains the requests in flight until every one has answered, or until the document
 //     service has to start for its reserve and the probes' to fit before the deadline (documentReserve,
-//     silentProbeReserve), when it logs that it settles documents with requests still in flight.
+//     silentProbeReserve), when it logs that it settles documents with requests still in flight. A
+//     message send among those requests finishes, bounded by the listener client's receipt timeout.
 //  2. The document service settles the documents owed until silentProbeReserve before the deadline.
-//  3. Hijacked delivery sockets and the delivery hub finish their Lifetime-driven shutdown.
+//  3. waitBackground waits for every keyed handler and detached delivery, the delivery hub, every
+//     live socket and the subscriptions they ran to finish their lifetime-driven shutdown.
 //  4. It waits until every request has answered and no connection of writePools is in use.
 //  5. deregister takes this process out of the registry of live server processes, within what is
 //     left of ctx: only once HTTP has drained, so a draining process counts as live until its last
@@ -134,7 +140,7 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 // that database too, and its row's heartbeat stops with the process instead. Writes carry no
 // deadline of their own, so a write still in flight at the deadline is cut off with the process,
 // as the runtime's kill would cut it moments later.
-func shutdown(ctx context.Context, server *http.Server, documentService *docs.Service, pool *store.Pool, waitDelivery func(),
+func shutdown(ctx context.Context, server *http.Server, documentService *docs.Service, pool *store.Pool, waitBackground func(),
 	deregister func(context.Context)) {
 	deadline, _ := ctx.Deadline()
 	drained := make(chan struct{})
@@ -156,15 +162,15 @@ func shutdown(ctx context.Context, server *http.Server, documentService *docs.Se
 	if err := documentService.Shutdown(documentCtx); err != nil {
 		slog.Warn("dispatch: shutdown document service", "error", err)
 	}
-	delivered := make(chan struct{})
+	background := make(chan struct{})
 	go func() {
-		defer close(delivered)
-		waitDelivery()
+		defer close(background)
+		waitBackground()
 	}()
 	select {
-	case <-delivered:
+	case <-background:
 	case <-ctx.Done():
-		slog.Warn("dispatch: exit with delivery work still running at the shutdown deadline")
+		slog.Warn("dispatch: exit with background work still running at the shutdown deadline")
 		return
 	}
 	if waitUntilIdle(ctx, drained, pool) {
