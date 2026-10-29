@@ -1,9 +1,6 @@
 package pmdoc
 
-import (
-	"slices"
-	"testing"
-)
+import "testing"
 
 // The browser's engine (micromark's code-fenced) takes up to as many columns from each line of
 // fenced code as the opening fence stands past its container's content, and a line ending right
@@ -12,16 +9,9 @@ import (
 // what it holds. A line of as many columns or more keeps those past the fence's indentation, and
 // a fence at its container's content keeps the whole line. On a blank line a list item eats up to
 // its content's offset, a footnote definition eats nothing, and a quote eats its `>` and one
-// optional space. Each row is markdown and what the engine reads in it, every code block's text
-// and every list's and list item's spread in document order (a nil slice is not checked), asserted
-// for every reader a document is read with - so a run without the engine still checks them - and
-// then for the engine's own reading.
+// optional space. Each row is what the engine reads in its markdown (checkCodeAndSpread).
 func TestFencedCodeDropsAWhitespaceLineShortOfTheFenceIndent(t *testing.T) {
-	tests := []struct {
-		name, markdown string
-		codes          []string
-		lists, items   []bool
-	}{
+	checkCodeAndSpread(t, []codeAndSpreadRow{
 		// A line short of the fence's indentation is empty.
 		{name: "last line, no fence closing", markdown: "  ~~~\n \n", codes: []string{""}},
 		{name: "before a line of code", markdown: "  ~~~\n \nx\n", codes: []string{"\nx"}},
@@ -46,6 +36,9 @@ func TestFencedCodeDropsAWhitespaceLineShortOfTheFenceIndent(t *testing.T) {
 		{name: "tab-only last line of a quoted item, with no final line feed", markdown: "> - ```\n>   x\n>\t", codes: []string{"x"}},
 		{name: "tab-only last line short of a quoted item's content, with no final line feed", markdown: "> -  ```\n>    x\n>\t", codes: []string{"x"}},
 		{name: "tab-only last line past the fence's indent in a quote, with no final line feed", markdown: ">  ```\n>  x\n>\t", codes: []string{"x\n "}},
+		// A typed block indented in its container takes its indentation from that last line too.
+		{name: "in a quoted typed block, empty last line with no final line feed", markdown: ">   :::callout{}\n>   ~~~\n>   x\n>   ", codes: []string{"x"}},
+		{name: "in a typed block in an item, empty last line with no final line feed", markdown: "- a\n\n    :::callout{}\n    ~~~\n    x\n    ", codes: []string{"x"}},
 		// A line as long as the fence's indentation, or a fence at its container's content, keeps
 		// what the line holds past them.
 		{name: "fence at the line's start", markdown: "~~~\n \nx\n", codes: []string{" \nx"}},
@@ -77,54 +70,5 @@ func TestFencedCodeDropsAWhitespaceLineShortOfTheFenceIndent(t *testing.T) {
 			lists: []bool{false},
 			items: []bool{false},
 		},
-	}
-	readers := []struct {
-		name  string
-		parse func(string) (*Node, error)
-	}{
-		{"Parse", Parse},
-		{"ParseRendering", ParseRendering},
-		{"ParseForWrite", func(markdown string) (*Node, error) { return ParseForWrite(markdown, nil) }},
-	}
-	// check reports where doc's reading differs from test's, as reader reads it.
-	check := func(t *testing.T, reader string, doc *Node, markdown string, codes []string, lists, items []bool) {
-		t.Helper()
-		got := readCodeAndSpread(doc)
-		if codes != nil && !slices.Equal(got.codes, codes) {
-			t.Errorf("%s(%q): code %q, want %q", reader, markdown, got.codes, codes)
-		}
-		if lists != nil && !slices.Equal(got.lists, lists) {
-			t.Errorf("%s(%q): list spread %v, want %v", reader, markdown, got.lists, lists)
-		}
-		if items != nil && !slices.Equal(got.items, items) {
-			t.Errorf("%s(%q): item spread %v, want %v", reader, markdown, got.items, items)
-		}
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			for _, reader := range readers {
-				doc, err := reader.parse(test.markdown)
-				if err != nil {
-					t.Errorf("%s(%q) = %v", reader.name, test.markdown, err)
-					continue
-				}
-				check(t, reader.name, doc, test.markdown, test.codes, test.lists, test.items)
-			}
-		})
-	}
-	t.Run("the engine", func(t *testing.T) {
-		markdowns := make([]string, 0, len(tests))
-		for _, test := range tests {
-			markdowns = append(markdowns, test.markdown)
-		}
-		readings := engineReadings(t, markdowns)
-		for index, test := range tests {
-			t.Run(test.name, func(t *testing.T) {
-				if readings[index] == nil {
-					t.Fatalf("the engine does not read %q", test.markdown)
-				}
-				check(t, "the engine", readings[index], test.markdown, test.codes, test.lists, test.items)
-			})
-		}
 	})
 }

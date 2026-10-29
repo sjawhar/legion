@@ -13,10 +13,14 @@ import (
 // included, as the browser editor's parser reads them, without the last line's line feed. Of a
 // block no fence closed, that parser drops the last line where it is blank and the block ends in a
 // quote, or in a list item or footnote definition flow content follows: the blank line is the
-// container's there.
+// container's there. It drops it too where it is the document's last, with no line feed, holding
+// nothing past the fence's indentation (fenceEndsEmptyAttr), which is no line of the code, and
+// drops one line either way: a quote takes that line in place of the code's last.
 func fencedCodeText(code *ast.FencedCodeBlock, source []byte) []*Node {
 	value := strings.TrimSuffix(segmentsText(code.Lines(), source), "\n")
-	if _, closed := code.Attribute(fenceClosedAttr); !closed && blankTaker(code, source) != nil {
+	_, closed := code.Attribute(fenceClosedAttr)
+	_, endsEmpty := code.Attribute(fenceEndsEmptyAttr)
+	if endsEmpty || !closed && blankTaker(code, source) != nil {
 		value = strings.TrimSuffix(value, "\n")
 	}
 	if value == "" {

@@ -368,13 +368,15 @@ func (p listItemColumns) Continue(node ast.Node, reader gmtext.Reader, pc parser
 // a whitespace-only line holding fewer is an empty line of the code. Goldmark keeps all such a line
 // holds, so `  ~~~\n \nx` held the code ` \nx`, where that parser reads `\nx`. A last line of the
 // document with no line feed that holds nothing past the fence's indentation is no line of the code
-// to that parser, as one holding nothing past its containers' markers is no line to goldmark
-// (lastLineColumns), so it is dropped as goldmark drops that one: `  ~~~\nx\n ` holds the code `x`,
-// and in a quote the quote takes that line in place of the code's last (droppedQuoteLine).
+// to that parser (fenceEndsEmptyAttr): `  ~~~\nx\n ` holds the code `x`, and in a quote, which takes
+// a blank line from the code's end, the quote takes that line (fencedCodeText).
 type fenceClosure struct{ parser.BlockParser }
 
 var (
 	fenceClosedAttr = []byte("pmdoc-fence-closed")
+	// fenceEndsEmptyAttr marks a fenced code block whose last line is the document's, with no line
+	// feed, holding nothing past the fence's indentation (fencedCodeText).
+	fenceEndsEmptyAttr = []byte("pmdoc-fence-ends-empty")
 	// fenceIndentAttr is how many columns a fenced code block's opening fence stands past its
 	// container's content, as goldmark measures them (fenceClosure.Open).
 	fenceIndentAttr = []byte("pmdoc-fence-indent")
@@ -409,8 +411,7 @@ func (p fenceClosure) Continue(node ast.Node, reader gmtext.Reader, pc parser.Co
 		code.ForceNewline = true
 	}
 	if code.Start >= code.Stop && code.Padding == 0 && !bytes.HasSuffix(line, []byte("\n")) {
-		node.Lines().SetSliced(0, last)
-		return state
+		node.SetAttribute(fenceEndsEmptyAttr, true)
 	}
 	node.Lines().Set(last, code)
 	return state
@@ -428,7 +429,7 @@ func (p fenceClosure) Continue(node ast.Node, reader gmtext.Reader, pc parser.Co
 // shorter blank lines between, where goldmark drops every blank line after the last line of text
 // (`    code\n      \nx` holds the code `code\n  `). Code right after a list outside it, or right
 // after a quote with no blank line between them, keeps goldmark's end: that parser holds the list
-// or quote open there (interruptsOpenBlock). The blank lines the code keeps past goldmark's end are
+// or quote open there (heldOpenBy). The blank lines the code keeps past goldmark's end are
 // its held lines (codeHeldAttr), which space no list (sourceLines.held).
 type codeColumns struct{ parser.BlockParser }
 
@@ -467,7 +468,7 @@ func (p codeColumns) Continue(node ast.Node, reader gmtext.Reader, pc parser.Con
 // editor's parser holds open there.
 func (p codeColumns) Close(node ast.Node, reader gmtext.Reader, pc parser.Context) {
 	p.BlockParser.Close(node, reader, pc)
-	if heldOpenBefore(node) {
+	if heldOpenBy(node) != nil {
 		return
 	}
 	kept, ok := node.Attribute(codeKeptAttr)
@@ -481,17 +482,21 @@ func (p codeColumns) Close(node ast.Node, reader gmtext.Reader, pc parser.Contex
 	}
 }
 
-// heldOpenBefore reports whether indented code stands right after a list, or right after a quote
-// with no blank line between them, which the browser editor's parser holds open across the code's
-// first line.
-func heldOpenBefore(code ast.Node) bool {
-	switch code.PreviousSibling().(type) {
+// heldOpenBy is the list right before indented code, outside it, or the quote right before it with
+// no blank line between them, which the browser editor's parser holds open across the code's first
+// line; nil when neither stands there. Close keeps goldmark's end of such code, interruptsOpenBlock
+// reads such code as holding nothing open, and the refusal of such code holding more than one line
+// names what it holds (refuseBlocks), so all three read the one shape.
+func heldOpenBy(code ast.Node) ast.Node {
+	switch previous := code.PreviousSibling().(type) {
 	case *ast.List:
-		return true
+		return previous
 	case *ast.Blockquote:
-		return !code.HasBlankPreviousLines()
+		if !code.HasBlankPreviousLines() {
+			return previous
+		}
 	}
-	return false
+	return nil
 }
 
 // setPadding sets reader's padding and drops the line it has peeked, which goldmark's
@@ -610,7 +615,7 @@ func interruptsOpenBlock(parent ast.Node, source []byte, start int) bool {
 		last := previous.Lines().At(previous.Lines().Len() - 1)
 		return bytes.Count(source[last.Start:start], []byte("\n")) <= 1
 	case *ast.CodeBlock:
-		if heldOpenBefore(previous) {
+		if heldOpenBy(previous) != nil {
 			return false
 		}
 		if previous.Lines().Len() == 0 {
@@ -735,7 +740,11 @@ func recordLine(line gmtext.Segment, source []byte, pc parser.Context) {
 // its parse, so pmdoc registers none, and takes the backslash out of a cell's escaped pipes itself
 // once the bounds hold (unescapeTablePipes).
 func parseSource(p parser.Parser, source []byte, context parser.Context) (ast.Node, error) {
-	root := p.Parse(&lastLineColumns{Reader: gmtext.NewReader(source)}, parser.WithContext(context))
+	reader := &lastLineColumns{Reader: gmtext.NewReader(source)}
+	root := p.Parse(reader, parser.WithContext(context))
+	if reader.kept {
+		root.SetAttribute(lastLineKeptAttr, true)
+	}
 	definitionsInPlace(root, context)
 	if recorded := context.Get(untrimmedLinesKey); recorded != nil {
 		root.SetAttribute(untrimmedLinesAttr, recorded)
@@ -755,11 +764,20 @@ func parseSource(p parser.Parser, source []byte, context parser.Context) (ast.No
 // (Segment.Value); a last line its containers leave nothing of stays no line to either parser.
 type lastLineColumns struct {
 	gmtext.Reader
+	// kept is whether it served such a line, which parseSource records on the document
+	// (lastLineKeptAttr).
+	kept bool
 }
+
+// lastLineKeptAttr marks a document whose last line lastLineColumns kept, which goldmark dropped:
+// the refusals that read the lines as before read it as the blank line it was then
+// (blanksOutsideCode).
+var lastLineKeptAttr = []byte("pmdoc-last-line-kept")
 
 func (r *lastLineColumns) PeekLine() ([]byte, gmtext.Segment) {
 	line, segment := r.Reader.PeekLine()
 	if line == nil && segment.Padding > 0 && segment.Start == len(r.Source()) {
+		r.kept = true
 		return segment.Value(r.Source()), segment
 	}
 	return line, segment
