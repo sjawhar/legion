@@ -24,3 +24,13 @@ Left in this round:
    dispatch_doc_head/ping: only docs/head_notice.go and head_liveness.go use them, an older build ignores them, rooms do not
    follow an older build's writes during a roll), with each search command; Size, Chain, figures 94, threads list.
 5. implement.json round 5, push, handoff_complete.
+
+## 2026-10-29 10:20Z (before the worker-image drain)
+- Main (88840d35, with #2449) merged forward a third time: 3e13f14a. No conflicts left; vet/build ok.
+- Lanes at 3e13f14a: docs ok 792.8 s; api fails only TestARepeatedSubReplacesAnotherKind, which fails the same way on
+  main@origin alone (#2449's own test, a 2-core timing flake; passes alone); cmd/dispatch, store, events, pglisten, loadtest
+  ok; multiprocess ok 644.7 s; infra/gcp fails only the two data-disk tests needing mkfs.ext4. Race docs not yet re-run.
+- Connection total unchanged: 94 = 64 + 4 + 8 + 1 + 12 + 1 + 1 + 3; #2449 changed the dashboard's live socket, not the
+  document socket, so the caps count as before.
+- Still left: race docs lane, read CI at the head, answer and resolve the 10 threads, contract change census + Size/Chain
+  lines in the PR body, implement.json, handoff_complete.
