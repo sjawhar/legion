@@ -2,44 +2,54 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-590",
-  "completed": "2026-10-29T17:05:00Z",
-  "round": 12,
-  "testedHead": "f970c3865f00840593f8781b5126a7a9ed1e74dc",
+  "completed": "2026-10-29T19:00:00Z",
+  "round": 13,
+  "testedHead": "5ea3ce58dd9aa6838e0ef69863f4b9c97acac7b7",
+  "testCommit": "24d206a67ed534782b501e9a3f399b5b8f640d4f",
+  "fingerprint": "The implementer's comment 6503673013 gives 'de32e067… -> 0803828c…' for the merge of main 7c2effba4 (#2370, #2505 in the listener and bus). It differs, so this is a full round.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Ran the implementer's new test TestAForwardRequestTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom 3 times at f970c386 on the in-process three-server cluster (ok), the bus, outbox and cmd/listener packages (ok) and the whole multiprocess package (ok, 896.9 s), and mutated the new request resend twice (proof below)."
+    "how": "Ran the suites again at 5ea3ce58, one at a time on this pod's Postgres 17: multiprocess ok (917.4 s); outbox, bus and roles ok; cmd/listener ok (476.4 s, the whole package, no flake this run). scripts/e2e-local.sh on a real listener and NATS passed. I mutated the merged listener code (proof below)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review finding (round 8): a role forward to a serving-port holder that the full clustered stream refused is not stalled for the 72 h duplicate window: once the stream has room, the forward's duplicate-with-no-sequence acknowledgement makes the window send it once more without its id, and it is stored",
-      "surface": "bus.Client window.Request with AcceptStreamAck and a MsgId (the outbox's role forward to a serving-port holder) against an in-process three-server JetStream cluster whose stream has a byte limit, as main's ENVOY_STREAM_MAX_BYTES configures",
-      "command": "cd packages/envoy && GOWORK=off go test -count=3 -run TestAForwardRequestTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom ./internal/bus/",
-      "observed": "ok 3 of 3: after the purge the retried forward answers nil and the stream stores it on the holder's subject without its id; a window whose deadline passes before the duplicate's acknowledgement answers ErrNotStored and ErrWindowDeadline and the stream holds nothing",
-      "headSha": "f970c3865f00840593f8781b5126a7a9ed1e74dc",
-      "negativeControl": "With the resend switched off (resendable forced false) the test fails: 'the forward retried once the stream had room = … NATS did not acknowledge the publish: … no receipt', which is the stall the review found"
+      "criterion": "The merged listener (main's #2370 resolver over roles.ResolveHolder, and the publish route's forwards) delivers role and topic messages as before, and its role forwards keep one stored copy",
+      "surface": "a real envoy-listener and NATS (scripts/e2e-local.sh: fixtures, a direct message, an unheld and a held role publish, both renderers), and the cmd/listener package",
+      "command": "cd packages/envoy && GOWORK=off bash scripts/e2e-local.sh; GOWORK=off DISPATCH_TEST_DATABASE_URL=<pg> go test -count=1 -v ./cmd/listener/",
+      "observed": "e2e-local: both PASS lines; the held role publish reached the holder. cmd/listener ok in 476.4 s",
+      "headSha": "5ea3ce58dd9aa6838e0ef69863f4b9c97acac7b7",
+      "negativeControl": "e2e-local's bus-down step: with NATS stopped the direct send is refused with HTTP 503"
     },
     {
-      "criterion": "The request resend is fenced by the window's deadline like every other write",
-      "surface": "same test, under a mutation in a scratch copy",
-      "command": "remove resend()'s w.expired() check and run the same test",
-      "observed": "Fails: 'a not-stored forward whose window's deadline passed = <nil>, want ErrNotStored and ErrWindowDeadline', so the fence is pinned",
-      "headSha": "f970c3865f00840593f8781b5126a7a9ed1e74dc",
+      "criterion": "The publish route's role forward is stored once per message and recipient however many attempts it takes (the merge moved the MsgId choice to RequestCoreTo's callers)",
+      "surface": "the publish route (POST /v1/messages/publish) over a real NATS with the agent stream, a holder stand-in that confirms only the second forward",
+      "command": "cd packages/envoy && GOWORK=off go test -count=3 -run TestPublishRouteStoresOneCopyOfARoleMessageItForwardsTwice -v ./cmd/listener/ (new test, commit 24d206a6)",
+      "observed": "Passes 3 of 3: two forwards, the 200 answer, and one copy on the holder's subject",
+      "headSha": "5ea3ce58dd9aa6838e0ef69863f4b9c97acac7b7",
+      "negativeControl": "With confirmed.go's two forwards passing no MsgId (scratch copy), the new test fails: 'the stream holds 2 copies on notifications.agent.ses_stored_once after two forwards of one role message, want 1'. Before this test the whole listener package passed under that mutation (156 s), and so did main's base 7c2effba4 with RequestCoreTo's MsgId removed"
+    },
+    {
+      "criterion": "The role lane's MsgId rule (set only for a key that names its event) is still pinned after the merge",
+      "surface": "cmd/listener under a mutation in a scratch copy",
+      "command": "delivery.go's DedupeKeyNamesTheUpstreamEvent check forced true; go test -run Role ./cmd/listener/",
+      "observed": "TestARoleForwardIsStoredOnceOnlyWhenItsEnvelopeNamesItsEvent fails",
+      "headSha": "5ea3ce58dd9aa6838e0ef69863f4b9c97acac7b7",
       "negativeControl": "the mutation is the broken input"
     },
     {
-      "criterion": "Role forwards and the publisher's guarantees are unchanged elsewhere",
-      "surface": "the outbox package and the repository's multiprocess harness (two real envoy-dispatch processes)",
-      "command": "GOWORK=off DISPATCH_TEST_DATABASE_URL=<pg> go test -count=1 ./internal/dispatch/outbox/ ./internal/bus/ ./cmd/listener/; go test -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch",
-      "observed": "All ok, TestARoleRouteToAHolderWithAServingPortIsPublishedOnTheStreamsAcknowledgement included. Multiprocess ok in 896.9 s: take-over after SIGKILL 5.961 s, NATS cut 3.005 s, silent cut 2.243 s, SIGSTOP 4.503 s; 200 comments each once and in order (role holder 80 through receipted forwards); TestARoleHolderWhoseConnectionMovesGetsTheEventOnceAndInOrder passes",
-      "headSha": "f970c3865f00840593f8781b5126a7a9ed1e74dc",
+      "criterion": "One publisher; take-over within 10 s; each session takes each event once and in order",
+      "surface": "the repository's multiprocess harness",
+      "command": "cd packages/envoy && GOWORK=off DISPATCH_TEST_DATABASE_URL=<pg> go test -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch",
+      "observed": "ok, 917.4 s. Take-over: SIGKILL 5.962 s, NATS cut 3.005 s, silent cut 2.233 s, SIGSTOP 4.433 s; 200 comments each once and in order; role holder whose connection moves gets each event once and in order",
+      "headSha": "5ea3ce58dd9aa6838e0ef69863f4b9c97acac7b7",
       "negativeControl": "TestAFrozenPublisherSendsNothingWhenItResumes: the resumed process started no batch"
     }
   ],
   "observations": [
-    "CI at f970c386: 24 checks queued, 3 green when read.",
-    "This round changes only internal/bus (async.go and a new test); no migration, connection count or main merge, so round 11's rollback and count checks stand.",
-    "The only known red on main is close-withdraws-asks.e2e.ts:126."
+    "Forcing the role lane's freshness test (laneHolderFresh) to true is caught by no listener test at this head, and the same mutation of main's inline rule at 7c2effba4 is caught by none either: a gap on main, not this merge's. The merge's roles.Fresh is the same rule (UpdatedAt > 0 and younger than session.ClaimStaleAfter), and the outbox's TestARoleRouteToAStaleHolderStaysPending fails if roles.Fresh itself is broken. Sent to the architect.",
+    "No migration or count change in this merge (0141/0142, 89); the PR is MERGEABLE now. CI at 5ea3ce58: 25 queued, 2 green when read.",
+    "The test commit 24d206a6 is pushed alone so CI runs on it; this handoff is a second push."
   ]
 }
