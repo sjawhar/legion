@@ -14,8 +14,9 @@ import { resetDatabase } from "./seed";
 import { signIn } from "./users";
 
 // Every row seeds through the real API and reads the real server: a block's id comes from
-// `GET /api/v1/artifacts/<id>/blocks`, never from a guess. Its helpers live in this file and in
-// `editor.ts`, so a run at the base, where none of this exists, copies those two files.
+// `GET /api/v1/artifacts/<id>/blocks`, never from a guess. Its helpers live in this file, in
+// `editor.ts` (`blockId`) and in `api.ts` (`getArtifactBlocks`, which `blockId` reads), so a run at
+// the base, where none of this exists, copies those three files.
 
 test.beforeEach(async ({ context }) => {
   await resetDatabase();

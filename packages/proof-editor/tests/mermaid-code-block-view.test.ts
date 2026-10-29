@@ -291,9 +291,9 @@ test("a code block in another language keeps upstream's plain layout and asks no
 
 // The case above switches a block that never drew, so what `showPlainLayout` clears is never
 // observed there. It shows on the way back: `showMermaidLayout` puts the preview and the status
-// into the frame again and asks for the current source, and until that answer arrives whatever
-// the block held before its trip through another language is on the reader's page. These two
-// cases take that window, one for each half of what the clearing empties.
+// into the frame again and the block asks for the current source, and until that answer arrives
+// whatever the block held before its trip through another language is on the reader's page.
+// These two cases take that window, one for each half of what the clearing empties.
 test("a mermaid block that drew, changed language and changed back shows no drawing until its new answer", async () => {
   const { drawMermaid, requests } = fakeDrawer();
   await withMarksEditor(
@@ -308,7 +308,8 @@ test("a mermaid block that drew, changed language and changed back shows no draw
       setLanguage("js");
       setLanguage("mermaid");
 
-      // The block asked again and nothing has answered, so the frame holds its source alone.
+      // The block asked again and nothing has answered, so only its source shows: the preview and
+      // the status are back in the frame, empty and hidden.
       expect(requests.map((request) => request.source)).toEqual([FIRST, FIRST]);
       expect(shownDiagram(block)).toBeNull();
       expectSourceShown(block);
