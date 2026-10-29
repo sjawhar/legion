@@ -646,8 +646,8 @@ func TestHealthzReportsTheBuildCommitAndTheAppliedSchemaVersion(t *testing.T) {
 
 // A binary the image build did not stamp says so: null, never an empty string or a guess. So does
 // a process with no announcement of the fleet's build to report. Every field is always present,
-// the ones nothing filled as null, and outbox_publisher false: a process with NATS disabled
-// publishes nothing.
+// the ones nothing filled as null, outbox_publisher false - a process with NATS disabled publishes
+// nothing - and idempotency_keys true, the binary's own fact.
 func TestHealthzReportsAnUnstampedCommitAsNull(t *testing.T) {
 	response := httptest.NewRecorder()
 	dispatchHandler(http.NewServeMux(), nil, nil, nil, nil, "", nil, issuers{}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -658,6 +658,7 @@ func TestHealthzReportsAnUnstampedCommitAsNull(t *testing.T) {
 	want := map[string]any{
 		"ok": false, "db": false, "nats": nil, "files": nil, "signin": nil, "service_tokens": nil,
 		"commit": nil, "fleet_commit": nil, "schema_version": nil, "outbox_publisher": false,
+		"idempotency_keys": true,
 	}
 	for field, value := range want {
 		if got, found := health[field]; !found || got != value {
@@ -743,6 +744,37 @@ func TestHealthzReportsWhetherThisProcessPublishesTheOutbox(t *testing.T) {
 			t.Fatal("healthz never reported the standby publishing once the holder stopped")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// /healthz says this build judges a write's Idempotency-Key (INFRA-258), which the agents' client
+// reads before it retries a write under its key: an earlier Dispatch ignores the header and would
+// run the retry again. It is the binary's fact, so a probe that answers 503 - its database down,
+// closed or never configured - carries it in its body as a 200 does: a client that reads the body
+// whatever the status resends a write its outage refused.
+func TestHealthzReportsThatWritesTakeIdempotencyKeys(t *testing.T) {
+	closed := storetest.Open(t)
+	closed.Pool.Close()
+	for name, probe := range map[string]struct {
+		database *store.Store
+		status   int
+	}{
+		"a database":        {storetest.Open(t), http.StatusOK},
+		"a closed database": {closed, http.StatusServiceUnavailable},
+		"no database":       {nil, http.StatusServiceUnavailable},
+	} {
+		response := httptest.NewRecorder()
+		dispatchHandler(http.NewServeMux(), probe.database, nil, nil, nil, "", nil, issuers{}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		if response.Code != probe.status {
+			t.Errorf("healthz with %s: status %d, want %d", name, response.Code, probe.status)
+		}
+		var health map[string]any
+		if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+			t.Fatalf("decode health response: %v", err)
+		}
+		if health["idempotency_keys"] != true {
+			t.Errorf("healthz with %s: idempotency_keys = %#v, want true", name, health["idempotency_keys"])
+		}
 	}
 }
 

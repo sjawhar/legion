@@ -104,9 +104,11 @@ type RequestOptions struct {
 // not capture answers ErrNotCaptured, and a core forward goes through Request. An outcome decided
 // before anything was sent is in the channel when PublishAsync returns: a refusal (ErrRefused),
 // ErrNotCaptured, or ErrUnavailable. Otherwise the answer is the stream's acknowledgement, within
-// publishAcknowledgementTimeout (the JetStream context's PublishAsyncTimeout). A publish NATS does
-// not acknowledge, or answers with no responders, is ErrNotAcknowledged while the window's
-// connection stays current and ErrUnavailable once it does not.
+// publishAcknowledgementTimeout (the JetStream context's PublishAsyncTimeout). An acknowledgement
+// of a duplicate with no sequence (ErrNotStored) has the envelope sent once more without its
+// MsgId, as Publish does, and that send's acknowledgement answers for it (sendJetStream). A
+// publish NATS does not acknowledge, or answers with no responders, is ErrNotAcknowledged while
+// the window's connection stays current and ErrUnavailable once it does not.
 //
 // A Request is a send of the window too, pinned and refused by the same rules, and a Probe pins
 // the window when nothing has yet (window.Request, window.Probe). The window's methods are safe to
@@ -232,7 +234,12 @@ func (w *window) current() bool {
 // sendJetStream publishes data, item's encoding, to the stream and returns what waits for its
 // acknowledgement. A failure is ErrUnavailable once the window's connection is no longer current
 // or nats.go reports the disconnect, and ErrNotAcknowledged when the acknowledgement ran out of
-// time or the server answered with no responders on a connection that stayed current.
+// time or the server answered with no responders on a connection that stayed current. An
+// acknowledgement of a duplicate with no sequence (ErrNotStored) has the envelope sent once more
+// without its MsgId, as publishJetStream does, while the window's connection is still current and
+// its deadline has not passed: the answer is that send's, and a failure of it still wraps
+// ErrNotStored. The resend goes out after the window's later sends, so the stream stores it after
+// them.
 func (w *window) sendJetStream(item contracts.Envelope, data []byte) (func() error, error) {
 	var options []nats.PubOpt
 	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {
@@ -243,18 +250,26 @@ func (w *window) sendJetStream(item contracts.Envelope, data []byte) (func() err
 		return nil, w.unsent(err, len(data))
 	}
 	return func() error {
-		select {
-		case <-future.Ok():
-			return nil
-		case err := <-future.Err():
-			if !w.current() || errors.Is(err, nats.ErrDisconnected) {
-				return fmt.Errorf("bus: %w: %w", ErrUnavailable, err)
-			}
-			if errors.Is(err, nats.ErrAsyncPublishTimeout) || errors.Is(err, nats.ErrNoResponders) {
-				return fmt.Errorf("bus: %w: %w", ErrNotAcknowledged, err)
-			}
+		err := w.acknowledged(future)
+		if !errors.Is(err, ErrNotStored) {
 			return err
 		}
+		if expired := w.expired(); expired != nil {
+			return fmt.Errorf("%w, and the window's deadline passed before the publish to %q was sent without its id: %w", err, item.Topic, expired)
+		}
+		if !w.current() {
+			return fmt.Errorf("bus: %w: %w, and the window's connection was lost or reconnected before the publish to %q was sent without its id", ErrUnavailable, err, item.Topic)
+		}
+		future, sendErr := w.js.PublishMsgAsync(&nats.Msg{Subject: item.Topic, Data: data})
+		if sendErr == nil {
+			sendErr = w.acknowledged(future)
+		} else {
+			sendErr = w.unsent(sendErr, len(data))
+		}
+		if sendErr != nil {
+			return fmt.Errorf("%w, and its publish without its id failed: %w", err, sendErr)
+		}
+		return nil
 	}, nil
 }
 
@@ -406,6 +421,26 @@ func (w *window) Probe(timeout time.Duration) error {
 		return fmt.Errorf("bus: %w: the window's connection was lost or reconnected since its first send", ErrUnavailable)
 	}
 	return nil
+}
+
+// acknowledged waits for future's acknowledgement and names what it came to: nil for a message the
+// stream stored or holds, ErrNotStored, ErrUnavailable when the connection failed or nats.go
+// reported the disconnect, ErrNotAcknowledged when the acknowledgement ran out of time or the
+// server answered with no responders on a connection that stayed current, or the server's refusal,
+// a full stream's as ErrStreamFull.
+func (w *window) acknowledged(future nats.PubAckFuture) error {
+	select {
+	case ack := <-future.Ok():
+		return notStored(ack)
+	case err := <-future.Err():
+		if !w.current() || errors.Is(err, nats.ErrDisconnected) {
+			return fmt.Errorf("bus: %w: %w", ErrUnavailable, err)
+		}
+		if errors.Is(err, nats.ErrAsyncPublishTimeout) || errors.Is(err, nats.ErrNoResponders) {
+			return fmt.Errorf("bus: %w: %w", ErrNotAcknowledged, err)
+		}
+		return streamFull(err)
+	}
 }
 
 // unsent names nats.go's refusal to send a message of size bytes: ErrUnavailable when the

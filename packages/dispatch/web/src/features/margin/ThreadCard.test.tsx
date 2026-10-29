@@ -17,6 +17,8 @@ import {
   type IntersectionControl,
   installIntersectionObserver,
 } from "../../__tests__/intersection-observer";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerThreadReads } from "../../__tests__/send-answers";
 import { api } from "../../api/client";
 import type { Comment } from "../../api/types";
 import { seedUnread } from "../replies/replies-fixture";
@@ -154,10 +156,14 @@ test("an expanded comment thread renders flat replies and posts an inline reply 
     fireEvent.keyDown(screen.getByLabelText("Reply"), { ctrlKey: true, key: "Enter" });
 
     await waitFor(() =>
-      expect(createComment).toHaveBeenCalledWith("CORE-1", {
-        body: "Second reply",
-        reply_to: root.id,
-      })
+      expect(createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "Second reply",
+          reply_to: root.id,
+        },
+        keyedAttempt
+      )
     );
     expect(composer.querySelector("blockquote")).toBeNull();
   } finally {
@@ -258,7 +264,7 @@ test("the author can edit a comment and an edited comment carries its marker", a
     expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
     fireEvent.change(screen.getByLabelText("Edit comment"), { target: { value: "Updated root" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(onEdit).toHaveBeenCalledWith(root.id, "Updated root"));
+    await waitFor(() => expect(onEdit).toHaveBeenCalledWith(root.id, "Updated root", keyedAttempt));
 
     view.rerender(
       <QueryClientProvider client={new QueryClient()}>
@@ -476,10 +482,14 @@ test("a document-owned comment thread posts its inline reply to the artifact rou
     fireEvent.change(reply, { target: { value: "Document reply" } });
     fireEvent.keyDown(reply, { ctrlKey: true, key: "Enter" });
     await waitFor(() =>
-      expect(createArtifactComment).toHaveBeenCalledWith("artifact-1", {
-        body: "Document reply",
-        reply_to: documentRoot.id,
-      })
+      expect(createArtifactComment).toHaveBeenCalledWith(
+        "artifact-1",
+        {
+          body: "Document reply",
+          reply_to: documentRoot.id,
+        },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -572,7 +582,7 @@ afterEach(() => {
 function renderUnreadCard(expanded: boolean) {
   jest.useFakeTimers();
   const screen = installIntersectionObserver();
-  const mark = spyOn(api, "markThreadRead").mockResolvedValue(undefined);
+  const mark = answerThreadReads().mockResolvedValue(undefined);
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
@@ -609,7 +619,9 @@ test("an expanded thread is marked read once its newest reply has been on screen
     // The watched element is the newest reply's own, not the card around the whole thread.
     expect(card.screen.observed()).toEqual([newest]);
     await dwellOn(newest, card.screen);
-    expect(card.mark.mock.calls).toEqual([[root.id, reply.created_at]]);
+    expect(card.mark.mock.calls).toEqual([
+      [root.id, { read_through: reply.created_at }, keyedAttempt],
+    ]);
   } finally {
     card.cleanup();
   }
