@@ -1,0 +1,5 @@
+kind: Fixed
+body: A closed issue's document no longer says "Reload to edit.", which a reload cannot make true; the dashboard shows that line only for a document a schema mismatch admitted read-only while the issue was open.
+time: 2026-10-29T06:00:01.000000000Z
+custom:
+    Issue: fix-close-withdraws-asks-reopen
