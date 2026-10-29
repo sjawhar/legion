@@ -10,7 +10,6 @@ date: 2026-10-29
 status: active
 module: packages/dispatch/e2e
 related_issues:
-  - "INFRA-728"
   - "sjawhar/legion#2502"
 ---
 
@@ -35,13 +34,14 @@ and what to do when the gap is not there.
 
 ## Evidence
 
-INFRA-728's past-version row fails when the page's scroll falls more than `MAX_SCROLL_FALL_PX`
-below the highest offset it reached (`packages/dispatch/e2e/deep-links.e2e.ts`). With the bound at
-0, the row passed 20 of 20 in each of chromium, iphone, webkit and firefox: the landing scroll
-only goes down, so the largest legitimate fall is 0 px, at landing peaks of 1980 px on desktop and
-2395 px on iPhone. The injected collapse falls 990 px. The shipped bound is 64 px — above every
-measured adjustment with room for an engine's anchor nudge, and more than fifteen times below the
-fault — and its comment carries all of those numbers.
+The past-version row of sjawhar/legion#2502 fails when the page's scroll falls more than
+`MAX_SCROLL_FALL_PX` below the highest offset it reached
+(`packages/dispatch/e2e/deep-links.e2e.ts`). With the bound at 0, the row passed 20 of 20 in each
+of chromium, iphone, webkit and firefox: the landing scroll only goes down, so the largest
+legitimate fall is 0 px, at landing peaks of 1980 px on desktop and 2395 px on iPhone. The
+injected collapse falls 990 px. The shipped bound is 64 px — above every measured adjustment with
+room for an engine's anchor nudge, and more than fifteen times below the fault — and its comment
+carries all of those numbers.
 
 The plan had required a separation of at least five times before any number could ship, and an
 explicit report to the architect otherwise.

@@ -9,7 +9,6 @@ date: 2026-10-29
 status: active
 module: packages/dispatch/e2e
 related_issues:
-  - "INFRA-728"
   - "sjawhar/legion#2502"
 ---
 
@@ -37,7 +36,7 @@ decides which engines run it, so a move that touches no assertion can still drop
 
 ## Evidence
 
-INFRA-728 moved a past-version landing row out of `e2e/mermaid.e2e.ts`. The spec named
+sjawhar/legion#2502 moved a past-version landing row out of `e2e/mermaid.e2e.ts`. The spec named
 `e2e/doc.e2e.ts` as its destination; `doc` is in neither the `webkit` nor the `firefox`
 `testMatch`, while `mermaid` and `deep-links` are in both, so that move would have taken the row
 from four engines to two. The plan recorded it as a departure with the two alternatives, and the

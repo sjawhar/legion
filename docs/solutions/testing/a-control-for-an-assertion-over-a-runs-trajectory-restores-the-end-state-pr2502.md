@@ -10,7 +10,6 @@ date: 2026-10-29
 status: active
 module: packages/dispatch/e2e
 related_issues:
-  - "INFRA-728"
   - "sjawhar/legion#2502"
 ---
 
@@ -35,8 +34,8 @@ older assertions still read where the run ended.
 
 ## Evidence
 
-INFRA-728 made a past-version browser row fail on any large fall of the page's scroll, not only on
-a fall to exactly zero (`packages/dispatch/e2e/deep-links.e2e.ts`, the loop over
+sjawhar/legion#2502 made a past-version browser row fail on any large fall of the page's scroll,
+not only on a fall to exactly zero (`packages/dispatch/e2e/deep-links.e2e.ts`, the loop over
 `window.__scrollEachFrame` ending `expect(falls).toEqual([])`, with
 `await expect(highlight).toBeInViewport()` after it).
 
@@ -48,12 +47,13 @@ run said nothing about either rule. Rewritten as a dip that returns (`window.scr
 wrong: the new rule failed with `falls [{from: 1980, to: 990}]`, a 990 px fall, and the old filter
 under the same dip passed. The tester reproduced both from a dip written independently.
 
-The spec's own A2 named a different fault — "with the page's jump re-run removed, the moved
-past-version rows still fail". `packages/dispatch/web/src/features/doc/refocus-after-diagrams.ts:24`
-returns a no-op when no diagram is waiting, and the moved row has no diagram, so that removal
-leaves the row green. The plan recorded the line and proposed the `VersionView` dependency-list
-mutation instead; the tester later confirmed the asymmetry in one run, where the diagram-bearing
-row failed with `viewport ratio 0` while the no-diagram row passed.
+The spec's own acceptance named a different fault — "with the page's jump re-run removed, the
+moved past-version rows still fail".
+`packages/dispatch/web/src/features/doc/refocus-after-diagrams.ts:24` returns a no-op when no
+diagram is waiting, and the moved row has no diagram, so that removal leaves the row green. The
+plan recorded the line and proposed the `VersionView` dependency-list mutation instead; the tester
+later confirmed the asymmetry in one run, where the diagram-bearing row failed with
+`viewport ratio 0` while the no-diagram row passed.
 
 The sparing half came from the same change's API move. With `getArtifactBlocks`' path broken to
 `/blokcs`, the row that calls `blockId` failed with the helper's own `404`, and a row of the same

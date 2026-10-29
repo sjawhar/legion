@@ -10,7 +10,6 @@ date: 2026-10-29
 status: active
 module: packages/proof-editor
 related_issues:
-  - "INFRA-728"
   - "sjawhar/legion#2502"
 ---
 
@@ -35,7 +34,7 @@ statements at all; then lock them with cases the product can actually produce.
 
 ## Evidence
 
-INFRA-728 merged two copies of four statements in
+sjawhar/legion#2502 merged two copies of four statements in
 `packages/proof-editor/src/mermaid-code-block-view.ts` into one private `clearPreview()` (empty the
 preview's shadow root, hide it, hide the status line, empty its text). The planner found that the
 only existing case switching a block's language switched one that had never drawn, so all four
