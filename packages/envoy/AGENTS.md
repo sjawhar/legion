@@ -1337,7 +1337,7 @@ replaced), and the metrics' `pool` label is the part after `dispatch-`.
 | `listen` (`Listener`) | the 3 it hands over (its one dial is one of them redialling) | 10 s | the LISTEN connections of the delivery hub, the event stream relay and the stale-room evictor |
 | `leases` (`Leases`) | 14 | 2 s | `duty.Exclusive`: one per lease name (12) and 2 spare |
 | `outbox` (`Outbox`) | 1 | none: its one caller | the events outbox |
-| `registry` (`RegistryConfig`) | 1 | none: its one caller | the server process registry's admission, heartbeat and deregistration (`processes.Register`, which opens and closes the pool itself) |
+| `registry` (`OpenRegistry`) | 1 | none: its one caller | the server process registry's admission, heartbeat and deregistration (`processes.Register` opens it through the store, so `Stats` and `/metrics` report it, and its `Deregister` closes it) |
 
 **Every connection wait is bounded.** Each pool's `ConnConfig.Tracer` is `store`'s acquire tracer
 (`store/acquire.go`, pgx's `AcquireTracer`), which every pool method goes through, wrapped or raw:

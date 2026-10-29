@@ -172,7 +172,8 @@ type Registration struct {
 //
 // The registry's statements, the heartbeat above all, run on a pool of one connection of its own,
 // opened here from the shared pool's configuration re-named as the registry's
-// (store.Pool.RegistryConfig: dispatch-registry, and counted in store.ConnectionsPerProcess) and
+// (store.Pool.OpenRegistry: dispatch-registry, counted in store.ConnectionsPerProcess and reported in
+// its Stats) and
 // closed by Deregister. Not the shared pool, for two reasons. A heartbeat queued behind the
 // requests that wait on one writer's lock is a heartbeat that lands late, and three late ones make
 // a process that still serves look gone. And cmd/dispatch's shutdown decides that the database has
@@ -183,7 +184,7 @@ func Register(ctx context.Context, pool *store.Pool, instance Instance) (*Regist
 	if len(instance.SigningKeys) == 0 {
 		return nil, errors.New("register this server process: it names no signing key")
 	}
-	own, err := pgxpool.NewWithConfig(ctx, pool.RegistryConfig())
+	own, err := pool.OpenRegistry(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("open the server process registry's pool: %w", err)
 	}

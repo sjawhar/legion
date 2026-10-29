@@ -350,8 +350,8 @@ func (p *Pool) Leases() (*pgxpool.Pool, error) {
 const outboxPoolSize = 1
 
 // registryPoolSize bounds the pool the registry of live server processes stamps this process's row
-// through: processes.Register opens it from RegistryConfig, outside the pools above and closed by
-// its Deregister, so it is counted here rather than by a method that opens it.
+// through: processes.Register opens it with OpenRegistry and its Deregister closes it, so each
+// registration opens a pool of its own, which Stats reports while it is open.
 const registryPoolSize = 1
 
 // permanentListeners is how many connections the listener pool dials and hands off for the life
@@ -502,17 +502,40 @@ func (p *Pool) Close() {
 // Config returns a copy of the pool's configuration.
 func (p *Pool) Config() *pgxpool.Config { return p.pool.Config() }
 
-// RegistryConfig is the configuration of the server process registry's own pool, which
-// processes.Register opens and its Deregister closes: this pool's configuration sized at
-// registryPoolSize and named as the registry's (configurePool, RegistryPool), so its connection is
-// dispatch-registry in pg_stat_activity and its acquires are counted apart from the requests'.
-func (p *Pool) RegistryConfig() *pgxpool.Config {
+// OpenRegistry opens the server process registry's own pool, which processes.Register uses and its
+// Deregister closes: this pool's configuration sized at registryPoolSize and named as the
+// registry's (configurePool, RegistryPool), so its connection is dispatch-registry in
+// pg_stat_activity and its acquires are counted apart from the requests'. The pool is recorded
+// with the others, replacing one an earlier registration opened, so Stats and the metrics report
+// the heartbeat's connection and its waits as they report every other pool's, and Close closes it
+// with them; closing it twice is harmless, since a pgx pool closes once.
+func (p *Pool) OpenRegistry(ctx context.Context) (*pgxpool.Pool, error) {
 	config := p.pool.Config()
 	config.MaxConns = registryPoolSize
 	config.MinConns = 0
 	config.MinIdleConns = 0
-	configurePool(config, RegistryPool, defaultAcquireBound(RegistryPool))
-	return config
+	p.mu.Lock()
+	bound, ok := p.acquireBounds[RegistryPool]
+	p.mu.Unlock()
+	if !ok {
+		bound = defaultAcquireBound(RegistryPool)
+	}
+	acquire := configurePool(config, RegistryPool, bound)
+	opened, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("open %s pool: %w", RegistryPool, err)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		opened.Close()
+		return nil, ErrPoolClosed
+	}
+	if p.separates == nil {
+		p.separates = make(map[string]openedPool, len(poolNames))
+	}
+	p.separates[RegistryPool] = openedPool{name: RegistryPool, pool: opened, acquire: acquire}
+	return opened, nil
 }
 
 // Stat reports the pool's current connection counts.

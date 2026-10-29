@@ -798,7 +798,7 @@ func TestEachPoolNamesItsConnectionsInPgStatActivity(t *testing.T) {
 		}
 		holdOne(t, opened.Acquire)
 	}
-	registry, err := pgxpool.NewWithConfig(ctx, pool.RegistryConfig())
+	registry, err := pool.OpenRegistry(ctx)
 	if err != nil {
 		t.Fatalf("open the registry's pool: %v", err)
 	}

@@ -35,12 +35,12 @@ const (
 	LivePool = "live"
 	// SettlementsPool is the document settlements' pool (Pool.Settlements).
 	SettlementsPool = "settlements"
-	// RegistryPool is the server process registry's one connection (Pool.RegistryConfig).
+	// RegistryPool is the server process registry's one connection (Pool.OpenRegistry).
 	RegistryPool = "registry"
 )
 
-// poolNames is every pool name, in the order Stats reports them. The registry's pool is never in
-// Stats: processes.Register opens and closes it itself (Pool.RegistryConfig).
+// poolNames is every pool name, in the order Stats reports them. The registry's pool is in Stats
+// once processes.Register has opened it (Pool.OpenRegistry).
 var poolNames = [...]string{
 	RequestsPool, RoomsPool, HealthPool, ListenPool, LeasesPool, OutboxPool,
 	BackgroundPool, LivePool, SettlementsPool, RegistryPool,
