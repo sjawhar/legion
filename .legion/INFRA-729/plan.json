@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-729",
+  "completed": "2026-10-29T01:56:24Z",
+  "planDocument": "dispatch://INFRA-729/artifact/plan-md",
+  "summary": "Move dispatch-browser-multiprocess's postgres service in .github/workflows/envoy-and-contracts.yaml from the pgvector 0.8.7-pg16 digest (7b822b0a…, line 1094) to the pg18 digest every other job pins (2358fcba…, line 975); the service mounts no data directory, so nothing else in it changes. Because the job's `dispatch` paths filter omits the workflow file, a PR changing only that line skips the job (PR #2476's head shows it skipped), so the plan adds a filter `dispatch_browser_multiprocess` = the workflow file + the anchored `dispatch` list and gates the job on it.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: push, PR body (`Dispatch: INFRA-729`), proof entries with headSha and negative control (references/pr-body.md)",
+      "dispatch: any write to the issue (message, comment) follows its rules"
+    ],
+    "test": [
+      "legion-worker: independent proof at the head SHA from GitHub's check runs and job logs, with the pg16 negative control (references/pr-body.md#what-a-proof-is)"
+    ],
+    "review": [
+      "legion-worker: review and approval of the head by SHA (references/merge-gate.md, references/review-threads.md)"
+    ]
+  },
+  "tasks": [
+    {
+      "id": 1,
+      "file": ".github/workflows/envoy-and-contracts.yaml",
+      "change": "Line 1094: image digest 7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a -> 2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11, byte-identical to line 975's image value. No volume or tmpfs exists to move."
+    },
+    {
+      "id": 2,
+      "file": ".github/workflows/envoy-and-contracts.yaml",
+      "change": "Line 645 `dispatch:` -> `dispatch: &dispatch`; after the dispatch list (after line 700) add a commented filter `dispatch_browser_multiprocess:` listing '.github/workflows/envoy-and-contracts.yaml' and `- *dispatch`."
+    },
+    {
+      "id": 3,
+      "file": ".github/workflows/envoy-and-contracts.yaml",
+      "change": "changes.outputs (lines 143-160): add `dispatch_browser_multiprocess: ${{ steps.filter.outputs.dispatch_browser_multiprocess }}`."
+    },
+    {
+      "id": 4,
+      "file": ".github/workflows/envoy-and-contracts.yaml",
+      "change": "Line 1090: `if: needs.changes.outputs.dispatch_browser_multiprocess == 'true'`."
+    },
+    {
+      "id": 5,
+      "file": ".github/workflows/envoy-and-contracts.yaml",
+      "change": "Keep comments true: lines 171-173 (five per-job Go filters; name the new filter as dispatch + this workflow), lines 179-181 (anchored keys are no job's gate: add that `dispatch` also carries an anchor for the new filter), job comment 1083-1087 (runs when a file its dispatch_browser_multiprocess filter names changes)."
+    },
+    {
+      "id": 6,
+      "file": "(none)",
+      "change": "Leave intentional pg16 records outside .github/workflows alone: packages/envoy/scripts/dev-postgres.test.sh:28-30, docs/plans/2026-10-14-dispatch-gcp-plan.md, docs/kubernetes.md 16.x notes, packages/dispatch/README.md:277, packages/envoy/internal/dispatch/outbox/THROUGHPUT.md:10. No AGENTS.md change, no changelog fragment (no package changes)."
+    }
+  ],
+  "localChecks": [
+    "grep -rn 7b822b0a .github/workflows  (no output)",
+    "python3 yaml.safe_load of the workflow; load jobs.changes.steps[1].with.filters as YAML; flatten; dispatch_browser_multiprocess == flattened dispatch + the workflow path",
+    "go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/envoy-and-contracts.yaml, Go caches under $TMPDIR; no new finding versus be4567e3",
+    ".github/scripts/check-image-trigger-paths.sh, check-action-pins.sh, check-private-names.sh pass"
+  ],
+  "acceptance": [
+    {
+      "criterion": "A1: `grep -rn 7b822b0a .github/workflows` on the PR head finds nothing",
+      "surface": "the repository tree at the PR head",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && grep -rn 7b822b0a .github/workflows",
+      "pass": "no output"
+    },
+    {
+      "criterion": "A2: dispatch-browser-multiprocess passes on the PR (ran, not skipped) on PostgreSQL 18",
+      "surface": "GitHub Actions CI on the pull request",
+      "command": "gh api \"repos/sjawhar/legion/commits/$H/check-runs?check_name=dispatch-browser-multiprocess\" --jq '.check_runs[].conclusion'; gh run view -R sjawhar/legion --job <id> --log | grep -E 'pgvector@sha256|starting PostgreSQL|[0-9]+ (passed|failed)'",
+      "pass": "conclusion success; Initialize containers pulls …2358fcba…; Stop containers prints `starting PostgreSQL 18.`; both test steps `N passed`, no `failed`, no 7b822b0a, no `PostgreSQL 16`",
+      "negativeControl": "main's job 123138185821 (run 40761578717, head af1ff09c) pulls 7b822b0a and prints `starting PostgreSQL 16.15`",
+      "gateControl": "same head's `dispatch` check run is `skipped`"
+    },
+    {
+      "criterion": "A3: no added line, path or commit subject names the private deployment repository's Dispatch keys",
+      "surface": "the required lint job on the PR",
+      "command": "gh api \"repos/sjawhar/legion/commits/$H/check-runs?check_name=lint\" --jq '.check_runs[].conclusion'",
+      "pass": "success, including check-private-names.sh and check-pr-text.sh steps"
+    }
+  ],
+  "knownFailures": "None apply: the job passed on main on PostgreSQL 16 (5 passed + 1 passed). Any failure on 18 is fixed in this PR.",
+  "productionCheck": "Production for this change is main's CI: the push-to-main run of envoy-and-contracts.yaml at the merge commit shows dispatch-browser-multiprocess success with `starting PostgreSQL 18.` (A2 commands at the merge SHA).",
+  "adjacentGapNamed": "The `dispatch` job (same `dispatch` filter) is also blind to edits of its own definition in this workflow; fixing it runs a 34-45 minute job, red on main today, on every workflow edit. Not changed here; sent to the architect to decide.",
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "The job is gated on the `dispatch` filter, which omits the workflow file, so a PR changing only the image line skips it; acceptance line 2 then cannot hold under 'Change nothing else'.",
+        "answer": "Plan adds filter dispatch_browser_multiprocess (workflow file + *dispatch), its changes.outputs entry, and gates the job on it; recorded as a spec departure. Rejected: workflow in `dispatch` (runs the 34-45 min red job), reuse of dispatch_multiprocess (Go closure), scratch PR."
+      },
+      {
+        "finding": "Anchoring `dispatch` and adding a sixth non-Go filter make the comments at workflow lines 171-173 and 179-181 false.",
+        "answer": "Task 5 updates both comments and the job comment at 1083-1087."
+      },
+      {
+        "finding": "Acceptance line 2 cannot tell skipped from passed and does not prove PostgreSQL 18.",
+        "answer": "A2 reads the check run's conclusion (success, not skipped), the job log's pulled digest and `starting PostgreSQL 18.` line, with main's pg16 job as negative control and the `dispatch` check run skipped as gate control."
+      },
+      {
+        "finding": "Acceptance line 3 names no check.",
+        "answer": "A3 is the required lint job's success, whose check-private-names.sh and check-pr-text.sh steps enforce it."
+      },
+      {
+        "finding": "Spec claims about #2476 removing three jobs and #2323's timing are unverified in the repo.",
+        "answer": "Not load-bearing for the plan; #2476's head check runs (read on GitHub) show both dispatch jobs skipped, and the only 7b822b0a in workflows is line 1094."
+      },
+      {
+        "finding": "Could PG18 change the job's behaviour (psql client, text search, two processes on one DB)?",
+        "answer": "No work: the `dispatch` job runs the same psql harness against 18 on the same runner; the multiprocess specs do no text search; dispatch-multiprocess runs two processes on 18."
+      },
+      {
+        "finding": "Other pg16 references outside workflows.",
+        "answer": "Task 6 leaves them: intentional fixtures and historical records; acceptance grep is scoped to .github/workflows."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "Set that job's image to the pg18 digest ... Change nothing else.",
+      "plan": "Also adds a paths filter `dispatch_browser_multiprocess` (the workflow file plus the anchored `dispatch` list), its `changes` output, and gates the job on it, with the comments that describe the filters kept true.",
+      "evidence": "The job is gated `if: needs.changes.outputs.dispatch == 'true'` (envoy-and-contracts.yaml:1090) and the `dispatch` filter (lines 645-700) omits the workflow file; PR #2476, which changed only workflows and docs, shows `dispatch-browser-multiprocess skipped` on its head. Without a gate change the job cannot pass on the PR (acceptance line 2) nor run on main after the merge.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "The 'Change nothing else' scope line no longer holds: the PR also changes the job's paths-filter gate in the same workflow. Summary and the three acceptance lines are unchanged."
+      }
+    }
+  ]
+}
