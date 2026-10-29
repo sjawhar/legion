@@ -5,10 +5,12 @@ body: |-
     every other caller makes, the Envoy listener's HTTP publishes among them. The server
     acknowledges such a publish with nothing, so the denial is read from the violation the server
     reports on the connection, recorded under the subject it names (`bus.ErrPublishDenied`), where
-    the publish's own answer is a publish-window timeout or a no-responders error. Every denied
-    destination of one event is named its own denial: a notifying event publishes its owner topic
-    and its route on one connection, and the connection keeps one last error, so only the
-    destination whose violation landed last used to be named one. An operator sees the difference
+    the publish's own answer is a publish-window timeout or a no-responders error. Every refused
+    message is named its own denial: the server refuses each message and reports a violation of
+    each, while the connection keeps one last error, so one batch's several destinations - a
+    notifying event's owner topic and its route - and its several messages to one subject - two
+    comments on one issue a moment apart - used to leave every publish but one reading as an
+    outage of the bus. An operator sees the difference
     on Dispatch's outbox: such a publish was released at INFO with no attempt counted, logged as
     `NATS is unreachable`, and the rest of
     that scan's backlog was abandoned; now the attempt is counted and backed off by its retry
