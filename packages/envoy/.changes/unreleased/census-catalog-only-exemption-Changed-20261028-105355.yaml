@@ -1,0 +1,5 @@
+kind: Changed
+body: '`envoy-dispatch census` exempts from its 1 GiB table limit a migration whose every statement is a `create function` (or procedure) in `plpgsql` or `sql`, or a `create trigger`, as Postgres''s own parser (libpg_query, through `github.com/wasilibs/go-pgquery`) reads them: each does its work in the catalog and reads no row of the table. No migration is exempt while an enabled event trigger runs on those commands. The report still prints the table''s size beside the limit and why the migration is exempt, and the migration''s lock holders still refuse it. Every refusal a lock holder causes now carries that holder''s diagnosis, read when the census refused: its state, transaction start, `backend_xid`, wait event and query (literals, numbers and comments replaced) from `pg_stat_activity`, and its locks from `pg_locks`.'
+time: 2026-10-28T10:53:55.62798295Z
+custom:
+    Issue: census-catalog-only-exemption
