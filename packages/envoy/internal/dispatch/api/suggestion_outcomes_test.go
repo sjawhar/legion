@@ -105,7 +105,7 @@ func startIdleSweep(t *testing.T, project string, settle time.Duration) idleSwee
 	leases := sweepLeases(t, counted)
 	schedule := suggestionSchedule{minGap: idleSweepGap, settle: settle, page: suggestionOutcomePage}
 	started := time.Now()
-	runSweep(t, func(ctx context.Context) { runSuggestionOutcomeSweep(ctx, counted.Pool, leases, wake, schedule) })
+	runSweep(t, func(ctx context.Context) { runSuggestionOutcomeSweep(ctx, counted.Pool, leases, wake, nil, schedule) })
 	select {
 	case <-connected:
 	case <-time.After(10 * time.Second):
@@ -334,7 +334,7 @@ const oldSuggestions = 1000
 // project document, and measures the one page that judges them. The page runs in a transaction of
 // the test's own, so pg_stat_xact_user_tables reads exactly that page's row counts before it
 // commits. The document event is there so the page looks pending suggestions up by document too,
-// the lookup migration 0141 indexed.
+// the lookup migration 0143 indexed.
 //
 // Both measurements seed the same rows, so the table, its indexes and its statistics are the same
 // size and Postgres plans each read the same way; the only difference is whether the old rows are

@@ -223,7 +223,7 @@ var (
 // startSuggestionCursor is what the first pass on a database reads before its rules run: the
 // highest event id, which the cursor moves to once the rules have judged every pending suggestion
 // against every event up to it, and up to $1 of the suggestions not yet swept, oldest first (all
-// of them recorded since migration 0141), which the rules judge too and the pass then marks.
+// of them recorded since migration 0143), which the rules judge too and the pass then marks.
 const startSuggestionCursor = `
 select coalesce((select max(id) from events), 0),
        array(select id::text from write_suggestions where not swept order by created_at limit $1)`
@@ -388,7 +388,12 @@ func runSuggestionRules(ctx context.Context, tx pgx.Tx, rules [3]string, args ..
 
 // RunSuggestionOutcomeSweep resolves LEGION-550's write_suggestions off the write path entirely:
 // whether the agent acted on a suggestion (cited it, or updated the suggested issue directly) or
-// overrode it (kept working on what it filed instead). It stops when ctx is done.
+// overrode it (kept working on what it filed instead). The same pass deletes every
+// Idempotency-Key past its window (sweepRequestKeys) and then sends every delivery a process
+// that died left owed (resumeDeliveries, the server's resumeOwedDeliveries), which are no reason
+// for a loop of their own: each would need a lease connection of its own (store.leasePoolSize,
+// whose headroom is zero), for two statements that cost nothing beside the suggestion rules.
+// resumeDeliveries is nil where nothing delivers. It stops when ctx is done.
 //
 // It is a woken loop (duty.RunWoken) under the suggestion-outcomes lease: one pass at start, then
 // a pass when wake is signalled - in the server, the pglisten.Hub wake on EventsChannel, which
@@ -397,8 +402,15 @@ func runSuggestionRules(ctx context.Context, tx pgx.Tx, rules [3]string, args ..
 // then - and when a pass asks for one: once what it held back for being under a minute old is a
 // minute old (judgeSuggestionPage), and a minute after a pass that failed. Passes start at least
 // a minute apart, and each reads page after page until it has caught up
-// (sweepSuggestionOutcomePages). With nothing written the loop holds no timer and makes no
-// statement. A nil wake leaves the loop with its start pass and the passes those ask for.
+// (sweepSuggestionOutcomePages). A nil wake leaves the loop with its start pass and the passes
+// those ask for.
+//
+// A loop that delivers (resumeDeliveries not nil) asks for a pass every minute whatever woke it,
+// which is the tick this loop kept before it was woken: what the delivery sweep answers is owed
+// by a process having died, and a death commits nothing for a wake to carry, so that work has no
+// wake to replace its timer with. Its pass is also bounded (deliverySweepBatch), and what one
+// pass leaves is the next one's. Where nothing delivers - every caller that passes nil - the loop
+// holds no timer between wakes and makes no statement with nothing written.
 //
 // Only an event can resolve a suggestion - every rule needs one written after the suggestion - so
 // a suggestion that commits after every pass its own write's event earned stays unswept until the
@@ -408,12 +420,19 @@ func runSuggestionRules(ctx context.Context, tx pgx.Tx, rules [3]string, args ..
 // When another process holds the lease, the loop tries again every minute until a pass of its
 // own runs, since the other process's pass may have read before the change that woke this one.
 // leases is required, as it is of every leased loop (cmd/dispatch exits at boot if the lease pool
-// cannot be opened).
-func RunSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, leases duty.Leases, wake <-chan struct{}) {
-	runSuggestionOutcomeSweep(ctx, pool, leases, wake, suggestionOutcomeSchedule)
+// cannot be opened). The three sweeps fail apart: one's failure is logged and the others still
+// run.
+func RunSuggestionOutcomeSweep(
+	ctx context.Context, pool *store.Pool, leases duty.Leases, wake <-chan struct{},
+	resumeDeliveries func(context.Context) error,
+) {
+	runSuggestionOutcomeSweep(ctx, pool, leases, wake, resumeDeliveries, suggestionOutcomeSchedule)
 }
 
-func runSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, leases duty.Leases, wake <-chan struct{}, schedule suggestionSchedule) {
+func runSuggestionOutcomeSweep(
+	ctx context.Context, pool *store.Pool, leases duty.Leases, wake <-chan struct{},
+	resumeDeliveries func(context.Context) error, schedule suggestionSchedule,
+) {
 	ctx = store.WithTransactionTracking(ctx)
 	duty.RunWoken(ctx, duty.WokenLoop{
 		Lease:  suggestionOutcomeLease,
@@ -422,14 +441,32 @@ func runSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, leases dut
 		MinGap: schedule.minGap,
 		Pass: func(ctx context.Context) time.Time {
 			next, err := sweepSuggestionOutcomePages(ctx, pool, schedule.page, schedule.settle)
-			switch {
-			case ctx.Err() != nil:
-				return time.Time{}
-			case err != nil:
+			if err != nil && ctx.Err() == nil {
 				slog.Warn("dispatch: suggestion outcome sweep failed", "error", err)
-				return time.Now().Add(schedule.minGap)
+				next = time.Now().Add(schedule.minGap)
+			}
+			if err := sweepRequestKeys(ctx, pool); err != nil && ctx.Err() == nil {
+				slog.Warn("dispatch: idempotency key sweep failed", "error", err)
+			}
+			if resumeDeliveries != nil {
+				if err := resumeDeliveries(ctx); err != nil && ctx.Err() == nil {
+					slog.Warn("dispatch: delivery sweep failed", "error", err)
+				}
+				// The deliveries owed are what no wake announces: keep this loop's own tick.
+				next = earlier(next, time.Now().Add(schedule.minGap))
+			}
+			if ctx.Err() != nil {
+				return time.Time{}
 			}
 			return next
 		},
 	})
+}
+
+// earlier is the sooner of two due times, either of which may be the zero time for never.
+func earlier(a, b time.Time) time.Time {
+	if a.IsZero() || b.Before(a) {
+		return b
+	}
+	return a
 }

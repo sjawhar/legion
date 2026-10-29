@@ -104,13 +104,13 @@ func TestTwoSuggestionSweepRunnersNeverPassAtOnceAndBothPass(t *testing.T) {
 	}
 
 	runSweep(t, func(ctx context.Context) {
-		runSuggestionOutcomeSweep(ctx, database.Pool, firstLeases, nil, sweepLeaseSchedule)
+		runSuggestionOutcomeSweep(ctx, database.Pool, firstLeases, nil, nil, sweepLeaseSchedule)
 	})
 	if waiting := storetest.WaitForLockWaiters(t, gate, 1, 30*time.Second); waiting < 1 {
 		t.Fatal("the first runner's pass never reached the cursor lock: it never took the lease")
 	}
 	runSweep(t, func(ctx context.Context) {
-		runSuggestionOutcomeSweep(ctx, second.Pool, secondLeases, nil, sweepLeaseSchedule)
+		runSuggestionOutcomeSweep(ctx, second.Pool, secondLeases, nil, nil, sweepLeaseSchedule)
 	})
 	// The second runner's boot attempt and at least one retry find the lease held.
 	waitUntil(t, 30*time.Second, "the second runner to find the lease held twice", func() bool {
@@ -145,7 +145,7 @@ func TestALoneSuggestionSweepRunnerPassesOnEveryWake(t *testing.T) {
 	logs := captureSweepLogs(t)
 	wake := make(chan struct{}, 1)
 	runSweep(t, func(ctx context.Context) {
-		runSuggestionOutcomeSweep(ctx, database.Pool, leases, wake, sweepLeaseSchedule)
+		runSuggestionOutcomeSweep(ctx, database.Pool, leases, wake, nil, sweepLeaseSchedule)
 	})
 
 	const wakes = 5

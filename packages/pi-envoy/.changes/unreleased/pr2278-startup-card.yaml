@@ -1,8 +1,0 @@
-kind: Fixed
-body: |-
-  A card that reaches an RPC session while Oh My Pi starts no longer holds back every RPC command
-  until the turn it started ends. Oh My Pi settles every extension send of its startup before RPC
-  mode reads its input, and an idle card's send lasted its whole turn, so a Legion worker's
-  `get_state` and task waited for it (once 72 minutes). Such a card now goes into the context with
-  no turn, and the wake starts its turn once the host is idle after its startup. Print, json and
-  terminal sessions keep the idle steer.

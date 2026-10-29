@@ -91,39 +91,76 @@ func TestAnEmailAutolinkIsAMailLinkInGoAndTheEngine(t *testing.T) {
 	}
 }
 
-// Go and the browser editor's engine still disagree on where an email address starts or ends
-// beside some characters: after a scheme or a `;`, at a `www.` opening the local part, at a `'` or
-// `!` in the local part, and in a domain ending in a digit. Each row is markdown and whether Go
-// and the engine read it alike, so a change to either reading shows here. The rows recorded as
-// differing are left to dispatch://INFRA-531 by the architect's decision D1 on INFRA-530
-// (dispatch://INFRA-530/comment/92c28ada-e835-4632-acdf-554c395b8d9f), which turns them to agree.
-func TestEmailReadingsThatDifferAreRecorded(t *testing.T) {
-	tests := []struct {
-		markdown string
-		agree    bool
-	}{
-		{"Mail mailto:a@b.test now.\n", false},
-		{"Mail xmpp:a@b.test now.\n", false},
-		{"x;a@b.test end\n", false},
-		{"www.a@b.test\n", false},
-		{"Mail a'b@c.test now.\n", false},
-		{"Mail a!b@c.test now.\n", false},
-		{"Mail a@b.test1 now.\n", false},
-		{"Mail a@b.test_ end\n", true},
-		{"Mail a@b end\n", true},
+// Go reads an email in each of these shapes as the browser editor's engine reads it, whole tree
+// for whole tree, and keeps it through a write: the rendering of Go's reading reads back as that
+// reading in Go and in the engine. The shapes are where an address could start or end otherwise:
+// after a scheme, a `;`, a `^`, a `_`, a quote, a letter outside ASCII, a character reference or an
+// escape; at a `www.` opening the local part, at a `'` or `!` in the local part, in a domain
+// ending in a digit or an underscore, and inside or after a mark - read from the engine's
+// tokenizer or from its transform over the decoded text.
+//
+// The transform splits each text of the `.@y.zz` rows at an email, in a paragraph and in each
+// block that holds one, and searches each text once, so the text beside the email is not searched
+// again as a text of its own. Written as an explicit link, the email ends the text before it and
+// begins the one after it, and both readers link an address that text opens with alone (`.@y.zz`),
+// so the writer writes the email as its address there (runSpelling.bareEmails).
+func TestEmailReadingsAgreeWithTheEngine(t *testing.T) {
+	markdowns := []string{
+		"Mail mailto:a@b.test now.\n",
+		"Mail xmpp:a@b.test now.\n",
+		"x;a@b.test end\n",
+		"www.a@b.test\n",
+		"Mail a'b@c.test now.\n",
+		"Mail a!b@c.test now.\n",
+		"Mail a@b.test1 now.\n",
+		"Mail a@b.test_ end\n",
+		"Mail a@b end\n",
+		"_a@b.test_\n",
+		"a\\@b.test\n",
+		"\"a@b.test\"\n",
+		"a@-b.test\n",
+		"\\<a@b.test>\n",
+		"\\*a@b.test c\n",
+		"\"a@b.test\" c\n",
+		"éa@b.test c\n",
+		"x&amp;a@b.test c\n",
+		"see www\\.a@b.test\n",
+		"x;mailto:a@b.test end\n",
+		"x^a@b.test end\n",
+		"x ^a@b.test end\n",
+		"x_a@b.test end\n",
+		"x _a@b.test end\n",
+		"*a@b.test*\n",
+		"x *a@b.test* y\n",
+		"a~b~x@y.co\n",
+		"~~a c~~x@y.co\n",
+		"a\\_b@c.dd\\.@y.zz\n",
+		"- a\\_b@c.dd\\.@y.zz\n",
+		"> a\\_b@c.dd\\.@y.zz\n",
+		"| a |\n| - |\n| a\\_b@c.dd\\.@y.zz |\n",
+		"x /www.x.test.a_b@c.dd y\n",
 	}
-	markdowns := make([]string, 0, len(tests))
-	for _, test := range tests {
-		markdowns = append(markdowns, test.markdown)
-	}
-	readings := engineReadings(t, markdowns)
-	for index, test := range tests {
-		doc, err := Parse(test.markdown)
+	docs := make([]*Node, len(markdowns))
+	renderings := make([]string, len(markdowns))
+	for index, markdown := range markdowns {
+		doc, err := Parse(markdown)
 		if err != nil {
-			t.Fatalf("Parse(%q) = %v", test.markdown, err)
+			t.Fatalf("Parse(%q) = %v", markdown, err)
 		}
-		if got := readings[index] != nil && doc.Equal(readings[index]); got != test.agree {
-			t.Errorf("%q: Go reads %s, the engine %s; recorded as agreeing: %v", test.markdown, inlineSummaries(doc), inlineSummaries(readings[index]), test.agree)
+		docs[index] = doc
+		renderings[index] = mustRender(t, doc)
+	}
+	readings := engineReadings(t, append(append([]string{}, markdowns...), renderings...))
+	for index, markdown := range markdowns {
+		doc, rendering := docs[index], renderings[index]
+		if reading := readings[index]; reading == nil || !doc.Equal(reading) {
+			t.Errorf("%q: Go reads %s, the engine %s", markdown, readingSummary(doc), readingSummary(reading))
+		}
+		if back, err := Parse(rendering); err != nil || !back.Equal(doc) {
+			t.Errorf("%q is written %q, which Go reads back as %s (%v), not %s", markdown, rendering, readingSummary(back), err, readingSummary(doc))
+		}
+		if reading := readings[len(markdowns)+index]; reading == nil || !reading.Equal(doc) {
+			t.Errorf("%q is written %q, which the engine reads back as %s, not %s", markdown, rendering, readingSummary(reading), readingSummary(doc))
 		}
 	}
 }
