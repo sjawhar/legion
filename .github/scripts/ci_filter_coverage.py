@@ -459,14 +459,21 @@ def reduce_line(line: str) -> tuple:
 
 
 # The only env: names a step, its job or the workflow may set while a go command of the step stays
-# reduced: test configuration the go tool itself never reads. Any other name falls to everything,
+# reduced: names that cannot change what the command compiles. Any other name falls to everything,
 # among them GO* and CGO_*, BASH_ENV and ENV (which bash sources before the script), HOME and
 # XDG_CONFIG_HOME (go reads its env file, GOFLAGS among it, from $XDG_CONFIG_HOME/go/env or else
-# $HOME/.config/go/env) and PATH (which chooses the go binary). Add a name here only when go does
-# not read it.
+# $HOME/.config/go/env) and PATH (which chooses the go binary). Add a name here only when go
+# compiles the same files with it set as without.
+#
+# GOPROXY is the one name go itself reads that is here. It says where a module's bytes come from,
+# never which version: the module files this check already reads decide that, and go.sum holds
+# each module's hash whichever source serves it. This check's own go commands run with
+# GOPROXY=off over an empty module cache (Go.env below), so a workflow's value never reaches
+# them either.
 ENV_ALLOWED = frozenset({
     "BROKER_TEST_DATABASE_URL", "DATABASE_URL", "DISPATCH_E2E_FILE_STORE_BUCKET", "DISPATCH_E2E_FILE_STORE_ENDPOINT",
     "DISPATCH_TEST_DATABASE_URL", "ENVOY_INFRA_DOCKER_PLUGIN", "ENVOY_SMOKE_HELD_PORT_IMAGE", "ENVOY_SMOKE_IMAGE",
+    "GOPROXY",
     "LEGION_E2E", "LEGION_E2E_ENVOY_STACK", "LEGION_E2E_PG_DSN", "LEGION_TEST_NATS_URL", "LEGION_TEST_PG_DSN",
     "TESTCONTAINERS_RYUK_DISABLED",
 })

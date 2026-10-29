@@ -76,6 +76,14 @@ env:
     .github/go-release-targets.json .github/agent-secrets-client-targets.json
 
 
+  # A `|` between proxy entries makes a go command fall through to the next source after ANY error,
+  # where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
+  # proxy.golang.org reset a download mid-stream and turned a Go lane red on a module whose hash
+  # go.sum already holds (dispatch://INFRA-567); with `|direct` the command fetches the same bytes
+  # straight from the source and checks them against go.sum, so this is a second path, not a weaker
+  # check.
+  GOPROXY: https://proxy.golang.org|direct
+
 jobs:
 
   # The architectures the archives are built for: .github/go-release-targets.json, the list the
@@ -85,6 +93,7 @@ jobs:
   # be the inconsistency.
   targets:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     outputs:
@@ -99,6 +108,7 @@ jobs:
   build:
     needs: targets
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # Checks out and uploads; nothing here writes to the repository or a registry.
     permissions:
       contents: read
@@ -152,6 +162,7 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 80
     # Builds and pushes images to ghcr.io; nothing here writes to the repository.
     permissions:
       contents: read
@@ -297,6 +308,7 @@ jobs:
   image_index:
     needs: docker
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # Pushes the index and its tag to ghcr.io; nothing here writes to the repository.
     permissions:
       packages: write
@@ -366,6 +378,7 @@ jobs:
   attest:
     needs: image_index
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # id-token: write is the OIDC token Sigstore issues the signing certificate for; attestations:
     # write stores the attestation with GitHub. The attestation stays with GitHub, not the
     # registry, so this job needs no packages scope.
@@ -403,6 +416,7 @@ jobs:
   release_build:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     outputs:
@@ -527,6 +541,7 @@ jobs:
       cancel-in-progress: false
       queue: max
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # packages: write moves the `latest` tag to the newest already-published image (`docker
     # buildx imagetools create`, below); contents: write creates and uploads the GitHub release
     # (`release-push.sh release`); id-token and attestations: write are for the agent-secrets

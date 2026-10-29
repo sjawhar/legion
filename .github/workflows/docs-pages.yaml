@@ -227,6 +227,7 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # Publishes the built site to GitHub Pages: pages: write performs the deployment, id-token:
     # write is the OIDC token actions/deploy-pages exchanges for it.
     permissions:

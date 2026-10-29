@@ -292,6 +292,12 @@ RUN --mount=type=secret,id=github_token \
 # ghcr.io/sjawhar/legion/ci, the copy of golang:1.27.1-alpine (.github/ci-images.yaml)
 FROM ghcr.io/sjawhar/legion/ci@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS go
 WORKDIR /src
+
+# A `|` between proxy entries makes a go command fall through to the next source after any error,
+# where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
+# go.sum holds each module's hash either way, so this is a second path, not a weaker check
+# (dispatch://INFRA-567).
+ENV GOPROXY=https://proxy.golang.org|direct
 # The notices stage's Go part: go-licenses (pinned in go-third-party-notices.sh) is built in a layer of
 # its own, before the module files, so neither a source change nor a dependency bump rebuilds it.
 COPY scripts/go-third-party-notices.sh /usr/local/bin/

@@ -69,12 +69,22 @@ concurrency:
 permissions:
   contents: read
 
+# A `|` between proxy entries makes a go command fall through to the next source after ANY error,
+# where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
+# proxy.golang.org reset a download mid-stream and turned envoy-infra-go red on a module whose
+# hash go.sum already holds (dispatch://INFRA-567); with `|direct` the command fetches the same
+# bytes straight from the source and checks them against go.sum, so this is a second path, not a
+# weaker check.
+env:
+  GOPROXY: https://proxy.golang.org|direct
+
 jobs:
   # Selects the jobs that read what this change touched. Skipped on a draft pull request, so no
   # test job runs; marking it ready for review starts a run that selects by the same diff.
   changes:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       typecheck: ${{ steps.filter.outputs.typecheck }}
       test: ${{ steps.filter.outputs.test }}
@@ -1054,6 +1064,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     # check-pr-text.sh reads a pull request's commits through the compare route (`contents: read`),
     # its reviews and review comments (`pull-requests: read`) and its issue comments
     # (`issues: read`).
@@ -1231,6 +1242,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.changes.result != 'success' || needs.changes.outputs.typecheck == 'true') }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1272,6 +1284,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.changes.result != 'success' || needs.changes.outputs.test == 'true') }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     services:
       postgres:
         # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -1498,6 +1511,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.contracts == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1521,6 +1535,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_plugin == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1552,6 +1567,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_client == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1588,6 +1604,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.pi_shared == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1610,6 +1627,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.pi_envoy == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # The NATS server extensions/card-delivery-omp.test.ts delivers Envoy cards and a person's Send
     # through (LEGION_TEST_NATS_URL on the test step): the 2.10 image the envoy-client job pulls,
     # pinned by digest as this file's other service images are.
@@ -1678,6 +1696,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.pi_legion == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # The NATS server the Envoy role claim of extensions/controller-start-omp.test.ts's controller
     # needs (LEGION_TEST_NATS_URL on the test step), on the image the envoy-client job pulls.
     services:
@@ -1769,6 +1788,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.dispatch == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 155
     services:
       postgres:
         # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -1897,6 +1917,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.dispatch_browser_multiprocess == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     services:
       postgres:
         # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -1972,6 +1993,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.claude_envoy == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2008,6 +2030,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_go == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     services:
       postgres:
         # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -2143,6 +2166,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_infra_go == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     env:
       TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
@@ -2391,6 +2415,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_smoke == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     env:
       # The runner VM is discarded after the job, so testcontainers' Ryuk reaper has nothing to
       # clean up, and its image would be one more registry pull a test could fail on.
@@ -2641,6 +2666,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.ci_filters == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2706,6 +2732,7 @@ jobs:
       - worker-image
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
