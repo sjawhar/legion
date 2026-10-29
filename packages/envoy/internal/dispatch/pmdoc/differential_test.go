@@ -99,66 +99,21 @@ func diffStep(dump *diffDump, name string, step func() error) (err error) {
 	return step()
 }
 
-// diffTree decodes the engine's ProseMirror JSON as Go holds the document where the two differ only
-// in what the browser editor does not store: a mark on a hard break or an image, which the engine's
-// reader keeps and the editor's store (y-prosemirror) drops, as Go's schema does by holding marks on
-// text alone. An image's link is one such mark, which the editor shows until the document is
-// reloaded (LEGION-365); TestDifferentialCompare counts those documents apart. Each short table
-// body row is padded to its header's width as Parse pads it, the documented canonicalisation. No
-// revision is judged by these.
+// diffTree decodes the engine's ProseMirror JSON as Go holds the document. The engine's reading is
+// compared as it stands: both readers hold a mark on text alone, never on an inline leaf, as the
+// browser editor's store (y-prosemirror) does, so the invariant is gated by the tool rather than
+// canonicalised away. Each short table body row is padded to its header's width as Parse pads it,
+// the documented canonicalisation. No revision is judged by these.
 func diffTree(reading *diffReading) *Node {
-	doc, _ := diffTreeLinkingImages(reading)
-	return doc
-}
-
-// diffTreeLinkingImages is diffTree, also reporting whether the engine's reading links an image.
-func diffTreeLinkingImages(reading *diffReading) (*Node, bool) {
 	if reading == nil || reading.Err != "" || reading.PM == nil {
-		return nil, false
+		return nil
 	}
-	var generic any
-	if err := json.Unmarshal(reading.PM, &generic); err != nil {
-		return nil, false
-	}
-	linksImage := dropUnstoredMarks(generic)
-	raw, err := json.Marshal(generic)
+	doc, err := FromJSON(reading.PM)
 	if err != nil {
-		return nil, linksImage
-	}
-	doc, err := FromJSON(raw)
-	if err != nil {
-		return nil, linksImage
+		return nil
 	}
 	padShortRows(doc)
-	return doc, linksImage
-}
-
-// dropUnstoredMarks removes, in decoded ProseMirror JSON, every mark on a hard break or an image,
-// and reports whether one it removed was an image's link.
-func dropUnstoredMarks(value any) (linksImage bool) {
-	node, ok := value.(map[string]any)
-	if !ok {
-		return false
-	}
-	switch node["type"] {
-	case "hardbreak":
-		delete(node, "marks")
-	case "image":
-		marks, _ := node["marks"].([]any)
-		for _, mark := range marks {
-			if m, ok := mark.(map[string]any); ok && m["type"] == "link" {
-				linksImage = true
-			}
-		}
-		delete(node, "marks")
-	}
-	children, _ := node["content"].([]any)
-	for _, child := range children {
-		if dropUnstoredMarks(child) {
-			linksImage = true
-		}
-	}
-	return linksImage
+	return doc
 }
 
 // padShortRows gives every short body row of every table under node the cells Parse pads it with,
@@ -341,12 +296,9 @@ func TestDifferentialCompare(t *testing.T) {
 			break
 		}
 		documents++
-		source, linksImage := diffTreeLinkingImages(read.MD)
+		source := diffTree(read.MD)
 		if source == nil {
 			counts["engine cannot read"]++
-		}
-		if linksImage {
-			counts["engine links an image"]++
 		}
 		var sides [2]diffSide
 		for index := range sides {
@@ -358,14 +310,6 @@ func TestDifferentialCompare(t *testing.T) {
 			sides[index] = judge(dump, source, reading)
 		}
 		base, head := sides[0], sides[1]
-		// A linked image is stored without its link at both revisions, as the editor stores it
-		// (LEGION-365); these are the documents that loss reaches.
-		if linksImage && base.stores {
-			counts["base stores a linked image without its link (LEGION-365)"]++
-		}
-		if linksImage && head.stores {
-			flag("head stores a linked image without its link (LEGION-365)", sides)
-		}
 		for index, name := range []string{"base", "head"} {
 			side := sides[index]
 			if side.correct {
