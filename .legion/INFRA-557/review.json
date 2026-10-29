@@ -2,58 +2,37 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-557",
-  "completed": "2026-10-28T19:10:42Z",
-  "round": 1,
-  "reviewedHead": "256345d7a542da8726a6b8c75f8d9db176631ddf",
+  "completed": "2026-10-29T00:52:00Z",
+  "round": 2,
+  "scope": "Narrowed by the INFRA-63 architect (2026-10-28 19:13Z): the six round-1 findings, per-machine scoping of $KV.envoy_listener, two-pod rows under the real rendered grant, required checks at the new code head; a new finding that is not a correctness defect goes on the Fast-follow line.",
+  "reviewedHead": "75ad248670bd7b5b1a100e9e5976e21407ee7257",
   "decision": "changes_requested",
-  "critical": 1,
-  "important": 5,
-  "minor": 2,
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. Every pull_request run at 256345d7 (Tests, Legion Envoy and Contracts, Docs, Worker Image) was still queued at 19:10Z, created 18:27Z; no check of the code head has run. A request for changes does not wait on it.",
-  "thermonuclear": "deep-review: CHANGES at 256345d7; code-quality: CHANGES at 256345d7. Plus three focused oracle passes (lease/receive, ledger/delivery, registry/health).",
+  "critical": 0,
+  "important": 2,
+  "minor": 0,
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. At 75ad2486 every required check was queued when read; at 6ee80831 Tests and Legion Envoy and Contracts were cancelled. A request for changes does not wait on it.",
+  "thermonuclear": "deep-review: CHANGES at 75ad2486 (H1, M1 below; round-1 findings 1, 2, 4, 5 closed, 3 closed for the first hand-over only); code-quality: CHANGES at 75ad2486 (structural only, on the Fast-follow line per the architect's scope).",
+  "roundOneFindings": {
+    "1 GetRevision refused under the grant": "closed in 28d478d5: lease.go and registry.go recordSeen read back with Get by key and compare Revision(); no runtime GetRevision left",
+    "2 own-boot InFlight acks undelivered messages": "closed in 18779a03: dedupe/kv.go judge holds a pair only while this process holds that revision; Clear forgets before deleting",
+    "3 settle hold ran to 13 s on any NAK delay": "closed for the first graceful hand-over (3 s cap) and hard take-over (7 s cap) in 21a1dd2b; reopened from the second graceful hand-over by finding H1",
+    "4 stuck holder kept the lease with no alarm": "closed in d19302d3: failures timed per term, ERROR alarm line after 135 s, lease given up",
+    "5 unplaceable deferral expiry 17 s": "closed in d19302d3: fixed 125 s",
+    "6 contract change census": "closed: PR body carries the census; its consumers (dispatch_kube probes, ECS, host:Listener, Dockerfile, deploy probe, notice_exceptions) match the searches",
+    "per-machine scope": "done: permissions.go grants envoy_listener writes only to lease.listener-<m>, delivery.listener-<m>.> and seen.>",
+    "rows under the rendered grant": "done: mpStartNATS signs each pod in under testnats.ListenerGrant (HostGrant for two-build rows), pinned byte for byte to core.ListenerPermissions by infra/core/grant_fixture_test.go"
+  },
   "keyFindings": [
     {
-      "severity": "critical",
-      "file": "packages/envoy/cmd/listener/lease.go:757",
-      "description": "The lease's read-back GetRevision publishes to the bare subject $JS.API.DIRECT.GET.KV_envoy_listener (nats.go v1.50 jsm.go:1277, apiDirectMsgGetT; buckets are created with AllowDirect true, kv.go:465). bucketPermissions (infra/core/permissions.go) grants only DIRECT.GET.KV_<bucket>.>, which needs one more token. Reviewer probe (in-process nats-server, a user holding the bucket's grant): Create and Get succeed, GetRevision -> 'Permissions Violation for Publish to \"$JS.API.DIRECT.GET.KV_envoy_listener\"', context deadline exceeded after 2.0 s. acquire then logs 'read back' and never sets held, so under the grant this PR renders no pod ever holds the lease and nothing on the durable is delivered, while /healthz answers 200 standby. registry.go:578 recordSeen makes the same refused call on envoy_sessions after every registration write. No row runs under the real grant (testnats without users; permissions_live_test only Create/Update/Get)."
+      "severity": "important",
+      "file": "packages/envoy/cmd/listener/receive.go:479",
+      "description": "A term taken from a graceful hand-back (HandedBack) still sets stale_binding when the durable is push-bound, and it always is then: the stopping pod lingers on its subscription by design. Nothing clears it for the rest of the term (only a begin that finds the durable unbound, line 477), so the term's release carries stale_binding and the next holder computes handedBack false (lease.go:806) and settles with the 7 s ack-wait cap. From the second graceful hand-over on (a rolling deploy's second pod), a stop with a prompt in hand past the 3 s grace (cancelled, NAKed with a delay, so outstanding) delivers about 3 + 1 + 0.5 + 7 = 11.5 s after SIGTERM, past the 10 s graceful bound. The deep-review subagent's scratch probe: C took B's record with handedBack=false, cap 7s, held_ms 7000 with a 30 s retry outstanding. Every graceful row starts from mpStartPair's first record, so none covers it."
     },
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dedupe/kv.go:162",
-      "description": "judge answers InFlight (ack, no prompt) for any attempted record of this boot, whether or not a prompt is outstanding. clearLedgerAttempt (delivery.go:341) only logs a failed Clear, then the message is NAKed 30 s; the redelivery finds its own record well inside AttemptedAge (5 min) and is acked without delivery. Same for a Create/Update that lands but returns a timeout: ledgerAttempt retries at once and gets InFlight. Silent loss the in-memory cache could not produce."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/cmd/listener/receive.go:1186",
-      "description": "The settle hold ends only when NumAckPending <= held. A message NAKed with a delay stays in the consumer's pending set until the delay ends (nats-server consumer.go processNak: p.Timestamp moved, entry kept). Any retryable prompt failure (30 s), unplaceable deferral (5 s) or ledger deferral outstanding holds every hold to its 13 s cap. Every graceful hand-back marks the term unsettled, so a graceful stop then delivers about 15 s after SIGTERM, against the spec's 10 s acceptance and the PR body's 'about 2-3 s'; a hard take-over about 19 s against the architect's 15 s. README admits 19 s for the hard case only; no row has a delayed NAK outstanding."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/cmd/listener/receive.go:480",
-      "description": "A lease holder whose durable info/create/update or subscribe keeps failing retries forever with one WARN, keeps renewing the lease so no standby can try, and /healthz answers 200; self-health skips a non-active receiver. Base exited after 135 s with the ERROR the AWS subscribe-exhausted alarm matched, whose description named this case; the new filter (metricfilters.go:131) matches only awaitUnbound's line. The change removes its own alarm for this outage."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/cmd/listener/durable.go:32",
-      "description": "unplaceableDeferralExpiry = 5 s + 2 x consumerAckWait fell from 125 s to 17 s, and its third term's premise (a redelivery waiting longer than one AckWait gets redelivered anyway) no longer holds now InProgress keeps queued messages alive. Slots are reclaimed while the message is still pending, so the deferral cap that protects MaxAckPending undercounts. The comment (unplaceable_delivery.go:72-79) and packages/envoy/AGENTS.md still say 60 s / 125 s."
-    },
-    {
-      "severity": "important",
-      "file": "PR body",
-      "description": "No '## Contract change census', though the change adds refusals at process boundaries: /healthz answers 503 starting where it answered 200, and a port session's pod-local address accepted by another pod is refused with delivery_failed instead of POSTed."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/infra/core/permissions.go:38",
-      "description": "Security[authz] hardening: $KV.envoy_listener.> goes to every Listener, Dispatch and Host user, so any machine's user can rewrite another machine's lease or ledger keys. Scope to lease.listener-<m>, delivery.listener-<m>.> and seen.>."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/listener/delivery.go:417",
-      "description": "Fast-follow: promptsHere repeats session.Deliverer's ownership rule (session.go:111-117); export one predicate. receive.go (1241 lines) splits receiveTerm into its own file."
+      "file": "packages/envoy/cmd/listener/receive.go:543",
+      "description": "abandon (new in d19302d3) gives the lease up without clearing awaitedBinding, which only a successful begin clears. A pod that gave up while waiting out a binding later takes an expired record from a holder that died hard and computes settle false (line 442), as if the expiry were its own lapsed renewal: it skips the hold (the dead pod's messages after newer ones) or waits out a lost node's binding for minutes."
     }
   ],
-  "dropped": [
-    "No-lease mode when the grant is missing departs from plan 1.9, but implement handoff bdee5417 records it as architect Q1 (2026-10-27): not a finding."
-  ]
+  "fastFollow": "From code-quality: make the owed settle a level on the record instead of stale_binding's second meaning; split ownAttempt's write lock from the held attempt; one ledgerSettle value instead of three booleans; one alarm-throttle helper; promptsHere vs session.Deliverer ownership predicate; receive.go split."
 }
