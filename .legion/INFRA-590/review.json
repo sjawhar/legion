@@ -2,24 +2,23 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-590",
-  "completed": "2026-10-29T09:36:00Z",
-  "round": 7,
-  "reviewedCodeHead": "90383ad764e578f7fcb98ee639ce23b7600b0812",
-  "decision": "approved",
+  "completed": "2026-10-29T15:01:30Z",
+  "round": 8,
+  "reviewedCodeHead": "c3cf88b9fcbbed4243834a8b65b26b62fcf58bea",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
+  "important": 1,
   "minor": 0,
-  "ci": "At CI head 90383ad7 (compare to afe7258b handoffs only): required lint, typecheck, test, pr-title success; envoy-go, envoy-go-race, dispatch-multiprocess, dispatch-memory, dispatch-browser-multiprocess, envoy-infra-go success. dispatch failed only on packages/dispatch/e2e/close-withdraws-asks.e2e.ts:126 (1 failed), main's known red (controller 00:56Z, architect 09:12Z). The Postgres 16 Dispatch suite no longer runs: main's #2476 removed the Postgres 16 jobs now that production runs Postgres 18, and the pull_request run uses the merge ref with main.",
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at 90383ad7 over fix 5aa6a3a8 and merge 90383ad7; both approve with no finding.",
-  "threads": "Round-6 thread PRRT_kwDORFy7ds6xXYKY accepted (reply 4410721755); 18 threads, 0 unresolved.",
-  "keyFindings": [],
-  "recordedAsMain": [
-    "close-withdraws-asks.e2e.ts:126 in the dispatch job (INFRA-138's tree).",
-    "cmd/listener TestListenerFollowsTheInterestRegistryAcrossNATSRestarts intermittent (1 in 49 at main's d4cbcfe6; INFRA-743)."
+  "fingerprint": "b1168a85116a7020a912b1286c524c6c0202b94a79600cfeef1c4e47dd95f3ff at 81f124f2 (last APPROVE) -> dd8e32c3fcbb01f23f71d6b4698f697053f4990a6e9062462f7745562325f791 at c3cf88b9: changed (two merges of main, the ErrNotStored port, renumbered migrations, the tester's test), so a new round.",
+  "ci": "At CI head c3cf88b9 only changes and pr-title were queued when read (33 runs queued repo-wide); compare c3cf88b9...c306f4fb is handoffs only. A request for changes does not wait on CI.",
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at c3cf88b9 over merges 03cf1385, 295f42ac and test commit c3cf88b9.",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/internal/bus/async.go:405", "description": "Main's #2362 brings an optional stream byte limit (ENVOY_STREAM_MAX_BYTES) with a clustered stream; a full clustered stream keeps a refused message's id at sequence 0, so every later publish under that id is acknowledged {seq:0, duplicate:true} for the 72 h duplicate window. The merge ports main's resend-without-MsgId to PublishAsync only; the outbox's role forward goes through window.Request with a MsgId, and for a holder with a serving port (AcceptStreamAck) answers() requires Sequence > 0, so each retry times out as ErrNotAcknowledged, the (owner, holder) chain is held, and the event stalls up to 72 h after the stream has room. Reproduced by DeepReview9 on the in-process 3-server cluster (16 KiB limit, fill, purge, three retries all not acknowledged, nothing stored; control nil). Main's listener forward had no MsgId and recovered at once. Fix: in window.request with AcceptStreamAck, a sequence-0 duplicate reply resends once without the MsgId header under the same deadline and connection checks; test as the repro."}
   ],
   "verifiedCorrect": [
-    "Round-6 finding closed: the incomplete hold skips delivered destinations and names a reached role route by its role topic; a scratch planChains test sends the new holder's forward unheld against 2ba3ba48's batch.go and holds it at this head.",
-    "One recursive loadRecipients runs the same statements and answers or fails every id exactly once.",
-    "Merge with main's #2396: compactDaily via duty.RunLeased runs under Run's wait group, so the shutdown wait is unchanged; Deps.Leases still wired; pmdoc test files equal main's #2482/#2484; migrations 0136_dashboard_assets, 0137_duty_holds, 0138_outbox_claim; connections 88."
+    "ErrNotStored resend port (async.go:243-274): main's semantics (one resend, no MsgId, only on a sequence-0 duplicate) with the deadline and connection checks before the write; every outcome settles safely (stored reached; deadline fenced and unrecorded; connection lost released; still full failed and held).",
+    "TestAWindowSendsNoResendOfANotStoredDuplicatePastItsDeadline fails with the deadline check removed (go test -overlay).",
+    "Shutdown: waitBackground, waitUntilIdle, waitForOutbox (outboxStopBudget), deregister, pool.Close; /healthz carries outbox_publisher and idempotency_keys.",
+    "Migrations 0141_duty_holds and 0142_outbox_claim above main's 0137-0140; connections 89; ci.yaml filters cover the Dispatch and listener jobs."
   ]
 }
