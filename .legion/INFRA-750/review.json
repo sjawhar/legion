@@ -2,35 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-750",
-  "completed": "2026-10-29T18:38:11Z",
-  "round": 1,
-  "reviewedCodeHead": "4ff726ac6d5287f8ef199822289930474dc459ba",
-  "decision": "changes_requested",
+  "completed": "2026-10-29T23:11:44Z",
+  "round": 2,
+  "reviewedCodeHead": "0a31755a216c3b7858959a3df6fee8ff86d51d35",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 2,
-  "ci": "Required set read from main's rulesets: lint, typecheck, test, pr-title (no branch protection checks). CI head 4ff726ac (newest pull_request run): lint, typecheck, test success, pr-title success (two superseded runs cancelled), envoy-go, envoy-go-race, envoy-infra-go, envoy-smoke, envoy-e2e-local, dispatch, ci-ok success. Compare 4ff726ac...654562cb: handoffsOnly true, 2 files.",
-  "threads": "No review threads on the pull request before this round (gh api graphql reviewThreads: empty).",
-  "thermonuclear": "Pair run once at 654562cb (code of 4ff726ac). Deep review: APPROVE, no Medium or High finding, one Minor (the warnOrErrorRecords comment); Security: no sensitive surface in this diff. Code quality: CHANGES, five Minors; three taken into this round, two judged not defects (the callers' doc comments restating updateStream follow the package's documented-behaviour convention).",
+  "important": 0,
+  "minor": 0,
+  "ci": "At the tester's code head 4805a397 the required test check was red on TestALaunchTryEndsAtItsBoundNamingIt/Resume in packages/daemon/internal/runtime/sandbox (run 40949312516, job 123731666673: 'wait for its new pod' where the test wants 'wait for its role launcher', a 500ms launch bound), code this pull request does not touch (its diff is packages/envoy alone) and green at ccc25a83; the INFRA-14 architect records it as main's flake. The reviewer's prose commits put a new code head at 0a31755a, whose own runs are the CI this approval reads: lint, typecheck, test and pr-title, the required set from main's rulesets, must be success there before the approval is submitted.",
+  "threads": "Three threads, all the reviewer's from round 1, each answered by the reviewer in its own words (fixed in 4805a397 or ccc25a83) and resolved by the implementer; no bot threads.",
+  "thermonuclear": "Pair at 161c1244 (code of 4805a397 with the reviewer's comment fixes). Deep review: APPROVE, no finding; it checked the round-2 updateStream against the round-1 loop on every answer sequence up to 6 long, with equal sends, reads and returned error. Security: no sensitive surface in this diff. Code quality: one Low finding, that TestWarnOrErrorRecordsTakesAClientThatHasLoggedNothing tests the test helper; judged not a defect, since it deterministically guards the one regression this pull request wrote once (a helper waiting for a record naming the client races nats.go's close callbacks, 4 of 20 measured drains), and its duplicated rationale and 'deriving' wording were fixed by the reviewer in 0a31755a.",
   "proseFixedByReviewer": [
-    "PR title: it named the create path, which this change leaves as it was; now 'fix(envoy): a stream update refused as overlapping its own stream is sent again', the branch's own commit subject (the tester's note).",
-    "PR body: Size corrected to 8 files, +241/-25 outside .legion/INFRA-750/; Look at first and Not proven / risk written; the Thermo line records the pair."
+    "161c1244: drain_kv_watcher_test.go's two comments no longer say that nothing a connected client logs carries its name (the keeper, reconnect and async-error records do); they say a healthy client of these tests may have logged nothing under its name yet; and the empty-name refusal's reason now matches the filter (it would drop every named record, the client under test's among them).",
+    "0a31755a: the helper's doc names the design it turned down (waiting for a record naming the client) instead of 'deriving', and keeps the rationale once, pointing to the test.",
+    "PR body: Size (8 files, +285/-26), Look at first's line range, the first Threads line (fixed in 4805a397, not ccc25a83's replaced guard), and the Thermo record of round 2."
   ],
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/bus/drain_kv_watcher_test.go",
-      "description": "warnOrErrorRecords' comment (lines 166-168) says a client started without a name of its own still passes the filter; it does not: such a client is named \"envoy\" (parseConnectOptions, nats.go:64), so every WARN and ERROR record it logs is dropped by line 189 and the drain assertion silently checks nothing. The helper must refuse a client under test that is not named t.Name() (fail when no captured record names it, or take the name from the caller next to WithName), and the comment must say so."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/bus/stream_update_overlap_test.go",
-      "description": "The table test does not pin 'any other refusal is returned at once': a regression that settles every refusal from the stream passes the 'refused otherwise' row because the stream does not hold the update there. Count the fake's StreamInfo reads per row, add a row for another refusal while the stream holds the update (want the refusal, 1 send, 0 reads), write the 'refused four times' row in terms of overlapSends, and have the fake's landed update not hard-code Replicas = 3."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/bus/stream.go",
-      "description": "updateStream's loop (lines 528-540) carries the unanswered rule only as '!overlap ||' in its third exit. A loop over overlapSends sends that breaks on any answer but 10065, then one unanswered-and-settled check after it, gives the same sends and reads in every case (checked case by case: 5 refusals, unanswered, overlap then unanswered, other refusal, success) without the flag, the counter and the double negatives."
-    }
-  ]
+  "keyFindings": []
 }
