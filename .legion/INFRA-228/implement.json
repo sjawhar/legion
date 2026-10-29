@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-228",
-  "completed": "2026-10-29T13:12:00Z",
+  "completed": "2026-10-29T13:31:22Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2503",
   "proof": [
     {
@@ -41,17 +41,25 @@
       "criterion": "Plan section 4 row 5 / D6: the claim names in docs/kubernetes.md are the claim names in the code.",
       "surface": "the repository's Go suite for packages/envoy/internal/broker/oauth",
       "command": "cd packages/envoy && go test ./internal/broker/oauth/ -count=1",
-      "observed": "ok github.com/sjawhar/envoy/internal/broker/oauth 8.001s",
-      "headSha": "b01d0dad988d",
-      "negativeControl": "the `project` bullet deleted: FAIL 'issued but not documented: project'; the `project_scope` bullet deleted: FAIL naming project_scope; a `- `extra` — x.` bullet added: FAIL 'documented but not issued: extra'. docs/kubernetes.md restored after each."
+      "observed": "At c718788b: go test ./internal/broker/oauth/ -count=1 ok (6.362s).",
+      "headSha": "c718788b0868996730f1ce83feb88b5416d0e4ef",
+      "negativeControl": "At c718788b the `project` bullet deleted: FAIL 'issued but not documented: project'. Round 1 at b01d0dad also: `project_scope` deleted and `extra` added each FAIL naming the claim. docs/kubernetes.md restored after each."
     },
     {
       "criterion": "Plan section 4 row 6 / section 7: the tree names no private host, and the skills guard's refused phrases stay out of docs/kubernetes.md.",
       "surface": "the repository's own checks",
       "command": ".github/scripts/check-private-names.sh; cd packages/pi-legion && bun test src/skills-guard.test.ts",
-      "observed": "check-private-names passed over 5193 files; skills guard 12 pass 0 fail.",
-      "headSha": "b01d0dad988d",
-      "negativeControl": "check-private-names over the PR body and the evidence comment as scratch files: passed, so the redaction of the broker host held; a .ts.net host in a scanned file is what the script refuses (plan D7)."
+      "observed": "At c718788b (after the forward merge): check-private-names passed over 6224 files; skills guard 13 pass 0 fail.",
+      "headSha": "c718788b0868996730f1ce83feb88b5416d0e4ef",
+      "negativeControl": "A non-placeholder MagicDNS host (secrets.tailzz9999.ts.net) written into docs/solutions/_implementer228-control.md: check-private-names exit 1 with its remediation block ('for a Tailscale MagicDNS host write <tailnet>.ts.net …'). The scratch file was removed; jj diff --stat empty."
+    },
+    {
+      "criterion": "Tester round 1 failure 1: the pull request merges with main and CI can run; tester citation finding: each cited name at the file that has it.",
+      "surface": "GitHub pull request sjawhar/legion#2503 and the merged tree",
+      "command": "jj new legion/INFRA-228 \"main\"@origin (conflict in docs/kubernetes.md resolved), push; fingerprint per conflicts-and-rewrites.md before and after; grep of every cited symbol on the merged tree",
+      "observed": "Head c718788b pushed as a fast-forward merge of b822e651 and main fe315392; fingerprint 8652a957… → f70a6f99… (changed: docs/kubernetes.md only). DISPATCH_OIDC_AUDIENCE now cited at packages/envoy/cmd/dispatch/settings.go (line 114), serviceTokenActor at packages/envoy/internal/dispatch/api/server.go, exchange.go by full path twice; every other cited symbol still in its file on main. Comment https://github.com/sjawhar/legion/pull/2503#issuecomment-6498040391. CI not read here: the daemon and the tester read it.",
+      "headSha": "c718788b0868996730f1ce83feb88b5416d0e4ef",
+      "negativeControl": "Before the merge, gh reported mergeable CONFLICTING at c1823f29 and git merge-tree reported CONFLICT (content) in docs/kubernetes.md (tester's test.json); after the push, gh pr view 2503 --json mergeable reports MERGEABLE for c718788b."
     }
   ],
   "filesChanged": [
@@ -64,12 +72,15 @@
     "The plan said the pod's bearer goes into a 'generation Secret'; the code puts it in each launch's secrets, which travel in the generation's start command and the launcher writes into g<generation>. The docs follow the code.",
     "The operator-launched controller presents controller.yaml's own dispatch_token_file (controllerEnvironment), not the daemon's bearer; the docs say so, and subsection A distinguishes the daemon-launched controller.",
     "An embedded Postgres 16.4 (zonky jar) is left unpacked and stopped at $TMPDIR/pg; start it with LD_LIBRARY_PATH=$TMPDIR/pg/lib $TMPDIR/pg/bin/pg_ctl -D $TMPDIR/pg/data -o \"-p 54329 -k $TMPDIR/pg -c listen_addresses=127.0.0.1\" -l $TMPDIR/pg/pg.log start. The proof's dev-broker copy and exchange client are at $TMPDIR/infra228/dev-broker-proof.sh and $TMPDIR/infra228/exchange_proof.py.",
-    "Comparing two roles' credentials needs a second container: the architect ran the salted-digest comparison, since a role cannot read another role's private directory."
+    "Comparing two roles' credentials needs a second container: the architect ran the salted-digest comparison, since a role cannot read another role's private directory.",
+    "main (14d907b6 and later) runs a pod's roles in one `roles` container with per-role namespaces, so the pod paragraph now says the broker's token is projected 'for a role', not 'into a role container'. The rest of the paragraph's facts (secrets[dispatchTokenKey] in prepare, the launcher writing g<generation>) were re-checked on main and hold."
   ],
   "deviations": [
     "Subsection 'The Dispatch identity the broker can issue' sits after the Operator configuration bullet list, before '#### Network shares', rather than directly after the agent_secrets bullet, so the list is not split by a heading.",
     "Plan section 4 row 4's expected statement was corrected as in trickyParts; the measured refusals are the plan's.",
-    "The pane statement (a pane reads the daemon's bearer through DISPATCH_TOKEN_FILE) has no tmux run: the architect accepted it on its code citation (dispatch://INFRA-228/comment/f6faadf0, point 3), recorded in the PR body's 'Not proven / risk'."
+    "The pane statement (a pane reads the daemon's bearer through DISPATCH_TOKEN_FILE) has no tmux run: the architect accepted it on its code citation (dispatch://INFRA-228/comment/f6faadf0, point 3), recorded in the PR body's 'Not proven / risk'.",
+    "Round 2 is the forward merge the tester asked for plus the architect's citation fixes, in one push."
   ],
-  "openQuestions": []
+  "openQuestions": [],
+  "round": 2
 }
