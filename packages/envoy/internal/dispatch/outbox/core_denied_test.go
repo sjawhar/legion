@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"slices"
 	"strings"
@@ -19,6 +21,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/logtest"
+	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -248,5 +251,82 @@ func TestRunPublishesAGrantedRoleRoute(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the role subscriber received nothing through a granted publish")
+	}
+}
+
+// A JetStream publish NATS denies is named a denial, counted and backed off, not reported as an
+// outage. An issue topic is always a JetStream subject (bus's streamSubjects holds
+// notifications.dispatch.>), and the server acknowledges a denied JetStream publish with nothing,
+// so the denial is read off the connection's last error (bus.ErrPublishDenied) rather than left to
+// the publish window to report as an unreachable NATS: the outbox records no destination, does not
+// mark the event published, counts the attempt and the denied destination, and logs the subject
+// and the violation.
+func TestRunRetriesAnIssueTopicNATSDenies(t *testing.T) {
+	var logged lockedBuffer
+	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
+
+	// The grant withholds the Dispatch notification subjects and keeps what the run needs:
+	// $JS.API.> so the stream is still created and the publish is a JetStream publish the server
+	// genuinely denies.
+	client, subscriber, _ := grantedNATS(t, "notifications.role.>", "_INBOX.>", "$JS.API.>")
+	issueTopic := "notifications.dispatch.issue.T-1.message.created"
+	received := subscribe(t, subscriber, issueTopic)
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: new("T-1"), Body: "Only the issue topic"},
+	})
+	registry := metrics.New()
+	stop := runDeps(t, Deps{
+		Store: database, Publisher: client, Broker: broker,
+		PublishFailures: registry.NewCounter("envoy_dispatch_outbox_publish_failures_total",
+			"Destinations of an outbox publish attempt that did not reach NATS"),
+	})
+	defer stop()
+
+	// A denial the outbox counts settles the wait through attempt_count; one it reads as an
+	// outage instead releases the event with no attempt counted and nothing recorded, and only
+	// the log says so, so the outage line settles the wait too and the assertions below name it.
+	waitFor(t, 30*time.Second, "the outbox's first attempt at the event settled", func() bool {
+		_, attempts := publishedDestinations(t, database, event.ID)
+		return attempts > 0 || publishedAt(t, database, event.ID) != nil ||
+			strings.Contains(logged.String(), bus.ErrUnavailable.Error())
+	})
+	destinations, attempts := publishedDestinations(t, database, event.ID)
+	if at := publishedAt(t, database, event.ID); at != nil {
+		t.Fatalf("event marked published at %s with destinations %v, though NATS denied its issue topic", at, destinations)
+	}
+	if slices.Contains(destinations, issueTopic) {
+		t.Fatalf("published_destinations = %v records the denied issue topic", destinations)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempt_count = %d, want the one backed-off attempt", attempts)
+	}
+	select {
+	case message := <-received:
+		t.Fatalf("the issue subscriber received %q through a denied publish", message.Data)
+	default:
+	}
+	lines := 0
+	for _, line := range strings.Split(logged.String(), "\n") {
+		if strings.Contains(line, bus.ErrUnavailable.Error()) {
+			t.Fatalf("line %q reports the denied publish as an outage", line)
+		}
+		if strings.Contains(line, "dispatch outbox: publish event") {
+			lines++
+			if !strings.Contains(line, issueTopic) || !strings.Contains(line, "Permissions Violation for Publish") {
+				t.Fatalf("retry line %q does not name the issue subject and the violation", line)
+			}
+		}
+	}
+	if lines != 1 {
+		t.Fatalf("logged %d retry lines, want one:\n%s", lines, logged.String())
+	}
+	response := httptest.NewRecorder()
+	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if body := response.Body.String(); !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="denied"} 1`) {
+		t.Fatalf("/metrics body = %q, want the denied publish counted once", body)
 	}
 }

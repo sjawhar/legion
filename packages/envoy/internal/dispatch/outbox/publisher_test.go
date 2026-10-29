@@ -1553,9 +1553,17 @@ func TestRunMarksIssueLessTargetedMessagesPublishedWithoutRepublishing(t *testin
 
 func run(t *testing.T, database *store.Store, publisher Publisher, broker *events.Broker) func() {
 	t.Helper()
+	return runDeps(t, Deps{Store: database, Publisher: publisher, Broker: broker})
+}
+
+// runDeps runs the outbox over deps - a test that needs more of Deps than run's store, publisher
+// and broker, a metrics counter among them, builds it itself - and returns the stop every test
+// here defers.
+func runDeps(t *testing.T, deps Deps) func() {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { Run(ctx, Deps{Store: database, Publisher: publisher, Broker: broker}); close(done) }()
+	go func() { Run(ctx, deps); close(done) }()
 	return func() {
 		cancel()
 		select {
