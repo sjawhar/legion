@@ -260,6 +260,124 @@ func TestARepeatedSubReplacesAnotherKind(t *testing.T) {
 	}
 }
 
+// The hub's answer to a delivery view goes out before the first frame of an events subscription
+// that takes the view's sub, however the writer's pick falls. The hub queued the answer before the
+// replacement began. Each round holds the writer between a look at the hub's queue that finds
+// nothing waiting and its pick of the next frame, until the answer is on the hub's queue and the
+// replacing subscription's first event is on the stream. Both are then ready at once, and Go's
+// select picks among ready cases at random, so a writer that trusts its earlier look writes the
+// event first in about half of the rounds and passes all of them one time in 2^rounds.
+func TestAReplacedDeliveryViewsAnswerGoesOutBeforeItsReplacementsFrames(t *testing.T) {
+	const rounds = 40
+	events := newFakeLiveKind(1, 0)
+	rig := newLiveSocketRig(t, testServerOptions{
+		liveKinds: map[string]liveKind{liveEventsView: events.kind(true)},
+		// No heartbeat takes one of the writer's turns while the test holds it.
+		streamHeartbeat: time.Hour,
+	}, nil)
+	writer := newIdleWriterHold(t)
+	rig.served.liveWriterBeforePick = writer.beforePick
+	writer.holdNext()
+	client := rig.dial(t, asUser("alice"))
+	socket := rig.sockets(t, 1)[0]
+	writer.waitHeld(t)
+
+	for round := range rounds {
+		sub := "x" + strconv.Itoa(round)
+		// The writer is held after a look that found nothing waiting. The hub answers a delivery
+		// view under sub (delivery is not configured), and then an events subscription takes sub
+		// and queues its first event.
+		client.send(t, deliverySubscribe(sub, livePipelineView(nil)))
+		pollUntil(t, 10*time.Second, "the hub answers "+sub, func() bool { return len(socket.queue) == 1 })
+		client.send(t, liveSubscribe(sub, eventsView(), ""))
+		running := events.next(t, 5*time.Second, sub+"'s events subscription")
+		pollUntil(t, 5*time.Second, sub+"'s first event on the stream", func() bool { return len(socket.stream) == 1 })
+		if queued := len(socket.queue); queued != 1 {
+			t.Fatalf("round %d: the hub's queue holds %d frames when the writer picks, want its answer to %s", round, queued, sub)
+		}
+
+		// The writer picks with both ready, writes both, and is held at its next look that finds
+		// nothing waiting.
+		writer.holdNext()
+		writer.release()
+		writer.waitHeld(t)
+		first := client.next(t, 5*time.Second, "the first frame for "+sub)
+		if event, ok := first.(LiveEventFrame); ok {
+			t.Fatalf("round %d: the first event of the events subscription that took %s (%+v) went out before the hub's answer to the delivery view it replaced", round, sub, event)
+		}
+		if refusal, ok := first.(LiveError); !ok || refusal.Sub != sub || refusal.Code != "DELIVERY_NOT_CONFIGURED" {
+			t.Fatalf("round %d: the first frame for %s = %+v, want DELIVERY_NOT_CONFIGURED", round, sub, first)
+		}
+		client.event(t, 5*time.Second, sub)
+		client.send(t, LiveUnsubscribe{Type: "unsubscribe", Sub: sub})
+		running.ended(t, 5*time.Second)
+	}
+	// A writer that holds back a stream frame its pick took while the hub's answer waited looks
+	// once with that answer waiting and the stream empty. None in every round would mean the pick
+	// never took the event first, so no round tested the order.
+	if took := writer.streamFirst.Load(); took == 0 {
+		t.Fatalf("in none of %d rounds did the writer's pick take the replacement's event ahead of the hub's answer", rounds)
+	} else {
+		t.Logf("the writer's pick took the replacement's event ahead of the hub's answer in %d of %d rounds", took, rounds)
+	}
+}
+
+// idleWriterHold holds a live socket's writer at its beforePick, between its look at the hub's
+// queue and its pick of the next frame, on a turn whose look found nothing waiting: the hub's
+// queue and the stream empty, and no frame the writer took out of the stream waiting to be
+// written. holdNext arms one hold, waitHeld waits until the writer is held, and release lets it
+// pick.
+type idleWriterHold struct {
+	armed  atomic.Bool
+	held   chan struct{}
+	resume chan struct{}
+	// done ends every hold when the test ends, ahead of the rig's cleanups, which wait for the
+	// socket's writer.
+	done chan struct{}
+	// streamFirst counts the looks that found a frame on the hub's queue and none on the stream
+	// while the stream was shut: a writer holding a stream frame its pick took first.
+	streamFirst atomic.Int32
+}
+
+func newIdleWriterHold(t *testing.T) *idleWriterHold {
+	writer := &idleWriterHold{held: make(chan struct{}), resume: make(chan struct{}), done: make(chan struct{})}
+	t.Cleanup(func() { close(writer.done) })
+	return writer
+}
+
+// beforePick is the socket's. takesStream false is a look that found a frame of the hub's queue
+// waiting, or one taken out of the stream; the stream's own length says whether one waits there.
+func (writer *idleWriterHold) beforePick(socket *liveSocket, takesStream bool) {
+	if !takesStream && len(socket.stream) == 0 && len(socket.queue) > 0 {
+		writer.streamFirst.Add(1)
+	}
+	if !takesStream || len(socket.stream) > 0 || !writer.armed.CompareAndSwap(true, false) {
+		return
+	}
+	select {
+	case writer.held <- struct{}{}:
+	case <-writer.done:
+		return
+	}
+	select {
+	case <-writer.resume:
+	case <-writer.done:
+	}
+}
+
+func (writer *idleWriterHold) holdNext() { writer.armed.Store(true) }
+
+func (writer *idleWriterHold) waitHeld(t *testing.T) {
+	t.Helper()
+	select {
+	case <-writer.held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the writer was not held at a look that found nothing waiting within 5s")
+	}
+}
+
+func (writer *idleWriterHold) release() { writer.resume <- struct{}{} }
+
 func TestAResumeOfTheWrongShapeIsAnInvalidFrame(t *testing.T) {
 	events := newFakeLiveKind(0, 0)
 	agent := newFakeLiveKind(0, 0)
