@@ -2,15 +2,15 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-493",
-  "completed": "2026-10-29T13:45:00Z",
-  "round": 5,
-  "headTested": "98d9a1052efb2ec3160f577afa98415917f76deb",
-  "codeHead": "6e7e399aad07e9b74c01689aa4838e84e9937953",
-  "earlierRounds": "Rounds 1-4 (55eb11c8 fail, ac10118d, e0332ad9, 7f8ec966 pass) are in .legion/INFRA-493/test.json at 00b7e93c, which retro's 9526e9e9 removed, and in the PR body's E2E (tester) history.",
-  "forwardMerge": "Fingerprint (conflicts-and-rewrites.md) at my round-4 code head fa20b0e2 3fc3493d… vs 6e7e399a 7c1f068e…: changed. Per file, the only line of the pull request's own diff that differs is packages/envoy/internal/dispatch/api/routes_table_test.go `registeredRoutes` (141 over main's 140 → 144 over main's 143, main's #2397 having added three routes); no product file changed. Retro's docs/solutions commit is outside the fileset.",
+  "completed": "2026-10-29T14:05:00Z",
+  "round": 6,
+  "headTested": "3bf3de231a23b251193ebcc79c6960b694b9e582",
+  "codeHead": "72675d215998eb967c7d2cc65c7e49a541a47189",
+  "earlierRounds": "Round 5 at 6e7e399a (the Dispatch app-installation route on the real server, the sweep smoke) and rounds 1-4 (at 00b7e93c) stand: 72675d21 changes no product file.",
+  "forwardMerge": "No merge this round. 72675d21 touches only .github/workflows/ci.yaml (envoy_go filter gains packages/contracts/fixtures/checks-settlement/**) and .github/scripts/ci_job_reads.py (three RULES entries), the reviewer's round-4 finding.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Its round-6 proof is the dispatch/api suite with the pin at 144. I drove the surface the pin guards independently: the real Dispatch server built at 6e7e399a on embedded Postgres 16.4 with pgvector 0.8.7, booting with main's new routes and this branch's GET /api/v1/github/app-installation/{owner}/{repo}, and called that route."
+    "how": "Its proof runs the repository's filter check and workflow_paths.PathsFilter. I evaluated ci.yaml independently with the matcher dorny/paths-filter uses (picomatch, dot: true) over the filters block parsed with the yaml package, before (f6f930bc) and after (72675d21)."
   },
   "failures": [],
   "failed": 0,
@@ -18,8 +18,16 @@
     "packages/dispatch/e2e/close-withdraws-asks.e2e.ts:126 (INFRA-138)",
     "packages/envoy/internal/dispatch/pmdoc typed_nesting_test.go:23 cpuTimeOf (until #2484)"
   ],
-  "ciAtHead": "Read on GitHub at 13:41Z at code head 6e7e399a: changes and pr-title queued, one pr-title cancelled, nothing else started yet (main's #2316 makes ci-ok the required check); read as running, not waited on. GitHub reports #2478 MERGEABLE.",
+  "ciAtHead": "Read on GitHub at 14:01Z: the CI and PR Title runs for 3bf3de23 (the push carrying 72675d21; no skip-checks trailer) are queued; the run at 6e7e399a was cancelled when superseded. Read as running, not waited on. GitHub reports #2478 MERGEABLE.",
   "proof": [
+    {
+      "criterion": "Reviewer's round-4 finding: a change to packages/contracts/fixtures/checks-settlement/** selects envoy-go, whose internal/cistore/settlement_fixture_test.go:56 reads listener-rules.json, so the cross-check the shared fixture exists for runs on a fixture-only change",
+      "surface": "ci.yaml's changes job filters as dorny/paths-filter v4.0.3 evaluates them: the step's `filters` block parsed as YAML (anchors flattened) and each pattern matched with picomatch {dot: true}",
+      "command": "bun run eval.ts <ci.yaml> packages/contracts/fixtures/checks-settlement/listener-rules.json for ci.yaml at f6f930bc and at 72675d21",
+      "observed": "after: envoy_go (38 patterns) selects it by `packages/contracts/fixtures/checks-settlement/**`, test (176 patterns) by `packages/contracts/**`; the redelivered test's builds are covered: packages/envoy/cmd/listener/main.go, cmd/dispatch/redeliver.go and internal/webhook/github_failures.go each select test",
+      "headSha": "72675d215998eb967c7d2cc65c7e49a541a47189",
+      "negativeControl": "before (f6f930bc, 37 patterns) envoy_go does NOT select the fixture while test does, the gap the reviewer named; after, an unrelated packages/contracts/fixtures/unrelated-new.json still does not select envoy_go"
+    },
     {
       "criterion": "1.3 Dispatch's GET /api/v1/github/app-installation/{owner}/{repo} serves beside main's routes after the merge (the route-count pin the merge changed)",
       "surface": "the real Dispatch server binary built from packages/envoy at 6e7e399a, embedded Postgres 16.4 with pgvector, a throwaway GitHub App key and a loopback GitHub fake answering /repos/{o}/{r}/installation",
