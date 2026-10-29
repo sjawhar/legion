@@ -10,10 +10,13 @@
 -- ask writes wait for the build. The release before this one never reads the index, so that
 -- release serves beside it unchanged.
 --
--- The cast cannot fail on a stored row: asks_anchor_artifact already evaluates
--- (anchor->>'artifact_id')::uuid on every row whose block_artifact_id is null, and the only writer
--- of block_artifact_id, the ask-block insert (docs/ask_blocks.go), writes no anchor. If a row did
--- not cast, the migration would fail the boot naming the error before the schema change is
--- recorded. Migrations run in one transaction, so the build is a plain create index, not
--- concurrently.
+-- The cast cannot fail on a row whose block_artifact_id is null: asks_anchor_artifact (0032)
+-- already evaluates (anchor->>'artifact_id')::uuid on every one of them. Nor does any release
+-- write an anchored ask with block_artifact_id set, since the only writer of that column, the
+-- ask-block insert (docs/ask_blocks.go), writes no anchor. But such a row written by an earlier
+-- release, whose artifact_id neither index has cast, would fail this build, so the census counts
+-- exactly those rows and the pre-deploy gate refuses the database before the boot would. If one
+-- reached a boot anyway, the migration would fail it naming the cast's error before the schema
+-- change is recorded. Migrations run in one transaction, so the build is a plain create index,
+-- not concurrently.
 create index asks_anchor_artifact_id on asks (((anchor->>'artifact_id')::uuid)) where anchor is not null;

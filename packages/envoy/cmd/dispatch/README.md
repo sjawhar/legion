@@ -1098,8 +1098,10 @@ Migration `0137_asks_anchor_artifact_id` creates `asks_anchor_artifact_id`, an i
 `comments_anchor_artifact` (`0032`). Settlement's sweep reads through it the marks a document's
 asks record, by the anchor's document alone, so an ask that also names an ask block on another
 document (`block_artifact_id`) keeps its mark on the document its anchor names. Building it takes
-`SHARE` on `asks`, so ask writes wait for the build; it rewrites and refuses no row, and its census
-answers `0`. The release before it never reads the index and serves beside it unchanged, except
+`SHARE` on `asks`, so ask writes wait for the build; it rewrites no row, and it refuses an
+anchored ask whose anchor's artifact id is not a uuid, which only a row written by an earlier
+release with `block_artifact_id` set could be, so its census counts those rows (no release writes
+one). The release before it never reads the index and serves beside it unchanged, except
 that its sweep still drops such an ask's mark (no such row is written today), and rolling Dispatch
 back past `0137` is an image rollback alone: the index is left for the next release that reads it.
 
