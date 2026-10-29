@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-651",
-  "completed": "2026-10-29T12:30:00Z",
+  "completed": "2026-10-29T14:40:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2469",
   "evidence": "dispatch://INFRA-651/artifact/infra651-measurements-tgz version 4 (sha256 235a9c6b3a85bdf11887976099ed126a5f014d347a8c0e8eada08872fe689ecb); round3/ holds this round's seed, identity and runs",
   "proof": [
@@ -109,6 +109,14 @@
       "observed": "biome check . : 'Checked 1288 files ... No fixes applied', no error; the file parses to the same 160 arrays (22,460 counts) as before; go test ./loadtest ok (TestMakeRefPlan still gives 1,000 targets, 19,471 versions, 310 cited issues)",
       "headSha": "6db4537626e25dd107384409fde0af2b269488d6",
       "negativeControl": "at 4b1d777a140a, `bunx biome check packages/envoy/loadtest/` fails: 'refs-sample-2026-10-27.json format × Formatter would have printed the following content'"
+    },
+    {
+      "criterion": "Review round 3 (seed): the seed keeps the old template for a loadgen without seed-refs; a retried write adds no version; TestMakeRefPlan pins the whole plan; a fresh seed still reproduces INFRA-650's counts and shape",
+      "surface": "the load test's local stack (Postgres 16.2 + pgvector, migrations to 138), base build = main 4e91eaa85984 with the branch's packages/envoy/loadtest at 9511fa83",
+      "command": "seed.sh (stack.sh setup, start, seed; reset; loadgen refs-shape; loadgen refs-fetch); then on the reset seed `stack.sh loadgen seed-refs` a second time and count ref-target-* artifacts and versions and references.md before and after; then put a loadgen built from main 4e91eaa85984 at $BIN and run `stack.sh seed --force`; go test -overlay with the citation draw changed to the permutation's last m elements",
+      "observed": "fresh seed: ref_targets 1000, ref_target_versions 19471, ref_sources 310, artifact_refs 51071 (seed 2390 s), refs-shape PASS with mean rows 2508.3, share 0.0539, 231.0 B/row, refs-fetch 1000 issues, 310 with members, 0 not 200; second seed-refs exit 0 in 61 s and counts 1000|19471|310|310 before and after (every write replayed its stored 201 under refs-t<n>-v<v> / refs-s-<key>); with main's loadgen, seed --force exits 1 naming the missing seed-refs and dispatch_seed, seed.json and seed.meta.json are all still there; the mutated draw fails TestMakeRefPlan on its plan digest",
+      "headSha": "9511fa836f8a947d17c7b03e86de1329b3fa0633",
+      "negativeControl": "an unkeyed POST of the same target adds a version (ref-target-7 3 -> 4, version 4 created), which is the write the keys prevent; the overlay mutation fails 'the plan hashes to b37b4497..., want 7414809c...' while the old 1,000 / 19,471 / 310 checks still pass"
     }
   ],
   "filesChanged": [
@@ -132,7 +140,8 @@
     "packages/envoy/loadtest/main.go",
     "packages/envoy/loadtest/stack.sh",
     "packages/envoy/loadtest/README.md",
-    "packages/envoy/.changes/unreleased/pr2469-Added-20261029-074050.yaml"
+    "packages/envoy/.changes/unreleased/pr2469-Added-20261029-074050.yaml",
+    "packages/envoy/loadtest/api.go"
   ],
   "trickyParts": [
     "The full answer's SQL text is byte for byte main's: the loader varies only the version join string, so its plan, row order and which decode error a request hits are unchanged (errors.sql check).",
@@ -150,7 +159,8 @@
     "Task 8 done at d55525c5 after the forward merge b96ae4be (main 4e91eaa85984): refseed is loadgen seed-refs / refs-shape / refs-fetch, run by stack.sh seed right after loadgen seed.",
     "The forward merge drops packages/claude-envoy/dist from the diff: main now builds those bundles itself after each merge and a pull request never commits them (packages/claude-envoy/AGENTS.md:165); the merge's fingerprint changed only by those three files (PR comment 6492562896).",
     "Measured seed time 2232 s (references 23 min), so the README and stack.sh estimates say 37 to 50 min and about 23 min, not the 53 to 62 / 35 min first written.",
-    "CI lint round: the sample file is now Biome-formatted (one number per line inside each array); same data, so the seed and every measurement of round 3 stand."
+    "CI lint round: the sample file is now Biome-formatted (one number per line inside each array); same data, so the seed and every measurement of round 3 stand.",
+    "Review round 3: no new merge-rule runs. The server code is unchanged since a3cd6ffc, and the seed's plan is pinned by digest and gives the same counts and shape as round 3's seed, so round 3's runs stand. The architect narrowed this round to the reviewer's findings (13:13Z)."
   ],
   "openQuestions": []
 }
