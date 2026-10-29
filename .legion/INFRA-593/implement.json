@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-593",
+  "completed": "2026-10-29T18:08:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2444",
+  "round": 8,
+  "answersMove": "READY's head moved from 11581bf6 to fd69c20e: retro's rename of its six docs/solutions/ lessons to ...-pr2444.md with the issue key removed, on the architect's instruction. No runtime code changed; this round re-proves the change at fd69c20e so the tester and reviewer can run that head.",
+  "proof": [
+    {
+      "criterion": "Acceptance 1, 2 and 5: a load reads the compacted row plus the rows after it, compaction survives a restart and runs without NATS, and young rows stay as written, at the head that will merge",
+      "surface": "real envoy-dispatch built from the head on Postgres 16.2, DISPATCH_NATS_DISABLED=1, driven through the HTTP API",
+      "command": "bash $TMPDIR/infra593/e2e.sh (script and output: dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 10)",
+      "observed": "30 uploads made 41 rows; after a stop every row but the newest 3 was backdated and the hour's document-compaction record cleared; after the restart the sweep logged candidates=1 compacted=1 rows_deleted=37, leaving 4 rows; the 3 young rows unchanged in version, xmin and md5; text sha256 db68d573... identical before and after; a 31st upload reads back.",
+      "headSha": "fd69c20e4e6a0d5090424bd49381c5bd62969ae4",
+      "negativeControl": "The restarted process's first sweep tick logs candidates=0 compacted=0 while the hour is recorded as served; only after the record is cleared does the next tick fold the 37 rows, so the fold is the sweep's and not the restart's."
+    },
+    {
+      "criterion": "The head moved only in files no runtime reads",
+      "surface": "jj diff of the branch",
+      "command": "jj diff --name-only --from 11581bf624d1 --to fd69c20e4e6a",
+      "observed": "Six renames under docs/solutions/ (each -INFRA-593.md -> -pr2444.md), with one front-matter line and one dispatch:// link removed; no file outside docs/solutions/.",
+      "headSha": "fd69c20e4e6a0d5090424bd49381c5bd62969ae4",
+      "negativeControl": "From 9ed33934 (the last code round) to fd69c20e the only packages/ paths are the reviewer's test-only commit 26953da8, which the approved head 11581bf6 already carried."
+    }
+  ],
+  "filesChanged": [
+    "docs/solutions/architecture-patterns/a-periodic-pass-starts-from-main-under-runleased-with-a-tick-at-start-pr2444.md",
+    "docs/solutions/database-issues/a-pool-whose-work-moves-out-of-its-transactions-was-also-a-semaphore-pr2444.md",
+    "docs/solutions/database-issues/a-sweep-over-a-table-too-large-to-migrate-reads-a-worklist-the-hot-write-fills-in-its-own-statement-pr2444.md",
+    "docs/solutions/database-issues/fold-off-the-lock-and-write-only-when-every-folded-rows-version-and-xmin-still-stand-pr2444.md",
+    "docs/solutions/envoy/let-the-consumers-own-decode-be-the-validation-instead-of-decoding-the-bytes-twice-pr2444.md",
+    "docs/solutions/testing/a-test-of-a-background-queue-pauses-it-through-its-production-pause-while-it-reads-the-state-it-compares-pr2444.md"
+  ],
+  "deviations": [
+    "This handoff-only push carries no skip-checks line, so the required checks run at the pull request's head that READY will name."
+  ]
+}
