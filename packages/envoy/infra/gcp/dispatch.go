@@ -409,6 +409,16 @@ type dispatchSettings struct {
 	azure                                       dispatchAzure
 }
 
+// socks5Proxy is the address of the front door's SOCKS5 proxy, the one the app and the listener
+// dial the NATS hub through, and "" with natsInCluster, where no proxy runs and the two dial
+// natsUrl themselves. One derivation, so the mode and the address can never disagree.
+func (s dispatchSettings) socks5Proxy() string {
+	if s.natsInCluster {
+		return ""
+	}
+	return clusterLocal(s.hostname+"-tailnet", s.namespace) + ":" + strconv.Itoa(dispatchSOCKS5Port)
+}
+
 // dispatchAzure is the Azure embedder's plain configuration, the zero value when
 // azureEmbedEndpoint is unset. When enabled, exactly one of key (azureEmbedKeySecret) and keyless
 // (azureTenantId with azureClientId) is set, and audience is the keyless form's token audience.

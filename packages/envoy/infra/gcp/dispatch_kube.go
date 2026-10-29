@@ -264,7 +264,7 @@ func refuseDispatchSeedInSecret(value pulumi.StringInput, dispatch, input string
 // The listener serves on every address of its pod, and its API refuses to start on a non-loopback
 // listen host without a bearer (packages/envoy/cmd/listener/apiauth.go), so the environment names
 // the bearer in Secret listenerSecret.
-func dispatchListenerEnv(s dispatchSettings, socks5Proxy, listenerSecret, url string) (corev1.EnvVarArray, error) {
+func dispatchListenerEnv(s dispatchSettings, listenerSecret, url string) (corev1.EnvVarArray, error) {
 	if s.natsInCluster && bus.LocalNATSURL(url) {
 		return nil, core.InputErrorf("natsUrl", "natsUrl names a local NATS server; with natsInCluster the pods dial it directly, so the URL must name the hub's in-cluster Service")
 	}
@@ -272,7 +272,7 @@ func dispatchListenerEnv(s dispatchSettings, socks5Proxy, listenerSecret, url st
 		MachineID:      s.hostname,
 		Port:           core.DefaultListenerPort,
 		ListenHost:     "0.0.0.0",
-		SOCKS5Proxy:    socks5Proxy,
+		SOCKS5Proxy:    s.socks5Proxy(),
 		NATSReplicas:   s.natsReplicas,
 		StreamMaxBytes: s.streamMaxBytes,
 	}).Env([]string{url})
@@ -391,23 +391,20 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	// ENVOY_NATS_SOCKS5_PROXY off both workloads, which then dial natsUrl themselves.
 	tailnetName := s.hostname + "-tailnet"
 	listenerPort := strconv.Itoa(core.DefaultListenerPort)
-	socks5Proxy := ""
-	if !s.natsInCluster {
-		socks5Proxy = clusterLocal(tailnetName, s.namespace) + ":" + strconv.Itoa(dispatchSOCKS5Port)
-	}
+	socks5Proxy := s.socks5Proxy()
 	listenerURL := "http://" + clusterLocal(listenerName, s.namespace) + ":" + listenerPort
 
 	// natsURL is the one NATS URL once checked: every container reads this output rather than the
 	// raw input, so envoy-dispatch's NATS_URLS is never an unchecked copy beside the listener's
 	// checked environment.
 	natsURL := args.NatsUrl.ToStringOutput().ApplyT(func(url string) (string, error) {
-		if _, err := dispatchListenerEnv(s, socks5Proxy, listenerName, url); err != nil {
+		if _, err := dispatchListenerEnv(s, listenerName, url); err != nil {
 			return "", fmt.Errorf("%s: %w", dispatch, err)
 		}
 		return url, nil
 	}).(pulumi.StringOutput)
 	listenerEnv := natsURL.ApplyT(func(url string) (corev1.EnvVarArray, error) {
-		env, err := dispatchListenerEnv(s, socks5Proxy, listenerName, url)
+		env, err := dispatchListenerEnv(s, listenerName, url)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", dispatch, err)
 		}

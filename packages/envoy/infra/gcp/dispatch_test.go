@@ -80,6 +80,12 @@ const (
 	// binary's default, so a container carrying one carries what the input asked for.
 	dispatchNatsReplicas   = 3
 	dispatchStreamMaxBytes = 64 << 20
+	// dispatchSocks5Proxy is the front door's SOCKS5 Service, the address both NATS clients
+	// carry without natsInCluster, and frontDoorPodURN and frontDoorServiceURN the two children
+	// each waits for in that mode.
+	dispatchSocks5Proxy = "example-dispatch-tailnet.dispatch.svc.cluster.local:1055"
+	frontDoorPodURN     = "urn:pulumi:s::p::" + dispatchType + "$kubernetes:apps/v1:Deployment::example-dispatch-tailnet"
+	frontDoorServiceURN = "urn:pulumi:s::p::" + dispatchType + "$kubernetes:core/v1:Service::example-dispatch-tailnet"
 )
 
 // setInClusterNats turns natsInCluster on and points natsUrl at the hub's in-cluster Service,
@@ -1274,10 +1280,8 @@ func TestDispatchRefusesATailnetServiceOtherThanItsOwn(t *testing.T) {
 func requireWaitsForTheFrontDoor(t *testing.T, m *pulumitest.Mocks, deployment, dials string) {
 	t.Helper()
 	deps := m.Named(t, "kubernetes:apps/v1:Deployment", deployment).RPC.GetDependencies()
-	require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$kubernetes:apps/v1:Deployment::example-dispatch-tailnet",
-		dials+" is created after the pod running the SOCKS5 proxy")
-	require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$kubernetes:core/v1:Service::example-dispatch-tailnet",
-		dials+" dials the proxy at its Service, not at the pod")
+	require.Contains(t, deps, frontDoorPodURN, dials+" is created after the pod running the SOCKS5 proxy")
+	require.Contains(t, deps, frontDoorServiceURN, dials+" dials the proxy at its Service, not at the pod")
 }
 
 // envoy-dispatch serves without NATS: its /healthz readiness reads only Postgres, reporting nats
@@ -1309,18 +1313,17 @@ func TestDispatchListenerIsAuthenticated(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
-	const socks5Proxy = "example-dispatch-tailnet.dispatch.svc.cluster.local:1055"
 	listenerToken := map[string]any{"name": "example-dispatch-listener", "key": "ENVOY_API_TOKEN"}
-	listener := containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch-listener"), "envoy-listener"))
+	listener := listenerEnv(t, m)
 	require.Equal(t, "example-dispatch", listener["ENVOY_MACHINE_ID"])
 	require.Equal(t, "0.0.0.0", listener["ENVOY_LISTEN_HOST"])
 	require.Equal(t, listenerToken, listener["ENVOY_API_TOKEN"])
-	require.Equal(t, socks5Proxy, listener["ENVOY_NATS_SOCKS5_PROXY"])
+	require.Equal(t, dispatchSocks5Proxy, listener["ENVOY_NATS_SOCKS5_PROXY"])
 
-	app := containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch"), "envoy-dispatch"))
+	app := appEnv(t, m)
 	require.Equal(t, "http://example-dispatch-listener.dispatch.svc.cluster.local:9020", app["ENVOY_URL"])
 	require.Equal(t, listenerToken, app["ENVOY_TOKEN"])
-	require.Equal(t, socks5Proxy, app["ENVOY_NATS_SOCKS5_PROXY"])
+	require.Equal(t, dispatchSocks5Proxy, app["ENVOY_NATS_SOCKS5_PROXY"])
 }
 
 // dispatchNatsEnvs are the environments of the two containers that dial the NATS hub, the app's
@@ -1329,7 +1332,7 @@ func dispatchNatsEnvs(t *testing.T, m *pulumitest.Mocks) map[string]map[string]a
 	t.Helper()
 	return map[string]map[string]any{
 		"envoy-dispatch": appEnv(t, m),
-		"envoy-listener": containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch-listener"), "envoy-listener")),
+		"envoy-listener": listenerEnv(t, m),
 	}
 }
 
@@ -1389,11 +1392,10 @@ func TestDispatchNatsNumbersKeepTheProxyPath(t *testing.T) {
 	m, err := runDispatch(t, args, true)
 	require.NoError(t, err)
 
-	const socks5Proxy = "example-dispatch-tailnet.dispatch.svc.cluster.local:1055"
 	for container, env := range dispatchNatsEnvs(t, m) {
 		require.Equal(t, strconv.Itoa(dispatchNatsReplicas), env["ENVOY_NATS_REPLICAS"], container)
 		require.Equal(t, strconv.Itoa(dispatchStreamMaxBytes), env["ENVOY_STREAM_MAX_BYTES"], container)
-		require.Equal(t, socks5Proxy, env["ENVOY_NATS_SOCKS5_PROXY"], container)
+		require.Equal(t, dispatchSocks5Proxy, env["ENVOY_NATS_SOCKS5_PROXY"], container)
 	}
 }
 
@@ -1587,10 +1589,8 @@ func TestDispatchInClusterNatsLeavesNoSocks5Path(t *testing.T) {
 	m, err := runDispatch(t, args, true)
 	require.NoError(t, err)
 
-	for _, registration := range m.Registrations() {
-		if registration.Type == "kubernetes:core/v1:Service" {
-			require.NotEqual(t, "example-dispatch-tailnet", registration.Name, "no Service publishes the proxy's port")
-		}
+	for _, registration := range registrationsOf(m, "kubernetes:core/v1:Service") {
+		require.NotEqual(t, "example-dispatch-tailnet", registration.Name, "no Service publishes the proxy's port")
 	}
 	template := deploymentPodTemplate(t, m, "example-dispatch-tailnet")
 	require.NotContains(t, frontDoorEnv(t, podContainer(t, template, "tailscale")), "TS_SOCKS5_SERVER",
@@ -1599,10 +1599,8 @@ func TestDispatchInClusterNatsLeavesNoSocks5Path(t *testing.T) {
 		"the front door's policy is still there and admits nothing at all")
 	for _, deployment := range []string{"example-dispatch", "example-dispatch-listener"} {
 		deps := m.Named(t, "kubernetes:apps/v1:Deployment", deployment).RPC.GetDependencies()
-		require.NotContains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$kubernetes:apps/v1:Deployment::example-dispatch-tailnet",
-			deployment+" waits for no front-door pod")
-		require.NotContains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$kubernetes:core/v1:Service::example-dispatch-tailnet",
-			deployment+" dials no proxy at a Service")
+		require.NotContains(t, deps, frontDoorPodURN, deployment+" waits for no front-door pod")
+		require.NotContains(t, deps, frontDoorServiceURN, deployment+" dials no proxy at a Service")
 	}
 }
 

@@ -250,6 +250,12 @@ func appEnv(t *testing.T, m *pulumitest.Mocks) map[string]any {
 	return containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch"), "envoy-dispatch"))
 }
 
+// listenerEnv is the listener's envoy-listener container's environment, appEnv's counterpart.
+func listenerEnv(t *testing.T, m *pulumitest.Mocks) map[string]any {
+	t.Helper()
+	return containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch-listener"), "envoy-listener"))
+}
+
 // The endpoint, the deployment and either credential are Inputs, typically an Azure resource's or
 // a managed identity's outputs: Construct takes them from another resource and renders them as
 // they resolve.
