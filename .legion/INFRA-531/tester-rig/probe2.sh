@@ -8,8 +8,8 @@ jq -Rc '{id: input_line_number, md: ((. | gsub("⏎"; "\n")) + "\n")}' "$T/$tag.
 (cd "$W/packages/envoy/internal/dispatch/pmdoc/gen" && bun differential.ts "$T/$tag.jsonl" "$T/$tag.eng.jsonl" md)
 case $side in
   head) dir=$W/packages/envoy/internal/dispatch/pmdoc env="" ;;
-  base) dir=$T/base1767/packages/envoy/internal/dispatch/pmdoc env="GOWORK=off" ;;
-  prev) dir=$T/prev3ff/packages/envoy/internal/dispatch/pmdoc env="GOWORK=off" ;;
+  base) dir=$T/based4c/packages/envoy/internal/dispatch/pmdoc env="GOWORK=off" ;;
+  prev) dir=$T/prev5d8/packages/envoy/internal/dispatch/pmdoc env="GOWORK=off" ;;
 esac
 cp "$T/zz_tester_probe_test.go" "$dir/"
 trap 'rm -f "$dir/zz_tester_probe_test.go"' EXIT

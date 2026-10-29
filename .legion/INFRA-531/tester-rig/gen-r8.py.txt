@@ -1,0 +1,13 @@
+# Round-8 task-checkbox shapes (1,414): python3 gen-r8.py > r8gen.txt, then probe2.sh r8gen <side>.
+import itertools
+markers=['- [ ] ','- [x] ','- [X] ','* [ ] ','1. [ ] ','- [ ]  ','  - [ ] ','> - [ ] ']
+openers=['<!-- todo','<div class=x','<!doctype html','<script>','<pre>','<?x','<![CDATA[x','<span title=a=b;a@b.cc>','<a href=x;https://y.test/>','<!x;a@b.cc>','<x-y z>','</div>','<b>bold</b>','<!-- x;a@b.cc -->']
+afters=['', ' tail', ' x;https://z.test']
+conts=[None, '  <div class=x', '  <!-- note', '  plain']
+out=[]
+for m,o,a,c in itertools.product(markers,openers,afters,conts):
+    s=m+o+a
+    if c is not None: s+='⏎'+(' ' if m.startswith('  ') else '')+c
+    out.append(s)
+for o in openers: out += ['- '+o, '[ ] '+o, '- [ ]'+o, '- [ ]x '+o, '- [y] '+o]
+print('\n'.join(out))
