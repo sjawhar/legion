@@ -1,0 +1,82 @@
+name: Mirror Images
+
+# Copies every image .github/ci-images.yaml names into ghcr.io/sjawhar/legion/ci, so no CI job
+# fetches an image from a third-party registry (dispatch://INFRA-567). `crane copy` keeps the
+# manifest digest, so a copy's digest is its upstream's digest, and every consumer names that one
+# string. The run copies only the rows the package does not hold yet, so the common run copies
+# nothing and takes seconds.
+#
+# A branch run of this workflow can write the package, and the digest is what makes that safe:
+# every consuming reference names a digest, so a push can add bytes to the package but can never
+# change the bytes a job pulls. .github/scripts/check-ci-images.sh refuses a consumer that names a
+# tag, a registry that is not this package, or a digest this file does not hold.
+#
+# A `workflow_dispatch` run is a later manual path only: GitHub dispatches a workflow only once it
+# exists on the default branch, so the first copies are made by this workflow's own pull-request
+# run.
+
+on:
+  pull_request:
+    paths:
+      - .github/ci-images.yaml
+      - .github/workflows/mirror-images.yaml
+      - .github/actions/install-crane/action.yml
+  push:
+    branches: [main]
+    paths:
+      - .github/ci-images.yaml
+      - .github/workflows/mirror-images.yaml
+      - .github/actions/install-crane/action.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write # ghcr.io push
+
+jobs:
+  mirror:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/install-crane
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Copy every image the package does not hold
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY' > rows.tsv
+          import sys, yaml
+          doc = yaml.safe_load(open(".github/ci-images.yaml"))
+          registry = doc["registry"]
+          for row in doc["images"]:
+              print("\t".join((registry, row["tag"], row["digest"], row["upstream"])))
+          PY
+          copied=0
+          held=0
+          while IFS=$'\t' read -r registry tag digest upstream; do
+            have=$(crane digest "$registry:$tag" 2>/dev/null || true)
+            if [ "$have" = "$digest" ]; then
+              echo "held   $registry:$tag $digest"
+              held=$((held + 1))
+              continue
+            fi
+            echo "copy   $upstream -> $registry:$tag"
+            crane copy "$upstream" "$registry:$tag"
+            have=$(crane digest "$registry:$tag")
+            if [ "$have" != "$digest" ]; then
+              echo "::error file=.github/ci-images.yaml::$registry:$tag landed at $have, and the row says $digest. Correct the row's digest, or the upstream reference it copies from."
+              exit 1
+            fi
+            echo "copied $registry:$tag $digest"
+            copied=$((copied + 1))
+          done < rows.tsv
+          echo "$held row(s) already in the package, $copied copied"
