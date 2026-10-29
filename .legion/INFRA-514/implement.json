@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-514",
-  "completed": "2026-10-29T14:45:00Z",
+  "completed": "2026-10-29T17:40:00Z",
   "proof": [
+    {
+      "criterion": "Review round 1 (findings 2 and 3): a resumed watch still repairs when its consumer create does not answer, leaves no nats.go goroutine after its connection closes, and is never labelled timed out; the resume path still works end to end",
+      "surface": "Real processes on the issue pod (nats-server 2.10.29, three envoy-listener builds of the head, 400 heartbeating sessions, a nats-server restart) and the kvwatch/bus tests on a real nats-server",
+      "command": "python3 heartbeat-proof.py head5 bin/envoy-listener-head 400; CGO_ENABLED=1 go test -race -count 3 -run 'TestResumedWatchesLeaveNoGoroutineBehindWhenTheirConnectionCloses|Resum' ./internal/bus/; CGO_ENABLED=1 go test -race ./internal/kvwatch/... (TestARewatchWhoseResumeCannotBeCreatedReadsTheBucketInFull, TestAResumedWatchThatEndsAtItsMarkerIsNotTimedOut)",
+      "observed": "1.203 KV writes per heartbeat; after the restart all three listeners logged interest and session warm-ups resumed with 0 entries and no 'could not resume' line; the goroutine count returned to baseline after 40 resumed watches' connection closed; a resume that cannot be created logs one WARN and the watch reads in full (completed, cache equals bucket, Err nil); a resumed watch ending at its marker logs resumed and keeps nats.ErrConnectionClosed",
+      "headSha": "93f5dc3844a3c155387ff37d02facb9af793b01d",
+      "negativeControl": "without the context cancel the goroutine test fails (57 goroutines against a baseline of 25 after 40 watches); without the fallback the Rewatch fails ('resume a watch of KV bucket kvwatch-test: nats: timeout'); with the old timedOut line the warm-up says 'timed out'"
+    },
     {
       "criterion": "Round 4 (tester's failure 2, deployment instructions): the change to the issue page's Subscribed agents row is proven by a test in Dispatch's browser suite that fails on a build before the change and passes at the head",
       "surface": "Dispatch's browser suite (packages/dispatch/e2e, Playwright chromium) against a real Dispatch build and the suite's fake listener, issue page Subscribed agents region",
@@ -73,7 +81,6 @@
     ".dispatch/architecture/envoy-listener.md",
     "docs/solutions/envoy/a-cache-miss-must-not-release-what-another-listener-wrote.md",
     "packages/envoy/AGENTS.md",
-    "packages/envoy/CHANGELOG.md",
     "packages/envoy/docs/architecture.md",
     "packages/envoy/cmd/listener/main.go",
     "packages/envoy/cmd/listener/api_test.go",
@@ -107,7 +114,12 @@
     ".github/scripts/ci_job_reads.py",
     "packages/dispatch/e2e/fake-envoy.ts",
     "packages/dispatch/e2e/agents.ts",
-    "packages/dispatch/e2e/issue.e2e.ts"
+    "packages/dispatch/e2e/issue.e2e.ts",
+    "packages/envoy/internal/kvwatch/export_test.go",
+    "packages/envoy/.changes/unreleased/pr2377-subscribers-last-seen.yaml",
+    "packages/envoy/.changes/unreleased/pr2377-rewatch-resumes.yaml",
+    "packages/envoy/.changes/unreleased/pr2377-session-cache-shared-reads.yaml",
+    "packages/envoy/.changes/unreleased/pr2377-unchanged-interest-writes.yaml"
   ],
   "trickyParts": [
     "kvwatch keeps one complete flag (the atomic) that both #2167's Complete() and the resume read; a resumed generation is complete at its own nil marker, and a WithRescan rescan passes no connection so it always reads in full.",
@@ -115,7 +127,8 @@
     "The reaper deletes with nats.LastRevision(checked revision); JetStream's wrong-last-sequence answer (nats.ErrKeyExists) counts as skipped. Revision 0 falls back to deleteInterest because LastRevision(0) is no condition.",
     "The session cache does not insert an already-expired put for an id it does not hold, so a stale delivery after the fence has gone cannot make the id live or bring back a LastSeen answer.",
     "EV-11 lives in Registry.UpsertWithin (#2167), which Upsert and the subscribe route both reach.",
-    "The listener keeps a dead session's last-seen record (and its revision fence) for InterestReapGrace + InterestRefreshAge after the session left the cache (session.WithLastSeenRetention), so GET /v1/interests/ can report the real last heartbeat for every row the reaper still holds; a retention below the TTL is raised to the TTL, because dropping the fence earlier would let a late old revision come back. A listener restarted since the session died has no record, and Dispatch falls back to updated_at."
+    "The listener keeps a dead session's last-seen record (and its revision fence) for InterestReapGrace + InterestRefreshAge after the session left the cache (session.WithLastSeenRetention), so GET /v1/interests/ can report the real last heartbeat for every row the reaper still holds; a retention below the TTL is raised to the TTL, because dropping the fence earlier would let a late old revision come back. A listener restarted since the session died has no record, and Dispatch falls back to updated_at.",
+    "A resumed watch's consumer create waits nats.go's legacy 5 s and cannot be given a deadline (nats.go unsubscribes when the watch context is done), so kvwatch falls back to the full WatchAll in the same watch when the resume cannot be created; the watch context is cancelled by the adapter once its updates close, because nats.go cancels it only in Unsubscribe, which a closed connection refuses."
   ],
   "deviations": [
     "The race job: #2167 added a listener race step, so ./internal/session/ joined that step (plan T5's stated alternative); kvwatch was already in it.",
@@ -125,7 +138,8 @@
     "Round 2: Dispatch keys and dispatch:// links removed from the lines this pull request adds (CHANGELOG, the race step's comment) and from its body, per the repository rule relayed on 2026-10-27; the body's 'Dispatch: INFRA-514' template line stays.",
     "Round 3: GitHub reported the pull request conflicting with main (8a911ecc) in packages/envoy/AGENTS.md and CHANGELOG.md, both prose; merged forward as 41fa18b1 with both sides' text on each line, fingerprint e512190a -> d7bf20aa (posted on the pull request). The proof was run again at the merge head on the new pod with a compact real-process driver (the 2-core reproduction stack did not survive the pod's recreation); the tester's full-harness readings at d7ebb1ee stand for the same code.",
     "Round 3 test notes: go test ./internal/dispatch/api needs CI's -timeout 20m on this pod; with it, one test failed for the local database's collation only (TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves refuses a database that already sorts in byte order, which a fresh initdb with no locale does); no file of that test's code is in this pull request.",
-    "Round 4: main's #2316 deleted .github/workflows/envoy-and-contracts.yaml and moved pull-request CI into ci.yaml; the forward merge (5e318b72, onto ef7ef530) accepts the deletion and adds ./internal/session/ to ci.yaml's listener race step, updating that step's entry in .github/scripts/ci_job_reads.py so check-ci-filters.sh passes (23 gates, 0 uncovered). Fingerprint d7bf20aa -> b71732dc, posted on the pull request."
+    "Round 4: main's #2316 deleted .github/workflows/envoy-and-contracts.yaml and moved pull-request CI into ci.yaml; the forward merge (5e318b72, onto ef7ef530) accepts the deletion and adds ./internal/session/ to ci.yaml's listener race step, updating that step's entry in .github/scripts/ci_job_reads.py so check-ci-filters.sh passes (23 gates, 0 uncovered). Fingerprint d7bf20aa -> b71732dc, posted on the pull request.",
+    "Review round 1: changelog entries moved to packages/envoy/.changes/unreleased/pr2377-*.yaml (Issue pr2377, no key); CHANGELOG.md is again its merge-base content. Forward merge onto main 7c2effba (93f5dc38) for a prose conflict in packages/envoy/AGENTS.md; fingerprint 95e15945 -> a97f1bc4."
   ],
   "openQuestions": [
     "The issue-topic delivery defect the controller reported went to its own child issue, by the architect's decision of 2026-10-29 11:59Z; it is not in this pull request.",
