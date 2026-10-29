@@ -81,6 +81,57 @@ func TestPublishCoreReportsAPublishNATSDenies(t *testing.T) {
 	}
 }
 
+// jetStreamGrantedClient connects a stream-owning bus client as a user NATS lets publish only to
+// the subjects allow names, beside the JetStream API and the inboxes the client needs to create
+// its stream and to be answered on it.
+func jetStreamGrantedClient(t *testing.T, allow ...string) *bus.Client {
+	t.Helper()
+	seed, public := testnats.User(t)
+	uri := testnats.StartNkeyGranted(t, public, append([]string{"$JS.API.>", "_INBOX.>"}, allow...)...).URL
+	t.Setenv("NATS_NKEY_SEED", seed)
+	client, err := bus.ConnectOwningStream([]string{uri})
+	if err != nil {
+		t.Fatalf("connect as the granted user: %v", err)
+	}
+	t.Cleanup(client.Close)
+	return client
+}
+
+// A JetStream publish the server denies returns the denial, naming the subject, rather than an
+// unreachable NATS: the stream acknowledges a denied publish with nothing, so a publisher reading
+// the acknowledgement alone meets the window running out and reports an outage. A publish of the
+// same stream subject under a grant that covers it is accepted and retained.
+func TestPublishReportsAJetStreamPublishNATSDenies(t *testing.T) {
+	const topic = "notifications.dispatch.issue.ACME-1.message.created"
+	envelope := contracts.Envelope{
+		EventID:       "evt-jetstream-denied",
+		Source:        "dispatch",
+		SourceEventID: "source-jetstream-denied",
+		Topic:         topic,
+		DedupeKey:     "publish.jetstream.denied",
+		IssuedAt:      contracts.NowMillis(),
+	}
+
+	err := jetStreamGrantedClient(t).Publish(envelope)
+	if !errors.Is(err, bus.ErrPublishDenied) || !errors.Is(err, natsgo.ErrPermissionViolation) {
+		t.Fatalf("denied JetStream publish returned %v, want ErrPublishDenied wrapping the permissions violation", err)
+	}
+	if errors.Is(err, bus.ErrUnavailable) {
+		t.Fatalf("denied JetStream publish returned %v, which reads as an unreachable NATS", err)
+	}
+	if !strings.Contains(err.Error(), `Permissions Violation for Publish to "`+topic+`"`) {
+		t.Fatalf("denied JetStream publish error %q does not carry the server's violation for %s", err, topic)
+	}
+
+	granted := jetStreamGrantedClient(t, "notifications.dispatch.>")
+	if err := granted.Publish(envelope); err != nil {
+		t.Fatalf("granted JetStream publish returned %v", err)
+	}
+	if _, err := granted.JS().GetLastMsg(bus.Stream, topic); err != nil {
+		t.Fatalf("the stream did not retain the granted publish: %v", err)
+	}
+}
+
 // A window holding several denied core sends among granted ones answers every denied send with
 // its denial and every granted one accepted, and delivers the granted ones: a granted send whose
 // flush another send's denial left unconfirmed is published again once the window's flushes are

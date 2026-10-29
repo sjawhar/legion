@@ -1189,6 +1189,17 @@ func (c *Client) refused(err error, size int) error {
 	return err
 }
 
+// lastError is the last error the client's connection recorded, nats.go's one slot per connection,
+// and ErrInvalidConnection on a client that has yet to hold one. It is the only evidence a denied
+// JetStream publish leaves its publisher (publishJetStream), since the server reports a
+// permissions violation on the connection and never in the publish's own answer.
+func (c *Client) lastError() error {
+	c.mu.Lock()
+	conn := c.Conn
+	c.mu.Unlock()
+	return conn.LastError()
+}
+
 // publishBound bounds Publish, PublishCoreTo and PublishReportingDuplicate, and the publishJetStream
 // and publishCoreTo of a caller that passed no deadline of its own: their wait for a reconnect and
 // their flush or JetStream acknowledgement together. A publish window's sends take
@@ -1260,6 +1271,14 @@ func (c *Client) PublishReportingDuplicateWithin(ctx context.Context, item contr
 // within the same bound, without the MsgId: stored, the publish succeeds; refused, its error wraps
 // ErrNotStored and that send's own error.
 //
+// A publish the server refuses under the connection's own publish permissions is answered
+// ErrPublishDenied, as a publish window's sends are (window.acknowledged): a denied JetStream
+// publish is acknowledged by nothing, so its caller would otherwise meet the acknowledgement
+// wait's timeout, or a no-responders error, and never the denial. The connection's last error is
+// what names it, with confirmPublished's documented ambiguity: nats.go keeps one last error per
+// connection, so a violation of another subject recorded in between leaves this publish named as
+// it was before.
+//
 // A ctx that has already ended never puts the message on the wire here, and that protection is
 // the dependency's rather than this repository's: js.Publish under nats.Context is a request, and
 // nats.go's requestWithContext returns ctx.Err() before it sends anything (nats.go v1.50.0,
@@ -1287,7 +1306,7 @@ func (c *Client) publishJetStream(ctx context.Context, item contracts.Envelope) 
 		return false, err
 	}
 	// publish sends data under options, once more if the connection had closed, and names a
-	// refusal as the ErrTooLarge or ErrStreamFull it is.
+	// refusal as the ErrPublishDenied, ErrTooLarge or ErrStreamFull it is.
 	publish := func(options ...nats.PubOpt) (*nats.PubAck, error) {
 		ack, err := c.JS().Publish(item.Topic, data, options...)
 		if err != nil && errors.Is(err, nats.ErrConnectionClosed) {
@@ -1297,6 +1316,9 @@ func (c *Client) publishJetStream(ctx context.Context, item contracts.Envelope) 
 			ack, err = c.JS().Publish(item.Topic, data, options...)
 		}
 		if err != nil {
+			if denied := publishDenial(c.lastError(), item.Topic); denied != nil {
+				return nil, denied
+			}
 			return nil, streamFull(c.refused(err, len(data)))
 		}
 		return ack, nil

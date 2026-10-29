@@ -1,9 +1,11 @@
 kind: Fixed
 body: |-
     A JetStream publish NATS denies is now named a denial rather than reported as an unreachable
-    NATS. The server acknowledges such a publish with nothing, so the denial is read off the
-    connection's last error (`bus.ErrPublishDenied`), where the publish's own answer is a
-    publish-window timeout. An operator sees the difference on Dispatch's outbox: such a publish
+    NATS, on both the windowed publishes Dispatch's event outbox makes and the synchronous ones
+    every other caller makes, the Envoy listener's HTTP publishes among them. The server
+    acknowledges such a publish with nothing, so the denial is read off the connection's last
+    error (`bus.ErrPublishDenied`), where the publish's own answer is a publish-window timeout or
+    a no-responders error. An operator sees the difference on Dispatch's outbox: such a publish
     was released at INFO with no attempt counted, logged as `NATS is unreachable`, and the rest of
     that scan's backlog was abandoned; now the attempt is counted and backed off by its retry
     delay, and the ERROR line `dispatch outbox: publish event` names the subject and the server's
