@@ -762,9 +762,10 @@ func TestTwoAdmissionsAtOnceCountTheStoredVersionOnce(t *testing.T) {
 	}
 }
 
-// Counts of distinct documents take their turns one at a time (storedCounts.takeTurn), so in a
-// burst the last of them waits for every count before it. Each count's read bound (coldReadTimeout)
-// starts once it holds its turn, not when its admission asks: n admissions of n documents whose
+// The counts of distinct documents each wait for a grant of the copy-heap bound, in the order they
+// asked for it (copyHeaps), so in a burst that fills the bound the last of them waits for every
+// count before it. Each count's read bound (coldReadTimeout) starts once it holds that grant, not
+// when its admission asks: against a bound one count fills, n admissions of n documents whose
 // counts each take twice the bound over n, the burst together twice the bound, all complete, none
 // with a count that timed out, each document counted once and no two counts at the same time.
 func TestABurstOfAdmissionsToDistinctDocumentsCountsEachWithinItsOwnReadBound(t *testing.T) {
@@ -775,6 +776,7 @@ func TestABurstOfAdmissionsToDistinctDocumentsCountsEachWithinItsOwnReadBound(t 
 	database := storetest.Open(t)
 	service := newRoomBudgetService(t, database, NewPgVersioned(database))
 	rooms := createDocuments(t, database, n)
+	useCopyHeaps(t, &copyHeaps{size: storedCountGrant(t, database, rooms[0], 1)})
 	oldTimeout := coldReadTimeout
 	coldReadTimeout = bound
 	t.Cleanup(func() { coldReadTimeout = oldTimeout })
@@ -827,16 +829,18 @@ func TestABurstOfAdmissionsToDistinctDocumentsCountsEachWithinItsOwnReadBound(t 
 	}
 }
 
-// An admission whose request ends while the count it waits for still waits for its turn returns at
-// once with its request's error, and leaves the count to the admissions still waiting for it, which
-// are admitted at that count, the document parsed once. A count every admission has left behind
-// ends its wait for its turn and never parses: nobody is waiting for it.
-func TestAnAdmissionWhoseRequestEndsWhileItsCountWaitsForItsTurnLeavesTheCountToTheOthers(t *testing.T) {
+// An admission whose request ends while the count it waits for still waits for its grant of the
+// copy-heap bound returns at once with its request's error, and leaves the count to the admissions
+// still waiting for it, which are admitted at that count, the document parsed once. A count every
+// admission has left behind ends its wait for that grant and never parses: nobody is waiting for
+// it. The bound here holds one count, so the count holding it keeps the others waiting.
+func TestAnAdmissionWhoseRequestEndsWhileItsCountWaitsForItsGrantLeavesTheCountToTheOthers(t *testing.T) {
 	ctx := context.Background()
 	database := storetest.Open(t)
 	service := newRoomBudgetService(t, database, NewPgVersioned(database))
 	ids := createDocuments(t, database, 3)
 	held, shared, abandoned := ids[0], ids[1], ids[2]
+	useCopyHeaps(t, &copyHeaps{size: storedCountGrant(t, database, held, 1)})
 	var mu sync.Mutex
 	parsed := map[string]int{}
 	counting, release := make(chan struct{}, 1), make(chan struct{})
@@ -935,6 +939,91 @@ func TestAnAdmissionWhoseRequestEndsWhileItsCountWaitsForItsTurnLeavesTheCountTo
 	defer mu.Unlock()
 	if parsed[held] != 1 || parsed[shared] != 1 || parsed[abandoned] != 0 {
 		t.Fatalf("the documents were parsed %v times, want the held and the shared once each and the abandoned never", parsed)
+	}
+}
+
+// Counts of distinct documents run beside each other, as many at once as the copy-heap bound has
+// room for and no more (storedCountWeight, countStoredVersion): against a bound of three counts,
+// six admissions to six documents, each count held where it would parse, run three at once; the
+// fourth waits, and the bound never holds more than its size. Once they are released every
+// document is counted once and every admission reserves that count.
+func TestCountsOfStoredVersionsRunBesideEachOtherWithinTheCopyHeapBound(t *testing.T) {
+	const n, together = 6, 3
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	rooms := createDocuments(t, database, n)
+	weight := storedCountGrant(t, database, rooms[0], 1)
+	heaps := useCopyHeaps(t, &copyHeaps{size: together * weight})
+	var most atomic.Int64
+	heaps.granted = func(held int64) {
+		for seen := most.Load(); held > seen && !most.CompareAndSwap(seen, held); seen = most.Load() {
+		}
+	}
+	var parses atomic.Int64
+	counting, release := make(chan string, n), make(chan struct{})
+	var released sync.Once
+	t.Cleanup(func() { released.Do(func() { close(release) }) })
+	service.budget.stored.beforeCount = func(room string, _ int64) {
+		parses.Add(1)
+		counting <- room
+		<-release
+	}
+	type admission struct {
+		reservation *roomReservation
+		err         error
+	}
+	admissions := make(chan admission, n)
+	for _, room := range rooms {
+		go func() {
+			reservation, err := service.reserveRoom(ctx, room)
+			admissions <- admission{reservation, err}
+		}()
+	}
+	started := map[string]bool{}
+	for range together {
+		select {
+		case room := <-counting:
+			started[room] = true
+		case <-time.After(10 * time.Second):
+			t.Fatalf("only %d of the %d counts the bound has room for started", len(started), together)
+		}
+	}
+	// The fourth count waits for its grant: nothing else gives one back while these three are held.
+	select {
+	case room := <-counting:
+		t.Fatalf("a fourth count of %s started with the %d-byte bound held by %d counts of %d bytes each", room, heaps.limit(), together, weight)
+	case <-time.After(250 * time.Millisecond):
+	}
+	if parses.Load() != together {
+		t.Fatalf("%d counts parsed with the bound held by %d, want only those", parses.Load(), together)
+	}
+	released.Do(func() { close(release) })
+	for range n - together {
+		select {
+		case <-counting:
+		case <-time.After(10 * time.Second):
+			t.Fatal("a count left waiting for its grant never ran once the first counts gave theirs back")
+		}
+	}
+	for range n {
+		select {
+		case got := <-admissions:
+			if got.err != nil || got.reservation == nil {
+				t.Fatalf("an admission of the burst answered %v (%v), want it admitted", got.reservation, got.err)
+			}
+			defer service.budget.release(got.reservation)
+		case <-time.After(30 * time.Second):
+			t.Fatal("an admission of the burst never returned")
+		}
+	}
+	t.Logf("%d counts of %d bytes each against a %d-byte bound: %d ran at once, the bound holding %d at its most",
+		n, weight, heaps.limit(), together, most.Load())
+	if parses.Load() != n {
+		t.Fatalf("the burst parsed %d times, want each of the %d documents counted once", parses.Load(), n)
+	}
+	if most.Load() != heaps.limit() {
+		t.Fatalf("the bound held %d bytes at its most, want all %d of it: %d counts of %d bytes ran at once", most.Load(), heaps.limit(), together, weight)
 	}
 }
 

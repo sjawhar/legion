@@ -6,15 +6,19 @@ import (
 	"os"
 	"runtime/debug"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // copyHeapMeasurement is the environment variable that runs the copy-heap measurement's heavy
@@ -299,6 +303,108 @@ func useCopyHeaps(t *testing.T, heaps *copyHeaps) *copyHeaps {
 	previous := podCopyHeaps.Swap(heaps)
 	t.Cleanup(func() { podCopyHeaps.Store(previous) })
 	return heaps
+}
+
+// densestMarkdownOf is bytes of the densest markdown this repository measures, empty items of
+// alternating bullet lists, each item a list of its own (bytesOfHeapAByteAtTheDensest).
+func densestMarkdownOf(bytes int) string {
+	const pair = "- \n\n* \n\n"
+	return strings.Repeat(pair, bytes/len(pair))
+}
+
+// storeVersionMarkdown stores markdown as room's next version, as an upload's insert stores one
+// (api/artifacts.go:296), leaving the document's stored history as it is: what a count of that
+// version parses is the markdown, whatever the history holds.
+func storeVersionMarkdown(t *testing.T, database *store.Store, room, markdown string) int64 {
+	t.Helper()
+	var number int64
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into artifact_versions (artifact_id, number, markdown, authors)
+		select $1, coalesce(max(number), 0) + 1, $2, '[]' from artifact_versions where artifact_id = $1
+		returning number
+	`, room, markdown).Scan(&number); err != nil {
+		t.Fatalf("store a version: %v", err)
+	}
+	return number
+}
+
+// storedCountGrant is what a count of room's latest version is granted of the copy-heap bound
+// (storedCountWeight), read as the count weighs itself (weighStoredCount).
+func storedCountGrant(t *testing.T, database *store.Store, room string, number int64) int64 {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := database.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	_, markdown, row, err := weighStoredCount(ctx, tx, room, number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return storedCountWeight(markdown, row)
+}
+
+// A count of an admission's stored version holds no more heap while it runs than the grant it
+// takes of the copy-heap bound (storedCountWeight): its markdown's bytes at storedCountHeapPerByte
+// up to storedCountHeapAtMost, and the largest row of the history it walks at
+// storedCountHeapPerStoredRowByte. The count leaves nothing behind but two integers it keeps
+// (storedCounts.put), so what it held above the heap before it is what the grant must cover.
+//
+// It measures, at GOMAXPROCS=1 with the collector at copyMeasurementGCPercent so the sampled peak
+// is what is live (measureLoad), a mebibyte of prose, the densest markdown measured
+// (bytesOfHeapAByteAtTheDensest) at a mebibyte, 64 KiB and 4 KiB, where the small shapes run
+// denser a byte because goldmark's guard stops the parse of a large one (nodeGuard), a mebibyte of
+// hard breaks, the shape that guard stops latest, and a paragraph typed into 100,000 times, whose
+// history is one row of over a mebibyte against a rendering of a few hundred bytes: the shape the
+// walk, not the parse, is weighed for.
+func TestAStoredVersionsCountHoldsNoMoreThanItsGrant(t *testing.T) {
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	shapes := []struct {
+		name     string
+		markdown string
+		history  func() []byte
+	}{
+		{"a mebibyte of prose", residentRoomMarkdown(t, 1<<20), func() []byte {
+			state, _ := residentRoomState(t, 1<<20)
+			return state
+		}},
+		{"a mebibyte of the densest markdown", densestMarkdownOf(1 << 20), nil},
+		{"64 KiB of the densest markdown", densestMarkdownOf(64 << 10), nil},
+		{"4 KiB of the densest markdown", densestMarkdownOf(4 << 10), nil},
+		{"a mebibyte of hard breaks", strings.Repeat("a\\\nb\\\n", 1<<20/6), nil},
+		{"a paragraph typed into 100,000 times", "# Title\n\nOne paragraph of ordinary prose.\n", func() []byte {
+			return typedBeforeState(t, 100_000)
+		}},
+	}
+	rooms := createDocuments(t, database, len(shapes))
+	for index, shape := range shapes {
+		room := rooms[index]
+		if shape.history != nil {
+			storeHistory(t, service, room, shape.history())
+		}
+		number := storeVersionMarkdown(t, database, room, shape.markdown)
+		grant := storedCountGrant(t, database, room, number)
+		cost := func() loadCost {
+			defer debug.SetGCPercent(debug.SetGCPercent(copyMeasurementGCPercent))
+			return measureLoad(t, func() any {
+				heap, err := service.countStoredVersion(context.Background(), room, number)
+				if err != nil {
+					t.Fatalf("count %s: %v", shape.name, err)
+				}
+				return heap
+			})
+		}()
+		held := int64(cost.peak)
+		t.Logf("%s, %d bytes of markdown: %s, %d allocated, %d peak, %.1f a byte of its markdown, against a %d-byte grant",
+			shape.name, len(shape.markdown), cost.took.Round(time.Millisecond), cost.allocated, held,
+			float64(held)/float64(len(shape.markdown)), grant)
+		if held > grant {
+			t.Errorf("the count of %s held %d bytes, %.1f a byte of its %d of markdown, past its %d-byte grant",
+				shape.name, held, float64(held)/float64(len(shape.markdown)), len(shape.markdown), grant)
+		}
+	}
 }
 
 // proseState is the state of a fresh document of at least bytes of prose (proseAtLeast).

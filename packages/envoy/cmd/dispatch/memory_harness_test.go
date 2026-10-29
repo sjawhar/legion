@@ -483,10 +483,10 @@ func documentFrame(room string, tag uint64, payload []byte) []byte {
 // at the server's schema version (schemaReadOnly, internal/dispatch/docs/websocket.go:388-390).
 // The server answers the upgrade only once it has admitted the browser and loaded the document
 // (Service.ServeHTTP, websocket.go:274-353), and a burst of browsers to documents at the bound
-// queues behind one count of a stored version at a time (storedCounts.takeTurn) and loads sharing
-// two processors, so a browser waits for that answer as long as a browser does rather than the
-// 45 seconds gorilla's default dialer gives up after. An upgrade the server answers with an HTTP
-// status in place of the socket is an *upgradeRefused.
+// queues behind the counts of their stored versions and the loads, which share the copy-heap
+// bound (storedCountWeight, copyHeaps) and two processors, so a browser waits for that answer as
+// long as a browser does rather than the 45 seconds gorilla's default dialer gives up after. An
+// upgrade the server answers with an HTTP status in place of the socket is an *upgradeRefused.
 func (p *memoryServer) dialDocument(artifactID string) (*gws.Conn, error) {
 	address := "ws" + strings.TrimPrefix(p.base, "http") + "/ws/doc/" + artifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
 	dialer := gws.Dialer{Proxy: http.ProxyFromEnvironment, HandshakeTimeout: 10 * time.Minute}

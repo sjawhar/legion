@@ -853,10 +853,23 @@ func TestTheHeaviestHandoffTheBoundsAllowIsNotClosedForSize(t *testing.T) {
 // Fifty at once, each browser hands back its whole state as soon as it has the room's, as the
 // editor does on every connect, and then edits: the budget admits within one room of the same
 // number and refuses the rest at admission, every browser one or the other and none answered 503,
-// though the counts of their fifty stored versions take their turns one at a time
-// (storedCounts.takeTurn) and the last waits for all the others; and no admitted browser's handoff
-// or first edit is refused, since a handoff of the state the room holds adds nothing to its charge
-// (deletedRuns) and each room's second copy was charged before the edit made it.
+// though the counts of their fifty stored versions and the loads of their rooms share one bound
+// (storedCountWeight, copyHeaps) and the last of them waits for the ones before it; and no
+// admitted browser's handoff or first edit is refused, since a handoff of the state the room
+// holds adds nothing to its charge (deletedRuns) and each room's second copy was charged before
+// the edit made it.
+//
+// What the fifty wait for is that bound. Measured on 2026-10-29 over four runs on a
+// three-processor sandbox, the server at the pod's Go memory limit: 39 admitted and 11 refused
+// every time, the last refusal 16.1 to 20.5 s after the burst began and the last admission 1m12s
+// to 1m23s, none answered 503, peak resident memory 3,717 to 3,802 MiB. In the run read line by
+// line, the counts, 93,811,288 bytes each, asked for 7.1 s of a wholly full bound between them;
+// the decodes of the rooms' loads, 144,268,320 each, asked for 42.8 s, two at a time in the
+// 393,705,336-byte bound, which was 76.9% full over the burst and never empty, and whose longest
+// waiter waited 35.8 s. That work is the processor's: with the server at GOMAXPROCS=1, the
+// condition the memory spec sets for half a processor, the longest hold grew from 4.5 s to 8.1 s
+// and the last admission came at 2m3.5s. A browser of this burst is answered no sooner than the
+// loads before it can decode, whatever the counts do.
 func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 	const burst, gone = 50, 5
 	memory := newMemoryHarness(t)
@@ -1082,6 +1095,10 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 			}
 			group.Wait()
 		})
+		// What the browsers waited for: the counts of their stored versions and the decodes of
+		// their rooms' loads share the copy-heap bound (storedCountWeight, copyHeaps), and the
+		// line says how long its longest waiter waited and its longest holder held it.
+		logHeapGrants(t, "the burst", heapGrants(t, server.output.String()))
 		applied, atAdmission, atHandoff, atEdit, unavailable := 0, 0, 0, 0, 0
 		var slowestAdmitted, slowestRefused time.Duration
 		for index, outcome := range outcomes {
