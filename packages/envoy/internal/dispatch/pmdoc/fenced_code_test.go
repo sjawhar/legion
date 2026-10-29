@@ -27,6 +27,11 @@ func TestFencedCodeDropsAWhitespaceLineShortOfTheFenceIndent(t *testing.T) {
 		{name: "before a line of code", markdown: "  ~~~\n \nx\n", codes: []string{"\nx"}},
 		{name: "in a callout", markdown: ":::callout{}\n  ~~~\n \n  x\n:::\n", codes: []string{"\nx"}},
 		{name: "in a quote", markdown: ">   ~~~\n>  \n>   x\n", codes: []string{"\nx"}},
+		// A document ending, with no line feed, in a line no fence closes that holds no more than
+		// the fence's indentation: the engine ends the code before that empty line.
+		{name: "short last line with no final line feed", markdown: "  ~~~\nx\n ", codes: []string{"x"}},
+		{name: "last line of the fence's indentation with no final line feed", markdown: "  ~~~\n  x\n  ", codes: []string{"x"}},
+		{name: "only such a line, with no final line feed", markdown: " ```js\n\n ", codes: []string{""}},
 		// A line as long as the fence's indentation, or a fence at its container's content, keeps
 		// what the line holds past them.
 		{name: "fence at the line's start", markdown: "~~~\n \nx\n", codes: []string{" \nx"}},

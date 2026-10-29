@@ -32,6 +32,11 @@ func TestIndentedCodeKeepsTheWhitespaceLinesTheEngineKeeps(t *testing.T) {
 		{name: "in a list item", markdown: "- a\n\n          x\n        \n       \n  y\n", codes: []string{"    x\n  \n "}},
 		{name: "in a footnote definition", markdown: "x[^f]\n\n[^f]: a\n\n          x\n        \n       \n    y\n", codes: []string{"  x\n    \n   "}},
 		{name: "in a callout", markdown: ":::callout{kind=\"note\" title=\"T\"}\n    code\n      \n:::\n", codes: []string{"code\n  "}},
+		// A document ending in a whitespace-only line with no line feed: that line is the code's
+		// last, empty once its four columns are eaten, and only one final line ending is dropped.
+		{name: "at the document's end with no final line feed", markdown: "    code\n    \n    ", codes: []string{"code\n"}},
+		{name: "after a shorter blank line, with no final line feed", markdown: "        code\n     code\n      deeper\n\n\t", codes: []string{"    code\n code\n  deeper\n"}},
+		{name: "in a list item, with no final line feed", markdown: "*     code\n     \n   \t  ", codes: []string{"code\n"}},
 		// Code the engine holds a list or a quote open over keeps none.
 		{name: "right after a list", markdown: "100. a\n\n    x\n          \nb\n", codes: []string{"x"}},
 		{name: "right after a quote", markdown: "> # h\n    x\n      \nb\n", codes: []string{"x"}},
