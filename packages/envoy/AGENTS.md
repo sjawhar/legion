@@ -1071,8 +1071,8 @@ splices its `replace_with`, which unlike an edit's `with` may be blocks, with Pr
 fitting (`pmdoc.Splice`). A non-empty replacement fitted into a typed block stays inside it, and a
 fit never replaces the typed block it lands in: a callout takes what its content rule allows, a
 code block included (the engine oracle's `callout-paragraph-and-code` case), and an ask takes any
-block at this step, since `Validate` lets an ask hold other blocks while a browser edit passes
-through. The one exception is a replacement holding exactly one block of the typed block's own
+block at this step, since `Validate` lets an ask hold other blocks, which concurrent browser edits
+can leave there. The one exception is a replacement holding exactly one block of the typed block's own
 type under its id, at any depth, which is that block rewritten: it replaces the block in place
 rather than nesting inside it, and the replacement's other blocks, and any it sits inside (a
 blockquote, a list item, a typed block under another id), go in the same parent, where they stand
@@ -1081,8 +1081,9 @@ like any other. Either way the accept keeps only what reads back as it wrote it 
 then reads each ask by its id before and after the splice (`docs/ask_blocks.go` `askReadability`,
 `docs/marks.go` `refuseBrokenAsks`): an ask is unreadable when settlement's parse fails, when its
 children break the content rule `paragraph+ bullet_list?` (`pmdoc.AskContentError`: a paragraph
-after its options or a second bullet list parses, but the browser editor drops such an ask from the
-shared document when it renders it, and settlement then retracts it), or when it repeats an earlier
+after its options or a second bullet list parses, but the browser's card takes its question from
+the ask's first child and its options from its last, so settlement marks such an ask `invalid` and
+keeps its row as it was, open or decided, `readAskBlockStrictly`), or when it repeats an earlier
 ask's id. The first ask left unreadable whose id was readable before is `400 INVALID_ASK_BLOCK` with
 that reason, so a question given a code block, a paragraph after the options, a second list or an
 emptied question is refused. An ask under a held id is refused one step earlier, by the write's
@@ -2332,6 +2333,30 @@ markdown a version records, never a list of forbidden characters: whatever the b
 back unchanged is refused, and an option label containing `": "` - the separator between a label
 and its description - is one example rather than the only one. A single newline is
 carried as a hard break; surrounding whitespace is trimmed, as the parser trims it.
+An edit of an ask whose body breaks its content rule (`pmdoc.AskContentError`: a second bullet
+list, or a block after its list, which concurrent browser edits can leave) is refused
+`400 ASK_BLOCK_TEXT` with field `block` (`ErrAskBlockUnrepresentable`), whatever it names
+(`refuseAskContentEdit` in `docs/ask_block_text.go`): the route never rebuilds such an ask, so it
+never moves or drops what a collaborator wrote. The reason quotes every child block of the ask in
+full (its rendered markdown, Go-quoted) with its block id given only as Go-quoted data - no shell
+command and no ready-made ops, since a block id is document text - and names one path: delete,
+all in one document edit (`dispatch doc-edit`, one delete per block by its id; doc-edit refuses an
+edit that leaves the ask broken, so one list at a time would be refused), the blocks it lists,
+which keep the question's paragraphs (from the first paragraph holding text) and the first list
+after them, then edit the ask, which the route then applies as for any valid ask. While a child
+has no id or an id repeats in the document (before settlement stamps ids), it names no delete and
+says to retry once the document settles. The one edit it names also deletes, by id, the extra
+blocks of every decision nested in the blocks it keeps that breaks its own rule, so one doc-edit
+repairs them together; before naming it, the refusal checks that, with those deletes applied, the
+ask, every nested decision losing a block and every decision holding the ask read strictly, as
+doc-edit requires (`planAskRepair`). When no such edit exists - a delete here would leave a
+decision holding this one unreadable, or a decision needs words written rather than blocks
+deleted - it names no delete and no ask edit of another decision, and says the decision is
+repaired in the document editor. An ask with no paragraph holding text is refused earlier, as having an empty
+question. Tests follow the refusal for every body of up to five blocks drawn from paragraphs,
+empty paragraphs, lists and lists holding a nested list, and for every body of up to four that
+adds an option holding a decision of up to three such blocks. Before, an edit naming only `urgency` or `multiple` wrote the
+options joined across both lists to the row.
 Settlement retracts an ask whose block left the document in its own name,
 `{kind: "system", id: "document-settlement"}`, and restores only a retraction it wrote - a
 person's or a session's retract stands however the document moves, which is why `resolve`
@@ -2340,8 +2365,13 @@ refuses a caller reason beginning `removed from the document in version`. The `a
 records the ask's return to the state it had, never a new answer. A restore the release before the
 mark writes - every one already in the event log, and one written during a rollout or an image
 rollback - carries none, so a missing mark does not prove a new answer.
-An invalid browser-edited ask retains its indexed ask, carries the server-owned `invalid` parse-error
-attribute, and emits `block.invalid`; repairing its body clears `invalid` before updating the ask row.
+A browser-edited ask settlement cannot read (`readAskBlockStrictly`) - one its parse refuses, such
+as a heading or code block in it, an emptied question or an option without a label, or one that
+breaks its content rule, a second bullet list or a paragraph after its list, which concurrent edits
+can leave and the browser editor keeps - carries the server-owned `invalid` attribute naming the
+reason and emits `block.invalid`. An open ask's indexed row stays open and unchanged; an answered
+or resolved ask keeps its decided row and answer. Repairing its body clears `invalid` before
+updating the ask row, and writes a decided ask's decided wording back into the block.
 Markdown that becomes a whole document - a spec at issue creation, an uploaded document or version -
 is refused with `400 INVALID_ASK_BLOCK` when an ask's body breaks its content rule,
 `paragraph+ bullet_list?` - one or more paragraphs, then at most one bullet list, last
