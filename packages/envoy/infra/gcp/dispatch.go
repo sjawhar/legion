@@ -826,6 +826,27 @@ func dnsSubdomain(value string) bool {
 	return true
 }
 
+// podPriorityClass resolves input, the name of a PriorityClass every pod of a component names, ""
+// when unset: gcp:Dispatch's and gcp:ClusteredNatsHub's priorityClassName. It refuses a name that
+// is empty or not a DNS subdomain, and one with the system- prefix, which Kubernetes reserves for
+// its own system-cluster-critical and system-node-critical classes: those outrank every workload
+// so the cluster's own components are scheduled first, and an application pod holding one could
+// preempt them. Each refusal is a core.InputError naming input.
+func podPriorityClass(input string, name *string) (string, error) {
+	if name == nil {
+		return "", nil
+	}
+	switch {
+	case *name == "":
+		return "", core.InputErrorf(input, "%s is empty; leave it unset for no priority class", input)
+	case !dnsSubdomain(*name):
+		return "", core.InputErrorf(input, "%s %q must be a DNS subdomain, the shape of a PriorityClass's name", input, *name)
+	case strings.HasPrefix(*name, "system-"):
+		return "", core.InputErrorf(input, "%s %q is a class Kubernetes reserves for its own system components (the system- prefix); name a PriorityClass of your own", input, *name)
+	}
+	return *name, nil
+}
+
 // newDispatchPprofPort resolves pprofPort, the port envoy-dispatch's profiler binds on the pod's
 // loopback: 0, rendering nothing, when it is unset. It refuses a value outside 1-65535, which
 // Dispatch would refuse at startup, and the two ports the app pod already binds on its loopback,
@@ -868,25 +889,15 @@ type dispatchDisruption struct {
 	listenerPDBMinAvailable                      int
 }
 
-// newDispatchDisruption resolves priorityClassName and the three budgets, appPdbMinAvailable,
-// frontDoorPdbMinAvailable and listenerPdbMinAvailable, each refusal naming its own input. It
-// refuses a class name that is empty or not a DNS subdomain, and one with the system- prefix,
-// which Kubernetes reserves for its own system-cluster-critical and system-node-critical classes:
-// those outrank every workload so the cluster's own components are scheduled first, and an
-// application pod holding one could preempt them. It refuses a budget below 1, which protects no
-// pod, and above its Deployment's replica count, which no number of ready pods can meet.
+// newDispatchDisruption resolves priorityClassName, by podPriorityClass's rule, and the three
+// budgets, appPdbMinAvailable, frontDoorPdbMinAvailable and listenerPdbMinAvailable, each refusal
+// naming its own input. It refuses a budget below 1, which protects no pod, and above its
+// Deployment's replica count, which no number of ready pods can meet.
 func newDispatchDisruption(args *DispatchArgs, replicas, frontDoorReplicas, listenerReplicas int) (dispatchDisruption, error) {
 	var d dispatchDisruption
-	if args.PriorityClassName != nil {
-		d.priorityClass = *args.PriorityClassName
-		switch {
-		case d.priorityClass == "":
-			return dispatchDisruption{}, errors.New("priorityClassName is empty; leave it unset for no priority class")
-		case !dnsSubdomain(d.priorityClass):
-			return dispatchDisruption{}, fmt.Errorf("priorityClassName %q must be a DNS subdomain, the shape of a PriorityClass's name", d.priorityClass)
-		case strings.HasPrefix(d.priorityClass, "system-"):
-			return dispatchDisruption{}, fmt.Errorf("priorityClassName %q is a class Kubernetes reserves for its own system components (the system- prefix); name a PriorityClass of your own", d.priorityClass)
-		}
+	var err error
+	if d.priorityClass, err = podPriorityClass("priorityClassName", args.PriorityClassName); err != nil {
+		return dispatchDisruption{}, err
 	}
 	for _, budget := range []struct {
 		input, replicasInput string

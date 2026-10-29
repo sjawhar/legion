@@ -23,10 +23,14 @@ interface SentMessage {
   readonly expects_reply: string;
 }
 
+/** A persisted interest row, served as seeded. `updated_at` is the row's own last write;
+ *  `last_seen` is the session's last heartbeat as the listener still knows it, which a listener
+ *  that restarted since the session ended sends no value for. */
 interface FakeInterest {
   session_id: string;
   topics: string[];
   updated_at?: number;
+  last_seen?: number;
 }
 
 /** What this fixture's session store holds under an id, which is a separate question from
