@@ -225,15 +225,18 @@ const (
 
 // ParkedDecision is a person's decision on a tree nobody in it could hear, which the daemon
 // relayed to the controller (a parked-decision notice) or kept for a root that waits for its slot
-// (RelayParkedDecision). It is kept until the architect's start task or catch-up that named it
-// (workflow.Engine.ParkedDecisionTask) reached that architect, and forgotten then
-// (Store.ForgetKeptDecisions).
+// (RelayParkedDecision). It is kept until the one architect start task or catch-up that claimed it
+// (ClaimedBy, the outbox row whose payload names it: workflow.Engine.ParkedDecisionTask names only
+// rows nobody claims) reached that architect, and forgotten then (Store.ForgetKeptDecisions); a
+// claiming row that finishes without delivering releases it for the next one.
 type ParkedDecision struct {
 	Root     string
 	Ref      string
 	Decision DecisionKind
 	Actor    string
 	At       time.Time
+	// ClaimedBy is the outbox row claiming it, 0 when no row does.
+	ClaimedBy int64
 }
 
 // AwaitingPerson says whether the issue is a root waiting on a person (phase awaiting_person).
@@ -881,6 +884,8 @@ type DispatchIssueRow struct {
 // atomically deduplicate an event, update the record, and enqueue all of its effects.
 type Store interface {
 	MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID string) (fresh bool, err error)
+	// Processed says whether MarkProcessed already marked source's event, writing nothing.
+	Processed(ctx context.Context, tx pgx.Tx, source, eventID string) (bool, error)
 	Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error)
 	Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error)
 	// QueuedRootsUnder is every labelled todo root whose Ancestry holds key, by key: the roots the
@@ -960,25 +965,35 @@ type Store interface {
 	// already keeps keeps its newest decision: a later one, by At, replaces it, so a changes request
 	// the person has since followed with an approval of the same spec is not what the start names.
 	AddParkedDecision(ctx context.Context, tx pgx.Tx, decision ParkedDecision) error
-	// ParkedDecisions is every decision root keeps, newest first, ties by ref. The rows stay until
-	// the start task or catch-up that named them reached its architect (ForgetKeptDecisions), so a
-	// start that finishes without acting leaves them for the next one to name.
+	// ParkedDecisions is every decision root keeps, claimed or not, newest first, ties by ref.
 	ParkedDecisions(ctx context.Context, tx pgx.Tx, root string) ([]ParkedDecision, error)
+	// UnclaimedKept is what root keeps that no delivery claims: its decisions, newest first, ties by
+	// ref, and its readmitted approval pair, zeros when it keeps none or a delivery claims it. It is
+	// all a start task or catch-up may name (workflow.Engine.ParkedDecisionTask).
+	UnclaimedKept(ctx context.Context, tx pgx.Tx, root string) ([]ParkedDecision, int, int, error)
+	// ClaimKeptDecisions claims for outbox row what kept names of what root keeps and no delivery
+	// claims yet, in the transaction that enqueues row: from then on no other start or catch-up
+	// names it, row's delivery forgets it (ForgetKeptDecisions), and row's deletion without that
+	// delivery releases it (claimed_by is set null with the row).
+	ClaimKeptDecisions(ctx context.Context, tx pgx.Tx, root string, kept KeptDecisions, row int64) error
+	// MoveKeptClaims moves every claim of outbox row from to row to: the re-hold's copy of a catch-up
+	// carries the claims of the row it copies, which then finishes.
+	MoveKeptClaims(ctx context.Context, tx pgx.Tx, from, to int64) error
 	// KeepReadmittedApproval keeps, for root's next architect start, the spec version a person
 	// approved and the spec's latest version, which its re-admission found above the approved one
-	// before it cleared the old generation's gate; a later keep replaces it.
+	// before it cleared the old generation's gate; a later keep replaces it, unclaimed.
 	KeepReadmittedApproval(ctx context.Context, tx pgx.Tx, root string, approved, latest int) error
-	// DropReadmittedApproval deletes the pair root keeps, if any: a re-admission that finds no stale
-	// approval leaves nothing an earlier one kept (one gates.design off never named, so never forgot).
+	// DropReadmittedApproval deletes the pair root keeps, if any: a re-admission whose gate holds no
+	// stale approval, or under gates.design off, leaves nothing an earlier one kept.
 	DropReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) error
-	// ReadmittedApproval is the pair root keeps, zeros when it keeps none. It stays until the start
-	// task that named it reached its architect (ForgetKeptDecisions).
+	// ReadmittedApproval is the pair root keeps, claimed or not, zeros when it keeps none.
 	ReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) (approved, latest int, err error)
-	// ForgetKeptDecisions deletes exactly what a delivered start task or catch-up named of what
-	// root keeps (KeptDecisions): every parked decision still standing at the reference and time it
-	// named — a newer decision on the same reference, kept since, survives — and the readmitted
-	// approval still standing at the pair of versions it named.
-	ForgetKeptDecisions(ctx context.Context, tx pgx.Tx, root string, kept KeptDecisions) error
+	// ForgetKeptDecisions deletes exactly what outbox row's delivered start task or catch-up named of
+	// what root keeps (KeptDecisions), of the rows row claims or nobody claims: every parked
+	// decision still standing at the reference and time it named — a newer decision on the same
+	// reference, kept since and unclaimed, survives — and the readmitted approval still standing at
+	// the pair of versions it named.
+	ForgetKeptDecisions(ctx context.Context, tx pgx.Tx, root string, kept KeptDecisions, row int64) error
 	// ClaimSession is the session claims records for token, "" and no error when the token holds
 	// no row. The workflow reads it for the reviewer's claim (PhaseRow.Claim) to tell the
 	// reviewer's own review from another review-App session's by the Legion footer each carries
@@ -1052,6 +1067,9 @@ type Store interface {
 	// a finished row is deleted, so any row of the kind is one still to run or retrying.
 	DisarmPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error)
 	Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error
+	// EnqueueID enqueues row as Enqueue does and returns its id, for a row that claims what it names
+	// (ClaimKeptDecisions). It refuses a ready_merge row, whose insert may update another.
+	EnqueueID(ctx context.Context, tx pgx.Tx, row OutboxRow) (int64, error)
 	// DueRows is every row of project a lane may run at now — due, under no live lease, in order
 	// behind none of its issue's older rows, and, for a lifecycle row, with no other lifecycle row
 	// of its issue under a live lease — oldest first, with no lease taken. Issue "" is every issue

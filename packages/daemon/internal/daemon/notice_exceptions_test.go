@@ -659,8 +659,8 @@ func TestAStoppedTreesSpecDecisionReportGoesToTheControllerOnce(t *testing.T) {
 		t.Fatalf("run the copy queued before the close and the controller row: %v", err)
 	}
 	if relayed() != 1 || to(notify.ControllerTopic("legion")) != 1 || to(architectTopic(t, "LEGION-1")) != 0 ||
-		!strings.Contains(logged.String(), `msg="outbox parked decision already sent to the controller"`) || !strings.Contains(logged.String(), "key=legion-outbox:78") {
-		t.Fatalf("%d relays, %d to the controller, %d to the architect, log %q; want one relay told to the controller once, none to the architect, and the copy logged as already sent",
+		!strings.Contains(logged.String(), `msg="outbox parked decision handled before under this key"`) || !strings.Contains(logged.String(), "key=legion-outbox:78") {
+		t.Fatalf("%d relays, %d to the controller, %d to the architect, log %q; want one relay told to the controller once, none to the architect, and the copy logged as handled before",
 			relayed(), to(notify.ControllerTopic("legion")), to(architectTopic(t, "LEGION-1")), logged.String())
 	}
 }

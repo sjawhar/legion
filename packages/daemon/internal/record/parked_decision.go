@@ -15,8 +15,8 @@ import (
 type RelayOutcome int
 
 const (
-	// RelayNone is a decision nobody outside its tree needs: the tree runs and hears it itself, or
-	// no person made it on a tree that already runs again. Nothing is kept and nobody is told.
+	// RelayNone is a decision nobody outside its tree needs: the tree runs and hears it itself.
+	// Nothing is kept and nobody is told.
 	RelayNone RelayOutcome = iota
 	// RelayKept is a person's decision on a tree whose root waits for its slot: it is kept for the
 	// root's next architect start, which names it (workflow.Engine.ParkedDecisionTask), and the
@@ -28,6 +28,9 @@ const (
 	// RelayNoPerson is a decision on a parked tree that no person made — a session's, or the
 	// daemon's own — which is nobody's to relay.
 	RelayNoPerson
+	// RelayNoPersonWaiting is a decision no person made on a tree whose root waits for its slot:
+	// nothing is kept, since only a person decides, and nobody is told.
+	RelayNoPersonWaiting
 	// RelayNotParked is a decision on a lingering root someone has since moved to a status of the
 	// workflow (admission's releaseUnslotted leaves one at in_progress): it is nobody's parked
 	// tree, so nothing is kept and nobody is told.
@@ -84,7 +87,7 @@ func RelayParkedDecision(ctx context.Context, tx pgx.Tx, store Store, issue stri
 	}
 	if !PersonActor(decision.Actor) {
 		if waiting {
-			return RelayNone, nil
+			return RelayNoPersonWaiting, nil
 		}
 		return RelayNoPerson, nil
 	}

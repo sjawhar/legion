@@ -954,17 +954,24 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 // keepStaleApproval keeps, for the architect start of the root key re-admission is clearing, the
 // person's approval its gate holds of a version the spec has since moved past: the new
 // generation's architect registers its spec again on a cleared gate, and its start task
-// (workflow.Engine.ParkedDecisionTask) tells it to request approval of the latest version. A
-// re-admission whose gate holds no stale approval drops any pair an earlier one kept: under
-// gates.design off the start never names one, so its delivery never forgets it, and a later
-// re-admission under an armed gate would otherwise name a pair this generation's gate no longer
-// holds.
+// (workflow.Engine.ParkedDecisionTask) tells it to request approval of the latest version. Under
+// gates.design off, which asks no person, nothing is kept and any pair an earlier re-admission kept
+// is dropped: no start names one there, so no delivery would forget it. Under an armed gate, a gate
+// that holds no stale approval drops an earlier pair, which this gate has since outgrown; a root
+// with no gate at all (an earlier re-admission cleared it and nothing has registered since) keeps
+// the earlier pair, which no start has delivered yet.
 func (a *Admission) keepStaleApproval(ctx context.Context, tx pgx.Tx, key string) error {
+	if a.engine.DesignGateOff() {
+		return a.store.DropReadmittedApproval(ctx, tx, key)
+	}
 	gate, err := a.store.Gate(ctx, tx, key)
 	if err != nil {
 		return fmt.Errorf("read the gate of re-admitted %s: %w", key, err)
 	}
-	if gate == nil || gate.ApprovedVersion == nil || *gate.ApprovedVersion >= gate.LatestVersion {
+	switch {
+	case gate == nil:
+		return nil
+	case gate.ApprovedVersion == nil || *gate.ApprovedVersion >= gate.LatestVersion:
 		return a.store.DropReadmittedApproval(ctx, tx, key)
 	}
 	return a.store.KeepReadmittedApproval(ctx, tx, key, *gate.ApprovedVersion, gate.LatestVersion)
@@ -1207,9 +1214,9 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			if err != nil {
 				return admitted, returned, fmt.Errorf("name the decisions on %s while nobody in its tree could hear them: %w", candidate.Key, err)
 			}
-			if err := a.enqueue(ctx, tx, candidate.Key, record.SuperviseRequest{Op: "start", Tree: candidate.Tree, Role: claim.RoleArchitect,
-				Generation: candidate.Generation, Task: task, Kept: kept}, now); err != nil {
-				return admitted, returned, err
+			if err := a.engine.EnqueueNaming(ctx, tx, candidate.Key, candidate.Key, record.SuperviseRequest{Op: "start", Tree: candidate.Tree,
+				Role: claim.RoleArchitect, Generation: candidate.Generation, Task: task, Kept: kept}, kept, now); err != nil {
+				return admitted, returned, fmt.Errorf("enqueue the architect start of %s: %w", candidate.Key, err)
 			}
 			if err := a.startMidPhaseMembers(ctx, tx, candidate, append(issues, candidate), now); err != nil {
 				return admitted, returned, err

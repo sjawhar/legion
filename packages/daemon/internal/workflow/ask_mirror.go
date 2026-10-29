@@ -234,9 +234,8 @@ func (e *Engine) dispatchAskClosed(ctx context.Context, tx pgx.Tx, fact intake.D
 	if fact.State == "answered" {
 		decision = record.DecisionAskAnswered
 	}
-	_, _, err := e.relayParkedDecision(ctx, tx, fact.Key, record.ParkedDecision{Ref: itemRef(fact.Key, "ask", fact.Ask),
+	return intake.Result{}, e.relayParkedDecision(ctx, tx, fact.Key, fact.Ask, record.ParkedDecision{Ref: itemRef(fact.Key, "ask", fact.Ask),
 		Decision: decision, Actor: fact.Actor.Name(), At: e.now()})
-	return intake.Result{}, err
 }
 
 // closeAsk closes the ask's mirror row, keeping the turn it last had, records who closed it
@@ -295,9 +294,9 @@ func (e *Engine) closer(ctx context.Context, tx pgx.Tx, root record.Issue, actor
 
 // dispatchAskReply applies the reply to the ask's mirror row and the root's wait (replyToAsk), and,
 // on a tree Legion is not running, relays a person's reply that leaves the turn with the agent, or
-// one under a closed ask, to the controller, and logs a session's reply there
-// (relayParkedDecision): nobody inside such a tree hears either. A reply that leaves the turn with
-// the human asks the person again, so it is no decision of theirs.
+// one under a closed ask, to the controller (relayParkedDecision): nobody inside such a tree hears
+// it. A reply that leaves the turn with the human asks the person again, so it is no decision of
+// theirs.
 func (e *Engine) dispatchAskReply(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskReply) (intake.Result, error) {
 	if err := e.replyToAsk(ctx, tx, fact); err != nil || fact.WaitingOn == "human" {
 		return intake.Result{}, err
@@ -306,14 +305,8 @@ func (e *Engine) dispatchAskReply(ctx context.Context, tx pgx.Tx, fact intake.Di
 	if fact.Comment != "" {
 		ref = itemRef(fact.Key, "comment", fact.Comment)
 	}
-	actor := fact.Actor.Name()
-	outcome, root, err := e.relayParkedDecision(ctx, tx, fact.Key, record.ParkedDecision{Ref: ref, Decision: record.DecisionAskReply,
-		Actor: actor, At: e.now()})
-	if err != nil || outcome != record.RelayNoPerson {
-		return intake.Result{}, err
-	}
-	e.logOnCommit(ctx, "workflow: a session's reply on a parked tree is not relayed", "issue", fact.Key, "root", root, "ask", fact.Ask, "actor", actor)
-	return intake.Result{}, nil
+	return intake.Result{}, e.relayParkedDecision(ctx, tx, fact.Key, fact.Ask, record.ParkedDecision{Ref: ref, Decision: record.DecisionAskReply,
+		Actor: fact.Actor.Name(), At: e.now()})
 }
 
 // replyToAsk applies a reply on an ask of the root, or Dispatch's hand-back of an approval

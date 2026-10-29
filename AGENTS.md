@@ -400,15 +400,18 @@ answer, resolution or reply on an ask of its issues (one that gives the turn to 
 under a closed ask), goes to the controller as `parked-decision`, once per decision. The daemon
 keeps the newest decision per Dispatch reference, and the root's next architect start names each
 one: admission's start task, or the catch-up of a later launch (a `legion claims retry` relaunch),
-with both spec versions when the approved one is no longer the current one. A decision stays kept
-until the start or catch-up that names it is delivered, so one that finishes without acting (its
-tree lingers again first, its generation is stale, or its catch-up goes undelivered) leaves it for
-the next. A decision on a root that was set to `todo` and waits for its slot is kept the same way
-and goes to no controller, whichever path finds it. A decision on a lingering root someone moved
-back to a status of the workflow (`in_progress` and the like) is nobody's parked tree: it is
-neither kept nor relayed. A decision no person made (`gates.design: off`) is not relayed. A
-session's reply on such an ask is not relayed either: the daemon logs `workflow: a session's reply
-on a parked tree is not relayed`, the reply stays on the Dispatch ask for the person who asked, and
+with both spec versions when the approved one is no longer the current one. Each kept decision is
+claimed by the one start or catch-up that names it, in the transaction that queues it, so no other
+start or catch-up names it; that delivery forgets it, and a start or catch-up that finishes
+without delivering (its tree lingers again first, its generation is stale, its catch-up goes
+undelivered) releases it for the next, so each is told once and none is lost. A retried start
+whose task was delivered is not delivered again. A decision on a root that was set to `todo` and
+waits for its slot is kept the same way and goes to no controller, whichever path finds it. A
+decision on a lingering root someone moved back to a status of the workflow (`in_progress` and the
+like) is nobody's parked tree: it is neither kept nor relayed. A decision no person made
+(`gates.design: off`) is not relayed. A session's reply on such an ask is not relayed either: the
+daemon logs `workflow: a session's reply on a parked tree is not relayed`, the reply stays on the
+Dispatch ask for the person who asked, and
 the controller's walk skips it.
 The controller sets the root `todo` when the park is its own hold and a decision gives its work a
 next step. Its own hold is a park by `session legion-daemon:<PROJECT>` with the controller's comment

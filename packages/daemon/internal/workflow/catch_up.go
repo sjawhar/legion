@@ -51,8 +51,10 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 		return intake.Result{}, err
 	}
 	// A decision kept since the start's task was written (one a person made while the tree's
-	// architect claim had ended, before this relaunch) is told here; the rows stay until this
-	// catch-up reaches the architect, which forgets exactly what it named (the outbox's notice).
+	// architect claim had ended, before this relaunch) is told here. The catch-up names only what no
+	// other start or catch-up claims (a start still queued keeps its own), and claims what it names
+	// in this transaction; its delivery forgets those rows (the outbox's notice), and a catch-up that
+	// finishes undelivered, or that DropCatchUps drops, releases them for the next one.
 	decided, kept, err := e.ParkedDecisionTask(ctx, tx, *root)
 	if err != nil {
 		return intake.Result{}, err
@@ -62,7 +64,8 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 	if len(awaiting) > 0 {
 		reason += fmt.Sprintf("; in accepting, waiting for your acceptance, which no worker gives: %s (read the evidence, then sign_off or request_backward_move)", strings.Join(awaiting, ", "))
 	}
-	return intake.Result{}, e.notice(ctx, tx, root.Key, record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: reason, CatchUp: &catchUp})
+	return intake.Result{}, e.EnqueueNaming(ctx, tx, root.Key, root.Key, record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: reason, CatchUp: &catchUp},
+		kept, e.now())
 }
 
 // catchUp is root's tree as the record holds it: whether a hand-over created the root at this

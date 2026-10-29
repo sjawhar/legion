@@ -387,7 +387,7 @@ func TestARootReadmittedOnAnOlderApprovalIsToldBothVersions(t *testing.T) {
 					t.Fatalf("gate after the re-admission = %#v, %v; want it cleared with the old generation", gate, err)
 				}
 				wantApproved, wantLatest := 3, 4
-				if tc.approved == 4 {
+				if tc.approved == 4 || tc.gate == config.DesignGateOff {
 					wantApproved, wantLatest = 0, 0
 				}
 				if approved, latest, err := records.ReadmittedApproval(ctx, tx, "LEGION-ROOT"); err != nil || approved != wantApproved || latest != wantLatest {
@@ -399,23 +399,30 @@ func TestARootReadmittedOnAnOlderApprovalIsToldBothVersions(t *testing.T) {
 	}
 }
 
-// A pair an earlier re-admission kept that no start ever named (gates.design off names none, so
-// its delivery forgets none) is dropped by a later re-admission whose gate holds no stale
-// approval, so a later start under an armed gate never names a pair the gate no longer holds.
-func TestAReadmissionWithNoStaleApprovalDropsTheOneAnEarlierKept(t *testing.T) {
+// A pair an earlier re-admission kept is dropped by a later one when no start could ever name it
+// (gates.design off) or the gate holds no stale approval any more, so a later start never names a
+// pair the gate has outgrown; under an armed gate with no gate row at all (an earlier re-admission
+// cleared it and nothing registered since), the earlier pair stays for the start to name.
+func TestAReadmissionKeepsOrDropsTheApprovalAnEarlierKept(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		gate *record.DesignGate
+		name   string
+		policy config.DesignGate
+		gate   *record.DesignGate
+		keeps  bool
 	}{
-		{"a gate approved at its latest version", &record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4, ApprovedVersion: new(4)}},
-		{"a gate approved at no version", &record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4}},
-		{"no gate", nil},
+		{"an armed gate approved at its latest version", config.DesignGateRootIssues,
+			&record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4, ApprovedVersion: new(4)}, false},
+		{"an armed gate approved at no version", config.DesignGateRootIssues, &record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4}, false},
+		{"an armed policy and no gate", config.DesignGateRootIssues, nil, true},
+		{"gates.design off and no gate", config.DesignGateOff, nil, false},
+		{"gates.design off and a stale approval", config.DesignGateOff,
+			&record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4, ApprovedVersion: new(3)}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			pool := migratedPool(t)
 			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
-				Clock: func() time.Time { return fixedNow }, DesignGate: config.DesignGateOff}, nil)
+				Clock: func() time.Time { return fixedNow }, DesignGate: tc.policy}, nil)
 			admission := New(record.NewStore(), engine, 1, testProject, nil)
 			admission.now = func() time.Time { return fixedNow }
 			parkedRoot(t, pool)
@@ -431,12 +438,55 @@ func TestAReadmissionWithNoStaleApprovalDropsTheOneAnEarlierKept(t *testing.T) {
 				}
 			})
 			readmitRoot(t, pool, admission)
+			want := 0
+			if tc.keeps {
+				want = 2
+			}
 			inTx(t, pool, func(tx pgx.Tx) {
-				if approved, latest, err := record.NewStore().ReadmittedApproval(ctx, tx, "LEGION-ROOT"); err != nil || approved != 0 || latest != 0 {
-					t.Fatalf("kept approval after the re-admission = %d, %d, %v; want none: the gate held no stale approval", approved, latest, err)
+				if approved, _, err := record.NewStore().ReadmittedApproval(ctx, tx, "LEGION-ROOT"); err != nil || approved != want {
+					t.Fatalf("kept approval after the re-admission = %d, %v; want %d", approved, err, want)
 				}
 			})
 		})
+	}
+}
+
+// Under an armed gate, a root re-admitted on a stale approval, whose start then finishes without
+// delivering, and which is parked and re-admitted again with no gate registered between, still
+// starts its architect naming both versions: the second re-admission finds no gate and keeps the
+// pair the first kept, which the undelivered start released.
+func TestARootReadmittedTwiceWithNoStartDeliveredIsStillToldBothVersions(t *testing.T) {
+	const versions = "The spec is approved at version 3 and is now at version 4: request approval of version 4, " +
+		"as skill://legion-architect/references/design-gate.md (\"The armed gate\") says."
+	ctx := context.Background()
+	pool := migratedPool(t)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
+		Clock: func() time.Time { return fixedNow }, DesignGate: config.DesignGateRootIssues}, nil)
+	admission := New(record.NewStore(), engine, 1, testProject, nil)
+	admission.now = func() time.Time { return fixedNow }
+	parkedRoot(t, pool)
+	inTx(t, pool, func(tx pgx.Tx) {
+		if err := record.NewStore().PutGate(ctx, tx, record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4, ApprovedVersion: new(3)}); err != nil {
+			t.Fatalf("put the gate: %v", err)
+		}
+	})
+	readmitRoot(t, pool, admission)
+	if starts := architectStartRows(t, pool); len(starts) != 1 || starts[0].Task != versions {
+		t.Fatalf("first architect starts %#v, want one whose task is %q", starts, versions)
+	}
+	// The start finishes without delivering (its tree parked again first): its row goes, and with
+	// it its claim on the pair.
+	if _, err := pool.Exec(ctx, "delete from outbox"); err != nil {
+		t.Fatalf("finish the first start without delivering: %v", err)
+	}
+	if _, err := pool.Exec(ctx, "delete from slots"); err != nil {
+		t.Fatalf("free the slot: %v", err)
+	}
+	parkedRoot(t, pool)
+	apply(t, pool, admission, "readmitted-again", intake.DispatchIssue{Key: "LEGION-ROOT", ResolvedRepo: "acme/widgets", Seq: 9, Type: "issue.updated",
+		Status: "todo", Title: "root", Rank: "A", HandedOver: true}, admission.engine)
+	if starts := architectStartRows(t, pool); len(starts) != 1 || starts[0].Task != versions {
+		t.Fatalf("second architect starts %#v, want one whose task is %q", starts, versions)
 	}
 }
 

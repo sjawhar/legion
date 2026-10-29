@@ -39,6 +39,14 @@ func (s *Postgres) MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID
 	return tag.RowsAffected() == 1, nil
 }
 
+func (s *Postgres) Processed(ctx context.Context, tx pgx.Tx, source, eventID string) (bool, error) {
+	var processed bool
+	if err := tx.QueryRow(ctx, "select exists (select 1 from processed_events where source = $1 and event_id = $2)", source, eventID).Scan(&processed); err != nil {
+		return false, fmt.Errorf("read whether %s event %s was processed: %w", source, eventID, err)
+	}
+	return processed, nil
+}
+
 // issueColumns reads an empty ancestry as NULL, so a record with none scans as a nil Ancestry, as
 // it was written.
 const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, taken_back, linger_until, held_from, last_dispatch_seq, ready_pending_version, coalesce(hold_reason, ''), dispatch_status, repo, default_branch, github_repo, awaiting_ask, awaiting_gate_version, coalesce(awaiting_artifact, ''), awaiting_answered_at, coalesce(awaiting_answered_by, ''), coalesce(awaiting_answered_detail, ''), awaiting_since_seq, awaiting_since, handout_seq, coalesce(declared_seq, 0), declared_at, nullif(ancestry, '{}'), handed_over_from`
@@ -549,7 +557,7 @@ func (s *Postgres) SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, sessi
 
 func (s *Postgres) AddParkedDecision(ctx context.Context, tx pgx.Tx, decision ParkedDecision) error {
 	if _, err := tx.Exec(ctx, `insert into parked_decisions (root, ref, decision, actor, at) values ($1, $2, $3, $4, $5)
-		on conflict (root, ref) do update set decision = excluded.decision, actor = excluded.actor, at = excluded.at
+		on conflict (root, ref) do update set decision = excluded.decision, actor = excluded.actor, at = excluded.at, claimed_by = null
 		where parked_decisions.at <= excluded.at`, decision.Root, decision.Ref, string(decision.Decision), decision.Actor, decision.At); err != nil {
 		return fmt.Errorf("keep the decision %s on %s: %w", decision.Ref, decision.Root, err)
 	}
@@ -557,7 +565,27 @@ func (s *Postgres) AddParkedDecision(ctx context.Context, tx pgx.Tx, decision Pa
 }
 
 func (s *Postgres) ParkedDecisions(ctx context.Context, tx pgx.Tx, root string) ([]ParkedDecision, error) {
-	rows, err := tx.Query(ctx, "select ref, decision, actor, at from parked_decisions where root = $1 order by at desc, ref", root)
+	return parkedDecisions(ctx, tx, root, false)
+}
+
+func (s *Postgres) UnclaimedKept(ctx context.Context, tx pgx.Tx, root string) ([]ParkedDecision, int, int, error) {
+	decisions, err := parkedDecisions(ctx, tx, root, true)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	var approved, latest int
+	err = tx.QueryRow(ctx, "select approved_version, latest_version from readmitted_approvals where root = $1 and claimed_by is null", root).Scan(&approved, &latest)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, 0, 0, fmt.Errorf("read the approval kept for %s: %w", root, err)
+	}
+	return decisions, approved, latest, nil
+}
+
+// parkedDecisions is every decision root keeps, or only those no delivery claims, newest first,
+// ties by ref.
+func parkedDecisions(ctx context.Context, tx pgx.Tx, root string, unclaimed bool) ([]ParkedDecision, error) {
+	rows, err := tx.Query(ctx, `select ref, decision, actor, at, coalesce(claimed_by, 0) from parked_decisions
+		where root = $1 and (not $2 or claimed_by is null) order by at desc, ref`, root, unclaimed)
 	if err != nil {
 		return nil, fmt.Errorf("read the decisions kept for %s: %w", root, err)
 	}
@@ -565,7 +593,7 @@ func (s *Postgres) ParkedDecisions(ctx context.Context, tx pgx.Tx, root string) 
 	var decisions []ParkedDecision
 	for rows.Next() {
 		decision := ParkedDecision{Root: root}
-		if err := rows.Scan(&decision.Ref, &decision.Decision, &decision.Actor, &decision.At); err != nil {
+		if err := rows.Scan(&decision.Ref, &decision.Decision, &decision.Actor, &decision.At, &decision.ClaimedBy); err != nil {
 			return nil, fmt.Errorf("scan a decision kept for %s: %w", root, err)
 		}
 		decisions = append(decisions, decision)
@@ -578,7 +606,8 @@ func (s *Postgres) ParkedDecisions(ctx context.Context, tx pgx.Tx, root string) 
 
 func (s *Postgres) KeepReadmittedApproval(ctx context.Context, tx pgx.Tx, root string, approved, latest int) error {
 	if _, err := tx.Exec(ctx, `insert into readmitted_approvals (root, approved_version, latest_version) values ($1, $2, $3)
-		on conflict (root) do update set approved_version = excluded.approved_version, latest_version = excluded.latest_version`,
+		on conflict (root) do update set approved_version = excluded.approved_version, latest_version = excluded.latest_version,
+		claimed_by = null`,
 		root, approved, latest); err != nil {
 		return fmt.Errorf("keep the approval of %s at version %d below version %d: %w", root, approved, latest, err)
 	}
@@ -603,22 +632,57 @@ func (s *Postgres) ReadmittedApproval(ctx context.Context, tx pgx.Tx, root strin
 	return approved, latest, nil
 }
 
-func (s *Postgres) ForgetKeptDecisions(ctx context.Context, tx pgx.Tx, root string, kept KeptDecisions) error {
+// keptMarks is kept's decision references and times as two parallel arrays, for unnest.
+func keptMarks(kept KeptDecisions) ([]string, []time.Time) {
+	refs := make([]string, 0, len(kept.Decisions))
+	at := make([]time.Time, 0, len(kept.Decisions))
+	for _, named := range kept.Decisions {
+		refs = append(refs, named.Ref)
+		at = append(at, named.At)
+	}
+	return refs, at
+}
+
+func (s *Postgres) ClaimKeptDecisions(ctx context.Context, tx pgx.Tx, root string, kept KeptDecisions, row int64) error {
 	if len(kept.Decisions) > 0 {
-		refs := make([]string, 0, len(kept.Decisions))
-		at := make([]time.Time, 0, len(kept.Decisions))
-		for _, named := range kept.Decisions {
-			refs = append(refs, named.Ref)
-			at = append(at, named.At)
+		refs, at := keptMarks(kept)
+		if _, err := tx.Exec(ctx, `update parked_decisions set claimed_by = $4 from unnest($2::text[], $3::timestamptz[]) as named (ref, at)
+			where parked_decisions.root = $1 and parked_decisions.ref = named.ref and parked_decisions.at = named.at
+			and parked_decisions.claimed_by is null`, root, refs, at, row); err != nil {
+			return fmt.Errorf("claim the decisions named to %s for outbox row %d: %w", root, row, err)
 		}
+	}
+	if kept.Approved > 0 {
+		if _, err := tx.Exec(ctx, `update readmitted_approvals set claimed_by = $4
+			where root = $1 and approved_version = $2 and latest_version = $3 and claimed_by is null`,
+			root, kept.Approved, kept.Latest, row); err != nil {
+			return fmt.Errorf("claim the approval named to %s for outbox row %d: %w", root, row, err)
+		}
+	}
+	return nil
+}
+
+func (s *Postgres) MoveKeptClaims(ctx context.Context, tx pgx.Tx, from, to int64) error {
+	for _, table := range []string{"parked_decisions", "readmitted_approvals"} {
+		if _, err := tx.Exec(ctx, "update "+table+" set claimed_by = $2 where claimed_by = $1", from, to); err != nil {
+			return fmt.Errorf("move the claims of outbox row %d to %d: %w", from, to, err)
+		}
+	}
+	return nil
+}
+
+func (s *Postgres) ForgetKeptDecisions(ctx context.Context, tx pgx.Tx, root string, kept KeptDecisions, row int64) error {
+	if len(kept.Decisions) > 0 {
+		refs, at := keptMarks(kept)
 		if _, err := tx.Exec(ctx, `delete from parked_decisions using unnest($2::text[], $3::timestamptz[]) as named (ref, at)
-			where parked_decisions.root = $1 and parked_decisions.ref = named.ref and parked_decisions.at = named.at`, root, refs, at); err != nil {
+			where parked_decisions.root = $1 and parked_decisions.ref = named.ref and parked_decisions.at = named.at
+			and (parked_decisions.claimed_by = $4 or parked_decisions.claimed_by is null)`, root, refs, at, row); err != nil {
 			return fmt.Errorf("forget the decisions named to %s: %w", root, err)
 		}
 	}
 	if kept.Approved > 0 {
-		if _, err := tx.Exec(ctx, "delete from readmitted_approvals where root = $1 and approved_version = $2 and latest_version = $3",
-			root, kept.Approved, kept.Latest); err != nil {
+		if _, err := tx.Exec(ctx, `delete from readmitted_approvals where root = $1 and approved_version = $2 and latest_version = $3
+			and (claimed_by = $4 or claimed_by is null)`, root, kept.Approved, kept.Latest, row); err != nil {
 			return fmt.Errorf("forget the approval named to %s: %w", root, err)
 		}
 	}
@@ -1159,6 +1223,22 @@ func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error 
 		return fmt.Errorf("enqueue %s for %s: %w", row.Kind, row.Issue, err)
 	}
 	return nil
+}
+
+func (s *Postgres) EnqueueID(ctx context.Context, tx pgx.Tx, row OutboxRow) (int64, error) {
+	if row.Kind == OutboxKindReadyMerge {
+		return 0, fmt.Errorf("enqueue %s for %s with its id: a ready_merge row may update an existing row", row.Kind, row.Issue)
+	}
+	if !json.Valid(row.Payload) {
+		return 0, fmt.Errorf("enqueue %s for %s: payload is not JSON", row.Kind, row.Issue)
+	}
+	var id int64
+	if err := tx.QueryRow(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token, lease_until)
+		values ($1, $2, $3, $4, $5, $6, $7, $8) returning id`,
+		string(row.Kind), row.Issue, string(row.Payload), row.Attempts, row.NextAt, row.LastError, row.LeaseToken, row.LeaseUntil).Scan(&id); err != nil {
+		return 0, fmt.Errorf("enqueue %s for %s: %w", row.Kind, row.Issue, err)
+	}
+	return id, nil
 }
 
 // The outbox's runnable predicates are one SQL text, so the lanes' list of due rows (DueRows), their

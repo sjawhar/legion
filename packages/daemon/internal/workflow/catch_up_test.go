@@ -140,9 +140,14 @@ func TestARelaunchedArchitectsCatchUpNamesTheDecisionsKeptForIt(t *testing.T) {
 	if got := lastCatchUp(t, pool); got.Decided != want || len(catchUps(t, pool)) != 1 {
 		t.Fatalf("after a relaunch dropped that catch-up undelivered, catch-ups %v naming %q; want one naming %q", catchUps(t, pool), got.Decided, want)
 	}
-	// The delivery of a catch-up forgets exactly what it named, and nothing else does.
+	// The delivery of a catch-up forgets exactly what it named and its row claims, and nothing else
+	// does.
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		return record.NewStore().ForgetKeptDecisions(ctx, tx, "LEGION-1", *lastCatchUp(t, pool).Kept)
+		var row int64
+		if err := tx.QueryRow(ctx, "select id from outbox where kind = 'notice' and payload->>'kind' = 'catch-up' order by id desc limit 1").Scan(&row); err != nil {
+			return err
+		}
+		return record.NewStore().ForgetKeptDecisions(ctx, tx, "LEGION-1", *lastCatchUp(t, pool).Kept, row)
 	}); err != nil {
 		t.Fatalf("forget what the delivered catch-up named: %v", err)
 	}

@@ -337,14 +337,24 @@ the root on each of these lines:
   tree goes to the controller`: the controller received the decision.
 - `outbox parked decision not relayed: it names no person`: the gate opened under
   `gates.design: off`, so no person made the decision.
-- `outbox parked decision not relayed: its root is not parked`: someone moved the lingering root
-  back to a status of the workflow (`in_progress` and the like), so it is nobody's parked tree.
+- `outbox parked decision not relayed: its root is not parked` or `workflow: a decision on a
+  lingering root someone moved back into the workflow is not relayed`: someone moved the
+  lingering root back to a status of the workflow (`in_progress` and the like), so it is nobody's
+  parked tree.
+- `outbox parked decision not relayed: its tree hears it` or `outbox parked decision not relayed:
+  its root has no record`: the tree runs and its architect hears the decision, or the daemon keeps
+  no record of the root.
+- `outbox parked decision handled before under this key`: the same notice came through again (a
+  re-held copy, or a run of its row again); the first line logged under that key says what became
+  of it.
 - `outbox parked decision kept for its root's start, which waits for its slot` or `workflow: a
   person's decision on a tree waiting for its slot is kept for its architect's start`: the root was
   set to `todo` already, so no controller is told, and its architect's start names the decision.
-  The daemon keeps the decision until that start, or a later catch-up, is delivered.
-- `workflow: a session's reply on a parked tree is not relayed`: an agent wrote the reply. It
-  stays on the ask for the person who asked.
+  The daemon keeps the decision until the one start or catch-up that names it is delivered; one
+  that is never delivered leaves it for the next.
+- `workflow: a session's reply on a parked tree is not relayed`, `workflow: a session's answer or
+  resolution on a parked tree is not relayed`, or `workflow: a session's decision on a tree waiting
+  for its slot is not kept`: an agent wrote it. It stays on the ask for the person who asked.
 
 Then read the controller's comment that begins `Parked decision read:`, on the root and on the
 issue where the decision was made. For a question, it is a reply on the question's own ask, which

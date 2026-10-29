@@ -5,8 +5,9 @@ or `icebox` and whose `issues.<KEY>.phase` in `read_state` is `done`. Its archit
 or gone, so nobody inside the tree hears what a person says on it. The Go daemon sends you each
 such decision as `parked-decision on <KEY>`; the walk below finds one sent while no controller
 ran. You decide whether the tree runs again, unless the park is not your own hold. When it
-runs, its architect's start task names each decision the daemon relayed, and both spec versions
-when the approved one is not the current one, so you need not tell it.
+runs, its architect's start task, or the catch-up of a later launch, names each decision the
+daemon relayed, and both spec versions when the approved one is not the current one, so you need
+not tell it.
 
 ## Backlog and icebox
 

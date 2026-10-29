@@ -213,6 +213,16 @@ func (r *outbox) reholdNotice(ctx context.Context, reported reportedNotice, reas
 			return err
 		}
 		queued = true
+		// A copy of a catch-up whose row still claims decisions (the confirmed route's answer, in the
+		// row's own run) takes those claims over before the row finishes and its deletion releases
+		// them, so no other start or catch-up names what the copy will.
+		if notice.CatchUp != nil && notice.CatchUp.Kept != nil && reported.claims != 0 {
+			id, err := r.records.EnqueueID(scoped, tx, row)
+			if err != nil {
+				return err
+			}
+			return r.records.MoveKeptClaims(scoped, tx, reported.claims, id)
+		}
 		return r.records.Enqueue(scoped, tx, row)
 	}); err != nil {
 		return err
@@ -290,6 +300,10 @@ type reportedNotice struct {
 	notice    record.Notice
 	row       int64
 	architect claim.Token
+	// claims is the outbox row still running that claims the decisions the notice names (the
+	// confirmed route's answer, in the row's own run), 0 when that row has already finished (an
+	// earlier listener's report).
+	claims int64
 }
 
 // exceptionNotice reads the notice a report is about: a publish of this daemon's outbox (its
