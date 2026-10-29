@@ -2,42 +2,39 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-368",
-  "completed": "2026-10-29T16:20:00Z",
+  "completed": "2026-10-29T21:45:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2463",
-  "round": "merge lane: the one forward merge of main (7c2effba)",
+  "round": "second mechanical forward merge of main (5455925b) after the merge lane",
   "proof": [
     {
       "criterion": "The forward merge keeps every behaviour: block graph, replies naming a block, carried ids through the editor, block-card refresh",
-      "surface": "local Dispatch harness (bun run dispatch:local): real Go server built from the merge head, real migrations 0001-0143 on Postgres 17, the dashboard in Chromium",
+      "surface": "local Dispatch harness (bun run dispatch:local): real Go server built from the merge head, real migrations 0001-0144 on Postgres 17, the dashboard in Chromium",
       "command": "DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh; bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/block-references.e2e.ts e2e/conversation.e2e.ts e2e/held-sends.e2e.ts -g 'passage|new text once|stops showing|kept|reload|edit'",
-      "observed": "schema_migrations max 143; driver exit 0 with 133 PASS and 0 FAIL; Playwright 7 passed: block-references 237, 274, 303 (block card new text after edit, comment block deleted, spec block deleted), conversation 188, 985 (passage), 1069 and 1245 (editor keeps cited ids)",
-      "headSha": "f728a2ade613ed4f5ee8d22e1083bb40094ee736",
-      "negativeControl": "The fingerprint changed only by the renumber, the route count and the filter lines (comment 6503378133); the earlier rounds' negative controls (each row failing at the commit before its fix) stand on unchanged code."
+      "observed": "schema_migrations max 144; driver exit 0 with 133 PASS and 0 FAIL; Playwright 7 passed (block-card edit, comment-block and spec-block delete, conversation ask edit, passage, editor id rows)",
+      "headSha": "2edec178df56c1903a223a3f522d8ef272643c4d",
+      "negativeControl": "The fingerprint changed only by the renumber to 0142-0144 and the test constants (comment 6508313229); the earlier rounds' negative controls (each row failing at the commit before its fix) stand on unchanged code."
     },
     {
-      "criterion": "Every CI filter matches every file its job reads, itemblocks included",
-      "surface": ".github/scripts/check-ci-filters.sh at the merge head (go list closures, PyYAML from a uv venv under $TMPDIR)",
-      "command": "PATH=$TMPDIR/ciyaml/bin:$PATH bash .github/scripts/check-ci-filters.sh",
-      "observed": "exit 0: every ci.yaml filter matches every file its job reads (24 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)",
-      "headSha": "f728a2ade613ed4f5ee8d22e1083bb40094ee736",
-      "negativeControl": "The same check on the merge without the lines: exit 1, 36 CI filter problem(s), naming each itemblocks file for test, docs, dispatch, dispatch-browser-multiprocess, envoy-infra-go and listener-server-change; with only the dispatch_server line, 7 problems (listener-server-change and docs-pages.yaml paths)."
+      "criterion": "CI's one red at c4020e72 (envoy-go-race, TestCallerTextThatIsNotUTF8IsRefused) is fixed by main's #2514, which this merge brings",
+      "surface": "go test -race on the api package at the merge head, against the pod's Postgres 17",
+      "command": "CGO_ENABLED=1 go test -race ./internal/dispatch/api/ -run TestCallerTextThatIsNotUTF8IsRefused -count=3",
+      "observed": "ok (3 of 3); efdd041f0 (#2514) is an ancestor of the head",
+      "headSha": "2edec178df56c1903a223a3f522d8ef272643c4d",
+      "negativeControl": "At c4020e72, before the merge, CI's envoy-go-race attempt 1 failed only this test (read_a_document:_slug)."
     }
   ],
   "filesChanged": [
-    ".github/workflows/ci.yaml",
-    ".github/workflows/docs-pages.yaml",
-    "packages/envoy/internal/dispatch/store/migrations/0141_item_blocks.{up,census}.sql (from 0139)",
-    "packages/envoy/internal/dispatch/store/migrations/0142_comments_item_blocks_trigger.{up,census}.sql (from 0140)",
-    "packages/envoy/internal/dispatch/store/migrations/0143_messages_item_blocks_trigger.{up,census}.sql (from 0141)",
+    "packages/envoy/internal/dispatch/store/migrations/0142_item_blocks.{up,census}.sql (from 0141)",
+    "packages/envoy/internal/dispatch/store/migrations/0143_comments_item_blocks_trigger.{up,census}.sql (from 0142)",
+    "packages/envoy/internal/dispatch/store/migrations/0144_messages_item_blocks_trigger.{up,census}.sql (from 0143)",
     "packages/envoy/internal/dispatch/store/item_blocks_migrations_test.go",
-    "packages/envoy/internal/dispatch/api/routes_table_test.go",
     "packages/envoy/internal/dispatch/docs/block_index.go",
     "packages/envoy/AGENTS.md",
     "packages/envoy/cmd/dispatch/AGENTS.md",
     "packages/envoy/cmd/dispatch/README.md"
   ],
   "deviations": [
-    "The task named five filters. ci.yaml's test, docs, dispatch, dispatch_browser_multiprocess and envoy_infra_go take the Dispatch server's packages through the shared dispatch_server anchor, so the line went there once. check-ci-filters.sh then still named listener_server_change and docs-pages.yaml's on.push.paths (which must equal the docs filter), so the line went into both too; the check is clean only with all three.",
-    "TestARepeatedSubReplacesAnotherKind (api/live_subscriptions_test.go:224, main's file, untouched here) failed once in the whole api package run (a 10 s poll) and passed 3 of 3 alone."
+    "Main added 0141_drop_broadcast_idempotency_keys, so the migrations moved to 0142-0144 although the task named only the two doc conflicts.",
+    "While I resolved the conflicts, a jj new from another process in the shared workspace (op de45e4e0, reviewer-authored working copy) left my resolution in a commit above the merge; I squashed it into the merge commit, which is mine, before pushing."
   ]
 }
