@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-607",
-  "completed": "2026-10-29T18:40:00Z",
+  "completed": "2026-10-29T22:05:00Z",
   "proof": [
+    {
+      "criterion": "Forward merge of main 5455925b (no rebase) keeps the branch's behaviour: one README conflict resolved keeping both sides, migrations renumbered past main's 0141, connection count re-derived",
+      "surface": "go build/vet and go test on the real Postgres 16 test database at the merge head; diff-check comment on the PR",
+      "command": "cd packages/envoy && go vet ./... && go vet -tags multiprocess ./cmd/dispatch/ && go test ./internal/dispatch/store/ ./internal/dispatch/docs/ ./internal/dispatch/refs/ ./internal/dispatch/embedqueue/ ./internal/dispatch/delivery/... ./internal/dispatch/duty/ ./internal/pglisten/ ./internal/bus/ ./cmd/dispatch/ ./internal/dispatch/api/ -count=1 -timeout 30m; (cd infra && go test ./gcp/ -run Connections)",
+      "observed": "all ok except api's TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, main's guard that refuses a C-locale test database (this pod's Postgres has no other locale). Migrations 0142-0148 after main's 0141; ConnectionsPerProcess 64+4+1+13+1+1+4 = 88 = dispatchConnectionsPerPod. Fingerprint b2755e7f470f at 84d139a3 -> 9c3fe489e68a at bc54fc4f (PR comment 6509158315).",
+      "headSha": "bc54fc4fdd2ee70e20f101e4d4f098b0f3e4ce13",
+      "negativeControl": "before renumbering, the merged tree held two 0141 migrations (0141_drop_broadcast_idempotency_keys and 0141_embeddings_notify); after it, ls migrations shows 0140, 0141 (main) and 0142-0148 (branch) with no duplicate number"
+    },
     {
       "criterion": "Review round 5: TestTheMaintenanceLoopSweepsOncePerPeriodAcrossTwoRunners no longer races between the key-sweep count (recorded as the delete starts) and the resume count (after it returns)",
       "surface": "go test on the real Postgres 16 test database (two store pools, storetest.SecondProcess), race detector on",
@@ -30,6 +38,7 @@
     }
   ],
   "filesChanged": [
+    "bc54fc4f (forward merge of main 5455925b): cmd/dispatch/README.md conflict; branch migrations renamed 0141-0147 -> 0142-0148 with every branch reference (migration headers, Go comments/tests, README, AGENTS.md, .dispatch/architecture, pr2391 changelog fragments, learnings)",
     "84d139a3: api/maintenance_test.go (check inside the pass); prose: .dispatch/architecture/dispatch-api.md and dispatch-server.md (maintenance sweep's lease and timer), cmd/dispatch/main.go (four timers), cmd/dispatch/README.md and api/suggestion_outcomes.go (the embedding queue takes no lease either), cmd/dispatch/multiprocess_test.go (why suggestion-outcomes is unobserved)",
     "Forward merge of main 7c2effba (a01bc655): migrations renumbered to 0141-0147; leasePoolSize 13 on main, so ConnectionsPerProcess and dispatchConnectionsPerPod 88; #2397's issue-spec embedding trigger kept (it calls embeddings_enqueue, so it notifies)",
     "Forward merges of main be4567e3 (03f27579, keeping #2396's due-time race fixes) and 88840d35 (5660b5be, keeping #2449's shutdown and keyed-write sweep); then renumbered at the next merge",
