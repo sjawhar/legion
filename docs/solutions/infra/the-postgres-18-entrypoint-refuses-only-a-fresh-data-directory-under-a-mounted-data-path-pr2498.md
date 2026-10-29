@@ -14,10 +14,22 @@ supersedes: docs/solutions/infra/the-postgres-18-image-mounts-its-data-one-level
 
 # The Postgres 18 entrypoint refuses only a fresh data directory under a mounted data path
 
-Every rule of the superseded note still holds; this note corrects one sentence of it. That note
-says the entrypoint "exits 1 when `/var/lib/postgresql/data` is a mount point", which is not the
-whole condition, and a negative control written from it can pass while proving nothing.
+This note replaces the superseded one: it carries every rule of that note, so a reader who reaches
+this file in its place loses none, and corrects one sentence of it. That note says the entrypoint
+"exits 1 when `/var/lib/postgresql/data` is a mount point", which is not the whole condition, and a
+negative control written from it can pass while proving nothing.
 
+- With a Postgres 18 image (`postgres:18`, `pgvector/pgvector:*-pg18`), put every tmpfs, volume
+  or testcontainers `Tmpfs` at `/var/lib/postgresql`, never `/var/lib/postgresql/data`. The data
+  directory is `/var/lib/postgresql/18/docker`.
+- The mount path follows the image's major: a `postgres:16` site keeps `/data`. When you bump an
+  image's digest or copy a `docker run` line, change the image and the mount in one edit.
+- After each forward merge of the base, grep the tree for `/var/lib/postgresql/data` and for the
+  old digest: the base keeps adding sites that copy the old line.
+- Give a named volume a new name when the major changes (the old volume holds a cluster the new
+  major cannot open), and say in the docs how to remove the old one.
+- Remove a Postgres container with `docker rm -v`, so the image's anonymous `VOLUME` and its data
+  go with it.
 - The refusal needs three things together: `PGDATA` at the image default, a data directory that is
   **fresh** (it holds no `PG_VERSION`), and `/var/lib/postgresql/data` being a mount point. A
   restart of a container whose data directory is already initialised never reaches the refusal,
@@ -32,6 +44,10 @@ whole condition, and a negative control written from it can pass while proving n
 
 ## Evidence
 
+- The five rules carried from the superseded note rest on its evidence: sjawhar/legion#2364
+  moved every `pgvector/pgvector` 0.8.7 pin from `-pg16` to `-pg18`, moved each tmpfs it found to
+  `/var/lib/postgresql`, found two more old-path mounts only by the grep after a forward merge,
+  and renamed the acceptance compose volume to `dispatch-acceptance-pg18`.
 - The image's own `docker-entrypoint.sh` (docker-library/postgres, `18/trixie`, the directory this
   image's `org.opencontainers.image.source` names; the `18/bookworm` copy of the same revision is
   byte-identical): `_main` runs the check only while `DATABASE_ALREADY_EXISTS` is empty, which
