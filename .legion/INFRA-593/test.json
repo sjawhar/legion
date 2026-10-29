@@ -2,42 +2,28 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-593",
-  "completed": "2026-10-29T13:10:00Z",
-  "round": 5,
-  "headTested": "3e89ac6ff215e6e163e9e206ce40ea74c8ac3cbd",
-  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-5-txt",
-  "outputs": "dispatch://INFRA-593/artifact/infra-593-tester-round-5-outputs-tar-gz",
-  "rig": "dispatch://INFRA-593/artifact/infra-593-tester-rig-round-4-tar-gz",
+  "completed": "2026-10-29T14:20:00Z",
+  "round": 6,
+  "headTested": "35636880ea1c6c493105633c74d6315adf9135b0",
+  "prHead": "025b3082c0c2cd47d7406ca644373e748e4779fd",
+  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-6-txt",
   "previousRounds": [
     "dispatch://INFRA-593/artifact/infra-593-tester-round-1-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-2-txt",
     "dispatch://INFRA-593/artifact/infra-593-tester-round-3-txt",
-    "dispatch://INFRA-593/artifact/infra-593-tester-round-4-txt"
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-4-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-5-txt"
   ],
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's e2e steps (scenA.sh, hour pass cleared) with envoy-dispatch built from 3e89ac6f on a rebuilt Postgres 16.2: the sweep's first tick logged candidates=1 compacted=1 rows_deleted=37, the 3 young rows unchanged in version/xmin/md5, text sha256 identical, a 31st upload reads back. Checked go.work.sum against main (identical) and drove the refactored note path (scenG.sh)."
+    "how": "No runtime code changed since round 5 (the Go diff 3e89ac6f..35636880 is compaction_queue_test.go alone), so round 5's re-run of the implementer's e2e steps at 3e89ac6f stands. Its round-6 proof, the test fix, re-run locally under -race on Postgres 16.2: the two queue tests passed 25 runs, then 45 more each under three concurrent copies."
   },
-  "failed": 0,
-  "failures": [],
-  "proof": [
+  "failed": 1,
+  "failures": [
     {
-      "criterion": "Review round 3: the note refactor keeps the review-round-2 behaviour (a note brings a waiting room's check forward, a note during a step re-queues it), so a burst after a quiet check keeps fewer than 16 rows older than 2 minutes after the fold point.",
-      "surface": "envoy-dispatch built from 3e89ac6f, real process on Postgres 16.2, DISPATCH_NATS_DISABLED=1, HTTP API",
-      "command": "BIN=<head> bash scenG.sh (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-4-tar-gz; output scenG-r5.out in dispatch://INFRA-593/artifact/infra-593-tester-round-5-outputs-tar-gz)",
-      "observed": "4 uploads, 160 s quiet, then an upload every 2 s for 300 s (117 uploads) and 2 minutes idle. Rows older than 2 minutes, counting the fold-point row, never exceeded 16 (the fold point plus 15); the queue folded them back every 30-45 s; the document ended at 1 row; the final text is exactly version 120.",
-      "headSha": "3e89ac6ff215e6e163e9e206ce40ea74c8ac3cbd",
-      "negativeControl": "Round 3's head d741863c under the same steps (round 4): 118 rows older than 2 minutes at most, folded only by its 15-minute check."
-    },
-    {
-      "criterion": "Acceptance 1, 2 and 5 at the round's head, and review round 3's important finding: main's infra go.work.sum restored.",
-      "surface": "envoy-dispatch built from 3e89ac6f, real process on Postgres 16.2, DISPATCH_NATS_DISABLED=1, HTTP API; the repository at 3e89ac6f",
-      "command": "CLEAR_PASS=1 bash scenA.sh; jj diff --from main@origin --to 3e89ac6f --stat -- packages/envoy/infra/go.work.sum",
-      "observed": "The sweep's first tick folded 37 rows; the 3 young rows were unchanged; the text sha256 was identical before, on the cold read and after; a 31st upload reads back. go.work.sum: 0 files changed against main.",
-      "headSha": "3e89ac6ff215e6e163e9e206ce40ea74c8ac3cbd",
-      "negativeControl": "At 713982bb the same diff against main deleted 24 lines main added (#2449, #2456), as review round 3 found; at 3e89ac6f it is empty."
+      "criterion": "The required checks run at the pull request's head: CI was red at 3e89ac6f (envoy-go-race, TestTheCompactionQueueFoldsTheOldRowsOfADocumentItsWritesNoted), and the test fix 35636880 is the change meant to turn it green.",
+      "evidence": "No workflow has run on any commit after 3e89ac6f. `gh run list --repo sjawhar/legion --commit <sha>` gives 0 runs for 025b3082 (PR head), 35636880, c2fafb44 and 9502de11; `gh pr checks 2444` reports no checks. The two pushes since round 5 each ended on a handoff commit carrying `skip-checks: true` (c2fafb44 review: record handoff over the AGENTS.md re-wraps 44f459e2 and 9502de11; 025b3082 implement: record handoff over the test fix 35636880), and GitHub honours the trailer on a push's head, so neither push ran CI. The base requires the checks, so the merge waits. Remedy for the implementer: a push whose head carries no skip-checks line, so CI runs on the code. No red test: nothing in the code is wrong; the test fix passes locally (25 runs, then 45 more under contention, under -race; at 3e89ac6f the same 25 runs failed once, matching CI)."
     }
   ],
-  "notRerun": "Unchanged since rounds 1-4, so not re-run: failed-load wording, benchmarks and heap profiles, the unfoldable-log probe, writes during a sweep, the 100,000-document listing, concurrent cold reads, the quiet 15-minute rule, upgrade and rolling update through migration 0139.",
-  "ci": "Read on GitHub at 3e89ac6f, 13:04 UTC: 9 lanes success, 3 in progress, 6 queued, none failed."
+  "ciAt3e89ac6f": "Run 40876511289: envoy-go-race failed in TestTheCompactionQueueFoldsTheOldRowsOfADocumentItsWritesNoted/browser_edits (the defect 35636880 fixes); envoy-go failed in cmd/listener TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget, a package this branch does not change from its fork point 88840d35 (0 files under cmd/listener and internal/bus), recorded by the implementer as main's NATS-restart flake (dispatch://INFRA-743)."
 }
