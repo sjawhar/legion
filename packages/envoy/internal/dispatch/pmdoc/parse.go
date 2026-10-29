@@ -964,8 +964,15 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			}
 			children = append(children, content...)
 		case *ast.AutoLink:
+			// The autolink's own link takes the place of a link the label around it opened, on the
+			// autolink's text alone: a text carries one link, as ProseMirror's Mark.addToSet holds
+			// it (addToMarkSet), where a mark excludes another of its own type. The label's link
+			// is not ended by it, so the text after the autolink carries it again, as the text
+			// before it does. Stacking the two, which this arm did, wrote a text under two links,
+			// a tree ProseMirror cannot hold and a rendering that does not read back as itself, so
+			// ParseForWrite refused a document a person can write in a comment.
 			label, href := autolinkText(current, source)
-			children = appendTextPiece(children, label, append(active, Mark{Type: "link", Attrs: Attrs{"href": href, "title": nil}}))
+			children = appendTextPiece(children, label, addToMarkSet(active, Mark{Type: "link", Attrs: Attrs{"href": href, "title": nil}}))
 		case *extensionast.Strikethrough:
 			content, err := within(current, Mark{Type: "strike_through"})
 			if err != nil {
@@ -1021,6 +1028,20 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 		}
 	}
 	return joinTexts(children), ended, nil
+}
+
+// addToMarkSet is marks with mark added as ProseMirror's Mark.addToSet adds it to a text's mark
+// set: a mark of mark's type already in the set is dropped, since a mark excludes another of its
+// own type, so one of a type is all a text ever carries. The type alone decides it, where
+// sameMark compares a mark's attributes too: a link replaces a link whatever its href.
+func addToMarkSet(marks []Mark, mark Mark) []Mark {
+	set := make([]Mark, 0, len(marks)+1)
+	for _, other := range marks {
+		if other.Type != mark.Type {
+			set = append(set, other)
+		}
+	}
+	return append(set, mark)
 }
 
 // parseTextValue is the text value of node, under marks, as the browser editor reads it:
