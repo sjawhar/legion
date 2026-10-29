@@ -337,10 +337,10 @@ func (s *server) firstRelayFloor(ctx context.Context) (int64, error) {
 }
 
 // takeBootMark takes the server's boot mark (bootMark) on a goroutine of its own, so register,
-// which must not touch the Store, returns at once. It is one statement that waits on no
+// which must not touch the Store, returns at once; a server with no Store pool takes none. It is one statement that waits on no
 // transaction, and a mark that fails leaves the boot mark zero, which no start uses.
 func (s *server) takeBootMark() {
-	if s.deps.Store == nil {
+	if s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return
 	}
 	s.bootMark = make(chan struct{})
