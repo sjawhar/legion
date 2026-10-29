@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-729",
+  "completed": "2026-10-29T08:58:00Z",
+  "proof": [
+    {
+      "criterion": "A1: `grep -rn 7b822b0a .github/workflows` on the PR head finds nothing",
+      "surface": "the repository tree at the PR head",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && grep -rn 7b822b0a .github/workflows",
+      "observed": "no output, exit 1",
+      "headSha": "08cbb0a2a8ad76a65ebde32ee76b6a0c44a34bb0",
+      "negativeControl": "the same grep on be4567e3 (the base) matches .github/workflows/envoy-and-contracts.yaml:1094, the dispatch-browser-multiprocess image line"
+    },
+    {
+      "criterion": "A2: dispatch-browser-multiprocess passes on the PR (ran, not skipped) on PostgreSQL 18",
+      "surface": "GitHub Actions CI on pull request #2486: https://github.com/sjawhar/legion/actions/runs/40804774509/job/123224515403",
+      "command": "gh api \"repos/sjawhar/legion/commits/08cbb0a2a8ad76a65ebde32ee76b6a0c44a34bb0/check-runs?per_page=100\" --jq '.check_runs[] | [.name,.status,.conclusion,.id] | @tsv'; gh run view -R sjawhar/legion --job 123224515403 --log | grep -E 'pgvector@sha256|starting PostgreSQL|[0-9]+ (passed|failed)|7b822b0a|PostgreSQL 16'",
+      "observed": "dispatch-browser-multiprocess completed success (job 123224515403, run 40804774509); docker pull mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11; service log `starting PostgreSQL 18.6 (Debian 18.6-1.pgdg12+2)`; test steps `5 passed (28.9s)` and `1 passed (1.6s)`; no `failed`, no 7b822b0a, no `PostgreSQL 16`. Gate control: the same head's `dispatch` check run is skipped, so the job ran on its new dispatch_browser_multiprocess filter (this PR changes only the workflow file).",
+      "headSha": "08cbb0a2a8ad76a65ebde32ee76b6a0c44a34bb0",
+      "negativeControl": "main's job 123138185821 (run 40761578717, head af1ff09c, before the change) pulls 7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a and prints `starting PostgreSQL 16.15`"
+    },
+    {
+      "criterion": "A3: no added line, path or commit subject names the private deployment repository's Dispatch keys",
+      "surface": "the required lint job on pull request #2486",
+      "command": "gh api \"repos/sjawhar/legion/commits/08cbb0a2a8ad76a65ebde32ee76b6a0c44a34bb0/check-runs?check_name=lint\" --jq '.check_runs[].conclusion'; bash .github/scripts/check-private-names.sh",
+      "observed": "lint check run 123220974710 completed success; pr-title success; local check-private-names.sh exit 0",
+      "headSha": "08cbb0a2a8ad76a65ebde32ee76b6a0c44a34bb0",
+      "negativeControl": "not run separately: check-private-names.sh's own refusal is outside this change; the lint job is the required gate and is green"
+    }
+  ],
+  "filesChanged": [
+    ".github/workflows/envoy-and-contracts.yaml"
+  ],
+  "trickyParts": [
+    "The job's old gate (`dispatch` filter) omitted the workflow file, so a workflow-only change would skip it; the new filter dispatch_browser_multiprocess = this workflow + `*dispatch` (anchor added to `dispatch`), and the `dispatch` job's gate is unchanged, as its skipped check run on this head shows.",
+    "check-image-trigger-paths.sh and check-action-pins.sh need PyYAML, absent in the pod; run under `uv run --no-project --with pyyaml==6.0.2`."
+  ],
+  "deviations": [
+    "Spec said 'Change nothing else'; the plan's recorded spec departure adds the paths filter, its changes output, the job's gate and the comments that describe the filters.",
+    "Thermo/simplify pass not run: the diff is CI configuration only, no runtime code."
+  ],
+  "openQuestions": []
+}
