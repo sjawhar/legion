@@ -283,6 +283,36 @@ test("a code block in another language keeps upstream's plain layout and asks no
   );
 });
 
+// The case above switches a block that never drew, so what `showPlainLayout` clears is never
+// observed there. A block that drew and then left mermaid is the one way this clearing shows on a
+// reader's page: without it the last drawing stands above a JavaScript block it no longer matches.
+test("a mermaid block that drew and then changed language leaves an empty hidden preview and status", async () => {
+  const { drawMermaid, requests } = fakeDrawer();
+  await withMarksEditor(
+    ONE_DIAGRAM,
+    ({ view }) => {
+      const [block] = blocks(view);
+      if (!block) throw new Error("the document draws a code block");
+      requests[0]?.answer(diagram(view.dom.ownerDocument, "drawn"));
+      expect(shownDiagram(block)).toBe("drawn");
+      expect(block.preview?.hidden).toBe(false);
+
+      let mermaidPos = -1;
+      view.state.doc.descendants((node, pos) => {
+        if (node.attrs.language === "mermaid") mermaidPos = pos;
+      });
+      view.dispatch(view.state.tr.setNodeAttribute(mermaidPos, "language", "js"));
+
+      expect(Array.from(block.frame.children)).toEqual([block.pre]);
+      expect(shownDiagram(block)).toBeNull();
+      expect(block.preview?.hidden).toBe(true);
+      expect(block.status?.hidden).toBe(true);
+      expect(block.status?.textContent).toBe("");
+    },
+    { drawMermaid }
+  );
+});
+
 test("a refusal shows its text in the status line and hides the preview", async () => {
   const { drawMermaid, requests } = fakeDrawer();
   await withMarksEditor(
