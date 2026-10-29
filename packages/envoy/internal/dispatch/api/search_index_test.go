@@ -26,11 +26,12 @@ import (
 // a real corpus's planner would choose - search_bench_test.go's latency bound is what proves that
 // at scale.
 func TestSearchMeaningLegsUseTheHNSWIndexNotASequentialScan(t *testing.T) {
+	const title, spec = "A title to embed for the index test", "Body text."
 	embedder := &fakeEmbedder{vectors: map[string][]float32{
-		"A title to embed for the index test": angledVector(0.9, 2),
+		issueEmbeddingText(title, spec): angledVector(0.9, 2),
 	}}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
-	createInteractionIssue(t, handler, "IDX1", "A title to embed for the index test", "Body text.")
+	createInteractionIssue(t, handler, "IDX1", title, spec)
 	processAllPending(t, database, embedder)
 
 	ctx := context.Background()

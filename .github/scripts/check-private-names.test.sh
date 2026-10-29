@@ -12,7 +12,7 @@
 # is this script's own stdout — the CI log; the last case runs the guard over that captured log.
 #
 # Run from anywhere: .github/scripts/check-private-names.test.sh
-# CI runs it in the Tests workflow (pr-and-main.yaml, job test).
+# CI runs it in ci.yaml's test job.
 set -euo pipefail
 shopt -s inherit_errexit
 
@@ -23,11 +23,12 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 # Every case's stdout below (echoed "case:" lines and `check`'s PASS/FAIL lines) is this script's
-# own output — the Tests job's log — so it is also teed to self_log and, as the last case, scanned
-# with the guard itself: a future case that prints an assembled form turns red here, in the suite,
-# before it ever reaches a real job log. `exec 3>&1 4>&2` keeps the real terminal fds reachable so
-# the redirection can be undone before reading the file: a process substitution's write end must
-# close (and its process be waited on) before its output is guaranteed to be flushed to disk.
+# own output — the log of ci.yaml's test job — so it is also teed to self_log and, as the last
+# case, scanned with the guard itself: a future case that prints an assembled form turns red
+# here, in the suite, before it ever reaches a real job log. `exec 3>&1 4>&2` keeps the real
+# terminal fds reachable so the redirection can be undone before reading the file: a process
+# substitution's write end must close (and its process be waited on) before its output is
+# guaranteed to be flushed to disk.
 self_log="$work/suite-output.log"
 exec 3>&1 4>&2
 exec > >(tee "$self_log") 2>&1

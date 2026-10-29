@@ -51,15 +51,16 @@ function keyFile(mode: number): string {
   writeFileSync(file, "sk-ant-rig-test-0000000000000000\n", { mode });
   return file;
 }
-function route(dir: string, env: Record<string, string>) {
+function route(dir: string, env: Record<string, string>, model = "") {
   const result = Bun.spawnSync(
     [
       "bash",
       "-c",
-      `${fn("install_model_route")}\ninstall_model_route "$1" skills-test "$2"`,
+      `route_model_id=claude-opus-4-8\n${fn("install_model_route")}\n${fn("install_provider_route")}\ninstall_model_route "$1" skills-test "$2" "$3"`,
       "-",
       root,
       dir,
+      model,
     ],
     { env: { ...childEnv, ...env } }
   );
@@ -106,11 +107,119 @@ describe("install_model_route", () => {
     expect(existsSync(path.join(dir, "model-key"))).toBe(false);
   });
 
-  test("an unknown route fails, naming the two it takes", () => {
+  /** An operator's models.yml holding the gateway block the provider route names, and another. */
+  function providerFile(apiKey: string): string {
+    const file = path.join(work, `models-${profiles}.yml`);
+    writeFileSync(
+      file,
+      [
+        "providers:",
+        "  openai:",
+        '    apiKey: "!secrets get --value OPENAI_KEY"',
+        "  box-gateway:",
+        "    baseUrl: http://gateway.internal.example:4000",
+        `    apiKey: "${apiKey}"`,
+        "    api: anthropic-messages",
+        "    authHeader: true",
+        "    models:",
+        "      - id: claude-opus-5-5",
+        "        thinking:",
+        "          mode: anthropic-adaptive",
+        "          efforts: [low, high]",
+        "",
+      ].join("\n")
+    );
+    return file;
+  }
+
+  test("provider copies the named block, its !cat key command as written, with the rig's one model", () => {
+    const dir = profileDir();
+    const { code, stderr } = route(dir, {
+      LEGION_E2E_MODEL_ROUTE: "provider",
+      LEGION_E2E_MODEL_PROVIDER_FILE: providerFile("!cat /run/user/1000/box/gateway-key"),
+      LEGION_E2E_MODEL_PROVIDER: "box-gateway",
+    });
+    expect({ code, stderr: code === 0 ? "" : stderr }).toEqual({ code: 0, stderr: "" });
+    const agent = path.join(dir, "home/.omp/profiles/skills-test/agent");
+    expect(JSON.parse(readFileSync(path.join(agent, "models.yml"), "utf8"))).toEqual({
+      providers: {
+        "box-gateway": {
+          baseUrl: "http://gateway.internal.example:4000",
+          apiKey: "!cat /run/user/1000/box/gateway-key",
+          api: "anthropic-messages",
+          authHeader: true,
+          models: [{ id: "claude-opus-4-8" }],
+        },
+      },
+    });
+    const config = readFileSync(path.join(agent, "config.yml"), "utf8");
+    expect(config).toContain("enabledModels:\n  - box-gateway/claude-opus-4-8\n");
+    expect(config).toContain("  - anthropic\n");
+    expect(config).toContain("  default: box-gateway/claude-opus-4-8\n");
+    expect(config).toContain("  task: box-gateway/claude-opus-4-8\n");
+    expect(existsSync(path.join(dir, "model-key"))).toBe(false);
+  });
+
+  test("provider with a model the block lists takes the block's own entry for it", () => {
+    const dir = profileDir();
+    const { code, stderr } = route(
+      dir,
+      {
+        LEGION_E2E_MODEL_ROUTE: "provider",
+        LEGION_E2E_MODEL_PROVIDER_FILE: providerFile("!cat /run/user/1000/box/gateway-key"),
+        LEGION_E2E_MODEL_PROVIDER: "box-gateway",
+      },
+      "claude-opus-5-5"
+    );
+    expect({ code, stderr: code === 0 ? "" : stderr }).toEqual({ code: 0, stderr: "" });
+    const agent = path.join(dir, "home/.omp/profiles/skills-test/agent");
+    expect(
+      JSON.parse(readFileSync(path.join(agent, "models.yml"), "utf8")).providers["box-gateway"]
+        .models
+    ).toEqual([
+      { id: "claude-opus-5-5", thinking: { mode: "anthropic-adaptive", efforts: ["low", "high"] } },
+    ]);
+    expect(readFileSync(path.join(agent, "config.yml"), "utf8")).toContain(
+      "  default: box-gateway/claude-opus-5-5\n"
+    );
+  });
+
+  test("provider without LEGION_E2E_MODEL_PROVIDER_FILE fails, naming the variable", () => {
+    const dir = profileDir();
+    const { code, stderr } = route(dir, {
+      LEGION_E2E_MODEL_ROUTE: "provider",
+      LEGION_E2E_MODEL_PROVIDER: "box-gateway",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain("LEGION_E2E_MODEL_PROVIDER_FILE is unset");
+  });
+
+  test("provider refuses a block absent from the file, and one whose key is not read by !cat", () => {
+    const missing = route(profileDir(), {
+      LEGION_E2E_MODEL_ROUTE: "provider",
+      LEGION_E2E_MODEL_PROVIDER_FILE: providerFile("!cat /run/user/1000/box/gateway-key"),
+      LEGION_E2E_MODEL_PROVIDER: "elsewhere",
+    });
+    expect(missing.code).toBe(1);
+    expect(missing.stderr).toContain("has no provider block elsewhere");
+    const literal = profileDir();
+    const inline = route(literal, {
+      LEGION_E2E_MODEL_ROUTE: "provider",
+      LEGION_E2E_MODEL_PROVIDER_FILE: providerFile("sk-literal-key"),
+      LEGION_E2E_MODEL_PROVIDER: "box-gateway",
+    });
+    expect(inline.code).toBe(1);
+    expect(inline.stderr).toContain('does not read its key as "!cat <absolute file>"');
+    expect(existsSync(path.join(literal, "home/.omp/profiles/skills-test/agent/models.yml"))).toBe(
+      false
+    );
+  });
+
+  test("an unknown route fails, naming the three it takes", () => {
     const dir = profileDir();
     const { code, stderr } = route(dir, { LEGION_E2E_MODEL_ROUTE: "bedrock" });
     expect(code).toBe(1);
-    expect(stderr).toContain("it is gateway or key-file");
+    expect(stderr).toContain("it is gateway, key-file or provider");
   });
 });
 
@@ -616,9 +725,15 @@ describe("install_superpowers", () => {
       path.join(bin, "probe.jsonl"),
       `${JSON.stringify({ message: { role: "toolResult", content: [{ type: "text", text: result }] } })}\n`
     );
+    // `mise where` names the pin's install, whose bin/omp the probe runs by path; any other call is
+    // the probe's `mise x <pin> -- <omp> -p …`.
+    mkdirSync(path.join(bin, "pin", "bin"), { recursive: true });
+    writeFileSync(path.join(bin, "pin", "bin", "omp"), "#!/bin/sh\n", { mode: 0o755 });
     writeFileSync(
       path.join(bin, "mise"),
       `#!/usr/bin/env bash
+if [ "$1" = where ]; then echo "$(dirname "$0")/pin"; exit 0; fi
+printf '%s\\n' "$@" >"$(dirname "$0")/argv.txt"
 env >"$(dirname "$0")/env.txt"
 while [ $# -gt 0 ] && [ "$1" != --session-dir ]; do shift; done
 mkdir -p "$2"
@@ -629,7 +744,7 @@ echo done
     );
     const run = () =>
       bash(
-        `${fn("fail")}\n${fn("install_superpowers")}\nsuperpowers_skills=(writing-plans brainstorming)\ninstall_superpowers "$1" skills-s1 omp@pin`,
+        `${fn("fail")}\n${fn("pinned_omp")}\n${fn("install_superpowers")}\nsuperpowers_skills=(writing-plans brainstorming)\ninstall_superpowers "$1" skills-s1 omp@pin`,
         [label],
         { PATH: `${bin}:${childEnv.PATH}`, SKILL_SCENARIOS_SUPERPOWERS: src, USER: "rig" }
       );
@@ -653,6 +768,10 @@ echo done
     expect(env).toContain(`HOME=${label}/home\n`);
     expect(readFileSync(path.join(label, "built-from"), "utf8")).toContain(
       "superpowers-skill writing-plans "
+    );
+    // The probe names the pin's own binary, so no omp earlier on PATH stands in for it.
+    expect(readFileSync(path.join(bin, "argv.txt"), "utf8")).toStartWith(
+      `x\nomp@pin\n--\n${bin}/pin/bin/omp\n-p\n`
     );
   });
 
@@ -1062,17 +1181,24 @@ describe("launch", () => {
     writeFileSync(path.join(run, "prompt.txt"), "The person answered your asks on LWEVAL-2.\n");
     writeFileSync(path.join(run, "pane.env"), `PATH=${bin}:${process.env.PATH ?? ""}\n`);
     writeFileSync(path.join(run, "out.txt"), "the first turn\nexit=0\n");
-    writeFileSync(path.join(bin, "mise"), '#!/bin/sh\nshift 3\necho "$@"\n', { mode: 0o755 });
+    mkdirSync(path.join(bin, "pin", "bin"), { recursive: true });
+    writeFileSync(path.join(bin, "pin", "bin", "omp"), "#!/bin/sh\n", { mode: 0o755 });
+    writeFileSync(
+      path.join(bin, "mise"),
+      `#!/bin/sh\nif [ "$1" = where ]; then echo "${bin}/pin"; exit 0; fi\nshift 3\necho "$@"\n`,
+      { mode: 0o755 }
+    );
     const standIns = `
 tmux() { case $1 in new-session) (command sleep 0.3 && bash -c "\${@: -1}") & ;; esac; }
 sleep() { command sleep 0.05; }`;
     const result = bash(
-      `${fn("launch")}\n${standIns}\nR=$1 tag=t pin=omp@pin\nlaunch spec-writing-s1-1 --continue\ncp "$R/out.txt" "$R/seen"`,
-      [run]
+      `${fn("fail")}\n${fn("pinned_omp")}\n${fn("launch")}\n${standIns}\nR=$1 tag=t pin=omp@pin\nlaunch spec-writing-s1-1 --continue\ncp "$R/out.txt" "$R/seen"`,
+      [run],
+      { PATH: `${bin}:${childEnv.PATH}` }
     );
     expect(result.code).toBe(0);
     expect(readFileSync(path.join(run, "seen"), "utf8")).toBe(
-      `omp -p The person answered your asks on LWEVAL-2. --continue --session-dir ${run}/sessions\nexit=0\n`
+      `${bin}/pin/bin/omp -p The person answered your asks on LWEVAL-2. --continue --session-dir ${run}/sessions\nexit=0\n`
     );
   });
 });

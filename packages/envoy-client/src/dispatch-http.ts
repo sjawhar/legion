@@ -45,8 +45,10 @@ import type {
   MessageReplyResult,
   OpenAsksResponse,
   Project,
+  RelatedCheckInput,
   ResolveAskInput,
   SearchResponse,
+  Suggestions,
   UpdateIssueInput,
   Version,
   WhoamiResponse,
@@ -681,8 +683,13 @@ export class DispatchClient {
     this.#signal = requestSignal(signal);
   }
 
-  async issue(input: CreateIssueInput): Promise<Advised<Issue>> {
-    return this.#json("POST", ["api", "v1", "issues"], input);
+  /**
+   * Creates an issue. `created` is whether this call made one (Dispatch's 201); false (its 200)
+   * means Dispatch already holds the issue `external` names and answered with that issue.
+   */
+  async issue(input: CreateIssueInput): Promise<Advised<Issue> & { created: boolean }> {
+    const answer = await this.#jsonAnswer<Advised<Issue>>("POST", ["api", "v1", "issues"], input);
+    return { ...answer.payload, created: answer.status === 201 };
   }
 
   /** Resolves an existing native key or external reference without creating an issue. */
@@ -777,6 +784,12 @@ export class DispatchClient {
 
   async search(query: string, options: SearchOptions = {}): Promise<SearchResponse> {
     return this.#json("GET", ["api", "v1", "search"], undefined, { q: query, ...options });
+  }
+
+  /** `POST /api/v1/projects/{key}/related`: the related-item check over a title and a text,
+   *  writing nothing. A blank title and text answer `outcome: "not_made"` with the reason. */
+  async related(project: string, input: RelatedCheckInput): Promise<Suggestions> {
+    return this.#json("POST", ["api", "v1", "projects", project, "related"], input);
   }
 
   async getIssue(issue: string): Promise<IssueDetails> {
