@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-493",
+  "completed": "2026-10-29T18:30:00Z",
+  "round": 7,
+  "headTested": "c20eb12a0e454fe34c0efc39df3b39f09d631aef",
+  "codeHead": "4a0517ec2189163e114a85523db90db63585efff",
+  "forwardMerge": "forward-merge re-check 72675d21 → 4a0517ec: fingerprint unchanged (417950e3794209b0587a4da86cce816f061d497620e1eee4d05cc84e08c7fbd6 at both, conflicts-and-rewrites.md's command), bare gates only. Retro's docs/solutions commit and its removal of .legion/ are outside the fileset.",
+  "earlierRounds": "Round 6 (72675d21, CI routing), round 5 (6e7e399a, the real Dispatch app-installation route) and rounds 1-4 (in git at 00b7e93c) stand: the pull request's own diff is identical.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Its round-8 proof gives the unchanged fingerprint 417950e3…; I recomputed it at 72675d21 and 4a0517ec and got the same value at both."
+  },
+  "failures": [],
+  "failed": 0,
+  "ciAtHead": "Read on GitHub at 18:26Z: at 4a0517ec `changes` and `pr-title` queued, nothing else started; c20eb12a is the handoff-only head (skip-checks). Read as running, not waited on. GitHub reports #2478 MERGEABLE.",
+  "proof": [
+    {
+      "criterion": "Smoke at the merge head: a delivery NATS refused is redelivered by the real sweep and applied once by the daemon; a delivery published twice is applied once by its dedupe_key",
+      "surface": "the real listener and `dispatch redeliver-webhooks` binaries built from packages/envoy at 4a0517ec, a fake GitHub, the daemon's consumer on Postgres 16.4 and nats-server 2.10.22",
+      "command": "cd packages/daemon && go test -count=1 ./internal/intake/ -run Redelivered -v",
+      "observed": "listener 503 `github publish failed: nats: no response from stream`; one redelivery request, answered 200; github.8a4f2c10-… applied once and acme/widgets#7 recorded open on ACME-7; the dedupe test PASS",
+      "headSha": "4a0517ec2189163e114a85523db90db63585efff",
+      "negativeControl": "the stream without notifications.github.> stores nothing on the pull request's subject until the sweep's redelivery"
+    }
+  ]
+}
