@@ -842,8 +842,10 @@ error body.
 **The record.** At the window start: one read of Dispatch's `/proc/<pid>/stat` (utime + stime),
 then `heap-start.pprof` (`/debug/pprof/heap`, no GC), then the first write. At its end:
 `heap-end.pprof`, then a `/proc` read, then the CPU profile's end, the goroutine dump and
-`heap.pprof`. After the drain, the end state of every document the run wrote is read over the
-stack's Postgres URL into `end_state.json`. In the step directory,
+`heap.pprof`. After the drain, while Dispatch still runs, the end state of every document the run
+wrote is read into `end_state.json`: its version, size and anchors over the stack's Postgres URL,
+and where each anchor's block stands in the document over the run's own Dispatch client (`GET
+/api/v1/artifacts/{id}/blocks`, the agent bearer). In the step directory,
 `go tool pprof -sample_index=alloc_space -diff_base=heap-start.pprof -top envoy-dispatch heap-end.pprof`
 gives the bytes allocated in the window alone, by function, where `envoy-dispatch` is the step's
 Dispatch binary (`$LOADTEST_ROOT/bin/envoy-dispatch` until the next `stack.sh setup` rebuilds it;
@@ -869,7 +871,7 @@ Dispatch binary (`$LOADTEST_ROOT/bin/envoy-dispatch` until the next `stack.sh se
 | `roster_skipped` | Bundle roster ids the listener refuses as a session key, replaced by synthetic ids. |
 | `doc_order_waits` | Writes that found the previous write on their document still running and waited for it (Sending, above). |
 | `doc_order_wait_s` | Those waits in seconds: `n`, `p50`, `p90`, `p99`, `max`. |
-| `end_state` | {`documents`, `sha256`}: the documents the run wrote and the sha256 over one sorted line per document (its logged artifact id, its highest version number, that version's size, and the sorted sha256 of the quote and block id of each unresolved anchored root comment on it). `end_state.json` in the step directory holds the lines' fields (ids, numbers and hashes, no quote text). Null when the Postgres read failed (`-allow-foreign` with no Postgres reachable). |
+| `end_state` | {`documents`, `sha256`}: the documents the run wrote and the sha256 over one sorted line per document (its logged artifact id, its highest version number, that version's size, and, sorted, the sha256 of the quote and the block index of each unresolved anchored root comment on it). A block index is where the anchor's block stands in the document: `<i>` for the i-th top-level block, `<i>.<r>` for its r-th table row, `<i>.<r>.<c>` for that row's c-th cell, `-1` for a block id the document no longer holds. The digest covers the block index, not the block id, because Dispatch mints a fresh uuid for every block a write creates, so two runs that did the same work differ in their block ids. `end_state.json` in the step directory holds the lines' fields (ids, numbers and hashes, no quote text), keeps each anchor's `block_id` for debugging, and names the digested fields in its `digest` field. Null when a read failed (`-allow-foreign` with no Postgres or no API reachable). |
 
 `meta.json` `replay` holds the same `inputs`, `cgroup_cpu_max` (`/sys/fs/cgroup/cpu.max`, `""`
 when absent), `heap_start_at`, `heap_end_at`, `dispatch_build` (the build JSON:

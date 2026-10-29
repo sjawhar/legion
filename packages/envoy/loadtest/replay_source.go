@@ -1678,7 +1678,7 @@ func (st *step) runReplay(ctx context.Context, a *api) (load *requestLoad, done 
 		wg.Wait()
 		close(actionsDone)
 		<-endDone
-		rr.readEndState()
+		rr.readEndState(a)
 	}()
 	return load, closed
 }

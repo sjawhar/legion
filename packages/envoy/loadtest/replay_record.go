@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -293,12 +294,20 @@ type replayEndState struct {
 	SHA256    string `json:"sha256"`
 }
 
-// replayEndAnchor is an unresolved anchored root comment's anchor: its quote's sha256 and its
-// block id.
+// replayEndAnchor is an unresolved anchored root comment's anchor: its quote's sha256, its block
+// id and where that block stands in the document (endStateBlockIndexes). The digest covers
+// block_index, not block_id: Dispatch mints a fresh uuid for every block a replay write creates,
+// so two runs that did the same work hold the same anchor on different block ids. block_id is
+// kept for debugging.
 type replayEndAnchor struct {
 	QuoteSHA256 string `json:"quote_sha256"`
 	BlockID     string `json:"block_id"`
+	BlockIndex  string `json:"block_index"`
 }
+
+// endStateBlockUnknown is the block index of an anchor whose block the document no longer holds
+// (an orphaned anchor).
+const endStateBlockUnknown = "-1"
 
 // replayEndDoc is one written document's end state, by its logged id (stable across runs, unlike
 // the local id of a document the run creates): its highest version number and that version's
@@ -310,14 +319,20 @@ type replayEndDoc struct {
 	Anchors    []replayEndAnchor `json:"anchors"`
 }
 
+// endStateDigestFields says which fields the sha256 covers, for a reader of end_state.json.
+const endStateDigestFields = "sha256 over, per document sorted by artifact_id: artifact_id, version, size, " +
+	"and each anchor's quote_sha256@block_index sorted; block_id is not covered, as Dispatch mints " +
+	"a fresh uuid for every block a write creates"
+
 // replayEndStateFile is end_state.json: ids, numbers and hashes only.
 type replayEndStateFile struct {
 	Documents []replayEndDoc `json:"documents"`
 	SHA256    string         `json:"sha256"`
+	Digest    string         `json:"digest"`
 }
 
 // endStateDigest sorts the documents by id and each one's anchors, and returns the sha256 of one
-// line per document: "<artifact id> <version> <size> <quote sha256>@<block id>,...".
+// line per document: "<artifact id> <version> <size> <quote sha256>@<block index>,...".
 func endStateDigest(docs []replayEndDoc) string {
 	slices.SortFunc(docs, func(a, b replayEndDoc) int { return strings.Compare(a.ArtifactID, b.ArtifactID) })
 	h := sha256.New()
@@ -326,31 +341,63 @@ func endStateDigest(docs []replayEndDoc) string {
 			if c := strings.Compare(a.QuoteSHA256, b.QuoteSHA256); c != 0 {
 				return c
 			}
-			return strings.Compare(a.BlockID, b.BlockID)
+			return strings.Compare(a.BlockIndex, b.BlockIndex)
 		})
 		anchors := make([]string, len(d.Anchors))
 		for i, a := range d.Anchors {
-			anchors[i] = a.QuoteSHA256 + "@" + a.BlockID
+			anchors[i] = a.QuoteSHA256 + "@" + a.BlockIndex
 		}
 		fmt.Fprintf(h, "%s %d %d %s\n", d.ArtifactID, d.Version, d.Size, strings.Join(anchors, ","))
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// endStateBlockIndexes is, by block id, where each of a document's blocks stands in document
+// order: "<i>" for the i-th top-level block, "<i>.<r>" for its r-th table row and "<i>.<r>.<c>"
+// for that row's c-th cell. A block the live document has not stamped with an id is left out.
+func endStateBlockIndexes(served []servedBlock) map[string]string {
+	ix := make(map[string]string, len(served))
+	for i, b := range served {
+		top := strconv.Itoa(i)
+		if b.ID != "" {
+			ix[b.ID] = top
+		}
+		if b.Table == nil {
+			continue
+		}
+		for r, row := range b.Table.Rows {
+			rp := top + "." + strconv.Itoa(r)
+			if row.ID != "" {
+				ix[row.ID] = rp
+			}
+			for c, cell := range row.Cells {
+				if cell.ID != "" {
+					ix[cell.ID] = rp + "." + strconv.Itoa(c)
+				}
+			}
+		}
+	}
+	return ix
+}
+
 // readEndState reads, over the stack's Postgres URL, the end state of every document the run
-// wrote, writes end_state.json and sets the record's end_state; a failed read leaves it null.
-func (rr *replayRun) readEndState() {
+// wrote, and over the run's own Dispatch client where each anchor's block stands in its document,
+// writes end_state.json and sets the record's end_state; a failed read leaves it null.
+func (rr *replayRun) readEndState(a *api) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	rr.mu.Lock()
 	logged := slices.Sorted(maps.Keys(rr.wrote))
 	rr.mu.Unlock()
-	docs, err := rr.queryEndState(ctx, logged)
+	docs, local, err := rr.queryEndState(ctx, logged)
+	if err == nil {
+		err = readEndStateBlocks(ctx, a, docs, local)
+	}
 	if err != nil {
 		rr.lg.Printf("replay: end state not read (end_state is null): %v", err)
 		return
 	}
-	f := replayEndStateFile{Documents: docs, SHA256: endStateDigest(docs)}
+	f := replayEndStateFile{Documents: docs, SHA256: endStateDigest(docs), Digest: endStateDigestFields}
 	writeJSONFile(filepath.Join(rr.out, "end_state.json"), f, 0o644, rr.lg)
 	rr.mu.Lock()
 	rr.endState = &replayEndState{Documents: len(docs), SHA256: f.SHA256}
@@ -358,41 +405,79 @@ func (rr *replayRun) readEndState() {
 	rr.lg.Printf("replay: end state of %d documents, sha256 %s", len(docs), f.SHA256)
 }
 
-func (rr *replayRun) queryEndState(ctx context.Context, logged []string) ([]replayEndDoc, error) {
+// readEndStateBlocks sets each anchor's block index from the blocks of its document in document
+// order (GET /api/v1/artifacts/{id}/blocks, over the run's agent bearer), endStateBlockUnknown
+// for a block id the document no longer holds. local is the local id of each document by its
+// logged id; a document with no anchor is not read.
+func readEndStateBlocks(ctx context.Context, a *api, docs []replayEndDoc, local map[string]string) error {
+	for i := range docs {
+		d := &docs[i]
+		if len(d.Anchors) == 0 {
+			continue
+		}
+		id, ok := local[d.ArtifactID]
+		if !ok {
+			return fmt.Errorf("artifact %s blocks: no local id", d.ArtifactID)
+		}
+		res := a.callRetry(ctx, "GET", "/api/v1/artifacts/"+url.PathEscape(id)+"/blocks", who{}, nil)
+		if !res.ok() {
+			return fmt.Errorf("artifact %s blocks: status %d %s: %v", d.ArtifactID, res.status, res.errorCode(), res.err)
+		}
+		var served []servedBlock
+		if err := json.Unmarshal(res.body, &served); err != nil {
+			return fmt.Errorf("artifact %s blocks: %w", d.ArtifactID, err)
+		}
+		ix := endStateBlockIndexes(served)
+		for j := range d.Anchors {
+			bi, ok := ix[d.Anchors[j].BlockID]
+			if !ok {
+				bi = endStateBlockUnknown
+			}
+			d.Anchors[j].BlockIndex = bi
+		}
+	}
+	return nil
+}
+
+// queryEndState reads each written document's version, size and anchors over Postgres, and
+// returns the local id of every document that exists locally, by its logged id.
+func (rr *replayRun) queryEndState(ctx context.Context, logged []string) ([]replayEndDoc, map[string]string, error) {
 	if rr.pg == "" {
-		return nil, errors.New("no Postgres URL")
+		return nil, nil, errors.New("no Postgres URL")
 	}
 	conn, err := pgx.Connect(ctx, rr.pg)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: %w", err)
+		return nil, nil, fmt.Errorf("postgres: %w", err)
 	}
 	defer conn.Close(context.Background())
 	docs := make([]replayEndDoc, 0, len(logged))
+	locals := make(map[string]string, len(logged))
 	for _, id := range logged {
 		d := replayEndDoc{ArtifactID: id, Anchors: []replayEndAnchor{}}
 		if local, ok := rr.localNow(replayRef{idArtifact, id}); ok {
+			locals[id] = local
 			if err := conn.QueryRow(ctx, `select coalesce(max(number), 0),
 				coalesce((select coalesce(size, octet_length(markdown), octet_length(content), 0) from artifact_versions
 					where artifact_id = $1 order by number desc limit 1), 0)
 				from artifact_versions where artifact_id = $1`, local).Scan(&d.Version, &d.Size); err != nil {
-				return nil, fmt.Errorf("artifact_versions: %w", err)
+				return nil, nil, fmt.Errorf("artifact_versions: %w", err)
 			}
 			rows, err := conn.Query(ctx, `select coalesce(anchor->>'quote', ''), coalesce(anchor->>'block_id', '') from comments
 				where anchor is not null and reply_to is null and not resolved and anchor->>'artifact_id' = $1`, local)
 			if err != nil {
-				return nil, fmt.Errorf("comments: %w", err)
+				return nil, nil, fmt.Errorf("comments: %w", err)
 			}
 			var quote, block string
 			if _, err := pgx.ForEachRow(rows, []any{&quote, &block}, func() error {
 				d.Anchors = append(d.Anchors, replayEndAnchor{QuoteSHA256: sha256Hex([]byte(quote)), BlockID: block})
 				return nil
 			}); err != nil {
-				return nil, fmt.Errorf("comments: %w", err)
+				return nil, nil, fmt.Errorf("comments: %w", err)
 			}
 		}
 		docs = append(docs, d)
 	}
-	return docs, nil
+	return docs, locals, nil
 }
 
 // localNow is the local id of a logged object once the run is over: the response of the run's
