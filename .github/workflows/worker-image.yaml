@@ -6,8 +6,8 @@ on:
   # skips the build and attests that digest after the caller's own publish job. skip_attest makes a
   # call attest nothing: release.yaml's build-only call sets it, and its attest-only call sets it to
   # its plugin-pair gate, so that call attests nothing when the pair did not publish. attest_digest
-  # makes a call attest only that digest, skipping the build. A `pull_request` or
-  # `workflow_dispatch` run, where both are unset, builds and (off pull requests) attests in one run.
+  # makes a call attest only that digest, skipping the build. ci.yaml's call on a pull request and a
+  # `workflow_dispatch` run, where both are unset, build and (off pull requests) attest in one run.
   workflow_call:
     inputs:
       legion_version:
@@ -58,90 +58,18 @@ on:
         type: string
         required: false
         default: ""
-  # Pre-merge iteration: a pull request against main that touches an image input builds its head and
-  # publishes :sha-<short> only. `pull_request` (not `push`) because GitHub evaluates these paths against
-  # the whole PR diff, so the check attaches to every head of such a PR — a handoff-only commit on top
-  # of a Dockerfile change still gets it. A `push` trigger filters on the pushed commits alone and left
-  # a PR head with no image check (LEGION-23 tester round 1). The paths are every file worker.Dockerfile
-  # builds from: the root manifest, lockfile, patches and every root workspace's package.json (the plugin
-  # stage's frozen install); the packages it copies whole — the Dockerfile (packages/daemon), the two
-  # plugins (packages/pi-envoy, packages/pi-legion, with packages/pi-shared, packages/envoy-client,
-  # packages/contracts), the Claude Code plugin (packages/claude-envoy, whose source the plugin
-  # stage builds into the image's dist/ and legion/, with the .bun-version that build is pinned to),
-  # the skills and the prepack that stages them, the Go module and its build inputs
-  # (packages/daemon, go.work, go.work.sum — packages/daemon also holds the committed lockfiles the
-  # toolchain stage installs the language servers and Claude Code from), and packages/envoy (copied
-  # whole for its agent-secrets binary) but its packages/envoy/infra module, which the
-  # .dockerignore drops; the scripts that write its third-party notices; the OMP pin (.omp-pin);
-  # the context's .dockerignore; and this workflow. The final `legion probe-image` runs the image's
-  # own `legion`, both Oh My Pi plugins and the Claude lane, so a PR that breaks any of them fails
-  # here instead of merging and publishing nothing. A draft's head builds no image until the pull
-  # request is marked ready (`ready_for_review`), which builds that head. A `closed` run builds
-  # nothing: it enters the concurrency group below and cancels the pull request's build still
-  # waiting or running, as a newer head's run cancels an older head's. A reopen within about a
-  # minute of the close can race that closed run: tests-closed.yaml says what happens and what
-  # to do.
-  # .github/scripts/check-image-trigger-paths.sh fails the build when this list misses a file the
-  # image build reads.
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review, closed]
-    paths:
-      - package.json
-      - bun.lock
-      - patches/**
-      - packages/envoy-plugin/package.json
-      - packages/claude-envoy/**
-      - packages/proof-editor/package.json
-      - packages/dispatch/package.json
-      - packages/envoy/internal/dispatch/pmdoc/gen/package.json
-      - docs/site/package.json
-      - packages/daemon/**
-      - packages/pi-envoy/**
-      - packages/pi-legion/**
-      - packages/pi-shared/**
-      - packages/envoy-client/**
-      - packages/contracts/**
-      - skills/**
-      - go.work
-      - go.work.sum
-      - packages/envoy/**
-      - "!packages/envoy/infra/**"
-      - .omp-pin
-      - .bun-version
-      - .dockerignore
-      - .github/workflows/worker-image.yaml
-      - scripts/pi-plugin-prepack.sh
-      - scripts/third-party-notices.ts
-      - scripts/go-third-party-notices.sh
-      - scripts/assemble-third-party-notices.sh
+  # Pull requests: .github/workflows/ci.yaml calls this workflow (its worker-image job) for every
+  # pull request whose diff its `worker_image` filter matches, on any base, building the head and
+  # publishing :sha-<short> only. A stacked pull request publishes a sha- tag too, which a pin never
+  # accepts (docs/kubernetes.md, "Pin by digest, never by tag"). The final `legion probe-image` runs
+  # the image's own `legion`, both Oh My Pi plugins and the Claude lane, so a pull request that
+  # breaks any of them fails here instead of merging and publishing nothing. .github/scripts/check-image-trigger-paths.sh fails the
+  # build when that filter misses a file the image build reads, or matches one it does not read.
 
-# Workflow-level, not job-level, because a job its own `if:` skips enters no job-level group: only
-# here does a closed pull request's run, whose build skips, cancel that pull request's build. On
-# pull_request the key is the pull request's number, so a newer head, or the closing, cancels an
-# older head's build of the same pull request whether it waits or runs (a merged pull request's
-# closed event carries github.ref = the base branch, so the number is the one key that names the
-# pull request). Every other event keys on github.sha, not github.ref, and cancel-in-progress is
-# off for those events, so a running main, workflow_call or workflow_dispatch build is never
-# cancelled, and none of those runs cancels a pull request's build. GitHub may still replace a
-# pending run with a newer one at the same sha, which builds the same image, so a dropped pending
-# main run never leaves a commit with no image to pin (why: this PR's description), except that a
-# further run at that sha (a manual `gh workflow run worker-image.yaml` at main's sha) replacing
-# release.yaml's pending attest-only call leaves the digest worker_image_release names
-# unattested, which the consumers' verify refuses: that fails closed. Under
-# workflow_call the github context is the caller's (release.yaml, on push or workflow_dispatch),
-# so a release run keys worker-image-<sha>, apart from release.yaml's own
-# `release-${{ github.ref }}` group. Both of a release run's calls key that group, and neither
-# waits on the other: the attest-only call starts only once the build-only call has finished
-# (release.yaml's worker_image_attest needs worker_image). The build job repeats no group: GitHub
-# detects a job group named like its workflow's as a deadlock and cancels the run.
-concurrency:
-  group: worker-image-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
-# Same-repo `pull_request` runs get this token too (a fork PR would get a read-only token, and this
-# repo takes no fork PRs), so it carries only what the pull request path needs. The legion version
-# tag and the release note, which needs `contents: write`, run in release.yaml's own
+# This workflow has no pull_request trigger of its own: a pull request's run is ci.yaml's call on
+# pull_request, which gets this same token (a fork pull request would get a read-only one, and this
+# repo takes no fork pull requests), so it carries only what the pull request path needs. The
+# legion version tag and the release note, which needs `contents: write`, run in release.yaml's own
 # `worker_image_release` job, and the attestation's `id-token` and `attestations: write` belong to
 # the `attest` job below alone, which a pull request run skips. A pull request runs its own head's
 # copy of this file, so one that drops that `if:` gets those scopes too; its attestation is still
@@ -158,14 +86,44 @@ env:
 jobs:
   build:
     # An attest-only call (attest_digest) attests what the caller's earlier call built, so it skips
-    # the build. workflow_dispatch and a workflow_call from release.yaml (on push or
-    # workflow_dispatch) carry no pull_request and no closed action, so the two event terms hold
-    # there. .github/scripts/check-image-trigger-paths.sh admits all three terms.
-    if: ${{ inputs.attest_digest == '' && github.event.action != 'closed' && !github.event.pull_request.draft }}
+    # the build. Every other run leaves attest_digest out (ci.yaml's call on a pull request,
+    # release.yaml's build-only call, workflow_dispatch), so it builds.
+    # .github/scripts/check-image-trigger-paths.sh admits this call-mode term.
+    if: ${{ inputs.attest_digest == '' }}
     runs-on: ubuntu-24.04
+    # Job-level (not workflow-level): this file is a called workflow, and job-level concurrency
+    # behaves identically for its two triggers, `workflow_call` and `workflow_dispatch`.
+    # A pull request's runs share one group per PR number. A new head's run cancels the build of the
+    # head it replaced, whether that build is waiting for the group, waiting for a runner or running.
+    # The call comes from ci.yaml on pull_request, whose own concurrency group (one per pull request
+    # number, cancel-in-progress on pull_request) already cancels an older head's whole run, this
+    # call included, and which tests-closed.yaml joins when the pull request closes, cancelling a
+    # build still waiting or running then; this group also cancels a build that a re-run of an older
+    # head's run starts. Only a head that starts a run of its own can do this. A push carrying
+    # `skip-checks: true` (a `.legion/`-only handoff) starts no run, so it never cancels the code
+    # head's build. Another pull request's build is in another group. Other events key on
+    # github.sha, not github.ref, so a pending run of one main commit never drops another commit's.
+    # They never cancel: in a call from release.yaml, `github.event_name` is the caller's (`push` or
+    # `workflow_dispatch`, never `pull_request`), so no main commit is left without an image to pin.
+    # Of a release run's two calls only the build-only one's build enters this group: the
+    # attest-only call's build skips on its `if:`, and a job its `if:` skips enters no job-level
+    # group. A further run at main's sha (a manual `gh workflow run worker-image.yaml`) can still
+    # replace release.yaml's pending build; release.yaml's worker_image then fails, so
+    # worker_image_attest and worker_image_release skip and nothing names an unattested image:
+    # that fails closed.
+    # On a pull request, the run that reaches the group last wins, and GitHub does not guarantee
+    # arrival order: two pushes seconds apart, or a re-run of an older head's run, can cancel the
+    # newest head's build, and ci.yaml's ci-ok then fails for that run. `gh run rerun` of the newest
+    # head's run restores it, so re-run an older head's run only after the newest head's build has
+    # completed. The job has no draft or closed `if:`: its only pull_request run is ci.yaml's call,
+    # which never runs on a draft (ci.yaml's `changes` skips it) and has no `closed` trigger.
+    concurrency:
+      group: worker-image-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     env:
-      # The commit that is built and that the sha- tag names: the PR head on `pull_request` (github.sha
-      # would be the ephemeral merge commit there); the triggering commit for workflow_call/dispatch.
+      # The commit that is built and that the sha- tag names: the PR head on a pull request (ci.yaml's
+      # call; github.sha would be the ephemeral merge commit there); the triggering commit for
+      # release.yaml's call and workflow_dispatch.
       BUILT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     outputs:
       ref: ${{ steps.record.outputs.ref }}
@@ -241,14 +199,23 @@ jobs:
           platforms: linux/amd64
           provenance: false
           push: true
-          # The layer cache is read by every build and written only by a build on main
-          # (release.yaml calls this workflow on main pushes, so github.ref there is
-          # refs/heads/main): an entry a pull request writes is readable by no other pull request.
-          # Off main cache-to is empty, which passes no --cache-to at all. The scope is the
-          # worker image's own, so the Envoy listener's build (release-envoy-listener.yaml, the
-          # default scope) does not replace its index.
+          # The layer cache is the GitHub Actions cache under the image's own scope, worker-image,
+          # so the Envoy listener's build (release-envoy-listener.yaml, the default scope) never
+          # replaces its index. Every build reads it; only a build on main writes it (release.yaml
+          # calls this workflow on main pushes; off main cache-to is empty, which passes no
+          # --cache-to). A pull request's build reads the entries main wrote and writes none, and
+          # GitHub never lets a main run restore a branch's entries, so a pull request cannot put a
+          # layer into the attested release build (no cache shared between trusted and untrusted
+          # builds, BuildKit advisory GHSA-f2v9-hprr-32q3). A newer head can cancel a pull request's
+          # build mid-export, and on 2026-10-27 the Actions cache held 10.80 GB of
+          # pull-request-scope buildkit entries. mode=min exports only the final image's layers, not
+          # every intermediate stage's: on 2026-10-28 main alone held 10.44 GB, 5.97 GB of it
+          # buildkit blobs, mostly this build's mode=max export, over the repository's limit, so main
+          # evicted its own entries (the Envoy listener measured 136.8 MB a run with mode=min
+          # against 1.6 GB with mode=max). ignore-error=true: the cache only saves time, so a failed
+          # export never fails the build that pushed the image a release pins.
           cache-from: type=gha,scope=worker-image
-          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=worker-image' || '' }}
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=worker-image,ignore-error=true' || '' }}
           tags: ${{ steps.meta.outputs.tags }}
           # org.opencontainers.image.source is the Dockerfile's LABEL (the in-repo convention).
           labels: |
