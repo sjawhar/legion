@@ -1,9 +1,0 @@
-kind: Added
-body: |-
-    `dispatch related --project <KEY> [--title <title>] [--text <text>] [--exclude-issue <KEY>]
-    [--keywords-only]` runs the related-item check a new issue or ask gets, through
-    `POST /api/v1/projects/{key}/related` (`DispatchClient.related`), writes nothing, and prints the
-    check's form as `dispatch issue` does. Use it to check a draft before filing it.
-time: 2026-10-28T10:15:02.237096258Z
-custom:
-    Issue: pr2397
