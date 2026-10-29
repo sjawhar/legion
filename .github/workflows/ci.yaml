@@ -2338,7 +2338,9 @@ jobs:
   # TestConnectsSharingADialerRecordItsLastError), the listener, where the role claim watcher, the
   # session and interest watchers and the request handlers meet, with the role claim view, its
   # lock and its epoch in the registry store and the watchers' completeness and rescans in kvwatch
-  # (INFRA-141), pmdoc (LEGION-571: its own flakes under -race and load, not a race in production
+  # (INFRA-141), the session cache, whose reads take its shared lock beside watcher writes and the
+  # expiry timer's callback as kvwatch's resume point is read while a replaced watcher still
+  # applies, pmdoc (LEGION-571: its own flakes under -race and load, not a race in production
   # code, cost three review rounds because nothing ran this package under -race before a PR
   # claimed it) and the Dispatch API - all under the race detector. A read that walks a live
   # document without its lock races the room's peers, which no ordinary run shows: envoy-go's
@@ -2347,7 +2349,8 @@ jobs:
   # since go test's ten-minute default is a whole package's.
   #
   # Three jobs of the lane are in this file: envoy-go-race (delivery, the Dispatch store, the bus,
-  # the listener, the registry store and kvwatch), envoy-go-race-pmdoc and envoy-go-race-api. The
+  # the listener, the registry store, the session cache and kvwatch), envoy-go-race-pmdoc and
+  # envoy-go-race-api. The
   # document service is raced in envoy-go-race-docs, a job another pull request adds, not this
   # file.
   #
@@ -2400,8 +2403,8 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
-      - name: Race-test delivery, the store, the bus, the listener, the registry store and kvwatch
-        run: go test -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/kvwatch/...
+      - name: Race-test delivery, the store, the bus, the listener, the registry store, the session cache and kvwatch
+        run: go test -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...
         working-directory: packages/envoy
 
   # pmdoc under the race detector, on a runner of its own (the lane's comment above says why). The

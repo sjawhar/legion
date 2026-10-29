@@ -624,10 +624,10 @@ GATES = [
     ) + setup_go("envoy-infra-go", f"{INFRA}/go.mod") + CI_SELF),
 
     gate("envoy_go_race", "envoy-go-race", runs=[
-        step_run("envoy-go-race", "Race-test delivery, the store, the bus, the listener, the registry store and kvwatch",
-                 "go test -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/kvwatch/...",
+        step_run("envoy-go-race", "Race-test delivery, the store, the bus, the listener, the registry store, the session cache and kvwatch",
+                 "go test -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...",
                  ENVOY, ["./internal/dispatch/delivery/...", "./internal/dispatch/store/...", "./internal/bus/",
-                         "./cmd/listener/", "./internal/store/", "./internal/kvwatch/..."], race=True),
+                         "./cmd/listener/", "./internal/store/", "./internal/session/", "./internal/kvwatch/..."], race=True),
     ], reads=setup_go("envoy-go-race", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("envoy_go_race_pmdoc", "envoy-go-race-pmdoc", runs=[

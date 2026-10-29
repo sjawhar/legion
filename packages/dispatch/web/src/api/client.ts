@@ -83,6 +83,7 @@ import type {
   RepoProject,
   SearchResponse,
   Subscriber,
+  Suggestions,
   UpdateDeliverySessionGroupInput,
   UpdateIssueInput,
   UserAgentState,
@@ -917,6 +918,22 @@ export class DispatchApiClient {
     options: { project?: string; limit?: number } = {}
   ): Promise<SearchResponse> {
     return this.json<SearchResponse>(pathWithQuery("/api/v1/search", { q: query, ...options }));
+  }
+
+  /**
+   * `GET /api/v1/projects/{key}/related`: the related-item check over a title, recording nothing.
+   * The create dialog asks while a person types, so a caller passes the `signal` of the check it
+   * is still interested in and a superseded one is aborted rather than raced.
+   */
+  relatedItems(
+    project: string,
+    title: string,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<Suggestions> {
+    return this.json<Suggestions>(
+      pathWithQuery(`/api/v1/projects/${pathSegment(project)}/related`, { title }),
+      { signal: options.signal }
+    );
   }
 
   createIssue(input: CreateIssueInput, bounds: WriteBounds): Promise<Issue> {
