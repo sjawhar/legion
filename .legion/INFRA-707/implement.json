@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-707",
+  "completed": "2026-10-29T09:40:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2496",
+  "proof": [
+    {
+      "criterion": "1. A test drives an agent write racing browser updates on one warm room, fails on main, passes at the head over enough rounds (count and main's failure rate stated).",
+      "surface": "Go tests against a real Postgres 18.6 + pgvector 0.8.7 (local, as CI runs them)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test ./internal/dispatch/docs/ -run 'TestStoredOrder' -count=1 -v ; go test ./internal/dispatch/docs/ -run TestStoredOrderSoak -count=1 -v -args -stored-order-rounds=300 ; CGO_ENABLED=1 go test -race ./internal/dispatch/docs/ -run 'TestStoredOrder|TestAFlush|TestAReadPoint|TestAShadow|TestAFailedRooms' -count=1 ; go test ./internal/dispatch/docs/ -count=1 -timeout 60m",
+      "observed": "At 7f2ba1ff (main plus tests) all ten window tests fail with their window's mismatch and the soak fails 200 of 200 counted rounds (p = 1, so n = max(3/p, 200) = 200). At a6b64ddb every TestStoredOrder test passes; soak rounds=300 counted=300 mismatching_counted_rounds=0 mismatches=0; race lane ok 18.0s with no data race; whole docs package ok 754.4s; cmd/dispatch ok 136.9s.",
+      "headSha": "a6b64ddb21782dc5e5680433a9934fbd707925c2",
+      "negativeControl": "The same tests at 7f2ba1ff (production code of main 75833475): every window test red, e.g. TestStoredOrderHeldBrowserEditUnderAnAgentVersion 'version number=3 doc_update_version=2 ... stored_length=28 ... fold_length=23', TestStoredOrderTwoBrowsersOutOfOrder 'class update=2 stored=true expected=false'; TestStoredOrderChecker flags each crafted fault."
+    },
+    {
+      "criterion": "Stored history replays under real browsers and agent HTTP writes on a real Dispatch server (the surface acceptance 2 runs at cluster scale)",
+      "surface": "local real envoy-dispatch built from the head, Postgres 18.6 + pgvector, browsertype peers over the document websocket, agent writes over the HTTP API, envoy-dispatch stored-order",
+      "command": "HEAD_SRC=<head packages/envoy> bash run.sh head <head packages/envoy> 18801 60 (run.sh and agent.py in dispatch://INFRA-707/artifact/infra-707-implementer-evidence-tar-gz version 2)",
+      "observed": "agent: 56 delete + 44 insert + 19 replace edits, 66 named versions, 53 uploads all accepted; 6 peers (3 per document) sent 638 updates each, errors=0; stored-order: documents=2 clean=2 mismatched=0 (1699 and 1736 updates checked, 94 and 98 versions checked), exit 0; server log 0 ERROR lines.",
+      "headSha": "a6b64ddb21782dc5e5680433a9934fbd707925c2",
+      "negativeControl": "Same script with the server built from main 75833475: stored-order documents=2 clean=0 mismatched=2, 42 mismatches (versions at doc_update_version whose fold differs, wrong classes), exit 1."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/docs/storedorder.go (new: CheckStoredOrder)",
+    "packages/envoy/internal/dispatch/docs/flush.go (new: readPoint, roomFlush, flushThrough, Ledger.flushThrough/storeRead/storeRepair)",
+    "packages/envoy/internal/dispatch/docs/shadow.go (new: roomShadow re-measure)",
+    "packages/envoy/internal/dispatch/docs/{roomstate,websocket,tree,ledger,persistence,pending_authors,livewrite,mutation,lostedit,service,rebuild}.go",
+    "packages/envoy/internal/dispatch/docs/docstest/docstest.go (DialContext)",
+    "packages/envoy/cmd/dispatch/{storedorder.go,storedorder_test.go,subcommands.go,settings.go,README.md}",
+    "packages/envoy/loadtest/browsertype/main.go (new)",
+    "packages/envoy/.changes/unreleased/INFRA-707-stored-order.yaml",
+    ".dispatch/architecture/dispatch-docs.md",
+    "tests: storedorder_test.go, flush_test.go, shadow_test.go (new) and the changed tests the PR body lists with their rules"
+  ],
+  "trickyParts": [
+    "Read point without a ygo change: renderedReplica.readPoint drains the room's update log under the replica lock and copies the replica; a replica in its recover state copies the live doc under its own lock then drains again (exact when the log hands over nothing).",
+    "flushThrough runs no render between its appends (INFRA-636 queues the inserts); provisional classes are re-measured on the write's shadow before the first append.",
+    "Settlement appends nothing until ask reconciliation has taken the project copy lock (TestCopyLockComesBeforeEveryPendingRowAndEvent).",
+    "Local Postgres harness for the tester: pg.sh in the evidence tarball (PG18 debs unpacked under $TMPDIR/pg18, port 55418). The run.sh script exits 1 at its last line only because `grep -c ' ERROR '` finds 0 under pipefail; read the stored-order exit line."
+  ],
+  "deviations": [
+    "The replay r16 mismatch INFRA-598 reported (no browsers) is renderer skew in that harness (Dispatch 9b92ac14 lacks #2272, the checker has it), not a sixth window; no code change. The checker must be built from the same commit as the Dispatch it reads (README).",
+    "An edit a snapshot or settlement stores itself is now credited on that version, not the next one (same rule captureWrite follows); the affected credit tests are renamed and listed in the PR body.",
+    "The api package's TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves refuses the local C-collation database; it is unrelated and passes in CI."
+  ],
+  "openQuestions": [
+    "Acceptance 2 (INFRA-598's cluster run with Dispatch and stored-order both built from the head, browsertype in the runner pod) and acceptance 3 (INFRA-589 harness, 5 runs per side) are not yet run; INFRA-598's implementer has the stored-order and browsertype interfaces."
+  ]
+}
