@@ -3,10 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -80,18 +77,20 @@ func liveEventsSince(ctx context.Context, q queryer, cursor, safe int64, limit i
 // event at cursor (nil when no row holds it): the delivery hub (catchUpEvents) and the event stream
 // relay (resetCursor) compare them with what they read for their cursor to tell an event log that
 // was reset (eventLogWasReset).
+//
+// Both come from one statement, so they describe one log. A `truncate events restart identity`
+// (e2e/seed.ts) takes an ACCESS EXCLUSIVE lock, and a statement holds its ACCESS SHARE lock on
+// events until it ends, so the reset lands wholly before or wholly after this read. Read as two
+// statements, a reset committing between them answered with the old log's newest id and no row at
+// the cursor: the relay then took the old log's head for the new log's and closed the next
+// subscription opened after the reset as a second reset.
 func eventCursorCheck(ctx context.Context, q queryer, cursor int64) (maxID int64, cursorAt *time.Time, err error) {
-	if err := q.QueryRow(ctx, `select coalesce(max(id), 0) from events`).Scan(&maxID); err != nil {
+	if err := q.QueryRow(ctx, `
+		select coalesce((select max(id) from events), 0), (select created_at from events where id = $1)
+	`, cursor).Scan(&maxID, &cursorAt); err != nil {
 		return 0, nil, err
 	}
-	var rowAt time.Time
-	switch err := q.QueryRow(ctx, `select created_at from events where id = $1`, cursor).Scan(&rowAt); {
-	case errors.Is(err, pgx.ErrNoRows):
-		return maxID, nil, nil
-	case err != nil:
-		return 0, nil, err
-	}
-	return maxID, &rowAt, nil
+	return maxID, cursorAt, nil
 }
 
 // eventLogWasReset is whether the event log was reset under a reader's cursor, from what

@@ -346,9 +346,9 @@ func (s *server) takeBootMark() {
 	s.bootMark = make(chan struct{})
 	go func() {
 		defer close(s.bootMark)
-		mark, err := s.horizon().Mark(s.lifetime())
+		mark, err := s.horizon().Mark(s.lifetime)
 		if err != nil {
-			if s.lifetime().Err() == nil {
+			if s.lifetime.Err() == nil {
 				slog.Warn("dispatch: could not take the event log's boot mark; the live event stream's first start falls back to a mark of its own", "error", err)
 			}
 			return

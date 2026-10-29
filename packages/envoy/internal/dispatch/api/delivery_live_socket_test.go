@@ -21,7 +21,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// deliverySocketRig is the API test server behind a real listener and run on a Lifetime, so Register
+// deliverySocketRig is the API test server behind a real listener and run on a lifetime, so Register
 // builds the delivery hub and mounts GET /ws/delivery as production does.
 type deliverySocketRig struct {
 	handler  http.Handler
@@ -29,12 +29,12 @@ type deliverySocketRig struct {
 	served   *server
 	host     string
 	url      string
-	// stop ends the server's Lifetime, as the signal that shuts Dispatch down does.
+	// stop ends the server's lifetime, as the signal that shuts Dispatch down does.
 	stop context.CancelFunc
 }
 
 // newDeliverySocketRig starts the rig on options; listen, when given, wraps the server's listener.
-// The Lifetime derives from the test's context, which ends before the test's cleanups wait out the
+// The lifetime derives from the test's context, which ends before the test's cleanups wait out the
 // sockets and the hub.
 func newDeliverySocketRig(t *testing.T, options testServerOptions, listen func(net.Listener) net.Listener) *deliverySocketRig {
 	t.Helper()
@@ -634,7 +634,7 @@ func TestTheTestHookClosesEveryDeliverySocket(t *testing.T) {
 		}
 		for name, client := range map[string]*socketClient{"the person's": person, "the agent's": agent} {
 			if code, _ := client.closeCode(t, 5*time.Second); code != gws.CloseServiceRestart {
-				t.Errorf("%s socket closed with %d, want 1012, which a page answers by resuming at once", name, code)
+				t.Errorf("%s socket closed with %d, want 1012, which a page answers by resuming within the first reconnect's spread", name, code)
 			}
 		}
 
@@ -683,9 +683,9 @@ func TestPingsKeepAnIdleSocketOpen(t *testing.T) {
 
 // A page that answers no ping is closed once two heartbeats pass without a pong. It has gone or
 // stopped reading, so the socket sends it no close frame: the connection ends, which gorilla and a
-// browser report as 1006, and the page reconnects with backoff, as after every close but 1012
-// (packages/dispatch/web/src/api/delivery-live.ts, lost). 1008 would say its caller no longer
-// resolves.
+// browser report as 1006, and the page reconnects on its backoff, as after every close but 1012,
+// which starts the backoff over (packages/dispatch/web/src/api/delivery-live.ts, lost). 1008
+// would say its caller no longer resolves.
 func TestAPageThatAnswersNoPingLosesItsSocketWithNoCloseFrame(t *testing.T) {
 	const heartbeat = 200 * time.Millisecond
 	rig := newDeliverySocketRig(t, testServerOptions{streamHeartbeat: heartbeat}, nil)

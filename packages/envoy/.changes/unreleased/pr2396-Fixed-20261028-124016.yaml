@@ -1,0 +1,5 @@
+kind: Fixed
+body: The live event stream reads the event log's cursor check in one statement, so a reset of the log between two reads is no longer taken for a second reset that closes the next subscription.
+time: 2026-10-28T12:40:16.824553569Z
+custom:
+    Issue: pr2396
