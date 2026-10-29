@@ -201,7 +201,7 @@ func TestAMentionInFlightAtAKillReachesItsSessionOnceAfterTheClaimLapses(t *test
 	// The killed process claimed the attempt and its send reached the listener; it died before it
 	// recorded the outcome, and its claim has lapsed.
 	if _, err := database.Pool.Exec(context.Background(), `
-		update comment_deliveries set claimed_at = now() - interval '`+claimLease+`' - interval '1 second'
+		update comment_deliveries set claimed_at = now() - `+model.DeliveryClaimLapseInterval+` - interval '1 second'
 		where comment_id = $1
 	`, inFlight.ID); err != nil {
 		t.Fatalf("lapse the killed process's claim: %v", err)
@@ -271,7 +271,7 @@ func TestAMentionClaimedByAKilledProcessStillReachesItsSessionWhenTheResendFails
 		"body": "Claimed when the process was killed.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
 	if _, err := database.Pool.Exec(context.Background(), `
-		update comment_deliveries set claimed_at = now() - interval '`+claimLease+`' - interval '1 second'
+		update comment_deliveries set claimed_at = now() - `+model.DeliveryClaimLapseInterval+` - interval '1 second'
 		where comment_id = $1
 	`, claimed.ID); err != nil {
 		t.Fatalf("lapse the killed process's claim: %v", err)

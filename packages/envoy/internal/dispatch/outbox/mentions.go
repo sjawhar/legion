@@ -520,7 +520,9 @@ func (c mentionComment) settleAbandoned(kind mentionKind, key string) (state men
 
 // fallbackCopy is one comment_fallback_copies row a fallback pass claimed: the copy of the comment
 // at destination, the comment.created event eventID's envelope, decided by the attempts under key
-// of kind. attempts is how many of the row's passes have failed so far (attempt_count).
+// of kind. attempts is how many of the row's passes have failed so far (attempt_count), and claim
+// the next_attempt_at the pass's claim set, which every write of the pass's record is guarded on
+// (recordFallbackCopies).
 type fallbackCopy struct {
 	commentID   string
 	destination string
@@ -528,6 +530,7 @@ type fallbackCopy struct {
 	key         string
 	kind        mentionKind
 	attempts    int
+	claim       time.Time
 }
 
 // fallbackEvent is the comment.created event a fallback copy is the envelope of, and the slug of
@@ -539,8 +542,8 @@ type fallbackEvent struct {
 
 // fallbackRecord is what a fallback pass came to for one row: settled, and published when it
 // published the copy; failed when its decision or publish failed, which counts an attempt on the
-// row and keeps its claim unless it settles the row too (failedFallbackCopy). A record of a row
-// neither settled nor failed releases the row's claim for a later pass.
+// row and backs it off (failedFallbackCopy). A record of a row neither settled nor failed releases
+// the row's claim for a later pass.
 type fallbackRecord struct {
 	held      fallbackCopy
 	settled   bool
@@ -549,18 +552,16 @@ type fallbackRecord struct {
 }
 
 // failedFallbackCopy is the record of a row whose decision or publish failed: one more attempt
-// counted on it, its claim kept until claimWindow lapses. The attempt that brings the row's count
-// to retry.DeadLetterAttempts, the threshold the event scan logs at (backOff), settles the row
-// unpublished instead and is logged at Error, so a copy NATS always denies, or one whose event
-// cannot be read, is not decided again for ever.
+// counted on it, and its next attempt retry.Delay of that count away, the schedule an event backs
+// off by (backOff). Nothing about a publish failing is permanent, so the row is never given up:
+// the attempt that brings its count to retry.DeadLetterAttempts, the threshold the event scan logs
+// at, is logged at Error, and the row is retried on the same schedule after it.
 func failedFallbackCopy(held fallbackCopy) fallbackRecord {
-	record := fallbackRecord{held: held, failed: true}
-	if attempts := held.attempts + 1; attempts >= retry.DeadLetterAttempts {
-		slog.Error("dispatch outbox: fallback copy reached dead-letter threshold; settled unpublished",
+	if attempts := held.attempts + 1; attempts == retry.DeadLetterAttempts {
+		slog.Error("dispatch outbox: fallback copy reached dead-letter threshold",
 			"comment_id", held.commentID, "destination", held.destination, "attempts", attempts)
-		record.settled = true
 	}
-	return record
+	return fallbackRecord{held: held, failed: true}
 }
 
 // publishFallbackCopies is the fallback pass. This is the one description of how a mentioned
@@ -606,12 +607,15 @@ func failedFallbackCopy(held fallbackCopy) fallbackRecord {
 // events row: the event's published_at, published_destinations and payload stay as its own
 // publish left them, and no destination but the row's is reached, whatever the issue's route,
 // claimant, followers or authors are by then. A decision or a publish that fails counts an attempt
-// on the row (attempt_count) and keeps its claim, so it is decided again once claimWindow lapses;
-// the attempt that brings the count to retry.DeadLetterAttempts settles the row unpublished and is
-// logged at Error (failedFallbackCopy). One cut short by the process stopping or by NATS being
-// unreachable counts nothing and releases the claim for the next pass; a process that dies between
-// the publish and the mark leaves the claim too, and the repeat carries the same dedupe key, which
-// the host, and the stream within its duplicate window, drop.
+// on the row (attempt_count) and moves its next_attempt_at out by retry.Delay of that count, the
+// schedule an event backs off by, so it is decided again once that passes; nothing about a
+// publish failing is permanent, so the row is never given up, and the attempt that brings the
+// count to retry.DeadLetterAttempts is logged at Error (failedFallbackCopy). One cut short by the
+// process stopping or by NATS being unreachable counts nothing and releases the claim for the next
+// pass; a process that dies between the publish and the mark leaves the claim too, and the repeat
+// carries the same dedupe key, which the host, and the stream within its duplicate window, drop.
+// Every write of a pass's record is guarded on the claim the pass took (recordFallbackCopies), so
+// a pass that outlasts claimWindow writes nothing to a row a later pass has claimed since.
 //
 // Races. A person's Retry of the mention opens or resumes an attempt the pass reads as being
 // sent, so the row waits for it, and a Retry that is sent settles the row with nothing sent. A
@@ -766,10 +770,12 @@ func decideFallbackCopy(
 	return fallbackPublishes, item, nil
 }
 
-// claimFallbackCopies claims at most batchSize unsettled fallback rows whose claim is not held,
-// oldest first, in one statement: for update skip locked, so a second process's pass skips them,
-// and next_attempt_at pushed out by claimWindow in the same breath. It reads the partial index of
-// unsettled rows, so a pass with nothing to decide reads no row.
+// claimFallbackCopies claims at most batchSize unsettled fallback rows that are due - never
+// claimed, released, or past the claim or the backoff their next_attempt_at holds - oldest first,
+// in one statement: for update skip locked, so a second process's pass skips them, and
+// next_attempt_at pushed out by claimWindow in the same breath, which each row returns as its
+// claim. It reads the partial index of unsettled rows, so a pass with nothing to decide reads no
+// row.
 func claimFallbackCopies(ctx context.Context, deps Deps) ([]fallbackCopy, error) {
 	rows, err := deps.Store.Pool.Query(ctx, `
 		update comment_fallback_copies set next_attempt_at = now() + $2
@@ -780,7 +786,7 @@ func claimFallbackCopies(ctx context.Context, deps Deps) ([]fallbackCopy, error)
 			limit $1
 			for update skip locked
 		)
-		returning comment_id::text, destination, event_id, session_id, target, attempt_count
+		returning comment_id::text, destination, event_id, session_id, target, attempt_count, next_attempt_at
 	`, batchSize, claimWindow)
 	if err != nil {
 		return nil, err
@@ -788,7 +794,9 @@ func claimFallbackCopies(ctx context.Context, deps Deps) ([]fallbackCopy, error)
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (fallbackCopy, error) {
 		var held fallbackCopy
 		var sessionID, target *string
-		if err := row.Scan(&held.commentID, &held.destination, &held.eventID, &sessionID, &target, &held.attempts); err != nil {
+		if err := row.Scan(
+			&held.commentID, &held.destination, &held.eventID, &sessionID, &target, &held.attempts, &held.claim,
+		); err != nil {
 			return fallbackCopy{}, err
 		}
 		if target != nil {
@@ -846,34 +854,44 @@ func loadFallbackEvents(ctx context.Context, deps Deps, copies []fallbackCopy) (
 }
 
 // recordFallbackCopies writes what a fallback pass came to, in one statement: each row settled is
-// marked so, published when it published the copy; each failed row counts one more attempt and,
-// unless that settled it, keeps its claim until claimWindow lapses; and each row left for a later
-// pass has its claim released. A row a pass did not reach is not written and keeps its claim.
+// marked so, published when it published the copy; each failed row counts one more attempt and
+// waits retry.Delay of its new count from now (failedFallbackCopy); and each row left for a later
+// pass has its claim released. Every write is guarded on the claim the pass took (fallbackCopy's
+// claim): a row whose next_attempt_at is no longer that claim was claimed again by a later pass,
+// once the claim lapsed, and is that pass's, so it is not written. A row a pass did not reach is
+// not written either and keeps its claim.
 func recordFallbackCopies(ctx context.Context, deps Deps, records []fallbackRecord) error {
 	if len(records) == 0 {
 		return nil
 	}
 	commentIDs := make([]string, 0, len(records))
 	destinations := make([]string, 0, len(records))
+	claims := make([]time.Time, 0, len(records))
 	settled := make([]bool, 0, len(records))
 	published := make([]bool, 0, len(records))
-	failed := make([]bool, 0, len(records))
+	retryAfter := make([]*time.Duration, 0, len(records))
 	for _, record := range records {
 		commentIDs = append(commentIDs, record.held.commentID)
 		destinations = append(destinations, record.held.destination)
+		claims = append(claims, record.held.claim)
 		settled = append(settled, record.settled)
 		published = append(published, record.published)
-		failed = append(failed, record.failed)
+		if record.failed {
+			retryAfter = append(retryAfter, new(retry.Delay(record.held.attempts+1)))
+		} else {
+			retryAfter = append(retryAfter, nil)
+		}
 	}
 	_, err := deps.Store.Pool.Exec(ctx, `
 		update comment_fallback_copies c set
 			settled_at = case when o.settled then now() end,
 			published = o.published,
-			attempt_count = c.attempt_count + case when o.failed then 1 else 0 end,
-			next_attempt_at = case when o.failed and not o.settled then c.next_attempt_at end
-		from unnest($1::uuid[], $2::text[], $3::bool[], $4::bool[], $5::bool[])
-			as o(comment_id, destination, settled, published, failed)
+			attempt_count = c.attempt_count + case when o.retry_after is not null then 1 else 0 end,
+			next_attempt_at = now() + o.retry_after
+		from unnest($1::uuid[], $2::text[], $3::timestamptz[], $4::bool[], $5::bool[], $6::interval[])
+			as o(comment_id, destination, claim, settled, published, retry_after)
 		where c.comment_id = o.comment_id and c.destination = o.destination and c.settled_at is null
-	`, commentIDs, destinations, settled, published, failed)
+			and c.next_attempt_at = o.claim
+	`, commentIDs, destinations, claims, settled, published, retryAfter)
 	return err
 }

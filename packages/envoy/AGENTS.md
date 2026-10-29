@@ -2886,8 +2886,9 @@ the synchronous listener call records the sent or failed attempt instead of blin
   outbox, with its `comment.delivery` receipt, before it publishes the copy
   (`mentionComment.settleAbandoned`), and an attempt the stranded pass resends
   (`model.MentionResumedSQL`) has its copy held as a `comment_fallback_copies` row (migration
-  `0138`), which the fallback pass decides later; a row whose decision or publish fails
-  `retry.DeadLetterAttempts` times is settled unpublished and logged at Error. The doc comment of
+  `0138`), which the fallback pass decides later; a row whose decision or publish fails counts
+  the attempt and backs off by `retry.Delay`, as an event does, and is never given up, its
+  `retry.DeadLetterAttempts`th failure logged at Error. The doc comment of
   `publishFallbackCopies` in `internal/dispatch/outbox/mentions.go` is that protocol's one
   description, races included.
   Every other session - each attempt `failed`, or no row at all - is published to as if it had

@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -18,11 +17,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
-
-// claimLease is model.DeliveryClaimLapse as the bare text of a Postgres interval literal
-// (`interval '` + claimLease + `'`), the spelling comment_delivery_silent_listener_test.go ages an
-// attempt's claim past the lease with.
-var claimLease = fmt.Sprintf("%d seconds", int64(model.DeliveryClaimLapse/time.Second))
 
 // senderTestSessions are the live sessions the mention sender's stand-in listener knows, each
 // able to receive a steer.

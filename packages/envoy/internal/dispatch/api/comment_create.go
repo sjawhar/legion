@@ -479,12 +479,8 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	}
 	// The suppression names a candidate only, and the outbox's other session routes (an author,
 	// the thread's sessions, the primary document's, the claimant, a follower) take the comment's
-	// mentions as their candidates the same way. The outbox decides each copy when it publishes,
-	// by what the mention's attempts did (mentionDeliveryQuery in internal/dispatch/outbox): it
-	// skips the copy once the mention was sent, holds it back while the mention is pending, and
-	// publishes it once the mention failed or was abandoned. It finds an unanswered session:<id>
-	// mention's attempts by that <id>, and a route suppressed by its string alone by the mention of
-	// that target.
+	// mentions as their candidates the same way. The outbox decides each copy when it publishes
+	// (attempt.leftTo); publishFallbackCopies in internal/dispatch/outbox is the one description.
 	turn := threadTarget.replyTurn(actor, input.Turn)
 	var rowID string
 	if err := tx.QueryRow(r.Context(), `select gen_random_uuid()::text`).Scan(&rowID); err != nil {

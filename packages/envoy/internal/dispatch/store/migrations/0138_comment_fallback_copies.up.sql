@@ -8,10 +8,11 @@
 -- Exactly one of session_id and target is the key whose mention attempts decide the copy: the
 -- session an attempt counts under, or the target as written for a route the comment suppressed by
 -- that string alone. settled_at is when the fallback pass decided the row, published whether it
--- published the copy then; next_attempt_at is the claim one pass holds on the row while it
--- decides it, so a second process skips it; attempt_count is how many of the pass's decisions or
--- publishes of the row failed, and the row is settled unpublished once it reaches the outbox's
--- dead-letter threshold (retry.DeadLetterAttempts).
+-- published the copy then; next_attempt_at is when the row is next due: the claim one pass holds
+-- on the row while it decides it, so a second process skips it, or the backoff after a failed
+-- decision or publish; attempt_count is how many of the pass's decisions or publishes of the row
+-- failed, which paces that backoff (retry.Delay) as an event's attempt_count paces its own. A
+-- failure never settles the row.
 --
 -- The partial index holds the unsettled rows alone, in the order the pass reads them: a pass with
 -- nothing to decide reads an empty index, and a settled row leaves it.

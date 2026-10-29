@@ -892,6 +892,13 @@ func (p *denyingPublisher) PublishAsync(item contracts.Envelope) <-chan error {
 	return answered(nil)
 }
 
+// allow lifts the grant's denial: every later publish is accepted.
+func (p *denyingPublisher) allow() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.deny = ""
+}
+
 // seen is how many publishes to deny were denied, and the topics of those accepted.
 func (p *denyingPublisher) seen() (int, []string) {
 	p.mu.Lock()
@@ -899,30 +906,17 @@ func (p *denyingPublisher) seen() (int, []string) {
 	return p.denials, topicsOf(p.accepted)
 }
 
-// TestAFallbackCopyNATSAlwaysDeniesIsSettledUnpublishedAtTheDeadLetterThreshold: a held copy whose
-// publish NATS denies on every pass counts each denial on its row and is decided again on the next
-// pass, until its count reaches retry.DeadLetterAttempts, the threshold the event scan logs at. The
-// pass that brings it there settles the row unpublished and logs it at Error, and no later pass
-// publishes, counts or claims it.
-func TestAFallbackCopyNATSAlwaysDeniesIsSettledUnpublishedAtTheDeadLetterThreshold(t *testing.T) {
-	const (
-		issueTopic   = "notifications.dispatch.issue.T-1.comment.created"
-		sessionTopic = "notifications.agent.s1"
-		deadLetter   = `level=ERROR msg="dispatch outbox: fallback copy reached dead-letter threshold; settled unpublished"`
-	)
-	var logged lockedBuffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
-
-	ctx := store.WithTransactionTracking(context.Background())
-	database := storetest.Open(t)
-	broker := events.NewBroker()
+// seedHeldFallbackCopy writes a comment on issue T-1, routed to session:s1, that mentions s1, whose
+// attempt the stranded pass resends; scans its comment.created event through deps, which holds
+// s1's copy as a fallback row on s1's own topic; and fails the resend, so the next fallback pass
+// publishes that copy. It returns the comment's id.
+func seedHeldFallbackCopy(ctx context.Context, t *testing.T, deps Deps) string {
+	t.Helper()
 	route := "session:s1"
-	seedIssue(t, database, "T-1", &route)
+	seedIssue(t, deps.Store, "T-1", &route)
 	alice := model.Actor{Kind: "user", ID: "alice"}
-	commentID := seedComment(t, database, "T-1", alice, "@s1 are you there?", nil)
-	appendEvent(t, database, broker, model.Event{
+	commentID := seedComment(t, deps.Store, "T-1", alice, "@s1 are you there?", nil)
+	appendEvent(t, deps.Store, deps.Broker, model.Event{
 		IssueKey: new("T-1"), Type: "comment.created", Actor: alice,
 		Payload: model.CommentEventPayload{
 			Comment: model.Comment{
@@ -931,73 +925,184 @@ func TestAFallbackCopyNATSAlwaysDeniesIsSettledUnpublishedAtTheDeadLetterThresho
 			SuppressRoute: true, SuppressedRoute: route, SuppressedRouteSessionID: new("s1"),
 		},
 	})
-	seedMentionDelivery(t, database, commentID, "s1", "resumed")
-	publisher := &denyingPublisher{deny: sessionTopic}
-	deps := Deps{Store: database, Publisher: publisher, Broker: broker}
-
+	seedMentionDelivery(t, deps.Store, commentID, "s1", "resumed")
 	scan(ctx, deps)
-	if _, err := database.Pool.Exec(ctx, `update comment_deliveries set state = 'failed' where comment_id = $1`, commentID); err != nil {
+	if _, err := deps.Store.Pool.Exec(ctx, `update comment_deliveries set state = 'failed' where comment_id = $1`, commentID); err != nil {
 		t.Fatalf("fail the resend: %v", err)
 	}
-	heldCopy := func() (attempts int, settled, published, claimed bool) {
-		t.Helper()
-		if err := database.Pool.QueryRow(ctx, `
-			select attempt_count, settled_at is not null, published, next_attempt_at is not null
-			from comment_fallback_copies where comment_id = $1 and destination = $2
-		`, commentID, sessionTopic).Scan(&attempts, &settled, &published, &claimed); err != nil {
-			t.Fatalf("read the held copy: %v", err)
-		}
-		return attempts, settled, published, claimed
+	return commentID
+}
+
+// heldCopyRow is a comment_fallback_copies row as a test reads it.
+type heldCopyRow struct {
+	attempts  int
+	settled   bool
+	published bool
+	due       *time.Time
+}
+
+// readHeldCopy reads commentID's fallback row at destination.
+func readHeldCopy(t *testing.T, database *store.Store, commentID, destination string) heldCopyRow {
+	t.Helper()
+	var row heldCopyRow
+	if err := database.Pool.QueryRow(context.Background(), `
+		select attempt_count, settled_at is not null, published, next_attempt_at
+		from comment_fallback_copies where comment_id = $1 and destination = $2
+	`, commentID, destination).Scan(&row.attempts, &row.settled, &row.published, &row.due); err != nil {
+		t.Fatalf("read the held copy: %v", err)
 	}
-	// pass runs a fallback pass once the claim a failed pass keeps on an unsettled row has lapsed.
+	return row
+}
+
+// TestAFallbackCopyNATSDeniesIsRetriedPastTheDeadLetterThresholdUntilItIsPublished: a held copy
+// whose publish NATS denies counts each denial on its row and waits retry.Delay of its count before
+// it is decided again, the schedule an event backs off by: a pass before that is due neither
+// publishes nor counts it. The denial that brings the count to retry.DeadLetterAttempts, the
+// threshold the event scan logs at, is logged at Error once, and the row is retried past it, never
+// settled. Once NATS accepts the copy, the next pass publishes it, once, and settles the row.
+func TestAFallbackCopyNATSDeniesIsRetriedPastTheDeadLetterThresholdUntilItIsPublished(t *testing.T) {
+	const (
+		issueTopic   = "notifications.dispatch.issue.T-1.comment.created"
+		sessionTopic = "notifications.agent.s1"
+		deadLetter   = `level=ERROR msg="dispatch outbox: fallback copy reached dead-letter threshold"`
+	)
+	var logged lockedBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	ctx := store.WithTransactionTracking(context.Background())
+	database := storetest.Open(t)
+	publisher := &denyingPublisher{deny: sessionTopic}
+	deps := Deps{Store: database, Publisher: publisher, Broker: events.NewBroker()}
+	commentID := seedHeldFallbackCopy(ctx, t, deps)
+	// pass runs a fallback pass once the held copy's backoff has passed.
 	pass := func() {
 		t.Helper()
 		if _, err := database.Pool.Exec(ctx, `
 			update comment_fallback_copies set next_attempt_at = now() - interval '1 second'
 			where comment_id = $1 and settled_at is null and next_attempt_at is not null
 		`, commentID); err != nil {
-			t.Fatalf("lapse the held copy's claim: %v", err)
+			t.Fatalf("pass the held copy's backoff: %v", err)
 		}
 		publishFallbackCopies(ctx, deps)
 	}
 
-	for want := 1; want < retry.DeadLetterAttempts; want++ {
-		pass()
-		if attempts, settled, published, claimed := heldCopy(); attempts != want || settled || published || !claimed {
-			t.Fatalf("after %d denied passes the held copy has attempts=%d settled=%v published=%v claimed=%v, "+
-				"want %d attempts, unsettled and claimed", want, attempts, settled, published, claimed, want)
+	denied := retry.DeadLetterAttempts + 2
+	for want := 1; want <= denied; want++ {
+		before := time.Now()
+		if want == 1 {
+			publishFallbackCopies(ctx, deps)
+		} else {
+			pass()
+		}
+		after := time.Now()
+		row := readHeldCopy(t, database, commentID, sessionTopic)
+		if row.attempts != want || row.settled || row.published || row.due == nil {
+			t.Fatalf("after %d denied passes the held copy has attempts=%d settled=%v published=%v next_attempt_at=%v, "+
+				"want %d attempts, unsettled and due again", want, row.attempts, row.settled, row.published, row.due, want)
+		}
+		if row.due.Before(before.Add(retry.Delay(want))) || row.due.After(after.Add(retry.Delay(want))) {
+			t.Fatalf("after %d denied passes the held copy is due at %v, want retry.Delay(%d) = %v from the pass",
+				want, *row.due, want, retry.Delay(want))
+		}
+		if want == 1 {
+			// A pass before the backoff has passed leaves the row alone.
+			publishFallbackCopies(ctx, deps)
+			if again := readHeldCopy(t, database, commentID, sessionTopic); again.attempts != 1 || !again.due.Equal(*row.due) {
+				t.Fatalf("a pass inside the backoff left the held copy attempts=%d next_attempt_at=%v, want 1 and %v",
+					again.attempts, again.due, *row.due)
+			}
 		}
 	}
-	if strings.Contains(logged.String(), deadLetter) {
-		t.Fatalf("the held copy was dead-lettered before its %dth denied pass:\n%s", retry.DeadLetterAttempts, logged.String())
-	}
-
-	pass()
-	if attempts, settled, published, claimed := heldCopy(); attempts != retry.DeadLetterAttempts || !settled || published || claimed {
-		t.Fatalf("after %d denied passes the held copy has attempts=%d settled=%v published=%v claimed=%v, "+
-			"want it settled unpublished at %d attempts with no claim", retry.DeadLetterAttempts,
-			attempts, settled, published, claimed, retry.DeadLetterAttempts)
-	}
-	logLine := ""
+	var lines []string
 	for line := range strings.SplitSeq(logged.String(), "\n") {
 		if strings.Contains(line, deadLetter) {
-			logLine = line
+			lines = append(lines, line)
 		}
 	}
-	if logLine == "" || !strings.Contains(logLine, "destination="+sessionTopic) ||
-		!strings.Contains(logLine, fmt.Sprintf("attempts=%d", retry.DeadLetterAttempts)) {
-		t.Fatalf("the dead-letter line = %q, want one naming %s at %d attempts; log:\n%s",
-			logLine, sessionTopic, retry.DeadLetterAttempts, logged.String())
+	if len(lines) != 1 || !strings.Contains(lines[0], "destination="+sessionTopic) ||
+		!strings.Contains(lines[0], fmt.Sprintf("attempts=%d", retry.DeadLetterAttempts)) {
+		t.Fatalf("the dead-letter lines = %q, want one naming %s at %d attempts; log:\n%s",
+			lines, sessionTopic, retry.DeadLetterAttempts, logged.String())
+	}
+	if denials, accepted := publisher.seen(); denials != denied || !reflect.DeepEqual(accepted, []string{issueTopic}) {
+		t.Fatalf("NATS saw %d denied publishes and accepted %#v, want %d denials and the issue topic alone",
+			denials, accepted, denied)
 	}
 
-	publishFallbackCopies(ctx, deps)
-	if attempts, settled, published, claimed := heldCopy(); attempts != retry.DeadLetterAttempts || !settled || published || claimed {
-		t.Fatalf("a pass after the dead letter left the held copy attempts=%d settled=%v published=%v claimed=%v, want it untouched",
-			attempts, settled, published, claimed)
+	publisher.allow()
+	pass()
+	pass()
+	if row := readHeldCopy(t, database, commentID, sessionTopic); row.attempts != denied || !row.settled || !row.published {
+		t.Fatalf("once NATS accepted it the held copy has attempts=%d settled=%v published=%v, want %d attempts, settled and published",
+			row.attempts, row.settled, row.published, denied)
 	}
-	if denials, accepted := publisher.seen(); denials != retry.DeadLetterAttempts || !reflect.DeepEqual(accepted, []string{issueTopic}) {
-		t.Fatalf("NATS saw %d denied publishes and accepted %#v, want %d denials and the issue topic alone",
-			denials, accepted, retry.DeadLetterAttempts)
+	if denials, accepted := publisher.seen(); denials != denied || !reflect.DeepEqual(accepted, []string{issueTopic, sessionTopic}) {
+		t.Fatalf("NATS saw %d denied publishes and accepted %#v, want %d denials and the issue topic, then the copy once",
+			denials, accepted, denied)
+	}
+}
+
+// takeoverPublisher is a NATS that answers every publish to topic with answer, after takeOver
+// runs: a second process claims the row while the pass waits on NATS.
+type takeoverPublisher struct {
+	topic    string
+	answer   error
+	takeOver func()
+}
+
+func (p *takeoverPublisher) Window() bus.Sender { return p }
+
+func (p *takeoverPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	if item.Topic != p.topic {
+		return answered(nil)
+	}
+	p.takeOver()
+	return answered(p.answer)
+}
+
+// TestAFallbackPassWritesNothingToARowClaimedSinceItsClaim: a pass that outlasts its claim on a
+// held copy, which a second process's pass then claims, writes nothing of what it came to - a
+// publish, a denial or a release - to that row: the row stays as the second claim left it.
+func TestAFallbackPassWritesNothingToARowClaimedSinceItsClaim(t *testing.T) {
+	const sessionTopic = "notifications.agent.s1"
+	for _, tc := range []struct {
+		name   string
+		answer error
+	}{
+		{name: "the copy is published", answer: nil},
+		{name: "the copy is denied", answer: fmt.Errorf("publish %s: %w", sessionTopic, bus.ErrPublishDenied)},
+		{name: "NATS is unreachable", answer: fmt.Errorf("publish %s: %w", sessionTopic, bus.ErrUnavailable)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := store.WithTransactionTracking(context.Background())
+			database := storetest.Open(t)
+			publisher := &takeoverPublisher{topic: sessionTopic, answer: tc.answer}
+			deps := Deps{Store: database, Publisher: publisher, Broker: events.NewBroker()}
+			commentID := seedHeldFallbackCopy(ctx, t, deps)
+			var secondClaim time.Time
+			publisher.takeOver = func() {
+				if err := database.Pool.QueryRow(ctx, `
+					update comment_fallback_copies set next_attempt_at = now() + interval '1 hour'
+					where comment_id = $1 and destination = $2
+					returning next_attempt_at
+				`, commentID, sessionTopic).Scan(&secondClaim); err != nil {
+					t.Errorf("claim the held copy for a second process: %v", err)
+				}
+			}
+
+			publishFallbackCopies(ctx, deps)
+			if secondClaim.IsZero() {
+				t.Fatal("the pass published no copy, so no second process claimed the row")
+			}
+			row := readHeldCopy(t, database, commentID, sessionTopic)
+			if row.attempts != 0 || row.settled || row.published || row.due == nil || !row.due.Equal(secondClaim) {
+				t.Fatalf("the held copy has attempts=%d settled=%v published=%v next_attempt_at=%v, "+
+					"want it as the second claim left it: 0 attempts, unsettled, unpublished, due at %v",
+					row.attempts, row.settled, row.published, row.due, secondClaim)
+			}
+		})
 	}
 }
 

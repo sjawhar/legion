@@ -1109,7 +1109,12 @@ destination topic, which the outbox's fallback pass publishes once that resend f
 (`publishFallbackCopies` in `internal/dispatch/outbox/mentions.go`), and its partial index of the
 unsettled rows. It names no other table, so a plain `create table` and `create index` in the
 runner's transaction lock only the new table, and the release before it neither reads nor writes
-it, so that release runs over the new schema unchanged and the census answers `0`.
+it, so that release runs over the new schema unchanged and the census answers `0`. That release
+does not publish a `comment_fallback_copies` row either: it has no fallback pass, and its outbox
+skips an event already published, so a copy a row holds is never sent once it serves alone.
+Before rolling back past `0138`, run
+`select count(*) from comment_fallback_copies where settled_at is null` and roll back only when it
+answers `0`, or let this build drain the rows first.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
