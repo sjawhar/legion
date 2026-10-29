@@ -14,8 +14,9 @@ import "slices"
 // the markdown never holds, and with every untyped block's id masked; a typed block's id is part of
 // what it is, and its server attributes, which an upload resets, are not compared
 // (unchangedAttrs). An id goes only to unchanged content at its paired position, never onto other
-// content: a moved, swapped, retyped or edited block, and every block holding a change, still
-// takes a fresh id from EnsureBlockIDs. An id next names anywhere is not carried, nor is one no ask
+// content: a moved, swapped, retyped or edited block, every block holding a change, and every
+// block a moved block passes, which the alignment pairs with a changed neighbour, still take a
+// fresh id from EnsureBlockIDs. An id next names anywhere is not carried, nor is one no ask
 // row or anchor could store (storedBlockID). A repeat live carries may be carried to both holders,
 // and EnsureBlockIDs keeps it for the first, as it would have.
 func carryBlockIDs(next, live *Node) {

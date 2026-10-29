@@ -64,7 +64,8 @@ untyped blocks it leaves unchanged: its markdown cannot name them (`GET /text` r
 `pmdoc.ParseForWrite` pairs the parsed tree with the live one as `pmdoc.Update` aligns them and
 carries each unchanged untyped block's id (`carryBlockIDs`) before `EnsureBlockIDs` mints the rest.
 An id stays only with unchanged content at its paired position: an edited, moved, swapped or retyped
-block, every block holding a change, and a typed block whose markdown names no id take fresh ids.
+block, every block holding a change, and a typed block whose markdown names no id take fresh ids, and
+so does every block a moved block passes, since the alignment pairs it with its changed neighbour.
 An upload over open anchors builds its tree with the anchors on it in a scratch document and writes
 that tree into the room with one `pmdoc.Update`, so anchored text it left unchanged is not
 re-formatted. Without either, every upload wrote a `blockId` tombstone for every block, and one per

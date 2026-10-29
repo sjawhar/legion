@@ -6,10 +6,11 @@ import (
 	"strings"
 )
 
-// LoadSpec is the load harness's spec (INFRA-589 loadtest/seed.go:270): a title, the "Revision
-// token r0" paragraph, then sections of two prose paragraphs and a six-column table of four rows
-// until it holds target bytes. It returns the spec, each row's "Requirement <key>-R<n> holds"
-// cell, and the prose paragraphs, each without its closing period. One seed of r gives one spec.
+// LoadSpec is the load harness's spec (specMarkdown in packages/envoy/loadtest/seed.go, not table
+// heavy): a title, the "Revision token r0" paragraph, then sections of two prose paragraphs and a
+// six-column table of four rows until it holds target bytes. It returns the spec, each row's
+// "Requirement <key>-R<n> holds" cell, and the prose paragraphs, each without its closing period.
+// One seed of r gives one spec.
 func LoadSpec(r *rand.Rand, key string, target int) (spec string, quotes, paragraphs []string) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Spec for %s\n\nRevision token r0\n\n", key)
