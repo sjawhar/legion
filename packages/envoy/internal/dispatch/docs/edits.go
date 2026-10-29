@@ -179,6 +179,16 @@ func nodeToken(node *pmdoc.Node) (string, error) {
 	return tokenHash(encoded), nil
 }
 
+// validToken is the document token of a tree its holder has already validated, from one encoding
+// of it (pmdoc.ValidDocument.TokenJSON): nodeToken for a validated tree.
+func validToken(tree pmdoc.ValidDocument) (string, error) {
+	encoded, err := tree.TokenJSON(nil)
+	if err != nil {
+		return "", err
+	}
+	return tokenHash(encoded), nil
+}
+
 // tokenHash is the token of an encoded token representation: "sha256:" and the lowercase hex of
 // its SHA-256.
 func tokenHash(encoded []byte) string {
@@ -457,7 +467,7 @@ type operationWrite struct {
 //
 // A one-operation batch needs no diff at all: every run that operation's own update inserted is
 // that operation's, whichever block it landed in. That is the case the uncontended path pays for,
-// so the batch does not walk the tree for it (applyOperationsWithValidation).
+// so the batch does not walk the tree for it (applyBatch).
 //
 // Every candidate is attributed, including the ones no operation's own text change claims. A
 // batch writes one Yjs update, and pmdoc.Update rewrites a block it passes over in place when an
@@ -511,11 +521,10 @@ func (b editBatch) outcome(applied int) (EditOutcome, pmdoc.ValidDocument, error
 	if err != nil {
 		return EditOutcome{}, pmdoc.ValidDocument{}, err
 	}
-	encoded, err := valid.TokenJSON(nil)
+	after, err := validToken(valid)
 	if err != nil {
 		return EditOutcome{}, pmdoc.ValidDocument{}, err
 	}
-	after := tokenHash(encoded)
 	return EditOutcome{
 		Applied:        applied,
 		Changed:        after != b.before,
@@ -576,15 +585,11 @@ func (t *batchTree) finder() (*pmdoc.QuoteFinder, error) {
 	return t.quotes, nil
 }
 
-// applyOperations applies each operation to its predecessor's tree so a
-// following operation resolves the structure created by the preceding one.
+// applyOperations applies each operation to its predecessor's tree so a following operation
+// resolves the structure created by the preceding one. It is the batch a caller holding a plain
+// tree applies (applyBatch, which the edit paths call with the tree and the token they hold).
 func applyOperations(tree *pmdoc.Node, ops []model.EditOp) (editBatch, error) {
-	return applyOperationsWithValidation(tree, ops, nil)
-}
-
-// applyOperationsWithValidation applies ops as applyOperations does, running validate before each.
-func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validate operationValidator) (editBatch, error) {
-	return applyBatch(newBatchTree(tree), ops, validate, "")
+	return applyBatch(newBatchTree(tree), ops, nil, "")
 }
 
 // applyBatch applies ops to start's tree, each operation to its predecessor's output, running
@@ -607,11 +612,9 @@ func applyBatch(start *batchTree, ops []model.EditOp, validate operationValidato
 		if err != nil {
 			return editBatch{}, err
 		}
-		encoded, err := valid.TokenJSON(nil)
-		if err != nil {
+		if before, err = validToken(valid); err != nil {
 			return editBatch{}, err
 		}
-		before = tokenHash(encoded)
 	}
 	removed := make(map[string]batchRemoval)
 	var unchanged []int
@@ -745,7 +748,7 @@ func tableAnchorCheck(tree *pmdoc.Node, op model.EditOp) (tableAnchorSnapshot, [
 
 func (s *Service) prevalidateOperations(ctx context.Context, artifactID string, tree *pmdoc.Node, ops []model.EditOp) ([]tableAnchorSnapshot, error) {
 	snapshots := make([]tableAnchorSnapshot, 0)
-	_, err := applyOperationsWithValidation(tree, ops, func(current *batchTree, op model.EditOp) error {
+	_, err := applyBatch(newBatchTree(tree), ops, func(current *batchTree, op model.EditOp) error {
 		snapshot, marks, table, err := tableAnchorCheck(current.node, op)
 		if err != nil || !table {
 			return err
@@ -758,7 +761,7 @@ func (s *Service) prevalidateOperations(ctx context.Context, artifactID string, 
 		}
 		snapshots = append(snapshots, snapshot)
 		return nil
-	})
+	}, "")
 	if err != nil {
 		return nil, err
 	}
@@ -1004,17 +1007,16 @@ func applyOperation(tree *batchTree, op model.EditOp, budget *pmdoc.WriteBudget)
 		if err != nil {
 			return nil, err
 		}
-		span := found.span(next)
 		if code {
-			return next, refuseCodeThatReshapesItsBlock(valid, next, span, at, "with", op.With)
+			return next, refuseCodeThatReshapesItsBlock(valid, next, found, at, "with", op.With)
 		}
-		if err := refuseCodePipeInTableCell(valid, next, span, "with", "with", op.With, ""); err != nil {
+		if err := refuseCodePipeInTableCell(valid, next, found, "with", "with", op.With, ""); err != nil {
 			return nil, err
 		}
-		if err := refuseUnreadableReplacement(valid, next, span, op.With); err != nil {
+		if err := refuseUnreadableReplacement(valid, next, found, op.With); err != nil {
 			return nil, err
 		}
-		return next, refuseReshapedReplacement(valid, next, span, op.With)
+		return next, refuseReshapedReplacement(valid, next, found, op.With)
 	case "delete":
 		if op.Block != "" {
 			if op.Find != "" {
@@ -1053,8 +1055,7 @@ func applyOperation(tree *batchTree, op model.EditOp, budget *pmdoc.WriteBudget)
 		if err != nil {
 			return nil, err
 		}
-		span := found.span(out)
-		return out, refuseCodePipeInTableCell(valid, out, span, "find", "deleting find", op.Find, "")
+		return out, refuseCodePipeInTableCell(valid, out, found, "find", "deleting find", op.Find, "")
 	case "insert":
 		if op.Markdown == "" {
 			return nil, invalidOp("markdown")
@@ -1394,8 +1395,8 @@ func insertTarget(tree *batchTree, field, anchor string, occurrence *int) (pmdoc
 // hard break opens an HTML block the Proof schema does not carry, while the same HTML inside a
 // line, a table cell or a heading is inline HTML and is kept. A block that was already unreadable,
 // or another block that is, is no reason to refuse this replace.
-func refuseUnreadableReplacement(before pmdoc.ValidDocument, after *pmdoc.Node, span changedSpan, with string) error {
-	_, unreadable, err := replacementBroke(before.Node(), after, span, pmdoc.BlockReadError)
+func refuseUnreadableReplacement(before pmdoc.ValidDocument, after *pmdoc.Node, found matchBlocks, with string) error {
+	_, unreadable, err := replacementBroke(before.Node(), after, found, pmdoc.BlockReadError)
 	if err != nil || unreadable == nil {
 		return err
 	}
@@ -1406,8 +1407,8 @@ func refuseUnreadableReplacement(before pmdoc.ValidDocument, after *pmdoc.Node, 
 // another shape where it lands: a heading and a table cell are written on one line, so a line
 // break inside a code span or inline HTML there ends the block, as a hard break would
 // (hasHardBreak), and the document reads back a heading and a paragraph, or a row as two rows.
-func refuseReshapedReplacement(before pmdoc.ValidDocument, after *pmdoc.Node, span changedSpan, with string) error {
-	_, reshaped, err := replacementBroke(before.Node(), after, span, pmdoc.BlockShapeError)
+func refuseReshapedReplacement(before pmdoc.ValidDocument, after *pmdoc.Node, found matchBlocks, with string) error {
+	_, reshaped, err := replacementBroke(before.Node(), after, found, pmdoc.BlockShapeError)
 	if err != nil || reshaped == nil {
 		return err
 	}
@@ -1418,7 +1419,7 @@ func refuseReshapedReplacement(before pmdoc.ValidDocument, after *pmdoc.Node, sp
 }
 
 // refuseCodePipeInTableCell refuses a write that adds, to the document-level blocks it changed
-// (changedBlocks), code in a table cell whose text holds a `|` after an odd run of backslashes
+// (matchedBlocks), code in a table cell whose text holds a `|` after an odd run of backslashes
 // (pmdoc.TableCodePipes): no markdown of a cell writes that code, so what the document stored would
 // read back otherwise. A replace's `with` is read as a paragraph's text, where `\|` in code is the
 // code's text, and a delete can cut code down to it. Such code a browser edit already left in those
@@ -1430,9 +1431,9 @@ func refuseReshapedReplacement(before pmdoc.ValidDocument, after *pmdoc.Node, sp
 // what the caller sent, which the refusal quotes after them, and advice what the caller can do
 // beside what pmdoc's refusal says, or "". An error from pmdoc, a panic (pmdoc.ErrPanic), is
 // pmdoc's bug, and is the error.
-func refuseCodePipeInTableCell(before pmdoc.ValidDocument, after *pmdoc.Node, span changedSpan, field, opening, value, advice string) error {
+func refuseCodePipeInTableCell(before pmdoc.ValidDocument, after *pmdoc.Node, found matchBlocks, field, opening, value, advice string) error {
 	beforeTree := before.Node()
-	first, last, lastAfter := span.first, span.last, span.lastAfter
+	first, last, lastAfter := found.first, found.last, found.lastAfter(after)
 	var held map[string]int
 	for index := first; index <= last; index++ {
 		cells, err := pmdoc.TableCodePipes(beforeTree.Children[index])
@@ -1588,8 +1589,8 @@ func inlineAware(markdown string, edges textEdges, opensDocument bool, budget *p
 // block's fence longer than any line of colons in its code that the browser editor's parser, or
 // this one, could read as that fence (pmdoc's typedFence). Code that only reads back with
 // different whitespace keeps its shape and is not refused.
-func refuseCodeThatReshapesItsBlock(before pmdoc.ValidDocument, after *pmdoc.Node, span changedSpan, at pmdoc.TextblockAt, field, with string) error {
-	_, reshaped, err := replacementBroke(before.Node(), after, span, pmdoc.BlockShapeError)
+func refuseCodeThatReshapesItsBlock(before pmdoc.ValidDocument, after *pmdoc.Node, found matchBlocks, at pmdoc.TextblockAt, field, with string) error {
+	_, reshaped, err := replacementBroke(before.Node(), after, found, pmdoc.BlockShapeError)
 	if err != nil || reshaped == nil {
 		return err
 	}

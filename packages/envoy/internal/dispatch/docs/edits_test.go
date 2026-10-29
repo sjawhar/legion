@@ -2866,7 +2866,7 @@ func TestReplacementBrokePassesAPanicOnAsAnError(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			block, broke, err := replacementBroke(before, after, found.span(after), test.check)
+			block, broke, err := replacementBroke(before, after, found, test.check)
 			if block != -1 || broke != nil || !errors.Is(err, pmdoc.ErrPanic) {
 				t.Fatalf("replacementBroke = (%d, %v, %v), want an ErrPanic error and no verdict", block, broke, err)
 			}

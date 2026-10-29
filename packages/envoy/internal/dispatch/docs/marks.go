@@ -331,24 +331,24 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		// after a reject, before anything reads the accept back, where the browser's accept writes
 		// the replacement where Splice does (padsLikeTheBrowser).
 		if padsLikeTheBrowser(tree, range_, at, inline) {
-			if next, err = padCutTables(next, found.span(next), budget); err != nil {
+			if next, err = padCutTables(next, found, budget); err != nil {
 				return acceptSpliceRefusal(err)
 			}
 		}
 		if code {
-			if err := refuseAcceptedCodeThatReshapes(valid, next, found.span(next), at, with); err != nil {
+			if err := refuseAcceptedCodeThatReshapes(valid, next, found, at, with); err != nil {
 				return err
 			}
 		}
-		next = settleAccepted(valid, next, found.span(next), with)
-		if err := refuseCodePipeInTableCell(valid, next, found.span(next), "replace_with", "replace_with", with, "reject the suggestion, or reply asking for text the cell can hold"); err != nil {
+		next = settleAccepted(valid, next, found, with)
+		if err := refuseCodePipeInTableCell(valid, next, found, "replace_with", "replace_with", with, "reject the suggestion, or reply asking for text the cell can hold"); err != nil {
 			return err
 		}
 		if !insideAsk(at) {
-			if err := refuseUnreadableAccept(valid, next, found.span(next), range_, at, with, replacement); err != nil {
+			if err := refuseUnreadableAccept(valid, next, found, range_, at, with, replacement); err != nil {
 				return err
 			}
-			if err := refuseReshapedAccept(valid, next, found.span(next), range_, at, with, replacement); err != nil {
+			if err := refuseReshapedAccept(valid, next, found, range_, at, with, replacement); err != nil {
 				return err
 			}
 		}

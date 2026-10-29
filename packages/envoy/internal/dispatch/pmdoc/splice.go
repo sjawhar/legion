@@ -133,6 +133,38 @@ func documentBlock(doc *Node, target Range) (index, start, end int, err error) {
 	return 0, 0, 0, ErrTargetNotFound
 }
 
+// BlockIndexes is the index of the document-level block holding target's start and of the one
+// holding its end, both by BlockIndex's rule - the first block whose range holds the position -
+// found in one pass over the document's children. A write reads the blocks it changed from the
+// two, so it walks the document once rather than once an endpoint. Either endpoint lying in no
+// block is ErrTargetNotFound, as the lookup of that endpoint alone gives it, and the zero
+// ValidDocument is BlockIndex's error for a nil tree.
+func (d ValidDocument) BlockIndexes(target Range) (first, last int, err error) {
+	if d.doc == nil {
+		_, err := BlockIndex(nil, target)
+		return 0, 0, err
+	}
+	first, last = -1, -1
+	position := 0
+	for index, block := range d.doc.Children {
+		end := position + nodeSize(block)
+		if first < 0 && target.From >= position && target.From <= end {
+			first = index
+		}
+		if last < 0 && target.To >= position && target.To <= end {
+			last = index
+		}
+		if first >= 0 && last >= 0 {
+			break
+		}
+		position = end
+	}
+	if first < 0 || last < 0 {
+		return 0, 0, ErrTargetNotFound
+	}
+	return first, last, nil
+}
+
 // insertTableRowsWantsDocument is the refusal of an insert of table rows into a tree that is no
 // document: both readers give it, so both give its words.
 func insertTableRowsWantsDocument() error {

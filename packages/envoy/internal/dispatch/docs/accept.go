@@ -24,8 +24,8 @@ import (
 // unchanged whose spread already read back otherwise. An empty replacement keeps the paragraph it
 // empties, which the renderer does not write beside other blocks. Everything else, block, mark and
 // node, stays as it was.
-func settleAccepted(before pmdoc.ValidDocument, after *pmdoc.Node, span changedSpan, with string) *pmdoc.Node {
-	return pmdoc.AgreeWithReadBack(before.Node(), after, span.first, span.lastAfter, with != "")
+func settleAccepted(before pmdoc.ValidDocument, after *pmdoc.Node, found matchBlocks, with string) *pmdoc.Node {
+	return pmdoc.AgreeWithReadBack(before.Node(), after, found.first, found.lastAfter(after), with != "")
 }
 
 // acceptedCode is the code text an accepted suggestion writes over match in the code block at, as
@@ -68,18 +68,18 @@ func insideAsk(at pmdoc.TextblockAt) bool {
 
 // refuseUnreadableAccept refuses a suggestion whose changed document-level block cannot be read
 // from its rendered markdown.
-func refuseUnreadableAccept(before pmdoc.ValidDocument, after *pmdoc.Node, span changedSpan, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node) error {
-	return refuseAcceptBy(before, after, span, match, at, with, replacement, pmdoc.BlockReadError)
+func refuseUnreadableAccept(before pmdoc.ValidDocument, after *pmdoc.Node, found matchBlocks, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node) error {
+	return refuseAcceptBy(before, after, found, match, at, with, replacement, pmdoc.BlockReadError)
 }
 
 // refuseReshapedAccept refuses a suggestion whose changed document-level block reads back as
 // blocks of another shape.
-func refuseReshapedAccept(before pmdoc.ValidDocument, after *pmdoc.Node, span changedSpan, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node) error {
-	return refuseAcceptBy(before, after, span, match, at, with, replacement, pmdoc.BlockShapeError)
+func refuseReshapedAccept(before pmdoc.ValidDocument, after *pmdoc.Node, found matchBlocks, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node) error {
+	return refuseAcceptBy(before, after, found, match, at, with, replacement, pmdoc.BlockShapeError)
 }
 
-func refuseAcceptBy(before pmdoc.ValidDocument, after *pmdoc.Node, span changedSpan, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node, check func(*pmdoc.Node) error) error {
-	_, broke, err := replacementBroke(before.Node(), after, span, check)
+func refuseAcceptBy(before pmdoc.ValidDocument, after *pmdoc.Node, found matchBlocks, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node, check func(*pmdoc.Node) error) error {
+	_, broke, err := replacementBroke(before.Node(), after, found, check)
 	if err != nil || broke == nil {
 		return err
 	}
@@ -152,10 +152,10 @@ func acceptRefusal(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textbl
 }
 
 // padCutTables pads each table in the document-level blocks a splice changed, from before to after
-// (changedBlocks), to its width (pmdoc.PadTables), as the browser editor's table plugin pads a
+// (matchedBlocks), to its width (pmdoc.PadTables), as the browser editor's table plugin pads a
 // table after any change, spending budget, the accept's or reject's.
-func padCutTables(after *pmdoc.Node, span changedSpan, budget *pmdoc.WriteBudget) (*pmdoc.Node, error) {
-	return pmdoc.PadTables(after, span.first, span.lastAfter, budget)
+func padCutTables(after *pmdoc.Node, found matchBlocks, budget *pmdoc.WriteBudget) (*pmdoc.Node, error) {
+	return pmdoc.PadTables(after, found.first, found.lastAfter(after), budget)
 }
 
 // padsLikeTheBrowser reports whether an accept may pad the tables its splice cut: whether the
@@ -213,14 +213,14 @@ func acceptSpliceRefusal(err error) error {
 // the code when the document-level block that reads back otherwise is the one holding the code,
 // and otherwise that block, such as the list of a task item that a suggestion running out of the
 // code empties ahead of the item's nested list.
-func refuseAcceptedCodeThatReshapes(before pmdoc.ValidDocument, after *pmdoc.Node, span changedSpan, at pmdoc.TextblockAt, with string) error {
-	broken, reshaped, err := replacementBroke(before.Node(), after, span, pmdoc.BlockShapeError)
+func refuseAcceptedCodeThatReshapes(before pmdoc.ValidDocument, after *pmdoc.Node, found matchBlocks, at pmdoc.TextblockAt, with string) error {
+	broken, reshaped, err := replacementBroke(before.Node(), after, found, pmdoc.BlockShapeError)
 	if err != nil || reshaped == nil {
 		return err
 	}
-	// The document-level block holding the code is the first the accept changed (changedBlocks),
+	// The document-level block holding the code is the first the accept changed (matchedBlocks),
 	// at the same index before and after it.
-	holding := span.first
+	holding := found.first
 	if broken == holding {
 		for _, ancestor := range at.Ancestors {
 			if pmdoc.IsTypedBlock(ancestor.Type) {
@@ -256,90 +256,61 @@ func emptyTextblock(textblock *pmdoc.Node) bool {
 	return true
 }
 
-// changedSpan is the document-level blocks one write changed: in the tree before it, every block
-// from first to last, and in the tree after it, every block from first to lastAfter.
-type changedSpan struct {
-	first     int
-	last      int
-	lastAfter int
-}
-
 // matchBlocks is where a write's match lies in the tree the write started from: the first
 // document-level block holding the match's start, the last holding its end, and how many blocks
 // that tree held. They depend on that tree and the match alone, so a write finds them once and
-// reads them against each tree it goes on to make (span), where before every refusal found them
-// again for itself.
+// reads them against each tree it goes on to make (lastAfter), where before every refusal found
+// them again for itself.
 type matchBlocks struct {
 	first  int
 	last   int
 	blocks int
 }
 
-// matchedBlocks is where match lies in before: both endpoints found in one pass over before's
-// children, each by the rule one lookup keeps (pmdoc.BlockIndex, documentBlock), the first block
-// whose range holds it. A match neither endpoint lands in is pmdoc.ErrTargetNotFound, as a lookup
-// of either endpoint gives it.
+// matchedBlocks is where match lies in before, both endpoints found in one walk of its blocks
+// (pmdoc.ValidDocument.BlockIndexes). A match an endpoint lands in no block of is
+// pmdoc.ErrTargetNotFound, as a lookup of that endpoint gives it.
 func matchedBlocks(before pmdoc.ValidDocument, match pmdoc.Range) (matchBlocks, error) {
-	tree := before.Node()
-	if tree == nil {
-		_, err := pmdoc.BlockIndex(nil, match)
+	first, last, err := before.BlockIndexes(match)
+	if err != nil {
 		return matchBlocks{}, err
 	}
-	found := matchBlocks{first: -1, last: -1, blocks: len(tree.Children)}
-	position := 0
-	for index, block := range tree.Children {
-		end := position + pmdoc.Size(block)
-		if found.first < 0 && match.From >= position && match.From <= end {
-			found.first = index
-		}
-		if found.last < 0 && match.To >= position && match.To <= end {
-			found.last = index
-			break
-		}
-		position = end
-	}
-	if found.first < 0 || found.last < 0 {
-		return matchBlocks{}, pmdoc.ErrTargetNotFound
-	}
-	return found, nil
+	return matchBlocks{first: first, last: last, blocks: len(before.Node().Children)}, nil
 }
 
-// span is the document-level blocks the write changed, from the tree it started from to after,
-// one of the trees it made: before's from the block holding the match's start to the one holding
-// its end, and after's from the same first one to as many more as the document gained, since the
-// blocks after them keep their order. A replace stays inside its textblock, so its block holds the
-// same index before and after; an accepted suggestion can write blocks, and its match can span
-// them. A write that goes on to change the tree again (padding its tables, settling what it wrote)
-// takes a span of each tree, as a refusal reading that tree always did.
-func (m matchBlocks) span(after *pmdoc.Node) changedSpan {
-	return changedSpan{
-		first:     m.first,
-		last:      m.last,
-		lastAfter: max(m.first, m.last+len(after.Children)-m.blocks),
-	}
+// lastAfter is the last document-level block the write changed in after, one of the trees it
+// made: the blocks it changed run from the one holding the match's start to as many more as the
+// document gained, since the blocks after them keep their order. A replace stays inside its
+// textblock, so its block holds the same index before and after; an accepted suggestion can write
+// blocks, and its match can span them. A write that goes on to change the tree again (padding its
+// tables, settling what it wrote) reads it against each tree, as a refusal reading that tree
+// always did.
+func (m matchBlocks) lastAfter(after *pmdoc.Node) int {
+	return max(m.first, m.last+len(after.Children)-m.blocks)
 }
 
 // replacementBroke is the index in after of the first document-level block the write changed
-// (changedBlocks) that check fails, and what check says of it, when it said nothing of the blocks
+// (matchedBlocks) that check fails, and what check says of it, when it said nothing of the blocks
 // the match lay in before: a block that already failed the check, or another block that does, is
 // no reason to refuse this write. A block before that reads back only past a read-back's padding
 // budget (pmdoc.ErrTablePadding) did not fail it, so the write is refused with that, naming the
 // first block it changed, rather than stored unchecked. Only a refusal (pmdoc.ErrSchema) is
 // check's verdict; any other error from it, a panic (pmdoc.ErrPanic) among them, is no verdict on
 // either side, but pmdoc's bug, and is its error.
-func replacementBroke(before, after *pmdoc.Node, span changedSpan, check func(*pmdoc.Node) error) (block int, broke, err error) {
-	for index := span.first; index <= span.last; index++ {
+func replacementBroke(before, after *pmdoc.Node, found matchBlocks, check func(*pmdoc.Node) error) (block int, broke, err error) {
+	for index := found.first; index <= found.last; index++ {
 		if err := check(before.Children[index]); err != nil {
 			if !errors.Is(err, pmdoc.ErrSchema) {
 				return -1, nil, err
 			}
 			if errors.Is(err, pmdoc.ErrTablePadding) {
-				return span.first, err, nil
+				return found.first, err, nil
 			}
 			return -1, nil, nil
 		}
 	}
-	for index := span.first; index <= span.lastAfter; index++ {
+	lastAfter := found.lastAfter(after)
+	for index := found.first; index <= lastAfter; index++ {
 		if broke = check(after.Children[index]); broke != nil {
 			if !errors.Is(broke, pmdoc.ErrSchema) {
 				return -1, nil, broke
