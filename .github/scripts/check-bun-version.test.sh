@@ -267,6 +267,53 @@ printf 'ARG BUN_VERSION=1.3.14\nFROM oven/bun:${BUN_VERSION}-slim AS cli\n' > "$
 run_check "$root"
 check "a -slim suffix on the ARG tag passes" "$(is "$status" 0)"
 
+# The Bun base of this repository's own Dockerfiles is a copy in ghcr.io/sjawhar/legion/ci, named
+# by digest, so the version it carries is its row's `upstream` in .github/ci-images.yaml. The
+# digests below are made up: nothing pulls them, and what each case reads is the row they match.
+echo "case: rule 6 — a Bun base in the mirror package"
+mirror_row() { # mirror_row <root> <upstream>
+  cat > "$1/.github/ci-images.yaml" <<YAML
+registry: ghcr.io/sjawhar/legion/ci
+images:
+  - upstream: $2
+    tag: bun
+    digest: sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071
+YAML
+}
+
+root=$(fixture mirror-bun-pinned)
+mirror_row "$root" mirror.gcr.io/oven/bun:1.3.14-slim
+printf 'FROM ghcr.io/sjawhar/legion/ci@sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071 AS plugin\n' \
+  > "$root/worker.Dockerfile"
+run_check "$root"
+check "the row whose upstream is the pinned Bun, suffix and all, passes" "$(is "$status" 0)"
+
+root=$(fixture mirror-bun-drift)
+mirror_row "$root" mirror.gcr.io/oven/bun:1.4.2-slim
+printf 'FROM ghcr.io/sjawhar/legion/ci@sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071 AS plugin\n' \
+  > "$root/worker.Dockerfile"
+run_check "$root"
+check "a row copying another Bun release fails" "$(is "$status" 1)"
+check "names the release that row copies" "$(contains "$out" 'is the copy of mirror.gcr.io/oven/bun:1.4.2-slim')"
+check "and says which file to raise, to what" "$(contains "$out" 'to oven/bun:1.3.14 and name its digest here')"
+
+root=$(fixture mirror-digest-unknown)
+mirror_row "$root" mirror.gcr.io/oven/bun:1.3.14-slim
+printf 'FROM ghcr.io/sjawhar/legion/ci@sha256:9f8e7d6c5b4a30219f8e7d6c5b4a30219f8e7d6c5b4a30219f8e7d6c5b4a3021 AS plugin\n' \
+  > "$root/worker.Dockerfile"
+run_check "$root"
+check "a digest no row holds fails" "$(is "$status" 1)"
+check "names the file it must come from" "$(contains "$out" 'names a digest no row of .github/ci-images.yaml holds')"
+check "and the line to edit" "$(contains "$out" 'worker.Dockerfile:1:')"
+
+echo "case: the repository's own tree"
+set +e
+out=$("$check_script" 2>&1)
+status=$?
+set -e
+check "the real tree passes" "$(is "$status" 0)"
+check "says so" "$(contains "$out" 'every Bun install reads .bun-version')"
+
 echo "case: rule 7 — a tool manager that installs bun"
 for manifest in mise.toml .mise.toml mise.local.toml .mise.local.toml .config/mise.toml \
   .config/mise/config.toml .mise/config.toml; do

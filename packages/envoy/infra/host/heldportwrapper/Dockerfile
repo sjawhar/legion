@@ -12,7 +12,8 @@ FROM ${BASE} AS base
 
 # Go version must match packages/envoy/infra/go.mod. The smoke image builds on the same image, so
 # the envoy-smoke job has pulled it already.
-FROM mirror.gcr.io/library/golang:1.27.1-alpine AS wrapper
+# ghcr.io/sjawhar/legion/ci, the copy of golang:1.27.1-alpine (.github/ci-images.yaml)
+FROM ghcr.io/sjawhar/legion/ci@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS wrapper
 
 WORKDIR /src/packages/envoy/infra
 

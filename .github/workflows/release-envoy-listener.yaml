@@ -173,10 +173,11 @@ jobs:
           # $GITHUB_EVENT_PATH's full JSON into any provenance predicate a build below computes,
           # attached to the pushed image or not. false here keeps every build this builder runs —
           # smoke and publish alike — free of that, regardless of each build's own provenance
-          # setting. image= is the driver's own default BuildKit image, through the mirror.
+          # setting. image= is the driver's own default BuildKit image: ghcr.io/sjawhar/legion/ci,
+          # the copy of moby/buildkit:buildx-stable-1 (.github/ci-images.yaml).
           driver-opts: |
             provenance-add-gha=false
-            image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+            image=ghcr.io/sjawhar/legion/ci@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod

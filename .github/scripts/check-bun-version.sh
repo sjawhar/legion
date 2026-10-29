@@ -32,9 +32,11 @@
 #      `bun-version-file: .bun-version` and may also pass `no-cache` (which only turns setup-bun's
 #      cache off and cannot change the version), and any other input fails; it is checked for what
 #      it is, not only for what other files are not,
-#   9. a `FROM oven/bun` (case-insensitive) whose tag does not come from `${BUN_VERSION}`, an
-#      `ARG BUN_VERSION` default that disagrees with the pin, or a Dockerfile `RUN` (backslash
-#      continuations joined) that installs Bun,
+#   9. a `FROM oven/bun` (case-insensitive) whose tag does not come from `${BUN_VERSION}`, a
+#      `FROM` on `ghcr.io/sjawhar/legion/ci` — the package every image a CI job fetches is copied
+#      into, named by digest — whose digest no row of `.github/ci-images.yaml` holds, or whose row
+#      copies another Bun release, an `ARG BUN_VERSION` default that disagrees with the pin, or a
+#      Dockerfile `RUN` (backslash continuations joined) that installs Bun,
 #  10. a tool-manager manifest (any mise file, `.tool-versions`) naming bun.
 #
 # Files are discovered by walking the tree, not by asking git, so an unsnapshotted change cannot
@@ -91,6 +93,11 @@ LineLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapp
 
 PIN_FILE = ".bun-version"
 SETUP_ACTION = Path(".github/actions/setup-bun/action.yml")
+# Every image a CI job fetches is a copy in this package, named by digest
+# (.github/workflows/mirror-images.yaml publishes it from CI_IMAGES), so a Dockerfile's Bun base
+# names a digest and no version. The row that digest belongs to is what says which Bun it is.
+CI_IMAGES = Path(".github/ci-images.yaml")
+MIRROR_REGISTRY = "ghcr.io/sjawhar/legion/ci"
 SKIP_DIRS = {".git", ".jj", "node_modules", ".venv", "vendor"}
 MISE_FILES = {
     "mise.toml",
@@ -406,6 +413,40 @@ def joined_lines(text: str):
         yield start, pending.strip()
 
 
+mirror_upstreams: dict[str, str] | None = None
+
+
+def mirror_rows() -> dict[str, str]:
+    """digest -> upstream, from CI_IMAGES. Read once, and only when a FROM names the package: a
+    repository that mirrors nothing never has to hold the file."""
+    global mirror_upstreams
+    if mirror_upstreams is not None:
+        return mirror_upstreams
+    mirror_upstreams = {}
+    if not CI_IMAGES.is_file():
+        problems.append(
+            f"::error file={CI_IMAGES}::{CI_IMAGES} is missing: it is the one file that says "
+            f"which image each {MIRROR_REGISTRY} digest is a copy of"
+        )
+        return mirror_upstreams
+    content = read_text(CI_IMAGES)
+    if content is None:
+        return mirror_upstreams
+    try:
+        document = yaml.safe_load(content)
+    except yaml.YAMLError as error:
+        problems.append(f"::error file={CI_IMAGES}::{CI_IMAGES} is not valid YAML: {one_line(error)}")
+        return mirror_upstreams
+    rows = document.get("images") if isinstance(document, dict) else None
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        digest, upstream = row.get("digest"), row.get("upstream")
+        if isinstance(digest, str) and isinstance(upstream, str):
+            mirror_upstreams[digest] = upstream
+    return mirror_upstreams
+
+
 for dockerfile in dockerfiles:
     content = read_text(dockerfile)
     if content is None:
@@ -425,6 +466,21 @@ for dockerfile in dockerfiles:
                 problems.append(
                     f"{dockerfile}:{number}: {one_line(image)} hardcodes its Bun tag — use "
                     f"oven/bun:${{BUN_VERSION}} and ARG BUN_VERSION={pinned}"
+                )
+        elif upper.startswith("FROM ") and MIRROR_REGISTRY in stripped.lower():
+            image = stripped.split()[1]
+            upstream = mirror_rows().get(image.partition("@")[2])
+            if upstream is None:
+                problems.append(
+                    f"{dockerfile}:{number}: {one_line(image)} names a digest no row of "
+                    f"{CI_IMAGES} holds — a FROM on {MIRROR_REGISTRY} names the digest of one of "
+                    f"its rows, which the mirror workflow publishes"
+                )
+            elif "oven/bun" in upstream.lower() and not bun_tag_is_pinned(upstream, pinned):
+                problems.append(
+                    f"{dockerfile}:{number}: {one_line(image)} is the copy of "
+                    f"{one_line(upstream)}, but {PIN_FILE} locks {pinned} — raise both together: "
+                    f"edit that row of {CI_IMAGES} to oven/bun:{pinned} and name its digest here"
                 )
         elif upper.startswith("RUN ") and installs_bun(stripped, pinned):
             problems.append(

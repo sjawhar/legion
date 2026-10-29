@@ -1082,6 +1082,9 @@ jobs:
       - name: Check image triggers cover every image input
         run: .github/scripts/check-image-trigger-paths.sh
 
+      - name: Check every image a CI job fetches is a row of .github/ci-images.yaml
+        run: .github/scripts/check-ci-images.sh
+
       - name: Check every remote action is pinned to a commit SHA
         run: .github/scripts/check-action-pins.sh
 
@@ -1264,7 +1267,8 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -1339,6 +1343,9 @@ jobs:
 
       - name: Test the image trigger path check
         run: .github/scripts/check-image-trigger-paths.test.sh
+
+      - name: Test the CI image check
+        run: .github/scripts/check-ci-images.test.sh
 
       - name: Test the action pin check
         run: .github/scripts/check-action-pins.test.sh
@@ -1479,7 +1486,8 @@ jobs:
     # truncate.
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -1639,7 +1647,8 @@ jobs:
         run: bun run typecheck
         working-directory: packages/envoy-client
       - name: Pre-pull the NATS image the credential tests run
-        run: docker pull mirror.gcr.io/library/nats:2.10
+        # ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
+        run: docker pull ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
       - name: Test Envoy client
         run: bun run test
         working-directory: packages/envoy-client
@@ -1680,7 +1689,8 @@ jobs:
     # pinned by digest as this file's other service images are.
     services:
       nats:
-        image: mirror.gcr.io/library/nats:2.10@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+        # ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
         ports: ["4222:4222"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1746,7 +1756,8 @@ jobs:
     # needs (LEGION_TEST_NATS_URL on the test step), on the image the envoy-client job pulls.
     services:
       nats:
-        image: mirror.gcr.io/library/nats:2.10@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+        # ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
         ports: ["4222:4222"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1761,7 +1772,8 @@ jobs:
       # (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
       # scripts/skill-scenarios/rig.test.ts runs rig.sh judge-omp's container with the runner's own
-      # Docker, pulling its pinned ubuntu image from mirror.gcr.io.
+      # Docker. Every image a CI job fetches is a copy in ghcr.io/sjawhar/legion/ci, named by
+      # digest, which .github/workflows/mirror-images.yaml publishes from .github/ci-images.yaml.
       # scripts/skill-scenarios/daemon-pane.test.ts runs daemon-pane.go with `go run` inside packages/daemon.
       - id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -1833,7 +1845,8 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -1957,7 +1970,8 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2067,7 +2081,8 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2279,7 +2294,8 @@ jobs:
     timeout-minutes: 75
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2323,7 +2339,8 @@ jobs:
     timeout-minutes: 75
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2362,7 +2379,8 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2409,7 +2427,8 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]

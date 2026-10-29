@@ -133,7 +133,8 @@ ARG CODEGRAPH_VERSION=1.5.0
 # ------------------------------------------------------------------------------------------------
 # plugin: workspace install, the CodeGraph CLI, the Oh My Pi plugins' frozen install, and the two packed
 # plugins.
-FROM mirror.gcr.io/oven/bun:${BUN_VERSION}-slim AS plugin
+# ghcr.io/sjawhar/legion/ci, the copy of oven/bun:1.4.4-slim (.github/ci-images.yaml)
+FROM ghcr.io/sjawhar/legion/ci@sha256:1846adf22496bd711036aae8be147e57bdebbaea2e5264e3e0b5af1db187d9a4 AS plugin
 WORKDIR /repo
 # jq: the same omp.extensions rewrite release.yaml's pi_envoy_build and pi_legion_build jobs run.
 # python3/make/g++: native devDependencies in the workspace lockfile (mirrors
@@ -219,7 +220,8 @@ RUN jq '.omp.extensions = ["dist/legion.js"]' package.json > tmp.json \
 # `scripts/build.ts --out` writes /out/claude-envoy from the source instead: the plugin's own files
 # with its skills symlinks resolved, since the image carries no repository root for them to point
 # into, and a fresh dist/ and legion/. It refuses any Bun but the one .bun-version pins, which this
-# stage's base image is (ARG BUN_VERSION; .github/scripts/check-bun-version.sh holds the two equal).
+# stage's base image carries (ARG BUN_VERSION; .github/scripts/check-bun-version.sh holds the ARG,
+# the pin and that base's row in .github/ci-images.yaml equal).
 # The copy drops group and other write, which a checkout's umask may have left, since the runtime
 # stage's final step refuses a plugin file anyone but root can write.
 COPY .bun-version /repo/.bun-version
@@ -236,7 +238,8 @@ RUN set -eu; \
 # daemon hands to `mise where` on a tmux host. mise itself is checked against MISE_SHA256 before
 # anything extracts or runs it, the same shape the toolchain stage below uses for uv, Node and the AWS
 # CLI; .github/actions/install-jj reads the same pair for the CI runner's own mise.
-FROM mirror.gcr.io/library/debian:bookworm-slim AS tools
+# ghcr.io/sjawhar/legion/ci, the copy of debian:bookworm-slim (.github/ci-images.yaml)
+FROM ghcr.io/sjawhar/legion/ci@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3 AS tools
 ARG MISE_VERSION
 ARG MISE_SHA256
 ARG JJ_TOOL
@@ -278,7 +281,8 @@ RUN --mount=type=secret,id=github_token \
 # base. LEGION_REVISION is the commit the workflow builds; it is linked in so `legion version` names
 # it, and the build refuses without it.
 # The same toolchain builds gopls (static too) for the runtime stage's /usr/local/bin/gopls.
-FROM mirror.gcr.io/library/golang:${GO_VERSION}-alpine AS go
+# ghcr.io/sjawhar/legion/ci, the copy of golang:1.27.1-alpine (.github/ci-images.yaml)
+FROM ghcr.io/sjawhar/legion/ci@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS go
 WORKDIR /src
 # The notices stage's Go part: go-licenses (pinned in go-third-party-notices.sh) is built in a layer of
 # its own, before the module files, so neither a source change nor a dependency bump rebuilds it.
@@ -346,7 +350,8 @@ RUN test -n "$LEGION_REVISION" \
 # starts with an allowlisted environment that drops CGO_ENABLED, and a test may build with go under an
 # environment it constructs. It is only a default: a role's `CGO_ENABLED=1` overrides it, as the final
 # stage's ENV comment says.
-FROM mirror.gcr.io/library/debian:trixie-slim AS toolchain
+# ghcr.io/sjawhar/legion/ci, the copy of debian:trixie-slim (.github/ci-images.yaml)
+FROM ghcr.io/sjawhar/legion/ci@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS toolchain
 ARG UV_VERSION
 ARG UV_SHA256
 ARG NODE_VERSION
@@ -410,7 +415,8 @@ RUN set -eu; \
 # WORKDIR belong in the final stage, not here:
 # TestImageEnvIsWhatTheWorkerImageSets (packages/daemon/internal/runtime/sandbox/operatorpod_test.go)
 # reads the last stage's ENV only.
-FROM mirror.gcr.io/library/debian:trixie-slim AS runtime-base
+# ghcr.io/sjawhar/legion/ci, the copy of debian:trixie-slim (.github/ci-images.yaml)
+FROM ghcr.io/sjawhar/legion/ci@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS runtime-base
 # git: jj's git backend and the workers' own git use. ca-certificates: GitHub, Dispatch, model APIs.
 # chromium, python3, curl, wget, jq, openssh-client (for ssh-keygen), util-linux (for flock),
 # postgresql-client (for psql), redis-tools (for redis-cli), sqlite3, netcat-openbsd (for nc) and
@@ -633,7 +639,7 @@ RUN set -eu; mkdir -p /out; . /in/tags.env; \
 # runtime: the final stage, the image itself, on runtime-base.
 FROM runtime-base AS runtime
 LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
-# Pinned Bun: the binary the plugin stage packed with (oven/bun:${BUN_VERSION}-slim).
+# Pinned Bun: the binary the plugin stage packed with (the copy of oven/bun:${BUN_VERSION}-slim).
 COPY --from=plugin /usr/local/bin/bun /usr/local/bin/bun
 RUN ln -s bun /usr/local/bin/bunx
 COPY --from=tools /opt/omp /opt/omp
