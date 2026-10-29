@@ -114,11 +114,17 @@ type messageRecovery struct {
 }
 
 // recoveredMessage is the message a keyed write committed, read once sendHeldMessageOn has put a
-// targeted one on its way, with its deliveries as they stand. It is read from the database before
-// the listener is, so a repeat never fails because the listener is down.
+// targeted one on its way, with its deliveries as they stand and the block it answers. It is read
+// from the database before the listener is, so a repeat never fails because the listener is down.
 func (s *server) recoveredMessage(ctx context.Context, point messageRecovery) (model.Message, error) {
 	message, err := s.loadMessage(ctx, s.deps.Store.Pool, "", point.MessageID)
 	if err != nil {
+		return model.Message{}, err
+	}
+	// loadMessage scans the row alone, so a reply that names a block carries only its node id:
+	// without this the repeat of a keyed reply answers reply_block null where the first answered
+	// the block.
+	if err := hydrateMessageReplyBlocks(ctx, s.deps.Store.Pool, &message); err != nil {
 		return model.Message{}, err
 	}
 	if message.Target != nil {
