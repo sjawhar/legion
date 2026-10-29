@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-743",
+  "completed": "2026-10-29T14:52:00Z",
+  "proof": [
+    {
+      "criterion": "Acceptance 1 and 2a: a rewatch that fails once after a reconnect is retried, the listener ends with a live watch and current caches, and no ERROR is logged for a retry that later succeeds.",
+      "surface": "The built envoy-listener binary (go build -o $TMPDIR/smoke/envoy-listener ./cmd/listener) against a real nats-server v2.10.29 with JetStream, restarted under it; /healthz and GET /v1/interests/ over HTTP.",
+      "command": "bash $TMPDIR/smoke/smoke.sh, steps 2 and 3: start the server and the listener, curl /healthz, stop and start nats-server, curl /healthz, POST /v1/interests/subscribe, GET /v1/interests/, then count ERROR lines in the listener's log.",
+      "observed": "/healthz 200 {\"status\":\"healthy\"} at start and again after the restart; the interest written after the restart was served by GET /v1/interests/; the log held 'INFO envoy nats reconnected name=envoy url=nats://127.0.0.1:14222' and 0 ERROR lines.",
+      "headSha": "b7cccdc95ba8d589e551c43507b5df0b0ea65b3f",
+      "negativeControl": "The same scenario as a Go test in a throwaway copy of the tree at this branch's base 88840d35: go test ./internal/bus/ -run TestBaseRewatchRetryAfterAReconnectLogsNoError -> FAIL, 'a failed run the retry repaired logged an error: {\"level\":\"ERROR\",\"msg\":\"envoy nats reconnect hook failed\",\"error\":\"context deadline exceeded\"}'."
+    },
+    {
+      "criterion": "Acceptance 2b: a rewatch still failing after the stated bound (bus.RepairGrace, one minute, measured from the connection event) is reported on the listener's health, not only logged.",
+      "surface": "The same built envoy-listener binary and real nats-server; the server restarted with a configuration that denies only $JS.API.CONSUMER.CREATE.KV_envoy_interests/.roles/.sessions, so STREAM.INFO, the pings and the durable keep working while every KV watch creation fails; /healthz over HTTP.",
+      "command": "bash $TMPDIR/smoke/smoke.sh, steps 4 and 5: restart under the deny configuration, poll /healthz, read the listener's WARN and ERROR lines, then restart under the allow configuration and poll /healthz again.",
+      "observed": "Inside the grace: WARN 'envoy nats reconnect hook failed; it is retried ... stall_ms=20007' and 'stall_ms=40015' while /healthz stayed 200 healthy. Past the grace: ERROR 'envoy nats reconnect hooks have not succeeded ... stall_ms=61022' and /healthz 503 {\"status\":\"unhealthy\",\"error\":\"KV watch rebuild unavailable: rewatch interest cache: watch interest registry KV bucket: context deadline exceeded\\nrewatch session cache: watch session registry KV bucket: context deadline exceeded (no rebuild has succeeded for 1m0s)\"}. With the deny lifted, the next recovery repaired the caches, /healthz returned to 200 healthy, and an interest written then was served.",
+      "headSha": "b7cccdc95ba8d589e551c43507b5df0b0ea65b3f",
+      "negativeControl": "The same scenario as a Go test at the base 88840d35, with a real 75 s wait in place of the clock: go test ./cmd/listener/ -run TestBaseHealthzAnswersAHookStallPastAMinute -> FAIL, '/healthz 75 s into a rebuild that never succeeded = 200 map[... status:healthy], want 503 unhealthy'. The base answers healthy however long the rebuild has failed."
+    },
+    {
+      "criterion": "Acceptance 3: TestListenerFollowsTheInterestRegistryAcrossNATSRestarts passes 200 of 200 isolated runs at the head, against 1-2 failures in 49 on main.",
+      "surface": "The built listener binary against a real NATS, as the test's own harness deploys it (cmdtest.Build runs go build . in the process's working directory, so the loop runs from packages/envoy/cmd/listener).",
+      "command": "cd packages/envoy/cmd/listener && go test -c -o \"$TMPDIR/listener-merge.test\" . && for i in $(seq 1 200); do \"$TMPDIR/listener-merge.test\" -test.run '^TestListenerFollowsTheInterestRegistryAcrossNATSRestarts$' -test.count=1 >\"$TMPDIR/merge-runs/run-$i.log\" 2>&1 && echo \"PASS $i\" || echo \"FAIL $i\"; done (serial, one process per run, no -race)",
+      "observed": "200 PASS, 0 FAIL at b7cccdc9. The same loop ran 200 PASS, 0 FAIL at a3b2b533 before the simplify pass and the forward merge.",
+      "headSha": "b7cccdc95ba8d589e551c43507b5df0b0ea65b3f",
+      "negativeControl": "The same loop, 49 runs, in a throwaway worktree at this branch's base 88840d35, run from that worktree's own packages/envoy/cmd/listener: 48 PASS, 1 FAIL (run 41), whose failure is this issue's symptom - 'restart_test.go:67: NATS restarts and the shutdown after them logged an error: ERROR envoy nats reconnect hook failed name=envoy error=\"rewatch session cache: open session registry KV bucket: context deadline exceeded\"'."
+    },
+    {
+      "criterion": "Acceptance 4a: no change to delivery semantics; the package's own suites stay green.",
+      "surface": "The repository's Go test harness for the three packages this change touches, plus the dispatch package the forward merge carried, each against real embedded NATS.",
+      "command": "cd packages/envoy && go build ./... && go vet ./... && go test ./internal/bus/ ./internal/kvwatch/ -count=1 -timeout 30m && go test ./cmd/dispatch/ -run 'Stream|Replica|Redeliver|Dispatch' -count=1 && go test ./cmd/listener/ -count=1 -timeout 35m -skip 'TestDispatchMentionResolvesASessionTheCacheHasNotRefilled|TestDispatchBroadcastResolvesSessionsTheCacheHasNotRefilled|TestDispatchRefusesABroadcastWhenASessionReadDoesNotAnswer|TestDispatchRefusesAClaimTakeoverWhileTheCacheRefills'",
+      "observed": "go build and go vet exit 0; ok github.com/sjawhar/envoy/internal/bus 297.122s; ok internal/kvwatch 63.165s; ok cmd/dispatch 42.548s; ok cmd/listener 452.760s. No message path, ack, dedupe or ordering rule is touched by the diff.",
+      "headSha": "b7cccdc95ba8d589e551c43507b5df0b0ea65b3f",
+      "negativeControl": "The four cmd/listener tests skipped by name need Docker or DISPATCH_TEST_DATABASE_URL, which this pod has neither of (no docker binary, no /var/run/docker.sock, no postgres server): run unskipped they panic 'rootless Docker not found', and they panic identically in a copy of the tree with this change reverted, so the skip is the environment and not this change. CI runs them."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/bus/nats.go: Client gains hooksDueSince and lastHookErr under mu, markHooksDueLocked at both sites that count a connection event, the exported constant RepairGrace (= time.Minute), the exported reader HookStall() (time.Duration, error), and the unexported now(); WithReconnectErrClock's doc widened to the whole of the bus's time-based reconnect reporting.",
+    "packages/envoy/internal/bus/recovery.go: rewatch records the last hook error and clears the stall on a run that succeeded; reportHookFailure reports a failed run at WARN under RepairGrace and at ERROR at or past it; onReconnect and recoverUntilHealthy both use it, and the restore keeps its own ERROR 'envoy nats recovery resubscribe failed'.",
+    "packages/envoy/internal/bus/restart_test.go: TestAReconnectHookFailureIsAnErrorUnlessTheClientStopped renamed to TestAReconnectHookFailureIsReportedByItsStallUnlessTheClientStopped and its running-client case rewritten to the WARN under the grace and the ERROR past it (clock moved with bus.WithReconnectErrClock).",
+    "packages/envoy/internal/bus/hook_stall_test.go (new): the retry that logs no ERROR after a server restart, and HookStall reporting the stall and the last hook error.",
+    "packages/envoy/internal/kvwatch/kvwatch.go: unrepairedDelay = bus.RepairGrace; reportFailedRepair and repairFailedReason deleted with their three call sites in Rewatch; reportUnrepaired lost the reason parameter the deletion left single-valued; three comments rewritten to the refined INFRA-182 decision.",
+    "packages/envoy/internal/kvwatch/repair_test.go: TestAWatcherWhoseBucketIsGoneLogsTheFailedRepair rewritten as TestAWatcherWhoseBucketIsGoneReportsOnlyWhenItsWaitPasses - no ERROR at the failed repair, the wait still armed, one ERROR with reason 'no repair within 1m0s' when it passes.",
+    "packages/envoy/cmd/listener/main.go: healthzHandler answers 503 through writeDependencyHealth(w, \"KV watch rebuild\", ...) once HookStall reaches bus.RepairGrace, after the WatchErr and ping loops; its doc comment carries the new answer.",
+    "packages/envoy/cmd/listener/healthz_hook_stall_test.go (new): in-process listenerDeps over real NATS, a real durable and real caches - 200 healthy under the grace, 503 naming the KV watch rebuild past it.",
+    "packages/envoy/cmd/dispatch/stream_replicas_test.go: reconcileFailure reads both records a failed hook run now writes (carried by the forward merge; the file reached main after this branch's base).",
+    "packages/envoy/AGENTS.md, packages/envoy/docs/architecture.md, docs/site/src/content/docs/dispatch/envoy.md: the health answers, the reconnect reporting and the watcher's one ERROR reason.",
+    "packages/envoy/.changes/unreleased/INFRA-743-rewatch-retry-report.yaml (new): kind Fixed."
+  ],
+  "trickyParts": [
+    "The stall is measured from the connection event, not from the first failed run: one hook run legitimately spends tens of seconds, because each JetStream call waits nats.MaxWait (10 s) and the caches are rewatched in sequence. The smoke shows it - the first WARN carried stall_ms=20007, two KV watch attempts of 10 s each.",
+    "A run that succeeds clears lastHookErr even when another connection event landed while it ran: without that, /healthz would name a fault that run had already repaired. The simplify pass found it; the stall itself restarts at the clock for the uncovered event.",
+    "The production-like smoke needs a NATS configuration whose permissions actually apply: a deny written beside its allow on one line is parsed into the allow list and the server applies no permissions at all (seen on /connz?auth=1), and KV_* is no NATS wildcard, since a wildcard is a whole token. The script writes one key per line and names the three KV streams in full.",
+    "bus.RepairGrace is exported because internal/kvwatch reads it (unrepairedDelay) and cmd/listener compares against it; it is the one bound both halves of an outage report at."
+  ],
+  "deviations": [
+    "The plan's section 4 asked for the past-the-grace ERROR assertion in a new internal/bus test and in the updated restart_test.go. It is in restart_test.go's running-client case, which the plan also names; hook_stall_test.go's second test holds the reader (HookStall's stall and last error, which /healthz reads) rather than repeating the same log assertion.",
+    "The plan's negative control named a deny of $JS.API.CONSUMER.CREATE.KV_*.>; that subject matches nothing, since a NATS wildcard is a whole token. The smoke denies $JS.API.CONSUMER.CREATE.KV_envoy_interests.>, .KV_envoy_roles.> and .KV_envoy_sessions.> instead, which is the same band: STREAM.INFO, the pings and the durable keep working and only KV watch creation fails.",
+    "A forward merge of main was needed: packages/envoy/cmd/dispatch/stream_replicas_test.go reached main after this branch's base (#2362) and matches the record this change renames, so the sentence it must change exists only on the base. The merge is b7cccdc9; its comment on the pull request carries both fingerprints (b9f1ba2c -> 40e2f17a, changed, that one file) and the re-run of every check and the proof at the merge head."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "Three sibling pull requests still touch these files and none has merged: #2377 (INFRA-514, rewrites internal/kvwatch/kvwatch.go's watch path and this issue's flaky test, which now asserts a resumed warm-up line), #2395 (INFRA-590, adds connectionChanged() at the same connection events this change counts), #2446 (INFRA-594, changes cmd/listener/main.go's healthz and internal/bus/nats.go). Each implementer was told this change's files and its new log lines, and each answered; whichever tree merges second carries the resolution, and after #2377 lands the 200-run loop should be run again against its version of the test.",
+    "This pod cannot run the four Docker-backed cmd/listener tests, nor packages/envoy's Postgres-backed suites; CI is the only place they run."
+  ]
+}
