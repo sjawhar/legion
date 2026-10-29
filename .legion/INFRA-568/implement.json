@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-568",
-  "completed": "2026-10-29T09:02:03Z",
+  "completed": "2026-10-29T09:54:39Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2397",
   "proof": [
     {
@@ -52,6 +52,14 @@
       "observed": "15 pairs: old 7, new 6, per pair and per wording in the body; pairs 1-9 equal the 28 October set's shipped column (new 5 vs old 4). DISPATCH_RECALL_REQUIRE_NO_LOSS is opt-in and no CI workflow sets it or the corpus",
       "headSha": "dc9071e65c3b44ec4a18bdca6f230ab5aadc016a",
       "negativeControl": "with DISPATCH_RECALL_REQUIRE_NO_LOSS=1 on the 29 October set the test fails at related_recall_test.go:422 (tester round 14), which is why the gate stays opt-in"
+    },
+    {
+      "criterion": "Round 12 review finding 1: a related_checks record retry started after the shutdown wait began is waited for and does not panic (main's backgroundWork, not a sync.WaitGroup)",
+      "surface": "Go test on real Postgres 17 + pgvector (ICU en-US) with a registered server, a lock on asks holding the record",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... go test ./internal/dispatch/api -run TestRelatedCheckRecordRetryStartedWhileShutdownWaitsIsWaitedFor -count=3 -v",
+      "observed": "3 PASS: waitBackground stays waiting while the retry holds its row after the in-flight keyed handler ends, returns without a panic after the lock's release, and the one timeout row is written. api subset (Related|DecisionBlock|Suggest|CreateIssue|CreateAsk|Keyed|Routes|Background|Shutdown|Broadcast) ok, store migrations ok, cmd/dispatch ok, vet and gofmt clean",
+      "headSha": "ca85bfa9816a4af2e13595e5701af169ff65a435",
+      "negativeControl": "the retry on a plain uncounted goroutine (throwaway edit, reverted): FAIL related_check_test.go:538 'the shutdown wait returned (panic <nil>) while the record's retry still held its row'"
     }
   ],
   "filesChanged": [
