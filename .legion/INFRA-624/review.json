@@ -2,41 +2,30 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-624",
-  "completed": "2026-10-29T12:04:05Z",
-  "round": 10,
-  "reviewedHead": "9d737655a865141a1f25b6bbc76a5cf7561405f8",
-  "codeHead": "d3e0a98a5e3e",
+  "completed": "2026-10-29T13:16:57Z",
+  "round": 11,
+  "reviewedHead": "21bde3dde71b506f2f4e9ceaca3f902b3b8f66a3",
+  "codeHead": "ea3cfcb04e83",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
+  "important": 0,
   "minor": 2,
-  "scope": "Narrowed by the INFRA-138 architect to round 9's two nested-decision items (review 5694589559) and the extended exhaustive test; correctness defects outside the test's shapes still fixed here; other points on Fast-follow.",
-  "ci": "CI head d3e0a98a (newest pull_request run; compare to 9d737655 handoffsOnly true, 2 files under .legion/INFRA-624/): every check success, required lint, typecheck, test, pr-title and dispatch-multiprocess included.",
-  "merge": "d3e0a98a merges main 5443d99b: every PR file's diff against main is byte-identical before and after, except packages/proof-editor/AGENTS.md, merged with main's mermaid kind; its legion-owned count (Sixteen) is right, but the copied-file kinds count stays twenty-two where both kinds make twenty-three.",
-  "roundNineItems": "Item 2 (misattributed nested decision) fixed in c5d2f236 and accepted (PRRT_kwDORFy7ds6xdslc). Item 1 (loop) fixed when the holder breaks the content rule (three and four levels, sibling nested decisions all name one edit that applies, code-quality probes), but not when the holder fails only to parse; PRRT_kwDORFy7ds6xdslS unresolved. Postgres in the pod was down this round, so both reviewers used in-package probes of refuseAskContentEdit and validateEditedAskBlocks; I re-ran the empty-holder probe.",
+  "scope": "The architect's design cut (recorded on INFRA-624): a refusal whose repair would need its holder changed names no delete and no ask edit. Judged: that refusal, that no named step loops or is refused, the exhaustive tests' counts, and the twenty-three kinds count.",
+  "ci": "CI head d78e7cbb (newest pull_request run; compare to 21bde3dd handoffsOnly true, 1 file under .legion/INFRA-624/): required lint, typecheck, test, pr-title success at 13:16Z; other lanes were still running.",
+  "roundTenItems": "Gone by the design cut in 9712a697 and accepted (PRRT_kwDORFy7ds6xioNx, PRRT_kwDORFy7ds6xioN2, PRRT_kwDORFy7ds6xioN-). The deep review followed every shape against Postgres (a holder with no question, O > M (no question) > I, an answered holder, a holder another session wrote, a holder with an unlabelled option, broken siblings): no named delete was refused and no reason sends the caller to another decision's ask edit. Counts verified: 1364 flat bodies (1242 broken, 892 followed, 350 empty question) and 780 nested bodies (715 broken; 1113 refusals = 348 followed + 765 naming no delete: 541 unreadable, 186 held back by the holder, 38 editor). proof-editor AGENTS.md says twenty-three, matching its list.",
   "keyFindings": [
     {
-      "severity": "important",
+      "severity": "minor",
       "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
-      "description": "planAskRepair's holder check (:597) sends the caller outward whenever readAskBlockStrictly fails on the holder after the deletes, parse failures included. Holder O = [empty paragraph, list item holding I], I = [P, L, L2]: I's refusal says 'ask block \"O\" has an empty question; edit ask block \"O\" first' (:544); editing O is refused by askBlockOf ('has an empty question', no path); a doc-edit writing O's question alone is refused because I breaks; a doc-edit deleting I-L2 alone is refused because O has an empty question; only one edit doing both applies, and no refusal names it (reviewer's re-run of TestProbeR10QEmptyHolder). The 'needs words written' branch (:547) has the same gap for O > M (empty question) > I (broken). Both reviewers count 97 such shapes inside the 780-body test, which its oracle accepts."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
-      "description": "The holder branch's only next step is an ask edit of the holder, which the handler refuses when the holder is decided (409 ASK_NOT_OPEN, api/asks.go:402-413) or another actor wrote it (403 NOT_AUTHOR): an open follow-up decision inside an answered decision's option, both broken, gets 'edit ask block \"o\" first' and never sees the one doc-edit the holder's plan would name."
+      "description": "The holder branch (:548) says the decision is repaired 'by an ask edit once the decision holding it reads as one', but the holder can never read as one while this decision breaks (pmdoc.AskContentError walks nested decisions). Reviewer's re-run of the code-quality probe TestR11HeldBackWayOut: after the holder's own repair, 'holder reads as one: false (… ask-nested … holds a second bullet list)', yet the held decision's ask edit then names deletes and following them ends valid. The same wording is at :497, packages/envoy/AGENTS.md:2316, the Changed fragment :13 and service_test.go:1587."
     },
     {
       "severity": "minor",
       "file": "packages/envoy/internal/dispatch/docs/service_test.go",
-      "description": "followAskRefusal (:1398) never follows 'edit ask block X first' and checks a named decision breaks the rule before the deletes, so the shapes above pass; it should follow X and assert X's refusal names deletes doc-edit accepts, or a terminal outcome whose advice applies."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/proof-editor/AGENTS.md",
-      "description": "After the merge the copied-file list holds main's mermaid kind (INFRA-532) and this PR's kind, but :57 and :128 still say twenty-two; twenty-three."
+      "description": "No test checks that a held-back refusal is true: a mutation returning holder:true for every nested decision (ask_block_text.go:600) passed every Ask test (code-quality probe). Add a row that repairs the holder's own problem, then follows the held decision's refusal to a valid end for both."
     }
   ],
   "fastFollow": "none",
-  "thermonuclear": "Both run at 9d737655 (code d3e0a98a): deep review CHANGES (items 1, 2 and 3), code quality CHANGES (items 1 and 3).",
-  "security": "untrusted-input: delete ids and holder ids stay strconv.Quote data, and no reason holds command text (ask_block_text.go:525-552). authz: no new route; every refusal runs inside SetAskBlockText behind the unchanged ask-edit handler, whose open-state and author checks are what item 2 meets."
+  "thermonuclear": "Both run at 21bde3dd (code ea3cfcb0): deep review APPROVE with one minor (item 1), code quality CHANGES (items 1 and 2).",
+  "security": "untrusted-input: every block id in the reason stays %q or strconv.Quote data and no branch holds command text (ask_block_text.go:519-555). authz: no new route; the refusal runs inside SetAskBlockText behind the unchanged ask-edit handler, and no branch names another decision's ask edit any more."
 }
