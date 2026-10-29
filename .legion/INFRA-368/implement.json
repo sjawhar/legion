@@ -2,23 +2,42 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-368",
-  "completed": "2026-10-29T14:40:00Z",
+  "completed": "2026-10-29T16:20:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2463",
-  "round": "review round 9 (architect's round 10)",
+  "round": "merge lane: the one forward merge of main (7c2effba)",
   "proof": [
     {
-      "criterion": "An unchanged edit of a comment stored with CR LF carries its block ids: the save works out the ids from the body it sends, the field's text",
-      "surface": "The Conversation tab's comment editor in Chromium on the local harness built from 30157984 (a comment posted with CR LF by the signed-in person, edited and saved without typing)",
-      "command": "a throwaway Playwright row (removed after the run): POST /api/v1/issues/CORE-1/comments {body: 'Alpha first.\\r\\n\\r\\nBeta second.'} as alice, reload, Expand thread, Edit, Save; plus `bun test web/src/features/conversation/MentionComposer.test.tsx` ('an unchanged edit of a comment stored with CR LF carries each block's id')",
-      "observed": "The blocks route answered b1 0-12 and b2 16-28 (UTF-16 into the CR LF body). The PATCH sent {body: 'Alpha first.\\n\\nBeta second.', base_revision: 1, blocks: [{from: 0, id: b1}, {from: 14, id: b2}]}. The unit test passes; conversation and margin tests 318 pass; the driver exits 0 with 133 PASS; the passage, held-send and editor rows 4 passed.",
-      "headSha": "30157984d4b2",
-      "negativeControl": "With MentionComposer.tsx at 881b03e5 (dashboard rebuilt), the same browser drive PATCHed {body: 'Alpha first.\\n\\nBeta second.'} alone, with no base_revision or blocks, and the unit test fails the same way."
+      "criterion": "The forward merge keeps every behaviour: block graph, replies naming a block, carried ids through the editor, block-card refresh",
+      "surface": "local Dispatch harness (bun run dispatch:local): real Go server built from the merge head, real migrations 0001-0143 on Postgres 17, the dashboard in Chromium",
+      "command": "DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh; bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/block-references.e2e.ts e2e/conversation.e2e.ts e2e/held-sends.e2e.ts -g 'passage|new text once|stops showing|kept|reload|edit'",
+      "observed": "schema_migrations max 143; driver exit 0 with 133 PASS and 0 FAIL; Playwright 7 passed: block-references 237, 274, 303 (block card new text after edit, comment block deleted, spec block deleted), conversation 188, 985 (passage), 1069 and 1245 (editor keeps cited ids)",
+      "headSha": "f728a2ade613ed4f5ee8d22e1083bb40094ee736",
+      "negativeControl": "The fingerprint changed only by the renumber, the route count and the filter lines (comment 6503378133); the earlier rounds' negative controls (each row failing at the commit before its fix) stand on unchanged code."
+    },
+    {
+      "criterion": "Every CI filter matches every file its job reads, itemblocks included",
+      "surface": ".github/scripts/check-ci-filters.sh at the merge head (go list closures, PyYAML from a uv venv under $TMPDIR)",
+      "command": "PATH=$TMPDIR/ciyaml/bin:$PATH bash .github/scripts/check-ci-filters.sh",
+      "observed": "exit 0: every ci.yaml filter matches every file its job reads (24 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)",
+      "headSha": "f728a2ade613ed4f5ee8d22e1083bb40094ee736",
+      "negativeControl": "The same check on the merge without the lines: exit 1, 36 CI filter problem(s), naming each itemblocks file for test, docs, dispatch, dispatch-browser-multiprocess, envoy-infra-go and listener-server-change; with only the dispatch_server line, 7 problems (listener-server-change and docs-pages.yaml paths)."
     }
   ],
   "filesChanged": [
-    "30157984: MentionComposer.tsx (sentRequest reads the field once and composedRequest takes that text for both draft.body and edit.carried), send-request.ts (carriedIdsOf doc comment), MentionComposer.test.tsx (CR LF unchanged-save case with a textarea that normalizes CR LF)"
+    ".github/workflows/ci.yaml",
+    ".github/workflows/docs-pages.yaml",
+    "packages/envoy/internal/dispatch/store/migrations/0141_item_blocks.{up,census}.sql (from 0139)",
+    "packages/envoy/internal/dispatch/store/migrations/0142_comments_item_blocks_trigger.{up,census}.sql (from 0140)",
+    "packages/envoy/internal/dispatch/store/migrations/0143_messages_item_blocks_trigger.{up,census}.sql (from 0141)",
+    "packages/envoy/internal/dispatch/store/item_blocks_migrations_test.go",
+    "packages/envoy/internal/dispatch/api/routes_table_test.go",
+    "packages/envoy/internal/dispatch/docs/block_index.go",
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/cmd/dispatch/AGENTS.md",
+    "packages/envoy/cmd/dispatch/README.md"
   ],
   "deviations": [
-    "Round 10 item 1 (the itemblocks lines in ci.yaml's five filters) is not in this push: ci.yaml and check-ci-filters.sh are main's (#2316) and not on this branch, whose merge base is 88840d35. The architect agreed (message 69c51de1): the lines go in the same push as the forward merge when the merge lane calls #2463's turn, and check-ci-filters.sh runs there."
+    "The task named five filters. ci.yaml's test, docs, dispatch, dispatch_browser_multiprocess and envoy_infra_go take the Dispatch server's packages through the shared dispatch_server anchor, so the line went there once. check-ci-filters.sh then still named listener_server_change and docs-pages.yaml's on.push.paths (which must equal the docs filter), so the line went into both too; the check is clean only with all three.",
+    "TestARepeatedSubReplacesAnotherKind (api/live_subscriptions_test.go:224, main's file, untouched here) failed once in the whole api package run (a 10 s poll) and passed 3 of 3 alone."
   ]
 }
