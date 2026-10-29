@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-29T20:30:35Z",
+  "completed": "2026-10-29T23:08:47Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -188,6 +188,14 @@
       "observed": "12 passed. Cut-off from an 18 s slow write: the page repeats under one key, gets the replayed 201, attempt 1 sent once. Slow send (4 s): the 201 carries the attempt pending, one POST, attempt 1 sent once.",
       "headSha": "dc3ad918de2134557a4fb2542d214295255215d9",
       "negativeControl": "The same tests against main 15be33d1's server (send inside the request): the slow-send test fails, Expected [\"pending\"], Received [\"sent\"]; the cut-off test passes on both."
+    },
+    {
+      "criterion": "Review round 4 finding 2 (architect's ruling): a mention queued over a minute in a live process keeps its recipient's order; the delivery sweep never resends it ahead of that recipient's earlier comments.",
+      "surface": "The API handler, the post-response mention sender, main's delivery sweep (resumeOwedDeliveries) and the real outbox against Postgres, with a listener that holds the first send",
+      "command": "go test ./internal/dispatch/api/ -run 'TestAHeldLaneKeepsItsQueuedCommentsInOrderThroughASweep|Mention|Sweep|Keyed|Repeat|Silent|Fallback' -count=1",
+      "observed": "s1 receives first, second, third once each in order while a sweep pass and the outbox run beside the held lane; queued attempts hold claims refreshed every third of a lease; no comment_fallback_copies row.",
+      "headSha": "74779becb2c8b3d1a2ca48a2001baa3dfee5e547",
+      "negativeControl": "With each attempt committed unclaimed (dc3ad918's behaviour) the same test reads sends second, third, first (the sweep resent the queued two first)."
     }
   ],
   "filesChanged": [
@@ -198,6 +206,7 @@
     "packages/dispatch/e2e/activity.e2e.ts",
     "packages/dispatch/e2e/api.ts",
     "packages/dispatch/e2e/keyed-send.e2e.ts",
+    "packages/dispatch/e2e/seed.ts",
     "packages/dispatch/web/src/features/activity/activity-model.test.ts",
     "packages/dispatch/web/src/features/activity/activity-model.ts",
     "packages/envoy/.changes/unreleased/pr2406-Added-20261028-113257.yaml",
@@ -263,8 +272,8 @@
     "packages/envoy/internal/dispatch/outbox/publisher.go",
     "packages/envoy/internal/dispatch/outbox/publisher_claimant_test.go",
     "packages/envoy/internal/dispatch/outbox/publisher_mentions_test.go",
-    "packages/envoy/internal/dispatch/store/migrations/0141_comment_fallback_copies.census.sql",
-    "packages/envoy/internal/dispatch/store/migrations/0141_comment_fallback_copies.up.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0142_comment_fallback_copies.census.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0142_comment_fallback_copies.up.sql",
     "packages/envoy/internal/dispatch/store/pool.go",
     "packages/envoy/loadtest/README.md",
     "packages/envoy/loadtest/live.go",
@@ -316,7 +325,9 @@
     "Main's TestARepeatedSubReplacesAnotherKind fails 2-4 of 20 on main alone; its rig (live_socket_test.go) now stalls the page's writes itself, the test unchanged.",
     "Main's tests that pinned the relay and hub running after their last subscriber (TestTheBackgroundWaitHoldsFor...) are rewritten to this PR's stop-at-zero behaviour; the delivery-sweep comment tests wait for the post-response send.",
     "Main's keyed-send.e2e.ts cut-off test changed (architect's ruling): its cut-off now comes from a slow write inside the request; a slow-send-after-the-answer case added.",
-    "Forward merge of main at ab986cd2: main's #2513 fixed TestARepeatedSubReplacesAnotherKind in its own rig, so this branch's rig change and pin test are dropped in favour of main's."
+    "Forward merge of main at ab986cd2: main's #2513 fixed TestARepeatedSubReplacesAnotherKind in its own rig, so this branch's rig change and pin test are dropped in favour of main's.",
+    "Forward merge of main at df929648: main's #2501 took 0141, so the fallback table is 0142_comment_fallback_copies; main's #2377 reference seed kept beside --min-events in the load test.",
+    "A card Retry while a send is still queued now opens attempt 2 rather than resuming attempt 1 (the queued attempt holds a live claim), the documented rule for a live claim."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -325,7 +336,7 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 11,
+  "round": 12,
   "answersTest": "735b6cde36e432bdc4bd6290e57e7dd4b71f6e0e",
-  "answersReview": "443aae3579981f75df76c95cc31294cf76f19468"
+  "answersReview": "44dcd5e44a1b93bb2553923ab612a3ea5b64256e"
 }
