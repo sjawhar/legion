@@ -2,45 +2,48 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-606",
-  "completed": "2026-10-29T02:04:19Z",
-  "round": 3,
-  "headReviewed": "0d428941235dbb52866eb40cc2f496668f68864f",
-  "codeHead": "2eda91938cc2",
+  "completed": "2026-10-29T21:05:36Z",
+  "round": 4,
+  "headReviewed": "c0cc6f3da1ac24ae3dc5a625aeab3a1371ff06bc",
+  "codeHead": "dc3ad918de2134557a4fb2542d214295255215d9",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 1,
+  "important": 2,
   "minor": 3,
-  "ci": "Required set lint, typecheck, test, pr-title. At code head 2eda9193: lint, typecheck, test and PR Title success. The non-required suites the architect named (envoy-go, envoy-go-race, dispatch, dispatch-multiprocess, dispatch-memory, the Dispatch Go suite on Postgres 16) were all still queued at review time; approval waits on them, this request does not. Known red on main: packages/dispatch/e2e/close-withdraws-asks.e2e.ts:126 (INFRA-138). pmdoc's build is fixed on main by #2484 (a09a2f25), after this branch's merge base d4cbcfe6, so pmdoc stays red on this branch until the next merge of main; record it as main's.",
-  "tests": "Local Postgres 16 at code head 2eda9193: go vet api, outbox, model, events, loadtest clean; go test outbox, model, events, store, loadtest ok; go test ./internal/dispatch/api/ ok except TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, environmental (this pgserver build has byte-order collation only; the implementer's handoff names the same).",
-  "architectChecks": {
-    "criterion5Unanswered": "Not a finding. The 9 of 37 mentioned comment writes in the 60 s after the restart that got no 2xx are client-side transport failures while the process restarted (restart 01:23:53.9 to /healthz 01:24:04.5): run.log in /legion/scratch/tmp/t606/lt/runs/t606r9-head has 36 'connect: connection refused', 1 dial 'i/o timeout' at 01:24:01, and 1 client timeout, for all comment writes after the restart, with and without mentions (9 of 37 with, 29 of 140 without). No comment was created for them, so no mention is owed; the load generator does not retry. Main answered 0 of 37.",
-    "nonRequiredSuites": "Queued at review time; approval waits for them."
-  },
+  "ci": "No CI run exists at dc3ad918 or its handoff head: GitHub reports the PR CONFLICTING with main, so no pull_request workflow starts. The last code run (fd8e7981, before round 11's test fix) had CI red in envoy-go, envoy-go-race, dispatch and pi-legion. The next approval waits for the required set (lint, typecheck, test, pr-title) and for envoy-go, envoy-go-race, dispatch, dispatch-multiprocess and the Dispatch browser job, all green at the merged head (architect's ruling). Known red on main: packages/dispatch/e2e/close-withdraws-asks.e2e.ts:126 (INFRA-138).",
   "threadsAnswered": [
-    "PRRT_kwDORFy7ds6xTdRC",
-    "PRRT_kwDORFy7ds6xTdRK",
-    "PRRT_kwDORFy7ds6xTdRO"
+    "PRRT_kwDORFy7ds6xY-i4",
+    "PRRT_kwDORFy7ds6xY-i8",
+    "PRRT_kwDORFy7ds6xY-i-",
+    "PRRT_kwDORFy7ds6xY-jB"
   ],
+  "notRaised": "Under the architect's round cap (only correctness findings or red required checks after round 2), the code-quality pass's structural items that change no behaviour are not raised: leftTo as a pure decision, routeTopic duplicating publishRoute, the MentionResumedSQL alias and startMentionSender wrapper, fallbackRecord's three booleans, test and README file splits, the commentEventOwner fallback, and restated ceil(k/8) prose.",
   "keyFindings": [
     {
       "severity": "important",
+      "file": "packages/envoy/internal/dispatch/store/migrations/0141_comment_fallback_copies.up.sql",
+      "description": "The PR conflicts with main, so no CI exists at the code head; it needs a forward merge of main (never a rebase). Main's #2501 took 0141 (0141_drop_broadcast_idempotency_keys); the files merge without a textual conflict, but pgmigrate refuses two migrations with one version (internal/pgmigrate/set.go), so every boot and store test fails after a merge that keeps both. Renumber to 0142 and update the README (1267, 1276), AGENTS.md (1405, 3288), the changelog fragment and the body."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/comment_mention_sender.go",
+      "description": "A queued mention attempt is committed unclaimed and claimed only when its lane starts the send. Once it is a minute old, model.OwedMentionAttemptSQL makes it owed, and the delivery sweep (any process, every minute, 4 at a time) sends it while the lane is still sending earlier comments to that recipient. A recipient behind a slow listener therefore gets comments out of order from a process that never stopped. Every such attempt also flips to resumed in the outbox and gets a fallback row. AGENTS.md:1423-1425 says the sweep never takes a live process's queue out of order; the changelog fragment and body promise order per recipient. Fix: keep a live process's queued attempts out of the sweep (claim at enqueue and keep the claim fresh while queued, or an equivalent), with a test of a lane held more than a lease."
+    },
+    {
+      "severity": "minor",
       "file": "packages/envoy/internal/dispatch/outbox/mentions.go",
-      "description": "failedFallbackCopy settles a comment_fallback_copies row unpublished when its count reaches retry.DeadLetterAttempts (10). A failed row keeps its claim of now()+claimWindow (1 minute), so the copy is given up after about 10 minutes, and any decision error (Postgres) or non-ErrUnavailable publish error counts. An event never stops (backOff logs at the threshold and retries on retry.Delay; retry.go:13-16 says the events outbox does not stop because nothing about a publish failure is permanent). A transient outage of about 10 minutes therefore drops the only copy a mentioned session was owed. The PR body says 'as an event does'. Fix: back off on retry.Delay and keep retrying as an event does, logging once at the threshold."
+      "description": "A fallback row waiting on a send or resend is released with next_attempt_at null, so every 5 s retry tick claims it again and re-reads its comment's attempts (2 queries plus claim and record), up to 100 rows: load in the post-restart minutes this PR exists to calm. Release a waiting row with a delay (mentionPendingDelay or the sweep interval)."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/cmd/dispatch/README.md",
-      "description": "A rollback to the previous build strands unsettled comment_fallback_copies rows: the previous build has neither the fallback pass nor the stranded pass, and the event is already published. The 0138 paragraph says the earlier release runs over the schema unchanged; name this and the drain check (select count(*) from comment_fallback_copies where settled_at is null)."
+      "file": "packages/dispatch/e2e/seed.ts",
+      "description": "comment_fallback_copies has no foreign key and is not in the browser suite's reset list, while the reset truncates events with restart identity, so an unsettled row from one scenario can publish whichever later event holds its event_id to an agent topic. Add the table to the reset."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/outbox/mentions.go",
-      "description": "recordFallbackCopies matches rows by (comment_id, destination, settled_at is null) and not by the claim it took, so a pass that outlasts claimWindow can release or fail a row another process has claimed since. The repeat publish carries the same dedupe key, so hosts drop it; guard on the claimed next_attempt_at."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/comment_create.go",
-      "description": "Lines 480-487 restate the copy protocol and are now wrong (a resent mention's copy is not held back; it becomes a fallback row), naming mentionDeliveryQuery as the decider; point to publishFallbackCopies. Also: comment_delivery_sender_test.go:22-25 keeps a test copy of claimLease, and BroadcastPage.tsx:43,91 name the deleted claimLapsed."
+      "file": "packages/envoy/AGENTS.md",
+      "description": "Stale or wrong prose: claimLapsed (deleted) at api/delivery_sweep.go:22, api/messages.go:183, AGENTS.md:2885; the removed stranded pass at comment_create.go:717-718 and AGENTS.md:3313; AGENTS.md:3277 says MentionLiveSQL is 'within the hour' (the window is MentionSweepWindow, 72 h); agent_stream.go:30-31,112 say bytes count 'until written' (released when queued on the socket's 64-frame stream, as cmd/dispatch/README.md:1948 says); changelog pr2406-...113307 names the socket's '16-frame queue' (agent frames ride the 64-frame stream); pr2406-...113301 and live_events.go:136-137 say a subscription ends 'behind' when the server stops (only a reset closes it; a stop closes the socket 1012)."
     }
-  ]
+  ],
+  "tests": "Thermo deep review ran at c0cc6f3d on local Postgres 16: go test ./internal/dispatch/outbox/ ok; the relay, agent-view, fallback, sender and sweep api tests ok. I re-read the round-3 fixes at head."
 }
