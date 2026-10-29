@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -219,11 +220,35 @@ func heapFixtures() (start, end *profile.Profile) {
 	return start, end
 }
 
+// TestCodepathsMemoryRowsSumToTheWorkingSet: the rows sum to the working set with and without
+// HeapReleased. With it, heap idle retained and non-Go memory leave the released pages out, so a
+// large HeapReleased under a working set that covers the resident memory (Sys - HeapReleased)
+// gives a non-negative non-Go row where working set - Sys would be negative. Without it, the old
+// formula holds and a note says so.
 func TestCodepathsMemoryRowsSumToTheWorkingSet(t *testing.T) {
 	start, end := heapFixtures()
-	ms := &memStats{HeapInuse: 600 * mib1, HeapSys: 800 * mib1, StackSys: 16 * mib1, Sys: 1000 * mib1}
-	for _, ws := range []float64{1200 * mib1, 900 * mib1} {
-		m, err := memoryTable(memoryInputs{heapEnd: end, heapStart: start, ms: ms, ws: new(ws), wsSource: "test"})
+	const (
+		retainedRow = "heap idle retained (HeapSys - HeapInuse - HeapReleased)"
+		nonGoRow    = "non-Go memory (working set - (Sys - HeapReleased))"
+		oldIdleRow  = "heap idle (HeapSys - HeapInuse)"
+		oldNonGoRow = "non-Go memory (working set - Sys)"
+	)
+	old := &memStats{HeapInuse: 600 * mib1, HeapSys: 800 * mib1, StackSys: 16 * mib1, Sys: 1000 * mib1}
+	released := &memStats{HeapInuse: 600 * mib1, HeapSys: 1400 * mib1, HeapReleased: new(700.0 * mib1), StackSys: 16 * mib1, Sys: 1600 * mib1}
+	for _, tc := range []struct {
+		ms                *memStats
+		ws                float64
+		idleRow, nonGoRow string
+		idle, nonGo       float64
+	}{
+		{old, 1200 * mib1, oldIdleRow, oldNonGoRow, 200 * mib1, 200 * mib1},
+		{old, 900 * mib1, oldIdleRow, oldNonGoRow, 200 * mib1, -100 * mib1},
+		// Resident 1600 - 700 = 900 MiB: a 1,000 MiB working set leaves 100 MiB non-Go, where
+		// working set - Sys would be -600 MiB.
+		{released, 1000 * mib1, retainedRow, nonGoRow, 100 * mib1, 100 * mib1},
+		{released, 850 * mib1, retainedRow, nonGoRow, 100 * mib1, -50 * mib1},
+	} {
+		m, err := memoryTable(memoryInputs{heapEnd: end, heapStart: start, ms: tc.ms, ws: new(tc.ws), wsSource: "test"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -231,14 +256,14 @@ func TestCodepathsMemoryRowsSumToTheWorkingSet(t *testing.T) {
 		rows := map[string]cpMemoryRow{}
 		for _, r := range m.Rows {
 			if r.Bytes == nil || r.ShareOfWorkingSet == nil {
-				t.Fatalf("working set %v: row %q has no bytes or share", ws, r.Row)
+				t.Fatalf("working set %v: row %q has no bytes or share", tc.ws, r.Row)
 			}
 			sum += *r.Bytes
 			shares += *r.ShareOfWorkingSet
 			rows[r.Row] = r
 		}
-		if math.Abs(sum-ws) > 1e-3 || math.Abs(shares-1) > 1e-12 {
-			t.Errorf("working set %v: rows sum to %v bytes, shares to %v", ws, sum, shares)
+		if math.Abs(sum-tc.ws) > 1e-3 || math.Abs(shares-1) > 1e-12 {
+			t.Errorf("working set %v: rows sum to %v bytes, shares to %v", tc.ws, sum, shares)
 		}
 		fold := rows["Go heap in use: "+entryFold]
 		if math.Abs(*fold.Bytes-300.0/400*600*mib1) > 1e-3 || math.Abs(*fold.WindowAllocBytes-8000*mib1) > 1e-3 {
@@ -247,13 +272,23 @@ func TestCodepathsMemoryRowsSumToTheWorkingSet(t *testing.T) {
 		if r := rows["Go heap in use: HTTP getIssueReferences"]; math.Abs(*r.WindowAllocBytes-300*mib1) > 1e-3 {
 			t.Errorf("getIssueReferences allocated %v, want 300 MiB", *r.WindowAllocBytes)
 		}
-		if r := rows["heap idle (HeapSys - HeapInuse)"]; *r.Bytes != 200*mib1 {
-			t.Errorf("heap idle %v, want 200 MiB", *r.Bytes)
+		if r, ok := rows[tc.idleRow]; !ok || *r.Bytes != tc.idle {
+			t.Errorf("working set %v: %q %+v (present %v), want %v", tc.ws, tc.idleRow, r, ok, tc.idle)
 		}
-		nonGo := *rows["non-Go memory (working set - Sys)"].Bytes
+		r, ok := rows[tc.nonGoRow]
+		if !ok {
+			t.Fatalf("working set %v: no row %q in %v", tc.ws, tc.nonGoRow, slices.Collect(maps.Keys(rows)))
+		}
 		negativeNote := slices.ContainsFunc(m.Notes, func(n string) bool { return strings.HasPrefix(n, "Non-Go memory is negative") })
-		if nonGo != ws-1000*mib1 || negativeNote != (nonGo < 0) {
-			t.Errorf("working set %v: non-Go %v, negative note %v", ws, nonGo, negativeNote)
+		if *r.Bytes != tc.nonGo || negativeNote != (tc.nonGo < 0) {
+			t.Errorf("working set %v: non-Go %v, negative note %v; want %v", tc.ws, *r.Bytes, negativeNote, tc.nonGo)
+		}
+		noReleasedNote := slices.ContainsFunc(m.Notes, func(n string) bool { return strings.Contains(n, "has no HeapReleased") })
+		if noReleasedNote != (tc.ms.HeapReleased == nil) {
+			t.Errorf("working set %v, HeapReleased %v: note for a block without HeapReleased %v", tc.ws, tc.ms.HeapReleased, noReleasedNote)
+		}
+		if (m.HeapReleased == nil) != (tc.ms.HeapReleased == nil) || m.HeapReleased != nil && *m.HeapReleased != *tc.ms.HeapReleased {
+			t.Errorf("working set %v: heap_released_bytes %v, want %v", tc.ws, m.HeapReleased, tc.ms.HeapReleased)
 		}
 	}
 }
@@ -379,8 +414,16 @@ func TestCodepathsParsesMemStats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if ms.HeapReleased == nil || *ms.HeapReleased != 104857600 {
+		t.Errorf("HeapReleased %v, want 104857600", ms.HeapReleased)
+	}
+	ms.HeapReleased = nil
 	if want := (memStats{HeapSys: 838860800, HeapInuse: 629145600, StackSys: 16777216, Sys: 1048576000}); ms != want {
 		t.Errorf("%+v, want %+v", ms, want)
+	}
+	without := strings.Replace(heapTxtFixture, "# HeapReleased = 104857600\n", "", 1)
+	if ms, err := parseMemStats([]byte(without)); err != nil || ms.HeapReleased != nil {
+		t.Errorf("a block without HeapReleased gave %+v, %v; want no HeapReleased and no error", ms, err)
 	}
 	if _, err := parseMemStats([]byte("heap profile: 1: 2\n")); !errors.Is(err, errNoMemStats) {
 		t.Errorf("a heap.txt with no runtime.MemStats gave %v, want errNoMemStats", err)
@@ -426,7 +469,7 @@ func TestCodepathsCommandTakesACutHeapTxt(t *testing.T) {
 	if rep.CPU == nil || rep.CPU.Samples != 52 || len(rep.Subsystems) == 0 {
 		t.Fatalf("cpu %+v, %d subsystems; want the CPU tables", rep.CPU, len(rep.Subsystems))
 	}
-	if m := rep.Memory; m.HeapInuse != nil || m.HeapSys != nil || m.StackSys != nil || m.Sys != nil || m.WorkingSetBytes == nil {
+	if m := rep.Memory; m.HeapInuse != nil || m.HeapSys != nil || m.HeapReleased != nil || m.StackSys != nil || m.Sys != nil || m.WorkingSetBytes == nil {
 		t.Errorf("memory %+v: want no runtime.MemStats figure, and the working set", m)
 	}
 	rows := map[string]cpMemoryRow{}
@@ -443,10 +486,10 @@ func TestCodepathsCommandTakesACutHeapTxt(t *testing.T) {
 	for _, want := range []string{
 		"| HTTP getIssueReferences | 7 | 13.46% | 0.07 | 1.62 |",
 		"| Go heap in use: " + entryFold + " | - | - | - | 75.00% | 7.812 |",
-		"| heap idle (HeapSys - HeapInuse) | - | - | - | - | - |",
+		"| heap idle retained (HeapSys - HeapInuse - HeapReleased) | - | - | - | - | - |",
 		"| stacks (StackSys) | - | - | - | - | - |",
 		"| other runtime memory (Sys - HeapSys - StackSys) | - | - | - | - | - |",
-		"| non-Go memory (working set - Sys) | - | - | - | - | - |",
+		"| non-Go memory (working set - (Sys - HeapReleased)) | - | - | - | - | - |",
 		fmt.Sprintf("heap.txt: no `# runtime.MemStats` block in its %d bytes (the block ends the profile, so a fetch cut short has none), so every row from runtime.MemStats shows `-`.", len(cut)+len("1: 100 [1: 1")),
 	} {
 		if !strings.Contains(md, want) {
@@ -495,7 +538,7 @@ func TestCodepathsCommand(t *testing.T) {
 		"Cores show `-`: cgroup.json: no cgroup.json in the step directory.",
 		"| HTTP getIssueReferences | 7 | 13.46% | 0.07 | - |",
 		"| **total** | 52 | 100.00% | 0.52 | - |",
-		"| heap idle (HeapSys - HeapInuse) | - | - | - | - | - |",
+		"| heap idle retained (HeapSys - HeapInuse - HeapReleased) | - | - | - | - | - |",
 		"| 23:00 | 5 | 12.46 / 15.63 | - / - | 9.53 / 10.59 | - / - | 0 of 10 |",
 		"| replay | - | - |",
 		"| **residual** (outage - replay) | - | - |",
@@ -548,6 +591,9 @@ func TestCodepathsCommand(t *testing.T) {
 	if math.Abs(cores-12) > 1e-9 || math.Abs(ws-39<<30) > 1e-3 {
 		t.Errorf("cores rows sum to %v, memory rows to %v; want 12 and 39 GiB", cores, ws)
 	}
+	if m := rep.Memory; m.HeapReleased == nil || *m.HeapReleased != 104857600 {
+		t.Errorf("heap_released_bytes %v, want heap.txt's 104857600", m.HeapReleased)
+	}
 	if !slices.Equal(rep.NotReproduced, []string{"- Reads assumed at ρ = 1.", "* Embeddings."}) {
 		t.Errorf("not reproduced %q", rep.NotReproduced)
 	}
@@ -556,6 +602,8 @@ func TestCodepathsCommand(t *testing.T) {
 		"| HTTP getIssueReferences | 7 | 13.46% | 0.07 | 1.62 |",
 		"| replay | 12.00 | 39.00 |",
 		"| **residual** (outage - replay) | -0.90 to 1.80 | -25.20 |",
+		"| heap idle retained (HeapSys - HeapInuse - HeapReleased) | 100 | 0.098 |",
+		"\nHeapReleased, 100 MiB (0.098 GiB): heap pages the runtime has returned to the OS.",
 		"\n## Not reproduced\n\n- Reads assumed at ρ = 1.\n* Embeddings.\n",
 		"| refreshAnchors *(write path, overlapping)* | 0 | 0.00% (not in profile) | 0.00 | 0.00 |",
 	} {

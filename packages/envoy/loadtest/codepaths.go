@@ -361,6 +361,7 @@ type cpMemory struct {
 	WorkingSetSource string        `json:"working_set_source"`
 	HeapInuse        *float64      `json:"heap_inuse_bytes"`
 	HeapSys          *float64      `json:"heap_sys_bytes"`
+	HeapReleased     *float64      `json:"heap_released_bytes"`
 	StackSys         *float64      `json:"stack_sys_bytes"`
 	Sys              *float64      `json:"sys_bytes"`
 	Rows             []cpMemoryRow `json:"rows"`
@@ -591,9 +592,11 @@ func heapByEntry(p *profile.Profile) (inuse, alloc map[string]int64, inuseTotal 
 	return inuse, alloc, inuseTotal, nil
 }
 
-// memStats is the part of heap.txt's runtime.MemStats the memory table needs.
+// memStats is the part of heap.txt's runtime.MemStats the memory table needs. HeapReleased is nil
+// when the block has no HeapReleased line.
 type memStats struct {
 	HeapSys, HeapInuse, StackSys, Sys float64
+	HeapReleased                      *float64
 }
 
 // errNoMemStats is parseMemStats' error for a heap.txt with no `# runtime.MemStats` block: the
@@ -601,7 +604,8 @@ type memStats struct {
 var errNoMemStats = errors.New("no `# runtime.MemStats` block")
 
 // parseMemStats reads the `# runtime.MemStats` block of /debug/pprof/heap?debug=1: `# Key = value`
-// lines, and `# Stack = <inuse> / <sys>`.
+// lines, and `# Stack = <inuse> / <sys>`. HeapSys, HeapInuse, Stack and Sys are required;
+// HeapReleased is read when present.
 func parseMemStats(text []byte) (memStats, error) {
 	_, blockBytes, ok := bytes.Cut(text, []byte("# runtime.MemStats\n"))
 	if !ok {
@@ -622,7 +626,7 @@ func parseMemStats(text []byte) (memStats, error) {
 			key = "StackSys"
 		}
 		switch key {
-		case "HeapSys", "HeapInuse", "StackSys", "Sys":
+		case "HeapSys", "HeapInuse", "HeapReleased", "StackSys", "Sys":
 			v, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
 			if err != nil {
 				return memStats{}, fmt.Errorf("%s: %w", key, err)
@@ -635,7 +639,11 @@ func parseMemStats(text []byte) (memStats, error) {
 			return memStats{}, fmt.Errorf("the runtime.MemStats block has no %s", k)
 		}
 	}
-	return memStats{HeapSys: got["HeapSys"], HeapInuse: got["HeapInuse"], StackSys: got["StackSys"], Sys: got["Sys"]}, nil
+	ms := memStats{HeapSys: got["HeapSys"], HeapInuse: got["HeapInuse"], StackSys: got["StackSys"], Sys: got["Sys"]}
+	if v, ok := got["HeapReleased"]; ok {
+		ms.HeapReleased = new(v)
+	}
+	return ms, nil
 }
 
 // memoryInputs are what the memory table reads; each nil when missing, with why.
@@ -649,11 +657,13 @@ type memoryInputs struct {
 }
 
 // memoryTable splits the working set at the window's end: the Go heap in use by entry point
-// (inuse_space shares of HeapInuse), heap idle, stacks, other runtime memory and non-Go memory.
+// (inuse_space shares of HeapInuse), heap idle retained, stacks, other runtime memory and non-Go
+// memory. HeapReleased, the heap pages the runtime has returned to the OS, is in HeapSys and Sys
+// but not in the working set, so it is taken out of heap idle and out of Sys before non-Go memory.
 func memoryTable(in memoryInputs) (cpMemory, error) {
 	m := cpMemory{WorkingSetBytes: in.ws, WorkingSetSource: in.wsSource}
 	if in.ms != nil {
-		m.HeapInuse, m.HeapSys, m.StackSys, m.Sys = new(in.ms.HeapInuse), new(in.ms.HeapSys), new(in.ms.StackSys), new(in.ms.Sys)
+		m.HeapInuse, m.HeapSys, m.HeapReleased, m.StackSys, m.Sys = new(in.ms.HeapInuse), new(in.ms.HeapSys), in.ms.HeapReleased, new(in.ms.StackSys), new(in.ms.Sys)
 	} else {
 		m.Notes = append(m.Notes, "heap.txt: "+in.msWhy+", so every row from runtime.MemStats shows `-`.")
 	}
@@ -720,19 +730,29 @@ func memoryTable(in memoryInputs) (cpMemory, error) {
 		add(r)
 	}
 	var idle, stacks, runtimeOther, nonGo *float64
+	idleRow, nonGoRow := "heap idle retained (HeapSys - HeapInuse - HeapReleased)", "non-Go memory (working set - (Sys - HeapReleased))"
 	if in.ms != nil {
-		idle, stacks, runtimeOther = new(in.ms.HeapSys-in.ms.HeapInuse), new(in.ms.StackSys), new(in.ms.Sys-in.ms.HeapSys-in.ms.StackSys)
+		released := 0.0
+		negative := "Non-Go memory is negative: Sys - HeapReleased exceeds the working set, because the runtime's Sys still counts address space it has mapped but never touched, which the working set does not hold."
+		if in.ms.HeapReleased != nil {
+			released = *in.ms.HeapReleased
+		} else {
+			idleRow, nonGoRow = "heap idle (HeapSys - HeapInuse)", "non-Go memory (working set - Sys)"
+			negative = "Non-Go memory is negative: the runtime's Sys counts address space it has reserved and released to the kernel (HeapReleased) or never touched, which the working set does not hold, so Sys exceeds the working set."
+			m.Notes = append(m.Notes, "heap.txt's runtime.MemStats block has no HeapReleased, so heap idle is HeapSys - HeapInuse and non-Go memory is working set - Sys: both count the heap pages the runtime has returned to the OS, which are not in the working set, so heap idle is high and non-Go memory low by that unknown amount.")
+		}
+		idle, stacks, runtimeOther = new(in.ms.HeapSys-in.ms.HeapInuse-released), new(in.ms.StackSys), new(in.ms.Sys-in.ms.HeapSys-in.ms.StackSys)
 		if in.ws != nil {
-			nonGo = new(*in.ws - in.ms.Sys)
+			nonGo = new(*in.ws - (in.ms.Sys - released))
 			if *nonGo < 0 {
-				m.Notes = append(m.Notes, "Non-Go memory is negative: the runtime's Sys counts address space it has reserved and released to the kernel (HeapReleased) or never touched, which the working set does not hold, so Sys exceeds the working set.")
+				m.Notes = append(m.Notes, negative)
 			}
 		}
 	}
-	add(cpMemoryRow{Row: "heap idle (HeapSys - HeapInuse)", Bytes: idle})
+	add(cpMemoryRow{Row: idleRow, Bytes: idle})
 	add(cpMemoryRow{Row: "stacks (StackSys)", Bytes: stacks})
 	add(cpMemoryRow{Row: "other runtime memory (Sys - HeapSys - StackSys)", Bytes: runtimeOther})
-	add(cpMemoryRow{Row: "non-Go memory (working set - Sys)", Bytes: nonGo})
+	add(cpMemoryRow{Row: nonGoRow, Bytes: nonGo})
 	return m, nil
 }
 
@@ -1160,7 +1180,7 @@ func memoryMD(md *markdown, m cpMemory) {
 	if m.WorkingSetBytes != nil {
 		ws = num(gibOf(*m.WorkingSetBytes), 2) + " GiB"
 	}
-	md.line("The Dispatch container's working set, %s (%s), split into the Go heap in use by entry point (the CPU table's rule applied to heap-end's `inuse_space` samples, each row's bytes = its `inuse_space` share × runtime.MemStats HeapInuse), heap idle, stacks, other runtime memory and non-Go memory, from heap.txt's runtime.MemStats. The rows sum to the working set. \"allocated in window\" is the entry point's heap-end minus heap-start `alloc_space`.\n",
+	md.line("The Dispatch container's working set, %s (%s), split into the Go heap in use by entry point (the CPU table's rule applied to heap-end's `inuse_space` samples, each row's bytes = its `inuse_space` share × runtime.MemStats HeapInuse), heap idle retained, stacks, other runtime memory and non-Go memory, from heap.txt's runtime.MemStats. The rows sum to the working set. \"allocated in window\" is the entry point's heap-end minus heap-start `alloc_space`.\n",
 		ws, m.WorkingSetSource)
 	md.header("part", "MiB", "GiB", "share of working set", "inuse_space share", "allocated in window GiB")
 	for _, r := range m.Rows {
@@ -1171,6 +1191,9 @@ func memoryMD(md *markdown, m cpMemory) {
 		total = new(1.0)
 	}
 	md.row("**working set**", mibCell(m.WorkingSetBytes), gibCell(m.WorkingSetBytes, 3), shareCell(total), "", "")
+	if m.HeapReleased != nil {
+		md.line("\nHeapReleased, %s MiB (%s GiB): heap pages the runtime has returned to the OS. They are in HeapSys and Sys but not in the working set, so no row holds them: heap idle retained and non-Go memory leave them out.", mibCell(m.HeapReleased), gibCell(m.HeapReleased, 3))
+	}
 	for _, n := range m.Notes {
 		md.line("\n%s", n)
 	}
