@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-745",
+  "completed": "2026-10-29T13:05:00Z",
+  "plan": "dispatch://INFRA-745/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase mechanics this change needs at every step — the shared workspace binding, commit-per-phase, the push and its skip-checks rule, and the handoff; its references/pr-body.md defines the proof entries and the simplify pass this plan's two-sided renderer proof must satisfy, and references/conflicts-and-rewrites.md covers the one merge this adoption can hit (packages/envoy/AGENTS.md).",
+      "ce-simplify-code: pr-body.md requires a simplify pass over the settled change before the handoff, and this change touches two settled files (internal/bus/async.go, outbox/publisher.go) where a second code path for the same denial would be the easy wrong answer.",
+      "dispatch-first: the plan's criterion-1 evidence and every finding the implementer meets must be searched for on Dispatch before anything is filed or asked, and criterion 1's reads are recorded as a Dispatch comment with their commands.",
+      "dispatch: the implementer records evidence on the issue and may need an ask block or a dispatch ask; its command forms and reference shapes are there.",
+      "asd-ste100: the pull-request body, the review replies and every Envoy message to the architect and the tester are written for other readers, and this repository requires that style for them.",
+      "envoy: the implementer answers the tester's and reviewer's questions on this issue's role topics while its phase is finished, and this plan expects it to message the architect about D1-D5."
+    ],
+    "test": [
+      "legion-worker: the tester's handoff, its proof entries (criterion, surface, command, observed, headSha, negativeControl) and the CI read are defined there; this change's lanes are not required by main, so references/pr-body.md's rule that evidence names the surface it ran on is what keeps the test honest.",
+      "dispatch: the tester records its evidence on the issue, and the plan's criterion table names Dispatch's own HTTP API as criterion 1's surface, which the tester re-runs.",
+      "asd-ste100: the tester's E2E line and its messages to the implementer and architect are read by others.",
+      "envoy: the tester reaches the implementer and the architect on this issue's role topics without ending a phase."
+    ],
+    "review": [
+      "legion-worker: the reviewer's round, its single review per round, and the handoff are defined there; references/merge-gate.md gives the required-check read, which for this change returns lint/typecheck/test/pr-title and so will not show the three lanes that actually hold this change's tests — the reviewer must read those lanes on the pull request itself.",
+      "legion-worker/references/review-threads.md: this pull request inherits #2490's review history and will carry bot findings; the reference says which to answer and how to judge one.",
+      "asd-ste100: the review body and every inline comment are read by the implementer and by anyone reading the pull request.",
+      "envoy: the reviewer sends a design or scope question to the architect rather than ending its round blocked."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "Criterion 3's two halves do not fit the cause: a counter cannot see a client-side render drop, and production grants cannot deny an issue topic (permissions.go:52,139), while a JetStream denial cannot even be classified today.",
+        "answer": "The plan keeps both halves and says plainly which answers what. The counter and the bus classification fix a present defect of the JetStream path (a publish with no ack is reported as an outage, releases the event with no attempt counted and breaks out of the scan's backlog, publisher.go:282-284,290-293), not a hypothetical denial. The half that matches the cause is task 4's live test under the rendered production grants plus #2490's renderer test. D4 records that no counter would have caught this defect and recommends building no client-side skip counter."
+      },
+      {
+        "finding": "Criterion 4 cannot pass on a server-only deploy: the client half ships in @sjawhar/pi-envoy and @sjawhar/claude-envoy through the worker image, whose pin lives in the deployment repository, and Legion's production wake never fires on a worker-image pin.",
+        "answer": "D3 records it as the architect's decision and the production-check section makes the look two-sided: the server half proved by a freshly published frame carrying quiet==false through POST /v1/replay, the client half by a session on an image whose /opt/legion/pi-envoy/package.json carries the fix. pending until both, naming the missing pin and the plugin version read."
+      },
+      {
+        "finding": "'Adopt #2490' names no mechanism: the change lives on another branch with another session's approval, and a Legion tree merges only its own pull request.",
+        "answer": "The plan's 'How #2490 is adopted' section: jj duplicate of the content commit d04a8269 onto the issue branch, keeping its author; only packages/envoy/AGENTS.md overlaps with main's changes since the merge-base, and there #2490 appends one bullet; #2490 is closed as superseded when this tree's pull request opens, because two open pull requests for one fix would break this tree's gate if the other merged."
+      },
+      {
+        "finding": "Criterion 1 names three reads: an 'errors' column that exists nowhere, outbox rows no credential of this tree reaches, and grants that are source rather than a cluster read.",
+        "answer": "Departure 1 and 2. Retention is read instead and settles the same question more strongly (a denied publish cannot have a retained frame); all 154 frames are present. No ask is raised for a Dispatch database credential, because the read it would serve is already answered. The grants are read from infra/core/permissions.go."
+      },
+      {
+        "finding": "The second cause ('if any person's event was also lost') is settled by one reachable command, and the spec's '20' is an undercount of what the subscription owed.",
+        "answer": "Settled and recorded in the plan and in dispatch://INFRA-745/comment/271a4276: no person-authored event exists in the window at all, and over the whole retained 72 h the only person frames with notify false are four unnamed artifact.version autosaves, which owe no card before or after. The owed-but-unshown count is restated as 25 peer events, of which 20 are comments."
+      },
+      {
+        "finding": "Criterion 4's 'once' has no surface that shows it, and INFRA-594 already owns cross-restart exactly-once.",
+        "answer": "The production check reads it as exactly one card for that comment's event id in the look, on the subscribed session, which that look can check; cross-restart once-ness stays INFRA-594's."
+      },
+      {
+        "finding": "'A metric and an alert-able log' names no surface that exists for Dispatch: nothing scrapes it and the only alerting machinery is the listener's CloudWatch filters.",
+        "answer": "Task 2 builds the counter and says in the pull-request body that nothing scrapes Dispatch today, so the thing that can page is the ERROR line task 1 makes name the denial. D2 records that a scrape or alert policy belongs in the deployment repository, which this tree's gh and git cannot write, and is the architect's to place."
+      },
+      {
+        "finding": "'Instead of retried silently' proposes a change to a retry path the cause never touched; the path is not silent and its unboundedness is deliberate (retry.go:15-16).",
+        "answer": "Departure 4: the clause is read as 'a denial is named and counted', and the retry policy is left alone."
+      },
+      {
+        "finding": "The spec's one code citation is wrong: outbox/publisher.go:270-273 is publishBatch's preamble, not where the owner topic is published first.",
+        "answer": "Departure 3: the plan and the evidence comment carry the correct citation, publisher.go:648-658. The spec is left as it is for whoever owns it."
+      },
+      {
+        "finding": "quiet is on the wire but declared in no contract, while notify is declared in DispatchEventBase (dispatch-api.ts:2257).",
+        "answer": "Task 6 declares quiet beside notify, optional because every frame published before this change carries none, and the body says whether the tolerant DispatchEventSchema needs a change."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "Criterion 1 asks for the outbox rows of the 20 events (published_at, published_destinations, attempt counts, errors) and Dispatch's publish errors over the window, and says a read no credential of this tree reaches is named as an ask on the root.",
+      "plan": "Reads the listener's retention of the issue topic instead, and raises no ask for a Dispatch database credential or for the pod logs.",
+      "evidence": "No error column exists on any row to read: recordBatch writes only published_destinations, published_at, attempt_count and next_attempt_at (outbox/publisher.go:437-446), and migration 0020_outbox_retry.up.sql adds no error column. The outbox columns are on no reachable API. All 154 frames of the issue are retained on notifications.dispatch.issue.LINUX-626.>, which a denied publish cannot have; the rows would restate it. Asking a person for a credential whose read is already answered costs their time for nothing.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "Criterion 1's evidence is the issue event log and the listener's replay, recorded at dispatch://INFRA-745/comment/271a4276, not the outbox rows and the publish-error log."
+        ]
+      }
+    },
+    {
+      "spec": "Criterion 1 asks for the NATS account's publish and subscribe grants for the publisher and the subscribing session.",
+      "plan": "Reads them from source, packages/envoy/infra/core/permissions.go:52 and :139.",
+      "evidence": "A client's grant is readable to nobody over NATS, the hub's rendered configuration is not reachable from a worker pod, and the grants are deterministic functions compiled into the deployment. The source read answers the question the live read would.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "The grant read is from infra/core/permissions.go, not from the live NATS account."
+        ]
+      }
+    },
+    {
+      "spec": "The Evidence section cites outbox/publisher.go:270-273 for the claim that the outbox publishes the owner (issue) topic first and unconditionally.",
+      "plan": "Uses publisher.go:648-658, publishDestinations, and says so on the issue.",
+      "evidence": "publisher.go:270-273 is publishBatch's preamble (resolveCommentRecipients and the send window). The claim itself is true and is at publishDestinations, 'The order is fixed: the owner topic, the route, ...'.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "The Outcome requires a denied or failing issue-topic publish to be visible 'instead of retried silently'.",
+      "plan": "Makes a denial named in the log and counted in a metric, and leaves the retry policy exactly as it is.",
+      "evidence": "The path is not silent: every failed attempt logs dispatch outbox: publish event (publisher.go:378-379) and a tenth logs the dead-letter line. Its unboundedness is deliberate and documented, 'nothing about a publish failure is ever permanent' (internal/dispatch/retry/retry.go:15-16), and the incident involved no failed publish at all. Bounding retries would change a path this issue's cause never touched.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    }
+  ]
+}
