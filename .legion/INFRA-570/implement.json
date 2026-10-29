@@ -2,48 +2,58 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-570",
-  "completed": "2026-10-29T16:05:00Z",
-  "round": 2,
-  "answers": "The tester's round-1 failure (the dialog's own actions leaving the window once the related section fills) and the architect's two decisions on it: fix the overflow, and stop the pending state being announced at every pause.",
+  "completed": "2026-10-29T17:10:00Z",
+  "round": 3,
+  "answers": "Review round 1 of pull request #2511: all five findings, and nothing else.",
   "proof": [
     {
-      "criterion": "The new-issue dialog keeps offering its own actions — Create, Cancel, and the duplicate refusal's Create anyway — once the related section fills. (The tester's red row, run unmodified.)",
-      "surface": "Dispatch dashboard new-issue dialog in Chromium at 375x667, the phone window the dialog's full-bleed sheet layout below xl is for; real Go Dispatch server, production SPA bundle, Postgres 18.6 with pgvector",
+      "criterion": "Finding 1 — the related-item check's three forms are judged in one place, and the CLI's printed lines do not move by one byte.",
+      "surface": "the CLI's own byte-for-byte guard on its printed advice, packages/envoy-client/src/__tests__/dispatch-advice.test.ts, run unmodified",
+      "command": "cd /legion/workspaces/sjawhar/legion/infra-570 && bun test packages/envoy-client/src/__tests__/dispatch-advice.test.ts && bun test packages/contracts packages/envoy-client",
+      "observed": "57 pass / 0 fail across that one file, and 1410 tests across 58 files with 0 fail for the two packages. `relatedCheckFormOf`, `relatedCheckModeWords` and `relatedCheckSearchWords` now live in packages/contracts/src/related-forms.ts; packages/envoy-client/src/related-check.ts and packages/dispatch/web/src/features/issue/RelatedItems.tsx both read that union and only word it, and the `?? []` the reviewer named is gone (the server always sends `related`: suggestions.go:177,376). The branch order is the contract's, documented as such.",
+      "headSha": "685e20da3ceb",
+      "negativeControl": "The guard is the control: `jj diff -r cd5fae7d2fdd..@ packages/envoy-client/src/__tests__/ packages/contracts/src/dispatch-api.ts` is empty, so neither the test file nor the contract types were touched — the move is proven against the assertions as they already stood, and any drift in a sentence would have failed them."
+    },
+    {
+      "criterion": "Finding 2 — a related answer is never served from a cache older than the check it stands for.",
+      "surface": "Dispatch dashboard new-issue dialog in Chromium, real Go Dispatch server, production SPA bundle, Postgres 18.6 with pgvector; new row 'a title checked before an issue was filed is checked again, not answered from before'",
       "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --repeat-each=2 e2e/create-issue-related.e2e.ts",
-      "observed": "8 passed (30.6s), the tester's row 'the dialog's own actions stay in the window once the section fills' among them, 2 of 2. The form now caps its height at the window and scrolls (max-h-[100dvh] overflow-y-auto, xl:max-h-[calc(100dvh-6rem)] so the wrapper's own p-4 pt-20 stays outside the cap), so Create and, after the POSSIBLE_DUPLICATE refusal, Create anyway are both brought whole into the window by scrollIntoViewIfNeeded. The tester's row, its helpers and its fixture are unchanged: `jj diff -r 479726710ce2..@` over that file shows only the two aria-busy assertions added to the display-gate row.",
-      "headSha": "7ede43d9d93f",
-      "negativeControl": "The two overflow classes removed from the form and the SPA rebuilt: the tester's row red 2 of 2 with its own message, 'Create stands outside the 667px window: top 651.53125, bottom 695.53125', while the other three rows stayed green — so the row is red on the defect and nothing else, and the classes are what clear it."
+      "observed": "10 passed (35.0s). The row types a title, sees 'Related-item check searched (keywords only: …) and found nothing.', presses Escape, files an issue with that exact title through the API as a colleague would, reopens the dialog with `c`, types the same title and sees that issue listed with its link. The query now carries staleTime: 0 and gcTime: 0, so every settled title is asked fresh; the 400 ms debounce bounds how often.",
+      "headSha": "2684dae27560",
+      "negativeControl": "Both options removed from the query and the SPA rebuilt: the row red 3 of 3, each at `expect(locator).toBeVisible()` for `getByRole('link', { name: 'CORE-2 Astrolabe drift spoils the mooring calibration' })`, 'element(s) not found' — the cached 'found nothing' answered the second check, which is exactly the defect the reviewer described."
     },
     {
-      "criterion": "A screen reader hears the check's answer, not 'Checking for related items…' at every pause in someone's typing.",
-      "surface": "the same browser suite, the display-gate row, reading the live region's own aria-busy on the real surface",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --repeat-each=2 e2e/create-issue-related.e2e.ts:199",
-      "observed": "2 of 2 green. While a check is out the section carries aria-busy=\"true\", so a polite live region holds its announcement; once the answer for the title in the box is shown it carries aria-busy=\"false\" and the answer alone is announced. Both states are asserted in the row that already drives them deterministically under a held clock.",
-      "headSha": "7ede43d9d93f",
-      "negativeControl": "`aria-busy={checking}` removed from the section and the SPA rebuilt: the row red 2 of 2 at `expect(related).toHaveAttribute(\"aria-busy\", \"true\")` with 'Expected: \"true\", Received: \"\"', so the assertion reads the attribute and not a default."
+      "criterion": "Finding 4 — the past decision's list item says who answered it, so a screen reader's item for the decision is whole.",
+      "surface": "the component's unit rows, which render the decision and read its list item by role",
+      "command": "cd packages/dispatch && bun test web/src/features/issue",
+      "observed": "147 pass / 0 fail. `RelatedItemRow` now takes a `children` slot rendered under the link inside the `<li>`, and the `withAsk` flag is gone: the related list passes an ask item's `AskHitStatus`, and the decision passes its 'Answered by …' line and its `AskHitStatus`. The decision row's assertions are scoped with `within(screen.getByRole(\"listitem\"))`, so the link and the answer must be in one item.",
+      "headSha": "2684dae27560",
+      "negativeControl": "The decision's 'Answered by' line and ask state moved back outside the `<li>`: that row fails with 'Unable to find an element with the text: /Answered by alice/' and prints the whole `<li>`, link only — the structure the finding objects to. Restored, 147 pass again."
     },
     {
-      "criterion": "No regression in the dialog the fix changes, or in the rows round 1 proved.",
+      "criterion": "Findings 3 and 5, and no regression in the dialog or the palette.",
       "surface": "the repository's Chromium suites that drive the create dialog and the palette, plus this change's own spec",
       "command": "source /legion/harness/env.sh && cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/create-issue-related.e2e.ts e2e/keyboard.e2e.ts e2e/keyboard-issue.e2e.ts e2e/keyboard-palette.e2e.ts",
-      "observed": "48 passed (2.1m): the four rows of this spec and every row of the three keyboard suites, 'c opens the create dialog; project and title create an issue the API returns and the SPA opens' among them.",
-      "headSha": "7ede43d9d93f",
-      "negativeControl": "The same four specs are the only ones in packages/dispatch/e2e that drive the create dialog (`grep -l 'Create issue' e2e/*.e2e.ts`), so the set is the dialog's own callers and not an arbitrary selection."
+      "observed": "49 passed (2.2m): this spec's five rows and every row of the three keyboard suites. `RELATED_TITLE_MIN` is now defined once, exported from related-timing.ts and imported by the component (finding 3). packages/dispatch/AGENTS.md's paragraph now names `relatedCheckFormOf` as the one judge, records the fresh check, and says which file proves what: the browser spec for the found form and its control, the fresh check, the debounce, the display gate with aria-busy and the scroll; RelatedItems.test.tsx for the not-made form, the past decision, the failed check with Retry and the two floors (finding 5).",
+      "headSha": "98f462c97422",
+      "negativeControl": "`grep -rn RELATED_TITLE_MIN packages/dispatch` finds the one definition in related-timing.ts and the one import in RelatedItems.tsx, so the duplicate is gone rather than merely unused; and the four specs run above are the only ones in packages/dispatch/e2e that drive the create dialog (`grep -l 'Create issue' e2e/*.e2e.ts`)."
     }
   ],
   "filesChanged": [
-    "packages/dispatch/web/src/features/issue/CreateIssueDialog.tsx — the form caps its height at the window and scrolls",
-    "packages/dispatch/web/src/features/issue/RelatedItems.tsx — aria-busy while a check is out; the answer narrowed into one `answer` value so the form takes a defined one",
-    "packages/dispatch/e2e/create-issue-related.e2e.ts — two aria-busy assertions in the display-gate row; the tester's row untouched",
-    "packages/dispatch/AGENTS.md — the busy state and the dialog's scroll"
+    "packages/contracts/src/related-forms.ts — new; relatedCheckFormOf, relatedCheckModeWords, relatedCheckSearchWords",
+    "packages/contracts/src/index.ts — one export line",
+    "packages/envoy-client/src/related-check.ts — reads the contract's union and only words it",
+    "packages/dispatch/web/src/features/issue/RelatedItems.tsx — the same union; staleTime 0 and gcTime 0; one RELATED_TITLE_MIN; the children slot in place of withAsk",
+    "packages/dispatch/web/src/features/issue/RelatedItems.test.tsx — the decision row's assertions scoped to its list item",
+    "packages/dispatch/e2e/create-issue-related.e2e.ts — the fresh-check row",
+    "packages/dispatch/AGENTS.md — the one judge, the fresh check, and which file proves what",
+    "packages/contracts/.changes/unreleased/pr2511-Changed-20261029-170000.yaml, packages/envoy-client/.changes/unreleased/pr2511-Changed-20261029-170000.yaml — changelog fragments"
   ],
   "trickyParts": [
-    "aria-busy is the fix the architect chose over moving the pending line out of the live region: a polite region holds its announcements while it is busy, so the reader hears the answer alone, and the line stays visible for everyone else.",
-    "Pulling the pending state into a named `checking` flag loses TypeScript's narrowing of `query.data`, so the component now computes one `answer` value (undefined while a check is out or while the box has moved past the title the query answers) and branches on that; `RelatedForm` still takes a defined `Suggestions`."
+    "The CLI's printed output is the hard constraint of finding 1: the classifier reproduces relatedCheckForm's branch order exactly, and every not_made member carries the server's search_query raw and untrimmed, because each caller resolves the words to search by in its own words (the CLI a `dispatch search` line, the dashboard a sentence naming the words).",
+    "Dropping `suggestions.related ?? []` is safe because the contract types `related` as a required array and the server constructs one even for a check that was not made (packages/envoy/internal/dispatch/api/suggestions.go:177,376); the callers' own try/catch still stands for a shape neither expects."
   ],
   "deviations": [],
   "openQuestions": [],
-  "discoveredComplexity": [
-    "The defect was not phone-only: the tester measured Create anyway 39 px below the fold at 1280x720 as well. The cap is on the form rather than on the related section, so it holds however the dialog's other parts grow."
-  ]
+  "discoveredComplexity": []
 }
