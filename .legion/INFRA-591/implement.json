@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-591",
-  "completed": "2026-10-28T23:55:00Z",
+  "completed": "2026-10-29T15:40:00Z",
   "proof": [
     {
       "criterion": "The global serialization is gone: a write holds no lock shared with writes to other issues.",
@@ -59,11 +59,18 @@
       "observed": "At code head 38ee69626795: browser suite 829 passed, 0 failed, 25 skipped. events ok; api fails only TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses this machine's byte-order collation. The tester's red test passes unmodified (it failed at 8f4a1d32), and so do the new TestSSEFirstColdConnectionIsSentAnEventThatDrewItsIdBeforeTheRequest and TestSSEFirstColdConnectionSkipsAnIdThatRolledBack, the round-5 replaced-log and relay-start tests, the header tests and TestSSEColdStartSendsNoBacklogAndDeliversTheNextCommit. The first start's gap read over 1,000,000 ids took 0.62 to 0.70 s (three runs, a synthetic log on the test Postgres).",
       "headSha": "38ee69626795",
       "negativeControl": "With the late-gap step disabled (cursor at the start's newest id), TestSSEFirstColdConnectionIsSentAnEventThatDrewItsIdBeforeTheRequest fails 2 of 2; with every gap taken as late, TestSSEFirstColdConnectionSkipsAnIdThatRolledBack fails 2 of 2 (the backlog above a rolled-back id is sent). The red test failed at 8f4a1d32 for the tester."
+    },
+    {
+      "criterion": "Every consumer of the event stream keeps its order at production size and across main's move of the feed to /ws/live: the relay's first start reads only recent ids (tester's red test 41ec0a41), the first cold subscription of a fresh process misses nothing (e7bbbc50), and whoami's event_head, which a page resumes from, is final.",
+      "surface": "Dispatch's browser suite through its own harness (packages/dispatch e2e/run.ts, server built from this branch, Postgres 16.2, chromium), Go tests against a real Postgres, and a 5,000,000-event measurement",
+      "command": "cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --reporter=line; cd packages/envoy && go vet ./... && go test ./internal/dispatch/api/ ./internal/dispatch/routes/ ./internal/dispatch/events/ ./internal/dispatch/store/ -count=1; cd packages/envoy/infra && go test ./gcp/ -run TestDispatchConnectionsPerPodIsTheServers",
+      "observed": "At ff684ac1066f: browser suite 880 passed, 0 failed, 25 skipped. go vet clean; routes, events, store ok; api fails only TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (this machine's byte-order collation); the per-pod budget test passes at 89. The tester's red tests pass unmodified in their /ws/live ports (TestTheRelaysFirstStartDoesNotReadTheWholeEventLog, TestTheFirstColdSubscriptionOfAFreshProcessIsSentAnEventCommittedWhileTheRelayStarts). On 5,000,000 events (round 7, SSE route then) the first cold stream opened 40-45 ms after its request with no write open and about 350 ms with a 300 ms write open; next event 50-60 ms after its write.",
+      "headSha": "ff684ac1066f",
+      "negativeControl": "Each with one production line reverted and restored: filled-gap step skipped -> TestTheFirstColdSubscriptionIsSentAnEventThatDrewItsIdBeforeIt fails; cursor taken under the horizon proven after the start's wait -> the fresh-process test fails; every gap taken as late -> TestTheFirstColdSubscriptionSkipsAnIdThatRolledBack fails; replaced-log wait removed -> both cases of TestAnEventsSubscriptionOnARelayStillOnAReplacedLogWaitsForItsReset fail; eventFeedHead answering the mark's newest id at once -> TestWhoamiEventHeadStaysBelowAnEventStillOpen fails; WriterFloor counting other databases' transactions -> TestWriterFloorIgnoresATransactionInAnotherDatabase fails; WriterFloor taking the newest mark regardless -> TestWriterFloorTakesTheNewestMarkOlderThanEveryWriterInThisDatabase fails. hover-preview.e2e.ts:87 failed 2 of 5 on main ef7ef530 and at ea9ecdec alike (main's)."
     }
   ],
   "filesChanged": [
     ".dispatch/architecture/dispatch-events.md",
-    ".github/workflows/envoy-and-contracts.yaml",
     "docs/site/src/content/docs/dispatch/running-dispatch.md",
     "packages/envoy/.changes/unreleased/pr2392-Changed-20261028-124735.yaml",
     "packages/envoy/AGENTS.md",
@@ -106,7 +113,14 @@
     "packages/envoy/internal/dispatch/outbox/window_test.go",
     "packages/envoy/internal/dispatch/refs/graph.go",
     "packages/envoy/internal/dispatch/store/pool.go",
-    "packages/envoy/internal/dispatch/store/pool_test.go"
+    "packages/envoy/internal/dispatch/store/pool_test.go",
+    "packages/envoy/internal/dispatch/api/live_events.go",
+    "packages/envoy/internal/dispatch/api/live_events_horizon_test.go",
+    "packages/envoy/internal/dispatch/api/live_events_test.go",
+    "packages/envoy/internal/dispatch/api/event_horizon_helpers_test.go",
+    "packages/envoy/internal/dispatch/routes/router.go",
+    "packages/envoy/internal/dispatch/routes/whoami_test.go",
+    ".github/workflows/ci.yaml"
   ],
   "trickyParts": [
     "events.Horizon: an observation is safe only once a LATER snapshot's xmin is above the observer's own xid; one snapshot cannot prove its own max(id) (xmax hole). Await waits for an observation that started after the call.",
@@ -131,7 +145,8 @@
     "Review round 3 (code 1adb786e0343, a forward merge of main 25ef8cd2 that GitHub did not force; it was made for the semantic conflict the review found). store.ConnectionsPerProcess now adds horizonPoolSize, and envoy-infra gcp dispatchConnectionsPerPod goes from 86 to 88. On the merged code TestDispatchConnectionsPerPodIsTheServers first failed (expected 88, actual 86) and now passes; the rest of infra/gcp passes except two data-disk tests that need mkfs.ext4, absent here. D2, as decided by INFRA-514's architect: the first release with this change rolls at one replica, written in packages/envoy/infra/README.md, in the changelog fragment and in the PR body's Rollout line. Fingerprint 429d29e8... -> 8302a4cc..., changed; PR comment posted. No added line carries a Dispatch key.",
     "Review round 4: docs/site/src/content/docs/dispatch/running-dispatch.md now lists the event horizon's up to 2 connections and gives one server's ceiling as 88 (64+12+4+1+1+2 plus 4 held open), matching store.ConnectionsPerProcess. Main changed none of store/, infra/gcp/dispatch.go or that page since 25ef8cd2, so the number stands and no forward merge was needed (GitHub reports the PR mergeable). check-private-names.sh passes; no other page states the 86 count.",
     "Review round 5 (architect's cap: the forward merge of main e82b013b only, plus the two fixes the architect approved on 2026-10-28): merge da99c4f8 resolves events.go (replay header via openEventStream on the early path), references.go and AGENTS.md; 76d0396e starts the relay's first cursor at Horizon.Proven when one is proven and has a cold stream wait out a relay still on a reset log, replayed from the new log's unbroken prefix; 26ae7d16 has a resuming stream wait for that reset too instead of ending; 8f4a1d32 makes the delivery hub tests' settle wait for the change cursor, the event cursor and a quiet window, since the hub takes changes independently of the horizon. Browser and suite runs before 20:25Z ran with a stray contention loop of this session's holding a transaction id on the test Postgres; the runs this proof cites were repeated after moving to a clean instance, except the merge-alone and main comparison, which both ran under it.",
-    "Review round 6 (architect's cap: the first-cursor fix on a fresh process only): round 5's claim that the delivery hub proves a horizon at boot was wrong (it runs nothing before its first subscriber), so 38ee6962 replaces the Proven-based first cursor. The relay's first start reads, in one statement, the log's newest id and its gaps above the horizon already proven (0 on a fresh process, so the whole log once), waits for a horizon proven after that read, and starts below the lowest gap that filled, else at the newest id. No boot step was added, so the server's boot does not block; the cost is the gap read at the relay's first start (0.6 s per million ids here) and the existing wait for every transaction open on the instance before the first cold stream opens. The changelog fragment, the architecture page and the PR body's Change, Not proven and census lines were corrected to match."
+    "Review round 6 (architect's cap: the first-cursor fix on a fresh process only): round 5's claim that the delivery hub proves a horizon at boot was wrong (it runs nothing before its first subscriber), so 38ee6962 replaces the Proven-based first cursor. The relay's first start reads, in one statement, the log's newest id and its gaps above the horizon already proven (0 on a fresh process, so the whole log once), waits for a horizon proven after that read, and starts below the lowest gap that filled, else at the newest id. No boot step was added, so the server's boot does not block; the cost is the gap read at the relay's first start (0.6 s per million ids here) and the existing wait for every transaction open on the instance before the first cold stream opens. The changelog fragment, the architecture page and the PR body's Change, Not proven and census lines were corrected to match.",
+    "Review round 8 (tester at 144ee198: conflicting head, and the first start read the whole log on 5M ids): cce412e3 bounds the first start's gap read by Horizon.Mark/WriterFloor (the newest mark, the server's boot mark or the start's own, older than every transaction holding a transaction id in Dispatch's database; else the proven horizon, logged). Merge 9290fdc7 of main 88840d35 (#2449 removed GET /api/v1/events; the feed is an events subscription on /ws/live): feedEvents rewritten with the horizon handover, and GET /auth/whoami's event_head made final (eventFeedHead: waits at most 2 s for writes in Dispatch's database, never for other databases, then the boot mark's floor) because main's raw max(id) head would let a page miss an event still open below it. ea9ecdec ports the SSE horizon tests to /ws/live (a deep-worker wrote them; reviewed). Merge ff684ac1 of main 1f5b0828: per-pod budget 89 (main's 13th lease connection plus the horizon's 2); envoy-and-contracts.yaml deleted as main did, its one comment carried into ci.yaml. 86fdc500 guards the boot mark against a Store with no pool. Two pod moves this round; the work was pushed before each."
   ],
   "openQuestions": [
     "D2 (from the plan): ship before multi-replica Dispatch (INFRA-63) or roll this release with Recreate; old pods' readers would skip events new pods commit out of id order during a rolling update."
