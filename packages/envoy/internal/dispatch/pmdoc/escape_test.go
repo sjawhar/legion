@@ -483,7 +483,7 @@ func TestRenderKeepsImageAltText(t *testing.T) {
 		"_*a**":                     "![_*a**](https://x.test/i.png) after\n",
 	} {
 		if got := mustRender(t, image(alt)); got != want {
-			t.Fatalf("Render(alt %q) = %q, want the bytes the writer before sjawhar/legion#1429 writes, %q", alt, got, want)
+			t.Fatalf("Render(alt %q) = %q, want the bytes an earlier writer stored, %q", alt, got, want)
 		}
 	}
 }
@@ -864,10 +864,11 @@ func blockKindsOf(doc *Node) string {
 	return strings.Join(kinds, ",")
 }
 
-// Stored markdown that the writer before sjawhar/legion#1383 already renders byte for byte must
-// come back byte for byte: a changed rendering mints a new version of the document on its next
-// anchor or edit, and on an approved spec a stale approval. Each row is that writer's own
-// rendering of text that reads back correctly, in a context an escape rule could misjudge - a
+// Stored markdown that an earlier writer already rendered byte for byte must come back byte for
+// byte: a changed rendering mints a new version of the document on its next anchor or edit, and
+// on an approved spec a stale approval. Each row is a rendering an earlier writer stored of text
+// that reads back correctly - the first rows the writer before sjawhar/legion#1383's, later rows
+// later writers', some named on their own rows - in a context an escape rule could misjudge - a
 // label split by formatting or a code span, a label beside a different link, a heading, a table
 // cell, the inside of a mark, a paragraph's later line, a typed block.
 func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
