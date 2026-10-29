@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-720",
-  "completed": "2026-10-29T02:16:00Z",
+  "completed": "2026-10-29T07:40:00Z",
   "proof": [
+    {
+      "criterion": "Tester's failure: migration 0137's census counts the rows 0137 refuses (an anchored ask with block_artifact_id set whose anchor artifact_id does not cast to uuid), so the pre-deploy gate refuses before the boot would",
+      "surface": "the real `envoy-dispatch census` command (built from the head tree) against a Postgres 17.11 database migrated to 0136 by base bb9fe49c's migrations, holding one both-column ask and one ask with anchor artifact_id 'not-a-uuid' and block_artifact_id set",
+      "command": "DATABASE_URL=postgres://postgres@127.0.0.1:55432/census720 dispatch-head census; then delete the bad row and run it again; tester's red test: go test ./internal/dispatch/store/ -run TestCensusCountsAnAskWhoseBlockColumnHides -count=1 -v",
+      "observed": "with the bad row: 'census: REFUSED 0137_asks_anchor_artifact_id.up.sql: its census counts 1 (0137_asks_anchor_artifact_id.census.sql)', exit 1; after deleting it: census 0, 'census: ok', exit 0 (the valid both-column ask counts nothing); the unmodified red test PASSES; store and pgmigrate suites pass",
+      "headSha": "9b9cb94a57c0550d42c9bdf206cfad50689f0e4f",
+      "negativeControl": "the previous head ff4d51c8's binary (census `select 0`) over the same database with the bad row: 'census ... : 0', 'census: ok', exit 0 - it passes a database whose boot then fails"
+    },
     {
       "criterion": "A1: a both-column ask keeps its mark on the anchor's document past the TTL; fails on INFRA-648's query",
       "surface": "docs package settlement against real Postgres 17.11 + pgvector 0.8.7 (DISPATCH_TEST_DATABASE_URL)",
@@ -24,33 +32,34 @@
       "criterion": "A3: the sweep's cost does not measurably rise",
       "surface": "(a) recordedMarkRefs over all 1,157 documents of the synthetic replay copy, base and head test binaries; (b) local Dispatch base bb9fe49c vs head ff4d51c8 under INFRA-639's replay of LINUX's 2026-10-26 window (harness b1367e2c), F=0.15, minutes 19-35, GOMAXPROCS=2",
       "command": "(a) docs-<side>.test -test.bench RecordedMarkRefsEveryDocument, 10 alternating rounds, benchstat golang.org/x/perf@v0.0.0-20261009192801-be2c69fb417e; (b) run-step.sh i720-<side>-<n> --replay --rate 0.15 --from 19m --to 35m --gomaxprocs 2 --dispatch-commit <rev>, base-1 head-1 base-2 head-2 base-3 head-3; pprof -focus='docs\\.\\(\\*Service\\)\\.sweepUnrecordedMarks$'",
-      "observed": "(a) 668.3m ± 9% vs 668.0m ± 6% sec/op, ~ (p=0.912 n=10); allocs -2.24%. (b) CPU-s base 234.78/229.69/235.50, head 231.40/229.80/222.15: median head 229.80 <= max base 235.50 (base spread 5.81); sweepUnrecordedMarks share base 0.10/0.12/0.12%, head 0.11/0.089/0.064%: median head 0.089% <= max base 0.12%; no run saturated, 0 timeouts, same 337 writes planned each run",
+      "observed": "(a) 668.3m \u00b1 9% vs 668.0m \u00b1 6% sec/op, ~ (p=0.912 n=10); allocs -2.24%. (b) CPU-s base 234.78/229.69/235.50, head 231.40/229.80/222.15: median head 229.80 <= max base 235.50 (base spread 5.81); sweepUnrecordedMarks share base 0.10/0.12/0.12%, head 0.11/0.089/0.064%: median head 0.089% <= max base 0.12%; no run saturated, 0 timeouts, same 337 writes planned each run",
       "headSha": "ff4d51c859449feb3c1087681c4c88ef052bb3c9",
       "negativeControl": "base build bb9fe49c on the same inputs is the control: same planned writes and seed checksum; rule would fail only if median head exceeded max base"
     }
   ],
   "filesChanged": [
+    "docs/solutions/database-issues/a-read-reaches-an-expression-index-only-through-its-exact-expression-and-keeps-the-old-predicate-beside-it-pr2467.md",
+    "packages/envoy/.changes/unreleased/pr2483-settlement-keeps-anchored-ask-mark.yaml",
+    "packages/envoy/cmd/dispatch/README.md",
     "packages/envoy/internal/dispatch/docs/marks.go",
     "packages/envoy/internal/dispatch/docs/marks_test.go",
     "packages/envoy/internal/dispatch/docs/recorded_mark_refs_test.go",
-    "packages/envoy/internal/dispatch/store/migrations/0137_asks_anchor_artifact_id.up.sql",
     "packages/envoy/internal/dispatch/store/migrations/0137_asks_anchor_artifact_id.census.sql",
-    "packages/envoy/internal/dispatch/store/store_test.go",
-    "packages/envoy/cmd/dispatch/README.md",
-    "packages/envoy/.changes/unreleased/pr2483-settlement-keeps-anchored-ask-mark.yaml",
-    "docs/solutions/database-issues/a-read-reaches-an-expression-index-only-through-its-exact-expression-and-keeps-the-old-predicate-beside-it-pr2467.md"
+    "packages/envoy/internal/dispatch/store/migrations/0137_asks_anchor_artifact_id.up.sql",
+    "packages/envoy/internal/dispatch/store/store_test.go"
   ],
   "trickyParts": [
     "The plan test needs an Index Cond on the index node, not only the index name: with a text-only predicate Postgres reads the whole partial index asks_anchor_artifact_id (its predicate anchor is not null is implied), which names the index and has no Seq Scan.",
-    "The A1 fixture leaves block_id null so B's ask-block reconciliation never sees the row; the unrecorded 'dangling' control mark makes a sweep that errored or never ran fail."
+    "The A1 fixture leaves block_id null so B's ask-block reconciliation never sees the row; the unrecorded 'dangling' control mark makes a sweep that errored or never ran fail.",
+    "The census calls pg_input_is_valid(anchor->>'artifact_id','uuid'), the cast's own input function (Postgres 16+, the supported floor), so it counts exactly what the index build refuses; a missing artifact_id is null and is counted by neither."
   ],
   "deviations": [
     "Task 5(b) ran on INFRA-639's replay (harness b1367e2c, seed 9b0349e4..., Postgres 16.2 from its pgserver wheel) at F=0.15, minutes 19-35, on the INFRA-512 architect's instruction (Envoy 6ec395d1, 22:18Z: use INFRA-639's replay for measurements not yet started, F <= 0.15 on 2 cores) instead of the INFRA-512 tools at F=0.3, minutes 27-35; the window was widened to 16 min to keep roughly the plan's sample of writes at half the rate.",
     "The migration was applied to the INFRA-512 seed with store.Migrate through a throwaway binary rather than a server boot: tasks 4 and 5(a) read only asks/comments rows, and 5(b) no longer restores warmed.dump.",
-    "Simplify pass applied (comment move in marks.go, pgx.CollectRows in the plan test): runtime statement unchanged; tests, negative control and all proofs above ran at the applied head ff4d51c8."
+    "Simplify pass applied (comment move in marks.go, pgx.CollectRows in the plan test): runtime statement unchanged; tests, negative control and all proofs above ran at the applied head ff4d51c8.",
+    "Round 2 (tester fail): only the census SQL and comments changed (0137's create index statement byte-identical, no Go runtime change), so the A1-A3 proofs at ff4d51c8 still describe the running code; the census proof above ran at the new head."
   ],
   "openQuestions": [
-    "The pod's $TMPDIR is not kept across the 02:30Z daemon roll: the tester re-runs from dispatch://INFRA-720/artifact/infra720-evidence-tgz (SQL, scripts, benchmark file, summaries, cpu profiles) and rebuilds Postgres 17 + the replay copy as the plan's tasks 1 and 4 say.",
     "Unrelated local failures in the full suite, recorded as environment: api TestIssueRanksStay... needs a non-byte-order default collation (this Postgres was initdb'd C.UTF-8); pmdoc needs bun install for @legion/proof-editor and its linearity tests failed under concurrent load; files' S3 test needs Docker."
   ]
 }
