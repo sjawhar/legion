@@ -2,61 +2,53 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-514",
-  "completed": "2026-10-27T16:59:30Z",
-  "headSha": "278c9c06140d1b26f678ff2b31b8c64cbac3da6a",
-  "branchHead": "d7ebb1ee02c70155d376c7dfea152af3d660fd64",
+  "completed": "2026-10-29T13:40:00Z",
+  "round": 2,
+  "headSha": "41fa18b19e7159f61f615b0c1d921e812605c83d",
+  "branchHead": "80332949f6a4f3874afa5f55d9a03030c8879b22",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's harness driver (harness-514.sh) and analyzer (analyze-514.py) on a listener I built at d7ebb1ee (code identical to 278c9c06): 1.30 KV writes per heartbeat at 1x and 1.28 at 10x against its 1.30 and 1.26, resumed warm-ups after the nats-server restart, reaper elapsed_ms 0; a main ae36683e listener I built from git archive gave 2.00 and completed warm-ups. Re-ran its Go benchmarks base (main plus the head's benchmark files) against head: Registry/Get 1.14x from 400 to 3,000 sessions (base 8.1x), Reap 7.2x (base 76x), kvwatch and cistore Rewatch flat at about 4-5 ms at 1,000 and 25,000 keys (base 15 ms/336 ms and 3.20 s at 25,000 for cistore)."
+    "how": "I built envoy-listener and envoy-dispatch at 80332949 (code identical to 41fa18b1) and re-ran the implementer's heartbeat-proof.py with my listener (400 sessions): 1.203 KV writes per heartbeat (interest 0.203, session 1.000) against its 1.204, and resumed interest and session warm-ups on all three listeners after the nats-server restart. I re-ran its last-seen driver as lastseen.sh on my builds, with a 20 s session TTL. The subscribers list showed the dead session's second heartbeat, and after a listener restart it fell back to updated_at, as the implementer's proof says."
   },
   "failures": [
     {
-      "criterion": "R7 EV-11: review only after INFRA-610's production check shows all three listeners (Dispatch's in-cluster listener, gke, envoy-hub) on its build (ae36683e); the architect's instruction of 2026-10-27 15:51Z: end the round with verdict fail naming this gate while it has not passed",
-      "evidence": "gh pr view 2374 -R sjawhar/legion --json body at 2026-10-27 16:55Z: the body's line reads '**Production:** pending deploy of ae36683e4df982273cd5cb72968eed24504bf0b1'. INFRA-610 is done in Dispatch with no production record. Every other criterion passed (proof below); the code needs no change for this gate, only the three listener pin moves and INFRA-610's production check."
+      "criterion": "The pull request merges into main and its required CI runs; R8: the listener's race step covers ./internal/session/",
+      "evidence": "gh pr view 2377 -R sjawhar/legion --json mergeable at 2026-10-29 13:25Z: CONFLICTING. git merge-tree --write-tree --name-only 41fa18b19e71 fe31539233c0 (main@origin): 'CONFLICT (modify/delete): .github/workflows/envoy-and-contracts.yaml deleted in fe31539233c0 and modified in 41fa18b19e71'. #2316 (14d907b6) moved pull-request CI into .github/workflows/ci.yaml, whose listener race step (ci.yaml:2311 at fe315392) runs 'go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/kvwatch/...' without ./internal/session/. The forward merge must carry this pull request's ./internal/session/ addition into that step. Until then GitHub builds no merge ref, and the required CI of the head cannot run: 'Legion Envoy and Contracts' at 41fa18b1 was still queued at 13:32Z. This needs the implementer's forward merge, not a red test."
+    },
+    {
+      "criterion": "Deployment instructions, 'Proving a change to a page a person reads in Dispatch': before the merge, a change to a page a person reads is proven by a test in Dispatch's browser suite (packages/dispatch/e2e, bun run e2e). The test must fail against a build of the commit before the change and pass at the change's head, and both runs are quoted on the pull request.",
+      "evidence": "Commit 395a0ca2 changes the last_seen that Dispatch's GET /api/v1/issues/<key>/subscribers answers for a subscriber that is no longer live. The issue page renders that value as the row's time: packages/dispatch/web/src/features/issue/SubscribedAgents.tsx:52, <Timestamp at={new Date(subscriber.last_seen).toISOString()} />. So the page a person reads now shows a different time. filesChanged has no file under packages/dispatch/e2e, and the pull request body quotes no browser run. The fake listener the suite uses (packages/dispatch/e2e/fake-envoy.ts) serves GET /v1/interests/ from FakeInterest, which has updated_at but no last_seen. So the test needs that field, a seeded interest row with updated_at T0 and last_seen T1 > T0 and no live session, and an assertion that the subscribers list shows T1. On a build of 278c9c06 it must show T0. My lastseen.sh shows the API half of this on real processes (proof below); the deployment instructions require the browser test itself."
     }
   ],
-  "failed": 1,
+  "failed": 2,
   "proof": [
     {
-      "criterion": "R6 EV-11: an unchanged heartbeat writes the interest row only once it is 5 minutes old, a changed row at once; KV writes per heartbeat 2.0 -> <=1.3 at 1x and 10x",
-      "surface": "INFRA-589 reproduction harness (three real envoy-listener processes, nats-server 2.10.29, Dispatch, Postgres, loadgen 400/1,000 sessions heartbeating every 90 s through POST /v1/interests/subscribe), and partition.py: two real listeners on one nats-server",
-      "command": "harness-514.sh tester-1x-q 1 / tester-10x 10 bin/envoy-listener-tester; analyze-514.py; python3 partition.py head bin/envoy-listener-tester (dispatch://INFRA-514/artifact/infra514-tester-evidence-tar-gz)",
-      "observed": "KV writes per heartbeat 1.30 at 1x (interest 0.300, session 1.000; 1,333 heartbeats in minutes 1-6) and 1.279 at 10x (interest 0.295, session 0.983; 3,336 heartbeats); partition.py: 50 identical heartbeats wrote 0 interest rows and 50 session rows (KV LastSeq deltas from /jsz), one heartbeat adding a topic wrote 1 interest row",
-      "headSha": "278c9c06140d1b26f678ff2b31b8c64cbac3da6a",
-      "negativeControl": "main's listener (ae36683e) in the same harness (testerctl-main-1x): 2.001 KV writes per heartbeat, interest 1.000; partition.py main: 50 identical heartbeats wrote 50 interest rows"
+      "criterion": "Round 2: Dispatch's subscribers list shows a subscriber that is no longer live with its session's last heartbeat (expired or deleted), not the interest row's updated_at; the listener keeps it for the reaper's grace; a restarted listener falls back to updated_at",
+      "surface": "Real envoy-listener and envoy-dispatch builds at 80332949, nats-server 2.10.29 with envoy_sessions created at MaxAge 20 s, private Postgres 16. Read through Dispatch's GET /api/v1/issues/PRF-1/subscribers as a person (header identity) and the listener's GET /v1/interests/",
+      "command": "bash lastseen.sh head bin/listener-head bin/dispatch-head (dispatch://INFRA-514/artifact/infra514-tester-round2-tar-gz)",
+      "observed": "ses-a (two identical heartbeats 8 s apart, then stopped): row updated_at 1793280521156, Dispatch live=false last_seen 1793280529244 (the second heartbeat). ses-b (deleted with DELETE /v1/sessions/ses-b): live=false, last_seen = its heartbeat. ses-c: live=true. The same answers came 60 s after the expiry, three TTLs past it, so WithLastSeenRetention is wired. After a listener restart: no last_seen on the rows, and Dispatch showed updated_at.",
+      "headSha": "41fa18b19e7159f61f615b0c1d921e812605c83d",
+      "negativeControl": "lastseen.sh before with 278c9c06's builds: the rows carry no last_seen, and Dispatch showed ses-a at 1793280624804, its first heartbeat, 8 s before its last one"
     },
     {
-      "criterion": "R4/R5 EV-7: a rewatch applies only what was written since the last revision applied, warm-up outcome resumed, and the cache equals the bucket afterwards",
-      "surface": "INFRA-589 harness with a nats-server restart 6 minutes in; partition.py: listener B dials NATS through a TCP relay that is killed while listener A writes",
-      "command": "harness-514.sh tester-1x-q 1 and tester-10x 10; python3 partition.py head bin/envoy-listener-tester",
-      "observed": "harness: every listener's interest and session warm-up after the restart was outcome resumed with 0-9 entries (1x: 0 and 1-2; 10x: 0 and 6-9); partition: while B was away A added 25 sessions, deleted 10, changed 10 topic sets and deleted 5 interests; after the relay came back B's GET /v1/sessions and GET /v1/interests/ equalled A's within 1.0 s, warm-ups resumed with 0 entries (the old watcher's ordered consumer had already caught up)",
-      "headSha": "278c9c06140d1b26f678ff2b31b8c64cbac3da6a",
-      "negativeControl": "main's listener: completed warm-ups reading all 400 keys of each bucket after the restart, and after the partition B replayed 81 interests (5 markers) and 76 sessions (10 markers) in full"
+      "criterion": "R6 EV-11 and R4 EV-7 at the merge head (main's bus changes merged in): an unchanged heartbeat is not rewritten, and a rewatch after a nats-server restart resumes",
+      "surface": "The implementer's real-process driver: nats-server 2.10.29, three envoy-listener processes built at 80332949, 400 sessions heartbeating every 90 s through POST /v1/interests/subscribe; KV LastSeq read from /jsz",
+      "command": "python3 heartbeat-proof.py tester-head <my listener-head build> 400",
+      "observed": "1,334 heartbeats in 300 s: interest writes 271 (0.203 per heartbeat), session writes 1,334 (1.000), 1.203 KV writes per heartbeat; after the restart, interest and session warm-ups were outcome resumed with 0 entries on all three listeners (role claims completed, its bucket empty)",
+      "headSha": "41fa18b19e7159f61f615b0c1d921e812605c83d",
+      "negativeControl": "round 1's main listener in the INFRA-589 harness: 2.00 KV writes per heartbeat and completed warm-ups reading all 400 keys (dispatch://INFRA-514/artifact/infra514-tester-evidence-tar-gz). The implementer's main 8a911ecc run with this driver: 2.00."
     },
     {
-      "criterion": "R1 EV-5: an expired session is absent at once and leaves the cache at its deadline with no read; Get at 3,000 sessions within 2x of 400; a reaper pass at 3,000 within 10x of 400",
-      "surface": "expiry.py: a real listener on an envoy_sessions bucket created with MaxAge 20 s, read only through /metrics' envoy_active_sessions gauge, GET /v1/sessions and GET /v1/roles/<role>; Go benchmarks internal/session and cmd/listener",
-      "command": "python3 expiry.py head bin/envoy-listener-tester; go test -run '^$' -bench 'Registry/Get/' -count 10 ./internal/session/; go test -run '^$' -bench 'Reap' -benchtime 20x -count 3 ./cmd/listener/ (base: main ae36683e plus the head's benchmark files, GOWORK=off)",
-      "observed": "21 sessions that stopped heartbeating left envoy_active_sessions 31 -> 10 at about 20 s; GET /v1/sessions listed the 10 live sessions; the lapsed holder's role answered 404 holder_lapsed with last_seen and claim_released; Registry/Get median 153.6 ns at 400 and 174.6 ns at 3,000 (1.14x); Reap 6.97/22.3/50.2 us at 400/1,000/3,000 (7.2x)",
-      "headSha": "278c9c06140d1b26f678ff2b31b8c64cbac3da6a",
-      "negativeControl": "the same benchmarks on main's code: Registry/Get 12.3 us -> 99.3 us (8.1x), Reap 5.08 ms -> 385 ms (76x)"
-    },
-    {
-      "criterion": "R9 delivery p99 no worse at head",
-      "surface": "INFRA-589 harness, Dispatch -> NATS -> sessions, run with nothing else on the pod",
-      "command": "harness-514.sh tester-1x-q 1 and testerctl-main-1x 1; summary.json events.delivery_ms_from_response_all",
-      "observed": "head: delivery p50/p99 54.9/270 ms at 3.05 events committed/s; main control: 83.4/536 ms at 0.73 events/s (the implementer's main run: 56.2/351 ms at 2.92/s); 5 of 10,231 head receipts missing, the self_subscribed port-0 pattern the implementer recorded",
-      "headSha": "278c9c06140d1b26f678ff2b31b8c64cbac3da6a",
-      "negativeControl": "tester-1x, run while my race stress test shared the pod's 2 cores: 1.63 events/s and p99 455 ms, so the comparison uses the quiet run only"
+      "criterion": "R7: review only after INFRA-610's production check shows all three listeners on a build containing ae36683e",
+      "surface": "sjawhar/legion#2374's Production line and its production-check comment",
+      "command": "gh pr view 2374 --json body; gh api repos/sjawhar/legion/issues/comments/6492594577; git merge-base --is-ancestor ae36683e b9883e6a",
+      "observed": "The Production line reads pass. Dispatch's listener pod runs ae36683e and gke's runs b9883e6a. envoy-hub's pin is b9883e6a, and the hub VM was recreated from that pin at about 12:10Z today. b9883e6a contains ae36683e (ancestry check exit 0). The reap probe read 'new rule' on production.",
+      "headSha": "41fa18b19e7159f61f615b0c1d921e812605c83d",
+      "negativeControl": "On 2026-10-27 at 16:55Z the same line read 'pending deploy of ae36683e', and round 1 failed on it"
     }
   ],
-  "adversarial": [
-    "A throwaway race test (not committed) wrote and deleted 50 keys continuously while 20 Rewatches ran, every other one onto a fresh connection after closing the old one: go test -race -count 3 converged to the bucket each time with 19-20 resumed warm-ups. No defect found, so no red test.",
-    "Read every new test against the ways I tried to break the change (chained resumes, writes racing the switch, a recreated or rolled-back stream, a stale delivery after the fence leaves, a re-upsert during a reaper pass, a paused session at 6 and 9 minutes): each has a test that would catch it."
-  ],
   "observations": [
-    "Dispatch's subscribers list (internal/dispatch/api/subscribers.go:123) shows a subscriber that is no longer live with last_seen = the interest row's updated_at. With the unchanged-row skip that time can be up to 5 minutes before the session's last heartbeat. Live subscribers read the session row, which is still written on every heartbeat. The listener's AGENTS.md table now says the stored subscription's updated_at is its last change or refresh; Dispatch's view does not say so.",
-    "The review document's EV-5 and EV-11 rows (dispatch://INFRA-514/artifact/architecture-review-md) quote the earlier 1357b95c measurements (Get 17.5/54.7/146 us, 1.93 -> 1.27 at 10x), not the PR body's ae36683e figures (14.2/36.3/122 us, 1.96 -> 1.26). Both runs agree in direction; the rows name sjawhar/legion#2377 as R10 requires.",
-    "CI at 278c9c06 when read at 16:55Z: Tests (lint, typecheck, test), Docs, Worker Image, PR Title and dispatch-multiprocess green; Legion Envoy and Contracts' envoy-go-race, envoy-go, envoy-smoke, dispatch, broker-multiprocess, envoy-e2e-local and envoy-infra-go still queued, dispatch-memory in progress."
+    "With WithLastSeenRetention at InterestReapGrace+InterestRefreshAge (15 min), the session cache's lastSeen records and revision fences now live 15 min after a session leaves, instead of one TTL (5 min). That is about three times as many dead-session entries, still bounded by session churn, and the expiry heap removes them (TestLastSeenRetentionKeepsTheRecordAndFenceThatLong).",
+    "A forward merge onto fe315392 changes the pull request's diff, since the race-step line moves to ci.yaml. So the next round is a full test round, not a fingerprint re-check."
   ]
 }
