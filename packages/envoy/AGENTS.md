@@ -3050,6 +3050,14 @@ blind republishing.
 - NATS `>` matches one or more trailing tokens, not its base subject. A subscription to a concrete
   `<subject>.>` is registered as the pair `<subject>` and `<subject>.>`, so the recommended
   per-PR default receives lifecycle plus child events.
+- Every published Dispatch event's payload carries one field the event log does not hold, `quiet`
+  (`events.Quiet`, set in `outbox.envelope`): whether it carries nothing for a reader following
+  its owner topic - a delivery receipt, an anchor refresh, settings or per-viewer bookkeeping, a
+  targeted message its session already had, a quiet ask edit, or a version nobody named. That is
+  the half of `Notify` that does not depend on who acted, and it is what a reader skips on
+  (`renderInbound`, `packages/envoy-client/README.md`). A reader that skipped on `notify` instead
+  saw nothing an agent did on an issue it had subscribed to, since `notify` is false for every
+  event an agent wrote.
 - Dispatch issue events use `notifications.dispatch.issue.<KEY>.<type>`, carry every event, and
   are retained in JetStream; `notify` only controls agent wake and routing the same envelope to
   `notifications.role.<role>` or `notifications.agent.<session_id>` (the issue's route, which also

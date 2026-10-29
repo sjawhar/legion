@@ -36,7 +36,15 @@ function envelope(overrides: Partial<Envelope> = {}): Envelope {
   };
 }
 
-function dispatchEvent(type: string, payload: object, eventActor = actor, notify = true): string {
+// `quiet` left out is a frame published before Dispatch stated it, which a reader judges by
+// `notify` instead.
+function dispatchEvent(
+  type: string,
+  payload: object,
+  eventActor = actor,
+  notify = true,
+  quiet?: boolean
+): string {
   return JSON.stringify(
     envelope({
       event_id: "dispatch-1",
@@ -51,6 +59,7 @@ function dispatchEvent(type: string, payload: object, eventActor = actor, notify
         type,
         actor: eventActor,
         notify,
+        ...(quiet === undefined ? {} : { quiet }),
         created_at: "2026-09-09T00:00:00Z",
         payload,
       }),
@@ -1374,6 +1383,84 @@ describe("renderInbound dispatch events", () => {
         reader
       )
     ).toMatchObject({ skip: true, content: "" });
+  });
+
+  // The one thing `envoy_subscribe notifications.dispatch.issue.<KEY>.>` is for
+  // (skills/dispatch/SKILL.md): a session following an issue hears what the agents on it do.
+  // Every such event carries notify false, because notify asks whether to wake the issue's route
+  // and claimant, so a reader that skipped on notify saw none of them.
+  test("shows an agent's comment on the issue topic it subscribed to", () => {
+    const rendered = renderInbound(
+      dispatchEvent(
+        "comment.created",
+        { id: "comment-9", body: "Slice 3 is pushed." },
+        actor,
+        false,
+        false
+      ),
+      reader,
+      dispatchIssueSubject("DSP-1", "comment.created")
+    );
+
+    expect(rendered.skip).toBe(false);
+    expect(decode(rendered.content)).toMatchObject({
+      envoy: {
+        dispatch: { type: "comment.created", payload: { body: "Slice 3 is pushed." } },
+      },
+    });
+  });
+
+  test("drops a quiet event on an issue topic however it was authored", () => {
+    expect(
+      renderInbound(
+        dispatchEvent(
+          "comment.delivery",
+          { id: "comment-9", state: "delivered" },
+          actor,
+          false,
+          true
+        ),
+        reader,
+        dispatchIssueSubject("DSP-1", "comment.delivery")
+      )
+    ).toMatchObject({ skip: true, content: "" });
+    expect(
+      renderInbound(
+        dispatchEvent(
+          "artifact.version",
+          { version: { number: 4, named: false } },
+          { kind: "user", id: "alice" },
+          false,
+          true
+        ),
+        reader,
+        dispatchIssueSubject("DSP-1", "artifact.version")
+      )
+    ).toMatchObject({ skip: true, content: "" });
+  });
+
+  // The stream holds 72 hours of frames published before Dispatch stated `quiet`, and a replay
+  // of those must not start showing their receipts and autosaves.
+  test("judges a frame published before `quiet` by its notify flag", () => {
+    expect(
+      renderInbound(
+        dispatchEvent("comment.created", { id: "comment-9", body: "Older frame" }, actor, false),
+        reader,
+        dispatchIssueSubject("DSP-1", "comment.created")
+      )
+    ).toMatchObject({ skip: true, content: "" });
+    expect(
+      renderInbound(
+        dispatchEvent(
+          "comment.created",
+          { id: "comment-9", body: "Older frame a person wrote" },
+          { kind: "user", id: "alice" },
+          true
+        ),
+        reader,
+        dispatchIssueSubject("DSP-1", "comment.created")
+      ).skip
+    ).toBe(false);
   });
 
   test("drops an event authored by the reader session", () => {

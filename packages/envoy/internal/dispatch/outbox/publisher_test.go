@@ -1218,6 +1218,59 @@ func TestRunPublishesEveryEventButRoutesOnlyNotifyingEvents(t *testing.T) {
 	}
 }
 
+// What a reader following an owner topic is given to decide on. `notify` is false for every
+// event an agent wrote, so a reader that skipped on it never saw an agent's comment on an issue
+// it had subscribed to; `quiet` says whether the event carries anything at all.
+func TestEnvelopePayloadStatesWhetherTheEventIsQuiet(t *testing.T) {
+	agent := model.Actor{Kind: "session", ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7"}
+	for _, tc := range []struct {
+		name  string
+		event model.Event
+		quiet bool
+	}{
+		{
+			name: "an agent's comment on an issue",
+			event: model.Event{
+				ID: 1, IssueKey: new("T-1"), Type: "comment.created", Actor: agent,
+				Payload: map[string]any{"id": "comment-9", "body": "Slice 3 is pushed."},
+			},
+			quiet: false,
+		},
+		{
+			name: "the delivery receipt of that comment",
+			event: model.Event{
+				ID: 2, IssueKey: new("T-1"), Type: "comment.delivery", Actor: agent,
+				Payload: map[string]any{"id": "comment-9", "state": "delivered"},
+			},
+			quiet: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			item, err := envelope(tc.event, "")
+			if err != nil {
+				t.Fatalf("envelope: %v", err)
+			}
+			var payload struct {
+				Type   string `json:"type"`
+				Notify bool   `json:"notify"`
+				Quiet  bool   `json:"quiet"`
+			}
+			if err := json.Unmarshal([]byte(item.Payload), &payload); err != nil {
+				t.Fatalf("decode event payload %s: %v", item.Payload, err)
+			}
+			if payload.Type != tc.event.Type {
+				t.Fatalf("payload type = %q, want %q", payload.Type, tc.event.Type)
+			}
+			if payload.Quiet != tc.quiet {
+				t.Fatalf("payload quiet = %t, want %t", payload.Quiet, tc.quiet)
+			}
+			if payload.Notify {
+				t.Fatalf("payload notify = true, want false: an agent's event wakes no route")
+			}
+		})
+	}
+}
+
 func TestReadyEventScanUsesEventsUnpublishedIndex(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
