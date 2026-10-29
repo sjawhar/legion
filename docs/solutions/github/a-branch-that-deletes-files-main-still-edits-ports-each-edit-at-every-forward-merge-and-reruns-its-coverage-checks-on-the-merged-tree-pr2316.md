@@ -10,7 +10,6 @@ date: 2026-10-29
 status: active
 module: .github/workflows
 related_issues:
-  - "INFRA-520"
   - "sjawhar/legion#2316"
 ---
 
