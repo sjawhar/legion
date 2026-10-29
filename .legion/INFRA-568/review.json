@@ -2,35 +2,37 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-568",
-  "completed": "2026-10-29T02:39:17Z",
-  "decision": "approved",
-  "round": 11,
-  "reviewedCodeHead": "b12e0766218ac8156d485a69dab9fba80c50e84e",
+  "completed": "2026-10-29T09:36:58Z",
+  "decision": "changes_requested",
+  "round": 12,
+  "reviewedCodeHead": "dc9071e65c3b",
   "critical": 0,
-  "important": 0,
-  "minor": 0,
-  "keyFindings": [],
-  "notDefects": [
+  "important": 1,
+  "minor": 2,
+  "keyFindings": [
     {
-      "file": "packages/envoy/internal/dispatch/api/server_test.go:221-223",
-      "description": "directServer gives its server lifetime context.Background(), so a related check run through it may leave a record retry (bounded at 30 s) or a statistics refresh (only for a project with no statistics, bounded at 10 min) running past the test. This is test-only. Production servers come from register, which refuses a nil lifetime. The focused api tests pass, including under -race. Moving directServer to t.Context() with a retry wait is a test-hygiene change, not a correctness one."
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/suggestions.go:861 (with server.go:343-347, 392-394, 417-418, 427)",
+      "description": "The related_checks record retry runs on its own sync.WaitGroup (relatedRecordRetries) next to main's backgroundWork, which #2449 brought in this merge. backgroundWork exists because work may start while wait is already waiting (server.go:430-433): cmd/dispatch/shutdown.go calls waitBackground once httpDrainBeforeDocuments has passed with requests still in flight. A late unkeyed create (a script, the daemon outbox) whose first record attempt fails can then call relatedRecordRetries.Go after Wait began from zero, which sync.WaitGroup forbids and which can panic in the window where Wait is releasing; otherwise the retry runs after waitBackground returned. Fix: run the retry with s.detached.goDetached, and delete the relatedRecordRetries field, its Wait at server.go:427 and the related-check clauses in the Register and waitBackground comments. Keep relatedRecordRetrying, which enforces the retry limit."
     },
     {
-      "file": "packages/envoy/internal/dispatch/api/server_test.go:209-212",
-      "description": "The test cleanup lists the same four waits as waitBackground; one t.Cleanup(served.waitBackground) would do. Duplication only."
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/keyed_write_guard_test.go:63-65",
+      "description": "The allowlist reason says the rows are written after the write marked its key, but respondWithExistingExternalIssue commits only a read, marks no key, and records an already_exists row. Say the row records the check whether or not the write wrote, and a duplicate after a takeover only adds one row of statistics."
     },
     {
-      "file": "packages/envoy/internal/dispatch/api/server.go:369",
-      "description": "The comment names TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound, which the pull request renamed to TestTheDeploymentsRelatedCheckAllowanceIsTheDocumentedBound. Wording only."
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/suggestions.go:146-150 (and 0139_related_checks.up.sql:38, README)",
+      "description": "'cancelled' is described as the request ending first. Under #2449 a keyed handler's context is detached from the client and ends only at keyedRunLimit, with no cause, so for a keyed write cancelled means the keyed run's own bound. Say so where cancelled is described."
     }
   ],
   "verified": {
-    "fingerprint": "Last review commit_id 05e1deef: 1b7f7441...; code head b12e0766: 7cced850..., changed. Narrowed round; thermonuclear pair run.",
-    "merge": "Merge of main 56a39157 (#2396 and others). RunSearchTermStatsRefresh uses duty.RunLeased with TickAtStart: a pass at boot, then every interval. The check's two s.lifetime readers (ensureSearchTermStats, the record retry) get a non-nil lifetime in production from register, and in every test-built server that reaches them; each &server{} literal without a lifetime reaches neither. Register's wait still ends with relatedRecordRetries.Wait before the pool closes.",
-    "tests": "In a scratch copy against Postgres: go test ./internal/dispatch/api -run 'TestRelated|TestDecisionBlock|Suggestion|TestRoutesTable|TestTheDeployments' passed in 145.9 s (2 corpus-gated skips). go test -race -run 'TestRelatedCheckBounds|TestRelatedCheckRecord' passed. go vet passed on 42 packages. pmdoc's typed_nesting_test.go fails to vet on main at 56a39157 (#2396 against #2403), and #2484 on main fixes it; it is main's.",
-    "ci": "Required lint, typecheck, test and pr-title all success at the CI head b12e0766. The compare to fc0c14e8 changes only .legion/.",
-    "thermonuclear": "deep-review APPROVE; code-quality CHANGES on the three items above, each judged not a defect.",
-    "threads": "All ten threads resolved; none new.",
-    "e2eLines": "E2E (implementer) and E2E (tester) present."
+    "fingerprint": "Last review commit_id 19841c71: 7cced850...; code head dc9071e6: b8970b00..., changed. Narrowed round; thermonuclear pair run.",
+    "keyedLayer": "A replayed create returns its stored status (request_keys.go:990), so the client's created (201) and already-held (200) stay right on a replay. Keyed handlers run on WithoutCancel(r.Context()) bounded by keyedRunLimit (10 min), so the 5 s allowance ends first and a slow check records timeout. POST /projects/{key}/related is keyed like every POST, as main keys its other read-only POSTs; it writes nothing and stores only its answer.",
+    "counts": "leasePoolSize 13 and ConnectionsPerProcess 87 = dispatchConnectionsPerPod; main added no pool or lease. Migrations 0139/0140 follow main's 0137_request_keys and 0138_pending_delivery_indexes; no stale numbers.",
+    "merge": "main.go keeps main's moved RunSuggestionOutcomeSweep once; insertRelatedChecks is allowlisted in the keyed-write guard; registeredRoutes 143 = 140 + 3; dc9071e6's census row covers DispatchClient.related.",
+    "thermonuclear": "deep-review APPROVE (two Minor items above); code-quality CHANGES (the WaitGroup item above).",
+    "ci": "Not waited on: a request for changes does not wait.",
+    "threads": "All ten earlier threads resolved."
   }
 }
