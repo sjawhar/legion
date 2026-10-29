@@ -2,22 +2,32 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-368",
-  "completed": "2026-10-29T13:37:19Z",
-  "round": 8,
+  "completed": "2026-10-29T14:09:40Z",
+  "round": 9,
   "decision": "changes_requested",
-  "reviewedHead": "the handoff commit this file is pushed in (child of 7a14b1f742f0d5f46439c31c6882a577cc39acc9)",
-  "codeHead": "8c404ede30a6",
+  "reviewedHead": "the handoff commit this file is pushed in (child of 957a8d10f087f7bf53d1953d3866c5de5b00edc1)",
+  "codeHead": "881b03e5834e",
   "critical": 0,
-  "important": 1,
-  "minor": 0,
-  "round7Findings": "Item 2 is fixed. recoveredMessage now calls hydrateMessageReplyBlocks (messages.go:127), and it serves both replayIssueMessage and replayAgentMessage. message_reply_block_repeat_test.go covers both routes; the tester saw reply_block null at 21ec46b9 and b2 at the head. No other recovered*/replay* path skips the hydration: replayComment goes through hydrateCommentSideTables. Item 1 is fixed for one reload only (below). The duplicated default save is folded into saveCommentEdit.",
+  "important": 2,
+  "minor": 1,
+  "round8Finding": "Fixed. SentRequest.edit.carried is data: keep writes it (held-sends.ts:277), restoredEdit reads it back, and sendAttempt passes it (send-request.ts:329), so Writes.#update's re-keeps no longer lose it. The new test (two reloads, then a reload that interrupts a Retry) fails at round 8's code and passes at the head (deep-review ran it both ways). restoredEdit's closure and the `followed ?? carried` fallback are gone. The two older-build comments are reworded, and recoveredMessage is in the body's loadMessage table.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/dispatch/web/src/features/conversation/held-sends.ts:273-283",
-      "description": "A kept edit's press-time block ids are dropped from storage on the first reload, so a second reload brings back 422 KEY_REUSED. `keep` recomputes the ids with carriedIds(request), which reads edit.blocks. `restoredEdit` sets blocks: undefined and holds the ids only in its save closure. Writes.#update re-keeps the detail through kind.keep on every update, including #resume (write-store.ts:717, 733, 982-983). So the restored write is saved back as {id} alone. A Retry after a second reload, or a Retry that a reload interrupts, goes under the same key (SendInterruptedError → retriesUnderItsKey) with {body} only, and the server answers 422 KEY_REUSED. Both thermonuclear agents reproduced this with scratch probes. The new test reloads only once. The `followed ?? carried` fallback at :258 shows the same split: sendAttempt passes carriedIds(sent), which is always undefined for a restored edit. Fix: keep the ids as data that both keep and sendAttempt read, for example a `carried` field on SentRequest.edit worked out once at the press, which keep writes and restore reads back. Add a two-reload (or reload-interrupts-Retry) test."
+      "file": ".github/workflows/ci.yaml (filters)",
+      "description": "The ci-filters check is red at the CI head 0fbea003 with 30 problems. The jobs test, docs, dispatch, dispatch-browser-multiprocess and envoy-infra-go all read the new packages/envoy/internal/dispatch/itemblocks/*.go files (through go build ./cmd/dispatch and the docs binaries), but none of their path filters matches that directory. So a later change to itemblocks alone would skip those jobs. main does not share this red: main has no itemblocks. Fix: add 'packages/envoy/internal/dispatch/itemblocks/*' to each of those five filters in ci.yaml, beside the other internal/dispatch packages, and run .github/scripts/check-ci-filters.sh."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/conversation/MentionComposer.tsx:900",
+      "description": "The ids are worked out from a different body than the one Save sends. composedRequest computes carriedIdsOf(followedBlocks.current, body) from the React state, and sentRequest then sends textarea.current?.value ?? body. Before round 9 the ids were checked against the sent body. Reachable path: open an edit of a comment whose stored body has CR LF, then save without typing. body keeps the CR LF (replaceDraft(editBody)), while the textarea and followed.value hold LF, so carriedBlocks returns undefined and the save carries no ids. deep-review reproduced this with a CR LF-normalizing textarea: round 8's code sent base_revision 3 and b1/b2, the head sent {body} alone. Fix: in sentRequest, read the textarea value once and use it for both draft.body and edit.carried. Add a test with a CR LF comment and a CR LF-normalizing textarea, which fails at the head."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/conversation/send-request.ts:302",
+      "description": "carriedIdsOf's doc comment still says \"The block ids `sent`'s save carries ... None for a send that is no edit\", but it no longer takes `sent`. The finding above touches the same code, so fix this wording with it."
     }
   ],
-  "ci": "The CI head is 0fbea003; the compare to 7a14b1f7 is handoffs only. At 13:35Z changes, pi-legion, pi-shared and pr-title had passed, typecheck was skipped, lint, test and worker-image/build were running, and the rest were queued. GitHub now reports the PR CONFLICTING with main. By the controller's ruling it is not merged again: it is held at its approved head for INFRA-520's merge queue. The request for changes does not wait on CI.",
-  "thermonuclear": "deep-review: `Verdict: CHANGES at 7a14b1f7`, H1 (the finding above, confirmed in write-store.ts #update), plus two minors: a misleading comment about records from the older build, and the PR body's loadMessage table omitting recoveredMessage. code-quality: `Verdict: CHANGES at 7a14b1f7`, the same split, with the remedy of keeping `carried` as data."
+  "ci": "GitHub reports the PR CONFLICTING, so no pull_request workflow has run at 1327aa0d or 881b03e5. The newest CI head is still 0fbea003 (round 8's code). There: lint, test, pr-title, contracts, claude-envoy, envoy-client, dispatch-memory, the multiprocess jobs, pi-*, envoy-* and the worker image all passed, and typecheck was skipped. dispatch, envoy-go and envoy-go-race were still running. ci-filters failed (finding 1). docs failed in docs:media on one screenshot, legion/handover: getByRole('heading', {level: 1}) resolved to 2 elements. This PR changes no Legion docs page, and docs passed on INFRA-723, INFRA-715 and INFRA-743 at the same time, so I am not counting that red as this PR's until a run after the fix shows it again.",
+  "thermonuclear": "deep-review: `Verdict: CHANGES at 957a8d10`, finding 2, reproduced. code-quality: `Verdict: CHANGES at 957a8d10`, findings 2 and 3."
 }
