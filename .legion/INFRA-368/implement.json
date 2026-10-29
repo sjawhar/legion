@@ -2,33 +2,23 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-368",
-  "completed": "2026-10-29T13:20:00Z",
+  "completed": "2026-10-29T14:05:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2463",
-  "round": "review round 7 findings (architect's round 8)",
+  "round": "review round 8 (architect's round 9)",
   "proof": [
     {
-      "criterion": "Finding 2: a repeated keyed message reply that names a block answers its reply_block, as the first answer did",
-      "surface": "Local Dispatch harness (bun run dispatch:local built from 8c404ede: real Go server, migrations 0001-0141, real request-key layer) over HTTP",
-      "command": "curl -H 'Authorization: Bearer e2e-token' -H 'Idempotency-Key: probe-reply-1' -X POST http://127.0.0.1:8777/api/v1/issues/KEY-1/messages -d '{\"actor\":{\"kind\":\"session\",\"id\":\"probe-session\"},\"body\":\"Answering two.\",\"in_reply_to\":\"<message id>\",\"in_reply_to_block\":\"b2\"}' twice; go test ./internal/dispatch/api/ -run TestARepeatOfAKeyedMessageReplyAnswersItsBlockAgain",
-      "observed": "First POST 201 with reply_block {block_id: b2, text: 'Two.'}; the repeat 201 with Idempotency-Replayed: ?1, the same message id and the same reply_block. The Go test passes for the issue message route and the single-session send route.",
-      "headSha": "8c404ede30a6",
-      "negativeControl": "The same key with a different body answers 422 KEY_REUSED. With the hydrateMessageReplyBlocks call removed from recoveredMessage, both Go subtests fail with 'the repeat: reply_block = null'."
-    },
-    {
-      "criterion": "Finding 1: after a reload, a Retry of a kept comment edit sends the body, base_revision and blocks its first save sent, under the same request key",
-      "surface": "The dashboard's held-sends module (held-sends.ts, the store a kept send is restored from after a reload) under Bun's DOM tests; the editor and held-send browser rows in Chromium on the harness",
-      "command": "cd packages/dispatch && bun test web/src/features/conversation/held-sends.test.ts web/src/features/conversation web/src/features/margin; bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/block-references.e2e.ts e2e/conversation.e2e.ts e2e/offline-edits.e2e.ts e2e/held-sends.e2e.ts",
-      "observed": "316 pass, 0 fail, including 'a comment edit retried after a reload sends the body its first save sent' (first and retried PATCH identical: body, base_revision 3, blocks b1/b2, key send-edit) and 'a send kept with its edit as a bare comment id still restores'. Playwright 34 passed, 1 skipped; the driver exits 0 with 133 PASS.",
-      "headSha": "8c404ede30a6",
-      "negativeControl": "With keep/restore reverted to 21ec46b9's form, the reload-then-Retry case fails: the retried PATCH carries {body} alone under the same key (the 422 KEY_REUSED the review found). A kept record in the previous build's shape restores with no ids."
+      "criterion": "A kept comment edit keeps its block ids through any number of reloads: after two reloads, and after a reload that interrupts a Retry already out, the next Retry sends the same {body, base_revision, blocks} under the send's key",
+      "surface": "The dashboard's held-send store (held-sends.ts, kept in sessionStorage across reloads) under Bun's DOM tests; the editor and held-send browser rows in Chromium on the local harness built from 881b03e5",
+      "command": "cd packages/dispatch && bun test web/src/features/conversation web/src/features/margin; bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/held-sends.e2e.ts e2e/offline-edits.e2e.ts e2e/conversation.e2e.ts -g 'passage|kept|reload|edit'; block-graph.sh with DEV_SIGNIN_LOGIN=alice",
+      "observed": "317 pass, 0 fail, including 'a comment edit keeps its ids through two reloads and through a reload that interrupts its Retry': all three PATCHes are ['comment-1', {body, base_revision 3, blocks b1/b2}] under key send-edit. Playwright 10 passed; driver exit 0, 133 PASS.",
+      "headSha": "881b03e5834e",
+      "negativeControl": "With held-sends.ts, send-request.ts and MentionComposer.tsx at 8c404ede, the new test fails: the retry after the second reload calls editComment without base_revision and blocks. A kept record from the older build (the edit as a bare comment id) still restores and saves with no ids."
     }
   ],
   "filesChanged": [
-    "a21c72bb: packages/dispatch/web/src/features/conversation/held-sends.ts (KeptComposerSend.edit keeps the press-time carried ids; restore sends them), send-request.ts (carriedIds, one default saveCommentEdit), MentionComposer.tsx (uses saveCommentEdit), held-sends.test.ts",
-    "8c404ede: packages/envoy/internal/dispatch/api/messages.go (recoveredMessage hydrates reply_block), message_reply_block_repeat_test.go"
+    "881b03e5: send-request.ts (SentRequest.edit.carried replaces .blocks; carriedIdsOf works the ids out at the press; sendAttempt passes edit.carried), MentionComposer.tsx (composedRequest sets carried), held-sends.ts (keep writes edit.carried; restore reads it back; restoredEdit's closure and the followed ?? carried fallback removed; the older-build comments reworded), held-sends.test.ts (two-reload / interrupted-Retry case; fixture derives carried from spans)"
   ],
   "deviations": [
-    "Finding 1 keeps the carried ids rather than reusing the kept wire request: the composer's Retry builds a SentRequest, and reusing the wire would duplicate requestFor's judgement of when it still applies.",
-    "The reload-then-Retry path is proven by the held-sends unit test; the tester drives it in a browser, as the architect assigned."
+    "The PR body's loadMessage call-site table now lists recoveredMessage (it hydrates reply_block since 8c404ede)."
   ]
 }
