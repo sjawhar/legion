@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-550",
+  "completed": "2026-10-29T23:05:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2529",
+  "proof": [
+    {
+      "criterion": "A consumer can pass the three inputs (plan acceptance table, row 5): the contract agent-infra's dispatch/ program pins.",
+      "surface": "The built pulumi-resource-envoy-infra plugin driven by the real Pulumi CLI v3.268.0 (the version .github/actions/install-pulumi/action.yml pins), installed under $TMPDIR, on a file:// backend.",
+      "command": "cd packages/envoy/infra && go build -ldflags '-X main.version=0.0.1' -o $TMPDIR/infra-550/pulumi-resource-envoy-infra ./cmd/pulumi-resource-envoy-infra; pulumi package get-schema $TMPDIR/infra-550/pulumi-resource-envoy-infra; pulumi plugin install resource envoy-infra 0.0.1 --file <that binary>; pulumi package add <that binary> in a scratch Go module; go build ./... of a throwaway program constructing gcp:Dispatch with natsInCluster true, natsReplicas 3, streamMaxBytes 1073741824 and natsUrl nats://envoy-hub.envoy.svc.cluster.local:4222; pulumi preview",
+      "observed": "get-schema lists natsInCluster {\"type\":\"boolean\",\"plain\":true}, natsReplicas {\"type\":\"integer\",\"plain\":true} and streamMaxBytes {\"type\":\"integer\",\"plain\":true} under envoy-infra:gcp:Dispatch's inputProperties, none of them in requiredInputs (the schema carries no description for any of this resource's 52 input properties). package add generated the Go SDK with NatsInCluster *bool, NatsReplicas *int and StreamMaxBytes *int on gcp.DispatchArgs; the consumer program built; pulumi preview reached 'envoy-infra:gcp:Dispatch resource 'example-dispatch' has a problem: envoy-infra:gcp:Dispatch needs a \"gcp\" provider in its providers option', the providers.Require gate, which is reached only after the resolver has accepted the three inputs.",
+      "headSha": "cfc95b6efe98dc7abdc2ec13b458f51cca08b53f",
+      "negativeControl": "The same program with natsReplicas: 6 fails earlier, at the resolver: 'envoy-infra:gcp:Dispatch example-dispatch: natsReplicas 6 is above 5, the most copies NATS keeps'. That is what makes the valid run's provider error mean the three inputs were accepted. The plan's second control (natsInCluster with nats://127.0.0.1:4222) does not reach its refusal on this surface: pulumi preview reports the missing gcp provider first, because the natsUrl check runs inside the Kubernetes rendering, after providers.Require; it is proven at the mock-engine surface instead (TestDispatchRefusesABadNatsURLOnceItResolves/a_loopback_URL_with_natsInCluster)."
+    },
+    {
+      "criterion": "With an in-cluster address set, neither container carries a SOCKS5 setting and both carry the address and the replica count (plan acceptance table, row 1; the spec's first acceptance line).",
+      "surface": "The rendered pods: the Pulumi mock engine of packages/envoy/infra/gcp, the only rendering of the three Deployments outside a GKE apply.",
+      "command": "cd packages/envoy/infra && go test ./gcp/ -run 'TestDispatchInClusterNatsDropsTheProxyAndCarriesTheNumbers|TestDispatchInClusterNatsLeavesNoSocks5Path' -v",
+      "observed": "Both pass. envoy-dispatch and envoy-listener each carry NATS_URLS=nats://envoy-hub.envoy.svc.cluster.local:4222, ENVOY_ALLOW_REMOTE_NATS=1, ENVOY_NATS_REPLICAS=3 and ENVOY_STREAM_MAX_BYTES=67108864, and neither environment holds the key ENVOY_NATS_SOCKS5_PROXY at all. No example-dispatch-tailnet Service is registered, the front door's tailscale container carries no TS_SOCKS5_SERVER, the front door's NetworkPolicy exists with an empty Ingress, and neither the app's nor the listener's Deployment lists the front door's Deployment or Service among its dependencies.",
+      "headSha": "cfc95b6efe98dc7abdc2ec13b458f51cca08b53f",
+      "negativeControl": "TestDispatchNatsNumbersKeepTheProxyPath is the same assertions with natsInCluster unset, and there both containers DO carry ENVOY_NATS_SOCKS5_PROXY=example-dispatch-tailnet.dispatch.svc.cluster.local:1055 beside the two numbers, so the in-cluster test is not passing because the keys are absent everywhere."
+    },
+    {
+      "criterion": "Each number is left unset unless given (plan acceptance table, row 2; the spec's 'each left unset unless given').",
+      "surface": "The rendered pods, mock engine as above.",
+      "command": "cd packages/envoy/infra && go test ./gcp/ -run 'TestDispatchInClusterNatsRendersNoNumbersWhenUnset|TestDispatchAppAndListenerAgreeOnNats' -v",
+      "observed": "Both pass. With natsInCluster alone, neither ENVOY_NATS_REPLICAS nor ENVOY_STREAM_MAX_BYTES is a key of either container's environment, so each binary keeps one copy and its own byte limit (bus.ParseNATSReplicas, bus.ParseStreamMaxBytes). TestDispatchAppAndListenerAgreeOnNats compares the five shared NATS keys present on each container in both modes: five keys in the SOCKS5 mode, four in the in-cluster mode, equal values on both containers.",
+      "headSha": "cfc95b6efe98dc7abdc2ec13b458f51cca08b53f",
+      "negativeControl": "The agreement test asserts require.Len on the app's set before comparing (5 and 4), so a mode that rendered no NATS settings at all on either container would fail rather than pass as two empty maps; and the absent-key assertions use require.NotContains on the key, not an equality against an empty value, so a rendered ENVOY_NATS_REPLICAS=\"\" would fail."
+    },
+    {
+      "criterion": "Without the in-cluster address, today's SOCKS5 path renders unchanged (plan acceptance table, row 3; the spec's 'today's SOCKS5 path renders unchanged').",
+      "surface": "The committed golden renderings of packages/envoy/infra/gcp/testdata, through the mock engine.",
+      "command": "cd packages/envoy/infra && go test ./gcp/ -count=1 (the whole package, which rewrites nothing but compares every dispatch-*.golden) and jj -R $LEGION_WORKSPACE diff --from main --to @- --name-only",
+      "observed": "The gcp package is green and the branch's file list holds no gcp/testdata/*.golden: the nine files changed are gcp/dispatch.go, gcp/dispatch_kube.go, gcp/dispatch_frontdoor.go, gcp/export_test.go, gcp/dispatch_test.go, gcp/dispatch_construct_test.go, infra/README.md, infra/AGENTS.md and the changelog fragment.",
+      "headSha": "cfc95b6efe98dc7abdc2ec13b458f51cca08b53f",
+      "negativeControl": "The goldens are a real tripwire on this diff: while the rendering was being written, moving ENVOY_NATS_SOCKS5_PROXY out of its place in appEnv's list (after NATS_NKEY_SEED_FILE, before ENVOY_URL) fails the golden comparison, which is why the proxy is appended in that slot rather than at the end."
+    },
+    {
+      "criterion": "The component refuses what the binaries would refuse at boot (plan acceptance table, row 4).",
+      "surface": "The component's resolver and its natsUrl check, through the mock engine and through the plugin.",
+      "command": "cd packages/envoy/infra && go test ./gcp/ -run 'TestDispatchResolverRefusesInvalidInputs|TestDispatchRefusesABadNatsURLOnceItResolves' -v",
+      "observed": "All rows pass, among them natsReplicas 0 and -1 ('natsReplicas <n> is below 1', 'leave it unset for one copy'), natsReplicas 6 ('is above 5, the most copies NATS keeps'), streamMaxBytes 0 and -1 ('is below 1', 'leave it unset for no limit'), and natsInCluster with nats://127.0.0.1:4222 refused naming natsUrl with a message that names neither natsUrls nor socks5Proxy.",
+      "headSha": "cfc95b6efe98dc7abdc2ec13b458f51cca08b53f",
+      "negativeControl": "Each refusal row asserts the input's own name and the words that distinguish its message, so a refusal mapped onto the wrong input (the hazard here: dispatchListenerEnv maps every core refusal that is not socks5Proxy's onto natsUrl) fails the row; and the resolver bound was driven end to end through the plugin too, where natsReplicas 6 refused a pulumi preview by name."
+    },
+    {
+      "criterion": "Production, before the change: the baseline the agent-infra apply must change (plan T8, surface 3). It proves nothing about this change.",
+      "surface": "The production Dispatch namespace of the cluster this pod runs in.",
+      "command": "kubectl -n dispatch get pods -o json, filtered to the envoy-dispatch and envoy-listener containers' env",
+      "observed": "dispatch-57688ffbc9-twn97/envoy-dispatch and dispatch-listener-86498746bf-vv78w/envoy-listener each carry NATS_URLS=nats://envoy-hub.<tailnet>.ts.net:4222, ENVOY_NATS_SOCKS5_PROXY=dispatch-tailnet.dispatch.svc.cluster.local:1055 and ENVOY_ALLOW_REMOTE_NATS=1, and neither ENVOY_NATS_REPLICAS nor ENVOY_STREAM_MAX_BYTES.",
+      "headSha": "cfc95b6efe98dc7abdc2ec13b458f51cca08b53f",
+      "negativeControl": "The read is of the live pods rather than of a rendering: a wrong namespace or a wrong container name returns no row at all, and both rows were present with the SOCKS5 variable set, which is the state the production check after the merge must find changed."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/infra/gcp/dispatch.go: DispatchArgs gains NatsInCluster, NatsReplicas and StreamMaxBytes; dispatchSettings gains natsInCluster, natsReplicas and streamMaxBytes and the socks5Proxy() method, the one derivation of the front door's proxy address; newDispatchSettings resolves and bounds all three beside the dispatchReplicas calls.",
+    "packages/envoy/infra/gcp/dispatch_kube.go: dispatchListenerEnv takes the resolved settings, refuses a local natsUrl in the in-cluster mode and carries both numbers into core.ListenerConfig; appEnv renders ENVOY_NATS_SOCKS5_PROXY only in the SOCKS5 mode and the two numbers after it; the <hostname>-tailnet Service, the front door's port-1055 ingress rule and the front-door DependsOn are rendered only in the SOCKS5 mode.",
+    "packages/envoy/infra/gcp/dispatch_frontdoor.go: socks5Server is set only in the SOCKS5 mode, so tailnet_service.go renders no TS_SOCKS5_SERVER with natsInCluster.",
+    "packages/envoy/infra/gcp/export_test.go: DispatchListenerEnvError follows the new signature and no longer copies the proxy formula.",
+    "packages/envoy/infra/gcp/dispatch_test.go: five new tests, refusal rows for both numbers and for the in-cluster loopback URL, and shared fixtures (inClusterNatsURL, dispatchNatsReplicas, dispatchStreamMaxBytes, dispatchSocks5Proxy, frontDoorPodURN, frontDoorServiceURN, setInClusterNats, setNatsNumbers, dispatchNatsEnvs, dispatchNatsSettings).",
+    "packages/envoy/infra/gcp/dispatch_construct_test.go: dispatchConstructInputs carries the three inputs through the plugin; listenerEnv added beside appEnv.",
+    "packages/envoy/infra/README.md: the three inputs in gcp:Dispatch's Inputs section, every SOCKS5 passage of that section saying which mode it describes, and an in-cluster YAML example.",
+    "packages/envoy/infra/AGENTS.md: the natsUrl refusal mapping covers the in-cluster refusal the component makes itself.",
+    "packages/envoy/.changes/unreleased/INFRA-550-dispatch-in-cluster-nats.yaml: the Added entry."
+  ],
+  "trickyParts": [
+    "ENVOY_ALLOW_REMOTE_NATS=1 must keep rendering in the in-cluster mode. core.ListenerConfig.Env sets it from the URL alone (any URL bus.LocalNATSURL does not vouch for), and bus.LocalNATSURL vouches only for localhost and loopback, so a Service name is remote and the variable stays; the app's hand-written copy is unconditional. Without it bus.refuseRemoteNATS would refuse every connect.",
+    "core refuses a local natsUrl only when a SOCKS5 proxy is set (its socks5Proxy refusal), so with no proxy a loopback URL would have rendered happily and the pods would have dialled themselves. The new refusal is written against bus.LocalNATSURL as a function, never against a spelling of its own.",
+    "dispatchListenerEnv maps every core refusal that is not socks5Proxy's onto natsUrl. natsReplicas and streamMaxBytes can never reach core's own bounds from this component, because newDispatchSettings bounds them more tightly (1..bus.MaxReplicas, and at least 1) before anything registers; the doc comment says so, since the mapping would otherwise rename such a refusal.",
+    "The order of appEnv's list is the golden files' contract: ENVOY_NATS_SOCKS5_PROXY keeps its slot between NATS_NKEY_SEED_FILE and ENVOY_URL, and the two numbers follow it, so a deployment that sets none of the three renders byte for byte what it rendered before.",
+    "The front door's NetworkPolicy is still created in the in-cluster mode, with an empty Ingress, which denies every source: port 1055 was its only rule, and a policy that selects a pod denies everything else anyway.",
+    "The Pulumi CLI minted an ephemeral agent account by itself on the first 'pulumi package add' (it prints a claim URL and asks that it be surfaced). Nothing of this proof used it: every later run set PULUMI_HOME, PULUMI_BACKEND_URL=file://... and an empty PULUMI_ACCESS_TOKEN, so the whole proof ran on a local backend. The account was not claimed and nothing was published to it."
+  ],
+  "deviations": [
+    "T4 goes beyond the spec's wording: it also stops rendering the front door's SOCKS5 proxy, its port-1055 Service, its port-1055 ingress rule and the front-door DependsOn. INFRA-14's architect confirmed this (A3, spec v5 'Decisions on the plan').",
+    "core.ListenerConfig.NATSReplicas and .StreamMaxBytes came from the base, not from this branch: sjawhar/legion#2371 (INFRA-549) merged at 1489a445 while this change was being written, and the architect's instruction was to take option (a) — merge main forward and build on #2371's fields, adding no second form. The fields had been written here in #2371's exact shape before it merged; that commit was abandoned before the merge, so this branch adds nothing to core/listener_env.go.",
+    "The plan's second negative control for surface 1 (natsInCluster with a loopback natsUrl through the plugin) is not reachable there: pulumi preview reports the missing gcp provider first, because the natsUrl check runs inside the Kubernetes rendering, after providers.Require. The refusal is proven at the mock-engine surface instead.",
+    "The plan called gcp:Dispatch's README 'Inputs' a table; it is prose, so the three inputs are two paragraphs in the section's voice. The in-cluster YAML form was added beside the existing example rather than replacing it, since that example's natsUrl is a hub resource's output and the section's front-door prose is written around the default mode.",
+    "The plan's T6 list named README line numbers from before #2371; the passages were found by reading instead, and three more SOCKS5 passages inside the gcp:Dispatch section were qualified than the plan listed."
+  ],
+  "openQuestions": [
+    "Nothing blocks the tester. The agent-infra half (the pin move from envoy-infra@2.9.1, the apply that sets natsInCluster, and the two agent-infra documents) is INFRA-553's, and Dispatch cannot reach the hub in-cluster until INFRA-551 adds the dispatch namespace to envoy-cluster/bridge.go's network policy; both were settled by this tree's architect in spec v5. The production check after the merge therefore reports pending until that apply."
+  ],
+  "discoveredComplexity": [
+    "Two other trees are working the same files. sjawhar/legion#2528 (INFRA-774) adds a clusterOnly input to gcp:Dispatch, splitting newDispatchCloud and changing newDispatchKubernetes's signature, and rewrites parts of the same README section; its implementer and this one exchanged the exact regions each touches, and whoever merges second merges the other's base forward. sjawhar/legion#2402 (a comment in dispatch_kube.go) and #2168 (bus.LocalNATSURL's spellings) are also open and were read rather than merged.",
+    "go test ./gcp/ cannot run two of its tests in this pod: TestTheDataDiskIsFormattedOnlyWhenItReadsAsZerosToItsEnd and TestARefusedDataDiskIsNeverFormattedOnALaterBoot need mkfs.ext4, which the worker image has not got, and the natslive lane needs Docker. CI runs both."
+  ]
+}
