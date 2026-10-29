@@ -2,41 +2,37 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-557",
-  "completed": "2026-10-29T12:19:54Z",
-  "round": 3,
-  "scope": "Narrowed by the INFRA-63 architect (2026-10-29 00:54Z and 12:09Z): only the two round-2 fixes, each with its failing-first row, plus the required checks. The PR conflicts with main, so no CI ran at 9c5cd05b; the controller holds forward merges until INFRA-520's merge queue is on, so this round cannot approve: request changes naming the forward merge, and any fix that does not hold.",
-  "reviewedHead": "9c5cd05b99938e552b237ca0c73c270eb69e1bc3",
+  "completed": "2026-10-29T23:31:59Z",
+  "round": 4,
+  "scope": "Narrowed by the INFRA-63 architect (2026-10-29 12:22Z and 23:17Z): the three round-3 code items with failing-first tests, the former Fast-follow items, the two forward merges (in particular #2377 combined with this branch's lease writes and seen records, and listener-multiprocess in ci.yaml's router and ci-ok), and main's required set at the code head. Since 17:02Z nothing goes on a Fast-follow line: every finding is a required change in this review.",
+  "reviewedHead": "57c6d1c5b12d9534b8811a6b8aff8596a84b5902",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 4,
-  "minor": 0,
-  "ci": "No pull_request run at 9c5cd05b (mergeable CONFLICTING, mergeStateStatus DIRTY). The last code run, at 75ad2486, has Legion Envoy and Contracts failed: envoy-go, envoy-go-race and the Dispatch Go suite on the then-known pmdoc build break (main's), and envoy-infra-go on TestHostPermissionsOnRealServers/{hub,2.10}/without_its_durable's_consumer_create_the_listener_never_reaches_healthy, which is green on main (8a911ecca3) and which the PR's behaviour breaks.",
-  "thermonuclear": "deep-review: CHANGES at 9c5cd05b; code-quality: CHANGES at 9c5cd05b. Every finding below was checked in the code by the reviewer.",
-  "roundTwoFindings": {
-    "A stale_binding across repeated graceful hand-overs": "closed for the case filed (a chain of graceful stops each bridged by the linger; rows TestTwoPodsEveryGracefulStop* fail at 75ad2486), but ack_wait_owed is written on only two exit paths, which opens the gap in keyFindings[1]",
-    "B awaitedBinding after abandon": "closed for the give-up path (row TestAPodThatGaveTheLeaseUpWhileWaitingOutABindingSettlesAHardTakeoverAfterIt fails before the fix); the same skipped settle remains when the term ends by losing the lease (keyFindings[2])"
+  "important": 3,
+  "minor": 9,
+  "ci": "Required set (rulesets) lint, typecheck, test, pr-title. At 57c6d1c5 the CI run (40970179594) was queued (only its changes job listed, queued) at 23:31Z; no required check has completed at the code head.",
+  "thermonuclear": "deep-review: CHANGES at 57c6d1c5; code-quality: CHANGES at 57c6d1c5; merge audit (oracle): fe171299 faithful, 57c6d1c5 faithful but for the last-seen finding. Each finding below was checked in the code by the reviewer.",
+  "roundThreeItems": {
+    "ack_wait_owed on every term exit": "closed for give-up after a hand-back, Stop before subscribing, a lapse that resumes, and a no-standby stop taken after 1.5 s (a919b77c, rows fail first); still open for a take-over 1.0-1.5 s after the release and for a stop during a lapse (keyFindings 0 and 1)",
+    "awaitedBinding on every term end": "closed (a919b77c): leaseStatus.Resumed set only in renew's lapse branch; serve clears the flag on every non-resumed term; row fails first",
+    "healthz never healthy while the holder prepares": "closed (a919b77c): degraded for a deliverer not yet receiving; the live subtest passes per the implementer and the tester; one gap for a lapsed holder (keyFindings 6)",
+    "former Fast-follow items": "done but for receive.go, still 1059 lines (keyFindings 3)",
+    "merge fe171299": "faithful: listener-multiprocess has a router filter, a job and is in ci-ok's needs and map; envoy-and-contracts.yaml removed as main did; grants match goldens and fixtures",
+    "merge 57c6d1c5": "faithful but for keyFindings 2 (LastSeen differs between pods after the shared record's MaxAge)"
   },
   "keyFindings": [
-    {
-      "severity": "important",
-      "file": "PR #2404",
-      "description": "Forward merge of main needed: the PR conflicts with main (DIRTY), so no CI runs on its code. Keep both sides, take main's pmdoc lines (fixed on main by #2482 and #2484), and push the merge without the skip-checks trailer so CI runs. The controller holds this merge until INFRA-520's merge queue is on; the implementer waits for the architect's word."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/cmd/listener/lease.go:827",
-      "description": "handedBack now reads only !ack_wait_owed, and ack_wait_owed is set only by handBack during an ack-wait hold and by a stuck abandon. Three exits release unsettled without it while a lost node's binding may still be open (stale_binding on the record): a graceful stop whose linger ends 'not taken' (no standby; lingerUntaken 1 s) so the frozen connection is the deliver subject's only subscriber until a later pod subscribes; a holder that took a hand-back and gives up after 135 s (settle && !HandedBack false); a Stop before the term subscribed (Release writes unsettled from the acquiring write, ack_wait_owed false). The next pod gets the 3 s cap while messages pushed to the lost binding alone come back only at their 6 s ack wait, so they are delivered after newer ones in the same session. Before d3787812 the carried stale_binding forced 7 s in these cases."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/cmd/listener/receive.go:448",
-      "description": "awaitedBinding still survives a term ended by losing the lease: awaitUnbound returns termCtx's error when the lease watcher cancels the term, abandon takes the refuse path and returns before line 557. Another pod then takes and holds the record; if it dies hard, this pod's later expired take-over is counted as its own resume, settle is false, and the dead pod's messages arrive after newer ones."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/cmd/listener/main.go:478",
-      "description": "envoy-infra-go fails at 75ad2486 on TestHostPermissionsOnRealServers/*/without_its_durable's_consumer_create_the_listener_never_reaches_healthy (both images; green on main 8a911ecca3; the subtest is unchanged by this PR): with CONSUMER.CREATE removed from the grant, /healthz answered {status: healthy, role: standby, receive: 'preparing the durable'} at 1.5 s, because a holder whose first durable attempt has not failed yet has report.Failing == 0. Nothing in 9c5cd05b touches it, so it is still red."
-    }
+    {"severity": "important", "file": "packages/envoy/cmd/listener/lease.go:45", "description": "leaseHandBackBridge = lingerUntaken + leaseStandbyPoll = 1.5 s, but the stopping pod's linger ends 'not taken' about 1.0 s after its release (linger, receive.go). A pod that first takes the released record 1.0-1.5 s after it (a pod starting, a standby whose poll failed) counts as handed back and holds 3 s while a lost node's binding (stale_binding) has had the deliver subject alone since the linger ended; messages due from it at the 6 s ack wait arrive after newer ones. The lingerMax 'timeout' exit has the same gap. TestLeaseTakesAReleasedRecordPastTheLingerAsNoHandBack waits the whole window plus 100 ms, so the gap is untested."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/lease.go:606", "description": "letGo writes a release whenever held is true, including during a lapse (held stays true; only Holding() turns false). A term whose hold ended (unsettled and ack_wait_owed false) that lapses drops what it took without an ack (handle, endLost), and a SIGTERM before renew resumes releases the record clean: the next pod does not settle and delivers new messages before the dropped ones return at the ack wait. Before the release the record would have expired and the take-over settled 7 s."},
+    {"severity": "important", "file": "packages/envoy/internal/session/registry.go:614", "description": "Merge 57c6d1c5: LastSeen falls back to this process's seenLocal once the seen. record leaves the bucket (MaxAge 10 min), while main's retention (WithLastSeenRetention, InterestReapAllowance, 15 min) keeps answering for ttl + 15 min. Between about 10 and 20 minutes after the last write, a pod that watched the session answers last_seen and a pod started since answers none, against spec item 7 and cmd/listener/README.md's 'every pod answers a lapsed session's last_seen alike'. lastseen_test.go asserts the divergence."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/receive.go:1", "description": "Still 1059 lines after the split, a round-3 required item; move the stop paths into receive_stop.go."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/delivery.go:370", "description": "1022 lines after the ledgerSettle refactor; nine explicit settle: settleNone fields and an empty case state the zero value; move the outcome mechanism into its own file."},
+    {"severity": "minor", "file": "packages/envoy/internal/dedupe/kv.go:275", "description": "KVConfig.AttemptedAge is read by the sweep but no longer by the hold rule (attemptHolds uses the constant); memory.go:98 keeps <= for the delivered age where kv.go uses <."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/main.go:497", "description": "A lapsed holder answers 200 healthy (role standby, active_instance itself) while nothing delivers; the predicate also belongs in the receiver's report."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/lease.go:733", "description": "Starting a term is two copied multi-assignments (renew's lapse branch, acquire) that this range had to edit together; one startTermLocked."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/main.go:949", "description": "The bucket keeper keeps bus.ListenerBuckets(), which excludes envoy_listener, while permissions.go's bucketPermissions doc and infra/README.md say every granted bucket is raised every 30 s."},
+    {"severity": "minor", "file": "docs", "description": "Stale or missing: infra/README.md:308 and infra/docs/nats-hub.md:861 'No such build exists until INFRA-557 lands'; envoy.md and async-health-startup-pattern.md lack the new degraded meaning; receive.go:27 lacks the time-window condition; confirmed.go and main.go justify the per-process confirmation record with a reason that no longer holds; LastSeen's and cacheSessionLocked's docs."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/api.go", "description": "GET /v1/interests/ reads the seen. record once per lapsed row with no request budget (readSeen is a plain Get)."},
+    {"severity": "minor", "file": "packages/envoy/internal/session/session.go:38", "description": "Small cleanups: OwnedBy's unreachable nil-entry branch; receive.go:452 re-tests status.Resumed; permissions.go's fourth copy of the seen.> reason."}
   ],
-  "fastFollow": "Split receive.go (1414 lines); the round-2 structural items stand."
+  "proseNotFixedByReviewer": "The doc findings change with the code fixes in the same passages, and a push from the reviewer now would cancel the only CI run of 57c6d1c5, so they are named for the implementer."
 }
