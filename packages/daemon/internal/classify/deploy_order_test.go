@@ -23,7 +23,7 @@ import (
 // tree's digests, which is how these were made: by this test, its helpers copied to the release
 // before (main at ec0263277), with no move named, as that release named none. Every push of these
 // histories is the implementer's or the review App's, so main at ec0263277, which also read
-// handoff-only pushes, and INFRA-177's tree before it took #2436 (b5d2a262) give the same digests.
+// handoff-only pushes, and this branch's tree before it took #2436 (b5d2a262) give the same digests.
 var releaseBeforeDigests = map[string]string{
 	"run-1":          "0fc445683dd6d4a02eebca6786b14f6826e9ad3123007d3b66edd10562a683a4",
 	"run-7":          "94bb2ea3532aa8a2cf1652759a24adc18cf5d52748fe1b24335b85b8f3b19a1b",

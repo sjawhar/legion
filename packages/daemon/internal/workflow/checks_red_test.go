@@ -1069,6 +1069,95 @@ func TestTwoHeadsAheadOfTheirPushesAreJudgedAsThePushesFirstJudgeThem(t *testing
 	}
 }
 
+// A push for a head the branch has since left - delivered after the head the record holds - moves
+// no head, and decides the checks when its replay of the head run changes the judgement or closes
+// the run (push), since no other fact reads what that replay changed. The chain it completes can
+// clear the planned mark the heads above it carried from a head whose push was unknown, or spare
+// the fix attempts their moves counted, with the newest head's push lost for good, so the run
+// stays open; or it can close the run with the judgement exactly as the heads left it. Each way
+// the red at the recorded head, held while the run waited and now past its hold, comes to stand
+// and sends the work back, and each way one clause of the re-check is what reads it.
+func TestAPushForAHeadTheBranchLeftDecidesTheChecks(t *testing.T) {
+	const required, implementer = "pr-checks-result", "legion-implementer[bot]"
+	start := time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		// seeded is the pull request before the heads arrive, facts what arrives while the run is
+		// open, and late the push, for a head the branch has left, delivered an hour later. closes
+		// says the late push closes the head run, which is the re-check's other clause.
+		seeded   record.PullRequest
+		facts    []intake.Fact
+		late     intake.Fact
+		attempts int
+		planned  bool
+		closes   bool
+	}{
+		{
+			name: "the late push clears the planned mark h4 and h5 carried",
+			seeded: record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h3", Required: []string{required}, PlannedRed: true, FixAttempts: 1},
+			facts: []intake.Fact{syncedTo("h4"), syncedTo("h5"), settledAt("h5", required, 2, required)},
+			late:  pushedFromTo("h3", "h4", implementer),
+			// The count is untouched: no verdict stands at h3 or h4 for a move to count.
+			attempts: 1, planned: false,
+		},
+		{
+			name: "the late push spares the fix attempts the moves above it counted",
+			seeded: record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h3", CheckedHead: "h3", Failing: []string{required},
+				CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Required: []string{required}, FixAttempts: 1, HeadCounted: "h3"},
+			facts: []intake.Fact{syncedTo("h4"), settledAt("h4", required, 2, required), syncedTo("h5"),
+				pushedFromTo("h4", "h5", implementer), syncedTo("h6"), settledAt("h6", required, 3, required)},
+			late: pushedFromTo("h3", "h4", testReviewApp),
+			// Each move counted one attempt while h4's push was unknown, taking the count to the cap
+			// of three, where h6's red was held. The push shows h4's own red to be the review App's
+			// planned one: h4's move is spared and h5's, onto a planned red, counts nothing, so the
+			// count is back where it started and h6's red, which no push planned, sends the work back.
+			attempts: 1, planned: false,
+		},
+		{
+			name: "the late push closes the run with the judgement unchanged",
+			seeded: record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h3", Required: []string{required}, FixAttempts: 1},
+			facts: []intake.Fact{syncedTo("h4"), syncedTo("h5"), pushedFromTo("h4", "h5", implementer),
+				settledAt("h5", required, 2, required)},
+			late: pushedFromTo("h3", "h4", implementer),
+			// h4's move is the run's one waiting head, and the push that reached it changes no
+			// judgement: no verdict stands at h3 for its move to count, and an implementer's push
+			// leaves the planned mark clear, as the unchained move already had it. Closing the run
+			// is what lets h5's held red be judged.
+			attempts: 1, planned: false, closes: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+			seedPR(t, pool, tc.seeded)
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			for _, fact := range tc.facts {
+				applyRefusingNothing(t, pool, readyEngineAt("merge-queue", start), fact)
+			}
+			if got := issuePhase(t, pool); got != phase.Testing {
+				t.Fatalf("before the late push the issue is in %s, want testing: the red is planned or held at the exhausted count", got)
+			}
+
+			applyRefusingNothing(t, pool, readyEngineAt("merge-queue", start.Add(time.Hour)), tc.late)
+
+			if got := issuePhase(t, pool); got != phase.Implementing {
+				t.Fatalf("after the late push the issue is in %s, want implementing: the push's replay is what makes the red stand", got)
+			}
+			pr := runOf(t, pool)
+			if pr.FixAttempts != tc.attempts || pr.PlannedRed != tc.planned {
+				t.Fatalf("fix attempts %d and planned red %v, want %d and %v", pr.FixAttempts, pr.PlannedRed, tc.attempts, tc.planned)
+			}
+			if pr := runOf(t, pool); (pr.Run == nil) != tc.closes {
+				t.Fatalf("the head run is open %v after the late push, want open %v: which clause of the re-check reads the push depends on it", pr.Run != nil, !tc.closes)
+			}
+		})
+	}
+}
+
 // A reopen past a head the daemon never recorded keeps the pushes recorded while the pull request
 // was closed, so a push that arrives after the reopen completes the chain the reopen's move took:
 // the review App's pushes h2..h3, pushed while closed, and h3..h4 after the reopen at h4 take back

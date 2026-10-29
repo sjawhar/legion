@@ -229,16 +229,19 @@ func unreviewedChange(ctx context.Context, github githubrest.Client, issue strin
 		return unreviewed("%s answered no file list, so what changed above the approved head is unknown", compared)
 	}
 	files := *compare.Files
-	var outside []string
+	// A file GitHub lists removed under .legion/ is the handoffs' removal, which no review needs;
+	// every other path the change touches, a rename's old name included, must be retro's.
+	above := make([]githubrest.ChangedFile, 0, len(files))
 	for _, file := range files {
 		if file.Status == "removed" && strings.HasPrefix(file.Filename, ".legion/") {
 			continue
 		}
-		if !strings.HasPrefix(file.Filename, "docs/solutions/") {
-			outside = append(outside, file.Filename)
-		}
-		if file.PreviousFilename != "" && !strings.HasPrefix(file.PreviousFilename, "docs/solutions/") {
-			outside = append(outside, file.PreviousFilename)
+		above = append(above, file)
+	}
+	var outside []string
+	for _, path := range githubrest.ChangedPaths(above) {
+		if !strings.HasPrefix(path, "docs/solutions/") {
+			outside = append(outside, path)
 		}
 	}
 	if len(outside) > 0 {

@@ -5236,7 +5236,7 @@ fails at the restart.
 
 ### Moving the handoffs onto their Dispatch issues
 
-From INFRA-177 on, a phase handoff is a record on the issue's Dispatch issue, written with
+From sjawhar/legion#2354 on, a phase handoff is a record on the issue's Dispatch issue, written with
 `dispatch handoff-write`, and no longer a file committed under `.legion/<KEY>/` on the issue's
 branch. The daemon of that release reads a completion's handoff from Dispatch alone, so a branch
 still in flight at the release carries files its next role would never see.
@@ -5274,9 +5274,15 @@ For each issue, as the implement App, it:
     issue back to `implementing`; and a `held` issue may have been held from any of these (the
     daemon's state does not say which), so the retry that restores its phase would find the push.
     There the import writes the records as usual, removes nothing, and the line says `removal
-    deferred: <KEY> is in <phase>; run the import again once the phase ends`. It reads the issue's
-    phase again just before each removal, so an issue that moved into one of these during the run
-    is not pushed over.
+    deferred: <KEY> is in <phase>; <what the operator does about it>`: another run once the phase
+    ends for `testing`, `reviewing` and `held`, and for `merging` and `awaiting_merge`, which end
+    in `done`, that the issue's own merge carries `.legion/` to the default branch, where the
+    cleanup after the cutover will remove it. It reads the issue's phase again just before each
+    removal, which narrows the window but does not close it: the re-read comes before the removal
+    commit is built, so an issue that enters one of these phases between the re-read and the ref
+    update is still pushed over, and the line reads `removed .legion/ at <sha>`. An issue that has
+    left the workflow by the re-read — merged, and `done` — has no phase to wait for and nothing
+    the push could undo, and its line says `left the workflow; nothing removed`.
 
   A branch that moved in between is read again and the issue started over, three times at most. A
   ref update GitHub refuses with the branch still where it was (a ruleset's refusal, a
@@ -5295,7 +5301,7 @@ mounted as the daemon's are; no daemon credential leaves the cluster. It reads t
 
 The cutover, in this order:
 
-1. **Dispatch deployed with the handoff routes.** Dispatch is deployed by hand (`dispatch://INFRA-64`).
+1. **Dispatch deployed with the handoff routes.** Dispatch is deployed by hand.
    A run against a Dispatch without them stops at its first handoff call, naming the route Dispatch
    answered 404 to, before it writes or pushes anything; that is the order's own check, and the
    daemon has no boot refusal for it.
@@ -5305,20 +5311,27 @@ The cutover, in this order:
    that also carries another issue's directory keeps it, and its line says `kept .legion/<dirs>
    for the run after the rollout`: removing it under the old daemon would be a code push there.
 3. **The daemon and the plugins roll to the release.** The plugin pair comes with the stale-plugin
-   relaunch from the release ([Contract discipline](#contract-discipline)).
-4. **`legion handoffs import` again, until it prints `deferred 0` and no `kept` line.** It catches
-   a file a worker of the old release pushed between step 2 and step 3, and removes what is left
-   under `.legion/`: every directory step 2 kept, and the issue's own on a branch that took a file
-   since. Under the new daemon the removal push is a code push, with the effects of any:
+   relaunch from the release ([Contract discipline](#contract-discipline)). On the first push to a
+   pull request after the upgrade, one that holds more than 16 pairs of heads of pushes waiting for
+   a link — the handoff-only pushes the release before it stored, which no longer lie on the path
+   forward from the head — lets the oldest pairs past that bound go (`boundedPushes`,
+   `maxWaitingPushes` in `packages/daemon/internal/classify/decisions.go`), one WARN each,
+   `workflow: a pull request holds the most pushes waiting for a link; the oldest is let go`. The
+   record is only trimmed: no verdict, approval or phase changes with it.
+4. **`legion handoffs import` again, until no line asks for another run and none says `kept`.**
+   It catches a file a worker of the old release pushed between step 2 and step 3, and removes what
+   is left under `.legion/`: every directory step 2 kept, and the issue's own on a branch that took
+   a file since. Under the new daemon the removal push is a code push, with the effects of any:
    - in `testing` or `reviewing` it is deferred, the line saying so; run the import again once the
      phase ends;
    - in `merging` it is deferred, since the merger builds READY at the head it reads and a push past
      it makes the daemon refuse or void that READY (`READY_HEAD_MOVED`);
    - in `awaiting_merge` it is deferred, since a push past READY's head withdraws that READY and
-     sends the issue back to `implementing`. A `merging` or `awaiting_merge` branch can still carry
-     another issue's directory (retro removed only its own `.legion/<KEY>/`, and a child branch can
-     carry its parent's); when it merges, that directory reaches the default branch with the merge,
-     and dispatch://INFRA-609 removes any `.legion/` there;
+     sends the issue back to `implementing`. `merging` and `awaiting_merge` end in `done`, which the
+     import skips, so neither asks for another run: a branch in either can still carry another
+     issue's directory (retro removed only its own `.legion/<KEY>/`, and a child branch can carry
+     its parent's), and when it merges, that directory reaches the default branch with the merge,
+     where the cleanup after the cutover will remove it;
    - in `held` it is deferred, since the hold may have come from any of the phases above and the
      retry that restores the phase would find the push;
    - in `implementing` on a red head it counts one fix attempt, as any push onto a red head does;
@@ -5347,18 +5360,24 @@ branch's (`<KEY>: …`):
   old one — the branch now names `<sha>`, the one commit that removed them (under `--dry-run`,
   `would remove .legion/ (<n> paths) above <head>`, or `.legion/<KEY>/`). Under the old daemon a
   branch carrying more under `.legion/` adds `; kept .legion/<dirs> for the run after the rollout`.
-- `removal deferred: <KEY> is in <phase>; run the import again once the phase ends` — under the new
+- `removal deferred: <KEY> is in <phase>; <what the operator does about it>` — under the new
   daemon, for an issue in `testing`, `reviewing`, `merging`, `awaiting_merge` or `held` (read again
-  just before the removal): the records are written, nothing is pushed.
+  just before the removal): the records are written, nothing is pushed. For `testing`, `reviewing`
+  and `held` the line reads `run the import again once the phase ends`; for `merging` and
+  `awaiting_merge`, which end in `done`, it reads `its merge carries .legion/ to the default
+  branch, which the cleanup after the cutover removes`, and asks nothing more of the import.
+- `left the workflow; nothing removed` — under the new daemon, the phase read again just before the
+  removal says the daemon no longer holds the issue in a phase (it merged, and is `done`): there is
+  no phase to wait for and no work the push could undo, and the records written above stand.
 - `no branch` — GitHub has no `legion/<KEY>`: the issue has nothing to import.
 - `failed: <why>` — that file or branch did not go through; on a file's failure `.legion/` stays on
   the branch, and the branch's line says so; `failed: GitHub refused the ref update: <answer>`
   quotes GitHub's refusal of the removal. Run the import again once the cause is fixed.
 
-A last line counts each kind, `deferred` among them. The exit is 0 when no line failed (a
-deferred removal included), and 1 when one did or the run stopped, its reason on stderr: a
-configuration it could not read, a daemon that did not answer or serves another project, or a
-Dispatch without the handoff routes.
+A last line counts each kind, `deferred` and `left the workflow` among them. The exit is 0 when no
+line failed (a deferred removal included), and 1 when one did or the run stopped, its reason on
+stderr: a configuration it could not read, a daemon that did not answer or serves another project,
+or a Dispatch without the handoff routes.
 
 ## Kubernetes runtime (TypeScript daemon)
 

@@ -91,7 +91,7 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
 number is the one `DaemonAPIVersion` declares, last bumped by contract 42's handoff records
-(INFRA-177: `handoff_complete` names the phase's Dispatch handoff record, `handoffId` and
+(sjawhar/legion#2354: `handoff_complete` names the phase's Dispatch handoff record, `handoffId` and
 `handoffVersion`, and `GET /legion/v1/state` gives each phase its `handoffRecord`; a 41 plugin
 posts a commit and no record, and rejects `handoffRecord`), after contract 41's controller start
 command (`legion controller start` ends the operator's Oh My Pi command line with

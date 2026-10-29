@@ -333,20 +333,15 @@ func (d *scratchDispatch) start() {
 	}
 }
 
-// holdPortAgain binds the port the server served on before its stop and returns a descriptor of
-// its own for the listening socket, as heldSocket does for a port the kernel chooses. From the stop
-// until here the port is any process's, so one that finds it taken binds it again until deadline.
+// holdPortAgain takes the socket of the port the server served on before its stop (takeSocket), as
+// heldSocket takes one of a port the kernel chooses. From the stop until here the port is any
+// process's, so a run that finds it taken binds it again until deadline.
 func (d *scratchDispatch) holdPortAgain(deadline time.Time) *os.File {
 	d.t.Helper()
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(d.port))
 	for {
-		listener, err := net.Listen("tcp", address)
+		file, _, err := takeSocket(address)
 		if err == nil {
-			file, err := listener.(*net.TCPListener).File()
-			_ = listener.Close()
-			if err != nil {
-				d.t.Fatalf("take the descriptor of scratch Dispatch's port %d: %v", d.port, err)
-			}
 			return file
 		}
 		if time.Now().After(deadline) {

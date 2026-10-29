@@ -42,13 +42,13 @@ handoff-only push or its `skip-checks: true` trailer. None of those exists after
 ## Notes that mention the mechanism and keep their rule
 
 These still hold. Skip only the sentence about handoff pushes:
-- `docs/solutions/github/an-unknown-blob-from-mirror-gcr-io-…-INFRA-303.md`, its "push the handoff
+- `docs/solutions/github/an-unknown-blob-from-mirror-gcr-io-….md`, its "push the handoff
   alone" step;
-- `docs/solutions/legion/the-private-names-check-reads-each-events-frozen-body-…-LEGION-781.md`,
+- `docs/solutions/legion/the-private-names-check-reads-each-events-frozen-body-….md`,
   its handoff half;
-- `docs/solutions/legion/a-forward-merge-after-retro-reinstalls-…-LEGION-634.md`, its retro
+- `docs/solutions/legion/a-forward-merge-after-retro-reinstalls-….md`, its retro
   removal step;
-- `docs/solutions/legion/a-description-edit-clears-pr-title-but-not-lint-…-INFRA-521.md`.
+- `docs/solutions/legion/a-description-edit-clears-pr-title-but-not-lint-….md`.
 
 ## Evidence
 

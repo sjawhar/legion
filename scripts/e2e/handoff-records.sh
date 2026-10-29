@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The live proof that a Legion phase's handoff is a record on its Dispatch issue (INFRA-177's A3,
-# A6, A10 and the daemon half of A7, and HANDOFF_NOT_NEW). The driver
+# The live proof that a Legion phase's handoff is a record on its Dispatch issue
+# (sjawhar/legion#2354's A3, A6, A10 and the daemon half of A7, and HANDOFF_NOT_NEW). The driver
 # (packages/daemon/internal/daemon/handoff_records_live_test.go, which this script builds with
 # `-tags e2e`) builds and starts the real Dispatch server from this checkout's packages/envoy on a
 # database of its own, boots the whole daemon with dispatch_url at it, and drives the real
@@ -38,8 +38,8 @@
 # HANDOFF_RECORDS_EVIDENCE_DIR (default a fresh directory under TMPDIR, or /tmp when it is unset,
 # kept and printed) keeps the transcript, the nats-server's log, the daemon's, Dispatch's
 # (dispatch.log) and the driver's output. Nothing reaches github.com or a deployed Dispatch: the run
-# is self-contained, so INFRA-480 runs it again on main as it is. A run takes two to four minutes,
-# most of it building Dispatch and the driver. The run around the driver is
+# is self-contained, so the integration issue after it runs it again on main as it is. A run takes
+# two to four minutes, most of it building Dispatch and the driver. The run around the driver is
 # lib/live-daemon-proof.sh's.
 set -euo pipefail
 

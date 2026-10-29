@@ -581,7 +581,7 @@ func TestUnderTheOldDaemonTheImportRemovesOnlyTheIssuesOwnDirectory(t *testing.T
 	if w.branches["legion/LEG-7"] != heads["legion/LEG-7"] {
 		t.Error("the done issue's branch moved")
 	}
-	wantLines(t, stdout, "LEG-6: no branch", "imported 14, unchanged 0, kept worker record 0, removed .legion/ 5, deferred 0, no branch 1, failed 0")
+	wantLines(t, stdout, "LEG-6: no branch", "imported 14, unchanged 0, kept worker record 0, removed .legion/ 5, deferred 0, left the workflow 0, no branch 1, failed 0")
 	if strings.Contains(stdout, "LEG-7") || strings.Contains(stdout, "LEG-99") {
 		t.Errorf("output names an issue outside the workflow's branches:\n%s", stdout)
 	}
@@ -607,7 +607,7 @@ func TestASecondRunWritesAndPushesNothing(t *testing.T) {
 		t.Fatalf("second run wrote %d records and sent %v to GitHub; want nothing", w.dispatchWrites-writes, w.writes[githubWrites:])
 	}
 	wantLines(t, stdout, "LEG-1: unchanged", "LEG-5: unchanged; kept .legion/OTHER-1/ for the run after the rollout", "LEG-6: no branch",
-		"imported 0, unchanged 5, kept worker record 0, removed .legion/ 0, deferred 0, no branch 1, failed 0")
+		"imported 0, unchanged 5, kept worker record 0, removed .legion/ 0, deferred 0, left the workflow 0, no branch 1, failed 0")
 }
 
 // The write rule: a phase whose newest record a worker wrote keeps it, and the file is not written
@@ -639,7 +639,7 @@ func TestAWorkerRecordIsKeptAndAnImportRecordIsWrittenOnlyWhenItDiffers(t *testi
 	}
 	w.removalOf(t, "LEG-3", before["legion/LEG-3"], ".legion/LEG-3/")
 	w.removalOf(t, "LEG-2", before["legion/LEG-2"], ".legion/LEG-2/")
-	wantLines(t, stdout, "imported 12, unchanged 1, kept worker record 1, removed .legion/ 5, deferred 0, no branch 1, failed 0")
+	wantLines(t, stdout, "imported 12, unchanged 1, kept worker record 1, removed .legion/ 5, deferred 0, left the workflow 0, no branch 1, failed 0")
 }
 
 // A branch that moves between its read and the ref update is read again and its issue started
@@ -704,7 +704,7 @@ func TestThreeMovesFailTheIssueAndExitOne(t *testing.T) {
 		t.Errorf("LEG-1's head is %q, want the last moving push", head.message)
 	}
 	wantLines(t, stdout, "LEG-1: failed: legion/LEG-1 moved under the removal commit 3 times; run the import again",
-		"imported 15, unchanged 0, kept worker record 0, removed .legion/ 4, deferred 0, no branch 1, failed 1")
+		"imported 15, unchanged 0, kept worker record 0, removed .legion/ 4, deferred 0, left the workflow 0, no branch 1, failed 1")
 }
 
 // A 422 to the ref update with the branch still at the head the attempt read is GitHub's own
@@ -739,13 +739,14 @@ func TestARefusalThatMovedNothingFailsAtOnceWithGitHubsAnswer(t *testing.T) {
 		t.Errorf("LEG-1 moved to %s, want it left at %s", w.branches["legion/LEG-1"], before)
 	}
 	wantLines(t, stdout, `LEG-1: failed: GitHub refused the ref update: {"message":"Repository rule violations found"}`,
-		"imported 14, unchanged 0, kept worker record 0, removed .legion/ 4, deferred 0, no branch 1, failed 1")
+		"imported 14, unchanged 0, kept worker record 0, removed .legion/ 4, deferred 0, left the workflow 0, no branch 1, failed 1")
 }
 
 // Under the records' daemon (a schema version at recordsSchema), the removal is all of .legion/,
-// other issues' directories included, on an issue in any phase but testing and reviewing: there
-// the records are written as usual, nothing is pushed, and the line says the removal is deferred
-// until the phase ends, which exits 0. A second run once the phases moved on removes them.
+// other issues' directories included, on an issue in a phase deferredUnderRecords does not name:
+// in one it does, the records are written as usual, nothing is pushed, and the line says the
+// removal is deferred and what the operator does about it, which exits 0. A second run once the
+// phases moved on removes them.
 func TestUnderTheRecordsDaemonTestingAndReviewingDeferTheRemoval(t *testing.T) {
 	w := newWorld(t)
 	w.schema = recordsSchema
@@ -765,7 +766,7 @@ func TestUnderTheRecordsDaemonTestingAndReviewingDeferTheRemoval(t *testing.T) {
 		"LEG-3 test: imported v1", "LEG-3: removal deferred: LEG-3 is in reviewing; run the import again once the phase ends",
 		"LEG-4: removed .legion/ at "+w.removalOf(t, "LEG-4", heads["legion/LEG-4"], ".legion/"),
 		"LEG-5: removed .legion/ at "+w.removalOf(t, "LEG-5", heads["legion/LEG-5"], ".legion/"),
-		"imported 14, unchanged 0, kept worker record 0, removed .legion/ 3, deferred 2, no branch 1, failed 0")
+		"imported 14, unchanged 0, kept worker record 0, removed .legion/ 3, deferred 2, left the workflow 0, no branch 1, failed 0")
 	for _, update := range w.updates {
 		if update.branch == "legion/LEG-2" || update.branch == "legion/LEG-3" {
 			t.Errorf("%s was moved to %s, want its removal deferred", update.branch, update.sha)
@@ -789,16 +790,17 @@ func TestUnderTheRecordsDaemonTestingAndReviewingDeferTheRemoval(t *testing.T) {
 	}
 	wantLines(t, stdout, "LEG-2: removal deferred: LEG-2 is in reviewing; run the import again once the phase ends",
 		"LEG-3: removed .legion/ at "+w.removalOf(t, "LEG-3", heads["legion/LEG-3"], ".legion/"),
-		"imported 0, unchanged 8, kept worker record 0, removed .legion/ 1, deferred 1, no branch 1, failed 0")
+		"imported 0, unchanged 8, kept worker record 0, removed .legion/ 1, deferred 1, left the workflow 0, no branch 1, failed 0")
 }
 
 // Under the records' daemon, a push past the head an awaiting_merge issue's READY named withdraws
 // that READY and sends the issue back to implementing (workflow's withdrawMovedReady): the new
 // daemon carries no push, so the import's removal commit is such a push. A branch in awaiting_merge
 // can still carry .legion/ at the cutover: retro removed only its own .legion/<KEY>/, and a child
-// branch can carry its parent's directory (on 2026-10-27, legion/INFRA-547, -548 and -549, in
-// needs_review, carried .legion/INFRA-439/). The import must leave such a branch where it is, so the
-// issue keeps its phase and its READY (A9), and must not report the branch failed.
+// branch can carry its parent's directory (on 2026-10-27, three sibling branches in needs_review
+// carried their parent's). The import must leave such a branch where it is, so the issue keeps its
+// phase and its READY (A9), and must not report the branch failed; its line says the issue's own
+// merge is what carries .legion/ to the default branch.
 func TestUnderTheRecordsDaemonAnAwaitingMergeBranchIsNotMoved(t *testing.T) {
 	w := newWorld(t)
 	w.schema = recordsSchema
@@ -823,6 +825,8 @@ func TestUnderTheRecordsDaemonAnAwaitingMergeBranchIsNotMoved(t *testing.T) {
 	if w.branches["legion/LEG-8"] != before {
 		t.Errorf("legion/LEG-8 moved from %s to %s", before, w.branches["legion/LEG-8"])
 	}
+	wantLines(t, stdout, "LEG-8: removal deferred: LEG-8 is in awaiting_merge; "+
+		"its merge carries .legion/ to the default branch, which the cleanup after the cutover removes")
 	if strings.Contains(stdout, "LEG-8: failed") {
 		t.Errorf("the awaiting_merge branch was reported failed:\n%s", stdout)
 	}
@@ -849,7 +853,7 @@ func TestUnderTheRecordsDaemonHeldAndMergingBranchesAreNotMoved(t *testing.T) {
 	}
 	wantLines(t, stdout,
 		"LEG-2: removal deferred: LEG-2 is in held; run the import again once the phase ends",
-		"LEG-3: removal deferred: LEG-3 is in merging; run the import again once the phase ends")
+		"LEG-3: removal deferred: LEG-3 is in merging; its merge carries .legion/ to the default branch, which the cleanup after the cutover removes")
 	if w.branches["legion/LEG-2"] != before2 || w.branches["legion/LEG-3"] != before3 {
 		t.Errorf("a held or merging branch moved: LEG-2 %s -> %s, LEG-3 %s -> %s", before2, w.branches["legion/LEG-2"], before3, w.branches["legion/LEG-3"])
 	}
@@ -886,6 +890,37 @@ func TestThePhaseIsReadAgainBeforeTheRemoval(t *testing.T) {
 	}
 }
 
+// An issue that left the workflow between the run's first read and its removal — merged, and done
+// — has no phase to wait for and no work the push could undo, so nothing is removed, its own line
+// says so with its own count, and the run still exits 0.
+func TestAnIssueThatLeftTheWorkflowHasNothingRemoved(t *testing.T) {
+	w := newWorld(t)
+	w.schema = recordsSchema
+	o := w.serve()
+	reads := 0
+	o.State = func(ctx context.Context) ([]byte, error) {
+		reads++
+		if reads > 1 {
+			w.mu.Lock()
+			w.states["LEG-2"] = seededIssue{"done", seed["LEG-2"].files}
+			w.mu.Unlock()
+		}
+		return w.state(ctx)
+	}
+	before := w.branches["legion/LEG-2"]
+
+	code, stdout, stderr := run(t, o)
+
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit %d, stderr %q; want 0 and nothing:\n%s", code, stderr, stdout)
+	}
+	wantLines(t, stdout, "LEG-2 implement: imported v1", "LEG-2: left the workflow; nothing removed",
+		"imported 14, unchanged 0, kept worker record 0, removed .legion/ 3, deferred 1, left the workflow 1, no branch 1, failed 0")
+	if w.branches["legion/LEG-2"] != before {
+		t.Errorf("legion/LEG-2 moved from %s to %s after it left the workflow", before, w.branches["legion/LEG-2"])
+	}
+}
+
 // The records' daemon is told by its store's schema version: recordsSchema is migration
 // 0062_handoff_records, the one the records' release added.
 func TestTheRecordsSchemaIsTheHandoffRecordsMigration(t *testing.T) {
@@ -917,7 +952,7 @@ func TestADryRunWritesNothing(t *testing.T) {
 	}
 	wantLines(t, stdout, "LEG-1 plan: would import v1", "LEG-1: would remove .legion/LEG-1/ (1 path) above "+heads["legion/LEG-1"],
 		"LEG-5: would remove .legion/LEG-5/ (4 paths) above "+heads["legion/LEG-5"]+"; kept .legion/OTHER-1/ for the run after the rollout",
-		"dry run, nothing written: would import 14, unchanged 0, kept worker record 0, would remove .legion/ 5, deferred 0, no branch 1, failed 0")
+		"dry run, nothing written: would import 14, unchanged 0, kept worker record 0, would remove .legion/ 5, deferred 0, left the workflow 0, no branch 1, failed 0")
 }
 
 // A Dispatch without the handoff routes stops the run at its first handoff call, naming the route,

@@ -42,7 +42,7 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 		{"sub-architect", claim.RoleArchitect, false, []string{"architect.md"}, []string{"architect.md", "architect-common.md"}, append([]string{"it chooses and starts the next role", "`register_gate` refuses a child issue", "Every notice about an issue you own arrives on your own role topic", "The merge carries no handoff onto the pull request's base"}, architectOperations...)},
 		{"planner", claim.RolePlanner, false, []string{"core/common.md", "core/planner.md", "mechanics/headless.md", "planner.md"}, []string{"planner.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "jj -R \"$LEGION_WORKSPACE\" git push --bookmark legion/<issue>", "dispatch handoff-write --issue <issue> --phase <word> --body-file", "dispatch handoff-read --issue <issue> --phase <word> --version <n>", "A handoff is never committed or pushed", "`HANDOFF_SESSION_MISMATCH`", "A refusal records nothing"}},
 		// A root with no code of its own pushes one empty commit to open its pull request, and a push
-		// the handoff import's commit refused is merged forward, never rewritten (INFRA-177).
+		// the handoff import's commit refused is merged forward, never rewritten.
 		{"implementer", claim.RoleImplementer, false, []string{"core/common.md", "core/implementer.md", "mechanics/headless.md", "implementer.md"}, []string{"implementer.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
 			"Retro removes nothing", "the root of its children; no code of its own", "chore(legion): <issue>'s handoffs are on its Dispatch issue now"}},
 		// The tester runs the application, not CI again (dispatch://LEGION-631).
@@ -181,14 +181,14 @@ func composedText(t *testing.T, composer *Composer, role claim.Role, isRoot bool
 	return text.String()
 }
 
-// No role's handoff is a commit: each is a record on the Dispatch issue (INFRA-177), so no phase
-// worker's composed prompt still teaches the committed handoff file, its commit and push, the
-// trailer that kept a handoff-only push from starting CI, or retro's removal of the handoffs from
-// the head that merges. Nor does any carry the rules that removal replaced (dispatch://LEGION-605):
-// that the approved and the merged head keep .legion/, and that the daemon strips the leftovers
-// from the next issue's branch. READY, not the merger, holds the commits above the approved head
-// to retro's docs/solutions/ ones, so no prompt carries the merger's own fileset check any more,
-// and the merger's names READY's refusals.
+// No role's handoff is a commit: each is a record on the Dispatch issue, so no phase worker's
+// composed prompt still teaches the committed handoff file, its commit and push, the trailer that
+// kept a handoff-only push from starting CI, or retro's removal of the handoffs from the head that
+// merges. Nor does any carry the rules that removal replaced: that the approved and the merged
+// head keep .legion/, and that the daemon strips the leftovers from the next issue's branch.
+// READY, not the merger, holds the commits above the approved head to retro's docs/solutions/
+// ones, so no prompt carries the merger's own fileset check any more, and the merger's names
+// READY's refusals.
 func TestNoComposedPromptCommitsAHandoff(t *testing.T) {
 	stateDir := t.TempDir()
 	composer, err := New(stateDir)

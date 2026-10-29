@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # The live proof, on GitHub itself, of what moving Legion's handoffs out of git does to a branch's
-# required checks (INFRA-177: A8, A9's GitHub half, and the plan's D13). On sjawhar/legion-smoke,
+# required checks (sjawhar/legion#2354: A8, A9's GitHub half, and the plan's D13). On sjawhar/legion-smoke,
 # whose main requires the check `gate` (the `gate` job of .github/workflows/fail-on-demand.yml,
 # which runs on every push and pull request), as the implement App this shell's gh acts as:
 #   - negative-control: a code commit gets a `gate` check run; a `.legion/`-only commit above it
 #     whose message ends with two empty lines and `skip-checks: true` - the handoff push of the
-#     release before INFRA-177 - and the pull request opened on it get none within 10 minutes;
+#     release before sjawhar/legion#2354 - and the pull request opened on it get none within 10 minutes;
 #   - import-removal: the commit `legion handoffs import` makes on that branch, removing all of
 #     `.legion/` with GitHub's Git Data API and no trailer, moved there by a non-forced ref update,
 #     gets a `gate` check run;
@@ -136,7 +136,7 @@ create_branch() {
 pull_number=
 open_pull() {
   pull_number=$(github POST "repos/$repo/pulls" "$(jq -n --arg head "$1" --arg title "$2" \
-    --arg body "INFRA-177's handoff cutover proof, run $run (scripts/e2e/handoff-cutover-github.sh). It is closed and its branch deleted when the run ends; nothing here is for review." \
+    --arg body "sjawhar/legion#2354's handoff cutover proof, run $run (scripts/e2e/handoff-cutover-github.sh). It is closed and its branch deleted when the run ends; nothing here is for review." \
     '{head: $head, base: "main", title: $title, body: $body}')" | jq -r .number)
   pulls+=("$pull_number")
 }
@@ -265,7 +265,7 @@ empty=$(commit_on "$base" "$key: the root of its children; no code of its own" "
 create_branch "$root_branch" "$empty"
 note "pushed $root_branch at the empty commit $empty (main's tree, no trailer) above main $base"
 answer=$(gh api -X POST "repos/$repo/pulls" --input - 2>&1 <<<"$(jq -n --arg head "$root_branch" --arg title "Handoff cutover proof $run: a root with no code of its own" \
-  --arg body "INFRA-177's handoff cutover proof, run $run (scripts/e2e/handoff-cutover-github.sh): D13, a pull request whose only commit is empty. It is closed and its branch deleted when the run ends." \
+  --arg body "sjawhar/legion#2354's handoff cutover proof, run $run (scripts/e2e/handoff-cutover-github.sh): D13, a pull request whose only commit is empty. It is closed and its branch deleted when the run ends." \
   '{head: $head, base: "main", title: $title, body: $body}')") ||
   fail "GitHub refused to open a pull request whose only commit is empty (D13 does not hold; report it to the architect, do not work around it): $answer"
 root_pull=$(jq -r .number <<<"$answer")

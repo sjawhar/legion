@@ -336,8 +336,8 @@ test.skipIf(jjOnPath === null)(
 );
 
 // A git lock an interrupted git or jj left in the workspace fails every jj that snapshots a change
-// into the working copy (jj rewrites the git index then, as in LEGION-731), and nothing under a
-// running pod removes it. The failure names the lock and its age, and the lock stays.
+// into the working copy (jj rewrites the git index then), and nothing under a running pod removes
+// it. The failure names the lock and its age, and the lock stays.
 test.skipIf(jjOnPath === null)(
   "a jj that fails on a stale git lock names it, its age, and when it goes",
   async () => {

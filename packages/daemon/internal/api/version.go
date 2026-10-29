@@ -386,7 +386,7 @@ package api
 // as the collision note says. Other open branches may declare 41 too: whichever merges after
 // another takes the next free number, as the collision note says.)
 //
-// 42: INFRA-177 (sjawhar/legion) -- a phase's handoff is a record on its Dispatch issue, which the
+// 42: sjawhar/legion#2354 -- a phase's handoff is a record on its Dispatch issue, which the
 // worker writes with `dispatch handoff-write` under its own session, rather than a committed
 // `.legion/<KEY>/<phase>.json`. `api.HandoffCompleteRequest` gains `handoffId` and
 // `handoffVersion`, the record a file-backed phase's completion (planning, implementing, testing,

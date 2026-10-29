@@ -1,13 +1,13 @@
 // Package handoffimport is `legion handoffs import`, the one-time and re-runnable move of the
 // handoff files Legion's workers committed under `.legion/<KEY>/` onto their Dispatch issues
-// (INFRA-177). For every issue the running daemon holds in a phase other than done, it reads the
-// issue's branch `legion/<KEY>` as the implement App, writes each of `.legion/<KEY>/plan.json`,
-// `implement.json`, `test.json` and `review.json` to Dispatch as that phase's handoff record under
-// the daemon's Dispatch session, and then removes the handoffs from the branch in one commit moved
-// there by a non-forced ref update. What it removes follows the daemon it runs under
-// (recordsSchema): under the release before the records, only `.legion/<KEY>/`, the push that
-// release carries as handoffs alone; under the records' release, all of `.legion/`, except on an
-// issue in testing or reviewing, whose removal waits for the phase to end.
+// (sjawhar/legion#2354). For every issue the running daemon holds in a phase other than done, it
+// reads the issue's branch `legion/<KEY>` as the implement App, writes each of
+// `.legion/<KEY>/plan.json`, `implement.json`, `test.json` and `review.json` to Dispatch as that
+// phase's handoff record under the daemon's Dispatch session, and then removes the handoffs from
+// the branch in one commit moved there by a non-forced ref update. What it removes follows the
+// daemon it runs under (recordsSchema): under the release before the records, only
+// `.legion/<KEY>/`, the push that release carries as handoffs alone; under the records' release,
+// all of `.legion/`, except on an issue in a phase deferredUnderRecords names, whose removal waits.
 package handoffimport
 
 import (
@@ -96,6 +96,7 @@ const (
 	keptWorker
 	removed
 	deferred
+	leftWorkflow
 	noBranch
 	failed
 )
@@ -110,6 +111,7 @@ var countLabels = []struct {
 	{keptWorker, "kept worker record", "kept worker record"},
 	{removed, "removed .legion/", "would remove .legion/"},
 	{deferred, "deferred", "deferred"},
+	{leftWorkflow, "left the workflow", "left the workflow"},
 	{noBranch, "no branch", "no branch"},
 	{failed, "failed", "failed"},
 }
@@ -135,15 +137,15 @@ type runner struct {
 // Run is `legion handoffs import` once the configuration is read: one line per issue and phase on
 // stdout — `<KEY> <word>: imported v<n>`, `unchanged`, `kept worker record v<n>` or `failed:
 // <why>` — then the branch's: `<KEY>: removed .legion/ at <sha>` under the records' daemon, or
-// `removal deferred: <KEY> is in <phase>; …` for an issue in a phase of deferredUnderRecords
-// there; `removed
-// .legion/<KEY>/ at <sha>` under the daemon before it, with `; kept .legion/<dirs> for the run
-// after the rollout` when the branch carries more under .legion/; `unchanged` (nothing of the
-// issue's under .legion/ to remove), `no branch` or `failed: <why>` — and a closing count of each.
-// Under DryRun the lines say what the run would do (`would import v<n>`, `would remove .legion/ …`)
-// and nothing is written. A run that cannot start, or that meets a Dispatch without the handoff
-// routes, says why on stderr. It answers the command's exit: 0 when every line went through (a
-// deferred removal included), 1 otherwise.
+// `removal deferred: <KEY> is in <phase>; <what the operator does about it>` for an issue in a
+// phase of deferredUnderRecords there, or `left the workflow; nothing removed` for an issue the
+// daemon no longer holds in a phase; `removed .legion/<KEY>/ at <sha>` under the daemon before it,
+// with `; kept .legion/<dirs> for the run after the rollout` when the branch carries more under
+// .legion/; `unchanged` (nothing of the issue's under .legion/ to remove), `no branch` or `failed:
+// <why>` — and a closing count of each. Under DryRun the lines say what the run would do (`would
+// import v<n>`, `would remove .legion/ …`) and nothing is written. A run that cannot start, or that
+// meets a Dispatch without the handoff routes, says why on stderr. It answers the command's exit: 0
+// when every line went through (a deferred removal included), 1 otherwise.
 func Run(ctx context.Context, o Options, stdout, stderr io.Writer) int {
 	r := &runner{Options: o, out: stdout, counts: map[outcome]int{}}
 	err := r.run(ctx)
@@ -159,10 +161,11 @@ func Run(ctx context.Context, o Options, stdout, stderr io.Writer) int {
 }
 
 func (r *runner) run(ctx context.Context) error {
-	issues, err := r.readState(ctx)
+	issues, schemaVersion, err := r.readState(ctx)
 	if err != nil {
 		return err
 	}
+	r.recordsDaemon = schemaVersion >= recordsSchema
 	for _, issue := range issues {
 		if err := r.issue(ctx, issue); err != nil {
 			return err
@@ -177,15 +180,16 @@ type workflowIssue struct {
 	phase     phase.Phase
 }
 
-// readState is every issue the daemon holds in a phase other than done, with a repository, by key:
-// an issue with no repository is an operator's claim, which the workflow does not record and no
-// branch of which a worker committed handoffs to. It notes whether the daemon is the records'
-// release (recordsSchema). The state is decoded into only the fields the run reads, so a daemon of
-// an earlier contract answers it as well.
-func (r *runner) readState(ctx context.Context) ([]workflowIssue, error) {
+// readState is every issue the daemon holds in a phase other than done, with a repository, by key,
+// and the store schema version the daemon's state names: an issue with no repository is an
+// operator's claim, which the workflow does not record and no branch of which a worker committed
+// handoffs to. The state is decoded into only the fields the run reads, so a daemon of an earlier
+// contract answers it as well. The read sets nothing on the run, which the phase re-read before a
+// removal (currentPhase) needs: the release the run goes by (recordsDaemon) is the first read's.
+func (r *runner) readState(ctx context.Context) ([]workflowIssue, int, error) {
 	body, err := r.State(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("read the daemon's state: %w", err)
+		return nil, 0, fmt.Errorf("read the daemon's state: %w", err)
 	}
 	var state struct {
 		Daemon struct {
@@ -198,12 +202,11 @@ func (r *runner) readState(ctx context.Context) ([]workflowIssue, error) {
 		} `json:"issues"`
 	}
 	if err := json.Unmarshal(body, &state); err != nil {
-		return nil, fmt.Errorf("decode the daemon's state: %w", err)
+		return nil, 0, fmt.Errorf("decode the daemon's state: %w", err)
 	}
 	if r.Project != "" && state.Daemon.Project != r.Project {
-		return nil, fmt.Errorf("the daemon serves project %q, and the configuration names %q", state.Daemon.Project, r.Project)
+		return nil, 0, fmt.Errorf("the daemon serves project %q, and the configuration names %q", state.Daemon.Project, r.Project)
 	}
-	r.recordsDaemon = state.Daemon.SchemaVersion >= recordsSchema
 	var issues []workflowIssue
 	for key, issue := range state.Issues {
 		if issue.Phase != phase.Done && issue.Repo != "" {
@@ -211,13 +214,13 @@ func (r *runner) readState(ctx context.Context) ([]workflowIssue, error) {
 		}
 	}
 	slices.SortFunc(issues, func(a, b workflowIssue) int { return strings.Compare(a.key, b.key) })
-	return issues, nil
+	return issues, state.Daemon.SchemaVersion, nil
 }
 
 // currentPhase is key's phase as the daemon's state names it now, read again: done when the state
 // no longer lists the issue among those in the workflow.
 func (r *runner) currentPhase(ctx context.Context, key string) (phase.Phase, error) {
-	issues, err := r.readState(ctx)
+	issues, _, err := r.readState(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -245,7 +248,7 @@ func (r *runner) issue(ctx context.Context, issue workflowIssue) error {
 		r.print(issue.key, "", result{failed, fmt.Sprintf("failed: mint the implement App's token for %s: %v", repo.Owner(), err)})
 		return nil
 	}
-	b := branch{key: issue.key, phase: issue.phase, repo: repo, github: githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.GitHubAPI, repo)}}
+	b := branch{key: issue.key, repo: repo, github: githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.GitHubAPI, repo)}}
 
 	phases := map[string]result{}
 	var last result
@@ -276,8 +279,8 @@ func (r *runner) issue(ctx context.Context, issue workflowIssue) error {
 // attempt is one pass over the branch at its current head: each phase's file into phases, then the
 // removal (removal). moved says the branch moved between the read and the ref update.
 func (r *runner) attempt(ctx context.Context, b branch, phases map[string]result) (last result, moved bool, err error) {
-	head, found, err := ghbranch.Head(ctx, b.github, b.repo, b.ref())
-	if !found {
+	head, err := ghbranch.Head(ctx, b.github, b.repo, b.ref())
+	if ghbranch.NotFound(err) {
 		return result{noBranch, "no branch"}, false, nil
 	}
 	if err != nil {
@@ -320,34 +323,53 @@ func (r *runner) attempt(ctx context.Context, b branch, phases map[string]result
 	return r.removal(ctx, b, head, top, own)
 }
 
+// runAgain and mergeCarries are what a deferred line tells the operator to do about the removal it
+// held back. A phase that ends in another phase the import still runs over asks for another run;
+// merging and awaiting_merge end in done, which the import skips, so nothing more is asked of it:
+// the issue's own merge is what carries `.legion/` to the default branch, and the cleanup of
+// `.legion/` after the cutover is what takes it off there.
+const (
+	runAgain     = "run the import again once the phase ends"
+	mergeCarries = "its merge carries .legion/ to the default branch, which the cleanup after the cutover removes"
+)
+
 // deferredUnderRecords is every phase in which, under the records' daemon, the removal push would
-// undo work in progress, so the import pushes nothing there: that daemon carries no push, so the
-// new head is a code head. In testing it clears the tester's planned red; in reviewing an approval
-// of the round the reviewer has not completed no longer stands; in merging the merger builds its
-// READY at the head it reads, and a push past that head makes the daemon refuse or void that READY
-// (READY_HEAD_MOVED), so the merger builds it again; in awaiting_merge a push past READY's head
-// withdraws that READY and sends the issue back to implementing. A held issue may have been held
-// from any of these, and the daemon's state does not say which, so it waits too; the retry that
-// restores its phase would otherwise find the push.
-var deferredUnderRecords = []phase.Phase{phase.Testing, phase.Reviewing, phase.Merging, phase.AwaitingMerge, phase.Held}
+// undo work in progress, so the import pushes nothing there, by what its line then says: that
+// daemon carries no push, so the new head is a code head. In testing it clears the tester's planned
+// red; in reviewing an approval of the round the reviewer has not completed no longer stands; a
+// held issue may have been held from any phase, and the daemon's state does not say which, so it
+// waits too, since the retry that restores its phase would otherwise find the push. In merging the
+// merger builds its READY at the head it reads, and a push past that head makes the daemon refuse
+// or void that READY (READY_HEAD_MOVED), so the merger builds it again; in awaiting_merge a push
+// past READY's head withdraws that READY and sends the issue back to implementing.
+var deferredUnderRecords = map[phase.Phase]string{
+	phase.Testing:       runAgain,
+	phase.Reviewing:     runAgain,
+	phase.Held:          runAgain,
+	phase.Merging:       mergeCarries,
+	phase.AwaitingMerge: mergeCarries,
+}
 
 // removal is what the attempt removes from the branch at head, whose .legion/ lists top, and
 // removes it. Under the records' daemon it is all of .legion/, but nothing for an issue in a phase
 // of deferredUnderRecords, read again from the daemon just before the push, since the run's first
-// read is many calls old by then and the issue may have moved into one (or left the workflow, when
-// nothing is pushed either); the line says the removal is deferred until the phase ends. Under the
-// daemon before it, it is only
-// .legion/<KEY>/ (own says the branch has it), the one push that daemon carries as handoffs alone,
-// keeping the issue's verdict and approval; every other path under .legion/ stays on the branch for
-// the run after the rollout, and the line names it.
+// read is many calls old by then and the issue may have moved into one; the line says the removal
+// is deferred and what the operator does about it. An issue that has left the workflow by then has
+// no phase to wait for and nothing the import may still push over, and says so. Under the daemon
+// before it, it is only .legion/<KEY>/ (own says the branch has it), the one push that daemon
+// carries as handoffs alone, keeping the issue's verdict and approval; every other path under
+// .legion/ stays on the branch for the run after the rollout, and the line names it.
 func (r *runner) removal(ctx context.Context, b branch, head string, top []contentEntry, own bool) (last result, moved bool, err error) {
 	if r.recordsDaemon {
 		now, err := r.currentPhase(ctx, b.key)
 		if err != nil {
 			return failure(err), false, nil
 		}
-		if now == phase.Done || slices.Contains(deferredUnderRecords, now) {
-			return result{deferred, fmt.Sprintf("removal deferred: %s is in %s; run the import again once the phase ends", b.key, now)}, false, nil
+		if now == phase.Done {
+			return result{leftWorkflow, "left the workflow; nothing removed"}, false, nil
+		}
+		if what, waits := deferredUnderRecords[now]; waits {
+			return result{deferred, fmt.Sprintf("removal deferred: %s is in %s; %s", b.key, now, what)}, false, nil
 		}
 		return r.remove(ctx, b, head, "")
 	}
@@ -476,10 +498,9 @@ func (r *runner) printCounts() {
 }
 
 // branch is an issue's branch legion/<KEY> on its repository, read and written through GitHub's
-// REST API as the implement App, and the phase the daemon holds the issue in.
+// REST API as the implement App.
 type branch struct {
 	key    string
-	phase  phase.Phase
 	repo   ghrepo.Repository
 	github githubrest.Client
 }
@@ -501,7 +522,7 @@ type contentEntry struct {
 func (b branch) list(ctx context.Context, path, head string) ([]contentEntry, error) {
 	var entries []contentEntry
 	err := b.github.Get(ctx, "/contents/"+path+"?ref="+url.QueryEscape(head), &entries)
-	if notFound(err) {
+	if ghbranch.NotFound(err) {
 		return nil, nil
 	}
 	if err != nil {
@@ -616,8 +637,8 @@ func (b branch) move(ctx context.Context, head, commit string) (moved bool, err 
 	if !errors.As(err, &answer) || answer.Status != http.StatusUnprocessableEntity {
 		return false, err
 	}
-	now, found, readErr := ghbranch.Head(ctx, b.github, b.repo, b.ref())
-	if !found {
+	now, readErr := ghbranch.Head(ctx, b.github, b.repo, b.ref())
+	if ghbranch.NotFound(readErr) {
 		return true, nil
 	}
 	if readErr != nil {
@@ -627,10 +648,4 @@ func (b branch) move(ctx context.Context, head, commit string) (moved bool, err 
 		return true, nil
 	}
 	return false, fmt.Errorf("GitHub refused the ref update: %s", answer.Body)
-}
-
-// notFound says whether err is GitHub's 404.
-func notFound(err error) bool {
-	var answer *githubrest.Answer
-	return errors.As(err, &answer) && answer.Status == http.StatusNotFound
 }

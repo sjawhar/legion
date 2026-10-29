@@ -1,9 +1,9 @@
 //go:build e2e
 
-// The live proof's driver for the handoff records of INFRA-177: a phase's handoff is a record on
-// the Dispatch issue, written with `dispatch handoff-write` under the worker's own session, and a
-// completion names it. scripts/e2e/handoff-records.sh builds this driver with `-tags e2e` and owns
-// the nats-server and the PostgreSQL it runs against.
+// The live proof's driver for the handoff records of sjawhar/legion#2354: a phase's handoff is a
+// record on the Dispatch issue, written with `dispatch handoff-write` under the worker's own
+// session, and a completion names it. scripts/e2e/handoff-records.sh builds this driver with
+// `-tags e2e` and owns the nats-server and the PostgreSQL it runs against.
 //
 // Nothing of the record path is stood in for. Dispatch is the real server: this driver builds
 // packages/envoy's cmd/dispatch and runs it, as packages/dispatch/e2e/run-server.sh does, on a

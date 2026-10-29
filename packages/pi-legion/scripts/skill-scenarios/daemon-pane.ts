@@ -2,7 +2,10 @@
  * The rig's reading of the Legion daemon: `daemon-pane.go`, run with `go run -overlay` as a main
  * inside a checkout's daemon module, which is how it reaches the daemon's internal packages. The
  * rig asks it rather than restating the daemon: a change to the daemon reaches the rig by
- * construction. `workerPane` builds a phase worker's whole pane environment over it.
+ * construction. The one exception is `daemon-pane.go`'s own table of the handoff words, which the
+ * program carries because one program runs against both checkouts of a comparison and the daemon's
+ * table has not always had the same name; its comment says so. `workerPane` builds a phase
+ * worker's whole pane environment over it.
  */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";

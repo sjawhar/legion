@@ -6,8 +6,8 @@
 //
 //	phase <role>             prints the phase the role's worker runs in, the first phase
 //	                         workflow.RoleFor gives to the role, then on a second line the word of
-//	                         the handoff record that phase ends with (phase.HandoffFile), empty
-//	                         for a phase that ends with none
+//	                         the handoff record that phase ends with (handoffWords), empty for a
+//	                         phase that ends with none
 //	pane                     reads a paneRequest (JSON) on stdin, writes the claim's gh bundle
 //	                         under its LEGION_GH_OWNERS_DIR, and prints its paneResponse (JSON)
 package main
@@ -57,9 +57,11 @@ func main() {
 	}
 }
 
-// handoffWords is the word of the handoff each handoff phase ends with. It is this program's own
-// copy rather than the daemon's phase table, since the rig runs it against each label's checkout of
-// the daemon module, whose table has had more than one name (phase.HandoffFile, phase.Handoff).
+// handoffWords is the word of the handoff each handoff phase ends with: this program's one
+// restatement of the daemon, and its own copy rather than the daemon's phase table because one
+// program runs against each label's checkout of the daemon module, and that table has had more
+// than one name (phase.HandoffFile, then phase.Handoff). Every other answer here is the daemon's
+// own function (daemon-pane.ts).
 var handoffWords = map[phase.Phase]string{
 	phase.Planning: "plan", phase.Implementing: "implement", phase.Testing: "test", phase.Reviewing: "review",
 }

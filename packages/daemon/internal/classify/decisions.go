@@ -136,8 +136,8 @@ func advance(pr record.PullRequest, arrival Arrival, headSHA string, names []rec
 	var planned, decided, chained, spared bool
 	var chain []record.ClassifiedPush
 	if read.path {
-		planned, decided = pathPlan(read.pushes)
 		chained, spared, chain = true, pathSpares(read.pushes), read.pushes
+		planned, decided = pathPlan(read.pushes), chained
 	} else {
 		planned, chained = arrivalPlan(read.pushes, pr.HeadSHA, headSHA)
 		decided = chained
@@ -168,12 +168,10 @@ func advance(pr record.PullRequest, arrival Arrival, headSHA string, names []rec
 
 // pathPlan reads the planned mark off path, the pushes of a move in the order the branch made
 // them: its last push, the one that left the new head, decides it - the review App's plans the
-// red, anyone else's clears it (arrivalPlan, over a chain). An empty path decides nothing.
-func pathPlan(path []record.ClassifiedPush) (planned, decided bool) {
-	if len(path) == 0 {
-		return false, false
-	}
-	return path[len(path)-1].ByReviewApp, true
+// red, anyone else's clears it (arrivalPlan, over a chain). A move read as a path is one those
+// pushes made, so path always holds one.
+func pathPlan(path []record.ClassifiedPush) (planned bool) {
+	return path[len(path)-1].ByReviewApp
 }
 
 // pathSpares is whether path, the pushes of a move in the order the branch made them, is no fix
@@ -922,7 +920,10 @@ type Dropped struct {
 func ApplyPushDropping(pr record.PullRequest, push record.ClassifiedPush) (record.PullRequest, Dropped) {
 	var dropped Dropped
 	pr.Moves, dropped.Repeat = pushedMoves(pr.Moves, push)
-	unspent, copied := cappedCopies(unspentPushes(withPush(pr.Pushes, push), pr.Moves, false), push)
+	// push is recorded after every earlier push: pushes of the same two heads are each kept, in
+	// delivery order.
+	recorded := append(append(make([]record.ClassifiedPush, 0, len(pr.Pushes)+1), pr.Pushes...), push)
+	unspent, copied := cappedCopies(unspentPushes(recorded, pr.Moves, false), push)
 	dropped.Copy = copied
 	var gone map[[2]string]bool
 	pr.Pushes, gone = boundedPushes(unspent, pr.HeadSHA)
@@ -960,12 +961,6 @@ func cappedCopies(pushes []record.ClassifiedPush, push record.ClassifiedPush) ([
 	}
 	gone := pushes[at[1]]
 	return append(append(make([]record.ClassifiedPush, 0, len(pushes)-1), pushes[:at[1]]...), pushes[at[1]+1:]...), &gone
-}
-
-// withPush is pushes with push recorded, after every earlier push: pushes of the same two heads are
-// each kept, in delivery order.
-func withPush(pushes []record.ClassifiedPush, push record.ClassifiedPush) []record.ClassifiedPush {
-	return append(append(make([]record.ClassifiedPush, 0, len(pushes)+1), pushes...), push)
 }
 
 // withoutCopies is pushes less gone, copy by copy: each push of gone takes away the oldest push of

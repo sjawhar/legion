@@ -23,7 +23,7 @@ import (
 // the read of base or to the create, is an error naming the repository, the ref and GitHub's
 // answer (a *githubrest.Answer, its status and body).
 func Create(ctx context.Context, github githubrest.Client, repo ghrepo.Repository, branch, base string) error {
-	head, _, err := Head(ctx, github, repo, base)
+	head, err := Head(ctx, github, repo, base)
 	if err != nil {
 		return err
 	}
@@ -38,25 +38,30 @@ func Create(ctx context.Context, github githubrest.Client, repo ghrepo.Repositor
 }
 
 // Head is the commit branch names on repo, whose REST API github calls, the branch's name read as
-// the one ref it names (refPath). found is false exactly when GitHub answers the read 404, which it
-// answers a branch it does not have; err then still carries that answer, so a caller that needs
-// the branch returns err as it is, and one that asks whether the branch exists reads found first.
-// Every other failure of the read, and an answer naming no commit, is err with found true.
-func Head(ctx context.Context, github githubrest.Client, repo ghrepo.Repository, branch string) (sha string, found bool, err error) {
+// the one ref it names (refPath). A branch GitHub does not have is the error GitHub answered the
+// read with, which NotFound reads, so a caller that needs the branch returns err as it is, and one
+// that asks whether the branch exists tests it with NotFound. Every other failure of the read, and
+// an answer naming no commit, is an error of its own.
+func Head(ctx context.Context, github githubrest.Client, repo ghrepo.Repository, branch string) (sha string, err error) {
 	var head struct {
 		Object struct {
 			SHA string `json:"sha"`
 		} `json:"object"`
 	}
 	if err = github.Get(ctx, "/git/ref/heads/"+refPath(branch), &head); err != nil {
-		var answer *githubrest.Answer
-		missing := errors.As(err, &answer) && answer.Status == http.StatusNotFound
-		return "", !missing, fmt.Errorf("read refs/heads/%s of %s: %w", branch, repo, err)
+		return "", fmt.Errorf("read refs/heads/%s of %s: %w", branch, repo, err)
 	}
 	if head.Object.SHA == "" {
-		return "", true, fmt.Errorf("read refs/heads/%s of %s: GitHub named no commit", branch, repo)
+		return "", fmt.Errorf("read refs/heads/%s of %s: GitHub named no commit", branch, repo)
 	}
-	return head.Object.SHA, true, nil
+	return head.Object.SHA, nil
+}
+
+// NotFound says whether err carries GitHub's 404, the answer it gives a ref, a file or a
+// repository it does not have.
+func NotFound(err error) bool {
+	var answer *githubrest.Answer
+	return errors.As(err, &answer) && answer.Status == http.StatusNotFound
 }
 
 // Move updates branch on repo to commit without force, so GitHub moves it only when commit

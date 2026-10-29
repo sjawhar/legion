@@ -12,7 +12,7 @@ import (
 )
 
 // handoffsCommands is `legion handoffs`, the move of the workers' committed handoff files onto
-// their Dispatch issues (INFRA-177), and the one list of its subcommands.
+// their Dispatch issues (sjawhar/legion#2354), and the one list of its subcommands.
 var handoffsCommands = map[string]command{
 	"import": runHandoffsImport,
 }
@@ -27,10 +27,10 @@ func runHandoffs(ctx context.Context, args []string, stdout, stderr io.Writer) i
 // every issue the running daemon holds in a phase other than done (read from its GET
 // /legion/v1/state with get) gets its branch's `.legion/<KEY>/<word>.json` files written to
 // Dispatch under the daemon's session, and then one commit removing them from its branch: all of
-// `.legion/` under a daemon of the records' release, deferred while the issue is in testing or
-// reviewing, and `.legion/<KEY>/` alone under the release before. The configuration is read by
-// config.Load, as boot reads it, since minting the App's token runs its private_key_command.
-// docs/kubernetes.md has the run order around a release.
+// `.legion/` under a daemon of the records' release, deferred while the issue is in a phase
+// handoffimport.deferredUnderRecords names, and `.legion/<KEY>/` alone under the release before.
+// The configuration is read by config.Load, as boot reads it, since minting the App's token runs
+// its private_key_command. docs/kubernetes.md has the run order around a release.
 func runHandoffsImport(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("handoffs import", "usage: legion handoffs import [--config <legion.yaml>] [--dry-run]", stderr)
 	configPath := flags.String("config", defaultConfigPath, "path to legion.yaml")

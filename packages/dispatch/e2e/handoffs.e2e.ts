@@ -132,6 +132,56 @@ test("the Conversation lists each handoff version, and expanding one shows its f
   }
 });
 
+// A handoff written while the Conversation is open reaches it over the event stream: the write's
+// `handoff.recorded` refreshes the issue's handoff list (`["handoffs", key]` in
+// `web/src/api/event-refresh.ts`), so the new version's card arrives with no reload. With that
+// target taken out of `eventRefreshTargets` the page stays on the two entries it loaded, which is
+// this test's negative control.
+test("a handoff written while the Conversation is open arrives without a reload", async ({
+  browser,
+}) => {
+  const key = await seedHandoffs();
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${key}/conversation`);
+    const cards = page
+      .getByRole("list", { name: "Conversation turns" })
+      .locator(":scope > li[data-turn]");
+    await expect(cards).toHaveCount(2);
+    // A mark on this document alone: a reload would load a new one, which carries no attribute of
+    // the test's, while a refresh of the list leaves the document as it is.
+    await page.evaluate(() => document.documentElement.setAttribute("data-loaded-once", "yes"));
+
+    await createHandoff(
+      key,
+      "implement",
+      {
+        schemaVersion: 1,
+        phase: "implement",
+        issue: key,
+        completed: true,
+        summary: "Third pass, written while the Conversation was open",
+        proof: [
+          { claim: "browser suite green", command: "bun run e2e" },
+          { claim: "lint clean", command: "bunx biome check" },
+        ],
+      },
+      implementer
+    );
+
+    await expect(cards).toHaveCount(3);
+    await expect(cards.first()).toContainText("implement handoff, version 3");
+    await expect(handoffCard(page, "implement handoff, version 3")).toContainText(
+      "Implementer (e2e)"
+    );
+    await expect(page.locator("html")).toHaveAttribute("data-loaded-once", "yes");
+  } finally {
+    await alice.close();
+  }
+});
+
 // The Activity half, which the commit before the Conversation change already passes.
 test("the Activity list has one line per recorded handoff version", async ({ browser }) => {
   const key = await seedHandoffs();

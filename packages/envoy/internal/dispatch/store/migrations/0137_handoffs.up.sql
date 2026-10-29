@@ -1,7 +1,7 @@
 -- 0137_handoffs.up.sql — phase handoffs recorded on their issue.
 --
--- INFRA-177: Legion's phase handoffs move from committed `.legion/<KEY>/<phase>.json` files to
--- records on the Dispatch issue. One row per handoff a session writes
+-- sjawhar/legion#2354: Legion's phase handoffs move from committed `.legion/<KEY>/<phase>.json`
+-- files to records on the Dispatch issue. One row per handoff a session writes
 -- (POST /api/v1/issues/{key}/handoffs/{phase}, api/handoffs.go):
 --
 -- - phase is a lowercase slug, the route's `{phase}` (Legion writes plan, implement, test and

@@ -252,39 +252,40 @@ func TestCreateRefusesARepositoryWhoseBaseItCannotRead(t *testing.T) {
 	}
 }
 
-// Head is the commit a branch names, its name read as the one ref it names, and found false with
-// GitHub's 404 kept in the error for a branch GitHub does not have.
+// Head is the commit a branch names, its name read as the one ref it names, and GitHub's 404, which
+// NotFound reads, for a branch GitHub does not have.
 func TestHeadReadsTheBranchOrSaysGitHubHasNone(t *testing.T) {
 	g := &github{refs: map[string]string{"legion/WIDGETS-12": baseCommit, "release#stable": decoyCommit, "release": baseCommit}}
 	api := widgets(g.serve(t))
 	for _, tc := range []struct{ branch, want string }{{"legion/WIDGETS-12", baseCommit}, {"release#stable", decoyCommit}} {
-		sha, found, err := Head(context.Background(), api, ghrepo.MustParse("acme/widgets"), tc.branch)
-		if err != nil || !found || sha != tc.want {
-			t.Fatalf("Head(%q) = %q, %t, %v; want %s found", tc.branch, sha, found, err, tc.want)
+		sha, err := Head(context.Background(), api, ghrepo.MustParse("acme/widgets"), tc.branch)
+		if err != nil || NotFound(err) || sha != tc.want {
+			t.Fatalf("Head(%q) = %q, %v; want %s", tc.branch, sha, err, tc.want)
 		}
 	}
 	if got := g.reads(); !slices.Equal(got, []string{"/repos/acme/widgets/git/ref/heads/legion/WIDGETS-12", "/repos/acme/widgets/git/ref/heads/release#stable"}) {
 		t.Fatalf("read %q, want each branch's own ref", got)
 	}
 
-	sha, found, err := Head(context.Background(), api, ghrepo.MustParse("acme/widgets"), "legion/WIDGETS-13")
+	sha, err := Head(context.Background(), api, ghrepo.MustParse("acme/widgets"), "legion/WIDGETS-13")
 	var answer *githubrest.Answer
-	if sha != "" || found || !errors.As(err, &answer) || answer.Status != http.StatusNotFound ||
+	if sha != "" || !NotFound(err) || !errors.As(err, &answer) || answer.Status != http.StatusNotFound ||
 		errorText(err) != `read refs/heads/legion/WIDGETS-13 of acme/widgets: GitHub answered GET /git/ref/heads/legion/WIDGETS-13 with 404: {"message":"Not Found","status":"404"}` {
-		t.Fatalf("Head of a branch GitHub does not have = %q, %t, %v; want not found with GitHub's 404", sha, found, err)
+		t.Fatalf("Head of a branch GitHub does not have = %q, %v; want NotFound with GitHub's 404", sha, err)
 	}
 }
 
-// Any other failure of the read is found true with the error, so no caller reads it as no branch.
-func TestHeadReportsAnyOtherFailureAsFound(t *testing.T) {
+// Any other failure of the read is an error NotFound is false for, so no caller reads it as no
+// branch.
+func TestHeadReportsAnyOtherFailureAsAnError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = io.WriteString(w, `{"message":"Resource not accessible by integration"}`)
 	}))
 	t.Cleanup(server.Close)
-	sha, found, err := Head(context.Background(), widgets(server.URL), ghrepo.MustParse("acme/widgets"), "main")
-	if sha != "" || !found || err == nil || !strings.Contains(err.Error(), "with 403") {
-		t.Fatalf("Head = %q, %t, %v; want found with GitHub's 403", sha, found, err)
+	sha, err := Head(context.Background(), widgets(server.URL), ghrepo.MustParse("acme/widgets"), "main")
+	if sha != "" || NotFound(err) || err == nil || !strings.Contains(err.Error(), "with 403") {
+		t.Fatalf("Head = %q, %v; want an error carrying GitHub's 403 that NotFound is false for", sha, err)
 	}
 }
 
