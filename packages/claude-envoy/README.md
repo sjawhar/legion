@@ -281,13 +281,12 @@ every third-party package they inline, written from Bun's metafile by
   `hooks/hooks.json`, `.mcp.json`, `bin/` and `.claude-plugin/` from the merge are live beside the
   previous build, so an install then gets a hook or server entry that names a bundle the previous
   build lacks; add a bundle in one pull request and the entry that runs it in a later one.
-  `scripts/build.ts` takes exactly one mode
-  and refuses a run that names none (exit 2); neither mode writes the package's own `dist/` or
-  `legion/`. `--check` (`bun run check-dist`) builds into a scratch directory and fails when the
-  committed files differ from it; `--out <dir>` makes a new or empty directory outside the
-  repository a runnable copy of the plugin built from the tree (its manifests, `.mcp.json`,
-  `bin/`, `hooks/`, `package.json` and skills, the skill links dereferenced, with a fresh `dist/`
-  and `legion/`), which is how to run an unmerged tree.
+  `scripts/build.ts` takes exactly one mode and refuses a run that names none (exit 2); neither
+  mode writes the package's own `dist/` or `legion/`. `--check` (`bun run check-dist`) builds into
+  a scratch directory and fails when the committed files differ from it; `--out <dir>` makes a new
+  or empty directory outside the repository a runnable copy of the plugin built from the tree (its
+  manifests, `.mcp.json`, `bin/`, `hooks/`, `package.json` and skills, the skill links
+  dereferenced, with a fresh `dist/` and `legion/`), which is how to run an unmerged tree.
 - `bun run verify-build <tar>` (`scripts/verify-build.sh`) is that workflow's build step: it builds
   the plugin twice into a scratch directory outside the repository and says so when the two builds
   differ, runs the private-name check over the first build's `dist/` and `legion/`, refuses a

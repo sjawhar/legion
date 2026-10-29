@@ -16,7 +16,9 @@
 //                runnable copy of the plugin built from this tree.
 //
 // scripts/build-inputs.txt must name every file this build reads, since main's push job decides
-// from it alone whether a moved main changed the build; tests/build-inputs.test.ts holds it to that.
+// from it alone whether a moved main changed the build. tests/build-inputs.test.ts checks it against
+// what buildBundles and buildLegionPlugin report reading; a file this script reads by path
+// (.bun-version, the scripts it runs) is listed by hand.
 import { cp, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"

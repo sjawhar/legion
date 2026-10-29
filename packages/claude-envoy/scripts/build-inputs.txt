@@ -10,7 +10,12 @@
 #   code): `git show <base>:packages/claude-envoy/scripts/build-inputs.txt`, then
 #   `git diff --no-renames --name-only <base> <tip> -- <pathspecs>` to decide whether main moved by
 #   a build input since the base the build was made from.
-# - tests/build-inputs.test.ts, which runs the build and fails when a file it reads is not matched.
+# - tests/build-inputs.test.ts, which runs the build and fails when a file the bundles or the
+#   Legion plugin read is not matched: each bundle's sources, the manifest, tsconfig and license
+#   files of each workspace package they reach, what bun install reads, and the skills and agents
+#   buildLegionPlugin reads. The files the build job's scripts and workflow read by path, the
+#   groups below from .bun-version to setup-bun, are listed by hand: no test checks them, so a
+#   change that makes build.ts, verify-build.sh or the workflow read a new file adds it here.
 #
 # The rule: whole package directories are listed and only known non-inputs are excluded, so a file
 # nobody thought of counts as an input. That is the safe direction: a false "changed" costs one

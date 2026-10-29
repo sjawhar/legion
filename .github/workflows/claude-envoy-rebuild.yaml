@@ -23,15 +23,15 @@ name: Rebuild Claude Envoy plugin
 # moved on by then. It lands the build on main's tip all the same, a commit that changes only the
 # two directories, unless main already holds a newer build (the base named in main's latest rebuild
 # commit does not precede this run's), when it lands nothing; and when a build input
-# (packages/claude-envoy/scripts/build-inputs.txt, which tests/build-inputs.test.ts holds to what
-# the build reads) changed between the two, it also starts a fresh run on main, which builds the
-# new inputs. Main rewritten past the build's base lands nothing and starts a fresh run. The push
-# lands only on the tip push-built checked, never forced; when main moves again in those seconds,
-# it lands nothing and starts one fresh run. So main's built files are a build of a recent main, at
-# most one run behind its inputs, and never move backward. Its commit carries GitHub's skip keyword
-# in its subject, so it starts no CI or release run of its own; `build` ran the private-name check
-# over the bundle already. A failed run lands nothing and is red on its own; the next run builds
-# again.
+# (packages/claude-envoy/scripts/build-inputs.txt; tests/build-inputs.test.ts checks it against the
+# files the bundles and the Legion plugin read, and the files read by path are listed by hand)
+# changed between the two, it also starts a fresh run on main, which builds the new inputs. Main
+# rewritten past the build's base lands nothing and starts a fresh run. The push lands only on the
+# tip push-built checked, never forced; when main moves again in those seconds, it lands nothing and
+# starts one fresh run. So main's built files are a build of a recent main, at most one run behind
+# its inputs, and never move backward. Its commit carries GitHub's skip keyword in its subject, so
+# it starts no CI or release run of its own; `build` ran the private-name check over the bundle
+# already. A failed run lands nothing and is red on its own; the next run builds again.
 #
 # Every push to main starts a run, and only a newer run replaces a pending one, so the newest main
 # is always built. The daily run is there only for a push that started no run of this workflow: a
