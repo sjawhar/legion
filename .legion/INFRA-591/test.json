@@ -2,64 +2,55 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-591",
-  "completed": "2026-10-29T16:34:12Z",
-  "headTested": "d9b4cffe5fbcc86e6371aac774ae744f145bec43 (code ff684ac1066f: cce412e3 bounded first start, merges e391721e/9290fdc7/ff684ac1 of main incl. #2449's /ws/live feed, 86fdc500, ea9ecdec; d9b4cffe adds only .legion/)",
-  "rebaseCheck": "The fingerprint changed (three forward merges of main, the feed moved to /ws/live, and code fixes), so this was a full round against main's fork point 1f5b0828, built the same way. GET /api/v1/events is gone on both sides. The tester's driver now subscribes on /ws/live through a throwaway gorilla/websocket client (wsfeed in the evidence artifact).",
+  "completed": "2026-10-29T19:42:06Z",
+  "headTested": "c3498e5265f16a7eb0ce363898b92cd435a2493d (code 28d06c208d98; c3498e52 adds only .legion/)",
+  "rebaseCheck": "No merge since round 11 (fork point still 1f5b0828). 28d06c20 changes the first start's floor and whoami's event_head (kept marks, event_marks.go), so this was a full round of those paths, plus the regression set.",
   "implementerProof": {
     "verdict": "rejected",
-    "how": "I drove the same surface independently: Dispatch built at ff684ac1 and at main 1f5b0828 on a Postgres 16.2 and a NATS of my own, and INFRA-589's harness (on main) for load. Verified: ordinary out-of-order commits, concurrency on one and two processes, the replay_complete rules carried to the socket, the reset waits, the fresh-process first start, the old lock, references since, the NATS order, whoami's final event_head, the bounded first start on 5,000,122 ids when no writer is open (events_start 38-44 ms), and 89 connections. Rejected on the architect's item 1. When a write in Dispatch's database holds its transaction id from before the boot mark into the first start, which is a restart under load, the bound falls back to reading every id from 0. It is logged ('reads every event id above the proven horizon'), and on 5M ids it costs seconds."
+    "how": "I drove the same surface independently, Dispatch built at 28d06c20 on a Postgres 16.2 and a NATS of my own, subscribing on /ws/live. Verified: my round-11 red test passes, with its threshold unchanged; with no writer open the first start on 5,000,122 ids takes 44-61 ms; with 3 s writers overlapping it reads no whole log; whoami answers at once with a write open and stays below it; the regression set holds. Rejected because a write from before boot, the case the change addresses, now loses events and makes whoami answer 0 (failures 1 and 2), and because the race lane is red on a hub test this change made time-sensitive (failure 3)."
   },
   "failures": [
     {
-      "criterion": "Every consumer of the event stream keeps the order it relies on, at production size (INFRA-514's architect, this round: re-measure the bounded first start on 5M ids and check the bound with a writer whose transaction began before the mark; a read from id 0 or a wait of seconds is a failure).",
-      "evidence": "Red test c6e566654bab: TestTheRelaysFirstStartDoesNotReadTheWholeEventLogWhileAWriterFromBeforeBootIsOpen in packages/envoy/internal/dispatch/api/live_events_horizon_test.go. It opens a writer in the test's database before register takes the boot mark (through testServerOptions.persistence, which runs on the database before register), fills 200,000 events, subscribes cold, and releases the writer 1 s into the start, as a write holding its id for seconds does. It fails twice: 'the relay's first start read 200021 rows of events on a log of 200000 events while a writer from before the boot mark was open, want at most 20000'. It passes with a local edit I reverted, used only as its control: firstRelayFloor takes a fresh mark every 50 ms until WriterFloor accepts one. The start waits for that writer anyway (Horizon.Await), so waiting for a qualifying mark costs nothing extra. The same commit hardens my round-10 test: both now count events rows read by sequential scan as well as through events_pkey, after ending the other connections so their statistics are flushed. The old idx_tup_read count missed a full read that Postgres planned as a sequential scan, and missed statistics a pooled backend had not yet flushed. The round-10 test still passes at the head. Command: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:16432/postgres?sslmode=disable go test ./internal/dispatch/api/ -run TestTheRelaysFirstStartDoesNotReadTheWholeEventLog -count=2 -v. Real surface, 5,000,122 ids, a newly started head process: (a) a psql write open since before boot and committed 2 s after the first cold subscription: full-read warning logged, events_start 2.96 s after that commit, its event and the next both delivered; (b) the same write opened after the boot mark: no warning, events_start 0.20 s after its commit; (c) four writers in Dispatch's database, each holding its id for 3 s and overlapping with no break, subscription 0.5 s after /healthz: full-read warning, events_start 6.01 s after subscribe; the same writers with the subscription 5 s and 10 s after /healthz: no warning, 3.12 s and 2.87 s, which is the horizon's own wait for those writers; (d) writers holding 1 s: no warning, 0.89 s. A deploy under load restarts the process while seconds-long write transactions are open, and pages resubscribe at once, so case (c) is a deploy's: about 3 s more per first subscription on 5M ids, linear in the log. The bound's ordering is safe in every case: every event committed after the start reached the first subscription, in id order."
+      "criterion": "A page that resumes from whoami's event_head misses nothing and is not replayed the whole log (architect's round-11 item 2, at the case this round's change addresses).",
+      "evidence": "Red test in b4258ecc634b: TestWhoamiDoesNotSendAPageToReplayTheWholeLogWhileAWriteFromBeforeBootIsOpen in packages/envoy/internal/dispatch/routes/whoami_test.go. It fills 1,000 events, opens a write that takes its transaction id before storeRouter registers (and so before the boot mark), ends the write 3 s later, and asks whoami. It fails twice: 'whoami answered event_head 0 while a write from before boot was open, want at least 1000'. It passes with eventFeedHeadWait raised to 5 s (a local edit I reverted, used only as its control). Real surface on 5,000,122 ids (adv.py wboot_whoami head 3): restart while a psql write from before boot is open, then whoami after 2.11 s answered event_head 0, and Dispatch logged 'whoami's event_head is 0, so the page's event feed replays the whole log'. A page resumed from 0 was sent 1,998,016 event frames in its first 120 s and had not reached the newest event, nor the write's own event. Every page that loads after a restart under load, while such a write is open, gets that replay. Round 11's fallback could answer 0 in the same case; I did not test it then."
+    },
+    {
+      "criterion": "Every consumer keeps the order it relies on: a cold subscription is sent every event that commits after it begins (the round-9 contract), on a restart under load.",
+      "evidence": "Red test in b4258ecc634b: TestTheFirstColdSubscriptionIsSentAnEventCommittedWhileAWriteFromBeforeBootHoldsTheStart in packages/envoy/internal/dispatch/api/live_events_horizon_test.go. It is the implementer's fresh-process test, but the start is held by a write in Dispatch's database that took its id before the boot mark (through testServerOptions.persistence), instead of by a transaction in another database. It fails twice: 'no frame within 30s, waiting for an event of events'. Cause: firstRelayFloor now waits for a mark that counts, and none does until that write ends. The floor is then a mark taken after the write, so every event committed after the subscription began and before the write ended stands at or below the floor, and the subscription starts after it. Real surface (adv.py wboot head, 5,000,122 ids): a write from before boot g=5000211; a comment h=5000212 committed 1 s after the cold subscription; then g committed. events_start said since=5000212, so neither g nor h was ever sent, though both committed after the subscription began. The test passes with round 11's full-read fallback (a local edit I reverted), which fails my round-11 cost test. The two tests together need a start that both waits for that write and finds what committed while it waited without a read from id 0. Inference: today's only /ws/live client, the web app, always resumes from whoami's event_head, so this reaches a cold subscriber only. The contract is documented in feedEvents and in the contracts package."
+    },
+    {
+      "criterion": "CI is green on the head that merges.",
+      "evidence": "At 28d06c20, envoy-go-race and ci-ok are red; the other 26 lanes are green (https://github.com/sjawhar/legion/actions/runs/40915071437/job/123603288142). Two causes. (a) internal/dispatch/api: TestADroppedBrokerSubscriptionIsRestoredWithoutMissingAnEvent, 'delivery_live_hub_test.go:1373: no frame within 3s, waiting for a delta of t'. This change made it time-sensitive: the hub's catch-up now waits for the horizon, which any transaction on the instance holds back, and CI's other packages hold transactions on that one Postgres. Locally, with a transaction in database postgres holding an id 4 s of every 4.3 s, it failed 3 of 5 at the head and passed 5 of 5 at main 1f5b0828. It needs a wait that allows for the horizon, as the implementer gave the other hub tests. (b) internal/dispatch/docs hit the lane's 30-minute cap (1800.98 s), with 66 tests reporting 'the test binary's deadline leaves 14 s'. dispatch://INFRA-747 records main's docs package at 1705.9-1745.8 s of that cap under -race. Whether this change added the last minute is unproven."
     }
   ],
-  "failed": 1,
+  "failed": 3,
   "proof": [
     {
-      "criterion": "The bounded first start on 5M ids, cold and resuming, with no writer open (architect's item 1).",
-      "surface": "/ws/live events subscription on a newly started head process; 5,000,122 ids (4,995,107 rows, 5,015 gaps)",
-      "command": "adv.py big11 head (four restarts: cold, resume, cold, resume)",
-      "observed": "events_start 0.044, 0.039, 0.038 and 0.038 s after subscribe; the next event was delivered by the time its POST answered. Round 10's head took 3.75 to 3.98 s.",
-      "headSha": "ff684ac1066f",
-      "negativeControl": "Round 10's head 38ee6962 on the same 5M log: 3.75, 3.75 and 3.98 s."
+      "criterion": "The bounded first start on 5M ids: no read from 0, cold and resuming (architect's round-11 item 1).",
+      "surface": "/ws/live on a newly started head process, 5,000,122 ids",
+      "command": "adv.py big11 head; adv.py bigload head 3.0 0.5 (twice), 1.0 0.5, 3.0 5; go test -run TestTheRelaysFirstStartDoesNotReadTheWholeEventLog",
+      "observed": "No writer open: events_start 0.061, 0.047, 0.049 and 0.044 s after subscribe. A write opened after the boot mark: events_start 0.239 s after it committed, with both its event and the next delivered. Four writers overlapping, each holding its id 3 s, subscription 0.5 s after /healthz: no full read, events_start 5.47 and 5.24 s after subscribe (round 11: 6.01 s with a full read); 5 s after /healthz: 3.11 s; writers holding 1 s: 1.03 s. The wait for a mark and the horizon's wait run one after the other, so the restart case is about 2 s slower than the boot-mark case. Both read-cost tests pass (round 11's failed at 200,021 rows).",
+      "headSha": "28d06c208d98",
+      "negativeControl": "Round 11's head ff684ac1: full read, 6.01 s; the red test read 200,021 rows."
     },
     {
-      "criterion": "whoami's event_head is final: a page that resumes its first feed from it misses no event committed below it; and whoami's wait (architect's item 2).",
-      "surface": "GET /auth/whoami, then a /ws/live events subscription resumed from its event_head",
-      "command": "adv.py whoami head|base; whoami_poll.py during run-step.sh t11-{before,after}-1x --events 4 --sessions 400 --requests 60 on INFRA-589's harness",
-      "observed": "No writer: event_head = max id, 3 to 22 ms. A transaction in another database held: no wait, 4 ms. A writer in Dispatch's database open (id 123) with 124 committed: whoami waited 2,289 ms and answered 122; resumed from 122, the page got 123 and then 124 after the writer committed, with replay_complete. A writer that commits 0.5 s later: answered 126 in 577 ms. Under 1x load (78 polls over 150 s): whoami p50 1,350 ms, p90 3,321 ms, max 4,085 ms, against main's p50 1,127, p90 3,124, max 3,937 ms (90 polls). 34 of 78 calls hit the 2 s bound and answered the proven horizon, 32 events below the newest on average (61 at most), so the page replays a few dozen more events.",
-      "headSha": "ff684ac1066f",
-      "negativeControl": "Main 1f5b0828: event_head 124 at once while 123 was open; the page resumed from 124 never got 123."
+      "criterion": "whoami answers at once with a write of this database open, below that write's id; a page resumed from it misses nothing.",
+      "surface": "GET /auth/whoami, then a /ws/live subscription resumed from event_head",
+      "command": "adv.py whoami head",
+      "observed": "No writer: event_head = max id, 3 to 21 ms. A transaction in another database held: 4 ms. A write open (id 123) with 124 committed: answered 122 in 7 ms (round 11: 2,289 ms); resumed from 122, the page got 123 and 124 after the write committed. A write committing 0.5 s later: answered 124 in 5 ms, below the open 125.",
+      "headSha": "28d06c208d98",
+      "negativeControl": "Main 1f5b0828 (round 11, same driver): answered 124 while 123 was open, and the page never got 123."
     },
     {
-      "criterion": "A reader resuming from a cursor never misses an event that commits later with a lower id; replay_complete keeps its promise on the socket (architect's item 3).",
-      "surface": "/ws/live events subscriptions, one and two processes; newly started processes; a replaced log",
-      "command": "adv.py ooo commit|rollback; concurrent; STREAM_PORT=17778 concurrent; replay; fresh resume|cold; firstcursor 0|3; replay_reset; stall; lastid; shutdown",
-      "observed": "123 open and 124 committed: nothing was sent, then 123 and 124; on rollback only 124, 17 ms after. 92 concurrent ids arrived in order on 3 subscriptions and a resume, on one process and across two. replay_complete true on a resume at the head, head-5 and 0 (the whole log, equal to the database), false on cold and above the head, and true with 123 still delivered when it was open. A non-numeric or overflowing since is refused with an INVALID_FRAME error frame. After a replaced log, a resume, a cold subscription and a resume from 0 each opened on the new log; only the last carried replay_complete. On a fresh process with an id held elsewhere, the first cold and resuming subscriptions got the event committed during the wait 0.13 to 0.31 s after the holder ended. On a fresh process, events_start waits for the relay's start while the socket heartbeats; the page's live-socket.ts has no deadline on it. Shutdown with a waiting subscription: exit in 1.06 s.",
-      "headSha": "ff684ac1066f",
-      "negativeControl": "Main 1f5b0828: 124 at once and never 123; each concurrent subscription missed 10 committed ids; replay_complete true while 123 open, and 123 never sent."
-    },
-    {
-      "criterion": "The global serialization is gone; load before and after.",
-      "surface": "REST API; INFRA-589's harness at 1x, seeded with main 1f5b0828",
-      "command": "adv.py lock; run-step.sh t11-{before,after}-1x --events 4 --sessions 400 --requests 60",
-      "observed": "POST on a third issue 201 in 17 ms with the old lock held. 1x: commit-order lock held 100% (47 waiting) -> 0%; committed 3.97 -> 3.99 of 3.99; comment write p50 13.9 s -> 1.36 s; NATS delivery from arrival p50 14.5 s -> 1.8 s; feed frame after the write's response p50 0.67 -> 0.75 s; 2xx 100% both; 0 order violations.",
-      "headSha": "ff684ac1066f",
-      "negativeControl": "Main: no answer within 8 s with the old lock held."
-    },
-    {
-      "criterion": "Connection count 89 against main's code (architect's item 4).",
-      "surface": "store/pool.go and infra/gcp/dispatch.go at the head and at main a1a134a3; a running process",
-      "command": "grep the constants; adv.py conns 15",
-      "observed": "Main: 64 + 4 + 1 + 13 (the thirteenth lease connection) + 1 + 1 + 3 = 87 = main's dispatchConnectionsPerPod. Head: the same plus horizonPoolSize 2 = 89 = ConnectionsPerProcess = dispatchConnectionsPerPod = running-dispatch.md:373. One process under 150 concurrent clients and 5 subscriptions peaked at 78 backends.",
-      "headSha": "ff684ac1066f",
-      "negativeControl": "Main's sum 87 holds no horizon pool."
+      "criterion": "Order, replay_complete and resets on the socket; the old lock; references; NATS order.",
+      "surface": "/ws/live and the REST API on one and two processes",
+      "command": "adv.py ooo commit|rollback; concurrent; lastid; stall; nats; lock; refs_open; replay; fresh resume|cold; replay_reset",
+      "observed": "As in round 11: 123 then 124 after an out-of-order commit, only 126 on a rollback; 92 concurrent ids in order on 3 subscriptions and a resume; replay_complete only on a resume at or below the head; bad since values refused INVALID_FRAME; fresh-process subscriptions with another database's id held got the event 0.17 to 0.20 s after its holder ended; after a replaced log all three subscriptions opened on the new log; old lock: comment POST 201 in 18 ms.",
+      "headSha": "28d06c208d98",
+      "negativeControl": "Main 1f5b0828 (round 11): 124 at once and never 123; 10 ids missed per concurrent subscription; the old lock blocked the POST 8 s."
     }
   ],
-  "ci": "Read at about 16:45Z, recorded here only. At ff684ac1 every lane is green except envoy-go and ci-ok (queued). Green lanes include dispatch (with the browser suite), dispatch-browser-multiprocess, dispatch-multiprocess, envoy-go-race, envoy-e2e-local, lint, typecheck and test. envoy-go failed only on TestTwoAnnouncersAtOnceAnnounceAndPublishOnce (internal/dispatch/startup, 'FleetCommit = <nil>'; https://github.com/sjawhar/legion/actions/runs/40892165062/job/123522911680), a package this PR does not touch. dispatch://INFRA-747 tracks it as a chance failure seen on other pull requests, so it is recorded as main's; a re-run of that job clears it for the merge. Main's other known red, close-withdraws-asks.e2e.ts:126, passed here.",
-  "risks": [
-    "Under 1x load, whoami waits its full 2 s bound in 34 of 78 calls before answering, which adds to every page load's sign-in check. Within the implementer's stated bound; the architect's call."
+  "notRun": [
+    "The 1x load step with the whoami poller. Another role's load-test stack holds this pod's harness ports (15432, 15433, 14222, 19120) and runs on the same 2 CPUs, so a run now would bias both. The connection count is unchanged since round 11 (89): store/pool.go and infra/gcp/dispatch.go are not in 28d06c20's diff."
   ]
 }
