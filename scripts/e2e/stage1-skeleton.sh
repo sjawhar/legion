@@ -148,7 +148,7 @@ bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" | sed 's/^/   
 if [ -z "${LEGION_E2E_PG_DSN:-}" ]; then
   docker ps >/dev/null # a broken docker is a failure of this run, not of the daemon
   # ghcr.io/sjawhar/legion/ci, the copy of postgres:16 (.github/ci-images.yaml)
-  docker run -d --name "$container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql/data \
+  docker run -d --name "$container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
     -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion \
     -e POSTGRES_DB=legion -p 127.0.0.1::5432 ghcr.io/sjawhar/legion/ci@sha256:1beaa3084eee2676f20a9cd9928f0bf2c5bf674f8e49f81017912183d377c61c >/dev/null
   # Over TCP, not the container's unix socket: the entrypoint's bootstrap phase answers on the

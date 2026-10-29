@@ -240,3 +240,49 @@ never a fixed number of milliseconds.
 ```bash
 DISPATCH_BENCH_DATABASE_URL=<copy> packages/envoy/scripts/search-latency-compare.sh <base-checkout> [rounds]
 ```
+
+## Measuring the related-item check on a project's duplicates
+
+`related-recall.sh` copies one project's pairs of issues closed one into the other, and every other
+issue of the project they compete with, from a Dispatch server into a JSONL file, for
+`TestRelatedRecallOnDuplicates` (`internal/dispatch/api`). A pair is a done issue whose close
+reason names one other issue that covers it: `Duplicate of`, `Duplicate:`, `Folded into`,
+`Covered by` or `Superseded by`, in any case, followed by a Dispatch issue reference
+(a Dispatch link to `<KEY>`, a bare `<KEY>` of one of the server's projects, or an `/issues/<KEY>` link).
+The close reason is the issue's last top-level message posted at or before its close, the message
+`dispatch issue-update --status done --reason` posts just before the close; the `issue.closed`
+event carries no reason. A reason naming only a pull request, several issues or the issue itself
+is not a pair. Two closes naming the same two issues make one pair, by the first close.
+
+Each pair's query is its later-filed issue as filed: its first title and first spec version. That
+is the closed issue when the issue its reason names came first (forward), and the named issue
+when that came later (reversed). The target, the issue the check should list, is the earlier one,
+its title and spec as of the query's filing. Pairs naming another project's issue, or one that
+does not exist, are counted and left out. It reads with the caller's own token, sends only
+`GET`s, one at a time, and prints counts only: done issues read, close reasons with a wording,
+those that are not a pair by what they name (`no_reference` is a wording followed by no issue or
+pull request), pairs found and kept per wording with forward and reversed, pairs left out by
+reason, chains (a pair's named issue itself closed into another), and issues copied.
+
+```bash
+DISPATCH_URL=<server> DISPATCH_TOKEN_FILE=<token file> \
+  packages/envoy/scripts/related-recall.sh <project> "$TMPDIR/recall.jsonl"
+```
+
+The file is production data: it is written with mode 600 and never committed. The test loads it
+into a fresh test database, every issue open, under its own key, with its latest title and spec.
+For each pair it sets the target's title and spec to their text at the query's filing, takes the
+query out of the search, refreshes the term statistics, runs the check's old 40-word OR query and
+its keyword search over the query's text, then puts both issues back. It prints each pair's
+wording, direction, the target's rank in each search and whether each lists it among its three
+related items, then the counts per wording and over every pair. An idf-weighted coordination rank
+of the same terms is printed beside them as an experiment. `DISPATCH_RECALL_REQUIRE_NO_LOSS=1`
+fails it if the keyword search lists fewer targets than the old query.
+`TestRelatedCheckLatencyOnRecallCorpus` loads the same corpus and prints the keyword search's p50,
+p95 and max over 20 runs for the text of the issue `DISPATCH_RECALL_LATENCY_ISSUE` names and for a
+10,000-word spec, and the refresh's duration.
+
+```bash
+cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<test database> DISPATCH_RECALL_CORPUS="$TMPDIR/recall.jsonl" \
+  go test ./internal/dispatch/api -run 'TestRelatedRecallOnDuplicates|TestRelatedCheckLatencyOnRecallCorpus' -v -count=1 -timeout 60m
+```
