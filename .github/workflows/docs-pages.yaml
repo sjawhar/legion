@@ -5,6 +5,12 @@ name: Docs (main)
 # which holds those steps once. Pull requests and merge groups call the same workflow from
 # ci.yaml's docs job; this workflow is main's half.
 #
+# A `workflow_dispatch` run starts this workflow on any branch. The build job runs as it does on
+# main, with the `upload-pages-artifact` step that no other caller of docs-site.yaml asks for, so
+# a dispatch of a branch proves that step before the merge. The deploy job runs on main alone
+# (`github.ref`), so a dispatch of a branch deploys nothing to
+# https://sjawhar.github.io/legion/.
+#
 # A workflow of its own, so deployments happen in push order and the site ends at the newest
 # docs-selecting commit's build. A workflow-level concurrency group takes runs in the order they
 # start, and GitHub starts a push's run when the push lands. A job-level group takes jobs in the
@@ -192,6 +198,7 @@ on:
       - 'deploy/kubernetes/**'
       - 'scripts/third-party-notices.ts'
       - '.github/scripts/check-private-names.sh'
+  workflow_dispatch:
 
 # One run at a time, in push order: `queue: max` keeps up to 100 runs waiting in the group, first
 # in, first out, where the default keeps one and replaces it with the next arrival
@@ -223,9 +230,11 @@ jobs:
       save-cache: true
 
   # No concurrency of its own: the workflow's group already holds the next run until this one's
-  # deploy ends.
+  # deploy ends. The if: holds the deployment to main: a workflow_dispatch of a branch builds the
+  # site and uploads the artifact, and publishes nothing to the live site.
   deploy:
     needs: build
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # Publishes the built site to GitHub Pages: pages: write performs the deployment, id-token:

@@ -1,6 +1,6 @@
 name: Install crane
 description: >-
-  Installs crane v0.22.1, the registry client .github/workflows/mirror-images.yaml copies images
+  Installs crane v0.22.1, the registry client .github/scripts/mirror-ci-images.sh copies images
   with, checked against its SHA-256 before it is unpacked, and puts it on PATH for the job's later
   steps.
 runs:

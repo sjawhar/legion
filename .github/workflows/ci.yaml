@@ -3,11 +3,12 @@ name: CI
 # The router: every check a pull request, the merge queue or a push to main runs, in one workflow.
 # Its first job, `changes`, reads the paths the change touched and selects, through one
 # dorny/paths-filter filter per job, the jobs that read those paths; each job runs only when its
-# filter matches (lint runs on every change, and typecheck and test also run when `changes` itself
-# failed). The last job, `ci-ok`, condenses every job's result into one check, the one main's
-# ruleset requires beside pr-title: it fails when a job `changes` selected did not succeed. The
-# docs site's build on a push to main, and its GitHub Pages deploy, are docs-pages.yaml's, a
-# workflow of its own whose header says why; its paths are held to the docs filter below.
+# filter matches (lint and ci-images run on every change, and typecheck and test also run when
+# `changes` itself failed). The last job, `ci-ok`, condenses every job's result into one check,
+# the one main's ruleset requires beside pr-title: it fails when a job `changes` selected did not
+# succeed. The docs site's build on a push to main, and its GitHub Pages deploy, are
+# docs-pages.yaml's, a workflow of its own whose header says why. Its paths are held to the docs
+# filter below.
 #
 # A new job joins the router in six places: a filter in `changes` that names every file the job
 # reads, an output of `changes` for that filter, the job's `needs: changes` and an `if:` on that
@@ -64,8 +65,9 @@ concurrency:
 
 # Read-only: the token clones, downloads pinned tools, and, in `changes`, reads the pull request's
 # file list, which this public repository serves without `pull-requests: read`. The jobs that need
-# more declare it in blocks of their own: lint (what check-pr-text.sh reads) and worker-image (the
-# image push and its attestation's scopes). docs-pages.yaml publishes the site to GitHub Pages.
+# more declare it in blocks of their own: lint (what check-pr-text.sh reads), ci-images (the
+# ghcr.io push its copy makes) and worker-image (the image push and its attestation's scopes).
+# docs-pages.yaml publishes the site to GitHub Pages.
 permissions:
   contents: read
 
@@ -1152,9 +1154,6 @@ jobs:
       - name: Check image triggers cover every image input
         run: .github/scripts/check-image-trigger-paths.sh
 
-      - name: Check every image a CI job fetches is a row of .github/ci-images.yaml
-        run: .github/scripts/check-ci-images.sh
-
       - name: Check every remote action is pinned to a commit SHA
         run: .github/scripts/check-action-pins.sh
 
@@ -1285,6 +1284,38 @@ jobs:
             ~/.cache/go-build
             ~/.cache/legion
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
+
+  # Copies every row .github/ci-images.yaml names into ghcr.io/sjawhar/legion/ci, then checks the
+  # two sides against each other. The order is the point: the check reads the package, and it
+  # fails a row the package does not hold, so the copy for this change runs first. Reading the
+  # whole tree, it runs on every non-draft run, as lint does. mirror-images.yaml runs the same
+  # copy on a push to main.
+  ci-images:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # packages: write is the ghcr.io push `crane copy` makes.
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/install-crane
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Copy every image the package does not hold
+        run: .github/scripts/mirror-ci-images.sh
+
+      - name: Check every image a CI job fetches is a row of .github/ci-images.yaml
+        run: .github/scripts/check-ci-images.sh
 
   # lint, typecheck and test keep the names main's ruleset required before ci-ok existed. Each
   # covers the shipped daemon (packages/daemon, the Go `legion`). Fail-open: when `changes` did not
@@ -1423,6 +1454,9 @@ jobs:
 
       - name: Test the CI image check
         run: .github/scripts/check-ci-images.test.sh
+
+      - name: Test the CI image mirror
+        run: .github/scripts/mirror-ci-images.test.sh
 
       - name: Test the action pin check
         run: .github/scripts/check-action-pins.test.sh
@@ -2799,16 +2833,18 @@ jobs:
 
   # The one check that condenses every job above into a verdict: .github/scripts/ci-ok.sh, whose
   # header says what it decides and why. It passes only when `changes` succeeded (it selected the
-  # jobs from this head's diff), lint succeeded, every job `changes` selected succeeded, and every
-  # job it did not select succeeded or was skipped. A selected job's skip fails: a skipped job
-  # reports success, and a failed-only re-run of a run whose `changes` failed can make `changes`
-  # succeed and leave the jobs it selects skipped. SELECTED_BY maps every needed job but `changes`
-  # and lint to the output its `if:` tests, and PULL_REQUEST_ONLY lists the jobs whose `if:` also
-  # admits only pull_request; check-ci-filters.sh holds both to those `if:`s.
+  # jobs from this head's diff), lint and ci-images succeeded (both run on every change), every
+  # job `changes` selected succeeded, and every job it did not select succeeded or was skipped. A
+  # selected job's skip fails: a skipped job reports success, and a failed-only re-run of a run
+  # whose `changes` failed can make `changes` succeed and leave the jobs it selects skipped.
+  # SELECTED_BY maps every needed job but those three to the output its `if:` tests, and
+  # PULL_REQUEST_ONLY lists the jobs whose `if:` also admits only pull_request;
+  # check-ci-filters.sh holds both to those `if:`s.
   ci-ok:
     needs:
       - changes
       - lint
+      - ci-images
       - typecheck
       - test
       - docs

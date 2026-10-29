@@ -4,8 +4,10 @@
 # under test did not cause. Every image a CI job of this repository fetches is therefore one copy
 # in one package this repository publishes, ghcr.io/sjawhar/legion/ci, and every reference names
 # that copy by digest. .github/ci-images.yaml holds one row per distinct upstream image, and
-# .github/workflows/mirror-images.yaml copies the rows the package does not hold yet with
-# `crane copy`, which keeps the manifest digest. This check holds the two sides to each other.
+# .github/scripts/mirror-ci-images.sh copies the rows the package does not hold yet with
+# `crane copy`, which keeps the manifest digest. ci.yaml's ci-images job runs that script and
+# then this check, in that order. .github/workflows/mirror-images.yaml runs the script on a push
+# to main. This check holds the two sides to each other.
 #
 # It fails, naming the file, the line and the remedy, on:
 #
@@ -40,8 +42,11 @@
 # A REFERENCE in those files is one of:
 #   * a job's `services:` or `container:` image, read from the parsed YAML, never grepped;
 #   * a buildx `driver-opts` `image=` value;
-#   * a `FROM` argument, continuations joined. A `FROM` naming an earlier stage of the same
-#     Dockerfile, or an `ARG` the Dockerfile declares, is not a reference;
+#   * a `FROM` argument, continuations joined, with each `ARG`'s default substituted into it.
+#     Docker builds `FROM` the default when no `--build-arg` overrides it, so the default is the
+#     image the build fetches. A `FROM` naming an earlier stage of the same Dockerfile is not a
+#     reference. A `FROM` on a variable the Dockerfile declares with no default anywhere is not
+#     one either: whoever runs the build passes that value, so no image can be read here;
 #   * the image a `docker pull`, `docker run` or `docker create` fetches, in a `run:` script or a
 #     shell file. Every literal reference the command holds is read. A command holding none must
 #     name a variable this check can follow: one the same file assigns a literal reference to, or
@@ -73,11 +78,13 @@
 # the four index and manifest media types. CI_IMAGES_MANIFEST_HEAD is the seam that read hangs
 # on: when it is set, this check runs `"$CI_IMAGES_MANIFEST_HEAD" <digest>` once per row instead
 # and reads the HTTP status code the command prints on stdout (200 = the package holds the
-# digest, 404 = it does not). check-ci-images.test.sh sets it to a small script of its own, so no
-# case of that test reaches the network.
+# digest, 404 = it does not). check-ci-images.test.sh sets it to a small script of its own, and
+# mirror-ci-images.test.sh drives this rule with it over the repository's own rows, so no case of
+# either test reaches the network.
 #
 # Run from anywhere: .github/scripts/check-ci-images.sh
-# CI runs it in ci.yaml's lint job, and its tests in ci.yaml's test job.
+# CI runs it in ci.yaml's ci-images job, after that job's copy, and its tests in ci.yaml's test
+# job.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -189,10 +196,11 @@ FETCHES_NOTHING = "a CI job runs it, and it fetches nothing"
 
 # Every file outside the reach that may name mirror.gcr.io, and the one ground that admits it.
 # `no CI job runs it`: the devbox live proofs and their libraries, the compose files, the
-# walkthrough recorder and documentation. `a CI job runs it, and it fetches nothing`: a script a
-# CI job runs whose mirror.gcr.io text no job ever hands to a registry — dev-postgres.test.sh,
-# which the envoy-go job runs, installs a fake `docker` on PATH, and check-bun-version.test.sh
-# writes its references into fixture files under a temporary directory.
+# walkthrough recorder, the corpus copy a developer restores on a devbox, and documentation.
+# `a CI job runs it, and it fetches nothing`: a script a CI job runs whose mirror.gcr.io text no
+# job ever hands to a registry — dev-postgres.test.sh, which the envoy-go job runs, installs a
+# fake `docker` on PATH, and check-bun-version.test.sh writes its references into fixture files
+# under a temporary directory.
 EXCEPTIONS = {
     "AGENTS.md": NO_CI_JOB,
     "docs/kubernetes.md": NO_CI_JOB,
@@ -203,6 +211,7 @@ EXCEPTIONS = {
     "docs/solutions/testing/a-docker-run-line-is-proven-from-a-pod-with-no-container-runtime-as-a-two-container-job-whose-client-ships-in-the-image-pr2498.md": NO_CI_JOB,
     "packages/envoy/deploy/compose/dispatch.acceptance.compose.yml": NO_CI_JOB,
     "packages/envoy/deploy/compose/single-node.compose.yml": NO_CI_JOB,
+    "packages/envoy/scripts/corpus-copy.sh": NO_CI_JOB,
     "scripts/e2e/README.md": NO_CI_JOB,
     "scripts/e2e/burstable-kind.sh": NO_CI_JOB,
     "scripts/e2e/claude-backend-sandbox.sh": NO_CI_JOB,
@@ -220,7 +229,6 @@ EXCEPTIONS = {
     "scripts/e2e/verifiers-staging-token.sh": NO_CI_JOB,
     ".github/scripts/check-bun-version.test.sh": FETCHES_NOTHING,
     "packages/daemon/internal/testpg/testpg.go": FETCHES_NOTHING,
-    "packages/envoy/scripts/corpus-copy.sh": FETCHES_NOTHING,
     "packages/envoy/scripts/dev-postgres.sh": FETCHES_NOTHING,
     "packages/envoy/scripts/dev-postgres.test.sh": FETCHES_NOTHING,
 }
@@ -612,9 +620,23 @@ def scan_shell(path: Path, text: str, first: int, lines: list[str]) -> None:
             )
 
 
+def expand(text: str, defaults: dict[str, str]) -> str:
+    """`text` with each ARG default substituted for its variable. The substitution repeats,
+    because a default can name another ARG. The bound stops a default that names itself."""
+    for _ in range(10):
+        grown = VARIABLE.sub(lambda found: defaults.get(found.group(1), found.group(0)), text)
+        if grown == text:
+            break
+        text = grown
+    return text
+
+
 def scan_dockerfile(path: Path, lines: list[str]) -> None:
-    """Rules 4, 5 and 6 over a Dockerfile: every FROM that is not an earlier stage or an ARG."""
-    args: set[str] = set()
+    """Rules 4, 5 and 6 over a Dockerfile: every FROM, read with the ARG defaults substituted
+    into it. A FROM naming an earlier stage of the same Dockerfile is not a reference, and
+    neither is a FROM on a variable the Dockerfile declares with no default anywhere."""
+    defaults: dict[str, str] = {}
+    declared: set[str] = set()
     stages: set[str] = set()
     for line, command in shell_lines("\n".join(lines), 1):
         words = command.split()
@@ -622,7 +644,12 @@ def scan_dockerfile(path: Path, lines: list[str]) -> None:
             continue
         verb = words[0].upper()
         if verb == "ARG" and len(words) > 1:
-            args.add(words[1].partition("=")[0])
+            name, equals, value = words[1].partition("=")
+            declared.add(name)
+            # A stage re-declares an ARG by name to carry the global default into that stage, so
+            # a re-declaration with no `=` keeps the default the first declaration gave.
+            if equals:
+                defaults[name] = unquote(value)
             continue
         if verb != "FROM":
             continue
@@ -638,15 +665,25 @@ def scan_dockerfile(path: Path, lines: list[str]) -> None:
             stages.add(rest[2].lower())
         if image.lower() in stages:
             continue
-        names = VARIABLE.findall(image)
-        if names:
-            unknown = [name for name in names if name not in args]
+        if VARIABLE.search(image):
+            resolved = expand(image, defaults)
+            left = sorted(set(VARIABLE.findall(resolved)))
+            unknown = [name for name in left if name not in declared]
             if unknown:
                 problems.append(
                     f"{path}:{line}: this FROM reads {one_line(image)}, whose "
-                    f"{', '.join(sorted(unknown))} this Dockerfile does not declare as an ARG, "
+                    f"{', '.join(unknown)} this Dockerfile does not declare as an ARG, "
                     f"so the image it builds on cannot be read here."
                 )
+                continue
+            if left:
+                # Each variable left is one the Dockerfile declares with no default anywhere.
+                # Whoever runs the build passes it with --build-arg, so this FROM names no image
+                # to read (packages/envoy/infra/host/heldportwrapper/Dockerfile is that case).
+                continue
+            if resolved.lower() in stages:
+                continue
+            note(path, line, resolved, f"this FROM, which the ARG defaults make {resolved},")
             continue
         note(path, line, image, "this FROM")
 

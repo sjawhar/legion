@@ -4,9 +4,9 @@
 #
 # One row per distinct upstream image. Each row holds:
 #
-#   upstream  the reference .github/workflows/mirror-images.yaml copies from: the image's own
-#             Docker Hub reference. The copy runs only when this file changes, so the one place
-#             this repository reads Docker Hub is a workflow that runs a few times a year.
+#   upstream  the reference .github/scripts/mirror-ci-images.sh copies from: the image's own
+#             Docker Hub reference. That script copies only a row the package does not hold, so
+#             this repository reads Docker Hub a few times a year.
 #   tag       the copy's tag in the package. A tag keeps the manifest from being a package
 #             version nothing names, which a retention policy may remove. The rule is the
 #             upstream repository's last path element, then the upstream tag, or the first eight
@@ -14,9 +14,10 @@
 #   digest    the manifest digest. `crane copy` keeps it, so the copy's digest and the upstream's
 #             are one string, and every consumer names this digest.
 #
-# To add an image, or to move one to a new version: add or edit its row and push. The mirror
-# workflow publishes the rows the package does not hold yet, and .github/scripts/check-ci-images.sh
-# refuses a consumer that names anything but a digest this file holds.
+# To add an image, or to move one to a new version: add or edit its row and push. ci.yaml's
+# ci-images job copies the rows the package does not hold yet, and then runs the gate, which
+# reads the package. .github/workflows/mirror-images.yaml copies them again on a push to main.
+# The gate refuses a consumer that names anything but a digest this file holds.
 #
 # .github/scripts/check-ci-images.sh is the gate. It reads this file and every file a CI job
 # runs, and its header says what it refuses.
