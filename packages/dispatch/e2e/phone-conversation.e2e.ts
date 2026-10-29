@@ -42,6 +42,34 @@ async function leaveThread(page: Page): Promise<void> {
   await expect(threadView(page)).toHaveCount(0);
 }
 
+/** The page's network, taken away and given back. While it is away every opening of the live
+ *  socket is refused, as a real outage refuses it: Playwright's WebKit keeps a WebSocket's
+ *  handshake on the network through `setOffline`, so without the refusal the page's next opening,
+ *  which the backoff makes within the first attempt's spread, succeeds there while the page is
+ *  offline and the pill leaves. Routed before the page loads, so every opening goes through it. */
+async function pageNetwork(
+  page: Page
+): Promise<{ offline: () => Promise<void>; online: () => Promise<void> }> {
+  let away = false;
+  await page.routeWebSocket(/\/ws\/live$/u, async (route) => {
+    if (away) {
+      await route.close({ code: 1006, reason: "the network is down" });
+      return;
+    }
+    route.connectToServer();
+  });
+  return {
+    offline: async () => {
+      away = true;
+      await page.context().setOffline(true);
+    },
+    online: async () => {
+      away = false;
+      await page.context().setOffline(false);
+    },
+  };
+}
+
 /** Scrolls the page to its foot, past the latest turn, as a reader browsing older turns does. */
 async function scrollToOldest(page: Page): Promise<void> {
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
@@ -690,6 +718,7 @@ test("on a phone, the connection pill covers none of the docked composer @phone"
 
   try {
     const page = await alice.newPage();
+    const network = await pageNetwork(page);
     await page.setViewportSize(narrow);
     await page.goto(`/issues/${issue.key}/conversation`);
     const form = page.getByRole("form", { name: "Comment composer" });
@@ -700,7 +729,7 @@ test("on a phone, the connection pill covers none of the docked composer @phone"
     refuse();
     await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
 
-    await alice.setOffline(true);
+    await network.offline();
     await expect(pill).toHaveText("Reconnecting…");
     await expectUncovered(pill, form);
     await page.setViewportSize(phone);
@@ -708,7 +737,7 @@ test("on a phone, the connection pill covers none of the docked composer @phone"
     await page.setViewportSize(narrow);
     await expectUncovered(pill, form);
 
-    await alice.setOffline(false);
+    await network.online();
     await expect(pill).toHaveCount(0);
   } finally {
     await alice.close();
@@ -776,6 +805,7 @@ test("on a phone, the connection pill covers none of a thread's composers @phone
 
   try {
     const page = await alice.newPage();
+    const network = await pageNetwork(page);
     await page.setViewportSize(narrow);
     await page.goto(`/issues/${issue.key}/conversation`);
     const thread = await openThread(page, root.id);
@@ -790,10 +820,10 @@ test("on a phone, the connection pill covers none of a thread's composers @phone
     await threadForm.getByRole("button", { exact: true, name: "Send" }).click();
     refuse();
     await expect(threadForm.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
-    await alice.setOffline(true);
+    await network.offline();
     await expect(pill).toHaveText("Reconnecting…");
     await expectUncovered(pill, threadForm);
-    await alice.setOffline(false);
+    await network.online();
     await expect(pill).toHaveCount(0);
 
     // Cancel reply gives the thread back its card's own reply, which a refusal grows too.
@@ -804,12 +834,12 @@ test("on a phone, the connection pill covers none of a thread's composers @phone
     await cardForm.getByRole("textbox", { name: "Reply" }).fill("A reply\nover\nfour lines");
     await cardForm.getByRole("button", { exact: true, name: "Send" }).click();
     await expect(cardForm.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
-    await alice.setOffline(true);
+    await network.offline();
     await expect(pill).toHaveText("Reconnecting…");
     await expectUncovered(pill, cardForm);
     await page.setViewportSize(phone);
     await expectUncovered(pill, cardForm);
-    await alice.setOffline(false);
+    await network.online();
     await expect(pill).toHaveCount(0);
   } finally {
     await alice.close();

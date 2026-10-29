@@ -8,6 +8,7 @@ import (
 	"maps"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -76,8 +77,30 @@ func TestRepairingAnUnreadableAskBlockCountsTheAskItOpens(t *testing.T) {
 		`select count(*) from asks where block_artifact_id = $1 and state = 'open'`, artifactID).Scan(&open); err != nil {
 		t.Fatal(err)
 	}
-	if open != 1 || outcome.AskBlocksAdded != open {
-		t.Fatalf("repair opened %d ask(s), reported %d", open, outcome.AskBlocksAdded)
+	if open != 1 || len(outcome.AddedAskBlocks) != open {
+		t.Fatalf("repair opened %d ask(s), reported %d", open, len(outcome.AddedAskBlocks))
+	}
+	if !slices.Equal(outcome.AddedAskBlocks, []AddedAskBlock{{ID: "ttl", Question: "Which cache TTL?"}}) {
+		t.Fatalf("repair named added blocks %+v, want ttl and its question", outcome.AddedAskBlocks)
+	}
+}
+
+// An edit names the ask blocks it added in document order, each with its question, whatever
+// their ids' order; a block already in the document is not among them.
+func TestEditNamesTheAddedAskBlocksInDocumentOrder(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#held urgency=\"med\"}\nWhich region?\n:::\n")
+	outcome, err := joinedApplyOps(service, artifactID, []model.EditOp{{
+		Op: "insert", After: "end",
+		Markdown: ":::ask{#zeta}\nWhich deployment window?\n:::\n\n> :::ask{#alpha}\n> Which cache TTL?\n> :::",
+	}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
+	if err != nil {
+		t.Fatalf("insert ask blocks: %v", err)
+	}
+	want := []AddedAskBlock{{ID: "zeta", Question: "Which deployment window?"}, {ID: "alpha", Question: "Which cache TTL?"}}
+	if !slices.Equal(outcome.AddedAskBlocks, want) {
+		t.Fatalf("edit named %+v, want %+v", outcome.AddedAskBlocks, want)
 	}
 }
 func TestEditingBesideAnUnreadableAskBlockAddsNoAsk(t *testing.T) {
@@ -101,8 +124,8 @@ func TestEditingBesideAnUnreadableAskBlockAddsNoAsk(t *testing.T) {
 		`select count(*) from asks where block_artifact_id = $1 and state = 'open'`, artifactID).Scan(&open); err != nil {
 		t.Fatal(err)
 	}
-	if open != 0 || outcome.AskBlocksAdded != open {
-		t.Fatalf("edit beside unreadable ask opened %d ask(s), reported %d", open, outcome.AskBlocksAdded)
+	if open != 0 || len(outcome.AddedAskBlocks) != open {
+		t.Fatalf("edit beside unreadable ask opened %d ask(s), reported %d", open, len(outcome.AddedAskBlocks))
 	}
 }
 
@@ -159,6 +182,50 @@ func TestSettlementIndexesRetractsAndRestoresTypedAskBlocks(t *testing.T) {
 	}
 	if state != "open" {
 		t.Fatalf("restored ask state=%q, want open", state)
+	}
+}
+
+// An ask's question and options are caller text, which the ask's edit writes into the block as
+// plain text and reads back through the document's own markdown pipeline. Text holding a web
+// address - after a space, after a letter and `;`, with a lowercase scheme - is written, settles,
+// and its row reads back as written, whether or not a reader takes the address for a link
+// (INFRA-531).
+func TestAnAskWhoseTextHoldsWebAddressesSettlesAsWritten(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#hosts urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich host?\n\n- A: First\n:::\n")
+	settleCurrentGeneration(t, service, artifactID)
+	question := "Which host, see https://x.test\n\nx;https://x.test\n\nor see http://x.test"
+	options := []model.AskOption{
+		{Label: "Secure", Description: "see https://x.test"},
+		{Label: "x;https://x.test"},
+		{Label: "Plain", Description: "see http://x.test"},
+	}
+	var stored AskBlockText
+	if err := joinedWrite(service, func(ctx context.Context) (err error) {
+		stored, err = service.SetAskBlockText(ctx, artifactID, "hosts", AskBlockEdit{Question: &question, Options: &options},
+			model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
+		return err
+	}); err != nil {
+		t.Fatalf("write the ask's text: %v", err)
+	}
+	if stored.Question != question || !reflect.DeepEqual(stored.Options, options) {
+		t.Fatalf("the block reads back question=%q options=%#v, want what was written", stored.Question, stored.Options)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	var settled string
+	var optionsJSON []byte
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select question, options from asks where block_artifact_id = $1 and block_id = 'hosts' and state = 'open'
+	`, artifactID).Scan(&settled, &optionsJSON); err != nil {
+		t.Fatalf("read the settled ask: %v", err)
+	}
+	var settledOptions []model.AskOption
+	if err := json.Unmarshal(optionsJSON, &settledOptions); err != nil {
+		t.Fatalf("decode the settled options: %v", err)
+	}
+	if settled != question || !reflect.DeepEqual(settledOptions, options) {
+		t.Fatalf("the settled ask holds question=%q options=%#v, want what was written", settled, settledOptions)
 	}
 }
 
