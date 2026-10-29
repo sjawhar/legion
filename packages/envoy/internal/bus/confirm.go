@@ -148,12 +148,26 @@ func confirmPublished(conn *nats.Conn, subject string, before connState) error {
 	if sameError(after.lastError, before.lastError) {
 		return nil
 	}
-	if errors.Is(after.lastError, nats.ErrPermissionViolation) &&
-		strings.Contains(after.lastError.Error(), fmt.Sprintf("Publish to %q", subject)) {
-		return fmt.Errorf("bus: %w to %q: %w", ErrPublishDenied, subject, after.lastError)
+	if denied := publishDenial(after.lastError, subject); denied != nil {
+		return denied
 	}
 	return fmt.Errorf("bus: %w: NATS reported an error during the publish to %q: %w",
 		errPublishUnconfirmed, subject, after.lastError)
+}
+
+// publishDenial names err as ErrPublishDenied when it is the server's refusal of a publish to
+// subject under the connection's own publish permissions, and nil when it is anything else. A core
+// publish reads it off the last error the connection recorded across the publish and its flush
+// (confirmPublished). A JetStream publish the server refuses is acknowledged by nothing: the
+// -ERR reaches the connection's async error handler alone, and the publish's own answer is
+// nats.ErrAsyncPublishTimeout a publish window later, so the connection's last error is the only
+// evidence that the denial is what the publish came to (window.acknowledged).
+func publishDenial(err error, subject string) error {
+	if errors.Is(err, nats.ErrPermissionViolation) &&
+		strings.Contains(err.Error(), fmt.Sprintf("Publish to %q", subject)) {
+		return fmt.Errorf("bus: %w to %q: %w", ErrPublishDenied, subject, err)
+	}
+	return nil
 }
 
 // sameError reports whether a and b are the same error value. nats.go records each permissions

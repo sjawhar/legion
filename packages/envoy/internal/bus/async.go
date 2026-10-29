@@ -211,7 +211,7 @@ func (w *window) sendJetStream(item contracts.Envelope, data []byte) (func() err
 		return nil, w.unsent(err, len(data))
 	}
 	return func() error {
-		err := w.acknowledged(future)
+		err := w.acknowledged(future, item.Topic)
 		if !errors.Is(err, ErrNotStored) {
 			return err
 		}
@@ -220,7 +220,7 @@ func (w *window) sendJetStream(item contracts.Envelope, data []byte) (func() err
 		}
 		future, sendErr := w.js.PublishMsgAsync(&nats.Msg{Subject: item.Topic, Data: data})
 		if sendErr == nil {
-			sendErr = w.acknowledged(future)
+			sendErr = w.acknowledged(future, item.Topic)
 		} else {
 			sendErr = w.unsent(sendErr, len(data))
 		}
@@ -231,14 +231,23 @@ func (w *window) sendJetStream(item contracts.Envelope, data []byte) (func() err
 	}, nil
 }
 
-// acknowledged waits for future's acknowledgement and names what it came to: nil for a message the
-// stream stored or holds, ErrNotStored, ErrUnavailable when the connection failed or NATS gave no
-// answer, or the server's refusal, a full stream's as ErrStreamFull.
-func (w *window) acknowledged(future nats.PubAckFuture) error {
+// acknowledged waits for future's acknowledgement of a publish to topic and names what it came to:
+// nil for a message the stream stored or holds, ErrNotStored, ErrPublishDenied for a publish the
+// server refused under the connection's own publish permissions, ErrUnavailable when the
+// connection failed or NATS gave no answer, or the server's refusal, a full stream's as
+// ErrStreamFull.
+func (w *window) acknowledged(future nats.PubAckFuture, topic string) error {
 	select {
 	case ack := <-future.Ok():
 		return notStored(ack)
 	case err := <-future.Err():
+		// A denied publish is acknowledged by nothing, so the connection's last error is the only
+		// evidence of it, and it is read with confirmPublished's documented ambiguity: nats.go
+		// keeps one last error per connection, so a violation of another subject recorded in
+		// between leaves this publish named unavailable instead.
+		if denied := publishDenial(w.conn.LastError(), topic); denied != nil {
+			return denied
+		}
 		if !w.current() || errors.Is(err, nats.ErrDisconnected) || errors.Is(err, nats.ErrAsyncPublishTimeout) ||
 			errors.Is(err, nats.ErrNoResponders) {
 			return fmt.Errorf("bus: %w: %w", ErrUnavailable, err)
