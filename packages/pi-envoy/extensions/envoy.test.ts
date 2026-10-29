@@ -4053,7 +4053,8 @@ console.log(JSON.stringify(args));
         context
       )) as { block?: boolean; reason?: string } | undefined;
 
-      expect(completions).toEqual([MODEL]);
+      // Two calls: the charter's, and the rules check's, which a `dispatch ask` also gets.
+      expect(completions).toEqual([MODEL, MODEL]);
       expect(result?.block).toBe(true);
       expect(result?.reason).toContain("see the message above");
       // The gate's own entries: the session also records replay state at start, which no gate
@@ -4434,7 +4435,7 @@ console.log(JSON.stringify(args));
       await fixture.handlers.get("session_start")?.({}, gateContext(notifications));
 
       expect(notifications).toHaveLength(1);
-      expect(notifications[0]).toContain("the review deadline is 25000 ms");
+      expect(notifications[0]).toContain("the review deadline is 20000 ms");
       expect(notifications[0]).toContain("extensionHandlers.toolCallTimeoutMs");
     }, 30_000);
     // A checkout's file can turn the session's Dispatch off in that checkout, but not the gate: the
@@ -4472,7 +4473,7 @@ console.log(JSON.stringify(args));
         )) as { block?: boolean } | undefined;
 
         expect(result?.block).toBe(true);
-        expect(completions).toEqual([MODEL]);
+        expect(completions).toEqual([MODEL, MODEL]);
       } finally {
         process.chdir(originalCwd);
         rmSync(checkout, { recursive: true, force: true });
@@ -4554,7 +4555,7 @@ console.log(JSON.stringify(args));
         context
       )) as { block?: boolean } | undefined;
       expect(result?.block).toBe(true);
-      expect(completions).toEqual([MODEL]);
+      expect(completions).toEqual([MODEL, MODEL]);
     });
 
     test("a gate that does not load is said at session start and refuses each write it would review, so a load failure is no off switch", async () => {

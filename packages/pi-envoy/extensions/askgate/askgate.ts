@@ -18,7 +18,11 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { selfOwner, setRecordMode } from "@legion/envoy-client/askgate-marker";
+import { activeDispatchSettings } from "@legion/envoy-client/dispatch-config";
+import { dispatchServerUrls } from "@legion/envoy-client/dispatch-execute";
+import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import { sessionDirectory, sessionStateRoot } from "@legion/envoy-client/dispatch-session-state";
+import { sessionDispatchSettings } from "@legion/envoy-client/session-settings";
 import type { PiApi, PiEventContract } from "@legion/pi-shared/pi-types";
 import type { ApiKeyResolver, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import type { ModelLookupRegistry } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -40,12 +44,20 @@ import {
   type ToolCallResult,
   type Usage,
 } from "./askgate-core";
+import type { DispatchSession } from "./rules-check";
 
 /** What the entry hands the gate from its own extension: where the switch lives, and where notices go. */
 export interface AskGateHost {
-  /** The session's envoy.json, named in the notice for an OMP_ASKGATE the gate ignores. */
-  readonly configFile: string;
+  /**
+   * The session's envoy.json, found and read once by the extension that loads the gate: its path is
+   * named in the notice for an OMP_ASKGATE the gate ignores, and its Dispatch section is what the
+   * gate's own reads of a document and its decision records go through.
+   */
+  readonly configFile: { readonly path: string; readonly error: null };
+  /** Where the gate's bind-time warning goes: the host shows it again at each session start. */
   readonly logger: { warn(message: string): void };
+  /** The host's plain log, for a warning one session's gated calls raise while it runs. */
+  readonly runtimeLogger: { warn(message: string): void };
 }
 
 // The core passes the host's objects through untyped: ctx is the ExtensionContext, whose
@@ -91,7 +103,11 @@ export function registerAskGate(pi: PiApi, host: AskGateHost): Promise<void> {
   const gate: Promise<ToolCallHandler> = loading.then(
     (handler) => handler,
     (error: unknown) => {
-      const refuse = loadFailureGate(error, { env: process.env, configFile: host.configFile }, pi);
+      const refuse = loadFailureGate(
+        error,
+        { env: process.env, configFile: host.configFile.path },
+        pi
+      );
       return async (event, ctx) => refuse(event, ctx);
     }
   );
@@ -238,6 +254,23 @@ async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandle
       return { text: "", error: error instanceof Error ? error.message : String(error), usage };
     }
   };
+  /**
+   * The session's Dispatch as the directory the gated command runs in configures it (a checkout's
+   * own `.envoy/envoy.json` names its own server), with the gated call's stop as the signal of
+   * every request, so a stopped run ends the read. `timedDispatchClient` in envoy.ts builds the
+   * session's own client the same way, with a timeout in place of the stop.
+   */
+  const dispatchClient = (directory: string, signal: AbortSignal): DispatchSession | undefined => {
+    const config = activeDispatchSettings(
+      sessionDispatchSettings(host.configFile, process.env, { cwd: directory }).dispatch
+    );
+    return config === null
+      ? undefined
+      : {
+          client: new DispatchClient(config.url, config.token, fetch, signal),
+          serverUrls: dispatchServerUrls(config),
+        };
+  };
 
   // The core binds to a `pi` that keeps its tool_call handler, which the one registered above
   // runs, and passes every other event, and appendEntry, to the real `pi`. The core names its
@@ -258,7 +291,9 @@ async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandle
     home: os.homedir(),
     now: Date.now,
     logger: host.logger,
-    configFile: host.configFile,
+    runtimeLogger: host.runtimeLogger,
+    configFile: host.configFile.path,
+    dispatchClient,
     // The dump holds the primary system prompt and transcript: owner-only, like the session files.
     appendFile: appendDump,
     complete,

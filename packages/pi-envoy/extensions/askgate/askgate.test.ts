@@ -167,7 +167,10 @@ interface BindOptions {
 interface BoundGate {
   handlers: Map<string, Handler>;
   entries: GateEntry[];
+  /** What the host's logger was told at bind: a notice at every session start. */
   warnings: string[];
+  /** What the host's plain log was told while the session ran (`runtimeLogger`), which no later session repeats. */
+  runtimeWarnings: string[];
   notices: string[];
   dumps: Array<[string, string]>;
   calls: CompleteRequest[];
@@ -190,6 +193,7 @@ function bind(opts: BindOptions = {}): BoundGate {
   const handlers = new Map<string, Handler>();
   const entries: GateEntry[] = [];
   const warnings: string[] = [];
+  const runtimeWarnings: string[] = [];
   const notices: string[] = [];
   const dumps: Array<[string, string]> = [];
   const calls: CompleteRequest[] = [];
@@ -227,6 +231,7 @@ function bind(opts: BindOptions = {}): BoundGate {
     home: HOME,
     now: Date.now,
     logger: { warn: (message: string) => warnings.push(message) },
+    runtimeLogger: { warn: (message: string) => runtimeWarnings.push(message) },
     appendFile: (p, text) => dumps.push([p, text]),
     complete: (req) => {
       calls.push(req);
@@ -239,6 +244,9 @@ function bind(opts: BindOptions = {}): BoundGate {
     configFile: CONFIG_FILE,
     contextMessages: () => (opts.context ?? (() => [fx.user("Post the comment.")]))(),
     handlerCeilingMs: () => opts.ceiling ?? 120_000,
+    // No session Dispatch: a document read gives nothing and a decision record is not written,
+    // which is this suite's session (the rules tests bind their own client).
+    dispatchClient: () => undefined,
     dryRun: (script, runOpts) => {
       dryRuns.push({ script, cwd: runOpts.cwd, timeoutMs: runOpts.timeoutMs });
       return (opts.dryRun ?? core.spawnDryRun)(script, runOpts);
@@ -284,6 +292,7 @@ function bind(opts: BindOptions = {}): BoundGate {
     handlers,
     entries,
     warnings,
+    runtimeWarnings,
     notices,
     dumps,
     calls,
@@ -549,7 +558,7 @@ describe("rebuttal (test 3)", () => {
     // The agent's record of its call no longer shows the field; the acknowledgement says why.
     expect(ack).toContain('outcome="rebuttal"');
     expect(ack).toContain('"a link"');
-    expect(ack).toContain("removed before sending");
+    expect(ack).toContain("AskGate removed it before the call ran");
     expect(g.calls).toHaveLength(0);
     expect(g.entries).toMatchObject([
       {
@@ -662,7 +671,7 @@ describe("verdicts", () => {
     const g = bind({ env: { OMP_ASKGATE: "block" }, complete: async () => ({ text: REVISE }) });
     const result = await g.device("t1", "dispatch_comment", COMMENT);
     expect(result?.block).toBe(true);
-    expect(result?.reason).toContain("removed before sending");
+    expect(result?.reason).toContain("the field is removed before the call runs");
     expect(result?.reason).toContain("see the message above");
     expect(result?.reason).toContain("advisor_rebuttal");
     expect(g.entries).toMatchObject([{ decision: "revise", verdictMode: "block" }]);
@@ -812,8 +821,10 @@ describe("untrusted text (security)", () => {
 });
 
 describe("breaker (test 7)", () => {
-  test("two revises on one target trip it for that target only, and the trip resets it", async () => {
-    const g = bind({ complete: async () => ({ text: REVISE }) });
+  // The breaker counts refusals, so these drive it in block mode, where a revise refuses the call;
+  // a warn-mode revise sends it and moves nothing (the test after the next holds that).
+  test("two refusals on one target trip it for that target only, and the trip resets it", async () => {
+    const g = bind({ env: { OMP_ASKGATE: "block" }, complete: async () => ({ text: REVISE }) });
     await g.device("a", "dispatch_comment", { issue: "X-1", body: "one" });
     await g.device("b", "dispatch_comment", { issue: "X-1", body: "two" });
     await g.device("c", "dispatch_comment", { issue: "X-2", body: "other" });
@@ -835,22 +846,24 @@ describe("breaker (test 7)", () => {
     ]);
     expect(g.entries[3].revisesForKey).toBe(2);
   });
-  test("the second revise on a target says the next write to it goes out unreviewed, changed or not, in both modes", async () => {
+  test("the second refusal on a target says the next unchanged resend goes out unreviewed, and a warn-mode revise says nothing of the kind", async () => {
     const SECOND =
-      "This is the second revise on this target: the next write to it, changed or not, is sent without review and recorded.";
+      "This is the second refusal of this call on its target: a third unchanged resend is sent without review and recorded.";
     const block = bind({ env: { OMP_ASKGATE: "block" }, complete: async () => ({ text: REVISE }) });
     const first =
       (await block.device("a", "dispatch_comment", { issue: "X-1", body: "one" }))?.reason ?? "";
     const second =
       (await block.device("b", "dispatch_comment", { issue: "X-1", body: "two" }))?.reason ?? "";
-    expect(first).not.toContain("second revise");
+    expect(first).not.toContain("second refusal");
     expect(second.trimEnd().endsWith(SECOND)).toBe(true);
+    // A warn-mode revise refused nothing, so there is no loop to break and no warning to give.
     const warn = bind({ complete: async () => ({ text: REVISE }) });
     await warn.device("a", "dispatch_comment", { issue: "X-1", body: "one" });
     const context =
       (await warn.device("b", "dispatch_comment", { issue: "X-1", body: "two" }))
         ?.additionalContext ?? "";
-    expect(context).toMatch(new RegExp(`${SECOND.replace(/[.:]/g, "\\$&")}\\n</advisor-gate>$`));
+    expect(context).not.toContain("without review");
+    expect(warn.calls).toHaveLength(2);
   });
   test("the request carries the reasons already given for the target", async () => {
     const g = bind({ complete: async () => ({ text: REVISE }) });
@@ -873,7 +886,7 @@ describe("breaker (test 7)", () => {
     expect(g.calls).toHaveLength(4);
   });
   test("each artifact of one project is its own breaker target", async () => {
-    const g = bind({ complete: async () => ({ text: REVISE }) });
+    const g = bind({ env: { OMP_ASKGATE: "block" }, complete: async () => ({ text: REVISE }) });
     await g.device("a", "dispatch_doc_edit", { project: "P", artifact: "a.md", edits: [] });
     await g.device("b", "dispatch_doc_edit", { project: "P", artifact: "a.md", edits: [] });
     await g.device("c", "dispatch_doc_edit", { project: "P", artifact: "b.md", edits: [] });
@@ -1081,7 +1094,11 @@ describe("a write that passes unreviewed is recorded and said", () => {
     expect(context).toContain("The call ran unreviewed.");
   });
   test("a rebuttal and a breaker trip already say the write went unreviewed", async () => {
-    const g = bind({ hasUI: false, complete: async () => ({ text: REVISE }) });
+    const g = bind({
+      hasUI: false,
+      env: { OMP_ASKGATE: "block" },
+      complete: async () => ({ text: REVISE }),
+    });
     await g.write(
       "r1",
       "xd://dispatch_comment",
@@ -1257,7 +1274,7 @@ describe("deadline and abandonment", () => {
   test("the deadline sits under the runner's handler ceiling, and each entry records it", async () => {
     const defaults = bind({ ceiling: 30_000 });
     await defaults.device("t1", "dispatch_comment", COMMENT);
-    expect(defaults.entries[0].deadlineMs).toBe(25_000);
+    expect(defaults.entries[0].deadlineMs).toBe(20_000);
     const raised = bind({ ceiling: 120_000 });
     await raised.device("t1", "dispatch_comment", COMMENT);
     expect(raised.entries[0].deadlineMs).toBe(90_000);
@@ -1270,7 +1287,7 @@ describe("deadline and abandonment", () => {
   });
   test("a deadline under 30 s binds the gate and logs one warning naming the ceiling, the deadline and the key to raise", async () => {
     const defaults = bind({ ceiling: 30_000 });
-    expect(defaults.warnings).toEqual([expect.stringContaining("review deadline is 25000 ms")]);
+    expect(defaults.warnings).toEqual([expect.stringContaining("review deadline is 20000 ms")]);
     expect(defaults.warnings[0]).toContain("extensionHandlers.toolCallTimeoutMs is 30000 ms");
     expect(defaults.warnings[0]).toContain(
       "Set extensionHandlers.toolCallTimeoutMs to 120000 or more"
@@ -1279,8 +1296,8 @@ describe("deadline and abandonment", () => {
     expect(await defaults.device("t1", "dispatch_comment", COMMENT)).toBeUndefined();
     await defaults.device("t2", "dispatch_comment", { issue: "X-2", body: "two" });
     expect(defaults.entries).toMatchObject([
-      { outcome: "verdict", deadlineMs: 25_000 },
-      { outcome: "verdict", deadlineMs: 25_000 },
+      { outcome: "verdict", deadlineMs: 20_000 },
+      { outcome: "verdict", deadlineMs: 20_000 },
     ]);
     expect(defaults.warnings).toHaveLength(1);
     expect(defaults.notices).toEqual([]);
@@ -1291,7 +1308,7 @@ describe("deadline and abandonment", () => {
     expect(env.warnings[0]).toContain("extensionHandlers.toolCallTimeoutMs is 120000 ms");
     expect(env.warnings[0]).toContain("Set OMP_ASKGATE_TIMEOUT_MS to 30000 or more");
     // At 30 s and over, nothing is logged.
-    expect(bind({ ceiling: 35_000 }).warnings).toEqual([]);
+    expect(bind({ ceiling: 40_000 }).warnings).toEqual([]);
     expect(bind({ ceiling: 120_000 }).warnings).toEqual([]);
   });
   test("a call abandoned by its tool (a user abort, or the runner's ceiling) cancels the model call and never counts toward the halt", async () => {
@@ -1563,7 +1580,8 @@ console.log(JSON.stringify(args, null, 2));
       },
     ]);
     const args = { issue: "X-1", question: QUESTION };
-    expect(g.calls).toHaveLength(1);
+    // Two calls: the charter's, and the rules check's, which every call that opens a new ask gets.
+    expect(g.calls).toHaveLength(2);
     expect(g.calls[0].user).toContain(
       "The agent is about to run `dispatch ask` with these arguments:"
     );
@@ -2284,7 +2302,10 @@ console.log(JSON.stringify(args, null, 2));
     const command = `dispatch ask --issue X-1 --advisor-rebuttal 'the plan is linked in the question' --question-file - <<'EOF'\n${QUESTION}EOF`;
     const result = await g.bash("b1", command, { cwd: work });
     expect(result?.block).toBeUndefined();
-    expect(result?.input).toEqual({ command: ASK, cwd: work });
+    expect(result?.input).toEqual({
+      command: ASK.replace("\n", " # --advisor-rebuttal 'the plan is linked in the question'\n"),
+      cwd: work,
+    });
     expect(result?.additionalContext).toContain('outcome="rebuttal"');
     expect(result?.additionalContext).toContain('"the plan is linked in the question"');
     expect(g.dryRuns[0].script).toBe(
@@ -2304,10 +2325,16 @@ console.log(JSON.stringify(args, null, 2));
       "b2",
       "dispatch comment --issue X-1 --advisor-rebuttal='a link' --body hi"
     );
-    expect(inline?.input).toEqual({ command: "dispatch comment --issue X-1 --body hi" });
+    expect(inline?.input).toEqual({
+      command: "dispatch comment --issue X-1 --body hi # --advisor-rebuttal='a link'",
+    });
   });
   test("a device call and a command on one target share its breaker", async () => {
-    const g = bind({ env: STUB, cwd: work, complete: async () => ({ text: REVISE }) });
+    const g = bind({
+      env: { ...STUB, OMP_ASKGATE: "block" },
+      cwd: work,
+      complete: async () => ({ text: REVISE }),
+    });
     await g.device("a", "dispatch_comment", { issue: "X-1", body: "one" });
     await g.bash("b", "dispatch comment --issue X-1 --body two");
     const third = await g.bash("c", "dispatch comment --issue X-1 --body three");
@@ -2379,14 +2406,16 @@ console.log(JSON.stringify(args, null, 2));
       expect(g.dryRuns[3]?.script).toBe(
         "cd inner >/dev/null && dispatch message --issue X-1 --body-file note.txt --dry-run"
       );
-      expect(g.calls).toHaveLength(5);
+      // Seven calls: five charter calls, and the rules call each of the two asks here gets.
+      expect(g.calls).toHaveLength(7);
       expect(g.calls[0].user).toContain('"body": "Body from the working directory."');
       expect(g.calls[1].user).toContain('"body": "Body from the inner directory."');
       expect(g.calls[2].user).toContain('"body": "Looks right."');
+      // The two asks' charter requests, each beside the rules request its call also made.
       expect(g.calls[3].user).toContain(
         JSON.stringify({ issue: "X-1", question: QUESTION }, null, 2)
       );
-      expect(g.calls[4].user).toContain(
+      expect(g.calls[5].user).toContain(
         JSON.stringify({ issue: "X-1", question: QUESTION }, null, 2)
       );
       expect(g.entries.map((e) => [e.tool, e.outcome, e.decision])).toEqual([
@@ -2458,7 +2487,7 @@ console.log(JSON.stringify(args, null, 2));
       "cd 'sub' && dispatch comment --issue X-1 --advisor-rebuttal 'r' --body hi 2>&1"
     );
     expect(result?.input).toEqual({
-      command: "cd 'sub' && dispatch comment --issue X-1 --body hi 2>&1",
+      command: "cd 'sub' && dispatch comment --issue X-1 --body hi 2>&1 # --advisor-rebuttal 'r'",
     });
     expect(g.dryRuns[0].script).toBe(
       "cd 'sub' >/dev/null && dispatch comment --issue X-1 --body hi --dry-run"
@@ -3346,7 +3375,10 @@ describe("the literal grammar, widened to forms with no expansion", () => {
     const command =
       "dispatch comment --issue X-1 \\\n  --advisor-rebuttal 'The link is the ask.' \\\n  --body 'See it.\nThanks.' | tail -n 1";
     const scoped = core.scopedCommand(command);
-    expect(scoped?.rebuttal).toBe("The link is the ask.");
+    expect(scoped?.rebuttal).toEqual({
+      line: "The link is the ask.",
+      sent: "--advisor-rebuttal 'The link is the ask.'",
+    });
     expect(core.commandArgv(scoped?.command)).toEqual(
       bashArgv("dispatch comment --issue X-1 --body 'See it.\nThanks.'") as string[]
     );
@@ -3904,7 +3936,11 @@ describe("askgate.ts, the entry", () => {
         on: (event: string, handler: Handler) => handlers.set(event, handler),
         appendEntry: (_: string, data: GateEntry) => entries.push(data),
       } as never,
-      { configFile: CONFIG_FILE, logger: { warn: (message) => warnings.push(message) } }
+      {
+        configFile: { path: CONFIG_FILE, error: null },
+        logger: { warn: (message: string) => warnings.push(message) },
+        runtimeLogger: { warn: () => {} },
+      }
     );
     const roles = opts.roles ?? { askgate: MODEL };
     const ctx = {
@@ -3981,7 +4017,11 @@ describe("askgate.ts, the entry", () => {
         on: (event: string, handler: Handler) => handlers.set(event, handler),
         appendEntry: (_: string, data: GateEntry) => entries.push(data),
       } as never,
-      { configFile: CONFIG_FILE, logger: { warn: () => {} } }
+      {
+        configFile: { path: CONFIG_FILE, error: null },
+        logger: { warn: () => {} },
+        runtimeLogger: { warn: () => {} },
+      }
     );
     // Registered before the load settles, so no call can pass between the load and the binding.
     const atOnce = [...handlers.keys()];
@@ -4091,7 +4131,7 @@ describe("askgate.ts, the entry", () => {
     try {
       const { result, entries, warnings } = await gateOnce();
       expect(result).toBeUndefined();
-      expect(entries).toMatchObject([{ outcome: "verdict", deadlineMs: 25_000 }]);
+      expect(entries).toMatchObject([{ outcome: "verdict", deadlineMs: 20_000 }]);
       expect(warnings).toEqual([
         expect.stringContaining("extensionHandlers.toolCallTimeoutMs is 30000 ms"),
       ]);

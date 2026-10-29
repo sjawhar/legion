@@ -3680,20 +3680,24 @@ export default function envoyExtension(pi: PiApi): void {
     const configFile = askgateFile;
     // What the gate logs at bind is also a notice at session start: the one it logs there says
     // the review deadline is under 30 s, which at the host's default handler limit is every
-    // profile that sets nothing, and a review that times out lets the write post.
+    // profile that sets nothing, and a review that times out lets the write post. A warning a
+    // gated call raises later goes to the plain log alone (`runtimeLogger`): it is about that
+    // session's calls, and a notice here would show again at every later session start.
     const gateLogger = {
       warn: (message: string) => {
         logger.warn(message);
         askgateNotices.push(message);
       },
     };
-    askgateLoad = registerAskGate(pi, { configFile, logger: gateLogger }).catch(
-      (error: unknown) => {
-        const notice = `AskGate did not load, so it refuses each Dispatch write it would review: ${messageFor(error)}. To turn AskGate off for this session, set askgate.enabled to false in ${configFile}.`;
-        logger.warn(notice);
-        askgateNotices.push(notice);
-      }
-    );
+    askgateLoad = registerAskGate(pi, {
+      configFile: { path: configFile, error: null },
+      logger: gateLogger,
+      runtimeLogger: logger,
+    }).catch((error: unknown) => {
+      const notice = `AskGate did not load, so it refuses each Dispatch write it would review: ${messageFor(error)}. To turn AskGate off for this session, set askgate.enabled to false in ${configFile}.`;
+      logger.warn(notice);
+      askgateNotices.push(notice);
+    });
   }
 
   pi.on("tool_result", async (event, context) => {

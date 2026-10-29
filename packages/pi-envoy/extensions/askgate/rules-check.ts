@@ -70,8 +70,14 @@ export type RuleOutcome =
   | "shutdown"
   | "unjudged";
 
-/** Every attempt's spend, as the gate passes it around. */
-type RuleUsage = {
+/**
+ * The outcomes of a rules check that reached no verdict, which the gate counts toward its one
+ * runtime notice and a reader of the records counts as the check's error rate.
+ */
+export const RULE_FAILURE_OUTCOMES: ReadonlyArray<RuleOutcome> = ["error", "timeout", "no-verdict"];
+
+/** Every attempt's spend, as the gate passes it around; the core's entries record the same shape. */
+export type Usage = {
   input: number;
   output: number;
   cacheRead: number;
@@ -79,16 +85,25 @@ type RuleUsage = {
   cost: number;
 };
 /**
- * One model call's answer and what it cost, as `createAskGate`'s walk gives them. Declared here,
- * structurally, so this module stays free of the core.
+ * One model call of a gated call, raced against that call's one stop: its deadline, its tool's end,
+ * a stopped run or the shutdown. Declared here, structurally, so this module stays free of the
+ * core, and declared once, so both checks and the host read one type.
  */
-export type RuleAnswer =
-  | { kind: "answer"; text: string; usage?: RuleUsage }
-  | { kind: "error"; reason: string; usage?: RuleUsage }
-  | { kind: "timeout" | "abandoned" | "shutdown"; usage?: RuleUsage };
-export type RuleWalked = {
-  answer: RuleAnswer;
-  called: { promptBytes?: number; model?: string; usage?: RuleUsage };
+export type Answer =
+  | { kind: "answer"; text: string; usage?: Usage }
+  | { kind: "error"; reason: string; usage?: Usage }
+  | { kind: "timeout" | "abandoned" | "shutdown"; usage?: Usage };
+/** What one walk of a role's chain answered, what every attempt of it cost, and its own time. */
+export type Walked = {
+  answer: Answer;
+  called: {
+    promptBytes?: number;
+    model?: string;
+    failedModels?: Array<{ model: string; error: string }>;
+    usage?: Usage;
+  };
+  /** The walk's own time, the render of its request included. */
+  elapsedMs: number;
 };
 
 /** A Dispatch client for one directory, and the addresses a dashboard-URL `ref` may be on. */
@@ -107,7 +122,7 @@ export interface RulesCheckDeps {
    */
   dispatchClient: (directory: string, signal: AbortSignal) => DispatchSession | undefined;
   /** The charter call's own walk: the role's chain under the call's deadline, dumped and raced by the core. */
-  walk: (prompt: { system: string; user: () => string; label: string }) => Promise<RuleWalked>;
+  walk: (prompt: { system: string; user: () => string; label: string }) => Promise<Walked>;
 }
 
 /** The gated call the rules check judges. */
@@ -163,7 +178,7 @@ export interface RulesCheck {
    * the openers no stored version could already hold, or on none of them (`unjudged`).
    */
   asksPartial: boolean;
-  usage?: RuleUsage;
+  usage?: Usage;
 }
 
 /**

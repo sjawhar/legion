@@ -33,6 +33,12 @@ import pkg from "../../package.json";
 /** The record's own stop: a write that has not answered by then is given up, and never retried. */
 export const RECORD_TIMEOUT_MS = 5_000;
 
+/**
+ * What every decision document's name starts with, the session's own id after it: the one name the
+ * upload writes and a reader of a project's documents finds them by.
+ */
+export const DECISION_DOCUMENT_PREFIX = "askgate-decisions-";
+
 /** The plugin that wrote the record, as the record names it: the manifest's own name and version. */
 const PLUGIN = `${pkg.name}@${pkg.version}`;
 
@@ -201,7 +207,7 @@ export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
       const where = source === "pod" ? "a Legion role's pod" : "a person's machine";
       const created = dispatch.client
         .projectArtifact(project, {
-          name: `askgate-decisions-${sessionId}.md`,
+          name: `${DECISION_DOCUMENT_PREFIX}${sessionId}.md`,
           content:
             `AskGate rule decisions of session ${sessionId}, made on ${where} (source ` +
             `\`${source}\`). One fenced block per decision follows, each holding one JSON ` +
