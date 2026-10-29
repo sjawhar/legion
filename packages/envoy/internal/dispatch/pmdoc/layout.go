@@ -52,7 +52,7 @@ const blockMarkerClass = blockEmptyParagraph | blockBulletList | blockOrderedLis
 // RenderWithLayout is RenderWithBlockOffsets that records the document's Layout as well, from the
 // same render: the markdown, the offsets and the errors are RenderWithBlockOffsets'.
 func RenderWithLayout(doc *Node) (string, []BlockOffset, *Layout, error) {
-	r, err := renderDocument(doc, maxSpanCells, true)
+	r, err := renderDocument(doc, maxSpanCells, true, true)
 	if err != nil {
 		return "", nil, nil, err
 	}

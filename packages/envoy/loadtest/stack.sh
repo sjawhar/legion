@@ -423,9 +423,15 @@ cmd_setup() {
   if ! { [ -x "$BIN/nats-server" ] && "$BIN/nats-server" --version | grep -qF "$nats_version"; }; then
     note "installing nats-server $nats_version into $BIN"
     # A go build inside the envoy module fails (its main imports a module go.sum lacks), so it is
-    # installed on its own, as scripts/e2e/dispatch-session-settings.sh does.
-    GOBIN=$BIN go install "github.com/nats-io/nats-server/v2@$nats_version"
+    # installed on its own, as scripts/e2e/dispatch-session-settings.sh does: with the toolchain's
+    # own go, under its own GOROOT. mise's go shim replaces a caller's GOBIN when go.set_gobin is
+    # true, and, on mise before 2026.9.0, in any shell `mise activate` set up. Separately, an
+    # activated shell exports mise's Go's GOROOT, whose compiler a newer toolchain's go refuses.
+    local goroot
+    goroot=$(go env GOROOT)
+    GOBIN=$BIN GOROOT=$goroot "$goroot/bin/go" install "github.com/nats-io/nats-server/v2@$nats_version"
   fi
+  [ -x "$BIN/nats-server" ] || die "no executable nats-server in $BIN after go install"
   note "$("$BIN/nats-server" --version)"
 
   if [ ! -x "$PGBIN/postgres" ]; then
