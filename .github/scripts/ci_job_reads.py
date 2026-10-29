@@ -28,8 +28,11 @@ header says what is proved).
             filter decides the pull request's and merge group's run, the paths main's.
 
 A Read's glob is expanded over the repository's files; a why cites the step (at()) or the
-source line that reads it. The Read lists of the jobs without Go steps (the Bun packages) are
-as hand-kept as RULES: the check proves the filter covers them, not that they are complete.
+source line that reads it. at()'s third argument is the workflow file that holds the step, and
+it is ci.yaml unless a job gives its steps away: ci.yaml's docs job calls docs-site.yaml, so the
+docs gate cites that file's build job (at_docs). The Read lists of the jobs without Go steps
+(the Bun packages) are as hand-kept as RULES: the check proves the filter covers them, not that
+they are complete.
 """
 
 import json
@@ -45,6 +48,8 @@ GO_TARGETS = ".github/go-release-targets.json"
 CLIENT_TARGETS = ".github/agent-secrets-client-targets.json"
 INFRA_TARGETS = ".github/envoy-infra-targets.json"
 NOTICES = "scripts/go-third-party-notices.sh"
+CI = ".github/workflows/ci.yaml"
+DOCS_SITE = ".github/workflows/docs-site.yaml"
 
 
 def targets(path: str, key: str) -> list:
@@ -90,12 +95,12 @@ WORKSPACES = [
 ]
 
 
-def bun_job(job):
+def bun_job(job, workflow=CI):
     """.github/actions/setup-bun and a frozen `bun install`. No bunfig.toml at the root and no
     .npmrc anywhere; packages/dispatch/bunfig.toml is read only by bun test there."""
-    install = at(job, "bun install --frozen-lockfile")
+    install = at(job, "bun install --frozen-lockfile", workflow)
     return reads(
-        (".github/actions/setup-bun/**", at(job, "./.github/actions/setup-bun")),
+        (".github/actions/setup-bun/**", at(job, "./.github/actions/setup-bun", workflow)),
         (".bun-version", ".github/actions/setup-bun/action.yml:21 bun-version-file: .bun-version"),
         ("package.json", f"{install} reads the root manifest (workspaces package.json:19-31, patchedDependencies :45-49)"),
         ("bun.lock", f"{install} refuses a lock that disagrees with the manifests"),
@@ -126,11 +131,21 @@ def install_omp(job):
     )
 
 
-def setup_go(job, gomod):
-    return reads((gomod, f"{at(job, 'actions/setup-go')} go-version-file"))
+def setup_go(job, gomod, workflow=CI):
+    return reads((gomod, f"{at(job, 'actions/setup-go', workflow)} go-version-file"))
 
 
-CI_SELF = reads((".github/workflows/ci.yaml", "a job reads its own definition"))
+CI_SELF = reads((CI, "a job reads its own definition"))
+# ci.yaml's docs job and docs-pages.yaml's build job both call docs-site.yaml, which holds the
+# steps. The gate stays on ci.yaml's docs job, whose if: the docs filter gates, and every step
+# citation names docs-site.yaml's build job.
+DOCS_JOB = "build"
+DOCS_SITE_SELF = reads((DOCS_SITE, "the docs build reads the definition of the steps it runs"))
+
+
+def at_docs(step):
+    return at(DOCS_JOB, step, DOCS_SITE)
+
 
 CONTRACTS_SRC = "packages/contracts/src/**"
 ENVOY_CLIENT_SRC = "packages/envoy-client/src/**"
@@ -399,33 +414,34 @@ GATES = [
       + biome(at("test", "Lint the Dispatch census script")) + bun_job("test") + CI_SELF),
 
 
+    # The job ci.yaml gates is docs, and the steps it runs are docs-site.yaml's (at_docs).
     gate("docs", "docs", runs=[
         script_run(BUILD_BINARIES, 'go -C "$root/$legion_module" build -o "$bin/legion" ./cmd/legion',
-                   f"docs/site/scripts/generate.ts:116, run by {at('docs', 'Build the docs site')}", DAEMON, ["./cmd/legion"], mode="build"),
+                   f"docs/site/scripts/generate.ts:116, run by {at_docs('Build the docs site')}", DAEMON, ["./cmd/legion"], mode="build"),
         script_run(BUILD_BINARIES, 'go -C "$root/$envoy_module" build -o "$bin/envoy-dispatch" ./cmd/dispatch',
-                   f"docs/site/scripts/generate.ts:116, run by {at('docs', 'Build the docs site')}", ENVOY, ["./cmd/dispatch"], mode="build"),
+                   f"docs/site/scripts/generate.ts:116, run by {at_docs('Build the docs site')}", ENVOY, ["./cmd/dispatch"], mode="build"),
         script_run(BUILD_BINARIES, 'go -C "$root/$envoy_module" build -o "$bin/envoy-broker" ./cmd/broker',
-                   f"docs/site/scripts/generate.ts:116, run by {at('docs', 'Build the docs site')}", ENVOY, ["./cmd/broker"], mode="build"),
+                   f"docs/site/scripts/generate.ts:116, run by {at_docs('Build the docs site')}", ENVOY, ["./cmd/broker"], mode="build"),
         script_run(BUILD_BINARIES, 'go -C "$root/$envoy_module" build -o "$bin/" ./cmd/agent-secrets ./cmd/agent-secrets-helper ./cmd/broker-refgen',
-                   f"docs/site/scripts/generate.ts:116, run by {at('docs', 'Build the docs site')}", ENVOY,
+                   f"docs/site/scripts/generate.ts:116, run by {at_docs('Build the docs site')}", ENVOY,
                    ["./cmd/agent-secrets", "./cmd/agent-secrets-helper", "./cmd/broker-refgen"], mode="build"),
         script_run(RUN_SERVER, DISPATCH_SERVER_BUILD, f"started by packages/dispatch/e2e/harness-listeners.ts:74 (harness-start.ts, which "
-                   f"docs/site/media/harness.ts:21,97 imports), run by {at('docs', 'Take the screenshots')}",
+                   f"docs/site/media/harness.ts:21,97 imports), run by {at_docs('Take the screenshots')}",
                    ENVOY, ["./cmd/dispatch"], mode="build"),
     ], reads=reads(
-        ("docs/site/**", f"{at('docs', 'Lint the docs site')}, typecheck, screenshots (docs/site/media/shots.ts) and build (generate.ts + astro build) in docs/site"),
-        ("packages/dispatch/**", f"{at('docs', 'Build the Dispatch dashboard the screenshots show')}; docs/site/media/harness.ts:21,97 boots packages/dispatch/e2e/harness-start.ts"),
+        ("docs/site/**", f"{at_docs('Lint the docs site')}, typecheck, screenshots (docs/site/media/shots.ts) and build (generate.ts + astro build) in docs/site"),
+        ("packages/dispatch/**", f"{at_docs('Build the Dispatch dashboard the screenshots show')}; docs/site/media/harness.ts:21,97 boots packages/dispatch/e2e/harness-start.ts"),
         ("packages/proof-editor/src/**", "packages/dispatch/web/vite.config.ts:73-81 aliases (build:web)"),
         (CONTRACTS_SRC, "packages/dispatch/web/vite.config.ts:63-72; docs/site/generators/dispatch-tools.ts:7"),
         (ENVOY_CLIENT_SRC, "docs/site/generators/dispatch-tools.ts:12 imports ../../../packages/envoy-client/src/dispatch-command.ts"),
         ("skills/**", "docs/site/generators/legion-skills.ts:11-17 reads skills/*/SKILL.md"),
         ("deploy/kubernetes/**", "docs/site/generators/legion-config.sh:28-32 renders every tracked deploy/kubernetes *.example/*.yml/*.yaml"),
         ("scripts/third-party-notices.ts", "docs/site/astro.config.mjs:15; packages/dispatch/web/vite.config.ts:11"),
-        (".github/scripts/check-private-names.sh", at("docs", "Check the built site has no private name, internal host, or tailnet host")),
+        (".github/scripts/check-private-names.sh", at_docs("Check the built site has no private name, internal host, or tailnet host")),
         (f"{ENVOY}/internal/dispatch/api/routes_table.go", "docs/site/generators/dispatch-api.ts:80 sources, checked by generators/lib/markdown.ts:46-49"),
         (f"{ENVOY}/cmd/dispatch/settings.go", "docs/site/generators/dispatch-config.ts:63 sources, checked by generators/lib/markdown.ts:46-49"),
-        (BUILD_BINARIES, f"docs/site/scripts/generate.ts:116 runs it ({at('docs', 'Build the docs site')})"),
-        (RUN_SERVER, f"packages/dispatch/e2e/harness-listeners.ts:74 runs it ({at('docs', 'Take the screenshots')})"),
+        (BUILD_BINARIES, f"docs/site/scripts/generate.ts:116 runs it ({at_docs('Build the docs site')})"),
+        (RUN_SERVER, f"packages/dispatch/e2e/harness-listeners.ts:74 runs it ({at_docs('Take the screenshots')})"),
         ("scripts/e2e/lib/held-port.py", "packages/dispatch/e2e/run-server.sh:37 holds the server's port through it"),
         # broker-refgen (docs/site/generators/broker-reference.sh:14) parses these at run time.
         (f"{ENVOY}/internal/broker/api/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/routes.go:15,173)"),
@@ -433,7 +449,8 @@ GATES = [
         (f"{ENVOY}/cmd/broker/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/config.go:12,40)"),
         (f"{ENVOY}/internal/broker/helper/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/pages.go:16, codes.go:15)"),
         (f"{ENVOY}/cmd/agent-secrets/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/pages.go:17, codes.go:68)"),
-    ) + setup_go("docs", f"{DAEMON}/go.mod") + biome(at("docs", "Lint the docs site")) + bun_job("docs") + CI_SELF),
+    ) + setup_go(DOCS_JOB, f"{DAEMON}/go.mod", DOCS_SITE) + biome(at_docs("Lint the docs site"))
+      + bun_job(DOCS_JOB, DOCS_SITE) + CI_SELF + DOCS_SITE_SELF),
 
     gate("contracts", "contracts", reads=reads(
         ("packages/contracts/**", f"{at('contracts', 'Lint contracts')}, typecheck, test (src/, scripts/gen-go.test.ts) and build in packages/contracts"),
@@ -720,6 +737,7 @@ GATES = [
         (GO_TARGETS, "ci_job_reads.py expands the notices and pack runs over it"),
         (CLIENT_TARGETS, "ci_job_reads.py expands the notices runs over it"),
         (INFRA_TARGETS, "ci_job_reads.py expands the notices runs over it"),
+        (DOCS_SITE, "ci_filter_coverage.py looks the docs gate's step citations up in it"),
     ) + reads(*((path, f"check-ci-filters.sh holds its on.push.paths equal to the {name} filter (PUSH_WORKFLOWS)")
                 for name, path in PUSH_WORKFLOWS.items()))
       + setup_go("ci-filters", f"{DAEMON}/go.mod") + CI_SELF),

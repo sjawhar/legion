@@ -106,15 +106,17 @@ def gate_runs(g: Gate) -> list:
     return list(g.runs) + [r for e in g.exact for r in e.runs]
 
 
-# Every ci.yaml step a why cites through at(), checked to exist so a renamed step fails here.
+# Every workflow step a why cites through at(), checked to exist so a renamed step fails here.
+# Each entry is (the workflow file that holds the step, the job, the step).
 CITED: list = []
 
 
-def at(job: str, step: str) -> str:
-    """A citation of a ci.yaml step by its name, its `uses:` (without the @ref) or its whole run:
-    text."""
-    CITED.append((job, step))
-    return f'ci.yaml {job} "{step}"'
+def at(job: str, step: str, workflow: str = WORKFLOW) -> str:
+    """A citation of a step by its name, its `uses:` (without the @ref) or its whole run: text.
+    `workflow` is the file that holds the job. It is ci.yaml, or a workflow ci.yaml calls: a job
+    that calls a reusable workflow keeps its gate here and its steps there."""
+    CITED.append((workflow, job, step))
+    return f'{os.path.basename(workflow)} {job} "{step}"'
 
 
 # ---------------------------------------------------------------- go list
@@ -698,10 +700,20 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
         if source not in files:
             problems.append(f"::error file=.github/scripts/ci_job_reads.py::RULES names {source}, which is not "
                             f"in the repository; update or remove the rule")
-    for job_id, ref in CITED:
-        if not any(step_matches(s, ref) for s in (jobs.get(job_id) or {}).get("steps") or []):
+    # A citation names the workflow file that holds the step: ci.yaml, or a workflow one of its
+    # jobs calls. The step must still be there, so a rename or a move fails here.
+    cited_documents = {WORKFLOW: document}
+    for path, job_id, ref in CITED:
+        if path not in cited_documents:
+            cited_documents[path] = (yaml.safe_load((REPO / path).read_text()) or {}) if (REPO / path).is_file() else None
+        cited = cited_documents[path]
+        if cited is None:
             problems.append(f"::error file=.github/scripts/ci_job_reads.py::a why cites step \"{ref}\" of job "
-                            f"{job_id}, which {WORKFLOW} does not have")
+                            f"{job_id} in {path}, which is not in the repository")
+            continue
+        if not any(step_matches(s, ref) for s in ((cited.get("jobs") or {}).get(job_id) or {}).get("steps") or []):
+            problems.append(f"::error file=.github/scripts/ci_job_reads.py::a why cites step \"{ref}\" of job "
+                            f"{job_id}, which {path} does not have")
     return unreduced
 
 # The jobs ci-ok.sh holds to success on every run, so its SELECTED_BY maps neither.

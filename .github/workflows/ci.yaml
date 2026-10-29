@@ -466,12 +466,15 @@ jobs:
               - 'packages/pi-legion/.changie.yaml'
               - 'packages/pi-legion/CHANGELOG.md'
             # docs/site's lint, typecheck, screenshots and build, with the sources its reference
-            # generators and its screenshot harness read. docs-pages.yaml builds and publishes main's
-            # site on the pushes this same list selects: its on.push.paths, which check-ci-filters.sh
-            # holds equal to this filter, so it names docs-pages.yaml too.
+            # generators and its screenshot harness read. docs-site.yaml holds those steps, and
+            # both the docs job here and docs-pages.yaml's build job call it. docs-pages.yaml
+            # builds and publishes main's site on the pushes this same list selects: its
+            # on.push.paths, which check-ci-filters.sh holds equal to this filter, so the list
+            # names all three workflow files.
             docs:
               - '.github/workflows/ci.yaml'
               - '.github/workflows/docs-pages.yaml'
+              - '.github/workflows/docs-site.yaml'
               - *bun_install
               - *biome
               - *go_workspace
@@ -1032,8 +1035,10 @@ jobs:
               - '.github/go-release-targets.json'
               - '.github/agent-secrets-client-targets.json'
               - '.github/envoy-infra-targets.json'
-              # The check holds docs-pages.yaml's on.push.paths equal to the docs filter.
+              # The check holds docs-pages.yaml's on.push.paths equal to the docs filter, and it
+              # reads docs-site.yaml to find the steps the docs gate cites.
               - '.github/workflows/docs-pages.yaml'
+              - '.github/workflows/docs-site.yaml'
               - '**/*.go'
               - '**/go.mod'
               - '**/go.sum'
@@ -1474,104 +1479,18 @@ jobs:
 
   # Builds the documentation site (docs/site) on every pull request and merge group that could
   # change it. A push to main runs no docs job here: docs-pages.yaml builds and publishes main's
-  # site to GitHub Pages (https://sjawhar.github.io/legion/), one push at a time in push order,
-  # with these same steps. The site's reference pages are generated from packages/ and skills/ at
-  # build time, scripts/third-party-notices.ts writes the THIRD_PARTY_NOTICES.txt it publishes,
-  # and the built site is checked with the private-name guard; the docs filter names all of them.
+  # site to GitHub Pages (https://sjawhar.github.io/legion/), one push at a time in push order.
+  # Both callers run the steps of docs-site.yaml, which holds them once. The site's reference
+  # pages are generated from packages/ and skills/ at build time, scripts/third-party-notices.ts
+  # writes the THIRD_PARTY_NOTICES.txt it publishes, and the built site is checked with the
+  # private-name guard; the docs filter names all of them, docs-site.yaml among them.
+  #
+  # No timeout-minutes: GitHub's keywords for a job that calls a reusable workflow leave it out.
+  # docs-site.yaml's own job carries the limit.
   docs:
     needs: changes
     if: needs.changes.outputs.docs == 'true'
-    runs-on: ubuntu-24.04
-    # The screenshots step boots Dispatch on the e2e harness, which needs a database it may
-    # truncate.
-    services:
-      postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
-        env:
-          POSTGRES_PASSWORD: ci
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-bun
-      # Astro runs on Node.js (22.12 or newer).
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24"
-      # docs/site/scripts/build-binaries.sh builds the Go binaries the reference generators run, and
-      # the screenshots step builds the Dispatch server; both modules name the same Go.
-      - id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: packages/daemon/go.mod
-          cache: false
-      # go-docs: docs builds the daemon's legion and envoy's dispatch, broker and agent-secrets
-      # commands, which envoy-e2e-local's go-envoy entry (listener and natsd only) does not hold;
-      # sharing one key let whichever job saved first own it. docs-pages.yaml's build job, on
-      # main, saves it; this job, which runs on no push, only restores it.
-      - id: go-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: go-docs-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
-          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-docs-{0}-', runner.os) || '' }}
-      - run: bun install --frozen-lockfile
-      - name: Lint the docs site
-        run: bun run lint
-        working-directory: docs/site
-      - name: Typecheck the docs site
-        run: bun run typecheck
-        working-directory: docs/site
-      # The pages' screenshots are made, not committed (docs/site/media/README.md): Dispatch on
-      # the e2e harness, seeded with example data, captured in Chromium.
-      - name: Build the Dispatch dashboard the screenshots show
-        run: bun run build:web
-        working-directory: packages/dispatch
-      - name: Install Playwright Chromium
-        # The runner image's chrome-stable apt source intermittently fails `apt-get update`, which
-        # takes `--with-deps` down with it; Chrome itself is preinstalled, so the source goes.
-        run: |
-          grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
-          bunx playwright install --with-deps chromium
-        working-directory: docs/site
-      - name: Take the screenshots
-        run: bun run docs:media
-        # A step of the run that hangs fails it within two minutes (STEP_TIMEOUT_MS in
-        # docs/site/media/harness.ts); this bounds the rest, the build and the boot.
-        timeout-minutes: 15
-        env:
-          DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
-      # What each failed shot's page showed, and the harness's process logs: a hang leaves the
-      # Dispatch server's goroutines at the end of dispatch.log.
-      - if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: docs-failed-shots-${{ github.run_attempt }}
-          path: |
-            docs/site/media/.work/failed-shots
-            docs/site/media/.work/harness
-          if-no-files-found: ignore
-      # Generates the reference pages, then builds the site; starlight-links-validator fails it on a
-      # broken internal link. The build writes dist/THIRD_PARTY_NOTICES.txt (docs/site/astro.config.mjs),
-      # failing on a package whose license cannot be determined; the listing shows the site ships it.
-      - name: Build the docs site
-        run: |
-          bun run docs:build
-          ls -l docs/site/dist/THIRD_PARTY_NOTICES.txt
-      # The built site, generated reference pages and copied media captions include no private
-      # deployment repository, company, internal host, or Tailscale MagicDNS host; the lint job
-      # checks the sources.
-      - name: Check the built site has no private name, internal host, or tailnet host
-        run: .github/scripts/check-private-names.sh docs/site/dist
+    uses: ./.github/workflows/docs-site.yaml
 
   contracts:
     needs: changes
