@@ -483,7 +483,6 @@ func startLogged(t *testing.T, name string, cmd *exec.Cmd) *cmdtest.Process {
 // earlier draw handed out, whose socket is closed. Another program can still take a port before
 // the process binds it, which startBound answers with a retry, on a new draw where build makes one.
 type loopbackPorts struct {
-	mu   sync.Mutex
 	used map[int]bool
 }
 
@@ -492,8 +491,6 @@ func newLoopbackPorts() *loopbackPorts { return &loopbackPorts{used: map[int]boo
 // draw returns n ports no earlier draw returned, distinct from one another.
 func (p *loopbackPorts) draw(t *testing.T, n int) []int {
 	t.Helper()
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	var held []net.Listener
 	defer func() {
 		for _, l := range held {

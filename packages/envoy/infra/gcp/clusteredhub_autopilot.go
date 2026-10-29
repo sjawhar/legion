@@ -7,28 +7,6 @@ import (
 	"github.com/sjawhar/envoy/infra/core"
 )
 
-// podPriorityClass resolves input, the name of a PriorityClass every pod of the clustered hub
-// names, "" when unset. It refuses a name that is empty or not a DNS subdomain, and one with the
-// system- prefix, which Kubernetes reserves for its own system-cluster-critical and
-// system-node-critical classes: those outrank every workload so the cluster's own components are
-// scheduled first, and an application pod holding one could preempt them. The rule is
-// gcp:Dispatch's priorityClassName's (newDispatchDisruption); each refusal here is a
-// core.InputError naming input.
-func podPriorityClass(input string, name *string) (string, error) {
-	if name == nil {
-		return "", nil
-	}
-	switch {
-	case *name == "":
-		return "", core.InputErrorf(input, "%s is empty; leave it unset for no priority class", input)
-	case !dnsSubdomain(*name):
-		return "", core.InputErrorf(input, "%s %q must be a DNS subdomain, the shape of a PriorityClass's name", input, *name)
-	case strings.HasPrefix(*name, "system-"):
-		return "", core.InputErrorf(input, "%s %q is a class Kubernetes reserves for its own system components (the system- prefix); name a PriorityClass of your own", input, *name)
-	}
-	return *name, nil
-}
-
 // autopilotPod is a pod Autopilot sizes: its main container, whose request and limit the inputs
 // cpuInput and memoryInput set (cpu and memory, nil when unset for defaultCPU and defaultMemory),
 // and the sidecars beside it at fixed sizes. name is the pod as a refusal names it, such as "the
