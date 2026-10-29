@@ -751,7 +751,7 @@ func loadAnchorRefreshedCommentDeliveries(ctx context.Context, tx pgx.Tx, id str
 // recordedMarksQuery is the statement that lists the anchor and mark type of every row of table,
 // asks or comments, whose anchor names the artifact $1. Both tables share the predicate but not
 // the uuid expression: asks compare store.CanonicalUUID's guarded cast, the expression
-// asks_anchor_artifact_id (migration 0139) indexes, and comments the plain cast, the expression of
+// asks_anchor_artifact_id (migration 0141) indexes, and comments the plain cast, the expression of
 // comments_anchor_artifact (0032), so each read is an index scan. It keeps the text comparison
 // beside the uuid one, so it returns exactly the rows that comparison alone would: a row the
 // guard leaves unindexed, whose artifact_id is not a lower-case document id, is a row the text

@@ -684,7 +684,8 @@ func TestDocumentEditAdviceCountsTheAskBlocksTheEditAdded(t *testing.T) {
 		}
 	}
 
-	// A project document has no issue state to report, so its edit's advice is the count alone.
+	// A project document has no issue state to report, so its edit's advice is the count and the
+	// added block's check alone.
 	upload := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects/ADDED/artifacts", map[string]string{
 		"name": "project-notes.md", "content": "# Notes\n\nBody.\n",
 	}, "alice")
@@ -702,12 +703,15 @@ func TestDocumentEditAdviceCountsTheAskBlocksTheEditAdded(t *testing.T) {
 	if edited.Code != http.StatusOK {
 		t.Fatalf("project document edit: status=%d body=%s", edited.Code, edited.Body.String())
 	}
-	var raw map[string]json.RawMessage
+	var raw struct {
+		Advice map[string]json.RawMessage `json:"advice"`
+	}
 	if err := json.Unmarshal(edited.Body.Bytes(), &raw); err != nil {
 		t.Fatalf("decode project document edit: %v", err)
 	}
-	if advice := string(raw["advice"]); advice != `{"decision_blocks_added":1}` {
-		t.Fatalf("project document edit advice = %s, want the count alone", advice)
+	checks, _ := decisionBlockChecksOf(t, edited)
+	if len(raw.Advice) != 2 || string(raw.Advice["decision_blocks_added"]) != "1" || len(checks) != 1 || checks[0].BlockID != "window" {
+		t.Fatalf("project document edit advice = %v, want the count and the block's check alone", raw.Advice)
 	}
 }
 
@@ -833,7 +837,7 @@ func TestWriteAdviceFailureDoesNotAbortWrite(t *testing.T) {
 }
 
 // Only a session's write runs the issue-advice queries, so only a session's document edit can
-// meet one that fails; what it keeps is the document's own block count.
+// meet one that fails; what it keeps is the document's own block count and the block's check.
 func TestDocumentEditAdviceKeepsCountWhenIssueAdviceFails(t *testing.T) {
 	handler, _ := newFailingAdviceHandler(t, "session_writes_since_human", 0)
 	createAdviceProject(t, handler, "COUNT")
@@ -856,8 +860,9 @@ func TestDocumentEditAdviceKeepsCountWhenIssueAdviceFails(t *testing.T) {
 	if err := json.Unmarshal(body["advice"], &rawAdvice); err != nil {
 		t.Fatalf("decode count-only advice: %v body=%s", err, edited.Body.String())
 	}
-	if len(rawAdvice) != 1 {
-		t.Fatalf("count-only advice fields = %#v, want decision_blocks_added alone", rawAdvice)
+	checks, _ := decisionBlockChecksOf(t, edited)
+	if len(rawAdvice) != 2 || len(checks) != 1 || checks[0].BlockID != "window" || checks[0].Suggestions == nil {
+		t.Fatalf("count-only advice fields = %#v, want decision_blocks_added and the block's check alone", rawAdvice)
 	}
 }
 

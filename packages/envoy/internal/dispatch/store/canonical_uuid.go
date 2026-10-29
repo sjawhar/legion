@@ -14,16 +14,16 @@ const canonicalUUIDForm = `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9
 //
 // The guard is a regex because an index expression must be immutable: `~` is immutable, while
 // pg_input_is_valid is only stable and create index refuses it. This expression is the index's,
-// not every reader's: asks_anchor_artifact_id (migration 0139) indexes it, the sweep read
+// not every reader's: asks_anchor_artifact_id (migration 0141) indexes it, the sweep read
 // (docs.recordedMarksQuery) compares it so its asks leg is an index scan, and
 // AsksOutsideAnchorArtifactIndex counts through it so the boot log can never describe a different
 // set of rows than the index leaves out. Those three are its only callers. A read resolves an
 // anchor's document through CastableUUID instead, which answers every spelling the cast accepts.
 //
-// asks_anchor_artifact_id (migration 0139) indexes exactly CanonicalUUID("anchor->>'artifact_id'"),
+// asks_anchor_artifact_id (migration 0141) indexes exactly CanonicalUUID("anchor->>'artifact_id'"),
 // written out as literal SQL because a migration's text is immutable. Postgres reaches an
 // expression index only through a predicate comparing its exact expression, so an edit here that
-// 0139 does not carry costs the asks read its index scan:
+// 0141 does not carry costs the asks read its index scan:
 // docs.TestRecordedMarkRefsReadsThroughTheAnchorIndexes fails the moment the two diverge.
 func CanonicalUUID(text string) string {
 	return `(case when ` + text + ` ~ '` + canonicalUUIDForm + `' then (` + text + `)::uuid end)`
@@ -38,7 +38,7 @@ func CanonicalUUID(text string) string {
 //
 // pg_input_is_valid is the cast's own input function, so this accepts exactly what the cast
 // accepts. It is only stable, so create index refuses it: that is why the index expression
-// (migration 0139), the sweep read (docs.recordedMarksQuery) and the boot count
+// (migration 0141), the sweep read (docs.recordedMarksQuery) and the boot count
 // (AsksOutsideAnchorArtifactIndex) keep CanonicalUUID's immutable regex, which an index can carry.
 // pg_input_is_valid is Postgres 16+, the supported floor.
 func CastableUUID(text string) string {

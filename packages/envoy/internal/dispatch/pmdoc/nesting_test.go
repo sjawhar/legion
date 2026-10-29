@@ -405,10 +405,10 @@ func TestReadRefusesAMillionLevelCRDTTreeWithoutOverflow(t *testing.T) {
 }
 
 // The walks over a live tree that do not read it through Read first - the text a mark covers
-// (MarkRange, Unmark) and the text a client wrote (AuthoredTextRuns) - meet the depth bound where
-// Read does: a tree at the bound is walked, one whose text alone stands one level past it is
-// refused, and under a stack far below the default, a tree a peer wrote far past it is refused
-// rather than recursed through.
+// (MarkRange, Unmark), the text a client wrote (AuthoredTextRuns) and the fold's read of a
+// document it holds alone (ReadUnshared) - meet the depth bound where Read does: a tree at the
+// bound is walked, one whose text alone stands one level past it is refused, and under a stack far
+// below the default, a tree a peer wrote far past it is refused rather than recursed through.
 func TestLiveTreeWalksStopAtTheDepthBoundUnderASmallStack(t *testing.T) {
 	stacktest.Under(t, 16<<20, func(t *testing.T) {
 		for _, test := range []struct {
@@ -436,11 +436,12 @@ func TestLiveTreeWalksStopAtTheDepthBoundUnderASmallStack(t *testing.T) {
 				})
 				_, authored := AuthoredTextRuns(fragment, ydoc.ClientID(), 0, nil)
 				_, read := Read(fragment)
+				_, unshared := ReadUnshared(fragment)
 				past := fmt.Sprintf("a node %d levels deep", expectedMaxTreeDepth+1)
 				for _, walk := range []struct {
 					name string
 					err  error
-				}{{"Read", read}, {"MarkRange", marked}, {"Unmark", unmarked}, {"AuthoredTextRuns", authored}} {
+				}{{"Read", read}, {"ReadUnshared", unshared}, {"MarkRange", marked}, {"Unmark", unmarked}, {"AuthoredTextRuns", authored}} {
 					if test.refused && (!errors.Is(walk.err, ErrSchema) || !strings.Contains(walk.err.Error(), past)) {
 						t.Errorf("%s of a chain %d deep: %v, want ErrSchema saying %q", walk.name, test.textLevel, walk.err, past)
 					}

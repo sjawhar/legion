@@ -253,7 +253,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// asks_anchor_artifact_id (migration 0139) indexes the anchors whose artifact_id is a
+	// asks_anchor_artifact_id (migration 0141) indexes the anchors whose artifact_id is a
 	// lower-case document id, the form every server-written anchor carries. A row an earlier
 	// release stored with another spelling is left out, and settlement records no mark for it:
 	// the migration refuses no such row, so the log is where its count is visible. A count that
@@ -458,6 +458,9 @@ func main() {
 	// Postgres, and the room this process holds for it closes within that round trip, so its
 	// browsers reconnect and re-sync instead of reading text the store no longer holds.
 	go documentService.RunStaleRoomEviction(ctx)
+	// The related-item check's keyword statistics (each project's df and N), rebuilt at
+	// boot and every ten minutes.
+	go api.RunSearchTermStatsRefresh(ctx, database.Pool, api.SearchTermStatsInterval, leases)
 	// Issues whose spec's task count is not their latest version's - every row the migration that
 	// added the count columns found, and any the task this one replaces versions while both run -
 	// are counted again, at start and on an interval, so their progress shows without anyone

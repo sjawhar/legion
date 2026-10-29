@@ -422,10 +422,10 @@ type DuplicateCandidate struct {
 	Href        string `json:"href"`
 }
 
-// WriteSuggestion is one item LEGION-550's write-time feedback judges similar to what was just
-// filed: a fused-search hit (sjawhar/legion#1764) over the same project. AnsweredBy and
-// AnsweredAt are set only when this is the ask Suggestions.Decision names — the "past decision"
-// case, where the agent needs who answered and when, not just a link.
+// WriteSuggestion is one item the related-item check judges like what was just filed:
+// a search hit over the same project. Ask is where an ask item stands (its latest answer, who gave
+// it, when and the options chosen; or its resolution; or open). AnsweredBy and AnsweredAt repeat
+// the answer's user and time on the ask Suggestions.Decision names, for clients built before Ask.
 type WriteSuggestion struct {
 	Kind       string          `json:"kind"`
 	Owner      SearchOwner     `json:"owner"`
@@ -433,18 +433,71 @@ type WriteSuggestion struct {
 	ID         string          `json:"id"`
 	Snippet    string          `json:"snippet"`
 	Href       string          `json:"href"`
+	Ask        *SearchAsk      `json:"ask,omitempty"`
 	AnsweredBy string          `json:"answered_by,omitempty"`
 	AnsweredAt *time.Time      `json:"answered_at,omitempty"`
 }
 
-// Suggestions is LEGION-550's write-time feedback on a newly created issue or ask: the three
-// items most like it (Related) and, when an answered ask already settles the same question,
-// that decision (Decision). Neither ever refuses or delays the write past
-// writeSuggestionTimeout; Missing explains why search did not answer in time instead.
+// Suggestions is the related-item check's result on a newly created issue or ask: the
+// three items most like it (Related, one per owner) and, when an answered ask already settles the
+// same question, that decision (Decision). The check never refuses the write; it waits at most
+// five seconds, and says what it did.
+//
+// Outcome is "found" (Related holds at least one item), "none" (it searched and found nothing) or
+// "not_made" (it did not search to the end). Search is how it searched, "meaning_and_keywords" or
+// "keywords_only", empty when not made; SearchNote says why it searched by keywords alone.
+// Missing is set, to the reason the check was not made, exactly when Outcome is "not_made", so a
+// client built before Outcome still says the check was skipped. SearchQuery is two or three of
+// the words the keyword search used, spelled as the text spells them, for a reader to search with
+// by hand. TitleMatches is the issues whose titles near-duplicate a new issue's when the create
+// was forced past that refusal. Related is always an array, never null.
 type Suggestions struct {
-	Related  []WriteSuggestion `json:"related"`
-	Decision *WriteSuggestion  `json:"decision,omitempty"`
-	Missing  string            `json:"missing,omitempty"`
+	Outcome      string               `json:"outcome"`
+	Search       string               `json:"search,omitempty"`
+	SearchNote   string               `json:"search_note,omitempty"`
+	SearchQuery  string               `json:"search_query,omitempty"`
+	Related      []WriteSuggestion    `json:"related"`
+	Decision     *WriteSuggestion     `json:"decision,omitempty"`
+	Missing      string               `json:"missing,omitempty"`
+	TitleMatches []DuplicateCandidate `json:"title_matches,omitempty"`
+}
+
+// RelatedChecksReport is GET /api/v1/related-checks: how the related-item checks recorded in
+// related_checks within one window went, so a deploy's checks can be counted against
+// its targets. Project, SourceKind, From and To echo the filters, each null when not given (every
+// project, every source kind, no lower or upper bound); From is inclusive and To exclusive.
+//
+// BySourceKind, ByOutcome, BySearch and ByReason count the checks by each column; BySearch counts
+// a check not made under "not_made", and ByReason leaves out the checks that had no reason (those
+// searched by meaning and keywords). Each map holds only the values seen, and is {} for none.
+// Completed is the checks that searched to the end (found or none, whatever the search mode),
+// SkippedForTime those not made because the search ran out of time (reason timeout).
+type RelatedChecksReport struct {
+	Project        *string            `json:"project"`
+	SourceKind     *string            `json:"source_kind"`
+	From           *time.Time         `json:"from"`
+	To             *time.Time         `json:"to"`
+	Total          int                `json:"total"`
+	BySourceKind   map[string]int     `json:"by_source_kind"`
+	ByOutcome      map[string]int     `json:"by_outcome"`
+	BySearch       map[string]int     `json:"by_search"`
+	ByReason       map[string]int     `json:"by_reason"`
+	Completed      int                `json:"completed"`
+	SkippedForTime int                `json:"skipped_for_time"`
+	KeywordMS      RelatedCheckTiming `json:"keyword_ms"`
+	TotalMS        RelatedCheckTiming `json:"total_ms"`
+}
+
+// RelatedCheckTiming summarizes one of related_checks' millisecond columns over the checks that
+// hold a value in it (Count): its 50th and 95th percentiles, each a time some check took (a
+// discrete percentile, never one between two checks), its largest value, and how many took more
+// than 300 ms, the keyword search's target. P50, P95 and Max are null when Count is 0.
+type RelatedCheckTiming struct {
+	Count     int  `json:"count"`
+	P50       *int `json:"p50"`
+	P95       *int `json:"p95"`
+	Max       *int `json:"max"`
+	Over300MS int  `json:"over_300ms"`
 }
 
 // IssueChild is a child item embedded in an issue detail response. The subtree counts

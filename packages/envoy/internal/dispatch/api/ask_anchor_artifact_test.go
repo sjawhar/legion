@@ -24,7 +24,7 @@ func openAnchoredAsk(t *testing.T, handler http.Handler, issueKey, slug, quote, 
 }
 
 // storeUncastableAnchor rewrites the ask's anchor into the shape only a release before
-// asks_anchor_artifact_id (migration 0139) could store: an artifact_id that is not a uuid at all,
+// asks_anchor_artifact_id (migration 0141) could store: an artifact_id that is not a uuid at all,
 // beside a block_artifact_id. asks_anchor_artifact (0032) casts the anchor only where
 // block_artifact_id is null, so no index and no census has ever cast this row's anchor, and an
 // unguarded cast in a read answers SQLSTATE 22P02 for the whole statement.
