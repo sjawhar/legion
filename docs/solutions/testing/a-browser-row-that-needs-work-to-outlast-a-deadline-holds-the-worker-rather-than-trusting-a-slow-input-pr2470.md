@@ -53,7 +53,7 @@ it passed 20/20 with `--repeat-each=5`. The tester held a 2-node flowchart, whic
 1.0-2.4 s without the hold, and the page still refused it in all four projects. The built bundle
 contains no `mermaid-worker-held`.
 
-INFRA-532 moved both time-limit rows (a comment's and a document's) onto one helper,
+sjawhar/legion#2472 moved both time-limit rows (a comment's and a document's) onto one helper,
 `holdWorkerSource`, with a 2-node flowchart each, since the hold, not the input, makes the work
 outlast the limit.
 
