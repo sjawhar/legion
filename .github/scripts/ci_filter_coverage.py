@@ -729,7 +729,9 @@ EVENT_LISTS = {
 def check_ci_ok(document: dict, problems: list) -> None:
     """ci-ok.sh fails a job its SELECTED_BY says `changes` selected unless the job succeeded, so
     SELECTED_BY must be exactly {job: the output its if: tests} for every job ci-ok needs but
-    changes and lint, and each EVENT_LISTS list exactly the jobs whose if: holds its term."""
+    changes and lint, and each EVENT_LISTS list exactly the jobs whose if: holds its term. The
+    jobs come from ci.yaml itself, every job whose if: tests an output of changes, so a job that
+    neither ci-ok's needs nor its SELECTED_BY names fails here too."""
     jobs = document.get("jobs") or {}
     ci_ok = jobs.get("ci-ok")
     if ci_ok is None:
@@ -756,6 +758,21 @@ def check_ci_ok(document: dict, problems: list) -> None:
             return
     needs = ci_ok.get("needs") or []
     needed = [j for j in ([needs] if isinstance(needs, str) else needs) if j not in ALWAYS_RUN]
+    # The jobs ci-ok must hold, read from ci.yaml's own jobs, not from ci-ok's needs. A job that
+    # `changes` gates and that neither needs nor SELECTED_BY names raises nothing in the two
+    # loops below, because both of them start from those two lists. ci-ok is the required check,
+    # so such a job is advisory: it goes red and tells nobody.
+    gated = sorted(job_id for job_id, job in jobs.items()
+                   if job_id not in ALWAYS_RUN and job_id != "ci-ok"
+                   and GATE_REF.search(str((job or {}).get("if", ""))))
+    for job_id in gated:
+        if job_id in needed:
+            continue
+        absent = [name for name, holder in (("needs", needed), ("SELECTED_BY", selected_by)) if job_id not in holder]
+        names = " and ".join(absent)
+        problems.append(f"::error file={WORKFLOW}::job {job_id} tests an output of changes in its if:, and ci-ok's "
+                        f"{names} {'do' if len(absent) > 1 else 'does'} not name it, so ci-ok passes while {job_id} "
+                        f"fails. Add {job_id} to ci-ok's {names}.")
     expected, list_expected = {}, {name: set() for name in EVENT_LISTS}
     for job_id in needed:
         condition = str((jobs.get(job_id) or {}).get("if", ""))
@@ -771,6 +788,8 @@ def check_ci_ok(document: dict, problems: list) -> None:
                 list_expected[name].add(job_id)
     for job_id in sorted(set(needed) | set(selected_by)):
         want, have = expected.get(job_id), selected_by.get(job_id)
+        if job_id in gated and job_id not in needed:
+            continue  # the loop above already names it, and says to add it to ci-ok's needs
         if job_id not in needed:
             problems.append(f"::error file={WORKFLOW}::ci-ok's SELECTED_BY maps {job_id}, which is not a job ci-ok "
                             f"needs other than {' and '.join(ALWAYS_RUN)}; drop it")

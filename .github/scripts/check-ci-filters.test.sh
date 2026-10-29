@@ -5,8 +5,9 @@
 # step that is more than the go line, a shell, a container, a BASH_ENV) and a step off its exact
 # entry's pinned script count as reading every Go file of the repository and every file under a
 # Go module's directory, a why that cites a step must name a workflow file that still holds it,
-# ci-ok's SELECTED_BY and PULL_REQUEST_ONLY must say what each
-# needed job's if: tests, and a PUSH_WORKFLOWS workflow's on.push.paths must equal its filter.
+# ci-ok must need and map every job changes gates, its SELECTED_BY and PULL_REQUEST_ONLY must
+# say what each needed job's if: tests, and a PUSH_WORKFLOWS workflow's on.push.paths must equal
+# its filter.
 #
 # Each case builds a miniature repository under a temporary directory - a go.work binding one
 # module, a ci.yaml whose `changes` job gates one job, and a ci_job_reads.py describing it - and
@@ -295,6 +296,16 @@ replace "$root/.github/workflows/ci.yaml" "PULL_REQUEST_ONLY: '[\"image\"]'" "PU
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job" "$(contains "$out" "ci-ok's PULL_REQUEST_ONLY lacks image, whose if: admits only pull_request")"
+
+echo "case: a job changes gates is in neither ci-ok's needs nor its SELECTED_BY"
+root=$(fixture ci-ok-unheld)
+replace "$root/.github/workflows/ci.yaml" "    needs: [changes, app, image]" "    needs: [changes, image]"
+replace "$root/.github/workflows/ci.yaml" "SELECTED_BY: '{\"app\": \"app\", \"image\": \"image\"}'" \
+  "SELECTED_BY: '{\"image\": \"image\"}'"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job and both lists it is missing from" \
+  "$(contains "$out" "job app tests an output of changes in its if:, and ci-ok's needs and SELECTED_BY do not name it, so ci-ok passes while app fails. Add app to ci-ok's needs and SELECTED_BY.")"
 
 echo "case: a push workflow's paths miss a pattern of its filter"
 root=$(fixture push-paths-missing)

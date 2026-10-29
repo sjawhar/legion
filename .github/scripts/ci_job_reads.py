@@ -553,7 +553,9 @@ GATES = [
         (ENVOY_CLIENT_SRC, "imported by packages/envoy-client/bin/dispatch.ts, which cli-body-cap.e2e.ts:27 runs"),
         (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/dispatch/web/src/__tests__/setup.ts:7, features/refs/markdown-engine.test.ts:3, e2e/engine-tables.ts:9-10"),
         (f"{ENVOY}/scripts/fixtures/shell-quote.json", "packages/dispatch/e2e/__tests__/local-instance-support.test.ts:153-154"),
-        (f"{ENVOY}/internal/tests3/seaweedfs.go", f"{at('dispatch', 'Start an S3-compatible server for uploaded files')} reads const Image"),
+        (f"{ENVOY}/internal/tests3/seaweedfs.go", f"{at('dispatch', 'Pull the file store image')} names it to the action, and "
+         f"{at('dispatch', 'Start an S3-compatible server for uploaded files')} reads const Image"),
+        (".github/actions/pull-test-images/**", at("dispatch", "Pull the file store image")),
         ("scripts/e2e/lib/held-port.py", "packages/dispatch/e2e/run-server.sh:37 holds the server's port through it"),
         ("scripts/third-party-notices.ts", "packages/dispatch/web/vite.config.ts:11 (build:web writes dist/THIRD_PARTY_NOTICES.txt)"),
     ) + setup_go("dispatch", f"{ENVOY}/go.mod") + biome(at("dispatch", "Lint dispatch dashboard")) + bun_job("dispatch") + CI_SELF),

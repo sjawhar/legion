@@ -71,7 +71,8 @@ phase worker `worker_backends` puts on `claude`, on Claude Code. It carries:
   `packages/daemon/docker/omp-plugins` (its `package.json` is the pin; the build resolves nothing from
   npm), the one plugin linked into the OMP profile `legion`
   (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`),
-  backed by the CodeGraph CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the
+  backed by the CodeGraph CLI (`@colbymchenry/codegraph`, installed at `/opt/codegraph` from the
+  committed lockfile at `packages/daemon/docker/codegraph`) at `/opt/codegraph/bin` (`PATH`) — the
   `codegraph` tool a tester queries for `affected` tests and a reviewer for `impact`/`callers` blast
   radius (`packages/daemon/internal/prompts/roles/core/tester.md`, `core/reviewer.md`). A pod's agent has that tool because its launch loads profile plugins (dispatch://LEGION-629), which the capability report's `codegraph` row says ([The deployment's capability report](#the-deployments-capability-report));
 - OMP's native module, extracted at build into `/home/legion/.omp/natives/<version>/`: from 18.11.0 OMP writes only the variant the CPU selects (AVX2 or not), so this is the build runner's variant, and a pod whose node selects the same one extracts nothing, while a node that selects the other has each role write that one (111 MiB) into its own home overlay, on the pod's `role-homes` volume, at its first OMP run;
@@ -212,9 +213,9 @@ the OMP fork release has no linux/arm64 build. One commit ⇒ one image, with on
 fresh pod still loads the image's own copies of `@sjawhar/pi-envoy` and `@sjawhar/pi-legion`, from
 the commit, never from an npm release, but a role relaunched onto a newer plugin contract in a
 kept pod loads the release's published pair, installed from npm under the generation directory
-("Contract discipline" below) — what the image does take from npm is pinned: the CodeGraph CLI by an
-`ARG` at the top of `worker.Dockerfile`, and the CodeGraph plugin, TypeScript and the two npm language
-servers by the committed lockfiles under `packages/daemon/docker/` (`omp-plugins`, `language-servers`).
+("Contract discipline" below) — what the image does take from npm is pinned: the CodeGraph CLI, the
+CodeGraph plugin, TypeScript and the two npm language servers all by the committed lockfiles under
+`packages/daemon/docker/` (`codegraph`, `omp-plugins`, `language-servers`).
 
 ### The tools a role's own work needs
 

@@ -17,7 +17,8 @@
 # explicit loads twice; the pod lane's probe refuses an image whose pi-envoy does), and
 # @bopstack/pi-codegraph (installed at /opt/omp-plugins from the committed lockfile at
 # packages/daemon/docker/omp-plugins), the one plugin linked into the isolated OMP profile
-# `legion`, where discovery loads it — backed by the CodeGraph CLI (@colbymchenry/codegraph, pinned) at
+# `legion`, where discovery loads it — backed by the CodeGraph CLI (@colbymchenry/codegraph,
+# installed from the committed lockfile at packages/daemon/docker/codegraph) at
 # /opt/codegraph/bin; @sjawhar/claude-envoy built from this checkout's packages/claude-envoy at
 # /opt/legion/claude-envoy, the plugin root a phase worker on the `claude` backend loads (its
 # dist/envoy-channel.js is that worker's one MCP server, its legion/ the generated Legion plugin
@@ -123,16 +124,19 @@ ARG KUBECTL_SHA256=3cfeaf80be482b435b0aa214aff6e0b2c312ee23c0ff20810c75517b6004c
 # apt packages carry no version pin (hadolint DL3008, ignored at each `apt-get install`): Debian's
 # archive serves only a suite's current version of a package, so a pinned version stops resolving at
 # the suite's next update. The base image's suite is the pin.
-# The CodeGraph CLI and the Oh My Pi tool that wraps it, pinned to the versions the devbox runs
-# (`@colbymchenry/codegraph --version`, `omp/plugins/package.json`). The tool, @bopstack/pi-codegraph,
-# installs from the committed lockfile at packages/daemon/docker/omp-plugins (the plugin stage's frozen
-# install): that package.json pins it and its bun.lock pins everything Bun installs beside it, so, as
-# for the language servers, there is no ARG pin to keep in step with them.
-ARG CODEGRAPH_VERSION=1.5.0
+# The CodeGraph CLI and the Oh My Pi tool that wraps it are pinned to the versions the devbox runs
+# (`codegraph --version`, `omp/plugins/package.json`). Each one installs from a committed lockfile
+# in the plugin stage: the tool, @bopstack/pi-codegraph, from packages/daemon/docker/omp-plugins,
+# and the CLI, @colbymchenry/codegraph, from packages/daemon/docker/codegraph. Each package.json
+# pins its one package, and each bun.lock pins everything Bun installs beside it, so, as for the
+# language servers, there is no ARG pin to keep in step with them. An ARG cannot be that one place
+# for the CLI: a lockfile is committed, so it names the version too, and the ARG would be a second
+# name to keep in step. The notices stage reads the CLI's version out of that package.json, the way
+# it reads the language servers' versions out of theirs.
 
 # ------------------------------------------------------------------------------------------------
-# plugin: workspace install, the CodeGraph CLI, the Oh My Pi plugins' frozen install, and the two packed
-# plugins.
+# plugin: workspace install, the Oh My Pi plugins' frozen install, the CodeGraph CLI's frozen
+# install, and the two packed plugins.
 # ghcr.io/sjawhar/legion/ci, the copy of oven/bun:1.4.4-slim (.github/ci-images.yaml)
 FROM ghcr.io/sjawhar/legion/ci@sha256:1846adf22496bd711036aae8be147e57bdebbaea2e5264e3e0b5af1db187d9a4 AS plugin
 WORKDIR /repo
@@ -142,22 +146,6 @@ WORKDIR /repo
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends jq python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
-ARG CODEGRAPH_VERSION
-# CodeGraph CLI (@colbymchenry/codegraph): `bin.codegraph` in the main npm package is a thin
-# `#!/usr/bin/env node` launcher shim that locates and execs the per-platform optionalDependency
-# (`@colbymchenry/codegraph-linux-x64`) — but this stage's base image has no system `node` (only
-# bun's own fallback shim, which the final runtime stage does not copy over), so the shim itself
-# cannot start. The platform package's own `bin/codegraph` is a `#!/bin/sh` wrapper that execs a
-# *bundled* Node 24 runtime sitting beside it — fully self-contained, no system node required
-# anywhere — so this copies that platform package alone, as `/opt/codegraph` in the runtime stage.
-# Installed before any application-source COPY: it depends on nothing this checkout builds, so a
-# source change to the plugin this stage packs never invalidates this layer. The bundled Node's
-# version goes to /out/codegraph-node-version, for the notices stage to fetch that release's LICENSE.
-RUN mkdir -p /out \
-    && bun add -g "@colbymchenry/codegraph@${CODEGRAPH_VERSION}" \
-    && cp -a /root/.bun/install/global/node_modules/@colbymchenry/codegraph-linux-x64 /out/codegraph \
-    && /out/codegraph/bin/codegraph --version \
-    && /out/codegraph/node --version > /out/codegraph-node-version
 COPY package.json bun.lock ./
 COPY patches patches
 COPY packages/contracts/package.json packages/contracts/package.json
@@ -183,6 +171,26 @@ RUN bun install --frozen-lockfile
 WORKDIR /opt/omp-plugins
 COPY packages/daemon/docker/omp-plugins/package.json packages/daemon/docker/omp-plugins/bun.lock ./
 RUN bun install --frozen-lockfile --ignore-scripts
+# CodeGraph CLI (@colbymchenry/codegraph), installed the same way, from the committed lockfile at
+# packages/daemon/docker/codegraph, a project of its own. `bin.codegraph` in the main npm package
+# is a thin `#!/usr/bin/env node` launcher shim that locates and execs the per-platform
+# optionalDependency (`@colbymchenry/codegraph-linux-x64`) — but this stage's base image has no
+# system `node` (only bun's own fallback shim, which the final runtime stage does not copy over),
+# so the shim itself cannot start. The platform package's own `bin/codegraph` is a `#!/bin/sh`
+# wrapper that execs a *bundled* Node 24 runtime sitting beside it — fully self-contained, no
+# system node required anywhere — so this copies that platform package alone, as `/opt/codegraph`
+# in the runtime stage. The lockfile pins that bundle too, which the unlocked global install this
+# replaced resolved afresh at every build. The install precedes every application-source COPY, so
+# a source change to the plugins this stage packs never invalidates its layer. The bundled Node's
+# version goes to /out/codegraph-node-version, for the notices stage to fetch that release's
+# LICENSE.
+WORKDIR /opt/codegraph-cli
+COPY packages/daemon/docker/codegraph/package.json packages/daemon/docker/codegraph/bun.lock ./
+RUN mkdir -p /out \
+    && bun install --frozen-lockfile --ignore-scripts \
+    && cp -a node_modules/@colbymchenry/codegraph-linux-x64 /out/codegraph \
+    && /out/codegraph/bin/codegraph --version \
+    && /out/codegraph/node --version > /out/codegraph-node-version
 WORKDIR /repo
 COPY packages/contracts packages/contracts
 COPY packages/envoy-client packages/envoy-client
@@ -542,11 +550,11 @@ ARG GH_TOOL
 ARG UV_VERSION
 ARG AWS_CLI_VERSION
 ARG KUBECTL_VERSION
-ARG CODEGRAPH_VERSION
 ARG GO_VERSION
 ARG GOPLS_VERSION
 COPY --from=plugin /out/codegraph-node-version /in/codegraph-node-version
 COPY packages/daemon/docker/language-servers/package.json /in/language-servers/package.json
+COPY packages/daemon/docker/codegraph/package.json /in/codegraph/package.json
 # The seventeen reads below (thirteen LICENSE/NOTICE fetches, four HEAD checks) are independent
 # of each other and left sequential rather than backgrounded: this whole RUN is the cached layer
 # the stage comment above describes (a source change, not a pin bump, reuses it, so it rebuilds
@@ -558,11 +566,12 @@ RUN set -eu; \
     jj_repo="${JJ_TOOL#github:}"; jj_repo="${jj_repo%@*}"; jj_tag="v${JJ_TOOL##*@}"; \
     gh_tag="v${GH_TOOL#gh@}"; \
     codegraph_node_tag="$(cat /in/codegraph-node-version)"; \
-    pin() { sed -n "s/^ *\"$1\": \"\([^\"]*\)\".*/\1/p" /in/language-servers/package.json; }; \
-    typescript_version=$(pin typescript); tsls_version=$(pin typescript-language-server); pyright_version=$(pin pyright); \
-    : "${typescript_version:?typescript pin not read from /in/language-servers/package.json}"; : "${tsls_version:?typescript-language-server pin not read from /in/language-servers/package.json}"; : "${pyright_version:?pyright pin not read from /in/language-servers/package.json}"; \
-    printf 'omp_repo=%s\nomp_tag=%s\njj_repo=%s\njj_tag=%s\ngh_tag=%s\ncodegraph_node_tag=%s\ntypescript_version=%s\ntsls_version=%s\npyright_version=%s\n' \
-      "$omp_repo" "$omp_tag" "$jj_repo" "$jj_tag" "$gh_tag" "$codegraph_node_tag" \
+    pin() { sed -n "s|^ *\"$2\": \"\([^\"]*\)\".*|\1|p" "/in/$1/package.json"; }; \
+    typescript_version=$(pin language-servers typescript); tsls_version=$(pin language-servers typescript-language-server); pyright_version=$(pin language-servers pyright); \
+    codegraph_version=$(pin codegraph @colbymchenry/codegraph); \
+    : "${typescript_version:?typescript pin not read from /in/language-servers/package.json}"; : "${tsls_version:?typescript-language-server pin not read from /in/language-servers/package.json}"; : "${pyright_version:?pyright pin not read from /in/language-servers/package.json}"; : "${codegraph_version:?@colbymchenry/codegraph pin not read from /in/codegraph/package.json}"; \
+    printf 'omp_repo=%s\nomp_tag=%s\njj_repo=%s\njj_tag=%s\ngh_tag=%s\ncodegraph_node_tag=%s\ncodegraph_version=%s\ntypescript_version=%s\ntsls_version=%s\npyright_version=%s\n' \
+      "$omp_repo" "$omp_tag" "$jj_repo" "$jj_tag" "$gh_tag" "$codegraph_node_tag" "$codegraph_version" \
       "$typescript_version" "$tsls_version" "$pyright_version" > /in/tags.env; \
     gh_raw_url() { printf 'https://raw.githubusercontent.com/%s/%s/%s' "$1" "$2" "$3"; }; \
     fetch() { curl -fsSL "$(gh_raw_url "$1" "$2" "$3")" -o "/in/$4"; }; \
@@ -575,7 +584,7 @@ RUN set -eu; \
     fetch astral-sh/uv "$UV_VERSION" LICENSE-MIT uv-LICENSE-MIT; \
     fetch aws/aws-cli "$AWS_CLI_VERSION" LICENSE.txt aws-cli-LICENSE.txt; \
     fetch kubernetes/kubernetes "v${KUBECTL_VERSION}" LICENSE kubectl-LICENSE; \
-    fetch colbymchenry/codegraph "v${CODEGRAPH_VERSION}" LICENSE codegraph-LICENSE; \
+    fetch colbymchenry/codegraph "v${codegraph_version}" LICENSE codegraph-LICENSE; \
     fetch nodejs/node "$codegraph_node_tag" LICENSE codegraph-node-LICENSE; \
     fetch golang/go "go${GO_VERSION}" LICENSE go-LICENSE; \
     fetch golang/tools "gopls/v${GOPLS_VERSION}" LICENSE gopls-LICENSE; \
@@ -625,7 +634,7 @@ RUN set -eu; mkdir -p /out; . /in/tags.env; \
       "AWS CLI v2: the THIRD_PARTY_LICENSES its installer archive ships" /in/aws-cli-THIRD_PARTY_LICENSES \
       "kubectl v${KUBECTL_VERSION}, /usr/local/bin/kubectl: LICENSE of github.com/kubernetes/kubernetes at v${KUBECTL_VERSION}" /in/kubectl-LICENSE \
       "kubectl: the Go modules it links" /in/kubectl-modules \
-      "CodeGraph CLI, /opt/codegraph: LICENSE of github.com/colbymchenry/codegraph at v${CODEGRAPH_VERSION}" /in/codegraph-LICENSE \
+      "CodeGraph CLI, /opt/codegraph: LICENSE of github.com/colbymchenry/codegraph at v${codegraph_version}" /in/codegraph-LICENSE \
       "Go ${GO_VERSION}, /opt/go (go and gofmt at /usr/local/bin): LICENSE of github.com/golang/go at go${GO_VERSION}" /in/go-LICENSE \
       "gopls v${GOPLS_VERSION}, /usr/local/bin/gopls: LICENSE of github.com/golang/tools at gopls/v${GOPLS_VERSION}" /in/gopls-LICENSE \
       "gopls: the Go modules it links" /in/gopls-modules \
