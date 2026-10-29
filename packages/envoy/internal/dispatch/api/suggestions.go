@@ -120,7 +120,7 @@ const (
 )
 
 // The reasons a check was not made, or searched by keywords alone: related_checks.reason's values
-// (0137_related_checks).
+// (0139_related_checks).
 const (
 	relatedReasonBlankText         = "blank_text"
 	relatedReasonTimeout           = "timeout"
@@ -844,16 +844,7 @@ func (s *server) recordRelatedChecks(ctx context.Context, rows ...relatedCheckRe
 	if len(inserts) == 0 {
 		return
 	}
-	// A batch is built for each attempt: pgx keeps what it learned of a statement on the batch's
-	// queued queries, which belongs to the connection that sent it.
-	insert := func(ctx context.Context) error {
-		batch := &pgx.Batch{}
-		for _, args := range inserts {
-			batch.Queue(relatedCheckInsert, args...)
-		}
-		return s.deps.Store.Pool.SendBatch(ctx, batch).Close()
-	}
-	err := insert(ctx)
+	err := s.insertRelatedChecks(ctx, inserts)
 	if err == nil {
 		return
 	}
@@ -871,10 +862,23 @@ func (s *server) recordRelatedChecks(ctx context.Context, rows ...relatedCheckRe
 		defer s.relatedRecordRetrying.Add(-1)
 		ctx, cancel := context.WithTimeout(s.lifetime, relatedRecordRetryTimeout)
 		defer cancel()
-		if err := insert(ctx); err != nil {
+		if err := s.insertRelatedChecks(ctx, inserts); err != nil {
 			slog.Warn("dispatch: related-item check not recorded", "rows", len(inserts), "error", err)
 		}
 	})
+}
+
+// insertRelatedChecks writes inserts' related_checks rows in one round trip. A batch is built for
+// each attempt: pgx keeps what it learned of a statement on the batch's queued queries, which
+// belongs to the connection that sent it. The rows are no write of the request that ran the
+// check: they record a write that has already committed and marked its key, so they are made
+// outside its transaction, and a failure is only logged.
+func (s *server) insertRelatedChecks(ctx context.Context, inserts [][]any) error {
+	batch := &pgx.Batch{}
+	for _, args := range inserts {
+		batch.Queue(relatedCheckInsert, args...)
+	}
+	return s.deps.Store.Pool.SendBatch(ctx, batch).Close()
 }
 
 // relatedRecordRetryable says whether a related_checks insert that failed may succeed when tried

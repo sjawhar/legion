@@ -1,4 +1,4 @@
-import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
   useCallback,
@@ -32,6 +32,7 @@ import { versionsNewestFirst } from "../artifacts/ArtifactHeader";
 import {
   ArtifactDropZone,
   ArtifactUploadRow,
+  CLOSED_ISSUE_UPLOAD_REFUSAL,
   useArtifactUpload,
 } from "../artifacts/ArtifactUpload";
 import { useMargin } from "../margin/margin-context";
@@ -46,6 +47,8 @@ import {
 } from "../refs/routes";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
+import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AskBlockCard } from "./AskBlockCard";
 import { installTypedBlocks } from "./ask-block";
 import type { ConnectionState, DocumentConnection } from "./connection";
@@ -219,10 +222,10 @@ export function ProofDocument({
   });
   const liveTextQuery = useQuery(liveTextQueryOptions(artifact.id));
   // The repair replaces this document, so it uploads under the document's own name whatever the
-  // picked file is called.
+  // picked file is called; a closed issue takes none.
   const repairUpload = useArtifactUpload(
     owner.kind === "issue" ? { issue: owner.key } : { project: owner.project },
-    { name: artifact.name }
+    { name: artifact.name, refusal: isClosed ? CLOSED_ISSUE_UPLOAD_REFUSAL : null }
   );
   const [admission, setAdmission] = useState<AdmissionBlock | undefined>(undefined);
   // Set while an admission is blocked: admits again, once the next read of the text succeeds.
@@ -257,9 +260,18 @@ export function ProofDocument({
   const blocksReadOnly = isClosed || schemaReadOnly;
   const [askBlockHosts, setAskBlockHosts] = useState<readonly AskBlockHost[]>([]);
   const [isNameDialogOpen, setIsNameDialogOpen] = useState(false);
-  const nameVersion = useMutation({
-    mutationFn: (summary: string) => api.createArtifactVersion(artifact.id, { summary }),
+  // Naming a version is the name dialog's form, which shows a refusal itself; a rebuild shows
+  // its own beside its button.
+  const nameVersion = useKeyedWrite({
+    // `write` comes first: `onSuccess` reads its answer.
+    write: (summary: string, bounds) => api.createArtifactVersion(artifact.id, { summary }, bounds),
+    inline: true,
+    label: () => `New version of ${artifact.name}`,
     onSuccess: (created) => {
+      // Made either way, so the dialog closes and a second press names nothing twice; with no
+      // answer to give, the store has read the document again.
+      setIsNameDialogOpen(false);
+      if (created === null) return;
       queryClient.setQueryData<Artifact>(["artifact", artifact.id], (current) => {
         const source = current ?? artifact;
         return {
@@ -268,14 +280,15 @@ export function ProofDocument({
         };
       });
       onVersionChange(created.number);
-      setIsNameDialogOpen(false);
     },
   });
-  const rebuild = useMutation({
-    mutationFn: () => api.rebuildArtifact(artifact.id),
+  const rebuild = useKeyedWrite({
+    inline: true,
+    label: () => `Rebuild of ${artifact.name}`,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id] });
     },
+    write: (_variables, bounds) => api.rebuildArtifact(artifact.id, undefined, bounds),
   });
   const liveMarkdown = liveTextQuery.data?.markdown ?? "";
   const versionMarkdown =
@@ -665,6 +678,9 @@ export function ProofDocument({
         open={isNameDialogOpen}
         saving={nameVersion.isPending}
       />
+      {nameVersion.unanswered === undefined ? null : (
+        <LandedWithoutAnswer what={`The version “${nameVersion.unanswered.variables}”`} />
+      )}
       {isClosed ? <p>This issue is closed. Its document is read-only.</p> : null}
       {repairError === undefined ? null : (
         <div className="space-y-3" role="alert">

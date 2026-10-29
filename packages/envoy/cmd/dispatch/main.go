@@ -442,8 +442,6 @@ func main() {
 	// Postgres, and the room this process holds for it closes within that round trip, so its
 	// browsers reconnect and re-sync instead of reading text the store no longer holds.
 	go documentService.RunStaleRoomEviction(ctx)
-	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule.
-	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval, leases)
 	// The related-item check's keyword statistics (each project's df and N), rebuilt at
 	// boot and every ten minutes.
 	go api.RunSearchTermStatsRefresh(ctx, database.Pool, api.SearchTermStatsInterval, leases)
@@ -521,7 +519,12 @@ func main() {
 	}
 	announcer := startup.New(startup.Deps{Pool: database.Pool, Publisher: announcements})
 
-	routesHandler, waitDelivery := routes.New(appCtx)
+	routesHandler, background := routes.New(appCtx)
+	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule; the
+	// same pass deletes the Idempotency-Keys past their 24 hours and sends every delivery a process
+	// that died left owed (INFRA-258), which is why it starts once the API server it resumes them
+	// through is built.
+	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval, leases, background.ResumeDeliveries)
 	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
 	server := newHTTPServer(handler, time.Now)
 	// The server serves on the socket it inherited (DISPATCH_LISTEN_FD) or binds its address, and
@@ -553,7 +556,7 @@ func main() {
 		slog.Error("dispatch: register this server process", "error", err)
 		os.Exit(1)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, waitDelivery,
+	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, background.Wait,
 		deregisterAfterDrain(registration), registration.Lost()); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
@@ -1250,6 +1253,11 @@ func serviceTokenVerifier(boot bootConfig) *oidc.LazyVerifier {
 // compares commit and schema_version with the commit its image pin names and that commit's
 // migrations, so neither is ever filled with a guess; the Legion daemon reads fleet_commit, since
 // mid-roll whichever process answers it may serve a build the rest do not.
+//
+// `idempotency_keys` is true on every build that judges a write's Idempotency-Key (INFRA-258,
+// api/request_keys.go): the agents' client reads it before it retries a write under its key, since
+// an earlier Dispatch ignores the header and would run a retried write again. It is a fact of the
+// binary, never of the probe, so it is true whatever the database or NATS answer.
 func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.HandlerFunc {
 	var reportedCommit *string
 	if commit != "" {
@@ -1309,16 +1317,21 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(struct {
-			OK            bool    `json:"ok"`
-			DB            bool    `json:"db"`
-			NATS          *bool   `json:"nats"`
-			Files         *bool   `json:"files"`
-			SignIn        *bool   `json:"signin"`
-			ServiceTokens *bool   `json:"service_tokens"`
-			Commit        *string `json:"commit"`
-			FleetCommit   *string `json:"fleet_commit"`
-			SchemaVersion *int    `json:"schema_version"`
-		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, SignIn: signInOK, ServiceTokens: serviceTokensOK, Commit: reportedCommit, FleetCommit: announcer.FleetCommit(), SchemaVersion: schemaVersion})
+			OK              bool    `json:"ok"`
+			DB              bool    `json:"db"`
+			NATS            *bool   `json:"nats"`
+			Files           *bool   `json:"files"`
+			SignIn          *bool   `json:"signin"`
+			ServiceTokens   *bool   `json:"service_tokens"`
+			Commit          *string `json:"commit"`
+			FleetCommit     *string `json:"fleet_commit"`
+			SchemaVersion   *int    `json:"schema_version"`
+			IdempotencyKeys bool    `json:"idempotency_keys"`
+		}{
+			OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, SignIn: signInOK, ServiceTokens: serviceTokensOK,
+			Commit: reportedCommit, FleetCommit: announcer.FleetCommit(), SchemaVersion: schemaVersion,
+			IdempotencyKeys: true,
+		})
 	}
 }
 
