@@ -13,7 +13,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/aes"
@@ -161,62 +160,46 @@ func (p *dispatchPair) name(one *dispatchProcess) string {
 	return "B"
 }
 
-// ───── server-sent events ───────────────────────────────────────────────────
+// ───── the live socket's event feed ─────────────────────────────────────────
 
-// sseFrame is one server-sent event the stream handler wrote: its type and its data line. Its
-// `id:` line names the event, which the data carries too, so nothing here keeps it.
-type sseFrame struct {
-	event string
-	data  string
+// feedEvent is one event the event feed sent: its type and the event's JSON.
+type feedEvent struct {
+	eventType string
+	data      string
 }
 
-// openEventStream holds GET /api/v1/events open as a dashboard tab does and reports every frame
-// it reads on the returned channel, until the test ends or the connection does. One request, read
-// to the end: a row about a live stream carrying the other process's event has to show that event
-// arriving on the connection the reader already had, never on a reconnect's catch-up.
-func (p *dispatchProcess) openEventStream(t *testing.T) <-chan sseFrame {
+// openEventFeed holds GET /ws/live open as a dashboard tab does, subscribed to the event feed, and
+// reports every event it is sent on the returned channel, until the test ends or the socket does.
+// One subscription, read to the end: a row about the live feed carrying the other process's event
+// has to show that event arriving on the subscription the page already had, never on a
+// resubscribe's catch-up.
+func (p *dispatchProcess) openEventFeed(t *testing.T) <-chan feedEvent {
 	t.Helper()
-	return p.openServerSentEvents(t, "/api/v1/events")
-}
-
-// openServerSentEvents holds the server-sent stream at path open as a signed-in tab does and
-// reports every frame it reads on the returned channel, which closes once the connection ends.
-func (p *dispatchProcess) openServerSentEvents(t *testing.T, path string) <-chan sseFrame {
-	t.Helper()
-	response, err := p.send(http.MethodGet, path, "")
-	if err != nil {
-		t.Fatalf("open %s: %v", path, err)
-	}
-	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		_ = response.Body.Close()
-		t.Fatalf("open %s: status %d: %s", path, response.StatusCode, body)
-	}
-	t.Cleanup(func() { _ = response.Body.Close() })
-	frames := make(chan sseFrame, 256)
+	conn := p.openLiveEvents(t)
+	events := make(chan feedEvent, 256)
 	go func() {
-		defer close(frames)
-		reader := bufio.NewReader(response.Body)
-		var frame sseFrame
+		defer close(events)
 		for {
-			line, err := reader.ReadString('\n')
-			switch trimmed := strings.TrimRight(line, "\r\n"); {
-			case trimmed == "":
-				if frame.data != "" {
-					frames <- frame
-				}
-				frame = sseFrame{}
-			case strings.HasPrefix(trimmed, "event: "):
-				frame.event = strings.TrimPrefix(trimmed, "event: ")
-			case strings.HasPrefix(trimmed, "data: "):
-				frame.data = strings.TrimPrefix(trimmed, "data: ")
+			var frame struct {
+				Type  string          `json:"type"`
+				Event json.RawMessage `json:"event"`
 			}
-			if err != nil {
+			if err := conn.ReadJSON(&frame); err != nil {
 				return
 			}
+			if frame.Type != "event" {
+				continue
+			}
+			var event struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal(frame.Event, &event); err != nil {
+				return
+			}
+			events <- feedEvent{eventType: event.Type, data: string(frame.Event)}
 		}
 	}()
-	return frames
+	return events
 }
 
 // ───── the API a row drives ─────────────────────────────────────────────────
@@ -278,11 +261,11 @@ func (p *dispatchProcess) documentText(t *testing.T, artifactID string) string {
 	return document.Markdown
 }
 
-// ───── a live stream carries the other process's events ─────────────────────
+// ───── the live feed carries the other process's events ─────────────────────
 
 // A dashboard tab is open on one process and the work happens on the other: the event of an issue
-// created through B's API has to reach the stream A is holding, on the connection it already has.
-// The live source of an open stream is no longer this process's in-memory broker, which hears
+// created through B's API has to reach the event feed A's socket holds, on the subscription it
+// already has. The live source of an open feed is not this process's in-memory broker, which hears
 // only its own writes, but a relay over `listen dispatch_events`, so what either process commits
 // every process publishes.
 func TestALiveStreamOnOneProcessCarriesTheOtherProcessesEvent(t *testing.T) {
@@ -290,21 +273,21 @@ func TestALiveStreamOnOneProcessCarriesTheOtherProcessesEvent(t *testing.T) {
 	project := uniqueProjectKey(t, "XPR")
 	pair.a.createProject(t, project, "Cross process")
 
-	frames := pair.a.openEventStream(t)
+	events := pair.a.openEventFeed(t)
 	key, _ := pair.b.createIssueIn(t, project, "Created on the other process", "spec")
 
 	deadline := time.After(30 * time.Second)
 	for {
 		select {
-		case frame, open := <-frames:
+		case event, open := <-events:
 			if !open {
-				t.Fatalf("the stream A held closed before B's event arrived:\n%s", pair.a.Output.String())
+				t.Fatalf("the feed A held closed before B's event arrived:\n%s", pair.a.Output.String())
 			}
-			if frame.event == "issue.created" && strings.Contains(frame.data, `"`+key+`"`) {
+			if event.eventType == "issue.created" && strings.Contains(event.data, `"`+key+`"`) {
 				return
 			}
 		case <-deadline:
-			t.Fatalf("the stream A held never carried the issue B created (%s):\nA:\n%s\nB:\n%s",
+			t.Fatalf("the feed A held never carried the issue B created (%s):\nA:\n%s\nB:\n%s",
 				key, pair.a.Output.String(), pair.b.Output.String())
 		}
 	}
@@ -1209,24 +1192,32 @@ func lockTables(t *testing.T, database *store.Store, mode string, tables ...stri
 // holds - which is the only way two processes' passes are made to overlap on purpose rather than
 // by luck.
 //
-// Four of the eleven leases are observable inside a window a test can wait out:
-// reference-excerpts, block-index and webhook-redelivery, whose first pass is immediate, and
-// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other seven
-// are not, and this row says so rather than pretending: document-compaction's interval is 24 h;
-// issue-ask-repair's first leased pass is one IssueAskRepairInterval (10 min) in, the boot's
-// repair taking no lease; architecture-import's and delivery-reconcile's first pass is jittered
-// uniformly over SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether
-// their passes ever overlap is a coin toss no test should turn into a flake; edit-notices' and
-// delivery-resume's periods are five and ten seconds, so this window holds many of their periods,
-// each served once (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce holds what the
-// edit-notices lease is for); and server-processes' pass is one delete on the table every
-// process's heartbeat writes, so a lock that held the pass would hold the heartbeats with it.
+// Five of the twelve leases are observable inside a window a test can wait out:
+// reference-excerpts, block-index, search-term-stats and webhook-redelivery, whose first pass is
+// immediate, and suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in.
+// The other seven are not, and this row says so rather than pretending: document-compaction's
+// interval is 24 h; issue-ask-repair's first leased pass is one IssueAskRepairInterval (10 min) in,
+// the boot's repair taking no lease; architecture-import's and delivery-reconcile's first pass is
+// jittered uniformly over SyncInterval/ReconcileInterval (5 min) and each process draws its own,
+// so whether their passes ever overlap is a coin toss no test should turn into a flake;
+// edit-notices' and delivery-resume's periods are five and ten seconds, so this window holds many
+// of their periods, each served once (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce
+// holds what the edit-notices lease is for); and server-processes' prune is one delete on
+// server_processes, the table every process's heartbeat writes every five seconds, so a lock that
+// held the prune would hold the registry itself.
 func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
 	fake := startGitHubFake(t)
+	// The term-statistics refresh writes nothing for a database with no project, so one exists
+	// before either process starts.
+	if _, err := pair.database.Pool.Exec(context.Background(), `insert into projects (key, name) values ('LEASE', 'Lease')`); err != nil {
+		t.Fatalf("create the project the term-statistics refresh rebuilds: %v", err)
+	}
 	// refs is where the reference-excerpt reconciliation's first statement writes
-	// (refs.MarkStaleExcerpts), write_suggestions where the suggestion-outcome sweep's does.
-	gate := lockTables(t, pair.database, "exclusive", "refs", "write_suggestions")
+	// (refs.MarkStaleExcerpts), write_suggestions where the suggestion-outcome sweep's does, and
+	// search_term_totals where the term-statistics refresh's first write for a project goes (its
+	// first statement only reads projects, which an exclusive lock does not hold).
+	gate := lockTables(t, pair.database, "exclusive", "refs", "write_suggestions", "search_term_totals")
 	// The block-index reconciliation's first statements read document_block_versions and
 	// block_grammar_owed, which only access exclusive mode holds back. They are held in a gate of
 	// their own, released as soon as the other process has found the lease held: that pass's
@@ -1243,6 +1234,10 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	waitForLease(t, pair, leaseSkipped, "reference-excerpts", 60*time.Second)
 	if ran := countLease(pair.a, leaseRan, "reference-excerpts") + countLease(pair.b, leaseRan, "reference-excerpts"); ran != 0 {
 		t.Errorf("a reference-excerpt pass reported running %d times while the one holding the lease is still inside the refs lock", ran)
+	}
+	waitForLease(t, pair, leaseSkipped, "search-term-stats", 60*time.Second)
+	if ran := countLease(pair.a, leaseRan, "search-term-stats") + countLease(pair.b, leaseRan, "search-term-stats"); ran != 0 {
+		t.Errorf("a term-statistics pass reported running %d times while the one holding the lease is still inside the search_term_totals lock", ran)
 	}
 
 	if waiting := storetest.WaitForLockWaiters(t, blockGate, 1, 60*time.Second); waiting < 1 {
@@ -1274,8 +1269,10 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	}
 	waitForLease(t, pair, leaseRan, "reference-excerpts", 60*time.Second)
 	waitForLease(t, pair, leaseRan, "suggestion-outcomes", 60*time.Second)
+	waitForLease(t, pair, leaseRan, "search-term-stats", 60*time.Second)
 	requireLeasedOnce(t, pair, "reference-excerpts")
 	requireLeasedOnce(t, pair, "suggestion-outcomes")
+	requireLeasedOnce(t, pair, "search-term-stats")
 	for _, unobserved := range []struct{ lease, why string }{
 		{"document-compaction", "its interval is 24 h, so no pass is due inside any window a test can wait out"},
 		{"issue-ask-repair", "its first leased pass is one IssueAskRepairInterval (10 min) after each process started"},
@@ -2407,7 +2404,7 @@ func TestADeliveryAKilledProcessLeftPendingIsSentByTheOther(t *testing.T) {
 			fmt.Sprintf(`{"body":"A mention","mentions":[{"target":"session:%s"}]}`, resumeSession.SessionID))
 		mention := sends.next(t, 30*time.Second, "the mention's send")
 		pair.a.call(t, http.MethodPost, "/api/v1/broadcasts", fmt.Sprintf(
-			`{"body":"A broadcast","delivery":"steer","session_ids":[%q],"idempotency_key":"killed-while-sending"}`,
+			`{"body":"A broadcast","delivery":"steer","session_ids":[%q]}`,
 			resumeSession.SessionID), http.StatusCreated)
 		broadcast := sends.next(t, 30*time.Second, "the broadcast recipient's send")
 
@@ -2731,7 +2728,8 @@ func backDateRedeliveryClaim(t *testing.T, natsURL, guid string, by time.Duratio
 	if err != nil {
 		t.Fatalf("JetStream: %v", err)
 	}
-	state, err := redeliver.OpenState(js)
+	// One copy, as the single test NATS server holds and the runs under test open.
+	state, err := redeliver.OpenState(js, 1)
 	if err != nil {
 		t.Fatalf("open the redelivery bucket: %v", err)
 	}
@@ -3374,73 +3372,89 @@ func startHookPair(t *testing.T) *dispatchPair {
 	return pair
 }
 
-// openDeliverySocket opens GET /ws/delivery as a signed-in Delivery page does and reports the
-// read error that ended it on the returned channel.
-func (p *dispatchProcess) openDeliverySocket(t *testing.T) <-chan error {
-	t.Helper()
-	conn, response, err := gws.DefaultDialer.Dial("ws"+strings.TrimPrefix(p.url("/ws/delivery"), "http"),
-		http.Header{"X-Dispatch-User": {dispatchTestLogin}})
-	if err != nil {
-		t.Fatalf("open the delivery socket: %v (%v)", err, response)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	ended := make(chan error, 1)
+// liveSocketFrames reads conn, a live socket, until it ends: each frame of the agent view it
+// holds lands on frames, and the read error that ended the socket on ended.
+func liveSocketFrames(conn *gws.Conn) (frames <-chan string, ended <-chan streamEnd) {
+	agent := make(chan string, 64)
+	end := make(chan streamEnd, 1)
 	go func() {
+		defer close(agent)
 		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
-				ended <- err
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				end <- streamEnd{at: time.Now(), err: err}
 				return
 			}
+			var frame struct {
+				Type  string          `json:"type"`
+				Event string          `json:"event"`
+				Data  json.RawMessage `json:"data"`
+			}
+			if json.Unmarshal(data, &frame) != nil || frame.Type != "agent" || frame.Event != "frame" {
+				continue
+			}
+			agent <- string(frame.Data)
 		}
 	}()
-	return ended
+	return agent, end
 }
 
-// requireStreamEnded drains frames until the stream closes, failing the row when it is still
-// open within.
-func requireStreamEnded(t *testing.T, frames <-chan sseFrame, within time.Duration, what string) {
+// requireSocketClosed waits for a live socket to end with code, failing the row when it is still
+// open within or ended another way.
+func requireSocketClosed(t *testing.T, ended <-chan streamEnd, code int, within time.Duration, what string) {
 	t.Helper()
-	deadline := time.After(within)
-	for {
-		select {
-		case _, open := <-frames:
-			if !open {
-				return
-			}
-		case <-deadline:
-			t.Fatalf("%s was still open %v later", what, within)
+	select {
+	case end := <-ended:
+		if !gws.IsCloseError(end.err, code) {
+			t.Fatalf("%s ended with %v, want the hook's %d", what, end.err, code)
 		}
+	case <-time.After(within):
+		t.Fatalf("%s was still open %v later", what, within)
 	}
 }
 
 // Every test hook acts on every process serving the database, whichever process the call landed
-// on: a browser suite against two processes disconnects, quiesces and feeds frames to the process
-// its page happens to be connected to, which is not the one its own API call reaches. A stream, a
-// delivery socket, a live document room and a conversation viewer are each held open on B, and
-// each hook is called on A. quiesce answers only once B's room has closed too, which is what a
-// harness truncating its database right after relies on. Once B is killed its lock is gone with
-// its connection, and a hook called on A answers on A's acknowledgement alone rather than waiting
-// out the timeout for a process that no longer exists.
+// on: a browser suite against two processes disconnects, rotates, quiesces and feeds frames to
+// the process its page happens to be connected to, which is not the one its own API call reaches.
+// A live socket - one per tab, holding both the event feed and a conversation view - a live
+// document room and a second live socket are each held open on B, and each hook is called on A.
+// quiesce answers only once B's room has closed too, which is what a harness truncating its
+// database right after relies on. Once B is killed its lock is gone with its connection, and a
+// hook called on A answers on A's acknowledgement alone rather than waiting out the timeout for a
+// process that no longer exists.
 func TestEveryTestHookActsOnBothProcesses(t *testing.T) {
 	pair := startHookPair(t)
 	project := uniqueProjectKey(t, "HKS")
 	pair.a.createProject(t, project, "Test hooks")
 	_, artifactID := pair.a.createIssueIn(t, project, "Open on B", "before")
 
-	stream := pair.b.openEventStream(t)
-	pair.a.call(t, http.MethodPost, "/api/v1/events/_test/disconnect", "", http.StatusOK)
-	requireStreamEnded(t, stream, 10*time.Second, "the event stream B held after the disconnect hook was called on A")
-
-	socket := pair.b.openDeliverySocket(t)
-	pair.a.call(t, http.MethodPost, "/api/v1/delivery/_test/disconnect", "", http.StatusOK)
+	// One socket per tab: B's holds the event feed and the conversation view the publish hook
+	// feeds, as a page watching an agent holds them.
+	viewer := pair.b.openLiveEvents(t)
+	pair.b.watchAgent(t, viewer, hookViewerSession)
+	published, viewerEnded := liveSocketFrames(viewer)
+	const frame = `{"v":1,"kind":"message","seq":7}`
+	pair.a.call(t, http.MethodPost, "/api/v1/agents/"+hookViewerSession+"/stream/_test/publish", frame, http.StatusOK)
 	select {
-	case err := <-socket:
-		if !gws.IsCloseError(err, gws.CloseServiceRestart) {
-			t.Fatalf("the delivery socket B held ended with %v, want the hook's 1012", err)
+	case got, open := <-published:
+		if !open {
+			t.Fatal("the conversation view B held closed before the frame published on A arrived")
+		}
+		if got != frame {
+			t.Fatalf("the conversation view B held received %s, want the frame published on A", got)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("the delivery socket B held was still open 10s after the delivery disconnect hook was called on A")
+		t.Fatal("the conversation view B held never received the frame published on A")
 	}
+
+	pair.a.call(t, http.MethodPost, "/api/v1/live/_test/disconnect", "", http.StatusOK)
+	requireSocketClosed(t, viewerEnded, gws.CloseServiceRestart, 10*time.Second,
+		"the live socket B held after the disconnect hook was called on A")
+
+	_, rotated := liveSocketFrames(pair.b.openLiveEvents(t))
+	pair.a.call(t, http.MethodPost, "/api/v1/live/_test/rotate", "", http.StatusOK)
+	requireSocketClosed(t, rotated, contracts.LiveSocketMaxAgeClose, 10*time.Second,
+		"the live socket B held after the rotate hook was called on A")
 
 	editor := pair.b.openEditor(t, artifactID, "before\n")
 	pair.a.call(t, http.MethodPost, "/api/v1/artifacts/_test/quiesce", "", http.StatusOK)
@@ -3453,33 +3467,18 @@ func TestEveryTestHookActsOnBothProcesses(t *testing.T) {
 		t.Fatalf("the document room B held was still open 2s after quiesce answered on A:\nB:\n%s", pair.b.Output.String())
 	}
 
-	viewer := pair.b.openServerSentEvents(t, "/api/v1/agents/"+hookViewerSession+"/stream")
-	const published = `{"v":1,"kind":"message","seq":7}`
-	pair.a.call(t, http.MethodPost, "/api/v1/agents/"+hookViewerSession+"/stream/_test/publish", published, http.StatusOK)
-	deadline := time.After(10 * time.Second)
-	for received := false; !received; {
-		select {
-		case frame, open := <-viewer:
-			if !open {
-				t.Fatal("the conversation viewer B held closed before the frame published on A arrived")
-			}
-			received = frame.event == "frame" && frame.data == published
-		case <-deadline:
-			t.Fatal("the conversation viewer B held never received the frame published on A")
-		}
-	}
-
-	survivor := pair.a.openEventStream(t)
+	_, survivor := liveSocketFrames(pair.a.openLiveEvents(t))
 	pair.b.kill(t)
 	called := time.Now()
-	pair.a.call(t, http.MethodPost, "/api/v1/events/_test/disconnect", "", http.StatusOK)
+	pair.a.call(t, http.MethodPost, "/api/v1/live/_test/disconnect", "", http.StatusOK)
 	waited := time.Since(called)
 	t.Logf("the disconnect hook on A answered %v after B was killed", waited)
 	// The hook's timeout is ten seconds; an answer inside it is one that did not wait for B.
 	if waited >= 10*time.Second {
 		t.Fatalf("the disconnect hook on A answered %v after B was killed, want well inside the 10s timeout", waited)
 	}
-	requireStreamEnded(t, survivor, 10*time.Second, "the event stream A held after the disconnect hook answered with B killed")
+	requireSocketClosed(t, survivor, gws.CloseServiceRestart, 10*time.Second,
+		"the live socket A held after the disconnect hook answered with B killed")
 }
 
 // ───── two dashboard builds ─────────────────────────────────────────────────

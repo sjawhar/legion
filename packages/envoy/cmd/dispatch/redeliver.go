@@ -25,14 +25,14 @@ import (
 // allows an endpoint.
 const redeliveryPace = time.Second
 
-// webhookSweeper builds the redelivery sweep for the App whose key Dispatch holds. It returns nil
-// when there is no key to sign with (the endpoints take only an App JWT) or no NATS for its
-// state. The sweep's KV bucket is opened by the first sweep that finds the client connected, not
-// here: the client connects in the background (serverBus), and a bus that is down at boot must
-// not stop the boot. A sweep before then is skipped and logged as failed. Its App client and its
-// own backoff obey the GitHub rate limits every process shares, in the database's
-// github_rate_limits.
-func webhookSweeper(natsClient *bus.Client, database *store.Store, app *auth.AppConfig, apiBase string) (*redeliver.Sweeper, error) {
+// webhookSweeper builds the redelivery sweep for the App whose key Dispatch holds, its state in a
+// bucket of replicas copies (ENVOY_NATS_REPLICAS). It returns nil when there is no key to sign with
+// (the endpoints take only an App JWT) or no NATS for its state. The sweep's KV bucket is opened by
+// the first sweep that finds the client connected, not here: the client connects in the background
+// (serverBus), and a bus that is down at boot must not stop the boot. A sweep before then is
+// skipped and logged as failed. Its App client and its own backoff obey the GitHub rate limits
+// every process shares, in the database's github_rate_limits.
+func webhookSweeper(natsClient *bus.Client, database *store.Store, app *auth.AppConfig, apiBase string, replicas int) (*redeliver.Sweeper, error) {
 	if natsClient == nil {
 		return nil, nil
 	}
@@ -45,7 +45,7 @@ func webhookSweeper(natsClient *bus.Client, database *store.Store, app *auth.App
 		if !natsClient.Connected() {
 			return bus.KeyValue{}, errors.New("NATS is not connected, so the sweep's state cannot be opened yet")
 		}
-		return redeliver.OpenState(natsClient.JS())
+		return redeliver.OpenState(natsClient.JS(), replicas)
 	}
 	return &redeliver.Sweeper{GitHub: github, Open: open, Limits: limits, Logger: slog.Default(), Pace: redeliveryPace}, nil
 }
@@ -92,6 +92,11 @@ func redeliverWebhooks(ctx context.Context, args []string, env settingValues, ou
 		fmt.Fprintf(out, "redeliver-webhooks: load envoy config: %v\n", err)
 		return 1
 	}
+	replicas, err := bus.ParseNATSReplicas(env.get(bus.ReplicasEnvVar))
+	if err != nil {
+		fmt.Fprintf(out, "redeliver-webhooks: %v\n", err)
+		return 1
+	}
 	natsClient, err := bus.Connect(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup))
 	if err != nil {
 		fmt.Fprintf(out, "redeliver-webhooks: connect NATS: %v\n", err)
@@ -108,7 +113,7 @@ func redeliverWebhooks(ctx context.Context, args []string, env settingValues, ou
 		fmt.Fprintf(out, "redeliver-webhooks: load app credentials: %v\n", err)
 		return 1
 	}
-	sweeper, err := webhookSweeper(natsClient, database, app, strings.TrimSpace(env.get("DISPATCH_GITHUB_API_BASE")))
+	sweeper, err := webhookSweeper(natsClient, database, app, strings.TrimSpace(env.get("DISPATCH_GITHUB_API_BASE")), replicas)
 	if err != nil {
 		fmt.Fprintf(out, "redeliver-webhooks: %v\n", err)
 		return 1

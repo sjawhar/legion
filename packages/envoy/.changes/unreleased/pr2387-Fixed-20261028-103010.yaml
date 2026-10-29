@@ -1,6 +1,6 @@
 kind: Fixed
 body: |-
-    Migrations `0137` to `0140` are additive (a nullable column, two indexes and three new tables),
+    Migrations `0142` to `0145` are additive (a nullable column, two indexes and three new tables),
     so the release before them keeps serving beside this one through a rolling update, and rolling
     back past them is an image rollback alone. While both releases serve, only this release's
     processes share the route list, the GitHub rate limits and the warnings, and resume stranded

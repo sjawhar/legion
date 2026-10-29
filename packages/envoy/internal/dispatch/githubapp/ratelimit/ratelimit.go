@@ -1,5 +1,5 @@
 // Package ratelimit is the GitHub rate limits every Dispatch process obeys together: one row of
-// github_rate_limits (migration 0139) per scope, judged by the database's clock.
+// github_rate_limits (migration 0144) per scope, judged by the database's clock.
 //
 // GitHub budgets the App and each installation, not a process, and warns that requests sent while
 // limited may get the integration banned. So a limit one process meets is recorded here, and every
@@ -101,13 +101,23 @@ func (s *Store) Get(ctx context.Context, scope string) (limit Limit, found bool,
 
 // Record records that GitHub asked for wait before the next request under scope. The limit ends
 // at the later of now() plus wait and a limit already recorded: two processes meeting one limit
-// moments apart never shorten it.
+// moments apart never shorten it. It writes in a transaction of its own, as every write a keyed
+// request makes is: a request whose GitHub call meets a limit is one, and the transaction's
+// commit step marks that request's Idempotency-Key committed with the write.
 func (s *Store) Record(ctx context.Context, scope string, wait time.Duration) error {
-	if _, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("record the GitHub rate limit of %s: %w", scope, err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
 		insert into github_rate_limits as l (scope, until, updated_at)
 		values ($1, now() + make_interval(secs => $2), now())
 		on conflict (scope) do update set until = greatest(l.until, excluded.until), updated_at = now()
 	`, scope, wait.Seconds()); err != nil {
+		return fmt.Errorf("record the GitHub rate limit of %s: %w", scope, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("record the GitHub rate limit of %s: %w", scope, err)
 	}
 	return nil

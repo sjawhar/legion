@@ -222,7 +222,7 @@ func TestAResumedMentionOfARoutedCommentReachesTheRouteHolderOnce(t *testing.T) 
 	for _, tc := range finish {
 		t.Run(tc.name, func(t *testing.T) {
 			// The comment's sender died before it settled attempt 1, its claim long lapsed.
-			strandAttempt(t, database, "comment_deliveries", "comment_id", tc.comment.ID, "'5 minutes'", "'5 minutes'")
+			strandStoredAttempt(t, database, "comment_deliveries", "comment_id", tc.comment.ID, "'5 minutes'", "'5 minutes'")
 			listener.play()
 			tc.run(t)
 

@@ -740,13 +740,14 @@ func TestAgentTargetedMessagesRequireHumanAndKeepTheirOwnConversation(t *testing
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 
 	nonHuman := bearerRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
-		"body": "Can I send this?", "delivery": "btw", "actor": map[string]any{"kind": "session", "id": "s2"},
+		"body": "Can I send this?", "delivery": "btw",
+		"actor": map[string]any{"kind": "session", "id": "s2"},
 	})
 	if nonHuman.Code != http.StatusForbidden || !strings.Contains(nonHuman.Body.String(), `"code":"HUMAN_ONLY"`) {
 		t.Fatalf("agent-authenticated creation: status=%d body=%s", nonHuman.Code, nonHuman.Body.String())
 	}
 
-	first := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+	first := postAgentMessage(t, handler, "s1", map[string]any{
 		"body": "First question", "delivery": "btw",
 	}, "alice")
 	if first.Code != http.StatusCreated {
@@ -768,7 +769,7 @@ func TestAgentTargetedMessagesRequireHumanAndKeepTheirOwnConversation(t *testing
 	}
 
 	sendStatus = http.StatusNotFound
-	failed := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+	failed := postAgentMessage(t, handler, "s1", map[string]any{
 		"body": "Second question", "delivery": "btw",
 	}, "alice")
 	if failed.Code != http.StatusCreated {
@@ -840,7 +841,7 @@ func TestAgentConversationReplyStaysInThatAgentsConversation(t *testing.T) {
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "Issue message", "before")
 
-	root := decodeBody[model.Message](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+	root := decodeBody[model.Message](t, postAgentMessage(t, handler, "s1", map[string]any{
 		"body": "First question", "delivery": "btw",
 	}, "alice"))
 	answered := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+root.ID+"/reply", map[string]any{
@@ -852,7 +853,7 @@ func TestAgentConversationReplyStaysInThatAgentsConversation(t *testing.T) {
 	answer := decodeBody[model.Message](t, answered)
 
 	// A reply to the agent's answer continues s1's conversation and is delivered to s1.
-	followUp := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+	followUp := postAgentMessage(t, handler, "s1", map[string]any{
 		"body": "Thanks - one more thing.", "delivery": "steer", "in_reply_to": answer.ID,
 	}, "alice")
 	if followUp.Code != http.StatusCreated {
@@ -865,14 +866,14 @@ func TestAgentConversationReplyStaysInThatAgentsConversation(t *testing.T) {
 
 	// Another agent's conversation cannot claim s1's thread, and an issue message is not an
 	// issue-less parent.
-	crossAgent := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s2/messages", map[string]any{
+	crossAgent := postAgentMessage(t, handler, "s2", map[string]any{
 		"body": "Hijack", "delivery": "steer", "in_reply_to": answer.ID,
 	}, "alice")
 	if crossAgent.Code != http.StatusBadRequest || !strings.Contains(crossAgent.Body.String(), `"code":"MESSAGE_INPUT"`) {
 		t.Fatalf("cross-agent reply: status=%d body=%s", crossAgent.Code, crossAgent.Body.String())
 	}
 	issueMessage := createIssueMessage(t, handler, issue.Key, map[string]any{"body": "On the issue"}, "alice")
-	crossIssue := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+	crossIssue := postAgentMessage(t, handler, "s1", map[string]any{
 		"body": "Wrong conversation", "delivery": "steer", "in_reply_to": issueMessage.ID,
 	}, "alice")
 	if crossIssue.Code != http.StatusBadRequest || !strings.Contains(crossIssue.Body.String(), `"code":"MESSAGE_INPUT"`) {
@@ -1250,7 +1251,7 @@ func TestReplyEventsNameTheirThreadRootTarget(t *testing.T) {
 	}
 
 	// An agent conversation has no issue, and a reply inside it still names that conversation.
-	agentRoot := decodeBody[model.Message](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+	agentRoot := decodeBody[model.Message](t, postAgentMessage(t, handler, "s1", map[string]any{
 		"body": "First question", "delivery": "btw",
 	}, "alice"))
 	agentAnswered := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+agentRoot.ID+"/reply", map[string]any{
@@ -1260,7 +1261,7 @@ func TestReplyEventsNameTheirThreadRootTarget(t *testing.T) {
 		t.Fatalf("answer in the agent conversation: status=%d body=%s", agentAnswered.Code, agentAnswered.Body.String())
 	}
 	agentAnswer := decodeBody[model.Message](t, agentAnswered)
-	agentFollowUp := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+	agentFollowUp := postAgentMessage(t, handler, "s1", map[string]any{
 		"body": "One more thing.", "delivery": "steer", "in_reply_to": agentAnswer.ID,
 	}, "alice")
 	if agentFollowUp.Code != http.StatusCreated {
@@ -1462,12 +1463,12 @@ func TestTargetedMessageAttemptIsPendingAcrossItsSend(t *testing.T) {
 	}
 }
 
-// A sender that dies between its send and its settle strands a pending attempt whose send landed.
-// The retry must resume it under its original idempotency key - the listener deduplicates that key
-// against the send that did land - rather than allocating a new attempt, whose new key delivers
-// the message a second time to an agent that already has it. A client that gives up on a slow
-// listener no longer strands the attempt (a request's own send outlives its connection), so the
-// row a dead sender leaves is written here directly once that send has completed.
+// A sender that stalls past its claim's lease - its process died mid-send, or its listener is
+// slower than the lease - strands a pending attempt. The retry must resume it under its original
+// idempotency key - the listener deduplicates that key against the send that did land - rather
+// than allocating a new attempt, whose new key delivers the message a second time to an agent that
+// already has it. The stalled sender, answered at last, finds the attempt resumed by someone else
+// and leaves it as the retry settled it.
 func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 	var listenerState struct {
 		sync.Mutex
@@ -1475,6 +1476,8 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 		delivered map[string]struct{}
 	}
 	listenerState.delivered = map[string]struct{}{}
+	held := make(chan struct{})
+	release := make(chan struct{})
 	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -1498,8 +1501,10 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 			listenerState.delivered[request.IdempotencyKey+"@"+request.TargetSession] = struct{}{}
 			listenerState.Unlock()
 			if first {
-				// The slow listener this whole change exists for: the client gives up first.
-				time.Sleep(1500 * time.Millisecond)
+				// The stalled sender: the listener has the frame, and answers only once the
+				// sender's claim has lapsed and the retry has resumed the attempt.
+				close(held)
+				<-release
 			}
 			_, _ = w.Write([]byte(`{"event_id":"target-envelope","recipient":"s1"}`))
 		default:
@@ -1507,32 +1512,43 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 		}
 	}))
 	defer listener.Close()
+	letGo := sync.OnceFunc(func() { close(release) })
+	defer letGo()
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "Stranded targeted attempt", "before")
 
-	body := "The client gives up while the listener is still answering."
-	abandoned, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
-	defer cancel()
+	body := "The sender stalls while the listener is still answering."
 	payload, err := json.Marshal(map[string]any{"body": body, "target": "session:s1", "delivery": "steer"})
 	if err != nil {
 		t.Fatalf("encode targeted message: %v", err)
 	}
 	request := httptest.NewRequest(
 		http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", bytes.NewReader(payload),
-	).WithContext(abandoned)
+	)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Dispatch-User", "alice")
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, request)
-	if abandoned.Err() == nil {
-		t.Fatalf("the message answered before its client's 700ms deadline, so no client gave up on it")
+	answered := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		answered <- recorder
+	}()
+	select {
+	case <-held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the send never reached the listener")
+	}
+	select {
+	case recorder := <-answered:
+		t.Fatalf("the send should not have completed while its listener holds it: status=%d body=%s", recorder.Code, recorder.Body.String())
+	default:
 	}
 
 	var messageID string
 	if err := database.Pool.QueryRow(context.Background(),
 		`select id::text from messages where body = $1`, body,
 	).Scan(&messageID); err != nil {
-		t.Fatalf("read the abandoned client's message: %v", err)
+		t.Fatalf("read the stalled sender's message: %v", err)
 	}
 	var attempt int
 	var state string
@@ -1541,16 +1557,14 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 	`, messageID).Scan(&attempt, &state); err != nil {
 		t.Fatalf("read the attempt: %v", err)
 	}
-	if attempt != 1 || state != "sent" {
-		t.Fatalf("attempt = %d/%q, want attempt 1 sent: the client gave up after the commit, and the send outlives it", attempt, state)
+	if attempt != 1 || state != "pending" {
+		t.Fatalf("stranded attempt = %d/%q, want attempt 1 left pending", attempt, state)
 	}
 
-	// A sender that died between that send and its settle would have left the row pending,
-	// under a claim old enough to be plainly abandoned.
+	// The sender has not come back within its lease: its claim is old enough to be plainly
+	// abandoned.
 	if _, err := database.Pool.Exec(context.Background(), `
-		update message_deliveries
-		set state = 'pending', envelope_id = null, claimed_at = now() - interval '5 minutes'
-		where message_id = $1
+		update message_deliveries set claimed_at = now() - interval '5 minutes' where message_id = $1
 	`, messageID); err != nil {
 		t.Fatalf("strand the attempt: %v", err)
 	}
@@ -1564,6 +1578,23 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 	resumed := decodeBody[model.MessageDelivery](t, retry)
 	if resumed.Attempt != 1 || resumed.State != "sent" {
 		t.Fatalf("retry of a stranded attempt = %#v, want the original attempt 1 completed", resumed)
+	}
+
+	// The stalled sender is answered at last. Its claim is no longer the row's, so it records
+	// nothing and answers with the attempt as the retry settled it.
+	letGo()
+	var late *httptest.ResponseRecorder
+	select {
+	case late = <-answered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stalled sender never answered")
+	}
+	if late.Code != http.StatusCreated {
+		t.Fatalf("the stalled sender: status=%d body=%s", late.Code, late.Body.String())
+	}
+	if stalled := decodeBody[model.Message](t, late); len(stalled.Deliveries) != 1 ||
+		stalled.Deliveries[0].Attempt != 1 || stalled.Deliveries[0].State != "sent" {
+		t.Fatalf("the stalled sender's deliveries = %#v, want attempt 1 as the retry settled it", stalled.Deliveries)
 	}
 
 	listenerState.Lock()

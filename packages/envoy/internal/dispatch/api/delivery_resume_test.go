@@ -79,9 +79,10 @@ func (l *resumeListener) forget() {
 	l.sends = nil
 }
 
-// strandAttempt sets attempt 1 of the message or comment back to pending, as a process that died
-// between its claim and its settle leaves it, claimed and created age ago (`null` claims nothing).
-func strandAttempt(t *testing.T, database *store.Store, table, column, id, claimed, created string) {
+// strandStoredAttempt sets attempt 1 of the message or comment back to pending, as a process that
+// died between its claim and its settle leaves it, claimed and created age ago (`null` claims
+// nothing).
+func strandStoredAttempt(t *testing.T, database *store.Store, table, column, id, claimed, created string) {
 	t.Helper()
 	if _, err := database.Pool.Exec(context.Background(), `
 		update `+table+`
@@ -182,7 +183,7 @@ func TestACommentResumeSendsNothingBesideALiveSenderAndTakesTheAttemptOnceItLaps
 	mention := ResolvedMention{Target: "session:s1", Delivery: "steer"}
 
 	// A sender claimed attempt 1 a moment ago and is still sending it.
-	strandAttempt(t, database, "comment_deliveries", "comment_id", comment.ID, "'0 seconds'", "'5 minutes'")
+	strandStoredAttempt(t, database, "comment_deliveries", "comment_id", comment.ID, "'0 seconds'", "'5 minutes'")
 	listener.forget()
 	held, err := direct.deliverResolvedCommentMention(context.Background(), comment, event, mention, comment.Author, 1, direct.newTakeoverRetry())
 	if err != nil {
@@ -199,7 +200,7 @@ func TestACommentResumeSendsNothingBesideALiveSenderAndTakesTheAttemptOnceItLaps
 	}
 
 	// That sender never came back.
-	strandAttempt(t, database, "comment_deliveries", "comment_id", comment.ID, "'5 minutes'", "'5 minutes'")
+	strandStoredAttempt(t, database, "comment_deliveries", "comment_id", comment.ID, "'5 minutes'", "'5 minutes'")
 	resumed, err := direct.deliverResolvedCommentMention(context.Background(), comment, event, mention, comment.Author, 1, direct.newTakeoverRetry())
 	if err != nil {
 		t.Fatalf("resume the abandoned attempt: %v", err)
@@ -235,19 +236,19 @@ func TestTheDeliveryResumePassSendsOnlyTheStrandedAttemptsItOwes(t *testing.T) {
 	stranded := createIssueMessage(t, handler, open.Key, map[string]any{
 		"body": "Stranded, and urgent", "target": "session:s1", "delivery": "steer", "urgency": "high",
 	}, "alice")
-	strandAttempt(t, database, "message_deliveries", "message_id", stranded.ID, "'2 minutes'", "'2 minutes'")
+	strandStoredAttempt(t, database, "message_deliveries", "message_id", stranded.ID, "'2 minutes'", "'2 minutes'")
 	mention := decodeMentionedComment(t, postMentionedComment(t, handler, open.Key, map[string]any{
 		"body": "A stranded mention.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
-	strandAttempt(t, database, "comment_deliveries", "comment_id", mention.ID, "'2 minutes'", "'2 minutes'")
+	strandStoredAttempt(t, database, "comment_deliveries", "comment_id", mention.ID, "'2 minutes'", "'2 minutes'")
 	fresh := agentMessage("Its request is still sending it")
-	strandAttempt(t, database, "message_deliveries", "message_id", fresh.ID, "null", "'0 seconds'")
+	strandStoredAttempt(t, database, "message_deliveries", "message_id", fresh.ID, "null", "'0 seconds'")
 	tooOld := agentMessage("Stranded before the horizon")
-	strandAttempt(t, database, "message_deliveries", "message_id", tooOld.ID, "'2 hours'", "'2 hours'")
+	strandStoredAttempt(t, database, "message_deliveries", "message_id", tooOld.ID, "'2 hours'", "'2 hours'")
 	onClosed := createIssueMessage(t, handler, closed.Key, map[string]any{
 		"body": "On an issue closed since", "target": "session:s1", "delivery": "steer",
 	}, "alice")
-	strandAttempt(t, database, "message_deliveries", "message_id", onClosed.ID, "'2 minutes'", "'2 minutes'")
+	strandStoredAttempt(t, database, "message_deliveries", "message_id", onClosed.ID, "'2 minutes'", "'2 minutes'")
 	if _, err := database.Pool.Exec(context.Background(),
 		`update issues set status = 'done', closed_at = now() where key = $1`, closed.Key); err != nil {
 		t.Fatalf("close %s: %v", closed.Key, err)
@@ -329,7 +330,7 @@ func TestARetryCarriesTheUrgencyOfTheAttemptItResumesAndNoneOnANewAttempt(t *tes
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			message := urgent(test.name)
-			strandAttempt(t, database, "message_deliveries", "message_id", message.ID, test.claimed, "'2 minutes'")
+			strandStoredAttempt(t, database, "message_deliveries", "message_id", message.ID, test.claimed, "'2 minutes'")
 			listener.forget()
 
 			retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/messages/"+message.ID+"/deliveries",

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	gws "github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
@@ -50,7 +50,7 @@ func TestATestHookNamesTheProcessThatNeverAcknowledged(t *testing.T) {
 	_, silent := holdTestHookLock(t, database)
 
 	called := time.Now()
-	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/events/_test/disconnect", nil, "alice")
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/live/_test/disconnect", nil, "alice")
 	waited := time.Since(called)
 	if response.Code != http.StatusGatewayTimeout {
 		t.Fatalf("disconnect hook with a silent process: status=%d body=%s, want 504", response.Code, response.Body.String())
@@ -81,7 +81,7 @@ func TestATestHookStopsWaitingForAProcessWhoseLockIsGone(t *testing.T) {
 	}()
 
 	called := time.Now()
-	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/events/_test/disconnect", nil, "alice")
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/live/_test/disconnect", nil, "alice")
 	waited := time.Since(called)
 	if response.Code != http.StatusOK {
 		t.Fatalf("disconnect hook after the silent process died: status=%d body=%s, want 200", response.Code, response.Body.String())
@@ -122,45 +122,6 @@ func secondHookProcess(t *testing.T, database *store.Store) *httptest.Server {
 	return server
 }
 
-// readStreamEventWithin is readStreamEvent bounded by within, failing the test rather than waiting
-// for ever on a frame that never comes.
-func readStreamEventWithin(t *testing.T, reader *bufio.Reader, within time.Duration) (string, string) {
-	t.Helper()
-	type event struct{ name, data string }
-	read := make(chan event, 1)
-	go func() {
-		defer close(read)
-		var current event
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				return
-			}
-			switch line = strings.TrimRight(line, "\r\n"); {
-			case line == "":
-				if current.name != "" {
-					read <- current
-					return
-				}
-			case strings.HasPrefix(line, "event: "):
-				current.name = strings.TrimPrefix(line, "event: ")
-			case strings.HasPrefix(line, "data: "):
-				current.data = strings.TrimPrefix(line, "data: ")
-			}
-		}
-	}()
-	select {
-	case got, ok := <-read:
-		if !ok {
-			t.Fatal("the stream ended before its next event")
-		}
-		return got.name, got.data
-	case <-time.After(within):
-		t.Fatalf("no stream event within %v", within)
-		return "", ""
-	}
-}
-
 // A published frame travels to every process inside the hook's notification, and one
 // notification carries less than Postgres's 8000-byte payload. A frame several times that - a
 // replay of a long transcript, which the browser suite sets - reaches a viewer on the other
@@ -170,13 +131,10 @@ func TestAFrameLargerThanOneNotificationReachesAViewerOnTheOtherProcessWhole(t *
 	handler, database, _ := newTestServer(t, testServerOptions{testHooks: true, agentStream: agentstream.NewMemory()})
 	other := secondHookProcess(t, database)
 
-	viewer, reader := openAgentStream(t, other, plannerSessionID, "cookie")
-	defer viewer.Body.Close()
-	if viewer.StatusCode != http.StatusOK {
-		t.Fatalf("open the viewer on the other process: %d", viewer.StatusCode)
-	}
-	if event, _ := readStreamEventWithin(t, reader, 10*time.Second); event != "responder" {
-		t.Fatalf("the viewer's first event is %q, want the responder verdict", event)
+	viewer := openLiveSocketAt(t, gws.DefaultDialer, "ws"+strings.TrimPrefix(other.URL, "http")+"/ws/live", asUser("alice")).read()
+	viewer.subscribeAgent(t, "agent", plannerSessionID)
+	if data := viewer.agentFrame(t, "agent", "responder"); data == "" {
+		t.Fatal("the viewer's first frame is not the responder verdict")
 	}
 
 	frame := map[string]any{"v": 1, "kind": "message", "text": strings.Repeat("ünïcødé ✓ the relay carries this turn. ", 700)}
@@ -191,9 +149,8 @@ func TestAFrameLargerThanOneNotificationReachesAViewerOnTheOtherProcessWhole(t *
 	if response.Code != http.StatusOK {
 		t.Fatalf("publish a %d-byte frame: status=%d body=%s", len(want), response.Code, response.Body.String())
 	}
-	event, data := readStreamEventWithin(t, reader, 10*time.Second)
-	if event != "frame" || data != string(want) {
-		t.Fatalf("the other process's viewer read %q of %d bytes, want the %d-byte frame whole", event, len(data), len(want))
+	if data := viewer.agentFrame(t, "agent", "frame"); data != string(want) {
+		t.Fatalf("the other process's viewer read %d bytes, want the %d-byte frame whole", len(data), len(want))
 	}
 }
 

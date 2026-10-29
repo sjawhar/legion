@@ -134,10 +134,10 @@ type liveWrite struct {
 	// written into the room's own bookkeeping as soon as the stamp runs: a write refused after the
 	// stamp but before commit (growth, a later validation failure) must not leave the room
 	// holding a trace of it. liveOperation.abandon, which applyLive and applyMargin both defer,
-	// clears all three maps whenever its one operation changed the fork but was never recorded -
-	// the same guard that drops the fork's rendering - so a growth-refused edit's own stamp never
-	// reaches Ledger.creditRooms. It runs per operation, so it does not distinguish this
-	// operation's own stamp from an earlier, already-recorded one's on the same liveWrite; no
+	// clears all three maps whenever its one operation changed the fork but was never recorded, or
+	// panicked - the same guard that drops the fork's rendering - so a growth-refused edit's own
+	// stamp never reaches Ledger.creditRooms. It runs per operation, so it does not distinguish
+	// this operation's own stamp from an earlier, already-recorded one's on the same liveWrite; no
 	// production caller invokes ApplyOps or ReplaceText more than once per Join (every api/ call
 	// site joins once per request), so two calls never share one liveWrite today, and a future
 	// one that did would need its own guard.
@@ -339,18 +339,28 @@ func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error 
 // compares against is the head their append meets from the first read on.
 func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
 	write.forkMarkdown, write.forkRead = nil, forkReadMark{}
+	// A document no room holds, or whose room stands behind the durable head, is forked cold.
 	live := s.srv.GetDoc(write.artifactID)
-	if live == nil {
-		return s.coldFork(ctx, write)
+	cold := live == nil
+	var err error
+	if !cold {
+		if cold, err = s.roomBehindHead(ctx, write, live); err != nil {
+			return nil, err
+		}
 	}
-	behind, err := s.roomBehindHead(ctx, write, live)
+	var fork *crdt.Doc
+	if cold {
+		fork, err = s.coldFork(ctx, write)
+	} else {
+		fork, err = s.warmFork(ctx, write)
+	}
 	if err != nil {
 		return nil, err
 	}
-	if behind {
-		return s.coldFork(ctx, write)
+	if s.checkRendering != nil {
+		s.checkRendering("fork", write)
 	}
-	return s.warmFork(ctx, write)
+	return fork, nil
 }
 
 // roomBehindHead reports whether live, the room resident for write's document, stands behind the
@@ -641,6 +651,21 @@ func (w *liveWrite) dropRendering() {
 	w.tree, w.markdown, w.offsets, w.anchorsTree, w.forkMarkdown = nil, "", nil, nil, nil
 }
 
+// rendering is the write's rendering of fork - its tree, markdown and offsets - and whether it has
+// one: exactly when it holds a rendering and fork is the write's own fork. forkLive drops the
+// rendering whenever the fork moves (buildFork, releaseFork), and an operation that moves it
+// records the rendering of what it left or abandons both (applyLive, applyMargin), so while the
+// rendering is set it describes the fork as it stands, and a margin write (applyMargin) or a read
+// joined to the write's transaction takes it in place of reading and rendering the fork again. The
+// tree is the write's own, which the transaction's next operation and its version still use, so a
+// caller only reads it.
+func (w *liveWrite) rendering(fork *crdt.Doc) (renderedTree, bool) {
+	if w.tree == nil || w.fork != fork {
+		return renderedTree{}, false
+	}
+	return renderedTree{tree: w.tree, markdown: w.markdown, offsets: w.offsets}, true
+}
+
 // releaseFork drops write's fork and the rendering taken from it, which serve the transaction's
 // operations alone. A write can outlive its transaction by a long way: whatever holds the
 // transaction's context holds its ledger and so the write, and a pooled pgx connection keeps the
@@ -707,14 +732,20 @@ func (s *Service) joinRead(ctx context.Context, artifactID string) (*crdt.Doc, e
 
 // docTree is the tree of the document the caller sees: the transaction's fork's when there is one
 // (joinRead), otherwise the live room's, which it loads, read as of one moment (liveTree): the
-// room's peers and the service write the room while a walk reads it.
+// room's peers and the service write the room while a walk reads it. Inside a write transaction
+// the tree may be the write's own rendering of the fork (reuseRendering), which every caller -
+// VerifyMark, BlockForQuote, SuggestionKind, prevalidateLiveOperations, currentToken and an ApplyOps
+// with no operation - only reads, and which a caller must never change.
 func (s *Service) docTree(ctx context.Context, artifactID string) (*pmdoc.Node, error) {
 	fork, err := s.joinRead(ctx, artifactID)
 	if err != nil {
 		return nil, err
 	}
 	if fork != nil {
-		return treeOf(fork)
+		if rendering, reused := s.reuseRendering(joinedLiveWrite(ctx, artifactID), fork, "docTree"); reused {
+			return rendering.tree, nil
+		}
+		return s.readFork(fork)
 	}
 	var tree *pmdoc.Node
 	var treeErr error
@@ -728,6 +759,30 @@ func (s *Service) docTree(ctx context.Context, artifactID string) (*pmdoc.Node, 
 		return nil, err
 	}
 	return tree, nil
+}
+
+// readFork reads the tree of fork, a write transaction's fork, for that write's operation
+// (applyLive, applyMargin) or a read joined to its transaction (docTree, heldTree,
+// captureLiveTextAndAuthors), and counts the read (forkTreeCounts.read).
+func (s *Service) readFork(fork *crdt.Doc) (*pmdoc.Node, error) {
+	s.forkTrees.read.Add(1)
+	return treeOf(fork)
+}
+
+// reuseRendering is write's rendering of fork, when it has one (liveWrite.rendering), for the
+// margin write (applyMargin) or the read joined to write's transaction at site at, which takes it in
+// place of reading the fork. Each reuse is counted (forkTreeCounts.renderingReused) and handed to
+// the test hook (checkRendering).
+func (s *Service) reuseRendering(write *liveWrite, fork *crdt.Doc, at string) (renderedTree, bool) {
+	rendering, ok := write.rendering(fork)
+	if !ok {
+		return renderedTree{}, false
+	}
+	s.forkTrees.renderingReused.Add(1)
+	if s.checkRendering != nil {
+		s.checkRendering(at, write)
+	}
+	return rendering, true
 }
 
 // creditLiveWrite records whom a joined content change is credited to once its transaction
@@ -770,6 +825,9 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 	defer s.finishLiveWrite(write)
 	// Committed, the write has no more use for its fork, so the fork goes before the publish,
 	// which loads the room when no room holds the document (coldFork).
+	if s.checkRendering != nil {
+		s.checkRendering("publish", write)
+	}
 	write.releaseFork()
 	for index, update := range write.updates {
 		err := s.publishLiveUpdate(write.artifactID, update, write.versions[index], write.renderings[index], write.marginRooms[index])

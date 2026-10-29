@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AgentStreamResponder } from "./agent-stream";
 import type {
   ASK_URGENCIES,
   DOC_EDIT_OPS,
@@ -224,15 +225,23 @@ export interface WriteAdvice {
    */
   readonly decision_blocks_added?: number;
   /**
+   * The related-item check each of a document edit's new decision blocks got, in
+   * document order; a block past the fifth in one edit answers `not_made`. Omitted when the edit
+   * added none, and absent from a Dispatch server predating the check, which only counts them in
+   * `decision_blocks_added`.
+   */
+  readonly decision_block_checks?: DecisionBlockCheck[];
+  /**
    * The typed block openings (`:::ask{…}`) the written document holds as text rather than as
    * blocks, outside code: written inside a line, or escaped. `examples` quotes the first few with a
    * little of the text before each. Omitted when there are none.
    */
   readonly unparsed_openers?: { readonly count: number; readonly examples: readonly string[] };
   /**
-   * LEGION-550's write-time feedback, set only on an issue or ask creation: the items most like
-   * what was just filed, and any past decision that matches. Never refuses or delays the write;
-   * `suggestions.missing` explains why search did not answer in time instead.
+   * The related-item check (LEGION-550), set on an issue or ask creation: the items
+   * most like what was just filed, any past decision that matches, and what the check did
+   * (`outcome`). Never refuses the write; it waits at most five seconds, and a check that did not
+   * search to the end says why in `missing`.
    */
   readonly suggestions?: Suggestions;
   /**
@@ -1300,6 +1309,130 @@ export const DELIVERY_CAPABILITIES = ["aside", "btw", "steer"] as const;
  */
 export const MAX_BROADCAST_RECIPIENTS = 100;
 
+/**
+ * The request header that names one write's intent: the same on every retry of that write, and
+ * different for every new press. Dispatch accepts it, optionally, on every `POST` and `PATCH`
+ * route (`PUT` and `DELETE` are idempotent already): a repeat with the same key and the same
+ * request, once the first has finished, is answered with the first's stored status and body and
+ * `IDEMPOTENCY_REPLAYED_HEADER`, and runs nothing again; the same key with a different request is
+ * `422 IDEMPOTENCY_KEY_REUSED`; the same key while the first is still running (within
+ * `IDEMPOTENCY_LEASE_MS`) is `409 IDEMPOTENCY_KEY_IN_FLIGHT` with `Retry-After: 1`, which a client
+ * asks again after. A 5xx, 401, 408 or 429 is not stored, so the next attempt runs the request
+ * again - unless the first attempt's write committed before its answer was lost, which a repeat
+ * is answered `409 IDEMPOTENCY_KEY_COMMITTED` for. Keys belong to the signed-in login that sent
+ * them and are kept `IDEMPOTENCY_KEY_TTL_MS`.
+ * Five routes answer a repeat from the record they made rather than the stored body: `POST
+ * /api/v1/agents/{session_id}/messages`, `POST /api/v1/broadcasts`, `POST
+ * /api/v1/issues/{key}/messages`, `POST /api/v1/issues/{key}/comments` and `POST
+ * /api/v1/artifacts/{id}/comments` resume any delivery still owed and answer `201` with
+ * `IDEMPOTENCY_REPLAYED_HEADER` and the resource read afresh in the first answer's shape (a
+ * broadcast with the first answer's `excluded`), so a recipient whose attempt a live sender holds
+ * can still read `pending`, and a repeat after a lost answer is that replay, never
+ * `409 IDEMPOTENCY_KEY_COMMITTED`. A write without the header is run as it always was, with no
+ * replay (the IETF `Idempotency-Key` draft; Google AIP-155).
+ */
+export const IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
+
+/** The response header (`?1`, a structured-field boolean) on an answer Dispatch replayed from
+ *  the first request under the key rather than ran again. */
+export const IDEMPOTENCY_REPLAYED_HEADER = "Idempotency-Replayed";
+
+/** The longest `IDEMPOTENCY_KEY_HEADER` value, in characters. */
+export const IDEMPOTENCY_KEY_MAX = 128;
+
+/** A whole `IDEMPOTENCY_KEY_HEADER` value: letters, digits, `.`, `_`, `:` and `-`, from one to
+ *  `IDEMPOTENCY_KEY_MAX` characters. Any other is `400 KEY_INVALID` (`IDEMPOTENCY_KEY_INVALID`). */
+export const IDEMPOTENCY_KEY_PATTERN = new RegExp(`^[A-Za-z0-9._:-]{1,${IDEMPOTENCY_KEY_MAX}}$`);
+
+/** The code of the `422` for a key already used for a different request (another method,
+ *  route, path value or body); that request was not run. */
+export const IDEMPOTENCY_KEY_REUSED = "KEY_REUSED";
+
+/** The code of the `409` (with `Retry-After: 1`) for a key whose first request is still running;
+ *  nothing was run, and the client asks again under the same key. */
+export const IDEMPOTENCY_KEY_IN_FLIGHT = "KEY_IN_FLIGHT";
+
+/** The code of the `409` for a key whose write landed before its answer was lost: Dispatch will
+ *  not run it again and has no answer to replay. The write is done; a client treats it as landed
+ *  and reads again what it wrote (the event feed carries the change too). */
+export const IDEMPOTENCY_KEY_COMMITTED = "KEY_COMMITTED";
+
+/** The code of the `400` for an `IDEMPOTENCY_KEY_HEADER` that does not match
+ *  `IDEMPOTENCY_KEY_PATTERN`, or is sent twice: named as `KEY_REUSED`, `KEY_IN_FLIGHT` and
+ *  `KEY_COMMITTED` are. */
+export const IDEMPOTENCY_KEY_INVALID = "KEY_INVALID";
+
+/** The code a replay's body carries when the first answer was larger than Dispatch keeps (1 MiB):
+ *  the replay has the first answer's status and this body instead of the first's. A 2xx with it
+ *  means the write ran; the client reads the resource again rather than this body. */
+export const IDEMPOTENCY_ANSWER_NOT_KEPT = "ANSWER_NOT_KEPT";
+
+/**
+ * The request header a page puts on every write it makes (`POST`, `PATCH`, `PUT`, `DELETE`): the
+ * login of the person who pressed it. Dispatch answers `409 DISPATCH_LOGIN_CHANGED` before
+ * anything runs, its key untouched, when the request's caller is another person or no person at
+ * all, so a write one person pressed never runs under another's session - another tab signs in
+ * in place, and this tab's retry goes out on the new cookie before it learns of it. A caller that
+ * resolves to nobody (a lapsed cookie) is answered by the route's own `401`. A write without the
+ * header (the `dispatch` command, an agent) is not checked.
+ */
+export const DISPATCH_LOGIN_HEADER = "Dispatch-Login";
+
+/** The code of the `409` for a write whose `DISPATCH_LOGIN_HEADER` names a login that is not its
+ *  caller's: nothing ran. The page drops every write that login pressed. */
+export const DISPATCH_LOGIN_CHANGED = "LOGIN_CHANGED";
+
+/** The codes of a write Dispatch made and has no answer to give for: `409 KEY_COMMITTED`, or a
+ *  replayed 2xx reading `ANSWER_NOT_KEPT`. A client treats either as landed. */
+export type IdempotencyLandedCode =
+  | typeof IDEMPOTENCY_KEY_COMMITTED
+  | typeof IDEMPOTENCY_ANSWER_NOT_KEPT;
+
+/**
+ * Whether an attempt Dispatch answered with `status` (and `code`, its error body's) ended without
+ * Dispatch's verdict on the key, so a client asks again under the same key: a 5xx, a 408 or a 429
+ * (none of which Dispatch stores, `IDEMPOTENCY_KEY_HEADER`), or `409 IDEMPOTENCY_KEY_IN_FLIGHT`
+ * (the first request under the key is still running). Any other answer is Dispatch's verdict, and
+ * the same key would be answered with it again. The page and the `dispatch` command both retry by
+ * this one rule.
+ */
+export function retriesUnderKey(status: number, code: string | undefined): boolean {
+  return (
+    status >= 500 ||
+    status === 408 ||
+    status === 429 ||
+    (status === 409 && code === IDEMPOTENCY_KEY_IN_FLIGHT)
+  );
+}
+
+/**
+ * Whether an answer of `status`, `replayed` (it carried `IDEMPOTENCY_REPLAYED_HEADER`) and parsed
+ * `body` is a replay whose first answer Dispatch did not keep: a replayed 2xx whose body is
+ * `{ code: IDEMPOTENCY_ANSWER_NOT_KEPT }`. The write ran; the client reads the resource again
+ * rather than taking this body for it. An answer that is not a replay is the resource itself,
+ * whatever it holds.
+ */
+export function answerNotKept(status: number, replayed: boolean, body: unknown): boolean {
+  return (
+    replayed &&
+    status >= 200 &&
+    status < 300 &&
+    typeof body === "object" &&
+    body !== null &&
+    Reflect.get(body, "code") === IDEMPOTENCY_ANSWER_NOT_KEPT
+  );
+}
+
+/** How long Dispatch keeps a key's answer: 24 hours. */
+export const IDEMPOTENCY_KEY_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** How long a key's first request holds the key: a repeat within this is
+ *  `409 IDEMPOTENCY_KEY_IN_FLIGHT`. One after it, the first one's process presumed dead, is
+ *  answered `409 IDEMPOTENCY_KEY_COMMITTED` when that first run's write committed, is answered
+ *  from the record on the five routes that keep one (`IDEMPOTENCY_KEY_HEADER`), and otherwise
+ *  takes the key over and runs the request again. 60 seconds. */
+export const IDEMPOTENCY_LEASE_MS = 60 * 1000;
+
 export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
 
 /**
@@ -1355,9 +1488,9 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  * under a MsgId of its delivery id, and GitHub redelivers deliveries up to three days old, so a
  * window shorter than that lets a GitHub redelivery be stored, and handed to a host, twice.
  *
- * This window bounds a *delivery* retry, not a broadcast *create*:
- * `CreateBroadcastInput.idempotency_key` is a database row that lives as long as its broadcast,
- * so a repeated `POST /api/v1/broadcasts` is recognised with no window, however late it arrives.
+ * This window bounds a *delivery* retry, not a repeated *write*: a write's `Idempotency-Key`
+ * (`IDEMPOTENCY_KEY_HEADER`) is recognised for `IDEMPOTENCY_KEY_TTL_MS`, however late within
+ * that the repeat arrives.
  */
 export const DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
 
@@ -1651,10 +1784,12 @@ export interface DuplicateCandidate {
 }
 
 /**
- * One item LEGION-550's write-time feedback judges similar to what was just filed: a fused-search
- * hit (`SearchResult`) over the same project. `answered_by`/`answered_at` are set only when this
- * is `Suggestions.decision` — the "past decision" case, where the agent needs who answered and
- * when, not just a link.
+ * One item the related-item check (LEGION-550) judges like what was just filed: a
+ * search hit over the same project. `ask` is where an ask item stands, absent from an older
+ * Dispatch and when the check could not read the asks' states (no item then carries `ask`, and
+ * there is no `decision`). `answered_by`/`answered_at` are set only when this is
+ * `Suggestions.decision` — the "past decision" case, where the agent needs who answered and when,
+ * not just a link — and repeat `ask.answer`'s user and time for clients built before `ask`.
  */
 export interface WriteSuggestion {
   readonly kind: SearchResultKind;
@@ -1663,20 +1798,101 @@ export interface WriteSuggestion {
   readonly id: string;
   readonly snippet: string;
   readonly href: string;
+  readonly ask?: SearchAsk;
   readonly answered_by?: string;
   readonly answered_at?: string;
 }
 
+/** `Suggestions.outcome`: the check listed items, searched and found none, or did not search to
+ *  the end (`missing` says why). */
+export type RelatedCheckOutcome = "found" | "none" | "not_made";
+
+/** `Suggestions.search`: how the check searched; keywords only when meaning search could not run
+ *  (`search_note` says why) or the caller asked for it. */
+export type RelatedCheckSearch = "meaning_and_keywords" | "keywords_only";
+
 /**
- * LEGION-550's write-time feedback on a newly created issue or ask: the three items most like
- * it (`related`) and, when an answered ask already settles the same question, that decision
- * (`decision`). `missing` explains why search did not answer within the write's bounded budget,
- * instead of refusing or delaying the write itself.
+ * The related-item check's result (LEGION-550) on a newly created issue or ask, on
+ * each new decision block of a document edit, and as the whole answer of the no-write related
+ * route: the three items most like it (`related`, one per owner, always an array) and, when an
+ * answered ask already settles the same question, that decision (`decision`). The check never
+ * refuses the write; it waits at most five seconds.
+ *
+ * A Dispatch predating the check's outcome sends only `related`, `decision` and `missing`; every other
+ * field is absent there. From that release on, `outcome` is always set, `search` is set unless the
+ * check was not made, and `missing` is set, to the reason, exactly when `outcome` is `not_made`.
+ * `search_query` is two or three of the words the keyword search used, spelled as the text spells
+ * them, for a reader to run `dispatch search` with. `title_matches` is the issues whose titles
+ * near-duplicate a new issue's when the create was forced past that refusal. Mirrors
+ * `model.Suggestions`.
  */
 export interface Suggestions {
+  readonly outcome?: RelatedCheckOutcome;
+  readonly search?: RelatedCheckSearch;
+  readonly search_note?: string;
+  readonly search_query?: string;
   readonly related: WriteSuggestion[];
   readonly decision?: WriteSuggestion;
   readonly missing?: string;
+  readonly title_matches?: DuplicateCandidate[];
+}
+
+/** One new decision block's related-item check in a document edit's advice
+ *  (`WriteAdvice.decision_block_checks`): the block's id, its question, and the check's result. */
+export interface DecisionBlockCheck {
+  readonly block_id: string;
+  readonly question: string;
+  readonly suggestions: Suggestions;
+}
+
+/**
+ * The body of `POST /api/v1/projects/{key}/related` (and the query of its `GET` form, which caps
+ * title and text together at `SEARCH_QUERY_MAX`): the related-item check over a title and a text
+ * without writing anything. `exclude_issue` leaves that issue's own items out of the results, as a
+ * check on that issue's own write does; `keywords_only` skips meaning search. A blank title and
+ * text answer `not_made`. The answer is `Suggestions`.
+ */
+export interface RelatedCheckInput {
+  readonly title?: string;
+  readonly text?: string;
+  readonly exclude_issue?: string;
+  readonly keywords_only?: boolean;
+}
+
+/** One millisecond column of `RelatedChecksReport` over the checks that hold a value in it
+ *  (`count`): discrete 50th and 95th percentiles, the largest, and how many took more than 300 ms.
+ *  `p50`, `p95` and `max` are null when `count` is 0. Mirrors `model.RelatedCheckTiming`. */
+export interface RelatedCheckTiming {
+  readonly count: number;
+  readonly p50: number | null;
+  readonly p95: number | null;
+  readonly max: number | null;
+  readonly over_300ms: number;
+}
+
+/**
+ * `GET /api/v1/related-checks?project=&from=&to=&source_kind=`: how the related-item checks of
+ * writes recorded within one window went. `project`, `source_kind`, `from` and `to` echo the
+ * filters, each null when not given (`from` inclusive, `to` exclusive). Each `by_*` map holds only
+ * the values seen; `by_search` counts a check not made under `not_made`, and `by_reason` leaves
+ * out checks with no reason. `completed` is the checks that searched to the end (found or none),
+ * `skipped_for_time` those not made because the search ran out of time. Mirrors
+ * `model.RelatedChecksReport`.
+ */
+export interface RelatedChecksReport {
+  readonly project: string | null;
+  readonly source_kind: string | null;
+  readonly from: string | null;
+  readonly to: string | null;
+  readonly total: number;
+  readonly by_source_kind: Readonly<Record<string, number>>;
+  readonly by_outcome: Readonly<Record<string, number>>;
+  readonly by_search: Readonly<Record<string, number>>;
+  readonly by_reason: Readonly<Record<string, number>>;
+  readonly completed: number;
+  readonly skipped_for_time: number;
+  readonly keyword_ms: RelatedCheckTiming;
+  readonly total_ms: RelatedCheckTiming;
 }
 
 export interface Agent {
@@ -1741,6 +1957,8 @@ export interface ReferenceMember {
   readonly via: ReferenceVia;
 }
 
+// IssueReferences is the answer of GET /api/v1/issues/{key}/references. With `?versions=latest`
+// each member's `artifact.versions` holds only its latest version.
 export interface IssueReferences {
   readonly members: ReferenceMember[];
   readonly truncated: boolean;
@@ -2024,7 +2242,7 @@ export interface ArchitectureSyncFailedEventPayload {
 export interface UserStateUpdatedEventPayload {
   readonly login: string;
   /** The viewer's row for one issue as the write left it. Absent from a snooze's event, which
-   *  every signed-in stream carries and so names no issue of the writer's. */
+   *  every signed-in feed carries and so names no issue of the writer's. */
   readonly state?: UserIssueState;
   /** Which of `pinned`, `last_read_seq`, `dismissed` and `snoozed` the write moved (`[]` when it
    *  moved none), so another tab refreshes its pinned list for a pin, its whole Inbox for a snooze
@@ -2338,9 +2556,24 @@ export interface EditOp {
   readonly attributes?: Readonly<Record<string, unknown>>;
 }
 
+/** The code of the `401` Dispatch itself answers a caller it cannot resolve to a person - no
+ *  session cookie, one it cannot read, one whose generation it has revoked, or a membership the
+ *  sign-in issuer no longer confirms (`identity.WriteError`). A `401` without it came from
+ *  something in front of Dispatch, an authenticating proxy among them, and says nothing about
+ *  the session: a sign-out answered that way did not go through. */
+export const AUTH_NO_IDENTITY = "NO_IDENTITY";
+
+/** `GET /auth/whoami`'s answer for a person signed in to the dashboard. */
 export interface AuthenticatedUser {
   readonly kind: "user";
   readonly login: string;
+  /** The decimal id of the newest event when Dispatch answered. Every read the page makes after
+   *  this answer holds every event at or below it, so the event feed resumes from it on its first
+   *  subscription and replays exactly what committed since. Always answered: a server that cannot
+   *  read the head answers `503 EVENT_HEAD_UNAVAILABLE` rather than a whoami without one, and a
+   *  server older than the field serves no `/ws/live` either, so no page of this release ever
+   *  reads one of its answers. */
+  readonly event_head: string;
 }
 
 export interface UserIssueState {
@@ -2659,15 +2892,6 @@ export interface CreateBroadcastInput {
   /** The sessions the human selected. A session named twice is one recipient; one that is no
    *  longer live, or that does not advertise `delivery`, comes back under `excluded`. */
   readonly session_ids: readonly string[];
-  /** Names this one send, the same on every retry of it: letters, digits, `.`, `_`, `:` and `-`,
-   *  at most 128 characters. The server answers a repeat (same human, same key, same body, mode
-   *  and session_ids) with the broadcast the first request made, 200 instead of 201, and refuses
-   *  a reuse of the key for a different request with 409 BROADCAST_KEY_REUSED, whose body names
-   *  the broadcast that already used the key as `broadcast_id`; that request is not sent.
-   *  Recognised for as long as the broadcast exists: there is no window (see
-   *  DELIVERY_DUPLICATE_WINDOW_MS). The dashboard sends a UUID per composed send; a script mints
-   *  its own. Required. */
-  readonly idempotency_key: string;
 }
 
 export interface IssueRead {
@@ -3532,19 +3756,66 @@ export interface DeliveryLiveRevChanges {
   readonly fields?: Readonly<Record<string, string>>;
 }
 
-export interface DeliveryLiveSubscribe {
+/** A delivery view's resume: the page's last applied change and what it holds; Dispatch answers
+ *  the delta. */
+export interface DeliveryLiveResume {
+  readonly seq: string;
+  readonly revs: DeliveryLiveRevs;
+}
+
+/** The close code Dispatch ends a live socket with once the socket reaches its age, a random point
+ *  in [LIVE_SOCKET_MIN_AGE_MS, LIVE_SOCKET_MAX_AGE_MS). It is in the private 4000-4999 range, apart
+ *  from the 4000 a page closes a silent socket with: the page reopens at once and resumes every
+ *  subscription, showing no pill and refreshing nothing. */
+export const LIVE_SOCKET_MAX_AGE_CLOSE = 4001;
+/** The youngest age at which Dispatch ends a live socket: 30 minutes. */
+export const LIVE_SOCKET_MIN_AGE_MS = 1_800_000;
+/** The age before which Dispatch ends every live socket: 60 minutes. */
+export const LIVE_SOCKET_MAX_AGE_MS = 3_600_000;
+/** The most subscriptions one live socket holds at once; a subscribe past it is refused with a
+ *  `TOO_MANY_SUBSCRIPTIONS` error frame. */
+export const LIVE_SOCKET_MAX_SUBSCRIPTIONS = 64;
+
+/** The Dispatch event feed, event by event in id order. */
+export interface EventsLiveView {
+  readonly kind: "events";
+}
+/** One session's agent stream: whether it is responding, its replay, and each frame it publishes. */
+export interface AgentLiveView {
+  readonly kind: "agent";
+  /** The session's id, a UUID. */
+  readonly session_id: string;
+}
+/** One view a live socket subscription shows. */
+export type LiveView = DeliveryLiveView | EventsLiveView | AgentLiveView;
+
+/** An events view's resume: the decimal id of the last event the page applied. */
+export interface EventsLiveResume {
+  readonly since: string;
+}
+
+/** A subscribe frame for a view of type `V`, whose resume is an `R`. */
+interface LiveSubscribeTo<V extends LiveView, R> {
   readonly type: "subscribe";
   /** The page's own id for this subscription, echoed on every frame for it. */
   readonly sub: string;
-  readonly view: DeliveryLiveView;
-  /** A reconnecting page's last applied change and what it holds; Dispatch answers the delta. */
-  readonly resume?: { readonly seq: string; readonly revs: DeliveryLiveRevs };
+  readonly view: V;
+  /** A reconnecting page's resume point, of its view's kind. */
+  readonly resume?: R;
 }
-export interface DeliveryLiveUnsubscribe {
+/** Starts the subscription `sub` names. Its resume is its view's kind's: a `DeliveryLiveResume`
+ *  for a delivery view, an `EventsLiveResume` for the events view, and none for an agent view,
+ *  which starts from the session's replay. Dispatch refuses any other pairing with an
+ *  `INVALID_FRAME` error frame, so the type admits none. */
+export type LiveSubscribe =
+  | LiveSubscribeTo<DeliveryLiveView, DeliveryLiveResume>
+  | LiveSubscribeTo<EventsLiveView, EventsLiveResume>
+  | LiveSubscribeTo<AgentLiveView, never>;
+export interface LiveUnsubscribe {
   readonly type: "unsubscribe";
   readonly sub: string;
 }
-export type DeliveryLiveClientFrame = DeliveryLiveSubscribe | DeliveryLiveUnsubscribe;
+export type LiveClientFrame = LiveSubscribe | LiveUnsubscribe;
 
 export type DeliveryLiveBody =
   | DeliveryTimelineResponse
@@ -3589,14 +3860,63 @@ export interface DeliveryLiveDelta {
   >;
   readonly revs: DeliveryLiveRevChanges;
 }
-/** Sent to every subscriber when the freshness row's verdict changes, and never otherwise. */
+/** Sent to every subscriber when the freshness row's verdict changes, and to a subscription right
+ *  after its first answer, so a page that was not subscribed at a change still learns it; never
+ *  otherwise. */
 export interface DeliveryLiveFreshness {
   readonly type: "freshness";
   readonly freshness: DeliveryTimelineResponse["freshness"];
   /** The sources past their threshold: "prs", "runs", "ci", "events". */
   readonly stale: readonly string[];
 }
-export interface DeliveryLiveError {
+/** Sent once at the start of every events subscription, before any `event`: the id it starts
+ *  after, which is the page's `since` clamped to the feed's head, or the head when the page sent
+ *  none. A page holding no cursor adopts it, so a page that has applied no event still resumes
+ *  without a gap. */
+export interface LiveEventsStart {
+  readonly type: "events_start";
+  readonly sub: string;
+  /** A decimal event id. */
+  readonly since: string;
+  /** True when the page resumed from an id at or below the feed's head: the subscription replays
+   *  every event after it before it goes live, so the page missed nothing and owes no refresh for
+   *  the gap. False with no resume, and for a resume above the head (an id of a log since
+   *  replaced), which start at the head and replay nothing the page missed. */
+  readonly replay_complete: boolean;
+}
+/** One event of the feed. */
+export interface LiveEventFrame {
+  readonly type: "event";
+  readonly sub: string;
+  /** The event's decimal id, which an `EventsLiveResume` names as `since`. */
+  readonly id: string;
+  readonly event: DispatchEvent;
+}
+interface LiveAgentEvent<E extends string, D> {
+  readonly type: "agent";
+  readonly sub: string;
+  readonly event: E;
+  readonly data: D;
+}
+/** One message of a session's agent stream; `event` names what `data` is. The responder verdict
+ *  is Dispatch's own. A replay's or a frame's data is the session's own JSON, which Dispatch
+ *  relays and never parses, so it is `unknown` here: meant to be an `AgentStreamReplay` or an
+ *  `AgentStreamFrame`, it is whatever the session published, and a page checks it before it
+ *  renders it. */
+export type LiveAgentFrame =
+  | LiveAgentEvent<"responder", AgentStreamResponder>
+  | LiveAgentEvent<"replay", unknown>
+  | LiveAgentEvent<"frame", unknown>;
+/** Dispatch ended this one subscription: it fell behind (`behind`), or the relay dropped the
+ *  viewer (`dropped`). The page subscribes it again at once. */
+export interface LiveEnded {
+  readonly type: "ended";
+  readonly sub: string;
+  readonly reason: "behind" | "dropped";
+}
+/** A refusal: of the subscription `sub` names, or, without `sub`, of a frame Dispatch could not
+ *  read. */
+export interface LiveError {
   readonly type: "error";
   readonly sub?: string;
   readonly code: string;
@@ -3604,15 +3924,19 @@ export interface DeliveryLiveError {
 }
 /** Sent every heartbeat interval beside the socket's own ping, carrying nothing: a browser never
  *  shows a ping to the page, so this is how the page tells a quiet socket from a dead one. */
-export interface DeliveryLiveHeartbeat {
+export interface LiveHeartbeat {
   readonly type: "heartbeat";
 }
-export type DeliveryLiveServerFrame =
+export type LiveServerFrame =
   | DeliveryLiveSnapshot
   | DeliveryLiveDelta
   | DeliveryLiveFreshness
-  | DeliveryLiveError
-  | DeliveryLiveHeartbeat;
+  | LiveEventsStart
+  | LiveEventFrame
+  | LiveAgentFrame
+  | LiveEnded
+  | LiveError
+  | LiveHeartbeat;
 
 /**
  * The delivery timeline's one configuration record: `GET /api/v1/settings/delivery` answers it, or

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -435,8 +434,7 @@ func TestReplyDuringAMentionRetrySendStillRecordsTheDeliveryReceipt(t *testing.T
 // and the reply is not refused for the life of the comment.
 //
 // A client that gives up no longer strands the attempt - a request's own send outlives its
-// connection - so the row a dead sender leaves is written here directly, after the retry whose
-// client gave up has completed its send.
+// connection - so the row a dead sender leaves is written here directly.
 func TestASessionAnswersAnAttemptStrandedBetweenItsSendAndItsSettle(t *testing.T) {
 	var listenerState struct {
 		sync.Mutex
@@ -470,31 +468,14 @@ func TestASessionAnswersAnAttemptStrandedBetweenItsSendAndItsSettle(t *testing.T
 		"body": "The retry's sender will not come back.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
 
-	abandoned, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
-	defer cancel()
-	payload, err := json.Marshal(map[string]any{"delivery": "steer"})
-	if err != nil {
-		t.Fatalf("encode retry: %v", err)
-	}
-	request := httptest.NewRequest(
-		http.MethodPost, "/api/v1/comments/"+comment.ID+"/deliveries", bytes.NewReader(payload),
-	).WithContext(abandoned)
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Dispatch-User", "alice")
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, request)
-	if abandoned.Err() == nil {
-		t.Fatalf("the retry answered before its client's 700ms deadline, so no client gave up on it")
-	}
-	if sent := commentAttemptRow(t, database, comment.ID, "session:s1", 2); sent != "sent///s1" {
-		t.Fatalf("attempt 2 = %q, want it sent: the client gave up after the claim, and the send outlives it", sent)
-	}
-	// The row a sender that died between that send and its settle would have left.
+	// The retry's sender claimed attempt 2, named the session, sent the frame and died before its
+	// settle. A client's giving up no longer strands a send (every delivery runs on a context its
+	// client cannot cancel), so the dead process's row is written as it leaves it.
 	if _, err := database.Pool.Exec(context.Background(), `
-		update comment_deliveries set state = 'pending', envelope_id = null
-		where comment_id = $1 and target = 'session:s1' and attempt = 2
+		insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, state, claimed_at)
+		values ($1, 'session:s1', 2, 'steer', 's1', 'pending', now())
 	`, comment.ID); err != nil {
-		t.Fatalf("strand attempt 2 between its send and its settle: %v", err)
+		t.Fatalf("strand attempt 2: %v", err)
 	}
 	if stranded := commentAttemptRow(t, database, comment.ID, "session:s1", 2); stranded != "pending///s1" {
 		t.Fatalf("attempt 2 = %q, want it left pending, naming the session its frame reached", stranded)

@@ -162,17 +162,19 @@ func openCommentDeliveryAttempt(
 // the comment and its mention, settles which attempt this call owns, and commits - all before
 // the listener is called at all, so no connection is held across the send.
 //
-// attempt binds the call, as a message's resumeAttempt does. A bound call (attempt > 0) takes that
-// attempt when it is pending and its claim has lapsed, reports it as it stands otherwise - settled,
-// or held by a live sender that owns its outcome - and never opens an attempt, since beside a live
-// sender that would be a second frame on the session's subject. The creating request completes
-// attempt 1 this way, which the comment's transaction opened unclaimed: a Retry that took it in the
-// moment after the commit owns it, and a reply that settled it is what the request reports. The
-// resume loop finishes a stranded attempt this way (delivery_resume.go). An unbound call (0) is a
-// person's or an agent's Retry: it resumes the lowest pending attempt once its claim has lapsed,
-// and otherwise opens an attempt of its own.
+// resumeAttempt binds the call, as a message's does. A bound call (resumeAttempt > 0) takes that
+// attempt when it is pending and its claim has lapsed, reports it as it stands otherwise -
+// settled, or held by a live sender that owns its outcome - and never opens an attempt, since
+// beside a live sender that would be a second frame on the session's subject. The creating
+// request completes attempt 1 this way, which the comment's transaction opened unclaimed, and so
+// does a keyed repeat's (replayComment): a Retry that took it in the moment after the commit owns
+// it, and a reply that settled it is what the request reports. The resume loop finishes a
+// stranded attempt this way (delivery_resume.go), and the delivery sweep the attempt it found
+// owed, so an older attempt a card retry overtook is never sent in that attempt's place. An
+// unbound call (0) is a person's or an agent's Retry: it resumes the lowest pending attempt once
+// its claim has lapsed, and otherwise opens an attempt of its own.
 func (s *server) claimCommentDeliveryAttempt(
-	ctx context.Context, comment model.Comment, target ResolvedMention, attempt int,
+	ctx context.Context, comment model.Comment, target ResolvedMention, resumeAttempt int,
 ) (claimedCommentDelivery, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -189,42 +191,49 @@ func (s *server) claimCommentDeliveryAttempt(
 		return claimedCommentDelivery{}, err
 	}
 	claimed := claimedCommentDelivery{comment: stored}
-	// A bound call reads its attempt, in whatever state; an unbound one the lowest pending attempt.
+	// A bound call reads its own attempt, in whatever state; an unbound one the lowest pending.
 	var lapsed bool
+	if resumeAttempt > 0 {
+		bound, err := scanCommentDelivery(tx.QueryRow(ctx, `
+			select `+commentDeliveryColumns+`, `+claimLapsed+`
+			from comment_deliveries
+			where comment_id = $1 and target = $2 and attempt = $3
+			for update
+		`, stored.ID, target.Target, resumeAttempt), &lapsed)
+		if err != nil {
+			return claimedCommentDelivery{}, fmt.Errorf(
+				"read attempt %d of comment delivery %s/%s: %w", resumeAttempt, stored.ID, target.Target, err)
+		}
+		if bound.State != "pending" || !lapsed {
+			// Answered or failed already - a reply consumed it while this sender was on its way -
+			// or held by a live sender, who owns the outcome.
+			claimed.settled = &bound
+		} else if err := claimed.take(ctx, tx, &bound); err != nil {
+			return claimedCommentDelivery{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return claimedCommentDelivery{}, err
+		}
+		return claimed, nil
+	}
 	pending, err := scanCommentDelivery(tx.QueryRow(ctx, `
 		select `+commentDeliveryColumns+`, `+claimLapsed+`
 		from comment_deliveries
-		where comment_id = $1 and target = $2 and (attempt = $3 or ($3 = 0 and state = 'pending'))
+		where comment_id = $1 and target = $2 and state = 'pending'
 		order by attempt
 		limit 1
 		for update
-	`, stored.ID, target.Target, attempt), &lapsed)
+	`, stored.ID, target.Target), &lapsed)
 	switch {
 	case err != nil && !errors.Is(err, pgx.ErrNoRows):
 		return claimedCommentDelivery{}, err
-	case attempt > 0 && err != nil:
-		return claimedCommentDelivery{}, fmt.Errorf(
-			"comment delivery %s/%s has no attempt %d", stored.ID, target.Target, attempt,
-		)
-	case attempt > 0 && (pending.State != "pending" || !lapsed):
-		// The attempt is settled, or a live sender holds it and owns its outcome: there is
-		// nothing for this call to send.
-		claimed.settled = &pending
 	case err == nil && lapsed:
-		// Nobody holds this attempt, or whoever claimed it never came back, so this call takes
-		// it under its original number and the listener deduplicates a send that did land.
-		if err := tx.QueryRow(ctx, `
-			update comment_deliveries set claimed_at = now()
-			where comment_id = $1 and target = $2 and attempt = $3
-			returning claimed_at
-		`, stored.ID, target.Target, pending.Attempt).Scan(&claimed.claimedAt); err != nil {
+		if err := claimed.take(ctx, tx, &pending); err != nil {
 			return claimedCommentDelivery{}, err
 		}
-		claimed.attempt = pending.Attempt
-		claimed.pending = &pending
 	default:
-		// No attempt is pending, or a live sender holds the pending one, so this retry gets one
-		// of its own rather than two senders driving the same attempt.
+		// No attempt is pending, or a live sender holds the one that is, so this retry gets one of
+		// its own rather than two senders driving the same attempt.
 		if claimed.attemptClaim, err = openCommentDeliveryAttempt(ctx, tx, stored, target); err != nil {
 			return claimedCommentDelivery{}, err
 		}
@@ -233,6 +242,21 @@ func (s *server) claimCommentDeliveryAttempt(
 		return claimedCommentDelivery{}, err
 	}
 	return claimed, nil
+}
+
+// take claims pending, an attempt nobody holds - never claimed, or claimed by a sender that never
+// came back - under its original number, so the listener deduplicates a send that did land.
+func (claimed *claimedCommentDelivery) take(ctx context.Context, tx pgx.Tx, pending *model.CommentDelivery) error {
+	if err := tx.QueryRow(ctx, `
+		update comment_deliveries set claimed_at = now()
+		where comment_id = $1 and target = $2 and attempt = $3
+		returning claimed_at
+	`, pending.CommentID, pending.Target, pending.Attempt).Scan(&claimed.claimedAt); err != nil {
+		return err
+	}
+	claimed.attempt = pending.Attempt
+	claimed.pending = pending
+	return nil
 }
 
 // commentDeliveryReceipt is the comment.delivery receipt an attempt row owes, read off that
@@ -371,7 +395,14 @@ func (s *server) recordCommentDeliveryResolution(
 	resolveError *string,
 ) (model.CommentDelivery, attemptClaim, bool, error) {
 	renewed := claim
-	recorded, err := scanCommentDelivery(s.deps.Store.Pool.QueryRow(ctx, `
+	// In a transaction of its own, as every write a keyed request makes is, so the request's
+	// commit mark hooks it (markRequestKeyCommitted).
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return model.CommentDelivery{}, claim, false, err
+	}
+	defer tx.Rollback(ctx)
+	recorded, err := scanCommentDelivery(tx.QueryRow(ctx, `
 		update comment_deliveries
 		set claimed_at = now(), delivery = $5, session_id = coalesce(session_id, $6), resolve_error = $7
 		where comment_id = $1 and target = $2 and attempt = $3
@@ -386,6 +417,9 @@ func (s *server) recordCommentDeliveryResolution(
 		}, claim, false, nil
 	}
 	if err != nil {
+		return model.CommentDelivery{}, claim, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return model.CommentDelivery{}, claim, false, err
 	}
 	return recorded, renewed, true, nil
@@ -644,7 +678,8 @@ func (s *server) createCommentDelivery(w http.ResponseWriter, r *http.Request) {
 	}
 	resolved := ResolvedMention{Target: target, Delivery: input.Delivery}
 	// The send outlives the request's connection, as createStoredMessage's does: the attempt is
-	// committed before the listener call, and a cut connection must not strand it.
+	// committed before the listener call, a cut connection must not strand it, and one a process
+	// death strands the delivery sweep resumes.
 	attempt, err := s.deliverResolvedCommentMention(
 		context.WithoutCancel(r.Context()), comment, created, resolved, actor, 0, s.newTakeoverRetry(),
 	)

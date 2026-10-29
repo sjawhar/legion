@@ -27,7 +27,7 @@ import (
 // A snooze or an un-snooze moves only its writer's Inbox, so it announces itself only to that
 // person's other tabs and devices: it appends `user_state.updated` (askSnoozeEvent), the event a
 // person's own pin, read mark and dismissal already append, with `changed: ["snoozed"]` and the
-// writer's login alone, since every signed-in stream carries it. A write that moves nothing - a
+// writer's login alone, since every signed-in feed carries it. A write that moves nothing - a
 // snooze to the moment the row already holds, an un-snooze of a row nobody snoozed - appends
 // nothing, since each event refetches the Inbox in every tab the person has open.
 

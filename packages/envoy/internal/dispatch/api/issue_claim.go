@@ -265,14 +265,21 @@ func (s *server) readIssueClaim(ctx context.Context, key string) (*model.IssueCl
 	return claim.resolve(key)
 }
 
+// issueClaimedNow is the value a claim write stamps updated_at with: the transaction's now(),
+// never below what the row already holds, as issueUpdatedNow is never below it. A claim writes
+// three times the reader compares - claimed_at, updated_at and its issue.claimed event's
+// created_at - and all three are that transaction's now(); issueUpdatedNow's clock_timestamp()
+// would put updated_at past the other two, which the one write produced together.
+const issueClaimedNow = "greatest(updated_at, now())"
+
 // writeIssueClaim sets the issue's claim to holder, or clears it when holder is nil. The two claim
 // columns always move together, and the issue's status is never touched here. claimed_at is the
-// transaction's now(), as updated_at is: each process's host keeps its own clock, and a claim's
-// time is compared with times other processes wrote.
+// transaction's now(): each process's host keeps its own clock, and a claim's time is compared
+// with times other processes wrote.
 func writeIssueClaim(ctx context.Context, tx pgx.Tx, key string, holder *model.Actor) error {
 	if holder == nil {
 		_, err := tx.Exec(ctx, `
-			update issues set claimed_by = null, claimed_at = null, updated_at = now() where key = $1
+			update issues set claimed_by = null, claimed_at = null, updated_at = `+issueClaimedNow+` where key = $1
 		`, key)
 		return err
 	}
@@ -281,7 +288,7 @@ func writeIssueClaim(ctx context.Context, tx pgx.Tx, key string, holder *model.A
 		return err
 	}
 	_, err = tx.Exec(ctx, `
-		update issues set claimed_by = $2, claimed_at = now(), updated_at = now() where key = $1
+		update issues set claimed_by = $2, claimed_at = now(), updated_at = `+issueClaimedNow+` where key = $1
 	`, key, actor)
 	return err
 }

@@ -1,5 +1,0 @@
-kind: Changed
-body: |-
-  The `dispatch_doc_read` description says a read prints every open thread anchored on the
-  document in full after the markdown, an open ask's replies included, and no resolved thread or
-  closed ask (#2366).

@@ -42,6 +42,7 @@ export function useIssueAssignee(issueKey: string): IssueAssigneeWrite {
     );
   };
   return useIssueFieldWrite<string | null>(issueKey, {
+    label: (assignee) => `${issueKey} assigned to ${assignee ?? "nobody"}`,
     patch: (assignee) => ({ assignee }),
     show: showAssignee,
   });

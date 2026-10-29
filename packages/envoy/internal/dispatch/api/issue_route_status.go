@@ -23,7 +23,7 @@ import (
 // issue read carries route_status beside the route, judged against the listener's live-session
 // list (GET /v1/sessions, each row carrying the roles its session holds), never one lookup per
 // issue. Every process judges against one stored copy of that list, the route_roster row
-// (migration 0138), and GET /api/v1/agents (listAgents) lists the sessions of that same copy: a
+// (migration 0143), and GET /api/v1/agents (listAgents) lists the sessions of that same copy: a
 // read uses it while it is fresh by the database's clock, so a route_status or an agents list can
 // be up to routeRosterTTL (5 s) old, and inside that age every process reads a route the same way,
 // and a filtered listing paged across processes is cut from one answer. A process that finds the
@@ -39,7 +39,7 @@ import (
 // between agent boxes keeps its id but is absent from the listener for minutes. The read does not
 // try to tell that gap from a vacancy with a last-seen time, because the listener offers none
 // that a read may take: GET /v1/roles/{role} reports a lapsed holder's last_seen only by
-// releasing the expired claim as it answers (cmd/listener resolveLiveRoleHolder), so a read
+// releasing the expired claim as it answers (cmd/listener resolveRoleHolder), so a read
 // would mutate role state and the next read would see "unclaimed" with no last_seen, and the
 // last-seen memory behind it is the answering listener's own process cache, not the shared
 // registry. The owner audit (skills/legion-controller/references/backlog-stewardship.md) and

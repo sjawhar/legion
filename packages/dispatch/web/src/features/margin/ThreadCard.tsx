@@ -2,6 +2,7 @@ import type { MutationKey } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
+import type { WriteBounds } from "../../api/client";
 import type { Suggestion } from "../../api/types";
 import { Pill } from "../../components/Pill";
 import { QueryError } from "../../components/QueryError";
@@ -105,7 +106,7 @@ export interface ThreadCardProps {
   hovered: boolean;
   isClosed: boolean;
   onAction(id: string, action: MarginItemAction): void;
-  onEdit(id: string, body: string): Promise<unknown>;
+  onEdit(id: string, body: string, bounds: WriteBounds): Promise<unknown>;
   onRetryAction(): void;
   onSelect?(): void;
   onToggle(): void;

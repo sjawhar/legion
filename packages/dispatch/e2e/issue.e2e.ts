@@ -365,6 +365,50 @@ test("issue pages show subscribers, external-link fallbacks, and children", asyn
   }
 });
 
+// The subscribers endpoint reads a row's own `last_seen` (the session's last heartbeat as the
+// listener still knows it) before the row's `updated_at`, which only says when the subscription
+// was last written and can lag the heartbeat by the listener's whole interest refresh age. The
+// two are hours apart here, so the chip's `<time>` says which one the page drew.
+test("a subscriber no longer live shows its last heartbeat, not its subscription's last write", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Heartbeat of a departed agent" });
+  const subscribedAt = Date.now() - 3 * 60 * 60 * 1000;
+  const lastHeartbeat = Date.now() - 60 * 60 * 1000;
+  // No live session at all: a session the registry still listed would carry its own heartbeat,
+  // which the endpoint prefers over both of these.
+  await setLiveSessions([]);
+  await setInterests([
+    {
+      last_seen: lastHeartbeat,
+      session_id: "e2e-departed-session",
+      topics: [
+        `notifications.dispatch.issue.${issue.key}`,
+        `notifications.dispatch.issue.${issue.key}.>`,
+      ],
+      updated_at: subscribedAt,
+    },
+  ]);
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/issues/${issue.key}`);
+    await page.getByRole("button", { name: "Subscribers: 1" }).click();
+    const subscribedAgents = page.getByRole("region", { name: "Subscribed agents" });
+    const row = subscribedAgents
+      .locator("li")
+      .filter({ has: page.locator("[title='e2e-departed-session']") });
+    await expect(row.locator("time")).toHaveAttribute(
+      "dateTime",
+      new Date(lastHeartbeat).toISOString()
+    );
+  } finally {
+    await context.close();
+  }
+});
+
 test("editing the parent line moves the issue across Children tabs live", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const oldParent = await createIssue({ project: "CORE", title: "Old parent" });
@@ -390,7 +434,8 @@ test("editing the parent line moves the issue across Children tabs live", async 
     await moverPage.getByRole("button", { name: "Save parent" }).click();
     await expect(moverPage.getByRole("link", { name: newParent.key })).toBeVisible();
 
-    // The new parent's open page hears child.added over SSE and gains the row without a reload.
+    // The new parent's open page hears child.added on the live event feed and gains the row
+    // without a reload.
     const movedRow = parentPage
       .getByRole("tabpanel")
       .getByRole("link", { name: `${mover.key} · Moving decision` });

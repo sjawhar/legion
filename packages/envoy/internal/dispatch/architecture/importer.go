@@ -292,12 +292,17 @@ func (i *Importer) failed(ctx, parent context.Context, source loadedSource, impo
 // version the sync began from, so neither a concurrent PUT nor another sync
 // that recorded since is overstamped. No event either way.
 func (i *Importer) touch(ctx context.Context, source loadedSource, commit string) (model.ArchitectureSource, error) {
-	updated, err := ScanSource(i.store.Pool.QueryRow(ctx, `
-		update architecture_sources
-		set last_sync_at = now(), last_commit = $5
-		where project_key = $1 and id = $2 and repo = $3 and branch = $4 and last_error is null
-		  and xmin::text = $6
-		returning `+SourceColumns, source.Project, source.ID, source.Repo, source.Branch, commit, source.version))
+	var updated model.ArchitectureSource
+	err := i.inTransaction(ctx, func(tx pgx.Tx) error {
+		var err error
+		updated, err = ScanSource(tx.QueryRow(ctx, `
+			update architecture_sources
+			set last_sync_at = now(), last_commit = $5
+			where project_key = $1 and id = $2 and repo = $3 and branch = $4 and last_error is null
+			  and xmin::text = $6
+			returning `+SourceColumns, source.Project, source.ID, source.Repo, source.Branch, commit, source.version))
+		return err
+	})
 	if err == nil {
 		return updated, nil
 	}
@@ -364,11 +369,13 @@ func (i *Importer) resolve(ctx context.Context, source *loadedSource) (owner, na
 	}
 	if installation.ID != source.InstallationID {
 		var version string
-		err := i.store.Pool.QueryRow(ctx, `
-			update architecture_sources set installation_id = $3
-			where project_key = $1 and id = $2 and xmin::text = $4
-			returning xmin::text`,
-			source.Project, source.ID, installation.ID, source.version).Scan(&version)
+		err := i.inTransaction(ctx, func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `
+				update architecture_sources set installation_id = $3
+				where project_key = $1 and id = $2 and xmin::text = $4
+				returning xmin::text`,
+				source.Project, source.ID, installation.ID, source.version).Scan(&version)
+		})
 		switch {
 		case err == nil:
 			source.version = version
@@ -382,6 +389,22 @@ func (i *Importer) resolve(ctx context.Context, source *loadedSource) (owner, na
 		return "", "", "", err
 	}
 	return owner, name, token, nil
+}
+
+// inTransaction runs write in a transaction of its own and commits it. Every write the importer
+// makes is one, never a bare pool statement, so a Refresh a person keyed under an Idempotency-Key
+// marks its key committed with the write itself (the commit step the pool's transactions take,
+// store.WithBeforeCommit).
+func (i *Importer) inTransaction(ctx context.Context, write func(pgx.Tx) error) error {
+	tx, err := i.store.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := write(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // lockSourceRow opens a writing transaction the cross-process way: it takes
@@ -777,7 +800,7 @@ func (i *Importer) recordFailure(ctx context.Context, source loadedSource, failu
 }
 
 // maxFailureMessage bounds what one failure writes: last_error, the
-// sync_failed payload (and its SSE frame), and thus the Settings row all
+// sync_failed payload (and its event frame), and thus the Settings row all
 // carry the same text, so a model with thousands of problems records the
 // first ones and a count of the rest.
 const maxFailureMessage = 4 << 10

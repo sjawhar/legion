@@ -17,17 +17,19 @@ import (
 	"time"
 	"unicode/utf8"
 
+	gws "github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/pglisten"
 )
 
 // A test hook acts on every envoy-dispatch process serving the database, not only on the one its
-// call reached. A browser suite against two processes holds its page's stream, socket, document
-// and conversation viewer on whichever process the page connected to, and calls a hook through an
-// API request that may land on the other; a hook that acted where it landed would disconnect,
-// quiesce or feed frames to the wrong process.
+// call reached. A browser suite against two processes holds its page's live socket, its document
+// room and its conversation view on whichever process the page connected to, and calls a hook
+// through an API request that may land on the other; a hook that acted where it landed would
+// disconnect, quiesce or feed frames to the wrong process.
 //
 // Each process with the hooks on (Deps.TestHooksEnabled; production never mounts them) holds one
 // listening connection of its own on testHooksChannel and testHookAcksChannel, and on that
@@ -76,8 +78,8 @@ const (
 
 // The hooks a call names.
 const (
-	hookDisconnectStreams = "events.disconnect"
-	hookDisconnectSockets = "delivery.disconnect"
+	hookDisconnectSockets = "live.disconnect"
+	hookRotateSockets     = "live.rotate"
 	hookQuiesceDocuments  = "artifacts.quiesce"
 	hookPublishFrame      = "agents.publish"
 )
@@ -461,12 +463,10 @@ func (s *server) runTestHookEverywhere(w http.ResponseWriter, r *http.Request, c
 // failure writes.
 func (s *server) runTestHook(ctx context.Context, call testHookCall) (int, []byte) {
 	switch call.Hook {
-	case hookDisconnectStreams:
-		s.eventRelay.stream.CloseAll()
 	case hookDisconnectSockets:
-		for _, socket := range s.deliverySockets.all() {
-			socket.drop()
-		}
+		s.shutAllLiveSockets(gws.CloseServiceRestart, "")
+	case hookRotateSockets:
+		s.shutAllLiveSockets(contracts.LiveSocketMaxAgeClose, liveSocketMaxAgeReason)
 	case hookQuiesceDocuments:
 		if err := s.deps.Docs.Quiesce(ctx); err != nil {
 			answer := &testHookAnswer{header: http.Header{}}
