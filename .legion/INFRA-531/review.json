@@ -2,27 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-531",
-  "completed": "2026-10-29T01:00:00Z",
-  "round": 5,
-  "codeHead": "5d887d3027df",
+  "completed": "2026-10-29T07:40:00Z",
+  "round": 6,
+  "codeHead": "b80be2083a4b",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
+  "important": 1,
   "minor": 0,
-  "scope": "Not the architect's quick re-check: the block-start fix 7fd13b50 was pushed after round 4's review and had no review, so this round reviewed it and the merge 5d887d30 only.",
-  "ci": "No verdict yet: lint, typecheck, test and pr-title at 5d887d30 are queued (00:28 UTC). The compare from 5d887d30 to da40d69c touches only .legion/.",
-  "thermonuclear": "Both run at 5d887d30. Deep review: round 4's finding fixed. htmlBlockStart matches micromark html-flow state by state. Fuzz of 37,200 documents in 31 container templates: 0 misreads, 0 refusals main lacks. One Minor (task items). Code quality: htmlBlockStart matches the engine on 14,533 generated lines; two findings (below).",
-  "roundFourThreads": "PRRT_kwDORFy7ds6xW71I accepted as fixed in 7fd13b50.",
+  "scope": "Commits 7dda41c7 and b80be208, which answer round 5; nothing else changed in code since 5d887d30.",
+  "code": "Both round-5 findings fixed. growthVerdict is main's again; synthetic quadratic of sub-tick times fails at the head (reviewer probe: 'took 256ms at 0 KiB, 256 times the 1ms') and passed at 5d887d30. A `<` right after a task checkbox keeps main's bytes (66 inputs byte-identical to main, all read alike by Go and the engine); continuation lines, later paragraphs, nested and sibling items, quotes and footnotes keep the round-5 escapes. Changed tests pass in this pod with the engine. Thermonuclear pair at b80be208: both APPROVE; the one Minor (PR body still describing the floor) the reviewer fixed in the body.",
+  "ci": "Required at b80be208: lint, typecheck, pr-title success; test failure twice (attempt 2 re-run by the reviewer) on .github/scripts/changelog-fold.test.sh 'push-fold: the release's block ... stands right above the old first ## heading'. That is main's red after its 2026-10-29 fold gave pi-legion's CHANGELOG 12.x headings; main fixed it in #2487 (12c9baf5, 04:20 UTC), which the run's merge ref predates. A re-run reuses the same merge commit, so only a new code push, which GitHub runs on a fresh merge with main, turns it green. Not required: envoy-go-race failed attempt 1 on TestBareURLShapesParseAndRenderLinearly's per-call 60 s deadline for `&lt;a b=\"x;a@b.cc \">` at 1 MiB under -race (head and 5d887d30 time the shape alike: 4.5 s vs 4.4 s at 1 MiB without race, linear from 64 KiB); attempt 2 in progress at 07:40 UTC.",
+  "roundFiveThreads": "PRRT_kwDORFy7ds6xYJoQ and PRRT_kwDORFy7ds6xYJoW accepted as fixed.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/pmdoc/linear_test.go:524-542,896-922",
-      "description": "The merge keeps this PR's cpuClockResolution floor in growthVerdict beside main's cputest.Measure (#2396). Measure already times a window of 50 clock steps and divides, so its per-run times are never 0. Flooring them at a whole 10 ms tick raises the failure bound up to 10x: growthVerdict([]int{1,16}, growthAllowance, size^2 ms) passes at the head ('10ms (the CPU clock's resolution; it read 1ms) ... 25.6 times') and fails on main ('256 times'). In this pod, TestBareURLShapesParseAndRenderLinearly floored 23 steps. The linearity gate is weakened; delete the floor and cpuClockResolution (cputest.resolution replaces it) and the comments citing it."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/pmdoc/render_inline.go:1237 (render.go:503-508)",
-      "description": "A task item's text after `[ ] ` / `[x] ` gets firstOnLine, so a `<` there is escaped where htmlBlockStart says kinds 1-6, though neither reader tries html-flow after a task checkbox. `- [ ] <!-- todo`, `- [ ] <div class=x`, `- [x] <!doctype html` are stored as written on main 56a39157 and with `\\<` at the head; both read alike, so this is byte churn that mints a new version of each such document on its next write. Clear firstOnLine on the checkbox's line."
+      "file": ".github/scripts/changelog-fold.test.sh (required check `test`)",
+      "description": "The required `test` check is red at the code head b80be208, from main's changelog-fold test that #2487 fixed on main after this run's merge ref was made. No code change in this PR is needed: push a commit that starts the pull_request workflows (no skip-checks line), so GitHub tests a fresh merge with main that holds #2487, and the round continues on that head."
     }
   ]
 }
