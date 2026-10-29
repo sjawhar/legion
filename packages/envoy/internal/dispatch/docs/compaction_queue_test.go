@@ -52,6 +52,11 @@ func TestTheCompactionQueueFoldsTheOldRowsOfADocumentItsWritesNoted(t *testing.T
 			steps.await(t, artifactID, 0, "the queue's first check of the young rows", func(step compactionStepRecord) bool {
 				return step.next.kind == compactionLater
 			})
+			// The queue checks a noted room at once here, so the notes of the writes below would
+			// let it compact before the rows it folds are read. It is held from here until they are,
+			// which drops what it holds and every note meanwhile; the document is then noted as
+			// the writes' commits noted it.
+			resume := service.compactions.pause(context.Background())
 			old := storedRows(t, service.store, artifactID)
 			if len(old) < 1+compactMinRows {
 				t.Fatalf("the writes stored %d rows, want at least %d", len(old), 1+compactMinRows)
@@ -66,7 +71,8 @@ func TestTheCompactionQueueFoldsTheOldRowsOfADocumentItsWritesNoted(t *testing.T
 			foldPoint := old[len(old)-1].version
 
 			from := steps.count()
-			recheckNow(service)
+			resume()
+			service.compactions.note(artifactID)
 			steps.await(t, artifactID, from, "the queue to compact the document", func(step compactionStepRecord) bool {
 				return step.next.kind == compactionAgain
 			})
@@ -392,12 +398,14 @@ func TestABurstAfterAQuietCheckBringsTheDocumentsCheckForward(t *testing.T) {
 		return queueWaitsOn(service, artifactID)
 	})
 
+	// Every note of the burst brings the check forward, so the compaction may come from the check of
+	// any of them once the burst is of age, or from the young row's; either leaves the same two rows.
+	from := steps.count()
 	for index := range 20 {
 		appendUpdates(t, persist, artifactID, writer.write(fmt.Sprintf("Burst %d.\n", index)))
 	}
 	// The burst comes of age, as it does compactTail after it was written.
 	ageUpdatesThrough(t, database, artifactID, everyVersion, 5*time.Minute)
-	from := steps.count()
 	appendUpdates(t, persist, artifactID, writer.write("Young.\n"))
 	steps.await(t, artifactID, from, "the check the burst's last note brought forward to compact it", func(step compactionStepRecord) bool {
 		return step.next.kind == compactionAgain
