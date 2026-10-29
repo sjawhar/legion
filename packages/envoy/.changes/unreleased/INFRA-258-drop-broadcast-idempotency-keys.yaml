@@ -1,10 +1,14 @@
-kind: Removed
+kind: Changed
 body: |-
-    Dispatch: migration `0139_drop_broadcast_idempotency_keys` drops `broadcast_idempotency_keys`,
-    the broadcast send's key table before every write took an `Idempotency-Key` header. No build
-    since `0137_request_keys` reads or writes it. A deployment that applies `0139` can no longer roll
-    back to a build from before `0137`, whose broadcast send writes that table. The drop takes
-    `ACCESS EXCLUSIVE` on `broadcasts` for the instant its transaction lasts.
+    **Breaking:** migration 0139 drops `broadcast_idempotency_keys`, the broadcast send's own key
+    table from before every write took an `Idempotency-Key` header (INFRA-258). No value anything
+    reads is lost: since 0137 a broadcast's key is a `request_keys` row, and the send route no
+    longer takes the body key the dropped rows recorded. Rollback floor: once 0139 has applied, a
+    task older than legion-envoy v21.0.0, the release that added 0137, still boots, but its
+    broadcast send fails with SQLSTATE 42P01 (undefined table), since it writes
+    `broadcast_idempotency_keys`. v21.0.0 and every later release neither read nor write it. The
+    drop takes `ACCESS EXCLUSIVE` on `broadcasts` for the instant its transaction lasts, so a
+    broadcast read or send waits that instant.
 time: 2026-10-29T10:30:00.000000000Z
 custom:
     Issue: INFRA-258

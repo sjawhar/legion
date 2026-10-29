@@ -2939,16 +2939,15 @@ A broadcast is keyed by its `Idempotency-Key` header like every write ("Keyed Di
 above); the body's `idempotency_key` of LEGION-446 is gone from the route and its
 `broadcast_idempotency_keys` table from the schema. The send commits the broadcast and its
 exclusions, with their reasons, as the key's recovery point (`broadcastRecovery`) in the
-broadcast's own transaction, so a repeat
-under the key is answered by `replayBroadcast` however the first request ended, even while the
-listener is down: the broadcast is read as `GET /api/v1/broadcasts/{id}` reads it, every
-recipient's attempts as they stand, with the send's own `excluded`, under the send's own `201` and
-`Idempotency-Replayed: ?1`, answered at once as the send was, while
-`sendOwedBroadcastRecipients` puts every recipient the broadcast still owes on its way behind the
-answer (`owedMessageAttempts`, the rule a single send's repeat, `sendHeldMessageOn`, also reads:
-the first attempt of a message with none, or its latest attempt when that is pending under a
-claim that has lapsed). A different request under the key is `422 KEY_REUSED`, and nothing is
-written.
+broadcast's own transaction, so a repeat under the key is answered by `replayBroadcast` however the
+first request ended, even while the listener is down: the broadcast is read as
+`GET /api/v1/broadcasts/{id}` reads it, every recipient's attempts as they stand, with the send's
+own `excluded`, under the send's own `201` and `Idempotency-Replayed: ?1`, answered at once as the
+send was, while `sendOwedBroadcastRecipients` puts every recipient the broadcast still owes on its
+way behind the answer (`owedMessageAttempts`, the rule a single send's repeat,
+`sendHeldMessageOn`, also reads: the first attempt of a message with none, or its latest attempt
+when that is pending under a claim that has lapsed). A different request under the key is
+`422 KEY_REUSED`, and nothing is written.
 
 The event feed retains the targeted `message.created`, `message.delivery`, and `message.answered`
 events for the Conversation card. Issue-less targeted-message events have no issue owner, use
