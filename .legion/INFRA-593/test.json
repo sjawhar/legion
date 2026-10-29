@@ -2,55 +2,51 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-593",
-  "completed": "2026-10-28T22:45:00Z",
-  "round": 2,
-  "headTested": "d1939c8689f53e46ea10804b353f13aa312425aa",
-  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-2-txt",
-  "rig": "dispatch://INFRA-593/artifact/infra-593-tester-rig-round-2-tar-gz",
-  "previousRound": "dispatch://INFRA-593/artifact/infra-593-tester-round-1-txt",
+  "completed": "2026-10-29T01:27:00Z",
+  "round": 3,
+  "headTested": "d741863c765161e472f2145d53c5c231d674ff28",
+  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-3-txt",
+  "rig": "dispatch://INFRA-593/artifact/infra-593-tester-rig-round-3-tar-gz",
+  "previousRounds": [
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-1-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-2-txt"
+  ],
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's e2e steps (scenA.sh, hour pass cleared) with envoy-dispatch built from d1939c86: sweep candidates=1 compacted=1 rows_deleted=37, the 3 young rows unchanged in version/xmin/md5, text sha256 identical, a 31st upload reads back. Re-ran its listing EXPLAIN on a 100,000-document database migrated by the head: Seq Scan of the empty doc_compaction_owed, 0.047 ms. The round-1 red test TestTheCompactionSweepReadsNoRowOfADocumentThatIsNotDue is byte-identical at the head (function and helper hash as in 267322ef) and passes with the other CompactionSweep tests."
+    "how": "Re-ran the implementer's e2e steps (scenA.sh, hour pass cleared) with envoy-dispatch built from d741863c: the sweep's first tick at start logged candidates=1 compacted=1 rows_deleted=37, the 3 young rows unchanged in version/xmin/md5, text sha256 identical before, on the cold read and after, a 31st upload reads back. Drove the review-round changes it lists (queue renote and young-row retry, fold slots) on real processes (scenE, scenF, 12 concurrent cold reads)."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Round 1 failure / INFRA-514 architect's check: the hourly sweep reads only documents with rows to fold, no scan of every document.",
-      "surface": "envoy-dispatch built from d1939c86 booted on a Postgres 16.2 database of 100,000 one-row documents (round 1's), and the docs package against the same Postgres",
-      "command": "start the head on t593_big (migrations 0136-0137 applied in a 1.6 s boot); EXPLAIN (ANALYZE, BUFFERS) select artifact_id::text from doc_compaction_owed; insert 50 stale entries, clear the hour's pass, restart; go test ./internal/dispatch/docs -run CompactionSweep -count=1",
-      "observed": "First sweep candidates=0. Listing: Seq Scan on doc_compaction_owed, 0 rows, 0.047 ms; with 50 rows, 1 buffer, 0.067 ms. The next sweep logged candidates=50 compacted=0 forgotten=50 and emptied the table. All 7 CompactionSweep tests pass, the round-1 red test included.",
-      "headSha": "d1939c8689f53e46ea10804b353f13aa312425aa",
-      "negativeControl": "Round 1 at 9eb0b4e2 on the same database: Seq Scan of the whole 89 MB heap, Rows Removed by Filter 100000, 113 ms; the red test failed 3 of 3 (2,024 rows read)."
+      "criterion": "Review finding 3 fixed: the queue keeps a room whose rows will come due - a note during its step re-queues it, and a check that finds young rows comes back when they are due - so the 16-row / 15-minute bound is the queue's, not the hourly sweep's.",
+      "surface": "envoy-dispatch built from d741863c, real process on Postgres 16.2, DISPATCH_NATS_DISABLED=1, HTTP API",
+      "command": "bash $TMPDIR/t593/scenE.sh; bash $TMPDIR/t593/scenF.sh (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-3-tar-gz)",
+      "observed": "scenE: an upload every 3 s for 330 s (101 uploads). The rows older than 2 minutes reached 16 at most and were folded back to 1-5 while appends kept noting the room. After the writes stopped, they folded at idle +45 s and +120 s, which left 4 rows (the fold point and 3 rows not yet 15 minutes old). The final text is exactly version 101. scenF: 5 rows written at 01:06:08 and no more writes. They stayed 5 rows through +870 s and were 1 row at +900 s (01:21:11). The process had swept that hour at its start, before the writes, so no sweep folded them.",
+      "headSha": "d741863c765161e472f2145d53c5c231d674ff28",
+      "negativeControl": "In scenF the queue's first check, at +2 minutes, found 4 rows after the first, fewer than 16, so not due, and did not fold them. They stayed 5 rows until the 15-minute rule made them due."
     },
     {
-      "criterion": "Upgrade and rolling update: migration 0137 names every document an older release left with rows to fold, and a document the old release appends to during the roll is still compacted.",
-      "surface": "envoy-dispatch main 1767c9af and head d1939c86 serving one Postgres 16.2 database, HTTP API",
-      "command": "bash $TMPDIR/t593/scenU.sh (dispatch://INFRA-593/artifact/infra-593-tester-rig-round-2-tar-gz)",
-      "observed": "Main wrote 4 documents of 11, 11, 11 and 2 rows. Head booted on that database: doc_compaction_owed held all 4 (no document with more than one row missing). Its first sweep logged candidates=4 compacted=4 rows_deleted=31 and the table emptied. A head upload to a compacted document named it again. With main serving beside head, a main upload gave a document a second row and no entry. A cold read through head noted it, and head's queue folded it to one row.",
-      "headSha": "d1939c8689f53e46ea10804b353f13aa312425aa",
-      "negativeControl": "The main upload is the case the table misses (docs with >1 row not owed: 1 right after it). Only head's queue, through the read, folded that document. One the old release alone appends to and nobody reads during the roll waits for its next append or load through the new release, as migration 0137's comment says."
+      "criterion": "Review finding 2 fixed: buffered folds are bounded (bufferedFolds = 4) and loads beyond the bound wait and complete.",
+      "surface": "envoy-dispatch built from d741863c on a database of 12 documents of 25 rows each, HTTP API",
+      "command": "12 concurrent GET /api/v1/artifacts/{id}/text on a fresh process, hour pass pre-recorded so no sweep folds them first",
+      "observed": "All 12 answered 200 in 463-965 ms. Each text is exactly version 27. No ERROR or WARN line.",
+      "headSha": "d741863c765161e472f2145d53c5c231d674ff28",
+      "negativeControl": "3 times as many loads as fold slots ran at once. None failed or hung, so waiting for a slot holds nothing that a slot holder needs."
     },
     {
-      "criterion": "Acceptance 3 with the new table: writes during a sweep land, texts stay exact, and every document with rows to fold stays named.",
-      "surface": "envoy-dispatch built from d1939c86, real process, 12 concurrent HTTP writers",
-      "command": "bash $TMPDIR/t593/scenC2.sh",
-      "observed": "12 documents of 21 rows backdated, hour pass cleared, restart; 96 uploads and 96 anchored comments while the sweep logged candidates=12 compacted=10 rows_deleted=200 left_to_queue=2. Every document reads exactly as version 27 with 8 anchored comments, also after a cold restart. Afterwards 0 documents with more than one row were missing from doc_compaction_owed (12 owed). No ERROR line.",
-      "headSha": "d1939c8689f53e46ea10804b353f13aa312425aa",
-      "negativeControl": "The two documents whose lock a writer held (left_to_queue=2) were not waited for; the queue took them, and their texts are exact."
-    },
-    {
-      "criterion": "Acceptance 1, 2 and 5 at the merged head: compaction survives a restart, runs without NATS, folds only rows older than 2 minutes; a restart inside a swept hour costs time, not correctness.",
-      "surface": "envoy-dispatch built from d1939c86, real process on Postgres 16.2, DISPATCH_NATS_DISABLED=1, HTTP API",
-      "command": "CLEAR_PASS=1 bash $TMPDIR/t593/scenA.sh; bash $TMPDIR/t593/scenA.sh",
-      "observed": "Hour pass cleared: 41 rows; sweep at +23 s compacted=1 rows_deleted=37; 4 rows left, the 3 young rows unchanged (version, xmin, md5); text sha256 identical; a 31st upload reads back. Hour already swept: the restarted tick skipped; a cold read of the 41 uncompacted rows gave the same text; the queue folded the log 2 minutes after that read.",
-      "headSha": "d1939c8689f53e46ea10804b353f13aa312425aa",
-      "negativeControl": "Main 1767c9af, serving beside head in scenU.sh, folded a row head had written that same second (its keep-1 room-close compaction); round 1's main 20ba65a6 folded a 67-second-old row at shutdown. The head kept every row younger than 2 minutes."
+      "criterion": "Acceptance 1, 2 and 5 and the doc_compaction_owed rollout at the review-round head: restart, NATS off, the tail rule, the upgrade backfill and a rolling update.",
+      "surface": "envoy-dispatch main 56a39157 and head d741863c, real processes on one Postgres 16.2 database, HTTP API",
+      "command": "CLEAR_PASS=1 bash scenA.sh; bash scenA.sh; bash scenU3.sh",
+      "observed": "Hour pass cleared: the sweep's tick at start folded 37 rows; the 3 young rows were unchanged; the text was identical. Hour already swept: the start tick skipped, a cold read of the 41 rows gave the same text, and the queue folded the log 122 s after the read. Upgrade from main: the start sweep logged candidates=4 compacted=4 rows_deleted=31. Rolling update: a main upload left its document unnamed (2 rows); main was killed with SIGKILL, so its shutdown compaction did not run; head's queue folded the document 121 s after a cold read through head.",
+      "headSha": "d741863c765161e472f2145d53c5c231d674ff28",
+      "negativeControl": "Main 56a39157's upload is the one case the table misses (1 document with more than one row not named). Only the read through head brought it to head's queue. Round 2's version of this check let main stop normally, so main's own room-close compaction may have folded the document; this run kills main to rule that out."
     }
   ],
-  "notRerun": "Code unchanged since round 1 for these, so not re-run: failed-load wording comparison, BenchmarkRoomLoad and heap profiles, BenchmarkUploadVersion, the unfoldable-log probe, the idle statement count (round 1 report).",
+  "notRerun": "Unchanged since rounds 1-2, so not re-run: failed-load wording, BenchmarkRoomLoad/BenchmarkUploadVersion and heap profiles, the unfoldable-log probe, 12 writers during a sweep, the 100,000-document listing EXPLAIN.",
+  "census": "The PR's Contract change census lists internal Go APIs (CompactAll, outbox.Deps, VersionedStore), compile-time and invoked by no person, and the doc_compaction_owed migration and rollout, which an operator meets and which scenU3.sh drives.",
   "observations": [
-    "Wording only: packages/envoy/internal/dispatch/store/migrations/0137_doc_compaction_owed.census.sql says '0136 creates doc_compaction_owed'; the file is 0137 (main's 0136 is dashboard_assets)."
+    "Round 2's rolling-update proof let main stop normally, so main's own room-close compaction may have folded the document; round 3 kills main with SIGKILL and shows head's queue folding it."
   ],
-  "ci": "Read on GitHub at d1939c86, 22:39 UTC: every lane queued (build, changes, lint, test, typecheck, the daemon Go suite)."
+  "ci": "Read on GitHub at d741863c, 01:24 UTC: every lane queued (build, changes, lint, test, typecheck, the daemon Go suite). pmdoc's vet passes locally at the head."
 }
