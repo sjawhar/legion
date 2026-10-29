@@ -502,16 +502,7 @@ func askFingerprints(tree *pmdoc.Node, fingerprint func(*pmdoc.Node) (string, er
 // nil before - a write with no readable starting tree, a repair - holds nothing, so every readable
 // ask in after counts.
 func addedAskBlockIDs(before, after *pmdoc.Node) map[string]struct{} {
-	held := map[string]struct{}{}
-	pmdoc.Walk(before, func(node *pmdoc.Node) bool {
-		if node.Type == "ask" {
-			if _, err := parseAskBlock(node); err == nil {
-				id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
-				held[id] = struct{}{}
-			}
-		}
-		return true
-	})
+	held := readableAskBlockIDs(before)
 	added := map[string]struct{}{}
 	pmdoc.Walk(after, func(node *pmdoc.Node) bool {
 		if node.Type == "ask" {
@@ -527,13 +518,47 @@ func addedAskBlockIDs(before, after *pmdoc.Node) map[string]struct{} {
 	return added
 }
 
-// addedAskBlocks counts the readable ask blocks in after whose block id no readable ask block in
-// before carries: one an edit inserted, retyped another block into, or repaired after a browser left
-// it unreadable, wherever it lands - a blockquote, a list item - as the parser reads it, so an opener
-// quoted in code adds none. One the edit moved, reworded or left alone keeps its id and counts
-// nothing.
-func addedAskBlocks(before, after *pmdoc.Node) int {
-	return len(addedAskBlockIDs(before, after))
+// readableAskBlockIDs is the block id of every ask block in tree the parser reads; none for a nil
+// tree.
+func readableAskBlockIDs(tree *pmdoc.Node) map[string]struct{} {
+	ids := map[string]struct{}{}
+	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+		if node.Type == "ask" {
+			if _, err := parseAskBlock(node); err == nil {
+				id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+				ids[id] = struct{}{}
+			}
+		}
+		return true
+	})
+	return ids
+}
+
+// addedAskBlocks is each readable ask block in after whose block id no readable ask block in
+// before carries, in after's document order, with its question: one an edit inserted, copied from
+// another document, retyped another block into, or repaired after a browser left it unreadable,
+// wherever it lands - a blockquote, a list item - as the parser reads it, so an opener quoted in
+// code adds none. One the edit moved, reworded or left alone keeps its id and is not among them. An
+// id two blocks repeat is named once, for the first.
+func addedAskBlocks(before, after *pmdoc.Node) []AddedAskBlock {
+	// An id once named joins held, so a later block repeating it is not named again.
+	held := readableAskBlockIDs(before)
+	added := []AddedAskBlock{}
+	pmdoc.Walk(after, func(node *pmdoc.Node) bool {
+		if node.Type != "ask" {
+			return true
+		}
+		block, err := parseAskBlock(node)
+		if err != nil {
+			return true
+		}
+		if _, kept := held[block.id]; !kept {
+			added = append(added, AddedAskBlock{ID: block.id, Question: block.question})
+			held[block.id] = struct{}{}
+		}
+		return true
+	})
+	return added
 }
 
 // newAskMarkdown is what an uploaded version can say of an ask, for one refuseChangedAsks call: its

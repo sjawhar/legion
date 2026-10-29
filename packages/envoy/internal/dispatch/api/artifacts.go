@@ -1024,7 +1024,10 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	// Conditional or not, an edit writes the live document, so it queues for the document's
 	// writer gate before its transaction opens: a flood of stale conditional retries, or writers
-	// clustered on one document, wait here holding no connection.
+	// clustered on one document, wait here holding no connection. release ends that gate once -
+	// right after the commit, which is all a later writer of this document waits on, so the
+	// checks of this edit's new decision blocks never hold it; on every earlier return, by the
+	// defer below.
 	r, release, err := s.gateDocuments(r, artifact.ID)
 	if err != nil {
 		s.writeHandlerError(w, r, err)
@@ -1100,6 +1103,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, r, err)
 		return
 	}
+	release()
 	var version *model.Version
 	if written != nil {
 		version = &written.Version
@@ -1128,7 +1132,10 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	// The ask blocks the edit added, read from the documents the batch was applied to: whether an
 	// operation's markdown makes a block depends on where it lands and on the parser's reading of
 	// code and containers, which a caller's own reading of that markdown would only approximate.
-	blocks := &editBlocks{DecisionBlocksAdded: edit.AskBlocksAdded}
+	blocks := &editBlocks{
+		DecisionBlocksAdded: len(edit.AddedAskBlocks),
+		DecisionBlockChecks: s.decisionBlockChecks(r.Context(), artifact, edit.AddedAskBlocks, actor),
+	}
 	if artifact.IssueKey == nil || advice == nil {
 		WriteJSON(w, http.StatusOK, withRawAdvice(responsePayload, blocks))
 		return

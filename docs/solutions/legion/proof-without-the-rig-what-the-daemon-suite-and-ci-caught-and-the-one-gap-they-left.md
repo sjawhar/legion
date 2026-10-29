@@ -59,8 +59,10 @@ by design, so the relaunch lands as a launch failure — the **second** cycle on
 and the `worker-died` reaching a real listener are proven only with the in-memory fakes
 (`swallowedRelaunchFixture` in `processes.test.ts`: `first`/`relaunched` fake clients keyed by
 socket path, `relaunchingTmux`). That is precisely what the withdrawn rig proof would have added:
-a relaunched real pane's second cycle and the role-lane delivery (`listener role forwarded` with
-the notice's `event_id`). The fake-driven test asserts the same daemon call the real lane would
+a relaunched real pane's second cycle and the role delivery (then the role lane's `listener role
+forwarded` with the notice's `event_id`; now that the publish route confirms a role message
+itself, a daemon notice goes through that route, which logs `listener publish role send` with
+outcome `delivered`, the holder and the `event_id`). The fake-driven test asserts the same daemon call the real lane would
 carry (`publishRole` on the architect topic with `{type:"worker-died", issue, role}`), and the
 listener half of that path was proven end to end for `worker-queued`/`worker-started` on
 LEGION-60's rig (`../daemon/role-notices-go-through-the-listener-a-bare-nats-publish-reaches-nobody.md`),

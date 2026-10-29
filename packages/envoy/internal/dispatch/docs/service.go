@@ -155,6 +155,13 @@ type Service struct {
 	// (forkLive), before the write's operation runs on it. Nil outside tests; tests use it to edit
 	// the room after the fork read it.
 	afterForkRead func(room string)
+	// checkRendering runs where a write's rendering (liveWrite.tree, markdown, offsets) is to
+	// describe its fork, at names where: "fork" once forkLive has brought the fork up to date,
+	// "margin", "docTree" and "capture" as a margin write (applyMargin) or a read joined to the
+	// write's transaction takes the rendering in place of reading the fork (reuseRendering), and
+	// "publish" just before publishLiveWrite releases the fork. Nil outside tests; tests use it to
+	// compare the rendering with a fresh read and render of the fork.
+	checkRendering func(at string, write *liveWrite)
 	// beforeSettleTake runs once a settlement pass has found every update of its room durable,
 	// before it takes what its version credits and the room's generation. Nil outside tests; tests
 	// use it to hand the store an update the pass then copies before that update is stored.
@@ -297,6 +304,9 @@ type Service struct {
 	// renderPaths counts how the renderings the rooms' update observers and the document writes
 	// need were had (renderPathCounts); every replica counts on it (keepReplica).
 	renderPaths renderPathCounts
+	// forkTrees counts the trees read off write transactions' forks and the reads that taking the
+	// write's rendering in their place avoided (forkTreeCounts).
+	forkTrees forkTreeCounts
 	// instances lists, for each resident room document, what that instance records about the
 	// durable history behind it (*roomInstance): the updates whose writes can have recorded a
 	// pending author, and the durable version the instance stands at, keyed by a weak pointer to

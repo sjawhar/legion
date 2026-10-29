@@ -101,7 +101,7 @@ func queuedEdits(t *testing.T, handler http.Handler, service *docs.Service, arti
 		edits.Add(1)
 		go func() {
 			defer edits.Done()
-			responses[index] = editDocument(t, handler, artifactID, fmt.Sprintf("Queued line %d.", index))
+			responses[index] = editDocument(t, handler, artifactID, insertAtEnd(fmt.Sprintf("Queued line %d.", index)))
 		}()
 		waitForQueuedWriters(t, service, base+int64(index+1))
 	}
@@ -119,12 +119,6 @@ func requireEditsLanded(t *testing.T, responses []*httptest.ResponseRecorder) {
 			t.Errorf("queued edit %d: status=%d body=%s, want 200", index, response.Code, response.Body.String())
 		}
 	}
-}
-
-func editDocument(t *testing.T, handler http.Handler, artifactID, line string) *httptest.ResponseRecorder {
-	return dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/edits", map[string]any{
-		"ops": []map[string]string{{"op": "insert", "after": "end", "markdown": line}},
-	}, "alice")
 }
 
 // Anchored writes queued for one document wait in its writer gate, ahead of their transactions,
@@ -191,7 +185,7 @@ func TestTheWriterQueuedPastTheBoundIsRefusedWithRetryAfter(t *testing.T) {
 	const bound = 32
 	wait := queuedEdits(t, handler, service, issue.PrimaryArtifactID, bound)
 
-	refused := editDocument(t, handler, issue.PrimaryArtifactID, "One writer too many.")
+	refused := editDocument(t, handler, issue.PrimaryArtifactID, insertAtEnd("One writer too many."))
 	if refused.Code != http.StatusTooManyRequests || decodeBody[struct {
 		Code string `json:"code"`
 	}](t, refused).Code != "EDIT_QUEUE_FULL" {
@@ -218,7 +212,7 @@ func TestAWriteToAnotherDocumentProceedsWhileWritersQueueOnTheFirst(t *testing.T
 	defer releaseHold()
 	wait := queuedEdits(t, handler, service, issue.PrimaryArtifactID, 8)
 
-	if edited := editDocument(t, handler, other, "Written past the queue."); edited.Code != http.StatusOK {
+	if edited := editDocument(t, handler, other, insertAtEnd("Written past the queue.")); edited.Code != http.StatusOK {
 		t.Errorf("a write to another document while eight writers queue on the first: status=%d body=%s, want 200",
 			edited.Code, edited.Body.String())
 	}
@@ -242,7 +236,7 @@ func TestWritersQueuedOnADocumentLeaveAdmissionRoomForOthers(t *testing.T) {
 	defer releaseHold()
 	wait := queuedEdits(t, handler, service, issue.PrimaryArtifactID, 2)
 
-	if edited := editDocument(t, handler, other, "Written while both write units' holders queue."); edited.Code != http.StatusOK {
+	if edited := editDocument(t, handler, other, insertAtEnd("Written while both write units' holders queue.")); edited.Code != http.StatusOK {
 		t.Errorf("a write to another document while two writers queue on the first: status=%d body=%s, want 200",
 			edited.Code, edited.Body.String())
 	}

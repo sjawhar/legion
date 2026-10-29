@@ -22,6 +22,10 @@ const (
 	ReferenceExcerptLease = "reference-excerpts"
 	// BlockIndexLease is docs.RunBlockIndexReconciliation's.
 	BlockIndexLease = "block-index"
+	// SearchTermStatsLease is api.RunSearchTermStatsRefresh's: the term-statistics refresh that
+	// rebuilds every project's term statistics. Two processes rebuilding the same rows would be
+	// the same work twice.
+	SearchTermStatsLease = "search-term-stats"
 	// EditNoticeLease is docs.RunEditNotices': the sweep that sends each document's edit notice.
 	EditNoticeLease = "edit-notices"
 	// WebhookRedeliveryLease is redeliver's GitHub webhook redelivery sweep's.
@@ -55,6 +59,7 @@ var leaseNames = [...]string{
 	SuggestionOutcomeLease,
 	ReferenceExcerptLease,
 	BlockIndexLease,
+	SearchTermStatsLease,
 	EditNoticeLease,
 	WebhookRedeliveryLease,
 	ArchitectureImportLease,

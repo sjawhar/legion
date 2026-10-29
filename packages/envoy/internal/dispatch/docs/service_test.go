@@ -77,8 +77,30 @@ func TestRepairingAnUnreadableAskBlockCountsTheAskItOpens(t *testing.T) {
 		`select count(*) from asks where block_artifact_id = $1 and state = 'open'`, artifactID).Scan(&open); err != nil {
 		t.Fatal(err)
 	}
-	if open != 1 || outcome.AskBlocksAdded != open {
-		t.Fatalf("repair opened %d ask(s), reported %d", open, outcome.AskBlocksAdded)
+	if open != 1 || len(outcome.AddedAskBlocks) != open {
+		t.Fatalf("repair opened %d ask(s), reported %d", open, len(outcome.AddedAskBlocks))
+	}
+	if !slices.Equal(outcome.AddedAskBlocks, []AddedAskBlock{{ID: "ttl", Question: "Which cache TTL?"}}) {
+		t.Fatalf("repair named added blocks %+v, want ttl and its question", outcome.AddedAskBlocks)
+	}
+}
+
+// An edit names the ask blocks it added in document order, each with its question, whatever
+// their ids' order; a block already in the document is not among them.
+func TestEditNamesTheAddedAskBlocksInDocumentOrder(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#held urgency=\"med\"}\nWhich region?\n:::\n")
+	outcome, err := joinedApplyOps(service, artifactID, []model.EditOp{{
+		Op: "insert", After: "end",
+		Markdown: ":::ask{#zeta}\nWhich deployment window?\n:::\n\n> :::ask{#alpha}\n> Which cache TTL?\n> :::",
+	}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
+	if err != nil {
+		t.Fatalf("insert ask blocks: %v", err)
+	}
+	want := []AddedAskBlock{{ID: "zeta", Question: "Which deployment window?"}, {ID: "alpha", Question: "Which cache TTL?"}}
+	if !slices.Equal(outcome.AddedAskBlocks, want) {
+		t.Fatalf("edit named %+v, want %+v", outcome.AddedAskBlocks, want)
 	}
 }
 func TestEditingBesideAnUnreadableAskBlockAddsNoAsk(t *testing.T) {
@@ -102,8 +124,8 @@ func TestEditingBesideAnUnreadableAskBlockAddsNoAsk(t *testing.T) {
 		`select count(*) from asks where block_artifact_id = $1 and state = 'open'`, artifactID).Scan(&open); err != nil {
 		t.Fatal(err)
 	}
-	if open != 0 || outcome.AskBlocksAdded != open {
-		t.Fatalf("edit beside unreadable ask opened %d ask(s), reported %d", open, outcome.AskBlocksAdded)
+	if open != 0 || len(outcome.AddedAskBlocks) != open {
+		t.Fatalf("edit beside unreadable ask opened %d ask(s), reported %d", open, len(outcome.AddedAskBlocks))
 	}
 }
 

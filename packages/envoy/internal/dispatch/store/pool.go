@@ -186,17 +186,19 @@ func NewPool(pool *pgxpool.Pool) *Pool {
 // median. The ceiling is picked here rather than derived from the task's CPU allotment or read
 // out of the DSN another repository's URL builder writes.
 //
-// It is 48 of one connection budget of 86 (ConnectionsPerProcess) that every pool of a process
+// It is 48 of one connection budget of 87 (ConnectionsPerProcess) that every pool of a process
 // shares, partitioned rather than grown: requests 48, background 6 (Background), live 4 (Live),
 // settlements 4 (Settlements), rooms 4, health 1, the three permanent listeners (the listener
-// pool's one dial is one of them redialling), leases leasePoolSize (14), outbox 1 and the server
-// process registry's own 1 (registryPoolSize). The total is the 86 the process opened before the
-// partition: the request pool gave up 16, which background, live, settlements and the leases' two
-// spare connections took. A write takes a connection per statement one after another, and a read
-// pins one for its whole length (PinConnection), so under load the API holds every connection of
-// this pool; the background loops, the live-update readers and the settlements wait on pools of
-// their own, so neither side can starve the other, and an acquire here waits at most
-// requestAcquireBound before it is refused with ErrPoolBusy rather than queueing without end.
+// pool's one dial is one of them redialling), leases leasePoolSize (15), outbox 1 and the server
+// process registry's own 1 (registryPoolSize). The partition itself added nothing: it is the 86
+// the process opened before, the request pool having given up 16, which background, live,
+// settlements and the leases' two spare connections took, and one more for the lease added since
+// (duty's thirteenth name, the term-statistics refresh). A write takes a connection per statement
+// one after another, and a read pins one for its whole length (PinConnection), so under load the
+// API holds every connection of this pool; the background loops, the live-update readers and the
+// settlements wait on pools of their own, so neither side can starve the other, and an acquire
+// here waits at most requestAcquireBound before it is refused with ErrPoolBusy rather than
+// queueing without end.
 //
 // The database bounds the budget from above. Dispatch's database is the gcp:Dispatch component's
 // Cloud SQL Postgres instance, whose default max_connections follows its tier's memory
@@ -312,7 +314,7 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 
 // leaseNameCount is how many lease names duty.Exclusive accepts: the names of duty's lease list,
 // counted here because store cannot import duty, and held to that list by a test.
-const leaseNameCount = 12
+const leaseNameCount = 13
 
 // leasePoolSize bounds the pool a periodic maintenance loop takes its once-overall lease on
 // (duty.Exclusive): a connection for every lease name on duty's list, and two spare. A caller and
@@ -359,7 +361,7 @@ const registryPoolSize = 1
 const permanentListeners = 3
 
 // ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres, the
-// budget of 86 sharedPoolSize describes: every pool's size, the registry's own pool
+// budget of 87 sharedPoolSize describes: every pool's size, the registry's own pool
 // (processes.Register) among them, and one connection per permanent listener, which the listener
 // pool dials and hands off rather than holds (its one dial in flight is a permanent listener
 // redialling, so it is not counted twice).

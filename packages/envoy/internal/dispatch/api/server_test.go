@@ -278,9 +278,11 @@ func waitBackgroundOf(t testing.TB, served *server) {
 
 // directServer is a server a test calls a handler or a delivery step on directly, without the
 // mux: it runs on the dependencies of the server under test - the same store, listener, broker
-// and document service - so what it writes and what it reads are the rows that handler left.
+// and document service - so what it writes and what it reads are the rows that handler left. Its
+// lifetime is context.Background(): a related-item check it runs starts a statistics refresh and
+// may retry its record on that lifetime, which nothing here cancels.
 func directServer(deps Deps) *server {
-	return &server{deps: deps}
+	return &server{deps: deps, lifetime: context.Background()}
 }
 
 // writeSessionRecord answers GET /v1/registry/{session_id} from the rows a stub listener also
