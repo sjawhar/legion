@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-745",
+  "completed": "2026-10-29T14:55:00Z",
+  "proof": [
+    {
+      "criterion": "2 - a session following an issue's topic is shown an agent's comment on it, with the fix's two halves joined on one real wire frame",
+      "surface": "the real envoy-dispatch binary built from this head, on a real nats-server 2.15.1 whose whole authorization is rendered by Envoy's own production renderer (core.Authorization{core.DispatchPermissions(\"example-dispatch\"), core.SessionPermissions()}.Render, nothing retyped) and a Postgres 17 with pgvector, with a NATS client holding core.SessionPermissions standing in for a Legion session; then this branch's own renderInbound (packages/envoy-client/src/delivery.ts) on the frame that server delivered, byte for byte",
+      "command": "go run github.com/nats-io/nats-server/v2@v2.15.1 -c out/nats.conf -js -sd js -a 127.0.0.1 -p 4333; go build -o rig/envoy-dispatch ./cmd/dispatch and run it with NATS_NKEY_SEED_FILE=out/dispatch.seed NATS_URLS=nats://127.0.0.1:4333 DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch745; go run ./sub nats://127.0.0.1:4333 out/session.seed 'notifications.dispatch.issue.>' frames2; curl -X POST /api/v1/issues and /api/v1/issues/RIG-2/comments as actor {\"kind\":\"session\",\"id\":\"1111...\"}; bun run render-frame.ts frames2/frame-1.json",
+      "observed": "the published comment.created frame on notifications.dispatch.issue.RIG-2.comment.created carries notify:false and quiet:false (the field present), and renderInbound as another session answers skip=false with a 949-byte card naming the comment's body and its reply command. The same stack's targeted message.created and message.delivery frames carry quiet:true and render skip=true.",
+      "headSha": "59c038efe73e0956113b77f99a2c8c085f9a1c87",
+      "negativeControl": "the same captured frame three ways: quiet set to true -> skip=true, content 0 bytes; quiet removed, which is every frame published before this change -> skip=true (the old notify rule, which is what keeps the stream's stored 72 hours quiet); the reader's own session as the frame's actor -> skip=true."
+    },
+    {
+      "criterion": "3a - a denied issue-topic publish is caught: named, counted and backed off rather than reported as an outage",
+      "surface": "a second stack of the same shape whose rendered grant has notifications.> removed from the Dispatch user's publish allow (core.DispatchPermissions with that one subject deleted, as the live test's own negative control deletes the delivery consumer create): the real envoy-dispatch binary on a real nats-server that genuinely refuses its publishes",
+      "command": "go run ./render-denied out-denied; go run github.com/nats-io/nats-server/v2@v2.15.1 -c out-denied/nats.conf -js -sd js-denied -p 4334; the same binary with NATS_NKEY_SEED_FILE=out-denied/dispatch.seed NATS_URLS=nats://127.0.0.1:4334 DATABASE_URL=...dispatch745denied; curl -X POST /api/v1/issues as a session actor; then read the process log and curl -s http://127.0.0.1:8746/metrics",
+      "observed": "the binary logs dispatch outbox: publish event at ERROR naming the subject (notifications.dispatch.issue.DEN-1.issue.created) and nats: permissions violation: Permissions Violation for Publish, logs no \"NATS is unreachable\" line at all (grep -c = 0), and GET /metrics reads envoy_dispatch_outbox_publish_failures_total{reason=\"denied\"} 1.",
+      "headSha": "59c038efe73e0956113b77f99a2c8c085f9a1c87",
+      "negativeControl": "packages/envoy/internal/bus/async.go restored to its base content (jj restore --from main@origin) with everything else at this head: TestRunRetriesAnIssueTopicNATSDenies fails in 7 s with 'attempt_count = 0, want the one backed-off attempt' - the event released with no attempt counted, which is the behaviour this change replaces. The granted stack above is the other control: there the same metric has no series at all."
+    },
+    {
+      "criterion": "3c - the counter is exported by a running envoy-dispatch",
+      "surface": "GET /metrics on the running envoy-dispatch binary, unauthenticated, above the router",
+      "command": "curl -sS -i http://127.0.0.1:8745/metrics | head -3 and curl -sS http://127.0.0.1:8745/metrics | grep envoy_dispatch_outbox_publish_failures_total",
+      "observed": "HTTP/1.1 200 with Content-Type: text/plain; version=0.0.4; charset=utf-8, and the counter's HELP and TYPE lines, where before this change that path fell through to the router and answered the dashboard's HTML shell.",
+      "headSha": "59c038efe73e0956113b77f99a2c8c085f9a1c87",
+      "negativeControl": "on the granted stack no series is printed under that name (nothing failed), while the denied stack prints reason=\"denied\" 1: the endpoint reports the process it is served by rather than a constant."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/bus/confirm.go - publishDenial, the violation predicate extracted from confirmPublished",
+    "packages/envoy/internal/bus/async.go - window.acknowledged takes the publish's topic and names a denial on the JetStream path",
+    "packages/envoy/internal/dispatch/outbox/publisher.go - Deps.PublishFailures and countPublishFailure, counted in attempt.answer and in publishDestination's fast-fail path; the adopted envelope's quiet field",
+    "packages/envoy/internal/dispatch/events/broker.go - events.Quiet (adopted), reading a targeted message and a quiet ask edit from either payload shape",
+    "packages/envoy/cmd/dispatch/main.go - the metrics registry, the counter, and GET /metrics on the probe mux",
+    "packages/envoy/cmd/dispatch/main_test.go - TestDispatchHandlerServesMetrics, and metrics.New() at every dispatchHandler call",
+    "packages/envoy/internal/dispatch/outbox/core_denied_test.go - TestRunRetriesAnIssueTopicNATSDenies",
+    "packages/envoy/internal/dispatch/outbox/publisher_test.go - runDeps, the scanned targeted-message case of TestEnvelopePayloadStatesWhetherTheEventIsQuiet, TestAPublishFailureThatEndsTheAttemptIsCountedOnce",
+    "packages/envoy/internal/dispatch/events/broker_test.go - map-payload rows of the Quiet table (adopted test extended)",
+    "packages/envoy/infra/core/dispatch_permissions_live_test.go - requireCommentQuietPublished under the rendered production grants",
+    "packages/envoy-client/src/delivery.ts - renderInbound skips on quiet (adopted), and the targeted frame reads it off the event",
+    "packages/envoy-client/src/__tests__/delivery.test.ts - the adopted renderer rows, with dispatchEvent's flags as one options object",
+    "packages/contracts/src/dispatch-api.ts - PublishedDispatchEvent declares the wire's optional quiet beside notify",
+    "skills/dispatch/SKILL.md - one clause naming what an issue-topic subscription does not show",
+    "packages/{envoy,envoy-client,pi-envoy,contracts}/.changes/unreleased/INFRA-745-*.yaml - five fragments, three of them #2490's renamed onto this issue",
+    "packages/envoy/AGENTS.md, packages/pi-envoy/AGENTS.md - the adopted commit's own documentation"
+  ],
+  "trickyParts": [
+    "The rig that proves this change is still standing on the issue's volume and the tester can reuse it rather than rebuild it: /legion/scratch/pgharness (Postgres 17 + pgvector unpacked from Debian packages, started by `bash /legion/scratch/pgharness/start.sh`, which is idempotent; it serves 127.0.0.1:5433 as DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable, which every Postgres-backed Go test here needs), and /legion/scratch/tmp/rig (the scratch Go module whose `render` and `render-denied` call Envoy's own production renderer, `sub` subscribes as a session, `render-frame.ts` drives renderInbound, plus the built envoy-dispatch and the captured frames under frames2/). Two nats-servers are running on 127.0.0.1:4333 (granted) and :4334 (notifications.> withheld). Nothing of it is in the workspace or the commit.",
+    "events.Quiet is asked of two payload shapes: the typed value at append time (Broker.Notify) and the map[string]any the outbox scanned out of Postgres at publish time. Any arm of it that reads a typed payload is silently false in the outbox - which is the defect this round's last commit fixes for a targeted message and a quiet ask edit. A future arm must read both shapes, as targetedMessage, quietAskEdit and namedVersion do.",
+    "The denial a JetStream publish gets is read off the connection's last error, because the server acknowledges a refused publish with nothing. That inherits confirmPublished's documented ambiguity: nats.go keeps one last error per connection, so a violation of another subject recorded in between leaves this publish named unavailable instead.",
+    "packages/envoy/infra is a Go module of its own; `go vet`/`go test` there rewrite its go.work.sum as a toolchain side effect. Restore it (jj restore packages/envoy/infra/go.work.sum) before committing, or the commit carries pruned sums nothing asked for."
+  ],
+  "deviations": [
+    "The plan put `quiet` on DispatchEventBase in packages/contracts. It is declared as PublishedDispatchEvent (DispatchEvent & { quiet?: boolean }) instead, beside DispatchEventSchema, because the field exists only on the copy the outbox publishes to NATS (outbox/publisher.go envelope), never on the API's event shape, and DispatchEventBase is pinned key-for-key by src/live.test.ts against fixtures/live/event.json: declaring it there forced an Exclude<> exception into that pin for a field the API never sends. DispatchEventSchema is unchanged, and needs no change: renderInbound reads quiet off the raw wire value, not off the parsed data, and a z.object strips unknown keys.",
+    "The plan's implementer proof ran task 4's live test and fed its envelope to renderInbound. That lane cannot run in a Legion issue pod at all (it starts NATS through testcontainers, and the pod has no container runtime). The proof above is the container-free equivalent in the shape docs/solutions/testing/a-docker-free-rig-renders-the-real-authorization-and-runs-the-real-server-INFRA-113.md defines: the same rendered production grants, a real nats-server of the deployment's version, the real binary, a real session-granted subscriber. The live test is still added, compiled here (go vet -tags natslive ./core/), and runs in the envoy-infra-go lane.",
+    "The rig is left standing rather than deleted (the plan said to delete the throwaway script). Nothing of it is in the workspace, and the next role saves the half-hour of rebuilding it: docs/solutions/legion/a-port-held-in-an-issue-pod-is-a-sibling-roles-harness-move-your-run-with-the-five-port-variables-and-your-own-database-and-never-stop-the-holder-LEGION-695.md is the precedent, and trickyParts above records every path and port."
+  ],
+  "discoveredComplexity": [
+    "The adopted #2490 carried a defect its own tests could not see: events.Quiet's typed assertions are false for every event the outbox publishes, so a targeted message and a quiet ask edit went out quiet:false and would have been shown to every session following the issue. The simplify pass's reviewers found it; it is fixed and pinned on the wire in 59c038e. Its tests passed because they called Quiet with typed payloads only.",
+    "The counter this issue asked for was silent in the one case it exists for until the same pass found it: a destination whose publish fails before it is recorded (NATS unreachable) returns from publishDestination without reaching attempt.answer, where the counting lives.",
+    "packages/envoy/internal/dispatch/api cannot run in this pod at all (it refuses a Postgres whose only collation is byte order, which is what an issue pod's initdb --locale=C gives); the suites this change needs - events, outbox, cmd/dispatch, bus - all run here."
+  ],
+  "openQuestions": [
+    "D2 (the plan's): nothing scrapes Dispatch, so the counter answers the criterion but pages nobody. A scrape or alert policy belongs in the deployment repository, which this tree's gh and git cannot write. The architect owns placing it; the PR body says so plainly.",
+    "D3 (the plan's): criterion 4 cannot pass on a server deploy alone. The client half ships in @sjawhar/pi-envoy and @sjawhar/claude-envoy through the worker image, whose pin lives in the deployment repository, and Legion's production wake never fires on a worker-image pin. The production check reports pending until both halves are live, naming the plugin version it read.",
+    "D5 (the plan's, adjacent): the synchronous publishJetStream path (internal/bus/nats.go:1276), which the listener's HTTP publishes take, is blind to a permissions violation in exactly the way this change fixes for the asynchronous path. No evidence of this issue touches it and it is the listener's path, not Dispatch's."
+  ]
+}
