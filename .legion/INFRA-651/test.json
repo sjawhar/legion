@@ -2,52 +2,64 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-651",
-  "completed": "2026-10-29T12:56:25Z",
-  "headTested": "823f38a4ff42740cd823692d2167b8697d98e920",
-  "codeHead": "6db4537626e2",
-  "round": 4,
-  "forwardMerge": {
-    "previousVerifiedHead": "705df7b5329d079002e56850c51fcab12a0a2ff5",
-    "merge": "b96ae4bedfa4 (main 4e91eaa85984)",
-    "fingerprints": "705df7b5: 1bf3824a... (standard fileset), 0c52bf66... with packages/claude-envoy/dist also left out; b96ae4be: 0c52bf66... both ways; 6b339c1e: 114bffb3...",
-    "verdict": "the merge left the diff unchanged but for the claude-envoy dist bundles, which main's .github/workflows/claude-envoy-rebuild.yaml builds after each merge (its header: a pull request never commits them); the claude-envoy changelog fragment stays. The seed commits d55525c5, 4b1d777a and 6db45376 change packages/envoy/loadtest, so this round is a full test of that surface."
-  },
+  "completed": "2026-10-29T15:50:38Z",
+  "headTested": "ceba343c5405451405b6938ab2276a68e9c234b3",
+  "codeHead": "9511fa836f8a947d17c7b03e86de1329b3fa0633",
+  "round": 5,
+  "scope": "The reviewer's round-3 findings in the load-test seed, as the architect narrowed it (Envoy, 2026-10-29 13:13Z): README before/after flow, TestMakeRefPlan pinning, retried POST, pool and helper cleanup, wording and census items.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's seed surface on a load-test stack of my own built from this head: stack.sh seed (with loadgen seed-refs), loadgen refs-shape and refs-fetch, and compared refs-fetch against main's envoy-dispatch (fork point 4e91eaa8) over the same template. Its counts (1,000 / 19,471 / 310 / 51,071), its PASS and its byte identity reproduce. Its merge-rule runs were not repeated."
+    "how": "Drove each claim on a load-test stack of my own built from this head: stack.sh seed and its counts; refs-shape; a second loadgen on main's code (4e91eaa8) in $BIN under stack.sh seed --force; the README flow with the pre-PR checkout then this head; seed-refs through an answer-dropping proxy; the reviewer's citation mutation on TestMakeRefPlan via go test -overlay; refs-fetch with failing answers; the census search re-run."
   },
-  "failed": 0,
-  "failures": [],
+  "failed": 2,
+  "failures": [
+    {
+      "criterion": "CI green at the head (required checks lint, typecheck, test, pr-title): the code commit 9511fa83 has run no workflow",
+      "evidence": "The push carried the code commit 9511fa836f8a and the handoff ceba343c5405 together, and ceba343c's message ends with 'skip-checks: true', which GitHub honours for the whole push. gh api repos/sjawhar/legion/commits/ceba343c5405451405b6938ab2276a68e9c234b3/check-runs -> total_count 0; .../status -> state pending, no statuses; gh run list --branch legion/INFRA-651 shows runs only at 823f38a4 and before. The trailer belongs only on a push whose commits touch only .legion/INFRA-651/. No red test is possible: this is the push's shape, not the code. Fix: the forward merge below, whose head carries no trailer, so the code reaches CI."
+    },
+    {
+      "criterion": "The pull request merges into main: GitHub reports it CONFLICTING",
+      "evidence": "gh pr view 2469 --json mergeable,mergeStateStatus -> CONFLICTING / DIRTY. git merge-tree --write-tree 64d2ad0be7da (main@origin) ceba343c5405 -> 'CONFLICT (content): Merge conflict in packages/envoy/cmd/dispatch/README.md': main's fe3153923 (#2397) added the /api/v1/projects/{key}/related and /api/v1/related-checks rows directly above this PR's /api/v1/issues/{key}/references?versions= row. Resolution: keep main's two new rows and this PR's row. Every other file auto-merges (contracts dispatch-api.ts, envoy-client dispatch-execute.test.ts and dispatch-http.ts, cmd/dispatch/AGENTS.md, routes_table.go). A real conflict, so the forward merge is the sanctioned one."
+    }
+  ],
   "proof": [
     {
-      "criterion": "A6: the references seed is committed into the load test as part of stack.sh seed, keyless, reproducing INFRA-650's counts and production's shape",
-      "surface": "packages/envoy/loadtest at this head: stack.sh setup, start, seed (Postgres 16.2 + pgvector, real migrations, latency proxy, NATS, listener) on LOADTEST_ROOT=$TMPDIR/t651r4/lt, ports 35432/35433/34222/38222/39120/38777/36061",
-      "command": "stack.sh setup; stack.sh start; stack.sh seed; stack.sh reset; stack.sh loadgen refs-shape; stack.sh loadgen refs-fetch -out full-head.tsv",
-      "observed": "seed done in 2,298 s, build_commit 823f38a4 build_dirty false; counts projects 4, issues 1,000, comments 8,000, artifacts 2,310, artifact_versions 20,781, ref_targets 1,000, ref_target_versions 19,471, ref_sources 310, artifact_refs 51,071, events 29,785; refs-shape: 400 LGA issues, 90 empty, version rows p50 244 / p90 6,337 / max 19,356 / mean 2,508, response bytes max 7,145,397, distinct share 0.0539, 231.0 author bytes per row: PASS (exit 0); refs-fetch: 1,000 issues, 310 with members, 370,204,182 bytes. The sample file is 160 arrays of numbers, no key or name; 6db45376's reformat parses to the same 160 lists (22,460 numbers)",
-      "headSha": "823f38a4ff42740cd823692d2167b8697d98e920",
-      "negativeControl": "refs-shape after setting every ref-target version to one author: 'distinct share 0.0003 ... author bytes/row 40.0 ... FAIL', exit 1; refs-fetch without -out: '-out is required', exit 1; stack.sh seed --bogus: 'seed takes only --force', exit 1; a second stack.sh seed without --force: 'already seeded', template kept (refs-shape PASS again after a reset)"
+      "criterion": "Review finding 3: a retried POST adds no version; seed-refs counts its 201s",
+      "surface": "packages/envoy/loadtest at this head: stack.sh loadgen seed-refs against the stack's Dispatch through dropproxy.py, which forwards every request and, for every 40th POST to /artifacts, lets Dispatch answer and then closes the connection unanswered (a stack.json copy whose dispatch port is the proxy's)",
+      "command": "stack.sh reset; psql: delete from request_keys where idempotency_key like 'refs-%' (19,781 rows); python3 dropproxy.py 38800 38777 40 & stack.sh loadgen seed-refs -stack stack-proxy.json; count ref-target and references.md versions and refs-% keys",
+      "observed": "exit 0, 'seed-refs: 1000 targets, 19471 target versions, references.md on 310 issues citing 51071 targets'; 507 answers dropped, every one a 201; target versions 19,471 -> 38,942 (+19,471 exactly, the plan), references.md versions 310 -> 620 (+310), keys 19,781",
+      "headSha": "ceba343c5405451405b6938ab2276a68e9c234b3",
+      "negativeControl": "the same proxy (every 2nd answer dropped) with curl: an unkeyed write whose answer was lost, retried, left 3 versions for 2 writes; under Idempotency-Key the document stayed at 2 versions and the retry answered 201 with 'Idempotency-Replayed: ?1'"
     },
     {
-      "criterion": "A1 at real size on the committed seed: without the parameter the answer is byte-identical to main's",
-      "surface": "the same seeded template, served by this head's envoy-dispatch and by main's (git archive of fork point 4e91eaa85984, built with GOWORK=off) through stack.sh reset",
-      "command": "stack.sh loadgen refs-fetch -out full-head.tsv (head binary); swap bin/envoy-dispatch for main's, stack.sh reset, refs-fetch -out full-base.tsv; diff full-base.tsv full-head.tsv",
-      "observed": "diff exit 0 over 1,000 rows (key, status, ETag, body sha256, bytes); refs-shape PASS on both servers with the same numbers",
-      "headSha": "823f38a4ff42740cd823692d2167b8697d98e920",
-      "negativeControl": "main's server answers ?versions=latest with 200 and the full 7,145,397 bytes for LGA-202, and ?versions=latest&versions=bogus with 200; the head refuses the latter (round 3)"
+      "criterion": "Review finding 1: the README's before/after flow keeps the seed and works with a pre-PR checkout",
+      "surface": "packages/envoy/loadtest/stack.sh and run-step.sh at this head, with LOADTEST_SRC set to a git archive of main at the fork point 4e91eaa85984 (no seed-refs, migration 0138 as at this head)",
+      "command": "LOADTEST_SRC=<pre-PR> stack.sh setup; LOADTEST_SRC=<pre-PR> stack.sh seed --force; then LOADTEST_SRC=<pre-PR> run-step.sh t651-before --events 1 --sessions 20 --requests 2 --duration 30s --warmup 10s --grace 10s; run-step.sh t651-after (same flags); stack.sh reset; refs-shape",
+      "observed": "seed --force exit 1: 'the loadgen at .../bin was built from a checkout that has no seed-refs; seed with a loadgen that has it, then run the older build on that seed'; dispatch_seed and dispatch still exist, dispatch_seed holds 19,471 target versions, seed.json and seed.meta.json sha256 unchanged; before step exit 0 in 118 s (references 83/83), after step exit 0 in 81 s (build_commit ceba343c, dirty false; references 45/45); refs-shape PASS afterwards",
+      "headSha": "ceba343c5405451405b6938ab2276a68e9c234b3",
+      "negativeControl": "the round-4 stack.sh (6db45376) with the same pre-PR loadgen dropped dispatch_seed, seed.json and seed.meta.json within 6 s and started the 14 to 27 minute loadgen seed, which would end on 'unknown command seed-refs' (stopped by pid, seed restored from a database backup and file copies)"
     },
     {
-      "criterion": "A2 at real size on the committed seed: versions=latest gives each member with only its latest version, under its own ETag",
-      "surface": "the same seeded stack, head server, agent bearer",
-      "command": "cut.py: for every key, GET full and ?versions=latest, cut each full member's versions to the last, compare parsed JSON, compare ETags",
-      "observed": "1,000 of 1,000 equal, 33,351 multi-version members, 0 issues with members sharing an ETag, 48,601,700 trimmed bytes vs 370,204,182 full",
-      "headSha": "823f38a4ff42740cd823692d2167b8697d98e920",
-      "negativeControl": "a byte comparison against Python's re-encoding differs on every issue, empty answers included, because Go's encoder ends each answer with a newline and escapes HTML characters: the comparison is of parsed values, and the round-3 head check by cmp at small size still stands"
+      "criterion": "Review finding 2: TestMakeRefPlan pins the citations",
+      "surface": "packages/envoy/loadtest refs_test.go, run against mutated refs.go through go test -overlay",
+      "command": "go test -run TestMakeRefPlan -count=1 .; the same with -overlay for last_m (cited := the last m of the permutation, the reviewer's mutation), first_writer (every version by the target's first writer), host_shift (target n on host n+1)",
+      "observed": "unmutated ok; each mutation FAIL at refs_test.go:102 'the plan hashes to <other>, want 7414809c...', with every total still passing",
+      "headSha": "ceba343c5405451405b6938ab2276a68e9c234b3",
+      "negativeControl": "the three mutations above are the negative controls; at round 4's head the totals-only test passed the reviewer's mutation (review.json finding 2)"
+    },
+    {
+      "criterion": "The seed at this head still writes the plan and production's shape (A6), after the pool rewrite",
+      "surface": "stack.sh setup, start, seed on a fresh LOADTEST_ROOT",
+      "command": "stack.sh seed; stack.sh reset; stack.sh loadgen refs-shape; stack.sh loadgen refs-fetch -out full-head.tsv",
+      "observed": "seed done in 2,421 s, build ceba343c dirty false, counts 1,000 issues, 1,000 ref_targets, 19,471 ref_target_versions, 310 ref_sources, 51,071 artifact_refs, request_keys 19,781; refs-shape PASS (mean rows 2,508, distinct share 0.0539, 231.0 author bytes per row); refs-fetch 1,000 issues, 310 with members, 0 not 200",
+      "headSha": "ceba343c5405451405b6938ab2276a68e9c234b3",
+      "negativeControl": "refs-fetch after deleting ref-target-0's versions: '263 with members, 47 not 200' and 47 rows with status 500 (review minor: a 500 is no longer counted as an answer with members)"
     }
   ],
   "notes": [
-    "loadgen seed-refs, run by hand a second time on a seeded database, would add the targets' versions again; stack.sh seed never does that (it keeps an existing template unless --force drops it first).",
-    "CI at 823f38a4: every job green but dispatch, still running when read; close-withdraws-asks.e2e.ts:126 in that job is main's known red (INFRA-138's tree).",
-    "Evidence: dispatch://INFRA-651/artifact/infra651-tester-evidence-tgz version 4 (sha256 7738ca70b3488bac5618da55b188ae590c0b394f290fbe5a015d30e3878f2084). Earlier rounds' route, ETag and CLI proofs stand: the server and CLI code is unchanged since a3cd6ffc.",
-    "A9 is the production check after the merge."
+    "Wording and census items checked against the code: 'absent, empty or all' in routes_table.go, references.go, cmd/dispatch README and AGENTS rows and the envoy fragment; '14 to 27' in stack.sh and README; the 'No step writes to those three projects' sentence is gone; census re-run at 9511fa83: 86 hits in 32 files, ArtifactsTab.test.tsx 20, no pr2425 row. The pool now uses errgroup SetLimit with one g.Go per item.",
+    "Idempotency keys live 24 h (contracts.IdempotencyKeyTTL): a second seed-refs on a template older than that writes the versions again. stack.sh seed never runs seed-refs on an existing seed.",
+    "Evidence: dispatch://INFRA-651/artifact/infra651-tester-evidence-tgz version 5 (sha256 3aef1acd73dbb49187408f3790cd4216b8b8af8236d579d638735cb075589a43).",
+    "After the forward merge the fingerprint will change (the README row conflict), so the next round re-checks the resolved row and reads CI; the seed findings above need not be driven again unless the merge touches packages/envoy/loadtest."
   ]
 }
