@@ -101,8 +101,11 @@ func (s *server) listUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 // whoami tells any authenticated caller who the server takes it for: a human by login, or an
-// agent with the lowercase login of the personal token's owner (null for the shared token) and
-// the verified Kubernetes subject of its service-account token (null for every other bearer).
+// agent with the lowercase login of the personal token's owner (null for the shared token), the
+// verified Kubernetes subject of its service-account token (null for every other bearer), the
+// session its credential proved (null for a credential that proves none, which every one but a
+// broker-issued token is) and the one project that credential lets it write (null where it names
+// none, a person-scoped token included).
 func (s *server) whoami(w http.ResponseWriter, r *http.Request) {
 	actor, human, err := s.optionalActor(r)
 	if err != nil {
@@ -117,5 +120,15 @@ func (s *server) whoami(w http.ResponseWriter, r *http.Request) {
 	if actor.Owner != nil {
 		owner = new(model.CanonicalLogin(*actor.Owner))
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"kind": "agent", "owner": owner, "service": actor.Service})
+	var session *string
+	if actor.Kind == "session" && actor.ID != "" {
+		session = &actor.ID
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"kind":    "agent",
+		"owner":   owner,
+		"service": actor.Service,
+		"session": session,
+		"project": actor.Project,
+	})
 }

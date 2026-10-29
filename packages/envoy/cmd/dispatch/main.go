@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sjawhar/envoy/internal/brokertoken"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
@@ -369,6 +370,15 @@ func main() {
 	// configured verifier, and every JWT-shaped bearer would be sent to it.
 	if serviceTokens != nil {
 		built.OIDC = serviceTokens
+	}
+	brokerTokens, err := brokerTokenVerifier(boot, database, serverURL)
+	if err != nil {
+		slog.Error("dispatch: build the broker access-token verifier", "error", err)
+		os.Exit(1)
+	}
+	built.BrokerTokens = brokerTokens
+	if brokerTokens != nil {
+		slog.Info("dispatch: deciding access tokens the secrets broker issued", "broker", redact.URL(boot.AgentSecretsURL))
 	}
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, built))
 
@@ -1236,6 +1246,29 @@ func serviceTokenVerifier(boot bootConfig) *oidc.LazyVerifier {
 		return nil
 	}
 	return oidc.NewLazyVerifier(boot.OIDCIssuer, boot.OIDCAudience)
+}
+
+// brokerTokenVerifier decides callers presenting an access token the secrets broker issued, under
+// the RFC 9449 DPoP scheme. It is built from the settings Dispatch already has and needs none of
+// its own: the broker DISPATCH_AGENT_SECRETS_URL names, which the approval relays already call,
+// Dispatch's own projected ServiceAccount token from DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE,
+// which it already presents there, and DISPATCH_SERVER_URL as the origin a proof's 'htu' is
+// checked against. Spent proofs are recorded in Dispatch's own database (store.DPoPProofs), which
+// the maintenance pass sweeps.
+//
+// A deployment with no broker gets nil: Dispatch then has no such credential kind, and a DPoP
+// presentation is refused as any non-bearer Authorization header has always been
+// (401 UNAUTHORIZED).
+func brokerTokenVerifier(boot bootConfig, database *store.Store, serverURL string) (*brokertoken.Verifier, error) {
+	if boot.AgentSecretsURL == "" {
+		return nil, nil
+	}
+	return brokertoken.New(brokertoken.Options{
+		BrokerURL: boot.AgentSecretsURL,
+		Account:   brokertoken.NewAccountToken(boot.AgentSecretsTokenFile),
+		Origin:    strings.TrimSuffix(serverURL, "/"),
+		Replay:    store.NewDPoPProofs(database.Pool),
+	})
 }
 
 // healthzHandler answers the readiness probe: 200 while this process can serve requests, which is

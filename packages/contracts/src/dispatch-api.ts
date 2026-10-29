@@ -2587,10 +2587,20 @@ export interface ListUsersResponse {
 
 /** GET /api/v1/whoami: a person by lowercase email (`login`), or an agent with its personal
  *  token's owner (a lowercase email) — null under the shared token or a verified service token —
- *  and that service token's subject, null unless one authenticated the request. */
+ *  and that service token's subject, null unless one authenticated the request. `session` is the
+ *  session the credential itself proved, which only an access token the secrets broker issued
+ *  does, and `project` the one project key that credential lets the caller write, null where it
+ *  names none. Both are absent from a Dispatch older than broker-issued tokens, which a client
+ *  reads as an older build rather than as null. */
 export type WhoamiResponse =
   | { readonly kind: "user"; readonly login: string }
-  | { readonly kind: "agent"; readonly owner: string | null; readonly service: string | null };
+  | {
+      readonly kind: "agent";
+      readonly owner: string | null;
+      readonly service: string | null;
+      readonly session?: string | null;
+      readonly project?: string | null;
+    };
 
 export interface CreateAskInput {
   readonly question: string;

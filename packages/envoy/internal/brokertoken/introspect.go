@@ -75,6 +75,20 @@ func (i Introspection) expiry() time.Time {
 	return time.Unix(i.ExpiresAt, 0)
 }
 
+// caller is the Caller a live answer names, the one shape both checks hand back.
+func (i Introspection) caller() Caller {
+	return Caller{
+		Session:      i.Session,
+		Person:       i.Person,
+		ProjectScope: i.ProjectScope,
+		Project:      i.Project,
+		Scope:        i.Scope,
+		ClientID:     i.ClientID,
+		Thumbprint:   i.Thumbprint,
+		ExpiresAt:    i.expiry(),
+	}
+}
+
 // introspect asks the broker what token is, presenting Dispatch's own projected ServiceAccount
 // token as the bearer the broker resolves its caller from. Every failure to obtain an answer —
 // the account token Dispatch could not read, a transport failure, a status the broker does not

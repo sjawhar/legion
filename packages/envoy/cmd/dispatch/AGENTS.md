@@ -464,6 +464,41 @@ write identity errors with `identity.WriteError`.
   the token alone: `bearerSessionActor` copies it from the authenticated actor
   exactly as it copies `owner`, and a request body naming one is ignored.
   Unset, the branch does not exist and bearer handling is unchanged.
+- An access token the secrets broker issued is the fifth credential and the one
+  that is not a bearer: it is presented under RFC 9449's DPoP scheme
+  (`Authorization: DPoP <token>` with a `DPoP:` proof header), because that RFC
+  refuses a DPoP-bound token presented under any other scheme.
+  `api.optionalActor` therefore branches on the scheme before it reads any
+  token, so a `DPoP` presentation is decided by `api.brokerTokenActor` alone and
+  never falls through to a bearer branch, and the bearer branches above are
+  untouched. `internal/brokertoken` does the deciding: the broker is asked what
+  the token is (RFC 7662 introspection) and the caller is held to the `jkt` that
+  answer carries. `brokerTokenVerifier` builds it from settings Dispatch already
+  has and adds none: `DISPATCH_AGENT_SECRETS_URL` (the broker the approval
+  relays already call), `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` (the
+  projected ServiceAccount token every broker call presents, read at call time)
+  and `DISPATCH_SERVER_URL` (the origin a proof's `htu` is checked against,
+  never a forwarded header). Spent proofs go in Dispatch's own `dpop_proofs`
+  (migration `0139`), swept beside the idempotency keys. A verified caller is
+  `{kind: "session", id: <the token's session>}` carrying `owner`, the person it
+  acts for, and `project`, the one project a named-scope token may write, both
+  set from the token and never from a body as `service` is; a person-scoped
+  token names no single project and carries none. Since the credential proves
+  the session, `bearerSessionActor` takes a body with no `actor` at all, takes
+  one naming that same session for its `origin`, and refuses one naming any
+  other writer `403 ACTOR_SESSION_MISMATCH` naming the session the token
+  carries. Its refusals are `401 BROKER_TOKEN_NOT_ACTIVE`,
+  `401 BROKER_TOKEN_PROOF_INVALID`, `401 BROKER_TOKEN_KEY_MISMATCH`,
+  `429 BROKER_TOKEN_RATE_LIMITED` and `503 BROKER_UNAVAILABLE`, which is a 503
+  for the reason `OIDC_ISSUER_UNAVAILABLE` is: the broker answered nothing, so
+  the token was never judged. A proof is single use by its `jti` and `htu`, so
+  `api.decideBrokerToken` decides each request once for every layer that
+  resolves its caller, and a websocket's heartbeat re-resolution asks the
+  broker's answer alone (`brokertoken.Verifier.Live`) rather than presenting the
+  upgrade's proof again. Without `DISPATCH_AGENT_SECRETS_URL` the branch has no
+  verifier, and a `DPoP` presentation is the `401 UNAUTHORIZED`
+  `invalid bearer token` that any Authorization header that is not a bearer has
+  always been.
 
 The GitHub proxy (`/api/github/rest/...`, `internal/dispatch/githubapi`) reads as the GitHub App
 installation that covers the repository, for a signed-in person, GET only and only four paths: a
@@ -599,7 +634,7 @@ caller that resolves to nobody keeps the route's own `401` (`refuseChangedLogin`
 | `/api/v1/me/agent-tokens` | GET, POST | human only | List personal token metadata or mint a personal agent token. |
 | `/api/v1/me/agent-tokens/{id}` | DELETE | human only | Revoke a personal agent token. |
 | `/api/v1/users` | GET | human only | Everyone who has signed in (`people`), as `{users: [{login}]}` sorted by email: the assignee picker's options. |
-| `/api/v1/whoami` | GET | user or bearer | Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service}` for a bearer (`owner` is the personal token's owner by lowercase email, null under the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
+| `/api/v1/whoami` | GET | user, bearer, or a broker-issued DPoP token | Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service, session, project}` for every other credential (`owner` is the personal token's owner or a broker-issued token's person by lowercase email, null under the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other credential; `session` is the session the credential itself proved, which only a broker-issued token does, null otherwise; `project` is the one project key that credential may write, null where it names none). |
 | `/api/v1/dashboard/builds` | GET | user or bearer | Which dashboard builds are served (`api/dashboard_builds.go`): `{serving, live}`, `serving` the entry chunk (`/assets/index-*.js`) of the build this process serves (`""` when it serves none), `live` the distinct entry chunks of the builds the live server processes serve (`processes.Live` joined to `dashboard_builds` on the build id), sorted. The dashboard's "A new version is available" notice offers itself only when `live` holds exactly one entry and it is not the tab's own, so no tab is told to reload while a rolling update or a rollback still runs two builds. |
 | `/api/v1/issues` | GET, POST | POST human or bearer | List or create native issues. The listing is every matching issue as an array, or, with `limit` (1–250) or `offset` (0 or more; alone it pages 50), one page `{issues, total, limit, offset}` cut after every filter, `total` counting the issues they match; a repeated, blank, non-integer or out-of-range value, or `cursor`, is `400 INVALID_QUERY` naming the parameter. Each listing row carries `blocked_by`, the sorted keys the issue waits on, `primary_artifact_id`, and `repo` and `resolved_repo` as the issue read below describes them. Creation without a `spec`, or with a blank one, gives an empty primary document at version 1. Creation takes the issue's own `repo` (`owner/name`, canonicalised as a mapping's is): one that is not `owner/name` is `400 INVALID_ISSUE`, and one not mapped to the issue's project `400 REPO_NOT_MAPPED`. A `parent` that would put the new issue more than 32 links (`parentDepthCap`) below its root is `409 PARENT_INPUT`. A title over `contracts.IssueTitleMax` (1,000) UTF-16 units, counted after trimming, is `400 CAP_EXCEEDED` before the duplicate check reads the project's titles. Creation refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`. A spec whose markdown makes more than 65,536 elements, or whose markdown as stored (what `.../text` answers) would be longer than 1 MiB or make more than 65,536 elements, is `413 CAP_EXCEEDED`. `blocked_by` names at most `contracts.MaxIssueBlockers` same-project issue keys before deduplication: an over-limit list or unknown key is `400 BLOCKED_BY_INPUT`, another project's issue `400 BLOCKED_BY_OUTSIDE_PROJECT`, and a wait cycle through `blocked_by` and parent links `409 DEPENDENCY_CYCLE`. Non-empty blocker lists and a `parent` take a per-project dependency advisory lock before allocating the number or rank; creation with neither takes no dependency lock, and no creation takes an explicit parent-row lock. |
 | `/api/v1/search?q=&project=&limit=&offset=` | GET | user or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; each kind is ranked on its own list and the lists are merged by reciprocal rank fusion (`README.md`, "Search"), with `<mark>` snippets and SPA `href`s. One page `{results, total, reachable, limit, offset, took_ms}`: `limit` is 1–50 (default 20) and `offset` 0 or more (default 0); `total` counts every match and `reachable` the hits the pages can return, each kind's best `contracts.SearchKindDepth` (100). An under-two-character query returns `400 INVALID_QUERY`, while a stop-word-only query returns `200` with no results; a query over `contracts.SearchQueryMax` (1,000) UTF-16 units, counted after trimming, returns `400 CAP_EXCEEDED` before anything runs, a project that is not a project key returns `400 INVALID_PROJECT` (an empty one searches every project), a repeated, blank, non-integer, or out-of-range limit returns `400 INVALID_LIMIT`, and the same for offset returns `400 INVALID_OFFSET`. They ride in the URL; `packages/contracts/AGENTS.md` "Search limits" owns what keeps it under the load balancer's limit. Keyword search finds a text whose search vector would pass Postgres's limit on one vector by the words in its opening part only (`README.md` "Search"). |

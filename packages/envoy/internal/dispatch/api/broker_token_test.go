@@ -1,0 +1,598 @@
+// broker_token_test.go drives the real server with the fifth credential kind: an access token the
+// secrets broker issued, presented under the RFC 9449 DPoP scheme. The broker is a stub answering
+// what each test says a token is, as internal/brokertoken's own suite uses one, and every proof
+// comes from internal/broker/helper's DPoP transport — the producer a real caller uses — so no
+// second signer of this package's own can drift from it.
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/sjawhar/envoy/internal/broker/helper"
+	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/brokertoken"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+)
+
+const (
+	// brokerTestOrigin is the server's own public origin: what a proof's 'htu' is checked
+	// against, whatever host the request reaches Dispatch under.
+	brokerTestOrigin = "https://dispatch.example"
+	// brokerTestSession and brokerTestPerson are who the broker says its tokens act for.
+	brokerTestSession = "ses_b1c2d3e4f5a6"
+	brokerTestPerson  = "alice"
+	// brokerTestProject is the one project a named-scope token may write.
+	brokerTestProject = "BRK"
+	// brokerTestAddress is the source address the verifier's per-address bucket is keyed on.
+	brokerTestAddress = "203.0.113.9:40001"
+)
+
+// stubBroker is the secrets broker's introspection route: it answers what the test has said each
+// token is, and counts the introspections so a test can prove how many reached it.
+type stubBroker struct {
+	server *httptest.Server
+
+	mu      sync.Mutex
+	answers map[string]brokertoken.Introspection
+
+	introspections atomic.Int64
+}
+
+func newStubBroker(t *testing.T) *stubBroker {
+	t.Helper()
+	broker := &stubBroker{answers: map[string]brokertoken.Introspection{}}
+	broker.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != brokertoken.IntrospectPath {
+			http.Error(w, "not the introspection route", http.StatusNotFound)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "unreadable form", http.StatusBadRequest)
+			return
+		}
+		broker.introspections.Add(1)
+		broker.mu.Lock()
+		answer := broker.answers[r.PostForm.Get("token")]
+		broker.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(answer)
+	}))
+	t.Cleanup(broker.server.Close)
+	return broker
+}
+
+// says makes the broker answer answer for token. A token nothing says anything about is answered
+// not live, as a token the broker never issued is.
+func (b *stubBroker) says(token string, answer brokertoken.Introspection) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.answers[token] = answer
+}
+
+func (b *stubBroker) count() int64 { return b.introspections.Load() }
+
+// liveNamedToken is the broker's answer for a live token bound to jkt and scoped to one project.
+func liveNamedToken(jkt string) brokertoken.Introspection {
+	return brokertoken.Introspection{
+		Active:       true,
+		Session:      brokerTestSession,
+		Person:       brokerTestPerson,
+		ProjectScope: brokertoken.ProjectScopeNamed,
+		Project:      brokerTestProject,
+		Scope:        "dispatch.write",
+		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
+		ClientID:     "machine-login",
+		Thumbprint:   jkt,
+	}
+}
+
+// capturedRequest keeps the request the helper's DPoP transport signed, instead of sending it.
+type capturedRequest struct {
+	mu   sync.Mutex
+	last *http.Request
+}
+
+func (c *capturedRequest) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.mu.Lock()
+	c.last = r
+	c.mu.Unlock()
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader("")),
+		Request:    r,
+	}, nil
+}
+
+// brokerCaller is an agent holding one key, producing the proofs its real client produces.
+type brokerCaller struct {
+	client   *http.Client
+	captured *capturedRequest
+	jkt      string
+}
+
+// newBrokerCaller mints a caller's key and the transport that proves it.
+func newBrokerCaller(t *testing.T) *brokerCaller {
+	t.Helper()
+	key, err := proof.NewKey()
+	if err != nil {
+		t.Fatalf("mint the caller's key: %v", err)
+	}
+	jkt, err := proof.Thumbprint(&key.PublicKey)
+	if err != nil {
+		t.Fatalf("thumbprint the caller's key: %v", err)
+	}
+	captured := &capturedRequest{}
+	return &brokerCaller{client: &http.Client{Transport: helper.NewDPoPTransport(key, captured)}, captured: captured, jkt: jkt}
+}
+
+// presenting is the request a caller sends Dispatch: the server-side request for path, carrying
+// token under the DPoP scheme and a proof of this caller's key signed for that method and target.
+// Each call signs a fresh proof, as a real client does.
+func (c *brokerCaller) presenting(t *testing.T, method, path, token string, body any) *http.Request {
+	t.Helper()
+	signing, err := http.NewRequest(method, brokerTestOrigin+path, nil)
+	if err != nil {
+		t.Fatalf("build the request to sign: %v", err)
+	}
+	signing.Header.Set("Authorization", "DPoP "+token)
+	response, err := c.client.Do(signing)
+	if err != nil {
+		t.Fatalf("sign the request: %v", err)
+	}
+	response.Body.Close()
+	c.captured.mu.Lock()
+	signed := c.captured.last
+	c.captured.mu.Unlock()
+	return brokerRequest(t, method, path, body, signed.Header.Get("Authorization"), signed.Header.Get("DPoP"))
+}
+
+// brokerRequest is the server-side request for path with the credential headers given, so a test
+// can replay one proof, present a token under another scheme, or send a body the proof never
+// covered (a proof names the method and the target URI, never the body).
+func brokerRequest(t *testing.T, method, path string, body any, authorization, dpop string) *http.Request {
+	t.Helper()
+	var reader io.Reader = bytes.NewReader(nil)
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("encode the request body: %v", err)
+		}
+		reader = bytes.NewReader(encoded)
+	}
+	request := httptest.NewRequest(method, path, reader)
+	request.RemoteAddr = brokerTestAddress
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	if authorization != "" {
+		request.Header.Set("Authorization", authorization)
+	}
+	if dpop != "" {
+		request.Header.Set("DPoP", dpop)
+	}
+	return request
+}
+
+// brokerTokenRig is the server under test, the broker it asks and the store behind it.
+type brokerTokenRig struct {
+	handler  http.Handler
+	deps     Deps
+	database *store.Store
+	broker   *stubBroker
+}
+
+// newBrokerTokenRig mounts the real routes on a Dispatch that decides broker-issued tokens, with
+// the replay store and the rest of the API on one database, as a deployment has them.
+func newBrokerTokenRig(t *testing.T) *brokerTokenRig {
+	t.Helper()
+	database := storetest.Open(t)
+	broker := newStubBroker(t)
+	documentService := docs.New(docs.Deps{
+		Store: database, Events: events.NewBroker(), ServerURL: brokerTestOrigin, Settle: 20 * time.Millisecond,
+	})
+	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+	seedPeople(t, database, brokerTestPerson, "bob")
+	verifier, err := brokertoken.New(brokertoken.Options{
+		BrokerURL: broker.server.URL,
+		Account:   brokertoken.NewAccountToken(accountTokenFile(t, credentialTestAccountToken)),
+		Origin:    brokerTestOrigin,
+		Replay:    store.NewDPoPProofs(database.Pool),
+	})
+	if err != nil {
+		t.Fatalf("build the broker token verifier: %v", err)
+	}
+	deps, err := NewDeps(DepsInput{
+		Store:        database,
+		Identity:     headerIdentity(database),
+		AgentTokens:  sharedAgentTokens(t, "agent-token"),
+		ServerURL:    brokerTestOrigin,
+		Docs:         documentService,
+		Events:       events.NewBroker(),
+		BrokerTokens: verifier,
+	})
+	if err != nil {
+		t.Fatalf("new API dependencies: %v", err)
+	}
+	mux := http.NewServeMux()
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
+	return &brokerTokenRig{handler: mux, deps: deps, database: database, broker: broker}
+}
+
+// serve carries one request through the server under test.
+func (r *brokerTokenRig) serve(request *http.Request) *httptest.ResponseRecorder {
+	response := httptest.NewRecorder()
+	r.handler.ServeHTTP(response, request)
+	return response
+}
+
+// whoamiAnswer is what GET /api/v1/whoami tells an agent caller.
+type whoamiAnswer struct {
+	Kind    string  `json:"kind"`
+	Login   string  `json:"login"`
+	Owner   *string `json:"owner"`
+	Service *string `json:"service"`
+	Session *string `json:"session"`
+	Project *string `json:"project"`
+}
+
+// refusal is the code and message a refused request carries.
+type refusalAnswer struct {
+	Code  string `json:"code"`
+	Error string `json:"error"`
+}
+
+// TestALiveBrokerTokenWithASoundProofIsAccepted: the two checks together admit the caller, and
+// whoami reports the session the token proved, the person it acts for and the project it may
+// write.
+func TestALiveBrokerTokenWithASoundProofIsAccepted(t *testing.T) {
+	rig := newBrokerTokenRig(t)
+	caller := newBrokerCaller(t)
+	const token = "a-token-the-broker-issued"
+	rig.broker.says(token, liveNamedToken(caller.jkt))
+
+	response := rig.serve(caller.presenting(t, http.MethodGet, "/api/v1/whoami", token, nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("whoami under a broker token: status=%d body=%s", response.Code, response.Body.String())
+	}
+	answer := decodeBody[whoamiAnswer](t, response)
+	if answer.Kind != "agent" || answer.Session == nil || *answer.Session != brokerTestSession {
+		t.Fatalf("whoami = %+v, want the session the token names", answer)
+	}
+	if answer.Owner == nil || *answer.Owner != brokerTestPerson {
+		t.Fatalf("whoami owner = %v, want %q", answer.Owner, brokerTestPerson)
+	}
+	if answer.Project == nil || *answer.Project != brokerTestProject {
+		t.Fatalf("whoami project = %v, want %q", answer.Project, brokerTestProject)
+	}
+	if answer.Service != nil {
+		t.Fatalf("whoami service = %v, want null: no service-account token authenticated this", *answer.Service)
+	}
+}
+
+// TestAPersonScopedBrokerTokenCarriesNoProject: a dev box session's token names no single
+// project, so the caller carries none at all rather than an empty one.
+func TestAPersonScopedBrokerTokenCarriesNoProject(t *testing.T) {
+	rig := newBrokerTokenRig(t)
+	caller := newBrokerCaller(t)
+	const token = "a-dev-box-session-token"
+	answer := liveNamedToken(caller.jkt)
+	answer.ProjectScope, answer.Project = brokertoken.ProjectScopePerson, ""
+	rig.broker.says(token, answer)
+
+	response := rig.serve(caller.presenting(t, http.MethodGet, "/api/v1/whoami", token, nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("whoami under a person-scoped token: status=%d body=%s", response.Code, response.Body.String())
+	}
+	decided := decodeBody[whoamiAnswer](t, response)
+	if decided.Project != nil {
+		t.Fatalf("whoami project = %q, want null for a person-scoped token", *decided.Project)
+	}
+	if decided.Session == nil || *decided.Session != brokerTestSession {
+		t.Fatalf("whoami = %+v, want the session the token names", decided)
+	}
+}
+
+// TestABrokerTokenWritesAsTheSessionItProves: the body's actor does not decide the session, which
+// the token carries. An absent one and a matching one are both taken, a matching one's origin is
+// kept because nothing else carries it, and the write is recorded as the token's session with the
+// person and project the token named.
+func TestABrokerTokenWritesAsTheSessionItProves(t *testing.T) {
+	rig := newBrokerTokenRig(t)
+	caller := newBrokerCaller(t)
+	const token = "a-token-that-writes"
+	rig.broker.says(token, liveNamedToken(caller.jkt))
+
+	created := rig.serve(caller.presenting(t, http.MethodPost, "/api/v1/projects", token, map[string]any{
+		"key": brokerTestProject, "name": "Broker",
+	}))
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create a project with no actor in the body: status=%d body=%s", created.Code, created.Body.String())
+	}
+
+	issue := rig.serve(caller.presenting(t, http.MethodPost, "/api/v1/issues", token, map[string]any{
+		"project": brokerTestProject,
+		"title":   "Written by the token's session",
+		"spec":    "# Spec",
+		"actor": map[string]any{
+			"kind":   "session",
+			"id":     brokerTestSession,
+			"origin": map[string]string{"cwd": "/workspace", "host": "example-host-one", "pane": "%7"},
+		},
+	}))
+	if issue.Code != http.StatusCreated {
+		t.Fatalf("create an issue with the matching actor: status=%d body=%s", issue.Code, issue.Body.String())
+	}
+	key := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, issue).Key
+
+	listed := rig.serve(withPerson(brokerRequest(t, http.MethodGet, "/api/v1/issues/"+key+"/events", nil, "", ""), brokerTestPerson))
+	if listed.Code != http.StatusOK {
+		t.Fatalf("read the issue's events: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	log := decodeBody[[]struct {
+		Type  string `json:"type"`
+		Actor struct {
+			Kind    string  `json:"kind"`
+			ID      string  `json:"id"`
+			Owner   *string `json:"owner"`
+			Project *string `json:"project"`
+			Origin  *struct {
+				Cwd  string `json:"cwd"`
+				Host string `json:"host"`
+				Pane string `json:"pane"`
+			} `json:"origin"`
+		} `json:"actor"`
+	}](t, listed)
+	if len(log) == 0 {
+		t.Fatalf("the issue has no events: %s", listed.Body.String())
+	}
+	actor := log[0].Actor
+	if actor.Kind != "session" || actor.ID != brokerTestSession {
+		t.Fatalf("the write's actor = %s:%s, want the session the token proved", actor.Kind, actor.ID)
+	}
+	if actor.Owner == nil || *actor.Owner != brokerTestPerson {
+		t.Fatalf("the write's owner = %v, want %q", actor.Owner, brokerTestPerson)
+	}
+	if actor.Project == nil || *actor.Project != brokerTestProject {
+		t.Fatalf("the write's project = %v, want %q", actor.Project, brokerTestProject)
+	}
+	if actor.Origin == nil || actor.Origin.Cwd != "/workspace" || actor.Origin.Host != "example-host-one" || actor.Origin.Pane != "%7" {
+		t.Fatalf("the write's origin = %+v, want the body's cwd, host and pane kept", actor.Origin)
+	}
+}
+
+// withPerson signs a request in as a person through the test header identity.
+func withPerson(request *http.Request, login string) *http.Request {
+	request.Header.Set("X-Dispatch-User", login)
+	return request
+}
+
+// TestABrokerTokenRefusesABodyActorNamingAnotherSession: the one thing a body actor may not do is
+// name a writer that is not the credential's, and the refusal names the session the token carries
+// so the caller can see what it should have sent.
+func TestABrokerTokenRefusesABodyActorNamingAnotherSession(t *testing.T) {
+	rig := newBrokerTokenRig(t)
+	caller := newBrokerCaller(t)
+	const token = "a-token-whose-body-lies"
+	rig.broker.says(token, liveNamedToken(caller.jkt))
+
+	for name, actor := range map[string]any{
+		"another session": map[string]string{"kind": "session", "id": "ses_someone_else"},
+		"a person":        map[string]string{"kind": "user", "id": brokerTestPerson},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := rig.serve(caller.presenting(t, http.MethodPost, "/api/v1/projects", token, map[string]any{
+				"key": "OTH", "name": "Other", "actor": actor,
+			}))
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("status=%d body=%s, want 403", response.Code, response.Body.String())
+			}
+			refusal := decodeBody[refusalAnswer](t, response)
+			if refusal.Code != "ACTOR_SESSION_MISMATCH" || !strings.Contains(refusal.Error, brokerTestSession) {
+				t.Fatalf("refusal = %+v, want ACTOR_SESSION_MISMATCH naming %s", refusal, brokerTestSession)
+			}
+		})
+	}
+}
+
+// TestABrokerTokenProvedByAnotherKeyIsRefused: a sound proof signed by a key the token is not
+// bound to is what a stolen token looks like, and it gets its own code.
+func TestABrokerTokenProvedByAnotherKeyIsRefused(t *testing.T) {
+	rig := newBrokerTokenRig(t)
+	owner, thief := newBrokerCaller(t), newBrokerCaller(t)
+	const token = "a-token-bound-to-its-owners-key"
+	rig.broker.says(token, liveNamedToken(owner.jkt))
+
+	response := rig.serve(thief.presenting(t, http.MethodGet, "/api/v1/whoami", token, nil))
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%s, want 401", response.Code, response.Body.String())
+	}
+	if refusal := decodeBody[refusalAnswer](t, response); refusal.Code != "BROKER_TOKEN_KEY_MISMATCH" {
+		t.Fatalf("refusal = %+v, want BROKER_TOKEN_KEY_MISMATCH", refusal)
+	}
+}
+
+// TestBrokerTokenRefusalsEachHaveTheirOwnCode: a token the broker does not hold as live, a proof
+// already spent, and a broker that answers nothing are three different things to a caller, and
+// only the last is a 503 — a caller told its token was refused would discard a live one.
+func TestBrokerTokenRefusalsEachHaveTheirOwnCode(t *testing.T) {
+	t.Run("not live", func(t *testing.T) {
+		rig := newBrokerTokenRig(t)
+		caller := newBrokerCaller(t)
+		const token = "a-token-the-broker-revoked"
+		rig.broker.says(token, brokertoken.Introspection{Active: false})
+
+		response := rig.serve(caller.presenting(t, http.MethodGet, "/api/v1/whoami", token, nil))
+		refusal := decodeBody[refusalAnswer](t, response)
+		if response.Code != http.StatusUnauthorized || refusal.Code != "BROKER_TOKEN_NOT_ACTIVE" {
+			t.Fatalf("status=%d refusal=%+v, want 401 BROKER_TOKEN_NOT_ACTIVE", response.Code, refusal)
+		}
+		if strings.Contains(refusal.Error, token) {
+			t.Fatalf("the refusal repeats the token: %q", refusal.Error)
+		}
+	})
+	t.Run("a spent proof", func(t *testing.T) {
+		rig := newBrokerTokenRig(t)
+		caller := newBrokerCaller(t)
+		const token = "a-token-whose-proof-is-captured"
+		rig.broker.says(token, liveNamedToken(caller.jkt))
+
+		presented := caller.presenting(t, http.MethodGet, "/api/v1/whoami", token, nil)
+		replay := brokerRequest(t, http.MethodGet, "/api/v1/whoami", nil,
+			presented.Header.Get("Authorization"), presented.Header.Get("DPoP"))
+		if first := rig.serve(presented); first.Code != http.StatusOK {
+			t.Fatalf("the first presentation: status=%d body=%s", first.Code, first.Body.String())
+		}
+		response := rig.serve(replay)
+		refusal := decodeBody[refusalAnswer](t, response)
+		if response.Code != http.StatusUnauthorized || refusal.Code != "BROKER_TOKEN_PROOF_INVALID" {
+			t.Fatalf("status=%d refusal=%+v, want 401 BROKER_TOKEN_PROOF_INVALID", response.Code, refusal)
+		}
+	})
+	t.Run("the broker unreachable", func(t *testing.T) {
+		rig := newBrokerTokenRig(t)
+		caller := newBrokerCaller(t)
+		const token = "a-token-nobody-can-be-asked-about"
+		rig.broker.server.Close()
+
+		response := rig.serve(caller.presenting(t, http.MethodGet, "/api/v1/whoami", token, nil))
+		refusal := decodeBody[refusalAnswer](t, response)
+		if response.Code != http.StatusServiceUnavailable || refusal.Code != "BROKER_UNAVAILABLE" {
+			t.Fatalf("status=%d refusal=%+v, want 503 BROKER_UNAVAILABLE", response.Code, refusal)
+		}
+	})
+}
+
+// TestABrokerTokenUnderTheBearerSchemeIsRefusedAsItAlwaysWas: RFC 9449 Section 7.2 refuses a
+// DPoP-bound token presented under any other scheme, and Dispatch's bearer branches are untouched
+// — such a presentation is the unknown personal token it has always been, and the broker is never
+// asked about it.
+func TestABrokerTokenUnderTheBearerSchemeIsRefusedAsItAlwaysWas(t *testing.T) {
+	rig := newBrokerTokenRig(t)
+	caller := newBrokerCaller(t)
+	const token = "a-token-presented-the-wrong-way"
+	rig.broker.says(token, liveNamedToken(caller.jkt))
+
+	response := rig.serve(brokerRequest(t, http.MethodGet, "/api/v1/whoami", nil, "Bearer "+token, ""))
+	refusal := decodeBody[refusalAnswer](t, response)
+	if response.Code != http.StatusUnauthorized || refusal.Code != "UNAUTHORIZED" {
+		t.Fatalf("status=%d refusal=%+v, want 401 UNAUTHORIZED", response.Code, refusal)
+	}
+	if rig.broker.count() != 0 {
+		t.Fatalf("the broker was asked %d times about a bearer presentation, want none", rig.broker.count())
+	}
+}
+
+// TestADPoPPresentationWithoutABrokerIsRefusedAsItAlwaysWas: a Dispatch with no broker configured
+// has no such credential kind, and the answer is what any Authorization header that is not a
+// bearer has always been here.
+func TestADPoPPresentationWithoutABrokerIsRefusedAsItAlwaysWas(t *testing.T) {
+	handler := newTestHandler(t)
+	caller := newBrokerCaller(t)
+	presented := caller.presenting(t, http.MethodGet, "/api/v1/whoami", "a-token-nobody-here-decides", nil)
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, presented)
+	refusal := decodeBody[refusalAnswer](t, response)
+	if response.Code != http.StatusUnauthorized || refusal.Code != "UNAUTHORIZED" || refusal.Error != "invalid bearer token" {
+		t.Fatalf("status=%d refusal=%+v, want 401 UNAUTHORIZED invalid bearer token", response.Code, refusal)
+	}
+}
+
+// TestTheOtherCredentialsAreUnaffectedByTheBrokerBranch: a cookie caller and a personal-token
+// caller resolve exactly as they did, on a server that decides broker tokens too — the personal
+// token's write still has to name its own session, since that credential proves none.
+func TestTheOtherCredentialsAreUnaffectedByTheBrokerBranch(t *testing.T) {
+	rig := newBrokerTokenRig(t)
+
+	person := rig.serve(withPerson(brokerRequest(t, http.MethodGet, "/api/v1/whoami", nil, "", ""), brokerTestPerson))
+	if person.Code != http.StatusOK {
+		t.Fatalf("whoami as a person: status=%d body=%s", person.Code, person.Body.String())
+	}
+	if answer := decodeBody[whoamiAnswer](t, person); answer.Kind != "user" || answer.Login != brokerTestPerson {
+		t.Fatalf("whoami as a person = %+v, want the signed-in person", answer)
+	}
+
+	minted := rig.serve(withPerson(brokerRequest(t, http.MethodPost, "/api/v1/me/agent-tokens", map[string]any{"name": "laptop"}, "", ""), brokerTestPerson))
+	if minted.Code != http.StatusCreated {
+		t.Fatalf("mint a personal token: status=%d body=%s", minted.Code, minted.Body.String())
+	}
+	personal := decodeBody[struct {
+		Token string `json:"token"`
+	}](t, minted).Token
+	if personal == "" {
+		t.Fatalf("the minted token is empty: %s", minted.Body.String())
+	}
+
+	agent := rig.serve(brokerRequest(t, http.MethodGet, "/api/v1/whoami", nil, "Bearer "+personal, ""))
+	if agent.Code != http.StatusOK {
+		t.Fatalf("whoami under a personal token: status=%d body=%s", agent.Code, agent.Body.String())
+	}
+	answer := decodeBody[whoamiAnswer](t, agent)
+	if answer.Kind != "agent" || answer.Owner == nil || *answer.Owner != brokerTestPerson {
+		t.Fatalf("whoami under a personal token = %+v, want the token's owner", answer)
+	}
+	if answer.Session != nil || answer.Project != nil {
+		t.Fatalf("whoami under a personal token = %+v, want no session and no project: it proves neither", answer)
+	}
+
+	unnamed := rig.serve(brokerRequest(t, http.MethodPost, "/api/v1/projects", map[string]any{"key": "PRS", "name": "Personal"}, "Bearer "+personal, ""))
+	refusal := decodeBody[refusalAnswer](t, unnamed)
+	if unnamed.Code != http.StatusBadRequest || refusal.Code != "ACTOR_KIND" {
+		t.Fatalf("a personal token writing with no actor: status=%d refusal=%+v, want 400 ACTOR_KIND", unnamed.Code, refusal)
+	}
+}
+
+// TestABrokerTokensReresolutionIsNotProofCheckedAgain: a connection that outlives its request
+// resolves its caller again from a detached copy of that request, whose proof is already spent. A
+// second request carrying that proof is refused as the replay it is, while the re-resolution of
+// the connection it authenticated asks only whether the token is still live.
+func TestABrokerTokensReresolutionIsNotProofCheckedAgain(t *testing.T) {
+	rig := newBrokerTokenRig(t)
+	caller := newBrokerCaller(t)
+	const token = "a-token-holding-a-socket-open"
+	rig.broker.says(token, liveNamedToken(caller.jkt))
+	served := directServer(rig.deps)
+
+	admitted := caller.presenting(t, http.MethodGet, "/ws/live", token, nil)
+	actor, human, err := served.optionalActor(admitted)
+	if err != nil || human || actor.ID != brokerTestSession {
+		t.Fatalf("the upgrade's caller = %+v, human=%v, err=%v; want the token's session", actor, human, err)
+	}
+
+	replayed := brokerRequest(t, http.MethodGet, "/ws/live", nil, admitted.Header.Get("Authorization"), admitted.Header.Get("DPoP"))
+	if _, _, err := served.optionalActor(replayed); err == nil {
+		t.Fatal("a fresh request carrying the spent proof resolved; want it refused as a replay")
+	}
+
+	again, _, err := served.optionalActor(admitted.WithContext(reresolving(admitted.Context())))
+	if err != nil {
+		t.Fatalf("the heartbeat's re-resolution: %v, want the caller to keep resolving", err)
+	}
+	if again.ID != brokerTestSession {
+		t.Fatalf("the re-resolved caller = %+v, want the token's session", again)
+	}
+
+	// Once the broker stops holding the token live, the re-resolution refuses and the connection
+	// closes. The affirmative answer is remembered for a few seconds, so this reads past it.
+	rig.broker.says(token, brokertoken.Introspection{Active: false})
+	time.Sleep(brokertoken.AffirmativeCacheTTL + 50*time.Millisecond)
+	if _, _, err := served.optionalActor(admitted.WithContext(reresolving(admitted.Context()))); err == nil {
+		t.Fatal("a revoked token kept resolving on an open connection")
+	}
+}

@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/persistence"
 
+	"github.com/sjawhar/envoy/internal/brokertoken"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -63,6 +64,10 @@ type testServerOptions struct {
 	// oidc is the service-account token verifier; nil is the unconfigured
 	// deployment, whose bearer handling is untouched by that feature.
 	oidc ServiceTokenVerifier
+	// brokerTokens decides a caller presenting an access token the secrets broker issued, under
+	// the DPoP scheme; nil is the deployment with no broker, which is every test but
+	// broker_token_test.go's and answers such a presentation 401 UNAUTHORIZED.
+	brokerTokens *brokertoken.Verifier
 	// identity resolves a cookie caller; nil is headerIdentity, which names the person the
 	// X-Dispatch-User header names.
 	identity identity.Identity
@@ -196,6 +201,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		EnvoyURL:         options.envoyURL,
 		EnvoyTimeout:     options.envoyTimeout,
 		OIDC:             options.oidc,
+		BrokerTokens:     options.brokerTokens,
 		AgentStream:      options.agentStream,
 		Embedder:         options.embedder,
 		Files:            options.files,

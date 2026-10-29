@@ -62,6 +62,41 @@ body, and every actor it writes carries `service`, the token's verified subject
 the body. A JWT the verifier rejects is `401 OIDC_TOKEN_INVALID` naming the
 reason class; it is never retried as a personal token.
 
+With `DISPATCH_AGENT_SECRETS_URL` set, an access token the secrets broker
+issued is a fifth credential, and the only one that proves a session of its
+own. It is presented under RFC 9449's DPoP scheme —
+`Authorization: DPoP <token>` with a `DPoP:` proof header signed by the key the
+token is bound to — because that RFC refuses a DPoP-bound token presented under
+any other scheme; the server decides a request by its scheme before it reads
+any token, so such a presentation is never retried as a bearer, and a bearer is
+never sent to this check. The server asks the broker what the token is (RFC
+7662 introspection on `/v1/oauth/introspect`, presenting the same projected
+ServiceAccount token `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` names as the
+approval relays do, one affirmative answer reused for five seconds) and checks
+the proof against the `jkt` that answer carries, with `DISPATCH_SERVER_URL` as
+the origin the proof's `htu` must name. No setting of its own configures it.
+A verified caller acts as the session the token names, for the person it names,
+and `actor` in the body does not decide that session: absent is accepted, one
+naming the same session is accepted and its `origin` kept, and one naming any
+other writer is `403 ACTOR_SESSION_MISMATCH` naming the session the token
+carries. A token scoped to one project carries that project on every actor it
+writes, set from the token and never from the body; a token scoped to its
+person names no single project and carries none. Each refusal is its own code
+and none repeats the token: `401 BROKER_TOKEN_NOT_ACTIVE` (the broker does not
+hold the token live), `401 BROKER_TOKEN_PROOF_INVALID` (the proof did not meet
+RFC 9449 Section 4.3, a proof presented twice included — a proof is single use
+by its `jti` and target URI), `401 BROKER_TOKEN_KEY_MISMATCH` (a sound proof
+signed by a key that is not the token's), `429 BROKER_TOKEN_RATE_LIMITED` (this
+source address's introspection bucket is empty; nothing was asked of the
+broker) and `503 BROKER_UNAVAILABLE` (the broker answered nothing, so the token
+was never judged — a 503 for the reason `OIDC_ISSUER_UNAVAILABLE` is one). A
+websocket re-resolves its caller every heartbeat from the request that opened
+it, and for this credential that re-resolution is the broker's introspection
+answer alone: the upgrade's proof authenticated it and cannot be presented a
+second time. Without `DISPATCH_AGENT_SECRETS_URL` there is no such credential,
+and a `DPoP` presentation is the `401 UNAUTHORIZED` `invalid bearer token` any
+Authorization header that is not a bearer has always been.
+
 GitHub App credentials come either from the `DISPATCH_APP_*` variables or from
 `~/.local/share/dispatch/app.json`; the variables take precedence. Two of them
 carry rules beyond their row:
@@ -1764,15 +1799,15 @@ time=2026-10-25T05:55:15.446Z level=INFO msg="dispatch: request" method=POST rou
 | `method` | The request's HTTP method. |
 | `route` | The route's own pattern (`/api/v1/issues/{key}`), so one route's requests group together whatever ids their paths carry; `unmatched` for a path under `/api`, `/v1`, `/auth`, `/ws` or `/healthz` that no route answers. |
 | `path` | The request path as it was sent, still escaped (`a%2Fb` stays `a%2Fb`), without its query string. |
-| `caller_kind` | How the caller authenticated: `user` (a signed-in person), `session` (the session a bearer named in its `actor`), `token` (a personal agent token with no session named), `service` (a verified service-account token), `shared-token` (`DISPATCH_AGENT_TOKEN` with no session named), or `anonymous` (a public route, a request whose credential was refused, or an `unmatched` path). |
-| `caller` | Who that is: the person's lowercase email, the session id, the personal token's owner, or the service-account subject. `shared-token` and `anonymous` name nobody. |
+| `caller_kind` | How the caller authenticated: `user` (a signed-in person), `session` (the session a bearer named in its `actor`, or the one a broker-issued token proved), `token` (a personal agent token with no session named), `service` (a verified service-account token), `broker-token` (an access token the secrets broker issued, on a line no session was named on), `shared-token` (`DISPATCH_AGENT_TOKEN` with no session named), or `anonymous` (a public route, a request whose credential was refused, or an `unmatched` path). |
+| `caller` | Who that is: the person's lowercase email, the session id, the personal token's owner, the service-account subject, or the person a broker-issued token acts for. `shared-token` and `anonymous` name nobody. |
 | `address` | The rightmost `X-Forwarded-For` entry, the address the load balancer in front of Dispatch saw, or the connection's own address when there is none. |
 | `peer` | The connection's own address without its port: the hop that reached Dispatch. Unlike `address`, a caller cannot forge it, so a caller that reaches Dispatch directly is still named. |
 | `user_agent` | The request's `User-Agent`. With `address`, it tells apart callers that share one credential. |
 | `status` | The response status. A handler that panicked before writing is logged as `500`; the client gets a closed connection, not a status. |
 | `elapsed_ms` | How long the request took, in milliseconds. A websocket's line is written when its connection ends, so it carries the connection's whole life. |
 | `bytes` | The response body the handler wrote. A websocket upgrade is `101` with `0` bytes: its frames are written on the connection it took. |
-| `credential` | Only on a `session` line: the credential that named the session, since the session id is the caller's own text. `token:<owner>`, `service:<subject>` or `shared-token`. |
+| `credential` | Only on a `session` line: the credential behind the session. `token:<owner>`, `service:<subject>`, `broker-token:<person>` or `shared-token`. For every one but the last that session id is the caller's own text; under a broker-issued token the credential itself named it. |
 | `aborted` | Only when the handler panicked (an artifact download whose store fails mid-stream aborts this way): `true`. The line is still written, and the panic still reaches the server. |
 
 The line never carries a token, a cookie, a query string, a request body or a response body. The
@@ -1851,7 +1886,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/me/agent-tokens` | GET, POST | cookie or trusted header (human only) | List personal-token metadata or mint a personal agent token. |
 | `/api/v1/me/agent-tokens/{id}` | DELETE | cookie or trusted header (human only) | Revoke a personal agent token. |
 | `/api/v1/users` | GET | cookie or trusted header (human only) | Everyone who has signed in, as `{users: [{login}]}` sorted by email — the assignee picker's options. |
-| `/api/v1/whoami` | GET | cookie, trusted header, or bearer | Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service}` for a bearer (`owner` is a personal token's owner by lowercase email, null for the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
+| `/api/v1/whoami` | GET | cookie, trusted header, bearer, or a broker-issued DPoP token | Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service, session, project}` for every other credential (`owner` is a personal token's owner or a broker-issued token's person, by lowercase email, null for the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other credential; `session` is the session the credential itself proved, which only a broker-issued token does, null otherwise; `project` is the one project key that credential may write, null where it names none). |
 | `/api/v1/dashboard/builds` | GET | cookie, trusted header, or bearer | Which dashboard builds are served: `{serving, live}`, `serving` the entry chunk (`/assets/index-*.js`) of the build this process serves (`""` when it serves none), `live` the distinct entry chunks of the builds the live server processes serve (the registry of live server processes joined to `dashboard_builds` on the build id), sorted. The dashboard offers "A new version is available" only when `live` holds exactly one entry and it is not the tab's own, so no tab is told to reload while a rolling update or a rollback still runs two builds. An older process answers `404`, which the dashboard reads as no new version. |
 | `/api/v1/issues?project=&status=&parent=&priority=&updated_since=&route_status=&limit=&offset=` | GET | cookie, trusted header, or bearer | List issue summaries: every matching issue as an array, or, with `limit` (1–250) or `offset` (0 or more; alone it pages 50), one page `{issues, total, limit, offset}` cut after every filter, `total` counting the issues they match. A repeated, blank, non-integer or out-of-range `limit` or `offset`, or any `cursor`, is `400 INVALID_QUERY` naming the parameter. The order is status, rank, creation time and key, so consecutive offsets cover the listing once while it does not change between reads; an issue that enters or leaves what the filters match, or whose status or rank changes, between two reads shifts rows across a page boundary, so one issue is served twice and another never. Only the unpaged array is an exact set in one read. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. `priority` repeats (`priority=0&priority=1`), each value `0`–`3` or `none` for an issue with no priority; any other value is `400 INVALID_PRIORITY`. `route_status` (`live`, `no_holder` or `unknown`; anything else is `400 INVALID_ROUTE_STATUS`) keeps the open issues whose route is in that state, whatever their priority; `live` or `no_holder` is `503 ENVOY_UNAVAILABLE` when the listener does not answer. Summaries contain `key`, `title`, `status`, `priority`, `parent`, `assignee`, `route`, `route_status`, `route_holder`, `updated_at`, `last_seq`, and `open_asks`. Every issue read (this list, `?pinned=true`, and `GET /api/v1/issues/{key}`) resolves `route_status` against the process's one copy of the listener's `GET /v1/sessions`, stored in no table: that copy is at most 5 s old, one listener call refreshes it for every read that asks while it runs, and a listener that fails or does not answer within 2 s is asked again only after 5 s, every read in that window reading `unknown` at once. The status is `live` (a live session holds the role, or the session is live; `route_holder` names it), `no_holder` (nobody live holds the role, or the session is not live), `unknown` (the listener did not answer), or null with no route. |
 | `/api/v1/search?q=&project=&limit=&offset=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; each kind ranked on its own and merged by reciprocal rank fusion (above), with `<mark>` snippets and SPA `href`s. One page `{results, total, reachable, limit, offset, took_ms}`: `limit` 1–50 (default 20), `offset` 0 or more (default 0), `total` every match, `reachable` the hits the pages can return (each kind's best 100). Every `ask` hit carries `ask`, where the ask stands when the search ran: `{state: "open"}`, `{state: "answered", answer}` with its latest answer, or `{state: "resolved", resolution, answer?}` with the last answer it had, absent when nobody answered; its excerpt is cut from the ask's indexed text ([Search](#search)). An under-two-character query returns `400 INVALID_QUERY`; a stop-word-only query returns `200` with no results; `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL; `400 INVALID_PROJECT` for a project that is not a project key (none searches every project); `400 INVALID_LIMIT`; `400 INVALID_OFFSET`. Keyword search finds a text whose search vector would pass Postgres's limit on one vector by the words in its opening part only ([Search](#search)). |
