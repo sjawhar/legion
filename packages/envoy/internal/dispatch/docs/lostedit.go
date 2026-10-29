@@ -128,7 +128,7 @@ func recordInsertedText(
 
 // refuseLostWrite refuses write, the calling transaction's write to room, when the room's
 // concurrent changes have already removed the text it inserted, before any version records it:
-// LEGION-269's first window. It reads a scratch merge of the write's fork with what the room
+// the lost write's first window. It reads a scratch merge of the write's fork with what the room
 // committed after the transaction read it (mergedSinceRead), and only when the room committed
 // something since: otherwise there is nothing the write could have lost. A write that inserted
 // nothing has nothing to lose.
@@ -173,7 +173,7 @@ func (s *Service) mergedSinceRead(write *liveWrite) (*crdt.Doc, error) {
 	if live == nil || !s.committedSince(write.artifactID, live, write.point) {
 		return nil, nil
 	}
-	state, _, err := s.readPoint(write.artifactID, live)
+	state, _, _, err := s.readPoint(write.artifactID, live)
 	if err != nil {
 		return nil, err
 	}

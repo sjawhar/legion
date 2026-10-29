@@ -9,7 +9,7 @@ import (
 
 // A live write's own updates are stored directly after the room state its fork was read at (its
 // read point), and the browser updates the room commits after that read and before it takes the
-// write are stored after the write's (INFRA-707). The room's update observer measured each of
+// write are stored after the write's. The room's update observer measured each of
 // those against a room without the write, while its stored prefix holds the write, so each is
 // measured again, as it is stored, against a state that holds the write: the room's shadow. Nothing
 // waits for the write's publish to reach the room instead: the publish's apply can block on ygo's
@@ -38,7 +38,7 @@ type roomShadow struct {
 	until  uint64
 	// repairs are the repair updates the instance took inside the window, in commit order: the
 	// classes after one are measured on a state that holds it (classifyDrained).
-	repairs []shadowUpdate
+	repairs []shadowRepair
 
 	mu  sync.Mutex
 	doc *crdt.Doc
@@ -49,7 +49,9 @@ type roomShadow struct {
 	repaired int
 }
 
-type shadowUpdate struct {
+// shadowRepair is one repair update a room instance took inside a shadow's window, at the commit
+// position seq.
+type shadowRepair struct {
 	seq    uint64
 	update []byte
 }
@@ -73,8 +75,8 @@ func (w *liveWrite) newShadow() *roomShadow {
 // earlier write's last published update, which the write's read held. A cold write's shadow names
 // the instance resident now, else the load under way; with neither, the room that loads next reads
 // the write from the store and needs none. A shadow it does not install lets go of its document,
-// so a cold write's fork is collected at releaseFork, before the publish loads the room
-// (LEGION-504). The caller holds state.mu.
+// so a cold write's fork is collected at releaseFork, before the publish loads the room. The
+// caller holds state.mu.
 func (s *Service) installShadowLocked(room string, state *roomState, shadow *roomShadow) {
 	if state.released || state.failed != nil {
 		// An uninstalled shadow is shared with no one, so its doc needs no sh.mu.
@@ -118,7 +120,7 @@ type shadowWindow struct {
 	cursor  *roomCursor
 	from    uint64
 	until   uint64
-	repairs []shadowUpdate
+	repairs []shadowRepair
 }
 
 // shadowWindowLocked is state's shadow window, the zero window while it holds no shadow. The caller
@@ -140,7 +142,7 @@ func (w shadowWindow) provisional(cursor *roomCursor, seq uint64) bool {
 // the classes after it (measure). The caller holds state.mu.
 func (state *roomState) recordRepairLocked(class documentUpdateClass) {
 	if window := state.shadowWindowLocked(); window.provisional(class.cursor, class.seq) {
-		window.shadow.repairs = append(window.shadow.repairs, shadowUpdate{seq: class.seq, update: class.update})
+		window.shadow.repairs = append(window.shadow.repairs, shadowRepair{seq: class.seq, update: class.update})
 	}
 }
 
@@ -231,7 +233,7 @@ func storedClasses(room string, window shadowWindow, classes []*queuedClass) []s
 // it changed the rendered markdown: true when either side does not render, the measure the room's
 // replica uses (updateChangesMarkdown). A class is measured once: a flush that rolled back leaves
 // its measure for the next, since the shadow holds the update already.
-func (sh *roomShadow) measure(room string, class *queuedClass, repairs []shadowUpdate) bool {
+func (sh *roomShadow) measure(room string, class *queuedClass, repairs []shadowRepair) bool {
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	if class.shadowed {

@@ -13,7 +13,15 @@ Pulumi language needs only the Pulumi CLI:
 | `envoy-infra:gcp:Dispatch` | Dispatch on GKE Autopilot, with Cloud SQL, served over a tailnet and, only to the namespaces `allowedNamespaces` names, inside its own cluster: see [gcp:Dispatch](#gcpdispatch). |
 
 The listener creates the `ENVOY_NOTIFICATIONS` stream and its key-value buckets itself when it
-starts, so it needs only a NATS server with JetStream to reach.
+starts, so it needs only a NATS server with JetStream to reach. It creates them at the deployment's
+replica count, `ENVOY_NATS_REPLICAS` (1 to 5, default 1), and raises one it finds with fewer
+copies, at start and every 30 seconds after. The copies stay at that count only when every Envoy
+program of the deployment carries the same value, so a clustered deployment sets it in every
+listener and in the Dispatch server: JetStream's stream update has no compare-and-swap, and a
+start with a lower or unset value can put the old copies back until the next pass raises them.
+More than 1 needs a clustered NATS: a single server, which is what `aws:NatsService` and
+`gcp:NatsHub` deploy, refuses it, and the listener's start then stops with an error naming
+`ENVOY_NATS_REPLICAS`.
 
 The command, `envoy-infra`, writes a NATS user's nkey seed into a secret store and checks the seed
 stored there ([NATS seeds](#nats-seeds)), and prints what the AWS components register for a program
@@ -318,13 +326,13 @@ among them, and at its Deployment's replica count it refuses every voluntary evi
 replica with a budget of 1, every drain of that pod's node waits: `kubectl drain` waits with no
 limit (until its own `--timeout`, if one is given), and a GKE upgrade waits up to an hour (below).
 Each keeps Kubernetes' default `unhealthyPodEvictionPolicy`, `IfHealthyBudget`, so it holds a pod
-that is not ready too while the budget is not met: `envoy-dispatch` and `envoy-listener` report
-not ready whenever NATS or Postgres is briefly out of reach (a front-door pod's own eviction in
-the same drain is one way), and evicting one then would turn that into a cold restart. A
-front-door pod is ready only while it hosts the Service ([The front door](#the-front-door)), so
-the front door's budget counts only pods that serve. A drain of a pod that stays broken waits the
-longer for it: GKE respects a budget for up to an hour while it drains a node for an upgrade and
-then evicts anyway
+that is not ready too while the budget is not met: `envoy-dispatch` reports not ready whenever
+Postgres is briefly out of reach (a Cloud SQL failover, the proxy sidecar restarting) and
+`envoy-listener` whenever NATS is (a front-door pod's own eviction in the same drain is one way),
+and evicting one then would turn that into a cold restart. A front-door pod is ready only while it
+hosts the Service ([The front door](#the-front-door)), so the front door's budget counts only pods
+that serve. A drain of a pod that stays broken waits the longer for it: GKE respects a budget for
+up to an hour while it drains a node for an upgrade and then evicts anyway
 ([Autopilot cluster upgrades](https://cloud.google.com/kubernetes-engine/docs/concepts/cluster-upgrades-autopilot)).
 A budget never slows its Deployment's own rollouts, which Kubernetes does not run through the
 eviction API. Delete every budget made by hand over the component's pods (`kubectl -n <namespace>
@@ -547,7 +555,7 @@ the process does not answer at all. `envoy-dispatch`'s and `envoy-listener`'s ru
 9020), with a 9-second timeout. `/livez` reads nothing: `envoy-dispatch` answers it `204`, and
 `envoy-listener`, which has no such route, answers it `404` from its router, outside the `/v1`
 routes its bearer guards. Without `-f`, curl exits 0 whatever the status, so any answer passes:
-unlike `/healthz`, which reads Postgres and NATS on every call, the probe neither fails during a
+unlike `/healthz`, which reads Postgres (`envoy-dispatch`) or NATS (`envoy-listener`) on every call, the probe neither fails during a
 dependency outage nor waits on a slow hub, so neither restarts every pod. Liveness asks every 10
 seconds, and three missed answers in a row restart the container.
 Startup asks the same question for longer before liveness takes over: 30 minutes for
@@ -569,19 +577,20 @@ no traffic, their loops log a failure and try again, and `cert-publish` exits on
 cannot recover from, a certificate cache it cannot read.
 
 Readiness is the other question. `envoy-dispatch` is ready while `curl -fsS` of its `/healthz`
-succeeds (every 10 seconds, three failures), which reads Postgres and NATS. `envoy-listener` is
-ready while `curl -fsS` of its `/healthz` succeeds every 5 seconds, two failures in a row taking
-it out; that endpoint answers within 5 seconds, so the probe allows 6. A front-door pod is ready
-while it hosts the Service ([The front door](#the-front-door)). The app and the listener reach
-NATS only through the front door's SOCKS5 proxy, so with no front-door pod ready both fail
-readiness within their probes' windows (30 seconds for the app, 10 for the listener) and leave
-their Services, and the in-cluster `allowedNamespaces` consumers lose the app for that time as
-well. It heals itself once a front-door pod is ready again, since `internal/bus` reconnects
-without limit (`MaxReconnect = -1`) and no liveness probe reads NATS. One case does not: a
-front-door pod whose advertiser spent all 6 certificate orders waits unready for ever while its
-liveness probe passes, so if every front-door pod reaches that state the SOCKS5 Service has no
-endpoint until someone deletes those pods (`kubectl -n <namespace> delete pod -l
-app=<hostname>-tailnet`), whose replacements start over.
+succeeds (every 10 seconds, three failures), which Postgres alone decides: the server serves while
+NATS is down. `envoy-listener` is ready while `curl -fsS` of its `/healthz` succeeds every 5
+seconds, two failures in a row taking it out; that endpoint answers within 5 seconds, so the probe
+allows 6. A front-door pod is ready while it hosts the Service ([The front door](#the-front-door)).
+The app and the listener reach NATS only through the front door's SOCKS5 proxy, so with no
+front-door pod ready the listener fails readiness within its probe's window (10 seconds) and
+leaves its Service, while the app stays ready, and the in-cluster `allowedNamespaces` consumers
+keep it, with its NATS traffic paused (no outbox publish, no delivery intake) until it reconnects
+through the proxy and the outbox catches up. It heals itself once a front-door pod is ready again,
+since `internal/bus` reconnects without limit (`MaxReconnect = -1`) and no liveness probe reads
+NATS. One case does not: a front-door pod whose advertiser spent all 6 certificate orders waits
+unready for ever while its liveness probe passes, so if every front-door pod reaches that state the
+SOCKS5 Service has no endpoint until someone deletes those pods (`kubectl -n <namespace> delete pod
+-l app=<hostname>-tailnet`), whose replacements start over.
 
 A stopping app or listener pod keeps serving for five seconds after it is told to stop, which is
 the window its removal from routing has to propagate, and is what its pre-stop wait (`sleep 5`)
@@ -621,6 +630,20 @@ the two Deployments roll in the same update, and until both have, a call from th
 listener pod on the other token is refused. `DISPATCH_AGENT_TOKEN` is also the `agentToken`
 output, so a consumer that hands it to its agents passes them the new value too.
 `<hostname>-tailnet-tls` carries no checksum: a renewed certificate rolls no pod.
+
+`DISPATCH_SIGNING_KEY` is the exception to that rotation by a roll. The component writes one random
+key (the `RandomPassword` `<hostname>-signing-key`), and Dispatch refuses to start a server whose
+keys a running server does not share, so a new value, which rolls the app, signs everyone out at
+one replica, and above one stalls the roll: the first new pod, holding only the new key, is
+refused beside the old pods, which hold only the old one, and crash-loops while they keep serving.
+The three steps of
+[Changing the session key](https://sjawhar.github.io/legion/dispatch/running-dispatch/#changing-the-session-key)
+change the key without signing anyone out, but they need the Secret to hold two keys at once, which
+the component does not express, and the next `up` reverts a hand edit of the Secret. A rotation
+through the component therefore signs everyone out, and is applied at one replica: set `replicas`
+to 1, so the app updates with `Recreate`, replace the key (`pulumi up --replace` with the
+`<hostname>-signing-key` resource's URN), which rolls the app onto the new key, and then restore
+`replicas`.
 
 The projected tokens need no restart either: the kubelet rewrites them in place, and Dispatch
 reads the broker token on every call and the keyless Azure form's token on every exchange with
@@ -740,7 +763,7 @@ the kubelet's SIGKILL.
 
 The first Google Cloud deployment proves the Autopilot admission of both native sidecars, the
 Secret Manager CSI mount, the Auth Proxy's private-IP connection, the cluster's IP allocation,
-tailnet Serve for HTTPS, SSE and websockets, the SOCKS5 connection to the hub, the non-root image
+tailnet Serve for HTTPS and websockets, the SOCKS5 connection to the hub, the non-root image
 user, and the exec-plugin credentials on the machine that runs Pulumi. It also verifies that the
 pod is ready, Dispatch reports a schema version, the site signs in through the configured client,
 and the database retains backups and point-in-time recovery.
@@ -1275,7 +1298,7 @@ Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn`
 | `logGroupName`, `logRetentionDays` | required | The log group, which the filters read and the alarms' descriptions name. |
 | `listenHost` | required | `ENVOY_LISTEN_HOST`. The listener binds `127.0.0.1` when it is blank, where the target group cannot reach it. |
 | `hostBridge` | required | `ENVOY_HOST_BRIDGE`; `""` leaves it unset. |
-| `natsReplicas` | required | `ENVOY_NATS_REPLICAS`, at least 1. |
+| `natsReplicas` | required | `ENVOY_NATS_REPLICAS`, from 1 to 5: the deployment's replica count, which the listener creates its stream and buckets at and raises them to, at start and every 30 seconds after. Every Envoy program of the deployment carries the same value. More than 1 needs a clustered NATS; `aws:NatsService` runs one server. |
 | `subscribeAllTopics` | `false` | `true` sets `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, as for `host:Listener`: only for a NATS user holding `HostPermissions`, since under any other grant the listener's start ends. |
 | `alarmTopicArn` | required | The SNS topic the alarms page and clear on. |
 | `baseTags`, `metricNamespace` | required | As for `aws:NatsService`. |
@@ -1307,7 +1330,7 @@ the input:
   leading or trailing whitespace, or one holding `.`, `*`, `>`, `/`, `\`, a control character, or
   whitespace other than an interior ordinary space, or one over 246 bytes; a `hostBridge` or `listenHost` holding a
   control character; a `hostBridge` with leading or trailing whitespace; a blank `listenHost`; a
-  `natsReplicas` below 1; an empty `subnetIds`; a `baseTags` holding `service`.
+  `natsReplicas` below 1 or above 5; an empty `subnetIds`; a `baseTags` holding `service`.
 - Either, without an `aws` provider (see [Providers and transformations](#providers-and-transformations)).
 
 `natsUrls` may come from another resource, so the listener checks it when the container's
@@ -2099,9 +2122,13 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
   `ListenerPermissions`; `SessionPermissions` does not, so a session holding that set alone reads
   what it missed only through the listener;
 - for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions` and
-  `envoy_ci_state`, the calls nats.go's key-value store makes: the info and create of the bucket's
-  stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its watchers'
-  consumer create and delete and their flow-control replies;
+  `envoy_ci_state`, the calls nats.go's key-value store makes: the info, create and update of the
+  bucket's stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its
+  watchers' consumer create and delete and their flow-control replies. The update is the raise a
+  start, or the listener's keeper every 30 seconds after, sends when it finds a bucket with fewer
+  copies than `ENVOY_NATS_REPLICAS`; neither writes fewer copies than it found, and a grant without
+  it makes that raise time out after 10 seconds with
+  `raise KV_<bucket>: ENVOY_NATS_REPLICAS=<n>: context deadline exceeded`;
 - `$JS.API.STREAM.PURGE.KV_envoy_interests`, which the interest bucket's delete-marker collection
   sends.
 

@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -225,13 +226,20 @@ func refuseOutsideSchema(w http.ResponseWriter, r *http.Request, room string, ca
 	}
 }
 
-// ServeHTTP serves the Hocuspocus-framed document websocket endpoint.
+// ServeHTTP serves the Hocuspocus-framed document websocket endpoint. A caller that does not
+// resolve is refused 401, except a person whose lapsed confirmation the sign-in issuer could not
+// renew (identity.ErrSignInUnavailable), who is still signed in and is refused 503
+// SIGNIN_UNAVAILABLE as every other route refuses them (identity.WriteError).
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	room := r.PathValue("room")
 	if room == "" {
 		room = path.Base(r.URL.Path)
 	}
 	if _, err := s.requestActor(r); err != nil {
+		if errors.Is(err, identity.ErrSignInUnavailable) {
+			identity.WriteError(w, err)
+			return
+		}
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -277,7 +285,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	connection := &connectionState{}
 	ctx := context.WithValue(r.Context(), connectionContextKey{}, connection)
-	s.srv.ServeHTTP(w, r.WithContext(ctx))
+	// The socket's peer hears from it at least every s.keepAlive (documentKeepAlive), however idle
+	// the room (keepalive.go), so its provider never takes the socket for dead.
+	keepAlive := newKeepAliveWriter(w, room, s.keepAlive)
+	s.srv.ServeHTTP(keepAlive, r.WithContext(ctx))
+	keepAlive.stop()
 	if connection.added {
 		s.removeConnection(connection.room, connection.id)
 	}
@@ -503,8 +515,8 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// (above), so it holds every transaction the room commits from here on, in commit order.
 	replica := s.keepReplica(doc, doc.OpenUpdateLog())
 	instance := s.keepInstance(room, doc)
-	replica.classify = func(logged crdt.LoggedUpdate, seq uint64, contentChanged bool, tree *pmdoc.Node) (bool, bool) {
-		return s.classifyDrained(room, instance, logged, seq, contentChanged, tree)
+	replica.classify = func(logged crdt.LoggedUpdate, seq uint64, contentChanged bool, asks *observedAsks) (bool, bool) {
+		return s.classifyDrained(room, instance, logged, seq, contentChanged, asks)
 	}
 	doc.OnUpdate(func(update []byte, origin any) {
 		// A published write's update is already durable. Its suppression slot is finished here,
@@ -538,15 +550,15 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 }
 
 // classifyDrained records the class of logged, the update room's log handed over at commit
-// position seq in instance, given whether it changed the room's rendered markdown and the tree it
-// rendered when it did (renderedReplica). It is the room's drainClassifier, which runs holding
-// the replica's lock. It reports whether a settlement follows the update, which is every update
-// but a repair's, and whether it changed the content.
+// position seq in instance, given whether it changed the room's rendered markdown and the ask
+// blocks it left when it did (renderedReplica, observedAsks). It is the room's drainClassifier,
+// which runs holding the replica's lock. It reports whether a settlement follows the update, which
+// is every update but a repair's, and whether it changed the content.
 //
 // The cursor is the instance's, taken here rather than looked up when the update reaches the
 // store: a room evicted and reloaded in between is a different instance, which did not take this
 // update and must not be recorded as holding the version it is stored at.
-func (s *Service) classifyDrained(room string, instance *roomInstance, logged crdt.LoggedUpdate, seq uint64, contentChanged bool, tree *pmdoc.Node) (settles, changed bool) {
+func (s *Service) classifyDrained(room string, instance *roomInstance, logged crdt.LoggedUpdate, seq uint64, contentChanged bool, asks *observedAsks) (settles, changed bool) {
 	class := documentUpdateClass{seq: seq, contentChanged: contentChanged, cursor: &instance.cursor}
 	if _, identityRepair := logged.Origin.(*identityClosureOrigin); identityRepair {
 		// A repair's writer appends its update in its own transaction, under the document's
@@ -558,8 +570,8 @@ func (s *Service) classifyDrained(room string, instance *roomInstance, logged cr
 		s.queueUpdateClass(room, logged.Update, class, true)
 		return false, false
 	}
-	if tree != nil {
-		s.observeAskBlocksForUpdate(room, tree)
+	if asks != nil {
+		s.observeAskBlocksForUpdate(room, asks.askBlocks())
 	}
 	class.durable = true
 	origin, published := logged.Origin.(*liveWriteOrigin)
@@ -595,14 +607,14 @@ func soleConnectedActor(connected map[uint64]model.Actor) (sole *model.Actor, am
 	return sole, ambiguous
 }
 
-// observeAskBlocksForUpdate records the ask blocks an update left in room's document and
-// attributes each one not already recorded (observeAskBlocks), in the same critical section the
-// update observer renders tree in (renderedReplica.observe): the observer renders each update in
-// the order the replica took them, so the room's record of its ask blocks moves forward only. The
-// tree walk that lists those ask blocks runs only once the cheap markdown comparison inside
-// observe already showed a real change, so the no-op path, the common one, pays for neither.
-func (s *Service) observeAskBlocksForUpdate(room string, tree *pmdoc.Node) {
-	askBlocks := askBlockIDs(tree)
+// observeAskBlocksForUpdate records askBlocks, the ask blocks an update left in room's document,
+// and attributes each one not already recorded (observeAskBlocks), in the same critical section
+// the update observer classifies the update in (renderedReplica.observe): the observer classifies
+// each update in the order the replica took them, so the room's record of its ask blocks moves
+// forward only. The tree walk that lists those ask blocks (observedAsks.askBlocks) runs only once
+// the cheap markdown comparison inside observe already showed a real change, so the no-op path,
+// the common one, pays for neither.
+func (s *Service) observeAskBlocksForUpdate(room string, askBlocks map[string]struct{}) {
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
 	var author *model.Actor

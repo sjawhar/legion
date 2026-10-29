@@ -67,7 +67,7 @@ func TestSettlementCreditsNoAuthorOfAnEditMadeAfterItsRead(t *testing.T) {
 // tree is in the version it reads. The settlement stores that edit's update itself before it
 // versions (Ledger.storeRead), with the edit's credit, whose append writes its author to the
 // pending authors the version then lists: the version credits its author although the credit
-// followed the bound, and no later version credits them again (LEGION-503).
+// followed the bound, and no later version credits them again.
 func TestSettlementCreditsAnEditMadeBetweenItsCreditBoundAndReadOnce(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -163,7 +163,7 @@ func TestSettlementKeepsTheCreditOfAnEditItsAuthorMakesBeforeItCommits(t *testin
 // an edit it holds has run. Its read point classifies and credits that edit itself, and the
 // settlement stores it, with that credit, before it versions (Ledger.storeRead): the version
 // credits the edit's author, the edit's own settlement finds the document already versioned and
-// writes none, and no later version credits the author again (LEGION-503).
+// writes none, and no later version credits the author again.
 func TestAnEditReadBeforeItsObserverRunsIsCreditedOnTheVersionThatStoresIt(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour

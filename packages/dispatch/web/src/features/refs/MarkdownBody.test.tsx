@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import * as mermaidRenderer from "@legion/proof-editor/mermaid-render";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
@@ -7,42 +6,34 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Artifact, AskRead } from "../../api/types";
+import type {
+  AskRead,
+  IssueReferenceSummary,
+  IssueReferenceSummaryDocument,
+} from "../../api/types";
 import { TextAskBlockCard } from "../doc/AskBlockCard";
 import { MarkdownBody } from "./MarkdownBody";
 import { TextAskCard } from "./markdown-cards";
-import { warmMarkdownRenderer } from "./markdown-engine";
-import { resetMermaidDiagrams } from "./mermaid-diagrams";
-import {
-  answerMermaidRequest,
-  type MermaidReply,
-  type MermaidRequest,
-} from "./mermaid-render.worker";
 
 function withQueries(children: ReactNode): ReactNode {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
 }
 
-/** An image artifact of CORE-1 with two versions, as the issue read lists it. */
-const picture: Artifact = {
-  created_at: "2026-10-04T00:00:00Z",
-  created_by: { id: "alice", kind: "user" },
+/** An image document of CORE-1 whose latest version is 2, as the issue summary lists it. */
+const picture: IssueReferenceSummaryDocument = {
   id: "artifact-shot",
-  issue_key: "CORE-1",
   kind: "image",
+  latest_version: 2,
   name: "shot.png",
   primary: false,
-  project: "CORE",
   slug: "shot-png",
-  versions: [1, 2].map((number) => ({
-    authors: [{ id: "alice", kind: "user" as const }],
-    created_at: "2026-10-04T00:00:00Z",
-    named: false,
-    number,
-    summary: null,
-  })),
 };
+
+/** CORE-1's summary read, the one read behind a reference to it or to its documents. */
+function issueSummary(documents: IssueReferenceSummaryDocument[]): IssueReferenceSummary {
+  return { documents, key: "CORE-1", project: "CORE", status: "in_progress", title: "Core one" };
+}
 
 // The dashboard is served from an origin, where a picture's same-origin bytes route resolves.
 // happy-dom's page starts at `about:blank`, where no relative `src` resolves and every picture
@@ -144,11 +135,9 @@ describe("Dispatch pictures", () => {
   });
 
   test("a Dispatch picture that pins no version reads as its reference, with the image's thumbnail", async () => {
-    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-      artifacts: [picture],
-      key: "CORE-1",
-      title: "Core one",
-    } as never);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([picture])
+    );
     const view = render(
       withQueries(<MarkdownBody markdown="![shot.png](dispatch://CORE-1/artifact/shot-png)" />)
     );
@@ -165,17 +154,15 @@ describe("Dispatch pictures", () => {
       );
       expect(link.querySelector("img")?.className.split(" ")).toContain("h-10");
     } finally {
-      getIssue.mockRestore();
+      getIssueSummary.mockRestore();
       view.unmount();
     }
   });
 
   test("a plain reference whose thumbnail cannot load drops it and keeps the title", async () => {
-    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-      artifacts: [picture],
-      key: "CORE-1",
-      title: "Core one",
-    } as never);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([picture])
+    );
     // A hand-written or stale reference can pin a version the server does not serve; the
     // thumbnail's load then fails, and the reference reads as its title with no broken glyph.
     const view = render(
@@ -196,17 +183,15 @@ describe("Dispatch pictures", () => {
       expect(link.textContent).toBe("shot.png");
       expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png?v=99");
     } finally {
-      getIssue.mockRestore();
+      getIssueSummary.mockRestore();
       view.unmount();
     }
   });
 
   test("a plain reference to a non-image artifact shows no thumbnail", async () => {
-    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-      artifacts: [{ ...picture, kind: "file", name: "notes.pdf", slug: "notes-pdf" }],
-      key: "CORE-1",
-      title: "Core one",
-    } as never);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([{ ...picture, kind: "file", name: "notes.pdf", slug: "notes-pdf" }])
+    );
     const view = render(
       withQueries(<MarkdownBody markdown="See dispatch://CORE-1/artifact/notes-pdf" />)
     );
@@ -215,17 +200,15 @@ describe("Dispatch pictures", () => {
       const link = await within(view.container).findByRole("link", { name: "notes.pdf" });
       expect(link.querySelector("img")).toBeNull();
     } finally {
-      getIssue.mockRestore();
+      getIssueSummary.mockRestore();
       view.unmount();
     }
   });
 
   test("a version that is no picture falls back to the reference's title", async () => {
-    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-      artifacts: [{ ...picture, kind: "file", name: "notes.pdf", slug: "notes-pdf" }],
-      key: "CORE-1",
-      title: "Core one",
-    } as never);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([{ ...picture, kind: "file", name: "notes.pdf", slug: "notes-pdf" }])
+    );
     const view = render(
       withQueries(<MarkdownBody markdown="![notes](dispatch://CORE-1/artifact/notes-pdf@v1)" />)
     );
@@ -237,7 +220,7 @@ describe("Dispatch pictures", () => {
       expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/notes-pdf?v=1");
       expect(within(view.container).queryByRole("img")).toBeNull();
     } finally {
-      getIssue.mockRestore();
+      getIssueSummary.mockRestore();
       view.unmount();
     }
   });
@@ -248,11 +231,9 @@ describe("Dispatch pictures", () => {
   // `dispatch://` source the browser cannot fetch or a dead link.
   test("a long-named picture is drawn and an explicit link to a long-named document opens it", async () => {
     const slug = "a".repeat(2683);
-    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-      artifacts: [{ ...picture, kind: "doc", name: "design.md", slug }],
-      key: "CORE-1",
-      title: "Core one",
-    } as never);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([{ ...picture, kind: "doc", name: "design.md", slug }])
+    );
     const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
       markdown: "The design.",
       token: "sha256:design",
@@ -275,7 +256,7 @@ describe("Dispatch pictures", () => {
       expect(link.getAttribute("data-dispatch-ref")).toBe(`dispatch://CORE-1/artifact/${slug}`);
     } finally {
       getArtifactText.mockRestore();
-      getIssue.mockRestore();
+      getIssueSummary.mockRestore();
       view.unmount();
     }
   });
@@ -286,14 +267,12 @@ describe("Dispatch pictures", () => {
   // same long-named document.
   test("a bare dashboard URL past the bounds stays a plain link; an author's link to it still opens the document", async () => {
     const slug = "a".repeat(2683);
-    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-      artifacts: [
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([
         { ...picture, kind: "doc", name: "design.md", slug },
         { ...picture, id: "artifact-plan", kind: "doc", name: "plan.md", slug: "plan-md" },
-      ],
-      key: "CORE-1",
-      title: "Core one",
-    } as never);
+      ])
+    );
     const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
       markdown: "The design.",
       token: "sha256:design",
@@ -327,7 +306,7 @@ describe("Dispatch pictures", () => {
       expect(bare.getAttribute("data-dispatch-ref")).toBeNull();
     } finally {
       getArtifactText.mockRestore();
-      getIssue.mockRestore();
+      getIssueSummary.mockRestore();
       view.unmount();
     }
   });
@@ -339,14 +318,12 @@ describe("Dispatch pictures", () => {
   // gave words of its own still opens the long-named document.
   test("a dispatch:// URL left as text past the bounds stays plain; an author's dispatch:// link with its own words still opens", async () => {
     const slug = "a".repeat(2683);
-    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-      artifacts: [
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([
         { ...picture, kind: "doc", name: "design.md", slug },
         { ...picture, id: "artifact-plan", kind: "doc", name: "plan.md", slug: "plan-md" },
-      ],
-      key: "CORE-1",
-      title: "Core one",
-    } as never);
+      ])
+    );
     const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
       markdown: "The design.",
       token: "sha256:design",
@@ -387,7 +364,7 @@ describe("Dispatch pictures", () => {
       }
     } finally {
       getArtifactText.mockRestore();
-      getIssue.mockRestore();
+      getIssueSummary.mockRestore();
       view.unmount();
     }
   });
@@ -764,14 +741,14 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
 });
 
 test("a block reference reads as the headline of its text: the pinned version's, opening that version, or the current one, opening the block", async () => {
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-    artifacts: [
+  // The pinned link's path names the spec's slug, which the issue's summary carries: no link to
+  // a block reads the full issue.
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+    issueSummary([
       { ...picture, id: "spec", kind: "doc", name: "Design.md", primary: true, slug: "design-md" },
-    ],
-    key: "CORE-1",
-    primary_artifact_id: "spec",
-    title: "Core one",
-  } as never);
+    ])
+  );
+  const getIssue = spyOn(api, "getIssue");
   const node = {
     block_id: "p1",
     changed_version: 3,
@@ -810,9 +787,11 @@ test("a block reference reads as the headline of its text: the pinned version's,
       expect(pinned.getAttribute("href")).toBe("/issues/CORE-1/artifacts/design-md?v=2")
     );
     expect(pinned.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1/spec#b-p1@v2");
+    expect(getIssue).not.toHaveBeenCalled();
   } finally {
     getReferences.mockRestore();
     getIssue.mockRestore();
+    getIssueSummary.mockRestore();
     view.unmount();
   }
 });
@@ -845,7 +824,7 @@ test("an external URL unrelated to the app renders as an ordinary link", async (
   }
 });
 
-test("two references in one body each resolve their own inline link and title", async () => {
+test("two references in one body each resolve their own inline link and title, reading only what each shows", async () => {
   const askRead: AskRead = {
     ask: {
       id: "ask-1",
@@ -872,21 +851,18 @@ test("two references in one body each resolve their own inline link and title", 
     route_holder: null,
     replies: [],
   };
-  const projectArtifact: Artifact = {
-    created_at: "2026-09-09T00:00:00Z",
-    created_by: { id: "alice", kind: "user" },
-    id: "artifact-1",
-    issue_key: null,
-    kind: "doc",
-    name: "Runbook.md",
-    primary: false,
-    project: "CORE",
-    ref_key: "CORE/runbook-md",
-    slug: "runbook-md",
-    versions: [],
-  };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
-  const getProjectArtifact = spyOn(api, "getProjectArtifact").mockResolvedValue(projectArtifact);
+  const getProjectDocumentSummary = spyOn(api, "getProjectDocumentSummary").mockResolvedValue({
+    id: "artifact-1",
+    kind: "doc",
+    latest_version: 4,
+    name: "Runbook.md",
+    project: "CORE",
+    slug: "runbook-md",
+  });
+  const getIssue = spyOn(api, "getIssue");
+  const getIssueSummary = spyOn(api, "getIssueSummary");
+  const getArtifactText = spyOn(api, "getArtifactText");
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <QueryClientProvider client={queryClient}>
@@ -900,8 +876,16 @@ test("two references in one body each resolve their own inline link and title", 
     expect(askLink.getAttribute("href")).toBe("/issues/CORE-1/asks/ask-1");
     expect(documentLink.getAttribute("href")).toBe("/projects/CORE/documents/runbook-md");
     expect(within(view.container).getAllByRole("link")).toHaveLength(2);
+    expect(getProjectDocumentSummary).toHaveBeenCalledWith("CORE", "runbook-md");
+    // An ask link reads its ask alone, and an inline document link shows no text, so reads none.
+    expect(getIssue).not.toHaveBeenCalled();
+    expect(getIssueSummary).not.toHaveBeenCalled();
+    expect(getArtifactText).not.toHaveBeenCalled();
   } finally {
-    getProjectArtifact.mockRestore();
+    getArtifactText.mockRestore();
+    getIssueSummary.mockRestore();
+    getIssue.mockRestore();
+    getProjectDocumentSummary.mockRestore();
     getAsk.mockRestore();
     view.unmount();
   }
@@ -995,541 +979,6 @@ test("a body re-renders when its text grows, formatting what has closed since", 
   } finally {
     view.unmount();
   }
-});
-
-/**
- * Stands in for the page's `Worker`, so a test decides what the worker answers and when. Like the
- * real one it posts `{ ready: true }` on a later task once started (or, while `startFails` is
- * set, fires `error` as a worker whose module cannot load does), then answers each request on a
- * later task with `answer`'s reply: the worker module's own `answerMermaidRequest` by default,
- * run on the test's thread; a reply of `undefined` never arrives, as from a worker stuck in a
- * layout. A terminated one posts nothing more.
- */
-class FakeWorker {
-  static created: FakeWorker[] = [];
-  static answer: (request: MermaidRequest) => MermaidReply | undefined = answerMermaidRequest;
-  static startFails = false;
-
-  terminated = false;
-  private readonly listeners: Record<string, ((event: unknown) => void)[]> = {
-    error: [],
-    message: [],
-  };
-
-  constructor() {
-    FakeWorker.created.push(this);
-    const fails = FakeWorker.startFails;
-    setTimeout(() => {
-      if (fails) this.emit("error", new Event("error"));
-      else this.emit("message", { data: { ready: true } });
-    }, 0);
-  }
-
-  addEventListener(type: string, listener: (event: unknown) => void): void {
-    this.listeners[type]?.push(listener);
-  }
-
-  postMessage(request: MermaidRequest): void {
-    setTimeout(() => {
-      const reply = FakeWorker.answer(request);
-      if (reply !== undefined) this.emit("message", { data: reply });
-    }, 0);
-  }
-
-  terminate(): void {
-    this.terminated = true;
-  }
-
-  private emit(type: string, event: unknown): void {
-    if (this.terminated) return;
-    for (const listener of this.listeners[type] ?? []) listener(event);
-  }
-}
-
-// The worker's renderer runs on the test's thread here, under happy-dom, where ELK, which lays out
-// flowcharts, cannot be built; so these draw sequence diagrams, and a dangling edge is refused in
-// validation, before any layout.
-describe("Mermaid diagrams", () => {
-  const pageWorker = globalThis.Worker;
-
-  // The worker, the drawn-source cache and a failure are module state that outlives every render,
-  // so each case starts from a page that has started and drawn nothing.
-  beforeEach(() => {
-    FakeWorker.created = [];
-    FakeWorker.answer = answerMermaidRequest;
-    FakeWorker.startFails = false;
-    globalThis.Worker = FakeWorker as unknown as typeof Worker;
-    resetMermaidDiagrams();
-  });
-
-  afterEach(() => {
-    resetMermaidDiagrams();
-    globalThis.Worker = pageWorker;
-  });
-
-  const fence = (source: string): string => `\`\`\`mermaid\n${source}\n\`\`\`\n`;
-  const figuresIn = (container: HTMLElement): HTMLElement[] =>
-    Array.from(container.querySelectorAll<HTMLElement>("figure.dispatch-mermaid"));
-  const diagramIn = (figure: Element): Element | null | undefined =>
-    figure
-      .querySelector(".dispatch-mermaid-preview")
-      ?.shadowRoot?.querySelector('svg[role="img"][aria-label="Rendered Mermaid diagram"]');
-
-  test("a mermaid block draws its diagram in the preview's shadow root, its source closed behind Mermaid source", async () => {
-    const view = render(
-      <MarkdownBody markdown={`Flow:\n\n${fence("sequenceDiagram\n  Alice->>Bob: Hi")}`} />
-    );
-    try {
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      const [figure] = figuresIn(view.container);
-      const diagram = diagramIn(figure);
-      expect(diagram?.textContent).toContain("Alice");
-      expect(diagram?.textContent).toContain("Hi");
-      expect(figure.querySelector('[role="status"]')).toBeNull();
-      const source = figure.querySelector<HTMLDetailsElement>("details.dispatch-mermaid-source");
-      expect(source?.open).toBe(false);
-      expect(source?.querySelector("summary")?.textContent).toBe("Mermaid source");
-      expect(source?.querySelector("pre code")?.textContent).toContain("Alice->>Bob: Hi");
-      expect(view.container.textContent).toContain("Flow:");
-    } finally {
-      view.unmount();
-    }
-  });
-
-  test("a source the renderer refuses shows the reason and its source open, and no diagram", async () => {
-    const view = render(<MarkdownBody markdown={`Broken:\n\n${fence("graph TD\n  A -->")}`} />);
-    try {
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      const [figure] = figuresIn(view.container);
-      expect(figure.querySelector('[role="status"]')?.textContent).toMatch(
-        /^Unable to render Mermaid diagram: Dangling Mermaid edge/
-      );
-      expect(figure.querySelector(".dispatch-mermaid-preview")).toBeNull();
-      const source = figure.querySelector<HTMLDetailsElement>("details.dispatch-mermaid-source");
-      expect(source?.open).toBe(true);
-      expect(source?.querySelector("pre code")?.textContent).toContain("A -->");
-    } finally {
-      view.unmount();
-    }
-  });
-
-  test("a dispatch reference in a diagram's label is neither linked nor resolved", async () => {
-    const view = render(
-      withQueries(
-        <MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: see dispatch://CORE-1")} />
-      )
-    );
-    try {
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      const diagram = diagramIn(figuresIn(view.container)[0]);
-      expect(diagram?.textContent).toContain("dispatch://CORE-1");
-      expect(diagram?.querySelector("a")).toBeNull();
-      expect(view.container.querySelector("a")).toBeNull();
-      expect(within(view.container).queryAllByRole("link")).toHaveLength(0);
-    } finally {
-      view.unmount();
-    }
-  });
-
-  // The live view re-parses a streamed turn on every frame: a diagram whose fence has not closed
-  // yet stays code, and the diagrams before it in the same body draw.
-  test("a body ending in an unclosed mermaid fence keeps it as code until the fence closes", async () => {
-    const done = fence("sequenceDiagram\n  Alice->>Bob: Hi");
-    const streaming = "```mermaid\nsequenceDiagram\n  Carol->>Dave: Yo";
-    const view = render(<MarkdownBody markdown={`${done}\n${streaming}`} />);
-    try {
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("Alice");
-      const open = view.container.querySelectorAll("pre");
-      expect(open).toHaveLength(2);
-      const code = open[1];
-      expect(code.textContent).toContain("Carol->>Dave: Yo");
-      expect(code.closest("figure")).toBeNull();
-      view.rerender(<MarkdownBody markdown={`${done}\n${streaming}\n\`\`\`\n`} />);
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(2));
-      expect(diagramIn(figuresIn(view.container)[1])?.textContent).toContain("Carol");
-    } finally {
-      view.unmount();
-    }
-  });
-
-  // A link reference definition is no block of the parse, so the diagram is the document's last
-  // block while the source's last line is the definition, not the diagram's closing fence. The
-  // fence did close, so the diagram is finished and draws.
-  test("a closed mermaid fence followed by a link reference definition draws its diagram", async () => {
-    const view = render(
-      <MarkdownBody
-        markdown={`${fence("sequenceDiagram\n  Alice->>Bob: Hi")}\n[spec]: https://example.com/spec\n`}
-      />
-    );
-    try {
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("Alice");
-    } finally {
-      view.unmount();
-    }
-  });
-
-  // CommonMark closes a fence only with a line of the opener's character, at least as long as the
-  // opener. A streamed turn's last line that would close some other fence (three backticks under
-  // a four-backtick opener, tildes under a backtick one) leaves the block open, so it stays code.
-  test("a body ending in a line that cannot close its mermaid fence keeps it as code", async () => {
-    const done = fence("sequenceDiagram\n  Alice->>Bob: Hi");
-    for (const streaming of [
-      "````mermaid\nsequenceDiagram\n  Carol->>Dave: Yo\n```",
-      "```mermaid\nsequenceDiagram\n  Carol->>Dave: Yo\n~~~",
-    ]) {
-      resetMermaidDiagrams();
-      const view = render(<MarkdownBody markdown={`${done}\n${streaming}`} />);
-      try {
-        await waitFor(() => expect(figuresIn(view.container).length).toBeGreaterThan(0));
-        expect(figuresIn(view.container)).toHaveLength(1);
-        const code = view.container.querySelectorAll("pre")[1];
-        expect(code?.textContent).toContain("Carol->>Dave: Yo");
-        expect(code?.closest("figure")).toBeNull();
-      } finally {
-        view.unmount();
-      }
-    }
-  });
-
-  // A fence opened inside a quote or a list item is still open while its quote or item runs to
-  // the end of the body, so a diagram streamed there stays code too; closed inside its container,
-  // it draws.
-  test("a mermaid fence still open inside a quote or a list item keeps it as code", async () => {
-    const done = fence("sequenceDiagram\n  Alice->>Bob: Hi");
-    for (const [streaming, closing] of [
-      ["> ```mermaid\n> sequenceDiagram\n>   Carol->>Dave: Yo", "\n> ```\n"],
-      ["- ```mermaid\n  sequenceDiagram\n    Carol->>Dave: Yo", "\n  ```\n"],
-    ] as const) {
-      resetMermaidDiagrams();
-      const view = render(<MarkdownBody markdown={`${done}\n${streaming}`} />);
-      try {
-        await waitFor(() => expect(figuresIn(view.container).length).toBeGreaterThan(0));
-        expect(figuresIn(view.container)).toHaveLength(1);
-        const code = view.container.querySelectorAll("pre")[1];
-        expect(code?.textContent).toContain("Carol->>Dave: Yo");
-        expect(code?.closest("figure")).toBeNull();
-        view.rerender(<MarkdownBody markdown={`${done}\n${streaming}${closing}`} />);
-        await waitFor(() => expect(figuresIn(view.container)).toHaveLength(2));
-      } finally {
-        view.unmount();
-      }
-    }
-  });
-
-  // A line ends at a lone CR too, as micromark reads it, so a body written with CR endings keeps
-  // a diagram still being written inside its quote or list item as code.
-  test("a mermaid fence still open inside a quote or a list item of a body with lone-CR line ends keeps it as code", async () => {
-    const done = "```mermaid\rsequenceDiagram\r  Alice->>Bob: Hi\r```\r";
-    for (const [streaming, closing] of [
-      ["> ```mermaid\r> sequenceDiagram\r>   Carol->>Dave: Yo", "\r> ```\r"],
-      ["- ```mermaid\r  sequenceDiagram\r    Carol->>Dave: Yo", "\r  ```\r"],
-    ] as const) {
-      resetMermaidDiagrams();
-      const view = render(<MarkdownBody markdown={`Lead\r${done}\r${streaming}`} />);
-      try {
-        await waitFor(() => expect(figuresIn(view.container).length).toBeGreaterThan(0));
-        expect(figuresIn(view.container)).toHaveLength(1);
-        const code = view.container.querySelectorAll("pre")[1];
-        expect(code?.textContent).toContain("Carol->>Dave: Yo");
-        expect(code?.closest("figure")).toBeNull();
-        view.rerender(<MarkdownBody markdown={`Lead\r${done}\r${streaming}${closing}`} />);
-        await waitFor(() => expect(figuresIn(view.container)).toHaveLength(2));
-      } finally {
-        view.unmount();
-      }
-    }
-  });
-
-  // A code block keeps its source's lone CRs and the renderer splits lines at LF alone, so the
-  // source reaches the worker with its line ends read as LF, and the diagram draws, not refused.
-  test("a mermaid block of a body with lone-CR line ends draws its diagram", async () => {
-    const view = render(
-      <MarkdownBody markdown={"Lead\r```mermaid\rsequenceDiagram\r  Alice->>Bob: Hi\r```\r"} />
-    );
-    try {
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("Alice");
-      expect(view.container.querySelector('[role="status"]')).toBeNull();
-    } finally {
-      view.unmount();
-    }
-  });
-
-  // A body's `:::` directive is parsed read-only, so a fence inside one follows the same rule: open
-  // it stays code, and closed it draws.
-  test("a mermaid fence inside a directive keeps it as code while open and draws once closed", async () => {
-    const streaming = ":::note\n```mermaid\nsequenceDiagram\n  Carol->>Dave: Yo";
-    const view = render(<MarkdownBody markdown={streaming} />);
-    try {
-      await waitFor(() =>
-        expect(view.container.querySelector("pre code")?.textContent).toContain("Carol->>Dave: Yo")
-      );
-      // Long enough for a draw the open fence must not start to have landed.
-      await Bun.sleep(50);
-      expect(figuresIn(view.container)).toHaveLength(0);
-      view.rerender(<MarkdownBody markdown={`${streaming}\n\`\`\`\n`} />);
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("Carol");
-    } finally {
-      view.unmount();
-    }
-  });
-
-  test("a body whose source changes or that unmounts before the worker answers draws only the newest source", async () => {
-    // With the engine loaded the body paints in its layout effect, so only the worker is late.
-    await warmMarkdownRenderer();
-    const view = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: First")} />);
-    const gone = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Erin->>Finn: Gone")} />);
-    // Each superseded code block stays in an element of its own, the one the re-paint replaced
-    // and the one the unmount removed; only the cancel keeps a late draw from wrapping it.
-    const first = view.container.querySelector("pre");
-    const gonePre = gone.container.querySelector("pre");
-    try {
-      expect(first?.textContent).toContain("First");
-      expect(gonePre?.textContent).toContain("Gone");
-      expect(figuresIn(view.container)).toHaveLength(0);
-      gone.unmount();
-      view.rerender(<MarkdownBody markdown={fence("sequenceDiagram\n  Carol->>Dave: Second")} />);
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("Second");
-      // The worker answers in the order the bodies asked, so both earlier answers have arrived.
-      expect(first?.closest("figure")).toBeNull();
-      expect(gonePre?.closest("figure")).toBeNull();
-      expect(FakeWorker.created).toHaveLength(1);
-    } finally {
-      view.unmount();
-    }
-  });
-
-  test("a source drawn before draws in the layout effect that paints its body", async () => {
-    await warmMarkdownRenderer();
-    const source = fence("sequenceDiagram\n  Alice->>Bob: Again");
-    const first = render(<MarkdownBody markdown={source} />);
-    try {
-      await waitFor(() => expect(figuresIn(first.container)).toHaveLength(1));
-    } finally {
-      first.unmount();
-    }
-    const again = render(<MarkdownBody markdown={`Again:\n\n${source}`} />);
-    try {
-      expect(figuresIn(again.container)).toHaveLength(1);
-      expect(diagramIn(figuresIn(again.container)[0])?.textContent).toContain("Again");
-    } finally {
-      again.unmount();
-    }
-  });
-
-  test("a diagram draws from the worker's answer alone: the page never runs the renderer", async () => {
-    const draw = spyOn(mermaidRenderer, "renderMermaidMarkup");
-    FakeWorker.answer = ({ id }) => ({
-      id,
-      markup: '<svg xmlns="http://www.w3.org/2000/svg"><text>From the worker</text></svg>',
-    });
-    const view = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: Hi")} />);
-    try {
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toBe("From the worker");
-      expect(draw).not.toHaveBeenCalled();
-    } finally {
-      draw.mockRestore();
-      view.unmount();
-    }
-  });
-
-  test("a source the worker has not drawn within the time limit is refused, and a fresh worker draws the next", async () => {
-    resetMermaidDiagrams(50);
-    const draw = spyOn(mermaidRenderer, "renderMermaidMarkup");
-    FakeWorker.answer = (request) =>
-      request.source.includes("Stuck") ? undefined : answerMermaidRequest(request);
-    const view = render(
-      <MarkdownBody markdown={`Big:\n\n${fence("sequenceDiagram\n  Stuck->>Bob: Hi")}`} />
-    );
-    try {
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      const [figure] = figuresIn(view.container);
-      expect(figure.querySelector('[role="status"]')?.textContent).toBe(
-        "Unable to render Mermaid diagram: it did not finish within 0.05 seconds"
-      );
-      expect(figure.querySelector(".dispatch-mermaid-preview")).toBeNull();
-      const source = figure.querySelector<HTMLDetailsElement>("details.dispatch-mermaid-source");
-      expect(source?.open).toBe(true);
-      expect(source?.querySelector("pre code")?.textContent).toContain("Stuck->>Bob: Hi");
-      // Terminating the worker is what stops a real layout.
-      expect(FakeWorker.created.map((worker) => worker.terminated)).toEqual([true]);
-
-      view.rerender(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: After")} />);
-      await waitFor(() =>
-        expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("After")
-      );
-      expect(FakeWorker.created.map((worker) => worker.terminated)).toEqual([true, false]);
-      // The renderer ran for the next source, inside the stand-in worker; the refused source
-      // never reached it, on the page's thread or any other.
-      const drawn = draw.mock.calls.map(([drawnSource]) => drawnSource);
-      expect(drawn.some((drawnSource) => drawnSource.includes("After"))).toBe(true);
-      expect(drawn.some((drawnSource) => drawnSource.includes("Stuck"))).toBe(false);
-    } finally {
-      draw.mockRestore();
-      view.unmount();
-    }
-  });
-
-  // The worker draws one source at a time and a slow one holds it for the whole time limit. A
-  // source whose every body re-painted or unmounted before the worker reached it is shown by no
-  // one, so it is never sent: a reader who leaves a page of slow diagrams does not wait for them
-  // on the next page.
-  test("a source no body still waits for is never sent to the worker", async () => {
-    await warmMarkdownRenderer();
-    resetMermaidDiagrams(60_000);
-    const sent: string[] = [];
-    FakeWorker.answer = (request) => {
-      sent.push(request.source);
-      return request.source.includes("Stuck") ? undefined : answerMermaidRequest(request);
-    };
-    const left = render(
-      <MarkdownBody
-        markdown={`${fence("sequenceDiagram\n  Stuck->>Bob: Hi")}\n${fence("sequenceDiagram\n  Gone->>Bob: Hi")}`}
-      />
-    );
-    try {
-      await waitFor(() => expect(sent.some((source) => source.includes("Stuck"))).toBe(true));
-    } finally {
-      left.unmount();
-    }
-    const next = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: Next")} />);
-    try {
-      await waitFor(() =>
-        expect(diagramIn(figuresIn(next.container)[0] ?? next.container)?.textContent).toContain(
-          "Next"
-        )
-      );
-      expect(sent.some((source) => source.includes("Gone"))).toBe(false);
-    } finally {
-      next.unmount();
-    }
-  });
-
-  // The live view re-paints a turn on every frame while text after a finished diagram streams:
-  // each paint cancels the draw and asks for the same source again in one commit, so the source
-  // the worker is drawing keeps its place and its draw.
-  test("a body re-painted while the worker draws its source neither stops the worker nor sends the source again", async () => {
-    await warmMarkdownRenderer();
-    resetMermaidDiagrams(60_000);
-    const sent: MermaidRequest[] = [];
-    FakeWorker.answer = (request) => {
-      sent.push(request);
-      return undefined;
-    };
-    // Holds the page's listener, so the test sends the answer once the re-paints are done.
-    const listeners: ((event: unknown) => void)[] = [];
-    class HeldWorker extends FakeWorker {
-      override addEventListener(type: string, listener: (event: unknown) => void): void {
-        super.addEventListener(type, listener);
-        if (type === "message") listeners.push(listener);
-      }
-    }
-    globalThis.Worker = HeldWorker as unknown as typeof Worker;
-    const diagram = fence("sequenceDiagram\n  Alice->>Bob: Streamed");
-    const view = render(<MarkdownBody markdown={diagram} />);
-    try {
-      await waitFor(() => expect(sent).toHaveLength(1));
-      for (const after of ["More", "More text", "More text after it"]) {
-        view.rerender(<MarkdownBody markdown={`${diagram}\n${after}`} />);
-        await Bun.sleep(10);
-      }
-      expect(FakeWorker.created.map((worker) => worker.terminated)).toEqual([false]);
-      expect(sent).toHaveLength(1);
-      expect(figuresIn(view.container)).toHaveLength(0);
-
-      for (const listener of listeners) listener({ data: answerMermaidRequest(sent[0]) });
-      await waitFor(() =>
-        expect(diagramIn(figuresIn(view.container)[0] ?? view.container)?.textContent).toContain(
-          "Streamed"
-        )
-      );
-      expect(view.container.textContent).toContain("More text after it");
-      expect(sent).toHaveLength(1);
-    } finally {
-      view.unmount();
-    }
-  });
-
-  // The time limit is a minute here, so the next body's diagram drawing within `waitFor`'s second
-  // proves it never waited for the source no body shows.
-  test("unmounting the only body whose source the worker is drawing stops the worker, caches nothing, and a fresh worker draws the next", async () => {
-    await warmMarkdownRenderer();
-    resetMermaidDiagrams(60_000);
-    const sent: string[] = [];
-    FakeWorker.answer = (request) => {
-      sent.push(request.source);
-      return request.source.includes("Stuck") ? undefined : answerMermaidRequest(request);
-    };
-    const stuck = fence("sequenceDiagram\n  Stuck->>Bob: Hi");
-    const left = render(<MarkdownBody markdown={stuck} />);
-    try {
-      await waitFor(() => expect(sent).toHaveLength(1));
-    } finally {
-      left.unmount();
-    }
-    const next = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: Next")} />);
-    try {
-      await waitFor(() =>
-        expect(diagramIn(figuresIn(next.container)[0] ?? next.container)?.textContent).toContain(
-          "Next"
-        )
-      );
-      // Terminating the worker is what stops a real layout.
-      expect(FakeWorker.created.map((worker) => worker.terminated)).toEqual([true, false]);
-    } finally {
-      next.unmount();
-    }
-    // Nothing was cached for the stopped source: the same body mounted again shows it as code and
-    // asks the worker for it again.
-    const back = render(<MarkdownBody markdown={stuck} />);
-    try {
-      expect(figuresIn(back.container)).toHaveLength(0);
-      await waitFor(() =>
-        expect(sent.filter((source) => source.includes("Stuck"))).toHaveLength(2)
-      );
-    } finally {
-      back.unmount();
-    }
-  });
-
-  test("a worker that fails to start leaves every block as code, logs once, and is tried again once the window is online", async () => {
-    await warmMarkdownRenderer();
-    FakeWorker.startFails = true;
-    const logged = spyOn(console, "error").mockImplementation(() => {});
-    const failures = () =>
-      logged.mock.calls.filter(
-        ([message]) => typeof message === "string" && message.startsWith("Showing Mermaid source")
-      );
-    const view = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: One")} />);
-    try {
-      await waitFor(() => expect(failures()).toHaveLength(1));
-      // A streamed turn paints again on every frame; no paint starts a worker or logs again.
-      for (const word of ["Two", "Three", "Four"]) {
-        view.rerender(<MarkdownBody markdown={fence(`sequenceDiagram\n  Alice->>Bob: ${word}`)} />);
-        await Bun.sleep(10);
-      }
-      expect(failures()).toHaveLength(1);
-      expect(FakeWorker.created).toHaveLength(1);
-      expect(figuresIn(view.container)).toHaveLength(0);
-      expect(view.container.querySelector("pre code")?.textContent).toContain("Four");
-
-      FakeWorker.startFails = false;
-      window.dispatchEvent(new Event("online"));
-      view.rerender(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: Five")} />);
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
-      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("Five");
-      expect(FakeWorker.created).toHaveLength(2);
-      expect(failures()).toHaveLength(1);
-    } finally {
-      logged.mockRestore();
-      view.unmount();
-    }
-  });
 });
 
 // Each list is parted from the next by a plain paragraph, so each parses as its own list.

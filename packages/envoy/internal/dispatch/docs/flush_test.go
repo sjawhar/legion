@@ -7,8 +7,6 @@ import (
 	"testing"
 
 	"github.com/reearth/ygo/crdt"
-
-	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 // renderedState is the markdown an encoded document state renders.
@@ -25,10 +23,10 @@ func renderedState(t *testing.T, state []byte) string {
 	return markdown
 }
 
-// replicaOf is the replica the room's update observer keeps for live.
-func replicaOf(t *testing.T, service *Service, live *crdt.Doc) *renderedReplica {
+// replicaFor is the replica the room's update observer keeps for live.
+func replicaFor(t *testing.T, service *Service, live *crdt.Doc) *renderedReplica {
 	t.Helper()
-	replica := service.liveReplica(live)
+	replica := service.replicaOf(live)
 	if replica == nil {
 		t.Fatal("the room lists no replica, or its replica is gone")
 	}
@@ -53,7 +51,7 @@ func TestAFlushStoresTheRoomsHeldUpdateOnceWithItsCredit(t *testing.T) {
 			return err
 		}
 		var err error
-		if state, point, err = service.readPoint(artifactID, live); err != nil {
+		if state, point, _, err = service.readPoint(artifactID, live); err != nil {
 			return err
 		}
 		ledger := ledgerFrom(ctx)
@@ -103,13 +101,13 @@ func TestAReadPointOfARecoveringReplicaIsExact(t *testing.T) {
 	editAsPeer(t, service, artifactID, replaceRun("First.", "First, alice."))
 	waitForLandedAppends(t, service, artifactID)
 	live := service.srv.GetDoc(artifactID)
-	replica := replicaOf(t, service, live)
+	replica := replicaFor(t, service, live)
 	replica.lockForUpdate()
-	replica.recover(artifactID, nil, func(crdt.LoggedUpdate, bool, *pmdoc.Node) {})
+	replica.recover(artifactID, nil, func(crdt.LoggedUpdate, bool, *observedAsks) {})
 	stopped := replica.seq
 	replica.mu.Unlock()
 
-	state, point, err := service.readPoint(artifactID, live)
+	state, point, _, err := service.readPoint(artifactID, live)
 	if err != nil {
 		t.Fatalf("read the recovering room: %v", err)
 	}
@@ -121,7 +119,7 @@ func TestAReadPointOfARecoveringReplicaIsExact(t *testing.T) {
 	}
 
 	releaseBob := holdPeerEdit(t, service, artifactID, &service.beforeObserveUpdate, replaceRun("Second.", "Second, bob."))
-	state, point, err = service.readPoint(artifactID, live)
+	state, point, _, err = service.readPoint(artifactID, live)
 	if err != nil {
 		t.Fatalf("read the room past Bob's commit: %v", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"slices"
 )
 
 // The mark vocabulary the reader and the writer share: which marks a text is written under, in
@@ -18,7 +19,7 @@ import (
 // The 8 characters are this package's own digest (the first 6 bytes of a SHA-256 over the type and
 // the canonical attributes, in standard base64), not y-prosemirror's (lib0's encodeAny over
 // mark.toJSON(), which carries every schema default). That is enough: both readers strip the suffix
-// by its shape (yattrMarkSuffix here, hashedMarkNameRegex there) and compare marks by name and
+// by its shape (yattrToMarkName here, hashedMarkNameRegex there) and compare marks by name and
 // attributes, never by key, so a mark one side wrote and the other rewrote under a different key on
 // an adjacent run reads as one mark across both.
 func markAttributeKey(mark Mark) string {
@@ -102,14 +103,27 @@ func markDelimiter(mark Mark) byte {
 	return 0
 }
 
+// visibleMarks is the rendered marks of marks in writing order: nil when there are none, else a
+// fresh slice the caller may filter in place (withoutMark) without touching marks.
 func visibleMarks(marks []Mark) []Mark {
-	out := make([]Mark, 0, len(marks))
-	for _, mark := range marks {
-		if renderedMarkTypes[mark.Type] {
-			out = append(out, mark)
-		}
+	out, kept := renderedMarks(marks)
+	if len(out) == 0 {
+		return nil
 	}
-	sortMarks(out)
+	if kept {
+		out = slices.Clone(out)
+	}
+	if len(out) > 1 {
+		slices.SortFunc(out, func(left, right Mark) int {
+			switch {
+			case markLess(left, right):
+				return -1
+			case markLess(right, left):
+				return 1
+			}
+			return 0
+		})
+	}
 	for i := range out {
 		for j := i + 1; j < len(out); j++ {
 			if renderMarkRank(out[j].Type) < renderMarkRank(out[i].Type) {

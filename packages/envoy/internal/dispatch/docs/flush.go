@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"weak"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
@@ -15,7 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
-// A room's updates are stored in the order the room committed them (INFRA-707). The room's update
+// A room's updates are stored in the order the room committed them. The room's update
 // observer gives each update its commit position in the room instance as it drains the room's
 // log (renderedReplica.seq, documentUpdateClass.seq), and every durable writer of the room stores,
 // under the document's advisory lock and before an append of its own, every update of the
@@ -32,46 +31,38 @@ type roomPoint struct {
 }
 
 // readPoint is live, the room document resident for room, as of an exact commit position: its
-// state, encoded, and the position it holds every update through (renderedReplica.readPoint). It
-// waits for the room's replica as the room's update observer does, but holds it only while it
-// drains the room's log and copies the replica: its caller does its database work after, holding
-// no replica lock. A document whose load listed no replica has had no update recorded, so its
-// state is taken under its own lock at position 0. The updates it classified arm the room's
-// settlement, as their update observers would have. The caller holds no state lock and is not
-// inside a Yjs transaction on live.
-func (s *Service) readPoint(room string, live *crdt.Doc) ([]byte, roomPoint, error) {
-	state, point, settles, err := s.readPointQuietly(room, live)
+// state, encoded, the position it holds every update through, and what the room's replica knows
+// of that state beyond the state itself (renderedReplica.readPoint, replicaRead). It waits for the
+// room's replica as the room's update observer does, but holds it only while it drains the room's
+// log and copies the replica: its caller does its database work after, holding no replica lock. A
+// document whose load listed no replica has had no update recorded, so its state is taken under
+// its own lock at position 0, and nothing is known of it beyond the state. The updates it
+// classified arm the room's settlement, as their update observers would have. The caller holds no
+// state lock and is not inside a Yjs transaction on live.
+func (s *Service) readPoint(room string, live *crdt.Doc) ([]byte, roomPoint, replicaRead, error) {
+	state, point, read, settles, err := s.readPointQuietly(room, live)
 	if settles {
 		s.scheduleSettle(room)
 	}
-	return state, point, err
+	return state, point, read, err
 }
 
 // readPointQuietly is readPoint for a settlement's own read of the room, which arms no settlement
 // for the updates it classified and reports instead whether any is one a settlement follows: the
 // settlement reading them is the one they would arm, and arming another moves the room's
 // generation under it, which ends it as superseded.
-func (s *Service) readPointQuietly(room string, live *crdt.Doc) ([]byte, roomPoint, bool, error) {
+func (s *Service) readPointQuietly(room string, live *crdt.Doc) ([]byte, roomPoint, replicaRead, bool, error) {
 	if live == nil {
-		return nil, roomPoint{}, false, errDocUnloaded
+		return nil, roomPoint{}, replicaRead{}, false, errDocUnloaded
 	}
 	point := roomPoint{cursor: s.cursorOf(live)}
-	replica := s.liveReplica(live)
+	replica := s.replicaOf(live)
 	if replica == nil {
-		return crdt.EncodeStateAsUpdateV1(live, nil), point, false, nil
+		return crdt.EncodeStateAsUpdateV1(live, nil), point, replicaRead{}, false, nil
 	}
-	state, seq, settles := replica.readPoint(room, live)
+	state, seq, read, settles := replica.readPoint(room, live)
 	point.seq = seq
-	return state, point, settles, nil
-}
-
-// liveReplica is the replica the update observer of live, a room's resident document, keeps, nil
-// for a document whose load listed none.
-func (s *Service) liveReplica(live *crdt.Doc) *renderedReplica {
-	if listed, ok := s.replicas.Load(weak.Make(live)); ok {
-		return listed.(weak.Pointer[renderedReplica]).Value()
-	}
-	return nil
+	return state, point, read, settles, nil
 }
 
 // stateTree is the tree of state, a room's state as a read point copied it (readPoint).
@@ -93,7 +84,7 @@ func (s *Service) committedSince(room string, live *crdt.Doc, point roomPoint) b
 	if point.cursor == nil || point.cursor != s.cursorOf(live) {
 		return true
 	}
-	replica := s.liveReplica(live)
+	replica := s.replicaOf(live)
 	if replica == nil {
 		return true
 	}
