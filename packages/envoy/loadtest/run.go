@@ -177,13 +177,8 @@ func runLoad(args []string) error {
 		if sf, err = readSeed(*seedPath); err != nil {
 			return err
 		}
-		for _, is := range sf.Issues {
-			if mix.Weights[kindReply] > 0 && len(is.AnchoredCommentIDs)+len(is.PlainCommentIDs) == 0 {
-				return fmt.Errorf("seed %s: issue %s has no root comment ids for replies; reseed with this loadgen", *seedPath, is.Key)
-			}
-			if mix.Weights[kindAnchored] > 0 && len(is.Quotes) == 0 {
-				return fmt.Errorf("seed %s: issue %s has no quotes for anchored comments", *seedPath, is.Key)
-			}
+		if err := checkSeedMix(sf, mix, *seedPath); err != nil {
+			return err
 		}
 	}
 	if *sse < 0 {
@@ -526,24 +521,36 @@ func (st *step) startSSE(ctx context.Context) *sseStreams {
 	return ss
 }
 
-// openLoop is an open-loop Poisson schedule at rate per second, from stream `stream` of rngSeed:
-// it draws the next arrival from start until one is at or after winEnd, sleeps until it, and calls
-// fire with the stream and whether the arrival is in the window [winStart, winEnd). fire draws
-// what the arrival does from the same stream, so the draws alternate, an arrival then its plan,
-// and one seed gives one schedule. A rate of 0 or less fires nothing. It returns when the
-// schedule ends or ctx does.
-func openLoop(ctx context.Context, rngSeed, stream uint64, rate float64, start, winStart, winEnd time.Time, fire func(r *rand.Rand, in bool)) {
+// openLoopPlan walks an open-loop Poisson schedule at rate per second, from stream `stream` of
+// rngSeed, without a clock: it draws the next arrival from start until one is at or after winEnd,
+// and calls plan with the stream, the arrival and whether it is in the window [winStart, winEnd).
+// plan draws what the arrival does from the same stream, so the draws alternate, an arrival then
+// its plan, and one seed gives one schedule; it returns false to end the walk. A rate of 0 or
+// less plans nothing. The schedule is a pure function of the seed, the stream, the rate and the
+// three times, so loadgen plan-docs walks the very schedule a run sends (plandocs.go).
+func openLoopPlan(rngSeed, stream uint64, rate float64, start, winStart, winEnd time.Time, plan func(r *rand.Rand, next time.Time, in bool) bool) {
 	if rate <= 0 {
 		return
 	}
 	r := rand.New(rand.NewPCG(rngSeed, stream))
 	for next := start; ; {
 		next = next.Add(time.Duration(r.ExpFloat64() / rate * float64(time.Second)))
-		if !next.Before(winEnd) || !sleepUntil(ctx, next) {
+		if !next.Before(winEnd) || !plan(r, next, inWindow(next, winStart, winEnd)) {
 			return
 		}
-		fire(r, inWindow(next, winStart, winEnd))
 	}
+}
+
+// openLoop is openLoopPlan's schedule, sent: it sleeps until each arrival and calls fire with the
+// stream and whether the arrival is in the window. It returns when the schedule ends or ctx does.
+func openLoop(ctx context.Context, rngSeed, stream uint64, rate float64, start, winStart, winEnd time.Time, fire func(r *rand.Rand, in bool)) {
+	openLoopPlan(rngSeed, stream, rate, start, winStart, winEnd, func(r *rand.Rand, next time.Time, in bool) bool {
+		if !sleepUntil(ctx, next) {
+			return false
+		}
+		fire(r, in)
+		return true
+	})
 }
 
 // runEvents starts the event generator, open-loop on stream 1; done closes once every write it
@@ -567,6 +574,18 @@ func (st *step) runEvents(ctx context.Context, wr *writer) (writes *collector[wr
 		})
 	}()
 	return writes, closed
+}
+
+// planWrites walks the event generator's schedule without a clock and calls fn with every write
+// the step plans and whether its arrival is in the window: the plans runEvents sends, in its
+// order, since both walk openLoopPlan's stream 1 and draw each plan with planEvent.
+func (st *step) planWrites(fn func(p eventPlan, in bool)) {
+	var marker int64
+	openLoopPlan(st.cfg.rngSeed, 1, st.cfg.events, st.start, st.winStart, st.winEnd, func(r *rand.Rand, _ time.Time, in bool) bool {
+		marker++
+		fn(planEvent(r, st.cfg, st.sessions, st.sf, marker), in)
+		return true
+	})
 }
 
 // requestLoad is what the request generator sent in the window, and what the in-flight cap

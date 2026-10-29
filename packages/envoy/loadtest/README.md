@@ -15,11 +15,12 @@ same step before and after its change, and compares the two rows.
 
 | File | What it is |
 | --- | --- |
-| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `run`, `tables`, `seed-finish`, `cgroup-merge`, `curves`, `codepaths`, `series-sessions`, `trigger-sql`, `box-busy`, `replay-fetch`, `replay-pack`, `replay-unpack`, `replay-verify-bundle`, `replay-seed`, `replay-check-seed`, `replay-checksum`, `replay-logical-dump`, `replay-plan` |
+| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `run`, `plan-docs`, `tables`, `seed-finish`, `cgroup-merge`, `curves`, `codepaths`, `series-sessions`, `trigger-sql`, `box-busy`, `replay-fetch`, `replay-pack`, `replay-unpack`, `replay-verify-bundle`, `replay-seed`, `replay-check-seed`, `replay-checksum`, `replay-logical-dump`, `replay-plan` |
 | `api.go` | The Dispatch HTTP client, with the request trace that gives the arrival time; `callRaw` sends a body of any type (a multipart upload) |
 | `seed.go` | The seed: 4 projects, 1,000 issues and 8,000 comments through Dispatch's API, and `seed.json` |
 | `seedfinish.go` | `loadgen seed-finish`: the steps after the seed (the wait for the outbox, the wait for the block-index backfill, `vacuum analyze`, the commit-time trigger), which `stack.sh seed` and `cluster.sh seed` both run |
 | `run.go` | One step: its phases (the window, SSE streams, the event and request generators on one open-loop schedule, the probes) and `summary.json` |
+| `plandocs.go` | `loadgen plan-docs`: the documents a step's in-window edits and uploads plan the most versions for, from `seed.json` and the step's own flags, without a stack (The load, below) |
 | `pgclock.go` | `meta.json`'s `pg_clock`: Postgres's clock against `loadgen`'s, from 10 timed reads at the step's start and after its window |
 | `copymeta.go` | `loadgen run -copy-meta`: the cluster copy's description, which `meta.json` records under `copy` |
 | `sessions.go` | The simulated sessions: their NATS subscriptions and receipts, their listener registrations and heartbeats |
@@ -476,6 +477,30 @@ also refuses a mix with `reply` or `anchored` when `seed.json` has no root comme
 | --- | --- | --- |
 | `production-2026-10-26` (default) | `comment=3,anchored=33,reply=35,edit=22,upload=7` | The 2026-10-26 production write counts for 22:55-23:34Z: 153 plain roots, 1,495 anchored roots, 1,576 replies, 1,329 document versions (§2 of the replay report of those writes). The 3 to 1 split of the versions into edits and uploads is INFERENCE from the production profile's write counts: `editArtifact` 6, `uploadArtifact` 2 (§3 of the production CPU profile of 2026-10-27). |
 | `report-2026-10-27` | `comment=50,anchored=30,edit=20` | The root report's mix, so that its 1x row can be compared. |
+
+### The documents a step writes versions to (`plan-docs`)
+
+Two of the five kinds write a document version: `edit` and `upload`. Which documents they hit is
+decided before the run, by the event generator alone, so `loadgen plan-docs` prints it without a
+stack and without a network:
+
+```bash
+loadgen plan-docs -seed "$LOADTEST_ROOT/seed.json" -events 40 -sessions 1000 \
+  -warmup 30s -duration 10m -rng-seed 1 -top 20 [-event-mix <mix>] [-json]
+```
+
+It walks the very schedule `loadgen run` sends (the same open-loop draw of each arrival, then
+`planEvent`'s draw of the session, the issue and the kind) and counts the in-window `edit` and
+`upload` writes on each issue's spec document (`seed.json` `artifact_id`). It prints the `-top` K
+documents, most versions first, ties by artifact id: one artifact id per line, or with `-json` an
+array of `{"artifact", "edits", "uploads", "versions"}`, `versions` being `edits + uploads`.
+
+The plan is a pure function of `seed.json`, `-sessions`, `-events`, `-warmup`, `-duration`,
+`-event-mix` and `-rng-seed`; it does not depend on `-requests`, `-route-mix`, `-human`,
+`-grace`, `-sse` or the clock, which draw from other streams or none. So `plan-docs` with a
+step's flags gives exactly what that step plans. It plans: a write the run then loses to an error
+(an upload whose read of the spec failed, a request the step's end cut short) is counted here all
+the same. `cluster.sh step --typing` chooses its typed documents with it (Browser typing, below).
 
 ### Route mix
 
@@ -1474,7 +1499,7 @@ so. A write (`drop database`, a `kubectl cp`, a start in the runner) is never re
 | --- | --- |
 | `up <up's flags>` | Refuses, before it creates anything, a commit with no image, a `--pg-major` other than production's, an image tag that does not resolve to a digest, stored-order flags it cannot build the checker from (The stored-order check, below: a `--dispatch-commit` the git store does not hold; a tree without `cmd/dispatch/storedorder.go` and no `--stored-order-source`, or one with it and a `--stored-order-source`; a source or checker commit the git store does not hold or whose tree lacks INFRA-707's files or registration), an overlay whose subcommand table lacks the registration's anchor, a checker that does not compile (naming the dispatch commit, the source commit and the compiler's first error), and a `--browsertype-commit` that the git store does not hold or whose tree has no `loadtest/browsertype`. Refuses with exit status 2 while the lock exists. Then takes the lock, installs the copy, builds `loadgen` and (with `--browsertype-commit`) `browsertype`, starts the heartbeat and the sampler, and prints each container's requests and limits. |
 | `seed` | `loadgen seed` from the runner through Dispatch's Service, then `loadgen seed-finish`. Then it stops Dispatch and the listener and renames the database to the template `dispatch_seed`. |
-| `step NAME FACTOR [--duration 10m] [--reads-only] [--typing [--typing-peers 2] [--typing-rate 5] [--typing-docs 20]]` | The reset, then one `loadgen run` at FACTOR × (4 events/s, 60 requests/s) with the `series-sessions` count, then the crash check, the stored-order check, `cgroup-merge` and `tables`. FACTOR can be fractional (`8.5`). `--reads-only` sends 0 events. Postgres's write-out counters go into `pg-stats-before.json` and `pg-stats-after.json`. `--typing` adds browser typing (below). |
+| `step NAME FACTOR [--duration 10m] [--reads-only] [--typing [--typing-peers 2] [--typing-rate 5] [--typing-docs 20]]` | The reset, then one `loadgen run` at FACTOR × (4 events/s, 60 requests/s) with the `series-sessions` count, then the crash check, the stored-order check, `cgroup-merge` and `tables`. FACTOR can be fractional (`8.5`). `--reads-only` sends 0 events, and is refused with `--typing`. Postgres's write-out counters go into `pg-stats-before.json` and `pg-stats-after.json`. `--typing` adds browser typing (below), into the documents `loadgen plan-docs` says the step's own writes plan the most versions for. |
 | `series [--duration 10m]` | 1x, 2x, 3x, 5x, 7x, 10x and `10x-reads`, then the refinement (below). |
 | `soak [--duration 60m]` | The step `10x-hour`. |
 | `db-size CPU MEMORY` | Postgres at the Cloud SQL tier of CPU and MEMORY (for example `4 15Gi`), restarted on the same claim. Postgres's `cpu.max` must then read the new limit. |
@@ -1604,12 +1629,27 @@ asks. In the runner:
 
 ```bash
 DATABASE_URL=<the copy's Postgres URL, the one Dispatch uses> \
-  timeout 1800 /work/envoy-dispatch stored-order --since <meta.json window_start>
+  timeout 7200 /work/envoy-dispatch stored-order --since <meta.json window_start>
 ```
+
+The bound is 7,200 s, and `LOADTEST_STORED_ORDER_SECONDS` (a whole number of seconds) overrides
+it: a typed document carries thousands of stored updates, and at 10x with 20 typed documents the
+old 1,800 s bound ran out after 976 of 1,000 documents (run `lt-20261029t115927-655c`).
+
+A step that typed (Browser typing, below) is checked twice, both calls inside that one bound:
+
+1. The typed documents alone, `stored-order --since <window_start> --artifact <id>` with one
+   `--artifact` of each, into `stored-order-typed.txt` and `stored-order-typed.json` (the same
+   fields as `stored-order.json`). It runs first, so INFRA-707's own documents have a result even
+   when the run over every document then runs out of the bound.
+2. The run over every document, with what is left of the bound, into `stored-order.txt` and
+   `stored-order.json`. With nothing left, it does not run: its `exit` is `null` and
+   `stored-order.txt` says the typed call used the whole bound.
 
 The URL goes to the runner on the standard input of `kubectl exec`. It is on no command line and
 in no recorded file. `--since` folds the rows and versions from before the window as the base,
-without a check. Each step then writes:
+without a check. Each call prints one line with the checker and its counts. Each step then
+writes:
 
 - `stored-order.txt`: the command's standard output and standard error. That is one line for each
   document, one line for each mismatch, and the summary line `stored-order: documents=N clean=N
@@ -1619,9 +1659,11 @@ without a check. Each step then writes:
   `since`, and `documents`, `clean`, `mismatched`, `refused` and `failed`, from the last summary
   line. `renderer_matches` is `false` too when `redeploy` moved Dispatch to another commit than
   the checker's `dispatch_commit` (`redeploy` warns so). A count is `null`, never 0, when there
-  is no summary line. A run that takes longer than 30 min is stopped: its `exit` is 124 and its
+  is no summary line. A run that takes longer than the bound is stopped: its `exit` is 124 and its
   counts are `null`. A step whose `meta.json` has no `window_start` does not run the command: its
   `exit` is `null`.
+- `stored-order-typed.txt` and `stored-order-typed.json`: the same two files of the typed call,
+  only for a step that typed.
 
 `cluster.sh` prints one line with the checker (its commits and `renderer_matches`) and the counts.
 Exit 0 means that every document replays. Exit 1 (a mismatch, a refused document, or a read that
@@ -1630,8 +1672,10 @@ failed) is a correctness finding, not a failed step: the step goes on, and it wr
 dispatch commit, its own tree or the overlay's source commit and files or the escape's commit,
 `renderer_matches` and the binary's sha256) and has one row for each step, in the order the
 steps ran: `since`, the exit, the five counts (`not run` for a step with no `stored-order.json`),
-the step's `renderer_matches`, and Typing, the keystroke updates browser typing sent during the
-step (`browsertype.json` `sent`), or `none` for a step without `--typing` (Browser typing, below).
+the five Typed counts of the step's typed call (`stored-order-typed.json`, `none` for a step that
+typed into no document), the step's `renderer_matches`, and Typing, the keystroke updates browser
+typing sent during the step (`browsertype.json` `sent`), or `none` for a step without `--typing`
+(Browser typing, below).
 
 The next step's reset drops the database, and with it the rows behind a mismatch. So when
 `stored-order.txt` names a document as mismatched or refused (its document line has
@@ -1695,9 +1739,14 @@ The documents are the ones the step writes most:
   `state.json`, mapped to the copy's ids through `loadtest.replay_ids` (kind `artifact`) of the
   reset database. Ties go by the logged id. A document the window creates has no copy id when the
   replay starts and is not typed into.
-- A load step: of the spec documents (`seed.json` `artifact_id`) of the issues the step's
-  sessions work on (the first `series-sessions` issues in key order), the K whose sha256 of
-  `<rng seed>:<artifact id>` sorts first, with the step's rng seed (1).
+- A load step: the K documents `loadgen plan-docs` names (The load, above: `plan-docs`), those
+  that the step's own in-window edits and uploads plan the most versions for, most first, ties by
+  artifact id. `cluster.sh` runs it with the step's own flags, the ones it then gives `loadgen
+  run`: `-seed <run>/seed.json -sessions <series-sessions> -top <K> -events <4 × factor> -warmup
+  30s -duration <--duration> -rng-seed 1`. When the Kth document has fewer than 10 planned
+  versions, the versions INFRA-707's acceptance 2 needs of every typed document, one warning line
+  names the count and the step runs on; `--reads-only` with `--typing` is refused, since a step
+  with no agent write has nothing to rank its documents by.
 
 The copy's agent token (`DISPATCH_AGENT_TOKEN`, from `state.json`) goes into the runner's
 `/work/typing/token` on the standard input of `kubectl exec`: it is on no command line, in no
@@ -1711,14 +1760,17 @@ run` starts, so the peers connect during its 30 s warm-up, the runner starts:
 ```
 
 `-duration` is `loadgen run`'s bound (its warm-up, window, grace and drain), the stored-order
-check's 1800 s and 600 s more, so it outlasts the window and the check. `cluster.sh` stops it with
-SIGTERM right after the stored-order command ends, while the peers still hold their rooms, before
+check's 7,200 s and 600 s more, so it outlasts the window and both of the check's calls.
+`cluster.sh` stops it with SIGTERM right after the last stored-order command ends, while the
+peers still hold their rooms, before
 the evidence export (and at the latest when the step ends, also when the step dies on the way).
 The step then writes:
 
 - `browsertype.txt`: browsertype's output, one line per peer: `artifact=<id> peer=<i> sent=<n>
   skipped=<n> errors=<0|1> error="<message>"`.
-- `browsertype.json`: `commit`, `docs` (the copy ids), `peers`, `rate`, `exit` (0, or 1 when a
+- `browsertype.json`: `commit`, `docs` (the copy ids), `planned_versions` (a load step's planned
+  edits and uploads of each typed document, by artifact id; `null` for a replay), `peers`,
+  `rate`, `exit` (0, or 1 when a
   peer failed to connect or ended early; `null` when it gave no exit status within 120 s of the
   SIGTERM) and `sent`, `skipped` and `errors`, the sums of the peer lines (`null`, never 0, when
   there is none).
@@ -1751,7 +1803,7 @@ the worker pod.
 | `replay/` | `replay-prepare`'s inputs: `parts/` (INFRA-639's parts), `bundle/` and `bundle.unpacked.json`. |
 | `replay-prepared.json` | `replay-prepare`'s record: `template`, `manifest`, `seed_dump_sha256`, `bundle_tar_zst_sha256`, `bundle_meta_sha256`, `dispatch_commit`, `dispatch_image`, `migration_before`, `migration_after`, `schema_version` (`/healthz`'s), `checksum` (`loadgen replay-checksum` of the template), `postgres_version`, `prepared_at`, and `seconds` for `inputs`, `stream`, `restore`, `migrate`, `backfill`, `quiet`, `vacuum`, `checksum` and `total`. |
 | `TABLES.md` | The tables (The tables, above) of every step, in the order the steps ran. |
-| `STORED-ORDER.md` | The stored-order check (above): the commit its `envoy-dispatch` was built from, the commit `browsertype` was built from, and one row for each step, in the order the steps ran, with `since`, the exit, the counts and the typing (`sent`, or `none`). |
+| `STORED-ORDER.md` | The stored-order check (above): the commit its `envoy-dispatch` was built from, the commit `browsertype` was built from, and one row for each step, in the order the steps ran, with `since`, the exit, the counts, the typed call's counts (`none` for a step that typed into no document) and the typing (`sent`, or `none`). |
 | `curves/CURVES.md`, `curves/curves.csv` | One row per step: the six series (delivery latency, throughput, CPU, memory, database connections, database CPU), pool waiters, commit-order lock waiters, failed rows, the Pass table, and the control's and the 4 vCPU step's comparisons. The memory series' Go heap is `heap_live_mib_p50` and `heap_live_mib_max` ("Go heap live … (heap profile)"), the heap profile's in-use bytes from `resources.heap_live_mib`; an older run's step, whose `summary.json` holds runtime.MemStats `HeapInuse` (`resources.heap_inuse_mib`), fills `memstats_heap_inuse_mib_p50` and `memstats_heap_inuse_mib_max` ("MemStats HeapInuse … (older run)") instead, so the two metrics never share a column. |
 | `curves/KNEES.md` | Each knee: the criteria it tripped, its bracket, the measured limit and the evidence files. |
 | `curves/refine.txt` | The refinement's factors, one per line. Empty when no knee needs another step. |
@@ -1774,8 +1826,9 @@ its cores and working set from `cgroup.json`. It also holds:
 | `step-failed.json` | Only when the step failed: `reasons`, each with `kind`, `role` and `detail`. `restart`: a container of the copy restarted during the step. `loadgen_exit`: `loadgen run` exited non-zero. `sampler_gap`: a container had no good cgroup read for more than 30 s in the window. |
 | `cgroup.json` | `loadgen cgroup-merge` of `cgroup.jsonl` over the window: `window_start`, `window_end`, `window_s`, `failed` and `failures`, and for each role `pods`, `container`, `samples`, `failed_reads`, `restarts`, `cpu_max`, `limit_cores`, `cores_mean`, `cores_peak_5s`, `cpu_s`, `throttled_s`, `working_set_bytes_mean` and `working_set_bytes_max` (`memory.current` less `inactive_file`), `max_gap_s`, and `minutes` (each whole minute's cores and mean working set; `null` for a minute with a gap over 30 s). A figure the reads cannot give is `null`, never 0. |
 | `loadgen.out` | The output of `loadgen run` in the runner. |
-| `stored-order.txt`, `stored-order.json`, `stored-order-evidence/` | The output of `envoy-dispatch stored-order --since <window_start>` after the step, and the checker's fields (`dispatch_commit`, `built_from`, `overlay_source`, `overlay_files`, `registration`, `renderer_matches`, `sha256`), `exit`, `since` and the counts of its summary line (`null` without one, never 0) and `evidence`; and the rows of each mismatched or refused document, never uploaded (The stored-order check, above). A non-zero exit is a correctness finding, not a `step-failed.json` reason. |
-| `browsertype.txt`, `browsertype.json` | Only with `--typing`: browsertype's output, one line per peer, and `commit`, `docs`, `peers`, `rate`, `exit` and the sums `sent`, `skipped` and `errors` (Browser typing, above). A peer error is reported, not a `step-failed.json` reason. |
+| `stored-order.txt`, `stored-order.json`, `stored-order-evidence/` | The output of `envoy-dispatch stored-order --since <window_start>` over every document after the step, and the checker's fields (`dispatch_commit`, `built_from`, `overlay_source`, `overlay_files`, `registration`, `renderer_matches`, `sha256`), `exit`, `since` and the counts of its summary line (`null` without one, never 0) and `evidence`; and the rows of each mismatched or refused document, never uploaded (The stored-order check, above). A non-zero exit is a correctness finding, not a `step-failed.json` reason. |
+| `stored-order-typed.txt`, `stored-order-typed.json` | Only with `--typing`: the same two files of the call over the typed documents alone (one `--artifact <id>` each), which runs first (The stored-order check, above). |
+| `browsertype.txt`, `browsertype.json` | Only with `--typing`: browsertype's output, one line per peer, and `commit`, `docs`, `planned_versions` (a load step's planned edits and uploads of each typed document; `null` for a replay), `peers`, `rate`, `exit` and the sums `sent`, `skipped` and `errors` (Browser typing, above). A peer error is reported, not a `step-failed.json` reason. |
 | `dispatch.log`, `listener.log`, `postgres.log`, `nats-0.log`, `nats-1.log`, `nats-2.log` | Each container's log from the step's start. |
 | `CODEPATHS.md`, `codepaths.json` | `loadgen codepaths` (a replay step's from `replay` and again from `collect`, with the replay's flags; every other step's from `collect`): Dispatch's CPU by entry point and by subsystem (cores = the share × the Dispatch container's `cores_mean`), its working set at the window's end split into heap by code path, heap idle retained (HeapSys − HeapInuse − HeapReleased), stacks, other runtime memory and non-Go memory (working set − (Sys − HeapReleased)), with HeapReleased, the heap the runtime has returned to the OS and so outside the working set, on a line under the table and in no row (a `runtime.MemStats` block without HeapReleased keeps HeapSys − HeapInuse and working set − Sys, with a note saying so), and the outage's 10-minute buckets beside it. |
 

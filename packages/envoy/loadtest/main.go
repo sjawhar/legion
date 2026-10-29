@@ -20,6 +20,8 @@ commands:
   proxy            TCP latency proxy toward Postgres
   seed             seed 4 projects, 1,000 issues and 8,000 comments through Dispatch; writes seed.json
   run              one load step against the stack in stack.json; writes summary.json and profiles
+  plan-docs        print, without a stack, the documents a step's in-window edits and uploads write
+                   the most versions to (the run's own plan of the same flags, seed.json)
   tables           render TABLES.md and pprof tops from step directories
   seed-finish      after seed: wait for the outbox and the block-index backfill, vacuum, install the commit-time trigger
   cgroup-merge     reduce a cluster sampler's cgroup.jsonl to a step directory's cgroup.json
@@ -60,6 +62,8 @@ func main() {
 		err = runSeed(os.Args[2:])
 	case "run":
 		err = runLoad(os.Args[2:])
+	case "plan-docs":
+		err = runPlanDocs(os.Args[2:])
 	case "tables":
 		err = runTables(os.Args[2:])
 	case "seed-finish":

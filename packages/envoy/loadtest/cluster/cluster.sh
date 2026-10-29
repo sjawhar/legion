@@ -100,9 +100,13 @@
 # The stored-order check (INFRA-707's oracle): after each step's and each replay's loadgen run,
 # while Dispatch still runs, the runner runs the checker's `stored-order --since <meta.json
 # window_start>`, with the copy's DATABASE_URL on its standard input (never on a command line),
-# for at most 30 min. Its output goes into <step>/stored-order.txt, the checker's fields and its
-# summary line into <step>/stored-order.json (renderer_matches false when Dispatch was redeployed
-# to another commit), and one line names the counts. A non-zero exit is a correctness finding,
+# within STORED_ORDER_SECONDS. A step that typed runs it twice inside that bound: first over the
+# typed documents alone (one --artifact of each), into <step>/stored-order-typed.txt and
+# stored-order-typed.json, so their result stands even when the run that follows times out; then
+# over every document, into <step>/stored-order.txt and <step>/stored-order.json (the checker's
+# fields and its summary line, renderer_matches false when Dispatch was redeployed
+# to another commit), with the bound's rest. Each call names its counts in one line. A non-zero
+# exit is a correctness finding,
 # not a step failure. Before the next reset drops the database, the rows of each mismatched or
 # refused document (artifacts, doc_checkpoints, artifact_versions, doc_updates, doc_snapshots),
 # its issue's events since window_start (issue-events-in-window), and its doc_checkpoints,
@@ -121,11 +125,14 @@
 # kubectl exec's standard input (never on a command line, in no recorded file, never printed) and
 # is removed when typing stops. A replay's documents are the artifacts with the most agent
 # writes (artifact.version events the replay sends) in the bundle's window.jsonl over the
-# sub-window, mapped to the copy's ids through loadtest.replay_ids; a load step's are K spec
-# documents of the issues its sessions work on (seed.json), chosen by the step's rng seed. It
-# starts detached in the runner just before loadgen run, so its peers connect during loadgen's
-# warm-up, with a -duration that outlasts loadgen's window, grace and the stored-order check, and
-# stops with SIGTERM right after the stored-order command. Its output goes into
+# sub-window, mapped to the copy's ids through loadtest.replay_ids; a load step's are the K
+# documents `loadgen plan-docs` names from seed.json and the step's own loadgen run flags, those
+# its in-window edits and uploads plan the most versions for, and browsertype.json records each
+# one's planned count (planned_versions); a Kth document under 10 planned versions, which
+# INFRA-707's acceptance 2 needs, is one warning line. It starts detached in the runner just
+# before loadgen run, so its peers connect during loadgen's warm-up, with a -duration that
+# outlasts loadgen's window, grace and the stored-order check, and stops with SIGTERM right after
+# the last stored-order command. Its output goes into
 # <step>/browsertype.txt, and its exit and per-peer sums into <step>/browsertype.json; a peer
 # error is reported, never a step failure.
 #
@@ -185,8 +192,13 @@ STORED_ORDER_FILES=(packages/envoy/internal/dispatch/docs/storedorder.go "$STORE
 STORED_ORDER_REGISTRY=packages/envoy/cmd/dispatch/subcommands.go
 STORED_ORDER_ANCHOR='var subcommands = []subcommand{'
 CHECKER_TMP="" STORED_ORDER_STATE=""
-# The stored-order check's bound, in seconds (its timeout's exit status is 124).
-STORED_ORDER_SECONDS=1800
+# The stored-order check's bound, in seconds (its timeout's exit status is 124). A step with browser
+# typing gives each typed document thousands of stored updates: at 10x with 20 typed documents the
+# check took 1800 s for 976 of 1000 documents (run lt-20261029t115927-655c), so the bound is 7200 s.
+# LOADTEST_STORED_ORDER_SECONDS overrides it.
+STORED_ORDER_SECONDS=${LOADTEST_STORED_ORDER_SECONDS:-7200}
+[[ $STORED_ORDER_SECONDS =~ ^[1-9][0-9]*$ ]] ||
+  { printf 'cluster.sh: LOADTEST_STORED_ORDER_SECONDS must be a whole number of seconds, not %s\n' "$STORED_ORDER_SECONDS" >&2; exit 2; }
 # The stored-order evidence export's bound for all of one step's documents, in seconds, and the
 # tables it exports for each document at the step's end, as table:key column[:order]: every table
 # that `envoy-dispatch stored-order` reads of a document (INFRA-707's
@@ -201,11 +213,13 @@ STORED_ORDER_START_TABLES=(doc_checkpoints:artifact_id artifact_versions:artifac
 TYPING_SESSION=ses-browsertype
 TYPING_DIR=/work/typing
 # A step's --typing settings (typing_parse); TYPING is empty for a step without --typing. The
-# step's documents (TYPING_LIST) and, once browsertype runs, the step's name and directory for
-# typing_stop_at_exit (TYPING_STEP).
+# step's documents (TYPING_LIST), a load step's planned versions of each of them (TYPING_PLANNED,
+# typing_plan_step; null for a replay, whose documents come from its bundle) and, once
+# browsertype runs, the step's name and directory for typing_stop_at_exit (TYPING_STEP).
 TYPING=""
 TYPING_PEERS="" TYPING_RATE="" TYPING_DOCS=""
 TYPING_LIST=()
+TYPING_PLANNED=null
 TYPING_STEP=()
 # What down deletes and then lists: the kinds of `kubectl get all` that the load-test Role may
 # read (it may not list replicationcontrollers, daemonsets, horizontalpodautoscalers or
@@ -1215,9 +1229,11 @@ checker_tmp_remove() {
 # ---- the stored-order check -----------------------------------------------------------------------
 
 # The runner's script: DATABASE_URL from its standard input, so the password is on no command line
-# and in no file, then stored-order since $2, bounded at $1 seconds (timeout's exit status 124).
+# and in no file, then stored-order since $2 with the flags after it (a --artifact of each typed
+# document, or none for the run over every document), bounded at $1 seconds (timeout's exit
+# status 124).
 # shellcheck disable=SC2016 # expanded by the runner's sh
-STORED_ORDER_SCRIPT='IFS= read -r DATABASE_URL; export DATABASE_URL; exec timeout "$1" /work/envoy-dispatch stored-order --since "$2"'
+STORED_ORDER_SCRIPT='IFS= read -r DATABASE_URL; export DATABASE_URL; seconds=$1; since=$2; shift 2; exec timeout "$seconds" /work/envoy-dispatch stored-order --since "$since" "$@"'
 
 # stored_order_summary TXT CHECKER EXIT SINCE: stored-order.json from the command's output TXT:
 # the checker's fields (CHECKER, the JSON object stored_order_checker gives: dispatch_commit,
@@ -1426,16 +1442,46 @@ stored_order_evidence() {
   printf '%s\n' "${entries[@]}" | jq -sc .
 }
 
+# stored_order_run SECONDS SINCE TXT ARG...: one stored-order command in the runner, bounded at
+# SECONDS, with the copy's DATABASE_URL on its standard input and the ARGs (one --artifact of each
+# typed document, or none for the run over every document) after --since SINCE. Its standard
+# output and error go into TXT, a timed-out run's line is appended, and its exit status is
+# printed.
+stored_order_run() {
+  local seconds=$1 since=$2 txt=$3 rc=0
+  shift 3
+  printf '%s\n' "$(pg_url)" | kube_for $((seconds + 60)) exec -i runner -c runner -- \
+    sh -c "$STORED_ORDER_SCRIPT" sh "$seconds" "$since" "$@" >"$txt" 2>&1 || rc=$?
+  ((rc != 124)) || printf 'stored-order: timed out after %s s (exit 124)\n' "$seconds" >>"$txt"
+  printf '%s\n' "$rc"
+}
+
+# stored_order_note NAME WHAT JSON TXT WHY: one line of what a stored-order command found: the
+# step, WHAT (the command, named), the checker (STORED_ORDER_LABEL), --since and the counts of the
+# summary JSON, or WHY it did not run. A non-zero exit points at TXT as a correctness finding,
+# never a step failure.
+stored_order_note() {
+  note "$(jq -r --arg name "$1" --arg what "$2" --arg txt "$4" --arg why "$5" "$STORED_ORDER_LABEL"' def n: if . == null then "null" else tostring end;
+    "step \($name): \($what) (envoy-dispatch of \(checker_label)) since \(.since | n): "
+    + if .exit == null then "not run: \($why)"
+      else "exit \(.exit)\(if .exit == 124 then " (timed out)" else "" end), documents=\(.documents | n) clean=\(.clean | n) mismatched=\(.mismatched | n) refused=\(.refused | n) failed=\(.failed | n)"
+        + (if .exit == 0 then "" else "; a correctness finding, not a step failure: \($txt)" end) end' "$3")"
+}
+
 # stored_order_check NAME DIR: the stored-order check of step NAME (see the header) after its
-# loadgen run, while Dispatch still runs: DIR/stored-order.txt (the command's standard output and
-# error), DIR/stored-order.json (stored_order_summary with the run's checker, and evidence:
-# stored_order_evidence's export of each mismatched or refused document, made here, before the
-# next reset drops the database) and one line naming the checker and the counts. A non-zero exit
-# is a finding, never the step's failure. Browser typing, when the step runs it, stops right
-# after the command (typing_stop). A run whose state.json records no checker (up builds one for
-# every run) says so in one line and runs nothing.
+# loadgen run, while Dispatch still runs. A step that typed (TYPING_LIST) is checked twice, both
+# calls within STORED_ORDER_SECONDS: first one call with a --artifact of each typed document, into
+# DIR/stored-order-typed.txt and DIR/stored-order-typed.json, so the typed documents' result
+# exists even when the run over every document then times out; then that run, into
+# DIR/stored-order.txt and DIR/stored-order.json (stored_order_summary with the run's checker, and
+# evidence: stored_order_evidence's export of each mismatched or refused document, made here,
+# before the next reset drops the database), with the bound's rest. Each call prints one line
+# naming the checker and the counts. A non-zero exit is a finding, never the step's failure.
+# Browser typing, when the step runs it, stops right after the last command (typing_stop). A run
+# whose state.json records no checker (up builds one for every run) says so in one line and runs
+# nothing.
 stored_order_check() {
-  local name=$1 dir=$2 checker since evidence rc=0 txt=$2/stored-order.txt
+  local name=$1 dir=$2 checker since deadline left id evidence rc=0 why="" typed=() txt=$2/stored-order.txt
   checker=$(stored_order_checker)
   if [ -z "$checker" ]; then
     note "step $name: the stored-order check is not run: $STATE records no stored-order checker"
@@ -1444,20 +1490,32 @@ stored_order_check() {
   since=$(jq -r '.window_start // empty' "$dir/meta.json" 2>/dev/null || true)
   if valid rfc3339 "$since"; then
     put_executable "$STORED_ORDER_BIN" /work/envoy-dispatch
-    printf '%s\n' "$(pg_url)" | kube_for $((STORED_ORDER_SECONDS + 60)) exec -i runner -c runner -- \
-      sh -c "$STORED_ORDER_SCRIPT" sh "$STORED_ORDER_SECONDS" "$since" >"$txt" 2>&1 || rc=$?
-    ((rc != 124)) || printf 'stored-order: timed out after %s s (exit 124)\n' "$STORED_ORDER_SECONDS" >>"$txt"
+    left=$STORED_ORDER_SECONDS
+    if [ -n "$TYPING" ] && ((${#TYPING_LIST[@]})); then
+      deadline=$((EPOCHSECONDS + STORED_ORDER_SECONDS))
+      for id in "${TYPING_LIST[@]}"; do typed+=(--artifact "$id"); done
+      rc=$(stored_order_run "$STORED_ORDER_SECONDS" "$since" "$dir/stored-order-typed.txt" "${typed[@]}")
+      stored_order_summary "$dir/stored-order-typed.txt" "$checker" "$rc" "$since" >"$dir/stored-order-typed.json"
+      stored_order_note "$name" "stored-order over the ${#TYPING_LIST[@]} typed documents" \
+        "$dir/stored-order-typed.json" "$name/stored-order-typed.txt" ""
+      rc=0
+      left=$((deadline - EPOCHSECONDS))
+    fi
+    if ((left > 0)); then
+      rc=$(stored_order_run "$left" "$since" "$txt")
+    else
+      why="the typed documents' check used the whole bound of $STORED_ORDER_SECONDS s"
+      printf 'stored-order: not run: %s\n' "$why" >"$txt"
+      rc=null
+    fi
   else
+    why="meta.json holds no window_start"
     printf 'stored-order: not run: %s/meta.json holds no RFC 3339 window_start\n' "$name" >"$txt"
     since="" rc=null
   fi
   typing_stop "$name" "$dir"
   stored_order_summary "$txt" "$checker" "$rc" "$since" >"$dir/stored-order.json"
-  note "$(jq -r --arg name "$name" "$STORED_ORDER_LABEL"' def n: if . == null then "null" else tostring end;
-    "step \($name): stored-order (envoy-dispatch of \(checker_label)) since \(.since | n): "
-    + if .exit == null then "not run: meta.json holds no window_start"
-      else "exit \(.exit)\(if .exit == 124 then " (timed out)" else "" end), documents=\(.documents | n) clean=\(.clean | n) mismatched=\(.mismatched | n) refused=\(.refused | n) failed=\(.failed | n)"
-        + (if .exit == 0 then "" else "; a correctness finding, not a step failure: \($name)/stored-order.txt" end) end' "$dir/stored-order.json")"
+  stored_order_note "$name" stored-order "$dir/stored-order.json" "$name/stored-order.txt" "$why"
   evidence=$(stored_order_evidence "$name" "$txt" "$dir" "$since") || {
     note "step $name: the stored-order evidence export did not complete"
     evidence='[]'
@@ -1471,11 +1529,13 @@ stored_order_check() {
 # overlay's source commit and files, renderer_matches and the binary's sha256), then one row per
 # step directory in the order given (the run's) from its stored-order.json, "not run" for a step
 # without one. A count that no summary line gave is null, never 0. Renderer matches is the step's
-# renderer_matches (false after a redeploy to another commit). The Typing column is the keystroke
-# updates browser typing sent during the step (browsertype.json sent, null when its output held no
-# peer line), or none for a step without --typing.
+# renderer_matches (false after a redeploy to another commit). The five Typed columns are the
+# counts of the step's own typed call over its typed documents alone (stored-order-typed.json),
+# none for a step that typed into no document. The Typing column is the keystroke updates browser
+# typing sent during the step (browsertype.json sent, null when its output held no peer line), or
+# none for a step without --typing.
 stored_order_table() {
-  local bt d typing out=$RUN_DIR/STORED-ORDER.md
+  local bt d typing typed out=$RUN_DIR/STORED-ORDER.md
   bt=$(state '.browsertype.commit // empty')
   {
     printf '# Stored order\n\n'
@@ -1492,19 +1552,24 @@ stored_order_table() {
     else
       printf "Typing: \`none\` for every step: up was given no \`--browsertype-commit\`.\n\n"
     fi
-    printf '| Step | Since | Exit | Documents | Clean | Mismatched | Refused | Failed | Renderer matches | Typing |\n'
-    printf '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n'
+    printf "Typed: the counts of the call that runs first over the step's typed documents alone (\`stored-order --since <window start> --artifact <id>\`, \`<step>/stored-order-typed.json\`), so their result stands even when the run over every document then times out; \`none\` for a step that typed into no document.\n\n"
+    printf '| Step | Since | Exit | Documents | Clean | Mismatched | Refused | Failed | Typed documents | Typed clean | Typed mismatched | Typed refused | Typed failed | Renderer matches | Typing |\n'
+    printf '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n'
     for d in "$@"; do
-      typing=none
+      typing=none typed='none | none | none | none | none'
       if [ -f "$d/browsertype.json" ]; then
         typing=$(jq -r '.sent | if . == null then "null" else tostring end' "$d/browsertype.json") || return 1
       fi
+      if [ -f "$d/stored-order-typed.json" ]; then
+        typed=$(jq -r 'def n: if . == null then "null" else tostring end;
+          "\(.documents | n) | \(.clean | n) | \(.mismatched | n) | \(.refused | n) | \(.failed | n)"' "$d/stored-order-typed.json") || return 1
+      fi
       if [ -f "$d/stored-order.json" ]; then
-        jq -r --arg step "${d##*/}" --arg typing "$typing" 'def n: if . == null then "null" else tostring end;
-          "| \($step) | \(.since | n) | \(if .exit == null then "not run" else .exit | tostring end) | \(.documents | n) | \(.clean | n) | \(.mismatched | n) | \(.refused | n) | \(.failed | n) | \(.renderer_matches | n) | \($typing) |"' \
+        jq -r --arg step "${d##*/}" --arg typed "$typed" --arg typing "$typing" 'def n: if . == null then "null" else tostring end;
+          "| \($step) | \(.since | n) | \(if .exit == null then "not run" else .exit | tostring end) | \(.documents | n) | \(.clean | n) | \(.mismatched | n) | \(.refused | n) | \(.failed | n) | \($typed) | \(.renderer_matches | n) | \($typing) |"' \
           "$d/stored-order.json" || return 1
       else
-        printf '| %s | | not run | | | | | | | %s |\n' "${d##*/}" "$typing"
+        printf '| %s |  | not run |  |  |  |  |  | %s |  | %s |\n' "${d##*/}" "$typed" "$typing"
       fi
     done
   } >"$out.tmp" || return 1
@@ -1519,7 +1584,7 @@ stored_order_table() {
 # no browsertype (up was given no --browsertype-commit). Called after use_run.
 typing_parse() {
   local f
-  TYPING=""
+  TYPING="" TYPING_PLANNED=null
   if [ -z "${OPT[typing]:-}" ]; then
     for f in typing-peers typing-rate typing-docs; do
       [ -z "${OPT[$f]+set}" ] || die "$CMD: --$f needs --typing"
@@ -1537,18 +1602,27 @@ typing_parse() {
   TYPING=1
 }
 
-# typing_docs_step SEED_JSON SESSIONS K RNG_SEED: a load step's typing documents: of the spec
-# documents (artifact_id) of the issues its sessions work on (the first SESSIONS issues in key
-# order, as loadgen run maps sessions onto them), the K whose sha256 of "<RNG_SEED>:<artifact id>"
-# sorts first, one per line.
-typing_docs_step() {
-  local id h
-  jq -r --argjson n "$2" '.issues // [] | sort_by(.key) | .[:$n][] | .artifact_id | strings' "$1" |
-    while IFS= read -r id; do
-      valid uid "$id" || continue
-      h=$(printf '%s:%s' "$4" "$id" | sha256sum)
-      printf '%s %s\n' "${h%% *}" "$id"
-    done | sort | awk -v k="$3" 'NR <= k { print $2 }'
+# TYPING_MIN_VERSIONS is the versions INFRA-707's acceptance 2 needs of every typed document (at
+# least 100 updates and at least 10 versions checked); typing_plan_step warns under it.
+TYPING_MIN_VERSIONS=10
+
+# typing_plan_step NAME SEED_JSON SESSIONS K EVENTS WARMUP DURATION RNG_SEED: a load step's typing
+# documents, into TYPING_LIST, and their planned versions, into TYPING_PLANNED (an object of
+# artifact id to count, which browsertype.json records as planned_versions): the K documents that
+# `loadgen plan-docs` names, those the step's own in-window edits and uploads plan the most
+# versions for, most first, from the step's own flags (the ones run_step gives loadgen run), so
+# browser typing types where the agent writes land. When the K-th document has fewer than
+# TYPING_MIN_VERSIONS planned versions, one warning line names the count and the step goes on.
+typing_plan_step() {
+  local name=$1 k=$4 plan count
+  plan=$(loadgen_local plan-docs -json -seed "$2" -sessions "$3" -top "$k" -events "$5" -warmup "$6" -duration "$7" -rng-seed "$8") ||
+    die "step $name: loadgen plan-docs failed; it names the documents browser typing types into"
+  mapfile -t TYPING_LIST < <(jq -r '.[].artifact | strings' <<<"$plan")
+  TYPING_PLANNED=$(jq -c 'map({key: .artifact, value: .versions}) | from_entries' <<<"$plan") ||
+    die "step $name: reading loadgen plan-docs' planned versions failed"
+  count=$(jq -r --argjson k "$k" 'if length < $k then 0 else .[$k - 1].versions end' <<<"$plan")
+  ((count >= TYPING_MIN_VERSIONS)) ||
+    note "WARNING: step $name: typed document number $k has $count planned versions, under the $TYPING_MIN_VERSIONS versions INFRA-707's acceptance 2 needs of every typed document (loadgen plan-docs named ${#TYPING_LIST[@]} documents of --typing-docs $k); the step runs on"
 }
 
 # The jq program over a replay bundle's window.jsonl (typing_docs_replay): each document's agent
@@ -1625,13 +1699,15 @@ typing_start() {
 typing_stop_at_exit() { typing_stop "${TYPING_STEP[@]}" || true; }
 
 # typing_summary TXT EXIT: browsertype.json from browsertype's output TXT: the commit it was built
-# from, the documents (TYPING_LIST), peers, rate, its exit status (null when it gave none in time)
-# and the sums of its peer lines' sent, skipped and errors, each null (never 0) when TXT holds no
-# peer line.
+# from, the documents (TYPING_LIST), the versions a load step plans for each of them
+# (TYPING_PLANNED, null for a replay), peers, rate, its exit status (null when it gave none in
+# time) and the sums of its peer lines' sent, skipped and errors, each null (never 0) when TXT
+# holds no peer line.
 typing_summary() {
-  jq -Rn --arg commit "$(state '.browsertype.commit')" --argjson exit "$2" --argjson peers "$TYPING_PEERS" --argjson rate "$TYPING_RATE" '
+  jq -Rn --arg commit "$(state '.browsertype.commit')" --argjson exit "$2" --argjson peers "$TYPING_PEERS" \
+    --argjson rate "$TYPING_RATE" --argjson planned "$TYPING_PLANNED" '
     [inputs | capture("^artifact=[^ ]+ peer=[0-9]+ sent=(?<sent>[0-9]+) skipped=(?<skipped>[0-9]+) errors=(?<errors>[0-9]+) ") | map_values(tonumber)] as $l
-    | {commit: $commit, docs: $ARGS.positional, peers: $peers, rate: $rate, exit: $exit}
+    | {commit: $commit, docs: $ARGS.positional, planned_versions: $planned, peers: $peers, rate: $rate, exit: $exit}
       + (if $l == [] then {sent: null, skipped: null, errors: null}
         else {sent: ($l | map(.sent) | add), skipped: ($l | map(.skipped) | add), errors: ($l | map(.errors) | add)} end)' \
     --args "${TYPING_LIST[@]}" <"$1"
@@ -1775,7 +1851,8 @@ save_pod_logs() {
 }
 
 # run_step NAME FACTOR DURATION READS_ONLY PHASE: one step (see the header), into steps/NAME; with
-# --typing (TYPING), browser typing into typing_docs_step's documents.
+# --typing (TYPING), browser typing into typing_plan_step's documents, the ones its own loadgen
+# run plans the most versions for.
 run_step() {
   local name=$1 factor=$2 duration=$3 reads=$4 phase=$5
   valid step "$name" || die "step name '$name' may hold only letters, digits, '.', '_' and '-'"
@@ -1787,13 +1864,15 @@ run_step() {
   [ ! -e "$dir" ] || die "$dir exists: name another step, or remove it"
   [ -f "$RUN_DIR/seed.json" ] || die "no $RUN_DIR/seed.json: cluster.sh seed first"
   ensure_daemons
-  local events requests sessions rng_seed=1
+  local events requests sessions rng_seed=1 warmup=30s
   events=$(awk -v f="$factor" 'BEGIN { printf "%g", 4 * f }')
   requests=$(awk -v f="$factor" 'BEGIN { printf "%g", 60 * f }')
   sessions=$(loadgen_local series-sessions "$factor") || die "loadgen series-sessions $factor failed"
   [ "$reads" = true ] && events=0
   if [ -n "$TYPING" ]; then
-    mapfile -t TYPING_LIST < <(typing_docs_step "$RUN_DIR/seed.json" "$sessions" "$TYPING_DOCS" "$rng_seed")
+    [ "$events" != 0 ] ||
+      die "step $name: --typing with --reads-only has no agent write to choose the typed documents by; run it without --reads-only"
+    typing_plan_step "$name" "$RUN_DIR/seed.json" "$sessions" "$TYPING_DOCS" "$events" "$warmup" "$duration" "$rng_seed"
     typing_chosen "$name"
   fi
   mkdir -p -- "$dir" "$RUN_DIR/phases"
@@ -1813,7 +1892,7 @@ run_step() {
     /work/loadgen run -allow-foreign -name "$name" -out "/work/steps/$name" \
     -seed /work/seed.json -copy-meta "/work/meta/$name.json" -build-commit "$(state .dispatch_commit)" \
     -events "$events" -sessions "$sessions" -requests "$requests" -duration "$duration" \
-    -warmup 30s -grace 20s -rng-seed "$rng_seed" "${ENDPOINTS[@]}"
+    -warmup "$warmup" -grace 20s -rng-seed "$rng_seed" "${ENDPOINTS[@]}"
   note "step $name done: $dir"
 }
 

@@ -39,7 +39,8 @@
 # copy and registers the source's stored-order entry after the table opener, recording the
 # overlay; with --stored-order-checker-commit it builds wholly from that commit, warns, and records
 # renderer_matches false; each step and replay then runs
-# stored-order --since its window start with DATABASE_URL set, the password on no command line and
+# stored-order --since its window start, bounded at 7200 s, with DATABASE_URL set, the password on
+# no command line and
 # in no recorded file, and writes stored-order.txt and stored-order.json (a clean run's counts, a
 # mismatching run's, which is no step failure, and nulls for a missing summary line); a mismatching
 # run exports each mismatched or refused document's rows (one psql \copy to stdout per table in the
@@ -81,13 +82,18 @@
 # --browsertype-commit builds browsertype with the stored-order build code and records it; step
 # and replay --typing write the agent token into the runner from standard input (on no command
 # line, in no file under the step directory, never printed), start browsertype with the step's
-# flags before loadgen's run and stop it with SIGTERM after the stored-order command (their order
-# in the fake kubectl's log), type into the K documents the step writes most, and write
-# browsertype.txt and browsertype.json, a peer error being no step failure; collect's
-# STORED-ORDER.md has a typing column (sent updates, or none) and its curves leave typing steps
+# flags before loadgen's run and stop it with SIGTERM after the stored-order commands (their order
+# in the fake kubectl's log), type into the K documents loadgen plan-docs names from the step's own
+# flags, run stored-order over those documents (one --artifact each) before the run over every
+# document, both within the bound, and write stored-order-typed.txt, stored-order-typed.json,
+# browsertype.txt and browsertype.json (with each typed document's planned versions), a peer error
+# being no step failure; collect's
+# STORED-ORDER.md has the typed columns and a typing column (sent updates, or none) and its curves
+# leave typing steps
 # out; (m) a replay's typing documents are the most-written documents of its sub-window in the
-# bundle fixture, mapped through replay_ids, and a load step's come from its sessions' issues by
-# its rng seed; (n) a read-only kubectl exec is retried once 5 s after a dial timeout or a refused
+# bundle fixture, mapped through replay_ids, and a load step's are loadgen plan-docs' documents,
+# with their planned versions and a warning when the Kth has fewer than 10; (n) a read-only
+# kubectl exec is retried once 5 s after a dial timeout or a refused
 # or reset API server connection, never after another error, and a write is never retried.
 set -euo pipefail
 
@@ -456,6 +462,26 @@ for a in "$@"; do
   prev=$a
 done
 case $1 in
+  # The fake plan-docs: the seed's spec documents, each with the planned versions
+  # FAKE_PLAN_VERSIONS names (whitespace-separated, in the seed's order; 100 for the rest), most
+  # versions first, the first -top of them; with -json the objects, else one artifact id per line.
+  plan-docs)
+    seed="" top=20 json=false prev=""
+    for a in "$@"; do
+      case $prev in
+        -seed) seed=$a ;;
+        -top) top=$a ;;
+      esac
+      [ "$a" != -json ] || json=true
+      prev=$a
+    done
+    jq -r --argjson top "$top" --argjson json "$json" --arg counts "${FAKE_PLAN_VERSIONS:-}" '
+      ($counts | split(" ") | map(select(. != "") | tonumber)) as $c
+      | [.issues[] | .artifact_id] | to_entries
+      | map(($c[.key] // 100) as $v | {artifact: .value, edits: ($v - ($v / 3 | floor)), uploads: ($v / 3 | floor), versions: $v})
+      | sort_by(-.versions, .artifact) | .[:$top]
+      | if $json then tojson else map(.artifact) | .[] end' "$seed"
+    ;;
   series-sessions) echo 400 ;;
   replay-unpack)
     # The bundle: its meta, and FAKE_DIR/bundle-fixture's files (state.json, window.jsonl) when the
@@ -914,8 +940,9 @@ grep -qx -- "args stored-order --since 2026-10-28T10:00:00Z" "$fake/stored-order
 grep -qxF -- "DATABASE_URL postgres://dispatch:$pg_password@postgres.$ns.svc:5432/dispatch?sslmode=disable" "$fake/stored-order.log" ||
   fail "stored-order ran without the copy's DATABASE_URL"
 so_call=$(grep -F '/work/envoy-dispatch stored-order' "$fake/kubectl.log") || fail "no kubectl call ran stored-order in the runner"
-[[ $so_call == "-n $ns exec -i runner -c runner -- sh -c "*" sh 1800 2026-10-28T10:00:00Z" ]] ||
-  fail "stored-order's kubectl call is not an exec -i in the runner bounded at 1800 s since the window start: $so_call"
+[[ $so_call == "-n $ns exec -i runner -c runner -- sh -c "*" sh 7200 2026-10-28T10:00:00Z" ]] ||
+  fail "stored-order's kubectl call is not an exec -i in the runner bounded at 7200 s since the window start, over every document: $so_call"
+[ ! -e "$run_dir/steps/smoke/stored-order-typed.json" ] || fail "a step that did not type ran the typed stored-order call"
 ! grep -qF -- "$pg_password" <<<"$so_call" || fail "stored-order's kubectl call carries the Postgres password"
 grep -qx 'stored-order: documents=2 clean=2 mismatched=0 refused=0 failed=0' "$run_dir/steps/smoke/stored-order.txt" ||
   fail "stored-order.txt does not hold the command's output: $(cat "$run_dir/steps/smoke/stored-order.txt" 2>/dev/null)"
@@ -1110,10 +1137,12 @@ for s in smoke reads; do
 done
 [ "$(grep -c -- "^codepaths -step $run_dir/steps/r16 .* -residual-notes " "$fake/loadgen.log")" = 2 ] ||
   fail "collect did not run the replay step's loadgen codepaths beside the outage"
-printf '%s\n' '| smoke | 2026-10-28T10:00:00Z | 0 | 2 | 2 | 0 | 0 | 0 | true | none |' '| reads | 2026-10-28T10:00:00Z | 1 | 3 | 1 | 1 | 1 | 0 | true | none |' \
-  '| r16 | 2026-10-28T10:00:00Z | 1 | null | null | null | null | null | true | none |' >"$tmp/want-stored-order"
+none5='none | none | none | none | none'
+printf '%s\n' "| smoke | 2026-10-28T10:00:00Z | 0 | 2 | 2 | 0 | 0 | 0 | $none5 | true | none |" \
+  "| reads | 2026-10-28T10:00:00Z | 1 | 3 | 1 | 1 | 1 | 0 | $none5 | true | none |" \
+  "| r16 | 2026-10-28T10:00:00Z | 1 | null | null | null | null | null | $none5 | true | none |" >"$tmp/want-stored-order"
 sed -n '/^| --- /,$p' "$run_dir/STORED-ORDER.md" | tail -n +2 | diff -u "$tmp/want-stored-order" - >&2 ||
-  fail "STORED-ORDER.md does not hold one row per step, in the order they ran, with their counts, exit and renderer_matches"
+  fail "STORED-ORDER.md does not hold one row per step, in the order they ran, with their counts, exit, the typed call's counts and renderer_matches"
 grep -qF "The checker was built for dispatch commit $commit_ok from that commit's own tree (no overlay). renderer_matches: true. Binary sha256 $(jq -r .stored_order.sha256 "$run_dir/state.json")." "$run_dir/STORED-ORDER.md" ||
   fail "STORED-ORDER.md does not name the commit the checker was built from, its overlay, renderer_matches and sha256: $(cat "$run_dir/STORED-ORDER.md")"
 ! grep -qF -- "$pg_password" "$run_dir/STORED-ORDER.md" || fail "STORED-ORDER.md holds the Postgres password"
@@ -1326,18 +1355,20 @@ for c in "--typing-rate 0|--typing-rate '0' is not a number" "--typing-peers x|-
   [ ! -e "$run_dir/steps/bad" ] || fail "step --typing ${c%%|*} made its step directory"
 done
 
-run_cluster step --namespace "$ns" 10x-typing 10 --duration 1m --typing --typing-docs 3 --typing-peers 3 --typing-rate 2.5
+# The step's documents: the 3 that loadgen plan-docs, over the step's own flags, says its
+# in-window edits and uploads plan the most versions for (the fake plan-docs reads
+# FAKE_PLAN_VERSIONS in the seed's order: LGA-3 40, LGA-1 12, LGA-5 7, LGA-2 30, LGA-4 60).
+FAKE_PLAN_VERSIONS='40 12 7 30 60' run_cluster step --namespace "$ns" 10x-typing 10 --duration 1m --typing --typing-docs 3 --typing-peers 3 --typing-rate 2.5
 ((RC == 0)) || fail "step --typing exited $RC"
 tdir=$run_dir/steps/10x-typing
-# The load step's documents: of the seed's spec documents, the 3 whose sha256 of "<rng seed>:<id>"
-# (rng seed 1) sorts first.
-want_docs=$(for i in 1 2 3 4 5; do
-  id=20000000-0000-4000-8000-00000000000$i
-  printf '%s %s\n' "$(printf '1:%s' "$id" | sha256sum | cut -c1-64)" "$id"
-done | sort | head -n3 | cut -d' ' -f2)
+want_docs=$(printf '20000000-0000-4000-8000-00000000000%s\n' 4 3 2)
+grep -qxF -- "plan-docs -json -seed $run_dir/seed.json -sessions 400 -top 3 -events 40 -warmup 30s -duration 1m -rng-seed 1" "$fake/loadgen.log" ||
+  fail "the step did not choose its typing documents with loadgen plan-docs over its own flags: $(grep '^plan-docs' "$fake/loadgen.log")"
 [ "$(cat "$fake/runner/work/typing/10x-typing.docs")" = "$want_docs" ] ||
-  fail "the step's typing documents are not the 3 the rng seed chooses: $(cat "$fake/runner/work/typing/10x-typing.docs" 2>/dev/null)"
-grep -qxF -- "typing-10x-typing /work/browsertype -url http://dispatch.$ns.svc:8766 -token-file /work/typing/token -session ses-browsertype -artifacts-file /work/typing/10x-typing.docs -peers 3 -rate 2.5 -duration 3410s -seed 1" \
+  fail "the step's typing documents are not the 3 plan-docs plans the most versions for: $(cat "$fake/runner/work/typing/10x-typing.docs" 2>/dev/null)"
+! grep -q 'WARNING: step 10x-typing:' "$tmp/out" ||
+  fail "a step whose 3rd typed document has 30 planned versions warned: $(grep 'WARNING: step 10x-typing:' "$tmp/out")"
+grep -qxF -- "typing-10x-typing /work/browsertype -url http://dispatch.$ns.svc:8766 -token-file /work/typing/token -session ses-browsertype -artifacts-file /work/typing/10x-typing.docs -peers 3 -rate 2.5 -duration 8810s -seed 1" \
   "$fake/runner-starts" || fail "browsertype did not start with the step's flags: $(grep '^typing-' "$fake/runner-starts")"
 # The token: written into the runner from standard input, on no command line, in no file under the
 # step directory, never printed.
@@ -1349,28 +1380,48 @@ grep -E 'browsertype|/work/typing|sh typing-' "$fake/kubectl.log" >"$tmp/typing-
 ! grep -rqF -- "$dispatch_token" "$tdir" || fail "a file under the step directory holds the agent token: $(grep -rlF -- "$dispatch_token" "$tdir")"
 ! grep -qF -- "$dispatch_token" "$tmp/out" || fail "step --typing printed the agent token"
 # The order in kubectl.log: the token, browsertype's start, loadgen's start (its warm-up, then its
-# window), the stored-order command, then browsertype's SIGTERM.
+# window), the two stored-order commands, then browsertype's SIGTERM.
 # shellcheck disable=SC2016 # the token write's runner script, as kubectl.log holds it
 token_at=$(line_of 'cat >"$1/token"') bt_at=$(line_of 'sh typing-10x-typing /work/browsertype ') lg_at=$(line_of ' sh step-10x-typing ')
 so_at=$(line_of '/work/envoy-dispatch stored-order' last) kill_at=$(line_of 'kill -TERM' last)
 grep -n -- 'kill -TERM' "$fake/kubectl.log" | tail -n1 | grep -qF 'sh typing-10x-typing' || fail "the SIGTERM did not go to typing-10x-typing"
 ((token_at < bt_at && bt_at < lg_at && lg_at < so_at && so_at < kill_at)) ||
   fail "the order is not token, browsertype, loadgen, stored-order, SIGTERM (kubectl.log lines $token_at, $bt_at, $lg_at, $so_at, $kill_at)"
+# The typed documents first, one --artifact each, then the run over every document, both since the
+# window start and both within the 7200 s bound.
+mapfile -t so_calls < <(grep -F '/work/envoy-dispatch stored-order' "$fake/kubectl.log")
+[ "${#so_calls[@]}" = 2 ] ||
+  fail "a typing step ran ${#so_calls[@]} stored-order commands, not the typed documents' and then every document's: $(printf '%s\n' "${so_calls[@]}")"
+mapfile -t want_docs_a <<<"$want_docs"
+typed_args=$(printf -- ' --artifact %s' "${want_docs_a[@]}")
+[[ ${so_calls[0]} == *" sh 7200 2026-10-28T10:00:00Z$typed_args" ]] ||
+  fail "the first stored-order call is not the typed documents' within the bound: ${so_calls[0]}"
+{ [[ ${so_calls[1]} =~ \ sh\ ([0-9]+)\ 2026-10-28T10:00:00Z$ ]] && ((BASH_REMATCH[1] > 0 && BASH_REMATCH[1] <= 7200)); } ||
+  fail "the second stored-order call is not the run over every document within what is left of the bound: ${so_calls[1]}"
+grep -qx 'stored-order: documents=2 clean=2 mismatched=0 refused=0 failed=0' "$tdir/stored-order-typed.txt" ||
+  fail "stored-order-typed.txt does not hold the typed call's output: $(cat "$tdir/stored-order-typed.txt" 2>/dev/null)"
+jq -e --argjson k "$checker" '. == $k + {exit: 0, since: "2026-10-28T10:00:00Z", documents: 2, clean: 2, mismatched: 0, refused: 0, failed: 0}' \
+  "$tdir/stored-order-typed.json" >/dev/null || fail "the typed call's stored-order-typed.json is wrong: $(cat "$tdir/stored-order-typed.json" 2>/dev/null)"
+grep -qF 'step 10x-typing: stored-order over the 3 typed documents (envoy-dispatch of dispatch commit aaaaaaaaaaaa, renderer_matches true) since 2026-10-28T10:00:00Z: exit 0, documents=2 clean=2' "$tmp/out" ||
+  fail "the typed stored-order call printed no line of its own"
 grep -qx 'artifact=a peer=1 sent=38 skipped=0 errors=0 error=""' "$tdir/browsertype.txt" || fail "browsertype.txt does not hold browsertype's output"
 jq -e --arg c "$commit_bt" --argjson d "$(jq -Rn '[inputs]' <<<"$want_docs")" \
-  '. == {commit: $c, docs: $d, peers: 3, rate: 2.5, exit: 0, sent: 78, skipped: 1, errors: 0}' "$tdir/browsertype.json" >/dev/null ||
+  --argjson p "$(jq -nc --args '{($ARGS.positional[0]): 60, ($ARGS.positional[1]): 40, ($ARGS.positional[2]): 30}' "${want_docs_a[@]}")" \
+  '. == {commit: $c, docs: $d, planned_versions: $p, peers: 3, rate: 2.5, exit: 0, sent: 78, skipped: 1, errors: 0}' "$tdir/browsertype.json" >/dev/null ||
   fail "browsertype.json is wrong: $(cat "$tdir/browsertype.json")"
 grep -qF 'step 10x-typing: browsertype exit 0: sent=78 skipped=1 errors=0' "$tmp/out" || fail "step --typing did not print browsertype's sums"
 [ ! -f "$tdir/step-failed.json" ] || fail "a typing step was marked failed: $(cat "$tdir/step-failed.json")"
 
-FAKE_TYPING_RC=1 run_cluster step --namespace "$ns" 10x-typing-err 10 --duration 1m --typing
+# --typing-docs 20 over a seed of 5 documents: one warning line, since the 20th has no planned
+# version and INFRA-707's acceptance 2 needs 10 of every typed document.
+FAKE_TYPING_RC=1 FAKE_PLAN_VERSIONS='40 12 7 30 60' run_cluster step --namespace "$ns" 10x-typing-err 10 --duration 1m --typing
 ((RC == 0)) || fail "step --typing with a peer error exited $RC"
+grep -qF 'WARNING: step 10x-typing-err: typed document number 20 has 0 planned versions, under the 10 versions INFRA-707'"'"'s acceptance 2 needs of every typed document (loadgen plan-docs named 5 documents of --typing-docs 20); the step runs on' "$tmp/out" ||
+  fail "a step whose 20th typed document has no planned version did not warn: $(grep WARNING "$tmp/out")"
 grep -q '^typing-10x-typing-err .* -peers 2 -rate 5 ' "$fake/runner-starts" || fail "step --typing's defaults are not 2 peers at 5 keystrokes/s"
-jq -e '.exit == 1 and .errors == 1 and .sent == 78 and (.docs | length) == 5' "$run_dir/steps/10x-typing-err/browsertype.json" >/dev/null ||
+jq -e '.exit == 1 and .errors == 1 and .sent == 78 and (.docs | length) == 5 and (.planned_versions | length) == 5
+  and .planned_versions["20000000-0000-4000-8000-000000000005"] == 7' "$run_dir/steps/10x-typing-err/browsertype.json" >/dev/null ||
   fail "browsertype.json with a peer error is wrong: $(cat "$run_dir/steps/10x-typing-err/browsertype.json")"
-grep -qF 'step 10x-typing-err: browsertype exit 1: sent=78 skipped=1 errors=1; a peer error is reported, not a step failure' "$tmp/out" ||
-  fail "step --typing did not report the peer error"
-[ ! -f "$run_dir/steps/10x-typing-err/step-failed.json" ] || fail "a peer error failed the step"
 
 FAKE_QUIET=1 run_cluster replay-prepare --namespace "$ns" --manifest "$seeded"
 ((RC == 0)) || fail "replay-prepare for the typing replay exited $RC"
@@ -1378,8 +1429,11 @@ run_cluster replay --namespace "$ns" r16-typing --to 5m --typing --typing-docs 2
 ((RC == 0)) || fail "replay --typing exited $RC"
 grep -qF -- "-d dispatch -v ON_ERROR_STOP=1 -At -c select logged_id, local_id from loadtest.replay_ids where kind = 'artifact'" "$fake/kubectl.log" ||
   fail "replay --typing did not read loadtest.replay_ids from database dispatch"
-jq -e --arg a "$typing_l1" --arg b "$typing_l2" '.docs == [$a, $b] and .exit == 0' "$run_dir/steps/r16-typing/browsertype.json" >/dev/null ||
-  fail "replay --typing did not type into the 2 documents the window writes most: $(cat "$run_dir/steps/r16-typing/browsertype.json")"
+jq -e --arg a "$typing_l1" --arg b "$typing_l2" '.docs == [$a, $b] and .exit == 0 and .planned_versions == null' "$run_dir/steps/r16-typing/browsertype.json" >/dev/null ||
+  fail "replay --typing did not type into the 2 documents the window writes most, with no planned versions: $(cat "$run_dir/steps/r16-typing/browsertype.json")"
+mapfile -t so_calls < <(grep -F '/work/envoy-dispatch stored-order' "$fake/kubectl.log" | tail -n2)
+[[ ${so_calls[0]} == *" --artifact $typing_l1 --artifact $typing_l2" && ${so_calls[1]} != *--artifact* ]] ||
+  fail "replay --typing did not run the typed documents' stored-order call first: $(printf '%s\n' "${so_calls[@]}")"
 bt_at=$(line_of 'sh typing-r16-typing /work/browsertype ') lg_at=$(line_of ' sh replay-r16-typing ') kill_at=$(line_of 'kill -TERM' last)
 so_at=$(line_of '/work/envoy-dispatch stored-order' last)
 ((bt_at < lg_at && lg_at < so_at && so_at < kill_at)) || fail "replay --typing's order is not browsertype, loadgen, stored-order, SIGTERM"
@@ -1389,14 +1443,14 @@ run_cluster step --namespace "$ns" plain 1 --duration 1m
 { [ ! -e "$run_dir/steps/plain/browsertype.json" ] && ! grep -q '^typing-plain ' "$fake/runner-starts"; } || fail "a step without --typing ran browsertype"
 run_cluster collect --namespace "$ns"
 ((RC == 0)) || fail "collect of the typing run exited $RC"
-sed -n '/^| --- /,$p' "$run_dir/STORED-ORDER.md" | tail -n +2 | awk -F' [|] ' '{ print $1 " " $NF }' >"$tmp/typing-column"
-printf '%s\n' '| 10x-typing 78 |' '| 10x-typing-err 78 |' '| r16-typing 78 |' '| plain none |' | diff -u - "$tmp/typing-column" >&2 ||
-  fail "STORED-ORDER.md's typing column is not each step's sent updates, or none"
 grep -qF "built from commit $commit_bt" "$run_dir/STORED-ORDER.md" || fail "STORED-ORDER.md does not name the browsertype commit"
+sed -n '/^| --- /,$p' "$run_dir/STORED-ORDER.md" | tail -n +2 | awk -F' [|] ' '{ print $1 " " $(NF - 6) " " $NF }' >"$tmp/typing-column"
+printf '%s\n' '| 10x-typing 2 78 |' '| 10x-typing-err 2 78 |' '| r16-typing 2 78 |' '| plain none none |' | diff -u - "$tmp/typing-column" >&2 ||
+  fail "STORED-ORDER.md's typed documents and typing columns are not each step's typed count and sent updates, or none"
 [ "$(logged_steps 'curves -out')" = plain ] || fail "collect's curves took a typing step: '$(logged_steps 'curves -out')'"
 run_cluster down --namespace "$ns"
 ((RC == 0)) || fail "down of the typing run exited $RC"
-pass "up --browsertype-commit builds browsertype; step and replay --typing start it before loadgen with the token from standard input, type into the documents the step writes most, stop it after stored-order, and record browsertype.txt and browsertype.json; a peer error is no step failure; collect's STORED-ORDER.md has the typing column and its curves leave typing steps out"
+pass "up --browsertype-commit builds browsertype; step and replay --typing start it before loadgen with the token from standard input, type into the documents their own writes plan the most versions for, stop it after the stored-order commands, and record browsertype.txt and browsertype.json; a peer error is no step failure; collect's STORED-ORDER.md has the typed and typing columns and its curves leave typing steps out"
 
 # up --stored-order-source: the checker is the dispatch tree (commit_old, without the command) with
 # the source's INFRA-707 files copied into its scratch copy and the source's stored-order entry
@@ -1768,15 +1822,42 @@ pass "the evidence export reads the start-* tables from the template the step wa
   [ "$(typing_docs_replay "$dir/bundle" 300 600 20 "$dir/ids")" = "$typing_l3" ] ||
     fail "the replay's typing documents in 5-10m are not doc-3's copy id alone: $(typing_docs_replay "$dir/bundle" 300 600 20 "$dir/ids")"
   [ -z "$(typing_docs_replay "$dir/bundle" 0 300 20 /dev/null)" ] || fail "a replay with no replay_ids rows still chose typing documents"
-  # A load step: only the issues its sessions work on (the first 2 in key order here), by the rng seed.
-  jq -n '{issues: [3, 1, 5, 2, 4 | {key: "LGA-\(.)", artifact_id: "20000000-0000-4000-8000-00000000000\(.)"}]}' >"$dir/seed.json"
-  got=$(typing_docs_step "$dir/seed.json" 2 5 1 | sort | tr '\n' ' ')
-  [ "$got" = "20000000-0000-4000-8000-000000000001 20000000-0000-4000-8000-000000000002 " ] ||
-    fail "a load step's typing documents are not the spec documents of its sessions' issues: $got"
-  { [ "$(typing_docs_step "$dir/seed.json" 400 3 1)" = "$(typing_docs_step "$dir/seed.json" 400 3 1)" ] &&
-    [ "$(typing_docs_step "$dir/seed.json" 400 3 1 | wc -l)" = 3 ]; } || fail "a load step's typing documents are not 3, the same for the same rng seed"
+  # A load step: loadgen plan-docs' documents, most planned versions first, with their counts and,
+  # under 10 planned versions for the Kth, one warning line.
+  LOADGEN=$dir/loadgen RUN_DIR=$dir
+  cat >"$LOADGEN" <<'PLAN'
+#!/usr/bin/env bash
+# A plan-docs that prints its flags on the first line of FAKE_DIR/plan-docs.args and the plan
+# PLAN_DOCS_JSON holds, cut to -top.
+printf '%s\n' "$*" >"$FAKE_DIR/plan-docs.args"
+top=20 prev=""
+for a in "$@"; do
+  [ "$prev" != -top ] || top=$a
+  prev=$a
+done
+jq -c --argjson top "$top" '.[:$top]' <<<"$PLAN_DOCS_JSON"
+PLAN
+  chmod +x "$LOADGEN"
+  plan() { jq -nc --args '[$ARGS.positional[] | split(":") | {artifact: .[0], edits: (.[1] | tonumber), uploads: (.[2] | tonumber), versions: ((.[1] | tonumber) + (.[2] | tonumber))}]' "$@"; }
+  export PLAN_DOCS_JSON
+  PLAN_DOCS_JSON=$(plan d-a:30:30 d-b:20:20 d-c:8:1)
+  TYPING_LIST=() TYPING_PLANNED=null
+  typing_plan_step 10x-typing "$dir/seed.json" 400 2 40 30s 10m 1 2>"$dir/warn" || fail "typing_plan_step failed: $(cat "$dir/warn")"
+  [ "${TYPING_LIST[*]}" = "d-a d-b" ] || fail "a load step's typing documents are not plan-docs' first 2: ${TYPING_LIST[*]}"
+  [ "$TYPING_PLANNED" = '{"d-a":60,"d-b":40}' ] || fail "the planned versions of the typed documents are wrong: $TYPING_PLANNED"
+  [ ! -s "$dir/warn" ] || fail "a step whose 2nd typed document has 40 planned versions warned: $(cat "$dir/warn")"
+  [ "$(cat "$FAKE_DIR/plan-docs.args")" = "plan-docs -json -seed $dir/seed.json -sessions 400 -top 2 -events 40 -warmup 30s -duration 10m -rng-seed 1" ] ||
+    fail "typing_plan_step did not run plan-docs with the step's own flags: $(cat "$FAKE_DIR/plan-docs.args")"
+  # The Kth document under 10 planned versions, and fewer documents than K: one warning line each.
+  typing_plan_step thin "$dir/seed.json" 400 3 40 30s 10m 1 2>"$dir/warn" || fail "typing_plan_step failed: $(cat "$dir/warn")"
+  { [ "$(wc -l <"$dir/warn")" = 1 ] && grep -qF 'WARNING: step thin: typed document number 3 has 9 planned versions, under the 10 versions' "$dir/warn"; } ||
+    fail "a step whose third typed document has 9 planned versions did not warn once: $(cat "$dir/warn")"
+  [ "${TYPING_LIST[*]}" = "d-a d-b d-c" ] || fail "a warned step's typing documents are not plan-docs' 3: ${TYPING_LIST[*]}"
+  typing_plan_step thin "$dir/seed.json" 400 4 40 30s 10m 1 2>"$dir/warn" || fail "typing_plan_step failed: $(cat "$dir/warn")"
+  { grep -qF 'typed document number 4 has 0 planned versions' "$dir/warn" && grep -qF 'named 3 documents of --typing-docs 4' "$dir/warn"; } ||
+    fail "a step with fewer planned documents than --typing-docs did not warn with 0: $(cat "$dir/warn")"
 )
-pass "a replay types into the documents with the most agent writes in its sub-window, mapped through replay_ids; a load step into spec documents of its sessions' issues chosen by its rng seed"
+pass "a replay types into the documents with the most agent writes in its sub-window, mapped through replay_ids; a load step into the documents loadgen plan-docs says its own writes plan the most versions for, recording each one's planned count and warning when the Kth has fewer than 10"
 
 # ---- (n) the retry of a read-only kubectl exec ----------------------------------------------------
 

@@ -121,6 +121,20 @@ func parseEventMix(s string) (eventMix, error) {
 	return m, nil
 }
 
+// checkSeedMix refuses a seed that the mix cannot draw from: a reply needs a root comment to
+// answer and an anchored comment a quote to anchor on, in every issue. path names the seed.
+func checkSeedMix(sf seedFile, mix eventMix, path string) error {
+	for _, is := range sf.Issues {
+		if mix.Weights[kindReply] > 0 && len(is.AnchoredCommentIDs)+len(is.PlainCommentIDs) == 0 {
+			return fmt.Errorf("seed %s: issue %s has no root comment ids for replies; reseed with this loadgen", path, is.Key)
+		}
+		if mix.Weights[kindAnchored] > 0 && len(is.Quotes) == 0 {
+			return fmt.Errorf("seed %s: issue %s has no quotes for anchored comments", path, is.Key)
+		}
+	}
+	return nil
+}
+
 // pick maps x in [0, 1) to a kind in proportion to the weights.
 func (m eventMix) pick(x float64) string {
 	x *= m.total
