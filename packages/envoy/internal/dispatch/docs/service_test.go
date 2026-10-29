@@ -858,6 +858,193 @@ func TestSetAskBlockTextRefusalNamesADeleteThatAppliesWhateverTheShape(t *testin
 	}
 }
 
+// Every decision body of one to five blocks - each a paragraph holding text (P), a paragraph
+// holding none (E), a bullet list (L), or a bullet list whose item holds a nested list (N) - that
+// breaks the content rule is refused, and the refusal followed exactly as written - ONE document
+// edit holding one delete per block it names, then the same ask edit - leaves the decision valid,
+// every word it did not name for deletion still in the document, and every word it did quoted in
+// it; or the refusal names no delete and says why. No body is skipped for resembling another, and
+// each block's words are its own, so a lost word names its block.
+func TestSetAskBlockTextRefusalOfEveryBrokenBodyLeadsToAValidDecision(t *testing.T) {
+	service, _ := newTestService(t)
+	service.settle = time.Hour
+	var bodies [][]string
+	var extend func(body []string)
+	extend = func(body []string) {
+		if len(body) > 0 {
+			bodies = append(bodies, body)
+		}
+		if len(body) == 5 {
+			return
+		}
+		for _, kind := range []string{"P", "E", "L", "N"} {
+			extend(append(slices.Clone(body), kind))
+		}
+	}
+	extend(nil)
+	if len(bodies) != 4+16+64+256+1024 {
+		t.Fatalf("enumerated %d bodies, want every one of 1364", len(bodies))
+	}
+	var (
+		mu                        sync.Mutex
+		broken, followed, unnamed int
+		noDelete                  = map[string]int{}
+		noDeleteShape             = map[string]string{}
+	)
+	t.Cleanup(func() {
+		t.Logf("%d bodies enumerated, %d breaking the content rule: %d followed to a valid decision, %d naming no delete and saying why, %d failing",
+			len(bodies), broken, followed, unnamed, broken-followed-unnamed)
+		for reason, count := range noDelete {
+			t.Logf("%d naming no delete (%s among them): %s", count, noDeleteShape[reason], reason)
+		}
+	})
+	for index, body := range bodies {
+		children := make([]*pmdoc.Node, len(body))
+		for position, kind := range body {
+			children[position] = askBodyBlock(t, kind, position+1)
+		}
+		if pmdoc.AskContentError(&pmdoc.Node{Type: "ask", Children: children}) == nil {
+			continue
+		}
+		broken++
+		shape := strings.Join(body, "-")
+		t.Run(shape, func(t *testing.T) {
+			t.Parallel()
+			// A document of its own on an issue of its own, so no two bodies share a lock.
+			artifactID := createIssueDocument(t, service.store, index+2, "# First")
+			seedServiceText(t, service, artifactID, ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n\n- Ship: Release it\n- Hold: Wait for review\n:::\n")
+			settleCurrentGeneration(t, service, artifactID)
+			editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+				firstAsk(tree).Children = children
+				return tree
+			})
+			settleCurrentGeneration(t, service, artifactID)
+			before := liveTree(t, service, artifactID)
+			ask := firstAsk(before)
+			edit := AskBlockEdit{Urgency: new("high")}
+			err := sendAskOptions(service, artifactID, edit)
+			var unrepresentable *ErrAskBlockUnrepresentable
+			if !errors.As(err, &unrepresentable) {
+				t.Fatalf("ask edit of the broken body = %v, want ErrAskBlockUnrepresentable", err)
+			}
+			if !blocksToDelete.MatchString(unrepresentable.Reason) {
+				why := noDeleteExplanation(ask, unrepresentable.Reason)
+				if why == "" || strings.Contains(unrepresentable.Reason, "delete the blocks") {
+					t.Fatalf("the refusal names no delete list and does not say why: %v", err)
+				}
+				if !liveTree(t, service, artifactID).EqualWithBlockIDs(before) {
+					t.Fatalf("the refused ask edit wrote to the document: %v", err)
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				unnamed++
+				if noDelete[why]++; noDelete[why] == 1 {
+					noDeleteShape[why] = shape
+				}
+				return
+			}
+			deletes, quoted := refusalDeletes(t, err)
+			if len(deletes) == 0 || len(quoted) != len(ask.Children) {
+				t.Fatalf("the refusal names %q to delete and quotes %d blocks, want a delete and the ask's %d: %v", deletes, len(quoted), len(ask.Children), err)
+			}
+			ops := make([]model.EditOp, 0, len(deletes))
+			for _, id := range deletes {
+				if !slices.ContainsFunc(ask.Children, func(child *pmdoc.Node) bool { return child.Attrs[pmdoc.BlockIDAttr] == id }) {
+					t.Fatalf("the refusal names %q to delete, which is no block of the ask: %v", id, err)
+				}
+				ops = append(ops, model.EditOp{Op: "delete", Block: id})
+			}
+			kept := []string{}
+			for _, block := range before.Children {
+				if block != ask {
+					kept = append(kept, textWords(block)...)
+					continue
+				}
+				for _, child := range ask.Children {
+					id, _ := child.Attrs[pmdoc.BlockIDAttr].(string)
+					if !slices.Contains(deletes, id) {
+						kept = append(kept, textWords(child)...)
+						continue
+					}
+					for _, word := range textWords(child) {
+						if !strings.Contains(quoted[id], word) {
+							t.Fatalf("the refusal does not quote %q of block %q it has the caller delete: %v", word, id, err)
+						}
+					}
+				}
+			}
+			if _, applyErr := joinedApplyOps(service, artifactID, ops, model.Actor{Kind: "user", ID: "alice"}, nil); applyErr != nil {
+				t.Fatalf("one document edit deleting %q, as the refusal names: %v\nrefusal: %v", deletes, applyErr, err)
+			}
+			if editErr := sendAskOptions(service, artifactID, edit); editErr != nil {
+				t.Fatalf("ask edit after deleting %q, as the refusal names: %v\nrefusal: %v", deletes, editErr, err)
+			}
+			settleCurrentGeneration(t, service, artifactID)
+			after := liveTree(t, service, artifactID)
+			repaired := firstAsk(after)
+			if got, exists := repaired.Attrs["invalid"]; exists {
+				t.Fatalf("after following the refusal the ask is invalid: %v\nrefusal: %v", got, err)
+			}
+			block, parseErr := parseAskBlock(repaired)
+			if strictErr := readAskBlockStrictly(repaired); parseErr != nil || strictErr != nil || repaired.Attrs["urgency"] != "high" {
+				t.Fatalf("after following the refusal the ask reads %v / %v with urgency %v, want it valid and the ask edit applied\nrefusal: %v",
+					parseErr, strictErr, repaired.Attrs["urgency"], err)
+			}
+			if state, question, options := blockAskRow(t, service, artifactID, "ask-lists"); state != "open" || question != block.question || !slices.Equal(options, block.options) {
+				t.Fatalf("ask row = state=%q question=%q options=%#v, want it open as the block reads: %q %#v", state, question, options, block.question, block.options)
+			}
+			words := textWords(after)
+			for _, word := range kept {
+				if !slices.Contains(words, word) {
+					t.Fatalf("the document lost %q, which the refusal did not name for deletion: it reads %q\nrefusal: %v", word, words, err)
+				}
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			followed++
+		})
+	}
+}
+
+// askBodyBlock is the block of kind - P a paragraph holding text, E a paragraph holding none, L a
+// bullet list, N a bullet list whose item holds a nested list - at position in an ask's body, its
+// words found nowhere else in the body.
+func askBodyBlock(t *testing.T, kind string, position int) *pmdoc.Node {
+	t.Helper()
+	var block *pmdoc.Node
+	switch kind {
+	case "P":
+		block = parsedBlock(t, fmt.Sprintf("Question%d asks%d?\n", position, position))
+	case "E":
+		block = &pmdoc.Node{Type: "paragraph", Attrs: pmdoc.Attrs{}}
+	case "L":
+		block = parsedBlock(t, fmt.Sprintf("- Option%d: Means%d\n- Other%d\n", position, position, position))
+	case "N":
+		block = parsedBlock(t, fmt.Sprintf("- Choice%d: Holds%d\n  - Nested%d\n", position, position, position))
+	default:
+		t.Fatalf("no ask body block of kind %q", kind)
+	}
+	block.Attrs[pmdoc.BlockIDAttr] = fmt.Sprintf("body-%d", position)
+	return block
+}
+
+// noDeleteExplanation is why reason, a refusal of an edit of ask naming no delete, names none, as
+// it says it - or "" when it does not say, or says what is not so.
+func noDeleteExplanation(ask *pmdoc.Node, reason string) string {
+	question := slices.ContainsFunc(ask.Children, func(child *pmdoc.Node) bool {
+		return child.Type == "paragraph" && strings.TrimSpace(pmdoc.TextContent(child)) != ""
+	})
+	for _, explanation := range []string{
+		`ask block "ask-lists" has an empty question`,
+		"no document edit deleting this ask's own blocks (dispatch doc-edit, deleting a block by its id) leaves it valid",
+	} {
+		if strings.Contains(reason, explanation) && !question {
+			return explanation
+		}
+	}
+	return ""
+}
+
 // AskContentError reads the decisions nested in an ask too, so an ask whose own blocks keep the
 // rule breaks it when an option holds a decision with two lists. No delete of the ask's own blocks
 // leaves it valid, and the refusal says so, naming the nested decision and no delete list.
