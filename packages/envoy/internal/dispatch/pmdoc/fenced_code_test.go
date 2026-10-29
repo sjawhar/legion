@@ -32,6 +32,15 @@ func TestFencedCodeDropsAWhitespaceLineShortOfTheFenceIndent(t *testing.T) {
 		{name: "short last line with no final line feed", markdown: "  ~~~\nx\n ", codes: []string{"x"}},
 		{name: "last line of the fence's indentation with no final line feed", markdown: "  ~~~\n  x\n  ", codes: []string{"x"}},
 		{name: "only such a line, with no final line feed", markdown: " ```js\n\n ", codes: []string{""}},
+		// In a quote, after a line of the quote's markers alone, the quote takes that blank line
+		// from the code and the document's last line, with no line feed, ends the code empty: one
+		// line ending stays, which main read so.
+		{name: "quoted, after a blank quote line, short last line with no final line feed", markdown: ">  ~~~\n>  x\n>\n>  ", codes: []string{"x\n"}},
+		{name: "quoted in an item, after a blank quote line, short last line with no final line feed", markdown: "- >  ```\n  >  x\n  >\n  >  ", codes: []string{"x\n"}},
+		// A last line with no line feed holding a tab its container eats part of keeps the
+		// columns the container leaves, as spaces, as it does with a line feed after it.
+		{name: "quoted tab-only last line with no final line feed", markdown: "> ```\n> x\n>\t", codes: []string{"x\n  "}},
+		{name: "tab-only last line of an item with no final line feed", markdown: "- ```\n  x\n\t", codes: []string{"x\n  "}},
 		// A line as long as the fence's indentation, or a fence at its container's content, keeps
 		// what the line holds past them.
 		{name: "fence at the line's start", markdown: "~~~\n \nx\n", codes: []string{" \nx"}},
