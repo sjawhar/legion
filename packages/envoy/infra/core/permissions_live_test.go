@@ -280,6 +280,85 @@ func TestListenerPermissionsRefuseTheSubscriptionToEveryTopicOnRealServers(t *te
 	}
 }
 
+// The grant of a listener's own NATS user, which no session shares (ListenerHostPermissions, a
+// gcp:NatsHub user with listenerMachineId): the one set under which a listener both keeps its
+// sessions' consumers and runs with ENVOY_SUBSCRIBE_ALL_TOPICS on. The listener reaches healthy,
+// answers a registration consumer rather than core, relays a stored send to the session on its
+// relay subject, and delivers to a session served on its machine a topic the stream does not
+// store, which only the subscription to every notification topic carries. The server refused
+// nothing but the publish provoked at the end: under this set, unlike the host's, no session
+// consumer's call is refused.
+func TestListenerHostPermissionsOnRealServers(t *testing.T) {
+	listener := buildEnvoyCommand(t, "listener")
+	for _, image := range testnats.Images {
+		t.Run(image.Name, func(t *testing.T) {
+			t.Parallel()
+			seed, server, uri := startSplitGrantServer(t, image.Ref, core.ListenerHostPermissions(liveMachineID))
+			held := cmdtest.HoldPort(t)
+			port := held.Port
+			process := startListenerConfig(t, listener, uri, seed, held, core.ListenerConfig{
+				MachineID: liveMachineID, HostBridge: "127.0.0.1", SubscribeAllTopics: true,
+			})
+			t.Logf("healthy /healthz body: %s", requireHealthy(t, process, port, liveHealthWindow, listenerHealthy))
+
+			// The session connects as the credential-free session user, as a session on another
+			// machine does, and reads its relay subject, which consumer delivery sends it on.
+			conn, errs := connect(t, uri, "")
+			relayed, err := conn.SubscribeSync(bus.DeliverSubject(liveSession))
+			require.NoError(t, err)
+			require.NoError(t, conn.Flush())
+
+			answer := postListener(t, process, port, "/v1/interests/subscribe", `{"session_id":"`+liveSession+
+				`","topics":[],"self_subscribed":true,"delivery":{"consumer":true,"epoch":"live-epoch"}}`)
+			require.Contains(t, answer, `"mode":"consumer"`, "the registration's answer: %s", answer)
+			require.Contains(t, answer, `"subject":"`+bus.DeliverSubject(liveSession)+`"`, "the registration's answer: %s", answer)
+
+			postListener(t, process, port, "/v1/messages/send", `{"target_session":"`+liveSession+`","message":"example message"}`)
+			sent, frame := nextEnvelope(t, process, relayed)
+			require.NotEmpty(t, frame.Reply, "the relay frame carries no subject for its receipt")
+			require.NoError(t, frame.Respond(nil))
+			require.Equal(t, contracts.AgentSubject(liveSession), sent.Topic)
+			require.Equal(t, "example message", sent.PayloadSummary)
+
+			// A topic the stream does not store, published over core NATS by another program
+			// holding this user, reaches a session served on this machine through the listener's
+			// subscription to every notification topic, which this set allows and
+			// ListenerPermissions does not. No session publishes it: the session user's grant
+			// holds no notification topic.
+			serving := startServingPort(t, liveServingSession)
+			postListener(t, process, port, "/v1/interests/subscribe", `{"session_id":"`+liveServingSession+
+				`","topics":["notifications.team.deploy-squad"],"port":`+strconv.Itoa(serving.port)+`,"host":"127.0.0.1"}`)
+			item := contracts.Envelope{
+				EventID:        "evt-live-listener-host",
+				Source:         "agent",
+				SourceEventID:  "evt-live-listener-host",
+				SourceSession:  liveSession,
+				Topic:          "notifications.team.deploy-squad",
+				DedupeKey:      "permissions-live-test.evt-live-listener-host",
+				IssuedAt:       contracts.NowMillis(),
+				PayloadSummary: "example message from another session",
+				Payload:        "example message from another session",
+				TraceID:        "trace-evt-live-listener-host",
+			}
+			data, err := json.Marshal(item)
+			require.NoError(t, err)
+			publisher, _ := connect(t, uri, seed)
+			require.NoError(t, publisher.Publish(item.Topic, data))
+			require.NoError(t, publisher.Flush())
+			serving.requirePrompt(t, process, item)
+
+			// Every allowed operation came first, so a violation for one would be the first error.
+			// A session may not publish to another session's inbox directly.
+			other := contracts.AgentSubject("s2")
+			require.NoError(t, conn.Publish(other, nil))
+			requireViolation(t, conn, errs, `Publish to "`+other+`"`)
+			for _, v := range violationsOnceLogged(t, server, other) {
+				require.Equal(t, other, v[2], "the server refused what the grant should allow: %s", v[0])
+			}
+		})
+	}
+}
+
 // A user holding SessionPermissions alone, as sessions that share one user hold it, receives its
 // notifications and publishes a reply, and the server refuses it a subscribe to the reply inboxes
 // and a JetStream API request, on the 2.10 image and on the hub's: request/reply from such a
@@ -319,11 +398,20 @@ func TestSessionPermissionsOnRealServers(t *testing.T) {
 // server's no_auth_user. It returns the listener's seed, the server and its client URL.
 func startSplitServer(t *testing.T, image string) (string, natsServer, string) {
 	t.Helper()
+	return startSplitGrantServer(t, image, core.ListenerPermissions(liveMachineID))
+}
+
+// startSplitGrantServer runs image with two users: the listener's, holding grant with a seed, and
+// the session user, holding SessionPermissions with no seed, as the server's no_auth_user, as a
+// hub renders them. grant is the set the hub's user carries: ListenerPermissions for its own
+// listener, ListenerHostPermissions for a listener's own user elsewhere.
+func startSplitGrantServer(t *testing.T, image string, grant core.Permissions) (string, natsServer, string) {
+	t.Helper()
 	seed, public := testnats.User(t)
 	_, sessionKey := testnats.User(t)
-	listener, session := core.ListenerPermissions(liveMachineID), core.SessionPermissions()
+	session := core.SessionPermissions()
 	config, err := core.Authorization{Users: []core.User{
-		{Name: liveMachineID, NKey: public, Publish: &listener.Publish, Subscribe: &listener.Subscribe, HasSeed: true},
+		{Name: liveMachineID, NKey: public, Publish: &grant.Publish, Subscribe: &grant.Subscribe, HasSeed: true},
 		{Name: "example-sessions", NKey: sessionKey, Publish: &session.Publish, Subscribe: &session.Subscribe},
 	}, NoAuthUser: "example-sessions"}.Render(nil)
 	require.NoError(t, err)

@@ -95,6 +95,31 @@ func TestListenerPermissions(t *testing.T) {
 	}, core.ListenerPermissions("example-host-a"))
 }
 
+// The listener-host set is the listener's own, with the subscribe to every notification topic
+// ENVOY_SUBSCRIBE_ALL_TOPICS needs after the role lanes: a user no session shares, so it holds
+// none of the session's publish entries.
+func TestListenerHostPermissions(t *testing.T) {
+	require.Equal(t, core.Permissions{
+		Publish:   core.Rules{Allow: listenerPublish},
+		Subscribe: core.Rules{Allow: append(append([]string{}, listenerSubscribe...), "notifications.>")},
+	}, core.ListenerHostPermissions("example-host-a"))
+}
+
+// The one set a listener may hold with ENVOY_SUBSCRIBE_ALL_TOPICS on and consumer delivery both:
+// it carries the session consumers' calls and the plain notifications.> subscribe, which no queue
+// group narrows. The plain host set, which a host's sessions share, carries that subscribe and no
+// consumer call, so a listener connecting as it answers every registration core.
+func TestListenerHostPermissionsHoldTheConsumerCallsAndEveryTopic(t *testing.T) {
+	grant := core.ListenerHostPermissions("example-host-a")
+	require.Subset(t, grant.Publish.Allow, sessionConsumerPublish)
+	require.Contains(t, grant.Subscribe.Allow, "notifications.>")
+	host := core.HostPermissions("example-host-a")
+	require.Contains(t, host.Subscribe.Allow, "notifications.>")
+	for _, entry := range sessionConsumerPublish {
+		require.NotContains(t, host.Publish.Allow, entry, "the host set publishes %q", entry)
+	}
+}
+
 // A space in the machine id is a hyphen in the durable and the queue, as the listener names them.
 func TestListenerPermissionsNameTheDurableAndQueueOfAMachineIDWithASpace(t *testing.T) {
 	p := core.ListenerPermissions("example host")
@@ -200,12 +225,13 @@ func TestDispatchPermissions(t *testing.T) {
 	require.Equal(t, want, got)
 }
 
-// The session consumers' calls belong to the listener's set alone: a user built on the same base
-// grant, Dispatch's or a host's, holds none of them, nor does a session's, so a listener
-// connecting as one of those users keeps its own durable alone and serves its sessions over core
-// NATS.
-func TestOnlyTheListenerSetHoldsTheSessionConsumersCalls(t *testing.T) {
+// The session consumers' calls belong to the sets of a user no session shares, the listener's and
+// the listener-host: a user built on the same base grant, Dispatch's or a host's, holds none of
+// them, nor does a session's, so a listener connecting as one of those users keeps its own durable
+// alone and serves its sessions over core NATS.
+func TestOnlyTheListenersOwnSetsHoldTheSessionConsumersCalls(t *testing.T) {
 	require.Subset(t, core.ListenerPermissions("example-host-a").Publish.Allow, sessionConsumerPublish)
+	require.Subset(t, core.ListenerHostPermissions("example-host-a").Publish.Allow, sessionConsumerPublish)
 	for name, p := range map[string]core.Permissions{
 		"host":     core.HostPermissions("example-host-a"),
 		"dispatch": core.DispatchPermissions("example-host-a"),
@@ -221,11 +247,12 @@ func TestOnlyTheListenerSetHoldsTheSessionConsumersCalls(t *testing.T) {
 // the sets holds one, the union included.
 func TestNoSetRepeatsAnEntry(t *testing.T) {
 	sets := map[string]core.Permissions{
-		"listener": core.ListenerPermissions("example-host-a"),
-		"session":  core.SessionPermissions(),
-		"host":     core.HostPermissions("example-host-a"),
-		"daemon":   core.DaemonPermissions(),
-		"dispatch": core.DispatchPermissions("example-host-a"),
+		"listener":      core.ListenerPermissions("example-host-a"),
+		"listener host": core.ListenerHostPermissions("example-host-a"),
+		"session":       core.SessionPermissions(),
+		"host":          core.HostPermissions("example-host-a"),
+		"daemon":        core.DaemonPermissions(),
+		"dispatch":      core.DispatchPermissions("example-host-a"),
 	}
 	for name, p := range sets {
 		for direction, allow := range map[string][]string{"publish": p.Publish.Allow, "subscribe": p.Subscribe.Allow} {
@@ -261,6 +288,12 @@ func TestASetIsTheCallersToChange(t *testing.T) {
 	again := core.DispatchPermissions("example-host-a")
 	require.Equal(t, "notifications.>", again.Publish.Allow[0])
 	require.Equal(t, "_INBOX.>", again.Subscribe.Allow[0])
+	listenerHost := core.ListenerHostPermissions("example-host-a")
+	listenerHost.Publish.Allow[0] = "edited"
+	listenerHost.Subscribe.Allow[0] = "edited"
+	own := core.ListenerHostPermissions("example-host-a")
+	require.Equal(t, "notifications.>", own.Publish.Allow[0])
+	require.Equal(t, "_INBOX.>", own.Subscribe.Allow[0])
 }
 
 // A set drops into a User as its rules, and the authorization renders it.

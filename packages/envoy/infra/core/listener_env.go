@@ -40,9 +40,10 @@ type ListenerConfig struct {
 	// SubscribeAllTopics renders ENVOY_SUBSCRIBE_ALL_TOPICS=1, which has the listener also hold a
 	// core subscription on every notification topic, so a session served on its machine receives a
 	// topic the stream does not store. Only a NATS user whose grant allows `notifications.>`
-	// (HostPermissions) may set it: the listener's start ends when NATS refuses that subscription,
-	// as it does for ListenerPermissions and DispatchPermissions. The component cannot read the
-	// user's grant, so the operator who knows it opts in; false renders nothing.
+	// (HostPermissions, ListenerHostPermissions) may set it: the listener's start ends when NATS
+	// refuses that subscription, as it does for ListenerPermissions and DispatchPermissions. The
+	// component cannot read the user's grant, so the operator who knows it opts in; false renders
+	// nothing.
 	SubscribeAllTopics bool
 }
 

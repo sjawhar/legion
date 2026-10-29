@@ -62,8 +62,9 @@ type WebhookListenerArgs struct {
 	HostBridge     string  `pulumi:"hostBridge"`              // ENVOY_HOST_BRIDGE
 	NatsReplicas   int     `pulumi:"natsReplicas"`            // ENVOY_NATS_REPLICAS
 	MentionTrigger *string `pulumi:"mentionTrigger,optional"` // ENVOY_GITHUB_MENTION_TRIGGER, with github
-	// ENVOY_SUBSCRIBE_ALL_TOPICS=1 when true, for a NATS user holding HostPermissions (a plain
-	// notifications.> subscribe); the listener's start ends on any other grant. Default false.
+	// ENVOY_SUBSCRIBE_ALL_TOPICS=1 when true, for a NATS user holding HostPermissions or
+	// ListenerHostPermissions (a plain notifications.> subscribe); the listener's start ends on any
+	// other grant. Default false.
 	SubscribeAllTopics bool `pulumi:"subscribeAllTopics,optional"`
 
 	AlarmTopicArn   pulumi.StringInput `pulumi:"alarmTopicArn"` // the SNS topic the alarms page and clear on

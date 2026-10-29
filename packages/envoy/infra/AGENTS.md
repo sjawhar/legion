@@ -331,7 +331,12 @@ the server's `no_auth_user` holding `SessionPermissions`, registers, receives a 
 message and a publish to an ad-hoc topic, and is refused a publish to another session's subject;
 the listener holding `ListenerPermissions` with `SubscribeAllTopics` on exits 1 at its start with
 an ERROR naming `ENVOY_SUBSCRIBE_ALL_TOPICS`, the server's one refusal its subscription to
-`notifications.>` (`TestListenerPermissionsRefuseTheSubscriptionToEveryTopicOnRealServers`); a
+`notifications.>` (`TestListenerPermissionsRefuseTheSubscriptionToEveryTopicOnRealServers`); the
+listener holding `ListenerHostPermissions`, a listener's own user, with `SubscribeAllTopics` on
+reaches `"status":"healthy"`, answers a registration `consumer`, relays a send on the session's
+relay subject and pushes to a session's serving port a topic the stream does not store, the
+server refusing nothing but the publish provoked at the end
+(`TestListenerHostPermissionsOnRealServers`); a
 user holding `SessionPermissions` alone publishes a reply and is refused a subscribe to `_INBOX.>`;
 and, as a hub with a listener renders its users, the listener's user creates, pulls, acks,
 restarts at its floor and deletes a session consumer through `bus.SessionConsumers`, subscribes

@@ -38,8 +38,8 @@ type ListenerArgs struct {
 	Port          *int                    `pulumi:"port,optional"`          // default core.DefaultListenerPort, 9020
 	HostBridge    *string                 `pulumi:"hostBridge,optional"`
 	// default false; true renders ENVOY_SUBSCRIBE_ALL_TOPICS=1, for a listener whose NATS user holds
-	// HostPermissions (a plain notifications.> subscribe): the listener's start ends on any other
-	// grant, which refuses the subscription
+	// HostPermissions or ListenerHostPermissions (a plain notifications.> subscribe): the
+	// listener's start ends on any other grant, which refuses the subscription
 	SubscribeAllTopics *bool              `pulumi:"subscribeAllTopics,optional"`
 	Seed               pulumi.StringInput `pulumi:"seed,optional" provider:"secret"`
 	Watchdog           *WatchdogArgs      `pulumi:"watchdog,optional"`

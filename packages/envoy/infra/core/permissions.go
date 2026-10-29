@@ -30,8 +30,9 @@ const inboxes = nats.InboxPrefix + ">"
 
 // listenerGrant is the grant every user that runs envoy-listener holds as machine machineID, built
 // from Envoy's own names: ListenerPermissions adds the session consumers' calls to it
-// (sessionConsumerCalls), DispatchPermissions what Dispatch itself needs, and HostPermissions the
-// session's entries. Publish, in this order:
+// (sessionConsumerCalls), ListenerHostPermissions those and the subscribe to every notification
+// topic, DispatchPermissions what Dispatch itself needs, and HostPermissions the session's
+// entries. Publish, in this order:
 //   - every notification topic (bus.NotificationTopicPrefix): the stream's subjects, the role
 //     lanes, every exception lane, the session relay subjects (bus.DeliverSubjectPrefix), and any
 //     other topic a caller of /v1/messages/publish names, which the listener publishes over core
@@ -79,11 +80,12 @@ func listenerGrant(machineID string) Permissions {
 	}
 }
 
-// sessionConsumerCalls are the calls bus.SessionConsumers makes, which ListenerPermissions alone
-// holds: consumer create, with and without a filter subject in its subject, info, delete, pull
-// (CONSUMER.MSG.NEXT) and acknowledgements, each on any consumer of the stream, since a session
-// consumer is named for its session (bus.SessionConsumerName), and the stream's consumer list,
-// which a listener that starts relaying every session at once reads instead of one info each
+// sessionConsumerCalls are the calls bus.SessionConsumers makes, which only the sets of a user no
+// session shares hold (ListenerPermissions and ListenerHostPermissions): consumer create, with and
+// without a filter subject in its subject, info, delete, pull (CONSUMER.MSG.NEXT) and
+// acknowledgements, each on any consumer of the stream, since a session consumer is named for its
+// session (bus.SessionConsumerName), and the stream's consumer list, which a listener that starts
+// relaying every session at once reads instead of one info each
 // (bus.SessionConsumers.ListSessionConsumers). A NATS wildcard is a whole token, so these reach
 // every consumer of the stream, other listeners' durables and Dispatch's included, and a consumer
 // created through them can deliver the stream's messages to any subject. That reach is the
@@ -103,13 +105,28 @@ func sessionConsumerCalls() []string {
 }
 
 // ListenerPermissions is the grant envoy-listener needs as machine machineID: the listener grant
-// (listenerGrant), then the session consumers' calls (sessionConsumerCalls), which no other set
-// holds. A hub that renders this set for its own listener gives that listener consumer delivery;
-// a listener connecting as a host or Dispatch user does not have it, and its sessions stay on the
-// core path.
+// (listenerGrant), then the session consumers' calls (sessionConsumerCalls), which only this set
+// and ListenerHostPermissions hold. A hub that renders this set for its own listener gives that
+// listener consumer delivery; a listener connecting as a host or Dispatch user does not have it,
+// and its sessions stay on the core path.
 func ListenerPermissions(machineID string) Permissions {
 	grant := listenerGrant(machineID)
 	grant.Publish.Allow = append(grant.Publish.Allow, sessionConsumerCalls()...)
+	return grant
+}
+
+// ListenerHostPermissions is the grant of a listener's own NATS user, one no session shares, as
+// machine machineID: the listener's set (ListenerPermissions), the session consumers' calls
+// included, then the subscribe to every notification topic (bus.NotificationTopicPrefix) that
+// ENVOY_SUBSCRIBE_ALL_TOPICS needs, which the role-lane entries of listenerGrant do not cover: a
+// listener opted in holds a core subscription on notifications.> in its machine's queue group, so
+// a session it serves receives a topic the stream does not store. That subscribe is all this set
+// adds to the listener's: it holds none of SessionPermissions' publish entries, so a process
+// connecting as this user can neither publish a session's agent stream frames nor subscribe to a
+// session's control subject. HostPermissions stays the set of a user a host's sessions share.
+func ListenerHostPermissions(machineID string) Permissions {
+	grant := ListenerPermissions(machineID)
+	grant.Subscribe.Allow = append(grant.Subscribe.Allow, bus.NotificationTopicPrefix+">")
 	return grant
 }
 
@@ -201,7 +218,8 @@ func DaemonPermissions() Permissions {
 // session's it lacks. It holds no session-consumer call (sessionConsumerCalls), so a listener
 // connecting as a host user keeps its own durable alone and answers every registration that asks
 // for consumer delivery core; its sessions read on their own subscriptions and catch up through
-// /v1/replay.
+// /v1/replay. A listener whose user no session shares takes ListenerHostPermissions instead,
+// which holds those calls beside the same notifications.> subscribe.
 func HostPermissions(machineID string) Permissions {
 	listener, agent := listenerGrant(machineID), SessionPermissions()
 	return Permissions{
