@@ -525,19 +525,23 @@ func keptSubjects(deployed, own []string) []string {
 //
 // Any other refusal is the update's own error.
 func updateStream(js nats.JetStreamContext, update *nats.StreamConfig, holds func(*nats.StreamInfo) bool) error {
-	for sent := 1; ; sent++ {
-		_, err := js.UpdateStream(update)
-		overlap := overlapRefused(err)
-		if !overlap && !unanswered(err) {
-			return err
+	settled := func() bool {
+		again, err := js.StreamInfo(update.Name)
+		return err == nil && holds(again)
+	}
+	var err error
+	for range overlapSends {
+		if _, err = js.UpdateStream(update); !overlapRefused(err) {
+			break
 		}
-		if again, infoErr := js.StreamInfo(update.Name); infoErr == nil && holds(again) {
+		if settled() {
 			return nil
 		}
-		if !overlap || sent == overlapSends {
-			return err
-		}
 	}
+	if unanswered(err) && settled() {
+		return nil
+	}
+	return err
 }
 
 // overlapSends bounds the sends of one update the server refuses as overlapping an existing stream

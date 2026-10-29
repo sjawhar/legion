@@ -158,18 +158,20 @@ func consumerNames(js natsgo.JetStreamContext, stream string) []string {
 }
 
 // warnOrErrorRecords is every WARN or ERROR record the client under test logged so far, each as
-// its level and message, with the error for an async error report. The client under test is the
-// one connected with bus.WithName(t.Name()), and its records are told by that name: the capture
-// (captureBusLogs) is the process's default logger, so every client of every test running in this
-// binary writes into it, and a record naming another client is dropped. Without that, a client an
-// earlier test left connected to a cluster it has stopped fails this test with its reconnect
-// warning. A record naming no client is kept, since the records these tests require are a
-// watcher's and a reconcile's, which name none; a client started without a name of its own still
-// passes that way.
+// its level and message, with the error for an async error report. The capture (captureBusLogs)
+// is the process's default logger, so every client of every test running in this binary writes
+// into it, and a record naming another client is dropped: without that, a client an earlier test
+// left connected to a cluster it has stopped fails this test with its reconnect warning. The
+// client under test must therefore be connected with bus.WithName(t.Name()), and this refuses the
+// test that does not do it rather than silently dropping that client's own records too: every
+// client carries a name, "envoy" when the test sets none, and a connected client logs at least
+// its own `envoy nats connected`. A record naming no client is kept, since the records these
+// tests require are a watcher's and a reconcile's, which name none.
 func warnOrErrorRecords(t *testing.T, logs *busLogs) []string {
 	t.Helper()
 	name := t.Name()
 	var records []string
+	named := false
 	for _, line := range logs.lines() {
 		if line == "" {
 			continue
@@ -183,6 +185,9 @@ func warnOrErrorRecords(t *testing.T, logs *busLogs) []string {
 		if err := json.Unmarshal([]byte(line), &record); err != nil {
 			t.Fatalf("decode the log record %q: %v", line, err)
 		}
+		if record.Name == name {
+			named = true
+		}
 		if record.Level != "WARN" && record.Level != "ERROR" {
 			continue
 		}
@@ -194,6 +199,9 @@ func warnOrErrorRecords(t *testing.T, logs *busLogs) []string {
 			continue
 		}
 		records = append(records, record.Level+" "+record.Msg)
+	}
+	if !named {
+		t.Fatalf("no captured record names %q, so this test's own client cannot be told from another test's: connect it with bus.WithName(t.Name())", name)
 	}
 	return records
 }

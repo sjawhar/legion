@@ -25,18 +25,21 @@ func TestAnUpdateRefusedAsOverlappingItsOwnStreamIsSettledFromTheStream(t *testi
 		name string
 		// the server's answer to each send in turn, nil once the answers run out
 		answers []error
-		// the other update gave the stream three copies with the first answer
+		// the other program's update lands with the first answer that is not nil, giving the
+		// stream what this update asks for
 		landed bool
 		sends  int
+		reads  int
 		want   error
 	}{
-		{name: "the other update gave the stream what this one asks", answers: []error{overlap}, landed: true, sends: 1},
-		{name: "the stream read again does not hold it yet", answers: []error{overlap}, sends: 2},
-		{name: "refused four times in a row", answers: slices.Repeat([]error{overlap}, 4), sends: 5},
-		{name: "refused on every send", answers: slices.Repeat([]error{overlap}, overlapSends+1), sends: overlapSends, want: overlap},
-		{name: "unanswered, and the stream does not hold it", answers: []error{nats.ErrTimeout}, sends: 1, want: nats.ErrTimeout},
-		{name: "unanswered, and the stream holds it", answers: []error{nats.ErrTimeout}, landed: true, sends: 1},
+		{name: "the other update gave the stream what this one asks", answers: []error{overlap}, landed: true, sends: 1, reads: 1},
+		{name: "the stream read again does not hold it yet", answers: []error{overlap}, sends: 2, reads: 1},
+		{name: "refused, then accepted on the last send", answers: slices.Repeat([]error{overlap}, overlapSends-1), sends: overlapSends, reads: overlapSends - 1},
+		{name: "refused on every send", answers: slices.Repeat([]error{overlap}, overlapSends+1), sends: overlapSends, reads: overlapSends, want: overlap},
+		{name: "unanswered, and the stream does not hold it", answers: []error{nats.ErrTimeout}, sends: 1, reads: 1, want: nats.ErrTimeout},
+		{name: "unanswered, and the stream holds it", answers: []error{nats.ErrTimeout}, landed: true, sends: 1, reads: 1},
 		{name: "refused otherwise", answers: []error{otherRefusal}, sends: 1, want: otherRefusal},
+		{name: "refused otherwise while the stream holds the update", answers: []error{otherRefusal}, landed: true, sends: 1, want: otherRefusal},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			js := &scriptedUpdateJetStream{config: nats.StreamConfig{Name: Stream, Replicas: 1}, answers: test.answers, landed: test.landed}
@@ -47,8 +50,8 @@ func TestAnUpdateRefusedAsOverlappingItsOwnStreamIsSettledFromTheStream(t *testi
 			if !errors.Is(err, test.want) {
 				t.Fatalf("updateStream = %v, want %v", err, test.want)
 			}
-			if len(js.sent) != test.sends {
-				t.Fatalf("updateStream sent %d updates, want %d", len(js.sent), test.sends)
+			if len(js.sent) != test.sends || js.reads != test.reads {
+				t.Fatalf("updateStream sent %d updates and read the stream %d times, want %d and %d", len(js.sent), js.reads, test.sends, test.reads)
 			}
 			for i, sent := range js.sent {
 				if !reflect.DeepEqual(sent, update) {
@@ -60,14 +63,17 @@ func TestAnUpdateRefusedAsOverlappingItsOwnStreamIsSettledFromTheStream(t *testi
 }
 
 // scriptedUpdateJetStream answers each stream update with the next of answers, applying the update
-// when that answer is nil, and every read with the stream as it holds it. With landed, the other
-// program's update, one to three copies, lands with the first answer that is not nil.
+// when that answer is nil, and every read with the stream as it holds it, counting the reads. With
+// landed, the other program's update lands with the first answer that is not nil, and it is this
+// update itself: the stream then holds what the caller asked for without the caller's own send
+// having been applied.
 type scriptedUpdateJetStream struct {
 	nats.JetStreamContext
 	config  nats.StreamConfig
 	answers []error
 	landed  bool
 	sent    []nats.StreamConfig
+	reads   int
 }
 
 func (js *scriptedUpdateJetStream) UpdateStream(cfg *nats.StreamConfig, _ ...nats.JSOpt) (*nats.StreamInfo, error) {
@@ -82,13 +88,14 @@ func (js *scriptedUpdateJetStream) UpdateStream(cfg *nats.StreamConfig, _ ...nat
 		return &nats.StreamInfo{Config: js.config}, nil
 	}
 	if js.landed {
-		js.config.Replicas = 3
+		js.config = *cfg
 		js.landed = false
 	}
 	return nil, answer
 }
 
 func (js *scriptedUpdateJetStream) StreamInfo(string, ...nats.JSOpt) (*nats.StreamInfo, error) {
+	js.reads++
 	return &nats.StreamInfo{Config: js.config}, nil
 }
 
