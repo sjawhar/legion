@@ -2,28 +2,28 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-588",
-  "completed": "2026-10-28T10:10:08Z",
-  "round": "public-file key ruling (dispatch://INFRA-472)",
+  "completed": "2026-10-29T17:45:34Z",
+  "round": "forward merge of main + conflicts steps routed in ci.yaml (audit item 2)",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2411",
-  "head": "b5484b414155aebeb936fd32a64db319b151ccbe",
-  "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6448930344",
-  "reviewAnswered": "Architect send-back for the controller ruling of 2026-10-28 10:04Z/10:05Z: scripts/conflicts/README.md named the Dispatch key four times (lines 5-6, 147, 157). Replaced with neutral text (the records are kept on this pull request's issue in Dispatch; the example uses --issue <KEY>) in b5484b414155; PR retitled without the key. Commit subjects left as they are (a rewrite needs a force push). Code unchanged since 5cfd10800698.",
+  "head": "ddd6873c284d518d8e05eeb16e7ecc7ee04b20e8",
+  "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6504098735",
+  "reviewAnswered": "Architect send-back: main deleted .github/workflows/pr-and-main.yaml (#2316) and GitHub reported #2411 CONFLICTING; the controller audit (dispatch://INFRA-588/comment/30c74574-b42a-48e6-8484-d55f70ecf1c0, item 2) asks the three scripts/conflicts steps be routed. One merge head ddd6873c284d: takes the deletion and adds the routed job conflicts-script with filter conflicts_script, its ci-ok entries and its ci_job_reads.py gate. scripts/conflicts/ unchanged. Fingerprint 0acec12c... -> a4cfcab7... (changed, as expected).",
   "proof": [
     {
-      "criterion": "No public file the pull request adds names the Dispatch key, and the squash subject (the PR title) does not either",
-      "surface": "the branch tree at the head that merges, and the pull request title on GitHub",
-      "command": "git grep -n INFRA-588 b5484b414155 -- . :!.legion ; gh pr view 2411 --repo sjawhar/legion --json title",
-      "observed": "git grep prints nothing (exit 1); title: feat(scripts): measure Legion pull requests' merge conflicts before and after a fix (passes the pr-title regex locally); bun test scripts/conflicts 40 pass, biome clean, check-private-names clean",
-      "headSha": "b5484b414155aebeb936fd32a64db319b151ccbe",
-      "negativeControl": "the same grep finds the key in .legion/ at b5484b414155 (implement.json, plan.json, review.json) and in scripts/conflicts/README.md (4 lines) at 5cfd10800698, so it reads the tree it is given"
+      "criterion": "The scripts/conflicts steps run in ci.yaml's router only when the script can change, and check-ci-filters.sh passes",
+      "surface": "ci.yaml's changes filter and router job, read by .github/scripts/check-ci-filters.sh and workflow_paths.PathsFilter (dorny/paths-filter's model)",
+      "command": ".github/scripts/check-ci-filters.sh; .github/scripts/check-ci-filters.test.sh; .github/scripts/ci-ok.test.sh; PathsFilter(conflicts_script).covers(<path>) over sample paths",
+      "observed": "check-ci-filters exit 0: conflicts-script: 37 files, 0 uncovered (filter conflicts_script), 25 gates; tests 127 and 40 passed; selects scripts/conflicts/**, package.json, bun.lock, .bun-version, biome.json, ci.yaml; skips scripts/dispatch/ask-census.ts, packages/envoy/CHANGELOG.md, packages/daemon/main.go, docs/kubernetes.md; GitHub reports the PR MERGEABLE at ddd6873c284d",
+      "headSha": "ddd6873c284d518d8e05eeb16e7ecc7ee04b20e8",
+      "negativeControl": "the gate's read pointed at scripts/dispatch/** -> check-ci-filters exit 1, conflicts-script: 41 files, 19 uncovered, each named (restored after)"
     },
     {
-      "criterion": "The script is committed with tests that re-run a known merge and list its conflicted files",
-      "surface": "bun test scripts/conflicts (local, in the recreated workspace; the CI test job runs the same three steps)",
-      "command": "cd $LEGION_WORKSPACE && bun test scripts/conflicts && bunx biome check --error-on-warnings scripts/conflicts && bunx tsc --noEmit -p scripts/conflicts",
-      "observed": "40 pass, 0 fail across 4 files; biome clean on 14 files; tsc exit 0",
-      "headSha": "5cfd1080069831382a886cc5e72666f5a1274275",
-      "negativeControl": "readRawRun with createdAt missing, and with mergedAt a number, throws UsageError (asserted in summary.test.ts)"
+      "criterion": "The script and its tests are unchanged and green at the merge head",
+      "surface": "bun test scripts/conflicts and the lint and typecheck lanes the new job runs",
+      "command": "jj diff --stat --from 49f9e1af --to ddd6873c284d scripts/conflicts; bunx biome check --error-on-warnings scripts/conflicts; bunx tsc --noEmit -p scripts/conflicts; bun test scripts/conflicts",
+      "observed": "0 files changed; biome clean on 14 files; tsc exit 0; 40 pass, 0 fail",
+      "headSha": "ddd6873c284d518d8e05eeb16e7ecc7ee04b20e8",
+      "negativeControl": "rounds 0-2 negative controls (PR comment 6448930344) stand, the code being byte-identical"
     },
     {
       "criterion": "The port reproduces the before measurement (P1, before numbers unchanged)",
@@ -43,9 +43,13 @@
     }
   ],
   "filesChanged": [
-    "scripts/conflicts/README.md"
+    ".github/workflows/ci.yaml",
+    ".github/scripts/ci_job_reads.py",
+    ".github/workflows/pr-and-main.yaml (deleted by main; merge takes the deletion)"
   ],
-  "trickyParts": [],
+  "trickyParts": [
+    "The steps were in pr-and-main.yaml's test job; on main that workflow is gone, so they become a job of their own in the router (filter, changes output, needs/if, ci-ok needs and SELECTED_BY, gate), as docs/solutions/github/join-a-job-to-the-ci-router.md lists. The conflict resolution and the move are in the merge commit itself, so the push has one head commit."
+  ],
   "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": []
