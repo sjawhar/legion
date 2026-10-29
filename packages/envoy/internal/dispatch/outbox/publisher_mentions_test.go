@@ -964,6 +964,79 @@ func readHeldCopy(t *testing.T, database *store.Store, commentID, destination st
 	return row
 }
 
+// TestAFallbackCopyWhoseMentionIsStillBeingSentIsClaimedAgainOnlyOnceItsWaitHasPassed: a pass that
+// finds the row's mention still in flight leaves the row to a later pass, counting no attempt, and
+// the row waits mentionPendingDelay rather than falling due at once: a second pass that follows it
+// claims nothing, so a row whose mention takes its time neither holds a place in every pass's
+// batch nor is read again by each of them. Once that wait has passed the row is claimed again, and
+// the pass that claims it publishes the copy when the mention has failed by then.
+func TestAFallbackCopyWhoseMentionIsStillBeingSentIsClaimedAgainOnlyOnceItsWaitHasPassed(t *testing.T) {
+	const (
+		issueTopic   = "notifications.dispatch.issue.T-1.comment.created"
+		sessionTopic = "notifications.agent.s1"
+	)
+	ctx := store.WithTransactionTracking(context.Background())
+	database := storetest.Open(t)
+	publisher := &recordingPublisher{}
+	deps := Deps{Store: database, Publisher: publisher, Broker: events.NewBroker()}
+	commentID := seedHeldFallbackCopy(ctx, t, deps)
+	// The mention is being sent again: a sender claimed its attempt just now, so the attempt is
+	// live (model.MentionLiveSQL) and the pass reads it as still being sent.
+	if _, err := database.Pool.Exec(ctx, `
+		update comment_deliveries set state = 'pending', claimed_at = now() where comment_id = $1
+	`, commentID); err != nil {
+		t.Fatalf("put the mention back in flight: %v", err)
+	}
+
+	before := time.Now()
+	publishFallbackCopies(ctx, deps)
+	after := time.Now()
+	row := readHeldCopy(t, database, commentID, sessionTopic)
+	if row.attempts != 0 || row.settled || row.published || row.due == nil {
+		t.Fatalf("the held copy has attempts=%d settled=%v published=%v next_attempt_at=%v, want no attempt "+
+			"counted, unsettled, unpublished and due again", row.attempts, row.settled, row.published, row.due)
+	}
+	if row.due.Before(before.Add(mentionPendingDelay)) || row.due.After(after.Add(mentionPendingDelay)) {
+		t.Fatalf("the held copy is due at %v, want mentionPendingDelay = %v from the pass, not at once",
+			*row.due, mentionPendingDelay)
+	}
+
+	// A pass inside that wait claims the row again, and so reads it again, only if it is due: the
+	// claim it would take is a next_attempt_at of its own.
+	publishFallbackCopies(ctx, deps)
+	if again := readHeldCopy(t, database, commentID, sessionTopic); again.attempts != 0 || again.due == nil ||
+		!again.due.Equal(*row.due) {
+		t.Fatalf("a pass inside the wait left the held copy attempts=%d next_attempt_at=%v, want 0 and %v: "+
+			"a row that is not due is not claimed", again.attempts, again.due, *row.due)
+	}
+	if published := topicsOf(publisher.all()); !reflect.DeepEqual(published, []string{issueTopic}) {
+		t.Fatalf("the passes published %#v, want the scan's issue topic alone while the mention is in flight", published)
+	}
+
+	// Once the mention has failed and the wait has passed, the next pass claims the row and
+	// publishes the copy.
+	if _, err := database.Pool.Exec(ctx, `
+		update comment_deliveries set state = 'failed' where comment_id = $1
+	`, commentID); err != nil {
+		t.Fatalf("fail the mention: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		update comment_fallback_copies set next_attempt_at = now() - interval '1 second'
+		where comment_id = $1 and settled_at is null
+	`, commentID); err != nil {
+		t.Fatalf("pass the held copy's wait: %v", err)
+	}
+	publishFallbackCopies(ctx, deps)
+	if settled := readHeldCopy(t, database, commentID, sessionTopic); settled.attempts != 0 || !settled.settled ||
+		!settled.published {
+		t.Fatalf("once the wait had passed the held copy has attempts=%d settled=%v published=%v, want no attempt "+
+			"counted by the wait, settled and published", settled.attempts, settled.settled, settled.published)
+	}
+	if published := topicsOf(publisher.all()); !reflect.DeepEqual(published, []string{issueTopic, sessionTopic}) {
+		t.Fatalf("the passes published %#v, want the scan's issue topic and s1's copy once", published)
+	}
+}
+
 // TestAFallbackCopyNATSDeniesIsRetriedPastTheDeadLetterThresholdUntilItIsPublished: a held copy
 // whose publish NATS denies counts each denial on its row and waits retry.Delay of its count before
 // it is decided again, the schedule an event backs off by: a pass before that is due neither
@@ -1056,7 +1129,7 @@ func TestAFallbackCopyNATSDeniesIsRetriedPastTheDeadLetterThresholdUntilItIsPubl
 
 // TestAFallbackCopyOutlivesANATSOutageLongerThanTheDeadLetterThreshold: NATS being unreachable
 // says nothing about a held copy, so a pass that cannot reach NATS counts no attempt on the row
-// and releases its claim at once, for the next pass to retry - however long the outage lasts.
+// and releases its claim for retryInterval, the next tick's pass - however long the outage lasts.
 // After more passes than retry.DeadLetterAttempts, the threshold a counted failure is logged at,
 // the row is still unsettled, unpublished and at no attempts, and no pass has logged that line.
 // The first pass once NATS is back publishes the copy, once and under the mention's dedupe key,
@@ -1077,8 +1150,8 @@ func TestAFallbackCopyOutlivesANATSOutageLongerThanTheDeadLetterThreshold(t *tes
 	publisher := &failingPublisher{topic: sessionTopic, answer: bus.ErrUnavailable}
 	deps := Deps{Store: database, Publisher: publisher, Broker: events.NewBroker()}
 	commentID := seedHeldFallbackCopy(ctx, t, deps)
-	// pass runs a fallback pass with any backoff the held copy waits on behind it. A pass that
-	// could not reach NATS leaves none, so while the outage lasts this moves nothing.
+	// pass runs a fallback pass with whatever wait the held copy sits behind - the retryInterval a
+	// pass that could not reach NATS releases it for - moved into the past rather than waited out.
 	pass := func() {
 		t.Helper()
 		if _, err := database.Pool.Exec(ctx, `
@@ -1092,12 +1165,18 @@ func TestAFallbackCopyOutlivesANATSOutageLongerThanTheDeadLetterThreshold(t *tes
 
 	outage := retry.DeadLetterAttempts + 2
 	for down := 1; down <= outage; down++ {
+		before := time.Now()
 		pass()
+		after := time.Now()
 		row := readHeldCopy(t, database, commentID, sessionTopic)
-		if row.attempts != 0 || row.settled || row.published || row.due != nil {
+		if row.attempts != 0 || row.settled || row.published || row.due == nil {
 			t.Fatalf("after %d passes with NATS unreachable the held copy has attempts=%d settled=%v published=%v "+
-				"next_attempt_at=%v, want no attempt counted, unsettled, unpublished and its claim released",
+				"next_attempt_at=%v, want no attempt counted, unsettled, unpublished and due again",
 				down, row.attempts, row.settled, row.published, row.due)
+		}
+		if row.due.Before(before.Add(retryInterval)) || row.due.After(after.Add(retryInterval)) {
+			t.Fatalf("after %d passes with NATS unreachable the held copy is due at %v, want retryInterval = %v "+
+				"from the pass, not at once", down, *row.due, retryInterval)
 		}
 	}
 	if unreachable, accepted := publisher.seen(); unreachable != outage || !reflect.DeepEqual(accepted, []string{issueTopic}) {

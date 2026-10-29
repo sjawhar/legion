@@ -180,10 +180,11 @@ func (s *server) sendHeldMessageOn(ctx context.Context, message model.Message, d
 // a message that owes nothing absent: the first attempt of a message with no attempt at all - its
 // process died between the commit and the send, or its own sender is between them right now - or
 // the message's latest attempt when it is pending and its claim has lapsed, which Postgres judges
-// against the claimed_at it wrote (claimLapsed). A pending attempt whose claim is live is in
-// flight and left to its sender, and a latest attempt that settled owes nothing: an earlier
-// pending one a later retry from the agent card overtook is that retry's to answer. A keyed send's
-// repeat (sendHeldMessageOn) and a broadcast's (sendOwedBroadcastRecipients) both ask it.
+// against the claimed_at it wrote (model.DeliveryClaimFreeSQL). A pending attempt whose claim is
+// live is in flight and left to its sender, and a latest attempt that settled owes nothing: an
+// earlier pending one a later retry from the agent card overtook is that retry's to answer. A
+// keyed send's repeat (sendHeldMessageOn) and a broadcast's (sendOwedBroadcastRecipients) both
+// ask it.
 func (s *server) owedMessageAttempts(ctx context.Context, messageIDs []string) (map[string]int, error) {
 	owed := make(map[string]int, len(messageIDs))
 	if len(messageIDs) == 0 {

@@ -542,13 +542,17 @@ type fallbackEvent struct {
 
 // fallbackRecord is what a fallback pass came to for one row: settled, and published when it
 // published the copy; failed when its decision or publish failed, which counts an attempt on the
-// row and backs it off (failedFallbackCopy). A record of a row neither settled nor failed releases
-// the row's claim for a later pass.
+// row and backs it off (failedFallbackCopy). A record neither settled nor failed releases the
+// row's claim for a later pass, counting no attempt, and delay is how long the row waits before
+// it is due again: mentionPendingDelay while its mention is still being sent, retryInterval while
+// NATS is unreachable, and none at all when the process is stopping, where whatever process runs
+// next takes the row at once.
 type fallbackRecord struct {
 	held      fallbackCopy
 	settled   bool
 	published bool
 	failed    bool
+	delay     time.Duration
 }
 
 // failedFallbackCopy is the record of a row whose decision or publish failed: one more attempt
@@ -598,7 +602,8 @@ func failedFallbackCopy(held fallbackCopy) fallbackRecord {
 // for update skip locked, so a second process skips them), and decides each by its key's
 // attempts, read as leftTo reads them (readMentionDeliveries): a sent attempt delivered the
 // comment, so the row is settled with nothing sent; an attempt still being sent or resent leaves
-// the row, its claim released, to a later pass; an abandoned attempt is settled failed first
+// the row to a later pass, its claim released for mentionPendingDelay, so the pass of every retry
+// tick does not read it again; an abandoned attempt is settled failed first
 // (mentionComment.settleAbandoned, which a sender's claim of it runs after or before under the
 // owner lock) and the row decided again; and when no attempt was sent and none is pending, the
 // comment.created event's envelope is published to the row's destination alone, carrying the
@@ -610,10 +615,12 @@ func failedFallbackCopy(held fallbackCopy) fallbackRecord {
 // on the row (attempt_count) and moves its next_attempt_at out by retry.Delay of that count, the
 // schedule an event backs off by, so it is decided again once that passes; nothing about a
 // publish failing is permanent, so the row is never given up, and the attempt that brings the
-// count to retry.DeadLetterAttempts is logged at Error (failedFallbackCopy). One cut short by the
-// process stopping or by NATS being unreachable counts nothing and releases the claim for the next
-// pass; a process that dies between the publish and the mark leaves the claim too, and the repeat
-// carries the same dedupe key, which the host, and the stream within its duplicate window, drop.
+// count to retry.DeadLetterAttempts is logged at Error (failedFallbackCopy). One cut short by NATS
+// being unreachable counts nothing and releases the claim for retryInterval, the next tick's pass;
+// one cut short by the process stopping counts nothing and releases it at once, for whatever
+// process runs next; a process that dies between the publish and the mark leaves the claim too,
+// and the repeat carries the same dedupe key, which the host, and the stream within its duplicate
+// window, drop.
 // Every write of a pass's record is guarded on the claim the pass took (recordFallbackCopies), so
 // a pass that outlasts claimWindow writes nothing to a row a later pass has claimed since.
 //
@@ -645,12 +652,14 @@ func publishFallbackCopies(ctx context.Context, deps Deps) {
 			slog.Error("dispatch outbox: record fallback copies", "error", err)
 		}
 	}()
-	release := func(held fallbackCopy) {
-		records = append(records, fallbackRecord{held: held})
+	// release leaves the row to a later pass, counting no attempt: it is due again once delay has
+	// passed, or at once when delay is none.
+	release := func(held fallbackCopy, delay time.Duration) {
+		records = append(records, fallbackRecord{held: held, delay: delay})
 	}
 	fail := func(held fallbackCopy) {
 		if ctx.Err() != nil {
-			release(held)
+			release(held, 0)
 			return
 		}
 		records = append(records, failedFallbackCopy(held))
@@ -671,7 +680,7 @@ func publishFallbackCopies(ctx context.Context, deps Deps) {
 	var sent []sentCopy
 	for _, held := range copies {
 		if ctx.Err() != nil {
-			release(held)
+			release(held, 0)
 			continue
 		}
 		event, ok := events[held.eventID]
@@ -687,8 +696,13 @@ func publishFallbackCopies(ctx context.Context, deps Deps) {
 			fail(held)
 		case decision == fallbackPublishes:
 			sent = append(sent, sentCopy{held: held, answer: sender.PublishAsync(item)})
+		case decision == fallbackSettles:
+			records = append(records, fallbackRecord{held: held, settled: true})
 		default:
-			records = append(records, fallbackRecord{held: held, settled: decision == fallbackSettles})
+			// The key's mention is still being sent or resent: the row waits for it as an event
+			// whose copy that mention holds back waits, rather than being claimed and read again
+			// by every pass until the mention ends.
+			release(held, mentionPendingDelay)
 		}
 	}
 	for _, item := range sent {
@@ -711,7 +725,7 @@ func publishFallbackCopies(ctx context.Context, deps Deps) {
 		default:
 			slog.Error("dispatch outbox: publish fallback copy", "comment_id", item.held.commentID, "destination", item.held.destination, "error", err)
 			if errors.Is(err, bus.ErrUnavailable) {
-				release(item.held)
+				release(item.held, retryInterval)
 			} else {
 				fail(item.held)
 			}
@@ -771,7 +785,7 @@ func decideFallbackCopy(
 }
 
 // claimFallbackCopies claims at most batchSize unsettled fallback rows that are due - never
-// claimed, released, or past the claim or the backoff their next_attempt_at holds - oldest first,
+// claimed, or past the claim, the wait or the backoff their next_attempt_at holds - oldest first,
 // in one statement: for update skip locked, so a second process's pass skips them, and
 // next_attempt_at pushed out by claimWindow in the same breath, which each row returns as its
 // claim. It reads the partial index of unsettled rows, so a pass with nothing to decide reads no
@@ -856,10 +870,11 @@ func loadFallbackEvents(ctx context.Context, deps Deps, copies []fallbackCopy) (
 // recordFallbackCopies writes what a fallback pass came to, in one statement: each row settled is
 // marked so, published when it published the copy; each failed row counts one more attempt and
 // waits retry.Delay of its new count from now (failedFallbackCopy); and each row left for a later
-// pass has its claim released. Every write is guarded on the claim the pass took (fallbackCopy's
-// claim): a row whose next_attempt_at is no longer that claim was claimed again by a later pass,
-// once the claim lapsed, and is that pass's, so it is not written. A row a pass did not reach is
-// not written either and keeps its claim.
+// pass has its claim replaced by the wait it was released with, which counts no attempt, or
+// cleared when that wait is none (fallbackRecord). Every write is guarded on the claim the pass
+// took (fallbackCopy's claim): a row whose next_attempt_at is no longer that claim was claimed
+// again by a later pass, once the claim lapsed, and is that pass's, so it is not written. A row a
+// pass did not reach is not written either and keeps its claim.
 func recordFallbackCopies(ctx context.Context, deps Deps, records []fallbackRecord) error {
 	if len(records) == 0 {
 		return nil
@@ -869,6 +884,7 @@ func recordFallbackCopies(ctx context.Context, deps Deps, records []fallbackReco
 	claims := make([]time.Time, 0, len(records))
 	settled := make([]bool, 0, len(records))
 	published := make([]bool, 0, len(records))
+	counted := make([]bool, 0, len(records))
 	retryAfter := make([]*time.Duration, 0, len(records))
 	for _, record := range records {
 		commentIDs = append(commentIDs, record.held.commentID)
@@ -876,9 +892,13 @@ func recordFallbackCopies(ctx context.Context, deps Deps, records []fallbackReco
 		claims = append(claims, record.held.claim)
 		settled = append(settled, record.settled)
 		published = append(published, record.published)
-		if record.failed {
+		counted = append(counted, record.failed)
+		switch {
+		case record.failed:
 			retryAfter = append(retryAfter, new(retry.Delay(record.held.attempts+1)))
-		} else {
+		case record.delay > 0:
+			retryAfter = append(retryAfter, new(record.delay))
+		default:
 			retryAfter = append(retryAfter, nil)
 		}
 	}
@@ -886,12 +906,12 @@ func recordFallbackCopies(ctx context.Context, deps Deps, records []fallbackReco
 		update comment_fallback_copies c set
 			settled_at = case when o.settled then now() end,
 			published = o.published,
-			attempt_count = c.attempt_count + case when o.retry_after is not null then 1 else 0 end,
+			attempt_count = c.attempt_count + case when o.counted then 1 else 0 end,
 			next_attempt_at = now() + o.retry_after
-		from unnest($1::uuid[], $2::text[], $3::timestamptz[], $4::bool[], $5::bool[], $6::interval[])
-			as o(comment_id, destination, claim, settled, published, retry_after)
+		from unnest($1::uuid[], $2::text[], $3::timestamptz[], $4::bool[], $5::bool[], $6::interval[], $7::bool[])
+			as o(comment_id, destination, claim, settled, published, retry_after, counted)
 		where c.comment_id = o.comment_id and c.destination = o.destination and c.settled_at is null
 			and c.next_attempt_at = o.claim
-	`, commentIDs, destinations, claims, settled, published, retryAfter)
+	`, commentIDs, destinations, claims, settled, published, retryAfter, counted)
 	return err
 }

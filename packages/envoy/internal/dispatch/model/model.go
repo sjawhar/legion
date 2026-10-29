@@ -1230,6 +1230,17 @@ var MentionSweepWindowInterval = fmt.Sprintf("interval '%d seconds'", int64(Ment
 // so, a comment mention's and a targeted message's alike.
 var DeliveryClaimFreeSQL = `(claimed_at is null or claimed_at < now() - ` + DeliveryClaimLapseInterval + `)`
 
+// DeliveryClaimMineSQL is true of a delivery attempt whose claim is the caller's own: the row was
+// claimed no earlier than the claim param names, and that claim is itself still live. A claim only
+// moves forward and a sender takes one only once the claim on the row has lapsed, so while the
+// caller's own claim is live every claim the row can carry is one the caller wrote itself - the
+// claim it took, and the refreshes it has made since. The mention sender's queued sends read it
+// beside DeliveryClaimFreeSQL (claimCommentDeliveryAttempt): each holds a claim from the moment
+// its attempt was committed, so the attempt its lane finally sends is claimed, and claimed by it.
+func DeliveryClaimMineSQL(param string) string {
+	return `(claimed_at >= ` + param + ` and ` + param + ` > now() - ` + DeliveryClaimLapseInterval + `)`
+}
+
 // MentionLatestAttemptSQL is true of the comment_deliveries row named row when it is the newest
 // attempt of its (comment, target): the one no retry from the card overtook, and the only one any
 // sender may still send.
@@ -1282,10 +1293,11 @@ func MentionAbandonedSQL(row string) string {
 
 // MentionLiveSQL is true of a pending mention attempt whose send is live: neither owed to the
 // sweep (MentionResumedSQL) nor abandoned (MentionAbandonedSQL). That is the mention's own
-// attempt before the sweep owes it - a sender claimed it within DeliveryClaimLapse, or it is
-// unclaimed and younger than that lease, since the mention sender leaves an attempt unclaimed
-// until its lane starts the send - and one past the sweep's reach that a sender holds all the
-// same. The outbox holds a mentioned session's copy back while its attempt is live.
+// attempt before the sweep owes it - a sender claimed it within DeliveryClaimLapse, which the
+// mention sender does when the attempt is committed and keeps doing while the send waits on its
+// recipient's lane, or it is unclaimed and younger than that lease, the shape of an attempt whose
+// send the sender refused - and one past the sweep's reach that a sender holds all the same. The
+// outbox holds a mentioned session's copy back while its attempt is live.
 func MentionLiveSQL(row string) string {
 	return `(not ` + MentionResumedSQL(row) + ` and not ` + MentionAbandonedSQL(row) + `)`
 }

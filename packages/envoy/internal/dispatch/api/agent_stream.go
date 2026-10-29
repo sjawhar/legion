@@ -28,11 +28,12 @@ const (
 	agentStreamWatchInterval = 10 * time.Second
 	// The most frame bytes a view holds for a page that is reading slower than the session is
 	// producing, counted as each frame's payload length from the moment it is queued until it has
-	// been written. A session publishes a message's snapshot at most every 100 ms and a view
-	// queues for up to agentStreamReplayTimeout before its first write, so 20 snapshots of 400 KiB
-	// fit; NATS's 1 MiB max_payload caps one frame, so a single frame always fits. A view that
-	// fills it ends (behind) rather than losing a frame, and the page's subscribe rebuilds from
-	// the session's replay.
+	// been handed to the socket's stream (liveSocketStream, 64 frames), which is where a page that
+	// stops reading backs up next. A session publishes a message's snapshot at most every 100 ms
+	// and a view queues for up to agentStreamReplayTimeout before its first write, so 20 snapshots
+	// of 400 KiB fit; NATS's 1 MiB max_payload caps one frame, so a single frame always fits. A
+	// view that fills it ends (behind) rather than losing a frame, and the page's subscribe
+	// rebuilds from the session's replay.
 	agentStreamBufferBytes = 8 << 20
 	// How long a view whose relay call failed waits before it ends (dropped), so a relay that keeps
 	// failing - a NATS connection that is reconnecting - is not asked again as fast as the page can
@@ -100,7 +101,7 @@ func (q *agentStreamQueue) push(frame agentstream.Frame) {
 
 // take hands over every queued frame in order, and their bytes. Those bytes stay counted against
 // the budget until release, so the budget bounds what the view holds while the frames are being
-// written too. After an overflow it hands over nothing.
+// queued on the socket's stream too. After an overflow it hands over nothing.
 func (q *agentStreamQueue) take() ([]agentstream.Frame, int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -109,7 +110,8 @@ func (q *agentStreamQueue) take() ([]agentstream.Frame, int) {
 	return frames, size
 }
 
-// release returns the bytes of frames take handed over once they have been written.
+// release returns the bytes of frames take handed over once they are queued on the socket's
+// stream (liveSocketStream), which is where the writer takes them from.
 func (q *agentStreamQueue) release(size int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()

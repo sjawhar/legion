@@ -19,15 +19,19 @@ import (
 // live view's model and thinking switch, a broadcast's recipients, an issue message to a session,
 // a comment's and a document comment's mentions, and a retry from an agent card - claims each
 // attempt before its send and settles it after. A process that dies between the two leaves the
-// attempt pending under a claim no process holds; once that claim lapses (claimLapsed, a minute)
-// the attempt is owed. Nobody has to ask again for it: every pass of the maintenance loop
+// attempt pending under a claim no process holds; once that claim lapses
+// (model.DeliveryClaimFreeSQL, a minute) the attempt is owed. Nobody has to ask again for it:
+// every pass of the maintenance loop
 // (RunSuggestionOutcomeSweep) sends each owed attempt, once, under its own attempt number and so
 // its own idempotency key, as a repeat under the write's key does, so the listener drops a frame
 // that did land (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts).
 //
 // An attempt is owed when it is its message's, or its mention's, latest attempt, still pending,
 // its claim lapsed, and opened over a lease ago: an unclaimed attempt the write itself opened (a
-// broadcast recipient's, a mention's) is its live sender's for the first minute. A pending attempt
+// broadcast recipient's) is its live sender's for the first minute, and a comment mention's
+// attempt is claimed from the moment its comment commits and stays claimed while its send waits
+// on its recipient's lane (mentionSender), so a live process's queue is never swept out of order.
+// A pending attempt
 // a later retry overtook is that retry's to answer, so the sweep sends the attempt it found owed
 // and no other (deliverMessageResuming and claimCommentDeliveryAttempt, bound to its number). A
 // keyed send whose process died between its message's commit and its first attempt has no attempt
@@ -178,8 +182,8 @@ func (s *server) resumeOwedDeliveries(ctx context.Context) error {
 }
 
 // resumeOwedDelivery sends one owed attempt, as a repeat under its write's key sends it, bound to
-// its number: an attempt a live sender took in the meantime, or that settled, is left as it is, and
-// no attempt of the sweep's own is opened.
+// its number and holding no claim of its own: an attempt a live sender took in the meantime, or
+// that settled, is left as it is, and no attempt of the sweep's own is opened.
 func (s *server) resumeOwedDelivery(ctx context.Context, owed owedDelivery) error {
 	if owed.commentID != "" {
 		comment, err := s.loadComment(ctx, s.deps.Store.Pool, owed.commentID)
@@ -191,7 +195,8 @@ func (s *server) resumeOwedDelivery(ctx context.Context, owed owedDelivery) erro
 			return err
 		}
 		_, err = s.deliverResolvedCommentMention(ctx, comment, created,
-			ResolvedMention{Target: owed.target, Delivery: owed.delivery}, comment.Author, owed.attempt)
+			ResolvedMention{Target: owed.target, Delivery: owed.delivery}, comment.Author,
+			attemptClaim{attempt: owed.attempt})
 		return err
 	}
 	message, err := s.loadMessage(ctx, s.deps.Store.Pool, "", owed.messageID)

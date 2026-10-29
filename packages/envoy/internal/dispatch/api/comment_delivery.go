@@ -222,15 +222,18 @@ func openCommentDeliveryAttempt(
 // the comment and its mention, settles which attempt this call owns, and commits - all before
 // the listener is called at all, so no connection is held across the send.
 //
-// resumeAttempt > 0 binds the call to that attempt, as deliverMessageResuming binds a message's:
-// it takes the attempt while it is pending and nobody holds it, and otherwise sends nothing and
-// reports the attempt as it stands (settled) - its live sender's, or its outcome. The mention
-// sender's own send binds to the attempt its comment committed, and so does a keyed repeat's
-// (replayComment); the delivery sweep binds to the attempt it found owed, so an older attempt a
-// card retry overtook is never sent in that attempt's place. resumeAttempt 0 is a retry from the
-// card: it resumes the oldest pending attempt nobody holds, and otherwise opens one of its own.
+// resume.attempt > 0 binds the call to that attempt, as deliverMessageResuming binds a message's:
+// it takes the attempt while it is pending and nobody else holds it, and otherwise sends nothing
+// and reports the attempt as it stands (settled) - another sender's, or its outcome. Nobody else
+// holds it when no sender does (model.DeliveryClaimFreeSQL) or when the claim on it is the
+// caller's own (model.DeliveryClaimMineSQL): the mention sender's send binds to the attempt its
+// comment committed, which this process has held claimed since (mentionSender), and so does a
+// keyed repeat's (replayComment); the delivery sweep binds to the attempt it found owed, holding
+// no claim of its own, so an older attempt a card retry overtook is never sent in that attempt's
+// place. A zero resume is a retry from the card: it resumes the oldest pending attempt nobody
+// holds, and otherwise opens one of its own.
 func (s *server) claimCommentDeliveryAttempt(
-	ctx context.Context, comment model.Comment, target ResolvedMention, resumeAttempt int,
+	ctx context.Context, comment model.Comment, target ResolvedMention, resume attemptClaim,
 ) (claimedCommentDelivery, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -247,23 +250,23 @@ func (s *server) claimCommentDeliveryAttempt(
 		return claimedCommentDelivery{}, err
 	}
 	claimed := claimedCommentDelivery{comment: stored}
-	var lapsed bool
-	if resumeAttempt > 0 {
+	var takeable bool
+	if resume.attempt > 0 {
 		bound, err := scanCommentDelivery(tx.QueryRow(ctx, `
-			select `+commentDeliveryColumns+`, `+model.DeliveryClaimFreeSQL+`
+			select `+commentDeliveryColumns+`, `+model.DeliveryClaimFreeSQL+` or `+model.DeliveryClaimMineSQL("$4")+`
 			from comment_deliveries
 			where comment_id = $1 and target = $2 and attempt = $3
 			for update
-		`, stored.ID, target.Target, resumeAttempt), &lapsed)
+		`, stored.ID, target.Target, resume.attempt, resume.claimedAt), &takeable)
 		if err != nil {
 			return claimedCommentDelivery{}, fmt.Errorf(
-				"read attempt %d of comment delivery %s/%s: %w", resumeAttempt, stored.ID, target.Target, err)
+				"read attempt %d of comment delivery %s/%s: %w", resume.attempt, stored.ID, target.Target, err)
 		}
-		if bound.State != "pending" || !lapsed {
+		if bound.State != "pending" || !takeable {
 			// Answered or failed already - a reply consumed it while this sender was on its way,
 			// or the outbox settled it abandoned and published the session's copy instead
-			// (attempt.leftTo in internal/dispatch/outbox) - or held by a live sender, who owns
-			// the outcome.
+			// (attempt.leftTo in internal/dispatch/outbox) - or held by another live sender, who
+			// owns the outcome.
 			claimed.settled = &bound
 		} else if err := claimed.take(ctx, tx, &bound); err != nil {
 			return claimedCommentDelivery{}, err
@@ -280,11 +283,11 @@ func (s *server) claimCommentDeliveryAttempt(
 		order by attempt
 		limit 1
 		for update
-	`, stored.ID, target.Target), &lapsed)
+	`, stored.ID, target.Target), &takeable)
 	switch {
 	case err != nil && !errors.Is(err, pgx.ErrNoRows):
 		return claimedCommentDelivery{}, err
-	case err == nil && lapsed:
+	case err == nil && takeable:
 		if err := claimed.take(ctx, tx, &pending); err != nil {
 			return claimedCommentDelivery{}, err
 		}
@@ -301,8 +304,10 @@ func (s *server) claimCommentDeliveryAttempt(
 	return claimed, nil
 }
 
-// take claims pending, an attempt nobody holds - never claimed, or claimed by a sender that never
-// came back - under its original number, so the listener deduplicates a send that did land.
+// take claims pending, an attempt nobody else holds - never claimed, claimed by a sender that
+// never came back, or claimed by this caller while the send waited on its lane - under its
+// original number, so the listener deduplicates a send that did land. The claim it writes is this
+// send's own: every statement of the settle is scoped to it.
 func (claimed *claimedCommentDelivery) take(ctx context.Context, tx pgx.Tx, pending *model.CommentDelivery) error {
 	if err := tx.QueryRow(ctx, `
 		update comment_deliveries set claimed_at = now()
@@ -479,17 +484,17 @@ func (s *server) recordCommentDeliveryResolution(
 // deliverResolvedCommentMention delivers one mention of a comment: it claims an attempt in one
 // short transaction, resolves with nothing held, records that resolution on the claimed row,
 // sends, then records the outcome in a second transaction. The listener never runs inside a
-// transaction. resumeAttempt binds it to one attempt, or to none for a card retry
-// (claimCommentDeliveryAttempt).
+// transaction. resume binds it to one attempt, and carries the claim the caller already holds on
+// that attempt, or nothing for a card retry (claimCommentDeliveryAttempt).
 func (s *server) deliverResolvedCommentMention(
 	ctx context.Context,
 	comment model.Comment,
 	created model.Event,
 	target ResolvedMention,
 	actor model.Actor,
-	resumeAttempt int,
+	resume attemptClaim,
 ) (model.CommentDelivery, error) {
-	claimed, err := s.claimCommentDeliveryAttempt(ctx, comment, target, resumeAttempt)
+	claimed, err := s.claimCommentDeliveryAttempt(ctx, comment, target, resume)
 	if err != nil {
 		return model.CommentDelivery{}, err
 	}
@@ -679,7 +684,8 @@ func (s *server) createCommentDelivery(w http.ResponseWriter, r *http.Request) {
 	resolved := ResolvedMention{Target: target, Delivery: input.Delivery}
 	// On a context the client cannot cancel, as every delivery runs: a retry the page gives up on
 	// still settles its attempt, and one a process death strands the delivery sweep resumes.
-	attempt, err := s.deliverResolvedCommentMention(context.WithoutCancel(r.Context()), comment, created, resolved, actor, 0)
+	attempt, err := s.deliverResolvedCommentMention(
+		context.WithoutCancel(r.Context()), comment, created, resolved, actor, attemptClaim{})
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

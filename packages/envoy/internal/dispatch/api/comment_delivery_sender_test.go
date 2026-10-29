@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -31,7 +33,17 @@ type mentionListener struct {
 	sends       []mentionListenerSend
 	held        map[string]chan struct{}
 	heldLookups map[string]chan struct{}
-	arrived     chan string
+	// stalls holds the next send to a session before the listener records it at all, so a send
+	// the test has not released has not reached the recipient yet.
+	stalls  map[string]*mentionStall
+	arrived chan string
+}
+
+// mentionStall is one held-back send: reached is closed when that send arrives at the listener,
+// and release when the test lets it be recorded and answered.
+type mentionStall struct {
+	reached chan struct{}
+	release chan struct{}
 }
 
 type mentionListenerSend struct {
@@ -41,7 +53,8 @@ type mentionListenerSend struct {
 func newMentionListener(t *testing.T) (*httptest.Server, *mentionListener) {
 	t.Helper()
 	state := &mentionListener{
-		held: map[string]chan struct{}{}, heldLookups: map[string]chan struct{}{}, arrived: make(chan string, 64),
+		held: map[string]chan struct{}{}, heldLookups: map[string]chan struct{}{},
+		stalls: map[string]*mentionStall{}, arrived: make(chan string, 64),
 	}
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
@@ -70,6 +83,18 @@ func newMentionListener(t *testing.T) (*httptest.Server, *mentionListener) {
 			}
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Errorf("decode mention send: %v", err)
+			}
+			state.mu.Lock()
+			stall := state.stalls[request.TargetSession]
+			delete(state.stalls, request.TargetSession)
+			state.mu.Unlock()
+			if stall != nil {
+				close(stall.reached)
+				select {
+				case <-stall.release:
+				case <-r.Context().Done():
+					return
+				}
 			}
 			state.mu.Lock()
 			state.sends = append(state.sends, mentionListenerSend{request.TargetSession, request.Message})
@@ -104,6 +129,17 @@ func (l *mentionListener) hold(sessions ...string) func() {
 	return sync.OnceFunc(func() { close(gate) })
 }
 
+// stall holds the next send to session before the listener records it - a send that has not
+// reached the recipient at all - and lets every later send through. reached is closed when that
+// send arrives; release lets it be recorded and answered, and may be called more than once.
+func (l *mentionListener) stall(session string) (reached <-chan struct{}, release func()) {
+	stall := &mentionStall{reached: make(chan struct{}), release: make(chan struct{})}
+	l.mu.Lock()
+	l.stalls[session] = stall
+	l.mu.Unlock()
+	return stall.reached, sync.OnceFunc(func() { close(stall.release) })
+}
+
 // holdLookups makes every GET of path wait until the returned release is called; release may be
 // called more than once.
 func (l *mentionListener) holdLookups(path string) func() {
@@ -133,7 +169,8 @@ func (l *mentionListener) sent() []mentionListenerSend {
 }
 
 // unclaimedPending reports whether the comment's attempt for target is pending with no sender's
-// claim on it: committed, and not yet taken by any send.
+// claim on it: the shape of an attempt whose send the mention sender refused, and of one whose
+// claim lapsed.
 func unclaimedPending(t *testing.T, database *store.Store, commentID, target string) bool {
 	t.Helper()
 	var unclaimed bool
@@ -144,6 +181,33 @@ func unclaimedPending(t *testing.T, database *store.Store, commentID, target str
 		t.Fatalf("read the attempt of %s for %s: %v", commentID, target, err)
 	}
 	return unclaimed
+}
+
+// claimedPending reports whether the comment's attempt for target is pending under a live claim:
+// committed and claimed, which is how the mention sender holds a send waiting on its lane, and how
+// a sender holds the attempt its send is in flight for.
+func claimedPending(t *testing.T, database *store.Store, commentID, target string) bool {
+	t.Helper()
+	var claimed bool
+	if err := database.Pool.QueryRow(context.Background(), `
+		select state = 'pending' and not `+model.DeliveryClaimFreeSQL+` from comment_deliveries
+		where comment_id = $1 and target = $2 and attempt = 1
+	`, commentID, target).Scan(&claimed); err != nil {
+		t.Fatalf("read the attempt of %s for %s: %v", commentID, target, err)
+	}
+	return claimed
+}
+
+// attemptClaimedAt is when the comment's attempt for target was last claimed.
+func attemptClaimedAt(t *testing.T, database *store.Store, commentID, target string) time.Time {
+	t.Helper()
+	var claimed time.Time
+	if err := database.Pool.QueryRow(context.Background(), `
+		select claimed_at from comment_deliveries where comment_id = $1 and target = $2 and attempt = 1
+	`, commentID, target).Scan(&claimed); err != nil {
+		t.Fatalf("read the claim on the attempt of %s for %s: %v", commentID, target, err)
+	}
+	return claimed
 }
 
 // allSent reports whether every attempt settled sent.
@@ -198,7 +262,8 @@ func TestMentionSendsRunAfterTheCommentHasAnswered(t *testing.T) {
 
 // One recipient gets the comments it is mentioned in in the order they were accepted, also when
 // one names it by role and the next by session: both resolve to the same session, and so to the
-// same lane. While the first comment's send is held, the second's attempt is not even claimed.
+// same lane. While the first comment's send is held, the second's attempt waits on that lane
+// under this process's claim, with its send not started.
 func TestMentionSendsReachOneRecipientInTheOrderItsCommentsWereAccepted(t *testing.T) {
 	listener, state := newMentionListener(t)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
@@ -215,8 +280,11 @@ func TestMentionSendsReachOneRecipientInTheOrderItsCommentsWereAccepted(t *testi
 	second := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "second", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
-	if !unclaimedPending(t, database, second.ID, "session:s1") {
-		t.Fatal("the second comment's attempt was taken while the first's send to the same session was still held")
+	if !claimedPending(t, database, second.ID, "session:s1") {
+		t.Fatal("the second comment's attempt is not held while the first's send to the same session is still held")
+	}
+	if sent := state.sent(); len(sent) != 1 {
+		t.Fatalf("sends while the first was still held = %#v, want the first alone", sent)
 	}
 
 	release()
@@ -649,10 +717,9 @@ func TestARollingUpdatesSuccessorSendsTheMentionTheOldProcessAcceptedWhileDraini
 	}
 }
 
-// A busy sender's queued sends have not started, so their attempts are pending with no claim, as
-// an attempt a dead process left is. A sweep pass running meanwhile leaves them to the sender
-// that holds them, because each was opened inside the claim lease, so each reaches its recipient
-// once and in the order its comment was accepted.
+// A busy sender holds the claim of every send waiting on its lanes, so a sweep pass running
+// meanwhile leaves each of them to it and each reaches its recipient once, in the order its
+// comment was accepted.
 func TestTheSweepLeavesABusySendersUnstartedSendsToIt(t *testing.T) {
 	listener, state := newMentionListener(t)
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL})
@@ -669,8 +736,8 @@ func TestTheSweepLeavesABusySendersUnstartedSendsToIt(t *testing.T) {
 	state.awaitSend(t)
 	queued := []string{post("queued first"), post("queued second")}
 	for _, comment := range queued {
-		if !unclaimedPending(t, database, comment, "session:s1") {
-			t.Fatalf("the attempt of %s behind the held send was taken", comment)
+		if !claimedPending(t, database, comment, "session:s1") {
+			t.Fatalf("the attempt of %s behind the held send is not held by the sender", comment)
 		}
 	}
 	if err := served.resumeOwedDeliveries(context.Background()); err != nil {
@@ -689,9 +756,9 @@ func TestTheSweepLeavesABusySendersUnstartedSendsToIt(t *testing.T) {
 	}
 }
 
-// A mention past the sender's queue bound is not queued: its attempt stays pending and
-// unclaimed, and the delivery sweep, once the queue has room and the attempt has waited a claim
-// lease, sends it, once.
+// A mention past the sender's queue bound is not queued: the claim its attempt committed with is
+// given back, so the attempt is pending and unclaimed, and the delivery sweep, once the queue has
+// room and the attempt has waited a claim lease, sends it, once.
 func TestAMentionPastTheQueueBoundIsSentOnceTheQueueDrains(t *testing.T) {
 	listener, state := newMentionListener(t)
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL})
@@ -711,8 +778,11 @@ func TestAMentionPastTheQueueBoundIsSentOnceTheQueueDrains(t *testing.T) {
 	state.awaitSend(t)
 	queued := post("queued")
 	refused := post("past the bound")
-	if !unclaimedPending(t, database, queued, "session:s1") || !unclaimedPending(t, database, refused, "session:s1") {
-		t.Fatal("an attempt behind the held send was taken")
+	if !claimedPending(t, database, queued, "session:s1") {
+		t.Fatal("the attempt behind the held send is not held by the sender")
+	}
+	if !unclaimedPending(t, database, refused, "session:s1") {
+		t.Fatal("the attempt past the queue's bound kept the claim it committed with")
 	}
 
 	release()
@@ -734,5 +804,116 @@ func TestAMentionPastTheQueueBoundIsSentOnceTheQueueDrains(t *testing.T) {
 	if sent := state.sent(); len(sent) != 3 || sent[0].body != "in flight" || sent[1].body != "queued" ||
 		sent[2].body != "past the bound" {
 		t.Fatalf("sends = %#v, want each comment sent once, in order", sent)
+	}
+}
+
+// runOutboxBeside runs the outbox beside the test, as a Dispatch process runs it beside its API,
+// publishing every event it decides on, until the test ends.
+func runOutboxBeside(t *testing.T, deps Deps) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		outbox.Run(ctx, outbox.Deps{
+			Store: deps.Store, Publisher: acceptingPublisher{}, Broker: events.NewBroker(), Docs: deps.Docs,
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-stopped
+	})
+}
+
+// fallbackCopiesOf waits until the outbox has published every event of issueKey, for at most 10 s,
+// and answers how many copies of the comments it held back as comment_fallback_copies rows.
+func fallbackCopiesOf(t *testing.T, database *store.Store, issueKey string, commentIDs []string) int {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var unpublished, copies int
+		if err := database.Pool.QueryRow(context.Background(), `
+			select (select count(*) from events where issue_key = $1 and published_at is null),
+			       (select count(*) from comment_fallback_copies where comment_id = any($2::uuid[]))
+		`, issueKey, commentIDs).Scan(&unpublished, &copies); err != nil {
+			t.Fatalf("count the outbox's work on %s: %v", issueKey, err)
+		}
+		if unpublished == 0 {
+			return copies
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the outbox left %d events of %s unpublished", unpublished, issueKey)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A recipient's comments reach it in the order they were accepted however long its first send is
+// held. The comments behind that send wait on the recipient's lane under the claim their attempts
+// committed with, which the sender writes again while they wait, so a delivery sweep pass that
+// runs while every attempt is old enough to be owed takes none of them and sends nothing past the
+// send in flight. The outbox counts each of them live rather than resumed meanwhile, so it holds
+// the mentioned session's copy back instead of keeping it as a comment_fallback_copies row.
+func TestAHeldLaneKeepsItsQueuedCommentsInOrderThroughASweep(t *testing.T) {
+	listener, state := newMentionListener(t)
+	handler, database, deps, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL})
+	issue := createInteractionIssue(t, handler, "TEST", "A held lane", "before")
+	if patched := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+		"route": "session:s1",
+	}, "alice"); patched.Code != http.StatusOK {
+		t.Fatalf("set the route: status=%d body=%s", patched.Code, patched.Body.String())
+	}
+	runOutboxBeside(t, deps)
+	reached, release := state.stall("s1")
+	defer release()
+	post := func(body string) string {
+		return decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
+			"body": body, "mentions": []map[string]any{{"target": "session:s1"}},
+		})).ID
+	}
+
+	// The first comment's send is at the listener, which has not taken it: s1 holds no copy yet.
+	sending := post("first")
+	<-reached
+	queued := []string{post("second"), post("third")}
+	for _, comment := range queued {
+		if !claimedPending(t, database, comment, "session:s1") {
+			t.Fatalf("the attempt of %s waiting on the held lane is not held by the sender", comment)
+		}
+	}
+	// The sender writes the claims of the sends waiting on the lane again, as its ticker does
+	// every mentionClaimRefresh, so a lane held past a claim lease keeps them.
+	claimed := map[string]time.Time{}
+	for _, comment := range queued {
+		claimed[comment] = attemptClaimedAt(t, database, comment, "session:s1")
+	}
+	served.mentions.refreshHeldClaims(context.Background())
+	for _, comment := range queued {
+		if again := attemptClaimedAt(t, database, comment, "session:s1"); !again.After(claimed[comment]) {
+			t.Fatalf("the claim on the queued attempt of %s is %v, want it written again past %v",
+				comment, again, claimed[comment])
+		}
+	}
+	// Every attempt was opened over a claim lease ago now; only the claims this sender holds keep
+	// the sweep off the two waiting on the lane.
+	comments := append([]string{sending}, queued...)
+	ageAttempts(t, database, comments...)
+	if err := served.resumeOwedDeliveries(context.Background()); err != nil {
+		t.Fatalf("resume the owed deliveries: %v", err)
+	}
+
+	release()
+	for _, comment := range comments {
+		if settled := settledCommentDeliveries(t, database, comment); !allSent(settled) {
+			t.Fatalf("comment %s attempts = %#v, want it sent", comment, settled)
+		}
+	}
+	if sent := state.sent(); len(sent) != 3 || sent[0] != (mentionListenerSend{"s1", "first"}) ||
+		sent[1] != (mentionListenerSend{"s1", "second"}) || sent[2] != (mentionListenerSend{"s1", "third"}) {
+		t.Fatalf("sends = %#v, want each comment sent to s1 once, in the order they were accepted", sent)
+	}
+	if copies := fallbackCopiesOf(t, database, issue.Key, comments); copies != 0 {
+		t.Fatalf("the outbox kept %d copies of the comments as fallback rows, want none: every attempt "+
+			"waiting on the lane was this sender's", copies)
 	}
 }

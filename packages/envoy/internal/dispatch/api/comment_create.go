@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -152,12 +153,15 @@ type commentRecovery struct {
 // under the comment's own 201, with every mention it still owes put back on the mention sender's
 // lanes behind the answer, as the first request's were. A mention owes its delivery when its
 // process died after the comment committed and before the mention's one attempt was sent: that
-// attempt is still pending, and its claim, if any, has lapsed. It is queued under its own number,
-// so the listener drops a frame that did land, and the send binds to it, as the comment's own
-// first send does (sendCommentMention, attempt 1), so an attempt a live sender holds is left to it
-// and no second attempt is opened. A mention someone retried from its card has more than one
-// attempt, and owes nothing here. An attempt no lane takes - this process is stopping, or its
-// queue is full - is the delivery sweep's, as the first request's would have been.
+// attempt is still pending, and its claim, if any, has lapsed. This process claims it before it
+// queues it (claimQueuedMention), as a comment of its own commits its attempt claimed, so the
+// delivery sweep leaves it to this process's lane; one another sender claimed first is left to
+// that sender and not queued here at all. It is queued under its own number, so the listener drops
+// a frame that did land, and the send binds to that number and to this process's claim, as the
+// comment's own first send does (sendCommentMention, attempt 1), so no second attempt is opened.
+// A mention someone retried from its card has more than one attempt, and owes nothing here. An
+// attempt no lane takes - this process is stopping, or its queue is full - has its claim given
+// back and is the delivery sweep's, as the first request's would have been.
 func (s *server) replayComment(w http.ResponseWriter, r *http.Request, point commentRecovery, stored []byte) {
 	ctx, pool := r.Context(), s.deps.Store.Pool
 	comment, err := s.loadComment(ctx, pool, point.CommentID)
@@ -176,10 +180,21 @@ func (s *server) replayComment(w http.ResponseWriter, r *http.Request, point com
 			s.writeHandlerError(w, err)
 			return
 		}
+		sending := context.WithoutCancel(ctx)
 		for _, mention := range owed {
-			s.mentions.enqueue(mentionSend{
+			item := mentionSend{
 				comment: comment, created: created, mention: mention, actor: comment.Author, attempt: 1,
-			})
+			}
+			claimed, mine, err := s.claimQueuedMention(sending, item.key())
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			if !mine {
+				continue
+			}
+			item.claimed = claimed
+			s.mentions.enqueue(sending, item)
 		}
 	}
 	hydrated, err := s.hydrateCommentSideTables(ctx, pool, []model.Comment{comment})
@@ -700,6 +715,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		}
 	}
 	attempts := make([]model.CommentDelivery, 0, len(resolvedMentions))
+	claims := make([]time.Time, 0, len(resolvedMentions))
 	for _, mention := range resolvedMentions {
 		if _, err := tx.Exec(r.Context(), `
 			insert into comment_mentions (comment_id, target, delivery, resolved_session_id)
@@ -712,21 +728,27 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		if mention.ResolveError != "" {
 			resolveError = &mention.ResolveError
 		}
-		// The attempt commits with its comment, pending and unclaimed: the mention sender claims
-		// it when its send starts, and an attempt no sender reaches - one queued at shutdown,
-		// refused once the sender stopped, or past the queue's bound - is still there for a
-		// stranded pass to find.
+		// The attempt commits with its comment, pending and claimed by this process: the mention
+		// sender holds that claim while the send waits on its recipient's lane and writes it again
+		// while it waits (refreshHeldClaims), so the delivery sweep never takes a queued send's
+		// attempt and sends it past the comments before it. An attempt no sender reaches - one
+		// refused once the sender stopped, past the queue's bound, or still queued when the drain
+		// ends - has its claim given back and is pending and unclaimed (mentionSender.enqueue,
+		// mentionSender.wait); one a kill leaves queued keeps a claim nothing writes again, which
+		// lapses a lease later. Either way the delivery sweep has it then (resumeOwedDeliveries).
+		var claimed time.Time
 		attempt, err := scanCommentDelivery(tx.QueryRow(r.Context(), `
-			insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, resolve_error, state)
-			values ($1, $2, 1, $3, $4, $5, 'pending')
-			returning `+commentDeliveryColumns,
+			insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, resolve_error, state, claimed_at)
+			values ($1, $2, 1, $3, $4, $5, 'pending', now())
+			returning `+commentDeliveryColumns+`, claimed_at`,
 			comment.ID, mention.Target, mention.Delivery, mention.SessionID, resolveError,
-		))
+		), &claimed)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
 		attempts = append(attempts, attempt)
+		claims = append(claims, claimed)
 	}
 	referenceChanges, err := s.replaceReferences(r.Context(), tx, "comment", comment.ID, comment.Body)
 	if err != nil {
@@ -799,8 +821,13 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		return
 	}
 	s.publish(events...)
-	for _, mention := range resolvedMentions {
-		s.mentions.enqueue(mentionSend{comment: comment, created: event, mention: mention, actor: actor, attempt: 1})
+	// On a context the client's going away does not cancel: a send this sender refuses gives its
+	// attempt's claim back, which must not be left undone because the caller hung up.
+	sending := context.WithoutCancel(r.Context())
+	for i, mention := range resolvedMentions {
+		s.mentions.enqueue(sending, mentionSend{
+			comment: comment, created: event, mention: mention, actor: actor, attempt: 1, claimed: claims[i],
+		})
 	}
 	// The answer carries each attempt as it committed, pending: the mention sender settles it
 	// after this response, and its comment.delivery receipt says how it ended.

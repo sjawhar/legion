@@ -133,8 +133,10 @@ func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string
 			}
 			select {
 			case <-subscription.ended:
-				// The relay ended this generation: the log was reset under its cursor, or the
-				// server is shutting down. The page subscribes again from the last id it applied.
+				// The relay ended this generation: the log was reset under its cursor. The page
+				// subscribes again from the last id it applied. A shutdown ends the generation
+				// too, but it closes the socket with 1012 and stops its writer (live_socket.go),
+				// so no ended frame reaches the page then: this one is a reset's.
 				_ = stream.SendWait(ctx, liveEnded(sub, liveEndedBehind))
 				return
 			default:
