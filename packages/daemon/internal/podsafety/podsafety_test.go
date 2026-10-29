@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,13 +59,55 @@ func leaves(prefix string, node any, into map[string]any) {
 	}
 }
 
-// Variables are PI_CONFIG_FILES, which Apply composes, and the two that place a pod's sessions,
-// both reserved to the runtime: nothing else is set on a pod's agent, so nothing of a repository's
-// .env is held off beyond where its sessions go.
-func TestVariablesAreTheOverlaysAndTheTwoThatPlaceSessions(t *testing.T) {
-	want := []Variable{{Name: "PI_CONFIG_FILES"}, {Name: "PI_CONFIG_DIR", Reserved: placesSessions}, {Name: "OMP_SESSION_STORAGE", Reserved: placesSessions}}
+// Variables are PI_CONFIG_FILES, which Apply composes, the two that place a pod's sessions, both
+// reserved to the runtime, and the Pulumi CLI's state backend, which an operator's pod may name:
+// nothing else is set on a pod's agent, so nothing of a repository's .env is held off beyond where
+// its sessions go and which Pulumi backend its commands reach.
+func TestVariablesAreTheOverlaysTheTwoThatPlaceSessionsAndThePulumiBackend(t *testing.T) {
+	want := []Variable{
+		{Name: "PI_CONFIG_FILES"},
+		{Name: "PI_CONFIG_DIR", Reserved: placesSessions},
+		{Name: "OMP_SESSION_STORAGE", Reserved: placesSessions},
+		{Name: "PULUMI_BACKEND_URL"},
+	}
 	if got := Variables(); !slices.Equal(got, want) {
 		t.Errorf("Variables() = %v, want %v", got, want)
+	}
+}
+
+// A Pulumi CLI that reaches no backend at all and recognizes a coding agent around it creates an
+// ephemeral Pulumi Cloud account of its own and prints a claim URL (CLI 3.268.0), so every pod's
+// agent is given one. The value is the container's own home where the pod names none, and the
+// pod's where it does: a deployment whose agents work a real backend names it in
+// runtime.kubernetes.pod.env, which this must not override, since PULUMI_BACKEND_URL outranks a
+// project file's own `backend.url` rather than falling back to it.
+func TestApplyGivesThePulumiCLIABackendAndYieldsToThePods(t *testing.T) {
+	for name, tc := range map[string]struct {
+		pod  *string
+		want string
+	}{
+		// A pod that sets the variable empty is a pod that leaves it to a repository's .env, and
+		// Apply must replace that as it replaces an unset one.
+		"unset":                {nil, "file://~"},
+		"empty, as .env fills": {new(""), "file://~"},
+		"the pod's own":        {new("gs://example-state"), "gs://example-state"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var environ []string
+			if tc.pod != nil {
+				environ = append(environ, "PULUMI_BACKEND_URL="+*tc.pod)
+			}
+			env, err := Apply(environ, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := envMap(env)["PULUMI_BACKEND_URL"]; got != tc.want {
+				t.Errorf("PULUMI_BACKEND_URL = %q, want %q", got, tc.want)
+			}
+			if n := named(env, "PULUMI_BACKEND_URL"); n != 1 {
+				t.Errorf("PULUMI_BACKEND_URL is named %d times in %q", n, env)
+			}
+		})
 	}
 }
 
@@ -126,19 +169,31 @@ func TestApplyNamesTheOverlayFirstAheadOfTheOperators(t *testing.T) {
 // case in which Oh My Pi would fill it from a repository's .env — so a value the pod carries wins,
 // the Sandbox runtime's session database among them, which it names before Apply runs (Apply does
 // not know who set it; the Sandbox runtime is what refuses an operator's pod setting either,
-// sandbox.CheckPod). Nothing beyond the two and PI_CONFIG_FILES is set.
+// sandbox.CheckPod). Nothing beyond the three and PI_CONFIG_FILES is set.
 func TestApplySetsEachBaselineVariableOnlyWhereThePodLeavesItUnset(t *testing.T) {
-	baseline := map[string]string{"PI_CONFIG_DIR": ".omp", "OMP_SESSION_STORAGE": "file"}
+	baseline := map[string]string{"PI_CONFIG_DIR": ".omp", "OMP_SESSION_STORAGE": "file", "PULUMI_BACKEND_URL": "file://~"}
+	with := func(pairs ...string) map[string]string {
+		want := map[string]string{}
+		maps.Copy(want, baseline)
+		for i := 0; i < len(pairs); i += 2 {
+			want[pairs[i]] = pairs[i+1]
+		}
+		return want
+	}
 	for name, tc := range map[string]struct {
 		pod, want map[string]string
 	}{
 		"unset":                {map[string]string{}, baseline},
-		"the pod's own value":  {map[string]string{"OMP_SESSION_STORAGE": "sql"}, map[string]string{"PI_CONFIG_DIR": ".omp", "OMP_SESSION_STORAGE": "sql"}},
+		"the pod's own value":  {map[string]string{"OMP_SESSION_STORAGE": "sql"}, with("OMP_SESSION_STORAGE", "sql")},
 		"empty, as .env fills": {map[string]string{"OMP_SESSION_STORAGE": ""}, baseline},
-		"another config root":  {map[string]string{"PI_CONFIG_DIR": ".config/omp"}, map[string]string{"PI_CONFIG_DIR": ".config/omp", "OMP_SESSION_STORAGE": "file"}},
+		"another config root":  {map[string]string{"PI_CONFIG_DIR": ".config/omp"}, with("PI_CONFIG_DIR", ".config/omp")},
+		"the pod's own Pulumi backend": {
+			map[string]string{"PULUMI_BACKEND_URL": "gs://example-state"},
+			with("PULUMI_BACKEND_URL", "gs://example-state"),
+		},
 		"the runtime's session database": {
 			map[string]string{"OMP_SESSION_STORAGE": "sql", "OMP_SESSION_SQL_DSN_FILE": "/var/run/legion/providers/OMP_SESSION_SQL_DSN"},
-			map[string]string{"PI_CONFIG_DIR": ".omp", "OMP_SESSION_STORAGE": "sql", "OMP_SESSION_SQL_DSN_FILE": "/var/run/legion/providers/OMP_SESSION_SQL_DSN"},
+			with("OMP_SESSION_STORAGE", "sql", "OMP_SESSION_SQL_DSN_FILE", "/var/run/legion/providers/OMP_SESSION_SQL_DSN"),
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

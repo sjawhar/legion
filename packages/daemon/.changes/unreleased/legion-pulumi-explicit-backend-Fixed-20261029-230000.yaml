@@ -1,0 +1,6 @@
+kind: Fixed
+body: |-
+    Every Legion agent's Pulumi CLI is told a state backend, so none creates a Pulumi Cloud account of its own. A CLI 3.268.0 that reaches no backend at all — no `PULUMI_BACKEND_URL`, no `pulumi login`, and no `backend.url` in the project file the command reads — and recognizes a coding agent around it creates an ephemeral Pulumi Cloud account, writes the claim in `/tmp/.pulumi/agent-claim.json` and prints a claim URL. The pod baseline (`internal/podsafety`) now sets `PULUMI_BACKEND_URL=file://~` where the pod leaves it unset, and the tmux runtime sets the same for a pane where the daemon's own environment leaves it unset; a deployment whose agents run Pulumi against a real state backend names it in `runtime.kubernetes.pod.env` or `runtime.tmux.pane_env`, which both yield to. The worker image sets `PULUMI_SKIP_UPDATE_CHECK=true`, and the tmux runtime sets it for a pane.
+time: 2026-10-29T23:00:00.000000000Z
+custom:
+    Issue: legion-pulumi-explicit-backend

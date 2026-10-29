@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 )
@@ -15,7 +16,10 @@ import (
 // paneEnvAllowList is every variable a pane process reads from the daemon's own environment: Oh My
 // Pi and its plugins (HOME, the XDG base directories, OMP_PROFILE/PI_PROFILE,
 // SECRETSD_SOCK for the secretsd OMP extension), jj/git/gh, mise and the `mise x` every pane runs,
-// tmux itself (TMUX_TMPDIR, SHELL), locale and proxy policy. Nothing else the daemon was started
+// tmux itself (TMUX_TMPDIR, SHELL), locale, proxy policy, and the Pulumi CLI an agent working a
+// repository with Pulumi programs runs (PULUMI_BACKEND_URL, the one way an operator names the
+// state backend their panes' agents work against; PaneEnvironment gives it Legion's own value
+// where the daemon's environment names none). Nothing else the daemon was started
 // with reaches the private server or a pane — not its provider keys (those reach OMP alone, as
 // daemon-held files: readProviderKeyNames), not the secret store's config or age identity, not an
 // operator's TMUX or SSH agent, not a LEGION_* value inherited from an outer pane. A name joins
@@ -37,6 +41,8 @@ var paneEnvAllowList = []string{
 	// outbound network policy
 	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
 	"SSL_CERT_DIR", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
+	// the Pulumi CLI's state backend
+	podsafety.PulumiBackend,
 	// the PATH panes run under
 	"PATH",
 }
@@ -128,11 +134,23 @@ func xdgDirectories(stateDir string) [][2]string {
 	}
 }
 
+// pulumiBackend is the Pulumi CLI's state backend a pane is told where nothing else names one: a
+// file backend under the daemon's own home (`<state_dir>/home`, which makePaneHome makes before
+// any pane opens), never `file://~`, which is the operator's home here — a pane's HOME is the
+// daemon's — where it would both take over the operator's own `pulumi login` and share one state
+// directory with their shells. A pod's baseline value is the container's own home, which is
+// nobody else's (internal/podsafety).
+func pulumiBackend(stateDir string) string { return "file://" + xdgHome(stateDir) }
+
 // PaneEnvironment is the environment the daemon's private tmux server is forked under, every tmux
 // command runs with, and every pane therefore inherits beneath its -e pairs: the allow-listed
 // names read from environ (the daemon's own, `os.Environ()` form), less any credential-shaped
 // name, with the four XDG base directories moved under `<state_dir>/home`
-// (environment.ts:270-294). A boot probe that must see what a pane sees runs under it too.
+// (environment.ts:270-294), the Pulumi CLI's update check off, and its state backend the daemon's
+// own value where environ names one, else pulumiBackend's. Every pane is told both as -e pairs
+// too (panePairs), since a daemon that adopted a running tmux server never writes this table; what
+// it decides here is a pane's backend where the operator names none, and what the boot probe that
+// must see what a pane sees runs under.
 func PaneEnvironment(environ []string, stateDir string) map[string]string {
 	allowed := make(map[string]bool, len(paneEnvAllowList))
 	for _, name := range paneEnvAllowList {
@@ -150,6 +168,10 @@ func PaneEnvironment(environ []string, stateDir string) map[string]string {
 	for _, dir := range xdgDirectories(stateDir) {
 		env[dir[0]] = dir[1]
 	}
+	if env[podsafety.PulumiBackend] == "" {
+		env[podsafety.PulumiBackend] = pulumiBackend(stateDir)
+	}
+	env[podsafety.PulumiSkipUpdateCheck] = "true"
 	return env
 }
 

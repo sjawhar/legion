@@ -5,14 +5,15 @@
 // names first in PI_CONFIG_FILES, before the operator's own (runtime.kubernetes.pod): by Oh My Pi's
 // order the operator's overlay outranks it, and both outrank a repository's .omp/config.yml, so a
 // repository's settings reach a pod's agent as they reach any agent session, under the operator's.
-// The baseline variables: the two that decide where a pod's Oh My Pi keeps its sessions
-// (baseline), set on the agent where the pod leaves them unset — when Oh My Pi would otherwise fill
-// them from the working directory's .env — and never on the shim; the Sandbox runtime refuses them,
-// and OMP_SESSION_SQL_DSN_FILE, in the operator's pod (sandbox.CheckPod). Every session of a
-// workflow role is a row in the database the deployment must name (runtime.kubernetes.session_store
-// postgres or cloudsql-iam): the runtime starts every such generation with
-// OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE itself, and Apply keeps both. The
-// baseline's `file` is left for the one
+// The baseline variables: the two that decide where a pod's Oh My Pi keeps its sessions, and the
+// Pulumi CLI's state backend (baseline), set on the agent where the pod leaves them unset — when
+// Oh My Pi would otherwise fill them from the working directory's .env — and never on the shim.
+// The Sandbox runtime refuses the session pair, and OMP_SESSION_SQL_DSN_FILE, in the operator's
+// pod (sandbox.CheckPod), and accepts the backend there, which is how a deployment whose agents
+// run Pulumi against a real state backend names it. Every session of a workflow role is a row in
+// the database the deployment must name (runtime.kubernetes.session_store postgres or
+// cloudsql-iam): the runtime starts every such generation with OMP_SESSION_STORAGE=sql and
+// OMP_SESSION_SQL_DSN_FILE itself, and Apply keeps both. The baseline's `file` is left for the one
 // container the runtime tells neither, the image probe's, whose session nothing resumes — neither
 // the probe's pod nor an issue's mounts a disk that outlives it, an issue pod's being the pod's
 // own ephemeral volume (the project controller's pod does mount one its Sandbox owns, and it is
@@ -30,8 +31,8 @@
 // a role's browser broker lock apart from its siblings', and the issue's scratch on the issue's
 // volume, which holds all of those but the two Go caches beside it and which every role of the
 // pod is told the same of, while the probe pod runs one container, on the image's own
-// directories, and is told neither. A pane gets the overlay alone, which runtime/tmux writes and
-// names itself (writeTurnScopeOverlay, panePairs).
+// directories, and is told neither. A pane gets the overlay and the Pulumi pair, which runtime/
+// tmux writes and names itself (writeTurnScopeOverlay, panePairs).
 package podsafety
 
 import (
@@ -66,10 +67,23 @@ const settingsOverlays = "PI_CONFIG_FILES"
 // runtime is the session database and nothing else, a pod's disk dying with the pod (INFRA-80).
 const placesSessions = "it decides where Oh My Pi keeps the session a resume reads"
 
+// PulumiBackend and PulumiBackendDefault are the Pulumi CLI's state backend and the value Legion
+// gives it where nothing else names one; PulumiSkipUpdateCheck is the CLI's update check, which no
+// Legion agent runs. The baseline below says why. The worker image sets the update check for a
+// pod's containers (packages/daemon/docker/worker.Dockerfile), and runtime/tmux sets both for a
+// pane, which has no image.
+const (
+	PulumiBackend         = "PULUMI_BACKEND_URL"
+	PulumiBackendDefault  = "file://~"
+	PulumiSkipUpdateCheck = "PULUMI_SKIP_UPDATE_CHECK"
+)
+
 // baseline are the variables Apply sets where the pod's environment leaves them unset or empty,
 // which is when Oh My Pi would fill them from the working directory's .env: the two that place a
-// pod's sessions, each with why an operator's pod may not set it instead (Variable.Reserved).
-// Nothing else is set on a pod's agent; a repository's own settings and .env are its own otherwise.
+// pod's sessions, each with why an operator's pod may not set it instead (Variable.Reserved), and
+// the Pulumi CLI's state backend, which an operator's pod may set and a deployment whose agents
+// work a real backend must. Nothing else is set on a pod's agent; a repository's own settings and
+// .env are its own otherwise.
 var baseline = []struct{ name, value, reserved string }{
 	// Names the config root Oh My Pi's agent directory is joined under (.omp in the image), which
 	// chooses the models.yml and profile it reads, and the sessions under it: no settings overlay
@@ -79,6 +93,20 @@ var baseline = []struct{ name, value, reserved string }{
 	// a database the repository names; `file` keeps each session a file. A runtime that keeps
 	// sessions in its own database sets sql and the URL file's pointer before Apply runs.
 	{"OMP_SESSION_STORAGE", "file", placesSessions},
+	// The Pulumi CLI's state backend. Reaching it with none at all — no PULUMI_BACKEND_URL, no
+	// `pulumi login`, and no `backend.url` in the project file the command reads — puts a CLI
+	// that recognizes a coding agent around it (3.268.0 reads CLAUDECODE, CURSOR_AGENT, CODEX_*,
+	// GEMINI_CLI, OPENCODE, AI_AGENT and others) on its ephemeral-agent-account path: it creates
+	// an account of its own on Pulumi Cloud, writes the claim in /tmp/.pulumi/agent-claim.json
+	// and prints a claim URL, so an agent that only read a schema has made an account on an
+	// outside platform nobody asked for. `file://~` is a backend of the container's own home,
+	// which the CLI makes on first write and which dies with the pod: the right one where no
+	// real backend is meant, and loud (`no stack named … found`) where one is and the pod was
+	// never told it. A deployment whose agents work a real backend names it in
+	// runtime.kubernetes.pod.env, which Apply yields to and which it must have, since
+	// PULUMI_BACKEND_URL outranks a project file's own `backend.url` rather than falling back to
+	// it.
+	{PulumiBackend, PulumiBackendDefault, ""},
 }
 
 // Variable is one variable Apply sets. Reserved, when set, is why an operator's pod may not set it

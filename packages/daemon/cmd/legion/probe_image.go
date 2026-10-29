@@ -77,7 +77,8 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // probe Sandbox starts it on the pod baseline's variables and overlay, with no state home of its
 // own: with --pod-safety, as a worker's shim starts Oh My Pi (podsafety.Apply: the turn-scoping
 // overlay named first in PI_CONFIG_FILES, written to a fresh temporary directory since the probe
-// pod mounts no state volume, and the two session-placing variables where the pod leaves them
+// pod mounts no state volume, and the two session-placing variables and the Pulumi CLI's state
+// backend where the pod leaves them
 // unset), but not the per-role state home the shim makes (podsafety.EnsureStateHome): the probe
 // pod runs one container, so no broker lock collides; with --provider-env-dir, each
 // provider key exported after it as the shim exports them (shim.ReadProviderEnv); and with

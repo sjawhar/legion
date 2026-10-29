@@ -140,7 +140,8 @@ func projectedToken(pod Pod) (fixtureToken, error) {
 // own variables are kept; Oh My Pi's two session variables are the runtime's, not the baseline's
 // file default — under the session database the daemon requires (the run's session_store is
 // postgres) the runtime sets OMP_SESSION_STORAGE=sql and points OMP_SESSION_SQL_DSN_FILE at the
-// URL the providers volume projects; neither OTEL_SDK_DISABLED nor PI_AUTO_QA,
+// URL the providers volume projects; PULUMI_BACKEND_URL is the baseline's file://~, since the
+// operator's pod names no Pulumi backend; neither OTEL_SDK_DISABLED nor PI_AUTO_QA,
 // which no baseline sets any more, is there; the agent's XDG_STATE_HOME is the architect's own
 // (roleStateHome; the root claim is the architect), and the shim made Oh My Pi's profile directory
 // under it (podsafety.EnsureStateHome) before Oh My Pi started, since Oh My Pi reads the variable
@@ -182,6 +183,7 @@ func (r *liveRig) checkPodBaseline() error {
 		ompsessions.StorageVariable: ompsessions.SQLStorage,
 		ompsessions.DSNFileVariable: providersDSNFile,
 		"XDG_STATE_HOME":            stateHome, "TMPDIR": scratchRoot + "/tmp",
+		podsafety.PulumiBackend: podsafety.PulumiBackendDefault,
 	}
 	for name, value := range r.pod.Env {
 		if name != "PI_CONFIG_FILES" {

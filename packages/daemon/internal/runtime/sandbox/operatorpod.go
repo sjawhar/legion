@@ -26,9 +26,14 @@ import (
 // profile, whose models and settings the image carries and whose sessions a pod never writes,
 // every session being a row in the session database; LEGION_OMP_PATH is the Oh My Pi the image
 // probe proves the workers run; DO_NOT_TRACK=1 is CodeGraph's telemetry and update-check opt-out;
+// PULUMI_SKIP_UPDATE_CHECK=true keeps every Pulumi CLI in the image off its own update check (the
+// CLI's state backend is the pod baseline's, which a pod's env may name, internal/podsafety);
 // and PATH, which the runtime sets as well. TestImageEnvIsWhatTheWorkerImageSets holds the list to
 // the Dockerfile.
-var imageEnv = []string{"AWS_CA_BUNDLE", "CGO_ENABLED", "COREPACK_DEFAULT_TO_LATEST", "DO_NOT_TRACK", "HOME", "LEGION_OMP_PATH", "OMP_PROFILE", "PATH"}
+var imageEnv = []string{
+	"AWS_CA_BUNDLE", "CGO_ENABLED", "COREPACK_DEFAULT_TO_LATEST", "DO_NOT_TRACK", "HOME",
+	"LEGION_OMP_PATH", "OMP_PROFILE", "PATH", podsafety.PulumiSkipUpdateCheck,
+}
 
 // setter is who sets a variable a worker's Oh My Pi starts with, and whether the operator's pod
 // env may set it too: the pod baseline yields to the operator's own value, and the operator's

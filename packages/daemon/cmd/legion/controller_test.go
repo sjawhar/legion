@@ -704,6 +704,12 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 		"LEGION_CONTROLLER_SECRET_FILE":   filepath.Join(secrets, "legion-demo-controller"),
 		"ENVOY_TOKEN_FILE":                filepath.Join(c.dir, "envoy-token"),
 		"NATS_NKEY_SEED_FILE":             filepath.Join(c.dir, "nats-seed"),
+		// The Pulumi CLI's two: a CLI that reaches no state backend at all and recognizes a coding
+		// agent around it creates an ephemeral Pulumi Cloud account of its own (internal/
+		// podsafety). The backend is this state directory's own, since the operator's environment
+		// names none here.
+		"PULUMI_SKIP_UPDATE_CHECK": "true",
+		"PULUMI_BACKEND_URL":       "file://" + c.defaultDir,
 	}
 	for name := range want {
 		if old, ok := baseline[name]; ok && old == want[name] {
