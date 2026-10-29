@@ -607,10 +607,15 @@ func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
 		LastSeen      int64  `json:"last_seen"`
 		ClaimReleased bool   `json:"claim_released"`
 	}
+	// Both routes answer a lapsed holder with the same 404 and the same fields; what they do to
+	// the claim differs, and each case says which. A publish holds a message for a holder that
+	// is not there and releases the claim; a lookup is a read and leaves it (keepLapsedClaim).
 	tests := []struct {
-		name    string
-		request func() *http.Request
-		handler func(*listenerDeps) http.Handler
+		name         string
+		request      func() *http.Request
+		handler      func(*listenerDeps) http.Handler
+		wantReleased bool
+		wantLapsed   string
 	}{
 		{
 			name: "publish",
@@ -624,6 +629,8 @@ func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
 			handler: func(d *listenerDeps) http.Handler {
 				return publishHandler(d, logging.New("test"))
 			},
+			wantReleased: true,
+			wantLapsed:   "role reviewer holder ses_holder lapsed; claim released (last seen %d)",
 		},
 		{
 			name: "role lookup",
@@ -633,6 +640,8 @@ func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
 			handler: func(d *listenerDeps) http.Handler {
 				return roleGetHandler(d)
 			},
+			wantReleased: false,
+			wantLapsed:   "role reviewer holder ses_holder lapsed; claim retained (last seen %d)",
 		},
 	}
 
@@ -684,19 +693,20 @@ func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
 			if err := json.NewDecoder(lapsedRecorder.Body).Decode(&lapsed); err != nil {
 				t.Fatalf("decode lapsed response: %v", err)
 			}
-			if lapsed.Error != fmt.Sprintf(
-				"role reviewer holder ses_holder lapsed; claim released (last seen %d)",
-				entry.UpdatedAt,
-			) || lapsed.Reason != "holder_lapsed" || lapsed.Holder != "ses_holder" ||
-				lapsed.LastSeen != entry.UpdatedAt || !lapsed.ClaimReleased {
+			if lapsed.Error != fmt.Sprintf(tc.wantLapsed, entry.UpdatedAt) ||
+				lapsed.Reason != "holder_lapsed" || lapsed.Holder != "ses_holder" ||
+				lapsed.LastSeen != entry.UpdatedAt || lapsed.ClaimReleased != tc.wantReleased {
 				t.Fatalf("lapsed response = %+v", lapsed)
 			}
 			holder, err := registry.RoleHolder("reviewer")
 			if err != nil {
-				t.Fatalf("read released claim: %v", err)
+				t.Fatalf("read the claim after the answer: %v", err)
 			}
-			if holder != "" {
-				t.Fatalf("released claim holder = %q, want empty", holder)
+			if tc.wantReleased && holder != "" {
+				t.Fatalf("the claim after the publish is held by %q, want released", holder)
+			}
+			if !tc.wantReleased && holder != "ses_holder" {
+				t.Fatalf("the claim after the lookup is held by %q, want ses_holder's, untouched", holder)
 			}
 		})
 	}
@@ -722,7 +732,7 @@ func TestResolveLiveRoleHolderReresolvesSupersededClaim(t *testing.T) {
 		},
 	}
 
-	result, err := resolveLiveRoleHolder(context.Background(), resolver, sessions, "reviewer")
+	result, err := resolveLiveRoleHolder(context.Background(), resolver, sessions, "reviewer", releaseLapsedClaim)
 	if err != nil {
 		t.Fatalf("resolve superseded role holder: %v", err)
 	}
@@ -749,7 +759,7 @@ func TestRoleHolderLapsedResponseDoesNotClaimConcurrentRemoval(t *testing.T) {
 		},
 	}
 
-	result, err := resolveLiveRoleHolder(context.Background(), resolver, sessions, role)
+	result, err := resolveLiveRoleHolder(context.Background(), resolver, sessions, role, releaseLapsedClaim)
 	if err != nil {
 		t.Fatalf("resolve concurrently removed role holder: %v", err)
 	}
@@ -841,10 +851,9 @@ func claimRole(t *testing.T, d *listenerDeps, sessionID, role string) {
 
 // A listener's session cache trails the session bucket, so a holder another listener registered and
 // gave a role a moment ago can be in the bucket and not yet in this listener's cache. A lookup there
-// answers that holder. Releasing the claim as lapsed on the cache's word deletes the claim the other
-// listener just wrote, and every later lookup and role message finds the role unclaimed until its
-// holder claims it again. Once the holder has left the bucket, the same lookup still releases it, and
-// so it does for a holder no session can register as: an id outside nats.go's key alphabet, which an
+// answers that holder, and a release refuses to take the claim from it. Once the holder has left the
+// bucket, the lookup reports the lapse and still keeps the claim, and the release ends it; the same
+// holds for a holder no session can register as: an id outside nats.go's key alphabet, which an
 // earlier build or a direct bucket write can leave in a claim.
 func TestARoleLookupWhoseSessionCacheTrailsTheBucketKeepsAFreshClaim(t *testing.T) {
 	claimant, observer := trailingListeners(t)
@@ -853,24 +862,40 @@ func TestARoleLookupWhoseSessionCacheTrailsTheBucketKeepsAFreshClaim(t *testing.
 		roleGetHandler(observer).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/roles/"+role, nil))
 		return recorder
 	}
+	release := func(role string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		roleReleaseHandler(observer, logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(
+			http.MethodPost, "/v1/roles/release",
+			strings.NewReader(`{"role":"`+role+`","released_by":"the trailing-cache test"}`)))
+		return recorder
+	}
 
 	claimRole(t, claimant, "ses_fresh_holder", "fresh-claim")
 	if answer := lookup("fresh-claim"); answer.Code != http.StatusOK || !strings.Contains(answer.Body.String(), `"holder":"ses_fresh_holder"`) {
 		t.Fatalf("GET /v1/roles/fresh-claim on a listener whose session cache trails the bucket: status %d %s, want 200 naming ses_fresh_holder", answer.Code, answer.Body.String())
 	}
+	if answer := release("fresh-claim"); answer.Code != http.StatusConflict {
+		t.Fatalf("POST /v1/roles/release for a holder only this cache misses: status %d %s, want 409", answer.Code, answer.Body.String())
+	}
 	if holder, err := claimant.registry.RoleHolder("fresh-claim"); err != nil || holder != "ses_fresh_holder" {
-		t.Fatalf("the fresh claim after the lookup = %q, %v; want ses_fresh_holder's", holder, err)
+		t.Fatalf("the fresh claim after the lookup and the release = %q, %v; want ses_fresh_holder's", holder, err)
 	}
 
 	claimRole(t, claimant, "ses_gone_holder", "lapsed-claim")
 	if err := claimant.sessions.Delete(context.Background(), "ses_gone_holder"); err != nil {
 		t.Fatalf("end ses_gone_holder's session: %v", err)
 	}
-	if answer := lookup("lapsed-claim"); answer.Code != http.StatusNotFound || !strings.Contains(answer.Body.String(), "claim released") {
-		t.Fatalf("GET /v1/roles/lapsed-claim for a holder gone from the bucket: status %d %s, want 404 releasing the claim", answer.Code, answer.Body.String())
+	if answer := lookup("lapsed-claim"); answer.Code != http.StatusNotFound || !strings.Contains(answer.Body.String(), "claim retained") {
+		t.Fatalf("GET /v1/roles/lapsed-claim for a holder gone from the bucket: status %d %s, want 404 keeping the claim", answer.Code, answer.Body.String())
+	}
+	if holder, err := claimant.registry.RoleHolder("lapsed-claim"); err != nil || holder != "ses_gone_holder" {
+		t.Fatalf("the lapsed claim after the lookup = %q, %v; want it untouched", holder, err)
+	}
+	if answer := release("lapsed-claim"); answer.Code != http.StatusOK || !strings.Contains(answer.Body.String(), `"released":true`) {
+		t.Fatalf("POST /v1/roles/release for a holder gone from the bucket: status %d %s, want 200 releasing the claim", answer.Code, answer.Body.String())
 	}
 	if holder, err := claimant.registry.RoleHolder("lapsed-claim"); err != nil || holder != "" {
-		t.Fatalf("the lapsed claim after the lookup = %q, %v; want it released", holder, err)
+		t.Fatalf("the lapsed claim after the release = %q, %v; want it released", holder, err)
 	}
 
 	roles, err := claimant.client.JS().KeyValue(bus.RoleClaimBucket)
@@ -884,11 +909,14 @@ func TestARoleLookupWhoseSessionCacheTrailsTheBucketKeepsAFreshClaim(t *testing.
 	if _, err := roles.Put("invalid-holder", stored); err != nil {
 		t.Fatalf("store the ses:bad claim: %v", err)
 	}
-	if answer := lookup("invalid-holder"); answer.Code != http.StatusNotFound || !strings.Contains(answer.Body.String(), "claim released") {
-		t.Fatalf("GET /v1/roles/invalid-holder for holder ses:bad, which no session can register as: status %d %s, want 404 releasing the claim", answer.Code, answer.Body.String())
+	if answer := lookup("invalid-holder"); answer.Code != http.StatusNotFound || !strings.Contains(answer.Body.String(), "claim retained") {
+		t.Fatalf("GET /v1/roles/invalid-holder for holder ses:bad, which no session can register as: status %d %s, want 404 keeping the claim", answer.Code, answer.Body.String())
+	}
+	if answer := release("invalid-holder"); answer.Code != http.StatusOK || !strings.Contains(answer.Body.String(), `"released":true`) {
+		t.Fatalf("POST /v1/roles/release for holder ses:bad: status %d %s, want 200 releasing the claim", answer.Code, answer.Body.String())
 	}
 	if holder, err := claimant.registry.RoleHolder("invalid-holder"); err != nil || holder != "" {
-		t.Fatalf("the ses:bad claim after the lookup = %q, %v; want it released", holder, err)
+		t.Fatalf("the ses:bad claim after the release = %q, %v; want it released", holder, err)
 	}
 }
 
@@ -1208,7 +1236,8 @@ func TestRoleGetHandlerReturnsLiveHolder(t *testing.T) {
 // A restored role claim routes while its holder is live, survives the holder's absence for one
 // session TTL after the registry opened, and is released after that. Deleting the holder's session
 // ends its liveness and the registry's clock ends the grace window, so no step waits on a real TTL
-// and none can lose a race with one.
+// and none can lose a race with one. The lookup reports each state and releases nothing; the grace
+// window is what the release route is held to (POST /v1/roles/release).
 func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 	client := setupPublishTestClient(t)
 	const (
@@ -1278,9 +1307,19 @@ func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 		)
 		return recorder
 	}
+	release := func() *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		roleReleaseHandler(restoredState, logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(
+			http.MethodPost, "/v1/roles/release",
+			strings.NewReader(`{"role":"`+role+`","released_by":"the restart test"}`)))
+		return recorder
+	}
 
 	if response := get(); response.Code != http.StatusOK {
 		t.Fatalf("restored live role: status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if response := release(); response.Code != http.StatusConflict {
+		t.Fatalf("release of a restored live role: status = %d, want 409; body = %s", response.Code, response.Body.String())
 	}
 
 	if err := restoredSessions.Delete(context.Background(), sessionID); err != nil {
@@ -1288,6 +1327,9 @@ func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 	}
 	if response := get(); response.Code != http.StatusNotFound {
 		t.Fatalf("unregistered restored role: status = %d, want 404; body = %s", response.Code, response.Body.String())
+	}
+	if response := release(); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"released":false`) {
+		t.Fatalf("release inside the restart grace window: status = %d, want 200 releasing nothing; body = %s", response.Code, response.Body.String())
 	}
 	if holder, err := restoredRegistry.RoleHolder(role); err != nil || holder != sessionID {
 		t.Fatalf("restored grace claim = %q, %v; want %q", holder, err, sessionID)
@@ -1299,6 +1341,12 @@ func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 	elapsed.Store(int64(sessionTTL))
 	if response := get(); response.Code != http.StatusNotFound {
 		t.Fatalf("expired role status = %d, want 404; body = %s", response.Code, response.Body.String())
+	}
+	if holder, err := restoredRegistry.RoleHolder(role); err != nil || holder != sessionID {
+		t.Fatalf("expired role claim after the lookup = %q, %v; want it kept: a lookup releases nothing", holder, err)
+	}
+	if response := release(); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"released":true`) {
+		t.Fatalf("release past the restart grace window: status = %d, want 200 releasing the claim; body = %s", response.Code, response.Body.String())
 	}
 	if holder, err := restoredRegistry.RoleHolder(role); err != nil || holder != "" {
 		t.Fatalf("expired role claim = %q, %v; want removed", holder, err)

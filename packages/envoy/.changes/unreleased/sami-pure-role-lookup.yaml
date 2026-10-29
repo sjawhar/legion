@@ -1,0 +1,8 @@
+kind: Fixed
+body: |-
+    `GET /v1/roles/<role>` no longer releases the claim of a holder that has left the session bucket: it reports `reason: "holder_lapsed"` with the holder, its last-seen time and `claim_released: false`, and changes nothing, so a tool that merely looks a role up cannot end a live holder's claim. A holder leaves that bucket as soon as it misses one heartbeat inside the bucket's TTL, which a loaded machine does while its process works, and the read turned that into a permanent fact with no record of who caused it.
+
+    `POST /v1/roles/release` is the explicit end of a lapsed claim, and the only route that releases one outside a delivery: `{role, holder?, released_by}`, where `released_by` names the caller and is required. It answers what the claim was, whether this call ended it, the holder's last-seen time and the caller, and the listener writes one `listener role release` line naming the role, the holder, the caller and the outcome, so a claim that ends can be traced to whoever ended it. A live holder's claim is never released (409 naming the holder), nor is a claim that moved to another session since (409, or the holder-changed 503 when it moves under the release itself); a role with no claim answers 200 having released nothing. A role-lane publish and a role-lane delivery still release a lapsed claim: each holds a message for a holder that is not there.
+time: 2026-10-29T09:40:00.000000000Z
+custom:
+    Issue: sami-pure-role-lookup
