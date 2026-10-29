@@ -18,7 +18,7 @@ import (
 //
 // The list is read as a list, in the one way the precedent in
 // packages/daemon/internal/runtime/sandbox/reclaim_doc_test.go had to learn: a claim is the
-// backticked name a bullet OPENS with, and a backticked word anywhere later in a bullet's prose is
+// backticked name a bullet opens with, and a backticked word anywhere later in a bullet's prose is
 // not a claim. The `project_scope` bullet is exactly why. It reads "`named` or `person`, which says
 // what `project` means", so a check that asked whether the paragraph mentions a claim anywhere
 // between its bounds would find `project` in that sentence and pass with the `project` bullet
@@ -73,18 +73,20 @@ func documentedClaims(t *testing.T) []string {
 		t.Fatalf("read docs/kubernetes.md: %v", err)
 	}
 	lines := strings.Split(string(doc), "\n")
-	flat, lineOf := flattenKeepingLines(lines)
+	flat, lineEnds := flattenKeepingLines(lines)
 	offset := strings.Index(flat, claimsDocMarker)
 	if offset < 0 {
 		t.Fatalf("docs/kubernetes.md has no %q: the paragraph introducing the claim list was "+
 			"reworded, and this check stops checking the moment it cannot find it", claimsDocMarker)
 	}
+	markerEnd := offset + len(claimsDocMarker) - 1
+	markerLine := slices.IndexFunc(lineEnds, func(end int) bool { return end > markerEnd })
 
 	var claims []string
 	// The list follows the marker's own line, after the blank line Markdown requires between a
 	// paragraph and a list, and runs to the first line that is neither a bullet nor a wrapped
 	// bullet's indented continuation — in the document as written, the blank line under it.
-	for i := lineOf[offset+len(claimsDocMarker)-1] + 1; i < len(lines); i++ {
+	for i := markerLine + 1; i < len(lines); i++ {
 		line := strings.TrimRight(lines[i], " ")
 		if strings.TrimSpace(line) == "" {
 			if len(claims) > 0 {
@@ -99,16 +101,15 @@ func documentedClaims(t *testing.T) []string {
 			break
 		}
 		bullet := strings.TrimSpace(strings.TrimPrefix(line, "- "))
-		name, rest, ok := strings.Cut(strings.TrimPrefix(bullet, "`"), "`")
-		if !strings.HasPrefix(bullet, "`") || !ok || !strings.HasPrefix(rest, claimsDocSeparator) {
+		inner, opened := strings.CutPrefix(bullet, "`")
+		name, rest, closed := strings.Cut(inner, "`")
+		if !opened || !closed || !strings.HasPrefix(rest, claimsDocSeparator) {
 			t.Fatalf("docs/kubernetes.md line %d of the claim list is %q, which does not open with a "+
 				"backticked claim name followed by %q: the list's shape is what tells this check "+
 				"which of a bullet's code spans is the claim it documents",
 				i+1, line, strings.TrimSpace(claimsDocSeparator))
 		}
-		if !slices.Contains(claims, name) {
-			claims = append(claims, name)
-		}
+		claims = append(claims, name)
 	}
 
 	// An empty list is this check failing open: the sentence is still there, the parse matched
@@ -120,16 +121,14 @@ func documentedClaims(t *testing.T) []string {
 	return claims
 }
 
-// missingFrom is the names in have that want does not carry, sorted so a failure message reads the
-// same on every run.
-func missingFrom(have, want []string) []string {
+// missingFrom is the names that carried does not carry, in the order names lists them.
+func missingFrom(names, carried []string) []string {
 	var missing []string
-	for _, name := range have {
-		if !slices.Contains(want, name) {
+	for _, name := range names {
+		if !slices.Contains(carried, name) {
 			missing = append(missing, name)
 		}
 	}
-	slices.Sort(missing)
 	return missing
 }
 
@@ -143,22 +142,19 @@ func claimList(claims []string) string {
 }
 
 // flattenKeepingLines collapses the document's whitespace so prose that was hard-wrapped reads as
-// one line, and records for every byte of the result the line it came from, which is what turns a
-// marker found in the flat text back into the line the list starts under.
+// one line, and records for every line the length the flattened text had reached at its end, which
+// is what turns a marker found in the flat text back into the line the list starts under.
 func flattenKeepingLines(lines []string) (string, []int) {
 	var flat strings.Builder
-	lineOf := make([]int, 0, len(lines)*8)
+	lineEnds := make([]int, len(lines))
 	for i, line := range lines {
 		for _, field := range strings.Fields(line) {
 			if flat.Len() > 0 {
 				flat.WriteByte(' ')
-				lineOf = append(lineOf, i)
 			}
 			flat.WriteString(field)
-			for range len(field) {
-				lineOf = append(lineOf, i)
-			}
 		}
+		lineEnds[i] = flat.Len()
 	}
-	return flat.String(), lineOf
+	return flat.String(), lineEnds
 }
